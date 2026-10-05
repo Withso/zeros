@@ -287,10 +287,11 @@ export async function getCloudWorkspaceCreateOptions(
   organizationId: string,
   owner: string,
   repository?: string,
+  source?: { cloudComputerV2: true },
 ): Promise<CloudWorkspaceCreateOptions> {
-  if (repository) await authorizeCloudGithubSource(organizationId, owner, repository);
+  if (repository && !source?.cloudComputerV2) await authorizeCloudGithubSource(organizationId, owner, repository);
   return request(
-    `${organizationPath(organizationId)}/create-options?owner=${encodeURIComponent(owner)}${repository ? `&repository=${encodeURIComponent(repository)}` : ""}`,
+    `${organizationPath(organizationId)}/create-options?owner=${encodeURIComponent(owner)}${repository ? `&repository=${encodeURIComponent(repository)}` : ""}${source?.cloudComputerV2 ? "&cloudComputerV2=true" : ""}`,
     OptionsSchema,
   );
 }

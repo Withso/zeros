@@ -552,7 +552,7 @@ describe("formatTranscript — tool heading and noise", () => {
     const out = run([
       tool({ title: "Read", status: "completed" }),
       tool({ title: "Bash", status: "failed" }),
-      tool({ title: "Grep", status: "in_progress" }),
+      tool({ title: "Grep", toolKind: "search", status: "in_progress", rawInput: { pattern: "pending", path: "src" } }),
     ]).text;
     expect(out).toContain("### Tool · Read\n");
     expect(out).toContain("### Tool · Bash — failed");

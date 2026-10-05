@@ -19,6 +19,80 @@ function transcript() {
 }
 
 describe("Codex transcript fidelity", () => {
+  it.each([
+    { type: "hookPrompt", id: "hook", fragments: [{ text: "Hook context", hookRunId: "hook-run" }] },
+    { type: "functionCallOutput", id: "output", name: "helper", namespace: null, output: "Native report" },
+    { type: "futureItem", id: "future", output: "Future report" },
+  ])("retains %s items with bounded diagnostics and stable replay identity", (native) => {
+    const t = transcript();
+    const item = { ...native, diagnostic: "x".repeat(300_000), _meta: { private: "provider-private" } };
+    t.item(item, false);
+    t.item(item);
+    const settled = t.messages()[0];
+    expect(settled).toMatchObject({ nativeToolCallId: item.id, status: "completed", rawInput: expect.objectContaining({ type: item.type }), rawOutput: expect.objectContaining({ type: item.type }) });
+    expect(JSON.stringify(settled)).not.toContain("provider-private");
+    expect(JSON.stringify(settled)).toContain("truncated");
+    expect(JSON.stringify(settled).length).toBeLessThan(520_000);
+    t.item(item, false);
+    t.item(item);
+    expect(t.messages()).toEqual([settled]);
+  });
+
+  it("preserves a native Sleep's identity and duration without finishing the turn", () => {
+    const t = transcript();
+    const native = { type: "sleep", id: "sleep-1", durationMs: 45_000 };
+    t.item(native, false);
+    const started = t.messages()[0];
+    expect(started).toMatchObject({ title: "Sleep", toolKind: "other", nativeToolCallId: native.id, status: "in_progress", rawInput: native });
+    t.item(native, false);
+    t.item(native);
+    const settled = t.messages()[0];
+    expect(settled).toMatchObject({ id: started.id, title: "Sleep", status: "completed", rawInput: native, rawOutput: native });
+    t.item(native, false);
+    t.item(native);
+    expect(t.messages()).toEqual([settled]);
+    expect(t.messages()[0]).toBe(settled);
+    expect(t.translator.sawTurnTerminal).toBe(false);
+    expect(t.translator.terminalError).toBeNull();
+  });
+
+  it("restores completed Sleep snapshots without a start and keeps pending checks' exit status", () => {
+    const t = transcript();
+    const sleep = { type: "sleep", id: "sleep-1", durationMs: 30_000 };
+    const checks = { type: "commandExecution", id: "checks-1", command: "gh pr checks 42", status: "failed", exitCode: 8, aggregatedOutput: "smoke pending" };
+    t.item(checks);
+    t.item(sleep);
+    expect(t.messages()).toEqual([
+      expect.objectContaining({ status: "failed", rawOutput: expect.objectContaining({ exitCode: 8, output: "smoke pending" }) }),
+      expect.objectContaining({ title: "Sleep", nativeToolCallId: sleep.id, status: "completed", rawInput: sleep, rawOutput: sleep }),
+    ]);
+    expect(t.translator.sawTurnTerminal).toBe(false);
+  });
+
+  it.each(["completed", "failed", "interrupted", "transport", "replacement"])("retains an unresolved Sleep when observation ends through %s", (ending) => {
+    const t = transcript();
+    const native = { type: "sleep", id: "sleep-1", durationMs: 45_000 };
+    t.item(native, false);
+    const id = t.messages()[0].id;
+    t.translator.handle("error", { willRetry: true, error: { message: "Retrying connection" } });
+    expect(t.messages()[0]).toMatchObject({ status: "in_progress" });
+    if (ending === "transport") t.translator.endAgentActivity();
+    else if (ending === "replacement") t.translator.startTurn();
+    else t.translator.handle("turn/completed", { turn: { id: "turn", status: ending } });
+    expect(t.messages()[0]).toMatchObject({ id, status: "pending", rawInput: native, rawOutput: { _zerosToolCompletion: "unreported" } });
+    if (ending !== "replacement") {
+      t.item(native);
+      expect(t.messages()[0]).toMatchObject({ id, status: "completed", rawOutput: native });
+    }
+  });
+
+  it("does not infer Sleep completion from an interrupted full turn snapshot", () => {
+    const t = transcript();
+    const native = { type: "sleep", id: "sleep-1", durationMs: 45_000 };
+    t.translator.handle("turn/completed", { turn: { id: "turn", status: "interrupted", itemsView: "full", items: [native] } });
+    expect(t.messages()[0]).toMatchObject({ title: "Sleep", status: "pending", rawOutput: { _zerosToolCompletion: "unreported" } });
+  });
+
   it("recovers missing item completions from a full terminal turn snapshot", () => {
     const t = transcript();
     t.item({ type: "agentMessage", id: "reply", text: "Draft" }, false);

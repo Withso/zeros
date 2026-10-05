@@ -979,6 +979,106 @@ d("cloud workspace API contracts", () => {
     expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros" });
   });
 
+  describe("Cloud Computer create-options", () => {
+    const path = () => `/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=withso&repository=zeros&cloudComputerV2=true`;
+    const prepare = async (primaryName = "zeros") => {
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [owner.id]);
+      actor = { ...owner, staffRole: "developer" };
+      await seedV4();
+      const template = await seedTemplate({ primaryName });
+      configureApp(false, templateConfig());
+      await withSystemTx(pool, tx => tx.query("UPDATE cloud_github_source_access SET actor_fingerprint=cloud_github_actor_fingerprint(org_id,owner_user_id)"));
+      return template;
+    };
+    it("reads the active repository default through the org grant without a personal proof or database writes", async () => {
+      await prepare();
+      await pool.query("DELETE FROM cloud_github_source_access");
+      const response = await request(path());
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ configured: true,
+        installations: [{ id: installationId, accountLogin: "withso" }],
+        repository: { owner: "withso", name: "zeros", defaultBranch: "main" } });
+      expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros", repositoryId: "123456789" });
+      expect((await pool.query("SELECT 1 FROM cloud_github_source_access")).rowCount).toBe(0);
+      expect((await pool.query("SELECT 1 FROM cloud_workspaces")).rowCount).toBe(0);
+    });
+    it("allows an engineering member without a personal App connection to use the active org grant", async () => {
+      await prepare();
+      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [outsider.id]);
+      await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [orgId, outsider.id]);
+      await pool.query("INSERT INTO team_members(team_id,org_id,user_id,role) VALUES($1,$2,$3,'member')", [teamId, orgId, outsider.id]);
+      await pool.query("UPDATE organization_entitlements SET seat_limit=2 WHERE org_id=$1", [orgId]);
+      await pool.query("INSERT INTO organization_seat_assignments(org_id,user_id,state) VALUES($1,$2,'active')", [orgId, outsider.id]);
+      actor = { ...outsider, staffRole: "developer" };
+      const response = await request(path());
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ repository: { defaultBranch: "main" } });
+      expect((await pool.query("SELECT 1 FROM cloud_github_connections WHERE owner_user_id=$1", [outsider.id])).rowCount).toBe(0);
+    });
+    it("keeps non-computer repositories on the existing personal-proof path", async () => {
+      await prepare("other");
+      const response = await request(path());
+      expect(response.status).toBe(200);
+      expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros" });
+      await pool.query("DELETE FROM cloud_github_source_access");
+      expect((await request(path())).status).toBe(409);
+    });
+    it.each(["flag off", "non-engineering member"])("retains personal proof with %s", async mode => {
+      await prepare();
+      if (mode === "non-engineering member") {
+        await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1", [owner.id]);
+        await pool.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')", [owner.id]);
+        actor = owner;
+        await withSystemTx(pool, tx => tx.query("UPDATE cloud_github_source_access SET actor_fingerprint=cloud_github_actor_fingerprint(org_id,owner_user_id)"));
+      }
+      const url = mode === "flag off" ? path().replace("&cloudComputerV2=true", "") : path();
+      expect((await request(url)).status).toBe(200);
+      expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros" });
+      await pool.query("DELETE FROM cloud_github_source_access");
+      expect((await request(url)).status).toBe(409);
+    });
+    it("closes resolver errors and rechecks a revoked org grant", async () => {
+      await prepare();
+      vi.mocked(repositoryResolver.resolve).mockRejectedValueOnce(new Error("synthetic private diagnostic"));
+      const unavailable = await request(path());
+      expect(unavailable.status).toBe(503);
+      expect(await unavailable.json()).toMatchObject({ error: { code: "github_repository_verification_unavailable",
+        message: "GitHub repository verification is temporarily unavailable" } });
+      const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
+      vi.mocked(repositoryResolver.resolve).mockImplementationOnce(async input => {
+        const result = await resolve(input);
+        await pool.query("UPDATE github_installations SET suspended_at=now() WHERE id=$1", [installationId]);
+        return result;
+      });
+      const revoked = await request(path());
+      expect(revoked.status).toBe(409);
+      expect(await revoked.json()).toMatchObject({ error: { code: "cloud_computer_repository_unavailable" } });
+    });
+    it.each(["no computer", "no active build", "inactive template"])("preserves personal-proof options with %s", async mode => {
+      if (mode !== "no computer") {
+        const template = await prepare();
+        if (mode === "no active build") await pool.query("UPDATE cloud_computer_v2_heads SET active_build_id=NULL WHERE org_id=$1", [orgId]);
+        else await pool.query("UPDATE cloud_computer_templates SET state='quarantined' WHERE build_id=$1", [template.buildId]);
+      }
+      const response = await request(path());
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ repository: { defaultBranch: "main" } });
+      expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros" });
+    });
+    it("rechecks active build identity after the bounded GitHub read", async () => {
+      await prepare();
+      const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
+      vi.mocked(repositoryResolver.resolve).mockImplementationOnce(async input => {
+        const result = await resolve(input);
+        await seedTemplate({ version: 2 });
+        return result;
+      });
+      const response = await request(path());
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: { code: "cloud_computer_changed" } });
+    });
+  });
+
   it("rechecks source authorization after GitHub returns", async () => {
     const resolve = repositoryResolver.resolve;
     repositoryResolver.resolve = async (input) => {

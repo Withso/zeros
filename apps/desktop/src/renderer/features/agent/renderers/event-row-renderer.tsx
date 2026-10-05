@@ -47,6 +47,8 @@ import {
   toolCompletionUnreported,
 } from "./raw-output";
 import { nativeAgentWait, toolRecord } from "./native-tool-presentation";
+import { pendingChecksMessage } from "./tool-pending-checks";
+import { toolPresentationReady } from "./tool-readiness";
 import { AgentNotice } from "../agent-notice";
 import { getLang } from "./syntax";
 import type { Renderer, RendererContext } from "./types";
@@ -95,6 +97,7 @@ function readPathOf(tool: AgentToolMessage): string | null {
 
 export const EventRowRenderer: Renderer<AgentMessage> = memo(
   function EventRowRenderer({ message, ctx }) {
+    if (message.kind === "tool" && !toolPresentationReady(message)) return null;
     // A LIVE api_retry notice (the CLI is mid-backoff, this row is the
     // streaming tail) renders as a shimmer + "Reconnecting agent" — an
     // active state, not a warning. The moment the
@@ -407,6 +410,7 @@ function ToolDetail({ tool, ctx }: { tool: AgentToolMessage; ctx: RendererContex
   const input = operationText(tool);
   const output = toolRecord(commandResultOutput(tool.rawOutput));
   const unreported = toolCompletionUnreported(tool.rawOutput);
+  const pendingChecks = pendingChecksMessage(tool);
   const nativeEnding = typeof output.status === "string" && ["cancelled", "declined", "interrupted"].includes(output.status)
     ? output.status : null;
   const body = renderToolOutput(tool, ctx);
@@ -421,7 +425,7 @@ function ToolDetail({ tool, ctx }: { tool: AgentToolMessage; ctx: RendererContex
       )}
       {unreported && <div className="text-fg2 px-3 py-2 text-xs">Completion not reported. The provider did not report whether this tool completed.</div>}
       {nativeEnding && <div className="text-fg2 px-3 py-2 text-xs">The tool was {nativeEnding}.</div>}
-      {body ?? (!unreported && !nativeEnding && (
+      {body ?? (!unreported && !nativeEnding && !pendingChecks && (
         <div className="text-fg2 px-3 py-2 text-xs italic">
           {tool.status === "failed"
             ? "The tool failed without an explanation."
@@ -436,6 +440,7 @@ function ToolDetail({ tool, ctx }: { tool: AgentToolMessage; ctx: RendererContex
                 : "No output was captured."}
         </div>
       ))}
+      {pendingChecks && <div className="text-fg2 px-3 py-2 text-xs">{pendingChecks}</div>}
     </div>
   );
 }

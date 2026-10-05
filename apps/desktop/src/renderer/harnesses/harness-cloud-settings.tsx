@@ -2,7 +2,7 @@
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ProvidersPanel } from "../features/settings/providers-panel";
 import {
@@ -33,9 +33,12 @@ import {
   cloudProviderAuthActionSchema,
   type CloudProviderAuthStatus,
 } from "@zeros/protocol/provider-auth";
+import { Toaster } from "../shared/ui/primitives/elements/toast";
 import { Button, TooltipProvider } from "../shared/ui/primitives";
 import { setSetting } from "../platform/settings";
 import { selectActiveFolder, useWorkspaceStore } from "../state/workspace-store";
+import { setCloudCreationModeOwner, pendingCloudDesignCreations } from "../state/cloud-creation-mode";
+import { subscribeUserSettingsSection } from "../features/settings/settings-navigation";
 import { CloudComputerAdminBadge } from "../features/settings/cloud-computer-admin-badge";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
@@ -44,7 +47,8 @@ const installationId = "22222222-2222-4222-8222-222222222222";
 const userA = "44444444-4444-4444-8444-444444444444";
 const userB = "55555555-5555-4555-8555-555555555555";
 let user = userA;
-const computerV2Mode = new URLSearchParams(location.search).has("computer-v2");
+const harnessQuery = new URLSearchParams(location.search);
+const computerV2Mode = harnessQuery.has("computer-v2");
 let platformOwner = computerV2Mode;
 setInternalFeatureEnabled("cloudComputerV2", computerV2Mode);
 const DispatcherPage = computerV2Mode ? (await import("../shell/dispatcher/dispatcher-modal")).DispatcherPage : null;
@@ -108,7 +112,8 @@ function installAccount(next: string) {
       },
     ],
   });
-  if (computerV2Mode) {
+  if (computerV2Mode) setCloudCreationModeOwner(user);
+  if (computerV2Mode && !harnessQuery.has("empty-projects")) {
     acceptCloudWorkspaceDocument({
       id: installationId, organizationId, teamId: organizationId, createdBy: user,
       name: "Fixture cloud workspace", placement: "cloud", status: "stopped", version: 1, error: null,
@@ -215,8 +220,30 @@ window.__ZEROS_NATIVE__ = {
   on: () => () => {},
 };
 // No cloud workspace or local CLI is present: account setup must work first.
+const sourceReads: Array<{ op: string; params: unknown }> = [];
+const sourceFixture = {
+  reads: sourceReads,
+  pendingDesign: pendingCloudDesignCreations,
+  unavailable: false,
+};
+Object.assign(window, { cloudComputerSourceFixture: sourceFixture });
 setActiveBridge({
-  async request() {
+  async request(message: { op: string; params: { owner?: string; repo?: string } }) {
+    if (computerV2Mode && message.op === "gh.branchList") {
+      sourceReads.push({ op: message.op, params: message.params });
+      if (sourceFixture.unavailable) throw new Error("Desktop GitHub access is unavailable");
+      return { type: "WORKSPACE_RESPONSE", op: message.op, result: [
+        { name: "main", isDefault: true }, { name: "feature/topic", isDefault: false },
+      ] };
+    }
+    if (computerV2Mode && message.op === "gh.prList") {
+      sourceReads.push({ op: message.op, params: message.params });
+      if (sourceFixture.unavailable) throw new Error("Desktop GitHub access is unavailable");
+      return { type: "WORKSPACE_RESPONSE", op: message.op, result: [{
+        number: 7, title: "Remote change", headBranch: "topic", baseBranch: "main", state: "open",
+        url: `https://github.com/${message.params.owner}/${message.params.repo}/pull/7`,
+      }] };
+    }
     throw new Error("Cloud settings attempted a local engine operation");
   },
 } as unknown as RuntimeClient);
@@ -245,6 +272,9 @@ function Harness() {
   const [active, setActive] = useState(true);
   const [section, setSection] = useState(computerV2Mode ? "computer" : "providers");
   const [githubOpen, setGithubOpen] = useState(false);
+  useEffect(() => subscribeUserSettingsSection(section => {
+    if (section === "cloud-computer") setSection("computer");
+  }), []);
   const organization = useActiveOrganization(),
     { me } = useTeams();
   const folder = useWorkspaceStore(selectActiveFolder);
@@ -252,6 +282,7 @@ function Harness() {
   const workspaceOpen = useWorkspaceStore(state => state.activePage === "workspace");
   return (
     <TooltipProvider>
+      <Toaster />
       <main className="bg-bg1 text-fg1 min-h-screen p-8">
         <div className="mb-6 flex gap-2">
           {computerV2Mode && <>

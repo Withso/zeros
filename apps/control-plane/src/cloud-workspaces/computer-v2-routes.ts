@@ -105,6 +105,7 @@ export function createCloudComputerV2Routes(
     .object({
       cursor: z.string().min(1).max(512).optional(),
       limit: z.string().optional(),
+      activeRepositories: z.enum(["true", "false"]).optional(),
     })
     .strict();
   const logQuery = z
@@ -125,7 +126,13 @@ export function createCloudComputerV2Routes(
           ? { limit: parse(z.number().max(100), integer(query.limit)) }
           : {}),
       })
-      .then((value) => c.json(value));
+      .then((value) => {
+        if (query.activeRepositories === "true") return c.json(value);
+        // Shipped desktops parse a strict schema. Negotiate the additive field
+        // so the server can deploy before those clients update.
+        const { activeRepositories: _activeRepositories, ...legacy } = value;
+        return c.json(legacy);
+      });
   });
   app.put(root + "/draft", async (c) =>
     c.json(

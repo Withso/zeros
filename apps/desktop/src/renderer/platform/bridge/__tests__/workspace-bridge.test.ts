@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { ChangesHistory } from "@zeros/protocol/changes-history";
 import {
   requestWorkspaceList,
@@ -18,6 +18,7 @@ import {
   bridgeGitShow,
   bridgeGitStage,
   bridgeGhPrCreate,
+  bridgeGhBranchList,
   bridgeGhPrMarkReady,
   bridgeGhPrMerge,
   bridgeWorkspaceArchive,
@@ -775,5 +776,19 @@ describe("git/gh write timeouts", () => {
     const seen: { timeoutMs?: number } = {};
     await run(timeoutBridge(op, { sha: "s", branch: "b" }, seen));
     expect(seen.timeoutMs).toBe(30_000);
+  });
+});
+
+describe("checkout-free GitHub branch listing", () => {
+  it("passes owner/repo on the existing workspace bridge and returns the branch shape", async () => {
+    const request = vi.fn().mockResolvedValue({ type: "WORKSPACE_RESPONSE", result: [{ name: "main", isDefault: true }] });
+    const rows = await bridgeGhBranchList({ request } as unknown as RuntimeClient, { owner: "example", repo: "project" });
+    expect(rows).toEqual([{ name: "main", isDefault: true }]);
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ type: "WORKSPACE_REQUEST", op: "gh.branchList", params: { owner: "example", repo: "project" } }), expect.anything());
+  });
+  it("preserves the engine's closed GitHub read error code", async () => {
+    const request = vi.fn().mockResolvedValue({ type: "WORKSPACE_ERROR", op: "gh.branchList", code: "NOT_AUTHENTICATED", message: "Connect GitHub to list branches." });
+    await expect(bridgeGhBranchList({ request } as unknown as RuntimeClient, { owner: "example", repo: "project" }))
+      .rejects.toMatchObject({ code: "NOT_AUTHENTICATED", message: "Connect GitHub to list branches." });
   });
 });

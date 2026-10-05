@@ -64,7 +64,7 @@ vi.mock("../../../state/use-cached-read", () => ({
   ) => {
     state.reads.push({ key, enabled: options.enabled ?? key !== null });
     if (key === "desktop") return { data: { enabled: true } };
-    if (key && JSON.parse(key).length === 4)
+    if (key && [4, 6].includes(JSON.parse(key).length))
       return {
         data: {
           configured: true,
@@ -150,6 +150,7 @@ describe("first-build cloud create admission", () => {
     state.snapshot = computerState({
       state: "building",
       active: computerBuild(),
+      activeRepositories: [{ id: "123", owner: "example", name: "project", installationId: computerOrg }],
       unbuiltChanges: true,
       latestBuild: computerBuild({ state: "running" }),
     });
@@ -167,6 +168,7 @@ describe("first-build cloud create admission", () => {
     state.snapshot = computerState({
       state: "active",
       active: computerBuild(),
+      activeRepositories: [{ id: "123", owner: "example", name: "project", installationId: computerOrg }],
     });
     state.error = new Error("offline");
     expect(create().reason).toBeNull();

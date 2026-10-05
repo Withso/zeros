@@ -758,6 +758,11 @@ export class DatabaseCloudComputerV2Service {
           : [];
         const active =
           builds.find((build) => build.id === head?.active_build_id) ?? null;
+        const activeRepositories = active
+          ? (await configuration(tx, org, active.config_id)).repositories.map(
+              ({ id, owner, name, installationId }) => ({ id, owner, name, installationId }),
+            )
+          : [];
         const previous =
           builds.find((build) => build.id === head?.previous_build_id) ?? null;
         const latest =
@@ -793,6 +798,7 @@ export class DatabaseCloudComputerV2Service {
               })) ?? [],
           },
           active: active ? summary(active) : null,
+          activeRepositories,
           previous: previous ? summary(previous) : null,
           latestBuild: latest ? summary(latest) : null,
           unbuiltChanges: Boolean(

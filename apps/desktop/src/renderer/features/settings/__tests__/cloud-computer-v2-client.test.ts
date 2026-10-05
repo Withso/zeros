@@ -68,6 +68,13 @@ beforeEach(() => {
 });
 
 describe("Cloud Computer v2 exact-key server state", () => {
+  it("opts in to active repositories on current-state and history reads", async () => {
+    transport.request.mockResolvedValue(computerState());
+    await loadCloudComputerV2(key);
+    expect(transport.request).toHaveBeenLastCalledWith(`${root}?activeRepositories=true`, expect.anything());
+    await loadCloudComputerV2History(key, "older/page");
+    expect(transport.request).toHaveBeenLastCalledWith(`${root}?activeRepositories=true&cursor=older%2Fpage&limit=30`, expect.anything());
+  });
   it("shares intent and panel reads, restores A → B → A synchronously, and keeps unchanged references", async () => {
     const pending = deferred<CloudComputerV2State>();
     transport.request.mockReturnValueOnce(pending.promise);
@@ -205,6 +212,19 @@ describe("Cloud Computer v2 exact-key server state", () => {
     expect(cloudComputerV2Cache.getSnapshot(key).data).toBeUndefined();
   });
 
+  it("parses active repositories separately from drafts and retains their references across progress updates", async () => {
+    const repositories = [{ id: "123", owner: "example", name: "project", installationId: computerOrg }];
+    const state = computerState({ state: "active", active: computerBuild(), activeRepositories: repositories });
+    transport.request.mockResolvedValueOnce(state);
+    const first = await loadCloudComputerV2(key);
+    expect(first.activeRepositories).toEqual(repositories);
+    transport.request.mockResolvedValueOnce({ ...state, revision: 2, activeRepositories: [{ ...repositories[0] }] });
+    const next = await loadCloudComputerV2(key, { force: true });
+    expect(next.activeRepositories).toBe(first.activeRepositories);
+    transport.request.mockResolvedValueOnce({ ...state, activeRepositories: [{ ...repositories[0], value: "unexpected" }] });
+    await expect(loadCloudComputerV2(key, { force: true })).rejects.toThrow();
+    expect(cloudComputerV2Cache.getSnapshot(key).data?.activeRepositories).toBe(first.activeRepositories);
+  });
   it("retains unchanged history rows when progress changes and bounds inactive org entries", async () => {
     const build = computerBuild();
     transport.request.mockResolvedValueOnce(
@@ -284,7 +304,7 @@ describe("Cloud Computer v2 typed API", () => {
     ]);
     expect(transport.request).toHaveBeenCalledTimes(2);
     expect(transport.request).toHaveBeenLastCalledWith(
-      `${root}?cursor=older%2Fpage&limit=30`,
+      `${root}?activeRepositories=true&cursor=older%2Fpage&limit=30`,
       expect.anything(),
     );
     expect(cloudComputerV2Cache.getSnapshot(key).data).toBe(current);

@@ -495,7 +495,7 @@ export function CreateFromSource({
   );
 }
 
-function SourceIcon({ base }: { base: DispatcherBase | null }) {
+export function SourceIcon({ base }: { base: DispatcherBase | null }) {
   const Icon =
     base?.kind === "pr"
       ? GitPullRequest
@@ -511,7 +511,7 @@ function SourceIcon({ base }: { base: DispatcherBase | null }) {
     />
   );
 }
-function ReadState({
+export function ReadState({
   loading,
   error,
   onRetry,
@@ -541,7 +541,7 @@ function ReadState({
     );
   return children;
 }
-function BaseList({
+export function BaseList({
   rows,
   emptyLabel,
 }: {

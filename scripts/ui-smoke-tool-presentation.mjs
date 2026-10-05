@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runToolWaitSmoke } from "./ui-smoke-tool-waits.mjs";
 
 export async function runToolPresentationSmoke({ page, check }) {
   await runToolSpacingSmoke({ page, check });
@@ -171,6 +172,7 @@ export async function runToolPresentationSmoke({ page, check }) {
     "Tools survive settlement/reload; shared results stay singular; highlighting never paints stale source",
     true,
   );
+  await runToolWaitSmoke({ page, check });
 }
 
 export async function runToolSpacingSmoke({ page, check }) {

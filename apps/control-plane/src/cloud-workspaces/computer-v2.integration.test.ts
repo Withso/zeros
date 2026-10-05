@@ -162,6 +162,29 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
       requestedRef: null,
     };
   }
+  it("reads only the active build repositories in configured order, including while draft additions are unbuilt", async () => {
+    const first = await proof();
+    const second = { ...first, id: "124", name: "other" };
+    await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_github_source_access(org_id,owner_user_id,installation_id,repository_owner,repository_name,
+      forge_repository_id,actor_fingerprint,expires_at) VALUES($1,$2,$3,$4,$5,$6,cloud_github_actor_fingerprint($1,$2),now()+interval '10 minutes')`,
+      [fixture.organizationId, fixture.userId, second.installationId, second.owner, second.name, second.id]));
+    await save(0, { ...draft, repositories: [second, first] });
+    expect((await read()).activeRepositories).toEqual([]);
+    const request = await build(1);
+    await service.claimNextBuild(1);
+    await finish(request.build.id, 1, [second, first].map(({ id, owner, name }) => ({ id, owner, name, sha: "a".repeat(40) })));
+    const expected = [second, first].map(({ id, owner, name, installationId }) => ({ id, owner, name, installationId }));
+    expect((await read()).activeRepositories).toEqual(expected);
+    const third = { ...first, id: "125", name: "new-repo" };
+    await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_github_source_access(org_id,owner_user_id,installation_id,repository_owner,repository_name,
+      forge_repository_id,actor_fingerprint,expires_at) VALUES($1,$2,$3,$4,$5,$6,cloud_github_actor_fingerprint($1,$2),now()+interval '10 minutes')`,
+      [fixture.organizationId, fixture.userId, third.installationId, third.owner, third.name, third.id]));
+    await save((await read()).revision, { ...draft, repositories: [third, first] });
+    const state = await read();
+    expect(state.unbuiltChanges).toBe(true);
+    expect(state.draft.repositories).toEqual([third, first]);
+    expect(state.activeRepositories).toEqual(expected);
+  });
   it("pins the runtime before repository SHAs exist and refuses to repin it", async () => {
     const repository = await proof();
     const request = await build(0, randomUUID(), { ...draft, repositories: [repository] });
@@ -204,6 +227,7 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
         .rows[0].count;
       expect(await read()).toMatchObject({
         state: "not_built",
+        activeRepositories: [],
         revision: 0,
         draft: { ...draft, configId: null, environment: [] },
         canManage: true,

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Keep every method in the pinned Codex app-server bindings deliberately
+// Keep every method and native item in the pinned bindings deliberately
 // classified without conflating generated protocol availability with a Zeros
 // product feature. A regeneration must update this manifest in the same PR.
 
@@ -26,6 +26,7 @@ const SECTION_STATES = {
   "client request": new Set(["handled", "generated-only"]),
   "server request": new Set(["handled", "provider-conditional"]),
   "server notification": new Set(["canonical", "handled", "forwarded"]),
+  "thread item": new Set(["handled", "retained"]),
 };
 
 function isRecord(value) {
@@ -33,10 +34,18 @@ function isRecord(value) {
 }
 
 export function extractCodexMethods(source, label = "generated source") {
+  return extractDiscriminants(source, "method", label);
+}
+
+export function extractCodexThreadItems(source, label = "generated ThreadItem") {
+  return extractDiscriminants(source, "type", label);
+}
+
+function extractDiscriminants(source, discriminant, label) {
   const methods = [];
   const seen = new Set();
   const duplicates = new Set();
-  const pattern = /"method"\s*:\s*"([^"]+)"/g;
+  const pattern = new RegExp(`"${discriminant}"\\s*:\\s*"([^"]+)"`, "g");
 
   for (const match of source.matchAll(pattern)) {
     const method = match[1];
@@ -47,11 +56,11 @@ export function extractCodexMethods(source, label = "generated source") {
     }
   }
   if (methods.length === 0) {
-    throw new Error(`no Codex method discriminants found in ${label}`);
+    throw new Error(`no Codex ${discriminant} discriminants found in ${label}`);
   }
   if (duplicates.size > 0) {
     throw new Error(
-      `duplicate Codex method discriminant(s) in ${label}: ${[
+      `duplicate Codex ${discriminant} discriminant(s) in ${label}: ${[
         ...duplicates,
       ].join(", ")}`,
     );
@@ -84,7 +93,7 @@ function validateSection({ errors, generatedMethods, label, section }) {
     counts[state] = methods.length;
     for (const method of methods) {
       if (typeof method !== "string" || method.length === 0) {
-        errors.push(`${label} classification ${state} contains a non-method`);
+        errors.push(`${label} classification ${state} contains a non-discriminant`);
         continue;
       }
       if (!generated.has(method)) stale.add(method);
@@ -117,6 +126,7 @@ export function validateCodexProtocolCoverage({
   clientRequests,
   serverRequests,
   serverNotifications,
+  threadItems,
 }) {
   const errors = [];
   if (!isRecord(manifest)) {
@@ -151,6 +161,12 @@ export function validateCodexProtocolCoverage({
     label: "server notification",
     section: manifest.serverNotifications,
   });
+  const threadItemCounts = validateSection({
+    errors,
+    generatedMethods: threadItems,
+    label: "thread item",
+    section: manifest.threadItems,
+  });
 
   if (errors.length > 0) {
     throw new Error(
@@ -161,6 +177,8 @@ export function validateCodexProtocolCoverage({
     clientRequests: clientRequestCounts,
     serverRequests: serverRequestCounts,
     serverNotifications: serverNotificationCounts,
+    threadItems: threadItemCounts,
+    totalItems: threadItems.length,
     total:
       clientRequests.length +
       serverRequests.length +
@@ -206,6 +224,10 @@ export function runCodexProtocolCoverageCheck() {
     readFileSync(join(GENERATED_DIR, "ServerNotificationEnvelope.ts"), "utf8"),
     "generated/ServerNotificationEnvelope.ts",
   );
+  const threadItems = extractCodexThreadItems(
+    readFileSync(join(GENERATED_DIR, "v2", "ThreadItem.ts"), "utf8"),
+    "generated/v2/ThreadItem.ts",
+  );
 
   const report = validateCodexProtocolCoverage({
     manifest,
@@ -213,15 +235,17 @@ export function runCodexProtocolCoverageCheck() {
     clientRequests,
     serverRequests,
     serverNotifications,
+    threadItems,
   });
   console.log(
-    `✓ check:codex-coverage — ${report.total} protocol methods classified for ${pinnedVersion}`,
+    `✓ check:codex-coverage — ${report.total} protocol methods and ${report.totalItems} thread items classified for ${pinnedVersion}`,
   );
   console.log(`  client requests: ${formatCounts(report.clientRequests)}`);
   console.log(`  server requests: ${formatCounts(report.serverRequests)}`);
   console.log(
     `  server notifications: ${formatCounts(report.serverNotifications)}`,
   );
+  console.log(`  thread items: ${formatCounts(report.threadItems)}`);
   return report;
 }
 

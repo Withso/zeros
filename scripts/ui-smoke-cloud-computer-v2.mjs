@@ -16,6 +16,7 @@ const base = () => ({
     environment: [],
   },
   active: null,
+  activeRepositories: [],
   previous: null,
   latestBuild: null,
   unbuiltChanges: false,
@@ -49,6 +50,7 @@ export const cloudComputerV2ReviewRegressions = [
   "history-hidden-conflict",
   "external-first-build",
   "admin-flow",
+  "create-from-computer-repos",
 ];
 
 // Real settings, dispatcher and dialog. Only the authenticated API is mocked;
@@ -74,6 +76,7 @@ export async function runCloudComputerV2Smoke({
   const requests = [];
   const adminWorkspaces = new Map(), adminReceipts = new Map();
   let heldAdmin = null, holdNextAdmin = false, failNextAdmin = false;
+  let createOptionsDrift = false, holdNextCreateConflict = false, heldCreateConflict = null;
   let conflictNextSave = false,
     heldState = null,
     holdNextState = false,
@@ -111,7 +114,7 @@ export async function runCloudComputerV2Smoke({
       path = url.pathname,
       method = request.method();
     const input = request.postDataJSON();
-    requests.push({ path, method, input, query: url.searchParams });
+    requests.push({ path, method, input, query: url.searchParams, idempotencyKey: request.headers()["idempotency-key"] });
     const org = path.match(/\/organizations\/([^/]+)/)?.[1] ?? orgA;
     const computer = states.get(org) ?? base();
     const root = `/v1/organizations/${org}/cloud-computer/v2`;
@@ -122,16 +125,35 @@ export async function runCloudComputerV2Smoke({
         contentType: "application/json",
         body: JSON.stringify(body),
       });
-    if (path.endsWith("/create-options"))
+    if (path.endsWith("/create-options")) {
+      if (createOptionsDrift)
+        return reply({ error: { code: "cloud_computer_changed", message: "Raw server drift text" } }, 409);
       result = {
         configured: true,
         repository: {
-          owner: "example",
-          name: "project",
+          owner: url.searchParams.get("owner") ?? "example",
+          name: url.searchParams.get("repository") ?? "project",
           defaultBranch: "main",
         },
         installations: [{ id: installation, accountLogin: "example" }],
       };
+    } else if (path.endsWith("/cloud-workspaces") && method === "POST") {
+      if (holdNextCreateConflict) {
+        holdNextCreateConflict = false;
+        heldCreateConflict = route;
+        return;
+      }
+      if (computer.active && !computer.activeRepositories.some(repo =>
+        repo.owner === input.repository.owner && repo.name === input.repository.name && repo.installationId === input.repository.githubInstallationId))
+        return reply({ error: { code: "cloud_computer_repository_not_configured", message: "Choose a repository from the active Cloud Computer." } }, 409);
+      result = { workspace: {
+        id: crypto.randomUUID(), organizationId: org, teamId: org, name: "Repository workspace", createdBy: adminUser,
+        placement: "cloud", status: "provisioning", repository: { forge: input.repository.forge, owner: input.repository.owner, name: input.repository.name, revision: input.repository.revision },
+        generation: { number: 1, architecture: "x86_64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 }, observedState: "provisioning", lastObservedAt: null },
+        capabilities: { canWrite: true, canManage: true, canStart: true, startUnavailableReason: null },
+        version: 1, error: null, createdAt: now, updatedAt: now, deletedAt: null,
+      } };
+    }
     else if (path.endsWith("/cloud-computer"))
       result = {
         revision: 0,
@@ -154,6 +176,10 @@ export async function runCloudComputerV2Smoke({
       result = cursor
         ? { ...computer, history: olderPages.get(cursor) }
         : computer;
+      if (url.searchParams.get("activeRepositories") !== "true") {
+        const { activeRepositories: _activeRepositories, ...legacy } = result;
+        result = legacy;
+      }
     } else if (path === `${root}/admin-workspaces`) {
       if (input.expectedActiveVersion !== computer.active?.version)
         return reply({ error: { code: "cloud_computer_changed", message: "Review the active version." } }, 409);
@@ -391,7 +417,18 @@ export async function runCloudComputerV2Smoke({
     Object.assign(states.get(orgA), { state: "active", revision: 1, active: first, latestBuild: first, history: { builds: [first], nextCursor: null } });
   }
 
-  await page.goto(`${harnessBase}/harness-cloud-settings.html?computer-v2`);
+  const activeRepositories = [
+    { id: "123", owner: "example", name: "project", installationId: installation },
+    { id: "456", owner: "example", name: "another", installationId: orgB },
+  ];
+  if (regression === "create-from-computer-repos") {
+    const first = build(1);
+    Object.assign(states.get(orgA), { state: "active", revision: 1, active: first, activeRepositories, latestBuild: first,
+      draft: { ...base().draft, repositories: [...activeRepositories.map(row => ({ ...row, requestedRef: null })), { ...activeRepositories[0], id: "789", name: "unbuilt" }] },
+      unbuiltChanges: true, history: { builds: [first], nextCursor: null } });
+    Object.assign(states.get(orgB), { state: "active", revision: 1, active: first, activeRepositories: [activeRepositories[0]], latestBuild: first, history: { builds: [first], nextCursor: null } });
+  }
+  await page.goto(`${harnessBase}/harness-cloud-settings.html?computer-v2${regression === "create-from-computer-repos" ? "&empty-projects" : ""}`);
   if (regression) {
     const button = (name) => page.getByRole("button", { name, exact: true });
     const editor = page.getByRole("textbox", {
@@ -406,7 +443,136 @@ export async function runCloudComputerV2Smoke({
           !row.query.has("cursor"),
       ).length;
     const current = states.get(orgA);
-    if (regression === "role-loss") {
+    if (regression === "create-from-computer-repos") {
+      const choose = () => button("Choose project");
+      const create = () => button("Create");
+      const source = () => page.locator("[data-create-source-trigger]");
+      const message = page.locator('[contenteditable="true"][aria-label="Message"]');
+      const optionsReads = () => requests.filter(row => row.path.endsWith("/create-options")).length;
+      await button("Create section").click();
+      await expect(choose()).toContainText("example/project");
+      await expect(source()).toContainText("main");
+      await expect(source()).toHaveAccessibleName("Create from GitHub branch: main");
+      expect(requests.filter(row => row.path.endsWith("/v2")).every(row => row.query.get("activeRepositories") === "true")).toBe(true);
+      await message.fill("Keep this prompt through metadata refresh");
+      createOptionsDrift = true;
+      const metadataStateReads = stateReads();
+      await choose().click();
+      const menu = page.getByRole("menu");
+      await expect(menu.getByRole("menuitem")).toHaveCount(3);
+      await expect(menu).toContainText("example/project");
+      await expect(menu).toContainText("example/another");
+      await expect(menu).not.toContainText(/unbuilt|Open project|Open GitHub project|Start from scratch|No projects yet/);
+      await menu.getByRole("menuitem", { name: "example/another", exact: true }).hover();
+      await menu.getByRole("menuitem", { name: "example/another", exact: true }).click();
+      await expect(choose()).toContainText("example/another");
+      await expect(page.getByText("Cloud Computer changed — refresh", { exact: true })).toBeVisible();
+      await expect(page.getByText("Raw server drift text", { exact: true })).toHaveCount(0);
+      await expect.poll(stateReads).toBeGreaterThan(metadataStateReads);
+      await expect(message).toHaveText("Keep this prompt through metadata refresh");
+      const settledMetadataReads = { state: stateReads(), options: optionsReads() };
+      await page.clock.runFor(30_001);
+      expect({ state: stateReads(), options: optionsReads() }).toEqual(settledMetadataReads);
+      createOptionsDrift = false;
+      await choose().hover();
+      await expect(create()).toBeEnabled();
+      await message.fill("");
+      await source().hover();
+      await expect.poll(() => page.evaluate(() => window.cloudComputerSourceFixture.reads.filter(row => row.op === "gh.prList").length)).toBeGreaterThan(0);
+      await source().click();
+      await expect(page.getByRole("tab", { name: "Local branches", exact: true })).toHaveCount(0);
+      await expect(page.getByRole("tab", { name: "Branches", exact: true })).toBeVisible();
+      await page.getByLabel("Search sources", { exact: true }).fill("feature");
+      await page.getByRole("button", { name: "feature/topic", exact: true }).click();
+      await expect(source()).toContainText("feature/topic");
+      await source().click();
+      await page.getByRole("tab", { name: "Pull requests", exact: true }).click();
+      await page.getByLabel("Search sources", { exact: true }).fill("Remote change");
+      await page.getByRole("button", { name: /#7 · Remote change/ }).click();
+      await create().click();
+      await expect.poll(() => writes("/cloud-workspaces").length).toBe(1);
+      expect(writes("/cloud-workspaces")[0].input).toMatchObject({
+        repository: { forge: "github.com", owner: "example", name: "another", revision: "refs/pull/7/head", githubInstallationId: orgB },
+      });
+      expect(writes("/cloud-workspaces")[0].input).not.toHaveProperty("cloudComputerBuild");
+      await choose().click();
+      await menu.getByRole("menuitem", { name: "Add repository", exact: true }).click();
+      await expect(page.getByRole("textbox", { name: "Cloud Computer install script", exact: true })).toBeVisible();
+      await button("Create section").click();
+      await expect(choose()).toContainText("example/another");
+      await expect(source()).toContainText("main");
+      await button("Organization B").click();
+      await expect(choose()).toContainText("example/project");
+      await button("Organization A").click();
+      await expect(choose()).toContainText("example/another");
+      const before = stateReads();
+      current.active = build(2);
+      current.latestBuild = current.active;
+      current.revision++;
+      current.history.builds.unshift(current.active);
+      current.activeRepositories = [activeRepositories[0]];
+      await message.fill("Keep this prompt through repository refresh");
+      await create().click();
+      await expect.poll(() => writes("/cloud-workspaces").length).toBe(2);
+      await expect.poll(stateReads).toBeGreaterThan(before);
+      await expect(page.getByText("Cloud Computer changed — refresh", { exact: true })).toBeVisible();
+      await expect(message).toHaveText("Keep this prompt through repository refresh");
+      await expect(choose()).toContainText("example/project");
+      await expect(create()).toBeEnabled();
+      await create().click();
+      await expect.poll(() => writes("/cloud-workspaces").length).toBe(3);
+      expect(writes("/cloud-workspaces")[2].input).toMatchObject({ repository: { revision: "refs/heads/main", name: "project", githubInstallationId: installation } });
+      expect(writes("/cloud-workspaces")[2].input).not.toHaveProperty("cloudComputerBuild");
+      expect(writes("/cloud-workspaces")[2].idempotencyKey).not.toBe(writes("/cloud-workspaces")[1].idempotencyKey);
+      await button("Design mode").click();
+      await create().click();
+      await expect.poll(() => writes("/cloud-workspaces").length).toBe(4);
+      expect(writes("/cloud-workspaces")[3].input).not.toHaveProperty("cloudComputerBuild");
+      // The Design intent is registered after the create response is accepted.
+      await expect.poll(() => page.evaluate(() => window.cloudComputerSourceFixture.pendingDesign().length)).toBe(1);
+      await button("Code mode").click();
+      holdNextCreateConflict = true;
+      await message.fill("Keep this prompt through hidden recovery");
+      await create().click();
+      await expect.poll(() => writes("/cloud-workspaces").length).toBe(5);
+      await button("Toggle settings activity").click();
+      const hiddenReads = { state: stateReads(), options: optionsReads() };
+      await heldCreateConflict.fulfill({ status: 409, contentType: "application/json",
+        body: JSON.stringify({ error: { code: "cloud_computer_template_unavailable", message: "Template changed" } }) });
+      await expect(source()).toBeEnabled();
+      await page.clock.runFor(5_000);
+      expect({ state: stateReads(), options: optionsReads() }).toEqual(hiddenReads);
+      await button("Toggle settings activity").click();
+      await expect.poll(stateReads).toBeGreaterThan(hiddenReads.state);
+      await expect.poll(optionsReads).toBeGreaterThan(hiddenReads.options);
+      await expect(message).toHaveText("Keep this prompt through hidden recovery");
+      await expect(create()).toBeEnabled();
+      await button("Computer section").click();
+      current.activeRepositories = [activeRepositories[0]];
+      current.revision++;
+      await page.clock.runFor(30_001);
+      await button("Create section").click();
+      await expect(choose()).toContainText("example/project");
+      await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("zeros:cloud-computer-repository:v1"))
+        .find(([owner]) => owner === JSON.stringify(["44444444-4444-4444-8444-444444444444", "11111111-1111-4111-8111-111111111111"]))[1])).toBe("123");
+      await page.evaluate(() => { window.cloudComputerSourceFixture.unavailable = true; });
+      await source().click();
+      await page.getByRole("button", { name: "Refresh sources", exact: true }).click();
+      await expect(page.getByText("Desktop GitHub access is unavailable", { exact: true })).toBeVisible();
+      await expect(create()).toBeEnabled();
+      await page.getByRole("tab", { name: "Pull requests", exact: true }).click();
+      await page.getByRole("button", { name: "Refresh sources", exact: true }).click();
+      await expect(page.getByText("Desktop GitHub access is unavailable", { exact: true })).toBeVisible();
+      await page.keyboard.press("Escape");
+      await button("Disable computer v2").click();
+      await choose().click();
+      await expect(menu).toContainText("Open project");
+      await expect(menu).toContainText("Open GitHub project");
+      await expect(menu).toContainText("Start from scratch");
+      await page.keyboard.press("Escape");
+      check("Cloud Create uses built repositories without a project, restores/prunes per-org choices, creates Code/Design, bounds metadata recovery, and defers hidden conflicts without losing the prompt", true);
+    } else if (regression === "role-loss") {
+
       await expect(
         page.getByText("Not built yet", { exact: true }),
       ).toBeVisible();
@@ -750,6 +916,7 @@ export async function runCloudComputerV2Smoke({
       });
       current.state = "active";
       current.active = first;
+      current.activeRepositories = [activeRepositories[0]];
       current.revision++;
       await page.clock.runFor(4000);
       await expect(button("Create")).toBeEnabled();
@@ -915,6 +1082,7 @@ export async function runCloudComputerV2Smoke({
     completedAt: now,
   });
   current.active = first;
+  current.activeRepositories = [];
   current.state = "active";
   current.revision++;
   current.unbuiltChanges = false;
@@ -922,7 +1090,7 @@ export async function runCloudComputerV2Smoke({
   await page.clock.runFor(3200);
   await expect(
     page.getByRole("button", { name: "Create", exact: true }),
-  ).toBeEnabled();
+  ).toBeDisabled();
   expect(logCount()).toBe(createLogReads);
   await page
     .getByRole("button", { name: "Computer section", exact: true })
@@ -942,7 +1110,7 @@ export async function runCloudComputerV2Smoke({
     .click();
   await expect(
     page.getByRole("button", { name: "Create", exact: true }),
-  ).toBeEnabled();
+  ).toBeDisabled();
   await page
     .getByRole("button", { name: "Computer section", exact: true })
     .click();

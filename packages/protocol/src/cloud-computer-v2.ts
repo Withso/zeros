@@ -89,6 +89,9 @@ export const CloudComputerV2RepositorySchema = z
 export type CloudComputerV2Repository = z.infer<
   typeof CloudComputerV2RepositorySchema
 >;
+/** Repositories available in the immutable active template, in configured order. */
+export const CloudComputerV2ActiveRepositorySchema = CloudComputerV2RepositorySchema.omit({ requestedRef: true });
+export type CloudComputerV2ActiveRepository = z.infer<typeof CloudComputerV2ActiveRepositorySchema>;
 export const CloudComputerV2EnvironmentOperationSchema = z.discriminatedUnion(
   "op",
   [
@@ -275,6 +278,7 @@ export type CloudComputerV2State = {
   revision: number;
   draft: CloudComputerV2Draft;
   active: CloudComputerV2BuildSummary | null;
+  activeRepositories: CloudComputerV2ActiveRepository[];
   previous: CloudComputerV2BuildSummary | null;
   latestBuild: CloudComputerV2BuildSummary | null;
   unbuiltChanges: boolean;

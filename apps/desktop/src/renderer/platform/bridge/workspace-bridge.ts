@@ -1667,6 +1667,13 @@ export async function bridgeGhPrComment(
   })) as { id: number; url: string };
 }
 
+export async function bridgeGhBranchList(
+  bridge: RuntimeClient,
+  args: { owner: string; repo: string },
+): Promise<import("../git").GithubBranch[]> {
+  return (await workspaceOp(bridge, "gh.branchList", { ...args })) as import("../git").GithubBranch[];
+}
+
 export async function bridgeGhPrList(
   bridge: RuntimeClient,
   args: {
