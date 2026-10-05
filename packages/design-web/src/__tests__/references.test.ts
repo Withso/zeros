@@ -1,9 +1,178 @@
 import { describe, expect, it } from "vitest";
 import {
+  designCssUrlReferences,
+  designSrcsetReferences,
   resolveDesignLocalReference,
+  rebaseDesignReference,
   rebaseDesignCssReferences,
   rebaseDesignHtmlReferences,
 } from "../references";
+
+describe("reference scanner spans", () => {
+  it("retains quoted URL offsets, surrounding whitespace and parentheses", () => {
+    const source = '/* ignored */ URL(  "  assets/a(b).png?q#p  "  )';
+    expect(designCssUrlReferences(source)).toEqual([
+      {
+        start: 23,
+        end: 42,
+        url: "assets/a(b).png?q#p",
+        functionStart: 14,
+        functionEnd: 48,
+      },
+    ]);
+  });
+
+  it("keeps URL identifier boundaries", () => {
+    const source = "noturl(a) -url(a) _url(a) \\url(a) .url(assets/a.png)";
+    expect(designCssUrlReferences(source)).toEqual([
+      {
+        start: 39,
+        end: 51,
+        url: "assets/a.png",
+        functionStart: 35,
+        functionEnd: 52,
+      },
+    ]);
+  });
+
+  it.each([
+    [
+      'url( "a" trailing)',
+      [
+        {
+          start: 6,
+          end: 18,
+          url: '"a" trailing',
+          functionStart: 0,
+          functionEnd: 18,
+        },
+      ],
+    ],
+    [
+      'url("unclosed ) url(next.png)',
+      [
+        {
+          start: 5,
+          end: 14,
+          url: '"unclosed',
+          functionStart: 0,
+          functionEnd: 15,
+        },
+        {
+          start: 20,
+          end: 28,
+          url: "next.png",
+          functionStart: 16,
+          functionEnd: 29,
+        },
+      ],
+    ],
+    [
+      '"unclosed url(inside.png)',
+      [
+        {
+          start: 14,
+          end: 24,
+          url: "inside.png",
+          functionStart: 10,
+          functionEnd: 25,
+        },
+      ],
+    ],
+    [
+      "/* unclosed url(inside.png)",
+      [
+        {
+          start: 16,
+          end: 26,
+          url: "inside.png",
+          functionStart: 12,
+          functionEnd: 27,
+        },
+      ],
+    ],
+  ])(
+    "preserves the public scanner's malformed-value fallback: %s",
+    (source, expected) => {
+      expect(designCssUrlReferences(source)).toEqual(expected);
+    },
+  );
+
+  it("preserves whitespace around migrated and rendered references", () => {
+    const source = "\u00a0\u2003assets/a.png?q#p \u2029\ufeff";
+    for (const options of [
+      {},
+      { strict: true, movedFiles: { "home.html": "page-1/home.html" } },
+    ]) {
+      expect(
+        rebaseDesignReference(source, "home.html", "page-1/home.html", options),
+      ).toBe("\u00a0\u2003../assets/a.png?q#p \u2029\ufeff");
+    }
+  });
+
+  it.each([false, true])(
+    "retains splice precedence for overlapping import/declaration spans (strict: %s)",
+    (strict) => {
+      const source =
+        '.a{background:url(assets/a.png)} @import "tokens.css" { .b{background:url(assets/b.png)}}';
+      const options = strict
+        ? { strict: true, movedFiles: { "home.html": "page-1/home.html" } }
+        : {};
+      const expected =
+        '.a{background:url(../assets/a.png)} @import "' +
+        (strict ? "../tokens.css" : "tokens.css") +
+        '" { .b{background:url(../assets/b.pngpng)}}';
+      expect(
+        rebaseDesignCssReferences(
+          source,
+          "home.html",
+          "page-1/home.html",
+          options,
+        ),
+      ).toBe(expected);
+      expect(
+        rebaseDesignHtmlReferences(
+          "<style>" + source + "</style>",
+          "home.html",
+          "page-1/home.html",
+          options,
+        ),
+      ).toBe("<style>" + expected + "</style>");
+    },
+  );
+
+  it("retains srcset URL spans and data-URL commas", () => {
+    const source =
+      " \tassets/a.png 1x, data:image/png;base64,AA 2x, assets/b.png, ";
+    expect(
+      designSrcsetReferences(source).map(({ start, end, url }) => ({
+        start,
+        end,
+        url,
+        raw: source.slice(start, end),
+      })),
+    ).toEqual([
+      { start: 2, end: 14, url: "assets/a.png", raw: "assets/a.png" },
+      {
+        start: 19,
+        end: 43,
+        url: "data:image/png;base64,AA",
+        raw: "data:image/png;base64,AA",
+      },
+      { start: 48, end: 60, url: "assets/b.png", raw: "assets/b.png" },
+    ]);
+  });
+
+  it.each([
+    "im/**/age(home.html)",
+    'im"discarded"age(home.html)',
+    "u\\72l(home.html)",
+  ])("preserves strict unsupported-function detection: %s", (source) =>
+    expect(() => designCssUrlReferences(source, true)).toThrow(
+      /unsupported|ambiguous/,
+    ),
+  );
+});
 
 describe("contained source-relative Design references", () => {
   it.each([

@@ -10,9 +10,11 @@ export function designTitleSlug(
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, options.maxLength);
-  if (options.trimTrailingHyphens) slug = slug.replace(/-+$/g, "");
+    .replace(/[^a-z0-9]+/g, "-");
+  if (slug.startsWith("-")) slug = slug.slice(1);
+  if (slug.endsWith("-")) slug = slug.slice(0, -1);
+  slug = slug.slice(0, options.maxLength);
+  if (options.trimTrailingHyphens && slug.endsWith("-"))
+    slug = slug.slice(0, -1);
   return slug || options.fallback;
 }

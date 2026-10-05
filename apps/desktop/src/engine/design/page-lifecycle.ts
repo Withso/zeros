@@ -73,7 +73,8 @@ export async function createDesignPage(
       suffix++
     ) {
       const ending = `-${suffix}`;
-      folder = base.slice(0, 64 - ending.length).replace(/-+$/g, "") + ending;
+      const prefix = base.slice(0, 64 - ending.length);
+      folder = (prefix.endsWith("-") ? prefix.slice(0, -1) : prefix) + ending;
     }
     const page = {
       id: `page_${randomUUID().replace(/-/g, "")}`,

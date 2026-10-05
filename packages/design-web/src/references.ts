@@ -1,6 +1,14 @@
 import { parse, parseFragment, type DefaultTreeAdapterTypes } from "parse5";
 import postcss from "postcss";
 import { portableDesignName } from "@zeros/protocol/design-path";
+import {
+  CssReferenceLexer,
+  hasCssReferenceFunction,
+  isReferenceWhitespace,
+  referenceWhitespaceStart,
+  referenceWhitespaceEnd,
+  type CssLiteralSpan,
+} from "./css-reference-lexer";
 
 /** Resolve URLs against the containing source file, bounded by the Design root.
  * This is lexical; filesystem readers still check the canonical target. */
@@ -257,8 +265,8 @@ function rebaseMigrationReference(
   )
     unsafeReference(reference);
   if (!moved && fromFile === toFile) return reference;
-  const leading = reference.match(/^\s*/)?.[0] ?? "";
-  const trailing = reference.match(/\s*$/)?.[0] ?? "";
+  const leading = reference.slice(0, referenceWhitespaceStart(reference));
+  const trailing = reference.slice(referenceWhitespaceEnd(reference));
   const fromDirectory = fromFile.split("/").slice(0, -1).join("/");
   const toDirectory = toFile.split("/").slice(0, -1).join("/");
   const target = moved ?? (options.movedFiles ? null : resolved.target);
@@ -320,13 +328,14 @@ export function rebaseDesignReference(
       ...destination.slice(shared).map(encodeURIComponent),
     ].join("/") || ".";
   const trailingSlash = value.split(/[?#]/, 1)[0]!.endsWith("/") ? "/" : "";
-  const suffix = value.match(/[?#][\s\S]*$/)?.[0] ?? "";
+  const suffixIndex = value.search(/[?#]/);
+  const suffix = suffixIndex < 0 ? "" : value.slice(suffixIndex);
   return (
-    (reference.match(/^\s*/)?.[0] ?? "") +
+    reference.slice(0, referenceWhitespaceStart(reference)) +
     relative +
     trailingSlash +
     suffix +
-    (reference.match(/\s*$/)?.[0] ?? "")
+    reference.slice(referenceWhitespaceEnd(reference))
   );
 }
 
@@ -346,43 +355,24 @@ export function designCssUrlReferences(
   value: string,
   strict = false,
 ): CssReferenceSpan[] {
+  const lexer = new CssReferenceLexer(value);
   if (strict) {
-    const syntax = value.replace(
-      /\/\*[\s\S]*?\*\/|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'/g,
-      "",
-    );
-    if (
-      /(?:image-set|image)\s*\(/i.test(syntax) ||
-      /[a-z_-][a-z0-9_\\-]*\\[a-z0-9_\\-]*\s*\(/i.test(syntax)
-    )
+    const syntax = lexer.syntax();
+    if (hasCssReferenceFunction(syntax, ["image-set", "image"], true))
       unsafeReference(value);
   }
-  const tokens =
-    /\/\*[\s\S]*?\*\/|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|(?<![-\w\\])url\(\s*(?:"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)'|([^)]*?))\s*\)/gi;
   const references: CssReferenceSpan[] = [];
-  for (const match of value.matchAll(tokens)) {
-    const raw = match[1] ?? match[2] ?? match[3];
-    if (raw === undefined) continue;
-    const url = raw.trim();
+  for (const span of lexer.urls()) {
+    const url = span.url;
     if (
       strict &&
       (url.includes("\\") ||
         url.includes("/*") ||
-        /(?:var|attr|env)\s*\(/i.test(url))
+        hasCssReferenceFunction(url, ["var", "attr", "env"]))
     )
       unsafeReference(url);
     if (!url || url.includes("\\") || url.includes("/*")) continue;
-    let start = match.index + match[0].indexOf("(") + 1;
-    while (/\s/.test(value[start] ?? "") && start < value.length) start++;
-    if (value[start] === '"' || value[start] === "'") start++;
-    start += raw.length - raw.trimStart().length;
-    references.push({
-      start,
-      end: start + url.length,
-      url,
-      functionStart: match.index,
-      functionEnd: match.index + match[0].length,
-    });
+    references.push(span);
   }
   return references;
 }
@@ -393,9 +383,14 @@ export function designSrcsetReferences(value: string): ReferenceSpan[] {
   const result: ReferenceSpan[] = [];
   let cursor = 0;
   while (cursor < value.length) {
-    while (/[\s,]/.test(value[cursor] ?? "") && cursor < value.length) cursor++;
+    while (
+      cursor < value.length &&
+      (isReferenceWhitespace(value[cursor]) || value[cursor] === ",")
+    )
+      cursor++;
     const start = cursor;
-    while (cursor < value.length && !/\s/.test(value[cursor]!)) cursor++;
+    while (cursor < value.length && !isReferenceWhitespace(value[cursor]))
+      cursor++;
     let end = cursor;
     while (end > start && value[end - 1] === ",") end--;
     if (end > start) result.push({ start, end, url: value.slice(start, end) });
@@ -415,52 +410,77 @@ function applyEdits(
   source: string,
   edits: Array<{ start: number; end: number; text: string }>,
 ): string {
-  let result = source;
-  for (const edit of edits.sort((left, right) => right.start - left.start))
-    result = result.slice(0, edit.start) + edit.text + result.slice(edit.end);
-  return result;
+  if (!edits.length) return source;
+  type Chunk = { text: string; offset: number; next: Chunk | null };
+  let head: Chunk | null = null;
+  let cursor = source.length;
+  // Preserve descending splice precedence, including overlapping parser spans,
+  // by trimming/prepending chunks instead of copying the entire source per edit.
+  for (const edit of edits.sort((left, right) => right.start - left.start)) {
+    if (edit.end < cursor) {
+      head = { text: source.slice(edit.end, cursor), offset: 0, next: head };
+    } else {
+      let discard = edit.end - cursor;
+      while (head && discard > 0) {
+        const length = head.text.length - head.offset;
+        if (discard >= length) {
+          discard -= length;
+          head = head.next;
+        } else {
+          head.offset += discard;
+          discard = 0;
+        }
+      }
+    }
+    if (edit.text) head = { text: edit.text, offset: 0, next: head };
+    cursor = edit.start;
+  }
+  const chunks = [source.slice(0, cursor)];
+  for (let chunk = head; chunk; chunk = chunk.next)
+    chunks.push(chunk.text.slice(chunk.offset));
+  return chunks.join("");
+}
+
+function literalLookup(literals: readonly CssLiteralSpan[]) {
+  let cursor = 0;
+  return (start: number) => {
+    while (cursor < literals.length && literals[cursor]!.end <= start) cursor++;
+    const span = literals[cursor];
+    return !!span && start >= span.start;
+  };
 }
 
 function migrationCssReferences(
   source: string,
   options: DesignReferenceRebaseOptions,
 ): CssReferenceSpan[] {
-  const literals = [
-    ...source.matchAll(
-      /\/\*[\s\S]*?(?:\*\/|$)|"(?:\\[\s\S]|[^"\\])*(?:"|$)|'(?:\\[\s\S]|[^'\\])*(?:'|$)/g,
-    ),
-  ].map((match) => ({
-    start: match.index,
-    end: match.index + match[0].length,
-  }));
-  const inLiteral = (start: number) =>
-    literals.some((span) => start >= span.start && start < span.end);
+  const lexer = new CssReferenceLexer(source);
+  const literals = lexer.literals(true);
+  const imageInLiteral = literalLookup(literals);
   // Quoted URLs in image functions are not URL tokens. Refuse only a possible
   // moved target, instead of unrelated unsupported syntax elsewhere in CSS.
-  for (const match of source.matchAll(/(?:image-set|image)\s*\(([\s\S]*?)\)/gi))
+  for (const span of lexer.images())
     if (
-      !inLiteral(match.index) &&
-      mayReferenceMovedDesignFrame(match[1]!, options.movedFiles)
+      !imageInLiteral(span.start) &&
+      mayReferenceMovedDesignFrame(
+        source.slice(span.bodyStart, span.bodyEnd),
+        options.movedFiles,
+      )
     )
-      unsafeReference(match[0]);
-  const references = designCssUrlReferences(source).filter(
-    (ref) =>
-      !inLiteral(ref.functionStart) && !/(?:var|attr|env)\s*\(/i.test(ref.url),
-  );
+      unsafeReference(source.slice(span.start, span.end));
+  const urlInLiteral = literalLookup(literals);
+  const references = lexer
+    .urls()
+    .filter(
+      (ref) =>
+        !!ref.url &&
+        !ref.url.includes("\\") &&
+        !ref.url.includes("/*") &&
+        !urlInLiteral(ref.functionStart) &&
+        !hasCssReferenceFunction(ref.url, ["var", "attr", "env"]),
+    );
   // Also cover quoted @import during the token fallback for malformed CSS.
-  const tokens =
-    /\/\*[\s\S]*?(?:\*\/|$)|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|@import(?:\s|\/\*[\s\S]*?\*\/)*(['"])((?:\\[\s\S]|[^\\])*?)\1/gi;
-  for (const match of source.matchAll(tokens)) {
-    if (!match[1]) continue;
-    const start = match.index + match[0].indexOf(match[1]) + 1;
-    references.push({
-      start,
-      end: start + match[2]!.length,
-      url: match[2]!,
-      functionStart: match.index,
-      functionEnd: match.index + match[0].length,
-    });
-  }
+  references.push(...lexer.imports());
   return references;
 }
 
@@ -548,19 +568,9 @@ function rebaseCssReferences(
       ? migrationCssReferences(authored, options)
       : designCssUrlReferences(authored);
     if (!references.length) {
-      const params = authored.slice(7);
-      const match = /^(?:\s|\/\*[\s\S]*?\*\/)*(['"])([\s\S]*?)\1/.exec(params);
-      if (!match) {
-        return;
-      }
-      const offset = 7 + match[0].indexOf(match[1]!) + 1;
-      references.push({
-        start: offset,
-        end: offset + match[2]!.length,
-        url: match[2]!,
-        functionStart: offset,
-        functionEnd: offset + match[2]!.length,
-      });
+      const reference = new CssReferenceLexer(authored).imports()[0];
+      if (!reference || reference.functionStart !== 0) return;
+      references.push(reference);
     }
     for (const reference of references) {
       const edit = referenceEdit(reference, start);
@@ -644,8 +654,7 @@ export function rebaseDesignHtmlReferences(
         const raw = source.slice(span.startOffset, span.endOffset);
         const equal = raw.indexOf("=");
         if (equal < 0) continue;
-        const valueStart =
-          equal + 1 + (raw.slice(equal + 1).match(/^\s*/)?.[0].length ?? 0);
+        const valueStart = referenceWhitespaceStart(raw, equal + 1);
         const quote =
           raw[valueStart] === '"' || raw[valueStart] === "'"
             ? raw[valueStart]
