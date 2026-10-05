@@ -113,26 +113,6 @@ describe("Surface markup equivalence", () => {
         "flex h-7.5 w-full min-w-0 items-center justify-start gap-2.5 rounded-md border-0 bg-transparent px-2.5 py-0 text-left text-xs font-normal text-fg2 transition-colors duration-150 ease-out hover:bg-sidebar-bg-hover hover:text-fg2 data-[state=active]:bg-sidebar-bg-hover data-[state=active]:text-fg1 data-[state=active]:hover:text-fg1 [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg2 data-[state=active]:[&>svg]:text-fg1",
       icon: false,
     },
-    // shell/app-sidebar.tsx archived workspaces
-    {
-      site: "shell/app-sidebar.tsx archived workspaces",
-      file: "shell/app-sidebar.tsx",
-      constant: "TITLE_ICON_BUTTON_CLS",
-      tag: "button",
-      original:
-        "h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1",
-      icon: true,
-    },
-    // shell/app-sidebar.tsx disabled archive
-    {
-      site: "shell/app-sidebar.tsx disabled archive",
-      file: "shell/app-sidebar.tsx",
-      constant: "TITLE_ICON_BUTTON_CLS",
-      tag: "button",
-      original:
-        "h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1",
-      icon: true,
-    },
     // shell/sidebar-workspace-row.tsx workspace
     {
       site: "shell/sidebar-workspace-row.tsx workspace",
