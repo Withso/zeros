@@ -1,0 +1,364 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Withso/zeros/blob/main/scripts/ci/incident.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "signature",
+    "signature_version",
+    "repository",
+    "incident_kind",
+    "state",
+    "claimed_by",
+    "base_branch",
+    "branch",
+    "first_failure",
+    "latest_failure",
+    "occurrences",
+    "required_lanes",
+    "required_ci_additions",
+    "marker_path",
+    "repair_generation",
+    "resolved_by",
+    "controller_evidence"
+  ],
+  "properties": {
+    "schema": { "const": "zeros.ci-failure/v1" },
+    "signature": { "$ref": "#/$defs/signature" },
+    "signature_version": { "const": 1 },
+    "repository": { "const": "Withso/zeros" },
+    "incident_kind": { "const": "postmerge_full_ci" },
+    "state": {
+      "enum": [
+        "awaiting_agent",
+        "claimed",
+        "fix_ready",
+        "resolved",
+        "needs_owner"
+      ]
+    },
+    "claimed_by": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "login", "head_sha"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "login": { "type": "string", "pattern": "^[A-Za-z0-9-]{1,39}$" },
+            "head_sha": { "$ref": "#/$defs/sha" }
+          }
+        }
+      ]
+    },
+    "base_branch": { "const": "main" },
+    "branch": { "type": "string", "pattern": "^ci-fix/[a-f0-9]{64}$" },
+    "first_failure": { "$ref": "#/$defs/occurrence" },
+    "latest_failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha",
+        "ref",
+        "workflow_id",
+        "workflow_path",
+        "workflow_name",
+        "event",
+        "run_id",
+        "attempt",
+        "run_url",
+        "retry",
+        "failing_jobs",
+        "suspected_culprit_prs",
+        "culprit_confidence",
+        "last_green_sha"
+      ],
+      "properties": {
+        "sha": { "$ref": "#/$defs/sha" },
+        "ref": { "const": "refs/heads/main" },
+        "workflow_id": { "$ref": "#/$defs/id" },
+        "workflow_path": { "const": ".github/workflows/preflight.yml" },
+        "workflow_name": { "const": "Preflight" },
+        "event": { "const": "push" },
+        "run_id": { "$ref": "#/$defs/id" },
+        "attempt": { "$ref": "#/$defs/attempt" },
+        "run_url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/Withso/zeros/actions/runs/[1-9][0-9]{0,19}$"
+        },
+        "retry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["automatic_budget", "used", "attempts", "result"],
+          "properties": {
+            "automatic_budget": { "const": 1 },
+            "used": { "type": "integer", "minimum": 0, "maximum": 1 },
+            "attempts": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/attempt" }
+            },
+            "result": {
+              "enum": ["not_eligible", "not_attempted", "persistent_failure"]
+            }
+          }
+        },
+        "failing_jobs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "lane",
+              "name",
+              "matrix",
+              "conclusion",
+              "steps",
+              "diagnostic_key",
+              "redacted_excerpt",
+              "excerpt_omission_reason",
+              "reproduction"
+            ],
+            "properties": {
+              "id": { "$ref": "#/$defs/id" },
+              "lane": { "$ref": "#/$defs/lane" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+              "matrix": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "shard": { "type": "integer", "minimum": 1, "maximum": 3 }
+                }
+              },
+              "conclusion": { "$ref": "#/$defs/failure" },
+              "steps": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["number", "key", "name", "conclusion"],
+                  "properties": {
+                    "number": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 1000
+                    },
+                    "key": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9-]{0,63}$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 100
+                    },
+                    "conclusion": { "$ref": "#/$defs/failure" }
+                  }
+                }
+              },
+              "diagnostic_key": { "type": "null" },
+              "redacted_excerpt": { "type": "null" },
+              "excerpt_omission_reason": {
+                "const": "no_safe_allowlisted_excerpt"
+              },
+              "reproduction": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["platform", "command_id", "display_command"],
+                "properties": {
+                  "platform": { "enum": ["linux", "macos", "unknown"] },
+                  "command_id": {
+                    "enum": [
+                      "composer-shard",
+                      "quality",
+                      "vitest",
+                      "build",
+                      "macos",
+                      "control-plane-db",
+                      "control-plane-static",
+                      "secret-scan",
+                      "manual-triage"
+                    ]
+                  },
+                  "display_command": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                }
+              }
+            }
+          }
+        },
+        "suspected_culprit_prs": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["number", "url", "evidence_kind", "confidence"],
+            "properties": {
+              "number": { "type": "integer", "minimum": 1 },
+              "url": {
+                "type": "string",
+                "pattern": "^https://github\\.com/Withso/zeros/pull/[1-9][0-9]*$"
+              },
+              "evidence_kind": { "const": "commit_association" },
+              "confidence": { "const": "possible" }
+            }
+          }
+        },
+        "culprit_confidence": { "const": "unknown" },
+        "last_green_sha": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/sha" }]
+        }
+      }
+    },
+    "occurrences": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/occurrence" }
+    },
+    "required_lanes": { "$ref": "#/$defs/lanes" },
+    "required_ci_additions": { "$ref": "#/$defs/additions" },
+    "marker_path": {
+      "type": "string",
+      "pattern": "^\\.github/ci-incidents/[a-f0-9]{64}\\.json$"
+    },
+    "repair_generation": { "const": 1 },
+    "resolved_by": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha", "run_id", "attempt", "reason"],
+          "properties": {
+            "sha": { "$ref": "#/$defs/sha" },
+            "run_id": { "$ref": "#/$defs/id" },
+            "attempt": { "$ref": "#/$defs/attempt" },
+            "reason": { "const": "current_main_full_preflight_green" }
+          }
+        }
+      ]
+    },
+    "controller_evidence": { "$ref": "#/$defs/evidence" }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
+    "sha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "signature": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 100 },
+    "failure": {
+      "enum": [
+        "failure",
+        "timed_out",
+        "startup_failure",
+        "cancelled",
+        "action_required",
+        "stale",
+        "neutral"
+      ]
+    },
+    "lane": {
+      "enum": [
+        "composer",
+        "quality",
+        "vitest",
+        "build",
+        "macos",
+        "control-plane-db",
+        "control-plane-static",
+        "secret-scan",
+        "unknown"
+      ]
+    },
+    "lanes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 9,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/lane" }
+    },
+    "additions": {
+      "type": "array",
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": { "enum": ["ci:ui-smoke", "ci:macos", "ci:control-plane-db"] }
+    },
+    "occurrence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha", "run_id", "attempt"],
+      "properties": {
+        "sha": { "$ref": "#/$defs/sha" },
+        "run_id": { "$ref": "#/$defs/id" },
+        "attempt": { "$ref": "#/$defs/attempt" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "attempt",
+        "artifact_id",
+        "artifact_digest",
+        "payload_sha256"
+      ],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/id" },
+        "attempt": { "$ref": "#/$defs/attempt" },
+        "artifact_id": { "$ref": "#/$defs/id" },
+        "artifact_digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "payload_sha256": { "$ref": "#/$defs/signature" }
+      }
+    },
+    "marker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "signature",
+        "signature_version",
+        "repository",
+        "incident_kind",
+        "base_branch",
+        "branch",
+        "first_failure",
+        "source",
+        "required_lanes",
+        "required_ci_additions",
+        "controller_evidence"
+      ],
+      "properties": {
+        "schema": { "const": "zeros.ci-failure/v1" },
+        "signature": { "$ref": "#/$defs/signature" },
+        "signature_version": { "const": 1 },
+        "repository": { "const": "Withso/zeros" },
+        "incident_kind": { "const": "postmerge_full_ci" },
+        "base_branch": { "const": "main" },
+        "branch": { "type": "string", "pattern": "^ci-fix/[a-f0-9]{64}$" },
+        "first_failure": { "$ref": "#/$defs/occurrence" },
+        "source": { "$ref": "#/$defs/occurrence" },
+        "required_lanes": { "$ref": "#/$defs/lanes" },
+        "required_ci_additions": { "$ref": "#/$defs/additions" },
+        "controller_evidence": { "$ref": "#/$defs/evidence" }
+      }
+    }
+  }
+}
