@@ -17,6 +17,7 @@ import {
   completeCloudWorkspaceGenerationTransition,
   failCloudWorkspaceGenerationRollback,
   rollbackCloudWorkspaceGenerationTransition,
+  isAutomaticRuntimeWakeGeneration,
 } from "./generation-transitions.js";
 import {
   retireCloudWorkspaceEngineInstances,
@@ -1056,7 +1057,8 @@ export class CloudWorkspaceSetupWorker {
       }
 
       if (this.recoveryConfig) await recordCloudRestoreEvidence(tx, setup, failure.restoreEvidence ?? failure.code);
-      if (failure.retryable && run.claim_count < this.maxClaims) {
+      const automaticCandidate = await isAutomaticRuntimeWakeGeneration(tx, setup);
+      if (failure.retryable && !automaticCandidate && run.claim_count < this.maxClaims) {
         const delayMs = retryDelayMs(run.claim_count, this.retryBaseMs);
         await tx.query(
           `UPDATE cloud_workspace_setup_runs

@@ -3,6 +3,7 @@ import { authorizeCloudGithubSource } from "./cloud-github";
 import { z } from "zod";
 import { CloudComputerAdminWorkspaceSchema } from "@zeros/protocol/cloud-computer-v2";
 import { CloudNativeCapabilitiesSchema } from "@zeros/protocol/cloud-agent-execution";
+import { CloudRuntimeUpgradeAvailabilitySchema, type CloudRuntimeUpgradeAvailability } from "@zeros/protocol/cloud-runtime-lifecycle";
 import { getSession } from "../features/auth/auth-store";
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
@@ -153,6 +154,17 @@ export async function cloudAccountRequest<T>(
 }
 
 const request = cloudAccountRequest;
+
+function runtimeUpgradePath(target: CloudWorkspaceTarget): string {
+  return `${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}/runtime-upgrade`;
+}
+
+export async function getCloudRuntimeUpgradeAvailability(target: CloudWorkspaceTarget): Promise<CloudRuntimeUpgradeAvailability> {
+  const result = await request(runtimeUpgradePath(target), CloudRuntimeUpgradeAvailabilitySchema);
+  if (result.organizationId !== target.organizationId || result.workspaceId !== target.workspaceId)
+    throw new Error("Cloud runtime details changed workspace identity");
+  return result;
+}
 
 const AgentGrantsSchema = z.object({
   delegations: z

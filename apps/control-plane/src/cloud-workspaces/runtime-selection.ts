@@ -107,17 +107,20 @@ function artifact(row: BundleRow): { descriptor: RuntimeDescriptor; objectKey: s
   return { descriptor: parsed.data, objectKey: row.object_key };
 }
 
-async function lockQualifications(tx: Tx, runtimeId: string, compatibilityId: string, mode: CloudRuntimeQualificationMode) {
+async function lockQualifications(tx: Tx, runtimeId: string, compatibilityId: string, mode: CloudRuntimeQualificationMode, kinds: readonly string[] = REQUIRED_KINDS) {
   const result = await tx.query(`SELECT qualification.credential_kind FROM cloud_runtime_qualifications qualification
     WHERE qualification.runtime_id=$1 AND qualification.base_compatibility_id=$2
       AND qualification.credential_kind=ANY($3::text[]) AND ${runtimeQualificationPredicate("$4")}
-    ORDER BY qualification.credential_kind FOR SHARE OF qualification`, [runtimeId, compatibilityId, REQUIRED_KINDS, mode]);
-  return result.rowCount === REQUIRED_KINDS.length;
+    ORDER BY qualification.credential_kind FOR SHARE OF qualification`, [runtimeId, compatibilityId, kinds, mode]);
+  return kinds.length > 0 && result.rowCount === kinds.length;
 }
 
 /** The caller owns the organization admission transaction. Lock revocable
  * registry rows through generation INSERT; no provider/artifact I/O occurs here. */
-export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualificationMode, baseImageId?: string) {
+export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualificationMode, baseImageId?: string, additionalKinds: readonly string[] = []) {
+  // Automatic updates require every delegated kind in addition to the
+  // existing three-kind floor. Other callers retain their default selection.
+  const requiredKinds = [...new Set([...REQUIRED_KINDS, ...additionalKinds])];
   const base = (await tx.query<BaseRow>(`SELECT base.* FROM cloud_runtime_base_images base
     WHERE base.revoked_at IS NULL AND ($1::text IS NULL OR base.base_image_id=$1)
     ORDER BY base.approved_at DESC, base.base_image_id LIMIT 1 FOR SHARE OF base`, [baseImageId ?? null])).rows[0];
@@ -135,8 +138,8 @@ export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualification
           AND qualification.credential_kind=required.kind AND ${runtimeQualificationPredicate("$4")}
       ))
     ORDER BY release.release_order DESC LIMIT 1 FOR SHARE OF release, bundle`,
-  [CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, REQUIRED_KINDS, base.base_compatibility_id, mode])).rows[0];
-  if (!bundle || !await lockQualifications(tx, bundle.runtime_id, base.base_compatibility_id, mode)) return null;
+  [CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, requiredKinds, base.base_compatibility_id, mode])).rows[0];
+  if (!bundle || !await lockQualifications(tx, bundle.runtime_id, base.base_compatibility_id, mode, requiredKinds)) return null;
   return { ...artifact(bundle), releaseOrder: BigInt(bundle.release_order), base: { id: base.base_image_id, compatibilityId: base.base_compatibility_id,
     imageRef: base.image_ref, sourceCommit: base.source_commit, architecture: base.architecture, storageMiB: Number(base.storage_mib) },
   pin: { runtimeId: bundle.runtime_id, manifestSha256: bundle.manifest_sha256,
@@ -145,7 +148,7 @@ export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualification
 }
 
 /** Revalidate an existing pin without consulting either the create switch or
- * the current channel head. Wake and retry never silently choose a new runtime. */
+ * the current channel head. Ordinary resume and retry use this saved pin. */
 export async function loadPinnedCloudRuntime(tx: Tx, pin: CloudRuntimePin, mode: CloudRuntimeQualificationMode) {
   const bundle = (await tx.query<BundleRow>(`SELECT bundle.* FROM cloud_runtime_bundles bundle
     JOIN cloud_runtime_base_images base ON base.base_image_id=$3 AND base.base_compatibility_id=$4

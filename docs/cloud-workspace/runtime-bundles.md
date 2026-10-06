@@ -510,65 +510,117 @@ Create reselects under the organization lock and saves base provenance and all
 six runtime fields in the generation transaction, without provider or artifact
 I/O. No eligible head returns HTTP 409 `cloud_runtime_unavailable` before
 allocation. Workspace responses include the saved six-field `generation.runtime`
-only for v4. Idempotent replay, wake and setup retry retain the saved pin even
-after the head advances or new v4 creation is disabled. Existing selected legacy
+only for v4. Idempotent replay and setup retry retain the saved pin; a stopped
+workspace may automatically select a compatible successor on wake, independently
+of the new-workspace profile switch. Existing selected legacy
 organization images and delegated provider connections retain their current path;
 Cloud Computer v2 template forks belong to Phase C.
 
-### V4 lifecycle pins and explicit runtime upgrades
+### V4 lifecycle pins and automatic wake updates
 
-Wake/resume and setup retry reuse the saved generation. Rebuild, rollback and
-automatic or explicit checkpoint recovery copy all six runtime fields unchanged
-through `copyGenerationPins` in `generation-pins.ts`, together with the saved v4
-provisioning profile. Neither a later channel head/base nor the new-workspace
-profile switch changes that selection. C5 extends this same transaction boundary
-for `cloud_workspace_computer_sources`; its extension test lives in
-`runtime-lifecycle.integration.test.ts`. Legacy generations keep their existing
-profile selection and NULL runtime fields.
+Ordinary resume, setup retry, rebuild, rollback and automatic or explicit
+checkpoint recovery keep all six saved runtime fields through
+`copyGenerationPins` in `generation-pins.ts`, together with the provisioning
+profile. Legacy generations retain their existing profile selection and NULL
+runtime fields. C5 extends this transaction for Cloud Computer source pins.
 
-Wake, recovery, provider provisioning and each setup attempt revalidate the saved
-runtime. Revoked bundle/base/contract or required qualification returns
-`cloud_runtime_revoked`, with an explicit-upgrade instruction. Other missing or
-incompatible runtime authority returns `cloud_runtime_unavailable`. Revocation
-during setup also prevents readiness and records the actionable error. No path
-falls back to another runtime. Boat restore is not a reboot: resume still requires
-fresh setup admission and its execution fence; it cannot rely on boot services
-having rerun or publish by renaming a pre-existing directory.
+A stopped or archived v4 allocation now checks for a newer runtime before its
+ordinary start/resume. The existing `/wake` route and direct create/wake lifecycle
+intents execute the same server decision; renderer polling never wakes compute.
+`selectCloudWorkspaceRuntimeUpgrade(tx, {workspaceId, organizationId, runtime,
+qualificationMode})` in `runtime-upgrade-availability.ts` selects the newest
+confirmed, nonrevoked Alpha release qualified in the configured mode for the
+exact saved base and compatibility. It requires the existing three-kind floor
+plus every active, unexpired, unrevoked delegation's current credential kind.
+`updateAvailable` requires a strictly later release order. A running allocation
+is never restarted to update, and a different base is never selected.
 
-Engineering staff (`developer` or `platform_owner`, including a current account
-role check) can request `POST
-/v1/organizations/:organization/cloud-workspaces/:workspace/runtime-upgrade`
-with the strict body `{expectedGeneration, operationId}`. Normal workspace
-management, funding and quota authorization also applies. This internal HTTP
-contract is exported by `@zeros/protocol`; there is no renderer upgrade UI here.
+`upgradeCloudRuntimeOnWake` uses the existing generation-replacement transaction,
+not a second installer or upgrade flow. Admission locks organization, workspace
+and the claimed wake intent, uses that intent UUID as the operation ID, and saves
+`runtime-upgrade:automatic-wake:<intent UUID>` as its durable replacement key.
+The original wake becomes a completed receipt; drain/create/setup own execution.
+Other devices join an active wake or automatic transition with their own
+replayable receipts, without accepting another start. Generation CAS, lease,
+authority, quota, settings and active-work checks still apply. Stop/archive/delete
+can cancel a transition and restore the source before cleaning its candidate.
 
-The endpoint selects the latest eligible runtime under
-`CLOUD_RUNTIME_QUALIFICATION_MODE` for the source's exact saved base. It keeps the
-base image, resource profile and settings snapshot, refuses a downgrade, and
-uses the existing drain/checkpoint/replacement-generation/restore flow. Running
-agents or other active work return 409 `cloud_workspace_busy`; a stale generation
-returns 409 `cloud_generation_changed`. A stopped, archived or failed source
-requires its current lossless final checkpoint before an upgrade can wake it.
-For v4 runtime upgrades, a completed `before_rebuild` capture also qualifies if
-content and record revisions are current and no later source registration or
-setup attestation exists. This permits a new upgrade after a failed candidate
-rolls back to a revoked source; ordinary recovery retains its existing rules.
-The ordinary `/generations` rebuild endpoint preserves v4 runtime pins.
+Admission runs inside a savepoint. Missing qualification, replacement headroom,
+a fresh checkpoint or another admission requirement defers the update and
+continues ordinary resume on the saved pin. Closed audit codes record deferral.
+A candidate provider/setup failure before readiness uses the existing rollback
+immediately, including retryable failures: the source wakes on its saved pin,
+and the rejected candidate is cleaned by its generation-scoped delete intent.
+The fallback wake carries the transition ID and never selects again in that
+attempt. A later sleep with a fresh final checkpoint and wake retries selection.
+Invalid or revoked source authority remains closed; fallback never revives a
+revoked base/runtime. A qualified newer same-base runtime may repair a revoked
+stopped runtime, as the explicit upgrade already permits.
 
-An accepted replacement returns 202 with `{operationId, sourceGeneration,
-generation, runtimeId, transitionId, unchanged:false}`. Replaying the same
-operation returns that accepted selection with 200 and `Idempotency-Replayed:
-true`, even if the generation or channel head advanced. Reusing the operation
-with a different request returns 409 `idempotency_key_reused`. Already-current
-requests return 200 with `unchanged:true`, the source generation and a null
-transition ID; their durable receipt never dispatches provider work. Failed
-candidates retain the source generation's pin; waking that source still checks
-revocation. If no later eligible runtime exists on the saved base, the endpoint
-fails closed instead of changing bases.
+The internal staff-only POST on
+`/v1/organizations/:organization/cloud-workspaces/:workspace/runtime-upgrade`
+remains compatible. Its strict body is `{expectedGeneration, operationId}`.
+Session and current database staff roles must allow organization creation
+(`developer` or `platform_owner`), and membership, management, funding and quota
+checks apply. It selects the existing three-kind-qualified head on the saved
+base. Fresh stale generations return `cloud_generation_changed`; active work
+returns `cloud_workspace_busy`. An accepted replacement returns 202 with
+`{operationId, sourceGeneration, generation, runtimeId, transitionId,
+unchanged:false}`. Replay returns that accepted selection with 200 and
+`Idempotency-Replayed:true` before CAS or head selection; a different request or
+actor reusing the key returns `idempotency_key_reused`. Already-current requests
+save a durable `unchanged:true` no-op receipt with no provider dispatch.
+
+The same staff and management gates protect a read-only, `no-store` GET on that
+path. It exposes the current runtime, newest compatible credential-qualified
+runtime, availability and closed transition progress/error. The effectively
+gated details row shows **Runtime · short ID** and, when newer exists,
+**Updates automatically the next time this workspace wakes**. During replacement
+it shows **Starting the cloud workspace…**. The cloud composer also discovers
+availability while details are closed; optional
+`ModelPill.runtimeUpgradeRequiredForAgents` supplies AG's stable additional reason
+and explains that installation happens on the next wake. When agent discovery
+already supplies the empty-menu explanation, the availability footer is omitted
+to keep one notice. There is no manual
+update button or renderer POST caller. The keyed
+`requestCloudRuntimeUpgradeDetails(folder)` navigation interface remains available
+for a cloud caller to focus the informational row. Local folders are a no-op.
+Hidden, concealed, nonstaff and nonmanager surfaces do no runtime polling.
+Availability is fenced by account, catalog, workspace and generation.
+Idle runtime polling reads availability only; the details panel refreshes the
+workspace document during startup or an active replacement to follow readiness.
+
+Automatic replacement reuses the already committed current lossless final
+checkpoint. The existing freshness checks require current content/record revisions
+and no later source registration or setup attestation. Explicit running upgrades
+first capture `before_rebuild`; a fresh completed rebuild capture can also be
+reused for a later stopped upgrade. Files excluded by the durability policy do
+not become durable merely because an update occurs.
+
+| State | Replacement behavior |
+| --- | --- |
+| Files and Git | Restores eligible working files, staged/unstaged changes, branch/HEAD/refs, index, local objects/history and immutable remote base. Existing ignored/secret-like and size exclusions apply. GitHub remote state is not changed. |
+| Chats/transcripts | Keeps workspace identity and durable records, plus existing allowlisted native agent/Design session history. Final sleep flushes records before committing its checkpoint. |
+| Agent turns and commands | No running turn continues across sleep/update. Dispatching commands, live execution/service/write leases and Cloud Computer builds block update admission. Undispatched queued commands keep their saved pause state and bind to the first fresh candidate or fallback engine. Claims wait for workspace readiness, with the existing durable command/claim/user-message identities preventing replay. Interrupted dispatched outcomes stay `uncertain` and paused. Ordinary later engine replacement still requires explicit queue Resume. |
+| Terminals, setup and previews | Sleep's final drain stops PTYs and running processes. Replacement does not restore a live shell, preview or setup process; terminal scrollback is not promised. Reopen terminals and restart previews. Setup reruns from the saved accepted settings/secrets snapshot; excluded dependencies may need regeneration. |
+| Engine and access | Source provider stop proves access revocation; the candidate restores the checkpoint into a new allocation/generation and registers a fresh engine before readiness. Old-generation access is fenced and clients reattach through existing transport. |
+| Failure | Retains the source checkpoint and exact pin, resumes that source with fresh setup/engine admission, and cleans the rejected candidate. Source revocation remains authoritative. Credential/delegation records are not mutated. |
+
+Wake latency is a code-path estimate, not live provider measurement. Plain resume
+uses one lifecycle claim and provider `start` before setup. Automatic replacement
+uses three claims: admission, source drain (`stop`, even when already stopped, to
+prove access revocation), and candidate `create`. This adds two lifecycle claims,
+selection/admission queries, stop/access drain, creation rather than resume,
+checkpoint restoration, and installation of the new bundle before the common
+setup/readiness path. It needs no additional final checkpoint capture. The
+reconciler drains up to 20 claims per tick, so there is no required two-interval
+sleep between those stages; provider latency, artifact size, restore size and
+worker availability determine the real delta. Local DB fixtures assert the
+`stop:1`/`create:2` path versus a plain `resume:1`; they do not measure Boat latency.
 
 The [Alpha lifecycle acceptance runbook](runtime-lifecycle-acceptance.md) covers
-the disposable API exercise, cleanup and the remaining manual acceptance cases.
-Local PostgreSQL and mocked tests do not constitute live Alpha acceptance.
+the disposable automatic-wake exercise, cleanup and owner Mac acceptance. Local
+PostgreSQL and mocked tests do not constitute live Alpha acceptance.
 
 V4 setup checks the base status and compatibility ID, requiring `idle` or
 `waiting_for_runtime`. The existing pinned SSH transport delivers a maximum

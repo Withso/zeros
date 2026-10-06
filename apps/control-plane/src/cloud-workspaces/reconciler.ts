@@ -7,6 +7,8 @@ import { withSystemTx } from "../db.js";
 import { deferCloudRecoveryResourceBlock } from "./automatic-recovery.js";
 import { requireGenerationRuntime } from "./generation-pins.js";
 import { CloudRuntimeError } from "./runtime-selection.js";
+import type { CloudWorkspaceBackendConfig } from "../config.js";
+import { upgradeCloudRuntimeOnWake } from "./runtime-wake-upgrade.js";
 import {
   assertProviderResourceIdentity,
   assertProviderAbsence,
@@ -22,6 +24,7 @@ import {
   failCloudWorkspaceGenerationRollback,
   rollbackCloudWorkspaceGenerationTransition,
   rollbackCloudWorkspaceGenerationTransitionAfterDrainFailure,
+  isAutomaticRuntimeWakeGeneration,
 } from "./generation-transitions.js";
 import {
   confirmCloudWorkspaceClientAccessRevoked,
@@ -78,6 +81,7 @@ export type CloudWorkspaceReconcilerOptions = {
   orphanGraceMs?: number;
   maxManagedResourcesPerSweep?: number;
   workosEnabled?: boolean;
+  runtimeUpgradeConfig?: CloudWorkspaceBackendConfig;
   paidAuthorityRecheckIntervalMs?: number;
   workerId?: string;
   logger?: ReconcileLogger;
@@ -256,6 +260,8 @@ export class CloudWorkspaceReconciler {
   private readonly logger: ReconcileLogger;
   private readonly paidAuthority: DatabaseCloudWorkspacePaidAuthorityReconciler;
   private readonly computeLeases: CloudWorkspaceComputeLeaseCoordinator;
+  private readonly runtimeUpgradeConfig: CloudWorkspaceBackendConfig | null;
+  private readonly workosEnabled: boolean;
   private timer: NodeJS.Timeout | null = null;
   private activeTick: Promise<void> | null = null;
   private started = false;
@@ -267,6 +273,8 @@ export class CloudWorkspaceReconciler {
     this.pool = options.pool;
     this.provider = options.provider;
     this.providerResolver = options.providerResolver ?? null;
+    this.runtimeUpgradeConfig = options.runtimeUpgradeConfig ?? null;
+    this.workosEnabled = options.workosEnabled === true;
     this.computeLeases = new CloudWorkspaceComputeLeaseCoordinator({pool:options.pool,provider:options.provider,
       ...(options.providerResolver?{providerResolver:options.providerResolver}:{}),workosEnabled:options.workosEnabled===true,
       ...(options.computePolicy?{policy:options.computePolicy}:{}),logger:options.logger??console});
@@ -520,12 +528,14 @@ export class CloudWorkspaceReconciler {
   async runOnce(): Promise<boolean> {
     const intent = await this.claimIntent();
     if (!intent) return false;
+    const mayUpgradeOnWake = !!this.runtimeUpgradeConfig && intent.affectsWorkspace &&
+      !intent.generationTransitionId && ["create", "wake"].includes(intent.operation);
     let provider: CloudWorkspaceProvider;
     try {
-      if (intent.operation === "create" || intent.operation === "wake") {
+      if (!mayUpgradeOnWake && (intent.operation === "create" || intent.operation === "wake")) {
         await withSystemTx(this.pool, tx => requireGenerationRuntime(tx, {
           workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
-        }));
+        }, this.runtimeUpgradeConfig?.runtime?.qualificationMode));
       }
       provider = this.providerResolver
         ? (
@@ -557,8 +567,6 @@ export class CloudWorkspaceReconciler {
 
     try {
       let current = await this.observe(provider, intent);
-      if(current?.state==='running'&&['create','wake'].includes(intent.operation))
-        await this.computeLeases.observeRunning({workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},provider,current);
       let providerAccessRevocationProven =
         current === null || current.state === "deleted";
 
@@ -572,6 +580,19 @@ export class CloudWorkspaceReconciler {
         await this.recordResult(intent, current, "superseded");
         return true;
       }
+
+      if (mayUpgradeOnWake && current && ["stopped", "archived"].includes(current.state) &&
+          await upgradeCloudRuntimeOnWake(this.pool, this.runtimeUpgradeConfig!, {
+            workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
+            intentId: intent.id, workerId: this.workerId,
+          }, this.workosEnabled)) return true;
+      // A replacement may repair a revoked stopped pin. Any ordinary resume
+      // still validates that saved pin before provider or compute-lease writes.
+      if (mayUpgradeOnWake) await withSystemTx(this.pool, tx => requireGenerationRuntime(tx, {
+        workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation,
+      },this.runtimeUpgradeConfig?.runtime?.qualificationMode));
+      if(current?.state==='running'&&['create','wake'].includes(intent.operation))
+        await this.computeLeases.observeRunning({workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},provider,current);
 
       // The provider adapter's destructive lifecycle contract includes
       // provider-wide access revocation. Even when provider state already
@@ -981,7 +1002,13 @@ export class CloudWorkspaceReconciler {
       }
 
       if (await deferCloudRecoveryResourceBlock(tx, {workspaceId:intent.workspaceId,transitionId:intent.generationTransitionId,intentId:intent.id,code:failure.code})) return;
-      if (failure.retryable) {
+      const automaticCandidate = await isAutomaticRuntimeWakeGeneration(tx, {
+        workspaceId: intent.workspaceId, organizationId: intent.orgId,
+        generation: intent.operation === "stop" && intent.generationTransitionId
+          ? (await tx.query<{ candidate_generation: number }>("SELECT candidate_generation FROM cloud_workspace_generation_transitions WHERE id=$1", [intent.generationTransitionId])).rows[0]?.candidate_generation ?? intent.generation
+          : intent.generation,
+      });
+      if (failure.retryable && !automaticCandidate) {
         await tx.query(
           `UPDATE cloud_workspace_lifecycle_intents
            SET state = 'observing', lease_owner = NULL, lease_expires_at = NULL,

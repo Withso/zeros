@@ -16,6 +16,31 @@ function requestDigest(value: unknown): Buffer {
   return createHash("sha256").update(JSON.stringify(value)).digest();
 }
 
+/** Automatic wake candidates use ordinary transition rows and a durable
+ * namespaced upgrade intent. Source rollback wakes must never upgrade again. */
+export async function isAutomaticRuntimeWakeGeneration(tx: Tx, input: {
+  workspaceId: string; organizationId: string; generation: number; includeSource?: boolean;
+  engineInstanceId?: string;
+}): Promise<boolean> {
+  const result = await tx.query(`SELECT 1 FROM cloud_workspace_generation_transitions transition
+    JOIN cloud_workspace_lifecycle_intents intent ON intent.id=transition.drain_intent_id
+    WHERE transition.workspace_id=$1 AND transition.org_id=$2
+      AND intent.idempotency_key LIKE 'runtime-upgrade:automatic-wake:%'
+      AND ((transition.candidate_generation=$3 AND (transition.state IN ('draining','provisioning','setting_up')
+        OR ($4::boolean AND transition.state='succeeded')))
+        OR ($4::boolean AND transition.source_generation=$3
+          AND transition.state IN ('rolling_back','rolled_back','cancelled')))
+      AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM cloud_workspace_engine_instances engine
+        WHERE engine.id=$5 AND engine.workspace_id=$1 AND engine.org_id=$2 AND engine.generation=$3
+          AND engine.registered_at>transition.created_at
+          AND NOT EXISTS(SELECT 1 FROM cloud_workspace_engine_instances earlier
+            WHERE earlier.workspace_id=$1 AND earlier.org_id=$2 AND earlier.generation=$3
+              AND earlier.registered_at>transition.created_at
+              AND (earlier.registered_at,earlier.id)<(engine.registered_at,engine.id)))) LIMIT 1`,
+  [input.workspaceId,input.organizationId,input.generation,input.includeSource === true,input.engineInstanceId ?? null]);
+  return (result.rowCount ?? 0) > 0;
+}
+
 async function queueTransitionIntent(
   tx: Tx,
   input: {

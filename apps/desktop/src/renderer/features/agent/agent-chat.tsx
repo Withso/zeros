@@ -182,6 +182,7 @@ import {
 import { useBridge } from "../../platform/bridge/use-bridge";
 import { BoundaryPortsPill } from "./boundary-ports";
 import { cloudAgentLimitations } from "./cloud-native-ui";
+import { cloudRuntimeUpgradeComposerContext } from "./cloud-runtime-upgrade-link";
 import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 import type { ExecutionBoundaryPortStatus } from "@zeros/protocol/containment";
 import { createBrowserTab } from "@/renderer/shell/workbench/tab-model";
@@ -1390,6 +1391,7 @@ export function AgentChat({
       <>
         <ModelPill
           agents={agentsList}
+          {...cloudRuntimeUpgradeComposerContext(chatThread.folder, interactive)}
           agentId={chatThread.agentId}
           initialize={session.initialize}
           value={chatThread.model}
@@ -1451,6 +1453,7 @@ export function AgentChat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     chatThread,
+    interactive,
     session.initialize,
     session.boundary,
     session.setModel,

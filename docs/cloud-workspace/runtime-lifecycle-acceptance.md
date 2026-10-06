@@ -56,9 +56,9 @@ It creates A, waits for ready, stops A, then waits for B. Once
 `.context/b8-runtime-lifecycle.json` includes `source_stopped`, the orchestrator
 can complete the separately authorized publication/qualification of B.
 
-The runner wakes A and compares every saved runtime field and generation number.
-It explicitly upgrades to B, waits for the replacement generation to be ready,
-checks the same base image and compatibility IDs, replays the operation, and
+The runner wakes A and requires automatic replacement with B, waits for ready,
+checks the unchanged base image and compatibility IDs and records the transition.
+It then verifies the staff POST returns an idempotent already-current no-op and
 checks stale-generation refusal with a new operation ID. Network retries reuse
 the original idempotency keys. A lost create response is replayed to recover the
 workspace ID for cleanup.
@@ -68,7 +68,7 @@ contains only workspace/operation/transition UUIDs, generation numbers and fixed
 check results; it excludes raw pins, responses, errors, URLs and credentials.
 Stdout contains one `zeros.diagnostic/v1` record with fixed checks. Exit 0 requires
 every check and confirmed provider cleanup. Mocked runner tests cover non-Alpha
-refusal, changed wake pins, failed upgrade, lost create replies, pending cleanup
+refusal, an unexpected base change, failed POST, lost create replies, pending cleanup
 and exclusion of secret response text.
 
 Cleanup uses ordinary DELETE with `discardUncheckpointed:true` only on the
@@ -97,15 +97,55 @@ and retain only closed diagnostics or nonsecret observations:
   it, then upgrade with a fresh operation. Exercise a source recovery incident
   and confirm exact pin copying, including when new v4 creation is disabled.
 - Revoke only an isolated disposable runtime with separately approved ownership
-  and no shared Alpha consumers. Require wake/recovery/setup retry to return or
-  persist `cloud_runtime_revoked`; explicitly upgrade to an eligible later runtime
-  on the same base. Never revoke the shared head for this test.
+  and no shared Alpha consumers. Require recovery/setup retry and a wake without an eligible successor to
+  return or persist `cloud_runtime_revoked`; wake with an eligible later runtime
+  on the same base must replace the revoked stopped pin without resuming it. Never revoke the shared head for this test.
 - Inspect provider-operation evidence for the source and candidate: the saved
   base image/build must be identical and the upgrade must not build/capture an
   image. Exercise candidate failure and verify preservation of the source and
   its pin; a revoked source must remain closed during rollback.
 - Run the required macOS engine smoke in a Mac checkout. Cloud Linux test
   results do not cover that platform gate or real native-provider turns.
+
+## Staff desktop acceptance
+
+Use the owner on their Mac against a separately authorized disposable Alpha
+workspace named `zeros-v2-test-*`; never mutate the shared audit workspace or its
+credentials/delegations. This is a manual checklist for the orchestrator, not
+authorization for an uncredentialed coding workspace to create live resources.
+
+1. On runtime A with eligible newer B on the same base, open details and the
+   composer model menu. Confirm the runtime ID and next-wake explanation, with
+   no manual update action. The qualified-runtime fallback also works without
+   `runtimeUpgradeRequiredForAgents`. Nonstaff/nonmanager accounts see no runtime
+   row, and Local or organization-owned local workspaces make no runtime calls.
+2. While a real cloud turn runs, confirm it continues on A. Passive details,
+   composer and Files reads must not restart or wake compute. Finish the turn.
+3. Add a harmless tracked edit, staged change, eligible untracked file and local
+   commit; record branch/status and existing chats/transcripts. Start a terminal
+   and preview. Keep explicitly paused messages paused. Do not use ignored or
+   secret-like files as persistence probes.
+4. Let the workspace sleep normally with its final checkpoint, then open it or
+   use **Start workspace**. Wake concurrently from two signed-in devices.
+   Confirm one replacement, **Starting the cloud workspace…**, eventual B/ready
+   and a fresh engine. Record workspace, original wake operation and transition
+   IDs and source/candidate generations; replay the original wake key to confirm
+   no second replacement. Close details during progress and reopen to check
+   server-owned state.
+5. Check unchanged base and restored files/Git/chats/native history. Reopen
+   terminals and restart previews. Confirm queued undispatched messages deliver
+   once after ready and explicitly paused queues stay paused. Have the owner
+   run a real provider turn on the Mac. Future plain wakes without a newer
+   qualified runtime keep B; no base changes occur.
+6. On separately authorized disposable fixtures, block update admission or fail
+   its candidate before ready. Confirm old-pin resume, closed diagnostics and a
+   retry on a later sleep/wake. Sleep during replacement and verify the latest
+   stopped intent wins and candidate cleanup. A revoked source stays closed
+   during fallback. Compare plain-resume and upgrade wake-to-ready timings;
+   record sizes and qualification mode, without credential/log contents.
+7. Record nonsecret observations and resource IDs, delete only the disposable
+   workspace, and confirm ordinary deletion and pending-provider cleanup as
+   above. Run the macOS engine/UI smoke separately.
 
 Cloud Computer template-source pin copying is C5's extension of the shared
 `copyGenerationPins` transaction. Public API/UI, base migration, billing changes,

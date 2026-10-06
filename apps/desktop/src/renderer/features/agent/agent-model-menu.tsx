@@ -167,6 +167,7 @@ export function AgentModelMenu({
   triggerTooltip = "Change model",
   redirectCrossAgent = false,
   selectionTiming,
+  footer,
   children,
 }: {
   /** Registry snapshot override (the dispatcher passes its own). When
@@ -194,6 +195,7 @@ export function AgentModelMenu({
    *  DIFFERENT agent opens a new chat tab instead of switching in place. */
   redirectCrossAgent?: boolean;
   selectionTiming?: "next-message";
+  footer?: React.ReactNode;
   /** The trigger element (rendered via PopoverTrigger asChild). */
   children: React.ReactNode;
 }) {
@@ -742,6 +744,7 @@ export function AgentModelMenu({
             </div>
           )}
         </Command>
+        {(groups.length > 0 || !registry?.some(agent => agent.runtimeUpgradeRequired)) && footer}
       </PopoverContent>
     </Popover>
   );
