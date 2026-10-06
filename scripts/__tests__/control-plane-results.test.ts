@@ -2,12 +2,13 @@
 // jobs. Its old skip-guard re-ran the migration file to prove the DB suites were
 // not silently skipped; the aggregate now proves that from the shards' reports.
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
+import { load } from "js-yaml";
 
 import {
   databaseBackedTestFiles,
@@ -164,6 +165,89 @@ describe("control-plane results", () => {
     expect(database.has("src/auth.test.ts")).toBe(false);
   });
 });
+
+describe.each(["ci.yml", "preflight.yml"])(
+  "%s eight-shard report coverage",
+  (file) => {
+    const workflow = load(
+      readFileSync(path.join(ROOT, ".github/workflows", file), "utf8"),
+    ) as {
+      jobs: Record<
+        string,
+        { steps: { name: string; env?: Record<string, unknown> }[] }
+      >;
+    };
+    const verdict = workflow.jobs["control-plane"].steps.find(
+      (step) => step.name === "Enforce control-plane results",
+    )!;
+    const env = {
+      ...databaseRun,
+      DATABASE_SHARDS: String(verdict.env?.DATABASE_SHARDS),
+    };
+    const files = listControlPlaneTestFiles();
+    const database = databaseBackedTestFiles(files);
+    const complete = () =>
+      new Map(
+        Array.from({ length: 8 }, (_, index) => [
+          index + 1,
+          report(
+            ...files
+              .filter((_, fileIndex) => fileIndex % 8 === index)
+              .map((testFile) =>
+                fileResult(testFile, [
+                  {
+                    suite:
+                      testFile === "src/migrations.test.ts"
+                        ? "migration ladder"
+                        : "suite",
+                    title: "runs",
+                    status: "passed",
+                  },
+                ]),
+              ),
+          ),
+        ]),
+      );
+    const check = (reports: ReturnType<typeof complete>, overrides = {}) =>
+      enforceControlPlaneResults({
+        env: { ...env, ...overrides },
+        reports,
+        testFiles: files,
+        databaseFiles: database,
+      });
+
+    it("accepts eight reports that cover the real inventory exactly once", () => {
+      expect(check(complete())).toEqual([]);
+    });
+
+    it("rejects every missing report, including the new final shard", () => {
+      for (let shard = 1; shard <= 8; shard++) {
+        const reports = complete();
+        reports.delete(shard);
+        expect(check(reports), `shard ${shard}`).toContain(
+          `Shard ${shard}/8 uploaded no Vitest report.`,
+        );
+      }
+    });
+
+    it("rejects a file duplicated into the eighth shard and a ninth artifact", () => {
+      const duplicated = complete();
+      duplicated.get(8)!.testResults.push(duplicated.get(1)!.testResults[0]);
+      expect(check(duplicated)).toContain(
+        `${files[0]} was run by shards 1, 8.`,
+      );
+      const extra = complete();
+      extra.set(9, extra.get(1)!);
+      expect(check(extra)).toContain("Found 9 shard reports for 8 shards.");
+    });
+
+    it("rejects a cancelled matrix even when all eight artifacts are green", () => {
+      expect(check(complete(), { DATABASE_RESULT: "cancelled" })).toContain(
+        "Database shards were cancelled.",
+      );
+    });
+  },
+);
 
 describe("control-plane results command", () => {
   const directories: string[] = [];

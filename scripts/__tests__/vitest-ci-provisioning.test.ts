@@ -78,7 +78,7 @@ describe("Vitest CI provisioning", () => {
 
   it("finds every workflow job that runs the Vitest suite", () => {
     // Releases require the exact commit's successful Preflight instead of
-    // re-running the suite. Pull requests run the same job in CI. Its two
+    // re-running the suite. Pull requests run the same job in CI. Its four
     // native shards are matrix legs of one job behind the `test` aggregate.
     expect(jobs.map(({ file, job }) => `${file}:${job}`).sort()).toEqual([
       "ci.yml:test-shard",

@@ -126,7 +126,7 @@ describe("control-plane database scope inputs", () => {
     );
     const matrix = /^ {8}shard: \[([\d, ]+)\]$/m.exec(workflow)?.[1];
     const shards = matrix?.split(",").map((value) => Number(value.trim()));
-    expect(shards).toEqual([1, 2, 3, 4]);
+    expect(shards).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(workflow).toContain(`--shard="\${SHARD}/${shards!.length}"`);
     expect(workflow).toContain(`DATABASE_SHARDS: ${shards!.length}`);
     expect(workflow).toContain(

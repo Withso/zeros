@@ -347,6 +347,41 @@ describe("CI recovery reconciliation", () => {
     expect((await sourceDecision(fixture)).action).toBe("resolve");
   });
 
+  it.each([
+    ["tests-vitest (1/2)", "Run vitest suite", "tests-vitest (4/4)"],
+    [
+      "control-plane database (2)",
+      "Control-plane tests (migrations + auth/invite contracts)",
+      "control-plane database (8)",
+    ],
+  ])(
+    "requires the current final partition when resolving a historical %s failure",
+    async (name, step, finalPartition) => {
+      const fixture = recoveryFixture({
+        jobs: [
+          {
+            ...jobFixtures.database,
+            name,
+            steps: [{ number: 8, name: step, conclusion: "failure" }],
+          },
+        ],
+        run: sourceRun({ run_attempt: 2 }),
+      });
+      await applyNext(fixture, "upsert");
+      fixture.state.runs.set(
+        "200",
+        sourceRun({ id: 200, head_sha: MAIN_SHA, conclusion: "success" }),
+      );
+      fixture.state.jobs.set(
+        "200",
+        greenJobs.filter((job) => job.name !== finalPartition),
+      );
+      expect((await sourceDecision(fixture)).action).not.toBe("resolve");
+      fixture.state.jobs.set("200", greenJobs);
+      expect((await sourceDecision(fixture)).action).toBe("resolve");
+    },
+  );
+
   it("requires every composer shard rather than only its successful aggregate", async () => {
     const fixture = recoveryFixture({ run: sourceRun({ run_attempt: 2 }) });
     await applyNext(fixture, "upsert");

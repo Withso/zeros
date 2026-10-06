@@ -699,9 +699,9 @@
         "full": true,
         "any_lanes": ["control-plane-db"]
       },
-      "execution_group": "control-plane-database-matrix-4",
+      "execution_group": "control-plane-database-matrix-8",
       "commands": [
-        "pnpm --dir apps/control-plane exec vitest run --shard=<i>/4 --reporter=json --outputFile.json=<report>"
+        "pnpm --dir apps/control-plane exec vitest run --shard=<i>/8 --reporter=json --outputFile.json=<report>"
       ]
     },
     "control-plane-reports": {

@@ -161,11 +161,11 @@ describe("independent main Preflight runs", () => {
     ]);
     expect(preflight.jobs["test-shard"].strategy).toEqual({
       "fail-fast": false,
-      matrix: { part: [1, 2] },
+      matrix: { part: [1, 2, 3, 4] },
     });
     expect(preflight.jobs["control-plane-database"].strategy).toEqual({
       "fail-fast": false,
-      matrix: { shard: [1, 2, 3, 4] },
+      matrix: { shard: [1, 2, 3, 4, 5, 6, 7, 8] },
     });
     expect(preflight.jobs["ui-smoke-shard"].strategy).toEqual({
       "fail-fast": false,

@@ -157,6 +157,7 @@ export function laneForJob(name) {
   if (name === "quality") return "quality";
   if (
     /^tests-vitest \([12]\/2\)$/.test(name) ||
+    /^tests-vitest \([1-4]\/4\)$/.test(name) ||
     /^test-shard \([12]\)$/.test(name)
   )
     return "vitest";
@@ -164,7 +165,7 @@ export function laneForJob(name) {
   if (name === "source-sync workload (macOS)" || name === "tests-macos")
     return "macos";
   if (
-    /^control-plane database(?: \([1-4]\))?$/.test(name) ||
+    /^control-plane database(?: \([1-8]\))?$/.test(name) ||
     /^tests-control-plane-db \([1-4]\/4\)$/.test(name)
   )
     return "control-plane-db";
@@ -465,10 +466,33 @@ export function requiredLanesCovered(contract, jobs) {
           ),
       );
     }
+    // Historical partition names remain classified for source failures. Current
+    // main resolution requires every current identity once: a job count alone
+    // could accept repeated jobs or a smaller matrix with a missing producer.
     const expected =
-      lane === "control-plane-db" ? 4 : lane === "vitest" ? 2 : 1;
+      lane === "control-plane-db"
+        ? Array.from(
+            { length: 8 },
+            (_, index) => `control-plane database (${index + 1})`,
+          )
+        : lane === "vitest"
+          ? Array.from(
+              { length: 4 },
+              (_, index) => `tests-vitest (${index + 1}/4)`,
+            )
+          : null;
+    if (expected) {
+      return (
+        matching.length === expected.length &&
+        expected.every((name) =>
+          matching.some(
+            (job) => job.name === name && job.conclusion === "success",
+          ),
+        )
+      );
+    }
     return (
-      matching.length >= expected &&
+      matching.length >= 1 &&
       matching.every((job) => job.conclusion === "success")
     );
   });

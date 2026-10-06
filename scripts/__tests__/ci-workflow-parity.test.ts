@@ -14,13 +14,14 @@ type Step = {
   uses?: string;
   if?: string;
   env?: Record<string, unknown>;
+  with?: Record<string, unknown>;
 };
 type Job = {
   if?: string;
   name?: string;
   needs?: string | string[];
   steps?: Step[];
-  strategy?: unknown;
+  strategy?: { "fail-fast"?: boolean; matrix?: Record<string, number[]> };
   "runs-on"?: unknown;
   "timeout-minutes"?: unknown;
   services?: unknown;
@@ -28,6 +29,34 @@ type Job = {
 type Workflow = { jobs: Record<string, Job> };
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
+const PART_ONE_GUARDS = [
+  "Fetch origin/main (for the migration forward-only guard)",
+  "Check preload allowlist is in sync",
+  "Cloud runtime version-skew contracts",
+  "Verify model catalog (strict)",
+  "Cursor asarUnpack closure is covered",
+  "Cursor SDK host actually loads (real spawn, source runtime)",
+  "Cursor SDK host actually works (real spawn, SHIPPED runtime)",
+  "Claude CLI actually launches under the Agent SDK",
+  "Codex app-server actually boots and matches the pin",
+  "Migration ladder is forward-only",
+  "Secret scan (tracked files)",
+  "Third-party license inventory is current",
+  "Production dependency audit has no unreviewed high advisory",
+  "Prod VITE_* env-set is wired into release.yml",
+  "Electron security posture intact",
+  "Codex protocol pin in lockstep",
+  "Bundled agent runtime pins are exact and provable",
+  "electron-builder source paths resolve",
+  "Control-plane migrations naming + forward-only",
+  "Control-plane expand/contract migration phases",
+  "Desktop ↔ web deep-link schemes in lockstep",
+  "Install web hub dependencies",
+  "Web hub unit tests (schemes + host routing)",
+  "Agent stream-translator contract (offline fixtures)",
+  "Wire-protocol version-bump reminder (advisory)",
+  "Settings schemas regenerate cleanly",
+];
 const workflow = (file: string) =>
   load(
     readFileSync(path.join(ROOT, ".github/workflows", file), "utf8"),
@@ -107,6 +136,126 @@ describe("CI and Preflight job parity", () => {
       const candidate = comparable(ci.jobs[CI_WORKLOADS[id] ?? id]!);
       if (CI_WORKLOADS[id]) candidate.name = preflight.jobs[id]!.name;
       expect(candidate).toEqual(comparable(preflight.jobs[id]!));
+    },
+  );
+
+  it.each(["ci.yml", "preflight.yml"])(
+    "runs four unique native Vitest legs with shared setup and one owner for each guard in %s",
+    (file) => {
+      const jobs = workflow(file).jobs;
+      const job = jobs["test-shard"]!;
+      const parts = job.strategy?.matrix?.part;
+      expect(parts).toEqual([1, 2, 3, 4]);
+      expect(job.strategy?.["fail-fast"]).toBe(false);
+      expect(job.name).toBe("tests-vitest (${{ matrix.part }}/4)");
+      const steps = job.steps!;
+      const shared = steps.filter((step) => !step.if);
+      expect(shared.map((step) => step.name)).toEqual([
+        ...(file === "ci.yml" ? ["Verify scope result"] : []),
+        "Checkout",
+        "Setup pnpm",
+        "Setup Node",
+        "Install JS dependencies",
+        "Install control-plane contract dependencies",
+        "Install contained-execution runtime",
+        "Install Playwright Chromium headless shell",
+        "Run vitest suite",
+      ]);
+      expect(
+        steps
+          .filter((step) => step.if === "matrix.part == 1")
+          .map((step) => step.name),
+      ).toEqual(PART_ONE_GUARDS);
+      expect(
+        steps
+          .filter((step) => step.if === "matrix.part == 2")
+          .map((step) => step.name),
+      ).toEqual(["Code + Design containment matrix"]);
+      expect(
+        steps.every(
+          (step) => !step.if || /^matrix\.part == [12]$/.test(step.if),
+        ),
+      ).toBe(true);
+      const suite = shared.find((step) => step.name === "Run vitest suite")!;
+      expect(suite.env).toEqual({ VITEST_PART: "${{ matrix.part }}" });
+      expect(suite.run).toBe(
+        'bash scripts/ci/with-userns.sh pnpm test:git --shard="${VITEST_PART}/4"',
+      );
+      const invocations = parts!.map((part) =>
+        suite.run!.replace("${VITEST_PART}", String(part)),
+      );
+      expect(new Set(invocations).size).toBe(4);
+      expect(invocations.at(-1)).toContain('--shard="4/4"');
+      for (const guard of steps.filter((step) => step.if)) {
+        expect(
+          parts!.filter((part) => guard.if === `matrix.part == ${part}`),
+          guard.name,
+        ).toHaveLength(1);
+      }
+      expect(jobs.test!.name).toBe("test");
+      expect(jobs.test!.if).toBe("always()");
+      expect(
+        (jobs.test!.needs as string[]).filter((id) => id !== "scope"),
+      ).toEqual(["test-shard"]);
+      const verdict = jobs.test!.steps!.find(
+        (step) => step.name === "Enforce the test result",
+      )!;
+      for (const result of ["success", "failure", "cancelled", "skipped"]) {
+        const outcome = spawnSync("bash", ["-c", verdict.run!], {
+          encoding: "utf8",
+          env: { ...process.env, TEST_RESULT: result },
+        });
+        expect(outcome.status, result).toBe(result === "success" ? 0 : 1);
+      }
+    },
+  );
+
+  it.each(["ci.yml", "preflight.yml"])(
+    "uploads eight distinct database reports and checks all eight in the stable aggregate in %s",
+    (file) => {
+      const jobs = workflow(file).jobs;
+      const database = jobs["control-plane-database"]!;
+      expect(database.strategy).toEqual({
+        "fail-fast": false,
+        matrix: { shard: [1, 2, 3, 4, 5, 6, 7, 8] },
+      });
+      const suite = database.steps!.find(
+        (step) =>
+          step.name ===
+          "Control-plane tests (migrations + auth/invite contracts)",
+      )!;
+      expect(suite.env?.SHARD).toBe("${{ matrix.shard }}");
+      expect(suite.run).toContain('--shard="${SHARD}/8"');
+      expect(suite.run).toContain(
+        '--outputFile.json="${RUNNER_TEMP}/control-plane-report/shard-${SHARD}.json"',
+      );
+      const upload = database.steps!.find(
+        (step) => step.name === "Upload the shard's test report",
+      )!;
+      expect(upload.if).toBe("always()");
+      expect(upload.with?.name).toBe(
+        "control-plane-database-report-${{ matrix.shard }}",
+      );
+      const artifacts = database.strategy!.matrix!.shard!.map((shard) =>
+        String(upload.with!.name).replace("${{ matrix.shard }}", String(shard)),
+      );
+      expect(new Set(artifacts).size).toBe(8);
+      expect(artifacts.at(-1)).toBe("control-plane-database-report-8");
+      const aggregate = jobs["control-plane"]!;
+      expect(aggregate.name).toBe("control plane");
+      expect(aggregate.if).toBe("always()");
+      const download = aggregate.steps!.find(
+        (step) => step.name === "Download database shard reports",
+      )!;
+      expect(download.with?.pattern).toBe("control-plane-database-report-*");
+      expect(download.with?.["merge-multiple"]).toBe(true);
+      const verdict = aggregate.steps!.find(
+        (step) => step.name === "Enforce control-plane results",
+      )!;
+      expect(verdict.env?.DATABASE_SHARDS).toBe(8);
+      expect(verdict.run).toBe(
+        'node scripts/ci/control-plane-results.mjs "$RUNNER_TEMP/control-plane-reports"',
+      );
     },
   );
 

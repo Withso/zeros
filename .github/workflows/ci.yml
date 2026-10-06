@@ -329,7 +329,7 @@ jobs:
           esac
 
   test-shard:
-    name: tests-vitest (${{ matrix.part }}/2)
+    name: tests-vitest (${{ matrix.part }}/4)
     needs: scope
     if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-vitest == 'true') }}
     runs-on: ubuntu-latest
@@ -337,11 +337,11 @@ jobs:
       # Every part reports, so one failure never hides another.
       fail-fast: false
       matrix:
-        # Root Vitest runs as two native shards. Part 1 also owns the
-        # repository guards and part 2 the explicit containment matrix, so
-        # both legs finish close together. The `test` job below is the
-        # required aggregate.
-        part: [1, 2]
+        # Root Vitest runs as four native shards. Part 1 also owns the
+        # repository guards and part 2 the explicit containment matrix.
+        # Parts 3 and 4 run the suite with the same shared setup. The `test`
+        # job below remains the required aggregate.
+        part: [1, 2, 3, 4]
     steps:
       - name: Verify scope result
         env:
@@ -420,7 +420,7 @@ jobs:
         # bubblewrap/seccomp path as the explicit containment matrix below.
         env:
           VITEST_PART: ${{ matrix.part }}
-        run: bash scripts/ci/with-userns.sh pnpm test:git --shard="${VITEST_PART}/2"
+        run: bash scripts/ci/with-userns.sh pnpm test:git --shard="${VITEST_PART}/4"
 
       - name: Cloud runtime version-skew contracts
         if: matrix.part == 1
@@ -599,8 +599,8 @@ jobs:
         run: pnpm schemas:build
 
   # The repository ruleset requires `test`. Keep that context as an explicit
-  # aggregate of both Vitest parts; `always()` turns a failed or cancelled part
-  # into a red required check rather than a skipped one that can be missed.
+  # aggregate of all four Vitest parts; `always()` turns a failed or cancelled
+  # part into a red required check rather than a skipped one that can be missed.
   test:
     name: test
     if: always()
@@ -986,7 +986,7 @@ jobs:
       fail-fast: false
       matrix:
         # Keep in step with DATABASE_SHARDS in the `control-plane` job.
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     # The DB suite requires real Postgres; otherwise integration tests self-skip.
     # Exercise migrations before the guarded deployment step. Hosted boot only
     # verifies the migration ledger. Each shard owns an ephemeral database, so
@@ -1049,7 +1049,7 @@ jobs:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
           SHARD: ${{ matrix.shard }}
         run: >-
-          pnpm exec vitest run --shard="${SHARD}/4"
+          pnpm exec vitest run --shard="${SHARD}/8"
           --reporter=default --reporter=json
           --outputFile.json="${RUNNER_TEMP}/control-plane-report/shard-${SHARD}.json"
       - name: Upload the shard's test report
@@ -1120,7 +1120,7 @@ jobs:
           DATABASE_SCOPE: ${{ needs.control-plane-scope.outputs.database }}
           STATIC_RESULT: ${{ needs.control-plane-static.result }}
           DATABASE_RESULT: ${{ needs.control-plane-scope.outputs.database == 'false' && needs.control-plane-database.result == 'success' && 'skipped' || needs.control-plane-database.result }}
-          DATABASE_SHARDS: 4
+          DATABASE_SHARDS: 8
         run: node scripts/ci/control-plane-results.mjs "$RUNNER_TEMP/control-plane-reports"
 
   ui-smoke:
