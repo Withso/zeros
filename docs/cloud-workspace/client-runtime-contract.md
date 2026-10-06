@@ -198,7 +198,7 @@ change.
 
 Presence cancels an uncommitted idle stop through the existing cancellation
 transaction and a final pre-commit `stillIdle` check. A gesture on a lagging ready
-snapshot retains a thirty-second intent across publication of a committed stop,
+snapshot retains a two-minute intent across publication of a committed stop,
 then wakes once; navigation, hiding or losing focus cancels that local intent.
 Automatic wake attempts are debounced for thirty seconds and limited to one per
 five minutes per app window and canonical workspace when the document carries a

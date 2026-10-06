@@ -93,4 +93,16 @@ describe("selected cloud workspace interaction", () => {
     h.current!.document.status = "stopping"; h.controller.refresh(); expect(h.wake).toHaveBeenCalledOnce();
     h.current!.document.status = "stopped"; h.controller.refresh(); expect(h.wake).toHaveBeenCalledOnce();
   });
+
+  it("retains the gesture across a delayed stop publication beyond the regular catalog interval", () => {
+    const h = harness(); h.controller.interact();
+    h.tick(45_000); h.current!.document.status = "stopping"; h.controller.refresh();
+    expect(h.wake).toHaveBeenCalledOnce();
+  });
+
+  it("expires an unconsumed gesture after two minutes without waking for a later passive refresh", () => {
+    const h = harness(); h.controller.interact();
+    h.tick(120_000); h.current!.document.status = "stopped"; h.controller.refresh();
+    expect(h.wake).not.toHaveBeenCalled();
+  });
 });

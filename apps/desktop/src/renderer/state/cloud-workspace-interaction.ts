@@ -3,6 +3,7 @@ import type { CloudWorkspaceDocument } from "../platform/cloud-workspaces";
 const INPUT_RECENCY_MS = 15 * 60_000;
 const PRESENCE_INTERVAL_MS = 60_000;
 const WAKE_DEBOUNCE_MS = 30_000;
+const WAKE_INTENT_MS = 2 * 60_000;
 const INCIDENT_WAKE_INTERVAL_MS = 5 * 60_000;
 const WAKE_STATES = new Set(["stopped", "sleeping", "stopping", "waking", "provisioning", "setting_up"]);
 
@@ -42,7 +43,7 @@ export class CloudWorkspaceInteraction {
   private wakeIfArmed(): void {
     const current = this.options.current();
     if (!this.armed || !current || this.armed.key !== current.key || this.armed.generation !== current.document.generation.number ||
-        this.now() - this.armed.at >= WAKE_DEBOUNCE_MS || !this.options.visible() || !this.options.focused() || !this.options.available() ||
+        this.now() - this.armed.at >= WAKE_INTENT_MS || !this.options.visible() || !this.options.focused() || !this.options.available() ||
         current.document.deletedAt || !current.document.capabilities.canWrite ||
         !WAKE_STATES.has(current.document.status) || this.pending?.key === current.key) return;
     const interval = current.document.error ? INCIDENT_WAKE_INTERVAL_MS : WAKE_DEBOUNCE_MS;
@@ -78,7 +79,8 @@ export class CloudWorkspaceInteraction {
       if (this.options.presence(key, true)) { this.presentKey = key; this.lastPresence = this.now(); }
     }
     // A recent gesture can race a committed idle stop while the catalog still
-    // says ready. Carry that bounded intent across the stop's publication.
+    // says ready. Allow its 30-second refresh plus network delay, bounded by
+    // the existing two-minute wake window, without changing wake throttling.
     this.wakeIfArmed();
   }
   reconnect(): void { this.lastPresence = -Infinity; this.refresh(); }
