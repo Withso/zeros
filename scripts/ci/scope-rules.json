@@ -1,0 +1,1047 @@
+{
+  "schema_version": 1,
+  "max_paths": 300,
+  "global_invalidators": {
+    "include": [
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      "patches/**",
+      "**/tsconfig*.json",
+      "**/vitest.config.*",
+      "**/vitest.setup.*",
+      "vite.config.*",
+      "tsup.config.*",
+      "eslint.config.*",
+      "postcss.config.*",
+      "**/.npmrc",
+      ".pnpmfile.cjs",
+      "**/.node-version",
+      "**/.nvmrc",
+      "**/.tool-versions",
+      "**/pnpm-workspace.yaml",
+      "packages/*/package.json",
+      "packages/*/tsconfig*.json",
+      "packages/*/vitest.config.*",
+      ".github/actions/**",
+      ".github/workflows/**",
+      ".github/actionlint.yaml",
+      ".github/CODEOWNERS",
+      "scripts/ci/**",
+      "scripts/check-*",
+      "scripts/design-system/**",
+      "styles/policy/ui-debt.json",
+      "scripts/run-explicit-vitest.mjs",
+      "scripts/run-zsr-contract-tests.mjs",
+      "scripts/zsr-qualification/pin.json",
+      "scripts/node-forge-patch.json",
+      "scripts/release/ci.ts",
+      "scripts/release/ci-cli.ts",
+      "scripts/release/github.ts",
+      ".gitignore",
+      ".gitattributes",
+      ".gitleaksignore",
+      ".worktreeinclude",
+      ".prettierignore",
+      ".prettierrc*",
+      "renovate.json",
+      "release.config.json",
+      ".env.example",
+      ".env.agent.example",
+      "zeros-dev-env-example.json",
+      "AGENTS.md",
+      "RULES.md",
+      "components.json",
+      ".conductor/**",
+      ".railway/**",
+      ".agents/**",
+      ".claude/**",
+      ".cursor/**",
+      ".mcp.json"
+    ]
+  },
+  "documentation": {
+    "include": [
+      "docs/**/*.md",
+      "CONTRIBUTING.md",
+      "CODE_OF_CONDUCT.md",
+      "SECURITY.md",
+      "SUPPORT.md",
+      ".github/PULL_REQUEST_TEMPLATE.md"
+    ],
+    "exclude": [
+      "docs/README.md",
+      "docs/agent-capabilities-parity-and-ui-consolidated-2026-07-01.md",
+      "docs/cloud-workspace/README.md",
+      "docs/cloud-workspace/implementation-roadmap.md",
+      "docs/cloud-workspace/engineering-reference.md",
+      "docs/deployment-environments.md",
+      "docs/cloud-workspace/infrastructure-and-operations.md",
+      "docs/design-system.md",
+      "docs/design-tokens.md"
+    ],
+    "allowed_paths": [
+      ".github/PULL_REQUEST_TEMPLATE.md",
+      "CODE_OF_CONDUCT.md",
+      "CONTRIBUTING.md",
+      "SECURITY.md",
+      "SUPPORT.md",
+      "docs/agent-harness-capability-boundary.md",
+      "docs/agent-identity-model.md",
+      "docs/agent-tool-presentation.md",
+      "docs/agent-turn-usage.md",
+      "docs/browser-service.md",
+      "docs/changes-history.md",
+      "docs/chat-titles.md",
+      "docs/claude-event-coverage.md",
+      "docs/cloud-workspace/account-pro-operations.md",
+      "docs/cloud-workspace/agent-authentication-and-language-tools.md",
+      "docs/cloud-workspace/architecture.md",
+      "docs/cloud-workspace/checkpoint-native-format.md",
+      "docs/cloud-workspace/client-runtime-contract.md",
+      "docs/cloud-workspace/compute-credits.md",
+      "docs/cloud-workspace/computer-environment.md",
+      "docs/cloud-workspace/computer-template-builds.md",
+      "docs/cloud-workspace/computer-template-retention.md",
+      "docs/cloud-workspace/computer-tools.md",
+      "docs/cloud-workspace/data-and-sync.md",
+      "docs/cloud-workspace/database-qualification.md",
+      "docs/cloud-workspace/enterprise-and-self-hosting.md",
+      "docs/cloud-workspace/lifecycle-diagnostics.md",
+      "docs/cloud-workspace/mcp-and-skills.md",
+      "docs/cloud-workspace/native-access-acceptance.md",
+      "docs/cloud-workspace/native-preview-acceptance.md",
+      "docs/cloud-workspace/organization-setup.md",
+      "docs/cloud-workspace/pro-backend.md",
+      "docs/cloud-workspace/product-contract.md",
+      "docs/cloud-workspace/provider-background-work.md",
+      "docs/cloud-workspace/provider-contract.md",
+      "docs/cloud-workspace/qualification-status.md",
+      "docs/cloud-workspace/relay-capacity.md",
+      "docs/cloud-workspace/release-worker-qualification.md",
+      "docs/cloud-workspace/root-coordinator-threat-model.md",
+      "docs/cloud-workspace/runtime-bundles.md",
+      "docs/cloud-workspace/runtime-lifecycle-acceptance.md",
+      "docs/cloud-workspace/security.md",
+      "docs/cloud-workspace/template-forks.md",
+      "docs/code-review.md",
+      "docs/codex-app-server-compatibility.md",
+      "docs/color-names.md",
+      "docs/composer-attachments.md",
+      "docs/composer-mentions.md",
+      "docs/context-storage.md",
+      "docs/design-mode-roadmap.md",
+      "docs/desktop-client-compatibility.md",
+      "docs/dev-connections.md",
+      "docs/development-environments.md",
+      "docs/development-restarts.md",
+      "docs/extension-discovery.md",
+      "docs/git-review-actions.md",
+      "docs/github-inline-review.md",
+      "docs/local-development.md",
+      "docs/native-computer-use.md",
+      "docs/navigation-state-persistence.md",
+      "docs/organizations-and-teams.md",
+      "docs/personal-settings.md",
+      "docs/plain-folder-ux.md",
+      "docs/provider-accounts.md",
+      "docs/terminal-workbench.md",
+      "docs/ui-interaction-performance.md",
+      "docs/workos-authentication-migration.md",
+      "docs/workspace-archive-recovery.md"
+    ],
+    "allowed_statuses": ["modified"]
+  },
+  "lane_names": [
+    "ci-config",
+    "cloud-runtime",
+    "control-plane",
+    "control-plane-db",
+    "dependencies-toolchain",
+    "design-containment",
+    "desktop-engine",
+    "desktop-renderer",
+    "docs-only",
+    "electron",
+    "macos",
+    "marketing",
+    "model-catalogs",
+    "packaging",
+    "protocol",
+    "repository-contracts",
+    "runtime-bundle",
+    "smoke-harness",
+    "ui-smoke",
+    "web"
+  ],
+  "path_rules": [
+    {
+      "id": "web-boundary",
+      "include": ["apps/web/**"],
+      "lanes": ["web"]
+    },
+    {
+      "id": "marketing-boundary",
+      "include": ["apps/marketing/**"],
+      "lanes": ["marketing", "web"]
+    },
+    {
+      "id": "control-plane-boundary",
+      "include": ["apps/control-plane/**"],
+      "lanes": ["control-plane"]
+    },
+    {
+      "id": "desktop-renderer-source",
+      "include": ["apps/desktop/src/renderer/**"],
+      "lanes": ["desktop-renderer", "cloud-runtime"]
+    },
+    {
+      "id": "renderer-assets-and-declarations",
+      "include": [
+        "apps/desktop/src/assets/**",
+        "apps/desktop/src/vite-env.d.ts"
+      ],
+      "lanes": ["desktop-renderer"]
+    },
+    {
+      "id": "desktop-engine-and-shared-source",
+      "include": ["apps/desktop/src/**"],
+      "exclude": ["apps/desktop/src/renderer/**"],
+      "lanes": ["desktop-engine", "cloud-runtime"]
+    },
+    {
+      "id": "electron-source",
+      "include": ["apps/desktop/electron/**"],
+      "lanes": ["electron"]
+    },
+    {
+      "id": "renderer-sources-imported-by-electron",
+      "include": [
+        "apps/desktop/src/renderer/shell/workbench/tabs/localhost-url.ts",
+        "apps/desktop/src/renderer/platform/process-metrics-types.ts"
+      ],
+      "lanes": ["electron"]
+    },
+    {
+      "id": "engine-helpers-imported-by-renderer",
+      "include": [
+        "apps/desktop/src/engine/runtime.ts",
+        "apps/desktop/src/engine/git/branch-naming.ts",
+        "apps/desktop/src/engine/settings/env-names.ts"
+      ],
+      "lanes": ["desktop-renderer"]
+    },
+    {
+      "id": "renderer-entry",
+      "include": ["index.html"],
+      "lanes": ["desktop-renderer"]
+    },
+    {
+      "id": "shared-styles",
+      "include": ["styles/**"],
+      "lanes": ["desktop-renderer"]
+    },
+    {
+      "id": "shipped-web-token-source",
+      "include": ["styles/zeros-tokens.css"],
+      "lanes": ["marketing", "web"]
+    },
+    {
+      "id": "catalogs",
+      "include": ["catalogs/**"],
+      "lanes": [
+        "model-catalogs",
+        "desktop-renderer",
+        "desktop-engine",
+        "protocol",
+        "cloud-runtime"
+      ]
+    },
+    {
+      "id": "protocol-package",
+      "include": ["packages/protocol/**"],
+      "lanes": [
+        "protocol",
+        "desktop-renderer",
+        "desktop-engine",
+        "electron",
+        "control-plane",
+        "cloud-runtime"
+      ]
+    },
+    {
+      "id": "design-packages",
+      "include": ["packages/design-core/**", "packages/design-web/**"],
+      "lanes": [
+        "design-containment",
+        "desktop-renderer",
+        "desktop-engine",
+        "electron",
+        "cloud-runtime"
+      ]
+    },
+    {
+      "id": "design-engine-and-containment",
+      "include": [
+        "apps/desktop/src/engine/design/**",
+        "apps/desktop/src/engine/agents/containment/**",
+        "apps/desktop/src/renderer/features/design-workspace/**",
+        "apps/desktop/electron/design-*.ts",
+        "scripts/design-*.ts",
+        "scripts/design-*.mjs"
+      ],
+      "lanes": ["design-containment"]
+    },
+    {
+      "id": "cloud-runtime-and-dev-kit",
+      "include": [
+        "scripts/cloud-workspace-validation/**",
+        "scripts/zsr-qualification/**",
+        "scripts/zsr-preview-browser-smoke.ts",
+        "scripts/dev-environment/**",
+        "scripts/setup-zeros-dev.sh"
+      ],
+      "lanes": ["cloud-runtime", "control-plane"]
+    },
+    {
+      "id": "cloud-worker-backend",
+      "include": ["apps/control-plane/src/cloud-workspaces/**"],
+      "lanes": ["cloud-runtime"]
+    },
+    {
+      "id": "cloud-clients-tested-by-backend",
+      "include": ["apps/desktop/**"],
+      "lanes": ["control-plane", "control-plane-db"],
+      "input_source": "control-plane-database"
+    },
+    {
+      "id": "operating-documents-are-db-inputs",
+      "include": ["docs/**"],
+      "lanes": ["control-plane", "control-plane-db", "repository-contracts"],
+      "input_source": "control-plane-database"
+    },
+    {
+      "id": "repository-layout-documents",
+      "include": [
+        "docs/README.md",
+        "docs/agent-capabilities-parity-and-ui-consolidated-2026-07-01.md",
+        "docs/cloud-workspace/README.md",
+        "docs/cloud-workspace/implementation-roadmap.md",
+        "docs/cloud-workspace/engineering-reference.md",
+        "README.md",
+        "REPOSITORY-ARCHITECTURE.md"
+      ],
+      "lanes": ["repository-contracts"]
+    },
+    {
+      "id": "added-documents-need-layout-contracts",
+      "include": [
+        "docs/**/*.md",
+        "CONTRIBUTING.md",
+        "CODE_OF_CONDUCT.md",
+        "SECURITY.md",
+        "SUPPORT.md",
+        ".github/PULL_REQUEST_TEMPLATE.md"
+      ],
+      "exclude": [
+        "docs/README.md",
+        "docs/agent-capabilities-parity-and-ui-consolidated-2026-07-01.md",
+        "docs/cloud-workspace/README.md",
+        "docs/cloud-workspace/implementation-roadmap.md",
+        "docs/cloud-workspace/engineering-reference.md",
+        "docs/deployment-environments.md",
+        "docs/cloud-workspace/infrastructure-and-operations.md",
+        "docs/design-system.md",
+        "docs/design-tokens.md"
+      ],
+      "statuses": ["added"],
+      "lanes": ["repository-contracts"]
+    },
+    {
+      "id": "design-system-documents-are-checked-inputs",
+      "include": ["docs/design-system.md", "docs/design-tokens.md"],
+      "lanes": ["desktop-renderer", "repository-contracts"]
+    },
+    {
+      "id": "design-token-generator-inputs",
+      "include": ["styles/tokens/**", "styles/policy/contrast-contract.json"],
+      "lanes": ["desktop-renderer", "marketing", "web", "repository-contracts"]
+    },
+    {
+      "id": "standalone-dependency-graphs",
+      "include": [
+        "apps/control-plane/package.json",
+        "apps/control-plane/pnpm-lock.yaml",
+        "apps/control-plane/pnpm-workspace.yaml",
+        "apps/web/package.json",
+        "apps/web/package-lock.json",
+        "apps/marketing/package.json",
+        "apps/marketing/pnpm-lock.yaml"
+      ],
+      "lanes": ["dependencies-toolchain"]
+    },
+    {
+      "id": "release-and-packaging",
+      "include": [
+        "electron-builder.yml",
+        "build/**",
+        "scripts/release/**",
+        "scripts/release-environment.ts",
+        "scripts/build-sidecar.mjs",
+        "scripts/build-zsr-supervisor.mjs",
+        "scripts/electron-*.cjs",
+        "scripts/electron-*.mjs",
+        "scripts/fix-node-pty-helper.cjs",
+        "scripts/packaged-pty-smoke.mjs",
+        "scripts/smoke-engine.mjs",
+        "scripts/verify-macos-release-artifacts.mjs",
+        "scripts/compute-version.mjs",
+        "scripts/stage-claude-cli.mjs",
+        "scripts/stage-codex-cli.mjs",
+        ".github/release.yml"
+      ],
+      "lanes": ["packaging"]
+    },
+    {
+      "id": "distributed-legal-and-vendor-assets",
+      "include": [
+        "LICENSE",
+        "THIRD-PARTY-NOTICES.md",
+        "THIRD-PARTY-LICENSES.txt",
+        "third_party/**"
+      ],
+      "lanes": [
+        "packaging",
+        "cloud-runtime",
+        "web",
+        "marketing",
+        "design-containment"
+      ]
+    },
+    {
+      "id": "license-generators",
+      "include": [
+        "scripts/prepare-third-party-license-graphs.mjs",
+        "scripts/generate-third-party-licenses.mjs"
+      ],
+      "lanes": ["dependencies-toolchain", "packaging"]
+    },
+    {
+      "id": "generated-codex-and-fixture-harness",
+      "include": [
+        "scripts/codegen-codex.mjs",
+        "scripts/codex-protocol-coverage.mjs",
+        "scripts/protocol-source-signature.mjs",
+        "scripts/test-adapters.mjs",
+        "scripts/fixtures/**",
+        "scripts/cursor-curated-ids.mjs",
+        "scripts/cursor-host-smoke.mjs",
+        "scripts/codex-app-server-smoke.mjs",
+        "scripts/claude-cli-smoke.mjs",
+        "scripts/agent-smoke.mjs",
+        "scripts/models-verify.mjs",
+        "scripts/models-list.mjs"
+      ],
+      "lanes": ["desktop-engine", "model-catalogs", "packaging"]
+    },
+    {
+      "id": "generated-settings-schemas",
+      "include": [
+        "scripts/build-settings-schemas.ts",
+        "apps/desktop/src/engine/settings/**"
+      ],
+      "lanes": ["desktop-engine", "marketing", "web", "design-containment"]
+    },
+    {
+      "id": "root-script-contract-tests",
+      "include": ["scripts/__tests__/**"],
+      "lanes": ["repository-contracts"]
+    },
+    {
+      "id": "composer-smoke-infrastructure",
+      "include": [
+        "scripts/ui-smoke-*",
+        "scripts/ui-smoke/**",
+        "apps/desktop/src/renderer/harnesses/**"
+      ],
+      "lanes": ["smoke-harness", "runtime-bundle"]
+    },
+    {
+      "id": "control-plane-database-inputs",
+      "include": ["**"],
+      "input_source": "control-plane-database",
+      "lanes": ["control-plane", "control-plane-db"]
+    }
+  ],
+  "checks": {
+    "tracked-secrets": {
+      "when": {
+        "always": true,
+        "full": true,
+        "any_lanes": []
+      },
+      "execution_group": "scope-core",
+      "commands": ["pnpm check:secrets"]
+    },
+    "commit-range-secrets": {
+      "when": {
+        "always": true,
+        "full": true,
+        "any_lanes": []
+      },
+      "execution_group": "scope-core",
+      "commands": ["gitleaks git --redact --log-opts=<verified-event-range>"]
+    },
+    "actionlint": {
+      "when": {
+        "always": true,
+        "full": true,
+        "any_lanes": []
+      },
+      "execution_group": "scope-core",
+      "commands": ["actionlint"]
+    },
+    "scope-policy-guard": {
+      "when": {
+        "always": true,
+        "full": true,
+        "any_lanes": []
+      },
+      "execution_group": "scope-core",
+      "commands": []
+    },
+    "root-vitest": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "web",
+          "marketing",
+          "control-plane",
+          "control-plane-db",
+          "desktop-renderer",
+          "desktop-engine",
+          "electron",
+          "packaging",
+          "model-catalogs",
+          "protocol",
+          "design-containment",
+          "cloud-runtime",
+          "dependencies-toolchain",
+          "repository-contracts",
+          "smoke-harness"
+        ]
+      },
+      "execution_group": "test",
+      "commands": ["bash scripts/ci/with-userns.sh pnpm test:git"]
+    },
+    "desktop-static": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "desktop-renderer",
+          "desktop-engine",
+          "electron",
+          "protocol",
+          "design-containment",
+          "model-catalogs",
+          "dependencies-toolchain"
+        ]
+      },
+      "execution_group": "quality",
+      "commands": [
+        "pnpm typecheck:app",
+        "pnpm typecheck:electron",
+        "pnpm typecheck:packages",
+        "pnpm lint",
+        "pnpm check:ui"
+      ]
+    },
+    "ui-source-guard": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "web",
+          "marketing",
+          "control-plane",
+          "control-plane-db",
+          "desktop-renderer",
+          "desktop-engine",
+          "electron",
+          "packaging",
+          "model-catalogs",
+          "protocol",
+          "design-containment",
+          "cloud-runtime",
+          "dependencies-toolchain",
+          "repository-contracts",
+          "smoke-harness"
+        ]
+      },
+      "execution_group": "quality",
+      "commands": ["pnpm check:ui"]
+    },
+    "protocol-package-static": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["control-plane"]
+      },
+      "execution_group": "quality",
+      "commands": ["pnpm --filter @zeros/protocol run typecheck"]
+    },
+    "web-static-and-tests": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["web", "marketing", "desktop-engine", "protocol"]
+      },
+      "execution_group": "quality-test",
+      "commands": [
+        "npm --prefix apps/web run typecheck",
+        "npm --prefix apps/web test",
+        "pnpm check:deep-link-schemes"
+      ]
+    },
+    "marketing-static": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["marketing", "web"]
+      },
+      "execution_group": "quality",
+      "commands": ["pnpm --filter @zeros/marketing run typecheck"]
+    },
+    "release-contracts": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "packaging",
+          "control-plane",
+          "web",
+          "cloud-runtime",
+          "dependencies-toolchain"
+        ]
+      },
+      "execution_group": "quality",
+      "commands": [
+        "pnpm exec tsc -p scripts/release/tsconfig.json",
+        "pnpm exec vitest run --config scripts/release/vitest.config.ts --maxWorkers=2"
+      ]
+    },
+    "control-plane-static": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["control-plane", "control-plane-db"]
+      },
+      "execution_group": "quality",
+      "commands": [
+        "pnpm --dir apps/control-plane typecheck",
+        "pnpm --dir apps/control-plane exec node ../../scripts/check-audit.mjs"
+      ]
+    },
+    "codex-keeper-pin": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["control-plane"]
+      },
+      "execution_group": "test",
+      "commands": ["pnpm check:codex-pin"]
+    },
+    "control-plane-database": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["control-plane-db"]
+      },
+      "execution_group": "control-plane-database-matrix-4",
+      "commands": [
+        "pnpm --dir apps/control-plane exec vitest run --shard=<i>/4 --reporter=json --outputFile.json=<report>"
+      ]
+    },
+    "control-plane-reports": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["control-plane-db"]
+      },
+      "execution_group": "required-aggregate",
+      "commands": ["node scripts/ci/control-plane-results.mjs <reports>"]
+    },
+    "preload": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "desktop-renderer",
+          "desktop-engine",
+          "electron",
+          "protocol"
+        ]
+      },
+      "execution_group": "test",
+      "commands": ["pnpm check:preload"]
+    },
+    "design-containment": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "desktop-engine",
+          "protocol",
+          "design-containment",
+          "cloud-runtime",
+          "dependencies-toolchain"
+        ]
+      },
+      "execution_group": "test",
+      "commands": [
+        "bash scripts/ci/with-userns.sh pnpm check:design-containment"
+      ]
+    },
+    "catalog-and-provider-runtime": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "desktop-engine",
+          "electron",
+          "model-catalogs",
+          "protocol",
+          "cloud-runtime",
+          "dependencies-toolchain",
+          "packaging"
+        ]
+      },
+      "execution_group": "test",
+      "commands": [
+        "pnpm models:verify --strict",
+        "pnpm check:cursor-asar",
+        "pnpm cursor:smoke",
+        "pnpm cursor:smoke:electron",
+        "pnpm claude:smoke",
+        "pnpm codex:smoke",
+        "pnpm check:codex-pin",
+        "pnpm check:runtime-pins"
+      ]
+    },
+    "engine-migrations": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["desktop-engine", "protocol", "design-containment"]
+      },
+      "execution_group": "test",
+      "commands": ["pnpm check:migrations"]
+    },
+    "backend-migration-guards": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["control-plane", "control-plane-db", "packaging"]
+      },
+      "execution_group": "test",
+      "commands": [
+        "pnpm check:control-plane-migrations",
+        "pnpm check:migration-phases"
+      ]
+    },
+    "dependency-licenses-audit": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "dependencies-toolchain",
+          "packaging",
+          "desktop-renderer",
+          "desktop-engine",
+          "electron",
+          "protocol",
+          "design-containment",
+          "marketing",
+          "web",
+          "control-plane",
+          "cloud-runtime",
+          "model-catalogs"
+        ]
+      },
+      "execution_group": "test",
+      "commands": ["pnpm check:licenses", "pnpm check:audit"]
+    },
+    "release-and-security-static": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "desktop-renderer",
+          "desktop-engine",
+          "electron",
+          "packaging",
+          "protocol",
+          "dependencies-toolchain",
+          "web",
+          "control-plane"
+        ]
+      },
+      "execution_group": "test",
+      "commands": [
+        "pnpm check:vite-env",
+        "pnpm check:electron-hardening",
+        "pnpm check:packaging-paths",
+        "pnpm check:deep-link-schemes"
+      ]
+    },
+    "adapter-fixtures": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "desktop-engine",
+          "protocol",
+          "model-catalogs",
+          "dependencies-toolchain"
+        ]
+      },
+      "execution_group": "test",
+      "commands": ["pnpm test:adapters"]
+    },
+    "protocol-advisory": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["protocol", "control-plane", "desktop-engine"]
+      },
+      "execution_group": "test",
+      "commands": ["pnpm check:protocol"]
+    },
+    "settings-schema-generation": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["desktop-engine", "design-containment", "marketing"]
+      },
+      "execution_group": "test",
+      "commands": ["pnpm schemas:build"]
+    },
+    "renderer-build": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "desktop-renderer",
+          "electron",
+          "protocol",
+          "design-containment",
+          "model-catalogs",
+          "packaging",
+          "dependencies-toolchain"
+        ]
+      },
+      "execution_group": "build",
+      "commands": ["pnpm build:ui"]
+    },
+    "engine-and-electron-build": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "desktop-engine",
+          "electron",
+          "protocol",
+          "design-containment",
+          "model-catalogs",
+          "packaging",
+          "dependencies-toolchain"
+        ]
+      },
+      "execution_group": "build",
+      "commands": [
+        "pnpm build:engine",
+        "pnpm electron:compile",
+        "bun build apps/desktop/src/cli.ts --compile --target=bun-darwin-arm64 --outfile <binary>"
+      ]
+    },
+    "web-and-marketing-build": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["web", "marketing", "packaging"]
+      },
+      "execution_group": "build",
+      "commands": [
+        "pnpm --filter @zeros/marketing build",
+        "npm --prefix apps/web run build:standalone"
+      ]
+    },
+    "source-sync-macos": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "desktop-engine",
+          "electron",
+          "packaging",
+          "protocol",
+          "design-containment",
+          "cloud-runtime",
+          "dependencies-toolchain",
+          "macos"
+        ]
+      },
+      "execution_group": "source-sync-macos",
+      "commands": [
+        "pnpm check:runtime-pins",
+        "pnpm agents:smoke:offline",
+        "pnpm check:zsr:runtime",
+        "pnpm build:sidecar",
+        "pnpm smoke:engine",
+        "pnpm test:workspace-lifecycle",
+        "pnpm check:design-containment"
+      ],
+      "lane": "macos"
+    },
+    "unsigned-packaging-proof": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": ["packaging", "dependencies-toolchain"]
+      },
+      "execution_group": "source-sync-macos",
+      "commands": [
+        "pnpm build:sidecar",
+        "pnpm electron:compile",
+        "pnpm build:ui",
+        "pnpm smoke:engine",
+        "pnpm exec electron-builder --config electron-builder.yml --publish never --dir",
+        "pnpm smoke:packaged-pty"
+      ],
+      "lane": "macos"
+    },
+    "cloud-runner": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "cloud-runtime",
+          "desktop-engine",
+          "protocol",
+          "design-containment",
+          "dependencies-toolchain",
+          "packaging"
+        ]
+      },
+      "execution_group": "cloud-runner",
+      "commands": [
+        "pnpm check:runtime-pins",
+        "pnpm agents:smoke:offline",
+        "bash scripts/ci/with-userns.sh pnpm check:zsr",
+        "bash scripts/ci/with-userns.sh pnpm check:zsr-preview-browser",
+        "pnpm --dir apps/control-plane typecheck"
+      ]
+    },
+    "linux-runtime-bundle": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "cloud-runtime",
+          "desktop-engine",
+          "protocol",
+          "design-containment",
+          "model-catalogs",
+          "packaging",
+          "dependencies-toolchain",
+          "smoke-harness"
+        ]
+      },
+      "execution_group": "cloud-runner",
+      "commands": [
+        "bash scripts/ci/with-userns.sh pnpm cloud:runtime-bundle:build --out-dir <temporary> --source-commit <head_sha>"
+      ],
+      "lane": "runtime-bundle"
+    },
+    "composer-critical": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "desktop-renderer",
+          "electron",
+          "protocol",
+          "design-containment",
+          "model-catalogs",
+          "control-plane",
+          "dependencies-toolchain"
+        ]
+      },
+      "execution_group": "browser",
+      "commands": []
+    },
+    "composer-full": {
+      "when": {
+        "always": false,
+        "full": false,
+        "any_lanes": ["ui-smoke"]
+      },
+      "execution_group": "browser",
+      "commands": ["pnpm test:ui-smoke"]
+    },
+    "codeql": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "web",
+          "marketing",
+          "control-plane",
+          "control-plane-db",
+          "desktop-renderer",
+          "desktop-engine",
+          "electron",
+          "packaging",
+          "model-catalogs",
+          "protocol",
+          "design-containment",
+          "cloud-runtime",
+          "dependencies-toolchain",
+          "repository-contracts",
+          "smoke-harness"
+        ]
+      },
+      "execution_group": "codeql",
+      "commands": []
+    },
+    "changed-prettier-advisory": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "web",
+          "marketing",
+          "control-plane",
+          "control-plane-db",
+          "desktop-renderer",
+          "desktop-engine",
+          "electron",
+          "packaging",
+          "model-catalogs",
+          "protocol",
+          "design-containment",
+          "cloud-runtime",
+          "dependencies-toolchain",
+          "repository-contracts",
+          "smoke-harness"
+        ]
+      },
+      "execution_group": "quality",
+      "commands": [
+        "pnpm exec prettier --check --ignore-unknown <validated changed files>"
+      ]
+    }
+  }
+}

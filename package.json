@@ -101,6 +101,7 @@
     "check:control-plane-migrations": "node scripts/check-control-plane-migrations.mjs",
     "check:migration-phases": "tsx scripts/check-migration-phases.ts",
     "check:protocol": "node scripts/check-protocol-version.mjs",
+    "ci:plan": "node scripts/ci/scope.mjs --mode local",
     "check:actions": "node scripts/check-actions.mjs",
     "check:web-deploy": "node scripts/check-web-deploy.mjs",
     "check:deep-link-schemes": "node scripts/check-deep-link-schemes.mjs",
