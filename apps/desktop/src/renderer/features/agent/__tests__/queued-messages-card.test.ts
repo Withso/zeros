@@ -30,6 +30,11 @@ describe("cloud readiness in the existing queued card", () => {
   it("renders a cloud enqueue error inline even before a row was accepted", () => {
     expect(render({ messages: [], error: "The workspace identity is unavailable." })).toContain('role="alert"');
   });
+  it("keeps admission recovery actions inside a terminal card, never an expected wait", () => {
+    const recovery = createElement("button", null, "Enable models");
+    expect(render({ error: "The model is not enabled.", recovery })).toContain("Enable models");
+    expect(render({ waiting: true, recovery })).not.toContain("Enable models");
+  });
   it("preserves the Local queue count, paused copy, send affordance and empty state with default props", () => {
     const html = render({ paused: true });
     expect(html).toContain("1 queued message · Paused"); expect(html).toContain('aria-label="Send now"');

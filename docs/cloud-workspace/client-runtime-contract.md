@@ -184,6 +184,10 @@ message identity is promoted exactly once. Removing a message, Stop, changing
 account/workspace identity or closing its chat fences late readiness. A terminal
 cause or a three-minute readiness bound leaves the messages queued with a clear
 inline error and explicit retry, without an error toast or a stopped-turn pill.
+A closed admission refusal before provider execution restores the same editable
+row and retains its elapsed readiness budget. Terminal admission causes use the
+existing model/credential recovery actions inside that card. An ambiguous
+dispatch result stays in the conversation for review and is never auto-replayed.
 A later Stop ends the wake intent; readiness retries cannot start it again.
 Expected waits suppress the composer's sleep notice. These queued drafts belong
 to the renderer's existing pending-send lifetime, rather than a durable server

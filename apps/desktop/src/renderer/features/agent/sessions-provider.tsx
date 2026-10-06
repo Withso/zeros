@@ -217,6 +217,8 @@ import {
   closeRouteForSession,
 } from "./session-close-lifecycle";
 import { recoverCloudAdmissionFailure } from "./cloud-runtime-upgrade";
+import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode } from "./cloud-admission-failure";
+import { reportCloudAgentRuntimeUpgrade, invalidateCloudAgentRegistry } from "./workspace-agent-registry";
 import { getLiveChatDraft, tryRestoreLiveChatDraft } from "./composer-live-drafts";
 
 // 2026-06-09: reconcile now runs on EVERY bind (new session, respawn, resume).
@@ -1294,10 +1296,12 @@ export function AgentSessionsProvider({
       cloud?: boolean;
       prepared?: boolean;
       cloudQueue?: CloudQueuedPrompt;
+      waitStartedAt?: number;
       /** Id of the greyed placeholder bubble shown while this send waits. */
       bubbleId: string;
     }>(),
   );
+  const cloudFlushRef = useRef(new Map<string, NonNullable<ReturnType<typeof sendQueueRef.current.get>>[number]>());
 
   const pauseQueue = useCallback(
     (chatId: string) => {
@@ -1551,6 +1555,7 @@ export function AgentSessionsProvider({
         args: Parameters<SessionsActions["sendPrompt"]>;
         cloud?: boolean;
         prepared?: boolean;
+        waitStartedAt?: number;
       },
     ): Promise<boolean> => {
       if (!sendQueueRef.current.claim(chatId, entry.bubbleId)) return false;
@@ -1583,6 +1588,7 @@ export function AgentSessionsProvider({
         else sendQueueRef.current.delete(chatId);
         sendQueueRef.current.release(chatId, entry.bubbleId);
         flushBubbleRef.current.set(chatId, entry.bubbleId);
+        if (entry.cloud) cloudFlushRef.current.set(chatId, entry);
         void sendPromptRef.current?.(...entry.args);
         return true;
       } catch (error) {
@@ -2273,6 +2279,9 @@ export function AgentSessionsProvider({
       const original = getStore().sessions[chatId];
       const chat = cloudComputerV2 ? useWorkspaceStore.getState().chats.find(candidate => candidate.id === chatId) : undefined;
       const cloudSend = cloudComputerV2 && isCloudWorkspace(chat?.folder ?? original?.cwd);
+      const flushedCloud = cloudSend && flushBubbleRef.current.has(chatId) ? cloudFlushRef.current.get(chatId) : undefined;
+      const cloudAccount = flushedCloud ? cloudCatalogGeneration() : undefined;
+      if (flushedCloud) cloudFlushRef.current.delete(chatId);
       // Accept before wake/session initialization. Readiness owns no payload;
       // the existing FIFO supplies editing, removal and exactly-once promotion.
       if (cloudSend && !flushBubbleRef.current.has(chatId)) {
@@ -2287,6 +2296,7 @@ export function AgentSessionsProvider({
           ...(segments?.length ? { segments } : {}), ...(autoAction ? { autoAction } : {}),
         };
         const q = sendQueueRef.current.get(chatId) ?? [];
+        if (sendQueueRef.current.isPaused(chatId)) for (const entry of q) if (entry.cloud) entry.waitStartedAt = undefined;
         q.push({ cloud: true, bubbleId, cloudQueue, args: [chatId, text, displayText, attachments, bubbleAttachments, segments, autoAction] });
         sendQueueRef.current.set(chatId, q);
         getStore().patchSession(chatId, { messages: capUserAppend(slot.messages, queuedMsg, slot.historyExpanded) });
@@ -2734,11 +2744,11 @@ export function AgentSessionsProvider({
               (message): message is AgentTextMessage =>
                 message.kind === "text" &&
                 message.id === flushBubbleId &&
-                message.queuedPresentation === "active-turn",
+                (cloudSend || message.queuedPresentation === "active-turn"),
             )
           : undefined;
         const userMessage: AgentTextMessage = {
-          id: admissionPlaceholder?.id ?? `user-${crypto.randomUUID()}`,
+          id: admissionPlaceholder?.id ?? (cloudSend && flushBubbleId ? flushBubbleId : `user-${crypto.randomUUID()}`),
           kind: "text",
           role: "user",
           text: displayText ?? text,
@@ -2864,10 +2874,39 @@ export function AgentSessionsProvider({
         getStore().setPendingLocalTurn(chatId, userMessage.id);
         const submittedDraft = isCloudWorkspace(current.cwd) ? getLiveChatDraft(chatId) : null;
         const submittedModel = isCloudWorkspace(current.cwd) ? useWorkspaceStore.getState().chats.find(chat => chat.id === chatId)?.model ?? null : null;
-        const settleCloudAdmission = (error: unknown) => recoverCloudAdmissionFailure({
-          folder: current.cwd, chatId, error, message: userMessage, draft: submittedDraft, model: submittedModel,
-          store: getStore(), pauseQueue, persist: persistAuthPrompt,
-        });
+        const settleCloudAdmission = (error: unknown) => {
+          const admission = flushedCloud && classifyCloudAdmissionFailure({ folder: current.cwd, error,
+            agentId: current.agentId, model: submittedModel });
+          // These closed causes prove provider execution did not begin. Keep
+          // the accepted identity and elapsed budget; ambiguous dispatch stays
+          // on AG's review-before-retry path below.
+          if (admission && admission.kind !== "unavailable") {
+            if (cancelledSince(cancelGenerationsRef.current, chatId, sendGeneration) ||
+                cloudAccount !== cloudCatalogGeneration() || getStore().sessions[chatId]?.cwd !== current.cwd) return true;
+            flushedCloud.prepared = false;
+            const queue = sendQueueRef.current.get(chatId) ?? [];
+            if (!queue.some(entry => entry.bubbleId === flushedCloud.bubbleId)) queue.unshift(flushedCloud);
+            sendQueueRef.current.set(chatId, queue);
+            const waiting = admission.kind === "waiting";
+            if (!waiting) {
+              if (admission.kind === "runtime-upgrade-required") reportCloudAgentRuntimeUpgrade(current.cwd!, current.agentId!);
+              else invalidateCloudAgentRegistry(current.cwd!);
+              pauseQueue(chatId);
+            }
+            const slot = getStore().sessions[chatId];
+            getStore().patchSession(chatId, { status: "ready", error: null, failure: null, lastStopReason: null, activeTurnStartedAt: null,
+              cloudAdmissionFailure: waiting ? null : { ...admission, code: String(cloudAdmissionFailureCode(error)),
+                turnId: userMessage.id, agentId: current.agentId!, model: submittedModel },
+              cloudSendWait: waiting ? undefined : { state: "failed", message: admission.message },
+              messages: slot.messages.map(message => message.id === userMessage.id && message.kind === "text"
+                ? { ...message, queued: true, queuedEditable: !autoAction && !text.trimStart().startsWith("<from_previous_chat"),
+                  queuedPresentation: undefined, queuedDelivery: undefined, recoveryFailure: undefined } : message) });
+            if (waiting) { resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId); }
+            return true;
+          }
+          return recoverCloudAdmissionFailure({ folder: current.cwd, chatId, error, message: userMessage, draft: submittedDraft,
+            model: submittedModel, store: getStore(), pauseQueue, persist: persistAuthPrompt });
+        };
         onAccepted?.();
 
         if (pendingAuth.length) {
@@ -3869,7 +3908,8 @@ export function AgentSessionsProvider({
         if (flushBubbleId) {
           const slot = getStore().sessions[chatId];
           const ph = slot?.messages.find((m) => m.id === flushBubbleId);
-          if (ph && ph.kind === "text" && ph.queued) {
+          if (ph && ph.kind === "text" && ph.queued &&
+              !(cloudSend && sendQueueRef.current.get(chatId)?.some(entry => entry.bubbleId === flushBubbleId))) {
             getStore().patchSession(chatId, {
               messages: capUserAppend(
                 slot!.messages.filter((m) => m.id !== flushBubbleId),
@@ -3930,7 +3970,9 @@ export function AgentSessionsProvider({
   const beginCloudSendWait = useCallback((chatId: string) => {
     if (!cloudComputerV2 || sendQueueRef.current.isPaused(chatId)) return;
     const slot = getStore().sessions[chatId], target = parseCloudWorkspaceKey(slot?.cwd);
-    if (!slot || !target || !sendQueueRef.current.get(chatId)?.some(entry => entry.cloud)) return;
+    const first = sendQueueRef.current.get(chatId)?.[0];
+    if (!slot || !target || !first?.cloud) return;
+    const startedAt = first.waitStartedAt ??= performance.now();
     const folder = slot.cwd, account = cloudCatalogGeneration();
     let generation = cloudWorkspaceDocument(target)?.generation.number;
     const cancellation = cancelGeneration(cancelGenerationsRef.current, chatId);
@@ -3940,6 +3982,7 @@ export function AgentSessionsProvider({
     if (slot.cloudSendWait?.state !== "waiting") getStore().patchSession(chatId, { cloudSendWait: { state: "waiting" } });
     cloudSendWaitRef.current.start(chatId, {
       current,
+      timeoutMs: 3 * 60_000 - (performance.now() - startedAt),
       attempt: async signal => {
         const doc = cloudWorkspaceDocument(target);
         if (generation !== undefined && doc && doc.generation.number !== generation)
@@ -3964,18 +4007,22 @@ export function AgentSessionsProvider({
         }
         if (signal.aborted || !current()) return false;
         fresh = getStore().sessions[chatId];
+        const admission = fresh?.failure && classifyCloudAdmissionFailure({ folder, error: fresh.failure.message, agentId: fresh.agentId,
+          model: useWorkspaceStore.getState().chats.find(chat => chat.id === chatId)?.model });
+        if (admission?.kind === "waiting") return false;
+        if (admission) throw Object.assign(new CloudSendWaitError(admission.message), { code: cloudAdmissionFailureCode(fresh!.failure!.message) });
         if (fresh?.failure && ["failed", "auth-required"].includes(fresh.status) && !isRecoverable(fresh.failure) &&
             fresh.failure.kind !== "lifecycle-superseded")
           throw new CloudSendWaitError(fresh.failure.advice ?? fresh.failure.message);
         if (fresh?.status !== "ready" && fresh?.status !== "streaming") return false;
         const head = sendQueueRef.current.get(chatId)?.[0];
         if (!head) return false;
+        head.waitStartedAt ??= startedAt;
         if (head.cloudQueue) {
           const captured = head.cloudQueue, args = head.args;
           const payload = await captured.prepare(fresh.initialize?.agentCapabilities?.promptCapabilities?.image !== false);
           if (signal.aborted || !current() || sendQueueRef.current.get(chatId)?.[0] !== head || head.args !== args) return false;
           head.args = [chatId, payload.text, payload.displayText, payload.attachments, payload.bubbleAttachments, payload.segments, args[6]];
-          head.cloudQueue = undefined;
           const queuedSlot = getStore().sessions[chatId];
           if (queuedSlot) getStore().patchSession(chatId, { messages: queuedSlot.messages.map(message =>
             message.id === head.bubbleId && message.kind === "text" ? { ...message, attachments: payload.bubbleAttachments, segments: payload.segments } : message) });
@@ -3986,8 +4033,13 @@ export function AgentSessionsProvider({
         await prepareForSend(chatId);
         return !signal.aborted && current() && sendQueueRef.current.get(chatId)?.[0] === head;
       },
-      terminal: error => error instanceof CloudSendWaitError || error instanceof CloudWorkspaceWakeEndedError || error instanceof ControlPlaneError &&
-        error.status >= 400 && error.status < 500 && ![408, 425, 429].includes(error.status),
+      terminal: error => {
+        const admission = classifyCloudAdmissionFailure({ folder, error, agentId: getStore().sessions[chatId]?.agentId,
+          model: useWorkspaceStore.getState().chats.find(chat => chat.id === chatId)?.model });
+        if (admission) return admission.kind !== "waiting";
+        return error instanceof CloudSendWaitError || error instanceof CloudWorkspaceWakeEndedError || error instanceof ControlPlaneError &&
+          error.status >= 400 && error.status < 500 && ![408, 425, 429].includes(error.status);
+      },
       cancelPreparation: () => cloudSendPreparationRef.current.cancel(chatId),
       ready: () => {
         const head = sendQueueRef.current.get(chatId)?.[0];
@@ -3996,9 +4048,19 @@ export function AgentSessionsProvider({
       },
       failed: error => {
         pauseQueue(chatId);
+        const agentId = getStore().sessions[chatId]?.agentId;
+        const model = useWorkspaceStore.getState().chats.find(chat => chat.id === chatId)?.model ?? null;
+        const admission = classifyCloudAdmissionFailure({ folder, error, agentId, model });
+        const head = sendQueueRef.current.get(chatId)?.[0];
+        if (admission && admission.kind !== "waiting" && agentId && head) {
+          if (admission.kind === "runtime-upgrade-required") reportCloudAgentRuntimeUpgrade(folder!, agentId);
+          else invalidateCloudAgentRegistry(folder!);
+        }
         getStore().patchSession(chatId, { cloudSendWait: { state: "failed", message: redactLogSecrets(
-          error instanceof Error ? error.message : "The agent could not become ready. Your messages are still queued.",
-        ).slice(0, 1000) } });
+          admission?.message ?? (error instanceof Error ? error.message : "The agent could not become ready. Your messages are still queued."),
+        ).slice(0, 1000) }, ...(admission && admission.kind !== "waiting" && agentId && head ? {
+          cloudAdmissionFailure: { ...admission, code: String(cloudAdmissionFailureCode(error)), turnId: head.bubbleId, agentId, model },
+        } : {}) });
       },
     });
   }, [cloudComputerV2, getStore, prepareForSend, drainNextQueued, pauseQueue, refreshQueuedAttachments]);
@@ -4747,7 +4809,10 @@ export function AgentSessionsProvider({
       if (!entry) return false;
       const slot = getStore().sessions[chatId];
       if (entry.cloud && slot?.cloudSendWait) {
-        if (slot.cloudSendWait.state === "failed") { resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId); }
+        if (slot.cloudSendWait.state === "failed") {
+          for (const queued of q ?? []) if (queued.cloud) queued.waitStartedAt = undefined;
+          resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId);
+        }
         return true;
       }
       if (!slot?.agentId) return false;
@@ -5917,6 +5982,7 @@ export function AgentSessionsProvider({
   const disposeAll = useCallback<SessionsActions["disposeAll"]>(() => {
     cloudSendPreparationRef.current.clear();
     cloudSendWaitRef.current.clear();
+    cloudFlushRef.current.clear();
     getStore().clearAll();
     prebindDirtySessionsRef.current.clear();
     prebindGoalSnapshotsRef.current.clear();
@@ -5942,6 +6008,7 @@ export function AgentSessionsProvider({
       bumpCancelGeneration(cancelGenerationsRef.current, chatId);
       cloudSendPreparationRef.current.cancel(chatId);
       if (getStore().sessions[chatId]?.cloudSendWait) cloudSendWaitRef.current.cancel(chatId);
+      cloudFlushRef.current.delete(chatId);
       const slot = getStore().sessions[chatId];
       prebindDirtySessionsRef.current.delete(chatId);
       clearPrebindGoalSnapshotsForChat(prebindGoalSnapshotsRef.current, chatId);

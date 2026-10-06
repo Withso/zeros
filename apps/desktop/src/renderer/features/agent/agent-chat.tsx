@@ -5136,6 +5136,11 @@ export function AgentChat({
             paused={session.queuePaused}
             waiting={cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait?.state === "waiting"}
             error={cloudComputerV2 && isCloudWorkspace(chatThread?.folder) ? session.cloudSendWait?.message ?? cloudSendError : undefined}
+            recovery={cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait?.state === "failed" &&
+              session.cloudAdmissionFailure && queuedMessages.some(message => message.id === session.cloudAdmissionFailure?.turnId) &&
+              (session.cloudAdmissionFailure.action === "choose-model" || session.cloudAdmissionFailure.action === "reconnect") ?
+              <CloudAdmissionStatus folder={chatThread?.folder} agentId={session.cloudAdmissionFailure.agentId}
+                failure={{ ...session.cloudAdmissionFailure, message: "" }} readOnly={readOnly} /> : undefined}
             agentName={steeringAgentName}
           />
           {/* Permission card (2026-07-02): the ONE permission gate. While a

@@ -51,4 +51,12 @@ describe("cloud queue readiness wait", () => {
     h.wait.start("other", sibling); await vi.advanceTimersByTimeAsync(0); expect(sibling.ready).toHaveBeenCalledOnce();
     h.wait.clear(); await vi.advanceTimersByTimeAsync(180_000); expect(h.failed).not.toHaveBeenCalled();
   });
+  it("keeps the original budget when an unexecuted admission returns to readiness", async () => {
+    const h = harness(); h.wait.start("chat", { ...h.options, timeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(1_000); expect(h.failed).toHaveBeenCalledOnce(); expect(h.ready).not.toHaveBeenCalled();
+  });
+  it("does not attempt a readiness retry after its original budget expired", () => {
+    const h = harness(); h.wait.start("chat", { ...h.options, timeoutMs: 0 });
+    expect(h.options.attempt).not.toHaveBeenCalled(); expect(h.failed).toHaveBeenCalledOnce();
+  });
 });

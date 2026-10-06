@@ -72,6 +72,7 @@ export interface QueuedMessagesCardProps {
   /** Cloud readiness uses the existing editable queue; Local defaults match. */
   waiting?: boolean;
   error?: string;
+  recovery?: ReactNode;
   /** Name for a provider without mid-turn steering. */
   agentName: string;
 }
@@ -93,6 +94,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
   paused = false,
   waiting = false,
   error,
+  recovery,
   agentName,
 }: QueuedMessagesCardProps) {
   if (messages.length === 0 && !error) return null;
@@ -125,6 +127,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
           )}
         </button>
         {error && <p role="alert" className="text-red-fg border-border1 border-t px-3.5 py-2 text-sm">{error}</p>}
+        {error && !waiting && recovery && <div className="px-3.5 pb-2">{recovery}</div>}
         {!collapsed && messages.length > 0 && (
           <>
             <div className="border-border1 flex flex-col gap-0.5 border-t px-1.5 py-1.5">

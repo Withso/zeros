@@ -15,6 +15,7 @@ export class CloudSendWait {
     cancelPreparation(): void;
     ready(): void;
     failed(error: unknown): void;
+    timeoutMs?: number;
   }): void {
     const previous = this.flights.get(chatId);
     if (previous && !previous.controller.signal.aborted && previous.current()) return;
@@ -27,9 +28,12 @@ export class CloudSendWait {
       if (!owns()) return;
       controller.abort(); this.flights.delete(chatId); options.cancelPreparation(); options.failed(error);
     };
-    const deadline = setTimeout(() => fail(new Error(
+    const timeoutError = () => new Error(
       "The agent did not become ready within three minutes. Your messages are still queued. Try again.",
-    )), WAIT_LIMIT_MS);
+    );
+    const timeoutMs = Math.min(options.timeoutMs ?? WAIT_LIMIT_MS, WAIT_LIMIT_MS);
+    if (timeoutMs <= 0) { fail(timeoutError()); return; }
+    const deadline = setTimeout(() => fail(timeoutError()), timeoutMs);
     void (async () => {
       try {
         while (owns()) {
