@@ -11,6 +11,53 @@ The ruleset still requires `quality`, `test`, `build`, `source-sync (macOS)`,
 is an additional aggregate for a future ruleset migration; it is not required
 by this change. Actionlint and CodeQL retain their separate workflows.
 
+## Independent full coverage
+
+`Full CI` (`.github/workflows/ci-full.yml`) runs alongside the required PR
+checks. It calls the existing Preflight workflow for every PR, including
+documentation-only changes, with all four database shards enabled. This runs
+the complete Linux tests/build, macOS source-sync workload, three composer
+browser shards, dependency audits and source/security contracts even when the
+fast PR classifier does not select them. The shared workflow definitions keep
+commands and future coverage changes in one place.
+
+The existing required CI job remains the single PR commit-range secret scanner.
+Full CI omits that duplicate scanner and the Alpha-only admission aggregate;
+neither omission drops a test or permits the assurance run to admit a release.
+
+Full CI also calls the existing native ABI, unsigned Electron packaging,
+packaged-engine/PTY smoke and runtime-drift checks on every PR and every push
+to main or a release branch. Their weekly and manual entrypoints remain
+available. Main and release pushes already run Preflight directly, so Full CI
+does not duplicate that full graph on pushes.
+
+These additional checks have `Full suite / ...` and `Extended checks / ...`
+names. They are independent of the existing required contexts and
+`zeros/ci-gate`; merging does not wait for them. Failures remain visible in
+Actions and on the PR. CI Recovery continues to monitor full main Preflight;
+it does not automatically open incidents for the separate extended checks.
+Beta and Production still require successful exact-source Preflight and
+CodeQL evidence. A PR assurance run is not release evidence: its workflow
+path, event and tested merge commit differ from the authenticated push runs.
+
+All reused verification jobs have read-only tokens, no inherited secrets and
+no protected environments. Fork PRs use `pull_request`, never
+`pull_request_target`. Credentialed live-provider qualification and deployment
+workflows retain their explicit operator triggers; they are not safe to run
+against arbitrary PR source. Runtime drift reports stale pins but fails broken
+ones, as before.
+
+CodeQL runs its `security-and-quality` suite across all JS/TS sources on PRs,
+main and release pushes. This includes every query in `security-extended` and
+adds maintainability and reliability analysis. Findings remain Code Scanning
+alerts; the required `codeql` context proves successful analysis, not that
+there are no alerts. See [GitHub's query suite definitions](https://docs.github.com/en/code-security/code-scanning/managing-your-code-scanning-configuration/codeql-query-suites).
+
+Different PRs and main pushes can use the Enterprise runner pool concurrently.
+Only obsolete runs of the same PR are cancelled. Extra capacity does not remove
+job dependencies, runner provisioning time or release destination locks; see
+[CI concurrency](ci-concurrency.md).
+
 ## Trusted workflow selection
 
 The `scope` job checks out full history and extracts `scripts/ci/scope.mjs`,

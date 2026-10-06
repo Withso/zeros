@@ -113,7 +113,7 @@ describe("CI and Preflight job parity", () => {
     const gate = preflight.jobs["alpha-gate"];
     expect(gate).toBeDefined();
     expect(gate!.name).toBe("alpha-gate");
-    expect(gate!.if).toBe("always()");
+    expect(gate!.if).toBe("always() && github.event_name != 'pull_request'");
     expect(gate!.needs).toEqual([
       "quality",
       "test",

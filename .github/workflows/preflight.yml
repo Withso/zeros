@@ -42,6 +42,12 @@ name: Preflight
 # cache).
 
 on:
+  workflow_call:
+    inputs:
+      full_database:
+        description: Run every database shard for full pull-request assurance
+        type: boolean
+        default: false
   # Required checks must also run for GitHub's synthetic merge-queue commit.
   merge_group:
   push:
@@ -613,7 +619,9 @@ jobs:
     name: control-plane scope
     runs-on: ubuntu-latest
     outputs:
-      database: ${{ steps.scope.outputs.database }}
+      # Full CI is additive: a docs-only PR still exercises every database
+      # shard. Direct release/main runs retain their existing scope policy.
+      database: ${{ inputs.full_database && 'true' || steps.scope.outputs.database }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -781,7 +789,8 @@ jobs:
   # attempt. The full Preflight run continues for release evidence and history.
   alpha-gate:
     name: alpha-gate
-    if: always()
+    # Full CI's PR invocation supplies coverage, never Alpha admission.
+    if: always() && github.event_name != 'pull_request'
     needs: [quality, test, build, control-plane, secret-scan]
     runs-on: ubuntu-latest
     steps:
@@ -852,6 +861,9 @@ jobs:
 
   secret-scan:
     name: secret scan (PR commit range)
+    # CI owns the required PR commit-range scanner. Avoid a second scanner in
+    # Full CI; direct push/merge-group Preflight keeps its existing scan.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # ── Why the PR's COMMIT RANGE, not the tree and not all history ──
     #
