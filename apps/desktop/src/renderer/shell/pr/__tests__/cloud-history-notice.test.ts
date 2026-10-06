@@ -112,10 +112,10 @@ describe("cloud shallow-history notice", () => {
     expect(fixture.changed).not.toHaveBeenCalled();
   });
 
-  it("does not issue reads for hidden or local surfaces", async () => {
+  it.each([null, "organization"])("does not issue reads for hidden or local surfaces (owner=%s)", async organizationId => {
     expect(mount("a", false)).toBeNull();
     fixture.cursor = 0; fixture.effects.length = 0;
-    expect(notice({ workspace: { ...workspace("local"), placement: "local" }, active: true })).toBeNull();
+    expect(notice({ workspace: { ...workspace("local"), placement: "local", organizationId }, active: true })).toBeNull();
     for (const effect of fixture.effects) { const cleanup = effect(); if (cleanup) cleanups.push(cleanup); }
     await flush(); expect(fixture.status).not.toHaveBeenCalled();
     expect(source().active).toBe(false);

@@ -218,6 +218,11 @@ No intentional Local behavior change. Cloud setup scripts and control-plane
 admission only execute for cloud allocations. Shared production paths are gated
 as follows; their regression tests remain in the repository.
 
+Personal Local and organization-owned local workspaces retain their existing
+fetch and tab behavior. Organization-owned cloud workspaces get the guarded
+action and one status slot. The Local regression cases cover both owner types;
+workspace/owner switching keeps exact-key history and action state isolated.
+
 | Shared file | Cloud gate and Local regression |
 | --- | --- |
 | `apps/desktop/src/engine/git/cloud-primary-workspace.ts` | Startup calls this only under `cloudWorker && cloudRuntimeConfig` (`zeros-engine.ts`). A Local row is rejected unchanged; `cloud-primary-workspace.test.ts` checks row and HEAD preservation. The existing Local branch allocator is reused without editing it. |

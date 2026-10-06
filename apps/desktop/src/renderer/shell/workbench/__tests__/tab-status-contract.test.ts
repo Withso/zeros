@@ -8,7 +8,7 @@ import { TAB_TYPE_META, type WorkbenchTabType } from "../tab-model";
 import { workbenchSourcesFor, workbenchStatusKey } from "../tab-status-model";
 
 const hooks = vi.hoisted(() => ({ target: vi.fn(), filter: vi.fn(), history: vi.fn(() => null),
-  workspace: null as { id: string; placement: string; path: string } | null }));
+  workspace: null as { id: string; placement: string; path: string; organizationId?: string | null } | null }));
 vi.mock("../../pr/cloud-history-notice", () => ({ CloudHistoryNotice: hooks.history }));
 vi.mock("../tabs/changes-tab", () => ({
   useSourceTarget: () => {
@@ -40,8 +40,8 @@ describe("every WorkbenchTabType enters the status frame", () => {
   });
   it.each(["changes", "review"] as const)("mounts the %s history source only for cloud workspaces", type => {
     const tab = { id: type, type, title: type };
-    for (const placement of ["local", "cloud"]) {
-      hooks.workspace = { id: "history-workspace", path: "/history", placement };
+    for (const [placement, organizationId] of [["local", null], ["local", "organization"], ["cloud", "organization"]] as const) {
+      hooks.workspace = { id: "history-workspace", path: "/history", placement, organizationId };
       hooks.history.mockClear();
       const markup = renderToStaticMarkup(createElement(WorkbenchTabContent, { tab, active: true, scope: "/history" }));
       expect(markup.match(/data-workbench-banner=/g)).toHaveLength(1);
