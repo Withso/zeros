@@ -806,6 +806,7 @@ describe("repository layout contracts", () => {
       "release-worker-qualification.md",
       "root-coordinator-threat-model.md",
       "runtime-bundles.md",
+      "runtime-hot-update.md",
       "runtime-lifecycle-acceptance.md",
       "security.md",
       "template-forks.md",

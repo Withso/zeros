@@ -68,6 +68,8 @@ behavior from release qualification and deferred product surfaces.
 - [Computer agent tools](computer-tools.md) defines marked admin workspaces, execution authority and the five computer tools.
 - [Provider background work](provider-background-work.md) defines retained native tasks, renewable leases and task recovery.
 - [Lifecycle diagnostics](lifecycle-diagnostics.md) defines setup progress, failure evidence and recovery diagnostics.
+- [In-place runtime updates](runtime-hot-update.md) proposes quiet engine updates,
+  immutable generation handoff, rollback and the bootstrap qualification gates.
 
 - [Qualification status](qualification-status.md) separates the current eight
   backend steps, native tool coverage, live evidence and remaining release gates.
