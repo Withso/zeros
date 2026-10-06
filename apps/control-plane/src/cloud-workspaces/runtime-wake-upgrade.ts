@@ -8,8 +8,8 @@ import { CloudRuntimeError } from "./runtime-selection.js";
 
 /** Called only for a stopped provider allocation and a standalone start intent.
  * Admission uses the existing replacement transaction; rollback uses the
- * existing generation transition. A rejected upgrade leaves ordinary resume
- * intact, including its original runtime authority checks. */
+ * existing generation transition. True means replacement owns execution or
+ * this worker lost wake authority; false allows ordinary saved-pin resume. */
 export async function upgradeCloudRuntimeOnWake(pool: pg.Pool, config: CloudWorkspaceBackendConfig,
   input: { workspaceId: string; organizationId: string; generation: number; intentId: string; workerId: string },
   workosEnabled: boolean): Promise<boolean> {
@@ -42,6 +42,21 @@ export async function upgradeCloudRuntimeOnWake(pool: pg.Pool, config: CloudWork
     } catch (error) {
       await tx.query("ROLLBACK TO SAVEPOINT runtime_wake_upgrade");
       await tx.query("RELEASE SAVEPOINT runtime_wake_upgrade");
+      const owned=(await tx.query(`SELECT 1 FROM cloud_workspace_lifecycle_intents intent
+        JOIN cloud_workspaces workspace ON workspace.id=intent.workspace_id AND workspace.org_id=intent.org_id
+        WHERE intent.id=$1 AND intent.workspace_id=$2 AND intent.org_id=$3 AND intent.generation=$4
+          AND intent.state='dispatching' AND intent.lease_owner=$5 AND intent.lease_expires_at>clock_timestamp()
+          AND workspace.current_generation=$4 AND workspace.desired_state='running'`,
+      [input.intentId,input.workspaceId,input.organizationId,input.generation,input.workerId])).rowCount;
+      if(!owned) {
+        await tx.query(`UPDATE cloud_workspace_lifecycle_intents SET state='superseded',completed_at=now(),
+          lease_owner=NULL,lease_expires_at=NULL,updated_at=now()
+          WHERE id=$1 AND state='dispatching' AND lease_owner=$5
+            AND NOT EXISTS(SELECT 1 FROM cloud_workspaces WHERE id=$2 AND org_id=$3
+              AND current_generation=$4 AND desired_state='running')`,
+        [input.intentId,input.workspaceId,input.organizationId,input.generation,input.workerId]);
+        return true;
+      }
       const code = error instanceof HttpError || error instanceof CloudRuntimeError ? error.code : "cloud_runtime_upgrade_deferred";
       if (code !== "cloud_runtime_already_current") await audit(tx,input.organizationId,null,"cloud_workspace.runtime_auto_upgrade_deferred",
         { workspaceId:input.workspaceId,generation:input.generation,code });

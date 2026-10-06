@@ -1,6 +1,6 @@
 import type { CloudRuntimeUpgradeAvailability } from "@zeros/protocol/cloud-runtime-lifecycle";
 import { getCloudRuntimeUpgradeAvailability } from "../platform/cloud-workspaces";
-import { cloudWorkspaceKey, parseCloudWorkspaceKey, type CloudWorkspaceTarget } from "../platform/bridge/cloud-workspace-key";
+import { parseCloudWorkspaceKey, type CloudWorkspaceTarget } from "../platform/bridge/cloud-workspace-key";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
 import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
 import { cloudCatalogGeneration, cloudWorkspaceDocument, subscribeCloudWorkspaces } from "./cloud-workspace-catalog";

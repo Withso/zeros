@@ -3248,6 +3248,12 @@ export function createCloudWorkspaceRoutes(
               !(await selectCloudWorkspaceRuntimeUpgrade(tx,{workspaceId,organizationId:orgId,
                 runtime:(await loadGenerationSource(tx,{workspaceId,organizationId:orgId,generation:workspace.current_generation})).runtime,
                 qualificationMode})).updateAvailable) throw error;
+          const checkpoint=(await tx.query<{current_checkpoint_id:string|null}>(
+            "SELECT current_checkpoint_id FROM workspace_content_heads WHERE workspace_id=$1 AND org_id=$2",[workspaceId,orgId])).rows[0];
+          if(!checkpoint?.current_checkpoint_id || !(await requireCloudRecoveryPoint(tx,{
+            workspaceId,organizationId:orgId,sourceGeneration:workspace.current_generation,
+            checkpointId:checkpoint.current_checkpoint_id,allowBeforeRebuild:true,
+          })).lossless) throw error;
         }
         const quarantined = await tx.query(`SELECT 1 FROM cloud_workspace_restore_incidents
           WHERE workspace_id=$1 AND source_generation=$2 AND (automatic_started_at IS NOT NULL OR state='recovery_needed')

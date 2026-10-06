@@ -255,6 +255,17 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     expect((await pool.query("SELECT desired_state,status,current_generation FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId])).rows[0])
       .toEqual({desired_state:"stopped",status:"stopped",current_generation:1});
   });
+  it("does not resume the old allocation after losing the claimed wake lease",async()=>{
+    await finalCheckpoint();await advanceHead();await route("/wake");
+    const {provider,calls}=stoppedProvider();
+    const inspect=provider.inspect.bind(provider);
+    provider.inspect=async id=>{
+      await pool.query("UPDATE cloud_workspace_lifecycle_intents SET lease_owner='another-worker' WHERE workspace_id=$1 AND state='dispatching'",[fixture.workspaceId]);
+      return inspect(id);
+    };
+    await new CloudWorkspaceReconciler({pool,provider,runtimeUpgradeConfig:config,intervalMs:1000}).runOnce();
+    expect(calls).not.toContain("resume:1");
+  });
   it("does not treat a later ordinary wake failure as an unfinished automatic update", async () => {
     await finalCheckpoint(); await advanceHead();
     await route("/wake");
@@ -279,9 +290,10 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
         {agentId:"claude",userMessageId:`message-${index}`,prompt:[{type:"text",text:"fixture"}],modeRevision:0},fixture.engineInstanceId,`message-${index}`]);
     }
     await route("/wake");
-    const {provider}=stoppedProvider();
+    const {provider,calls}=stoppedProvider();
     const reconciler=new CloudWorkspaceReconciler({pool,provider,runtimeUpgradeConfig:config,intervalMs:1000});
     await reconciler.runOnce(); await reconciler.runOnce(); await reconciler.runOnce();
+    expect(calls).toEqual(["stop:1","create:2"]);
     const service=new DatabaseCloudWorkspaceCommandService({pool});
     let newScope:CloudCommandEngineScope|undefined;
     const worker=readyWorker(async engineScope=>{
@@ -298,6 +310,16 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     expect((await service.snapshot(newScope!,"paused")).paused).toBe(true);
     await service.settle(newScope!,{commandId:claim!.commandId,claimId,state:"succeeded",resultCode:null});
     expect(await service.claim(newScope!,"pending","after-ready",claimId)).toBeNull();
+    const paused=await service.snapshot(newScope!,"paused");
+    await service.mutate(newScope!,{conversationId:"paused",operationId:randomUUID(),expectedRevision:paused.revision,action:{kind:"resume"}});
+    await pool.query("UPDATE cloud_workspace_engine_instances SET state='revoked',revoked_at=now() WHERE id=$1",[newScope!.engineInstanceId]);
+    await pool.query(`INSERT INTO cloud_workspace_setup_runs(workspace_id,generation,org_id,attempt,state)
+      VALUES($1,2,$2,2,'queued')`,[fixture.workspaceId,fixture.organizationId]);
+    await pool.query("UPDATE cloud_workspaces SET status='setting_up',authority_epoch=authority_epoch+1 WHERE id=$1",[fixture.workspaceId]);
+    let ordinaryScope:CloudCommandEngineScope|undefined;
+    await readyWorker(async engineScope=>{ordinaryScope=engineScope;}).runOnce();
+    expect(await service.claim(ordinaryScope!,"paused","later-ordinary-engine")).toBeNull();
+    expect((await service.snapshot(ordinaryScope!,"paused")).paused).toBe(true);
   });
   it.each(["provider","setup"])("resumes the previous pin immediately after an automatic %s failure and retries on a later wake",async failure=>{
     const source=await pin(); await finalCheckpoint(); await advanceHead(); await route("/wake");
@@ -346,6 +368,24 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     expect((await pool.query("SELECT subject->>'code' AS code FROM audit_log WHERE action='cloud_workspace.runtime_auto_upgrade_deferred' AND subject->>'workspaceId'=$1",[fixture.workspaceId])).rows)
       .toEqual([{code:blocker==="checkpoint"?"cloud_recovery_checkpoint_unavailable":"cloud_replacement_headroom_exceeded"}]);
   });
+  it.each(["full","smoke"] as const)("uses %s qualification mode for the automatic wake decision",async qualificationMode=>{
+    await finalCheckpoint();const next=await advanceHead("smoke");
+    const selectedConfig={...config,runtime:{...config.runtime!,qualificationMode}};
+    await route("/wake",{},selectedConfig);
+    const {provider,calls}=stoppedProvider();
+    await new CloudWorkspaceReconciler({pool,provider,runtimeUpgradeConfig:selectedConfig,intervalMs:1000}).runOnce();
+    if(qualificationMode==="full") {
+      expect(calls).toEqual(["resume:1"]);
+      expect((await pool.query("SELECT count(*)::int AS count FROM cloud_workspace_generations WHERE workspace_id=$1",[fixture.workspaceId])).rows[0].count).toBe(1);
+    } else expect((await pin(2)).runtime).toEqual(next.pin);
+  });
+  it("does not restart a running workspace when a newer compatible runtime exists",async()=>{
+    const saved=await pin();await advanceHead();
+    expect((await route("/wake")).status).toBe(202);
+    const {provider,calls}=stoppedProvider();
+    expect(await new CloudWorkspaceReconciler({pool,provider,runtimeUpgradeConfig:config,intervalMs:1000}).runOnce()).toBe(false);
+    expect(calls).toEqual([]);expect(await pin()).toEqual(saved);
+  });
   it.each(["draining","setting_up"])("honors sleep during an automatic %s update and cleans its candidate",async phase=>{
     await finalCheckpoint(); await advanceHead(); await route("/wake");
     const {provider,calls}=stoppedProvider();
@@ -393,6 +433,10 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     expect(await (await availability()).json()).toMatchObject({ latestRuntimeId: qualified.pin.runtimeId, updateAvailable: true });
     const unqualified = await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "3", releaseOrder: 3 }));
     expect(await (await availability()).json()).toMatchObject({ latestRuntimeId: qualified.pin.runtimeId, updateAvailable: true, unavailableReason: null });
+    await finalCheckpoint();await route("/wake");
+    const {provider}=stoppedProvider();
+    await new CloudWorkspaceReconciler({pool,provider,runtimeUpgradeConfig:config,intervalMs:1000}).runOnce();
+    expect((await pin(2)).runtime).toEqual(qualified.pin);
     await pool.query("UPDATE cloud_agent_credential_delegations SET revoked_at=now() WHERE id=$1", [delegationId]);
     expect(await (await availability()).json()).toMatchObject({ latestRuntimeId: unqualified.pin.runtimeId, updateAvailable: true });
   });

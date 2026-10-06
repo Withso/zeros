@@ -23,7 +23,8 @@ beforeEach(() => { state.internal = true; state.manager = true; state.available 
 describe("composer runtime update entry", () => {
   it("leaves local composers' props and visibility behavior unchanged, including retained inactive chats", () => {
     for (const active of [true, false]) {
-      expect(cloudRuntimeUpgradeComposerContext("/local/workspace", active)).toEqual({});
+      for(const localFolder of ["/local/workspace","/organizations/example/local-workspace"])
+        expect(cloudRuntimeUpgradeComposerContext(localFolder, active)).toEqual({});
       expect(cloudRuntimeUpgradeComposerContext(folder, active)).toEqual({ workspaceFolder: folder, active });
     }
     const chat = readFileSync(new URL("../agent-chat.tsx", import.meta.url), "utf8");

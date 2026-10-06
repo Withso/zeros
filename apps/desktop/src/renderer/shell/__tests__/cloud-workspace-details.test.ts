@@ -8,8 +8,7 @@ const state = vi.hoisted(() => ({ workspace: null as CloudWorkspaceDocument | nu
   availability: null as CloudRuntimeUpgradeAvailability | null }));
 vi.mock("../../state/use-cached-read", () => ({ useCachedRead: (cache: unknown) => ({ data: cache === "runtime" ? state.availability : state.workspace, error: null }) }));
 vi.mock("../../state/cloud-runtime-upgrade", () => ({ cloudRuntimeUpgradeAvailability: "runtime", cloudRuntimeUpgradeAvailabilityKey: () => "runtime-key",
-  loadCloudRuntimeUpgradeAvailability: vi.fn(), requestCloudRuntimeUpgrade: vi.fn(), settleCloudRuntimeUpgrade: vi.fn(), warmCloudRuntimeUpgrade: vi.fn(),
-  subscribeCloudRuntimeUpgradeDetails: () => () => {}, cloudRuntimeUpgradeOutcome: () => null }));
+  loadCloudRuntimeUpgradeAvailability: vi.fn(), warmCloudRuntimeUpgrade: vi.fn(), subscribeCloudRuntimeUpgradeDetails: () => () => {} }));
 vi.mock("../../state/cloud-workspace-catalog", () => ({ cloudWorkspaceDetails: {}, cloudCatalogGeneration: () => 0, manageCloudWorkspace: vi.fn(), manageCloudWorkspaceRecovery: vi.fn(), refreshCloudWorkspace: vi.fn() }));
 vi.mock("../../features/team/team-store", () => ({ useTeams: () => ({ me: { user: { id: state.userId } } }), getOrganizationStoreGeneration: () => 0 }));
 vi.mock("../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => state.internal }));
@@ -46,9 +45,9 @@ beforeEach(() => {
   };
 });
 describe("staff runtime update controls", () => {
-  it("renders no details or runtime controls for a local workspace, even with staff enabled", () => {
+  it.each(["/local/workspace","/organizations/example/local-workspace"])("renders no details or runtime controls for local folder %s, even with staff enabled", folder => {
     state.internal = true;
-    expect(render("/local/workspace")).toBe("");
+    expect(render(folder)).toBe("");
   });
   it("shows the current runtime and automatic update notice only behind the effective staff feature gate", () => {
     expect(render()).not.toContain("Runtime ·");
@@ -60,14 +59,14 @@ describe("staff runtime update controls", () => {
     expect(render()).toContain("Updates automatically the next time this workspace wakes");
     expect(render()).not.toContain("Update runtime");
   });
-  it("disables the update for running work and non-managers", () => {
+  it("shows next-wake information during active work and hides the row for non-managers", () => {
     state.internal = true;
     Object.assign(state.workspace!, { status: "ready", recovery: null });
     state.availability!.unavailableReason = "cloud_workspace_busy";
     expect(render()).not.toContain("Update runtime");
     expect(render()).toContain("Updates automatically the next time this workspace wakes");
     state.workspace!.capabilities.canManage = false;
-    expect(render()).not.toContain("Update runtime");
+    expect(render()).not.toContain("Runtime ·");
   });
   it("retains progress on the old ready generation while its replacement drains", () => {
     state.internal = true;
@@ -78,7 +77,7 @@ describe("staff runtime update controls", () => {
     expect(render()).toContain("Starting the cloud workspace…");
     expect(render()).not.toContain("Update available");
   });
-  it("disables immediately for a locally observed turn before the server's busy projection arrives", () => {
+  it("keeps next-wake information visible while a cloud turn runs", () => {
     state.internal = true;
     state.running = true;
     Object.assign(state.workspace!, { status: "ready", recovery: null });
