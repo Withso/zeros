@@ -6,6 +6,7 @@ import {
   type ConnectionRejection,
 } from "../../platform/bridge/ws-client";
 import { describeWorkspaceAvailability } from "../../shell/workbench/tab-status-model";
+import { publishCloudWorkspaceRestartPhase } from "../cloud-workspace-restart-status";
 import {
   reconnectWorkbenchWorkspace,
   recordWorkbenchConnectionFailure,
@@ -18,6 +19,7 @@ import {
 } from "../workbench-availability";
 
 const fixture = vi.hoisted(() => ({
+  account: 0,
   statuses: new Map<string, "connected" | "disconnected">(),
   listeners: new Map<string, Set<() => void>>(),
   docs: new Map<string, { status: string; setupFailure?: object }>(),
@@ -89,6 +91,7 @@ vi.mock("../../platform/bridge/active-bridge", async () => {
   };
 });
 vi.mock("../cloud-workspace-catalog", () => ({
+  cloudCatalogGeneration: () => fixture.account,
   cloudWorkspaceDocument: (target: {
     organizationId: string;
     workspaceId: string;
@@ -114,7 +117,9 @@ function connection(status: "connected" | "disconnected") {
 }
 describe("workbench availability observers", () => {
   beforeEach(() => {
+    fixture.account = 0;
     resetWorkbenchAvailabilityForTests();
+    publishCloudWorkspaceRestartPhase(folder, 0, null);
     fixture.statuses.clear();
     fixture.docs.clear();
     fixture.warm.mockClear();
@@ -124,8 +129,52 @@ describe("workbench availability observers", () => {
     vi.setSystemTime(100);
   });
   afterEach(() => {
+    publishCloudWorkspaceRestartPhase(folder, 0, null);
     resetWorkbenchAvailabilityForTests();
     vi.useRealTimers();
+  });
+  it("retires the old account's restart status before the same cloud key is reused", () => {
+    connection("connected");
+    fixture.docs.set(folder, { status: "ready" });
+    const off = subscribeWorkbenchAvailability(folder, () => {});
+    publishCloudWorkspaceRestartPhase(folder, 0, "stopping");
+    expect(workbenchAvailabilitySnapshot(folder).restarting).toBe(true);
+    fixture.account++;
+    for (const listener of fixture.catalog) listener();
+    expect(workbenchAvailabilitySnapshot(folder).restarting).toBe(false);
+    expect(workbenchAvailabilityStatusSnapshot(folder).status).toBeNull();
+    off();
+  });
+  it("surfaces a failed Restart wake once while the last confirmed workspace state is stopped", () => {
+    connection("disconnected");
+    fixture.docs.set(folder, { status: "stopped" });
+    const off = registerWorkbenchFrameVisibility(folder);
+    recordWorkbenchConnectionFailure(folder, new Error("Wake rejected"), "restart");
+    expect(workbenchAvailabilityStatusSnapshot(folder).status?.tone).toBe("error");
+    expect(fixture.toasts.size).toBe(0);
+    off();
+    expect(fixture.toasts.size).toBe(1);
+  });
+  it("keeps the restart stop/wake gap calm, isolates Local and resets the reconnect clock", async () => {
+    connection("connected");
+    fixture.localStatus = "connected";
+    fixture.docs.set(folder, { status: "ready" });
+    const off = subscribeWorkbenchAvailability(folder, () => {});
+    publishCloudWorkspaceRestartPhase(folder, 0, "stopping");
+    connection("disconnected");
+    recordWorkbenchConnectionFailure(folder, new Error("Old admission retired"));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(workbenchAvailabilityStatusSnapshot(folder).status).toEqual({ tone: "pending", message: "Restarting the cloud workspace…" });
+    expect(workbenchAvailabilityStatusSnapshot("/local").status).toBeNull();
+    expect(fixture.toasts.size).toBe(0);
+    publishCloudWorkspaceRestartPhase(folder, 0, null);
+    expect(workbenchAvailabilityStatusSnapshot(folder).status).toBeNull();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(workbenchAvailabilityStatusSnapshot(folder).status?.tone).toBe("pending");
+    recordWorkbenchConnectionFailure(folder, new Error("Restart failed"), "restart");
+    expect(workbenchAvailabilityStatusSnapshot(folder).status?.tone).toBe("error");
+    expect(fixture.toasts.size).toBe(1);
+    off();
   });
   it.each(["cloud", "local"])("shares one clock and decision across %s frames", async (placement) => {
     const path = placement === "cloud" ? folder : "/local";
