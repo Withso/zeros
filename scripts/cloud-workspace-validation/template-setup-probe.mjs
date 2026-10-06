@@ -1814,7 +1814,9 @@ async function main() {
 
 if (new URL(import.meta.url).searchParams.has("observer")) observeAttester();
 else if (process.argv[1] && path.resolve(process.argv[1]) === self)
-  main().catch(() => {
-    process.stderr.write("probe_failed\n");
+  main().catch(error => {
+    const name = ["Error", "TypeError", "SyntaxError", "RangeError", "ReferenceError"].includes(error?.name) ? error.name : "Error";
+    const code = ["ERR_MODULE_NOT_FOUND", "ERR_UNKNOWN_BUILTIN_MODULE", "ERR_REQUIRE_ESM"].includes(error?.code) ? error.code : "probe_failed";
+    process.stderr.write(JSON.stringify({ schema: "zeros.template-setup-error/v1", phase: "probe", name, code }) + "\n");
     process.exitCode = 1;
   });

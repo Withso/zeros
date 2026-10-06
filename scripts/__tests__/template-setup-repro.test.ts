@@ -640,6 +640,15 @@ print(json.dumps({'sourceMatches':data['source']==source,'qualificationMatches':
         runTemplateSetupProbe(childId, f.material, { request }),
       ).rejects.toThrow(/^probe_invalid$/);
     }
+    const diagnose = vi.fn();
+    request.mockResolvedValueOnce({ success: false, exitCode: 1, timedOut: false, stdoutTruncated: false,
+      stdout: "private stdout", stderr: JSON.stringify({ schema: "zeros.template-setup-error/v1", phase: "probe",
+        name: "FileNotFoundError", code: "probe_transport_failed" }) });
+    await expect(runTemplateSetupProbe(childId, f.material, { request, diagnose })).rejects.toThrow("probe_invalid");
+    const diagnostic = templateSetupErrorDiagnostic("probe", diagnose.mock.calls[0]?.[1]);
+    expect(diagnostic).toMatchObject({ command: { outcome: "nonzero", exitCode: 1 },
+      transport: { name: "FileNotFoundError", code: "probe_transport_failed" } });
+    expect(JSON.stringify(diagnostic)).not.toContain("private");
   });
 
   it("bounds snapshot output while retaining the first failing check and its metadata", async () => {
