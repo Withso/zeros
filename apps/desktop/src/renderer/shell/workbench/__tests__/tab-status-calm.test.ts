@@ -278,6 +278,82 @@ describe("calm workbench status", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("keeps an unfinished silent retry quiet across hiding and revealing its tab", async () => {
+    const sources = new WorkbenchStatusSources();
+    let settle!: () => void;
+    const retry = vi.fn(async () => {
+      sources.update("read", { ...read, pending: true });
+      await new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      sources.update("read", { ...read, error: undefined });
+    });
+    const read = {
+      error: "first failure",
+      pending: false,
+      primary: true,
+      hasContent: true,
+      retry,
+    };
+    sources.update("read", read);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(retry).toHaveBeenCalledTimes(1);
+    sources.update("read", { ...read, pending: true, active: false });
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(200);
+    sources.update("read", { ...read, pending: true });
+    expect(sources.snapshot().failure).toBeNull();
+    expect(sources.snapshot().hasContent).toBe(true);
+    settle();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sources.snapshot().failure).toBeNull();
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("preserves the original retry bound after a hidden gap", async () => {
+    const sources = new WorkbenchStatusSources();
+    const retry = vi.fn(() => new Promise<void>(() => {}));
+    const read = { error: "first failure", pending: false, retry };
+    sources.update("read", read);
+    await vi.advanceTimersByTimeAsync(1_500);
+    sources.update("read", { ...read, pending: true, active: false });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(vi.getTimerCount()).toBe(0);
+    sources.update("read", { ...read, pending: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sources.snapshot().failure).toBe("first failure");
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps a retry that fails while hidden persistent when revealed", async () => {
+    const sources = new WorkbenchStatusSources();
+    let settle!: () => void;
+    const retry = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      sources.update("read", {
+        error: "second failure",
+        pending: false,
+        retry,
+        active: false,
+      });
+    });
+    const read = { error: "first failure", pending: false, retry };
+    sources.update("read", read);
+    await vi.advanceTimersByTimeAsync(1_500);
+    sources.update("read", { ...read, pending: true, active: false });
+    settle();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(0);
+    sources.update("read", { error: "second failure", pending: false, retry });
+    expect(sources.snapshot().failure).toBe("second failure");
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
   it("retries an exact read once when equivalent consumers fail a few milliseconds apart", async () => {
     const sources = new WorkbenchStatusSources();
     const retry = vi.fn(async () => {});

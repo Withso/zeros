@@ -497,8 +497,20 @@ export class WorkbenchStatusSources {
       }
       resolve();
     };
-    const timer = setTimeout(finish, WORKBENCH_RETRY_LIMIT_MS);
+    const deadline = Date.now() + WORKBENCH_RETRY_LIMIT_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(finish, WORKBENCH_RETRY_LIMIT_MS);
     const settled = () => {
+      const visible = [...this.sources.values()].some(source => source.active !== false);
+      // Hiding cannot turn an unfinished read into a second failure. Keep its
+      // exact-key flight, pause only the timer, and retain the original bound
+      // on reveal. Removing every source still releases the abandoned flight.
+      if (silent && this.sources.size && !visible && !completed) {
+        clearTimeout(timer);
+        timer = undefined;
+        return;
+      }
+      if (silent && visible && timer === undefined && !ended)
+        timer = setTimeout(finish, Math.max(0, deadline - Date.now()));
       if (
         (silent && ![...this.sources.values()].some(
           (source) => source.active !== false && source.retryAvailable !== false,

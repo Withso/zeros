@@ -464,6 +464,35 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
   await expect(banner()).toContainText("Couldn't load the terminal.");
   check("Portal-owned Terminal/Setup sources stop silent retry timers while the document is hidden", true);
 
+  await page.goto(`${harnessBase}/harness-workbench-status.html`);
+  await page.waitForFunction(() => !!window.workbenchStatusFixture);
+  await page.evaluate(() => {
+    const fixture = window.workbenchStatusFixture;
+    fixture.failNextReads(1);
+    fixture.render("terminal", { target: "hidden-flight", surface: "contract" });
+  });
+  await page.clock.runFor(100);
+  await page.evaluate(() => window.workbenchStatusFixture.hold(true));
+  await page.clock.runFor(1_500);
+  const inFlightReads = await page.evaluate(() => window.workbenchStatusFixture.reads.length);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.clock.fastForward(200);
+  expect(await page.evaluate(() => window.workbenchStatusFixture.reads.length)).toBe(inFlightReads);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect(banner()).toHaveCount(0);
+  await expect(empty()).toHaveCount(0);
+  await page.evaluate(() => window.workbenchStatusFixture.release());
+  await expect(page.locator("[data-confirmed-content]:visible")).toHaveCount(1);
+  await expect(banner()).toHaveCount(0);
+  expect(await page.evaluate(() => window.workbenchStatusFixture.reads.length)).toBe(inFlightReads);
+  check("An in-flight silent retry stays quiet across document hiding and reveal without a second request", true);
+
   for (const kind of ["connect", "open"]) {
     await page.goto(`${harnessBase}/harness-workbench-status.html`);
     await page.waitForFunction(() => !!window.workbenchStatusFixture);
