@@ -1,12 +1,13 @@
 name: Preflight
 
-# The full exact-source check suite. It runs on every push to main and release
-# branches, and on merge-queue commits. Pull requests run the same jobs, under
-# the same required check names, in `ci.yml` ("CI"); the composer UI smoke runs
-# only here, after merge. Releases read this workflow by name and path
-# (scripts/release/ci.ts): Beta and Production require a successful Preflight
-# and CodeQL run on their exact release commit. Automatic Alpha can opt in to
-# the successful alpha-gate job alone while the other jobs finish.
+# The full exact-source check suite. It runs on pushes to main (coalesced; see
+# `concurrency:` below) and release branches, and on merge-queue commits. Pull
+# requests run the same jobs, under the same required check names, in `ci.yml`
+# ("CI"); the composer UI smoke runs only here, after merge. Releases read this
+# workflow by name and path (scripts/release/ci.ts): Beta and Production
+# require a successful Preflight and CodeQL run on their exact release commit.
+# Automatic Alpha can opt in to the successful alpha-gate job alone while the
+# other jobs finish.
 # No job here needs a secret, and the top-level `permissions:` block below keeps
 # the token read-only. Parallel jobs keep failures attributable while putting
 # source-sync behavior on the app's actual platform:
@@ -63,12 +64,14 @@ on:
 permissions:
   contents: read
 
-# Release branches cancel superseded pushes. Every push to main gets its own
-# group, so a newer merge never cancels or replaces an older SHA's run: each
-# merged commit keeps exact-source evidence for the Alpha barrier and the
-# post-merge record.
+# Release branches and merge groups cancel superseded runs. Main pushes
+# coalesce: one run in progress is never cancelled, and at most one newer push
+# waits behind it. A later push replaces the waiting run, so a burst of merges
+# is tested together by its newest commit, which contains every earlier merge.
+# CI Recovery reports the commit range since the last green run, and automatic
+# Alpha supersedes a candidate whose waiting run was replaced.
 concurrency:
-  group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('preflight-main-{0}', github.run_id) || format('preflight-{0}', github.ref) }}
+  group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'preflight-main' || format('preflight-{0}', github.ref) }}
   cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -434,21 +437,6 @@ jobs:
   source-sync-workload:
     name: source-sync workload (macOS)
     runs-on: macos-latest
-    concurrency:
-      # Two main-push buckets leave macOS headroom for Alpha and PR jobs.
-      # Other events keep a unique group and never wait on main's backlog.
-      group: >-
-        ${{ github.event_name == 'push' && github.ref == 'refs/heads/main'
-          && format('preflight-main-macos-{0}',
-            (endsWith(format('{0}', github.run_number), '0')
-              || endsWith(format('{0}', github.run_number), '2')
-              || endsWith(format('{0}', github.run_number), '4')
-              || endsWith(format('{0}', github.run_number), '6')
-              || endsWith(format('{0}', github.run_number), '8'))
-            && 'even' || 'odd')
-          || format('preflight-{0}-{1}-{2}-{3}-macos',
-            github.event_name, github.ref, github.run_id, github.run_attempt) }}
-      queue: max
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -795,15 +783,6 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
-    concurrency:
-      # One main-push group per shard retains every SHA without unbounded
-      # composer runner usage. Release and merge-group runs stay independent.
-      group: >-
-        ${{ github.event_name == 'push' && github.ref == 'refs/heads/main'
-          && format('preflight-main-composer-{0}', matrix.shard)
-          || format('preflight-{0}-{1}-{2}-{3}-composer-{4}',
-            github.event_name, github.ref, github.run_id, github.run_attempt, matrix.shard) }}
-      queue: max
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

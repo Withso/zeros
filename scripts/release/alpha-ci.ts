@@ -93,7 +93,17 @@ export async function alphaRequiredChecks(candidate: Candidate, read: Read): Pro
     const run = newestRun(candidate, check.file, check.name,
       await read(`/actions/workflows/${check.file}/runs?head_sha=${candidate.sourceSha}&event=push&per_page=100`));
     const evidence = { workflow: check.name, runId: run?.id ?? 0, attempt: run?.run_attempt ?? 0, succeeded: false };
-    if (!run || run.conclusion === "cancelled") return evidence;
+    if (!run) return evidence;
+    if (run.conclusion === "cancelled") {
+      // Main Preflight coalesces pushes: a newer push replaces a pending run,
+      // so this exact-source gate will never report. Once main has moved on,
+      // supersede instead of waiting out the barrier; only the unmutated
+      // initial barrier turns that into a green skip.
+      const head = await read(`/commits/${encodeURIComponent(candidate.branch)}`);
+      requireCheck(typeof head?.sha === "string" && SHA.test(head.sha), "Current main identity is unavailable for automatic Alpha");
+      if (head.sha !== candidate.sourceSha) throw new CandidateSupersededError();
+      return evidence;
+    }
     const jobs = await jobPages(read, `/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`);
     const gates = jobs.filter(job => job?.name === "alpha-gate");
     const gate = gates[0];

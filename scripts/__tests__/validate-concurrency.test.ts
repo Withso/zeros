@@ -30,7 +30,7 @@ afterEach(() => {
 function queuedJob(queue = "max", cancellation = "", group = "heavy-lane") {
   return load(`
 jobs:
-  ui-smoke-shard:
+  queue-canary:
     concurrency:
       group: ${group}
       queue: ${queue}
@@ -50,20 +50,16 @@ function fixture(files: Record<string, string>) {
 }
 
 describe("queued concurrency policy", () => {
-  it("accepts max on the canary and the two heavy Preflight jobs", () => {
-    for (const [file, job] of [
-      [CANARY, "queue-canary"],
-      [PREFLIGHT, "ui-smoke-shard"],
-      [PREFLIGHT, "source-sync-workload"],
-    ]) {
-      expect(
-        validateQueuedConcurrency(
-          load(
-            `jobs:\n  ${job}:\n    concurrency: { group: lane, queue: max }`,
-          ),
-          file,
-        ),
-      ).toEqual([]);
+  it("accepts max only on the canary job; coalesced Preflight jobs have no queue", () => {
+    const queued = (job: string) =>
+      load(`jobs:\n  ${job}:\n    concurrency: { group: lane, queue: max }`);
+    expect(validateQueuedConcurrency(queued("queue-canary"), CANARY)).toEqual(
+      [],
+    );
+    for (const job of ["ui-smoke-shard", "source-sync-workload"]) {
+      expect(validateQueuedConcurrency(queued(job), PREFLIGHT), job).toEqual([
+        expect.stringContaining("allowlisted jobs"),
+      ]);
     }
   });
 
@@ -71,7 +67,7 @@ describe("queued concurrency policy", () => {
     expect(
       validateQueuedConcurrency(
         queuedJob("max", "cancel-in-progress: false"),
-        PREFLIGHT,
+        CANARY,
       ),
     ).toEqual([]);
     expect(
@@ -85,7 +81,7 @@ describe("queued concurrency policy", () => {
   it.each(["single", "MAX", "true", "1", "null", "${{ vars.CI_QUEUE }}"])(
     "rejects the unsupported queue value %s",
     (queue) => {
-      expect(validateQueuedConcurrency(queuedJob(queue), PREFLIGHT)).toEqual([
+      expect(validateQueuedConcurrency(queuedJob(queue), CANARY)).toEqual([
         expect.stringContaining("queue must be the literal max"),
       ]);
     },
@@ -97,7 +93,7 @@ describe("queued concurrency policy", () => {
       expect(
         validateQueuedConcurrency(
           queuedJob("max", `cancel-in-progress: ${cancellation}`),
-          PREFLIGHT,
+          CANARY,
         ),
       ).toEqual([expect.stringContaining("cancel-in-progress")]);
     },
@@ -105,11 +101,11 @@ describe("queued concurrency policy", () => {
 
   it.each(["null", '""', '"   "'])("rejects the empty group %s", (group) => {
     expect(
-      validateQueuedConcurrency(queuedJob("max", "", group), PREFLIGHT),
+      validateQueuedConcurrency(queuedJob("max", "", group), CANARY),
     ).toEqual([expect.stringContaining("group must be a nonempty string")]);
   });
 
-  it("rejects workflow-level queues and queues on Alpha-critical jobs", () => {
+  it("rejects workflow-level queues and queues on every Preflight job", () => {
     expect(
       validateQueuedConcurrency(
         load("concurrency: { group: whole-run, queue: max }"),
@@ -127,7 +123,9 @@ describe("queued concurrency policy", () => {
       "secret-scan",
       "alpha-gate",
       "ui-smoke",
+      "ui-smoke-shard",
       "source-sync",
+      "source-sync-workload",
     ]) {
       expect(
         validateQueuedConcurrency(
@@ -153,9 +151,9 @@ describe("queued concurrency policy", () => {
     expect(
       validateQueuedConcurrency(
         load(
-          "jobs:\n  ui-smoke-shards:\n    concurrency: { group: lane, queue: max }",
+          "jobs:\n  queue-canaries:\n    concurrency: { group: lane, queue: max }",
         ),
-        PREFLIGHT,
+        CANARY,
       ),
     ).toEqual([expect.stringContaining("allowlisted jobs")]);
   });
@@ -165,22 +163,22 @@ describe("queued concurrency policy", () => {
       validateQueuedConcurrency(
         load(`
 jobs:
-  ui-smoke-shard:
+  queue-canary:
     concurrency: &heavy
       group: composer
       queue: max
   quality:
     concurrency: *heavy
 `),
-        PREFLIGHT,
+        CANARY,
       ),
     ).toEqual([expect.stringContaining("jobs.quality.concurrency")]);
   });
 
   it("scans both workflow extensions and fails on malformed YAML", () => {
     const root = fixture({
-      "preflight.yml":
-        "jobs:\n  ui-smoke-shard:\n    concurrency: { group: lane, queue: max }",
+      "concurrency-canary.yml":
+        "jobs:\n  queue-canary:\n    concurrency: { group: lane, queue: max }",
       "other.yaml":
         "jobs:\n  quality:\n    concurrency: { group: lane, queue: max }",
       "broken.yml": "jobs: [",
@@ -193,8 +191,8 @@ jobs:
 
   it("returns a failing CLI exit status for an invalid queue", () => {
     const root = fixture({
-      "preflight.yml":
-        "jobs:\n  ui-smoke-shard:\n    concurrency: { group: lane, queue: single }",
+      "concurrency-canary.yml":
+        "jobs:\n  queue-canary:\n    concurrency: { group: lane, queue: single }",
     });
     const result = spawnSync(
       process.execPath,

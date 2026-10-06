@@ -9,12 +9,9 @@ self-hosted-runner:
     - ubuntu-26.04
 
 # actionlint 1.7.12 does not know concurrency.queue. Suppress only that exact
-# diagnostic in the canary and Preflight; scripts/ci/validate-concurrency.mjs
-# and its root Vitest suite enforce max, retained work, and the job allowlist.
+# diagnostic in the canary; scripts/ci/validate-concurrency.mjs and its root
+# Vitest suite enforce max, retained work, and the job allowlist.
 paths:
   .github/workflows/concurrency-canary.yml:
-    ignore:
-      - '^unexpected key "queue" for "concurrency" section\. expected one of "cancel-in-progress", "group"$'
-  .github/workflows/preflight.yml:
     ignore:
       - '^unexpected key "queue" for "concurrency" section\. expected one of "cancel-in-progress", "group"$'

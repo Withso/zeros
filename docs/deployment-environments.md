@@ -818,12 +818,15 @@ without status filtering, ordered by run ID and attempt. Its current attempt's
 paginated jobs must list exactly one completed, successful `alpha-gate`. The
 gate depends on successful `quality`, `test`, `build`, `control-plane` and
 `secret-scan` aggregates. A carried gate cannot override a currently pending or
-failed critical aggregate. Every main push runs all database shards, including a
-docs-only push after an earlier service change. The fast path does not wait
+failed critical aggregate. Every main Preflight run executes all database
+shards, including a docs-only push after an earlier service change. The fast path does not wait
 for CodeQL: its findings are advisory, the scan still runs on every push, and
 Beta, Production and every full-policy caller keep requiring its exact-SHA
 success. PR, merge-group, fork and older-attempt proof cannot replace the gate, and Preflight from another branch is ineligible; cancellation refuses
-admission. A newer pending or failed gate defeats an older success. API-listed
+admission. Main Preflight coalesces pushes ([CI concurrency](ci-concurrency.md)),
+so a candidate whose pending run was replaced never receives a gate: once main
+has moved on, the barrier treats it as superseded, a green skip before any
+destination mutation, instead of waiting for the barrier timeout. A newer pending or failed gate defeats an older success. API-listed
 carried successes count on an ancillary-only retry; timestamps and certificate
 artifacts are not inferred as proof. History is bounded to 100 runs per
 workflow and 1,000 jobs, and an attempt change during job retrieval denies the

@@ -90,6 +90,18 @@ describe("incident contract and rendering", () => {
     expect(incidentTitle(contract)).toBe("fix(ci): restore composer on main");
   });
 
+  it("reports the coalesced commit range since the last green main run", () => {
+    const green = "d".repeat(40);
+    const body = renderBody(make({ lastGreenSha: green }));
+    expect(body).toContain(
+      `https://github.com/Withso/zeros/compare/${green}...${run.head_sha}`,
+    );
+    expect(body).toContain("every merge since the last green main run");
+    expect(renderBody(make())).toContain(
+      "Commits under test: unknown; no earlier green main run is recorded.",
+    );
+  });
+
   it("renders a bounded marker with compulsory lanes and source linkage", () => {
     const contract = make({
       roots: classifyFailures([jobs.composer, jobs.database, jobs.setupFailure])
