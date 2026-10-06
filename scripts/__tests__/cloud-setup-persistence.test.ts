@@ -134,6 +134,20 @@ it("keeps the legacy staging and seed paths unchanged", async () => {
   expect(fs.existsSync(`${fixture.root}/srv/zeros/files/.zeros-setup`)).toBe(false);
 });
 
+it.each([
+  { keySha256: ["d".repeat(64)] },
+  { mode: "resume_existing", proofEpoch: ["44444444-4444-4444-8444-444444444444"] },
+])("does not publish completion from a coercible but non-string preparation identity (%j)", async invalid => {
+  await setup();
+  const helper = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
+  const setupDirectory = `${fixture.root}/srv/zeros/setup`;
+  helper.saveCompletedCloudWorkspacePreparation({ ...material,
+    engine: { instanceId: "44444444-4444-4444-8444-444444444444" },
+    resume: { version: 1, mode: "prepare_generation", keySha256: "d".repeat(64), proofEpoch: null, ...invalid },
+  }, { version: 4, setupDirectory });
+  expect(fs.existsSync(`${setupDirectory}/resume.json`)).toBe(false);
+});
+
 it("reuses only an exact completed enrollment and leaves dirty files, Design and conversation bytes alone", async () => {
   await setup();
   const helper = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");

@@ -1674,9 +1674,9 @@ function journalMatches(journal, identity, commandCount, completedSetup) {
 
 function validResumePlan(value) {
   return isRecord(value) && exactKeys(value, ["version", "mode", "keySha256", "proofEpoch"]) && value.version === 1 &&
-    SHA256_PATTERN.test(value.keySha256 ?? "") &&
+    typeof value.keySha256 === "string" && SHA256_PATTERN.test(value.keySha256) &&
     ((value.mode === "prepare_generation" && value.proofEpoch === null) ||
-      (value.mode === "resume_existing" && UUID_PATTERN.test(value.proofEpoch ?? "")));
+      (value.mode === "resume_existing" && typeof value.proofEpoch === "string" && UUID_PATTERN.test(value.proofEpoch)));
 }
 
 /** Root-controlled completion evidence is useful only with the control plane's

@@ -26,6 +26,14 @@ timeline; no complete click-to-paint trace has been collected. Boat API, restore
 hydration, attester substage, Node/SQLite and first-heartbeat timings remain
 unmeasured. Scheduler notifications alone cannot meet the target.
 
+`setup-worker.ts` keeps `started_at = coalesce(started_at, now())` when reclaiming
+a run, so this **execution interval includes retry backoff between claims**.
+The later 12:49:10–12:51:24 observation contains about 114 seconds before material
+admission and 20 seconds from admission to registration. It does not show 130
+seconds spent inside the guest helper. Readiness polling and preparation reuse
+address different parts of that interval; compare claim counts and per-claim
+clocks before attributing the saving to attestation.
+
 Code explains the repetition: a running provider result enters `setting_up`
 (`reconciler.ts:176`); the setup worker claims a new fenced attempt. The v4
 helper invokes full attestation both before repository preparation and again
