@@ -850,18 +850,99 @@ Other errors and downstream supersession remain failures; a green no-op never
 falls through to a provider, feed or runtime writer.
 
 Hosted guard, services, finalization and both final publishers re-read the
-selected evidence and keep strict HEAD equality. The optional native-worker
-callable retains its existing full-CI wait because it does not receive this
-Alpha-only input; releases requiring native worker promotion still wait for
-full Preflight there. Rapid main advancement can still supersede a candidate
-after admission. Forward-only admission and a deployed frontier are separate
-future work.
+selected evidence. Hosted promotion passes the optional Alpha CI input to its
+nested native-worker callable, so that authenticated automatic Alpha parent
+uses the same evidence at the worker wait and every worker checkpoint. Both
+reusable inputs default to empty; direct worker dispatch, controlled cutover,
+staff bootstrap, Beta and Production keep full CI and strict HEAD equality.
 
 Leave the flag unset until the ordered Alpha controller is rehearsed and
 independent Railway/Pages Git autodeploy is held. No repository or provider
 setting changes are part of this opt-in implementation. Served-deployment
 verification remains after deployment; `check:web-deploy` is not an early CI
 producer.
+
+### Automatic Alpha forward-only stages
+
+`ZEROS_ALPHA_FORWARD_ONLY` is a separate repository variable from the CI fast
+path. It defaults off: unset, empty or any value other than exactly `admitted`
+or `enabled` preserves strict branch-HEAD equality. Only the authenticated
+automatic `release-alpha.yml` push/main identity can use either stage; setting
+the variable or reusable input alone grants no authority. The source remains
+the immutable event SHA, including on reruns.
+
+| Value | Barrier admission | Checks after admission |
+| --- | --- | --- |
+| Unset or other | Candidate equals current main HEAD | Candidate equals current main HEAD |
+| `admitted` (Stage 1) | Candidate equals current main HEAD | Main must still contain the candidate |
+| `enabled` (Stage 2) | Main contains the candidate and every live Alpha destination is at or before it | Main still contains the candidate; re-read every destination and refuse regression |
+
+Ancestry uses the GitHub compare API with immutable SHAs: `identical` or `ahead`
+is accepted only when the merge base is the base SHA. A rewritten main that
+removes the candidate, missing identity, malformed comparison or compare error
+fails red. Run IDs, publication times and identical input trees do not prove
+Git ancestry. Main advancing to a descendant after admission allows the same
+candidate to finish; all exact-source CI, services/worker/final receipts and
+live API/Pages/schema/worker checks remain required.
+
+The flagged barrier saves `alpha-admission-<sha>` only after successful CI and
+freshness checks. Later checks require its own source/run/attempt-bound receipt
+and the successful producing barrier and upload steps. A green `ready=false`
+skip has no admission receipt. An earlier admitted attempt can support an
+otherwise valid desktop-only retry of the same parent; an expired, missing or
+foreign receipt blocks forward-only freshness. Enabling a stage midway through
+an older unflagged run cannot manufacture admission.
+
+Stage 2 reads the existing bounded public Alpha API release identity, both
+app and Ops `/zeros-deployment.json` manifests, the current rolling `alpha`
+Git tag (including annotated tags), and the feed's cumulative
+`alpha-release-ledger.json`. It compares each source separately with the
+candidate; a live worker tuple, when present, must also be at or before it.
+At admission, the tag and latest ledger entry must agree. After admission, a
+parallel publisher may observe the current candidate's ledger before its tag
+update (or the older cached ledger after the tag update); both sources must
+still be at or before the candidate, and one must identify that candidate.
+Other disagreements block. The existing API identity reader rejects
+maintenance, unavailable readiness, or an actual migration ledger head that
+differs from the running package's expected head. Missing feeds or
+unreadable/malformed identities are unknown, not a zero/genesis destination.
+The strict migrator still rejects unknown or newer schema rows; neither stage
+rolls schema back or authorizes a controlled migration.
+
+A known newer or divergent destination can produce the existing green
+pre-mutation skip only at the initial barrier, after complete retained parent
+job evidence proves no destination has started. Unknown reads remain red.
+After admission, every conflict or unknown check remains red; reconcile actual
+provider state and retained receipts before retrying. Locks remain
+`hosted-mutation-<channel>` with cancellation disabled, and automatic candidates
+remain serialized by the existing `release-alpha` workflow lock.
+
+To enable, pause automatic Alpha delivery operationally, let running and
+pending Alpha work finish, and verify a healthy current Alpha API/schema,
+Pages, worker and feed/tag/ledger baseline. Hold independent provider Git
+autodeploy. Start with `ZEROS_ALPHA_FORWARD_ONLY=admitted`; after observing
+successful admitted candidates finish while main advances, set it to `enabled`
+to admit candidates already behind main. `ZEROS_ALPHA_CI_FAST_PATH` remains an
+independent choice of exact-source evidence. No repository variable or provider
+setting is changed by this implementation.
+
+The pilot requires exclusive automatic Alpha writers across its stages.
+Individual hosted locks are released between services, worker and finalization;
+they do not provide cross-destination atomicity or exclude a direct operation
+between stages. Before a manual Alpha cutover, direct worker/runtime/feed
+operation or recovery, pause and drain automatic releases, perform the existing
+strict full/current operation, verify every destination and cleanup receipt,
+then resume. Unknown partial mutations require owner reconciliation; this
+change does not introduce an automatic recovery journal. GitHub's pending slot
+coalesces queued arrivals, so out-of-order main events may still affect liveness;
+frontier checks prevent an older source from overwriting a newer destination.
+
+To roll back Stage 2, pause and drain before setting the variable to `admitted`.
+To restore today's strict policy, pause and drain before unsetting it (or use
+any other value). Existing receipts remain valid for their original protocols;
+there is no tag, feed, provider or schema rollback. An in-flight variable change
+can stop a later checkpoint, so drain before toggling. Beta, Production and
+direct/manual paths keep their existing policy throughout.
 
 When enabled, the hosted controller performs a read-only provider plan, a
 short-lived migration-role SQL plan, source retarget, a fresh successful

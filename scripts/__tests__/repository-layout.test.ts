@@ -876,7 +876,7 @@ describe("repository layout contracts", () => {
     expect(stable).not.toContain("refs/heads/main|refs/heads/release/*");
   });
 
-  it("keeps Alpha fast evidence opt-in while preserving publication identities and shipping checks", () => {
+  it("keeps Alpha policies opt-in while preserving publication identities and shipping checks", () => {
     const alpha = read(".github/workflows/release-alpha.yml");
     const preflight = read(".github/workflows/preflight.yml");
     expect(preflight).toContain("    needs: [quality, test, build, control-plane, secret-scan]");
@@ -887,8 +887,17 @@ describe("repository layout contracts", () => {
     expect(alpha).toContain("pnpm check:zsr");
     expect(alpha).toContain("pnpm smoke:engine");
     expect(alpha).toContain("pnpm smoke:packaged-pty");
-    for (const workflow of ["release-beta", "release", "controlled-cutover", "cloud-worker-promotion"]) {
-      expect(read(`.github/workflows/${workflow}.yml`)).not.toContain("ZEROS_ALPHA_CI_FAST_PATH");
+    expect(alpha).toContain("ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}");
+    expect(alpha).toContain("if: success() && steps.barrier.outputs.admission_issued == 'true'");
+    for (const workflow of ["release-beta", "release", "controlled-cutover", "staff-owner-bootstrap"]) {
+      expect(read(`.github/workflows/${workflow}.yml`)).not.toMatch(/ZEROS_ALPHA_CI_FAST_PATH|ZEROS_ALPHA_FORWARD_ONLY/);
+    }
+    const worker = read(".github/workflows/cloud-worker-promotion.yml");
+    expect(worker).not.toMatch(/vars\.ZEROS_ALPHA_/);
+    const [dispatch, callable] = worker.split("  workflow_call:\n");
+    for (const input of ["alpha_ci_fast_path", "alpha_forward_only"]) {
+      expect(dispatch).not.toContain(`${input}:`);
+      expect(callable).toMatch(new RegExp(`${input}:\\n        description: [^\\n]+\\n        default: ''\\n        type: string`));
     }
   });
 

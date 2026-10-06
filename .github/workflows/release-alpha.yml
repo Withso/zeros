@@ -76,6 +76,7 @@ jobs:
       RELEASE_SHA: ${{ github.sha }}
       RELEASE_BRANCH: ${{ github.ref_name }}
       ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}
+      ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -91,6 +92,16 @@ jobs:
       - name: Wait for exact-source Alpha CI
         id: barrier
         run: pnpm exec tsx scripts/release/ci-cli.ts --wait
+      - name: Save Alpha admission receipt
+        if: success() && steps.barrier.outputs.admission_issued == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: alpha-admission-${{ github.sha }}
+          path: .context/release/alpha-admission.json
+          overwrite: true
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
 
   # A candidate proven superseded before any destination mutation (ready=false)
   # still holds the release-alpha concurrency slot until its read-only builds
@@ -126,6 +137,7 @@ jobs:
       branch: ${{ github.ref_name }}
       before_sha: ${{ github.event.before || '' }}
       alpha_ci_fast_path: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}
+      alpha_forward_only: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}
     secrets: inherit
 
   runtime-build:
@@ -199,6 +211,7 @@ jobs:
           RELEASE_SHA: ${{ github.sha }}
           RELEASE_BRANCH: ${{ github.ref_name }}
           ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}
+          ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}
           GH_TOKEN: ${{ github.token }}
           CLOUD_WORKSPACE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL }}
           CLOUD_RUNTIME_OIDC_AUDIENCE: ${{ vars.CLOUD_RUNTIME_OIDC_AUDIENCE || 'zeros-control-plane-alpha' }}
@@ -452,6 +465,7 @@ jobs:
       RELEASE_SHA: ${{ github.sha }}
       RELEASE_BRANCH: ${{ github.ref_name }}
       ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}
+      ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}
       ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
       ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
       ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
