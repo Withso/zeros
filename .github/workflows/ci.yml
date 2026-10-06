@@ -1,10 +1,10 @@
 name: CI
 
 # Pull-request checks. CI reports the same required check names as Preflight,
-# so the main ruleset is unchanged; Preflight (preflight.yml)
-# keeps running the full suite on every push to main, release branches and
-# merge-queue commits, and it remains the only workflow releases read as
-# exact-source evidence. The trusted-base scope selects whole existing jobs;
+# so the main ruleset is unchanged. Preflight (preflight.yml) keeps running
+# the full suite after merge on main (coalesced during bursts), release
+# branches and merge-queue commits, and it remains the only workflow releases
+# read as exact-source evidence. The trusted-base scope selects whole existing jobs;
 # their workload steps stay in parity with Preflight. A producer can skip only
 # after a successful scope decision. Composer runs on an explicit ci:ui-smoke
 # or ci:full label; path selection and missing-policy fallback do not add it.
