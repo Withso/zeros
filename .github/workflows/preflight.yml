@@ -5,7 +5,8 @@ name: Preflight
 # the same required check names, in `ci.yml` ("CI"); the composer UI smoke runs
 # only here, after merge. Releases read this workflow by name and path
 # (scripts/release/ci.ts): Beta and Production require a successful Preflight
-# and CodeQL run on their exact release commit, and Alpha currently does too.
+# and CodeQL run on their exact release commit. Automatic Alpha can opt in to
+# the successful alpha-gate job plus CodeQL while the other jobs finish.
 # No job here needs a secret, and the top-level `permissions:` block below keeps
 # the token read-only. Parallel jobs keep failures attributable while putting
 # source-sync behavior on the app's actual platform:
@@ -577,7 +578,8 @@ jobs:
 
   # The required `control plane` check is the aggregate at the end of this
   # group. Typecheck and audit run on every change. The database suites run
-  # only when one of their inputs changed (scripts/ci/control-plane-scope.mjs),
+  # on every main push and otherwise when one of their inputs changed
+  # (scripts/ci/control-plane-scope.mjs),
   # split across shards that each own a Postgres service.
   control-plane-scope:
     name: control-plane scope
@@ -746,6 +748,30 @@ jobs:
           DATABASE_RESULT: ${{ needs.control-plane-database.result }}
           DATABASE_SHARDS: 4
         run: node scripts/ci/control-plane-results.mjs "$RUNNER_TEMP/control-plane-reports"
+
+  # Automatic Alpha consumes this job from the newest exact-SHA main push
+  # attempt. The full Preflight run continues for release evidence and history.
+  alpha-gate:
+    name: alpha-gate
+    if: always()
+    needs: [quality, test, build, control-plane, secret-scan]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce the Alpha gate results
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          CONTROL_PLANE_RESULT: ${{ needs.control-plane.result }}
+          SECRET_SCAN_RESULT: ${{ needs.secret-scan.result }}
+        run: |
+          set -euo pipefail
+          for check in QUALITY_RESULT TEST_RESULT BUILD_RESULT CONTROL_PLANE_RESULT SECRET_SCAN_RESULT; do
+            if [ "${!check}" != "success" ]; then
+              echo "::error::${check} was ${!check}"
+              exit 1
+            fi
+          done
 
   ui-smoke:
     name: ui-smoke (composer)

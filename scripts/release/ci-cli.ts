@@ -1,4 +1,6 @@
+import { appendFile } from "node:fs/promises";
 import { PromotionError, releaseSource, requireCheck } from "./contracts";
+import { CandidateSupersededError } from "./alpha-ci";
 import { waitForRequiredCI } from "./ci";
 import { githubClient } from "./github";
 import { command } from "./io";
@@ -11,14 +13,35 @@ async function main() {
     "Beta proof is available only with Production --verify --beta");
   requireCheck((await command("git", ["rev-parse", "HEAD"])).trim() === source.sourceSha, "CI gate checkout differs from the event SHA");
   const github = githubClient(source, process.env);
-  if (mode === "--wait") await waitForRequiredCI(async () => {
+  const automaticAlpha = source.channel === "alpha" && await github.automaticAlpha();
+  const expectedAlphaBarrier = source.channel === "alpha" && mode === "--wait" && process.env.GITHUB_JOB === "ci" &&
+    process.env.GITHUB_WORKFLOW_REF?.includes("/.github/workflows/release-alpha.yml@");
+  requireCheck(!expectedAlphaBarrier || automaticAlpha,
+    "Automatic Alpha barrier identity could not be authenticated; verify the release-alpha.yml parent run, run attempt, repository, source SHA and GITHUB_WORKFLOW_REF before retrying.");
+  const barrier = automaticAlpha && mode === "--wait" && process.env.GITHUB_JOB === "ci";
+  const ready = async (value: boolean) => {
+    requireCheck(process.env.GITHUB_OUTPUT, "Automatic Alpha barrier requires a readiness output destination");
+    await appendFile(process.env.GITHUB_OUTPUT, `ready=${value}\n`);
+  };
+  try {
+    if (mode === "--wait") await waitForRequiredCI(async () => {
+      await github.assertCurrent();
+      return github.requiredChecks();
+    });
+    else await github.assertRequiredChecks();
     await github.assertCurrent();
-    return github.requiredChecks();
-  });
-  else await github.assertRequiredChecks();
-  await github.assertCurrent();
+  } catch (error) {
+    if (barrier && error instanceof CandidateSupersededError && await github.alphaBarrierUnmutated()) {
+      await ready(false);
+      console.log("::notice::Automatic Alpha candidate was superseded before any destination mutation; downstream publication skipped.");
+      return;
+    }
+    throw error;
+  }
   if (process.argv[3] === "--beta" && process.env.ZEROS_HOSTED_PROMOTION === "enabled") await github.betaReceipt();
-  console.log(`Preflight and CodeQL succeeded for the exact ${source.channel} source ${source.sourceSha}.`);
+  if (barrier) await ready(true);
+  const checks = automaticAlpha && process.env.ZEROS_ALPHA_CI_FAST_PATH === "enabled" ? "Alpha gate and CodeQL" : "Preflight and CodeQL";
+  console.log(`${checks} succeeded for the exact ${source.channel} source ${source.sourceSha}.`);
 }
 
 void main().catch(error => {

@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 const mocked = vi.hoisted(() => ({
   source: { channel: "production", sourceSha: "a".repeat(40), repository: "Withso/zeros", branch: "release/0.1.20" },
   command: vi.fn(), assertRequiredChecks: vi.fn(), assertCurrent: vi.fn(), betaReceipt: vi.fn(), requiredChecks: vi.fn(), waitForRequiredCI: vi.fn(),
+  automaticAlpha: vi.fn(), alphaBarrierUnmutated: vi.fn(),
 }));
 vi.mock("./github", () => ({ githubClient: () => mocked }));
 vi.mock("./ci", () => ({ waitForRequiredCI: mocked.waitForRequiredCI }));
@@ -14,26 +18,47 @@ vi.mock("./io", async importOriginal => ({
 }));
 
 const originalArgv = process.argv, originalExitCode = process.exitCode;
+const directories: string[] = [];
 beforeEach(() => {
   vi.resetModules();
   vi.resetAllMocks();
   process.argv = ["node", "ci-cli.ts", "--verify"];
   process.exitCode = undefined;
+  mocked.source.channel = "production";
+  mocked.source.branch = "release/0.1.20";
   mocked.command.mockResolvedValue(mocked.source.sourceSha);
   mocked.assertRequiredChecks.mockResolvedValue(undefined);
   mocked.assertCurrent.mockResolvedValue(undefined);
   mocked.betaReceipt.mockResolvedValue(undefined);
   mocked.requiredChecks.mockResolvedValue([]);
   mocked.waitForRequiredCI.mockImplementation(async (read: () => Promise<unknown>) => read());
+  mocked.automaticAlpha.mockResolvedValue(false);
+  mocked.alphaBarrierUnmutated.mockResolvedValue(true);
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
-afterEach(() => {
+afterEach(async () => {
   process.argv = originalArgv;
   process.exitCode = originalExitCode;
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true });
 });
+
+async function automaticBarrier(flag = "enabled") {
+  mocked.source.channel = "alpha";
+  mocked.source.branch = "main";
+  mocked.automaticAlpha.mockResolvedValue(true);
+  process.argv[2] = "--wait";
+  vi.stubEnv("GITHUB_JOB", "ci");
+  vi.stubEnv("GITHUB_WORKFLOW_REF", `${mocked.source.repository}/.github/workflows/release-alpha.yml@refs/heads/main`);
+  vi.stubEnv("ZEROS_ALPHA_CI_FAST_PATH", flag);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "alpha-ci-output-"));
+  directories.push(directory);
+  const output = path.join(directory, "output");
+  vi.stubEnv("GITHUB_OUTPUT", output);
+  return output;
+}
 
 describe("exact-source CI CLI mutation authority", () => {
   it("rechecks freshness on every CI wait iteration instead of occupying the channel lock for a superseded SHA", async () => {
@@ -101,5 +126,113 @@ describe("exact-source CI CLI mutation authority", () => {
     await vi.waitFor(() => expect(console.log).toHaveBeenCalledOnce());
     expect(mocked.betaReceipt).not.toHaveBeenCalled();
     expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it.each(["enabled", "disabled"])("writes ready=true after successful automatic Alpha CI with flag %s", async flag => {
+    const output = await automaticBarrier(flag);
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(console.log).toHaveBeenCalledOnce());
+    expect(await readFile(output, "utf8")).toBe("ready=true\n");
+    expect(process.exitCode).toBeUndefined();
+    expect(mocked.assertCurrent).toHaveBeenCalledTimes(2);
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it.each(["enabled", "disabled"])("refuses an unauthenticated automatic Alpha barrier with flag %s", async flag => {
+    const output = await automaticBarrier(flag);
+    mocked.automaticAlpha.mockResolvedValue(false);
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(console.error).toHaveBeenCalledOnce());
+    expect(process.exitCode).toBe(1);
+    expect(console.error).toHaveBeenCalledWith("Automatic Alpha barrier identity could not be authenticated; verify the release-alpha.yml parent run, run attempt, repository, source SHA and GITHUB_WORKFLOW_REF before retrying.");
+    expect(console.log).not.toHaveBeenCalled();
+    expect(mocked.waitForRequiredCI).not.toHaveBeenCalled();
+    expect(mocked.assertCurrent).not.toHaveBeenCalled();
+    expect(mocked.alphaBarrierUnmutated).not.toHaveBeenCalled();
+    await expect(readFile(output)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each(["enabled", "disabled"])("turns a proven pre-mutation Alpha supersession into ready=false and a green notice with flag %s", async flag => {
+    const output = await automaticBarrier(flag);
+    const { CandidateSupersededError } = await import("./alpha-ci");
+    mocked.assertCurrent.mockRejectedValue(new CandidateSupersededError());
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(console.log).toHaveBeenCalledOnce());
+    expect(await readFile(output, "utf8")).toBe("ready=false\n");
+    expect(console.log).toHaveBeenCalledWith(expect.stringMatching(/^::notice::.*superseded.*before.*mutation/));
+    expect(console.error).not.toHaveBeenCalled();
+    expect(process.exitCode).toBeUndefined();
+    expect(mocked.requiredChecks).not.toHaveBeenCalled();
+    expect(mocked.alphaBarrierUnmutated).toHaveBeenCalledOnce();
+  });
+
+  it("handles supersession after the last successful poll before any mutation", async () => {
+    const output = await automaticBarrier();
+    const { CandidateSupersededError } = await import("./alpha-ci");
+    mocked.assertCurrent.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new CandidateSupersededError());
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(console.log).toHaveBeenCalledOnce());
+    expect(await readFile(output, "utf8")).toBe("ready=false\n");
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("keeps a retry red when a prior attempt may already have mutated a destination", async () => {
+    const output = await automaticBarrier();
+    const { CandidateSupersededError } = await import("./alpha-ci");
+    mocked.assertCurrent.mockRejectedValue(new CandidateSupersededError());
+    mocked.alphaBarrierUnmutated.mockResolvedValue(false);
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(console.error).toHaveBeenCalledOnce());
+    expect(process.exitCode).toBe(1);
+    expect(console.log).not.toHaveBeenCalled();
+    await expect(readFile(output)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("never converts a generic PromotionError with the supersession message into a green no-op", async () => {
+    await automaticBarrier();
+    const { PromotionError } = await import("./contracts");
+    mocked.assertCurrent.mockRejectedValue(new PromotionError("Candidate was superseded before mutation; run the current branch SHA"));
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(console.error).toHaveBeenCalledOnce());
+    expect(process.exitCode).toBe(1);
+    expect(console.log).not.toHaveBeenCalled();
+    expect(mocked.alphaBarrierUnmutated).not.toHaveBeenCalled();
+  });
+
+  it.each(["--verify", "worker"])("keeps automatic Alpha supersession red outside the initial wait barrier (%s)", async location => {
+    const output = await automaticBarrier();
+    if (location === "--verify") process.argv[2] = location;
+    else vi.stubEnv("GITHUB_JOB", location);
+    const { CandidateSupersededError } = await import("./alpha-ci");
+    mocked.assertCurrent.mockRejectedValue(new CandidateSupersededError());
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(console.error).toHaveBeenCalledOnce());
+    expect(process.exitCode).toBe(1);
+    expect(console.log).not.toHaveBeenCalled();
+    expect(mocked.alphaBarrierUnmutated).not.toHaveBeenCalled();
+    await expect(readFile(output)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each(["beta", "production"])("keeps %s supersession red and emits no Alpha output even with the flag enabled", async channel => {
+    const output = await automaticBarrier();
+    mocked.source.channel = channel;
+    mocked.source.branch = "release/0.1.20";
+    const { CandidateSupersededError } = await import("./alpha-ci");
+    mocked.assertCurrent.mockRejectedValue(new CandidateSupersededError());
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(console.error).toHaveBeenCalledOnce());
+    expect(process.exitCode).toBe(1);
+    expect(console.log).not.toHaveBeenCalled();
+    expect(mocked.automaticAlpha).not.toHaveBeenCalled();
+    await expect(readFile(output)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps unauthenticated manual Alpha on the full policy without ready output", async () => {
+    const output = await automaticBarrier();
+    vi.stubEnv("GITHUB_WORKFLOW_REF", `${mocked.source.repository}/.github/workflows/controlled-cutover.yml@refs/heads/main`);
+    mocked.automaticAlpha.mockResolvedValue(false);
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(console.log).toHaveBeenCalledOnce());
+    await expect(readFile(output)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
