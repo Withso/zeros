@@ -14,7 +14,7 @@ name: Preflight
 #
 #   quality — type safety (renderer + engine + Electron main + packages) and
 #             lint. CI adds an advisory Prettier pass over a PR's changed files.
-#   test    — the vitest suite (two native shards behind the `test` aggregate) +
+#   test    — the vitest suite (four native shards behind the `test` aggregate) +
 #             the repo's correctness guards (preload allowlist, model catalog,
 #             Cursor asar closure, migration forward-only, secret scan,
 #             settings-schema drift).

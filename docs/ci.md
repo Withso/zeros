@@ -15,11 +15,17 @@ by this change. Actionlint and CodeQL retain their separate workflows.
 
 `Full CI` (`.github/workflows/ci-full.yml`) runs alongside the required PR
 checks. It calls the existing Preflight workflow for every PR, including
-documentation-only changes, with all four database shards enabled. This runs
+documentation-only changes, with all eight database shards enabled. This runs
 the complete Linux tests/build, macOS source-sync workload, three composer
 browser shards, dependency audits and source/security contracts even when the
 fast PR classifier does not select them. The shared workflow definitions keep
 commands and future coverage changes in one place.
+
+CI and Preflight split the root Vitest suite into four native shards and the
+control-plane database suite into eight isolated Postgres shards. Every shard
+reports even if another fails. Repository guards remain on Vitest part 1 and
+the explicit containment matrix on part 2; the existing required aggregates
+still enforce all selected shards and every database report.
 
 The existing required CI job remains the single PR commit-range secret scanner.
 Full CI omits that duplicate scanner and the Alpha-only admission aggregate;
