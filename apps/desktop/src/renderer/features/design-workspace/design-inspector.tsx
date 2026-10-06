@@ -931,7 +931,24 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   );
 });
 
-export function DesignInspector({
+export function DesignInspector(props: DesignInspectorProps) {
+  return isCloudWorkspace(props.workspaceId)
+    ? <CloudDesignInspector {...props} />
+    : <DesignInspectorContent {...props} />;
+}
+
+function CloudDesignInspector(props: DesignInspectorProps) {
+  const enabled = useInternalFeatureActive("cloudComputerV2");
+  const canEdit = useCloudWorkspaceCanEdit(props.workspaceId ?? undefined);
+  return <DesignInspectorContent {...props} previewAccess={{
+    enabled,
+    allowed: enabled && canEdit && !!props.workspaceId && workspacePreviewAvailable(props.workspaceId),
+    account: getOrganizationStoreGeneration(),
+  }} />;
+}
+
+// Local inspection has no dependency on cloud account discovery or permissions.
+function DesignInspectorContent({
   workspaceId,
   pages,
   activePageId,
@@ -950,12 +967,12 @@ export function DesignInspector({
   motionProperties,
   onOpenMotionTimeline,
   zoomActionsRef,
-}: DesignInspectorProps) {
+  previewAccess,
+}: DesignInspectorProps & { previewAccess?: { enabled: boolean; allowed: boolean; account: number } }) {
   const cloudPreview = isCloudWorkspace(workspaceId);
-  const cloudPreviewsEnabled = useInternalFeatureActive("cloudComputerV2");
-  const cloudCanEdit = useCloudWorkspaceCanEdit(workspaceId ?? undefined);
-  const previewAllowed = !cloudPreview || (cloudPreviewsEnabled && cloudCanEdit && !!workspaceId && workspacePreviewAvailable(workspaceId));
-  const previewAccount = cloudPreview ? getOrganizationStoreGeneration() : 0;
+  const cloudPreviewsEnabled = previewAccess?.enabled === true;
+  const previewAllowed = !cloudPreview || previewAccess?.allowed === true;
+  const previewAccount = previewAccess?.account ?? 0;
   const previewDirectoryId = useDesignWorkspaceUiStore(state =>
     workspaceId ? state.byWorkspace[workspaceId]?.directoryId : undefined,
   );
