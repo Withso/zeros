@@ -86,6 +86,20 @@ suite("cloud GitHub single-operation writes", () => {
     await expect(redeem(pending.grant)).rejects.toMatchObject({ status: 403 });
     await expect(service.authorizeProxy(proxy.token)).rejects.toMatchObject({ status: 403 });
   });
+  it.each(["git.fetch", "git.pull"] as const)("authorizes managed %s with an operation-bound connected-account grant", async operation => {
+    const params = { workspaceId: "local-main", ...(operation === "git.pull" ? { strategy: "rebase", autoStash: true } : {}) };
+    const paramsSha256 = createHash("sha256").update(JSON.stringify([operation, params])).digest("hex");
+    const prepared = await service.prepare({ ...input(), operation, paramsSha256 }, fixture.userId, verified, "synthetic-user-token");
+    const redemption = { grant: prepared.grant, operation, params, paramsSha256, branch: "test", baseBranch: "main" };
+    await expect(service.redeem(engine(), { ...redemption, operation: "git.push" })).rejects.toBeDefined();
+    const changedParams = { ...params, remote: "other" };
+    await expect(service.redeem(engine(), { ...redemption, params: changedParams,
+      paramsSha256: createHash("sha256").update(JSON.stringify([operation, changedParams])).digest("hex") })).rejects.toBeDefined();
+    const proxy = await service.redeem(engine(), redemption);
+    expect(await service.authorizeProxy(proxy.token)).toMatchObject({ operation: "git.fetch", expectedBody: null, userToken: "synthetic-user-token" });
+    await service.release(engine(), prepared.grant);
+    await expect(service.authorizeProxy(proxy.token)).rejects.toBeDefined();
+  });
   it("native push exchanges only a connected user grant, never installation credentials", async () => {
     const native = { requestId: randomUUID(), generation: 1, engineInstanceId: fixture.engineInstanceId,
       source: { kind: "terminal" as const, actorSessionId }, branch: "topic" };

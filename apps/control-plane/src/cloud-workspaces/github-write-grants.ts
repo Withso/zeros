@@ -12,7 +12,10 @@ import { authorizeCloudWorkspaceActor } from "./actors.js";
 import { assertCloudActorSession, type CloudActorEngineScope } from "./actor-sessions.js";
 import { assertCurrentCloudEngineAuthority, assertCloudEngineIdentityForIdempotentReplay, assertCloudEngineAuthorityDeadline } from "./engine-authority.js";
 
-export const githubWriteOperation = z.enum(["git.fetch", "git.push", "gh.prCreate", "gh.prUpdate", "gh.prMarkReady", "gh.prMerge", "gh.prComment"]);
+export const githubWriteOperation = z.enum(["git.fetch", "git.pull", "git.push", "gh.prCreate", "gh.prUpdate", "gh.prMarkReady", "gh.prMerge", "gh.prComment"]);
+// Pull integrates locally after fetching. Its GitHub capability is upload-pack;
+// the digest still binds the exact git.pull request, strategy and autostash.
+const proxyOperation = (operation: string) => operation === "git.pull" ? "git.fetch" : operation;
 export const githubWritePreparation = z.object({
   action: z.literal("prepareWrite"), organizationId: z.string().uuid(), workspaceId: z.string().uuid(),
   native: cloudGithubNativePreparationSchema.optional(),
@@ -63,6 +66,7 @@ function expectedBody(input: z.infer<typeof githubWriteRedemption>): Record<stri
   const p = input.params, text = z.string().max(131072), title = z.string().min(1).max(1024);
   switch (input.operation) {
     case "git.fetch":
+    case "git.pull":
     case "git.push": return null;
     case "gh.prCreate": return { title: title.parse(p.title), body: text.parse(p.body), draft: z.boolean().default(true).parse(p.draft), head: input.branch, base: input.baseBranch };
     case "gh.prUpdate": return { ...(p.title !== undefined ? { title: title.parse(p.title) } : {}), ...(p.body !== undefined ? { body: text.parse(p.body) } : {}) };
@@ -115,7 +119,7 @@ export class DatabaseCloudGithubWriteGrants {
       const nativeActor = await assertNativeGithubActor(tx, { ...input, generation: input.native.generation,
         engineInstanceId: input.native.engineInstanceId }, input.native.source, this.workosEnabled);
       if (nativeActor.actorUserId !== actorUserId || nativeActor.fingerprint !== actor.fingerprint) throw denied();
-    } else if (input.operation === "git.fetch") throw denied();
+    }
     await devConnectionRuntime(this.pool)?.assertGithub(tx,actorUserId,input.organizationId);
     // Hold the selected connection through the final grant insert/use. A
     // disconnect either wins this check or waits, then deletes the grant.
@@ -141,7 +145,7 @@ export class DatabaseCloudGithubWriteGrants {
   async prepare(input: Preparation, actorUserId: string, verify: (snapshot: Snapshot) => Promise<{ repositoryId: string; installationId: number | string }>, userAccessToken: string) {
     input = githubWritePreparation.parse(input);
     if (!z.string().min(1).max(4096).regex(/^[^\s\0]+$/).safeParse(userAccessToken).success ||
-        (!["git.push", "git.fetch", "gh.prCreate"].includes(input.operation) && !input.prNumber)) throw denied();
+        (!["git.push", "git.fetch", "git.pull", "gh.prCreate"].includes(input.operation) && !input.prNumber)) throw denied();
     const snapshot = await withSystemTx(this.pool, tx => this.snapshot(tx, input, actorUserId));
     const verified = await verify(snapshot);
     if (verified.repositoryId !== snapshot.repositoryId || String(verified.installationId) !== snapshot.installationId) throw denied();
@@ -154,7 +158,7 @@ export class DatabaseCloudGithubWriteGrants {
         operation,params_sha256,pr_number,repository_id,repository_owner,repository_name,token_sealed,admission_expires_at,lease_expires_at,native_request)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,clock_timestamp()+CASE WHEN $15::jsonb IS NULL THEN interval '2 minutes' ELSE interval '60 seconds' END,clock_timestamp()+CASE WHEN $15::jsonb IS NULL THEN interval '2 minutes' ELSE interval '60 seconds' END,$15)`,
       [grantHash, input.workspaceId, input.organizationId, snapshot.generation, actorUserId, snapshot.actorFingerprint, snapshot.githubFingerprint,
-        input.operation, input.paramsSha256, input.prNumber ?? null, snapshot.repositoryId, snapshot.owner, snapshot.repository, sealed(userAccessToken, grant, grantHash), input.native ? JSON.stringify(input.native) : null]);
+        proxyOperation(input.operation), input.paramsSha256, input.prNumber ?? null, snapshot.repositoryId, snapshot.owner, snapshot.repository, sealed(userAccessToken, grant, grantHash), input.native ? JSON.stringify(input.native) : null]);
     });
     return { grant };
   }
@@ -175,7 +179,7 @@ export class DatabaseCloudGithubWriteGrants {
       // Connection before grant is also the disconnect trigger's lock order.
       const snapshot = await this.receiptSnapshot(tx, seed);
       const row = (await tx.query<Receipt>(`${receiptQuery} FOR UPDATE`, receiptParams)).rows[0];
-      if (!row || !matchesSnapshot(row, snapshot) || row.actor_fingerprint !== actor.fingerprint || row.operation !== request.operation ||
+      if (!row || !matchesSnapshot(row, snapshot) || row.actor_fingerprint !== actor.fingerprint || row.operation !== proxyOperation(request.operation) ||
           row.params_sha256 !== request.paramsSha256 || row.pr_number !== (request.params.prNumber ?? null)) throw denied();
       if (row.native_request) {
         const native = cloudGithubNativePreparationSchema.parse(row.native_request);

@@ -295,14 +295,16 @@ export const cloudGithubNativeDesktopSchema = z.discriminatedUnion("kind", [
 ]);
 export const CLOUD_GITHUB_DESKTOP_REQUIRED = "Open Zeros to authorize GitHub push for this cloud workspace";
 const cloudGithubScope = { organizationId: z.string().uuid() };
-export const CLOUD_GITHUB_WRITE_OPERATIONS = ["git.push", "gh.prCreate", "gh.prUpdate", "gh.prMarkReady", "gh.prMerge", "gh.prComment"] as const;
+// Fetch writes remote-tracking refs; pull also integrates them into the checkout.
+// Both need the same per-request courier as push on credential-free workers.
+export const CLOUD_GITHUB_WRITE_OPERATIONS = ["git.fetch", "git.pull", "git.push", "gh.prCreate", "gh.prUpdate", "gh.prMarkReady", "gh.prMerge", "gh.prComment"] as const;
 export const cloudGithubWriteGrantSchema = z.object({ grant: z.string().regex(/^zgw_[A-Za-z0-9_-]{43}$/) });
 export function isCloudGithubWriteOperation(value: unknown): value is typeof CLOUD_GITHUB_WRITE_OPERATIONS[number] {
   return typeof value === "string" && (CLOUD_GITHUB_WRITE_OPERATIONS as readonly string[]).includes(value);
 }
 const cloudGithubName = z.string().regex(/^[A-Za-z0-9_.-]{1,100}$/);
 export const cloudGithubRequestSchema = z.discriminatedUnion("action", [
-  z.object({ ...cloudGithubScope, action: z.literal("prepareWrite"), workspaceId: z.string().uuid(), operation: z.enum([...CLOUD_GITHUB_WRITE_OPERATIONS, "git.fetch"]), prNumber: z.number().int().positive().max(2147483647).optional(), paramsSha256: z.string().regex(/^[a-f0-9]{64}$/), native: cloudGithubNativePreparationSchema.optional() }).strict(),
+  z.object({ ...cloudGithubScope, action: z.literal("prepareWrite"), workspaceId: z.string().uuid(), operation: z.enum(CLOUD_GITHUB_WRITE_OPERATIONS), prNumber: z.number().int().positive().max(2147483647).optional(), paramsSha256: z.string().regex(/^[a-f0-9]{64}$/), native: cloudGithubNativePreparationSchema.optional() }).strict(),
   z.object({ ...cloudGithubScope, action: z.literal("catalog") }).strict(),
   z.object({ ...cloudGithubScope, action: z.literal("connect"), installationId: z.string().uuid() }).strict(),
   z.object({ ...cloudGithubScope, action: z.literal("disconnect"), installationId: z.string().uuid() }).strict(),
