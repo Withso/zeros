@@ -288,6 +288,48 @@ acknowledgement today; host-side input deduplication alone does not establish
 lossless typing during a client reconnect. Keep present-client activation gated
 until LU-5 verifies that path and the agreed client retry contract.
 
+## LU-5 acceptance harness (adapter pending)
+
+The orchestrator runs
+`pnpm exec tsx scripts/cloud-workspace-validation/live-update-acceptance/cli.mts --adapter <reviewed-adapter-path>`
+from a credential-bearing Alpha workspace. No live provider adapter is included:
+HU and LU must first agree the exported
+[`AlphaLiveUpdateAdapter`](../../scripts/cloud-workspace-validation/live-update-acceptance/contract.ts).
+Missing adapter, non-Alpha/staff evidence or missing exact-pair capabilities
+refuses before resource creation. The factory reads credentials from a private
+map parsed from `.env.agent`; it must not print or copy them into child arguments.
+
+The runner owns these assertions: stage while a synthetic provider turn is held;
+queue a duplicate prompt without dispatching across the drain; release the turn;
+preserve terminal/server PIDs, boot/allocation/controller/host identity and a
+sentinel file digest; require fresh engine/proof/authority/fence; converge on two
+devices with ordered replay; retry duplicate input/command identities after the
+swap; inject candidate health failure and require a fresh rollback attachment.
+It measures each device's last source response to first replacement response
+and rejects a maximum gap over two seconds. Synthetic adapter tests exercise the
+assertions; they do not establish real process continuity or timing.
+
+The adapter has six operations: read-only `preflight`, idempotent `provision`,
+`connect` for each device, `stage`, `handoff`, and `cleanup`; the device interface
+provides workload start, authenticated observation, acknowledged input, durable
+enqueue, turn release and close. (The connection factory serves both devices.)
+Implementations must source observations from actual authenticated engine and
+server-verified proof responses, honor abort signals, and stay silent. No URLs or
+provider commands are guessed by the runner. Until these capabilities exist,
+the harness is deliberately non-runnable against Alpha.
+
+Before provisioning, fsync a private
+`.context/zeros-v2-test-lu-<operation-id>.json` journal. All resources belong to
+that test operation and use its name prefix where supported. Lost create replies
+reuse its idempotency key. Cleanup runs even after failure/interrupt and must
+reconcile ambiguous operations, every generation and pending deletion inventory;
+a DELETE acknowledgement is insufficient. A closed JSON report lists the test
+operation/workspace IDs, measured gaps and cleanup result, never raw provider
+errors or workload output. Resume interrupted cleanup with the same adapter and
+`--cleanup .context/zeros-v2-test-lu-<operation-id>.json`; do not discard a journal
+marked `cleanup_required`. The adapter must record additional provider resource
+IDs in its own credential-free test inventory for the orchestrator's live report.
+
 ## Local workspace impact
 
 Local-owner and organization-owned local workspaces retain their existing
