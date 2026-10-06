@@ -22,7 +22,7 @@ import {
   waitForPendingDesignEdits,
 } from "./state/design-workspace-cache";
 import { useCloudDesignManagement } from "./use-cloud-design-management";
-import { errorMessage } from "./design-workspace-error";
+import { reportDesignDirectoryFailure, type DesignDirectoryAction } from "./design-directory-failure";
 
 const folderKey = (workspaceId: string, directory: string) =>
   JSON.stringify([workspaceId, directory]);
@@ -70,7 +70,6 @@ export function CloudDesignDirectories({
     name: string;
   } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const mounted = useRef(true);
   const running = useRef(false);
   const latest = useRef({ workspaceId, active, canManage });
@@ -98,6 +97,7 @@ export function CloudDesignDirectories({
         .catch(() => {});
   };
   const run = async (
+    action: DesignDirectoryAction,
     operation: () => Promise<unknown>,
     success?: () => void,
     mutation = true,
@@ -105,7 +105,6 @@ export function CloudDesignDirectories({
     if (!active || !canManage || running.current) return;
     running.current = true;
     setBusy(true);
-    setError(null);
     const current = () =>
       mounted.current &&
       latest.current.workspaceId === workspaceId &&
@@ -119,7 +118,7 @@ export function CloudDesignDirectories({
       if (current()) success?.();
     } catch (cause) {
       if (current()) {
-        setError(errorMessage(cause));
+        reportDesignDirectoryFailure(workspaceId, action, cause);
         listing.refresh();
       }
     } finally {
@@ -132,7 +131,7 @@ export function CloudDesignDirectories({
     const id = listing.data?.directoryIds?.[directory];
     if (!id || !listing.data || listing.error) return;
     const expected = listing.data.directoryIds?.[listing.data.active] ?? null;
-    void run(() =>
+    void run("open", () =>
       bridgeCloudDesignSelectDirectory(bridge(), workspaceId, id, expected),
     );
   };
@@ -140,6 +139,7 @@ export function CloudDesignDirectories({
     if (!folder) return;
     let result: DesignFolderPreviewWire;
     void run(
+      "inspect",
       async () => {
         result = (await workspaceOp(
           bridge(),
@@ -162,9 +162,9 @@ export function CloudDesignDirectories({
           folders.
         </p>
       )}
-      {(error || listing.error) && (
+      {listing.error && (
         <p role="alert" className="text-red-fg text-sm">
-          {error ?? listing.error?.message}
+          Couldn't load Design directories. Try again.
         </p>
       )}
       {listing.error && (
@@ -251,6 +251,7 @@ export function CloudDesignDirectories({
               disabled={disabled || !newName.trim()}
               onClick={() =>
                 void run(
+                  "create",
                   () =>
                     bridgeCloudDesignCreateDirectory(
                       bridge(),
@@ -370,6 +371,7 @@ export function CloudDesignDirectories({
                     disabled={disabled}
                     onClick={() =>
                       void run(
+                        "register",
                         () =>
                           workspaceOp(bridge(), "design.adoptDirectory", {
                             workspaceId,
@@ -429,6 +431,7 @@ export function CloudDesignDirectories({
                   }
                   onClick={() =>
                     void run(
+                      action.kind === "rename" ? "rename" : "unregister",
                       () =>
                         workspaceOp(
                           bridge(),

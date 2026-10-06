@@ -20,6 +20,13 @@ export async function runCloudDesignDirectoriesSmoke({
       })
       .last();
   await expect(settings.getByText("Brand", { exact: true })).toBeVisible();
+  await page.evaluate(() => window.cloudDesignFixture.failNextCreate());
+  await settings.getByRole("textbox", { name: "New Design folder", exact: true }).fill("Retry");
+  await settings.getByRole("button", { name: "Create folder", exact: true }).click();
+  await expect(page.locator("[data-sonner-toast]")).toContainText("Couldn't create the Design directory. Try again.");
+  await expect(page.locator("body")).not.toContainText("Command failed:");
+  await expect(page.locator("body")).not.toContainText("/srv/zeros/");
+  check("cloud Design lifecycle failures use a short action toast without command paths", true);
   await settings
     .getByRole("textbox", { name: "New Design folder", exact: true })
     .fill("Campaign");

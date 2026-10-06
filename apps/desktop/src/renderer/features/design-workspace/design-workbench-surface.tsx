@@ -28,11 +28,10 @@ import {
   WorkbenchEmptyState,
   useWorkbenchStatusSource,
 } from "../../shell/workbench/tab-status";
-import { toast } from "../../shared/ui/primitives/elements";
 import { Button } from "../../shared/ui/primitives/button";
 import { primeDesignWorkspaceSnapshot } from "./state/design-workspace-cache";
 import { DesignWorkspaceColumn } from "./design-workspace";
-import { errorMessage } from "./design-workspace-error";
+import { reportDesignDirectoryFailure } from "./design-directory-failure";
 import { DesignGitSetup } from "./design-git-setup";
 
 /** Human authoring surface; selecting it has no effect on agent authority. */
@@ -103,9 +102,7 @@ export function DesignWorkbenchSurface({
       markDesignDirectoryTargetExists(key);
       refreshTarget();
     } catch (error) {
-      toast.error("Couldn't create Design directory", {
-        description: errorMessage(error),
-      });
+      reportDesignDirectoryFailure(workspace.id, "create", error);
     } finally {
       setCreating(false);
     }
