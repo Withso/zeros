@@ -107,7 +107,7 @@ static void require_kernel_control(const char *name) {
       (filesystem.f_type != 0x9fa0 && filesystem.f_type != 0x65735546)) fail();
 }
 
-static void validate_view(int qualification) {
+static void validate_view(int qualification, int resident) {
   struct statfs root;
   if (statfs("/", &root) || root.f_type != 0x01021994 ||
       !(root.f_flags & MS_RDONLY)) fail();
@@ -123,6 +123,7 @@ static void validate_view(int qualification) {
   require_path(runtime_node, 0, 1);
   require_worker_path("dist-engine", 1);
   require_worker_path("dist-engine/cli.js", 0);
+  if (resident) require_worker_path("dist-engine/resident-pty.js", 0);
   require_path("/etc/zeros/cloud-worker.json", 0, 1);
   if (runtime_version == 4) {
     require_path("/opt/zeros-infra", 1, 1);
@@ -280,9 +281,10 @@ int main(int argc, char **argv) {
   const int qualification = argc == option + 1 ?
     (strcmp(argv[option], "--qualify") == 0 ? 1 :
       (version >= 3 && strcmp(argv[option], "--qualify-agent") == 0 ? 2 : 0)) : 0;
-  if ((argc != option && !qualification) || getuid() != 0 || geteuid() != 0 || getgid() != 0 ||
+  const int resident = version == 4 && argc == option + 1 && strcmp(argv[option], "--resident") == 0;
+  if ((argc != option && !qualification && !resident) || getuid() != 0 || geteuid() != 0 || getgid() != 0 ||
       setgroups(0, NULL)) fail();
-  validate_view(qualification);
+  validate_view(qualification, resident);
   struct rlimit core = { .rlim_cur = 0, .rlim_max = 0 };
   if (setrlimit(RLIMIT_CORE, &core)) fail();
   /* No inherited file capability, directory, socket or engine-lock descriptor
@@ -306,10 +308,11 @@ int main(int argc, char **argv) {
         getgroups(0, NULL) != 0) fail();
     restrict_capabilities();
     restrict_syscalls();
-    char engine[PATH_MAX], qualify[PATH_MAX], agent[PATH_MAX];
+    char engine[PATH_MAX], qualify[PATH_MAX], agent[PATH_MAX], host[PATH_MAX];
     worker_path(engine, sizeof(engine), "dist-engine/cli.js");
     worker_path(qualify, sizeof(qualify), "scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs");
     worker_path(agent, sizeof(agent), "scripts/cloud-workspace-validation/sandbox/qualify-cloud-agent.ts");
+    worker_path(host, sizeof(host), "dist-engine/resident-pty.js");
     char *arguments[] = {
       runtime_node, engine,
       "serve", "--root", "/srv/zeros/workspace", NULL,
@@ -320,7 +323,8 @@ int main(int argc, char **argv) {
     char *agent_qualification_arguments[] = {
       runtime_node, "--import", "tsx", agent, NULL,
     };
-    execv(arguments[0], qualification == 2 ? agent_qualification_arguments :
+    char *resident_arguments[] = { runtime_node, host, NULL };
+    execv(arguments[0], resident ? resident_arguments : qualification == 2 ? agent_qualification_arguments :
       (qualification ? qualification_arguments : arguments));
     fail();
   }

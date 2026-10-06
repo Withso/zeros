@@ -109,7 +109,7 @@ export class TerminalMirror {
   }
 
   /** Resolve once every queued write has been parsed into the grid. */
-  private flush(): Promise<void> {
+  flush(): Promise<void> {
     return new Promise<void>((resolve) => {
       this.term.write("", resolve);
     });

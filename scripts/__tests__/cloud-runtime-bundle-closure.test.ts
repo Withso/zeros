@@ -325,7 +325,7 @@ describe("pnpm runtime closure", () => {
     ).rejects.toThrow(/native_platform/);
   });
 
-  it("matches the legacy helpers plus the v4 update adapter and optional self-test", async () => {
+  it("matches the legacy helpers plus the v4 update adapter, resident host and optional self-test", async () => {
     const legacy = await readFile(
       "scripts/cloud-workspace-validation/boat-image/templates/build.sh",
       "utf8",
@@ -338,7 +338,7 @@ describe("pnpm runtime closure", () => {
       )
         .map((entry) => path.basename(entry.target))
         .sort(),
-    ).toEqual([...names, "runtime-update-adapter.py"].sort());
+    ).toEqual([...names, "runtime-update-adapter.py", "cloud-resident-workload.mjs"].sort());
     expect(RUNTIME_HELPERS).toContainEqual({
       source:
         "apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs",
