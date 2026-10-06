@@ -32,7 +32,8 @@ import {
 import { useShallow } from "zustand/react/shallow";
 import { type RunAction } from "@zeros/protocol/run-actions";
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
-import { onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
+import { getActiveBridge, onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
+import { WorkspaceRuntimeClient } from "../../../platform/bridge/workspace-runtime-client";
 
 import { createPortal } from "react-dom";
 import { defaultScopeFor } from "../tab-model";
@@ -50,7 +51,8 @@ import {
   type TerminalNavigationEntry,
 } from "../../terminal/terminal-workbench-layout";
 import { useRetainedViewKeySet } from "../../use-retained-view-keys";
-import { WorkbenchTabFrame, WorkbenchTabStatusProvider } from "../tab-status";
+import { WorkbenchTabFrame, WorkbenchTabStatusProvider, WorkbenchTabToolbar } from "../tab-status";
+import { CloudWorkspaceStatusRow } from "../../conversation/cloud-workspace-restart-controls";
 import { cn } from "../../../shared/ui/cn";
 import { Button } from "../../../shared/ui";
 import { Badge, Tooltip } from "../../../shared/ui/primitives";
@@ -147,8 +149,11 @@ function useEngineTerminalSync(
     const excluded = new Set(chatTerminalIds);
     const refresh = async () => {
       const request = ++generation;
+      const bridge = isCloudWorkspace(folder) ? getActiveBridge() : null;
+      const engine = bridge instanceof WorkspaceRuntimeClient ? bridge.cloudEngineInstanceId(folder) : undefined;
       const terms = await ptyTerminals(isCloudWorkspace(folder) ? folder : undefined);
       if (cancelled || request !== generation) return;
+      if (bridge instanceof WorkspaceRuntimeClient && engine !== bridge.cloudEngineInstanceId(folder)) return;
       // null = engine unreachable: don't reconcile (would wrongly prune tabs).
       if (terms !== null) {
         const { inFolder, aliveIds } = selectPanelTerminals(
@@ -156,7 +161,8 @@ function useEngineTerminalSync(
           excluded,
           folder,
         );
-        sync(folder, inFolder, aliveIds);
+        if (engine) sync(folder, inFolder, aliveIds, engine);
+        else sync(folder, inFolder, aliveIds);
         setSyncedFolder(folder);
       }
     };
@@ -686,6 +692,7 @@ export function TerminalPanel({
             active={surfaceActive && mainTab !== null}
           >
             <TerminalWorkbenchLayout
+              active={surfaceActive && mainTab !== null}
               folder={folderKey}
               tab={mainTab}
               entries={entries}
@@ -845,6 +852,9 @@ export function TerminalPanel({
           folder={folderKey}
           active={surfaceActive && hasPanel && expanded}
         >
+          {activeSubTab === SETUP_SUBTAB && <WorkbenchTabToolbar>
+            <CloudWorkspaceStatusRow folder={folderKey} active={surfaceActive && hasPanel && expanded} />
+          </WorkbenchTabToolbar>}
           <div
             ref={setPanelBody}
             {...(!expanded ? { inert: "" } : {})}
@@ -900,6 +910,7 @@ export function TerminalPanel({
                   visible={isActive}
                   agentId={s.agentId}
                   initialCommand={s.initialCommand ?? null}
+                  resumePending={s.resumePending}
                   // A run terminal's restart affordance is its Rerun button —
                   // a key-restart would spawn a plain shell under the run id.
                   // attachOnly: its PTY is born only through workspace.startRun;

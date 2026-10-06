@@ -429,6 +429,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     });
     const materials = new DatabaseCloudWorkspaceSetupMaterialService({
       pool,
+      resumeExistingEnabled: config.cloudWorkspaceResumeExistingEnabled === true,
       setupAudience: endpoint(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH),
       engineRegistrationAudience: endpoint(
         CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,

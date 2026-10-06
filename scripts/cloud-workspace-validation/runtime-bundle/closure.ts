@@ -46,6 +46,7 @@ export const RUNTIME_HELPERS = [
     "cloud-github-refresh-request.mjs",
     "cloud-git-askpass.mjs",
     "cloud-worker-supervisor.mjs",
+    "cloud-resident-workload.mjs",
     "ensure-cloud-worker-supervisor.mjs",
     "setup-cloud-workspace.mjs",
     "zeros-cloud-engine.apparmor",

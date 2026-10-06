@@ -6,6 +6,7 @@ import {
   cloudCatalogGeneration,
   cloudWorkspaceDocument,
   cloudWorkspaceStopVersion,
+  isCloudWorkspaceLifecyclePending,
   manageCloudWorkspace,
   refreshCloudWorkspace,
   subscribeCloudWorkspaces,
@@ -38,7 +39,7 @@ export async function wakeCloudWorkspace(
     if (signal?.aborted) throw new Error("Cloud workspace wake cancelled");
     if (account !== cloudCatalogGeneration()) throw new Error("Cloud account changed while waking");
     const current = cloudWorkspaceDocument(target);
-    if (!current || !canReadCloudWorkspace(current) || current.generation.number < generation)
+    if (!current || !canReadCloudWorkspace(current) || current.generation.number < generation && !isCloudWorkspaceLifecyclePending(current))
       throw new Error("Cloud workspace generation or access changed while waking");
     if (!isInternalFeatureActive("cloudComputerV2") || !current.capabilities.canWrite)
       throw new Error("Cloud workspace run access is required to wake it");
@@ -47,9 +48,9 @@ export async function wakeCloudWorkspace(
     if (["archived", "archiving", "failed", "error"].includes(current.status) || current.error && current.status !== "stopped")
       throw new CloudWorkspaceWakeEndedError(current.error?.message ?? `Cloud workspace is ${current.status}. Open it again to retry.`);
     if (expired) throw new Error("The cloud workspace is still starting after fifteen minutes. Try again when it is ready.");
-    // Upgrade-on-wake replaces the engine, not the authorized user intent.
+    // Upgrade-on-wake or its rollback replaces the engine, not the user intent.
     // Keep waiting through its drain/setup; never reuse the old admission.
-    if (current.generation.number > generation) replacement = true;
+    if (current.generation.number !== generation) replacement = true;
     generation = current.generation.number;
     return current;
   };

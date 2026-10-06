@@ -9,6 +9,11 @@ pins runtimes at creation, admits installation, and binds redemption,
 registration and readiness to that pin. The base installer, qualification workers
 and generation upgrade/recovery services have their own implementation boundaries.
 
+The [version-skew gate](runtime-skew-gate.md) pins historical runtime/desktop
+source contracts for required CI testing and documents pin advancement and
+cohort retirement. It is a first slice; released-engine qualification remains
+separate.
+
 ## Identity and installed layout
 
 `manifestSha256` is lowercase SHA-256 of the **original canonical UTF-8 manifest

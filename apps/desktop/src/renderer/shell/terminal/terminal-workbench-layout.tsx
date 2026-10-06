@@ -16,6 +16,7 @@ import { useResizeHint } from "../use-resize-hint";
 import { CloudTerminalIndicator } from "./cloud-terminal-indicator";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
 import { WorkbenchTabToolbar, useWorkbenchStatusManaged } from "../workbench/tab-status";
+import { CloudWorkspaceStatusRow } from "../conversation/cloud-workspace-restart-controls";
 
 export interface TerminalNavigationEntry {
   id: string;
@@ -48,6 +49,7 @@ export function TerminalWorkbenchLayout({
   onDock,
   onToggleSidebar,
   bodyRef,
+  active = true,
 }: {
   folder: string;
   tab: WorkbenchTab | null;
@@ -65,6 +67,7 @@ export function TerminalWorkbenchLayout({
   onDock(): void;
   onToggleSidebar(): void;
   bodyRef(node: HTMLDivElement | null): void;
+  active?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const managed = useWorkbenchStatusManaged();
@@ -191,6 +194,7 @@ export function TerminalWorkbenchLayout({
           </Tooltip>
         </Inline>
       </div>
+      {tab?.terminalId === "setup" && <CloudWorkspaceStatusRow folder={folder} active={active} />}
       </WorkbenchTabToolbar>
       <div
         ref={containerRef}

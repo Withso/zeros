@@ -102,6 +102,7 @@
     "check:control-plane-migrations": "node scripts/check-control-plane-migrations.mjs",
     "check:migration-phases": "tsx scripts/check-migration-phases.ts",
     "check:protocol": "node scripts/check-protocol-version.mjs",
+    "check:runtime-skew": "node --import tsx scripts/runtime-skew/check.mjs",
     "ci:plan": "node scripts/ci/scope.mjs --mode local",
     "check:actions": "node scripts/ci/validate-concurrency.mjs && node scripts/check-actions.mjs",
     "check:web-deploy": "node scripts/check-web-deploy.mjs",

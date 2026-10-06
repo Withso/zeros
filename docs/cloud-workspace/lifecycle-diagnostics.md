@@ -101,7 +101,9 @@ It never releases disk without the binding's deletion proof. Receipt progress
 advances only at a new monotonic stage, not retries or blocked/processing
 oscillation. Health reports `deletion_intent_stalled` for failed intents,
 one-hour lack of progress, or 24-hour total age, including retirement while a
-replacement workspace remains active. Old pending idle checkpoints report
+replacement workspace remains active. Provider-reported waiting stages (Boat's
+`waiting_for_uploads`, `kept_for_newer_snapshots` and `waiting_for_restore`)
+count as progress until the 24-hour limit. Old pending idle checkpoints report
 `idle_stop_blocked`. These are aggregate health reasons without tenant IDs.
 
 Legacy credential compatibility is reconciled at organization discovery/selection
@@ -355,3 +357,26 @@ checks, registration, containment and durable readiness. Telemetry grants no
 new authority and adds no per-stage network requests. This change does not
 implement resume reuse or a runtime transition; RU/HU's decision paths remain
 unchanged.
+
+### Boat restore readiness polling
+
+The v4 setup transport can observe provider `running` before the guest accepts
+commands. Its fixed, secret-free base-status probe now retries classified Boat
+409 `boat_starting` / `boat_restoring`, retryable 5xx responses, and a valid
+matching-base `stopped` host while enabled restore units start, every
+two seconds within one fenced setup claim. The phase is bounded to 120 seconds
+(or the configured command timeout when shorter) and honors cancellation.
+A longer provider Retry-After, other conflicts, rate limits, access failures,
+invalid base identity, and failed guest status go directly to normal setup
+failure handling. Once the base reports ready, neither SSH nor installer,
+attestation or setup execution is retried by this phase.
+
+This avoids spending 5/10/20/40-second claim backoffs on an allocation whose
+restored guest is almost command-ready. It does not change the worker's retry,
+upgrade/rollback or readiness publication decisions. Exhaustion returns the
+closed provider error to those existing policies. A persistent provider outage
+can occupy a setup slot for the bounded phase; it cannot publish readiness.
+Local and organization-owned local workspaces, legacy cloud setup and owner
+switching use their existing paths. No new environment flag or migration is
+required. Measure a real stopped wake after deployment before claiming a saved
+latency; a 5xx response alone is not proof of the guest's boot state.

@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { perfDatabaseConfig, perfTimeline, elapsed, readPerfTimeline } from "../cloud-workspace-validation/workspace-perf-timeline.mjs";
 import { cleanupPerfRun, newPerfJournal, ownPerfWorkspace, perfAlphaRequest, perfHandshake, runPerfLive, validatePerfJournal } from "../cloud-workspace-validation/workspace-perf-live.mjs";
-import { inspectPerfVmSource, perfVmRequest, runPerfVm, parsePerfBootstrapDetails } from "../cloud-workspace-validation/workspace-perf-vm.mjs";
+import { inspectPerfVmSource, perfVmRequest, runPerfVm, parsePerfBootstrapDetails, perfBootstrapAnchor, preparePerfVmRuntime, perfRuntimeArtifactStore, readPerfRuntimeArtifact } from "../cloud-workspace-validation/workspace-perf-vm.mjs";
 import { newTemplateSetupJournal } from "../cloud-workspace-validation/template-setup-repro.mjs";
 import { CloudProviderError } from "../../apps/control-plane/src/cloud-workspaces/provider";
 
@@ -212,13 +212,21 @@ describe("cloud performance measurement", () => {
         snapshotAvailable: true, lastSnapshotStatus: "completed", sourceSandboxId: pathname.endsWith(child) ? source : undefined } };
     });
     const request = perfVmRequest(journal, billingOrg, raw, () => time);
-    const probe = vi.fn(async () => ({ schema: "zeros.template-setup-probe/v1", paths: [], checks: [{ check: "image", ok: true,
-      attester: { stages: [{ stage: "verify_tree", outcome: "passed", durationMs: 13, failedChecks: [] }] } }] }));
-    await runPerfVm(journal, { billingOrg }, { request, probe, save: vi.fn(), now: () => time, wait: async (ms: number) => { time += ms; },
+    const prepared: string[] = [];
+    const prepareRuntime = vi.fn(async (id: string) => { expect(id).toBe(child); prepared.push(journal.perf.cycle); time += 100; });
+    const probe = vi.fn(async () => {
+      expect(prepared).toContain(journal.perf.cycle);
+      return { schema: "zeros.template-setup-probe/v1", paths: [], checks: [{ check: "image", ok: true,
+        attester: { stages: [{ stage: "verify_tree", outcome: "passed", durationMs: 13, failedChecks: [] }] } }] };
+    });
+    await runPerfVm(journal, { billingOrg }, { request, probe, prepareRuntime, save: vi.fn(), now: () => time, wait: async (ms: number) => { time += ms; },
       load: async () => ({ templateId: source, billingOrg, baseImageId: "zeros-v2-test-base", computer: { template: { baseCompatibilityId } },
         image: { resources: { architecture: "linux/amd64", cpuMillicores: 4000, memoryMiB: 8192, storageMiB: 20480 } } }) });
     expect(journal.failedChecks).toEqual([]); expect(journal.cleanup).toBe("verified");
     expect(probe).toHaveBeenCalledTimes(2);
+    expect(prepareRuntime).toHaveBeenCalledTimes(2);
+    expect(journal.perf.create.runtimePreparationMs).toBe(100);
+    expect(journal.perf.wake.runtimePreparationMs).toBe(100);
     expect(journal.perf.create.stages.attester[0].durationMs).toBe(13);
     expect(journal.perf.wake.stages.attester[0].durationMs).toBe(13);
     expect(journal.perf.create.bootstrapObservations).toEqual({ command_nonzero: 1, host_failed: 1, ready: 1 });
@@ -235,6 +243,77 @@ describe("cloud performance measurement", () => {
     await expect(request("/sandboxes/bx_44444444/resume", { method: "POST" })).rejects.toThrow("request_scope_invalid");
   });
 
+  it("bounds unit start in the operator clock without subtracting unsynchronized clock epochs", () => {
+    const details = parsePerfBootstrapDetails({ schema: "zeros.workspace-perf-bootstrap/v1", observedMonotonicUs: 260_839_941,
+      units: [{ unit: "zeros-boot.service", ExecMainStartTimestampMonotonic: 251_637_114 }] });
+    const anchor = perfBootstrapAnchor(details, { requestStartMs: 36_725, requestEndMs: 37_225, providerReadyObservedMs: 2_860 });
+    expect(anchor).toEqual({ requestStartMs: 36_725, requestEndMs: 37_225,
+      unitStartsFromCycleMs: [{ unit: "zeros-boot.service", lower: 27_522, upper: 28_023 }],
+      firstUnitStartFromCycleMs: { lower: 27_522, upper: 28_023 },
+      firstUnitStartAfterProviderObservationMs: { lower: 24_662, upper: 25_163 } });
+    const earlier = perfBootstrapAnchor({ ...details, units: [...details.units,
+      { unit: "systemd-tmpfiles-setup.service", ExecMainStartTimestampMonotonic: 245_000_000 }] },
+      { requestStartMs: 36_725, requestEndMs: 37_225, providerReadyObservedMs: 2_860 });
+    expect(earlier.firstUnitStartFromCycleMs).toEqual({ lower: 20_885, upper: 21_386 });
+    expect(earlier.unitStartsFromCycleMs).toHaveLength(2);
+    expect(perfBootstrapAnchor({ ...details, observedMonotonicUs: 1 }, { requestStartMs: 10, requestEndMs: 20 })).toBeNull();
+    expect(perfBootstrapAnchor(details, { requestStartMs: 20, requestEndMs: 10 })).toBeNull();
+    expect(perfBootstrapAnchor({ ...details, units: [] }, { requestStartMs: 10, requestEndMs: 20 })).toBeNull();
+  });
+
+  it("prepares the exact runtime through the verified installer over private stdin before Node probes", async () => {
+    const runtime = { runtimeId: `r1-${"a".repeat(64)}`, manifestSha256: "a".repeat(64), archiveSha256: "b".repeat(64),
+      archiveBytes: 100, expandedBytes: 200, sourceCommit: "c".repeat(40), nodeModulesAbi: 137,
+      bootstrapProtocolVersion: 1, engineProtocolVersion: 7 };
+    const baseCompatibilityId = `bc1-${"d".repeat(64)}`, child = "bx_22222222";
+    const material = { runtimePin: { runtimeId: runtime.runtimeId, manifestSha256: runtime.manifestSha256, baseCompatibilityId },
+      computer: { template: { baseCompatibilityId } }, runtimeArtifact: { descriptor: runtime,
+        objectKey: `runtime/v1/${runtime.runtimeId}/${runtime.archiveSha256}.tar.gz` } };
+    const capability = { url: "https://artifacts.test/runtime?capability=private", expiresAt: new Date(Date.now() + 900_000).toISOString() };
+    const store = { presignGet: vi.fn(async () => capability) };
+    const request = vi.fn(async () => ({ success: true, exitCode: 0, stdout: JSON.stringify({ schema: "zeros.base-status/v1",
+      baseCompatibilityId, bootId: runId, currentRuntimeId: runtime.runtimeId, hostState: "idle" }) }));
+    const execute = vi.fn(async (input: any) => {
+      const parsed = JSON.parse(Buffer.from(input.stdin, "base64url").toString("utf8"));
+      expect(parsed).toEqual({ schema: "zeros.runtime-install/v1", purpose: "qualification", runtime, artifact: capability });
+      expect(input.resourceId).toBe(child);
+      expect(input.command).toContain("/opt/zeros-bootstrap/install-runtime.sh --stdin");
+      expect(input.command).not.toContain("private");
+      return { exitCode: 0, output: JSON.stringify({ schema: "zeros.diagnostic/v1", component: "installer", stage: "done",
+        ok: true, exitCode: 0, timedOut: false, failedChecks: [] }) };
+    });
+    await preparePerfVmRuntime(child, material, { request, artifactStore: store, execute });
+    expect(execute).toHaveBeenCalledOnce(); expect(store.presignGet).toHaveBeenCalledOnce();
+    expect(JSON.stringify(request.mock.calls)).not.toContain("private");
+    request.mockResolvedValueOnce({ success: true, exitCode: 0, stdout: JSON.stringify({ schema: "zeros.base-status/v1",
+      baseCompatibilityId, bootId: runId, currentRuntimeId: null, hostState: "waiting_for_runtime" }) });
+    await expect(preparePerfVmRuntime(child, material, { request, artifactStore: store, execute })).rejects.toThrow("runtime_unavailable");
+    execute.mockResolvedValueOnce({ exitCode: 1, output: "private installer output" });
+    await expect(preparePerfVmRuntime(child, material, { request, artifactStore: store, execute })).rejects.toThrow("runtime_prepare_failed");
+    const foreign = { ...material, runtimePin: { ...material.runtimePin, runtimeId: `r1-${"f".repeat(64)}` } };
+    execute.mockClear();
+    await expect(preparePerfVmRuntime(child, foreign, { request, artifactStore: store, execute })).rejects.toThrow("source_invalid");
+    expect(execute).not.toHaveBeenCalled();
+    expect(() => perfRuntimeArtifactStore({ ZEROS_R2_ALPHA_BUCKET: "production" })).toThrow("runtime_artifact_config_invalid");
+  });
+
+  it("loads only the exact unrevoked immutable artifact through read-only SQL before allocation", async () => {
+    const pin = { runtimeId: `r1-${"a".repeat(64)}`, manifestSha256: "a".repeat(64), baseCompatibilityId: `bc1-${"d".repeat(64)}` };
+    const row = { runtime_id: pin.runtimeId, manifest_sha256: pin.manifestSha256, archive_sha256: "b".repeat(64),
+      archive_bytes: "100", expanded_bytes: "200", object_key: `runtime/v1/${pin.runtimeId}/${"b".repeat(64)}.tar.gz`,
+      source_commit: "c".repeat(40), node_modules_abi: 137, bootstrap_protocol_version: 1, engine_protocol_version: 7, secret: "private" };
+    const query = vi.fn(async (sql: string) => ({ rows: sql.includes("FROM cloud_runtime_bundles") ? [row] : [] }));
+    const pool = { connect: async () => ({ query, release: vi.fn() }) };
+    const result = await readPerfRuntimeArtifact(pool, { runtimePin: pin, baseImageId: "zeros-v2-test-base" });
+    expect(result.descriptor.runtimeId).toBe(pin.runtimeId);
+    expect(result.descriptor.archiveBytes).toBe(100);
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(query.mock.calls[0][0]).toContain("READ ONLY");
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    row.object_key = "private";
+    await expect(readPerfRuntimeArtifact(pool, { runtimePin: pin, baseImageId: "zeros-v2-test-base" })).rejects.toThrow("source_invalid");
+  });
+
   it("projects only closed bootstrap unit and hydration observations", () => {
     const result = parsePerfBootstrapDetails({ schema: "zeros.workspace-perf-bootstrap/v1", observedMonotonicUs: 50_000_000,
       hydrationDone: true, activeDescriptorPresent: false,
@@ -247,6 +326,33 @@ describe("cloud performance measurement", () => {
     expect(parsePerfBootstrapDetails({ ...result, units: [{ unit: "private", active: "private" }],
       hydrationEvents: [{ event: "private", waitedSeconds: 2 }] }).units).toEqual([]);
   });
+  it("filters boot critical-chain and blame on the VM and retains bounded named durations", () => {
+    const output = execFileSync("python3", ["-I", "-B", "-c", `
+import importlib.util,json,sys
+spec=importlib.util.spec_from_file_location('perf','scripts/cloud-workspace-validation/workspace-perf-bootstrap.py')
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+value=json.load(sys.stdin)
+print(json.dumps(module.project_analysis(value['chain'],value['blame'])))
+`], { encoding: "utf8", input: JSON.stringify({
+      chain: "zeros-boot.service @25.637s +5.662s\n└─systemd-tmpfiles-setup.service @20.000s +30ms\n  └─private-identity.service @1.2s +20s\n    └─local-fs.target @400ms\n",
+      blame: "1min 3.500s private-identity.service\n3.123s systemd-journal-flush.service\n550us systemd-tmpfiles-setup.service\n",
+    }) });
+    const analysis = JSON.parse(output);
+    expect(analysis.criticalChain).toEqual([
+      { unit: "zeros-boot.service", activationUs: 25_637_000, durationUs: 5_662_000 },
+      { unit: "systemd-tmpfiles-setup.service", activationUs: 20_000_000, durationUs: 30_000 },
+      { unit: "local-fs.target", activationUs: 400_000, durationUs: null },
+    ]);
+    expect(analysis.blame).toEqual([{ unit: "systemd-journal-flush.service", durationUs: 3_123_000 },
+      { unit: "systemd-tmpfiles-setup.service", durationUs: 550 }]);
+    expect(analysis.unknownCriticalChainUnits).toBe(1);
+    expect(analysis.unknownBlameUnits).toBe(1);
+    expect(output).not.toContain("private");
+    const projected = parsePerfBootstrapDetails({ schema: "zeros.workspace-perf-bootstrap/v1", bootAnalysis: {
+      ...analysis, private: "private", blame: [...analysis.blame, { unit: "private", durationUs: 1 }] } });
+    expect(projected.bootAnalysis).toEqual(analysis);
+  });
+
   it("filters journal messages on the VM before bootstrap diagnostics leave it", () => {
     const output = execFileSync("python3", ["-I", "-B", "-c", `
 import importlib.util,json,sys

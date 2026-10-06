@@ -296,6 +296,7 @@
       "id": "cloud-runtime-and-dev-kit",
       "include": [
         "scripts/cloud-workspace-validation/**",
+        "scripts/runtime-skew/**",
         "scripts/zsr-qualification/**",
         "scripts/zsr-preview-browser-smoke.ts",
         "scripts/dev-environment/**",

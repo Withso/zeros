@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { runCloudRuntimeUpgradeSmoke } from "./ui-smoke-cloud-runtime-upgrade.mjs";
+import { runCloudWorkspaceRestartSmoke } from "./ui-smoke-cloud-workspace-restart.mjs";
 
 export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
   await page.goto(`${harnessBase}/harness-cloud-workspace.html`);
@@ -107,6 +108,7 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
   await expect(access).toHaveCount(0);
   check("Staff native access uses exact device context, retains snapshots, isolates close and leaves hidden controls inert", true);
   await runCloudWorkspaceSharingSmoke({ page, check, harnessBase });
+  await runCloudWorkspaceRestartSmoke({ page, check, harnessBase });
 }
 
 export async function runCloudWorkspaceSharingSmoke({ page, check, harnessBase }) {

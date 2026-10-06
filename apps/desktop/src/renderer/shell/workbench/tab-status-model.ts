@@ -98,6 +98,8 @@ export interface WorkbenchStatus {
 
 export interface WorkspaceAvailability {
   cloud: boolean;
+  restarting?: boolean;
+  restartFailed?: boolean;
   state?: string;
   connection: ConnectionStatus;
   since: number;
@@ -148,6 +150,10 @@ export function describeWorkspaceAvailability(
   now: number,
 ): WorkbenchStatus | null {
   const workspace = input.cloud ? "cloud workspace" : "Zeros engine";
+  if (input.cloud && input.restarting)
+    return { tone: "pending", message: "Restarting the cloud workspace…" };
+  if (input.cloud && input.restartFailed)
+    return { tone: "error", message: "Couldn't restart this cloud workspace." };
   switch (input.state) {
     case "creating":
     case "provisioning":
@@ -213,6 +219,19 @@ export function describeWorkspaceAvailability(
         : "Reconnecting to the Zeros engine…",
     connectionPhase: input.previouslyConnected ? "reconnecting" : "connecting",
   };
+}
+
+/** Compact runtime status uses the same availability decision and calm clock
+ * as the workbench banner. It never introduces another connection timer. */
+export function describeWorkspaceRuntimeStatus(input: WorkspaceAvailability, now: number): string {
+  if (input.cloud && input.restarting) return "Restarting…";
+  const status = describeWorkspaceAvailability(input, now);
+  if (status?.tone === "error") return "Needs attention";
+  if (["stopped", "sleeping"].includes(input.state ?? "")) return "Sleeping";
+  if (input.state === "stopping") return "Stopping";
+  if (status?.tone === "pending") return "Starting";
+  if (input.state === "archived") return "Archived";
+  return "Running";
 }
 
 export function workbenchFailureDiagnostic(error: unknown): string {

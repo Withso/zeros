@@ -15,6 +15,10 @@ function receipt() { return { version: 1, status: "success", channel: "beta", so
 const run = { id: 1, run_attempt: 1, conclusion: "success", event: "push", head_sha: sha, head_branch: "release/1.2.3", path: ".github/workflows/release-beta.yml", repository: { full_name: "example/zeros" } };
 const config = { sourceSha: sha, branch: "release/1.2.3", repository: "example/zeros" };
 describe("rollout and promotion evidence", () => {
+  it.each(["alpha", "beta", "production"] as const)("withholds a valid %s identity on HTTP 503", async channel => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ ...liveIdentity(), channel }, { status: 503 }));
+    expect(await publicIdentity(channel, fetcher)).toEqual({ present: true, identity: null });
+  });
   it("never silently labels a disabled rollout successful", async () => {
     const unchanged = fakeIdentity(null); unchanged.migrationManifest.mockResolvedValue(manifest);
     expect(await disabledGuard(["docs/example.md"], candidate, unchanged)).toMatchObject({ blocked: false, message: expect.stringContaining("DISABLED") });

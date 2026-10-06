@@ -196,16 +196,26 @@ function parseStartEnvironment(value) {
   };
 }
 
+function parseResidentFence(value, source = false) {
+  return isRecord(value) && exactKeys(value, source ? ["hostId", "engineId", "fence"] : ["hostId", "fence"]) &&
+    UUID_PATTERN.test(value.hostId ?? "") && (!source || UUID_PATTERN.test(value.engineId ?? "")) &&
+    positiveInteger(value.fence) ? { ...value } : null;
+}
+
 export function parseCloudWorkerSupervisorRequest(value) {
   if (
     !isRecord(value) ||
     value.version !== 1 ||
     value.audience !== CLOUD_WORKER_SUPERVISOR_AUDIENCE ||
-    !["status", "update-status", "prepare", "start", "select-runtime"].includes(value.operation)
+    !["status", "update-status", "resident-status", "prepare", "start", "select-runtime"].includes(value.operation)
   ) {
     return null;
   }
-  if (["prepare", "status", "update-status"].includes(value.operation)) {
+  if (value.operation === "prepare" && Object.hasOwn(value, "resident")) {
+    const resident = parseResidentFence(value.resident, true);
+    return resident && exactKeys(value, ["audience", "operation", "resident", "version"]) ? { ...value, resident } : null;
+  }
+  if (["prepare", "status", "update-status", "resident-status"].includes(value.operation)) {
     return exactKeys(value, ["audience", "operation", "version"])
       ? {
           version: 1,
@@ -227,19 +237,22 @@ export function parseCloudWorkerSupervisorRequest(value) {
       "operation",
       "session",
       "version",
+      ...(Object.hasOwn(value, "resident") ? ["resident"] : []),
     ]) ||
     !SESSION_PATTERN.test(value.session ?? "")
   ) {
     return null;
   }
   const environment = parseStartEnvironment(value.environment);
-  return environment
+  const resident = Object.hasOwn(value, "resident") ? parseResidentFence(value.resident) : undefined;
+  return environment && resident !== null
     ? {
         version: 1,
         audience: CLOUD_WORKER_SUPERVISOR_AUDIENCE,
         operation: "start",
         session: value.session,
         environment,
+        ...(resident ? { resident } : {}),
       }
     : null;
 }
@@ -327,6 +340,9 @@ export class CloudWorkerSupervisor {
     engineScope = null,
     setupScope = null,
     verifySelectedRuntime = verifySelectedCloudRuntime,
+    // Legacy images retain their closed helper inventory. This v4-only entry
+    // is part of the immutable runtime bundle, loaded only for explicit opt-in.
+    createResident = async options => new (await import("./cloud-resident-workload.mjs")).CloudResidentWorkload(options),
   } = {}) {
     this.socketPath = socketPath;
     this.runtime = runtime;
@@ -335,6 +351,9 @@ export class CloudWorkerSupervisor {
     this.engineScope = engineScope;
     this.setupScope = setupScope;
     this.verifySelectedRuntime = verifySelectedRuntime;
+    this.createResident = createResident;
+    this.resident = null;
+    this.preparedResident = null;
     this.selectedRuntime = runtime.profile === "v4" ? cloudActiveRuntimeDescriptor(runtime) : null;
     this.binRoot = runtime.binRoot;
     this.server = null;
@@ -346,13 +365,19 @@ export class CloudWorkerSupervisor {
     this.#handlers = Object.freeze(new Map([
       ["status", this.#status.bind(this)],
       ["update-status", this.#updateStatus.bind(this)],
+      ["resident-status", this.#residentStatus.bind(this)],
       ["prepare", this.#prepare.bind(this)],
       ["start", this.#startRuntime.bind(this)],
       ["select-runtime", this.#selectRuntime.bind(this)],
     ]));
   }
 
-  async stopChild() {
+  async stopChild({ preserveWorkload } = {}) {
+    if (preserveWorkload !== undefined) {
+      const witness = await this.resident?.witness();
+      if (this.runtime.profile !== "v4" || witness?.hostId !== preserveWorkload || witness.engineId !== null)
+        throw new Error("Resident workload preservation was not confirmed");
+    }
     const child = this.child;
     let failure;
     try {
@@ -378,7 +403,16 @@ export class CloudWorkerSupervisor {
     // Version-2 images retain and drain the kernel scope even after a broker
     // restart loses its ChildProcess object. Failure cannot mint a new session.
     try {
-      await this.engineScope?.retire();
+      if (preserveWorkload === undefined) {
+        await this.resident?.stop();
+        this.resident = null;
+      }
+    } catch (error) {
+      failure ??= error;
+    }
+    try {
+      if (preserveWorkload === undefined) await this.engineScope?.retire();
+      else await this.engineScope?.retire({ preserveWorkload });
     } catch (error) {
       failure ??= error;
     }
@@ -415,6 +449,7 @@ export class CloudWorkerSupervisor {
         ZEROS_CLOUD_SETUP_BOOT: "1",
         ZEROS_CLOUD_TOKEN: environment.bridgeToken,
         ZEROS_REQUIRE_ACCOUNT: "1",
+        ...(environment.residentB64 ? { ZEROS_RESIDENT_PTY_B64: environment.residentB64 } : {}),
       },
     });
     await new Promise((resolve, reject) => {
@@ -459,11 +494,24 @@ export class CloudWorkerSupervisor {
       : supervisorResponse("rejected");
   }
 
-  async #prepare() {
+  async #residentStatus() {
+    if (this.runtime.profile !== "v4") return rejectSupervisorRequest();
+    return supervisorResponse("ready", { resident: this.resident ? await this.resident.witness() : null });
+  }
+
+  async #prepare(request) {
+    let resident = null;
+    if (request.resident) {
+      if (this.runtime.profile !== "v4" || !this.resident) return rejectSupervisorRequest();
+      await this.resident.witness();
+      resident = await this.resident.detach(request.resident);
+    }
     this.session = null;
-    await this.stopChild();
+    this.preparedResident = null;
+    await this.stopChild(resident ? { preserveWorkload: resident.hostId } : undefined);
+    this.preparedResident = resident;
     this.session = `zsp_${randomBytes(32).toString("base64url")}`;
-    return supervisorResponse("prepared", { session: this.session });
+    return supervisorResponse("prepared", { session: this.session, ...(resident ? { resident } : {}) });
   }
 
   #selectRuntime(request) {
@@ -480,9 +528,36 @@ export class CloudWorkerSupervisor {
 
   async #startRuntime(request) {
     if (!this.#sessionMatches(request.session)) return rejectSupervisorRequest();
+    const retained = this.preparedResident;
+    const requested = request.resident;
+    const execution = request.environment?.runtime?.execution;
+    if (retained && (!requested || requested.hostId !== retained.hostId || requested.fence <= retained.fence ||
+      execution?.workspaceId !== retained.workspaceId || execution?.organizationId !== retained.organizationId))
+      return rejectSupervisorRequest();
+    if (requested && this.runtime.profile !== "v4") return rejectSupervisorRequest();
     this.session = null;
-    await this.stopChild();
-    const pid = await this.launch(request.environment);
+    this.preparedResident = null;
+    await this.stopChild(retained ? { preserveWorkload: retained.hostId } : undefined);
+    let environment = request.environment;
+    if (requested) {
+      if (!this.resident) {
+        const active = this.verifySelectedRuntime(this.selectedRuntime);
+        if (Object.keys(this.selectedRuntime).some(key => active[key] !== this.selectedRuntime[key]))
+          throw new Error("Resident runtime selection changed");
+        this.resident = await this.createResident({ runtime: { ...active, profile: "v4",
+          node: `${active.root}/bin/node`, libRoot: `${active.root}/lib/zeros` },
+          hostId: requested.hostId, organizationId: execution.organizationId, workspaceId: execution.workspaceId });
+        await this.resident.start(environment.runtimeB64);
+      }
+      const authority = { organizationId: execution.organizationId, workspaceId: execution.workspaceId,
+        engineId: environment.runtime.engine.instanceId, generation: execution.generation,
+        fence: requested.fence, token: randomBytes(32).toString("base64url") };
+      await this.resident.enroll(authority);
+      environment = { ...environment, residentB64: Buffer.from(JSON.stringify({
+        protocol: "zeros.resident-pty/v1", hostId: requested.hostId, authority,
+      })).toString("base64url") };
+    }
+    const pid = await this.launch(environment);
     return supervisorResponse("started", { pid });
   }
 
