@@ -190,20 +190,28 @@ export function createGitHubApi({
   };
 }
 
-export async function paginate(api, endpoint, key = null, maxPages = 10) {
+export async function paginate(
+  api,
+  endpoint,
+  key = null,
+  maxPages = 10,
+  perPage = 100,
+) {
   const rows = [];
   for (let page = 1; page <= maxPages; page++) {
     const result = await api.get(
       endpoint +
         (endpoint.includes("?") ? "&" : "?") +
-        "per_page=100&page=" +
+        "per_page=" +
+        perPage +
+        "&page=" +
         page,
     );
     const batch = key ? result[key] : result;
     if (!Array.isArray(batch))
       throw new Error("Invalid GitHub recovery collection");
     rows.push(...batch);
-    if (batch.length < 100) return rows;
+    if (batch.length < perPage) return rows;
   }
   throw new Error(
     "GitHub recovery pagination bound exceeded; no writes are safe",
