@@ -879,8 +879,8 @@ the immutable event SHA, including on reruns.
 
 Ancestry uses the GitHub compare API with immutable SHAs: `identical` or `ahead`
 is accepted only when the merge base is the base SHA. A rewritten main that
-removes the candidate, missing identity, malformed comparison or compare error
-fails red. Run IDs, publication times and identical input trees do not prove
+removes the candidate, missing main/admission identity, malformed comparison or
+compare error fails red. Run IDs, publication times and identical input trees do not prove
 Git ancestry. Main advancing to a descendant after admission allows the same
 candidate to finish; all exact-source CI, services/worker/final receipts and
 live API/Pages/schema/worker checks remain required.
@@ -911,11 +911,13 @@ unreadable/malformed identities are unknown, not a zero/genesis destination.
 The strict migrator still rejects unknown or newer schema rows; neither stage
 rolls schema back or authorizes a controlled migration.
 
-A known newer or divergent destination can produce the existing green
-pre-mutation skip only at the initial barrier, after complete retained parent
-job evidence proves no destination has started. Unknown reads remain red.
-After admission, every conflict or unknown check remains red; reconcile actual
-provider state and retained receipts before retrying. Locks remain
+A newer, divergent, unreadable or malformed destination can produce the existing
+green pre-mutation skip only at the initial barrier, after complete retained
+parent job evidence proves no destination has started. It never issues an
+admission receipt. Main ancestry, authentication, admission proof and compare
+errors remain red. After admission or a possible mutation, every conflict or
+unknown check remains red; reconcile actual provider state and retained receipts
+before retrying. Locks remain
 `hosted-mutation-<channel>` with cancellation disabled, and automatic candidates
 remain serialized by the existing `release-alpha` workflow lock.
 

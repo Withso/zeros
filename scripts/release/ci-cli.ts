@@ -35,7 +35,9 @@ async function main() {
   } catch (error) {
     if (barrier && (error instanceof CandidateSupersededError || error instanceof AlphaAdmissionRejectedError) && await github.alphaBarrierUnmutated()) {
       await ready(false);
-      console.log("::notice::Automatic Alpha candidate was superseded before any destination mutation; downstream publication skipped.");
+      console.log(error instanceof CandidateSupersededError
+        ? "::notice::Automatic Alpha candidate was superseded before any destination mutation; downstream publication skipped."
+        : "::notice::Automatic Alpha candidate was not admitted before any destination mutation; downstream publication skipped.");
       return;
     }
     throw error;

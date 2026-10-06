@@ -266,4 +266,40 @@ describe("exact-source CI CLI mutation authority", () => {
     else await expect(readFile(output)).rejects.toMatchObject({ code: "ENOENT" });
     expect(process.exitCode).toBe(unmutated ? undefined : 1);
   });
+
+  it.each([true, false])("keeps an unavailable destination unadmitted with unmutated=%s", async unmutated => {
+    const output = await automaticBarrier();
+    process.chdir(path.dirname(output));
+    vi.stubEnv("ZEROS_ALPHA_FORWARD_ONLY", "enabled");
+    const { AlphaAdmissionRejectedError } = await import("./alpha-frontier");
+    mocked.assertCurrent.mockRejectedValue(new AlphaAdmissionRejectedError("Alpha live API/schema identity is unavailable"));
+    mocked.alphaBarrierUnmutated.mockResolvedValue(unmutated);
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(unmutated ? console.log : console.error).toHaveBeenCalledOnce());
+    if (unmutated) {
+      expect(await readFile(output, "utf8")).toBe("ready=false\n");
+      expect(console.log).toHaveBeenCalledWith(expect.stringMatching(/^::notice::.*not admitted.*before.*mutation/));
+      expect(console.error).not.toHaveBeenCalled();
+    } else {
+      await expect(readFile(output)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(console.log).not.toHaveBeenCalled();
+    }
+    await expect(readFile(".context/release/alpha-admission.json")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(process.exitCode).toBe(unmutated ? undefined : 1);
+    expect(mocked.requiredChecks).not.toHaveBeenCalled();
+  });
+
+  it.each(["--verify", "worker"])("keeps an unavailable destination red outside initial admission (%s)", async location => {
+    const output = await automaticBarrier();
+    if (location === "--verify") process.argv[2] = location;
+    else vi.stubEnv("GITHUB_JOB", location);
+    const { AlphaAdmissionRejectedError } = await import("./alpha-frontier");
+    mocked.assertCurrent.mockRejectedValue(new AlphaAdmissionRejectedError("Alpha live API/schema identity is unavailable"));
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(console.error).toHaveBeenCalledOnce());
+    expect(process.exitCode).toBe(1);
+    expect(console.log).not.toHaveBeenCalled();
+    expect(mocked.alphaBarrierUnmutated).not.toHaveBeenCalled();
+    await expect(readFile(output)).rejects.toMatchObject({ code: "ENOENT" });
+  });
 });

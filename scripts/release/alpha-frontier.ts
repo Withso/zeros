@@ -41,25 +41,29 @@ export function alphaAncestry(read: Read) {
   };
 }
 
-/** Only the initial, proven unmutated barrier may convert this known frontier
- * conflict into a green skip. Downstream callers leave it red. */
+/** Only the initial, proven unmutated barrier may skip an unsafe or unavailable
+ * live destination. Ancestry errors and downstream callers remain red. */
 export class AlphaAdmissionRejectedError extends PromotionError {
-  constructor() { super("An Alpha destination is newer than or divergent from this candidate; forward-only admission refused"); }
+  constructor(reason = "An Alpha destination is newer than or divergent from this candidate; forward-only admission refused") { super(reason); }
+}
+
+function requireDestination(condition: unknown, reason: string): asserts condition {
+  if (!condition) throw new AlphaAdmissionRejectedError(reason);
 }
 
 async function alphaTagSource(read: Read) {
   const ref = await read("/git/ref/tags/alpha");
-  requireCheck(ref?.ref === "refs/tags/alpha", "Alpha rolling tag identity is unavailable");
+  requireDestination(ref?.ref === "refs/tags/alpha", "Alpha rolling tag identity is unavailable");
   let object = ref.object;
   const seen = new Set<string>();
   for (let depth = 0; depth <= 5; depth++) {
-    requireCheck(object && typeof object.sha === "string" && SHA.test(object.sha), "Alpha rolling tag source is invalid");
+    requireDestination(object && typeof object.sha === "string" && SHA.test(object.sha), "Alpha rolling tag source is invalid");
     if (object.type === "commit") return object.sha as string;
-    requireCheck(object.type === "tag" && depth < 5 && !seen.has(object.sha), "Alpha rolling tag does not resolve to a bounded commit identity");
+    requireDestination(object.type === "tag" && depth < 5 && !seen.has(object.sha), "Alpha rolling tag does not resolve to a bounded commit identity");
     seen.add(object.sha);
     object = (await read(`/git/tags/${object.sha}`))?.object;
   }
-  throw new PromotionError("Alpha rolling tag source is unavailable");
+  throw new AlphaAdmissionRejectedError("Alpha rolling tag source is unavailable");
 }
 
 export async function assertAlphaDestinations(candidate: { repository: string; sourceSha: string }, env: NodeJS.ProcessEnv,
@@ -73,25 +77,29 @@ export async function assertAlphaDestinations(candidate: { repository: string; s
     publicPagesSource(CHANNELS.alpha.ops, "ops", fetcher),
     alphaTagSource(read),
     previousReleaseLedger(candidate.repository, "alpha", env.GH_TOKEN, fetcher),
-  ]);
+  ]).catch(error => {
+    if (error instanceof AlphaAdmissionRejectedError) throw error;
+    throw new AlphaAdmissionRejectedError("Alpha live destination identity is unavailable; forward-only admission refused");
+  });
   const identity = observed.identity;
-  requireCheck(identity, "Alpha live API/schema identity is unavailable; forward-only admission refused");
-  requireCheck(!identity.cloud.enabled || identity.worker,
+  requireDestination(identity, "Alpha live API/schema identity is unavailable; forward-only admission refused");
+  requireDestination(!identity.cloud.enabled || identity.worker,
     "Alpha active worker identity is unavailable; forward-only admission refused");
-  requireCheck(app && ops, "Alpha live Pages identity is unavailable; forward-only admission refused");
+  requireDestination(app && ops, "Alpha live Pages identity is unavailable; forward-only admission refused");
   const parsed = ReleaseLedger.safeParse(previous);
-  requireCheck(parsed.success && parsed.data.channel === "alpha" && parsed.data.releases.length > 0,
+  requireDestination(parsed.success && parsed.data.channel === "alpha" && parsed.data.releases.length > 0,
     "Alpha live release ledger is unavailable; forward-only admission refused");
   const entry = parsed.data.releases.at(-1)!;
   // Reuse the feed's version, duplicate and idempotency checks. Missing feeds
   // or malformed ledgers are unknown, never fabricated genesis frontiers.
-  buildReleaseLedger("alpha", parsed.data, entry);
+  try { buildReleaseLedger("alpha", parsed.data, entry); }
+  catch { throw new AlphaAdmissionRejectedError("Alpha live release ledger is invalid; forward-only admission refused"); }
   const sources = [identity.sourceSha, app, ops, tag, entry.sourceSha, ...(identity.worker ? [identity.worker.sourceSha] : [])];
   const accepted = await Promise.all(sources.map(source => ancestor(source, candidate.sourceSha)));
   if (accepted.some(value => !value)) throw new AlphaAdmissionRejectedError();
   // Feed assets precede the tag update. The same admitted parent's parallel
   // runtime publisher can observe that intermediate write; both identities
   // must still be <= X and at least one must identify this admitted X.
-  requireCheck(tag === entry.sourceSha || env.GITHUB_JOB !== "ci" && (tag === candidate.sourceSha || entry.sourceSha === candidate.sourceSha),
+  requireDestination(tag === entry.sourceSha || env.GITHUB_JOB !== "ci" && (tag === candidate.sourceSha || entry.sourceSha === candidate.sourceSha),
     "Alpha rolling tag and release ledger disagree; reconcile publication before admission");
 }

@@ -2,6 +2,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CandidateSupersededError } from "./alpha-ci";
+import { AlphaAdmissionRejectedError } from "./alpha-frontier";
 import { PromotionError } from "./contracts";
 import { githubClient } from "./github";
 
@@ -170,14 +171,24 @@ describe("Stage 2 automatic Alpha admission", () => {
     for (const sha of [descendant, divergent, "invalid"]) {
       const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" }); test.state.head = descendant;
       test.state[destination] = sha;
-      await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(PromotionError);
+      await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(AlphaAdmissionRejectedError);
     }
   });
 
-  it.each(destinations)("refuses unreadable %s identity without optimistic admission", async destination => {
+  it.each(destinations)("classifies unreadable %s identity for a proven unmutated barrier skip", async destination => {
     const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
     test.state.unreadable = destination;
-    await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(PromotionError);
+    await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(AlphaAdmissionRejectedError);
+  });
+
+  it("keeps destination comparison errors red at initial admission", async () => {
+    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
+    const original = test.fetcher.getMockImplementation()!;
+    test.fetcher.mockImplementation(async (input, init) => String(input).endsWith(`/compare/${ancestor}...${sourceSha}`)
+      ? Response.json({}, { status: 403 }) : original(input, init));
+    const error = await test.client.assertCurrent().catch(error => error);
+    expect(error).toBeInstanceOf(PromotionError);
+    expect(error).not.toBeInstanceOf(AlphaAdmissionRejectedError);
   });
 
   it("peels annotated Alpha tags and refuses non-commit tag targets", async () => {
