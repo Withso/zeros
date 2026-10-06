@@ -15,7 +15,7 @@ import {
 } from "../../state/read-caches";
 import { useWorkspaceDispatch } from "../../state/store";
 import { useProjectForFolder } from "../../state/use-projects";
-import { Tooltip, toast } from "../../shared/ui/primitives";
+import { Tooltip } from "../../shared/ui/primitives";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -28,7 +28,7 @@ import {
   waitForPendingDesignEdits,
 } from "./state/design-workspace-cache";
 import { triggerGitRefresh } from "../../shell/use-git-refresh-key";
-import { errorMessage } from "./design-workspace-error";
+import { reportDesignDirectoryFailure } from "./design-directory-failure";
 
 /** Selecting a directory changes only this workspace's personal pointer.
  * Rename/adoption remain explicit repository lifecycle actions in Settings.
@@ -89,9 +89,7 @@ export function DesignDirectoryMenu({
       invalidateDesignDirectoryTargetReadCache();
       triggerGitRefresh(workspace.path);
     } catch (error) {
-      toast.error("Couldn't open Design directory", {
-        description: errorMessage(error),
-      });
+      reportDesignDirectoryFailure(workspace.id, "open", error);
     } finally {
       if (mounted.current) setBusy(false);
     }

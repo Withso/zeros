@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { gitProcessOptions } from "../git/git-execution-identity";
+import { gitExecutionIdentity, gitProcessOptions } from "../git/git-execution-identity";
 import { readDesignStorageFile } from "./metadata-storage";
 
 const START = "# Zeros Design metadata (managed by Zeros)";
@@ -68,6 +68,21 @@ export function designGitignoreSource(
 
 const visibilityChecks = new Map<string, string>();
 
+/** Publish only copied ignore inputs, leaves first. The engine's private
+ * mkdtemp root stays inaccessible to the worker until every child is ready.
+ * Never follow a link or grant access to the repository/engine authority. */
+function grantIgnoreTree(directory: string, identity: { uid: number; gid: number }): void {
+  const fd = openSync(directory, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(fd);
+    if (stat.isDirectory()) {
+      for (const name of readdirSync(directory)) grantIgnoreTree(path.join(directory, name), identity);
+    } else if (!stat.isFile()) throw new Error("Invalid Design ignore probe input.");
+    fchmodSync(fd, stat.isDirectory() ? 0o700 : 0o600);
+    fchownSync(fd, identity.uid, identity.gid);
+  } finally { closeSync(fd); }
+}
+
 /** Root rules override global/local excludes, but a nested .gitignore has
  * higher priority. Check with Git itself and invalidate when an ancestor rule
  * changes; warm document saves do not spawn a Git process. */
@@ -90,7 +105,9 @@ export function assertDesignFilesNotIgnored(
   // A private, minimal worktree copies only ignore inputs; no authored file or
   // index is changed to test visibility, including nested rule precedence.
   if (plannedRootSource !== undefined && plannedRootSource !== readDesignStorageFile(workspace, ".gitignore")) {
-    const temporary = mkdtempSync(path.join(tmpdir(), "zeros-design-ignore-"));
+    const identity = gitExecutionIdentity();
+    // A cloud engine's TMPDIR may itself be private to its UID.
+    const temporary = mkdtempSync(path.join(identity ? "/tmp" : tmpdir(), "zeros-design-ignore-"));
     try {
       writeFileSync(path.join(temporary, ".gitignore"), plannedRootSource);
       for (const file of ignores) {
@@ -104,6 +121,7 @@ export function assertDesignFilesNotIgnored(
       const gitDir = execFileSync("git", ["rev-parse", "--absolute-git-dir"], {
         cwd: workspace, encoding: "utf8", timeout: 10_000, ...gitProcessOptions(),
       }).trim();
+      if (identity) grantIgnoreTree(temporary, identity);
       checkIgnored(temporary, files, ["--git-dir=" + gitDir, "--work-tree=" + temporary]);
       return;
     } finally {

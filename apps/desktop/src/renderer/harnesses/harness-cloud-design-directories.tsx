@@ -112,6 +112,7 @@ const states = new Map(
 const requests: Array<{ op: string; params: Record<string, unknown> }> = [];
 let release: (() => void) | undefined;
 let holdNextBrowse = false;
+let failNextCreate = false;
 window.__ZEROS_NATIVE__ = {
   invoke: async () => {
     throw new Error("Native picker must never be called");
@@ -121,6 +122,7 @@ window.__ZEROS_NATIVE__ = {
 Object.assign(window, {
   cloudDesignFixture: {
     requests,
+    failNextCreate: () => { failNextCreate = true; },
     get pending() {
       return !!release;
     },
@@ -141,6 +143,10 @@ setActiveBridge({
   request: async (message: { op: string; params: Record<string, unknown> }) => {
     const { op, params } = message;
     requests.push({ op, params });
+    if (op === "design.createDirectory" && failNextCreate) {
+      failNextCreate = false;
+      throw new Error("Command failed: git --git-dir=/srv/zeros/workspace/.git --work-tree=/tmp/zeros-design-ignore-fixture check-ignore: fatal: this operation must be run in a work tree");
+    }
     if (local && op === "settings.write")
       return { type: "WORKSPACE_RESPONSE", op, result: { ok: true } };
     const state = states.get(String(params.workspaceId));
