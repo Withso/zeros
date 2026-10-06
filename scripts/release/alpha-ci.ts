@@ -94,8 +94,8 @@ export async function alphaRequiredChecks(candidate: Candidate, read: Read): Pro
       await read(`/actions/workflows/${check.file}/runs?head_sha=${candidate.sourceSha}&event=push&per_page=100`));
     const evidence = { workflow: check.name, runId: run?.id ?? 0, attempt: run?.run_attempt ?? 0, succeeded: false };
     if (!run) return evidence;
-    // Main Preflight coalesces pushes: a newer push replaces a pending run, so
-    // its gate never reports. A failed gate or a completed attempt without a
+    // Historical coalesced Preflight runs may have been replaced while pending,
+    // so their gates never reported. A failed gate or a completed attempt without a
     // green gate also cannot succeed without a rerun. Once main has moved on,
     // supersede such a candidate instead of waiting out the barrier; only the
     // unmutated initial barrier turns that into a green skip.
