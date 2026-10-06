@@ -470,13 +470,16 @@ describe("DaytonaCloudWorkspaceSetupExecutor", () => {
     expect(broker.revoke).toHaveBeenCalledWith(grant, "failed");
   });
 
-  it("maps allowlisted helper failures without trusting arbitrary retryability", async () => {
+  it.each([
+    ["repository_temporarily_unavailable", "setup_repository_unavailable", true],
+    ["repository_history_limit", "setup_repository_history_limit", false],
+  ] as const)("maps allowlisted helper failure %s without trusting arbitrary retryability", async (helperCode, code, retryable) => {
     const { broker, executor, grant, input, runner } = harness();
     vi.mocked(runner.execute).mockResolvedValue({
       exitCode: 75,
       output: JSON.stringify({
         audience: "zeros-cloud-workspace-setup-result-v1",
-        code: "repository_temporarily_unavailable",
+        code: helperCode,
         outcome: "error",
         version: 1,
       }),
@@ -486,8 +489,8 @@ describe("DaytonaCloudWorkspaceSetupExecutor", () => {
     await expect(
       executor.execute(input, new AbortController().signal),
     ).rejects.toMatchObject({
-      code: "setup_repository_unavailable",
-      retryable: true,
+      code,
+      retryable,
     });
     expect(broker.revoke).toHaveBeenCalledWith(grant, "failed");
   });

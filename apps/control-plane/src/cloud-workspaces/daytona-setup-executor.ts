@@ -125,6 +125,10 @@ const HELPER_FAILURES: Readonly<
     code: "setup_repository_revision_invalid",
     retryable: false,
   },
+  repository_history_limit: {
+    code: "setup_repository_history_limit",
+    retryable: false,
+  },
   repository_temporarily_unavailable: {
     code: "setup_repository_unavailable",
     retryable: true,

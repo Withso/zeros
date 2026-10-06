@@ -13,6 +13,28 @@ import {
 import { WorkbenchEmptyState, WorkbenchTabBanner } from "../tab-status";
 
 describe("workbench status contract", () => {
+  it("offers a neutral notice only below errors and renders its action once", () => {
+    const sources = new WorkbenchStatusSources();
+    const action = { label: "Fetch full history", busyLabel: "Fetching…", run: vi.fn(), busy: true };
+    const notice = { tone: "neutral" as const, message: "Shallow Git history — older commits and comparisons may be incomplete.", action };
+    sources.update("history", { pending: false, notice });
+    expect(sources.snapshot().notice).toBe(notice);
+    const markup = renderToStaticMarkup(createElement(WorkbenchTabBanner, {
+      type: "changes", status: { tone: notice.tone, message: notice.message }, active: true, busy: true, retry: vi.fn(), noticeAction: action,
+    }));
+    expect(markup.match(/data-workbench-banner=/g)).toHaveLength(1);
+    expect(markup).toContain('data-tone="neutral"');
+    expect(markup).toContain('aria-label="Fetch full history"');
+    expect(markup).toContain('aria-busy="true"');
+    expect(markup).toContain("Fetching…");
+    sources.update("read", { pending: false, error: "read failed" });
+    expect(sources.snapshot().notice).toBeNull();
+    sources.remove("read");
+    expect(sources.snapshot().notice).toBe(notice);
+    sources.update("history", { pending: false, notice, active: false });
+    expect(sources.snapshot().notice).toBeNull();
+  });
+
   it.each(Object.keys(TAB_TYPE_META) as WorkbenchTabType[])(
     "gives %s one banner and a quiet centre",
     (type) => {

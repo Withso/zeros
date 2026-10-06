@@ -94,6 +94,7 @@ const BLOB_BODY_BYTES = 64 * 1024 * 1024;
 const SetupAdmissionBody = z
   .object({
     materialVersion: z.literal(2).optional(),
+    checkoutSourceVersion: z.literal(1).optional(),
     runtime: CloudRuntimeWitnessSchema.optional(),
     workspaceId: UUID,
     organizationId: UUID,

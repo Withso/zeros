@@ -291,6 +291,17 @@ export function workbenchStatusKey(
   ]);
 }
 
+export interface WorkbenchNotice {
+  tone: "neutral";
+  message: string;
+  action?: {
+    label: string;
+    busyLabel: string;
+    busy: boolean;
+    run: () => void | Promise<unknown>;
+  };
+}
+
 export interface WorkbenchSource {
   error?: unknown;
   pending: boolean;
@@ -298,6 +309,8 @@ export interface WorkbenchSource {
   hasContent?: boolean;
   retry?: () => void | Promise<unknown>;
   active?: boolean;
+  /** Informational state, below every availability/read failure. */
+  notice?: WorkbenchNotice;
 }
 
 interface StatusSnapshot {
@@ -305,6 +318,7 @@ interface StatusSnapshot {
   hasContent: boolean;
   busy: boolean;
   pending: boolean;
+  notice: WorkbenchNotice | null;
 }
 
 /** One frame owns its exact target's sources. Old callbacks hold the old
@@ -319,6 +333,7 @@ export class WorkbenchStatusSources {
     hasContent: false,
     busy: false,
     pending: false,
+    notice: null,
   };
   snapshot = (): StatusSnapshot => this.value;
   get unused(): boolean {
@@ -357,16 +372,18 @@ export class WorkbenchStatusSources {
     const pending = sources.some(
       (source) => source.active !== false && source.pending,
     );
+    const notice = failure ? null : sources.find(source => source.notice)?.notice ?? null;
     if (
       this.value.failure === failure &&
       this.value.hasContent === hasContent &&
       this.value.busy === busy &&
-      this.value.pending === pending
+      this.value.pending === pending &&
+      this.value.notice === notice
     ) {
       this.flightSettled?.();
       return;
     }
-    this.value = { failure, hasContent, busy, pending };
+    this.value = { failure, hasContent, busy, pending, notice };
     for (const listener of this.listeners) listener();
     this.flightSettled?.();
   }

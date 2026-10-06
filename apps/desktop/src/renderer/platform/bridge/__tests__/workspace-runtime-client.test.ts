@@ -246,10 +246,10 @@ describe("workspace runtime routing", () => {
     expect(nextPeer.release).not.toHaveBeenCalled();
     client.dispose();
   });
-  it.each(["git.fetch", "git.pull"])("authorizes managed %s without an ambient VM credential", async op => {
+  it.each([["git.fetch", false], ["git.fetch", true], ["git.pull", false]] as const)("authorizes managed %s (unshallow=%s) without an ambient VM credential", async (op, unshallow) => {
     const peer = fakePeer(a), prepareGithubWrite = vi.fn(async () => "test-write-grant");
     const client = new WorkspaceRuntimeClient({ open: async () => peer.peer, workspaces: () => [], prepareGithubWrite });
-    const params = { workspaceId: "local-main", ...(op === "git.pull" ? { strategy: "rebase", autoStash: true } : {}) };
+    const params = { workspaceId: "local-main", ...(op === "git.pull" ? { strategy: "rebase", autoStash: true } : {}), ...(unshallow ? { unshallow: true } : {}) };
     await client.request({ type: "WORKSPACE_REQUEST", op, params: { ...params, workspaceId: cloudScopedId(a, "local-main") } } as never);
     expect(prepareGithubWrite).toHaveBeenCalledWith(a, op, params);
     expect(peer.request).toHaveBeenCalledWith(expect.objectContaining({ op, params: { ...params, $cloudGithubWriteGrant: "test-write-grant" } }), expect.anything());

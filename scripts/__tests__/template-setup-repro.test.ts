@@ -1172,7 +1172,7 @@ print(json.dumps({'network':all(c[0][:3]==['/usr/bin/unshare','--net','--'] for 
       expect(result.sites).toContainEqual({
         source: "cloud-computer-checkout.mjs",
         function: "walk",
-        line: 104,
+        line: 123,
       });
       expect(result.observed).toMatchObject({
         type: "symlink",

@@ -77,6 +77,23 @@ const ref = z
         .some((part) => part.startsWith(".") || part.endsWith(".lock")),
   );
 
+/** Accepted creation metadata; the pinned commit is never a target branch. */
+const checkoutBranch = ref.refine(value => value !== "@" && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(value));
+export const CloudWorkspaceCheckoutSourceSchema = z.object({
+  kind: z.enum(["default", "branch", "pull_request", "commit"]),
+  revision: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
+  headBranch: checkoutBranch.nullable(),
+  targetBranch: checkoutBranch,
+  pullRequest: z.object({
+    number: z.number().int().min(1).max(2_147_483_647),
+    url: z.string().max(2048).regex(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/),
+    state: z.enum(["draft", "ready", "closed", "merged"]),
+  }).strict().nullable(),
+}).strict().refine(value => (value.kind === "commit" ? value.headBranch === null : value.headBranch !== null) &&
+  (value.kind !== "pull_request" || value.pullRequest !== null) &&
+  (value.kind !== "default" || (value.headBranch === value.targetBranch && value.pullRequest === null)));
+export type CloudWorkspaceCheckoutSource = z.infer<typeof CloudWorkspaceCheckoutSourceSchema>;
+
 export const CloudComputerV2RepositorySchema = z
   .object({
     /** GitHub's canonical numeric repository ID, validated with the actor's source proof. */

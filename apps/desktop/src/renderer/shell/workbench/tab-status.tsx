@@ -29,6 +29,7 @@ import {
   type WorkbenchStatusSources,
   type WorkbenchSource,
   type WorkbenchStatus,
+  type WorkbenchNotice,
 } from "./tab-status-model";
 import type { WorkbenchTab, WorkbenchTabType } from "./tab-model";
 
@@ -72,6 +73,7 @@ export function WorkbenchTabBanner({
   retry,
   type,
   singleFile = false,
+  noticeAction,
 }: {
   status: WorkbenchStatus | null;
   active: boolean;
@@ -79,6 +81,7 @@ export function WorkbenchTabBanner({
   retry: () => void;
   type: WorkbenchTabType;
   singleFile?: boolean;
+  noticeAction?: WorkbenchNotice["action"];
 }) {
   // Keep this element (and its live region) mounted through recovery, retry,
   // and tone changes. Only message text mutations trigger announcements.
@@ -127,7 +130,7 @@ export function WorkbenchTabBanner({
           {status?.message}
         </span>
       </span>
-      {status?.action && (
+      {(status?.action || noticeAction) && (
         <Button
           variant="ghost"
           size="compact"
@@ -135,13 +138,13 @@ export function WorkbenchTabBanner({
           disabled={busy || !active}
           aria-busy={busy || undefined}
           aria-label={
-            status.action === "Retry"
+            noticeAction?.label ?? (status?.action === "Retry"
               ? `Retry loading ${type === "files" && singleFile ? "this file" : WORKBENCH_STATUS_ADAPTERS[type].noun}`
-              : "Open workspace Setup"
+              : "Open workspace Setup")
           }
-          onClick={retry}
+          onClick={noticeAction ? () => { void noticeAction.run(); } : retry}
         >
-          {busy ? "Retrying…" : status.action}
+          {busy ? noticeAction?.busyLabel ?? "Retrying…" : noticeAction?.label ?? status?.action}
         </Button>
       )}
     </div>
@@ -204,6 +207,7 @@ export function WorkbenchTabFrame({
   if (status?.action === "Open Setup" && tab.terminalId === SETUP_SUBTAB)
     status = { ...status, action: undefined };
   lastStatus.current = { key, status };
+  const notice = !status && availability.connection === "connected" ? snapshot.notice : null;
   const blocked = status !== null && !snapshot.hasContent;
   const retry = useCallback(() => {
     if (!visible) return;
@@ -239,9 +243,10 @@ export function WorkbenchTabFrame({
       >
         <div ref={setToolbar} data-workbench-toolbar="" className="shrink-0" />
         <WorkbenchTabBanner
-          status={status}
+          status={status ?? (notice ? { tone: notice.tone, message: notice.message } : null)}
           active={visible}
-          busy={snapshot.busy}
+          busy={snapshot.busy || notice?.action?.busy === true}
+          noticeAction={notice?.action}
           retry={retry}
           type={tab.type}
           singleFile={!!tab.filePath}
@@ -335,8 +340,8 @@ export function WorkbenchTabStatusProvider({
   );
 }
 
-/** Publish only persistent read/availability failures. Action outcomes keep
- * their existing toasts. A source must provide an awaitable retry when possible. */
+/** Publish persistent read failures or optional neutral notices. Action errors
+ * keep their existing toasts. Provide an awaitable retry when possible. */
 export function useWorkbenchStatusSource(
   source: WorkbenchSource,
   owner?: string,
@@ -353,7 +358,7 @@ export function useWorkbenchStatusSource(
   );
   retry.current = source.retry;
   const retrySource = useCallback(() => retry.current?.(), [retry]);
-  const { error, pending, primary, hasContent, active } = source;
+  const { error, pending, primary, hasContent, active, notice } = source;
   useLayoutEffect(() => {
     if (!context) return;
     context.sources.update(id, {
@@ -363,8 +368,9 @@ export function useWorkbenchStatusSource(
       primary,
       hasContent,
       retry: retrySource,
+      notice,
     });
-  }, [context, id, error, pending, primary, hasContent, retrySource, active]);
+  }, [context, id, error, pending, primary, hasContent, retrySource, active, notice]);
   useLayoutEffect(
     () => () => context?.sources.remove(id),
     [context?.sources, id],

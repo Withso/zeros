@@ -13,6 +13,8 @@ import { WorkbenchTabFrame } from "./tab-status";
 import { useSourceTarget } from "./tabs/changes-tab";
 import { useChangesFilter } from "./tabs/changes-filter-store";
 import { scopeIdentity } from "./tabs/changes-scope";
+import { CloudHistoryNotice } from "../pr/cloud-history-notice";
+import type { Workspace } from "../../platform/git";
 
 interface TabBodyProps {
   tab: WorkbenchTab;
@@ -41,7 +43,8 @@ function TabContentFrame({
   active,
   scope,
   statusTarget,
-}: TabBodyProps & { statusTarget?: string }) {
+  cloudHistoryWorkspace,
+}: TabBodyProps & { statusTarget?: string; cloudHistoryWorkspace?: Workspace }) {
   const Body = TAB_BODY_MAP[tab.type];
   const folder = useWorkspaceStore(selectActiveFolder);
   return (
@@ -51,18 +54,21 @@ function TabContentFrame({
       active={active}
       statusTarget={statusTarget}
     >
+      {cloudHistoryWorkspace?.placement === "cloud" && (
+        <CloudHistoryNotice workspace={cloudHistoryWorkspace} active={active} />
+      )}
       <Body tab={tab} active={active} scope={scope} />
     </WorkbenchTabFrame>
   );
 }
 
 function ChangesTabContent(props: TabBodyProps) {
-  const { changesTarget } = useSourceTarget();
+  const { changesTarget, workspace } = useSourceTarget();
   const filter = useChangesFilter(changesTarget ?? "");
   const statusTarget = changesTarget
     ? JSON.stringify([changesTarget, scopeIdentity(filter.scope), filter.turn])
     : undefined;
-  return <TabContentFrame {...props} statusTarget={statusTarget} />;
+  return <TabContentFrame {...props} statusTarget={statusTarget} cloudHistoryWorkspace={workspace ?? undefined} />;
 }
 
 function ReviewTabContent(props: TabBodyProps) {
@@ -70,7 +76,7 @@ function ReviewTabContent(props: TabBodyProps) {
   const statusTarget = workspace
     ? JSON.stringify([workspace.id, workspace.prNumber, props.tab.reviewSubtab])
     : undefined;
-  return <TabContentFrame {...props} statusTarget={statusTarget} />;
+  return <TabContentFrame {...props} statusTarget={statusTarget} cloudHistoryWorkspace={workspace ?? undefined} />;
 }
 
 // Only comparison/review bodies subscribe to their additional target stores.

@@ -11,7 +11,7 @@ import type { CloudGitAuthor } from "@zeros/protocol/cloud-agent-execution";
 
 afterEach(() => vi.restoreAllMocks());
 
-it.each(["git.fetch", "git.pull"])("composes the grant and any commit author for managed %s", async op => {
+it.each([["git.fetch", false], ["git.fetch", true], ["git.pull", false]] as const)("composes the grant and any commit author for managed %s (unshallow=%s)", async (op, unshallow) => {
   const engine = new ZerosEngine({ root: "/tmp/zeros-v2-test-managed-git", port: 29920 });
   const state = engine as unknown as {
     cloudWorker: object;
@@ -37,8 +37,10 @@ it.each(["git.fetch", "git.pull"])("composes the grant and any commit author for
   const client: TransportClient = { id: "cloud", kind: "cloud", accountUserId: "actor", authorized: () => true,
     cloudActor: { sessionId: "actor-session", deviceId: "device", role: "developer", fingerprint: "a".repeat(64) },
     send: vi.fn(), close: vi.fn() };
+  const params = { workspaceId: "local-main", ...(op === "git.pull" ? { strategy: "rebase" } : {}), ...(unshallow ? { unshallow: true } : {}) };
   await state.handleWorkspaceMessage({ type: "WORKSPACE_REQUEST", source: "browser", id: op, timestamp: 1, op,
-    params: { workspaceId: "local-main", strategy: "rebase", $cloudGithubWriteGrant: "fixture-grant" } }, client);
+    params: { ...params, $cloudGithubWriteGrant: "fixture-grant" } }, client);
+  expect(githubWriteRequest).toHaveBeenCalledWith(expect.objectContaining({ kind: "redeem", operation: op, params }));
   expect(handle).toHaveBeenCalledOnce();
   expect(observedCredential).toBe(credential);
   expect(gitAuthorRequest).toHaveBeenCalledTimes(op === "git.pull" ? 1 : 0);
