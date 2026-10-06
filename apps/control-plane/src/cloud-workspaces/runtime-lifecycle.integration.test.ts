@@ -133,7 +133,7 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     await worker.runOnce();
     return worker;
   }
-  function stoppedProvider(failCreate = false) {
+  function stoppedProvider() {
     const resources = new Map<number, CloudProviderResource>([[1, { workspaceId: fixture.workspaceId, generation: 1,
       resourceId: `sandbox-${fixture.workspaceId}`, state: "stopped", target: null, metadata: {} }]]);
     const calls: string[] = [];
@@ -141,7 +141,6 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
       async inspect(id) { return [...resources.values()].find(value => value.resourceId === id) ?? null; },
       async find(identity) { const value = resources.get(identity.generation); return value ? [value] : []; },
       async create(input) { calls.push(`create:${input.generation}`);
-        if (failCreate) throw new CloudProviderError("provider_temporarily_unavailable", "Fixture candidate unavailable", true);
         const value: CloudProviderResource = { workspaceId:input.workspaceId,generation:input.generation,
           resourceId:`zeros-v2-test-generation-${input.generation}`,state:"running",target:null,metadata:{} };
         resources.set(input.generation,value); return value;
@@ -155,9 +154,10 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     };
     return {provider,calls};
   }
-  function readyWorker(afterRegistration?: (engineScope: CloudCommandEngineScope) => Promise<void>) {
+  function readyWorker(afterRegistration?: (engineScope: CloudCommandEngineScope) => Promise<void>, beforeExecution?: () => void) {
     return new CloudWorkspaceSetupWorker({ pool, intervalMs:1000, sanitizeLog:value=>value,
       executor:{async execute(execution) {
+        beforeExecution?.();
         const engineId=randomUUID(), heartbeatToken="zwh_"+randomBytes(32).toString("base64url");
         await withSystemTx(pool,async tx=>{
           const grant=(await tx.query(`INSERT INTO cloud_workspace_endpoint_grants
@@ -279,8 +279,8 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     await pool.query("UPDATE cloud_workspace_generation_transitions SET state='succeeded',completed_at=now() WHERE workspace_id=$1", [fixture.workspaceId]);
     expect(await withSystemTx(pool, tx => isAutomaticRuntimeWakeGeneration(tx,{...scope(),generation:2}))).toBe(false);
   });
-  it("delivers undispatched prompts once after the automatic candidate is ready and preserves paused queues",async()=>{
-    await finalCheckpoint(); await advanceHead();
+  it.each(["none", "setup", "provider create", "provider wake"] as const)("delivers undispatched prompts once after the automatic candidate is ready and preserves paused queues (%s failures)",async failure=>{
+    await finalCheckpoint(); const next=await advanceHead();
     const commandIds=[randomUUID(),randomUUID()];
     for(const [index,conversation] of ["pending","paused"].entries()) {
       await pool.query(`INSERT INTO cloud_workspace_conversation_controls(workspace_id,org_id,conversation_id,paused,next_position)
@@ -291,17 +291,65 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     }
     await route("/wake");
     const {provider,calls}=stoppedProvider();
+    const providerFailure=new CloudProviderError("provider_temporarily_unavailable","Fixture candidate unavailable",true);
+    let providerAttempts:ReturnType<typeof vi.spyOn>|undefined;
+    if(failure==="provider create") {
+      const create=provider.create.bind(provider);
+      providerAttempts=vi.spyOn(provider,"create").mockRejectedValueOnce(providerFailure).mockRejectedValueOnce(providerFailure).mockImplementation(create);
+    } else if(failure==="provider wake") {
+      const create=provider.create.bind(provider), start=provider.start.bind(provider);
+      provider.create=async input=>{const value=await create(input);value.state="stopped";return value;};
+      providerAttempts=vi.spyOn(provider,"start").mockRejectedValueOnce(providerFailure).mockRejectedValueOnce(providerFailure).mockImplementation(start);
+    }
     const reconciler=new CloudWorkspaceReconciler({pool,provider,runtimeUpgradeConfig:config,intervalMs:1000});
-    await reconciler.runOnce(); await reconciler.runOnce(); await reconciler.runOnce();
-    expect(calls).toEqual(["stop:1","create:2"]);
+    await reconciler.runOnce(); await reconciler.runOnce();
+    if(failure==="provider wake") {
+      await reconciler.runOnce(); // The candidate exists but still needs to start.
+      await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now() WHERE workspace_id=$1 AND generation=2 AND operation='create'",[fixture.workspaceId]);
+    }
+    if(providerAttempts) for(let attempt=1;attempt<=2;attempt++) {
+      expect(await reconciler.runOnce()).toBe(true);
+      const intentAttempt=attempt+(failure==="provider wake"?1:0);
+      expect((await pool.query(`SELECT state,attempt_count,error_code,
+        round(extract(epoch FROM (next_attempt_at-updated_at))*1000)::integer AS retry_delay_ms
+        FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND generation=2 AND operation='create'`,[fixture.workspaceId])).rows[0])
+        .toEqual({state:"observing",attempt_count:intentAttempt,error_code:providerFailure.code,retry_delay_ms:1000*2**(intentAttempt-1)});
+      expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE workspace_id=$1",[fixture.workspaceId])).rows[0].state).toBe("provisioning");
+      expect(await reconciler.runOnce()).toBe(false);
+      await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now() WHERE workspace_id=$1 AND generation=2 AND operation='create'",[fixture.workspaceId]);
+    }
+    expect(await reconciler.runOnce()).toBe(true);
+    if(providerAttempts) expect(providerAttempts).toHaveBeenCalledTimes(3);
+    expect(calls).toEqual(failure==="provider wake"?["stop:1","create:2","resume:2"]:["stop:1","create:2"]);
     const service=new DatabaseCloudWorkspaceCommandService({pool});
     let newScope:CloudCommandEngineScope|undefined;
+    let setupAttempts=0;
     const worker=readyWorker(async engineScope=>{
       newScope=engineScope;
       expect(await service.claim(engineScope,"pending","before-ready")).toBeNull();
+    },()=>{
+      setupAttempts++;
+      if(failure==="setup"&&setupAttempts<=2) throw new CloudWorkspaceSetupError("setup_provider_request_failed","Fixture provider request failed",true);
     });
+    if(failure==="setup") for(let attempt=1;attempt<=2;attempt++) {
+      expect(await worker.runOnce()).toBe(true);
+      expect((await pool.query(`SELECT state,claim_count,error_code,
+        round(extract(epoch FROM (next_attempt_at-updated_at))*1000)::integer AS retry_delay_ms
+        FROM cloud_workspace_setup_runs WHERE workspace_id=$1 AND generation=2`,[fixture.workspaceId])).rows[0])
+        .toEqual({state:"queued",claim_count:attempt,error_code:"setup_provider_request_failed",retry_delay_ms:5000*2**(attempt-1)});
+      expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE workspace_id=$1",[fixture.workspaceId])).rows[0].state).toBe("setting_up");
+      expect((await pool.query("SELECT state FROM cloud_workspace_commands WHERE workspace_id=$1 ORDER BY conversation_id",[fixture.workspaceId])).rows)
+        .toEqual([{state:"queued"},{state:"queued"}]);
+      expect(await worker.runOnce()).toBe(false);
+      await pool.query("UPDATE cloud_workspace_setup_runs SET next_attempt_at=now() WHERE workspace_id=$1 AND generation=2",[fixture.workspaceId]);
+    }
     expect(await worker.runOnce()).toBe(true);
-    expect((await pool.query("SELECT status FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId])).rows[0].status).toBe("ready");
+    expect(setupAttempts).toBe(failure==="setup"?3:1);
+    expect((await pool.query("SELECT current_generation,status FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId])).rows[0])
+      .toEqual({current_generation:2,status:"ready"});
+    expect((await pin(2)).runtime).toEqual(next.pin);
+    expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE workspace_id=$1",[fixture.workspaceId])).rows[0].state).toBe("succeeded");
+    expect((await pool.query("SELECT 1 FROM audit_log WHERE action='cloud_workspace.generation_rollback_started' AND subject->>'workspaceId'=$1",[fixture.workspaceId])).rows).toEqual([]);
     const claimId=randomUUID(), claim=await service.claim(newScope!,"pending","after-ready",claimId);
     expect(claim?.commandId).toBe(commandIds[0]);
     expect(await service.claim(newScope!,"pending","after-ready",claimId)).toEqual(claim);
@@ -321,13 +369,45 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     expect(await service.claim(ordinaryScope!,"paused","later-ordinary-engine")).toBeNull();
     expect((await service.snapshot(ordinaryScope!,"paused")).paused).toBe(true);
   });
-  it.each(["provider","setup"])("resumes the previous pin immediately after an automatic %s failure and retries on a later wake",async failure=>{
+  it.each([
+    {failure:"setup",retryable:true,caseName:"exhausted retries"},
+    {failure:"provider",retryable:true,caseName:"retries followed by a terminal failure"},
+    {failure:"setup",retryable:false,caseName:"immediate terminal failure"},
+    {failure:"provider",retryable:false,caseName:"immediate terminal failure"},
+  ])("resumes the previous pin after an automatic $failure failure ($caseName) and retries on a later wake",async({failure,retryable})=>{
     const source=await pin(); await finalCheckpoint(); await advanceHead(); await route("/wake");
-    const {provider,calls}=stoppedProvider(failure==="provider");
+    const {provider,calls}=stoppedProvider();
+    const create=failure==="provider"?vi.spyOn(provider,"create").mockRejectedValue(
+      new CloudProviderError("provider_temporarily_unavailable","Fixture candidate unavailable",retryable)):undefined;
     const reconciler=new CloudWorkspaceReconciler({pool,provider,runtimeUpgradeConfig:config,intervalMs:1000});
-    await reconciler.runOnce(); await reconciler.runOnce(); await reconciler.runOnce();
-    if(failure==="setup") await new CloudWorkspaceSetupWorker({pool,intervalMs:1000,sanitizeLog:value=>value,
-      executor:{async execute(){throw new CloudWorkspaceSetupError("setup_temporarily_unavailable","Fixture setup unavailable",true);}}}).runOnce();
+    await reconciler.runOnce(); await reconciler.runOnce();
+    const worker=new CloudWorkspaceSetupWorker({pool,intervalMs:1000,sanitizeLog:value=>value,
+      executor:{async execute(){throw new CloudWorkspaceSetupError("setup_provider_request_failed","Fixture provider request failed",retryable);}}});
+    if(failure==="setup") await reconciler.runOnce();
+    if(retryable) for(let attempt=1;attempt<=(failure==="setup"?4:2);attempt++) {
+      expect(await (failure==="setup"?worker:reconciler).runOnce()).toBe(true);
+      expect((await pool.query("SELECT current_generation FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId])).rows[0].current_generation).toBe(2);
+      expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE workspace_id=$1",[fixture.workspaceId])).rows[0].state)
+        .toBe(failure==="setup"?"setting_up":"provisioning");
+      if(failure==="setup") {
+        expect((await pool.query(`SELECT state,claim_count,
+          round(extract(epoch FROM (next_attempt_at-updated_at))*1000)::integer AS retry_delay_ms
+          FROM cloud_workspace_setup_runs WHERE workspace_id=$1 AND generation=2`,[fixture.workspaceId])).rows[0])
+          .toEqual({state:"queued",claim_count:attempt,retry_delay_ms:5000*2**(attempt-1)});
+        await pool.query("UPDATE cloud_workspace_setup_runs SET next_attempt_at=now() WHERE workspace_id=$1 AND generation=2",[fixture.workspaceId]);
+      } else {
+        expect((await pool.query(`SELECT state,attempt_count FROM cloud_workspace_lifecycle_intents
+          WHERE workspace_id=$1 AND generation=2 AND operation='create'`,[fixture.workspaceId])).rows[0])
+          .toEqual({state:"observing",attempt_count:attempt});
+        await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now() WHERE workspace_id=$1 AND generation=2 AND operation='create'",[fixture.workspaceId]);
+      }
+    }
+    // Provider intents have no attempt cap: only a terminal error ends their retries.
+    if(retryable&&create) create.mockRejectedValue(new CloudProviderError("provider_request_rejected","Fixture terminal failure",false));
+    expect(await (failure==="setup"?worker:reconciler).runOnce()).toBe(true);
+    if(failure==="setup") expect((await pool.query("SELECT state,claim_count FROM cloud_workspace_setup_runs WHERE workspace_id=$1 AND generation=2",[fixture.workspaceId])).rows[0])
+      .toEqual({state:"failed",claim_count:retryable?5:1});
+    else expect(create).toHaveBeenCalledTimes(retryable?3:1);
     expect((await pool.query("SELECT current_generation,status FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId])).rows[0])
       .toEqual({current_generation:1,status:"waking"});
     expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE workspace_id=$1",[fixture.workspaceId])).rows[0].state).toBe("rolling_back");
@@ -386,12 +466,20 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     expect(await new CloudWorkspaceReconciler({pool,provider,runtimeUpgradeConfig:config,intervalMs:1000}).runOnce()).toBe(false);
     expect(calls).toEqual([]);expect(await pin()).toEqual(saved);
   });
-  it.each(["draining","setting_up"])("honors sleep during an automatic %s update and cleans its candidate",async phase=>{
+  it.each(["draining","setting_up","provider_retry","setup_retry"])("honors sleep during an automatic %s update and cleans its candidate",async phase=>{
     await finalCheckpoint(); await advanceHead(); await route("/wake");
     const {provider,calls}=stoppedProvider();
+    if(phase==="provider_retry") vi.spyOn(provider,"create").mockRejectedValueOnce(
+      new CloudProviderError("provider_temporarily_unavailable","Fixture candidate unavailable",true));
     const reconciler=new CloudWorkspaceReconciler({pool,provider,runtimeUpgradeConfig:config,intervalMs:1000});
     await reconciler.runOnce();
-    if(phase==="setting_up") {await reconciler.runOnce();await reconciler.runOnce();}
+    if(phase!=="draining") {await reconciler.runOnce();await reconciler.runOnce();}
+    if(phase==="setup_retry") {
+      await new CloudWorkspaceSetupWorker({pool,intervalMs:1000,sanitizeLog:value=>value,
+        executor:{async execute(){throw new CloudWorkspaceSetupError("setup_provider_request_failed","Fixture provider request failed",true);}}}).runOnce();
+      expect((await pool.query("SELECT state FROM cloud_workspace_setup_runs WHERE workspace_id=$1 AND generation=2",[fixture.workspaceId])).rows[0].state).toBe("queued");
+    }
+    if(phase==="provider_retry") expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND generation=2 AND operation='create'",[fixture.workspaceId])).rows[0].state).toBe("observing");
     expect((await route("/stop")).status).toBe(202);
     for(let attempt=0;attempt<5&&await reconciler.runOnce();attempt++) {}
     expect((await pool.query("SELECT current_generation,status,desired_state FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId])).rows[0])
