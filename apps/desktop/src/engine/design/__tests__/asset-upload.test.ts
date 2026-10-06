@@ -203,10 +203,10 @@ describe("checked Design image storage", () => {
     await expect(withDesignAssetUpload(tx.asset, tx.commit)).rejects.toThrow(
       "128 images",
     );
-    expect(fs.existsSync(tx.target)).toBe(false);
     expect(fs.existsSync(designTransactionJournalPath(root))).toBe(false);
     fs.unlinkSync(path.join(assets, "0.png"));
-    fs.writeFileSync(tx.target, image);
+    // Exclusive create: also proves the rejected upload left no target behind.
+    fs.writeFileSync(tx.target, image, { flag: "wx" });
     const inode = fs.statSync(tx.target).ino;
     await withDesignAssetUpload(tx.asset, tx.commit);
     expect(fs.statSync(tx.target).ino).toBe(inode);
