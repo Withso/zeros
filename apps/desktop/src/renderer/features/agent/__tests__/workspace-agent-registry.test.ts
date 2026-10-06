@@ -13,6 +13,7 @@ vi.mock("../../../state/cloud-workspace-catalog", () => ({
 }));
 import {
   clearCloudAgentRegistry,
+  reportCloudAgentRuntimeUpgrade,
   modelsForWorkspaceAgent,
   warmCloudAgentRegistry,
   workspaceAgentsSnapshot,
@@ -28,6 +29,25 @@ beforeEach(() => {
   clearCloudAgentRegistry();
 });
 describe("workspace agent registry", () => {
+  it("publishes an exact-workspace rejection immediately and refreshes durable discovery", async () => {
+    const local = [{ id: "codex", installed: true, authenticated: true }] as never;
+    await refreshAgents(async () => local);
+    mock.request.mockResolvedValue({ type: "AGENT_AGENTS_LIST", agents: local });
+    mock.grants.mockResolvedValue([{ kind: "codex-chatgpt", runtimeQualified: true, models: ["gpt-5.6-sol"] }]);
+    await Promise.all([warmCloudAgentRegistry(a), warmCloudAgentRegistry(b)]);
+    const untouched = workspaceAgentsSnapshot(b);
+    let complete!: (value: unknown) => void;
+    mock.grants.mockReturnValue(new Promise(resolve => { complete = resolve; }));
+    reportCloudAgentRuntimeUpgrade(a, "codex");
+    expect(workspaceAgentsSnapshot(a)?.[0]).toMatchObject({ runtimeUpgradeRequired: true, authenticated: false, cloudModels: [] });
+    expect(workspaceAgentsSnapshot(b)).toBe(untouched);
+    expect(workspaceAgentsSnapshot("/local/workspace")).toBe(local);
+    reportCloudAgentRuntimeUpgrade("/local/workspace", "codex");
+    await vi.waitFor(() => expect(mock.grants).toHaveBeenCalledTimes(3));
+    complete([{ kind: "codex-chatgpt", runtimeQualified: false, runtimeUpgradeRequired: true, models: ["gpt-5.6-sol"] }]);
+    await warmCloudAgentRegistry(a);
+    expect(workspaceAgentsSnapshot(a)?.[0].runtimeUpgradeRequired).toBe(true);
+  });
   it("keeps local discovery and models unchanged while cloud grants require an upgrade", async () => {
     const local = [{ id: "codex", installed: true, authenticated: true }] as never;
     await refreshAgents(async () => local);

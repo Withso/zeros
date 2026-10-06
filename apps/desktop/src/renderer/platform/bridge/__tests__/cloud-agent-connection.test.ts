@@ -562,6 +562,44 @@ describe("cloud agent command adapter", () => {
     expect(after.authorize).not.toHaveBeenCalled();
   });
 
+  it.each(["dispatching", "failed"])("recovers the exact upgrade denial from a %s receipt without resending", async state => {
+    const f = fixture(); f.setState(state);
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async message => {
+      const response = await original(message);
+      if (message.op === "cloudCommands.request" && ((message.params as WireRecord).request as WireRecord).kind === "read")
+        (response.result as WireRecord).resultCode = "cloud_runtime_upgrade_required";
+      return response;
+    });
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "gpt-5.6" } });
+    const flight = f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "upgrade-receipt", prompt: [] });
+    try {
+      await expect(flight).resolves.toMatchObject({ type: "AGENT_PROMPT_FAILED", error: "cloud_runtime_upgrade_required" });
+      expect(f.request.mock.calls.filter(([m]) => m.op === "cloudCommands.request" && ((m.params as WireRecord).request as WireRecord).kind === "mutate")).toHaveLength(1);
+    } finally { f.setState("succeeded"); f.connection.dispose(); }
+  });
+
+  it("recovers the admission code when an old engine's generic terminal event wins the receipt race", async () => {
+    const f = fixture(); f.setState("dispatching");
+    const original = f.request.getMockImplementation()!;
+    let marker = false;
+    f.request.mockImplementation(async message => {
+      const response = await original(message);
+      if (marker && message.op === "cloudCommands.request" && ((message.params as WireRecord).request as WireRecord).kind === "read")
+        (response.result as WireRecord).resultCode = "cloud_runtime_upgrade_required";
+      return response;
+    });
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "gpt-5.6" } });
+    const flight = f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "old-engine-upgrade", prompt: [] });
+    try {
+      await vi.waitFor(() => expect(f.getEnqueued()).toBeDefined());
+      marker = true;
+      f.connection.observePromptResult({ type: "AGENT_PROMPT_FAILED", requestId: f.getEnqueued()!.commandId,
+        agentId: "codex", executionId: "execution", error: "Cloud agent execution authority is unavailable" });
+      await expect(flight).resolves.toMatchObject({ type: "AGENT_PROMPT_FAILED", error: "cloud_runtime_upgrade_required" });
+    } finally { f.setState("succeeded"); f.connection.dispose(); }
+  });
+
   it("accepts the terminal frame while a receipt read is still outstanding", async () => {
     const f = fixture();
     const original = f.request.getMockImplementation()!;

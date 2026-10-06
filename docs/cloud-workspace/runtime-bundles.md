@@ -350,23 +350,34 @@ immutable qualification evidence is never overwritten or re-enabled by retry.
 
 Credential discovery reports `runtimeQualified` for basic turns, plus independent
 `mcpQualified` and optional versioned `nativeCapabilities` metadata per delegation.
-For v4, a smoke-only delegation is usable only when its exact live engine has
-recorded `agentCustomizationVersion: 3` during registration. Registration verifies
-the pinned runtime, manifest, base and installation witness before persisting
-`cloud_workspace_engine_instances.agent_customization_version`. Absence is
-unknown support; neither the v4 profile nor the smoke qualification date proves
-that an old engine can request optional customization.
+For v4, the exact live engine records optional-customization support when it
+advertises `agentCustomizationVersion: 3` during registration or makes an
+admitted customization-v3 request. Registration verifies the pinned runtime,
+manifest, base and installation witness. Admission verifies the engine, actor,
+consent, model and runtime qualification before recording evidence in
+`cloud_workspace_engine_instances.agent_customization_version`. A v1/v2 request
+on a basic-qualified, non-MCP runtime records required-only evidence (1 or 2),
+but never downgrades existing v3 proof. Unknown engines remain eligible: earlier
+v3-capable bundles did not advertise the registration field. Runtime dates and
+profile names are not capability evidence.
 
-Discovery returns the stable boolean `runtimeUpgradeRequired` for a v4
-delegation that has basic runtime qualification but cannot run because its
-engine lacks this capability and its credential kind lacks MCP proof. The
-renderer excludes that grant's models, shows “This workspace gets the new cloud
-runtime the next time it wakes” and blocks Send and Enter while preserving the
-draft. A provider remains usable if another matching grant qualifies. Lifecycle
-surfaces can use
+Discovery returns `runtimeUpgradeRequired` only when basic qualification exists,
+MCP proof is absent, and the live engine has recorded required-only evidence.
+These grants report `runtimeQualified: false`. The rejected admission commits its
+evidence and exact command receipt before returning the closed
+`cloud_runtime_upgrade_required` error. Settlement preserves that code even when
+older engines replace the HTTP error with a generic failure. The renderer reads
+the exact receipt, restores the rich draft without overwriting newer typing,
+pauses queued successors, and refreshes discovery without resending.
+
+The renderer excludes blocked grants' models, shows “This workspace gets the new
+cloud runtime the next time it wakes” and blocks Send and Enter while preserving
+the draft. A provider remains usable if another matching grant qualifies.
+Lifecycle surfaces can use
 `delegations.some(grant => grant.runtimeUpgradeRequired)` from the existing
 prepare/discovery response; no credential material is involved. Missing or
-retired engines do not inherit the previous engine's capability.
+retired engines do not inherit the previous engine's capability. Runtime
+selection on wake is owned by lifecycle policy, not this discovery flag.
 
 Legacy v3 gateways still require MCP in discovery because they always request
 required customization.

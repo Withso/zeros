@@ -6,6 +6,9 @@ import { CLOUD_COMPUTER_TOOL_MAX_RESPONSE_BYTES, CloudComputerToolConflictSchema
 export class CloudAgentExecutionError extends Error{
   constructor(){super("Cloud agent execution authority is unavailable");this.name="CloudAgentExecutionError";}
 }
+export class CloudRuntimeUpgradeRequiredError extends Error {
+  constructor(){super("cloud_runtime_upgrade_required");this.name="CloudRuntimeUpgradeRequiredError";}
+}
 export class CloudComputerToolsUpdateRequiredError extends Error {
   constructor(){super("Update the cloud runtime and control plane to configure this computer.");this.name="CloudComputerToolsUpdateRequiredError";}
 }
@@ -47,6 +50,9 @@ export async function requestCloudAgentExecution(authority:CloudRuntimeAuthority
     if(request.kind==="admit"&&response.status===409&&document&&typeof document==="object"&&
       Object.keys(document).join()==="error"&&(document as {error?:unknown}).error==="cloud_computer_tools_update_required")
       throw new CloudComputerToolsUpdateRequiredError();
+    if(request.kind==="admit"&&response.status===409&&document&&typeof document==="object"&&
+      Object.keys(document).join()==="error"&&(document as {error?:unknown}).error==="cloud_runtime_upgrade_required")
+      throw new CloudRuntimeUpgradeRequiredError();
     if(!document||typeof document!=="object"||Array.isArray(document)||Object.keys(document).join()!=="result")throw new CloudAgentExecutionError();
     const value=(document as {result:unknown}).result;
     if(request.kind==="computer-tool"){
@@ -80,5 +86,5 @@ export async function requestCloudAgentExecution(authority:CloudRuntimeAuthority
     }
     if(!value||typeof value!=="object"||Object.keys(value).join()!=="released"||(value as {released?:unknown}).released!==true)throw new CloudAgentExecutionError();
     return {released:true};
-  }catch(error){await reader.cancel().catch(()=>{});if(error instanceof CloudComputerToolsUpdateRequiredError)throw error;throw new CloudAgentExecutionError();}finally{reader.releaseLock();}
+  }catch(error){await reader.cancel().catch(()=>{});if(error instanceof CloudComputerToolsUpdateRequiredError||error instanceof CloudRuntimeUpgradeRequiredError)throw error;throw new CloudAgentExecutionError();}finally{reader.releaseLock();}
 }

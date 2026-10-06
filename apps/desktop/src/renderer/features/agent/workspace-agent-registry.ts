@@ -59,6 +59,20 @@ export function invalidateCloudAgentRegistry(folder: string): void {
   const target = parseCloudWorkspaceKey(folder);
   if (target) cache.invalidate(cloudWorkspaceKey(target));
 }
+/** A closed admission denial is authoritative for this workspace/provider.
+ * Publish it before returning the draft, then recheck durable discovery (which
+ * can also find another MCP-qualified grant). Local registry state is separate. */
+export function reportCloudAgentRuntimeUpgrade(folder: string, agentId: string): void {
+  const target = parseCloudWorkspaceKey(folder);
+  if (!target) return;
+  const key = cloudWorkspaceKey(target), agents = cache.getSnapshot(key).data;
+  if (agents) cache.setData(key, agents.map(agent => agent.id === agentId ? {
+    ...agent, runtimeUpgradeRequired: true, authenticated: false, cloudModels: [],
+    runtimeUnavailableReason: "This workspace gets the new cloud runtime the next time it wakes",
+  } : agent));
+  cache.invalidate(key);
+  void warmCloudAgentRegistry(key).catch(() => { /* Retain the confirmed denial until revalidation succeeds. */ });
+}
 export function workspaceAgentsSnapshot(
   folder?: string | null,
 ): WorkspaceRegistryAgent[] | null {

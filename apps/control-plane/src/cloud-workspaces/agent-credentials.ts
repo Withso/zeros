@@ -424,9 +424,9 @@ export class DatabaseCloudAgentCredentialService {
         coalesce(runtime.mcp_qualified,false) AS mcp_qualified,runtime.native_capabilities
         FROM cloud_agent_credential_delegations delegation JOIN cloud_agent_credentials credential ON credential.id=delegation.credential_id
         LEFT JOIN LATERAL (SELECT qualification.mcp_qualified,qualification.native_capabilities,
-          (qualification.mcp_qualified OR (engine.agent_customization_version=3 AND
+          (qualification.mcp_qualified OR (COALESCE(engine.agent_customization_version,3)=3 AND
             NOT EXISTS(SELECT 1 FROM cloud_computer_admin_workspaces admin WHERE admin.workspace_id=workspace.id))) AS runtime_qualified,
-          (generation.runtime_id IS NOT NULL AND NOT qualification.mcp_qualified AND engine.agent_customization_version IS DISTINCT FROM 3
+          (generation.runtime_id IS NOT NULL AND NOT qualification.mcp_qualified AND engine.agent_customization_version IN (1,2)
             AND NOT EXISTS(SELECT 1 FROM cloud_computer_admin_workspaces admin WHERE admin.workspace_id=workspace.id)) AS runtime_upgrade_required
           FROM cloud_workspaces workspace
           JOIN cloud_workspace_generations generation ON generation.workspace_id=workspace.id AND generation.generation=workspace.current_generation
