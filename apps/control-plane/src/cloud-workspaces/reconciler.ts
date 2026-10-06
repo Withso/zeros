@@ -25,7 +25,6 @@ import {
   failCloudWorkspaceGenerationRollback,
   rollbackCloudWorkspaceGenerationTransition,
   rollbackCloudWorkspaceGenerationTransitionAfterDrainFailure,
-  isAutomaticRuntimeWakeGeneration,
 } from "./generation-transitions.js";
 import {
   confirmCloudWorkspaceClientAccessRevoked,
@@ -985,13 +984,7 @@ export class CloudWorkspaceReconciler {
       }
 
       if (await deferCloudRecoveryResourceBlock(tx, {workspaceId:intent.workspaceId,transitionId:intent.generationTransitionId,intentId:intent.id,code:failure.code})) return;
-      const automaticCandidate = await isAutomaticRuntimeWakeGeneration(tx, {
-        workspaceId: intent.workspaceId, organizationId: intent.orgId,
-        generation: intent.operation === "stop" && intent.generationTransitionId
-          ? (await tx.query<{ candidate_generation: number }>("SELECT candidate_generation FROM cloud_workspace_generation_transitions WHERE id=$1", [intent.generationTransitionId])).rows[0]?.candidate_generation ?? intent.generation
-          : intent.generation,
-      });
-      if (failure.retryable && !automaticCandidate) {
+      if (failure.retryable) {
         await tx.query(
           `UPDATE cloud_workspace_lifecycle_intents
            SET state = 'observing', lease_owner = NULL, lease_expires_at = NULL,
