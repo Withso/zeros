@@ -29,6 +29,7 @@ import * as path from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { isCloudGithubWriteOperation } from "@zeros/protocol/github-auth";
 import { runWithGithubWriteCredential } from "./git/github-write-context";
+import { runWithGithubReadTransport } from "./git/github-read-context";
 import { cloudGitAuthorEnvironment, needsCloudGitAuthor, runWithCloudGitAuthor } from "./git/cloud-git-author";
 import { NativeGithubTerminals } from "./git/github-native-terminal";
 import {
@@ -8892,10 +8893,19 @@ export class ZerosEngine {
         const reviewUserName = reviewUserId && this.clientAccount.get(client.id) === reviewUserId
           ? this.clientAccountNames.get(client.id)
           : client.kind === "local" && reviewUserId === this.ownerAccountSub ? this.ownerAccountName ?? undefined : undefined;
-        const handleWorkspace=()=>this.workspace.handle(op,params,{hostLocalResources:client.kind==="local",remote:hostRelay||client.cloudActor!==undefined,cloudWorker:!!this.cloudWorker,
+        const handleWorkspaceRequest=()=>this.workspace.handle(op,params,{hostLocalResources:client.kind==="local",remote:hostRelay||client.cloudActor!==undefined,cloudWorker:!!this.cloudWorker,
           ...(op.startsWith("codeReview.") ? { reviewUserId, reviewUserName } : {}),
           ...(client.cloudActor && client.accountUserId ? { cloudActorIdentity: { userId: client.accountUserId, deviceId: client.cloudActor.deviceId, sessionId: client.cloudActor.sessionId },
             cloudFileActor: { role: client.cloudActor.role, authorized: () => client.authorized?.() === true && !this.cloudRuntimeAuthorityStopping } } : {})});
+        const handleWorkspace = () => {
+          if (this.cloudWorker?.version !== 4) return handleWorkspaceRequest();
+          const runtime = this.cloudRuntimeRegistration, actor = client.cloudActor;
+          return runWithGithubReadTransport((input, init) => {
+            if (!runtime || !actor) throw new Error("GitHub read authorization is unavailable.");
+            return runtime.githubReadRequest(actor.sessionId, input, init);
+          }, () => client.authorized?.() === true && !this.cloudRuntimeAuthorityStopping, handleWorkspaceRequest,
+          !!actor && ["developer", "manager", "owner"].includes(actor.role));
+        };
         const handleWithAuthor = async () => {
           if (!this.cloudWorker || !needsCloudGitAuthor(op, params)) return handleWorkspace();
           if (!this.cloudRuntimeRegistration || !client.cloudActor) throw new Error("Cloud Git author is unavailable.");

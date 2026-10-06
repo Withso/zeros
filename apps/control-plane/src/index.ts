@@ -32,6 +32,8 @@ import { loadEmailConfig, sendEmailStrict } from "./email.js";
 import { startGithubOauthCleanup } from "./github.js";
 import { createApp } from "./app.js";
 import { DatabaseCloudGithubWriteGrants } from "./cloud-workspaces/github-write-grants.js";
+import { DatabaseCloudGithubReads } from "./cloud-workspaces/github-read-proxy.js";
+import { GithubCloudWorkspaceCredentialBroker } from "./cloud-workspaces/github-credentials.js";
 import { DatabaseCloudIdleStop } from "./cloud-workspaces/idle-stop.js";
 import {
   CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
@@ -623,6 +625,8 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
 
 const cloudGithubWriteGrants = config.github && cloudWorkspaceInternalSetupService
   ? new DatabaseCloudGithubWriteGrants(pool, config.auth.provider === "workos") : undefined;
+const cloudGithubReads = config.github && cloudWorkspaceInternalSetupService
+  ? new DatabaseCloudGithubReads(pool, config.auth.provider === "workos", new GithubCloudWorkspaceCredentialBroker(config.github)) : undefined;
 let githubWriteCleanup: ReturnType<typeof setInterval> | undefined;
 let githubWriteCleanupPending = Promise.resolve();
 let githubWriteCleanupRunning = false;
@@ -632,6 +636,7 @@ const app = createApp(config, pool, emailConfig, {
       requalify: (id: string) => runtimeQualificationWorker.enqueue(id, { force: true }) } : {}) },
   ...(cloudWorkspaceInternalSetupService ? { cloudIdleStop: new DatabaseCloudIdleStop(pool, config.auth.provider === "workos") } : {}),
   ...(cloudGithubWriteGrants ? { cloudGithubWriteGrants } : {}),
+  ...(cloudGithubReads ? { cloudGithubReads } : {}),
   securityEventBroker,
   migrationStatus: migrationResult.status,
   ...(workosProvider ? { workosProvider } : {}),

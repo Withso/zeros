@@ -28,6 +28,7 @@ import type { Octokit as OctokitClass } from "@octokit/rest";
 import { createGithubInlineReviewService } from "./github-inline-review";
 import { createHash } from "node:crypto";
 import { githubWriteCredential } from "./github-write-context";
+import { githubReadTransport } from "./github-read-context";
 import { githubWritePublication } from "./github-write-publication";
 import { ensureLocalSettingsIgnored } from "../settings/personal-repo";
 import { GitError, isGitError, type GitErrorCode } from "./errors";
@@ -528,6 +529,11 @@ export async function verifyGithubToken(
 async function getOctokit(): Promise<OctokitClass> {
   const scoped = githubWriteCredential();
   if (scoped) return octokitFactory(scoped.token, scoped.apiBaseUrl);
+  const readTransport = githubReadTransport();
+  if (readTransport) {
+    const { Octokit } = await loadOctokit();
+    return new Octokit({ request: { fetch: readTransport } });
+  }
   // Consult the token store on EVERY call so a sign-out / token swap can never
   // be served by a stale cached client. The cache is reused only when the
   // current token still matches the one the client was built with.
@@ -555,6 +561,7 @@ async function getOctokit(): Promise<OctokitClass> {
 async function getOptionalAuthOctokit(): Promise<OctokitClass> {
   const scoped = githubWriteCredential();
   if (scoped) return octokitFactory(scoped.token, scoped.apiBaseUrl);
+  if (githubReadTransport()) return getOctokit();
   const token = await tokenStore.get();
   if (!token) {
     clearOctokitCache();
@@ -879,7 +886,7 @@ function wrapApiError(err: unknown, fallbackMessage: string): GitError {
 async function withAuthRetry<T>(
   fn: (octokit: OctokitClass) => Promise<T>,
 ): Promise<T> {
-  if (githubWriteCredential()) {
+  if (githubWriteCredential() || githubReadTransport()) {
     try { return await fn(await getOctokit()); }
     catch (error) { throw wrapApiError(error, "GitHub API call failed"); }
   }

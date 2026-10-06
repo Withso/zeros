@@ -10,6 +10,8 @@ import { PTY_AGENT_AUTH_CWD } from "@zeros/protocol/messages";
 type Capability="read"|"run"|"edit"|"manage";
 type WorkspacePolicy={remoteReadable(op:string):boolean;isWriteOp(op:string):boolean;isRemoteAllowed(op:string):boolean};
 const reads=new Set([
+  // Discovery copies GitHub's own PR metadata, never client-supplied content.
+  "gh.prSync",
   "design.page.select",
   "codeReview.list",
   "git.reviewHunks",

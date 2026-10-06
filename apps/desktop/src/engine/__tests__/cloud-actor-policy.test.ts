@@ -23,6 +23,16 @@ function fixture(role:NonNullable<TransportClient["cloudActor"]>["role"]="viewer
   return {client,engine,send};
 }
 describe("actor roles at the worker message boundary",()=>{
+  it("allows every reader to discover a branch's PR without write authority", async () => {
+    for (const role of ["viewer", "prompter", "developer", "manager", "owner"] as const) {
+      const f = fixture(role);
+      f.engine.workspace.remoteReadable = WorkspaceService.prototype.remoteReadable;
+      f.engine.workspace.isWriteOp = WorkspaceService.prototype.isWriteOp;
+      f.engine.workspace.isRemoteAllowed = WorkspaceService.prototype.isRemoteAllowed;
+      await f.send({ type: "WORKSPACE_REQUEST", op: "gh.prSync", params: { workspaceId: "local-main" } });
+      expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledOnce();
+    }
+  });
   it("treats page selection as a read and page lifecycle as edit authority", async () => {
     for (const role of ["viewer", "prompter", "developer", "manager", "owner"] as const) {
       const f = fixture(role);

@@ -16,6 +16,7 @@ import {
   type PrThreadResolveInput,
 } from "@zeros/protocol/github-review";
 import { GitError } from "./errors";
+import { githubReadCanEdit } from "./github-read-context";
 
 interface Dependencies {
   repository(workspaceId: string): Promise<{ owner: string; repo: string }>;
@@ -169,8 +170,8 @@ function threadFromNode(node: ThreadNode): PrReviewThread {
     originalLine: node.originalLine,
     isResolved: node.isResolved,
     isOutdated: node.isOutdated,
-    canResolve: node.viewerCanResolve,
-    canUnresolve: node.viewerCanUnresolve,
+    canResolve: githubReadCanEdit() === undefined ? node.viewerCanResolve : githubReadCanEdit() === true && !node.isResolved,
+    canUnresolve: githubReadCanEdit() === undefined ? node.viewerCanUnresolve : githubReadCanEdit() === true && node.isResolved,
     commentsTruncated: node.comments.pageInfo.hasNextPage,
     ...(context !== undefined ? { context } : {}),
     comments: node.comments.nodes.map((comment) => ({
@@ -364,7 +365,7 @@ export function createGithubInlineReviewService(deps: Dependencies) {
   async function diff(input: PrReviewTarget): Promise<PrReviewDiff> {
     const opts = githubReviewTargetSchema.parse(input);
     const repository = await repositoryFor(opts.workspaceId);
-    const request = { ...repository, pull_number: opts.prNumber };
+    const request = { ...repository, pull_number: opts.prNumber, headers: { "cache-control": "no-cache" } };
     const before = await deps.withAuth((oct) => oct.pulls.get(request));
     const response = await deps.withAuth((oct) =>
       oct.pulls.get({ ...request, mediaType: { format: "diff" } }),
