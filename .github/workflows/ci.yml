@@ -166,8 +166,29 @@ jobs:
         uses: ./.github/actions/contained-execution-runtime
 
       - name: Fetch origin/main (for the migration forward-only guard)
+        # Compare with the main this commit was built on, not the current tip:
+        # a run can start after later merges, whose new migrations would then
+        # look deleted here. A main push uses the main it was pushed onto; a
+        # pull request's merge commit uses its first parent. Other events keep
+        # comparing with the fetched main.
         if: matrix.part == 1
-        run: git fetch --no-tags origin main || echo "origin/main unavailable — guard runs HEAD-only"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
+            base="$PUSH_BEFORE"
+            if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" =~ ^0+$ ]] ||
+               ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              base=$(git rev-parse --verify HEAD^) || { echo "No parent commit — guard runs HEAD-only"; exit 0; }
+            fi
+            git update-ref refs/remotes/origin/main "$base"
+          elif [ "$EVENT_NAME" = pull_request ]; then
+            base=$(git rev-parse --verify HEAD^1) || { echo "No base parent — guard runs HEAD-only"; exit 0; }
+            git update-ref refs/remotes/origin/main "$base"
+          else
+            git fetch --no-tags origin main || echo "origin/main unavailable — guard runs HEAD-only"
+          fi
 
       - name: Check preload allowlist is in sync
         # Fails if the renderer invokes a command missing from ALLOWED_COMMANDS

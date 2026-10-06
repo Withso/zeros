@@ -94,16 +94,18 @@ export async function alphaRequiredChecks(candidate: Candidate, read: Read): Pro
       await read(`/actions/workflows/${check.file}/runs?head_sha=${candidate.sourceSha}&event=push&per_page=100`));
     const evidence = { workflow: check.name, runId: run?.id ?? 0, attempt: run?.run_attempt ?? 0, succeeded: false };
     if (!run) return evidence;
-    if (run.conclusion === "cancelled") {
-      // Main Preflight coalesces pushes: a newer push replaces a pending run,
-      // so this exact-source gate will never report. Once main has moved on,
-      // supersede instead of waiting out the barrier; only the unmutated
-      // initial barrier turns that into a green skip.
+    // Main Preflight coalesces pushes: a newer push replaces a pending run, so
+    // its gate never reports. A failed gate or a completed attempt without a
+    // green gate also cannot succeed without a rerun. Once main has moved on,
+    // supersede such a candidate instead of waiting out the barrier; only the
+    // unmutated initial barrier turns that into a green skip.
+    const unshippable = async () => {
       const head = await read(`/commits/${encodeURIComponent(candidate.branch)}`);
       requireCheck(typeof head?.sha === "string" && SHA.test(head.sha), "Current main identity is unavailable for automatic Alpha");
       if (head.sha !== candidate.sourceSha) throw new CandidateSupersededError();
       return evidence;
-    }
+    };
+    if (run.conclusion === "cancelled") return unshippable();
     const jobs = await jobPages(read, `/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`);
     const gates = jobs.filter(job => job?.name === "alpha-gate");
     const gate = gates[0];
@@ -113,7 +115,10 @@ export async function alphaRequiredChecks(candidate: Candidate, read: Read): Pro
       gate.head_branch !== "main" || gate.status !== "completed" || gate.conclusion !== "success" ||
       gate.run_attempt !== undefined && (!Number.isSafeInteger(gate.run_attempt) || gate.run_attempt < 1 || gate.run_attempt > run.run_attempt) ||
       jobs.some(job => CRITICAL_JOBS.has(job?.name) && (job.run_id !== run.id || job.head_sha !== candidate.sourceSha ||
-        job.status !== "completed" || job.conclusion !== "success")) || securityVeto(jobs)) return evidence;
+        job.status !== "completed" || job.conclusion !== "success")) || securityVeto(jobs)) {
+      const failedGate = gates.length === 1 && gate.status === "completed" && gate.conclusion !== "success";
+      return failedGate || run.status === "completed" ? unshippable() : evidence;
+    }
     // A rerun/cancellation during pagination must invalidate the old snapshot.
     const current = await read(`/actions/runs/${run.id}`) as Run | null;
     return { ...evidence, succeeded: trustedRun(candidate, check.file, check.name, current) && current.id === run.id &&

@@ -150,6 +150,28 @@ describe("automatic Alpha exact-source evidence", () => {
     expect(current).not.toBeInstanceOf(CandidateSupersededError);
   });
 
+  it.each(["failure", "cancelled", "timed_out"])("supersedes a candidate whose completed gate is %s after main moved on", async conclusion => {
+    const failed = { jobs: [{ ...gate, conclusion }] };
+    await expect(fixture({ ...failed, branchSha: "b".repeat(40) }).client.assertRequiredChecks())
+      .rejects.toBeInstanceOf(CandidateSupersededError);
+    const current = await fixture(failed).client.assertRequiredChecks().catch(error => error);
+    expect(current).toBeInstanceOf(Error);
+    expect(current).not.toBeInstanceOf(CandidateSupersededError);
+  });
+
+  it("supersedes a completed run that never produced a green gate after main moved on", async () => {
+    const completed = { preflight: [{ ...preflight, status: "completed", conclusion: "failure" }], jobs: [] };
+    await expect(fixture({ ...completed, branchSha: "b".repeat(40) }).client.assertRequiredChecks())
+      .rejects.toBeInstanceOf(CandidateSupersededError);
+  });
+
+  it("keeps waiting for a gate whose producers are still running when main has moved on", async () => {
+    const error = await fixture({ jobs: [{ ...gate, status: "queued", conclusion: null }], branchSha: "b".repeat(40) })
+      .client.assertRequiredChecks().catch(error => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(CandidateSupersededError);
+  });
+
   it("keeps waiting for a pending Preflight even when main has moved on", async () => {
     const error = await fixture({ preflight: [{ ...preflight, status: "queued", conclusion: null }], jobs: [], branchSha: "b".repeat(40) })
       .client.assertRequiredChecks().catch(error => error);
