@@ -69,6 +69,10 @@ export interface QueuedMessagesCardProps {
    *  While idle, send-now is a plain flush and is always allowed. */
   streaming: boolean;
   paused?: boolean;
+  /** Cloud readiness uses the existing editable queue; Local defaults match. */
+  waiting?: boolean;
+  /** Cloud failures use one toast; pending rows retain neutral retry controls. */
+  notSent?: boolean;
   /** Name for a provider without mid-turn steering. */
   agentName: string;
 }
@@ -88,12 +92,14 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
   steeringSupported,
   streaming,
   paused = false,
+  waiting = false,
+  notSent = false,
   agentName,
 }: QueuedMessagesCardProps) {
   if (messages.length === 0) return null;
   const editing = editingId != null;
-  const sendBlocked = streaming && !steeringSupported;
-  const sendLabel = sendBlocked
+  const sendBlocked = waiting || streaming && !steeringSupported;
+  const sendLabel = waiting ? "Waiting for agent" : sendBlocked
     ? `${agentName} doesn't support mid-turn steering`
     : "Send now";
 
@@ -111,7 +117,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
           className="text-fg2 hover:text-fg1 flex w-full items-center justify-between gap-2 px-3.5 py-2.5 text-left text-sm transition-colors"
         >
           <span>
-            {messages.length} queued message{messages.length === 1 ? "" : "s"}{paused ? " · Paused" : ""}
+            {waiting ? "Waiting for agent" : notSent ? "Not sent" : `${messages.length} queued message${messages.length === 1 ? "" : "s"}${paused ? " · Paused" : ""}`}
           </span>
           {collapsed ? (
             <ChevronUp size={16} aria-hidden="true" />
@@ -119,7 +125,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
             <ChevronDown size={16} aria-hidden="true" />
           )}
         </button>
-        {!collapsed && (
+        {!collapsed && messages.length > 0 && (
           <>
             <div className="border-border1 flex flex-col gap-0.5 border-t px-1.5 py-1.5">
               {messages.map((m) => {
@@ -183,7 +189,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
                         </RowAction>
                       )}
                       <RowAction
-                        label="Delete"
+                        label={notSent ? "Remove" : "Delete"}
                         destructive
                         onClick={() => onDelete(m.id)}
                         disabled={!!m.queuedDelivery}
@@ -191,7 +197,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
                         <Trash2 size={14} aria-hidden="true" />
                       </RowAction>
                       <RowAction
-                        label={m.queuedDelivery === "sending" ? "Sending…" : m.queuedDelivery === "unconfirmed" ? "Retry delivery" : sendLabel}
+                        label={m.queuedDelivery === "sending" ? "Sending…" : m.queuedDelivery === "unconfirmed" ? "Retry delivery" : notSent ? "Retry" : sendLabel}
                         onClick={() => onSendNow(m.id)}
                         disabled={sendBlocked || m.queuedDelivery === "sending"}
                       >

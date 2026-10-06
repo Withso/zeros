@@ -72,6 +72,21 @@ async function addTrackedNestedFile(root: string): Promise<string> {
 }
 
 describe("cloud checkpoint repository program isolation", () => {
+  checkpointIt("cancels an idle capture when presence returns during upload, before committing stop", async () => {
+    const root = await checkpointRepository();
+    const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
+    let idle = true;
+    const commits = vi.fn();
+    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: (async (input, init) => {
+      const pathname = new URL(String(input)).pathname;
+      if (pathname.endsWith("/blobs/batch") || pathname.endsWith("/blobs")) idle = false;
+      if (pathname.endsWith("/checkpoints/commit")) commits();
+      return harness.fetch(input, init);
+    }) as typeof fetch });
+    await expect(runtime.checkpoint({ id: "55555555-5555-4555-8555-555555555555", reason: "before_stop", deadlineAtMs: Date.now() + 60_000 }, authority, () => idle)).rejects.toThrow(/no longer idle/);
+    expect(commits).not.toHaveBeenCalled();
+  });
+
   checkpointIt("publishes periodic recovery without inventing a control-plane request receipt", async () => {
     const root = await checkpointRepository();
     const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });

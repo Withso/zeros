@@ -17,9 +17,12 @@ function fixture() {
     running: true, cloudRuntimeCheckpointQuiescing: true, cloudRuntimeAuthorityStopping: false,
     cloudIdleReservation: (() => true) as (() => boolean) | null, cloudIdleCheckpoint: null,
     cloudRuntimeRegistration: { idleStopRequest: vi.fn(async () => directive) },
+    cloudUserPresence: { active: () => false },
+    cloudCommands: { hasActiveWork: () => false }, cloudGoals: { active: () => false },
+    activePrompts: new Set(), sessionLoadResponses: new Map(), sessionAgent: new Map(), pty: { list: () => [], hasRecentInput: () => false },
     cloudDurabilityRuntime: { checkpoint: vi.fn(async () => undefined) }, cloudRecordRuntime: { synchronize: vi.fn(async () => undefined), flush: vi.fn(async () => undefined) },
     cloudHumanServices: { pause: vi.fn(async () => undefined), resume: vi.fn(), hasActiveWork: () => false },
-    cloudLanguageServices: { pause: vi.fn(async () => undefined), resume: vi.fn() },
+    cloudLanguageServices: { pause: vi.fn(async () => undefined), resume: vi.fn(), idleProcessRoots: () => [] },
     cloud: { setHumanServicesPaused: vi.fn() }, cloudCheckpointScheduler: { pause: vi.fn(async () => undefined), resume: vi.fn() },
     globalDesignAuthorityStarts: new Set(), cloudWorkspaceMutations: new Set(), workspaceProcessStarts: new Map(),
     waitForWorkspaceProcessStartSnapshot: vi.fn(async () => undefined), setup: { stopAllAndProve: vi.fn(async () => undefined), hasRepositoryCodeAuthority: () => false },
@@ -34,6 +37,13 @@ function fixture() {
 }
 beforeEach(() => { vi.mocked(hasCloudUserProcesses).mockReset().mockResolvedValue(false); });
 describe("idle checkpoint execution", () => {
+  it("keeps idle terminal registrations usable when presence cancels a capture", async () => {
+    const state = fixture();
+    state.cloudDurabilityRuntime.checkpoint.mockRejectedValue(new Error("Cloud workspace is no longer idle"));
+    await expect(state.handleCloudCheckpointRequest(directive, authority)).rejects.toThrow("no longer idle");
+    expect(state.terminals.clear).not.toHaveBeenCalled();
+    expect(state.cloudRuntimeCheckpointQuiescing).toBe(false);
+  });
   it("retries the same paused submission until a held checkpoint observes server cancellation", async () => {
     const state = fixture(), conversationId = "11111111-1111-4111-8111-111111111111";
     let release!: () => void, serverCancelled = false, paused = true, revision = 7, executions = 0;

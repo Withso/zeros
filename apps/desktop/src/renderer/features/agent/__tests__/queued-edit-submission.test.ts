@@ -67,6 +67,7 @@ function fixture() {
     },
     setQueueSelectedId: vi.fn(),
     toast: { error: vi.fn(), warning: vi.fn() },
+    cloudComputerV2: false,
   };
   const bind = new Function(
     "environment",

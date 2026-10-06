@@ -48,6 +48,7 @@ function notImpl(cmd: string, _order: number): CommandHandler {
 const commandTable: Record<string, CommandHandler> = {
   // ── App info (runtime mode / version) — for analytics routing ──
   app_info: notImpl("app_info", 1),
+  app_user_presence: notImpl("app_user_presence", 1),
   cursor_subscription: notImpl("cursor_subscription", 1),
   provider_subscription: notImpl("provider_subscription", 1),
   cloud_provider_auth: notImpl("cloud_provider_auth", 1),

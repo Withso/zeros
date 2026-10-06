@@ -34,6 +34,13 @@ export class CloudRuntimeLanguageServices {
   private paused=false;
   private readonly clients=new Map<string,{active:boolean;service:CloudLanguageService;processes:Set<BoundaryProcess>}>();
   constructor(private readonly worker:CloudWorkerConfiguration,private readonly failed:()=>void){}
+  /** Only immutable, read-only supervised helpers may be ignored by the idle
+   * census. Actual capture still pauses and proves retirement of these trees. */
+  idleProcessRoots(): number[] {
+    return [...this.clients.values()].flatMap(client => [...client.processes])
+      .filter(process => process instanceof CloudSupervisedProcess && process.child.exitCode === null && process.child.signalCode === null)
+      .map(process => process.pid);
+  }
   async request(id:string,authorized:()=>boolean,request:unknown):Promise<unknown>{
     const runtime=resolveCloudRuntime(),NODE=runtime.node,SUPERVISOR=runtime.processSupervisor;
     if(this.paused||!authorized())throw new LspError("denied");

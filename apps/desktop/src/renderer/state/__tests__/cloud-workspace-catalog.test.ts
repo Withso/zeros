@@ -20,6 +20,7 @@ import {
   getCloudProjects,
   cloudProjectForFolder,
   manageCloudWorkspace,
+  cloudWorkspaceStopVersion,
   cloudWorkspaceOperation,
   refreshCloudWorkspaceCatalog,
   cloudWorkspaceDetails,
@@ -71,6 +72,18 @@ beforeEach(() => {
   api.projects.mockReturnValue([]);
 });
 describe("cloud workspace catalog ownership", () => {
+  it("publishes a bounded local Stop fence before HTTP settles and clears it with the account", async () => {
+    acceptCloudWorkspaceDocument(doc(1));
+    let resolve!: (document: CloudWorkspaceDocument) => void;
+    api.lifecycle.mockImplementationOnce(() => new Promise<CloudWorkspaceDocument>(done => { resolve = done; }));
+    const changed = vi.fn(), off = subscribeCloudWorkspaces(changed);
+    const pending = manageCloudWorkspace(target, "stop");
+    expect(cloudWorkspaceStopVersion(target)).toBeGreaterThan(0); expect(changed).toHaveBeenCalled();
+    resolve(doc(2, "stopped")); await pending; off();
+    const other = { ...target, workspaceId: "33333333-3333-4333-8333-333333333333" };
+    expect(cloudWorkspaceStopVersion(other)).toBe(0);
+    clearCloudWorkspaceCatalog(); expect(cloudWorkspaceStopVersion(target)).toBe(0);
+  });
   it.each(["stopped", "archived", "stopping", "failed", "error"])("does not schedule background reads or mirrors for %s workspaces", status => {
     expect(canBackgroundSyncCloudWorkspace(target)).toBe(false);
     acceptCloudWorkspaceDocument(doc(1, status));
@@ -105,6 +118,26 @@ describe("cloud workspace catalog ownership", () => {
     await manageCloudWorkspace(target, "wake");
     expect(api.lifecycle.mock.calls[1][2]).toBe(api.lifecycle.mock.calls[0][2]);
   });
+  it("retains an interaction reason with an uncertain wake intent when a send retries it", async () => {
+    acceptCloudWorkspaceDocument(doc(1, "stopped"));
+    api.lifecycle.mockRejectedValueOnce(new Error("Transport response lost")).mockResolvedValueOnce(doc(2, "waking"));
+    await expect(manageCloudWorkspace(target, "wake", false, "interaction")).rejects.toThrow("Transport response lost");
+    await manageCloudWorkspace(target, "wake");
+    expect(api.lifecycle.mock.calls).toEqual([
+      [target, "wake", expect.any(String), "interaction"],
+      [target, "wake", api.lifecycle.mock.calls[0][2], "interaction"],
+    ]);
+  });
+  it("does not retag an uncertain ordinary wake when an interaction joins its retry", async () => {
+    acceptCloudWorkspaceDocument(doc(1, "stopped"));
+    api.lifecycle.mockRejectedValueOnce(new Error("Transport response lost")).mockResolvedValueOnce(doc(2, "waking"));
+    await expect(manageCloudWorkspace(target, "wake")).rejects.toThrow("Transport response lost");
+    await manageCloudWorkspace(target, "wake", false, "interaction");
+    expect(api.lifecycle.mock.calls).toEqual([
+      [target, "wake", expect.any(String)],
+      [target, "wake", api.lifecycle.mock.calls[0][2]],
+    ]);
+  });
   it("does not retain the wake key after a confirmed rejection", async () => {
     acceptCloudWorkspaceDocument(doc(1, "stopped"));
     api.lifecycle.mockRejectedValueOnce(new ControlPlaneError(409, "quota_exceeded", "No capacity"))
@@ -114,7 +147,7 @@ describe("cloud workspace catalog ownership", () => {
     expect(api.lifecycle.mock.calls[1][2]).not.toBe(api.lifecycle.mock.calls[0][2]);
   });
   it.each(["account", "removed", "generation", "target"])("rejects a late wake response after its %s changes", async reason => {
-    acceptCloudWorkspaceDocument(doc(1, "stopped"));
+    acceptCloudWorkspaceDocument({ ...doc(1, "stopped"), generation: { ...doc(1).generation, number: 2 } });
     let finish!: (document: CloudWorkspaceDocument) => void;
     api.lifecycle.mockReturnValue(new Promise(resolve => { finish = resolve; }));
     const waking = manageCloudWorkspace(target, "wake");
@@ -124,12 +157,35 @@ describe("cloud workspace catalog ownership", () => {
       api.list.mockResolvedValue([]);
       await refreshCloudWorkspaceCatalog();
     }
-    if (reason === "generation") acceptCloudWorkspaceDocument({ ...doc(3), generation: { ...doc(3).generation, number: 2 } });
-    finish({ ...doc(2, "waking"), ...(reason === "target" ? { organizationId: "33333333-3333-4333-8333-333333333333" } : {}) });
+    if (reason === "generation") acceptCloudWorkspaceDocument(doc(3));
+    finish({ ...doc(2, "waking"), generation: { ...doc(2).generation, number: 2 }, ...(reason === "target" ? { organizationId: "33333333-3333-4333-8333-333333333333" } : {}) });
     await rejected;
     if (["account", "removed"].includes(reason)) expect(cloudWorkspaceDocument(target)).toBeUndefined();
-    if (reason === "generation") expect(cloudWorkspaceDocument(target)?.generation.number).toBe(2);
+    if (reason === "generation") expect(cloudWorkspaceDocument(target)?.generation.number).toBe(1);
     if (reason === "target") expect(getCloudProjects()).toHaveLength(1);
+  });
+  it("shares the wake receipt while the replacement generation drains and ignores an older response", async () => {
+    acceptCloudWorkspaceDocument(doc(1, "stopped"));
+    let finish!: (document: CloudWorkspaceDocument) => void;
+    api.lifecycle.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const first = manageCloudWorkspace(target, "wake", false, "interaction");
+    const replacement = { ...doc(3, "stopping"), generation: { ...doc(3).generation, number: 2 } };
+    acceptCloudWorkspaceDocument(replacement);
+    const second = manageCloudWorkspace(target, "wake");
+    expect(api.lifecycle).toHaveBeenCalledOnce();
+    finish(doc(2, "waking"));
+    expect(await first).toEqual(replacement); expect(await second).toEqual(replacement);
+  });
+  it("gives a later explicit wake a fresh receipt after Stop of a replacement generation", async () => {
+    acceptCloudWorkspaceDocument(doc(1, "stopped"));
+    const replacement = (version: number, status: string) => ({ ...doc(version, status), generation: { ...doc(version).generation, number: 2 } });
+    api.lifecycle.mockResolvedValueOnce(replacement(2, "setting_up")).mockResolvedValueOnce(replacement(3, "stopped")).mockResolvedValueOnce(replacement(4, "waking"));
+    await manageCloudWorkspace(target, "wake");
+    const original = api.lifecycle.mock.calls[0][2];
+    await manageCloudWorkspace(target, "stop");
+    await manageCloudWorkspace(target, "wake");
+    expect(api.lifecycle.mock.calls[2][2]).not.toBe(original);
+    expect(cloudWorkspaceDocument(target)?.status).toBe("waking");
   });
   it("returns a newer stop instead of the late wake receipt", async () => {
     acceptCloudWorkspaceDocument(doc(1, "stopped"));

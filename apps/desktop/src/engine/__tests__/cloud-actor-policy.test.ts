@@ -4,6 +4,7 @@ import { ZerosEngine } from "../zeros-engine";
 import type { TransportClient } from "../transport/types";
 import type { EngineMessage } from "../types";
 import { WorkspaceService } from "../workspace/service";
+import { CloudUserPresence } from "../cloud-idle-stop";
 
 // Exercise the authorization dispatcher with small injected dependencies.
 // The outer activity wrapper is covered by engine-activity-lifecycle.test.ts.
@@ -33,6 +34,23 @@ describe("actor roles at the worker message boundary",()=>{
       expect(f.engine.handleWorkspaceMessage).toHaveBeenCalledOnce();
     }
   });
+  it("accepts authenticated viewer presence during checkpointing and rejects identity overrides", async () => {
+    const f = fixture();
+    const activity = vi.fn();
+    Object.assign(f.engine, { cloudWorker: true, cloudRuntimeCheckpointQuiescing: true,
+      cloudRuntimeAuthorityStopping: false, cloudUserPresence: new CloudUserPresence({ activity }), cloudIdleStop: { activity: vi.fn() } });
+    await f.send({ type: "WORKSPACE_REQUEST", op: "cloudPresence.update", params: { present: true } });
+    expect(activity).toHaveBeenCalledOnce();
+    expect(f.engine.handleWorkspaceMessage).not.toHaveBeenCalled();
+    expect(f.client.send).toHaveBeenLastCalledWith(expect.objectContaining({ type: "WORKSPACE_RESPONSE", result: { accepted: true } }));
+    activity.mockClear();
+    await f.send({ type: "WORKSPACE_REQUEST", op: "cloudPresence.update", params: { present: true, deviceId: randomUUID() } });
+    expect(activity).not.toHaveBeenCalled();
+    f.client.authorized = () => false;
+    await f.send({ type: "WORKSPACE_REQUEST", op: "cloudPresence.update", params: { present: true } });
+    expect(activity).not.toHaveBeenCalled();
+  });
+
   it("treats page selection as a read and page lifecycle as edit authority", async () => {
     for (const role of ["viewer", "prompter", "developer", "manager", "owner"] as const) {
       const f = fixture(role);

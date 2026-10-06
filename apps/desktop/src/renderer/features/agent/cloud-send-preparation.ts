@@ -7,7 +7,7 @@ export interface CloudSendOwner {
 
 function sameOwner(a: CloudSendOwner, b: CloudSendOwner | undefined): boolean {
   return !!b && a.account === b.account && a.folder === b.folder &&
-    a.generation === b.generation && a.cancellation === b.cancellation;
+    (a.generation === undefined || b.generation !== undefined && b.generation >= a.generation) && a.cancellation === b.cancellation;
 }
 
 /** Preparation has no prompt payload or submission retry. The caller retains
@@ -26,7 +26,7 @@ export class CloudSendPreparation {
     current: () => CloudSendOwner | undefined,
   ): Promise<void> {
     const existing = this.flights.get(chatId);
-    if (existing && sameOwner(owner, existing.owner)) return existing.task;
+    if (existing && sameOwner(existing.owner, owner)) return existing.task;
     this.cancel(chatId);
     const controller = new AbortController();
     const assertCurrent = () => {

@@ -106,6 +106,8 @@ export interface AgentUsage {
 export interface AgentSessionState {
   /** Cloud-only refusal before provider execution; independent of local auth. */
   cloudAdmissionFailure?: CloudAdmissionState | null;
+  /** Renderer-owned cloud FIFO readiness; Local sessions never set it. */
+  cloudSendWait?: { state: "waiting" | "failed"; message?: string };
   /** Stop preserves follow-ups until the next explicit send resumes FIFO. */
   queuePaused?: boolean;
   /** The provider resumed into an empty conversation; carry visible context on
@@ -267,6 +269,7 @@ export interface AgentSessionControls {
     segments?: MessageContentSegment[],
     /** Called once the session provider owns this pending submission. */
     onAccepted?: () => void,
+    cloudQueue?: import("./sessions-context").CloudQueuedPrompt,
   ): Promise<void>;
   /** Cancel the in-flight prompt (if any). */
   cancel(): Promise<void>;
@@ -304,6 +307,7 @@ export interface AgentSessionControls {
   /** Remove a still-pending QUEUED send (by its placeholder message id)
    *  before it flushes — the user changed their mind. */
   removeQueued?(messageId: string): void;
+  getQueuedDraft?(messageId: string): import("./sessions-context").CloudQueuedDraft | undefined;
   /** Replace a still-pending QUEUED send's full payload in place (by its
    *  placeholder message id) before it flushes. The payload rides the same
    *  send pipeline as a fresh prompt (wire text, display text, attachments,

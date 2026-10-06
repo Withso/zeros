@@ -191,7 +191,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     for (const [state, message] of [
       ["starting", "Starting the cloud workspace…"],
       ["stopping", "Stopping the cloud workspace…"],
-      ["stopped", "This cloud workspace is stopped."],
+      ["stopped", "Sleeping — resumes when you continue"],
       ["archived", "This cloud workspace is archived."],
     ]) {
       await page.evaluate(

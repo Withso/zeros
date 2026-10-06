@@ -2,7 +2,7 @@ import { getWorkspace as getGithubWriteWorkspace } from "./git/worktree";
 import { githubWritePublication } from "./git/github-write-publication";
 import { configureNativeGithubDesktop, acceptNativeGithubDesktop } from "./git/github-native-desktop";
 import { readCloudAgentRuntimeAttestation } from "./cloud-runtime-attestation";
-import { CloudIdleStopScheduler, hasCloudUserProcesses, isCloudIdleMaintenance } from "./cloud-idle-stop";
+import { CloudIdleStopScheduler, CloudUserPresence, hasCloudUserProcesses, isCloudIdleMaintenance } from "./cloud-idle-stop";
 import { conversationModePort } from "./design/conversation-mode";
 import { startCloudDesignCapture } from "./design/capture-cloud";
 import { setDesignCaptureConfig } from "./design/capture-client";
@@ -1070,10 +1070,20 @@ export class ZerosEngine {
   private cloudRuntimeCheckpointQuiescing = false;
   private cloudIdleReservation: (() => boolean) | null = null;
   private cloudIdleCheckpoint: { id: string; promise: Promise<void> } | null = null;
+  private cloudIdleCaptureId: string | null = null;
+  private readonly cloudUserPresence = new CloudUserPresence({ activity: () => {
+    this.cloudIdleStop.activity();
+    // Race the final commit through the existing authenticated cancellation
+    // transaction as well as invalidating the local stillIdle guard.
+    if (this.cloudIdleCaptureId) void this.cloudRuntimeRegistration?.idleStopRequest({
+      kind: "cancel", requestId: this.cloudIdleCaptureId,
+    }).catch(() => undefined);
+  } });
   private cloudUnresolvedFinalCheckpoint: { id: string; engineInstanceId: string; generation: number } | null = null;
   private cloudFinalCheckpointReconciliationTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly cloudIdleStop = new CloudIdleStopScheduler({
     busy: () => this.cloudIdleBusy(),
+    inspectWorkload: () => this.cloudIdleUserProcesses(),
     stop: async (authority, stillIdle) => {
       await this.stopIdleCloudWorkspace(authority, stillIdle);
       return this.cloudRuntimeCheckpointQuiescing && this.cloudIdleReservation === null;
@@ -3244,14 +3254,26 @@ export class ZerosEngine {
   }
 
   private cloudIdleBusy(): boolean {
+    // Observe traffic even while another busy guard holds; a byte sampled
+    // after a long turn must not be mistaken for freshly received traffic.
+    const humanServices = this.cloudHumanServices?.hasActiveWork() === true;
     return !this.running || !this.cloudWorker || this.cloudRuntimeAuthorityStopping ||
       this.activePromptContexts.size > 0 || this.promptSessions.size > 0 || this.retiringCloudExecutions.size > 0 ||
       this.pendingPermissionRequests.size > 0 || this.pendingQuestionRequests.size > 0 ||
       this.cloudWorkspaceMutations.size > this.cloudWorkspaceIdleMaintenance.size || this.globalDesignAuthorityStarts.size > 0 ||
       [...this.workspaceProcessStarts.values()].some(starts => starts.size > 0) ||
       this.setup.hasRepositoryCodeAuthority() || this.runs.hasRepositoryCodeAuthority() ||
-      this.terminals.visibleTo({ isRemote: false, restricted: new Set() }).some(terminal => !terminal.exited) ||
-      this.cloudHumanServices?.hasActiveWork() === true;
+      this.cloudCommands?.hasActiveWork() === true || this.cloudGoals.active() || this.activeAgentExecutionCount() > 0 ||
+      this.pty.hasRecentInput() ||
+      humanServices || this.cloudUserPresence.active();
+  }
+
+  private cloudIdleUserProcesses(): Promise<boolean> {
+    const terminals = this.terminals.visibleTo({ isRemote: false, restricted: new Set() }).filter(terminal => !terminal.exited);
+    const processes = this.pty.list();
+    const pids = terminals.map(terminal => processes.find(pty => pty.sessionId === terminal.sessionId)?.pid ?? 0);
+    if (pids.some(pid => !Number.isSafeInteger(pid) || pid <= 0)) return Promise.resolve(true);
+    return hasCloudUserProcesses({ idleTerminalPids: pids, infrastructurePids: this.cloudLanguageServices?.idleProcessRoots() ?? [] });
   }
 
   private async stopIdleCloudWorkspace(authority: CloudDurabilityAuthority, stillIdle: () => boolean): Promise<void> {
@@ -3264,7 +3286,7 @@ export class ZerosEngine {
       // An idle language server is restartable infrastructure. User/provider
       // processes remain untouched and prevent the stop instead.
       await this.cloudLanguageServices?.pause();
-      if (!stillIdle() || await hasCloudUserProcesses() || !stillIdle()) return;
+      if (!stillIdle() || await this.cloudIdleUserProcesses() || !stillIdle()) return;
       const directive = await runtime.idleStopRequest({ kind: "request", attemptId: randomUUID() });
       if (!directive) return;
       await this.handleCloudCheckpointRequest(directive, authority);
@@ -3314,7 +3336,8 @@ export class ZerosEngine {
       throw new Error("Cloud workspace is no longer idle; final checkpoint cancelled");
     }
     const idleReserved = directive.idleStop && this.cloudIdleReservation !== null;
-    if (directive.idleStop && (!this.cloudIdleReservation?.() || await hasCloudUserProcesses() || !this.cloudIdleReservation?.())) {
+    const stillIdle = directive.idleStop ? this.cloudIdleReservation : null;
+    if (directive.idleStop && (!this.cloudIdleReservation?.() || await this.cloudIdleUserProcesses() || !this.cloudIdleReservation?.())) {
       await this.cloudRuntimeRegistration?.idleStopRequest({ kind: "cancel", requestId: directive.id }).catch(() => undefined);
       throw new Error("Cloud workspace is no longer idle");
     }
@@ -3327,6 +3350,7 @@ export class ZerosEngine {
     }
     this.cloudRuntimeCheckpointQuiescing = true;
     this.cloudIdleReservation = null;
+    this.cloudIdleCaptureId = directive.idleStop ? directive.id : null;
     this.cloud?.setHumanServicesPaused(true);
     const retainQuiescence = [
       "before_stop",
@@ -3349,9 +3373,12 @@ export class ZerosEngine {
       await this.setup.stopAllAndProve();
       await this.runs.stopAllAndProve();
       await this.retireAllCodeAgentSessionsForTerritoryChange();
-      await this.terminals.clear();
+      if (!directive.idleStop) await this.terminals.clear();
       await this.cloudRecordRuntime.flush(authority);
-      await this.cloudDurabilityRuntime.checkpoint(directive, authority);
+      await this.cloudDurabilityRuntime.checkpoint(directive, authority, stillIdle ?? undefined);
+      // A cancelled idle capture must leave terminal access intact. Clear the
+      // shared registrations only after its final checkpoint was committed.
+      if (directive.idleStop) await this.terminals.clear();
       if (!retainQuiescence) {
         this.cloudRuntimeCheckpointQuiescing = false;
         this.cloudHumanServices?.resume();
@@ -3375,6 +3402,8 @@ export class ZerosEngine {
       }
       this.resumeCloudCheckpointAdmission();
       throw error;
+    } finally {
+      this.cloudIdleCaptureId = null;
     }
   }
 
@@ -5185,7 +5214,8 @@ export class ZerosEngine {
     // Prompt activity belongs to the accepted turn, starting before its first
     // await. Its original RPC can remain unresolved after verified retirement;
     // counting that promise too would keep renewing an abandoned work lease.
-    if (msg.type === "CONNECTED" || msg.type === "HEARTBEAT" || msg.type === "AGENT_PROMPT") {
+    if (msg.type === "CONNECTED" || msg.type === "HEARTBEAT" || msg.type === "AGENT_PROMPT" ||
+        (this.cloudWorker && msg.type === "WORKSPACE_REQUEST" && msg.op === "cloudPresence.update")) {
       return this.dispatchMessage(msg, client);
     }
     return this.activityHeartbeat.track(() => this.dispatchMessage(msg, client));
@@ -5222,6 +5252,12 @@ export class ZerosEngine {
       })
     ) {
       client.close(1008, "account binding required");
+      return;
+    }
+    if (this.cloudWorker && msg.type === "WORKSPACE_REQUEST" && msg.op === "cloudPresence.update") {
+      const accepted = !this.cloudRuntimeAuthorityStopping && this.cloudUserPresence.update(client, msg.params);
+      client.send(createMessage({ type: "WORKSPACE_RESPONSE", source: "engine", requestId: msg.id,
+        op: msg.op, result: { accepted: !!accepted } }));
       return;
     }
     // Client→engine AGENT_* messages route to the agent dispatcher. This used
@@ -10411,6 +10447,7 @@ export class ZerosEngine {
    *  terminals are NOT torn down here — they're engine-owned and persist for the
    *  other devices (see the note at the end of this method). */
   private handleDisconnect(client: TransportClient): void {
+    if (this.cloudWorker) this.cloudUserPresence.release(client);
     void this.cloudLanguageServices?.release(client.id).catch(()=>this.handleCloudRuntimeAuthorityLoss());
     const owned = this.router.sessionsOwnedBy(client.id);
     const hostRelay = this.isHostRelayClient(client);

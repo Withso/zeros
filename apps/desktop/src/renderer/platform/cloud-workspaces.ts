@@ -265,12 +265,15 @@ export async function changeCloudWorkspaceLifecycle(
   target: CloudWorkspaceTarget,
   operation: "wake" | "stop" | "archive" | "delete",
   idempotencyKey: string,
+  reason?: "interaction",
 ): Promise<CloudWorkspaceDocument> {
   const { workspace } = await request(
     `${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}${operation === "delete" ? "" : `/${operation}`}`,
     z.object({ workspace: CloudWorkspaceDocumentSchema }),
     {
-      body: {},
+      // Additive hint on the existing wake path; server-side cross-device
+      // interaction backoff can use it later without changing clients.
+      body: operation === "wake" && reason ? { reason } : {},
       idempotencyKey,
       method: operation === "delete" ? "DELETE" : "POST",
     },

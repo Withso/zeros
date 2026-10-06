@@ -2,13 +2,24 @@ import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { describe,expect,it } from 'vitest';
-import { cloudSshWorkerLaunch,parseCloudSshIntro } from '../cloud-human-services';
+import { cloudSshWorkerLaunch,parseCloudSshIntro,CloudRuntimeHumanServices } from '../cloud-human-services';
 import type { CloudWorkerConfiguration } from '../../agents/containment/cloud-worker-config';
 const {utils}=createRequire(import.meta.url)('ssh2');
 const worker:CloudWorkerConfiguration={version:2,backend:'cloud-worker',profile:'zeros-cloud-worker-v2',uid:10001,gid:10001,
  toolchain:{node:'/opt/zeros-runtime/bin/node',setpriv:'/usr/bin/setpriv',supervisor:'/opt/zeros/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs',bwrap:'/usr/bin/bwrap'}};
 const intro=()=>{const keys=utils.generateKeyPairSync('ed25519'),raw=utils.parseKey(keys.public).getPublicSSH();return{version:1,kind:'ssh',publicKey:keys.public,hostKeySha256:createHash('sha256').update(raw).digest('base64').replace(/=+$/,'')};};
 describe('cloud human service process boundary',()=>{
+ it('counts forwarding traffic for ten minutes but never lets an unused listener renew activity',()=>{
+  let now=0;
+  const services=new CloudRuntimeHumanServices(worker,()=>[],()=>now);
+  const stream={bytesRead:0,bytesWritten:0};
+  const tunnels=(services as unknown as {tunnels:Map<typeof stream,{bytes:number;at:number}>}).tunnels;
+  tunnels.set(stream,{bytes:0,at:now});
+  expect(services.hasActiveWork()).toBe(true);
+  now=600_000;expect(services.hasActiveWork()).toBe(false);
+  stream.bytesWritten=1;expect(services.hasActiveWork()).toBe(true);
+  now+=600_000;expect(services.hasActiveWork()).toBe(false);
+ });
  it('launches the image-owned Node worker after dropping identity and privilege elevation',()=>{
   expect(cloudSshWorkerLaunch(worker)).toEqual({command:'/usr/bin/bwrap',script:'/opt/zeros/apps/desktop/src/engine/transport/cloud-ssh-session.mjs',
    args:['--unshare-pid','--die-with-parent','--new-session','--bind','/','/','--proc','/proc','--dev','/dev',

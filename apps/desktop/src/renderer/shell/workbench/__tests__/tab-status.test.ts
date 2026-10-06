@@ -35,6 +35,14 @@ describe("workbench status contract", () => {
     expect(sources.snapshot().notice).toBeNull();
   });
 
+  it("distinguishes clean cloud sleep from a safety incident without a manual start action", () => {
+    const sleeping = { cloud: true, state: "stopped", connection: "disconnected" as const, since: 0 };
+    expect(describeWorkspaceAvailability(sleeping, 0)).toEqual({ tone: "pending", message: "Sleeping — resumes when you continue" });
+    expect(describeWorkspaceAvailability({ ...sleeping, stopError: { code: "cloud_workspace_safety_failure", message: "Managed compute stopped after a safety check failed" } }, 0))
+      .toMatchObject({ tone: "error", message: "Managed compute stopped after a safety check failed" });
+    expect(describeWorkspaceAvailability({ ...sleeping, cloud: false }, 0)?.message).toBe("This Zeros engine is stopped.");
+  });
+
   it.each(Object.keys(TAB_TYPE_META) as WorkbenchTabType[])(
     "gives %s one banner and a quiet centre",
     (type) => {

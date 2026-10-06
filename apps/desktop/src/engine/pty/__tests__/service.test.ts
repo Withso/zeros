@@ -67,6 +67,32 @@ function makeFake() {
 }
 
 describe("PtyService", () => {
+  it("preserves local writes and output without using cloud input tracking", () => {
+    const fake = makeFake();
+    let clockReads = 0;
+    const svc = new PtyService(process.cwd(), () => fake.handle, undefined, { now: () => { clockReads++; return 0; } });
+    const output: string[] = [];
+    svc.onData((_id, data) => output.push(data));
+    svc.create({ sessionId: "local-input", cwd: process.cwd() });
+    svc.write("local-input", "hello");
+    expect(fake.state.writes).toEqual(["hello"]);
+    expect(output).toEqual(["echo:hello"]);
+    expect(svc.hasRecentInput()).toBe(false);
+    expect(clockReads).toBe(0);
+    svc.killAll();
+  });
+  it("retains recent input for ten minutes without treating replay/output as input", () => {
+    let now = 0;
+    const fake = makeFake();
+    const svc = new PtyService(process.cwd(), () => fake.handle, undefined, { now: () => now, agentAuthIdentity: { uid: 10001, gid: 10001 } });
+    svc.create({ sessionId: "idle-input", cwd: process.cwd() });
+    expect(svc.hasRecentInput()).toBe(false);
+    svc.write("idle-input", "hello"); expect(svc.hasRecentInput()).toBe(true);
+    now = 599_999; expect(svc.hasRecentInput()).toBe(true);
+    fake.emitData("background output"); now++; expect(svc.hasRecentInput()).toBe(false);
+    svc.write("missing", "hello"); expect(svc.hasRecentInput()).toBe(false);
+    svc.killAll();
+  });
   it("filters execution literals before both live output and terminal replay, including split writes", () => {
     const fake=makeFake(), mirrored:string[]=[], published:string[]=[];
     const svc=new PtyService(process.cwd(),()=>fake.handle,()=>({write:(data:string)=>{mirrored.push(data);},resize:()=>{},dispose:()=>{},snapshot:async()=>({data:mirrored.join(""),truncated:false,bytes:0})}));

@@ -719,7 +719,8 @@ export class CloudTransport implements Transport {
     if (this.clients.get(ws) !== client || ws.readyState !== WebSocket.OPEN) {
       return;
     }
-    const control = CONTROL_HANDLER_MESSAGE_TYPES.has(msg.type);
+    const control = CONTROL_HANDLER_MESSAGE_TYPES.has(msg.type) ||
+      (msg.type === "WORKSPACE_REQUEST" && msg.op === "cloudPresence.update");
     const routeKey = this.handlerRouteKey(msg);
     const entry: QueuedHandlerMessage = {
       ws,
