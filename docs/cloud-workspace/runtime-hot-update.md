@@ -1,6 +1,6 @@
 # In-place cloud runtime updates
 
-Status: proposed internal Alpha design. This document does not enable updates or
+Status: approved internal Alpha design; implementation is staged. This document does not enable updates or
 claim live qualification. It extends the [runtime bundle contract](runtime-bundles.md).
 Automatic wake upgrades and quiet running updates must use one transition owner;
 they differ in whether they replace the allocation or retain it.
@@ -157,6 +157,23 @@ authenticated health and an exact transition attestation complete. Do not mark
 ordinary repository setup as rerun. A lost registration response is reconciled
 by transition/engine identity, never by minting another active engine.
 
+PERF's resume cache keys `(generation, runtime_id, manifest_sha256,
+base_compatibility_id, engine_instance_id)` remain exact. HU never reuses cached
+functional qualification or workspace preparation during a runtime transition;
+it runs fresh attestation even if the source previously qualified. Slice 2 will
+expose `readCloudRuntimeResumeProofEpoch(tx, { workspaceId, organizationId,
+generation })` from
+`apps/control-plane/src/cloud-workspaces/runtime-transition.ts`. Its epoch is the
+enrolled engine instance UUID, rather than a second mutable counter. A completed
+epoch may survive stopping the same generation, so the hook does not itself
+disable PERF's resume cache. It returns `null` during any unsettled/uncertain
+transition, incomplete enrollment or engine/generation pin mismatch. Every target and rollback enrollment uses a fresh
+UUID, including after a failed launch; rollback never restores a cached epoch.
+PERF may reuse evidence only for the same non-null epoch and full cache key,
+under the shared lifecycle lock, with its fresh launch and restored-tree checks.
+The adapter's `validate_enrollment_environment(...)` independently rejects the
+source engine ID and any candidate ID previously used by the same invocation.
+
 The disk pointer and PostgreSQL cannot commit atomically together. The durable
 transition journal and closed admission interval bridge that gap: at no point
 may a ready old engine use the new generation or a candidate use the old pin.
@@ -173,6 +190,15 @@ are busy. Required guards include turns, approvals/questions, background leases,
 native processes, commands in dispatch, mutation/process starts, setup/run,
 live PTYs, SSH/tunnels and active preview traffic. Read process identities/state,
 never argv or environments. Keep the existing UID process scan conservative.
+
+Until the disposable acceptance runner measures a reconnect gap **at most 10
+seconds**, automatic activation also requires **no present client on any device**.
+Use IW2's presence signal: no window focused with input in the preceding 15
+minutes. Unknown/stale presence blocks activation. After measured qualification
+establishes the 10-second bound for the applicable execution path and runtime
+pair, a present user may be merely quiet under the same 60-second rule. Bootstrap
+and engine-only measurements are separate; a fast engine swap does not qualify
+the one-time host restart. Recheck presence at the final activation decision.
 
 | Phase | Authority and failure behavior |
 | --- | --- |
@@ -288,12 +314,35 @@ repository setup rerun, Git rewrite or checkpoint restore is part of HU.
 
 ## Implementation slices and verification
 
-1. Agree this design and RU/IW2 interfaces; qualify the old-base bootstrap adapter.
-2. Installer/controller staging, activation, recovery journal and containment
-   tests, with existing install-purpose behavior retained.
-3. Additive transition/allocation-transfer schema and registration service;
-   obtain migration numbers before creating files. Add database race tests.
-4. Quiet trigger, RU queue integration and the credentialed acceptance runner.
+1. Verified installer/controller adapter and v4-5 bootstrap.
+2. Additive migration **0135** (assigned by the orchestrator), allocation transfer
+   and enrollment service, based on RU after its merge.
+3. Quiet trigger, including the measured-gap presence gate above.
+4. RU/IW2 durable queue integration.
+5. Disposable Alpha acceptance runner, executed by the orchestrator.
+
+The first slice adds a fixed deployment-owned Python adapter, shipped both with
+the isolated control plane and in the runtime bundle. It imports the unchanged
+protected v4 installer, stages through its complete verification path, and
+intercepts only the destructive switch. Staging and activation share the
+existing setup/install locks. The adapter's bounded root SSH conversation asks
+for a final transition decision before retirement, then for one-use enrollment
+and authenticated health. A small fixed loader verifies the deployment's exact
+adapter digest before execution; source and request bytes travel on the pinned
+channel's stdin, within the SSH forced-command size limit. It never executes
+repository hooks. Root journals
+contain identities and closed phases, never grants or artifact URLs.
+
+The update-capable supervisor accepts `select-runtime` only after a one-use
+prepared session and confirmed retirement. It reuses the protected full-tree
+verifier and keeps its resident controller identity distinct from the selected
+engine identity. Legacy status/prepare/start behavior is retained. Bootstrap
+activation is refused once the resident supervisor supports engine selection.
+Failed target health requests a fenced rollback decision and fresh source
+enrollment. Unknown authority or failed recovery leaves `recovery_required`;
+ordinary update retries refuse that journal until the transfer service
+reconciles it. This foundation has no automatic lifecycle caller, registry
+qualification claim, or measured live reconnect gap.
 
 Local tests must cover every phase edge and crash boundary: each busy guard;
 60-second monotonic interval; stale identity/epoch; work arriving during staging,

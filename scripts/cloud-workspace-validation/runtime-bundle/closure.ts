@@ -59,6 +59,11 @@ export const RUNTIME_HELPERS = [
     optional: false,
   },
   {
+    source: "apps/control-plane/src/cloud-workspaces/runtime-update-adapter.py",
+    target: "lib/zeros/runtime-update-adapter.py",
+    optional: false,
+  },
+  {
     source: `${SANDBOX}/runtime-self-test.mjs`,
     target: "lib/zeros/runtime-self-test.mjs",
     optional: true,

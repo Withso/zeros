@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -16,7 +16,7 @@ import {
 import net from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { CloudEngineCgroup, CloudDelegatedCgroups } from "./cloud-engine-cgroup.mjs";
-import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
+import { cloudActiveRuntimeDescriptor, parseCloudActiveRuntime, resolveCloudRuntime } from "./cloud-runtime-root.mjs";
 import { readCloudHostRuntimeProfile } from "./cloud-runtime-profile.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -201,11 +201,11 @@ export function parseCloudWorkerSupervisorRequest(value) {
     !isRecord(value) ||
     value.version !== 1 ||
     value.audience !== CLOUD_WORKER_SUPERVISOR_AUDIENCE ||
-    !["status", "prepare", "start"].includes(value.operation)
+    !["status", "update-status", "prepare", "start", "select-runtime"].includes(value.operation)
   ) {
     return null;
   }
-  if (value.operation === "prepare" || value.operation === "status") {
+  if (["prepare", "status", "update-status"].includes(value.operation)) {
     return exactKeys(value, ["audience", "operation", "version"])
       ? {
           version: 1,
@@ -213,6 +213,12 @@ export function parseCloudWorkerSupervisorRequest(value) {
           operation: value.operation,
         }
       : null;
+  }
+  if (value.operation === "select-runtime") {
+    if (!exactKeys(value, ["audience", "active", "operation", "session", "version"]) ||
+      !SESSION_PATTERN.test(value.session ?? "")) return null;
+    try { return { ...value, active: parseCloudActiveRuntime(value.active) }; }
+    catch { return null; }
   }
   if (
     !exactKeys(value, [
@@ -247,6 +253,10 @@ function supervisorResponse(outcome, extra = {}) {
   };
 }
 
+function rejectSupervisorRequest() {
+  return supervisorResponse("rejected");
+}
+
 function childExit(child, timeoutMs) {
   if (child.exitCode !== null || child.signalCode !== null)
     return Promise.resolve(true);
@@ -263,7 +273,52 @@ function childExit(child, timeoutMs) {
   });
 }
 
+// Reuse the protected installer on the physical host. Do not override the
+// ordinary runtime resolver's pinned-executable check: this supervisor remains
+// controller H while it launches engine T. The adapter already hashed T; this
+// independent check also prevents a root caller selecting an unverified tree.
+const VERIFY_SELECTED_RUNTIME = `
+import importlib.util,json,sys
+sys.dont_write_bytecode=True
+s=importlib.util.spec_from_file_location('bootstrap','/opt/zeros-bootstrap/bootstrap.py')
+b=importlib.util.module_from_spec(s);s.loader.exec_module(b)
+try:
+ a=b.Bootstrap();a.base();a.require_persistence()
+ expected=b.strict_json(sys.stdin.buffer.read(4097),'input_schema')
+ active=b.strict_json(a.read(b.ACTIVE,4096,0o600),'input_schema')
+ _,receipt=a.verify_runtime(a.current(),full=True)
+ installed=b.strict_json(receipt,'cache_conflict')
+ b.text_match(active['supervisorSessionId'],b.UUID,'input_schema')
+ verified={'schema':'zeros.active-runtime/v1','runtimeId':installed['runtimeId'],
+  'manifestSha256':installed['manifestSha256'],'root':b.INFRA+'/'+installed['runtimeId'],
+  'baseCompatibilityId':a.compat_id,'installerReceiptSha256':b.sha(receipt),
+  'bootId':a.boot_id(),'cgroupRoot':b.CGROUP,'supervisorSessionId':active['supervisorSessionId']}
+ b.require(active==verified and expected==verified,'input_schema')
+ print(json.dumps(verified,separators=(',',':')))
+except Exception:
+ sys.exit(1)
+`;
+
+export function verifySelectedCloudRuntime(expected) {
+  if (process.platform !== "linux" || process.geteuid?.() !== 0)
+    throw new Error("Cloud runtime selection requires the root host");
+  const active = parseCloudActiveRuntime(expected);
+  const result = spawnSync("/usr/bin/python3", ["-I", "-c", VERIFY_SELECTED_RUNTIME], {
+    input: JSON.stringify(active), encoding: "utf8", timeout: 90_000, maxBuffer: 8192,
+    env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", HOME: "/root", LANG: "C.UTF-8" },
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  if (result.error || result.status !== 0 || result.signal)
+    throw new Error("Cloud runtime selection verification failed");
+  const verified = parseCloudActiveRuntime(JSON.parse(result.stdout));
+  if (Object.keys(active).some(key => active[key] !== verified[key]))
+    throw new Error("Cloud runtime selection changed");
+  return verified;
+}
+
 export class CloudWorkerSupervisor {
+  #handlers;
+
   constructor({
     socketPath = CLOUD_WORKER_SUPERVISOR_SOCKET,
     runtime = resolveCloudRuntime(),
@@ -271,6 +326,7 @@ export class CloudWorkerSupervisor {
     spawnProcess = spawn,
     engineScope = null,
     setupScope = null,
+    verifySelectedRuntime = verifySelectedCloudRuntime,
   } = {}) {
     this.socketPath = socketPath;
     this.runtime = runtime;
@@ -278,12 +334,22 @@ export class CloudWorkerSupervisor {
     this.spawnProcess = spawnProcess;
     this.engineScope = engineScope;
     this.setupScope = setupScope;
+    this.verifySelectedRuntime = verifySelectedRuntime;
+    this.selectedRuntime = runtime.profile === "v4" ? cloudActiveRuntimeDescriptor(runtime) : null;
+    this.binRoot = runtime.binRoot;
     this.server = null;
     this.child = null;
     this.session = null;
     this.operation = Promise.resolve();
     this.stopping = false;
     this.lock = null;
+    this.#handlers = Object.freeze(new Map([
+      ["status", this.#status.bind(this)],
+      ["update-status", this.#updateStatus.bind(this)],
+      ["prepare", this.#prepare.bind(this)],
+      ["start", this.#startRuntime.bind(this)],
+      ["select-runtime", this.#selectRuntime.bind(this)],
+    ]));
   }
 
   async stopChild() {
@@ -333,7 +399,7 @@ export class CloudWorkerSupervisor {
       env: {
         HOME: "/root",
         LANG: "C.UTF-8",
-        PATH: `${this.runtime.binRoot}:/usr/bin:/bin:/usr/sbin:/sbin`,
+        PATH: `${this.binRoot}:/usr/bin:/bin:/usr/sbin:/sbin`,
         ZEROS_ACCOUNT_JWT_AUD: environment.accountAudience,
         ...(environment.accountContract
           ? {
@@ -372,17 +438,48 @@ export class CloudWorkerSupervisor {
   }
 
   async apply(request) {
-    if (this.stopping) return supervisorResponse("rejected");
-    if (request.operation === "status") return supervisorResponse("ready");
-    if (request.operation === "prepare") {
-      this.session = null;
-      await this.stopChild();
-      this.session = `zsp_${randomBytes(32).toString("base64url")}`;
-      return supervisorResponse("prepared", { session: this.session });
-    }
-    if (!this.session || request.session !== this.session) {
-      return supervisorResponse("rejected");
-    }
+    if (this.stopping) return rejectSupervisorRequest();
+    return (this.#handlers.get(request?.operation) ?? rejectSupervisorRequest)(request);
+  }
+
+  #sessionMatches(candidate) {
+    if (!this.session || typeof candidate !== "string") return false;
+    const expected = Buffer.from(this.session, "utf8");
+    const supplied = Buffer.from(candidate, "utf8");
+    return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+  }
+
+  #status() {
+    return supervisorResponse("ready");
+  }
+
+  #updateStatus() {
+    return this.runtime.profile === "v4"
+      ? supervisorResponse("ready", { controller: cloudActiveRuntimeDescriptor(this.runtime), selected: this.selectedRuntime })
+      : supervisorResponse("rejected");
+  }
+
+  async #prepare() {
+    this.session = null;
+    await this.stopChild();
+    this.session = `zsp_${randomBytes(32).toString("base64url")}`;
+    return supervisorResponse("prepared", { session: this.session });
+  }
+
+  #selectRuntime(request) {
+    if (!this.#sessionMatches(request.session)) return rejectSupervisorRequest();
+    if (this.runtime.profile !== "v4" || this.child) return rejectSupervisorRequest();
+    const active = this.verifySelectedRuntime(request.active);
+    if (["baseCompatibilityId", "bootId", "cgroupRoot"].some(key => active[key] !== this.runtime[key]))
+      return rejectSupervisorRequest();
+    this.selectedRuntime = active;
+    this.binRoot = `${active.root}/bin`;
+    this.launcher = `${this.binRoot}/start-engine.sh`;
+    return supervisorResponse("selected");
+  }
+
+  async #startRuntime(request) {
+    if (!this.#sessionMatches(request.session)) return rejectSupervisorRequest();
     this.session = null;
     await this.stopChild();
     const pid = await this.launch(request.environment);
@@ -435,6 +532,7 @@ export class CloudWorkerSupervisor {
         reject();
         return;
       }
+      if (request.operation === "select-runtime") socket.setTimeout(100_000);
       complete = true;
       this.enqueue(request).then(
         (response) => socket.end(`${JSON.stringify(response)}\n`),

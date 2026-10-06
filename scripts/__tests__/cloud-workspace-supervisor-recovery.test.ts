@@ -11,6 +11,129 @@ import {
   CLOUD_WORKER_SUPERVISOR_AUDIENCE,
 } from "../cloud-workspace-validation/sandbox/cloud-worker-supervisor.mjs";
 
+describe("cloud runtime activation", () => {
+  function fixture() {
+    const tree = cloudRuntimeFixture();
+    const runtime = createCloudRuntimeResolver({ filesystem: tree.filesystem }).resolve();
+    const active = { ...tree.descriptor, runtimeId: `r1-${"d".repeat(64)}`,
+      root: `/opt/zeros-infra/r1-${"d".repeat(64)}`, manifestSha256: "d".repeat(64),
+      supervisorSessionId: "32345678-1234-4234-8234-123456789abc" };
+    const verifySelectedRuntime = vi.fn(() => active);
+    const retire = vi.fn(async () => {});
+    const supervisor = new CloudWorkerSupervisor({ runtime, verifySelectedRuntime, engineScope: { retire } });
+    return { tree, runtime, active, verifySelectedRuntime, retire, supervisor };
+  }
+
+  it("accepts only an exact root activation request, never an arbitrary launcher", () => {
+    const f = fixture();
+    try {
+      const request = { version: 1, audience: CLOUD_WORKER_SUPERVISOR_AUDIENCE,
+        operation: "select-runtime", session: `zsp_${"S".repeat(43)}`, active: f.active };
+      expect(parseCloudWorkerSupervisorRequest(request)).toEqual(request);
+      for (const invalid of [ { ...request, command: "/tmp/launcher" },
+        { ...request, active: { ...f.active, root: "/tmp/runtime" } },
+        { ...request, session: "stale" } ]) expect(parseCloudWorkerSupervisorRequest(invalid)).toBeNull();
+    } finally { f.tree.dispose(); }
+  });
+
+  it("keeps the resident controller identity while selecting the new engine", async () => {
+    const f = fixture();
+    try {
+      const prepared = await f.supervisor.apply({ operation: "prepare" });
+      expect(await f.supervisor.apply({ operation: "select-runtime", session: prepared.session,
+        active: f.active })).toMatchObject({ outcome: "selected" });
+      expect(f.verifySelectedRuntime).toHaveBeenCalledWith(f.active);
+      expect(f.retire).toHaveBeenCalledOnce();
+      expect(f.supervisor.runtime).toBe(f.runtime);
+      expect(f.supervisor.launcher).toBe(`${f.active.root}/bin/start-engine.sh`);
+      expect(await f.supervisor.apply({ operation: "update-status" })).toMatchObject({
+        outcome: "ready", controller: f.tree.descriptor, selected: f.active,
+      });
+    } finally { f.tree.dispose(); }
+  });
+
+  it("rejects a stale session or live child before verification", async () => {
+    const f = fixture();
+    try {
+      const prepared = await f.supervisor.apply({ operation: "prepare" });
+      expect(await f.supervisor.apply({ operation: "select-runtime", session: "stale",
+        active: f.active })).toMatchObject({ outcome: "rejected" });
+      f.supervisor.child = { exitCode: null, signalCode: null };
+      expect(await f.supervisor.apply({ operation: "select-runtime", session: prepared.session,
+        active: f.active })).toMatchObject({ outcome: "rejected" });
+      expect(f.verifySelectedRuntime).not.toHaveBeenCalled();
+    } finally { f.tree.dispose(); }
+  });
+
+  it.each(["unknown", "constructor", "__proto__", "toString", "select-runtime\0", ["select-runtime"], null])(
+    "rejects unknown or forged operations without consuming the session (%s)", async operation => {
+      const f = fixture();
+      try {
+        const prepared = await f.supervisor.apply({ operation: "prepare" });
+        const launch = vi.spyOn(f.supervisor, "launch").mockResolvedValue(42);
+        f.retire.mockClear();
+        const request = { version: 1, audience: CLOUD_WORKER_SUPERVISOR_AUDIENCE,
+          operation, session: prepared.session, active: f.active };
+        expect(parseCloudWorkerSupervisorRequest(request)).toBeNull();
+        expect(await f.supervisor.apply(request)).toMatchObject({ outcome: "rejected" });
+        expect(f.supervisor.session === prepared.session).toBe(true);
+        expect(f.retire).not.toHaveBeenCalled();
+        expect(launch).not.toHaveBeenCalled();
+        expect(f.verifySelectedRuntime).not.toHaveBeenCalled();
+      } finally { f.tree.dispose(); }
+    },
+  );
+
+  it.each(["start", "select-runtime"])("rejects stale and malformed sessions before %s", async operation => {
+    const f = fixture();
+    try {
+      const stale = await f.supervisor.apply({ operation: "prepare" });
+      const prepared = await f.supervisor.apply({ operation: "prepare" });
+      const launch = vi.spyOn(f.supervisor, "launch").mockResolvedValue(42);
+      f.retire.mockClear();
+      for (const session of [stale.session, undefined, null, 42, prepared.session.slice(1),
+        `${prepared.session}x`, `x${prepared.session.slice(1)}`]) {
+        expect(await f.supervisor.apply({ operation, session, active: f.active })).toMatchObject({ outcome: "rejected" });
+      }
+      expect(f.supervisor.session === prepared.session).toBe(true);
+      expect(f.retire).not.toHaveBeenCalled();
+      expect(launch).not.toHaveBeenCalled();
+      expect(f.verifySelectedRuntime).not.toHaveBeenCalled();
+    } finally { f.tree.dispose(); }
+  });
+
+  it.each([
+    ["baseCompatibilityId", `bc1-${"e".repeat(64)}`],
+    ["bootId", "42345678-1234-4234-8234-123456789abc"],
+    ["cgroupRoot", "/sys/fs/cgroup/other.slice/zeros-host.service"],
+  ])("rejects a forged matching request when the verified %s differs", async (key, value) => {
+    const f = fixture();
+    try {
+      const prepared = await f.supervisor.apply({ operation: "prepare" });
+      f.verifySelectedRuntime.mockReturnValue({ ...f.active, [key]: value });
+      expect(f.active[key]).toBe(f.runtime[key]);
+      expect(await f.supervisor.apply({ operation: "select-runtime", session: prepared.session,
+        active: f.active })).toMatchObject({ outcome: "rejected" });
+      expect(f.verifySelectedRuntime).toHaveBeenCalledWith(f.active);
+      expect(f.supervisor.selectedRuntime).toEqual(f.tree.descriptor);
+      expect(f.supervisor.launcher).toBe(f.runtime.startEngine);
+    } finally { f.tree.dispose(); }
+  });
+
+  it("retains the old launch selection on verification failure and rejects legacy hosts", async () => {
+    const f = fixture();
+    try {
+      const prepared = await f.supervisor.apply({ operation: "prepare" });
+      f.verifySelectedRuntime.mockImplementation(() => { throw new Error("verification failed"); });
+      await expect(f.supervisor.apply({ operation: "select-runtime", session: prepared.session,
+        active: f.active })).rejects.toThrow("verification failed");
+      expect(f.supervisor.launcher).toBe(f.runtime.startEngine);
+      const legacy = new CloudWorkerSupervisor();
+      expect(await legacy.apply({ operation: "update-status" })).toMatchObject({ outcome: "rejected" });
+    } finally { f.tree.dispose(); }
+  });
+});
+
 describe("cloud broker resume and ownership", () => {
   it("requires systemd ownership on v4 even when a broker is already healthy",async()=>{
     const tree=cloudRuntimeFixture();
