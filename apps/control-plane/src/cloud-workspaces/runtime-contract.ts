@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { setupTimingsSchema } from "./setup-timings.js";
 
 // The control plane is an isolated Zod 3 build. These trust-boundary readers
 // follow packages/protocol's v4 contracts; runtime-contract.test.ts runs the
@@ -73,6 +74,7 @@ const installerChecks = new Set(["input_schema", "input_too_large", "artifact_ho
   "pointer_publish", "host_start", "setup_exit", "timeout", "process_signal", "diagnostic_missing"]);
 export const ClosedDiagnosticSchema = z.object({
   schema: z.literal("zeros.diagnostic/v1"), component: z.enum(["bundle", "publication", "base", "bootstrap", "installer", "attester", "setup", "qualification", "cleanup", "build"]),
+  timings: setupTimingsSchema.optional(),
   stage: constant, ok: z.boolean(), exitCode: integer.max(255).nullable(), timedOut: z.boolean(), failedChecks: z.array(constant).max(32),
-}).strict().refine(value => new Set(value.failedChecks).size === value.failedChecks.length &&
+}).strict().refine(value => (!value.timings || value.component === "attester") && new Set(value.failedChecks).size === value.failedChecks.length &&
   (value.component !== "installer" || (installerStages.has(value.stage) && value.failedChecks.every(check => installerChecks.has(check)))));

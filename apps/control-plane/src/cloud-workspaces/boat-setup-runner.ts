@@ -6,6 +6,7 @@ export { boatAuthorizedKeyCommand, isPublicBoatAddress, openBoatBootstrapChannel
 export type { BoatBootstrapChannel } from "./boat-pinned-ssh.js";
 import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND, CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "./daytona-setup-executor.js";
 import { RuntimeBaseStatusSchema, RuntimeInstallInputSchema, RUNTIME_INSTALL_MAX_ENCODED_BYTES } from "./runtime-contract.js";
+import { setupTimingClock } from "./setup-timings.js";
 import {
   CloudProviderError,
   type CloudWorkspaceCommandRunner,
@@ -79,12 +80,16 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
     }
     signal.throwIfAborted();
     await this.options.assertOwned(input.resourceId);
-    return executeBoatPinnedSsh({
+    const timings = v4 ? setupTimingClock("boat_transport") : undefined;
+    const transportFinished = timings?.start("ssh_transport");
+    let bootstrapFinished: ReturnType<ReturnType<typeof setupTimingClock>["start"]> | undefined;
+    const operation = executeBoatPinnedSsh({
       resourceId: input.resourceId,
       command: `${input.command}${v4 ? "" : " --stdin"}`,
       stdin: encoded,
       timeoutSeconds: input.timeoutSeconds,
     }, this.options, signal, async () => {
+      bootstrapFinished = timings?.start("bootstrap_probe");
       // Boat cold resume restores disk, not the image's OCI entrypoint or /run.
       // This fixed, secret-free helper probes or starts the one root broker;
       // it cannot replace an active engine or consume a launch admission.
@@ -124,6 +129,17 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
         ), { diagnostic: { version: 1, phase: "bootstrap", exit: prepared.timedOut ? "timeout" : prepared.stdoutTruncated ? "overflow" :
           typeof prepared.exitCode === "number" && prepared.exitCode !== 0 ? "nonzero" : "unknown", ...(files ? { files } : {}) } });
       }
+      bootstrapFinished?.();
     });
+    try {
+      const result = await operation;
+      transportFinished?.(result.exitCode === 0 ? "passed" : "failed");
+      return { ...result, ...(timings ? { timings: timings.snapshot() } : {}) };
+    } catch (error) {
+      bootstrapFinished?.(signal.aborted ? "cancelled" : "failed");
+      transportFinished?.(signal.aborted ? "cancelled" : "failed");
+      if (timings && error instanceof Error) Object.assign(error, { timings: timings.snapshot() });
+      throw error;
+    }
   }
 }

@@ -58,6 +58,19 @@ function harness(overrides: Partial<CloudWorkspaceInternalSetupService> = {}) {
 }
 
 describe("cloud workspace internal setup routes", () => {
+  it("negotiates timing output outside the immutable setup material only after successful v4 redemption", async () => {
+    const { app, service } = harness();
+    const headers = { authorization: `Bearer ${SETUP_TOKEN}`, "content-type": "application/json", "x-zeros-setup-timings": "1" };
+    const input = { ...body, materialVersion: 2, runtime: runtimeWitness };
+    const response = await app.request(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, { method: "POST", headers, body: JSON.stringify(input) });
+    expect(response.headers.get("x-zeros-setup-timings")).toBe("1");
+    expect(await response.json()).toEqual({ version: 1, material: "secret" });
+    const legacy = await app.request(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, { method: "POST", headers, body: JSON.stringify(body) });
+    expect(legacy.headers.get("x-zeros-setup-timings")).toBeNull();
+    vi.mocked(service.redeem).mockRejectedValueOnce(new CloudWorkspaceSetupMaterialError("setup_admission_rejected", "closed", false));
+    const rejected = await app.request(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, { method: "POST", headers, body: JSON.stringify(input) });
+    expect(rejected.headers.get("x-zeros-setup-timings")).toBeNull();
+  });
   it("passes strict v4 redemption and registration witnesses to the generation-bound service", async () => {
     const { app, service } = harness();
     const headers = { authorization: `Bearer ${SETUP_TOKEN}`, "content-type": "application/json" };

@@ -577,6 +577,23 @@ d("cloud workspace setup worker", () => {
     expect(retired.rows).toEqual([{ consumed: true, revoked: true }]);
   });
 
+  it.each([true, false])("persists closed stage timings for a current setup claim (success=%s)", async success => {
+    const seeded = await seedSetup({ v4: true });
+    const timings = { version: 1, clocks: [{ source: "setup", clockId: randomUUID(), startedAt: "2026-10-06T00:00:00.000Z",
+      spans: [{ stage: "repository", startMs: 10, endMs: 25, outcome: success ? "passed" : "failed" }] }] };
+    const executor = new FakeExecutor([async execution => {
+      if (!success) throw Object.assign(new CloudWorkspaceSetupError("setup_command_failed", "closed", false), { timings });
+      return { ...await registeredSuccessfulSetup(execution, ""), timings };
+    }]);
+    await worker(executor).runOnce();
+    const stored = (await pool.query("SELECT stage_timings FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0];
+    expect(stored.stage_timings).toEqual(timings);
+    for (const invalid of [{ ...timings, text: "private" }, { version: 1, clocks: [{ ...timings.clocks[0], source: "private" }] },
+      { version: 1, clocks: [{ ...timings.clocks[0], spans: [{ stage: "repository", startMs: 25, endMs: 10, outcome: "passed" }] }] }]) {
+      await expect(pool.query("UPDATE cloud_workspace_setup_runs SET stage_timings=$2 WHERE id=$1", [seeded.setupRunId, invalid])).rejects.toMatchObject({ code: "23514" });
+    }
+  });
+
   it("persists distinct closed installer failures without URL or token-like input", async () => {
     const seeded = await seedSetup({ v4: true });
     const broker = new DatabaseCloudWorkspaceSetupAdmissionBroker({ pool, endpoint: admissionEndpoint });
@@ -937,18 +954,25 @@ d("cloud workspace setup worker", () => {
       [seeded.setupRunId],
     );
 
+    const winnerTimings = { version: 1 as const, clocks: [{ source: "setup" as const, clockId: randomUUID(), startedAt: "2026-10-06T00:00:00.000Z",
+      spans: [{ stage: "repository" as const, startMs: 0, endMs: 10, outcome: "passed" as const }] }] };
+    const loserTimings = { ...winnerTimings, clocks: [{ ...winnerTimings.clocks[0]!, clockId: randomUUID() }] };
+    await pool.query("UPDATE cloud_workspace_setup_runs SET stage_timings=$2 WHERE id=$1", [seeded.setupRunId, loserTimings]);
     const secondExecutor = new FakeExecutor([
-      async (execution) => registeredSuccessfulSetup(execution, "winner"),
+      async (execution) => {
+        expect((await pool.query("SELECT stage_timings FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0].stage_timings).toBeNull();
+        return { ...await registeredSuccessfulSetup(execution, "winner"), timings: winnerTimings };
+      },
     ]);
     await expect(
       worker(secondExecutor, { workerId: "worker-two" }).runOnce(),
     ).resolves.toBe(true);
-    firstRelease.resolve(successfulSetup(firstClaim, "late loser"));
+    firstRelease.resolve({ ...successfulSetup(firstClaim, "late loser"), timings: loserTimings });
     await expect(firstRun).resolves.toBe(true);
 
     const stored = await pool.query(
       `SELECT cw.status, sr.state, sr.claim_count, sr.execution_fence,
-              sr.log_excerpt
+              sr.log_excerpt, sr.stage_timings
        FROM cloud_workspaces cw
        JOIN cloud_workspace_setup_runs sr ON sr.workspace_id = cw.id
        WHERE cw.id = $1`,
@@ -960,6 +984,7 @@ d("cloud workspace setup worker", () => {
       claim_count: 2,
       execution_fence: "2",
       log_excerpt: "winner",
+      stage_timings: winnerTimings,
     });
   });
 

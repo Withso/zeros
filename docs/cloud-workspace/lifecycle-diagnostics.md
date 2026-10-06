@@ -293,3 +293,59 @@ the target is met.
 Local workspaces (Personal or organization-owned) never enter these workers.
 Cloud authorization remains keyed by organization, workspace and generation;
 owner/placement switching introduces no new client state or wake behavior.
+
+## Closed setup stage timings
+
+Migration 0136 (expand) adds nullable `cloud_workspace_setup_runs.stage_timings`.
+A document has `version: 1` and at most five clocks / 32 total spans / 8 KiB.
+Each clock carries a closed source, random UUID, UTC anchor and spans with a
+closed stage/outcome plus integer start/end offsets, bounded to one hour. The
+control-plane, shipped helper and SQL validators reject unknown fields and
+values, duplicate clocks, reversed offsets and oversized documents. No logs,
+command text, repository paths, credentials or arbitrary error strings enter
+this column.
+
+Clocks are independent monotonic domains. Durations are `endMs - startMs`
+within one clock; UTC anchors locate observations but do not synchronize hosts.
+`provider_command` includes the complete runner; `ssh_transport` includes
+channel/key/command/cleanup and overlaps `bootstrap_probe`. Setup `image_*`
+spans include child attester spans; do not sum overlapping clocks. Attester
+spans cover lock, tree verification, engine qualification, setup qualification
+and proof publication. The same checks, short-lived proof and engine readiness
+barrier still run. `engine_readiness` includes observation polling; this is not
+an independent Node, SQLite, registration HTTP or first-heartbeat measurement.
+
+The worker writes timings only under the current setup-run lease/fence, scoped
+to organization/workspace/generation, for both success and returned failure.
+Reclaim clears the previous attempt's document; a late previous claimant cannot
+overwrite the winner. This column describes the last claim, not a full retry
+history. An abruptly killed or unresponsive helper may return no partial spans.
+Malformed optional telemetry is dropped at the result boundary; it cannot
+supply missing readiness or replace a failed proof. Existing setup-run RLS,
+retention and deletion apply.
+
+Runtime rollout is negotiated over the existing authenticated material
+redemption: the helper sends `X-Zeros-Setup-Timings: 1`, and a supporting
+control plane echoes it only after successful v4 redemption. No JSON request
+or immutable material field is added. The new helper emits a strict version-4
+ready/error envelope with timings only after that acknowledgement; otherwise
+it keeps existing v1 ready / v1-v3 error envelopes. New readers accept both.
+Within the new bundle, attester completion diagnostics have an optional closed
+timing document; their report hash, proof bytes and admission checks do not use
+it. Legacy v1-v3 attester/proof snapshots are unchanged. Deploy the additive
+migration/reader first, then qualify and select a new runtime bundle to collect
+helper spans. Old pinned bundles still yield control-plane/transport timings.
+
+### Local workspace impact
+
+Personal Local and organization-owned local workspaces do not run the cloud
+setup worker or consume these setup envelopes. Local files, settings, engine
+launch, owner selection and switching are unchanged.
+
+### Cloud workspace impact
+
+Cloud setup retains exact organization/workspace/generation and execution-fence
+checks, registration, containment and durable readiness. Telemetry grants no
+new authority and adds no per-stage network requests. This change does not
+implement resume reuse or a runtime transition; RU/HU's decision paths remain
+unchanged.

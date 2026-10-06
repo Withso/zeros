@@ -67,6 +67,17 @@ function rewriteDiagnostic(stdout: string, change: Record<string, unknown>) {
 }
 
 describe("v4 attester to setup admission", () => {
+  it("returns closed stage clocks after proof publication and carries them through setup", async () => {
+    const { attestImage } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
+    const result = attesterOutput(), diagnostic = JSON.parse(result.stdout.trim().split("\n").at(-1)!);
+    expect(diagnostic.timings.clocks[0].spans.map((span: any) => span.stage)).toEqual([
+      "lock", "verify_tree", "qualify_engine", "run_setup", "publish_proof",
+    ]);
+    returnOutput(result);
+    const recordTimings = vi.fn();
+    await attestImage(material(), profile, vi.fn(), recordTimings);
+    expect(recordTimings).toHaveBeenCalledWith(diagnostic.timings);
+  });
   it("admits the real report against the resolver witness without legacy metadata", async () => {
     const { cloudWorkspaceImageAdmissionChecks } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
     const result = attesterOutput(), report = JSON.parse(result.stdout.split("\n")[0]);

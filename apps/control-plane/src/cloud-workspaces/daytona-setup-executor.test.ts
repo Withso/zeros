@@ -178,6 +178,24 @@ describe("DaytonaCloudWorkspaceSetupExecutor", () => {
     expect(wrapped.setup).toBe(vi.mocked(legacy.runner.execute).mock.calls[0][0].env!.ZEROS_CLOUD_WORKSPACE_SETUP_B64);
     expect(JSON.stringify(vi.mocked(f.broker.revoke).mock.calls)).not.toContain(f.artifactUrl);
   });
+  it("accepts bounded v4 setup timing envelopes without changing the readiness proof", async () => {
+    const f = v4();
+    const timings = { version: 1, clocks: [{ source: "setup", clockId: randomUUID(), startedAt: "2026-10-06T00:00:00.000Z",
+      spans: [{ stage: "repository", startMs: 10, endMs: 25, outcome: "passed" }] }] };
+    vi.mocked(f.runner.execute).mockResolvedValue({ exitCode: 0, outputTruncated: false,
+      output: JSON.stringify({ version: 4, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "ready",
+        readiness: readiness(f.input), timings }) + "\n" + JSON.stringify(f.installerDiagnostic) + "\n" });
+    const result = await f.executor.execute(f.input, new AbortController().signal);
+    expect(result.readiness).toEqual(readiness(f.input));
+    expect((result as any).timings.clocks).toEqual(expect.arrayContaining(timings.clocks));
+    vi.mocked(f.runner.execute).mockResolvedValue({ exitCode: 0, outputTruncated: false,
+      output: JSON.stringify({ version: 4, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "ready",
+        readiness: readiness(f.input), timings: { private: "discarded" } }) + "\n" + JSON.stringify(f.installerDiagnostic) + "\n" });
+    const malformed = await f.executor.execute(f.input, new AbortController().signal);
+    expect(malformed.readiness).toEqual(readiness(f.input));
+    expect(JSON.stringify(malformed.timings)).not.toContain("private");
+    expect(malformed.timings?.clocks.map(clock => clock.source)).toEqual(["control_plane"]);
+  });
   it("never returns artifact URLs in setup logs or errors", async () => {
     const f = v4();
     vi.mocked(f.runner.execute).mockResolvedValueOnce({ exitCode: 1, output: f.artifactUrl, outputTruncated: false });

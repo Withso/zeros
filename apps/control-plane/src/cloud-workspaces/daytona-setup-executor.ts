@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { mergeSetupTimings, parseSetupTimings, setupTimingClock, type SetupTimings } from "./setup-timings.js";
 import { parseCloudWorkspaceSetupHookLog } from "./setup-log.js";
 import { ClosedDiagnosticSchema, RuntimeInstallInputSchema, RUNTIME_INSTALL_MAX_ENCODED_BYTES, type RuntimeDescriptor } from "./runtime-contract.js";
 import type { CloudRuntimePin } from "./runtime-selection.js";
@@ -91,11 +92,12 @@ export type DaytonaCloudWorkspaceSetupExecutorOptions =
   CloudWorkspaceLinuxSetupExecutorOptions;
 
 type SetupHelperReady = {
-  version: 1;
+  version: 1 | 4;
   audience: typeof SETUP_RESULT_AUDIENCE;
   outcome: "ready";
   readiness: CloudWorkspaceSetupReadiness;
   logExcerpt?: string;
+  timings?: unknown;
 };
 
 const HELPER_FAILURES: Readonly<
@@ -345,6 +347,7 @@ function parseReadyResponse(
   const value = parsed as Partial<SetupHelperReady>;
   const expectedKeys = [
     "audience",
+    ...(value.version === 4 ? ["timings"] : []),
     ...(value.logExcerpt === undefined ? [] : ["logExcerpt"]),
     "outcome",
     "readiness",
@@ -352,7 +355,7 @@ function parseReadyResponse(
   ];
   if (
     !exactKeys(parsed, expectedKeys) ||
-    value.version !== 1 ||
+    !(value.version === 1 || value.version === 4 && execution.runtime?.profile === "zeros-cloud-worker-v4") ||
     value.audience !== SETUP_RESULT_AUDIENCE ||
     value.outcome !== "ready" ||
     !value.readiness ||
@@ -371,6 +374,7 @@ function parseReadyResponse(
   }
   return {
     readiness: value.readiness,
+    ...(value.version === 4 ? { timings: parseSetupTimings(value.timings) } : {}),
     ...(value.logExcerpt !== undefined ? { logExcerpt: value.logExcerpt } : {}),
     logTruncated: false,
   };
@@ -422,6 +426,14 @@ function helperFailure(
 ): CloudWorkspaceSetupError {
   try {
     const parsed = JSON.parse(output) as Record<string, unknown>;
+    // A v4 envelope carries optional telemetry around the unchanged closed
+    // v1/v2/v3 failure. Parse it independently; it cannot alter rejection.
+    if (parsed.version === 4 && execution.runtime?.profile === "zeros-cloud-worker-v4" &&
+      exactKeys(parsed, ["version", "audience", "outcome", "code", "diagnostic", "timings", ...(parsed.hookLog === undefined ? [] : ["hookLog"])])) {
+      const { timings, ...legacy } = parsed;
+      return Object.assign(helperFailure(JSON.stringify({ ...legacy, version: parsed.hookLog === undefined ? 2 : 3 }), execution),
+        { timings: parseSetupTimings(timings) });
+    }
     if (
       ((parsed.version === 1 && exactKeys(parsed, ["audience", "code", "outcome", "version"])) ||
         (parsed.version === 2 && exactKeys(parsed, ["audience", "code", "outcome", "version", "diagnostic"]) && parseSetupDiagnostic(parsed.diagnostic)) ||
@@ -471,7 +483,8 @@ function normalizeExecutionError(error: unknown): CloudWorkspaceSetupError {
       code,
       "Cloud workspace provider command did not complete",
       error.retryable,
-    ), "diagnostic" in error && parseSetupDiagnostic(error.diagnostic) ? { diagnostic: parseSetupDiagnostic(error.diagnostic)! } : {});
+    ), "diagnostic" in error && parseSetupDiagnostic(error.diagnostic) ? { diagnostic: parseSetupDiagnostic(error.diagnostic)! } : {},
+    { timings: parseSetupTimings((error as CloudProviderError & { timings?: unknown }).timings) });
   }
   return setupError(
     "setup_provider_failure",
@@ -553,6 +566,7 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
       );
     }
     validateExecution(execution);
+    const clock = execution.runtime ? setupTimingClock("control_plane") : undefined;
 
     let commandRunner: DaytonaSetupCommandRunner;
     try {
@@ -566,11 +580,15 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
     }
 
     let admission: CloudWorkspaceSetupAdmission;
+    const admissionFinished = clock?.start("admission");
     try {
       admission = await this.admissionBroker.issue(execution, signal);
+      admissionFinished?.();
     } catch (error) {
+      admissionFinished?.("failed");
       const failure = error instanceof CloudWorkspaceSetupError ? error : setupError(
         "setup_admission_unavailable", "Cloud workspace setup admission is temporarily unavailable", true);
+      failure.timings = clock?.snapshot();
       await this.retain(execution,failure,"setup_admission",error);
       throw failure;
     }
@@ -578,6 +596,8 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
     let disposition: AdmissionDisposition = "failed";
     let result: CloudWorkspaceSetupResult | null = null;
     let failure: CloudWorkspaceSetupError | null = null;
+    let transportTimings: SetupTimings | undefined;
+    let commandFinished: ReturnType<ReturnType<typeof setupTimingClock>["start"]> | undefined;
     try {
       const now = this.now();
       const endpoint = validateAdmission(execution, admission, now);
@@ -613,6 +633,7 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
         if (encoded.length > RUNTIME_INSTALL_MAX_ENCODED_BYTES)
           throw setupError("setup_runtime_input_invalid", "Cloud workspace runtime input is invalid", false);
       }
+      commandFinished = clock?.start("provider_command");
       const response = await commandRunner.execute(
         {
           resourceId: execution.provider.resourceId,
@@ -624,6 +645,8 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
         },
         signal,
       );
+      commandFinished?.(response.exitCode === 0 ? "passed" : "failed");
+      transportTimings = parseSetupTimings(response.timings);
       if (response.output.includes(admission.token) || (artifactUrl && response.output.includes(artifactUrl)) ||
         (execution.runtime && response.output.includes(encoded))) {
         throw setupError(
@@ -649,26 +672,35 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
       );
       // V4 installer output is a closed diagnostic boundary. The helper sees
       // only its nested payload, but never persist arbitrary installer stdout.
-      if (execution.runtime) result = { readiness: result.readiness, logTruncated: false };
+      if (execution.runtime) result = { readiness: result.readiness, logTruncated: false, timings: result.timings };
       disposition = "completed";
     } catch (error) {
+      commandFinished?.(signal.aborted ? "cancelled" : "failed");
       failure = normalizeExecutionError(error);
       await this.retain(execution,failure,execution.runtime ? "runtime" : "bootstrap",error);
       if (failure.code === "setup_admission_invalid") disposition = "rejected";
     }
 
+    const revokeFinished = clock?.start("admission_revoke");
     try {
       await this.admissionBroker.revoke(admission, disposition);
+      revokeFinished?.();
     } catch (error) {
+      revokeFinished?.("failed");
       const revokeFailure = setupError(
         "setup_admission_revoke_failed",
         "Cloud workspace setup admission could not be retired",
         true,
       );
       await this.retain(execution,revokeFailure,"setup_admission",error);
+      revokeFailure.timings = mergeSetupTimings(result?.timings ?? failure?.timings, transportTimings, clock?.snapshot());
       throw revokeFailure;
     }
-    if (failure) throw failure;
+    if (failure) {
+      failure.timings = mergeSetupTimings(failure.timings, transportTimings, clock?.snapshot());
+      throw failure;
+    }
+    if (clock && result) result.timings = mergeSetupTimings(result.timings, transportTimings, clock.snapshot());
     return result!;
   }
 }

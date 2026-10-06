@@ -45,7 +45,8 @@ describe("cloud worker attestation", () => {
       baseCompatibilityId: tree.descriptor.baseCompatibilityId, installerReceiptSha256: tree.descriptor.installerReceiptSha256,
       bootId: tree.descriptor.bootId, supervisorSessionId: tree.descriptor.supervisorSessionId } });
     expect(diagnostic).toEqual({ schema: "zeros.diagnostic/v1", component: "attester", stage: "done", ok: true,
-      exitCode: 0, timedOut: false, failedChecks: [] });
+      exitCode: 0, timedOut: false, failedChecks: [], timings: expect.any(Object) });
+    expect(ClosedDiagnosticSchema.safeParse(diagnostic).success).toBe(true);
     expect(result.stdout).not.toMatch(/buildSha256|imageContract|sourceIntegrity|nativeInventory/);
     const proof = JSON.parse(fs.readFileSync(tree.physical(proofPath), "utf8"));
     expect(proof).toMatchObject({ version: 2, ...report.runtime, profile: report.profile });

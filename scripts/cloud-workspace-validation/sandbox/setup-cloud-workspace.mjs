@@ -2,6 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { mergeSetupTimings, parseSetupTimings, setupTimingClock } from "./cloud-setup-timings.mjs";
 import {
   chmodSync,
   chownSync,
@@ -1322,6 +1323,9 @@ export function parseRecoveryDesignSelection(value) {
   return value;
 }
 
+const timingNegotiatedMaterials = new WeakSet();
+export const hasCloudSetupTimingSupport = material => timingNegotiatedMaterials.has(material);
+
 export async function redeemMaterials(request) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
@@ -1337,6 +1341,7 @@ export async function redeemMaterials(request) {
         Accept: "application/json",
         Authorization: `Bearer ${request.admission.token}`,
         "Content-Type": "application/json",
+        "X-Zeros-Setup-Timings": "1",
       },
       body: JSON.stringify({
         materialVersion: 2,
@@ -1390,7 +1395,9 @@ export async function redeemMaterials(request) {
   try {
     raw = await boundedResponseJson(response, MAX_MATERIAL_BYTES);
     if (raw?.version !== 2) throw failure("image_contract_invalid");
-    return parseCloudWorkspaceSetupMaterials(raw, request);
+    const material = parseCloudWorkspaceSetupMaterials(raw, request);
+    if (response.headers.get("x-zeros-setup-timings") === "1") timingNegotiatedMaterials.add(material);
+    return material;
   } catch (error) {
     if (error instanceof SetupFailure) throw error;
     throw failure("settings_invalid");
@@ -2505,7 +2512,7 @@ export function cloudWorkspaceImageDigests(build, observed) {
   return result;
 }
 
-export async function attestImage(material, profile, recordChecks) {
+export async function attestImage(material, profile, recordChecks, recordTimings = () => {}) {
   if (
     material.repository.credential.expiresAtMs - Date.now() < 5 * 60_000 ||
     material.engine.registration.expiresAtMs - Date.now() < 5 * 60_000
@@ -2523,6 +2530,11 @@ export async function attestImage(material, profile, recordChecks) {
   );
   let report;
   if (profile.version === 4) {
+    try {
+      const diagnostic = JSON.parse(result.stdout.trimEnd().split("\n").at(-1));
+      const timings = parseSetupTimings(diagnostic?.timings);
+      if (timings) recordTimings(timings);
+    } catch { /* Telemetry cannot supply an admission or leak raw output. */ }
     report = readCloudWorkspaceV4Attestation(result);
   } else {
     try {
@@ -2700,8 +2712,21 @@ async function executeSetup(encoded) {
   let supervisorPrepared = false;
   let successful = false;
   let profile;
+  const timing = RUNTIME.profile === "v4" && hasCloudSetupTimingSupport(material) ? setupTimingClock("setup") : null;
+  const childTimings = [];
+  let finishStage;
+  const snapshotTimings = () => mergeSetupTimings(timing?.snapshot(), ...childTimings);
+  const recordAttesterTimings = source => value => {
+    const parsed = parseSetupTimings(value);
+    if (parsed?.clocks.length === 1 && parsed.clocks[0].source === "attester_preflight")
+      childTimings.push({ version: 1, clocks: [{ ...parsed.clocks[0], source }] });
+  };
   let diagnostic = { version: 1, stage: "runtime", outcome: "running" };
   const record = (stage, checks, runtime, digests) => {
+    if (stage !== diagnostic.stage) {
+      finishStage?.();
+      finishStage = stage === "complete" ? undefined : timing?.start(stage.replaceAll("-", "_"));
+    }
     diagnostic = {
       version: 1,
       stage,
@@ -2727,7 +2752,9 @@ async function executeSetup(encoded) {
       if (RUNTIME.profile !== "v4") throw failure("image_contract_invalid");
       // The root-only, boot/session-bound document routes all host work and
       // selects the primary alias for each fresh engine mount namespace.
-      verifyCloudComputerTemplate(material.computer, material.repository);
+      const verified = timing?.start("template_verify");
+      try { verifyCloudComputerTemplate(material.computer, material.repository); verified?.(); }
+      catch (error) { verified?.("failed"); throw error; }
       atomicWrite(CLOUD_COMPUTER_WORKSPACE_ADMISSION,
         `${JSON.stringify(createCloudComputerWorkspaceAdmission(material, RUNTIME))}\n`, { mode: 0o600 });
       for (const name of ["github-credential.json", "github-credential-refresh.json"])
@@ -2739,6 +2766,7 @@ async function executeSetup(encoded) {
     record("image-preflight");
     await attestImage(material, profile, (checks, runtime, digests) =>
       record("image-preflight", checks, runtime, digests),
+      recordAttesterTimings("attester_preflight"),
     );
     record("repository");
     const commit = await prepareRepositoryAndSettings(material, profile);
@@ -2751,6 +2779,7 @@ async function executeSetup(encoded) {
     record("image-launch");
     await attestImage(material, profile, (checks, runtime, digests) =>
       record("image-launch", checks, runtime, digests),
+      recordAttesterTimings("attester_launch"),
     );
     record("engine-launch");
     await startEngine(material, session);
@@ -2758,11 +2787,14 @@ async function executeSetup(encoded) {
     const engine = await waitForReadiness(material);
     record("complete");
     successful = true;
-    return readyResult(material, commit, engine);
+    const ready = readyResult(material, commit, engine);
+    return timing ? { ...ready, version: 4, timings: snapshotTimings() } : ready;
   } catch (error) {
     // Preserve v1 successes. Version 2 errors add only a closed, bounded
     // envelope; older control planes safely treat them as helper failures.
     const normalized = error instanceof SetupFailure ? error : failure("image_contract_invalid");
+    finishStage?.("failed");
+    if (timing) normalized.timings = snapshotTimings();
     normalized.diagnostic = {
       version: 1, phase: diagnostic.stage.replaceAll("-", "_"),
       ...(diagnostic.checks ? { checks: diagnostic.checks } : {}),
@@ -2879,13 +2911,14 @@ async function main() {
   } catch (error) {
     exitCode = 1;
     response = {
-      version: error instanceof SetupFailure && error.hookLog ? 3 : error instanceof SetupFailure && error.diagnostic ? 2 : 1,
+      version: error instanceof SetupFailure && error.timings ? 4 : error instanceof SetupFailure && error.hookLog ? 3 : error instanceof SetupFailure && error.diagnostic ? 2 : 1,
       audience: CLOUD_WORKSPACE_SETUP_RESULT_AUDIENCE,
       outcome: "error",
       code:
         error instanceof SetupFailure ? error.code : "image_contract_invalid",
       ...(error instanceof SetupFailure && error.diagnostic ? { diagnostic: error.diagnostic } : {}),
       ...(error instanceof SetupFailure && error.hookLog ? { hookLog: error.hookLog } : {}),
+      ...(error instanceof SetupFailure && error.timings ? { timings: error.timings } : {}),
     };
   }
   process.stdout.write(JSON.stringify(response));

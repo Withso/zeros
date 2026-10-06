@@ -514,6 +514,23 @@ const diagnosticConstant = z
   .string()
   .max(64)
   .regex(/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/);
+export const setupTimingSources = ["control_plane", "boat_transport", "setup", "attester_preflight", "attester_launch"] as const;
+export const setupTimingStages = ["admission", "provider_command", "admission_revoke", "bootstrap_probe", "ssh_transport", "supervisor",
+  "template_verify", "image_preflight", "repository", "credential_projection", "image_launch", "engine_launch", "engine_readiness",
+  "lock", "verify_tree", "qualify_engine", "run_setup", "publish_proof"] as const;
+const setupTimingOffset = z.number().int().min(0).max(3_600_000);
+const span = z.object({ stage: z.enum(setupTimingStages), startMs: setupTimingOffset, endMs: setupTimingOffset,
+  outcome: z.enum(["passed", "failed", "cancelled"]) }).strict().refine(value => value.endMs >= value.startMs);
+const clock = z.object({ source: z.enum(setupTimingSources), clockId: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/), startedAt: z.string().datetime({ precision: 3 }).refine(value => Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value),
+  spans: z.array(span).max(32) }).strict();
+export const setupTimingsSchema = z.object({ version: z.literal(1), clocks: z.array(clock).max(5) }).strict().refine(value =>
+  value.clocks.reduce((total, item) => total + item.spans.length, 0) <= 32 &&
+  new Set(value.clocks.map(item => item.clockId)).size === value.clocks.length &&
+  new Set(value.clocks.map(item => item.source)).size === value.clocks.length &&
+  new TextEncoder().encode(JSON.stringify(value)).byteLength <= 8192);
+export type SetupTimings = z.infer<typeof setupTimingsSchema>;
+export type SetupTimingClock = SetupTimings["clocks"][number];
+
 export const ClosedDiagnosticSchema = z
   .object({
     schema: z.literal("zeros.diagnostic/v1"),
@@ -534,9 +551,12 @@ export const ClosedDiagnosticSchema = z
     exitCode: integer.max(255).nullable(),
     timedOut: z.boolean(),
     failedChecks: z.array(diagnosticConstant).max(32),
+    timings: setupTimingsSchema.optional(),
   })
   .strict()
   .superRefine((value, context) => {
+    if (value.timings && value.component !== "attester")
+      context.addIssue({ code: "custom", path: ["timings"], message: "Only attester diagnostics carry setup timings" });
     if (new Set(value.failedChecks).size !== value.failedChecks.length)
       context.addIssue({
         code: "custom",

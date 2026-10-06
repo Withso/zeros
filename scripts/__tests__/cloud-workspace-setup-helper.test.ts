@@ -32,6 +32,7 @@ import {
   parseRecoveryDesignSelection,
   redactCloudWorkspaceSetupHookLog,
   redeemMaterials,
+  hasCloudSetupTimingSupport,
   runProcess,
 } from "../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
 import {
@@ -197,6 +198,22 @@ describe("cloud image admission diagnostics", () => {
 });
 
 describe("cloud setup credential transport", () => {
+  it("keeps legacy output until the redeemed response explicitly negotiates timings", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+    try {
+      const body = { ...materialDocument(), version: 2, image: { ...materialDocument().image,
+        resources: { architecture: "linux/amd64", cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 } } };
+      for (const accepted of [undefined, "1", "private"]) {
+        const headers = { "content-type": "application/json", ...(accepted ? { "x-zeros-setup-timings": accepted } : {}) };
+        const fetch = vi.fn(async () => new Response(JSON.stringify(body), { headers }));
+        vi.stubGlobal("fetch", fetch);
+        const material = await redeemMaterials(requestDocument());
+        expect(hasCloudSetupTimingSupport(material)).toBe(accepted === "1");
+        expect(Object.keys(material).sort()).toEqual(Object.keys(body).sort());
+        expect((fetch.mock.calls[0] as any)[1].headers["X-Zeros-Setup-Timings"]).toBe("1");
+      }
+    } finally { vi.restoreAllMocks(); vi.unstubAllGlobals(); }
+  });
   it("requires the saved Cloud Computer tuple for a template image and refuses it on other images", () => {
     const request = requestDocument();
     request.expected.imageRef = "boat-template:bx_3456789a";

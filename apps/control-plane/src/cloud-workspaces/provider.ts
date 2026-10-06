@@ -3,6 +3,8 @@
 // Public API and database identity use the stable Zeros workspace id. Provider
 // resource ids stay behind this interface and may change on a new generation.
 
+import type { SetupTimings } from "./setup-timings.js";
+
 export const CLOUD_WORKSPACE_PROVIDER_NAMES = ["daytona", "boat"] as const;
 export type CloudWorkspaceProviderName =
   (typeof CLOUD_WORKSPACE_PROVIDER_NAMES)[number];
@@ -31,6 +33,7 @@ export interface CloudWorkspaceCommandRunner {
     exitCode: number;
     output: string;
     outputTruncated: boolean;
+    timings?: SetupTimings | undefined;
   }>;
 }
 
