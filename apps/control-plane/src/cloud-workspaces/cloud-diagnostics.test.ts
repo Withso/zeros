@@ -31,4 +31,12 @@ describe("bounded cloud diagnostics", () => {
     expect(publicCloudIncident({id,reason:"credential-canary"})).toBeNull();
     expect(publicCloudIncident({id:"credential-canary",reason:"safety_failure"})).toBeNull();
   });
+  it("projects an outage stop without changing the stored legacy reason or incident reference", () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    expect(publicCloudIncident({ id, reason: "safety_failure", stopReason: "provider_outage" })).toEqual({
+      code: "cloud_workspace_provider_outage",
+      message: `Workspace stopped because a provider outage exhausted its compute lease runway (incident ${id})`,
+    });
+    expect(publicCloudIncident({ id, reason: "safety_failure", stopReason: "credential-canary" })?.code).toBe("cloud_workspace_safety_failure");
+  });
 });

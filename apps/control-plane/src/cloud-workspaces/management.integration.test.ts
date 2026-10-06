@@ -28,6 +28,7 @@ import { seedCanonicalWorkspaceSettingsVersion,seedHostedCloudWorkspaceProviderC
 import {DatabaseCloudWorkspaceCollaborationService} from "./actors.js";
 import {CloudWorkspaceCheckpointRequestWorker,enqueueWorkspaceCheckpointRequest} from "./checkpoint-requests.js";
 import {assertDatabaseLockOrder} from "./lock-order-test-utils.js";
+import { retainCloudDiagnostic } from "./cloud-diagnostic-store.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -209,6 +210,19 @@ d("cloud workspace Phase 5 management", () => {
         clientFactory: () => ({ currentApiKey }),
       }),
     });
+  });
+
+  it("projects outage stops in management history while preserving the legacy stored reason", async () => {
+    const id = await retainCloudDiagnostic(pool, {
+      workspaceId, organizationId: orgId, generation: 1, operationKind: "engine", operationId: randomUUID(),
+    }, { phase: "provider_inspect", code: "provider_request_failed", errorClass: "provider", retryable: true,
+      httpClass: "5xx", stopReason: "provider_outage", decision: "direct_stop" });
+    expect(id).not.toBeNull();
+    expect((await pool.query("SELECT reason FROM cloud_workspace_diagnostic_incidents WHERE id=$1", [id])).rows[0].reason).toBe("safety_failure");
+    const result = await management.workspaceOverview({ organizationId: orgId, workspaceId, actorUserId: actor.id });
+    expect(result.incidents).toEqual([expect.objectContaining({ id, reason: "provider_outage",
+      message: "Workspace stopped because a provider outage exhausted its compute lease runway" })]);
+    expect(JSON.stringify(result.incidents)).not.toContain("provider_request_failed");
   });
 
   it("expires final checkpoints without reversing lifecycle request locks",async()=>{

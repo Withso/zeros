@@ -8,6 +8,8 @@ import { parseCloudWorkspaceSetupHookLog, type CloudWorkspaceSetupHookLog } from
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { cloudRuntimePin, cloudRuntimePinValues, requirePinnedCloudRuntime, CloudRuntimeError, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
 import { publicCloudError } from "./public-contract.js";
+import { cloudDiagnosticSchema, type CloudDiagnostic } from "./cloud-diagnostics.js";
+import { tryRetainCloudDiagnosticTx } from "./cloud-diagnostic-store.js";
 import type { CloudRuntimeWitnessRow } from "./runtime-contract.js";
 import { cloudRuntimeQualificationMode } from "./runtime-config.js";
 import { advanceCloudAutomaticRecovery, classifyCloudRestoreEvidence, enqueueCloudAutomaticRecovery, recordCloudRestoreEvidence } from "./automatic-recovery.js";
@@ -111,6 +113,7 @@ export interface CloudWorkspaceSetupExecutor {
 
 export class CloudWorkspaceSetupError extends Error {
   hookLog?: CloudWorkspaceSetupHookLog;
+  providerDiagnostic?: CloudDiagnostic;
   constructor(
     public readonly code: string,
     message: string,
@@ -153,6 +156,7 @@ type SafeSetupFailure = {
   retryable: boolean;
   restoreEvidence?: string | undefined;
   hookLog?: CloudWorkspaceSetupHookLog | undefined;
+  providerDiagnostic?: CloudDiagnostic | undefined;
 };
 
 function safeInteger(
@@ -224,11 +228,13 @@ export function cloudWorkspaceSetupReadinessMatches(
 function safeFailure(error: unknown): SafeSetupFailure {
   if (error instanceof CloudRuntimeError) return { code: error.code, retryable: false };
   if (error instanceof CloudWorkspaceSetupError) {
+    const providerDiagnostic = cloudDiagnosticSchema.safeParse(error.providerDiagnostic);
     return {
       code: /^[a-z][a-z0-9_]{0,127}$/.test(error.code)
         ? error.code
         : "setup_executor_failure",
       retryable: error.retryable,
+      providerDiagnostic: providerDiagnostic.success ? providerDiagnostic.data : undefined,
       hookLog: ["setup_command_failed", "setup_hook_retry_required"].includes(error.code) ? parseCloudWorkspaceSetupHookLog(error.hookLog) ?? undefined : undefined,
       restoreEvidence: classifyCloudRestoreEvidence(error.code, "diagnostic" in error ? error.diagnostic : null) ?? undefined,
     };
@@ -1079,6 +1085,9 @@ export class CloudWorkspaceSetupWorker {
         return true;
       }
 
+      if (failure.providerDiagnostic) await tryRetainCloudDiagnosticTx(tx, {
+        ...setup, operationKind: "setup", operationId: setup.setupRunId,
+      }, { ...failure.providerDiagnostic, retryCount: Math.min(10000,run.claim_count), decision: "reject_setup", claim: "current" });
       await tx.query(
         `UPDATE cloud_workspace_setup_runs
          SET state = 'failed', completed_at = now(), updated_at = now(),

@@ -54,6 +54,25 @@ budget code stays compatible; the message includes only the fixed reason and
 incident UUID. Ready publication clears this active error while retaining history,
 even when incident recovery bookkeeping is still waiting to run.
 
+Active allocation retries retain their closed error code and first-error time
+on the lease, without appending an incident on each transient provider failure.
+A complete successful recovery, including any required renewal, clears those
+fields and recovers existing incidents. If the provider outage consumes the
+checkpoint runway, its incident carries additive `stopReason: "provider_outage"`
+JSON evidence. The stored legacy reason remains `safety_failure`; management
+projects `provider_outage`, and the workspace error uses
+`cloud_workspace_provider_outage` with fixed outage copy and the same incident
+UUID. Stop escalation preserves that classification. No database migration is
+required, and genuine safety failures retain their existing reason and message.
+
+The setup executor passes closed transient provider diagnostics to the setup
+worker instead of recording `reject_setup` immediately. The worker keeps its
+existing retry backoff (five-second base in production) and records the diagnostic
+only when retries are exhausted. Successful retries leave no rejection incident.
+Nonrecoverable provider errors, helper failures and integrity rejections still
+retain evidence immediately. The existing setup fence and admission revocation
+apply to each retry.
+
 Setup success and exact-key v1 failure parsing remain compatible. New helpers
 return **version 2 failures only**, using the existing result audience and a
 strict version 1 `diagnostic` envelope. Older control planes fail closed on these
