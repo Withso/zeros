@@ -39,7 +39,7 @@ name: Release (alpha)
 #
 # Exact-source Preflight and CodeQL gate hosted mutation and feed publication.
 # With ZEROS_ALPHA_CI_FAST_PATH=enabled, automatic Alpha uses Preflight's
-# successful alpha-gate job while the deferred jobs finish. Other callers and
+# successful alpha-gate job alone (no CodeQL wait) while the deferred jobs finish. Other callers and
 # an unset/disabled flag retain the full-workflow policy.
 # Signing starts in parallel; only the final publisher has repository write scope.
 

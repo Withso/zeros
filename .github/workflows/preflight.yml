@@ -6,7 +6,7 @@ name: Preflight
 # only here, after merge. Releases read this workflow by name and path
 # (scripts/release/ci.ts): Beta and Production require a successful Preflight
 # and CodeQL run on their exact release commit. Automatic Alpha can opt in to
-# the successful alpha-gate job plus CodeQL while the other jobs finish.
+# the successful alpha-gate job alone while the other jobs finish.
 # No job here needs a secret, and the top-level `permissions:` block below keeps
 # the token read-only. Parallel jobs keep failures attributable while putting
 # source-sync behavior on the app's actual platform:

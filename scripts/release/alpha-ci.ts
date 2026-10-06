@@ -1,5 +1,5 @@
 import { PromotionError, requireCheck, SHA } from "./contracts";
-import { REQUIRED_CI, type RequiredCIEvidence } from "./ci";
+import { type RequiredCIEvidence } from "./ci";
 
 type Candidate = { repository: string; sourceSha: string; branch: string };
 type Read = (route: string) => Promise<any>;
@@ -80,13 +80,19 @@ function securityVeto(jobs: any[]) {
   });
 }
 
+/** Automatic Alpha's fast path waits only for Preflight's exact-SHA alpha-gate.
+ * CodeQL stays required for Beta, Production and every full-policy caller;
+ * its findings are advisory, so the disposable Alpha ring does not wait for
+ * the scan to finish. */
+export const ALPHA_REQUIRED_CI = [{ file: "preflight.yml", name: "Preflight" }] as const;
+export const ALPHA_CI_FAILURE = "Exact-source Alpha gate must succeed before any provider or feed mutation";
+
 export async function alphaRequiredChecks(candidate: Candidate, read: Read): Promise<RequiredCIEvidence> {
-  return Promise.all(REQUIRED_CI.map(async check => {
+  return Promise.all(ALPHA_REQUIRED_CI.map(async check => {
     const run = newestRun(candidate, check.file, check.name,
       await read(`/actions/workflows/${check.file}/runs?head_sha=${candidate.sourceSha}&event=push&per_page=100`));
     const evidence = { workflow: check.name, runId: run?.id ?? 0, attempt: run?.run_attempt ?? 0, succeeded: false };
     if (!run || run.conclusion === "cancelled") return evidence;
-    if (check.file === "codeql.yml") return { ...evidence, succeeded: run.status === "completed" && run.conclusion === "success" };
     const jobs = await jobPages(read, `/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`);
     const gates = jobs.filter(job => job?.name === "alpha-gate");
     const gate = gates[0];

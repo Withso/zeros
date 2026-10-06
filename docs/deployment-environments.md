@@ -798,7 +798,7 @@ not a cached failure from the original release attempt.
 ### Automatic Alpha CI evidence
 
 The repository variable `ZEROS_ALPHA_CI_FAST_PATH=enabled` opts automatic
-`release-alpha.yml` main pushes into Preflight's early `alpha-gate` plus CodeQL.
+`release-alpha.yml` main pushes into Preflight's early `alpha-gate` alone.
 An unset or other value retains the existing whole-run Preflight + CodeQL
 policy. Beta, Production, manual Alpha operations and direct worker/cutover
 paths keep that full policy and strict branch-HEAD equality. They do not read
@@ -819,11 +819,10 @@ paginated jobs must list exactly one completed, successful `alpha-gate`. The
 gate depends on successful `quality`, `test`, `build`, `control-plane` and
 `secret-scan` aggregates. A carried gate cannot override a currently pending or
 failed critical aggregate. Every main push runs all database shards, including a
-docs-only push after an earlier service change. The newest exact-SHA push
-CodeQL run must still finish successfully. CodeQL selects the newest trusted
-push on that SHA across branches; a newer release-branch push defeats an older
-main success. PR, merge-group, fork and older-attempt proof cannot replace these
-producers, and Preflight from another branch is ineligible; cancellation refuses
+docs-only push after an earlier service change. The fast path does not wait
+for CodeQL: its findings are advisory, the scan still runs on every push, and
+Beta, Production and every full-policy caller keep requiring its exact-SHA
+success. PR, merge-group, fork and older-attempt proof cannot replace the gate, and Preflight from another branch is ineligible; cancellation refuses
 admission. A newer pending or failed gate defeats an older success. API-listed
 carried successes count on an ancillary-only retry; timestamps and certificate
 artifacts are not inferred as proof. History is bounded to 100 runs per
