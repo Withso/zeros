@@ -259,7 +259,7 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
   if (![2,3,4].includes(profile.version) || (profile.version === 4) !== (runtime.profile === "v4"))
     throw new Error("Isolated cloud engine profile required");
   let engineIdentity;
-  if (runtime.profile === "v4" && operation === "serve") {
+  if (runtime.profile === "v4" && ["serve", "resident"].includes(operation)) {
     try {
       const encoded = source.ZEROS_CLOUD_RUNTIME_B64;
       if (typeof encoded !== "string" || encoded.length > 65536) throw new Error();
@@ -274,6 +274,7 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
     runtime.node,
     runtime.engineNamespace,
     `${runtime.workerRoot}/dist-engine/cli.js`,
+    ...(operation === "resident" ? [`${runtime.workerRoot}/dist-engine/resident-pty.js`] : []),
   ])
     rootPath(file);
   // The attester verifies the complete installation against the image digest.
@@ -385,12 +386,13 @@ export async function launchCloudEngine({
     if (!scope) {
       let instanceId;
       if (runtime.profile === "v4") {
-        if (operation === "serve") {
+        if (operation === "resident") instanceId = source.ZEROS_RESIDENT_HOST_ID;
+        else if (operation === "serve") {
           try { instanceId = JSON.parse(Buffer.from(source.ZEROS_CLOUD_RUNTIME_B64 ?? "", "base64url").toString("utf8"))?.engine?.instanceId; }
           catch { throw new Error("Invalid cloud engine scope identity"); }
         } else instanceId = randomUUID();
       }
-      scope = new CloudEngineCgroup({runtime, instanceId});
+      scope = new CloudEngineCgroup({runtime, instanceId, kind: operation === "resident" ? "workload" : "engine"});
     }
     scope.prepare();
   } catch (error) {
@@ -433,7 +435,9 @@ export async function launchCloudEngine({
       {
         cwd: "/",
         env: environment,
-        stdio: ["ignore", "inherit", "inherit", "pipe"],
+        // The resident entry receives only the supervisor's private control
+        // pipe. Its lifetime never depends on an engine attachment socket.
+        stdio: [operation === "resident" ? "inherit" : "ignore", "inherit", "inherit", "pipe"],
       },
     );
     exit = new Promise((resolve) => {
@@ -499,6 +503,8 @@ if (
         ? "qualify"
         : args.length === 1 && args[0] === "--qualify-agent"
           ? "qualify-agent"
+        : args.length === 1 && args[0] === "--resident"
+          ? "resident"
         : null;
   if (!operation) process.exitCode = 125;
   else
