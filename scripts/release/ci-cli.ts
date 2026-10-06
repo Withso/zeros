@@ -1,6 +1,7 @@
-import { appendFile } from "node:fs/promises";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { PromotionError, releaseSource, requireCheck } from "./contracts";
 import { CandidateSupersededError } from "./alpha-ci";
+import { AlphaAdmissionReceipt, AlphaAdmissionRejectedError, alphaForwardOnlyMode } from "./alpha-frontier";
 import { waitForRequiredCI } from "./ci";
 import { githubClient } from "./github";
 import { command } from "./io";
@@ -32,7 +33,7 @@ async function main() {
     else await github.assertRequiredChecks();
     await github.assertCurrent();
   } catch (error) {
-    if (barrier && error instanceof CandidateSupersededError && await github.alphaBarrierUnmutated()) {
+    if (barrier && (error instanceof CandidateSupersededError || error instanceof AlphaAdmissionRejectedError) && await github.alphaBarrierUnmutated()) {
       await ready(false);
       console.log("::notice::Automatic Alpha candidate was superseded before any destination mutation; downstream publication skipped.");
       return;
@@ -40,6 +41,14 @@ async function main() {
     throw error;
   }
   if (process.argv[3] === "--beta" && process.env.ZEROS_HOSTED_PROMOTION === "enabled") await github.betaReceipt();
+  const admissionMode = alphaForwardOnlyMode(process.env);
+  if (barrier && admissionMode !== "off") {
+    const receipt = AlphaAdmissionReceipt.parse({ version: 1, ...source, runId: process.env.GITHUB_RUN_ID,
+      runAttempt: process.env.GITHUB_RUN_ATTEMPT, mode: admissionMode });
+    await mkdir(".context/release", { recursive: true, mode: 0o700 });
+    await writeFile(".context/release/alpha-admission.json", `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
+    await appendFile(process.env.GITHUB_OUTPUT!, "admission_issued=true\n");
+  }
   if (barrier) await ready(true);
   const checks = required.length === 1 ? "Alpha gate" : "Preflight and CodeQL";
   console.log(`${checks} succeeded for the exact ${source.channel} source ${source.sourceSha}.`);

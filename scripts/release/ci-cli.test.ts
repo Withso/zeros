@@ -18,6 +18,7 @@ vi.mock("./io", async importOriginal => ({
 }));
 
 const originalArgv = process.argv, originalExitCode = process.exitCode;
+const originalDirectory = process.cwd();
 const directories: string[] = [];
 beforeEach(() => {
   vi.resetModules();
@@ -39,6 +40,7 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 afterEach(async () => {
+  process.chdir(originalDirectory);
   process.argv = originalArgv;
   process.exitCode = originalExitCode;
   vi.restoreAllMocks();
@@ -236,5 +238,32 @@ describe("exact-source CI CLI mutation authority", () => {
     await import("./ci-cli");
     await vi.waitFor(() => expect(console.log).toHaveBeenCalledOnce());
     await expect(readFile(output)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each(["admitted", "enabled"])("writes source-bound admission proof only after successful %s barrier checks", async flag => {
+    const output = await automaticBarrier();
+    process.chdir(path.dirname(output));
+    vi.stubEnv("ZEROS_ALPHA_FORWARD_ONLY", flag);
+    vi.stubEnv("GITHUB_RUN_ID", "300"); vi.stubEnv("GITHUB_RUN_ATTEMPT", "1");
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(console.log).toHaveBeenCalledOnce());
+    expect(await readFile(output, "utf8")).toBe("admission_issued=true\nready=true\n");
+    expect(JSON.parse(await readFile(".context/release/alpha-admission.json", "utf8"))).toEqual({ version: 1,
+      ...mocked.source, runId: "300", runAttempt: "1", mode: flag });
+    expect(mocked.assertCurrent).toHaveBeenCalledTimes(2);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it.each([true, false])("only skips a known newer destination when parent mutation evidence is unmutated=%s", async unmutated => {
+    const output = await automaticBarrier();
+    vi.stubEnv("ZEROS_ALPHA_FORWARD_ONLY", "enabled");
+    const { AlphaAdmissionRejectedError } = await import("./alpha-frontier");
+    mocked.assertCurrent.mockRejectedValue(new AlphaAdmissionRejectedError());
+    mocked.alphaBarrierUnmutated.mockResolvedValue(unmutated);
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(unmutated ? console.log : console.error).toHaveBeenCalledOnce());
+    if (unmutated) expect(await readFile(output, "utf8")).toBe("ready=false\n");
+    else await expect(readFile(output)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(process.exitCode).toBe(unmutated ? undefined : 1);
   });
 });

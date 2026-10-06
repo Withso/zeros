@@ -1,5 +1,6 @@
 import { PromotionError, requireCheck, SHA } from "./contracts";
 import { type RequiredCIEvidence } from "./ci";
+import { AlphaAdmissionReceipt } from "./alpha-frontier";
 
 type Candidate = { repository: string; sourceSha: string; branch: string };
 type Read = (route: string) => Promise<any>;
@@ -123,6 +124,25 @@ export async function alphaBarrierUnmutated(candidate: Candidate, env: NodeJS.Pr
   return !jobs.some(job => job.name === "Exact-source Preflight and CodeQL barrier" && job.conclusion === "success") &&
     jobs.some(job => job.name === "Exact-source Preflight and CodeQL barrier" && job.status === "in_progress" && job.run_attempt === Number(env.GITHUB_RUN_ATTEMPT)) &&
     jobs.every(job => readOnly.has(job.name) || !job.started_at && (job.status === "queued" || job.status === "completed" && job.conclusion === "skipped"));
+}
+
+/** A successful barrier can also be a green ready=false skip. Only its own
+ * uploaded receipt proves admission, including on a desktop-only retry. */
+export async function assertAlphaAdmission(candidate: Candidate, env: NodeJS.ProcessEnv, read: Read, receipt: unknown) {
+  const parsed = AlphaAdmissionReceipt.safeParse(receipt);
+  requireCheck(parsed.success, "Automatic Alpha admission receipt is invalid");
+  const value = parsed.data, attempt = Number(value.runAttempt), currentAttempt = Number(env.GITHUB_RUN_ATTEMPT);
+  requireCheck(value.repository === candidate.repository && value.sourceSha === candidate.sourceSha && value.branch === candidate.branch &&
+    value.runId === env.GITHUB_RUN_ID && Number.isSafeInteger(attempt) && attempt > 0 && attempt <= currentAttempt,
+  "Automatic Alpha admission receipt belongs to another source, run or attempt");
+  const jobs = await jobPages(read, `/actions/runs/${value.runId}/attempts/${attempt}/jobs`);
+  const barriers = jobs.filter(job => job?.name === "Exact-source Preflight and CodeQL barrier");
+  requireCheck(barriers.length === 1 && barriers[0].run_id === Number(value.runId) && barriers[0].head_sha === candidate.sourceSha &&
+    barriers[0].head_branch === "main" && (barriers[0].run_attempt === undefined || barriers[0].run_attempt === attempt) &&
+    barriers[0].status === "completed" && barriers[0].conclusion === "success" &&
+    ["Wait for exact-source Alpha CI", "Save Alpha admission receipt"].every(name =>
+      barriers[0].steps?.some((step: any) => step.name === name && step.status === "completed" && step.conclusion === "success")),
+  "Automatic Alpha admission has no successful producing barrier and receipt upload");
 }
 
 export function supersededCandidate(currentSha: unknown): never {
