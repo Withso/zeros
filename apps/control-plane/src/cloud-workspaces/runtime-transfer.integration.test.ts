@@ -207,7 +207,7 @@ import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-versi
     scope:{workspaceId:claim.workspaceId,organizationId:claim.organizationId,sourceGeneration:1,candidateGeneration:2,sourceEngineInstanceId:fixture.engineInstanceId},
     operation:"activate" as const,outcome:rollback?"rolled_back" as const:"healthy" as const,active});
   it("opens admissions and a fresh proof epoch only after a bound health challenge",async()=>{
-    const {claim,active,enrollment}=await registered();
+    const {claim,active,enrollment,result}=await registered();
     const scope={...claim,generation:2};
     expect(await withSystemTx(pool,tx=>readCloudRuntimeResumeProofEpoch(tx,scope))).toBeNull();
     const probe=async (challenge:string)=>({challenge,executionFence:claim.executionFence,active,engineInstanceId:enrollment.engineInstanceId,
@@ -216,6 +216,9 @@ import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-versi
     expect(await service.verifyHealth(claim,probe)).toBe(true);
     expect(await withSystemTx(pool,tx=>readCloudRuntimeResumeProofEpoch(tx,scope))).toBeNull();
     expect(await service.finish(claim,receipt(claim,active))).toBe(true);
+    expect((await withSystemTx(pool,tx=>assertCurrentCloudEngineAuthority(tx,{...scope,
+      engineInstanceId:enrollment.engineInstanceId,heartbeatToken:result.heartbeat.token,workosEnabled:false}))).engineInstanceId)
+      .toBe(enrollment.engineInstanceId);
     expect(await withSystemTx(pool,tx=>readCloudRuntimeResumeProofEpoch(tx,scope))).toBe(enrollment.engineInstanceId);
     expect((await pool.query("SELECT status FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId])).rows[0].status).toBe("ready");
     expect((await pool.query("SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1",[fixture.workspaceId])).rowCount).toBe(0);
@@ -260,7 +263,11 @@ import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-versi
   });
 
   it("keeps ordinary admissions closed while permitting durable record synchronization",async()=>{
+    const sourceScope={workspaceId:fixture.workspaceId,organizationId:fixture.organizationId,generation:1,
+      engineInstanceId:fixture.engineInstanceId,heartbeatToken:fixture.heartbeatToken,workosEnabled:false};
+    expect((await withSystemTx(pool,tx=>assertCurrentCloudEngineAuthority(tx,sourceScope))).engineInstanceId).toBe(fixture.engineInstanceId);
     const {claim,enrollment,result}=await registered();
+    await expect(withSystemTx(pool,tx=>assertCurrentCloudEngineAuthority(tx,sourceScope))).rejects.toThrow();
     const scope={...claim,generation:2,engineInstanceId:enrollment.engineInstanceId,heartbeatToken:result.heartbeat.token,workosEnabled:false};
     await expect(withSystemTx(pool,tx=>assertCurrentCloudEngineAuthority(tx,scope))).rejects.toThrow();
     expect((await withSystemTx(pool,tx=>assertCurrentCloudEngineAuthority(tx,{...scope,transitionRecordSync:true}))).engineInstanceId).toBe(enrollment.engineInstanceId);
