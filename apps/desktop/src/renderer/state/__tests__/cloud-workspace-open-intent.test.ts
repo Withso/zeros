@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 const harness = vi.hoisted(() => ({
-  enabled: true, effects: [] as Array<() => void | (() => void)>, error: vi.fn(),
+  enabled: true, effects: [] as Array<() => void | (() => void)>, error: vi.fn(), failure: vi.fn(),
 }));
 vi.mock("react", async original => ({ ...await original<typeof import("react")>(),
   useEffect: (effect: () => void | (() => void)) => harness.effects.push(effect),
@@ -15,9 +15,10 @@ vi.mock("../store", async original => {
   ) };
 });
 vi.mock("../../shared/ui/primitives/elements", () => ({ toast: { error: harness.error } }));
+vi.mock("../workbench-availability", async original => ({ ...await original<typeof import("../workbench-availability")>(), recordWorkbenchConnectionFailure: harness.failure }));
 import { CloudWorkspaceLifecycle } from "../cloud-workspace-lifecycle";
 import { requestCloudWorkspaceOpen } from "../cloud-workspace-open-intent";
-import { acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog, manageCloudWorkspace } from "../cloud-workspace-catalog";
+import { acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog, cloudCatalogGeneration, cloudWorkspaceDocument, manageCloudWorkspace } from "../cloud-workspace-catalog";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
 import { setActiveBridge } from "../../platform/bridge/active-bridge";
 import { useWorkspaceStore } from "../workspace-store";
@@ -36,7 +37,7 @@ const doc: CloudWorkspaceDocument = {
 let client: WorkspaceRuntimeClient;
 let cleanup: void | (() => void);
 beforeEach(() => {
-  harness.effects.length = 0; harness.enabled = true; harness.error.mockClear();
+  harness.effects.length = 0; harness.enabled = true; harness.error.mockClear(); harness.failure.mockClear();
   clearCloudWorkspaceCatalog(); acceptCloudWorkspaceDocument(doc);
   vi.stubGlobal("document", { visibilityState: "visible", addEventListener: vi.fn(), removeEventListener: vi.fn() });
   client = new WorkspaceRuntimeClient({ open: vi.fn(), workspaces: () => [] });
@@ -46,6 +47,38 @@ beforeEach(() => {
 afterEach(() => { cleanup?.(); cleanup = undefined; client.dispose(); setActiveBridge(null); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("explicit cloud navigation intent", () => {
+  it.each(["navigation", "interaction"])("silently follows N to N+1 during a pending %s wake", async intent => {
+    client.dispose(); let finish!: () => void;
+    const ready = new Promise<void>(resolve => { finish = resolve; });
+    const open = vi.fn(async () => {
+      await ready;
+      return { client: { status: "connected", onStatusChange: () => () => {}, on: () => () => {},
+        request: async () => ({ type: "WORKSPACE_RESPONSE", result: { chats: [], chatDeletions: [] } }) },
+        scope: { ...target, root: "/workspace/repo", engineWorkspaceId: "local-main" }, release: () => {} } as never;
+    });
+    client = new WorkspaceRuntimeClient({ open, workspaces: () => [],
+      identity: () => `${cloudCatalogGeneration()}:${cloudWorkspaceDocument(target)?.generation.number}`,
+      wakeOwner: () => ({ account: String(cloudCatalogGeneration()), generation: cloudWorkspaceDocument(target)!.generation.number, stopVersion: 0 }) });
+    setActiveBridge(client);
+    if (intent === "navigation") { CloudWorkspaceLifecycle(); cleanup = harness.effects[3](); requestCloudWorkspaceOpen(folder); }
+    else interactions().input("pointerdown");
+    const pending = client.openWorkspace(target);
+    for (const [index, status] of ["stopping", "provisioning", "setting_up", "ready"].entries()) {
+      acceptCloudWorkspaceDocument({ ...doc, status, version: index + 2, generation: { ...doc.generation, number: 2 } });
+      client.pruneCloudConnections();
+      expect(harness.failure).not.toHaveBeenCalled();
+    }
+    finish(); await pending; await Promise.resolve();
+    expect(open).toHaveBeenCalledOnce(); expect(harness.error).not.toHaveBeenCalled(); expect(harness.failure).not.toHaveBeenCalled();
+  });
+  it.each(["navigation", "interaction"])("keeps an in-progress %s calm when its client safety wait ends", async intent => {
+    acceptCloudWorkspaceDocument({ ...doc, version: 2, status: "setting_up" });
+    vi.spyOn(client, "openWorkspace").mockRejectedValue(new Error("The workspace is still starting after fifteen minutes"));
+    if (intent === "navigation") { CloudWorkspaceLifecycle(); cleanup = harness.effects[3](); requestCloudWorkspaceOpen(folder); }
+    else interactions().input("keydown");
+    await Promise.resolve(); await Promise.resolve();
+    expect(harness.failure).not.toHaveBeenCalled(); expect(harness.error).not.toHaveBeenCalled();
+  });
   function interactions(native = false) {
     const listeners = new Map<string, EventListener>();
     const invoke = vi.fn(async () => ({ available: true }));
@@ -124,13 +157,16 @@ describe("explicit cloud navigation intent", () => {
     h.input("pointerdown"); expect(open).not.toHaveBeenCalled();
   });
 
-  it("renews presence only for the exact connected selection and releases it on blur", () => {
+  it("retains visible presence on blur and releases it immediately when hidden", () => {
     acceptCloudWorkspaceDocument({ ...doc, status: "ready", version: 2 });
     const send = vi.spyOn(client, "sendWorkspacePresence").mockReturnValue(true);
     const h = interactions(); expect(send).not.toHaveBeenCalled();
     h.input("wheel"); expect(send).toHaveBeenLastCalledWith(expect.objectContaining(target), true);
     Object.assign(document, { hasFocus: () => false });
-    h.listeners.get("blur")!({} as Event); expect(send).toHaveBeenLastCalledWith(expect.objectContaining(target), false);
+    h.listeners.get("blur")!({} as Event); expect(send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining(target), true);
+    Object.defineProperty(document, "visibilityState", { value: "hidden" });
+    (vi.mocked(document.addEventListener).mock.calls.find(([event]) => event === "visibilitychange")![1] as () => void)();
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining(target), false);
   });
 
   it("keeps selection restore, catalog refresh and visibility inert; only a click opens compute", async () => {

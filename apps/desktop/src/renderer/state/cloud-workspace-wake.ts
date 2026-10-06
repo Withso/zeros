@@ -27,21 +27,30 @@ export async function wakeCloudWorkspace(
   reason?: "interaction",
 ): Promise<CloudWorkspaceDocument> {
   const account = cloudCatalogGeneration();
-  const generation = initial.generation.number;
+  let generation = initial.generation.number;
+  let replacement = false;
   const stopVersion = cloudWorkspaceStopVersion(target);
   const controller = new AbortController();
+  let expired = false;
   const cancel = () => controller.abort();
   signal?.addEventListener("abort", cancel, { once: true });
   const assertCurrent = () => {
     if (signal?.aborted) throw new Error("Cloud workspace wake cancelled");
     if (account !== cloudCatalogGeneration()) throw new Error("Cloud account changed while waking");
     const current = cloudWorkspaceDocument(target);
-    if (!current || !canReadCloudWorkspace(current) || current.generation.number !== generation)
+    if (!current || !canReadCloudWorkspace(current) || current.generation.number < generation)
       throw new Error("Cloud workspace generation or access changed while waking");
     if (!isInternalFeatureActive("cloudComputerV2") || !current.capabilities.canWrite)
       throw new Error("Cloud workspace run access is required to wake it");
     if (cloudWorkspaceStopVersion(target) !== stopVersion)
       throw new CloudWorkspaceWakeEndedError("Cloud workspace was stopped. Open it again to retry.");
+    if (["archived", "archiving", "failed", "error"].includes(current.status) || current.error && current.status !== "stopped")
+      throw new CloudWorkspaceWakeEndedError(current.error?.message ?? `Cloud workspace is ${current.status}. Open it again to retry.`);
+    if (expired) throw new Error("The cloud workspace is still starting after fifteen minutes. Try again when it is ready.");
+    // Upgrade-on-wake replaces the engine, not the authorized user intent.
+    // Keep waiting through its drain/setup; never reuse the old admission.
+    if (current.generation.number > generation) replacement = true;
+    generation = current.generation.number;
     return current;
   };
   const off = subscribeCloudWorkspaces(() => {
@@ -57,6 +66,10 @@ export async function wakeCloudWorkspace(
     promise.then(resolve, reject).finally(() => controller.signal.removeEventListener("abort", abort));
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // Compute drain/create/setup are server-owned progress, not agent admission
+  // time. Keep waiting without a short client deadline; bound even hung IPC
+  // with one elapsed (clock-skew-independent) fifteen-minute safety cap.
+  const safety = setTimeout(() => { expired = true; cancel(); }, 15 * 60_000);
   try {
     let current = assertCurrent();
     // An open arriving during final capture waits for stop to finish. After a
@@ -69,7 +82,6 @@ export async function wakeCloudWorkspace(
       await wait(manageCloudWorkspace(target, "wake", false, reason));
       current = assertCurrent();
     }
-    const deadline = Date.now() + 120_000;
     while (!["ready", "busy"].includes(current.status)) {
       if (current.status === "stopped" && mayWake) {
         mayWake = false;
@@ -78,10 +90,8 @@ export async function wakeCloudWorkspace(
         continue;
       }
       if (!["stopping", "waking", "provisioning", "setting_up"].includes(current.status) ||
-          (current.status === "stopping" && !mayWake))
+          (current.status === "stopping" && !mayWake && !replacement))
         throw new CloudWorkspaceWakeEndedError(current.error?.message ?? `Cloud workspace is ${current.status}. Open it again to retry.`);
-      if (Date.now() >= deadline)
-        throw new Error("The cloud workspace is still starting. Open it again when it is ready.");
       await wait(new Promise<void>(resolve => { timer = setTimeout(resolve, 1_000); }));
       current = assertCurrent();
       if (["ready", "busy"].includes(current.status)) continue;
@@ -91,6 +101,7 @@ export async function wakeCloudWorkspace(
     return current;
   } finally {
     clearTimeout(timer);
+    clearTimeout(safety);
     off();
     signal?.removeEventListener("abort", cancel);
   }

@@ -82,12 +82,24 @@ describe("explicit cloud wake readiness", () => {
     if (reason === "cancel") controller.abort();
     if (reason === "account") clearCloudWorkspaceCatalog();
     if (reason === "removed") { api.list.mockResolvedValue([]); await refreshCloudWorkspaceCatalog(); }
-    if (reason === "generation") acceptCloudWorkspaceDocument({ ...doc(3), generation: { ...doc(3).generation, number: 8 } });
+    if (reason === "generation") acceptCloudWorkspaceDocument({ ...doc(3), generation: { ...doc(3).generation, number: 6 } });
     if (reason === "run access") acceptCloudWorkspaceDocument({ ...doc(3), capabilities: { ...doc(3).capabilities, canWrite: false } });
     await rejected;
     finish(doc(2, "waking")); await vi.advanceTimersByTimeAsync(5_000);
     expect(api.read).not.toHaveBeenCalled();
     if (["account", "removed"].includes(reason)) expect(cloudWorkspaceDocument(target)).toBeUndefined();
+  });
+
+  it("follows replacement drain, provisioning and setup for the same wake without another mutation", async () => {
+    const replacement = (version: number, status: string) => ({ ...doc(version, status), generation: { ...doc(version).generation, number: 8 } });
+    api.wake.mockResolvedValue(replacement(2, "stopping"));
+    api.read.mockResolvedValueOnce(replacement(3, "provisioning")).mockResolvedValueOnce(replacement(4, "setting_up")).mockResolvedValue(replacement(5, "ready"));
+    const opened = wakeCloudWorkspace(target, doc(1), undefined, "interaction");
+    const sending = wakeCloudWorkspace(target, doc(1));
+    const completed = Promise.all([opened, sending]);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect((await completed).map(value => value.generation.number)).toEqual([8, 8]);
+    expect(api.wake).toHaveBeenCalledOnce();
   });
 
   it("waits through final capture before waking once, and lets a later Stop win", async () => {
@@ -124,10 +136,34 @@ describe("explicit cloud wake readiness", () => {
     api.read.mockResolvedValue(doc(2, "waking"));
     const pending = wakeCloudWorkspace(target, doc(2, "waking"));
     const rejected = expect(pending).rejects.toThrow(/still starting/);
-    await vi.advanceTimersByTimeAsync(120_000); await rejected;
+    await vi.advanceTimersByTimeAsync(15 * 60_000); await rejected;
     const reads = api.read.mock.calls.length;
     await vi.advanceTimersByTimeAsync(5_000);
     expect(api.read).toHaveBeenCalledTimes(reads);
     expect(api.wake).toHaveBeenCalledOnce();
+  });
+  it.each([150_000, 360_000])("keeps lifecycle progress calm for %i ms before replacement readiness", async duration => {
+    const replacement = (version: number, status: string) => ({ ...doc(version, status), generation: { ...doc(version).generation, number: 8 } });
+    api.wake.mockResolvedValue(replacement(2, "provisioning")); api.read.mockImplementation(async () => cloudWorkspaceDocument(target)!);
+    let result: CloudWorkspaceDocument | undefined; const failed = vi.fn();
+    const pending = wakeCloudWorkspace(target, doc(1)).then(value => { result = value; }, failed);
+    await vi.advanceTimersByTimeAsync(duration / 2);
+    acceptCloudWorkspaceDocument(replacement(3, "setting_up"));
+    await vi.advanceTimersByTimeAsync(duration / 2);
+    expect(result).toBeUndefined(); expect(failed).not.toHaveBeenCalled();
+    acceptCloudWorkspaceDocument(replacement(4, "ready")); await vi.advanceTimersByTimeAsync(1_000); await pending;
+    expect(result?.generation.number).toBe(8); expect(api.wake).toHaveBeenCalledOnce();
+  });
+  it("ends a hung lifecycle immediately on a document error and caps missing progress at fifteen minutes", async () => {
+    api.wake.mockReturnValue(new Promise(() => {}));
+    const pending = wakeCloudWorkspace(target, doc(1));
+    const ended = expect(pending).rejects.toThrow("Setup failed");
+    acceptCloudWorkspaceDocument({ ...doc(2, "setting_up"), error: { code: "setup_failed", message: "Setup failed" } });
+    await ended;
+    acceptCloudWorkspaceDocument(doc(3, "waking"));
+    api.read.mockReturnValue(new Promise(() => {}));
+    const hung = wakeCloudWorkspace(target, doc(3, "waking"));
+    const capped = expect(hung).rejects.toThrow(/still starting/);
+    await vi.advanceTimersByTimeAsync(15 * 60_000); await capped;
   });
 });

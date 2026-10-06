@@ -158,15 +158,17 @@ export async function openCloudRuntime(
         },
       },
       runtimeId: descriptor.runtimeId,
+      generation: descriptor.generation,
       async prepareForRun(signal, reason) {
         const current = await refreshCloudWorkspace(target);
         assertAccount();
         await wakeCloudWorkspace(target, current, signal, reason);
         if (signal.aborted) throw new Error("Cloud workspace open cancelled");
-        assertCurrent();
         // A committed capture retires this runtime while preparation waits.
-        // The caller must obtain a fresh native admission in that case.
+        // A replacement generation does too. Wake already revalidated the
+        // account/access/Stop intent; the caller now needs fresh admission.
         if (released) return false;
+        assertCurrent();
         // Revalidate the still-live connection and root without disrupting an
         // active turn. Reads do not prove the capture fence has cleared;
         // CloudAgentConnection waits on explicit checkpointing rejections.

@@ -59,6 +59,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
   const provider: any = { ...lifecycle, ...retention, Error, BLANK: {}, useCallback: (fn: unknown) => fn, isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId,
     cloudComputerV2: cloud, bridge: { status: "connected" }, getStore: () => store, useWorkspaceStore: { getState: () => workspace },
     cloudCatalogGeneration: () => 1, cloudWorkspaceDocument: () => doc, prepareForSend: prepare, cloudSendWaitRef: { current: wait },
+    subscribeCloudWorkspaces: () => () => {}, cloudWorkspaceStopVersion: () => 0,
     cloudSendPreparationRef: { current: { cancel: vi.fn() } }, beginCloudSendWaitRef: { current: null }, hydrateCloudSendRef: { current: null },
     sendQueueRef: { current: queue }, sendingChatsRef: { current: sending }, queueHeldRef: { current: new Set() },
     cancelGenerationsRef: { current: new Map() }, flushBubbleRef: { current: flush }, cloudFlushRef: { current: new Map() },
@@ -175,6 +176,18 @@ describe("cloud composer readiness queue", () => {
     expect(h.queue.get("chat")).toHaveLength(1); expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting");
     h.ready(); await vi.advanceTimersByTimeAsync(0); expect(h.delivered).toHaveBeenCalledOnce();
   });
+  it("keeps an undispatched row editable across N to N+1 and sends it once without a failure toast", async () => {
+    const h = harness(); h.prepare.mockRejectedValueOnce(new Error("Connecting"));
+    await h.send(); await vi.advanceTimersByTimeAsync(0);
+    const row = h.queue.get("chat")![0], doc = h.provider.cloudWorkspaceDocument();
+    doc.generation.number++; doc.status = "provisioning";
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting");
+    h.provider.actions.editQueued("chat", row.bubbleId, { text: "Replacement", displayText: "Replacement" });
+    doc.status = "setting_up"; h.ready(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.delivered).toHaveBeenCalledExactlyOnceWith(row.bubbleId, expect.arrayContaining(["Replacement"]));
+    expect(h.failureNotice).not.toHaveBeenCalled();
+  });
   it("preserves Local sends' existing runtime availability guard", async () => {
     const h = harness(false); h.composer.runtimeUpgradeRequired = true; await h.send();
     expect(h.composer.session.sendPrompt).not.toHaveBeenCalled(); expect(h.clear).not.toHaveBeenCalled();
@@ -188,7 +201,7 @@ describe("cloud composer readiness queue", () => {
       reason: status === "failed" ? "workspace_unavailable" : "workspace_archived" }));
   });
   it("keeps a timed-out message editable and uses one shared toast with an explicit retry action", async () => {
-    const h = harness(); await h.send(); const id = h.queue.get("chat")![0].bubbleId;
+    const h = harness(true, "ready"); await h.send(); const id = h.queue.get("chat")![0].bubbleId;
     await vi.advanceTimersByTimeAsync(179_999); expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting");
     await vi.advanceTimersByTimeAsync(1); expect(h.store.sessions.chat.cloudSendWait).toMatchObject({ state: "failed", message: expect.stringContaining("three minutes") });
     expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ chatId: "chat", attemptId: id, reason: "queued_timeout", onRetry: expect.any(Function) }));
@@ -220,14 +233,14 @@ describe("cloud composer readiness queue", () => {
       attemptId: h.queue.get("chat")![0].bubbleId }));
   });
   it("retries a timed-out queued message only through an explicit toast action and keeps its identity", async () => {
-    const h = harness(); await h.send(); const id = h.queue.get("chat")![0].bubbleId;
+    const h = harness(true, "ready"); await h.send(); const id = h.queue.get("chat")![0].bubbleId;
     await vi.advanceTimersByTimeAsync(180_000); h.ready(); await vi.advanceTimersByTimeAsync(0);
     expect(h.delivered).not.toHaveBeenCalled();
     h.failureNotice.mock.calls[0][0].onRetry(); await vi.advanceTimersByTimeAsync(0);
     expect(h.delivered).toHaveBeenCalledExactlyOnceWith(id, expect.anything()); expect(h.failureNotice).toHaveBeenCalledOnce();
   });
   it.each(["removed", "account changed"])("ignores a stale toast retry after its queued owner is %s", async cause => {
-    const h = harness(); await h.send(); const id = h.queue.get("chat")![0].bubbleId;
+    const h = harness(true, "ready"); await h.send(); const id = h.queue.get("chat")![0].bubbleId;
     await vi.advanceTimersByTimeAsync(180_000);
     const retry = h.failureNotice.mock.calls[0][0].onRetry;
     if (cause === "removed") h.provider.actions.removeQueued("chat", id);
@@ -235,6 +248,32 @@ describe("cloud composer readiness queue", () => {
     const calls = h.prepare.mock.calls.length;
     retry(); h.ready(); await vi.advanceTimersByTimeAsync(0);
     expect(h.prepare).toHaveBeenCalledTimes(calls); expect(h.delivered).not.toHaveBeenCalled();
+  });
+  it.each([150_000, 360_000])("delivers once after a %i ms wake/replacement with no readiness failure", async duration => {
+    const h = harness(); await h.send(); const id = h.queue.get("chat")![0].bubbleId;
+    const doc = h.provider.cloudWorkspaceDocument(); doc.status = "stopping";
+    await vi.advanceTimersByTimeAsync(duration / 3);
+    doc.generation.number++; doc.status = "provisioning";
+    await vi.advanceTimersByTimeAsync(duration / 3); doc.status = "setting_up";
+    await vi.advanceTimersByTimeAsync(duration / 3);
+    expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting"); expect(h.failureNotice).not.toHaveBeenCalled();
+    h.ready(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.delivered).toHaveBeenCalledExactlyOnceWith(id, expect.anything()); expect(h.failureNotice).not.toHaveBeenCalled();
+  });
+  it("reports a terminal document error while a wake preparation is still hung", async () => {
+    const h = harness(); await h.send();
+    const doc = h.provider.cloudWorkspaceDocument(); doc.status = "setting_up"; doc.error = { message: "Setup failed" };
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: "workspace_unavailable", error: expect.objectContaining({ message: "Setup failed" }) }));
+    h.ready(); await vi.advanceTimersByTimeAsync(0); expect(h.delivered).not.toHaveBeenCalled();
+  });
+  it("ends an undispatched send immediately when explicit workspace Stop supersedes pending agent admission", async () => {
+    const h = harness(true, "ready"); let changed!: () => void;
+    h.provider.subscribeCloudWorkspaces = (listener: () => void) => { changed = listener; return () => {}; };
+    h.prepare.mockResolvedValue(undefined); await h.send(); await vi.advanceTimersByTimeAsync(0);
+    h.provider.cloudWorkspaceStopVersion = () => 1; changed();
+    expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: "workspace_stopped" }));
+    h.ready(); await vi.advanceTimersByTimeAsync(0); expect(h.delivered).not.toHaveBeenCalled();
   });
   it("keeps a message queued when a later Stop wins without retrying the wake", async () => {
     const h = harness();

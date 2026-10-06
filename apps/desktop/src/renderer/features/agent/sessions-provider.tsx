@@ -66,10 +66,10 @@ import { TranscriptHydrationRetries } from "./transcript-hydration-retries";
 import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
 import { useInternalFeatureActive } from "../settings/internal-features";
-import { cloudCatalogGeneration, cloudWorkspaceDocument, canBackgroundSyncCloudWorkspace } from "../../state/cloud-workspace-catalog";
+import { cloudCatalogGeneration, cloudWorkspaceDocument, cloudWorkspaceStopVersion, canBackgroundSyncCloudWorkspace, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
 import { CloudWorkspaceWakeEndedError } from "../../state/cloud-workspace-wake";
 import { CloudSendPreparation } from "./cloud-send-preparation";
-import { CloudSendWait, CloudSendWaitError } from "./cloud-send-wait";
+import { CloudSendWait, CloudSendWaitError, type CloudSendWaitBudget } from "./cloud-send-wait";
 import { ControlPlaneError } from "../team/control-plane";
 import { chatChangeTargets } from "../../state/chat-change-targets";
 import { BackgroundTaskSnapshots, loadedBackgroundTaskState } from "./background-task-state";
@@ -1298,6 +1298,8 @@ export function AgentSessionsProvider({
       prepared?: boolean;
       cloudQueue?: CloudQueuedPrompt;
       waitStartedAt?: number;
+      waitBudget?: CloudSendWaitBudget;
+      waitStopVersion?: number;
       retryAdmission?: boolean;
       /** Toast identity survives explicit renewal of a refused delivery ID. */
       queueEntryId?: string;
@@ -1329,7 +1331,7 @@ export function AgentSessionsProvider({
     folder: string | null | undefined) => {
     if (!entry.cloud || account !== cloudCatalogGeneration() || getStore().sessions[chatId]?.cwd !== folder ||
         !sendQueueRef.current.get(chatId)?.includes(entry)) return;
-    for (const queued of sendQueueRef.current.get(chatId) ?? []) if (queued.cloud) queued.waitStartedAt = undefined;
+    for (const queued of sendQueueRef.current.get(chatId) ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; }
     resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId);
   }, [getStore, resumeQueue]);
   const markQueuedDelivery = useCallback(
@@ -2309,7 +2311,7 @@ export function AgentSessionsProvider({
           ...(segments?.length ? { segments } : {}), ...(autoAction ? { autoAction } : {}),
         };
         const q = sendQueueRef.current.get(chatId) ?? [];
-        if (sendQueueRef.current.isPaused(chatId)) for (const entry of q) if (entry.cloud) entry.waitStartedAt = undefined;
+        if (sendQueueRef.current.isPaused(chatId)) for (const entry of q) if (entry.cloud) { entry.waitStartedAt = undefined; entry.waitBudget = undefined; entry.waitStopVersion = undefined; }
         q.push({ cloud: true, bubbleId, queueEntryId: bubbleId, cloudQueue, args: [chatId, text, displayText, attachments, bubbleAttachments, segments, autoAction] });
         sendQueueRef.current.set(chatId, q);
         getStore().patchSession(chatId, { messages: capUserAppend(slot.messages, queuedMsg, slot.historyExpanded) });
@@ -4002,25 +4004,36 @@ export function AgentSessionsProvider({
     const first = sendQueueRef.current.get(chatId)?.[0];
     if (!slot || !target || !first?.cloud) return;
     const startedAt = first.waitStartedAt ??= performance.now();
+    const stopVersion = first.waitStopVersion ??= cloudWorkspaceStopVersion(target);
     const folder = slot.cwd, account = cloudCatalogGeneration();
     let generation = cloudWorkspaceDocument(target)?.generation.number;
     const cancellation = cancelGeneration(cancelGenerationsRef.current, chatId);
     const current = () => cloudCatalogGeneration() === account && getStore().sessions[chatId]?.cwd === folder &&
       cancelGeneration(cancelGenerationsRef.current, chatId) === cancellation && !sendQueueRef.current.isPaused(chatId) &&
       sendQueueRef.current.get(chatId)?.some(entry => entry.cloud) === true;
+    const readiness = () => {
+      if (cloudWorkspaceStopVersion(target) !== stopVersion)
+        throw new CloudWorkspaceWakeEndedError("Cloud workspace was stopped. Your messages are still queued. Try again.");
+      const doc = cloudWorkspaceDocument(target);
+      if (generation !== undefined && (!doc || doc.generation.number < generation))
+        throw new CloudSendWaitError("The workspace generation or access changed. Your messages are still queued. Try again.", "workspace_unavailable");
+      if (doc?.deletedAt || ["archived", "archiving", "deleting", "deleted", "failed", "error"].includes(doc?.status ?? "") || doc?.error && doc.status !== "stopped")
+        throw new CloudSendWaitError(doc?.error?.message ?? `The workspace is ${doc?.status}. Your messages are still queued.`,
+          doc?.deletedAt || ["archived", "archiving", "deleting", "deleted"].includes(doc?.status ?? "") ? "workspace_archived" : "workspace_unavailable");
+      if (doc && !doc.capabilities.canWrite) throw new CloudSendWaitError("You do not have permission to run agents in this workspace.", "workspace_unavailable");
+      // Replacement lifecycle progress belongs to this same undispatched row.
+      generation = doc?.generation.number ?? generation;
+      return doc?.status === "ready" || doc?.status === "busy";
+    };
     if (slot.cloudSendWait?.state !== "waiting") getStore().patchSession(chatId, { cloudSendWait: { state: "waiting" } });
     cloudSendWaitRef.current.start(chatId, {
       current,
-      timeoutMs: 3 * 60_000 - (performance.now() - startedAt),
+      readiness,
+      observe: subscribeCloudWorkspaces,
+      budget: first.waitBudget ??= { elapsedMs: 0 },
+      safetyTimeoutMs: 15 * 60_000 - (performance.now() - startedAt),
       attempt: async signal => {
-        const doc = cloudWorkspaceDocument(target);
-        if (generation !== undefined && doc && doc.generation.number !== generation)
-          throw new CloudSendWaitError("The workspace generation changed. Your messages are still queued. Try again.", "workspace_unavailable");
-        if (doc?.deletedAt || ["archived", "archiving", "deleting", "deleted", "failed", "error"].includes(doc?.status ?? ""))
-          throw new CloudSendWaitError(doc?.error?.message ?? `The workspace is ${doc?.status}. Your messages are still queued.`,
-            doc?.deletedAt || ["archived", "archiving", "deleting", "deleted"].includes(doc?.status ?? "") ? "workspace_archived" : "workspace_unavailable");
-        if (doc && !doc.capabilities.canWrite) throw new CloudSendWaitError("You do not have permission to run agents in this workspace.", "workspace_unavailable");
-        generation ??= doc?.generation.number;
+        readiness();
         await prepareForSend(chatId);
         if (signal.aborted || !current()) return false;
         if (getStore().sessions[chatId]?.transcriptState !== "resident") await hydrateCloudSendRef.current?.(chatId);
@@ -4843,7 +4856,7 @@ export function AgentSessionsProvider({
       const slot = getStore().sessions[chatId];
       if (entry.cloud && slot?.cloudSendWait) {
         if (slot.cloudSendWait.state === "failed") {
-          for (const queued of q ?? []) if (queued.cloud) queued.waitStartedAt = undefined;
+          for (const queued of q ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; }
           resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId);
         }
         return true;

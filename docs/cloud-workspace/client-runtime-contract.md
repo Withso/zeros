@@ -156,8 +156,10 @@ Existing control-plane workload/authority guards still apply, including the
 bounded lifetime of outstanding human-service grants.
 
 User presence requires a selected cloud workspace, a signed-in/admitted client,
-a visible and focused app window, and keyboard/pointer/scroll input in the last
-fifteen minutes. Settings and other app controls count for the selected workspace.
+a visible, available app window, and keyboard/pointer/scroll input in the last
+fifteen minutes. Window focus is required to capture trusted input and arm wake,
+but presence continues when a visible Zeros window sits beside another app.
+Settings and other app controls count for the selected workspace.
 Main reports screen lock and system suspend; either withdraws presence. The
 client renews `cloudPresence.update` over the existing `WORKSPACE_REQUEST` bridge
 every sixty seconds and immediately when presence returns. The engine uses a
@@ -182,10 +184,18 @@ messages retain order, rich documents and attachment sources; edit/remove remain
 available before dispatch. Files resolve after fresh admission, then the stable
 message identity is promoted exactly once. Removing a message, Stop, changing
 account/workspace identity or closing its chat fences late readiness. A terminal
-cause or a three-minute readiness bound leaves editable **Not sent** rows with
+cause or an exhausted readiness budget leaves editable **Not sent** rows with
 Retry/Remove and shows one toast per accepted message/turn with the cause and a
 relevant action. The card has no inline error text or stopped-turn pill. Expected
 readiness waits produce no error toast.
+Drain, waking, provisioning and setup with no document error have no short
+client deadline. Wake/open and queued preparation keep waiting through a
+150-second wake or a replacement taking several minutes, with a fifteen-minute
+elapsed safety cap. A client reaching that cap while compute is still progressing
+does not record a workbench connection failure; the shared lifecycle state stays
+calm. The three-minute agent/session admission budget starts only at ready/busy,
+pauses during further lifecycle progress, and survives automatic readiness retries.
+Document errors and terminal lifecycle outcomes end the wait immediately.
 A closed admission refusal before provider execution restores the same editable
 row and retains its elapsed readiness budget. Terminal admission causes use the
 existing model/credential copy and recovery action in the toast. An ambiguous
@@ -201,6 +211,11 @@ to the renderer's existing pending-send lifetime, rather than a durable server
 queue; Local submissions keep their existing pipeline and presentation.
 Runtime upgrades are selected by the server's existing wake/start lifecycle;
 replacement-engine admission precedes delivery of the queued prompt.
+For the same account epoch and organization/workspace with readable, writable
+access, a newer generation is a continuation: retain undispatched rows, follow
+replacement drain/create/setup and admit its engine. Exact-generation transport
+and passive-read fences remain strict. Account changes, revoked access/run
+permission, archive/delete and an explicit Stop still end the original intent.
 Automatic interaction wakes add the optional `reason: "interaction"` body field
 to that same `/wake` request. Shared sends and uncertain retries retain the
 initiating reason and lifecycle identity; ordinary explicit wakes keep their

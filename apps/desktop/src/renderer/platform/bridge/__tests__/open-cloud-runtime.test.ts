@@ -99,10 +99,23 @@ describe("cloud runtime admission fencing", () => {
     await vi.waitFor(() => expect(mocks.wake).toHaveBeenCalledOnce());
     if (reason === "abort") controller.abort();
     if (reason === "account") mocks.epoch++;
-    mocks.doc = { ...mocks.doc, status: "ready", generation: { number: reason === "generation" ? 2 : 1 } };
+    mocks.doc = { ...mocks.doc, status: "ready", generation: { number: reason === "generation" ? 0 : 1 } };
     wake.resolve(mocks.doc);
     await rejected;
     expect(mocks.admission).not.toHaveBeenCalled();
+  });
+  it("admits the replacement generation after wake and retires a reused older connection calmly", async () => {
+    const peer = await openCloudRuntime(target);
+    const capture = deferred<typeof mocks.doc>(); mocks.wake.mockReturnValue(capture.promise);
+    const preparing = peer.prepareForRun!(new AbortController().signal);
+    await vi.waitFor(() => expect(mocks.wake).toHaveBeenCalledOnce());
+    mocks.doc = { ...mocks.doc, generation: { number: 2 } };
+    for (const listener of mocks.listeners) listener();
+    capture.resolve(mocks.doc);
+    expect(await preparing).toBe(false);
+    mocks.admission.mockResolvedValue({ ...descriptor, generation: 2 });
+    const replacement = await openCloudRuntime(target);
+    expect(mocks.admission).toHaveBeenCalledTimes(2); replacement.release();
   });
   it("never requests admission from a ready read when a newer stopped document won", async () => {
     const opening = openCloudRuntime(target);

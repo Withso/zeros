@@ -18,7 +18,7 @@ describe("cloud queue readiness wait", () => {
     expect(h.options.attempt).toHaveBeenCalledTimes(3); expect(h.ready).toHaveBeenCalledOnce(); expect(h.failed).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(180_000); expect(h.ready).toHaveBeenCalledOnce();
   });
-  it("bounds a hung wake or initialization at three minutes and fences late readiness", async () => {
+  it("bounds a hung ready-workspace initialization at three minutes and fences late readiness", async () => {
     const h = harness(); let finish!: (ready: boolean) => void;
     h.options.attempt.mockReturnValue(new Promise(resolve => { finish = resolve; })); h.wait.start("chat", h.options);
     await vi.advanceTimersByTimeAsync(179_999); expect(h.failed).not.toHaveBeenCalled();
@@ -26,6 +26,35 @@ describe("cloud queue readiness wait", () => {
     expect(h.cancel).toHaveBeenCalledOnce(); finish(true); await vi.advanceTimersByTimeAsync(0); expect(h.ready).not.toHaveBeenCalled();
     h.options.attempt.mockResolvedValue(true); h.wait.start("chat", h.options); await vi.advanceTimersByTimeAsync(0);
     expect(h.ready).toHaveBeenCalledOnce();
+  });
+  it("starts the admission budget after six minutes of compute progress and retains elapsed ready time across retries", async () => {
+    const h = harness(); let readyForAgent = false;
+    const budget = { elapsedMs: 0 };
+    h.wait.start("chat", { ...h.options, readiness: () => readyForAgent, budget });
+    await vi.advanceTimersByTimeAsync(360_000); expect(h.failed).not.toHaveBeenCalled();
+    readyForAgent = true; await vi.advanceTimersByTimeAsync(61_000);
+    h.wait.cancel("chat");
+    h.wait.start("chat", { ...h.options, readiness: () => readyForAgent, budget });
+    await vi.advanceTimersByTimeAsync(119_000); expect(h.failed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000); expect(h.failed).toHaveBeenCalledOnce();
+    h.wait.clear();
+  });
+  it("defers an exhausted admission budget until replacement lifecycle progress reaches ready again", async () => {
+    const h = harness(); let readyForAgent = false;
+    h.wait.start("chat", { ...h.options, readiness: () => readyForAgent, budget: { elapsedMs: 180_000 } });
+    await vi.advanceTimersByTimeAsync(360_000); expect(h.failed).not.toHaveBeenCalled();
+    readyForAgent = true; await vi.advanceTimersByTimeAsync(1_000); expect(h.failed).toHaveBeenCalledOnce(); h.wait.clear();
+  });
+  it("caps a hung compute wait at fifteen minutes and observes terminal lifecycle errors while initialization is pending", async () => {
+    const h = harness(); h.options.attempt.mockReturnValue(new Promise(() => {}));
+    let cause: Error | undefined;
+    h.wait.start("chat", { ...h.options, readiness: () => { if (cause) throw cause; return false; } });
+    await vi.advanceTimersByTimeAsync(899_999); expect(h.failed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); expect(h.failed).toHaveBeenCalledOnce();
+    h.failed.mockClear();
+    h.wait.start("chat", { ...h.options, readiness: () => { if (cause) throw cause; return false; } });
+    cause = new CloudSendWaitError("Setup failed", "workspace_unavailable");
+    await vi.advanceTimersByTimeAsync(1_000); expect(h.failed).toHaveBeenCalledWith(cause); h.wait.clear();
   });
   it("keeps removal and a replacement wait independent of the cancelled completion", async () => {
     const h = harness(); let old!: (ready: boolean) => void;

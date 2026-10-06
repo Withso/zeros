@@ -28,14 +28,21 @@ describe("selected cloud workspace interaction", () => {
     expect(h.wake).not.toHaveBeenCalled();
   });
 
-  it.each(["hide", "blur", "lock"])("withdraws presence on %s and does not wake on resume", kind => {
+  it.each(["hide", "lock"])("withdraws presence on %s and does not wake on resume", kind => {
     const h = harness(); h.controller.interact();
     if (kind === "hide") h.visibility(false);
-    if (kind === "blur") h.focus(false);
     if (kind === "lock") h.lock();
     expect(h.presence).toHaveBeenLastCalledWith("cloud://fixture", false);
     h.current!.document.status = "stopped"; h.visibility(true); h.focus(true); h.tick(60_000);
     expect(h.wake).not.toHaveBeenCalled();
+  });
+  it("keeps a visible unfocused window present until fifteen minutes after trusted input", () => {
+    const h = harness(); h.controller.interact(); h.focus(false);
+    expect(h.presence).toHaveBeenCalledExactlyOnceWith("cloud://fixture", true);
+    h.tick(60_000); expect(h.presence).toHaveBeenLastCalledWith("cloud://fixture", true);
+    h.controller.interact(); // Unfocused input cannot renew presence or arm wake.
+    h.tick(14 * 60_000); expect(h.presence).toHaveBeenLastCalledWith("cloud://fixture", false);
+    h.current!.document.status = "stopped"; h.controller.interact(); expect(h.wake).not.toHaveBeenCalled();
   });
 
   it("wakes once for app input during sleep, shares the pending flight, and never wakes for refresh", async () => {

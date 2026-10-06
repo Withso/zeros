@@ -50,6 +50,14 @@ import { clearCloudLatencySpans, pruneCloudLatencySpans } from "./cloud-workspac
 import { clearWorkbenchConnectionFailure, recordWorkbenchConnectionFailure } from "./workbench-availability";
 import { CloudWorkspaceInteraction } from "./cloud-workspace-interaction";
 
+function recordCloudOpenFailure(key: string, error: unknown): void {
+  const target = parseCloudWorkspaceKey(key), doc = target ? cloudWorkspaceDocument(target) : undefined;
+  // Drain/create/setup remain calm server-owned progress, including when the
+  // client's fifteen-minute safety wait ends. The shared model owns that copy.
+  if (doc && !doc.error && ["stopping", "waking", "provisioning", "setting_up"].includes(doc.status)) return;
+  recordWorkbenchConnectionFailure(key, error, "open");
+}
+
 /** Account/catalog lifecycle, mounted once beside the existing persistence
  * controller. It never replaces the conversation or workbench renderers. */
 export function CloudWorkspaceLifecycle() {
@@ -340,7 +348,7 @@ export function CloudWorkspaceLifecycle() {
         })
         .catch((error) => {
           if (!intent.controller.signal.aborted && ownsView(key))
-            recordWorkbenchConnectionFailure(key, error, "open");
+            recordCloudOpenFailure(key, error);
         })
         .finally(() => { if (pending === intent) pending = undefined; });
     });
@@ -379,7 +387,7 @@ export function CloudWorkspaceLifecycle() {
         await bridge.openWorkspace(target, { signal, reason: "interaction" });
         if (!signal.aborted && current()?.key === key) clearWorkbenchConnectionFailure(key);
       },
-      failed: (key, error) => recordWorkbenchConnectionFailure(key, error, "open"),
+      failed: recordCloudOpenFailure,
     });
     const input = (event: Event) => {
       if (!event.isTrusted) return;

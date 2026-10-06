@@ -30,6 +30,9 @@ export interface CloudPeer {
   scope: CloudRuntimeScope;
   release: () => void;
   runtimeId?: string;
+  /** Native admission's exact generation; renderer-only, never inferred from
+   * a catalog update that can race the connection's final reply. */
+  generation?: number;
   agents?: CloudAgentConnection;
   events?: Pick<RuntimeClient, "on">;
   /** Serialize explicit work with idle capture and revalidate the admission.
@@ -40,6 +43,9 @@ export interface WorkspaceRuntimeOptions {
   open: (target: CloudWorkspaceTarget, options?: { signal: AbortSignal; wake?: boolean; reason?: "interaction" }) => Promise<CloudPeer>;
   /** Account/catalog epoch and generation; never a credential or admission. */
   identity?: (target: CloudWorkspaceTarget) => string;
+  /** Explicit wake ownership survives only forward generation replacements.
+   * Undefined revokes run access; passive connections remain exact-generation. */
+  wakeOwner?: (target: CloudWorkspaceTarget) => WakeOwner | undefined;
   workspaces: () => readonly WireRecord[];
   /** Complete catalog confirmation includes an authoritative empty list. */
   workspacesConfirmed?: () => boolean;
@@ -49,6 +55,7 @@ export interface WorkspaceRuntimeOptions {
   readHistory?: (target: CloudWorkspaceTarget, op: string, params: WireRecord) => Promise<WireRecord>;
   prepareGithubWrite?: (target: CloudWorkspaceTarget, op: string, params: WireRecord) => Promise<string>;
 }
+interface WakeOwner { account: string; generation: number; stopVersion: number }
 interface PeerEntry extends CloudPeer {
   unsubscribers: Map<string, () => void>;
   stopStatus: () => void;
@@ -77,6 +84,7 @@ interface OpeningPeer {
   controller: AbortController;
   wake: boolean;
   consumers: number;
+  owner?: WakeOwner;
 }
 
 /** One renderer protocol boundary, multiple independently owned connections.
@@ -306,13 +314,31 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   /** Explicit navigation and message preparation share one wake/admission.
    * Each caller owns cancellation; a navigation away cannot cancel a send. */
   async openWorkspace(target: CloudWorkspaceTarget, options?: { signal?: AbortSignal; reason?: "interaction" }): Promise<void> {
+    const controller = new AbortController();
+    const cancel = () => controller.abort(options?.signal?.reason);
+    options?.signal?.addEventListener("abort", cancel, { once: true });
+    if (options?.signal?.aborted) cancel();
+    // Bound the whole intent, including native admission and retargeting N+1;
+    // compute progress never starts a fresh short deadline at each stage.
+    const safety = setTimeout(() => controller.abort(new Error("The cloud workspace is still starting after fifteen minutes. Try again when it is ready.")), 15 * 60_000);
+    try { await this.openWorkspaceIntent(target, { signal: controller.signal, reason: options?.reason }); }
+    finally { clearTimeout(safety); options?.signal?.removeEventListener("abort", cancel); }
+  }
+
+  private async openWorkspaceIntent(target: CloudWorkspaceTarget, options: { signal: AbortSignal; reason?: "interaction" }): Promise<void> {
+    const cancelled = () => options.signal.reason instanceof Error && options.signal.reason.name !== "AbortError"
+      ? options.signal.reason : new Error("Cloud workspace open cancelled");
     const key = cloudWorkspaceKey(target);
     const identity = this.identity(target);
+    const owner = this.routing.wakeOwner?.(target);
+    const epoch = this.accountEpoch;
+    const current = () => epoch === this.accountEpoch && (owner
+      ? this.continuesWake(target, owner) : identity === this.identity(target));
     const pending = this.opening.get(key);
     this.claimPeer(key);
     const open = () => {
-      if (options?.signal?.aborted) return Promise.reject(new Error("Cloud workspace open cancelled"));
-      if (identity !== this.identity(target)) return Promise.reject(new Error("Cloud account changed while connecting"));
+      if (options.signal.aborted) return Promise.reject(cancelled());
+      if (!current()) return Promise.reject(new Error("Cloud account changed while connecting"));
       const promise = this.peer(target, true, options?.reason);
       const flight = this.opening.get(key);
       if (flight) flight.consumers++;
@@ -330,7 +356,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
           return true;
         };
         const abort = () => {
-          if (finish(true)) reject(new Error("Cloud workspace open cancelled"));
+          if (finish(true)) reject(cancelled());
         };
         options?.signal?.addEventListener("abort", abort, { once: true });
         if (options?.signal?.aborted) abort();
@@ -342,10 +368,21 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       // Await it, then prepare explicitly; never retry a submitted command.
       try { await open(); }
       catch (error) {
-        if (options?.signal?.aborted || identity !== this.identity(target)) throw error;
+        if (options?.signal?.aborted || !current()) throw error;
       }
     }
-    await open();
+    let generation = owner?.generation;
+    for (;;) {
+      try { await open(); return; }
+      catch (error) {
+        const next = this.routing.wakeOwner?.(target);
+        // An admission/connect/hydration for N can lose to N+1. Dispose N and
+        // retarget the still-undispatched intent; never retry any command here.
+        if (options?.signal?.aborted || !current() || !this.continuesWake(target, owner) || !next ||
+            generation === undefined || next.generation <= generation) throw error;
+        generation = next.generation;
+      }
+    }
   }
 
   async warmHistoryWorkspace(target: CloudWorkspaceTarget, options?: { intent: boolean }): Promise<void> {
@@ -528,9 +565,10 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         ),
       );
     const key = cloudWorkspaceKey(target);
-    const identity = this.identity(target);
+    let identity = this.identity(target);
+    const owner = wake ? this.routing.wakeOwner?.(target) : undefined;
     const pending = this.opening.get(key);
-    if (pending?.identity === identity) return pending.promise;
+    if (pending && (pending.identity === identity || pending.wake && this.continuesWake(target, pending.owner))) return pending.promise;
     if (pending) {
       pending.controller.abort();
       this.opening.delete(key);
@@ -580,8 +618,14 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     catch (error) { this.ongoingOpens--; return Promise.reject(error); }
     const flight = opening
       .then(async (opened) => {
+        if (owner && opened.generation !== undefined && opened.generation !== this.routing.wakeOwner?.(target)?.generation) {
+          if (opened === reusable) this.retirePeer(reusable); else opened.release();
+          throw new Error("Cloud workspace generation changed during admission");
+        }
+        if (wake && this.continuesWake(target, owner)) identity = this.identity(target);
         if (
           epoch !== this.accountEpoch ||
+          (owner && !this.continuesWake(target, owner)) ||
           controller.signal.aborted || identity !== this.identity(target) ||
           this.closed ||
           (this.routing.canAccess && !this.routing.canAccess(target))
@@ -642,7 +686,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         if (this.opening.get(key)?.promise === flight) this.opening.delete(key);
         this.workspaceStatusChanged(key);
       });
-    this.opening.set(key, { promise: flight, identity, target, controller, wake, consumers: 0 });
+    this.opening.set(key, { promise: flight, identity, target, controller, wake, consumers: 0, owner });
     this.workspaceStatusChanged(key);
     return flight;
   }
@@ -907,7 +951,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
 
   pruneCloudConnections(): void {
     for (const [key, pending] of this.opening) {
-      if (pending.identity === this.identity(pending.target) && (!this.routing.canAccess || this.routing.canAccess(pending.target))) continue;
+      if ((pending.owner ? this.continuesWake(pending.target, pending.owner) : pending.identity === this.identity(pending.target)) &&
+          (!this.routing.canAccess || this.routing.canAccess(pending.target))) continue;
       pending.controller.abort();
       this.opening.delete(key);
       this.claimPeer(key);
@@ -921,6 +966,13 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       this.historyWorkspaces.delete(key);
       for (const cached of this.history.keys()) if (cached.startsWith(`${key}\0`)) this.history.forget(cached);
     }
+  }
+
+  private continuesWake(target: CloudWorkspaceTarget, owner: WakeOwner | undefined): boolean {
+    const current = this.routing.wakeOwner?.(target);
+    if (!owner || !current || current.account !== owner.account || current.stopVersion !== owner.stopVersion || current.generation < owner.generation) return false;
+    owner.generation = current.generation;
+    return true;
   }
 
   private claimPeer(key: string): void {

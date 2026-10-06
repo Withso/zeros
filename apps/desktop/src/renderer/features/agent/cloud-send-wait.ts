@@ -1,5 +1,10 @@
 const WAIT_LIMIT_MS = 3 * 60_000;
 const RETRY_MS = 2_000;
+const SAFETY_LIMIT_MS = 15 * 60_000;
+
+/** Stored on the undispatched FIFO row so closed readiness refusals retain
+ * their elapsed ready/busy budget across replacement connections and retries. */
+export interface CloudSendWaitBudget { elapsedMs: number; readySince?: number }
 
 export class CloudSendWaitError extends Error {
   constructor(message: string, readonly reason?: AgentSendFailureReason) { super(message); }
@@ -18,6 +23,10 @@ export class CloudSendWait {
     ready(): void;
     failed(error: unknown): void;
     timeoutMs?: number;
+    readiness?(): boolean;
+    observe?(changed: () => void): () => void;
+    budget?: CloudSendWaitBudget;
+    safetyTimeoutMs?: number;
   }): void {
     const previous = this.flights.get(chatId);
     if (previous && !previous.controller.signal.aborted && previous.current()) return;
@@ -34,9 +43,35 @@ export class CloudSendWait {
       "The agent did not become ready within three minutes. Your messages are still queued. Try again.",
       "queued_timeout",
     );
-    const timeoutMs = Math.min(options.timeoutMs ?? WAIT_LIMIT_MS, WAIT_LIMIT_MS);
-    if (timeoutMs <= 0) { fail(timeoutError()); return; }
-    const deadline = setTimeout(() => fail(timeoutError()), timeoutMs);
+    const budget = options.budget ?? { elapsedMs: Math.max(0, WAIT_LIMIT_MS - (options.timeoutMs ?? WAIT_LIMIT_MS)) };
+    const safetyAt = performance.now() + Math.min(options.safetyTimeoutMs ?? SAFETY_LIMIT_MS, SAFETY_LIMIT_MS);
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    let off = () => {};
+    const cleanup = () => { clearTimeout(deadline); off(); };
+    controller.signal.addEventListener("abort", cleanup, { once: true });
+    const progress = () => {
+      clearTimeout(deadline);
+      if (!owns()) { controller.abort(); return; }
+      const now = performance.now();
+      try {
+        // Lifecycle time does not spend the agent budget. Observe transitions
+        // even while prepare/admission is hung, and surface terminal docs now.
+        const ready = options.readiness?.() ?? true;
+        if (ready) budget.readySince ??= now;
+        else if (budget.readySince !== undefined) {
+          budget.elapsedMs += now - budget.readySince; budget.readySince = undefined;
+        }
+        const remaining = WAIT_LIMIT_MS - budget.elapsedMs - (budget.readySince === undefined ? 0 : now - budget.readySince);
+        if (ready && remaining <= 0) { fail(timeoutError()); return; }
+        if (now >= safetyAt) {
+          fail(new CloudSendWaitError("The workspace is still starting after fifteen minutes. Your messages are still queued. Try again.", "queued_timeout")); return;
+        }
+        deadline = setTimeout(progress, Math.min(1_000, safetyAt - now, ready ? remaining : Infinity));
+      } catch (error) { if (options.terminal(error)) fail(error); else deadline = setTimeout(progress, 1_000); }
+    };
+    off = options.observe?.(progress) ?? off;
+    progress();
+    if (!owns()) return;
     void (async () => {
       try {
         while (owns()) {
@@ -57,7 +92,7 @@ export class CloudSendWait {
           });
         }
       } finally {
-        clearTimeout(deadline);
+        cleanup(); controller.signal.removeEventListener("abort", cleanup);
         if (this.flights.get(chatId) === flight) this.flights.delete(chatId);
       }
     })();

@@ -369,6 +369,7 @@ function settleLifecycleIntents(doc: CloudWorkspaceDocument): void {
   // A later Stop/failure is a confirmed outcome, not an uncertain transport
   // retry. An unchanged stopped read must keep the original idempotency key.
   if (wake && doc.version > (wake.version ?? -1) &&
+      !(doc.generation.number > (wake.generation ?? doc.generation.number) && ["stopping", "stopped"].includes(doc.status)) &&
       ["stopping", "stopped", "failed", "error", "archiving", "archived", "deleting", "deleted"].includes(doc.status))
     lifecycleIntents.delete(wakeKey);
   const operation = ["ready", "busy"].includes(doc.status)
@@ -397,10 +398,14 @@ export async function manageCloudWorkspace(
   if (owner !== undefined) detailOwnerGenerations.set(workspaceKey, owner);
   const generation = cloudWorkspaceDocument(target)?.generation.number;
   const previous = lifecycleIntents.get(key);
-  const intent: LifecycleIntent = previous && (operation !== "wake" || previous.owner === owner && previous.generation === generation)
+  const intent: LifecycleIntent = previous && (operation !== "wake" || previous.owner === owner &&
+      (previous.generation === generation || generation !== undefined && previous.generation !== undefined && generation >= previous.generation))
     ? previous : { id: crypto.randomUUID(), owner, generation, version: cloudWorkspaceDocument(target)?.version, reason: operation === "wake" ? reason : undefined };
   if (intent.task) return intent.task;
   if (operation === "stop") {
+    // A later explicit wake (including Restart) is a new intent. Do not reuse
+    // the receipt for an upgrade that this Stop supersedes, even across N+1.
+    lifecycleIntents.delete(`${epoch}:${workspaceKey}:wake`);
     localStopVersions.delete(workspaceKey);
     localStopVersions.set(workspaceKey, ++nextLocalStopVersion);
     while (localStopVersions.size > 256) localStopVersions.delete(localStopVersions.keys().next().value!);
@@ -420,12 +425,15 @@ export async function manageCloudWorkspace(
       if (doc.id !== target.workspaceId || doc.organizationId !== target.organizationId)
         throw new Error("Cloud wake returned a different workspace");
       const current = cloudWorkspaceDocument(target);
-      if (generation !== undefined && (doc.generation.number !== generation || current?.generation.number !== generation))
+      if (generation !== undefined && (doc.generation.number < generation || !current || current.generation.number < generation))
         throw new Error("Cloud workspace generation changed while waking");
+      if (generation !== undefined && (!canReadCloudWorkspace(current) || !current?.capabilities.canWrite))
+        throw new Error("Cloud workspace access changed while waking");
     }
     acceptCloudWorkspaceDocument(doc);
     if (operation === "wake") doc = cloudWorkspaceDocument(target)!;
-    if (operation === "wake" && !["waking", "provisioning", "setting_up"].includes(doc.status) && lifecycleIntents.get(key) === intent)
+    if (operation === "wake" && !["waking", "provisioning", "setting_up"].includes(doc.status) &&
+        !(doc.status === "stopping" && doc.generation.number > (generation ?? doc.generation.number)) && lifecycleIntents.get(key) === intent)
       lifecycleIntents.delete(key);
     const terminal =
       operation === "wake"

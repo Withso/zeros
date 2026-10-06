@@ -66,9 +66,12 @@ export class CloudWorkspaceInteraction {
   refresh(): void {
     if (this.closed) return;
     const current = this.options.current();
-    const available = this.options.visible() && this.options.focused() && this.options.available();
-    if (!available || current?.key !== this.armed?.key || current?.stopVersion !== this.armed?.stopVersion) this.armed = null;
-    if (this.pending && (current?.key !== this.pending.key || current?.stopVersion !== this.pending.stopVersion || !available)) {
+    // A visible window beside another app stays present after recent input.
+    // Focus gates trusted input/wake only; hide, lock and suspend withdraw now.
+    const available = this.options.visible() && this.options.available();
+    const interactive = available && this.options.focused();
+    if (!interactive || current?.key !== this.armed?.key || current?.stopVersion !== this.armed?.stopVersion) this.armed = null;
+    if (this.pending && (current?.key !== this.pending.key || current?.stopVersion !== this.pending.stopVersion || !interactive)) {
       this.pending.controller.abort(); this.pending = null;
     }
     const key = current && !current.document.deletedAt && ["ready", "busy"].includes(current.document.status) &&
