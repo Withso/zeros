@@ -11,7 +11,7 @@ import {readCloudAgentComputeTrust} from "./agent-compute-trust.js";
 import {CODEX_AUTH_RUNTIME_VERSION,parseCodexNativeCache,sealCodexNativeCache,type CodexNativeAuthCache} from "./codex-auth-cache.js";
 import {rememberCodexRefreshSeed} from "./codex-auth-renewal.js";
 import {cloudRuntimeQualificationMode} from "./runtime-config.js";
-import {runtimeCredentialQualificationJoin} from "./runtime-selection.js";
+import {runtimeCredentialQualificationJoin,runtimeNativeCapabilities} from "./runtime-selection.js";
 
 // Keep the shared schema/projection import acyclic; disabled paths do not load
 // the Dev adapter or read its authority configuration.
@@ -419,22 +419,26 @@ export class DatabaseCloudAgentCredentialService {
       const workspace=(await tx.query<{org_id:string}>("SELECT org_id FROM cloud_workspaces WHERE id=$1",[workspaceId])).rows[0];if(!workspace)unavailable();
       const actor=await authorizeCloudWorkspaceActor(tx,{workspaceId,organizationId:workspace.org_id,actorUserId,capability:"run"});
       const compute=await readCloudAgentComputeTrust(tx,workspaceId);if(!compute)unavailable();
-      const rows=await tx.query<{id:string;kind:CloudAgentCredentialKind;owner_user_id:string;models:string[];expires_at:Date;runtime_qualified:boolean}>(`SELECT delegation.id,credential.kind,credential.owner_user_id,delegation.models,delegation.expires_at,
-        EXISTS(SELECT 1 FROM cloud_workspaces workspace
+      const rows=await tx.query<{id:string;kind:CloudAgentCredentialKind;owner_user_id:string;models:string[];expires_at:Date;runtime_qualified:boolean;mcp_qualified:boolean;native_capabilities:unknown}>(`SELECT delegation.id,credential.kind,credential.owner_user_id,delegation.models,delegation.expires_at,
+        coalesce(runtime.runtime_qualified,false) AS runtime_qualified,coalesce(runtime.mcp_qualified,false) AS mcp_qualified,runtime.native_capabilities
+        FROM cloud_agent_credential_delegations delegation JOIN cloud_agent_credentials credential ON credential.id=delegation.credential_id
+        LEFT JOIN LATERAL (SELECT qualification.mcp_qualified,qualification.native_capabilities,
+          (qualification.mcp_qualified OR NOT EXISTS(SELECT 1 FROM cloud_computer_admin_workspaces admin WHERE admin.workspace_id=workspace.id)) AS runtime_qualified
+          FROM cloud_workspaces workspace
           JOIN cloud_workspace_generations generation ON generation.workspace_id=workspace.id AND generation.generation=workspace.current_generation
           JOIN cloud_workspace_engine_instances engine ON engine.workspace_id=workspace.id AND engine.org_id=workspace.org_id AND engine.generation=generation.generation
             AND engine.state='ready' AND engine.revoked_at IS NULL AND engine.lease_expires_at>clock_timestamp() AND engine.actor_protocol_version=2
-          ${runtimeCredentialQualificationJoin("$7", "true")}
-          WHERE workspace.id=delegation.workspace_id) AS runtime_qualified
-        FROM cloud_agent_credential_delegations delegation JOIN cloud_agent_credentials credential ON credential.id=delegation.credential_id
+          ${runtimeCredentialQualificationJoin("$7", "generation.runtime_id IS NULL")}
+          WHERE workspace.id=delegation.workspace_id) runtime ON true
         WHERE delegation.workspace_id=$1 AND delegation.org_id=$2 AND delegation.grantee_user_id=$3
-          AND delegation.revoked_at IS NULL AND delegation.expires_at>clock_timestamp() AND credential.revoked_at IS NULL
+          AND delegation.revoked_at IS NULL AND delegation.expires_at>clock_timestamp()+interval '5 seconds' AND credential.revoked_at IS NULL
           AND credential.revision=delegation.credential_revision AND delegation.grantee_fingerprint=$4
           AND delegation.compute_fingerprint=$5 AND delegation.compute_trust=$6
           AND delegation.owner_fingerprint=cloud_workspace_actor_fingerprint($1,credential.owner_user_id)
           AND cloud_workspace_actor_role($1,credential.owner_user_id) IN ('prompter','developer','manager','owner')
         ORDER BY delegation.created_at DESC,delegation.id LIMIT 100`,[workspaceId,workspace.org_id,actorUserId,actor.fingerprint,compute.fingerprint,compute.trust,cloudRuntimeQualificationMode()]);
-      return {compute,delegations:rows.rows.map(row=>({id:row.id,kind:row.kind,ownerUserId:row.owner_user_id,models:row.models,expiresAt:row.expires_at.toISOString(),runtimeQualified:row.runtime_qualified}))};
+      return {compute,delegations:rows.rows.map(row=>({id:row.id,kind:row.kind,ownerUserId:row.owner_user_id,models:row.models,expiresAt:row.expires_at.toISOString(),
+        runtimeQualified:row.runtime_qualified,mcpQualified:row.mcp_qualified,...(runtimeNativeCapabilities(row.native_capabilities)?{nativeCapabilities:runtimeNativeCapabilities(row.native_capabilities)}:{})}))};
     });
   }
 }

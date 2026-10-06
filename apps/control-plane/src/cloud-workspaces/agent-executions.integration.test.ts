@@ -246,6 +246,11 @@ d("private provider execution leases",()=>{
   it("requires exact-image MCP qualification for customization admission",async()=>{
     await expect(service.admit(engine(),{...admission(),customization:{version:1,repositoryServers:[]}})).rejects.toMatchObject({status:403});
   });
+  it("keeps legacy discovery aligned with its gateway's required customization", async () => {
+    expect((await credentials.forWorkspace(owner.id, fixture.workspaceId)).delegations[0]?.runtimeQualified).toBe(false);
+    await pool.query("UPDATE cloud_agent_runtime_qualifications SET mcp_qualified=true");
+    expect((await credentials.forWorkspace(owner.id, fixture.workspaceId)).delegations[0]?.runtimeQualified).toBe(true);
+  });
   it("delivers history authority only to version-2 admitted executions and binds it through renewals",async()=>{
     await pool.query("UPDATE cloud_agent_runtime_qualifications SET mcp_qualified=true");
     const legacy=await service.admit(engine(),{...admission(),customization:{version:1,repositoryServers:[]}});

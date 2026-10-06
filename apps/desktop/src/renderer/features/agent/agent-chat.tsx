@@ -179,6 +179,7 @@ import {
 } from "./session-tools-cache";
 import { useBridge } from "../../platform/bridge/use-bridge";
 import { BoundaryPortsPill } from "./boundary-ports";
+import { cloudAgentLimitations } from "./cloud-native-ui";
 import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 import type { ExecutionBoundaryPortStatus } from "@zeros/protocol/containment";
 import { createBrowserTab } from "@/renderer/shell/workbench/tab-model";
@@ -386,6 +387,7 @@ export function AgentChat({
   // In particular, background continuation chrome is an Ultracode-only aid.
   const chatThread = useChatById(chatId);
   const cloudNativeCapabilities=session.boundary?.cloudExecution?.capabilities??session.session?.nativeCapabilities;
+  const cloudLimitations=cloudAgentLimitations(session.boundary);
   const goalsAvailable=!isCloudWorkspace(chatThread?.folder)||cloudNativeCapabilities?.goals===true;
   const browserConfirmation = useBrowserConfirmation(chatId);
   const workflows = session.workflows;
@@ -5171,6 +5173,11 @@ export function AgentChat({
               so the popover matches the composer width,
               not the full-width wrapper above. */}
               {composerSuggestionPopup}
+              {cloudLimitations.length > 0 && (
+                <p className="text-fg3 mb-2 text-2xxs" data-cloud-agent-limitations="">
+                  Unavailable on this cloud runtime: {cloudLimitations.join(", ")}.
+                </p>
+              )}
               {dragActive && (
                 <div
                   className={cn(

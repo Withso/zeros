@@ -1,6 +1,7 @@
 import { authorizeCloudGithubSource } from "./cloud-github";
 import { z } from "zod";
 import { CloudComputerAdminWorkspaceSchema } from "@zeros/protocol/cloud-computer-v2";
+import { CloudNativeCapabilitiesSchema } from "@zeros/protocol/cloud-agent-execution";
 import { getSession } from "../features/auth/auth-store";
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
@@ -161,6 +162,8 @@ const AgentGrantsSchema = z.object({
         models: z.array(z.string()),
         expiresAt: z.string().datetime(),
         runtimeQualified: z.boolean().optional(),
+        mcpQualified: z.boolean().optional(),
+        nativeCapabilities: CloudNativeCapabilitiesSchema.optional(),
       }),
     )
     .max(100),

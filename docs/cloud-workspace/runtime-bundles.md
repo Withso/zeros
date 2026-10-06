@@ -348,6 +348,33 @@ credentials and do not prove a per-kind model turn or an MCP round trip;
 `mcp_qualified` stays false and native capabilities stay empty. Existing
 immutable qualification evidence is never overwritten or re-enabled by retry.
 
+Credential discovery reports `runtimeQualified` for basic turns, plus independent
+`mcpQualified` and optional versioned `nativeCapabilities` metadata per delegation.
+Legacy v3 gateways still require MCP in discovery because they always request
+required customization.
+The empty native capability object in a smoke row is absence of proof and is
+omitted from execution and renewal responses. Revoked, mismatched, disabled or
+wrong-mode qualifications still reject. Marked computer administration workspaces
+continue to require MCP proof because their purpose requires the computer tools.
+
+V4 engines request customization version 3: use the same encrypted snapshot and
+history as version 2 when MCP is qualified, or explicitly continue a basic turn
+without user MCP and organization skills when it is not. Versions 1 and 2 remain
+required requests and never downgrade. Replay cannot gain or lose an admitted
+snapshot; renewal of a customized execution still requires MCP qualification.
+The composer describes unavailable features, and goals, review and native fork
+remain gated by their independent capability flags. Smoke success never grants
+these flags and is not evidence of a real provider turn.
+
+Deploy the control-plane reader before a runtime containing the version-3 client.
+Existing pinned runtimes retain their old required-customization behavior until
+an explicit runtime upgrade; merely restarting them does not install this fix.
+No qualification rows need to be rewritten for basic turns. Enabling MCP or
+native features requires separate per-kind evidence and a new qualified runtime
+identity under the immutable registry contract; rerunning today's smoke worker
+cannot upgrade existing evidence. Keep full-mode deployments closed until that
+evidence exists.
+
 Failures retain only a closed diagnostic and insert no qualifications. A
 crashed run is reconciled after its deadline: recover the sandbox identity from
 the provider journal, delete it, verify the deletion receipt and a subsequent

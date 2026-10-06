@@ -24,13 +24,21 @@ beforeEach(() => {
   clearCloudAgentRegistry();
 });
 describe("workspace agent registry", () => {
-  it("does not offer unqualified API-key modes when only account modes were proven", async () => {
+  it("retains unqualified providers with a runtime reason and offers qualified account modes", async () => {
     mock.request.mockResolvedValue({ type: "AGENT_AGENTS_LIST", agents: [{ id: "codex", installed: true }, { id: "claude", installed: true }, { id: "cursor", installed: true }] });
     mock.grants.mockResolvedValue([{ kind: "codex-api-key", runtimeQualified: false }, { kind: "claude-api-key", runtimeQualified: false }, { kind: "cursor-api-key", runtimeQualified: true }]);
-    expect((await warmCloudAgentRegistry(a)).map(agent => agent.id)).toEqual(["cursor"]);
+    const agents = await warmCloudAgentRegistry(a);
+    expect(agents.map(agent => agent.id)).toEqual(["codex", "claude", "cursor"]);
+    expect(agents.map(agent => agent.authenticated)).toEqual([false, false, true]);
+    expect(agents[0]?.runtimeUnavailableReason).toContain("runtime");
     clearCloudAgentRegistry();
     mock.grants.mockResolvedValue([{ kind: "codex-chatgpt", runtimeQualified: true }, { kind: "claude-setup-token", runtimeQualified: true }, { kind: "cursor-api-key", runtimeQualified: true }]);
     expect((await warmCloudAgentRegistry(a)).map(agent => agent.authenticated)).toEqual([true, true, true]);
+  });
+  it("keeps smoke-qualified providers selectable when MCP and native capabilities are unqualified", async () => {
+    mock.request.mockResolvedValue({ type: "AGENT_AGENTS_LIST", agents: [{ id: "cursor", installed: true }] });
+    mock.grants.mockResolvedValue([{ kind: "cursor-api-key", runtimeQualified: true, mcpQualified: false }]);
+    expect(await warmCloudAgentRegistry(a)).toEqual([expect.objectContaining({ id: "cursor", authenticated: true })]);
   });
   it("deduplicates exact workspace reads and keeps each workspace's grants separate", async () => {
     mock.request.mockResolvedValue({

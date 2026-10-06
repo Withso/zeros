@@ -60,9 +60,10 @@ async function readCloudAgentRegistry(
   if (response.type !== "AGENT_AGENTS_LIST" || !Array.isArray(response.agents))
     throw new Error("Cloud agent registry is unavailable");
   const qualified = delegations.filter(grant => grant.runtimeQualified !== false);
-  return response.agents.filter(agent => !delegations.some(grant => grant.kind.startsWith(`${agent.id}-`)) ||
-    qualified.some(grant => grant.kind.startsWith(`${agent.id}-`))).map((agent) => ({
+  return response.agents.map((agent) => ({
     ...agent,
+    ...(!qualified.some(grant => grant.kind.startsWith(`${agent.id}-`)) && delegations.some(grant => grant.kind.startsWith(`${agent.id}-`))
+      ? {runtimeUnavailableReason: agent.runtimeUnavailableReason ?? "This workspace's agent runtime needs an update. Your account connection is saved."} : {}),
     authenticated:
       !agent.runtimeUnavailableReason &&
       qualified.some((grant) => grant.kind.startsWith(`${agent.id}-`)),
