@@ -122,10 +122,11 @@ follow-up; never report it as cleaned up.
 First inspect source preconditions without allocating anything. The template
 must be pinned to the source workspace's current generation; the organization's
 current template may be a different build. A stopped source workspace is allowed.
-This exact read-only invocation diagnoses the orchestrator's failed sample:
+The source inspector confirmed this generation pins `bx_v255c32q`; the
+organization's newer `bx_dxzfh3p6` template is not its source:
 
 ```sh
-pnpm exec tsx scripts/cloud-workspace-validation/workspace-perf-vm.mjs --inspect-source --workspace c5f68576-41cb-4d1a-af6f-60b07f42e5fe --template bx_dxzfh3p6
+pnpm exec tsx scripts/cloud-workspace-validation/workspace-perf-vm.mjs --inspect-source --workspace c5f68576-41cb-4d1a-af6f-60b07f42e5fe --template bx_v255c32q
 ```
 
 It reports closed source/build/template/repository/base checks, the pinned
@@ -140,7 +141,7 @@ Do not relax the source/qualification checks or modify the owner's source.
 Then use the verified source/template pair:
 
 ```sh
-pnpm exec tsx scripts/cloud-workspace-validation/workspace-perf-vm.mjs --run before --workspace WORKSPACE_UUID --template bx_TEMPLATE
+pnpm exec tsx scripts/cloud-workspace-validation/workspace-perf-vm.mjs --run before --workspace c5f68576-41cb-4d1a-af6f-60b07f42e5fe --template bx_v255c32q
 ```
 
 This wraps the existing qualified `template-setup-repro.mjs` boundary. It reads
@@ -219,3 +220,12 @@ All live writes are opt-in orchestrator commands, restricted to fixed Alpha
 API routes and recorded test resources. Existing attestation, containment,
 actor admission, protocol ordering and cleanup receipts remain required.
 Read-only source inspection never becomes authority to mutate that source.
+
+The corrected before run (`bx_d54mkt7t`) reached provider ready in 4,481 ms but
+timed out at bootstrap after 1,038 commands. Compute cleanup was verified;
+storage remains pending uploads. The updated probe records per-cycle
+`bootstrapObservations` and `lastBootstrapDiagnostic` without raw command
+output. It probes immediately, then backs off from 250 ms to 5 s after failures;
+reported readiness includes that observation delay. Repeat the pinned-template
+command above and return the closed JSON to PERF. Do not patch or restart the
+source/template to make this probe pass.

@@ -57,9 +57,13 @@ an ordinary setup run. Reuse preparation across its new generation only through
 RU's validated provenance copy and the exact HU allocation-transfer fence. A new
 generation with no such authorized provenance takes normal preparation/recovery.
 
-PERF proposes owning performance instrumentation and the narrow resume launcher;
-RU/HU must agree on the hook and eligible runtime identity before implementation.
-No edits to their decision/update files are authorized by this document alone.
+The orchestrator assigned PERF the timing transport/persistence and same-generation
+resume path on 2026-10-06. RU owns runtime selection; its wake implementation
+must land before the resume change ships. HU owns runtime transitions and the
+shared proof-cache invalidation interface. Until that interface exists, cache
+keys include generation, runtime ID, manifest digest, base compatibility and
+engine instance, so a transition or engine change misses by construction.
+Fresh launch proofs and full restored-tree integrity checks remain mandatory.
 
 ## Resume eligibility and fresh authority
 
@@ -150,7 +154,7 @@ stage; they do not preserve successful stage spans. The helper's
 `last-diagnostic.json` is overwritten per stage, so it cannot reconstruct them.
 
 Proposed additive storage: a bounded nullable JSON timing document on each setup
-execution (migration number **must be assigned by the orchestrator**). No raw
+execution (orchestrator-assigned migration **0136**, expand phase). No raw
 stdout, paths, provider messages, repository names or credential fields.
 
 - Version 1; maximum 32 entries / 8 KiB. A closed source enum identifies
@@ -172,8 +176,8 @@ stdout, paths, provider messages, repository names or credential fields.
   data cannot make failed verification pass, hold a safety stop, or falsely
   mark a run ready. Partial failed/cancelled spans remain identifiable.
 
-PERF needs scoped coordination for helper/runner/protocol/persistence edits and
-an assigned migration before implementing this storage. The read-only timeline
+PERF has scoped ownership of helper/runner/result-schema/persistence hooks and
+assigned migration 0136 for this storage. The read-only timeline
 can then project successful spans alongside the existing failure observations.
 
 ## Required regression and rollout checks

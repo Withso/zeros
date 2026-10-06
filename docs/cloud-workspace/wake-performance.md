@@ -59,7 +59,7 @@ columns, command output, setup logs or repository contents.
 | Setup execution | Completed: 116.422–133.063 s, median 130.325 s (n=5); cancelled: 112.935 s | Not measured | Dominant observed cost; not a complete wake endpoint |
 | Engine row creation → registration | Approximately 17–23 s | Not measured | Includes prelaunch/startup; not pure registration HTTP time |
 | Actor creation → consumption | 2.718–3.447 s, median 2.999 s (five examples) | Not measured | Includes client scheduling/bridge; not complete CONNECTED probe or paint |
-| Boat fork / resume → observed base ready | Not measured | Not measured | Separate isolated VM experiment, not a real workspace endpoint |
+| Boat fork API / provider ready | 0.184 s / 4.481 s from cycle start (one failed sample) | Not measured | Base never became accepted-ready; not a successful workspace create |
 | Attester / containment / checkout / engine sub-stages | Not measured | Not measured | Successful production stage spans are not persisted; failure observations are available |
 | Polling scheduler regression | Next periodic tick | Immediate scheduled pass | Deterministic fake-clock regression, **not live latency** |
 
@@ -69,14 +69,31 @@ with each result. Compare matched configurations. Start with one before/after
 run; repeated samples require a deliberate resource budget. Never report a p95
 from a single run or quietly discard a failure/timeout.
 
-The orchestrator's isolated VM run using this workspace and `bx_dxzfh3p6`
-(current organization template, build prefix `d60cde4b`) failed before allocation:
-`verification_failed`, `childId: null`, `cleanup: not_created`. A stopped source
-workspace is permitted. The source reader requires the generation's pinned
-template, qualified source row, matching image reference and protected digest;
-the organization's current template alone is insufficient. A pin/source mismatch
-is a hypothesis until the runbook's new read-only `--inspect-source` reports its
-closed checks. No new VM was created by that failed run.
+The source inspector confirmed that the initial `bx_dxzfh3p6` run used the
+wrong template. This generation pins `bx_v255c32q` (build prefix `1a776d6d`);
+every other source/snapshot precondition passed. The original run allocated
+nothing (`childId: null`, `cleanup: not_created`).
+
+The corrected before run allocated disposable child `bx_d54mkt7t`. Source
+inspection took 305 ms and the fork request 184 ms; provider ready was observed
+at 4,481 ms from cycle start. These intervals overlap; do not add the fork
+request duration to that total. Bootstrap never passed
+within ten minutes: 1,052 inspections (103 s summed, max 1.4 s, one failed) and
+1,038 commands (235 s summed, max 12.4 s, four failed). These are serial API
+aggregates, not hydration or setup stage durations. No attester stages ran.
+Compute cleanup was verified; storage remained `waiting_for_uploads`, so
+snapshot erasure is not established. The orchestrator supplied no run UUID.
+
+The old probe discarded every rejection reason. Successful API calls do not
+prove that the command succeeded. Its 250 ms fixed retry generated excessive
+probes, but does not explain why bootstrap never passed. Source tracing shows
+`bootstrap.py:base` gates on hydration and protected-base checks; `status`
+requires active host/persistence, and template sanitation stops the host before
+snapshot. Host state, command exit and hydration cannot be recovered from the
+reported aggregates. The updated probe preserves bounded closed rejection
+counts and a whitelisted bootstrap diagnostic, and backs off 250 ms to 5 s.
+It keeps the same base identity/readiness checks and never restarts a host.
+A repeat of the pinned-template run is required to diagnose the actual gate.
 
 The [resume proposal](resume-performance-design.md) prioritizes preparation reuse,
 fresh launch authority, integrity-bound qualification reuse, engine startup,

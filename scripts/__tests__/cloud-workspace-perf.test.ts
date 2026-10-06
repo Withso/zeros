@@ -169,7 +169,7 @@ describe("cloud performance measurement", () => {
     const baseCompatibilityId = `bc1-${"a".repeat(64)}`, deletionId = `bdop_${"b".repeat(32)}`;
     const journal = { ...newTemplateSetupJournal(workspaceId, 1, source, runId),
       perf: { label: "before", cycle: "create", api: {}, create: {}, wake: {} } };
-    let deleted = false, stopped = false, name = "", time = 0;
+    let deleted = false, stopped = false, name = "", time = 0, statusProbes = 0;
     const raw = vi.fn(async (pathname: string, input: any = {}) => {
       time += 5;
       if (pathname === `/sandboxes/${source}/fork`) return { sandboxId: child, sourceSandboxId: source };
@@ -178,6 +178,11 @@ describe("cloud performance measurement", () => {
       if (pathname.endsWith("/resume")) { stopped = false; return {}; }
       if (input.method === "DELETE") { deleted = true; return { operation: { id: deletionId, targetId: child } }; }
       if (pathname.startsWith("/deletion-operations/")) return { operation: { id: deletionId, targetId: child, kind: "sandbox", status: "completed", completedAt: "2026-01-01T00:00:00Z" } };
+      if (pathname.endsWith("/commands") && statusProbes++ === 0) return { success: false, exitCode: 1,
+        stderr: "private provider output", stdout: JSON.stringify({ schema: "zeros.diagnostic/v1", component: "bootstrap",
+          stage: "validate_input", ok: false, exitCode: 1, timedOut: false, failedChecks: ["base_compatibility", "private_text"] }) };
+      if (pathname.endsWith("/commands") && statusProbes === 2) return { success: true, exitCode: 0, stdout: JSON.stringify({ schema: "zeros.base-status/v1",
+        baseCompatibilityId, bootId: runId, currentRuntimeId: `r1-${"b".repeat(64)}`, hostState: "failed" }) };
       if (pathname.endsWith("/commands")) return { success: true, exitCode: 0, stdout: JSON.stringify({ schema: "zeros.base-status/v1",
         baseCompatibilityId, bootId: runId, currentRuntimeId: `r1-${"b".repeat(64)}`, hostState: "idle" }) };
       if (deleted && pathname.endsWith(child)) throw new CloudProviderError("provider_not_found", "private error", false);
@@ -194,6 +199,10 @@ describe("cloud performance measurement", () => {
     expect(probe).toHaveBeenCalledTimes(2);
     expect(journal.perf.create.stages.attester[0].durationMs).toBe(13);
     expect(journal.perf.wake.stages.attester[0].durationMs).toBe(13);
+    expect(journal.perf.create.bootstrapObservations).toEqual({ command_nonzero: 1, host_failed: 1, ready: 1 });
+    expect(journal.perf.create.lastBootstrapDiagnostic).toEqual({ stage: "validate_input", failedChecks: ["base_compatibility"] });
+    expect(journal.perf.create.bootstrapPollMaxMs).toBe(500);
+    expect(JSON.stringify(journal)).not.toContain("private");
     expect(name).toBe(`zeros-v2-test-perf-${runId}`);
     expect(raw.mock.calls.filter(([, input]) => input?.method === "DELETE").map(([pathname]) => pathname)).toEqual([`/sandboxes/${child}`]);
     expect(raw.mock.calls.find(([pathname]) => pathname.endsWith("/fork"))?.[1].idempotencyKey).toBe(name);

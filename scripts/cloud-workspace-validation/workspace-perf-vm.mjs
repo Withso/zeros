@@ -14,6 +14,37 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const STATUS = "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status";
 const name = journal => `zeros-v2-test-perf-${journal.id}`;
 const providerReady = state => ["ready", "idle", "running"].includes(state);
+const bootstrapStages = new Set(["validate_input", "lock", "check_space", "check_cache", "download", "verify_archive", "verify_manifest",
+  "extract", "verify_tree", "publish_receipt", "switch_pointer", "start_host", "run_setup", "done"]);
+const bootstrapChecks = new Set(["input_schema", "input_too_large", "artifact_host", "artifact_expired", "insufficient_space", "cache_conflict",
+  "http_status", "download_truncated", "archive_digest", "archive_size", "manifest_digest", "manifest_schema", "bootstrap_protocol",
+  "archive_paths", "archive_member_type", "file_inventory", "file_digest", "file_mode", "symlink_escape", "root_ownership", "hard_link",
+  "pointer_publish", "host_start", "setup_exit", "timeout", "process_signal", "diagnostic_missing", "lock_busy", "base_compatibility",
+  "cgroup_retired", "uid_map", "apparmor", "cgroup_controllers"]);
+
+// Preserve the rejection reason, never the response, stderr or unrecognized
+// diagnostic text. Status polling is observational; it cannot restart a host
+// or bypass any readiness/identity check.
+function observeBootstrap(response, expectedBase, timings) {
+  let value;
+  if (typeof response?.stdout === "string" && Buffer.byteLength(response.stdout) <= 16_384 && /^[^\r\n]+\n?$/.test(response.stdout)) {
+    try { value = JSON.parse(response.stdout); } catch { /* Closed invalid_response below. */ }
+  }
+  if (value?.schema === "zeros.diagnostic/v1" && value.component === "bootstrap" && Array.isArray(value.failedChecks)) {
+    timings.lastBootstrapDiagnostic = {
+      stage: bootstrapStages.has(value.stage) ? value.stage : "unknown",
+      failedChecks: [...new Set(value.failedChecks.filter(check => bootstrapChecks.has(check)))].slice(0, 32),
+    };
+  }
+  if (response?.timedOut) return "command_timeout";
+  if (response?.stdoutTruncated) return "command_overflow";
+  if (response?.exitCode !== 0) return "command_nonzero";
+  if (response?.success !== true) return "command_unsuccessful";
+  const parsed = RuntimeBaseStatusSchema.safeParse(value);
+  if (!parsed.success) return "invalid_response";
+  if (parsed.data.baseCompatibilityId !== expectedBase) return "base_mismatch";
+  return ["idle", "waiting_for_runtime"].includes(parsed.data.hostState) ? "ready" : `host_${parsed.data.hostState}`;
+}
 
 export async function inspectPerfVmSource(pool, workspaceId, templateId, billingOrg, request, materialReader = readTemplateSetupSource) {
   perfCheck(PERF_UUID.test(workspaceId) && PERF_RESOURCE.test(templateId), "input_invalid");
@@ -116,23 +147,33 @@ export async function runPerfVm(journal, config, deps) {
   let cycleStarted = now();
   const ready = async (_journal, material) => {
     const deadline = now() + 600_000;
+    const timings = journal.perf[journal.perf.cycle];
+    const observations = timings.bootstrapObservations ??= {};
+    let pollMs = 250;
     while (now() < deadline) {
+      let observation = "provider_pending";
       try {
         const { sandbox } = await request(`/sandboxes/${journal.childId}`);
         perfCheck(sandbox?.id === journal.childId && sandbox.team?.id?.toLowerCase() === config.billingOrg.toLowerCase() &&
           (sandbox.sourceSandboxId === undefined || sandbox.sourceSandboxId === journal.templateId), "child_invalid");
         if (providerReady(sandbox.state)) {
-          const timings = journal.perf[journal.perf.cycle];
           timings.providerReadyObservedMs ??= Math.round(now() - cycleStarted);
           const response = await request(`/sandboxes/${journal.childId}/commands`, { method: "POST", body: { command: STATUS, timeoutSeconds: 20 } });
-          const parsed = RuntimeBaseStatusSchema.safeParse(JSON.parse(response.stdout));
-          if (response.success === true && response.exitCode === 0 && !response.timedOut && !response.stdoutTruncated && parsed.success &&
-            parsed.data.baseCompatibilityId === material.computer.template.baseCompatibilityId && ["idle", "waiting_for_runtime"].includes(parsed.data.hostState)) {
+          observation = observeBootstrap(response, material.computer.template.baseCompatibilityId, timings);
+          if (observation === "ready") {
+            observations.ready = (observations.ready ?? 0) + 1;
             timings.baseReadyObservedMs = Math.round(now() - cycleStarted); save(journal); return;
           }
         }
-      } catch { /* Bounded readiness retry; raw provider data never leaves. */ }
-      await wait(250);
+      } catch { observation = "request_failed"; }
+      observations[observation] = (observations[observation] ?? 0) + 1;
+      timings.bootstrapPollMaxMs = pollMs;
+      save(journal);
+      await wait(Math.min(pollMs, Math.max(0, deadline - now())));
+      // Leave the initial ready probe fast; bound pressure on a boot that is
+      // persistently unavailable. Each failed loop previously spawned Python
+      // and inspected the provider again after only 250 ms.
+      pollMs = Math.min(5_000, pollMs * 2);
     }
     throw new Error("bootstrap_timeout");
   };
@@ -207,7 +248,7 @@ async function main() {
     process.stdout.write(JSON.stringify({ schema: "zeros.workspace-perf-vm/v1", runId: id, childId: journal.childId,
       metrics: cleanup ? undefined : journal.perf, cleanup: journal.cleanup, storagePending: journal.cleanupStorageStage,
       failedChecks: journal.failedChecks.filter(code => ["verification_failed", "probe_failed", "cleanup_pending"].includes(code)),
-      isolatedProbe: true, controlPlaneSetupAndActorAdmission: "not_measured", readinessPollMs: 250 }) + "\n");
+      isolatedProbe: true, controlPlaneSetupAndActorAdmission: "not_measured", readinessPollMs: 250, readinessPollMaxMs: 5_000 }) + "\n");
     process.exitCode = journal.cleanup === "pending" || !cleanup && journal.failedChecks.length ? 1 : 0;
   } finally { await pool.end(); }
 }
