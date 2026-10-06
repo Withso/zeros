@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { getActiveBridge } from "../../platform/bridge/active-bridge";
+import {
+  describeConnectionRejection,
+  type ConnectionRejection,
+} from "../../platform/bridge/ws-client";
 import { describeWorkspaceAvailability } from "../../shell/workbench/tab-status-model";
 import {
   reconnectWorkbenchWorkspace,
   recordWorkbenchConnectionFailure,
   resetWorkbenchAvailabilityForTests,
   workbenchAvailabilitySnapshot,
+  registerWorkbenchFrameVisibility,
+  wireWorkbenchConnectionRejection,
 } from "../workbench-availability";
 
 const fixture = vi.hoisted(() => ({
@@ -14,11 +21,50 @@ const fixture = vi.hoisted(() => ({
   docs: new Map<string, { status: string; setupFailure?: object }>(),
   catalog: new Set<() => void>(),
   warm: vi.fn(async () => {}),
+  localStatus: "disconnected" as "connected" | "disconnected",
+  localListeners: new Set<(status: "connected" | "disconnected") => void>(),
+  rejections: new Set<(rejection: ConnectionRejection) => void>(),
+  toasts: new Map<
+    string,
+    { headline: string; description: string; duration?: number }
+  >(),
+}));
+vi.mock("../../shared/ui/primitives/elements", () => ({
+  toast: {
+    error: (
+      headline: string,
+      options: { id: string; description: string; duration?: number },
+    ) => {
+      fixture.toasts.set(options.id, {
+        headline,
+        description: options.description,
+        duration: options.duration,
+      });
+    },
+    dismiss: (id: string) => fixture.toasts.delete(id),
+  },
 }));
 vi.mock("../../platform/bridge/workspace-runtime-client", () => ({
   WorkspaceRuntimeClient: class {
+    get status() {
+      return fixture.localStatus;
+    }
+    onStatusChange(callback: (status: "connected" | "disconnected") => void) {
+      fixture.localListeners.add(callback);
+      return () => {
+        fixture.localListeners.delete(callback);
+      };
+    }
+    onConnectionRejected(callback: (rejection: ConnectionRejection) => void) {
+      fixture.rejections.add(callback);
+      return () => {
+        fixture.rejections.delete(callback);
+      };
+    }
     statusForWorkspace(folder: string) {
-      return fixture.statuses.get(folder) ?? "disconnected";
+      return folder.startsWith("cloud://")
+        ? (fixture.statuses.get(folder) ?? "disconnected")
+        : fixture.localStatus;
     }
     onWorkspaceStatusChange(folder: string, callback: () => void) {
       const callbacks = fixture.listeners.get(folder) ?? new Set();
@@ -67,6 +113,8 @@ describe("workbench availability observers", () => {
     fixture.statuses.clear();
     fixture.docs.clear();
     fixture.warm.mockClear();
+    fixture.toasts.clear();
+    fixture.localStatus = "disconnected";
     vi.useFakeTimers();
     vi.setSystemTime(100);
   });
@@ -103,8 +151,15 @@ describe("workbench availability observers", () => {
       describeWorkspaceAvailability(
         workbenchAvailabilitySnapshot(folder),
         Date.now(),
-      )?.tone,
-    ).toBe("pending");
+      ),
+    ).toBeNull();
+    vi.setSystemTime(82_000);
+    expect(
+      describeWorkspaceAvailability(
+        workbenchAvailabilitySnapshot(folder),
+        Date.now(),
+      )?.message,
+    ).toBe("Connecting to the workspace…");
   });
   it("isolates admission rejection by workspace and clears it on connection recovery", () => {
     recordWorkbenchConnectionFailure(
@@ -139,5 +194,110 @@ describe("workbench availability observers", () => {
       [...fixture.listeners.values()].filter((listeners) => listeners.size > 0),
     ).toHaveLength(64);
     expect(fixture.catalog.size).toBe(64);
+  });
+
+  it.each(["connect", "open"] as const)(
+    "hands a cloud %s failure between the toast and exact-workspace banner",
+    (kind) => {
+      const other = cloudWorkspaceKey({
+        ...target,
+        workspaceId: "33333333-3333-4333-8333-333333333333",
+      });
+      const hideOther = registerWorkbenchFrameVisibility(other);
+      recordWorkbenchConnectionFailure(
+        folder,
+        new Error("Engine unavailable"),
+        kind,
+      );
+      const id = `cloud-connect:${folder}`;
+      expect(fixture.toasts.get(id)).toMatchObject({
+        headline:
+          kind === "connect"
+            ? "Couldn't connect to this cloud workspace"
+            : "Couldn't open this cloud workspace",
+        description: "Engine unavailable",
+      });
+      expect(workbenchAvailabilitySnapshot(other).rejected).not.toBe(true);
+      const hide = registerWorkbenchFrameVisibility(`${folder}/src`);
+      expect(fixture.toasts.size).toBe(0);
+      expect(
+        describeWorkspaceAvailability(
+          workbenchAvailabilitySnapshot(folder),
+          Date.now(),
+        )?.tone,
+      ).toBe("error");
+      const hideSecond = registerWorkbenchFrameVisibility(folder);
+      hide();
+      expect(fixture.toasts.size).toBe(0);
+      hideSecond();
+      expect(fixture.toasts.has(id)).toBe(true);
+      connection("connected");
+      expect(fixture.toasts.size).toBe(0);
+      hideOther();
+    },
+  );
+
+  it.each([
+    "protocol-too-old",
+    "protocol-too-new",
+    "auth-invalid",
+    "auth-required",
+    "auth-wrong-account",
+    "desktop-unbound",
+  ])(
+    "keeps %s remediation visible through local toast/banner hand-offs",
+    (reason) => {
+      const stop = wireWorkbenchConnectionRejection(getActiveBridge()!);
+      workbenchAvailabilitySnapshot("/local-a");
+      const rejection = { reason, message: "Engine rejection detail" };
+      for (const listener of fixture.rejections) listener(rejection);
+      const copy = describeConnectionRejection(rejection);
+      expect(fixture.toasts.get("bridge-connection-rejected")).toEqual({
+        ...copy,
+        duration: Infinity,
+      });
+      const hideA = registerWorkbenchFrameVisibility("/local-a");
+      expect(fixture.toasts.size).toBe(0);
+      expect(
+        describeWorkspaceAvailability(
+          workbenchAvailabilitySnapshot("/local-a"),
+          Date.now(),
+        )?.message,
+      ).toBe(copy.headline);
+      const hideB = registerWorkbenchFrameVisibility("/local-b");
+      hideA();
+      expect(fixture.toasts.size).toBe(0);
+      hideB();
+      expect(fixture.toasts.get("bridge-connection-rejected")?.headline).toBe(
+        copy.headline,
+      );
+      fixture.localStatus = "connected";
+      for (const listener of fixture.localListeners) listener("connected");
+      expect(fixture.toasts.size).toBe(0);
+      expect(
+        workbenchAvailabilitySnapshot("/local-a").rejection,
+      ).toBeUndefined();
+      stop();
+      expect(fixture.rejections.size).toBe(1); // only the passive availability observer
+    },
+  );
+
+  it("does not show a local rejection toast while an existing visible frame represents it", () => {
+    const stop = wireWorkbenchConnectionRejection(getActiveBridge()!);
+    const hide = registerWorkbenchFrameVisibility("/local");
+    workbenchAvailabilitySnapshot("/local");
+    for (const listener of fixture.rejections)
+      listener({ reason: "auth-invalid", message: "" });
+    expect(fixture.toasts.size).toBe(0);
+    expect(
+      describeWorkspaceAvailability(
+        workbenchAvailabilitySnapshot("/local"),
+        Date.now(),
+      )?.message,
+    ).toBe("Sign in again to reconnect");
+    hide();
+    expect(fixture.toasts.size).toBe(1);
+    stop();
+    expect(fixture.toasts.size).toBe(0);
   });
 });

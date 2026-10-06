@@ -7,6 +7,20 @@ import { WorkbenchTabContent } from "../tab-content";
 import { TAB_TYPE_META, type WorkbenchTabType } from "../tab-model";
 import { workbenchSourcesFor, workbenchStatusKey } from "../tab-status-model";
 
+const hooks = vi.hoisted(() => ({ target: vi.fn(), filter: vi.fn() }));
+vi.mock("../tabs/changes-tab", () => ({
+  useSourceTarget: () => {
+    hooks.target();
+    return {};
+  },
+}));
+vi.mock("../tabs/changes-filter-store", () => ({
+  useChangesFilter: () => {
+    hooks.filter();
+    return {};
+  },
+}));
+
 // The map's frame must work even when a future body provides no status UI.
 vi.mock("../tabs/files-tab", () => ({ FilesTab: () => null }));
 vi.mock("../tabs/changes-surface", () => ({
@@ -23,6 +37,8 @@ describe("every WorkbenchTabType enters the status frame", () => {
   it.each(Object.keys(TAB_TYPE_META) as WorkbenchTabType[])(
     "structurally supplies %s with one banner and neutral empty state",
     (type) => {
+      hooks.target.mockClear();
+      hooks.filter.mockClear();
       setActiveBridge({
         status: "connected",
         onStatusChange: () => () => {},
@@ -46,6 +62,11 @@ describe("every WorkbenchTabType enters the status frame", () => {
       expect(markup).toContain(`data-workbench-frame="${type}"`);
       expect(markup).toContain("text-fg2");
       expect(markup.match(/<button/g)).toHaveLength(1);
+      if (type === "changes" || type === "review")
+        expect(hooks.target).toHaveBeenCalled();
+      else expect(hooks.target).not.toHaveBeenCalled();
+      if (type === "changes") expect(hooks.filter).toHaveBeenCalled();
+      else expect(hooks.filter).not.toHaveBeenCalled();
       sources.remove("fixture");
     },
   );

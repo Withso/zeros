@@ -15,12 +15,14 @@ import { Button } from "../../shared/ui/primitives/button";
 import { cn } from "../../shared/ui/cn";
 import {
   reconnectWorkbenchWorkspace,
+  registerWorkbenchFrameVisibility,
   useWorkbenchAvailability,
 } from "../../state/workbench-availability";
 import { openWorkbenchTerminal } from "./open-terminal";
 import { SETUP_SUBTAB } from "../terminal/use-setup-control";
 import {
   describeWorkbenchFailure,
+  describeWorkbenchEmptyState,
   WORKBENCH_STATUS_ADAPTERS,
   workbenchSourcesFor,
   workbenchStatusKey,
@@ -56,7 +58,9 @@ export function WorkbenchEmptyState({
       className="flex h-full min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
     >
       <Icon className="text-muted-fg size-10" strokeWidth={1} aria-hidden />
-      <p className="text-fg2 m-0 text-xs">{message ?? adapter.empty}</p>
+      <p className="text-fg2 m-0 text-xs">
+        {message ?? adapter.empty.retryable}
+      </p>
     </div>
   );
 }
@@ -67,12 +71,14 @@ export function WorkbenchTabBanner({
   busy,
   retry,
   type,
+  singleFile = false,
 }: {
   status: WorkbenchStatus | null;
   active: boolean;
   busy: boolean;
   retry: () => void;
   type: WorkbenchTabType;
+  singleFile?: boolean;
 }) {
   // Keep this element (and its live region) mounted through recovery, retry,
   // and tone changes. Only message text mutations trigger announcements.
@@ -130,7 +136,7 @@ export function WorkbenchTabBanner({
           aria-busy={busy || undefined}
           aria-label={
             status.action === "Retry"
-              ? `Retry loading ${WORKBENCH_STATUS_ADAPTERS[type].noun}`
+              ? `Retry loading ${type === "files" && singleFile ? "this file" : WORKBENCH_STATUS_ADAPTERS[type].noun}`
               : "Open workspace Setup"
           }
           onClick={retry}
@@ -171,6 +177,9 @@ export function WorkbenchTabFrame({
     availability,
     visible,
   } = useWorkbenchAvailability(folder, active);
+  useLayoutEffect(() => {
+    if (visible) return registerWorkbenchFrameVisibility(folder);
+  }, [folder, visible]);
   const [toolbar, setToolbar] = useState<HTMLDivElement | null>(null);
   const context = useMemo(
     () => ({ sources, toolbar, active: visible, type: tab.type }),
@@ -179,7 +188,7 @@ export function WorkbenchTabFrame({
   const nextStatus =
     availabilityStatus ??
     (availability.connection === "connected" && snapshot.failure
-      ? describeWorkbenchFailure(tab.type, snapshot.failure)
+      ? describeWorkbenchFailure(tab.type, snapshot.failure, !!tab.filePath)
       : null);
   const lastStatus = useRef<{ key: string; status: WorkbenchStatus | null }>({
     key,
@@ -187,7 +196,9 @@ export function WorkbenchTabFrame({
   });
   let status =
     nextStatus ??
-    ((snapshot.busy || snapshot.pending) && lastStatus.current.key === key
+    ((snapshot.busy ||
+      (snapshot.pending && lastStatus.current.status?.tone === "error")) &&
+    lastStatus.current.key === key
       ? lastStatus.current.status
       : null);
   if (status?.action === "Open Setup" && tab.terminalId === SETUP_SUBTAB)
@@ -195,7 +206,7 @@ export function WorkbenchTabFrame({
   lastStatus.current = { key, status };
   const blocked = status !== null && !snapshot.hasContent;
   const retry = useCallback(() => {
-    if (!active) return;
+    if (!visible) return;
     if (status?.action === "Open Setup") {
       openWorkbenchTerminal(folder, {
         terminalId: SETUP_SUBTAB,
@@ -209,7 +220,7 @@ export function WorkbenchTabFrame({
         ? () => reconnectWorkbenchWorkspace(folder)
         : undefined,
     );
-  }, [active, availability.connection, folder, sources, status?.action]);
+  }, [visible, availability.connection, folder, sources, status?.action]);
   return (
     <StatusContext.Provider value={context}>
       <div
@@ -225,6 +236,7 @@ export function WorkbenchTabFrame({
           busy={snapshot.busy}
           retry={retry}
           type={tab.type}
+          singleFile={!!tab.filePath}
         />
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           <div
@@ -238,7 +250,14 @@ export function WorkbenchTabFrame({
           </div>
           {blocked && (
             <div className="absolute inset-0 flex min-h-0 flex-col">
-              <WorkbenchEmptyState type={tab.type} />
+              <WorkbenchEmptyState
+                type={tab.type}
+                message={describeWorkbenchEmptyState(
+                  tab.type,
+                  status,
+                  !!tab.filePath,
+                )}
+              />
             </div>
           )}
         </div>

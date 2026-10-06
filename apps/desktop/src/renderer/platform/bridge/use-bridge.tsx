@@ -34,6 +34,7 @@ import { WorkspaceRuntimeClient } from "./workspace-runtime-client";
 import { openCloudRuntime } from "./open-cloud-runtime";
 import { readCloudWorkspaceHistory } from "../cloud-history";
 import { canReadCloudWorkspace, cloudCatalogGeneration, cloudWorkspaceCatalogConfirmed, cloudWorkspaceDocument, cloudWorkspaceOperation, getCloudWorkspaceRows } from "../../state/cloud-workspace-catalog";
+import { wireWorkbenchConnectionRejection } from "../../state/workbench-availability";
 
 // ── Context ──────────────────────────────────────────────
 
@@ -89,8 +90,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     // renderer sees only secret-free method-addressed invalidations.
     const offCredentialWriteback = wireGithubCredentialWriteback(client);
 
-    // Persistent engine availability is presented by workbench tab frames.
-    // Keep connection/rejection handling in the client; no duplicate load toast.
+    const offConnectionNotice = wireWorkbenchConnectionRejection(client);
 
     // Watchdog respawn handler: when the Electron sidecar respawns
     // the engine on a NEW port (after detecting unresponsiveness),
@@ -143,6 +143,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
       if (offRestart) offRestart();
       if (offCloudRetired) offCloudRetired();
       offCredentialWriteback();
+      offConnectionNotice();
       // React StrictMode replays passive setup immediately after cleanup. The
       // client is render-owned, so disposing it synchronously would leave that
       // second setup with a permanently dead transport. A real unmount has no

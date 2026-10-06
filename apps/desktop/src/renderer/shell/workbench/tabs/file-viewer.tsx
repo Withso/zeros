@@ -790,7 +790,7 @@ export function FileViewer({
             className="min-h-0 min-w-0 flex-1 overflow-hidden"
             aria-busy={readLoading || diffLoading || undefined}
           >
-            {readFailed && !diffShown && <WorkbenchEmptyState type="files" />}
+            {readFailed && !diffShown && <WorkbenchEmptyState type="files" message="Retry to load this file." />}
             {result?.kind === "binary" && !diffShown && (
               <Placeholder
                 Icon={FileX2}
@@ -804,7 +804,7 @@ export function FileViewer({
               />
             )}
             {result?.kind === "error" && !fileMissing && !diffShown && (
-              <WorkbenchEmptyState type="files" />
+              <WorkbenchEmptyState type="files" message="Retry to load this file." />
             )}
             {missingDisposition === "show-missing" && !diffShown && (
               <Placeholder Icon={FileX2} text="file no longer exists on disk" />
@@ -829,7 +829,7 @@ export function FileViewer({
                   text={`${baseOf(path)} isn’t part of this commit`}
                 />
               ) : diffFailed ? (
-                <WorkbenchEmptyState type="files" />
+                <WorkbenchEmptyState type="files" message="Retry to load this file." />
               ) : diffLoading ? (
                 <div className="h-full" aria-busy="true" />
               ) : (

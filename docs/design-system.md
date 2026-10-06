@@ -55,8 +55,10 @@ The full guide is `docs/design-system.md`; token values are in
    map states to complete class strings instead.
    Workbench content load/availability failures use `WorkbenchTabFrame`'s
    single persistent banner and neutral icon/line empty state. Action outcomes
-   use toasts. Report each read with `useWorkbenchStatusSource`; retain confirmed
-   exact-key content and never add a second error paragraph or Retry button.
+   use toasts. Connection failures fall back to their existing app toast only
+   while no affected frame is visible. Report each read with
+   `useWorkbenchStatusSource`; retain confirmed exact-key content and never add
+   a second error paragraph or Retry button.
 7. **Verify:** run `pnpm check:ui` (compiles every class, enforces the policy
    ratchet) plus `pnpm typecheck`, `pnpm lint`, and the nearby tests. Fix
    findings; never raise `styles/policy/ui-debt.json`, add a `check:ui ignore`
@@ -240,7 +242,11 @@ rows; layout gaps prefer `gap-1` `gap-2` `gap-3` `gap-4` `gap-6`.
 single app-wide toast surface — `toast` / `toast.error` / `toast.success` from
 `shared/ui/primitives/elements`. Persistent state stays with its owner: a form
 error beside its field, or a workbench content load/availability failure in its
-tab's status banner. Never toast that same load failure.
+tab's status banner. Never toast that same load failure while its frame is
+visible. Engine rejection and cloud connect/open failures keep their original
+app-level toast when no affected workbench frame is visible; the passive frame
+visibility registry dismisses it as soon as a frame represents the condition.
+Engine rejection banners preserve the reason-specific update/sign-in headline.
 
 Every workbench body, including retained Design, Setup, terminal tabs and the
 bottom Terminals panel, uses one `WorkbenchTabFrame`. Its persistent full-width
@@ -252,6 +258,11 @@ and failure. Without confirmed content, show the tab icon (`size-10`,
 `strokeWidth={1}`, `text-muted-fg`) and one neutral sentence of about eight words
 or fewer (`text-fg2 text-xs`), centred with no buttons or repeated error text.
 Legitimate non-error empty states may retain their creation/configuration action.
+Every tab's adapter defines pending, retryable and unavailable empty copy.
+Pending copy explains that content appears when the workspace is ready; Retry
+copy is reserved for a banner offering Retry. Archived or non-retryable states
+say the content is unavailable. A single-file viewer says “this file”. Terminal
+reconnections after a confirmed connection say “Terminal reconnects automatically.”
 
 Failures use `bg-red-bg text-red-fg` and a leading error icon. Self-resolving
 availability (setup, starting, reconnecting) uses `bg-yellow-bg text-yellow-fg`
@@ -264,11 +275,15 @@ diagnostics. Copy describes the workspace condition or “Couldn't load files”
 The banner message wraps to two lines with full copy in its title. A single
 compact ghost action stays visible at narrow widths; Retry has a tab-specific
 accessible name, shares one flight across failed sources, and says “Retrying…”
-until settled. Keep the banner element/live region stable through retry and tone
-changes; announce message changes once without moving focus. Hidden retained tabs
+until settled, bounded to 30 seconds even if a source never settles. Keep the
+banner element/live region stable through retry and tone changes; announce
+message changes once without moving focus. Hidden retained tabs
 are inert and do not announce, animate, poll or run status timers. Reconnect
-grace (2 seconds) and escalation (20 seconds) use connection timestamps on
-activation. Passive reads/Retry admission never wake a cloud computer.
+grace (2 seconds, including the first connection) and escalation (20 seconds) use
+connection timestamps on activation. Passive reads/Retry admission never wake a
+cloud computer.
+Before a successful connection, use “Connecting”; reserve “Reconnecting” for
+a lost confirmed connection. Stopping and stopped have distinct pending copy.
 
 ## 8. Building blocks
 

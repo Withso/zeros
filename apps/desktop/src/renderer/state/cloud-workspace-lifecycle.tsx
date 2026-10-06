@@ -46,7 +46,7 @@ import { clearCloudProviderConnections } from "../features/settings/cloud-provid
 import { toast } from "../shared/ui/primitives/elements";
 import { warmCloudWorkspaceDestination } from "./cloud-workspace-warmup";
 import { clearCloudLatencySpans, pruneCloudLatencySpans } from "./cloud-workspace-latency";
-import { recordWorkbenchConnectionFailure } from "./workbench-availability";
+import { clearWorkbenchConnectionFailure, recordWorkbenchConnectionFailure } from "./workbench-availability";
 
 /** Account/catalog lifecycle, mounted once beside the existing persistence
  * controller. It never replaces the conversation or workbench renderers. */
@@ -283,13 +283,16 @@ export function CloudWorkspaceLifecycle() {
       attaching = key;
       void warmCloudWorkspaceDestination(folder!)
         .then(() => {
-          if (!cancelled && identity() === key && folder) clearWorkspaceSettling(folder);
+          if (!cancelled && identity() === key && folder) {
+            clearWorkspaceSettling(folder);
+            clearWorkbenchConnectionFailure(folder);
+          }
         })
         .catch((error) => {
           if (
             !cancelled && identity() === key && doc && ["ready", "busy"].includes(doc.status)
           )
-            recordWorkbenchConnectionFailure(folder!, error);
+            recordWorkbenchConnectionFailure(folder!, error, "connect");
         })
         .finally(() => {
           if (attaching === key) attaching = undefined;
@@ -330,9 +333,12 @@ export function CloudWorkspaceLifecycle() {
       const intent = { key, controller: new AbortController() };
       pending = intent;
       void bridge.openWorkspace(target, { signal: intent.controller.signal })
+        .then(() => {
+          if (!intent.controller.signal.aborted && ownsView(key)) clearWorkbenchConnectionFailure(key);
+        })
         .catch((error) => {
           if (!intent.controller.signal.aborted && ownsView(key))
-            recordWorkbenchConnectionFailure(key, error);
+            recordWorkbenchConnectionFailure(key, error, "open");
         })
         .finally(() => { if (pending === intent) pending = undefined; });
     });

@@ -1,10 +1,10 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { TAB_TYPE_META, type WorkbenchTabType } from "../tab-model";
 import {
   describeWorkbenchFailure,
+  describeWorkbenchEmptyState,
   describeWorkspaceAvailability,
   WorkbenchStatusSources,
   workbenchStatusKey,
@@ -40,9 +40,10 @@ describe("workbench status contract", () => {
       expect(empty).toContain("size-10");
       expect(empty).not.toContain("<button");
       expect(empty).not.toContain("text-red");
-      expect(
-        WORKBENCH_STATUS_ADAPTERS[type].empty.split(/\s+/).length,
-      ).toBeLessThanOrEqual(8);
+      for (const message of Object.values(
+        WORKBENCH_STATUS_ADAPTERS[type].empty,
+      ))
+        expect(message.split(/\s+/).length).toBeLessThanOrEqual(9);
     },
   );
 
@@ -132,6 +133,96 @@ describe("workbench status contract", () => {
     ).toBeUndefined();
   });
 
+  it.each(Object.keys(TAB_TYPE_META) as WorkbenchTabType[])(
+    "gives %s distinct pending, retryable and unavailable empty copy",
+    (type) => {
+      const adapter = WORKBENCH_STATUS_ADAPTERS[type];
+      expect(Object.keys(adapter.empty).sort()).toEqual([
+        "pending",
+        "retryable",
+        "unavailable",
+      ]);
+      expect(
+        describeWorkbenchEmptyState(type, {
+          tone: "pending",
+          message: "Starting…",
+        }),
+      ).toBe(adapter.empty.pending);
+      expect(adapter.empty.pending).toContain("when the workspace is ready.");
+      expect(
+        describeWorkbenchEmptyState(
+          type,
+          describeWorkbenchFailure(type, "failed"),
+        ),
+      ).toBe(adapter.empty.retryable);
+      expect(adapter.empty.retryable).toMatch(/retry/i);
+      for (const status of [
+        { tone: "neutral" as const, message: "Archived." },
+        {
+          tone: "error" as const,
+          message: "Setup failed.",
+          action: "Open Setup" as const,
+        },
+      ])
+        expect(describeWorkbenchEmptyState(type, status)).toBe(
+          adapter.empty.unavailable,
+        );
+      expect(adapter.empty.unavailable).not.toMatch(/retry/i);
+    },
+  );
+
+  it("uses file-specific copy for a single-file target", () => {
+    const status = describeWorkbenchFailure("files", "Request timeout", true);
+    expect(status.message).toBe("This file took too long to load.");
+    expect(describeWorkbenchEmptyState("files", status, true)).toBe(
+      "Retry to load this file.",
+    );
+    expect(describeWorkbenchFailure("files", "read failed", true).message).toBe(
+      "Couldn't load this file.",
+    );
+  });
+
+  it.each([true, false])(
+    "graces the first connection and uses connecting copy (cloud=%s)",
+    (cloud) => {
+      const cold = { cloud, connection: "connecting" as const, since: 100 };
+      expect(describeWorkspaceAvailability(cold, 2_099)).toBeNull();
+      expect(describeWorkspaceAvailability(cold, 2_100)?.message).toBe(
+        cloud
+          ? "Connecting to the workspace…"
+          : "Connecting to the Zeros engine…",
+      );
+      expect(describeWorkspaceAvailability(cold, 20_100)?.tone).toBe("error");
+      expect(
+        describeWorkbenchEmptyState(
+          "terminal",
+          describeWorkspaceAvailability(cold, 2_100),
+        ),
+      ).toBe("The terminal opens when the workspace is ready.");
+      expect(
+        describeWorkbenchEmptyState(
+          "terminal",
+          describeWorkspaceAvailability(
+            { ...cold, previouslyConnected: true },
+            2_100,
+          ),
+        ),
+      ).toBe("Terminal reconnects automatically.");
+    },
+  );
+
+  it("presents stopping separately from stopped", () => {
+    expect(
+      describeWorkspaceAvailability(
+        { cloud: true, state: "stopping", connection: "connected", since: 0 },
+        0,
+      ),
+    ).toMatchObject({
+      tone: "pending",
+      message: "Stopping the cloud workspace…",
+    });
+  });
+
   it("keeps the last failure through retry, clears on recovery, and shows recurrence", async () => {
     const sources = new WorkbenchStatusSources();
     sources.update("files", {
@@ -195,6 +286,14 @@ describe("workbench status contract", () => {
     expect(sources.snapshot().busy).toBe(false);
   });
 
+  it("reconnects an unavailable frame even before it has data sources", async () => {
+    const sources = new WorkbenchStatusSources();
+    const reconnect = vi.fn(async () => {});
+    await sources.retry(reconnect);
+    expect(reconnect).toHaveBeenCalledTimes(1);
+    expect(sources.snapshot().busy).toBe(false);
+  });
+
   it("isolates workspace and comparison keys", () => {
     const tab = {
       id: "changes",
@@ -213,6 +312,67 @@ describe("workbench status contract", () => {
     old.update("load", { error: "late failure", pending: false });
     expect(current.snapshot().failure).toBeNull();
   });
+
+  it.each(["callback", "source"])(
+    "bounds Retry when a %s never settles",
+    async (kind) => {
+      vi.useFakeTimers();
+      try {
+        const sources = new WorkbenchStatusSources();
+        const retry = vi.fn(() =>
+          kind === "callback" ? new Promise<void>(() => {}) : Promise.resolve(),
+        );
+        sources.update("never", {
+          primary: true,
+          error: "read failed",
+          pending: true,
+          retry,
+        });
+        const flight = sources.retry();
+        await vi.advanceTimersByTimeAsync(29_999);
+        expect(sources.snapshot().busy).toBe(true);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(sources.snapshot()).toMatchObject({
+          busy: false,
+          failure: "read failed",
+        });
+        await flight;
+        expect(vi.getTimerCount()).toBe(0);
+        sources.remove("never");
+        await sources.retry();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([true, false])(
+    "ends the Retry timer when all sources become hidden (pending=%s)",
+    async (pending) => {
+      vi.useFakeTimers();
+      try {
+        const sources = new WorkbenchStatusSources();
+        sources.update("load", {
+          error: pending ? "failed" : null,
+          pending,
+          retry: () => new Promise(() => {}),
+        });
+        const flight = sources.retry(() => new Promise(() => {}));
+        sources.update("load", {
+          error: pending ? "failed" : null,
+          pending,
+          active: false,
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(sources.snapshot().busy).toBe(false);
+        expect(vi.getTimerCount()).toBe(0);
+        await flight;
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("does not announce a hidden retained tab", () => {
     const markup = renderToStaticMarkup(
@@ -257,23 +417,5 @@ describe("workbench status contract", () => {
       message: "Couldn't load files.",
       action: "Retry",
     });
-  });
-
-  it("routes cloud connection failures to persistent status instead of a toast", () => {
-    const source = readFileSync(
-      "apps/desktop/src/renderer/state/cloud-workspace-lifecycle.tsx",
-      "utf8",
-    );
-    expect(source).not.toContain(
-      'toast.error("Couldn\'t connect to this cloud workspace"',
-    );
-  });
-
-  it("does not also toast a persistent Local engine rejection", () => {
-    const source = readFileSync(
-      "apps/desktop/src/renderer/platform/bridge/use-bridge.tsx",
-      "utf8",
-    );
-    expect(source).not.toContain("toast.error(copy.headline");
   });
 });

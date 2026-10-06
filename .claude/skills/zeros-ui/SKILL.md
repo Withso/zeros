@@ -46,8 +46,10 @@ The full guide is `docs/design-system.md`; token values are in
    map states to complete class strings instead.
    Workbench content load/availability failures use `WorkbenchTabFrame`'s
    single persistent banner and neutral icon/line empty state. Action outcomes
-   use toasts. Report each read with `useWorkbenchStatusSource`; retain confirmed
-   exact-key content and never add a second error paragraph or Retry button.
+   use toasts. Connection failures fall back to their existing app toast only
+   while no affected frame is visible. Report each read with
+   `useWorkbenchStatusSource`; retain confirmed exact-key content and never add
+   a second error paragraph or Retry button.
 7. **Verify:** run `pnpm check:ui` (compiles every class, enforces the policy
    ratchet) plus `pnpm typecheck`, `pnpm lint`, and the nearby tests. Fix
    findings; never raise `styles/policy/ui-debt.json`, add a `check:ui ignore`

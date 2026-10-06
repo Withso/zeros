@@ -12,8 +12,24 @@ const copy = {
   terminal: [
     "The terminal",
     "the terminal",
-    "Terminal reconnects automatically.",
+    "Retry to reconnect the terminal.",
   ],
+};
+const pendingCopy = {
+  files: "Files appear when the workspace is ready.",
+  changes: "Changes appear when the workspace is ready.",
+  review: "The review appears when the workspace is ready.",
+  design: "Design appears when the workspace is ready.",
+  browser: "The preview appears when the workspace is ready.",
+  terminal: "The terminal opens when the workspace is ready.",
+};
+const unavailableCopy = {
+  files: "Files aren't available.",
+  changes: "Changes aren't available.",
+  review: "The review isn't available.",
+  design: "Design isn't available.",
+  browser: "The preview isn't available.",
+  terminal: "The terminal isn't available.",
 };
 
 export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
@@ -33,7 +49,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
   await page.clock.install();
   for (const type of types) {
-    await page.goto(`${harnessBase}/harness-workbench-status.html`);
+    await page.goto(`${harnessBase}/harness-workbench-status.html?cold=1`);
     await page.waitForFunction(() => !!window.workbenchStatusFixture);
     await page.evaluate((type) => {
       const fixture = window.workbenchStatusFixture;
@@ -51,9 +67,39 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     );
     await expect(banner().getByRole("button")).toHaveCount(0);
     await expect(empty()).toHaveCount(1);
-    await expect(empty()).toHaveText(copy[type][2]);
+    await expect(empty()).toHaveText(pendingCopy[type]);
     await noToast();
     await screenshot(type, "setting-up");
+
+    for (const [state, message] of [
+      ["starting", "Starting the cloud workspace…"],
+      ["stopping", "Stopping the cloud workspace…"],
+      ["stopped", "This cloud workspace is stopped."],
+      ["archived", "This cloud workspace is archived."],
+    ]) {
+      await page.evaluate(
+        (state) => window.workbenchStatusFixture.state(state),
+        state,
+      );
+      await expect(banner()).toContainText(message);
+      await expect(banner().getByRole("button")).toHaveCount(0);
+      await expect(empty()).toHaveText(
+        state === "archived" ? unavailableCopy[type] : pendingCopy[type],
+      );
+      await noToast();
+      await screenshot(type, state);
+    }
+
+    // Readiness starts a cold connection interval with no initial flash.
+    await page.evaluate(() => window.workbenchStatusFixture.state("ready"));
+    await expect(banner()).toHaveCount(0);
+    await page.clock.fastForward(1_900);
+    await expect(banner()).toHaveCount(0);
+    await page.clock.fastForward(200);
+    await expect(banner()).toContainText("Connecting to the workspace…");
+    await expect(empty()).toHaveText(pendingCopy[type]);
+    await noToast();
+    await screenshot(type, "connecting");
 
     await page.evaluate(() => {
       const fixture = window.workbenchStatusFixture;
@@ -76,9 +122,15 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await expect(banner()).toHaveCount(1);
     await expect(banner()).toContainText("Reconnecting to the workspace…");
     await expect(empty()).toHaveCount(1);
+    await expect(empty()).toHaveText(
+      type === "terminal"
+        ? "Terminal reconnects automatically."
+        : pendingCopy[type],
+    );
     await screenshot(type, "reconnecting");
     await page.clock.fastForward(18_000);
     await expect(banner()).toContainText("Can't reach the workspace.");
+    await expect(empty()).toHaveText(copy[type][2]);
     await noToast();
     await screenshot(type, "unreachable");
 
@@ -123,6 +175,15 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     expect(
       await page.evaluate(() => window.fixtureBannerChanges.includes(true)),
     ).toBe(false);
+    // Even a read that never settles releases the flight within thirty seconds.
+    await page.clock.fastForward(30_000);
+    await expect(retry).toBeEnabled();
+    await expect(retry).toHaveText("Retry");
+    expect(
+      await banner().evaluate(
+        (element) => element === window.fixtureBannerElement,
+      ),
+    ).toBe(true);
     await page.evaluate(() => window.workbenchStatusFixture.release());
     await expect(banner()).toHaveCount(0);
     await expect(empty()).toHaveCount(0);
@@ -256,6 +317,53 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     true,
   );
 
+  for (const kind of ["connect", "open"]) {
+    await page.goto(`${harnessBase}/harness-workbench-status.html`);
+    await page.waitForFunction(() => !!window.workbenchStatusFixture);
+    await page.evaluate((kind) => {
+      const fixture = window.workbenchStatusFixture;
+      fixture.connection("disconnected");
+      fixture.connectFailure(kind);
+    }, kind);
+    await expect(banner()).toContainText("Can't reach the workspace.");
+    await noToast();
+    await page.evaluate(() =>
+      window.workbenchStatusFixture.render("files", { active: false }),
+    );
+    await expect(banner()).toHaveCount(0);
+    await expect(page.locator("[data-sonner-toast]")).toContainText(
+      kind === "connect"
+        ? "Couldn't connect to this cloud workspace"
+        : "Couldn't open this cloud workspace",
+    );
+    await page.evaluate(() =>
+      window.workbenchStatusFixture.render("files", { active: true }),
+    );
+    await page.clock.fastForward(1_000);
+    await expect(banner()).toContainText("Can't reach the workspace.");
+    await noToast();
+    await page.evaluate(() =>
+      window.workbenchStatusFixture.connection("connected"),
+    );
+    await expect(banner()).toHaveCount(0);
+    await page.evaluate(() =>
+      window.workbenchStatusFixture.render("files", { active: false }),
+    );
+    await noToast();
+  }
+  check(
+    "Cloud connect/open failures hand off between the banner and original toast without doubling",
+    true,
+  );
+
+  // Use the prior connected fixture for the narrow layout below.
+  await page.evaluate(() =>
+    window.workbenchStatusFixture.render("files", {
+      active: true,
+      workspace: "b",
+    }),
+  );
+
   await page.setViewportSize({ width: 240, height: 500 });
   await page.evaluate(() => {
     document.documentElement.setAttribute("data-theme", "light");
@@ -294,7 +402,14 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     }, type);
     await expect(banner()).toHaveCount(1);
     await expect(empty()).toHaveCount(1);
-    await expect(empty()).toHaveText(copy[type][2]);
+    await expect(empty()).toHaveText(
+      type === "files" ? "Retry to load this file." : copy[type][2],
+    );
+    await expect(banner()).toContainText(
+      type === "files"
+        ? "This file took too long to load."
+        : `${copy[type][0]} took too long to load.`,
+    );
     await expect(
       page.getByText("Choose a Design directory in repository settings.", {
         exact: true,

@@ -10,6 +10,7 @@ import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-cli
 import type { ConnectionStatus } from "../platform/bridge/ws-client";
 import type { BridgeMessage } from "../platform/bridge/messages";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
+import { recordWorkbenchConnectionFailure } from "../state/workbench-availability";
 import { cloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import type { CloudWorkspaceDocument } from "../platform/cloud-workspaces";
 import {
@@ -19,6 +20,7 @@ import {
 import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
 import { PanelHeader, TooltipProvider } from "../shared/ui/primitives";
 import { Toaster } from "../shared/ui/primitives/elements/toast";
+import { cn } from "../shared/ui/cn";
 import {
   WorkbenchTabFrame,
   WorkbenchTabToolbar,
@@ -109,7 +111,9 @@ class FixtureBridge extends WorkspaceRuntimeClient {
   connections = new Map(
     Object.values(targets).map((target) => [
       cloudWorkspaceKey(target),
-      "connected" as ConnectionStatus,
+      (new URLSearchParams(location.search).has("cold")
+        ? "disconnected"
+        : "connected") as ConnectionStatus,
     ]),
   );
   fixtureStatusListeners = new Map<string, Set<() => void>>();
@@ -415,7 +419,7 @@ function Harness() {
     id: config.type,
     type: config.type,
     title: TAB_TYPE_META[config.type].label,
-    filePath: config.target,
+    filePath: config.surface === "feature" ? config.target : undefined,
     diffSha: config.target,
     terminalId: config.target,
   };
@@ -426,7 +430,10 @@ function Harness() {
           <section
             key={index}
             aria-label={`${tab.title} fixture ${index + 1}`}
-            className="border-border1 flex min-w-0 flex-1 flex-col border-r"
+            className={cn(
+              "border-border1 flex min-w-0 flex-1 flex-col border-r",
+              !config.active && "hidden",
+            )}
             {...(!config.active ? { inert: "", "aria-hidden": true } : {})}
           >
             <WorkbenchTabFrame
@@ -483,6 +490,13 @@ const fixture = {
   },
   connection(status: ConnectionStatus) {
     bridge.connection(config.folder, status);
+  },
+  connectFailure(kind: "connect" | "open" = "connect") {
+    recordWorkbenchConnectionFailure(
+      config.folder,
+      new Error("Engine unavailable"),
+      kind,
+    );
   },
   fail(message: string | null, secondary = false) {
     const map = secondary ? secondaryFailures : failures;

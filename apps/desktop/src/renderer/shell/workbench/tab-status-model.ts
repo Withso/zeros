@@ -8,49 +8,84 @@ import {
 } from "lucide-react";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
 import type { WorkbenchTab, WorkbenchTabType } from "./tab-model";
-import type { ConnectionStatus } from "../../platform/bridge/ws-client";
+import {
+  describeConnectionRejection,
+  type ConnectionRejection,
+  type ConnectionStatus,
+} from "../../platform/bridge/ws-client";
+
+type EmptyStateKind = "pending" | "retryable" | "unavailable";
 
 /** Exhaustive: a new tab type must choose its copy and quiet empty state. */
 export const WORKBENCH_STATUS_ADAPTERS = {
   files: {
     noun: "files",
     subject: "Files",
-    empty: "Retry to load files.",
+    empty: {
+      pending: "Files appear when the workspace is ready.",
+      retryable: "Retry to load files.",
+      unavailable: "Files aren't available.",
+    },
     icon: File,
   },
   changes: {
     noun: "changes",
     subject: "Changes",
-    empty: "Choose another comparison or retry.",
+    empty: {
+      pending: "Changes appear when the workspace is ready.",
+      retryable: "Choose another comparison or retry.",
+      unavailable: "Changes aren't available.",
+    },
     icon: FileDiff,
   },
   review: {
     noun: "the review",
     subject: "The review",
-    empty: "Retry to load the review.",
+    empty: {
+      pending: "The review appears when the workspace is ready.",
+      retryable: "Retry to load the review.",
+      unavailable: "The review isn't available.",
+    },
     icon: GitPullRequestArrow,
   },
   design: {
     noun: "Design",
     subject: "Design",
-    empty: "Retry to load Design.",
+    empty: {
+      pending: "Design appears when the workspace is ready.",
+      retryable: "Retry to load Design.",
+      unavailable: "Design isn't available.",
+    },
     icon: PenTool,
   },
   browser: {
     noun: "the preview",
     subject: "The preview",
-    empty: "Retry to load the preview.",
+    empty: {
+      pending: "The preview appears when the workspace is ready.",
+      retryable: "Retry to load the preview.",
+      unavailable: "The preview isn't available.",
+    },
     icon: Globe,
   },
   terminal: {
     noun: "the terminal",
     subject: "The terminal",
-    empty: "Terminal reconnects automatically.",
+    empty: {
+      pending: "The terminal opens when the workspace is ready.",
+      retryable: "Retry to reconnect the terminal.",
+      unavailable: "The terminal isn't available.",
+    },
     icon: Terminal,
   },
 } satisfies Record<
   WorkbenchTabType,
-  { noun: string; subject: string; empty: string; icon: typeof File }
+  {
+    noun: string;
+    subject: string;
+    empty: Record<EmptyStateKind, string>;
+    icon: typeof File;
+  }
 >;
 
 export interface WorkbenchStatus {
@@ -58,6 +93,7 @@ export interface WorkbenchStatus {
   message: string;
   diagnostic?: string;
   action?: "Retry" | "Open Setup";
+  connectionPhase?: "connecting" | "reconnecting";
 }
 
 export interface WorkspaceAvailability {
@@ -67,11 +103,40 @@ export interface WorkspaceAvailability {
   since: number;
   previouslyConnected?: boolean;
   rejected?: boolean;
+  rejection?: ConnectionRejection;
   setupFailed?: boolean;
 }
 
 export const WORKBENCH_RECONNECT_GRACE_MS = 2_000;
 export const WORKBENCH_RECONNECT_ERROR_MS = 20_000;
+export const WORKBENCH_RETRY_LIMIT_MS = 30_000;
+
+export function describeWorkbenchEmptyState(
+  type: WorkbenchTabType,
+  status: WorkbenchStatus | null,
+  singleFile = false,
+): string {
+  const kind: EmptyStateKind =
+    status?.tone === "pending"
+      ? "pending"
+      : !status || status.action === "Retry"
+        ? "retryable"
+        : "unavailable";
+  if (type === "files" && singleFile) {
+    return {
+      pending: "This file appears when the workspace is ready.",
+      retryable: "Retry to load this file.",
+      unavailable: "This file isn't available.",
+    }[kind];
+  }
+  if (
+    type === "terminal" &&
+    kind === "pending" &&
+    status?.connectionPhase === "reconnecting"
+  )
+    return "Terminal reconnects automatically.";
+  return WORKBENCH_STATUS_ADAPTERS[type].empty[kind];
+}
 
 export function describeWorkspaceAvailability(
   input: WorkspaceAvailability,
@@ -92,8 +157,9 @@ export function describeWorkspaceAvailability(
       return { tone: "pending", message: `Starting the ${workspace}…` };
     case "stopped":
     case "sleeping":
-    case "stopping":
       return { tone: "pending", message: `This ${workspace} is stopped.` };
+    case "stopping":
+      return { tone: "pending", message: `Stopping the ${workspace}…` };
     case "archived":
       return { tone: "neutral", message: `This ${workspace} is archived.` };
     case "failed":
@@ -108,21 +174,35 @@ export function describeWorkspaceAvailability(
   }
   if (input.setupFailed)
     return { tone: "error", message: "Setup failed.", action: "Open Setup" };
-  if (input.connection === "connected") return null;
+  if (input.rejection) {
+    const copy = describeConnectionRejection(input.rejection);
+    return {
+      tone: "error",
+      message: copy.headline,
+      diagnostic: workbenchFailureDiagnostic(copy.description),
+      action: "Retry",
+    };
+  }
   const elapsed = now - input.since;
-  if (input.rejected || elapsed >= WORKBENCH_RECONNECT_ERROR_MS)
+  if (
+    input.rejected ||
+    (input.connection !== "connected" &&
+      elapsed >= WORKBENCH_RECONNECT_ERROR_MS)
+  )
     return {
       tone: "error",
       message: `Can't reach the ${input.cloud ? "workspace" : "Zeros engine"}.`,
       action: "Retry",
     };
-  if (input.previouslyConnected && elapsed < WORKBENCH_RECONNECT_GRACE_MS)
-    return null;
+  if (input.connection === "connected") return null;
+  if (elapsed < WORKBENCH_RECONNECT_GRACE_MS) return null;
+  const verb = input.previouslyConnected ? "Reconnecting" : "Connecting";
   return {
     tone: "pending",
     message: input.cloud
-      ? "Reconnecting to the workspace…"
-      : "Reconnecting to the Zeros engine…",
+      ? `${verb} to the workspace…`
+      : `${verb} to the Zeros engine…`,
+    connectionPhase: input.previouslyConnected ? "reconnecting" : "connecting",
   };
 }
 
@@ -153,10 +233,11 @@ export function workbenchFailureDiagnostic(error: unknown): string {
 export function describeWorkbenchFailure(
   type: WorkbenchTabType,
   error: unknown,
+  singleFile = false,
 ): WorkbenchStatus {
   const diagnostic = workbenchFailureDiagnostic(error);
   const state =
-    /(?:cloud workspace|Zeros engine) (?:is )?(creating|setting_up|starting|waking|stopped|sleeping|archived)\b/i
+    /(?:cloud workspace|Zeros engine) (?:is )?(creating|setting_up|starting|waking|stopping|stopped|sleeping|archived)\b/i
       .exec(diagnostic)?.[1]
       ?.toLowerCase();
   if (state) {
@@ -172,14 +253,17 @@ export function describeWorkbenchFailure(
     return { ...status, diagnostic };
   }
   const adapter = WORKBENCH_STATUS_ADAPTERS[type];
+  const subject =
+    type === "files" && singleFile ? "This file" : adapter.subject;
+  const noun = type === "files" && singleFile ? "this file" : adapter.noun;
   return {
     tone: "error",
     message:
       /time[ -]?out|timed out|took too long|didn't respond in time/i.test(
         diagnostic,
       )
-        ? `${adapter.subject} took too long to load.`
-        : `Couldn't load ${adapter.noun}.`,
+        ? `${subject} took too long to load.`
+        : `Couldn't load ${noun}.`,
     diagnostic,
     action: "Retry",
   };
@@ -229,6 +313,7 @@ export class WorkbenchStatusSources {
   private sources = new Map<string, WorkbenchSource>();
   private listeners = new Set<() => void>();
   private flight: Promise<void> | null = null;
+  private flightSettled: (() => void) | null = null;
   private value: StatusSnapshot = {
     failure: null,
     hasContent: false,
@@ -277,13 +362,17 @@ export class WorkbenchStatusSources {
       this.value.hasContent === hasContent &&
       this.value.busy === busy &&
       this.value.pending === pending
-    )
+    ) {
+      this.flightSettled?.();
       return;
+    }
     this.value = { failure, hasContent, busy, pending };
     for (const listener of this.listeners) listener();
+    this.flightSettled?.();
   }
   retry(reconnect?: () => Promise<unknown>): Promise<void> {
     if (this.flight) return this.flight;
+    const hadSources = this.sources.size > 0;
     // Snapshot the current sources. Navigating during retry cannot start reads
     // against another key through a caller's newly installed closure.
     const callbacks = [
@@ -295,31 +384,47 @@ export class WorkbenchStatusSources {
           .flatMap((source) => (source.retry ? [source.retry] : [])),
       ),
     ];
-    const flight = Promise.resolve()
+    let resolve!: () => void;
+    const flight = new Promise<void>((done) => {
+      resolve = done;
+    });
+    let ended = false;
+    let completed = false;
+    const finish = () => {
+      if (ended) return;
+      ended = true;
+      clearTimeout(timer);
+      if (this.flight === flight) {
+        this.flight = null;
+        this.flightSettled = null;
+        this.publish();
+      }
+      resolve();
+    };
+    const timer = setTimeout(finish, WORKBENCH_RETRY_LIMIT_MS);
+    const settled = () => {
+      if (
+        (completed && !this.value.pending) ||
+        (hadSources &&
+          ![...this.sources.values()].some((source) => source.active !== false))
+      )
+        finish();
+    };
+    this.flightSettled = settled;
+    this.flight = flight;
+    this.publish();
+    void Promise.resolve()
       .then(async () => {
+        if (ended) return;
         if (reconnect) await reconnect();
+        if (ended) return;
         await Promise.allSettled(
           callbacks.map((callback) => Promise.resolve().then(callback)),
         );
-        if (this.value.pending)
-          await new Promise<void>((resolve) => {
-            const stop = this.subscribe(() => {
-              if (!this.value.pending) {
-                stop();
-                resolve();
-              }
-            });
-          });
+        completed = true;
+        settled();
       })
-      .catch(() => {})
-      .finally(() => {
-        if (this.flight === flight) {
-          this.flight = null;
-          this.publish();
-        }
-      });
-    this.flight = flight;
-    this.publish();
+      .catch(finish);
     return flight;
   }
 }
