@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { TransportClient } from "../../transport/types";
 import {
   configureNativeGithubDesktop, acceptNativeGithubDesktop, requestNativeGithubDesktop,
 } from "../github-native-desktop";
+afterEach(() => { configureNativeGithubDesktop(() => []); vi.useRealTimers(); });
 const request = () => ({
   actorUserId: randomUUID(), organizationId: randomUUID(), workspaceId: randomUUID(),
   generation: 1, engineInstanceId: randomUUID(), owner: "org", repository: "repo", repositoryId: "42",
@@ -52,4 +53,59 @@ it("drops an aborted request and leaves Local clients untouched", async () => {
   const rejected = expect(waiting).rejects.toThrow("Open Zeros");
   abort.abort(); await rejected;
   expect(acceptNativeGithubDesktop(desktop, { kind: "reply", requestId: input.native.requestId, grant: null })).toBe(false);
+});
+
+it("tries the next ready device of the same actor after no grant, then selects only one", async () => {
+  const input = request(), first = client(input.actorUserId), second = client(input.actorUserId), other = client(randomUUID()), third = client(input.actorUserId);
+  configureNativeGithubDesktop(() => [first, other, second, third]);
+  for (const desktop of [first, second, other, third]) acceptNativeGithubDesktop(desktop, { kind: "ready" });
+  const waiting = requestNativeGithubDesktop(input, new AbortController().signal).catch(error => error);
+  expect(acceptNativeGithubDesktop(first, { kind: "reply", requestId: input.native.requestId, grant: null })).toBe(true);
+  expect(second.send).toHaveBeenCalledOnce();
+  const reply = { kind: "reply", requestId: input.native.requestId, grant: `zgw_${"b".repeat(43)}` };
+  expect(acceptNativeGithubDesktop(first, reply)).toBe(false);
+  expect(acceptNativeGithubDesktop(other, reply)).toBe(false);
+  expect(acceptNativeGithubDesktop(second, reply)).toBe(true);
+  expect(await waiting).toEqual({ grant: reply.grant, actorSessionId: second.cloudActor!.sessionId });
+  expect(other.send).not.toHaveBeenCalled(); expect(third.send).not.toHaveBeenCalled();
+  expect(acceptNativeGithubDesktop(second, reply)).toBe(false);
+});
+
+it("bounds fallback to four devices and a single overall deadline", async () => {
+  vi.useFakeTimers();
+  const input = request(), desktops = Array.from({ length: 5 }, () => client(input.actorUserId));
+  configureNativeGithubDesktop(() => desktops);
+  for (const desktop of desktops) acceptNativeGithubDesktop(desktop, { kind: "ready" });
+  const waiting = requestNativeGithubDesktop(input, new AbortController().signal);
+  const rejection = expect(waiting).rejects.toThrow("Open Zeros");
+  for (const desktop of desktops.slice(0, 4)) acceptNativeGithubDesktop(desktop, { kind: "reply", requestId: input.native.requestId, grant: null });
+  await rejection;
+  expect(desktops[4]!.send).not.toHaveBeenCalled();
+  expect(desktops.slice(0, 4).every(desktop => vi.mocked(desktop.send).mock.calls.length === 1)).toBe(true);
+
+  const expiring = requestNativeGithubDesktop(input, new AbortController().signal);
+  const expired = expect(expiring).rejects.toThrow("Open Zeros");
+  await vi.advanceTimersByTimeAsync(14_900);
+  acceptNativeGithubDesktop(desktops[0]!, { kind: "reply", requestId: input.native.requestId, grant: null });
+  await vi.advanceTimersByTimeAsync(100);
+  await expired;
+  expect(acceptNativeGithubDesktop(desktops[1]!, { kind: "reply", requestId: input.native.requestId, grant: `zgw_${"b".repeat(43)}` })).toBe(false);
+});
+
+it.each(["abort", "reconfigure", "session"])("ends fallback after %s without accepting a late grant", async cause => {
+  vi.useFakeTimers();
+  const input = request(), first = client(input.actorUserId), second = client(input.actorUserId), third = client(input.actorUserId);
+  configureNativeGithubDesktop(() => [first, second, third]);
+  for (const desktop of [first, second, third]) acceptNativeGithubDesktop(desktop, { kind: "ready" });
+  const abort = new AbortController();
+  const waiting = requestNativeGithubDesktop(input, abort.signal);
+  const rejection = expect(waiting).rejects.toThrow("Open Zeros");
+  acceptNativeGithubDesktop(first, { kind: "reply", requestId: input.native.requestId, grant: null });
+  if (cause === "abort") abort.abort();
+  if (cause === "reconfigure") configureNativeGithubDesktop(() => [first, second, third]);
+  if (cause === "session") second.cloudActor = { ...second.cloudActor!, sessionId: randomUUID() };
+  expect(acceptNativeGithubDesktop(second, { kind: "reply", requestId: input.native.requestId, grant: `zgw_${"b".repeat(43)}` })).toBe(false);
+  await vi.advanceTimersByTimeAsync(100);
+  await rejection;
+  expect(third.send).not.toHaveBeenCalled();
 });
