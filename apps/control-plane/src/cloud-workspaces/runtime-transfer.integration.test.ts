@@ -147,6 +147,62 @@ import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-versi
     expect(await service.staged(next!)).toBe(true);
   });
 
+  it("releases a staged claim immediately without changing its execution fence or source", async () => {
+    const claim = await claimed(); await service.staged(claim);
+    expect(await service.release(claim)).toBe(true);
+    expect(await service.release(claim)).toBe(false);
+    expect(await service.renew(claim)).toBe(false);
+    const next = await service.claim(claim,"zeros-v2-test-hu-next");
+    expect(next!.executionFence).toBe(claim.executionFence);
+    expect(next!.workerFence === claim.workerFence).toBe(false);
+    expect(await service.release(claim)).toBe(false);
+    expect(await service.cancelStaging(claim)).toBe(false);
+    expect((await pool.query("SELECT phase FROM cloud_workspace_runtime_transitions WHERE transition_id=$1",[claim.transitionId])).rows[0].phase).toBe("staged");
+    expect((await pool.query("SELECT state FROM cloud_workspace_engine_instances WHERE id=$1",[fixture.engineInstanceId])).rows[0].state).toBe("ready");
+  });
+
+  it.each(["offered","staged"])("cancels %s idempotently without retiring or stopping the source",async phase=>{
+    const claim=await claimed(); if (phase==='staged') await service.staged(claim);
+    expect(await service.cancelStaging(claim)).toBe(true);
+    const completed=(await pool.query("SELECT completed_at FROM cloud_workspace_runtime_transitions WHERE transition_id=$1",[claim.transitionId])).rows[0].completed_at;
+    expect(await service.cancelStaging(claim)).toBe(true);
+    expect((await pool.query("SELECT completed_at FROM cloud_workspace_runtime_transitions WHERE transition_id=$1",[claim.transitionId])).rows[0].completed_at).toEqual(completed);
+    expect(await service.claim(claim,"zeros-v2-test-hu-next")).toBeNull();
+    expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE id=$1",[claim.transitionId])).rows[0].state).toBe("cancelled");
+    expect((await pool.query("SELECT current_generation,status FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId])).rows[0]).toEqual({current_generation:1,status:"ready"});
+    expect((await pool.query("SELECT state FROM cloud_workspace_engine_instances WHERE id=$1",[fixture.engineInstanceId])).rows[0].state).toBe("ready");
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1",[fixture.workspaceId])).rowCount).toBe(0);
+    expect((await offer())?.candidateGeneration).toBe(3);
+  });
+
+  it("rejects foreign and expired release/cancel claims, including terminal replay",async()=>{
+    const claim=await claimed();
+    for (const key of ['workspaceId','organizationId','transitionId','workerId','workerFence','executionFence'] as const) {
+      const forged={...claim,[key]:randomUUID()};
+      expect(await service.release(forged)).toBe(false);
+      expect(await service.cancelStaging(forged)).toBe(false);
+    }
+    await pool.query("UPDATE cloud_workspace_runtime_transitions SET worker_expires_at=clock_timestamp()-interval '1 second' WHERE transition_id=$1",[claim.transitionId]);
+    expect(await service.release(claim)).toBe(false); expect(await service.cancelStaging(claim)).toBe(false);
+    const next=(await service.claim(claim,"zeros-v2-test-hu-next"))!;
+    expect(await service.cancelStaging(next)).toBe(true);
+    expect(await service.cancelStaging(claim)).toBe(false);
+  });
+
+  it("rejects staging cancellation after activation",async()=>{
+    const activatedClaim=await activated();
+    expect(await service.cancelStaging(activatedClaim)).toBe(false);
+  });
+
+  it("orders staging cancellation against activation under the common lock",async()=>{
+    const claim=await claimed(); await qualifyTransfer(); await service.staged(claim);
+    const results=await Promise.all([service.cancelStaging(claim),service.activate(claim,{controller:sourceActive(),
+      policy:{id:"zeros_test_cancel_race",async authorize(){return true;}}})]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const phase=(await pool.query("SELECT phase FROM cloud_workspace_runtime_transitions WHERE transition_id=$1",[claim.transitionId])).rows[0].phase;
+    expect(phase).toBe(results[0]?'cancelled':'activated');
+  });
+
   it("rechecks source lease expiry after awaited policy evidence", async () => {
     const claim = await claimed();
     await qualifyTransfer();

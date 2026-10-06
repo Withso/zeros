@@ -426,6 +426,8 @@ The controller integration contract is:
 | --- | --- |
 | `offer` | Current source engine and generation, operation UUID, engine/bootstrap mode. Returns the single transition or joins RU's existing one. |
 | `claim` / `renew` | Worker lease lasts 90 seconds. Reclaim changes the worker fence; the VM execution fence remains fixed. Renewal cannot extend phase deadlines. |
+| `release(claim): Promise<boolean>` | Relinquish an exact live worker claim immediately, retaining phase and execution fence. The next claimant receives a new worker fence. A stale, expired, already released or terminal claim returns false. |
+| `cancelStaging(claim): Promise<boolean>` | Cancel only offered/staged work before any activation, under the common transition lock. Requires the current live claim; an exact retry of its completed cancellation returns true even after lease expiry. Other fences and post-activation cancellations return false. Source authority, allocation and pin remain unchanged. |
 | `staged` | Called only after the authenticated, pinned installer conversation returns its exact staged receipt. Staging expires after 15 minutes. |
 | `activate` | Verified controller descriptor and injected `CloudRuntimeActivationPolicy`. True is the source-admission fence; target registration is bounded to 240 seconds. |
 | `enroll` | Fresh verified active/controller identities and the complete normalized v4 attester report from the pinned root channel. Rejects a reused supervisor session, wrong boot/base/pin or incomplete containment evidence. Returns a fresh engine UUID and short-lived, one-use capabilities in memory only. |

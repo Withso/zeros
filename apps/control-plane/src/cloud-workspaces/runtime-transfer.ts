@@ -366,6 +366,45 @@ export class DatabaseCloudRuntimeTransitionService {
     });
   }
 
+  /** Relinquish a live worker lease, preserving the durable execution fence
+   * and phase. A subsequent claim gets a new worker fence immediately. */
+  async release(claim:CloudRuntimeTransitionClaim):Promise<boolean> {
+    return withSystemTx(this.options.pool,async tx=>{
+      if (!await this.locked(tx,claim)) return false;
+      const released=await tx.query(`UPDATE cloud_workspace_runtime_transitions
+        SET worker_id=NULL,worker_fence=NULL,worker_expires_at=NULL,updated_at=clock_timestamp()
+        WHERE transition_id=$1 AND worker_expires_at>clock_timestamp()`,[claim.transitionId]);
+      return released.rowCount===1;
+    });
+  }
+
+  /** Cancel only an unswitched offer. Preserve the cancelling fence as an
+   * idempotency receipt; cancelled rows cannot be claimed again. This never
+   * retires source authority or issues provider lifecycle operations. */
+  async cancelStaging(claim:CloudRuntimeTransitionClaim):Promise<boolean> {
+    return withSystemTx(this.options.pool,async tx=>{
+      await lockCloudWorkspaceGenerationTransition(tx,claim);
+      const row=(await tx.query<{phase:string;activated_at:Date|null;state:string}>(`SELECT runtime.phase,runtime.activated_at,transition.state
+        FROM cloud_workspace_runtime_transitions runtime
+        JOIN cloud_workspace_generation_transitions transition ON transition.id=runtime.transition_id
+        WHERE runtime.transition_id=$1 AND runtime.workspace_id=$2 AND runtime.org_id=$3
+          AND runtime.worker_id=$4 AND runtime.worker_fence=$5 AND runtime.execution_fence=$6
+          AND transition.execution_mode='retain_allocation'
+        FOR UPDATE OF runtime,transition`,
+      [claim.transitionId,claim.workspaceId,claim.organizationId,claim.workerId,claim.workerFence,claim.executionFence])).rows[0];
+      if (!row || row.activated_at!==null) return false;
+      if (row.phase==='cancelled' && row.state==='cancelled') return true;
+      if (!['offered','staged'].includes(row.phase) || row.state!=='draining') return false;
+      const cancelled=await tx.query(`UPDATE cloud_workspace_runtime_transitions
+        SET phase='cancelled',completed_at=clock_timestamp(),worker_expires_at=clock_timestamp(),updated_at=clock_timestamp()
+        WHERE transition_id=$1 AND worker_expires_at>clock_timestamp()`,[claim.transitionId]);
+      if (cancelled.rowCount!==1) return false;
+      await tx.query(`UPDATE cloud_workspace_generation_transitions SET state='cancelled',completed_at=clock_timestamp(),
+        updated_at=clock_timestamp() WHERE id=$1`,[claim.transitionId]);
+      return true;
+    });
+  }
+
   private async locked(tx: Tx, claim: CloudRuntimeTransitionClaim): Promise<TransitionRow | null> {
     await lockCloudWorkspaceGenerationTransition(tx,claim);
     return (await tx.query<TransitionRow>(`SELECT ${scopeColumns} FROM cloud_workspace_runtime_transitions runtime
