@@ -157,7 +157,7 @@ export function ModelPill({
   // one-frame strand at the viewport origin); the effect syncs local state so
   // the popover doesn't spring back open when the composer returns.
   const concealed = useContext(ComposerConcealedContext);
-  const runtimeUpgradeLink = useCloudRuntimeUpgradeLink(workspaceFolder, active && !concealed, runtimeUpgradeRequiredForAgents, () => setOpen(false));
+  const runtimeUpgradeLink = useCloudRuntimeUpgradeLink(workspaceFolder, active && !concealed, runtimeUpgradeRequiredForAgents);
   useEffect(() => {
     if ((concealed || !active) && open) setOpen(false);
   }, [concealed, active, open]);

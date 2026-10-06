@@ -567,6 +567,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       pool,
       provider,
       providerResolver,
+      runtimeUpgradeConfig: cloud,
       ...(cloud.computePolicy?{computePolicy:cloud.computePolicy}:{}),
       workosEnabled: config.auth.provider === "workos",
       intervalMs: cloud.reconcileIntervalMs,

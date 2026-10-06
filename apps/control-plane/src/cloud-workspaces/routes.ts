@@ -14,7 +14,7 @@ import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-versi
 import { copyGenerationPins, loadGenerationSource, requireGenerationRuntime } from "./generation-pins.js";
 import { cloudRuntimeQualificationMode } from "./runtime-config.js";
 import { CloudRuntimeUpgradeRequestSchema } from "./runtime-upgrade-contract.js";
-import { readCloudRuntimeUpgradeAvailability } from "./runtime-upgrade-availability.js";
+import { readCloudRuntimeUpgradeAvailability, selectCloudWorkspaceRuntimeUpgrade } from "./runtime-upgrade-availability.js";
 import { cloudWorkspaceHasActiveWork } from "./idle-workloads.js";
 import { ensureWorkspaceDeletionJob } from "./workspace-deletion-job.js";
 import { assertCloudGithubSource } from "./github-user-access.js";
@@ -1027,6 +1027,512 @@ function deviceProof(c: Context): CloudWorkspaceDeviceProof {
     timestampMs: Number(rawTimestamp),
     nonce,
     signature,
+  };
+}
+
+/** The existing generation replacement transaction, shared by explicit staff
+ * upgrades and automatic wake. No provider calls occur inside admission. */
+export function createCloudWorkspaceGenerationReplacement(config: CloudWorkspaceBackendConfig,
+  options: { workosEnabled?: boolean; setupSecretKeyV1?: string | null } = {}) {
+  return async (tx: Tx, input: {
+    user: { id: string }; orgId: string; workspaceId: string; key: string;
+    upgradeInput: z.infer<typeof CloudRuntimeUpgradeRequestSchema> | null;
+    body: z.infer<typeof GenerationTransitionSchema>;
+    normalize: (profile: CloudWorkspaceProvisioningProfile | null) => unknown;
+    automaticWake?: { intentId: string; workerId: string };
+  }) => {
+    const { user, orgId, workspaceId, key, upgradeInput, body, normalize, automaticWake } = input;
+    if (upgradeInput && !automaticWake) {
+      const account = (await tx.query<{ staff_role: StaffRole | null }>(
+        "SELECT staff_role FROM users WHERE id=$1 AND auth_status='active' AND deleted_at IS NULL FOR SHARE", [user.id])).rows[0];
+      requireOrganizationCreationCapability(account?.staff_role ?? null);
+    }
+    if (!automaticWake) await requireOrganizationMembership(tx, orgId, user.id);
+    await lockCloudOrganization(tx, orgId);
+    const workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true, user.id);
+    if (automaticWake) {
+      const parent = (await tx.query(`SELECT 1 FROM cloud_workspace_lifecycle_intents
+        WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND generation=$4 AND state='dispatching'
+          AND lease_owner=$5 AND lease_expires_at>clock_timestamp() FOR UPDATE`,
+      [automaticWake.intentId,workspaceId,orgId,upgradeInput!.expectedGeneration,automaticWake.workerId])).rowCount;
+      if (!parent || workspace.desired_state !== "running" || workspace.status !== "waking")
+        throw new HttpError(409, "cloud_generation_changed", "Wake authority changed before runtime admission");
+    }
+    if (!automaticWake) await authorizeCloudWorkspaceCleanup(tx,{organizationId:orgId,workspaceId,actorUserId:user.id});
+    const existing = await loadIntentByKey(tx, orgId, key);
+    if (existing) {
+      const transition = await loadTransitionByRequestIntent(
+        tx,
+        orgId,
+        workspaceId,
+        existing.id,
+      );
+      if (upgradeInput) {
+        assertIdempotencyMatch(existing, workspaceId, requestDigest(normalize(null)), user.id);
+        const generation = transition?.candidate_generation ?? upgradeInput.expectedGeneration;
+        const accepted = await loadGenerationSource(tx, { workspaceId, organizationId: orgId, generation });
+        if (!accepted.runtime) throw new CloudRuntimeError("cloud_runtime_unavailable");
+        return { workspace, intent: existing, transition, replayed: true, upgrade: {
+          operationId: upgradeInput.operationId, sourceGeneration: upgradeInput.expectedGeneration,
+          generation, runtimeId: accepted.runtime.runtimeId, transitionId: transition?.id ?? null, unchanged: transition === null,
+        } };
+      }
+      if (!transition) {
+        throw new HttpError(
+          409,
+          "idempotency_key_reused",
+          "Idempotency-Key was already used for another operation",
+        );
+      }
+      // Replays use the accepted immutable target, even after deployment
+      // configuration or the managed default has changed.
+      const accepted = await tx.query<CloudWorkspaceProvisioningProfile>(
+        `SELECT provider, image_ref AS "imageRef", architecture,
+                cpu_millicores AS "cpuMillicores", memory_mib AS "memoryMiB",
+                storage_mib AS "storageMiB", source_commit AS "sourceCommit",
+                sandbox_class AS "sandboxClass"
+         FROM cloud_workspace_generations
+         WHERE workspace_id = $1 AND org_id = $2 AND generation = $3`,
+        [workspaceId, orgId, transition.candidate_generation],
+      );
+      const profile = accepted.rows[0];
+      if (!profile) {
+        throw new HttpError(
+          409,
+          "idempotency_key_reused",
+          "Accepted generation is unavailable",
+        );
+      }
+      assertIdempotencyMatch(
+        existing,
+        workspaceId,
+        requestDigest(normalize(profile)),
+        user.id,
+      );
+      return { workspace, intent: existing, transition, replayed: true };
+    }
+
+    if (upgradeInput && workspace.current_generation !== upgradeInput.expectedGeneration) {
+      throw new HttpError(409, "cloud_generation_changed", "Cloud workspace generation changed before the runtime upgrade");
+    }
+
+    await authorizeCloudWorkspaceActor(tx,{organizationId:orgId,workspaceId,actorUserId:user.id,capability:automaticWake ? "run" : "manage"});
+    const authorization = await authorizeCloudWorkspaceOperation(tx, {
+      workspaceId,
+      organizationId: orgId,
+      teamId: workspace.team_id,
+      actorUserId: workspace.owner_user_id,
+      billingOwnerUserId: workspace.owner_user_id,
+      workosEnabled: options.workosEnabled === true,
+      requireWorkspaceOwner: true,
+    });
+    await refreshCloudWorkspaceBillingEpoch(tx, {
+      workspaceId,
+      organizationId: orgId,
+      authorization,
+    });
+    if (body.operation === "recover") {
+      const recovery = await createCloudRecoveryTransition(tx, {
+        workspaceId, organizationId: orgId, sourceGeneration: body.sourceGeneration,
+        checkpointId: body.checkpointId, actorUserId: user.id, workosEnabled: options.workosEnabled === true,
+        config: options.setupSecretKeyV1 === undefined ? config : { ...config,
+          settingsSecretEncryptionKeys: options.setupSecretKeyV1 ? { 1: options.setupSecretKeyV1 } : {},
+          currentSettingsSecretEncryptionKeyVersion: options.setupSecretKeyV1 ? 1 : null },
+        idempotencyKey: key, requestDigest: (profile: CloudWorkspaceProvisioningProfile) => requestDigest(normalize(profile)),
+        ...(body.allowDataLoss !== undefined ? { allowDataLoss: body.allowDataLoss } : {}),
+      });
+      return { ...recovery, workspace: await loadWorkspace(tx, orgId, workspaceId, user.id), replayed: false };
+    }
+    if (upgradeInput && (workspace.status === "busy" || await cloudWorkspaceHasActiveWork(tx, {
+      workspaceId, organizationId: orgId, generation: workspace.current_generation,
+      allowQueuedForStoppedWake: !!automaticWake,
+    }))) {
+      throw new HttpError(409, "cloud_workspace_busy", "Stop running agents and active workspace work before upgrading the runtime");
+    }
+    const stoppedUpgrade = upgradeInput && (["stopped", "archived", "failed"].includes(workspace.status) || !!automaticWake && workspace.status === "waking") && workspace.desired_state !== "deleted";
+    if (workspace.deleted_at !== null || (!stoppedUpgrade && (workspace.desired_state !== "running" || workspace.status !== "ready"))) {
+      throw new HttpError(409, "cloud_workspace_not_stable", "Cloud workspace must be ready before replacing its generation");
+    }
+    const active = await tx.query(
+      `SELECT 1
+       FROM cloud_workspace_generation_transitions
+       WHERE workspace_id = $1 AND org_id = $2
+         AND state IN ('draining', 'provisioning', 'setting_up', 'rolling_back')`,
+      [workspaceId, orgId],
+    );
+    if ((active.rowCount ?? 0) !== 0) {
+      throw new HttpError(
+        409,
+        "cloud_generation_transition_active",
+        "A cloud workspace generation transition is already active",
+      );
+    }
+    const lifecycle = await tx.query(
+      `SELECT 1 FROM cloud_workspace_lifecycle_intents
+       WHERE workspace_id = $1 AND affects_workspace
+         AND state IN ('queued', 'dispatching', 'observing')
+         AND ($2::uuid IS NULL OR id<>$2)`,
+      [workspaceId, automaticWake?.intentId ?? null],
+    );
+    if ((lifecycle.rowCount ?? 0) !== 0) {
+      throw new HttpError(
+        409,
+        "cloud_workspace_lifecycle_active",
+        "Cloud workspace lifecycle work must finish before rebuilding",
+      );
+    }
+
+    const templateGeneration =
+      body.operation === "rollback"
+        ? body.sourceGeneration
+        : workspace.current_generation;
+    if (
+      body.operation === "rollback" &&
+      templateGeneration >= workspace.current_generation
+    ) {
+      throw new HttpError(
+        422,
+        "invalid_rollback_generation",
+        "Rollback must select an older qualified generation",
+      );
+    }
+    const template = await tx.query<{
+      provider: CloudWorkspaceProviderName;
+      image_ref: string;
+      sandbox_class: "container" | "linux-vm" | null;
+      architecture: "linux/amd64" | "linux/arm64";
+      cpu_millicores: number;
+      memory_mib: number;
+      storage_mib: number;
+      source_commit: string | null;
+      repository_forge: string;
+      repository_owner: string;
+      repository_name: string;
+      repository_revision: string;
+      github_installation_id: string | null;
+      spec_version: number;
+      settings_snapshot: unknown;
+      settings_snapshot_sha256: Buffer;
+    }>(
+      `SELECT g.provider, g.image_ref, g.sandbox_class, g.architecture, g.cpu_millicores,
+              g.memory_mib, g.storage_mib, g.source_commit,
+              ss.repository_forge, ss.repository_owner, ss.repository_name,
+              ss.repository_revision, ss.github_installation_id,
+              ss.spec_version, ss.settings_snapshot,
+              ss.settings_snapshot_sha256
+       FROM cloud_workspace_generations g
+       JOIN cloud_workspace_setup_specs ss
+         ON ss.workspace_id = g.workspace_id
+        AND ss.generation = g.generation AND ss.org_id = g.org_id
+       WHERE g.workspace_id = $1 AND g.org_id = $2 AND g.generation = $3
+         AND (
+           $4::boolean = false
+           OR EXISTS (
+             SELECT 1 FROM cloud_workspace_setup_attestations sa
+             WHERE sa.workspace_id = g.workspace_id
+               AND sa.generation = g.generation AND sa.org_id = g.org_id
+           )
+         )`,
+      [workspaceId, orgId, templateGeneration, body.operation === "rollback"],
+    );
+    const source = template.rows[0];
+    if (!source) {
+      throw new HttpError(
+        404,
+        "cloud_generation_not_qualified",
+        "Qualified cloud workspace generation not found",
+      );
+    }
+    const sourceScope = { workspaceId, organizationId: orgId, generation: templateGeneration };
+    const qualificationMode = config.runtime?.qualificationMode ?? cloudRuntimeQualificationMode();
+    const sourcePins = upgradeInput
+      ? await loadGenerationSource(tx, sourceScope)
+      : await requireGenerationRuntime(tx, sourceScope, qualificationMode);
+    let upgradedRuntime: CloudRuntimePin | undefined;
+    let upgradeCheckpointId: string | undefined;
+    if (upgradeInput) {
+      if (!sourcePins.runtime) throw new HttpError(409, "cloud_runtime_upgrade_not_supported", "Runtime upgrades require a v4 workspace");
+      if (config.setupExecution && config.setupExecution.engineProtocolVersion !== CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION) {
+        throw new CloudRuntimeError("cloud_runtime_unavailable");
+      }
+      const wakeSelection = automaticWake ? await selectCloudWorkspaceRuntimeUpgrade(tx, {
+        workspaceId, organizationId:orgId, runtime:sourcePins.runtime, qualificationMode,
+      }) : null;
+      const selected = automaticWake ? wakeSelection!.selected
+        : await selectCloudRuntime(tx, qualificationMode, sourcePins.runtime.baseImageId);
+      if (!selected) throw new CloudRuntimeError("cloud_runtime_unavailable");
+      if (selected.pin.runtimeId === sourcePins.runtime.runtimeId) {
+        if (automaticWake) throw new HttpError(409, "cloud_runtime_already_current", "Runtime is already current");
+        // A completed, non-affecting lifecycle receipt makes even a no-op
+        // replay stable after a later channel release. It never dispatches.
+        const receipt = (await tx.query<IntentRow>(`INSERT INTO cloud_workspace_lifecycle_intents
+          (id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,affects_workspace,state,completed_at)
+          VALUES($1,$2,$3,$4,$5,'stop',$6,$7,false,'succeeded',now()) RETURNING *`,
+        [randomUUID(),workspaceId,workspace.current_generation,orgId,user.id,key,requestDigest(normalize(null))])).rows[0]!;
+        await audit(tx, orgId, user.id, "cloud_workspace.runtime_upgrade_unchanged", { workspaceId, generation: workspace.current_generation });
+        return { workspace, intent: receipt, transition: null, replayed: false, upgrade: {
+          operationId: upgradeInput.operationId, sourceGeneration: upgradeInput.expectedGeneration,
+          generation: workspace.current_generation, runtimeId: selected.pin.runtimeId, transitionId: null, unchanged: true,
+        } };
+      }
+      const sourceOrder = (await tx.query<{ release_order: string | null }>(
+        "SELECT max(release_order)::text AS release_order FROM cloud_runtime_channel_releases WHERE channel='alpha' AND runtime_id=$1 AND confirmed_at IS NOT NULL", [sourcePins.runtime.runtimeId])).rows[0]!.release_order;
+      if (sourceOrder === null || selected.releaseOrder <= BigInt(sourceOrder)) throw new CloudRuntimeError("cloud_runtime_unavailable");
+      upgradedRuntime = selected.pin;
+      if (stoppedUpgrade) {
+        const head = (await tx.query<{ current_checkpoint_id: string | null }>(
+          "SELECT current_checkpoint_id FROM workspace_content_heads WHERE workspace_id=$1 AND org_id=$2", [workspaceId, orgId])).rows[0];
+        if (!head?.current_checkpoint_id) throw new HttpError(409, "cloud_recovery_checkpoint_unavailable", "A durable checkpoint is required to upgrade a stopped workspace");
+        // A failed upgrade may leave its source revoked after rollback. Its
+        // completed rebuild capture still fences writes unless newer work
+        // or a later source admission invalidates the shared freshness checks.
+        const point = await requireCloudRecoveryPoint(tx, { workspaceId, organizationId: orgId,
+          sourceGeneration: workspace.current_generation, checkpointId: head.current_checkpoint_id, allowBeforeRebuild: true });
+        if (!point.lossless) throw new HttpError(409, "recovery_acknowledgement_required", "Recover the workspace from its checkpoint before upgrading the runtime");
+        upgradeCheckpointId = point.id;
+      }
+    }
+    if (body.operation === "rollback") {
+      const policy = await tx.query<{ current: boolean }>(
+        `SELECT cloud_workspace_generation_policy_current(
+           $1, $2, $3
+         ) AS current`,
+        [workspaceId, templateGeneration, orgId],
+      );
+      if (policy.rows[0]?.current !== true) {
+        throw new HttpError(
+          409,
+          "cloud_managed_policy_rebuild_required",
+          "This rollback snapshot predates the current managed policy; create an upgrade generation instead",
+        );
+      }
+    }
+    const providerConnection = await loadGenerationCloudProviderConnection(
+      tx,
+      {
+        workspaceId,
+        organizationId: orgId,
+        generation: workspace.current_generation,
+      },
+    );
+    const templateProfile: CloudWorkspaceProvisioningProfile =
+      sourcePins.runtime ? sourcePins.profile : body.operation !== "rollback"
+        ? cloudWorkspaceProvisioningProfile(config, source.provider)
+        : {
+            provider: source.provider,
+            imageRef: source.image_ref,
+            ...(source.sandbox_class?{sandboxClass:source.sandbox_class}:{}),
+            architecture: source.architecture,
+            cpuMillicores: source.cpu_millicores,
+            memoryMiB: source.memory_mib,
+            storageMiB: source.storage_mib,
+            sourceCommit: source.source_commit,
+          };
+    const candidate = !sourcePins.runtime && body.operation === "upgrade" && providerConnection?.credentialSource === "hosted" && !authorization.isPersonal
+      ? await resolveComputerImage(tx, orgId, templateProfile) : templateProfile;
+    const digest = requestDigest(normalize(candidate));
+    const quota = await loadQuota(tx, orgId), usage = await loadUsage(tx, orgId);
+    if (upgradeInput && workspace.desired_state !== "running" && Number(usage.running) + 1 > quota.max_running_workspaces) {
+      throw new HttpError(409, "cloud_quota_exceeded", "Cloud workspace running quota would be exceeded");
+    }
+    assertGenerationReplacementQuota(quota, usage, candidate);
+
+    const nextGeneration = await tx.query<{ generation: number }>(
+      `SELECT coalesce(max(generation), 0)::integer + 1 AS generation
+       FROM cloud_workspace_generations
+       WHERE workspace_id = $1`,
+      [workspaceId],
+    );
+    const candidateGeneration = nextGeneration.rows[0]!.generation;
+    const transitionId = randomUUID();
+    const intentId = randomUUID();
+
+    if (
+      !providerConnection ||
+      providerConnection.provider !== candidate.provider
+    ) {
+      throw new HttpError(
+        409,
+        "cloud_provider_connection_unavailable",
+        "The cloud provider connection is not available",
+      );
+    }
+
+    await copyGenerationPins(tx, {
+      workspaceId, organizationId: orgId, sourceGeneration: templateGeneration,
+      targetGeneration: candidateGeneration, actorUserId: user.id,
+      providerConnectionId: providerConnection.id, legacyProfile: candidate,
+      qualificationMode,
+      ...(upgradedRuntime ? { runtimeUpgrade: upgradedRuntime } : {}),
+      ...(upgradeCheckpointId ? { recoveryCheckpointId: upgradeCheckpointId } : {}),
+    });
+    const resolvedSettings =
+      body.operation === "rollback" || upgradeInput
+        ? await cloneDatabaseCloudWorkspaceSettingsForRollback(tx, {
+            workspaceId,
+            organizationId: orgId,
+            sourceGeneration: templateGeneration,
+            targetGeneration: candidateGeneration,
+            secretEncryptionKeys:
+              options.setupSecretKeyV1 !== undefined
+                ? options.setupSecretKeyV1
+                  ? { 1: options.setupSecretKeyV1 }
+                  : {}
+                : config.settingsSecretEncryptionKeys,
+            currentSecretEncryptionKeyVersion:
+              options.setupSecretKeyV1 !== undefined
+                ? options.setupSecretKeyV1
+                  ? 1
+                  : null
+                : config.currentSettingsSecretEncryptionKeyVersion,
+          })
+        : await resolveDatabaseCloudWorkspaceSettings(tx, {
+            organizationId: orgId,
+            repositoryId: workspace.repository_id,
+            workspaceId,
+            generation: candidateGeneration,
+            actorUserId: workspace.owner_user_id,
+            isPersonal: authorization.isPersonal,
+            secretEncryptionKeys:
+              options.setupSecretKeyV1 !== undefined
+                ? options.setupSecretKeyV1
+                  ? { 1: options.setupSecretKeyV1 }
+                  : {}
+                : config.settingsSecretEncryptionKeys,
+            currentSecretEncryptionKeyVersion:
+              options.setupSecretKeyV1 !== undefined
+                ? options.setupSecretKeyV1
+                  ? 1
+                  : null
+                : config.currentSettingsSecretEncryptionKeyVersion,
+          });
+    const settings = await persistDatabaseCloudWorkspaceSettings(tx, {
+      workspaceId,
+      organizationId: orgId,
+      generation: candidateGeneration,
+      actorUserId: user.id,
+      settings: resolvedSettings,
+    });
+    await tx.query(
+      `INSERT INTO cloud_workspace_setup_specs (
+         workspace_id, generation, org_id, spec_version,
+         repository_forge, repository_owner, repository_name,
+         repository_revision, github_installation_id, settings_snapshot,
+         settings_snapshot_sha256, workspace_settings_version_id
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb,
+         digest($10::jsonb::text, 'sha256'), $11
+       )`,
+      [
+        workspaceId,
+        candidateGeneration,
+        orgId,
+        source.spec_version,
+        source.repository_forge,
+        source.repository_owner,
+        source.repository_name,
+        source.repository_revision,
+        source.github_installation_id,
+        settings.document,
+        settings.id,
+      ],
+    );
+    await persistCloudWorkspaceSetupSecrets(tx, {
+      workspaceId,
+      organizationId: orgId,
+      generation: candidateGeneration,
+      secrets: resolvedSettings.setupSecrets,
+    });
+    await tx.query(
+      `INSERT INTO cloud_workspace_provider_bindings (
+         workspace_id, generation, org_id, provider
+       ) VALUES ($1, $2, $3, $4)`,
+      [workspaceId, candidateGeneration, orgId, candidate.provider],
+    );
+    const insertedIntent = await tx.query<IntentRow>(
+      `INSERT INTO cloud_workspace_lifecycle_intents (
+         id, workspace_id, generation, org_id, requested_by, operation,
+         idempotency_key, request_sha256, affects_workspace
+       ) VALUES ($1, $2, $3, $4, $5, 'stop', $6, $7, false)
+       RETURNING id, workspace_id, operation, request_sha256, state,
+                 attempt_count, created_at, updated_at`,
+      [
+        intentId,
+        workspaceId,
+        workspace.current_generation,
+        orgId,
+        user.id,
+        key,
+        digest,
+      ],
+    );
+    const insertedTransition = await tx.query<GenerationTransitionRow>(
+      `INSERT INTO cloud_workspace_generation_transitions (
+         id, workspace_id, org_id, requested_by, operation,
+         source_generation, template_generation, candidate_generation,
+         state, drain_intent_id
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draining', $9)
+       RETURNING id, operation, source_generation, template_generation,
+                 candidate_generation, state, error_code, error_message,
+                 created_at, updated_at, completed_at`,
+      [
+        transitionId,
+        workspaceId,
+        orgId,
+        user.id,
+        body.operation,
+        workspace.current_generation,
+        templateGeneration,
+        candidateGeneration,
+        intentId,
+      ],
+    );
+    await tx.query(
+      `UPDATE cloud_workspace_lifecycle_intents
+       SET generation_transition_id = $2
+       WHERE id = $1`,
+      [intentId, transitionId],
+    );
+    const checkpointRequest = upgradeCheckpointId ? null : await enqueueWorkspaceCheckpointRequest(tx, {
+      workspaceId,
+      organizationId: orgId,
+      generation: workspace.current_generation,
+      requestedBy: user.id,
+      lifecycleIntentId: intentId,
+      reason: "before_rebuild",
+      idempotencyKey: `generation.${transitionId}`,
+    });
+    if (upgradeCheckpointId) {
+      await retireCloudWorkspaceRuntimeAccess(tx, { workspaceId, organizationId: orgId, generation: workspace.current_generation, reason: "generation_replacement_requested" });
+      await tx.query(`UPDATE cloud_workspaces SET desired_state='running',status=$3,authority_epoch=authority_epoch+1,
+        version=version+1,updated_at=now() WHERE id=$1 AND org_id=$2`, [workspaceId,orgId,automaticWake ? "waking" : "stopping"]);
+    }
+    await audit(
+      tx,
+      orgId,
+      user.id,
+      upgradeInput ? "cloud_workspace.runtime_upgrade_requested" : `cloud_workspace.generation_${body.operation}_requested`,
+      {
+        workspaceId,
+        transitionId,
+        drainIntentId: intentId,
+        sourceGeneration: workspace.current_generation,
+        templateGeneration,
+        candidateGeneration,
+        checkpointRequestId: checkpointRequest?.id ?? null,
+        checkpointDeadlineAt: checkpointRequest?.deadlineAt.toISOString() ?? null,
+      },
+    );
+    return {
+      workspace: await loadWorkspace(tx, orgId, workspaceId, user.id),
+      intent: insertedIntent.rows[0]!,
+      transition: insertedTransition.rows[0]!,
+      replayed: false,
+      ...(upgradeInput && upgradedRuntime ? { upgrade: {
+        operationId: upgradeInput.operationId, sourceGeneration: upgradeInput.expectedGeneration,
+        generation: candidateGeneration, runtimeId: upgradedRuntime.runtimeId, transitionId, unchanged: false,
+      } } : {}),
+    };
   };
 }
 
@@ -2611,484 +3117,8 @@ export function createCloudWorkspaceRoutes(
       ...(body.operation === "recover" ? { recoveryCheckpointId: body.checkpointId, sourceGeneration: body.sourceGeneration, ...(body.allowDataLoss ? { allowDataLoss: true } : {}) } : {}),
     });
 
-    const result = await withSystemTx(pool, async (tx) => {
-      if (upgradeInput) {
-        const account = (await tx.query<{ staff_role: StaffRole | null }>(
-          "SELECT staff_role FROM users WHERE id=$1 AND auth_status='active' AND deleted_at IS NULL FOR SHARE", [user.id])).rows[0];
-        requireOrganizationCreationCapability(account?.staff_role ?? null);
-      }
-      await requireOrganizationMembership(tx, orgId, user.id);
-      await lockCloudOrganization(tx, orgId);
-      const workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true, user.id);
-      await authorizeCloudWorkspaceCleanup(tx,{organizationId:orgId,workspaceId,actorUserId:user.id});
-      const existing = await loadIntentByKey(tx, orgId, key);
-      if (existing) {
-        const transition = await loadTransitionByRequestIntent(
-          tx,
-          orgId,
-          workspaceId,
-          existing.id,
-        );
-        if (upgradeInput) {
-          assertIdempotencyMatch(existing, workspaceId, requestDigest(normalize(null)), user.id);
-          const generation = transition?.candidate_generation ?? upgradeInput.expectedGeneration;
-          const accepted = await loadGenerationSource(tx, { workspaceId, organizationId: orgId, generation });
-          if (!accepted.runtime) throw new CloudRuntimeError("cloud_runtime_unavailable");
-          return { workspace, intent: existing, transition, replayed: true, upgrade: {
-            operationId: upgradeInput.operationId, sourceGeneration: upgradeInput.expectedGeneration,
-            generation, runtimeId: accepted.runtime.runtimeId, transitionId: transition?.id ?? null, unchanged: transition === null,
-          } };
-        }
-        if (!transition) {
-          throw new HttpError(
-            409,
-            "idempotency_key_reused",
-            "Idempotency-Key was already used for another operation",
-          );
-        }
-        // Replays use the accepted immutable target, even after deployment
-        // configuration or the managed default has changed.
-        const accepted = await tx.query<CloudWorkspaceProvisioningProfile>(
-          `SELECT provider, image_ref AS "imageRef", architecture,
-                  cpu_millicores AS "cpuMillicores", memory_mib AS "memoryMiB",
-                  storage_mib AS "storageMiB", source_commit AS "sourceCommit",
-                  sandbox_class AS "sandboxClass"
-           FROM cloud_workspace_generations
-           WHERE workspace_id = $1 AND org_id = $2 AND generation = $3`,
-          [workspaceId, orgId, transition.candidate_generation],
-        );
-        const profile = accepted.rows[0];
-        if (!profile) {
-          throw new HttpError(
-            409,
-            "idempotency_key_reused",
-            "Accepted generation is unavailable",
-          );
-        }
-        assertIdempotencyMatch(
-          existing,
-          workspaceId,
-          requestDigest(normalize(profile)),
-          user.id,
-        );
-        return { workspace, intent: existing, transition, replayed: true };
-      }
-
-      if (upgradeInput && workspace.current_generation !== upgradeInput.expectedGeneration) {
-        throw new HttpError(409, "cloud_generation_changed", "Cloud workspace generation changed before the runtime upgrade");
-      }
-
-      await authorizeCloudWorkspaceActor(tx,{organizationId:orgId,workspaceId,actorUserId:user.id,capability:"manage"});
-      const authorization = await authorizeCloudWorkspaceOperation(tx, {
-        workspaceId,
-        organizationId: orgId,
-        teamId: workspace.team_id,
-        actorUserId: workspace.owner_user_id,
-        billingOwnerUserId: workspace.owner_user_id,
-        workosEnabled: options.workosEnabled === true,
-        requireWorkspaceOwner: true,
-      });
-      await refreshCloudWorkspaceBillingEpoch(tx, {
-        workspaceId,
-        organizationId: orgId,
-        authorization,
-      });
-      if (body.operation === "recover") {
-        const recovery = await createCloudRecoveryTransition(tx, {
-          workspaceId, organizationId: orgId, sourceGeneration: body.sourceGeneration,
-          checkpointId: body.checkpointId, actorUserId: user.id, workosEnabled: options.workosEnabled === true,
-          config: options.setupSecretKeyV1 === undefined ? config : { ...config,
-            settingsSecretEncryptionKeys: options.setupSecretKeyV1 ? { 1: options.setupSecretKeyV1 } : {},
-            currentSettingsSecretEncryptionKeyVersion: options.setupSecretKeyV1 ? 1 : null },
-          idempotencyKey: key, requestDigest: (profile: CloudWorkspaceProvisioningProfile) => requestDigest(normalize(profile)),
-          ...(body.allowDataLoss !== undefined ? { allowDataLoss: body.allowDataLoss } : {}),
-        });
-        return { ...recovery, workspace: await loadWorkspace(tx, orgId, workspaceId, user.id), replayed: false };
-      }
-      if (upgradeInput && (workspace.status === "busy" || await cloudWorkspaceHasActiveWork(tx, {
-        workspaceId, organizationId: orgId, generation: workspace.current_generation,
-      }))) {
-        throw new HttpError(409, "cloud_workspace_busy", "Stop running agents and active workspace work before upgrading the runtime");
-      }
-      const stoppedUpgrade = upgradeInput && ["stopped", "archived", "failed"].includes(workspace.status) && workspace.desired_state !== "deleted";
-      if (workspace.deleted_at !== null || (!stoppedUpgrade && (workspace.desired_state !== "running" || workspace.status !== "ready"))) {
-        throw new HttpError(409, "cloud_workspace_not_stable", "Cloud workspace must be ready before replacing its generation");
-      }
-      const active = await tx.query(
-        `SELECT 1
-         FROM cloud_workspace_generation_transitions
-         WHERE workspace_id = $1 AND org_id = $2
-           AND state IN ('draining', 'provisioning', 'setting_up', 'rolling_back')`,
-        [workspaceId, orgId],
-      );
-      if ((active.rowCount ?? 0) !== 0) {
-        throw new HttpError(
-          409,
-          "cloud_generation_transition_active",
-          "A cloud workspace generation transition is already active",
-        );
-      }
-      const lifecycle = await tx.query(
-        `SELECT 1 FROM cloud_workspace_lifecycle_intents
-         WHERE workspace_id = $1 AND affects_workspace
-           AND state IN ('queued', 'dispatching', 'observing')`,
-        [workspaceId],
-      );
-      if ((lifecycle.rowCount ?? 0) !== 0) {
-        throw new HttpError(
-          409,
-          "cloud_workspace_lifecycle_active",
-          "Cloud workspace lifecycle work must finish before rebuilding",
-        );
-      }
-
-      const templateGeneration =
-        body.operation === "rollback"
-          ? body.sourceGeneration
-          : workspace.current_generation;
-      if (
-        body.operation === "rollback" &&
-        templateGeneration >= workspace.current_generation
-      ) {
-        throw new HttpError(
-          422,
-          "invalid_rollback_generation",
-          "Rollback must select an older qualified generation",
-        );
-      }
-      const template = await tx.query<{
-        provider: CloudWorkspaceProviderName;
-        image_ref: string;
-        sandbox_class: "container" | "linux-vm" | null;
-        architecture: "linux/amd64" | "linux/arm64";
-        cpu_millicores: number;
-        memory_mib: number;
-        storage_mib: number;
-        source_commit: string | null;
-        repository_forge: string;
-        repository_owner: string;
-        repository_name: string;
-        repository_revision: string;
-        github_installation_id: string | null;
-        spec_version: number;
-        settings_snapshot: unknown;
-        settings_snapshot_sha256: Buffer;
-      }>(
-        `SELECT g.provider, g.image_ref, g.sandbox_class, g.architecture, g.cpu_millicores,
-                g.memory_mib, g.storage_mib, g.source_commit,
-                ss.repository_forge, ss.repository_owner, ss.repository_name,
-                ss.repository_revision, ss.github_installation_id,
-                ss.spec_version, ss.settings_snapshot,
-                ss.settings_snapshot_sha256
-         FROM cloud_workspace_generations g
-         JOIN cloud_workspace_setup_specs ss
-           ON ss.workspace_id = g.workspace_id
-          AND ss.generation = g.generation AND ss.org_id = g.org_id
-         WHERE g.workspace_id = $1 AND g.org_id = $2 AND g.generation = $3
-           AND (
-             $4::boolean = false
-             OR EXISTS (
-               SELECT 1 FROM cloud_workspace_setup_attestations sa
-               WHERE sa.workspace_id = g.workspace_id
-                 AND sa.generation = g.generation AND sa.org_id = g.org_id
-             )
-           )`,
-        [workspaceId, orgId, templateGeneration, body.operation === "rollback"],
-      );
-      const source = template.rows[0];
-      if (!source) {
-        throw new HttpError(
-          404,
-          "cloud_generation_not_qualified",
-          "Qualified cloud workspace generation not found",
-        );
-      }
-      const sourceScope = { workspaceId, organizationId: orgId, generation: templateGeneration };
-      const qualificationMode = config.runtime?.qualificationMode ?? cloudRuntimeQualificationMode();
-      const sourcePins = upgradeInput
-        ? await loadGenerationSource(tx, sourceScope)
-        : await requireGenerationRuntime(tx, sourceScope, qualificationMode);
-      let upgradedRuntime: CloudRuntimePin | undefined;
-      let upgradeCheckpointId: string | undefined;
-      if (upgradeInput) {
-        if (!sourcePins.runtime) throw new HttpError(409, "cloud_runtime_upgrade_not_supported", "Runtime upgrades require a v4 workspace");
-        if (config.setupExecution && config.setupExecution.engineProtocolVersion !== CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION) {
-          throw new CloudRuntimeError("cloud_runtime_unavailable");
-        }
-        const selected = await selectCloudRuntime(tx, qualificationMode, sourcePins.runtime.baseImageId);
-        if (!selected) throw new CloudRuntimeError("cloud_runtime_unavailable");
-        if (selected.pin.runtimeId === sourcePins.runtime.runtimeId) {
-          // A completed, non-affecting lifecycle receipt makes even a no-op
-          // replay stable after a later channel release. It never dispatches.
-          const receipt = (await tx.query<IntentRow>(`INSERT INTO cloud_workspace_lifecycle_intents
-            (id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,affects_workspace,state,completed_at)
-            VALUES($1,$2,$3,$4,$5,'stop',$6,$7,false,'succeeded',now()) RETURNING *`,
-          [randomUUID(),workspaceId,workspace.current_generation,orgId,user.id,key,requestDigest(normalize(null))])).rows[0]!;
-          await audit(tx, orgId, user.id, "cloud_workspace.runtime_upgrade_unchanged", { workspaceId, generation: workspace.current_generation });
-          return { workspace, intent: receipt, transition: null, replayed: false, upgrade: {
-            operationId: upgradeInput.operationId, sourceGeneration: upgradeInput.expectedGeneration,
-            generation: workspace.current_generation, runtimeId: selected.pin.runtimeId, transitionId: null, unchanged: true,
-          } };
-        }
-        const sourceOrder = (await tx.query<{ release_order: string | null }>(
-          "SELECT max(release_order)::text AS release_order FROM cloud_runtime_channel_releases WHERE channel='alpha' AND runtime_id=$1 AND confirmed_at IS NOT NULL", [sourcePins.runtime.runtimeId])).rows[0]!.release_order;
-        if (sourceOrder === null || selected.releaseOrder <= BigInt(sourceOrder)) throw new CloudRuntimeError("cloud_runtime_unavailable");
-        upgradedRuntime = selected.pin;
-        if (stoppedUpgrade) {
-          const head = (await tx.query<{ current_checkpoint_id: string | null }>(
-            "SELECT current_checkpoint_id FROM workspace_content_heads WHERE workspace_id=$1 AND org_id=$2", [workspaceId, orgId])).rows[0];
-          if (!head?.current_checkpoint_id) throw new HttpError(409, "cloud_recovery_checkpoint_unavailable", "A durable checkpoint is required to upgrade a stopped workspace");
-          // A failed upgrade may leave its source revoked after rollback. Its
-          // completed rebuild capture still fences writes unless newer work
-          // or a later source admission invalidates the shared freshness checks.
-          const point = await requireCloudRecoveryPoint(tx, { workspaceId, organizationId: orgId,
-            sourceGeneration: workspace.current_generation, checkpointId: head.current_checkpoint_id, allowBeforeRebuild: true });
-          if (!point.lossless) throw new HttpError(409, "recovery_acknowledgement_required", "Recover the workspace from its checkpoint before upgrading the runtime");
-          upgradeCheckpointId = point.id;
-        }
-      }
-      if (body.operation === "rollback") {
-        const policy = await tx.query<{ current: boolean }>(
-          `SELECT cloud_workspace_generation_policy_current(
-             $1, $2, $3
-           ) AS current`,
-          [workspaceId, templateGeneration, orgId],
-        );
-        if (policy.rows[0]?.current !== true) {
-          throw new HttpError(
-            409,
-            "cloud_managed_policy_rebuild_required",
-            "This rollback snapshot predates the current managed policy; create an upgrade generation instead",
-          );
-        }
-      }
-      const providerConnection = await loadGenerationCloudProviderConnection(
-        tx,
-        {
-          workspaceId,
-          organizationId: orgId,
-          generation: workspace.current_generation,
-        },
-      );
-      const templateProfile: CloudWorkspaceProvisioningProfile =
-        sourcePins.runtime ? sourcePins.profile : body.operation !== "rollback"
-          ? cloudWorkspaceProvisioningProfile(config, source.provider)
-          : {
-              provider: source.provider,
-              imageRef: source.image_ref,
-              ...(source.sandbox_class?{sandboxClass:source.sandbox_class}:{}),
-              architecture: source.architecture,
-              cpuMillicores: source.cpu_millicores,
-              memoryMiB: source.memory_mib,
-              storageMiB: source.storage_mib,
-              sourceCommit: source.source_commit,
-            };
-      const candidate = !sourcePins.runtime && body.operation === "upgrade" && providerConnection?.credentialSource === "hosted" && !authorization.isPersonal
-        ? await resolveComputerImage(tx, orgId, templateProfile) : templateProfile;
-      const digest = requestDigest(normalize(candidate));
-      const quota = await loadQuota(tx, orgId), usage = await loadUsage(tx, orgId);
-      if (upgradeInput && workspace.desired_state !== "running" && Number(usage.running) + 1 > quota.max_running_workspaces) {
-        throw new HttpError(409, "cloud_quota_exceeded", "Cloud workspace running quota would be exceeded");
-      }
-      assertGenerationReplacementQuota(quota, usage, candidate);
-
-      const nextGeneration = await tx.query<{ generation: number }>(
-        `SELECT coalesce(max(generation), 0)::integer + 1 AS generation
-         FROM cloud_workspace_generations
-         WHERE workspace_id = $1`,
-        [workspaceId],
-      );
-      const candidateGeneration = nextGeneration.rows[0]!.generation;
-      const transitionId = randomUUID();
-      const intentId = randomUUID();
-
-      if (
-        !providerConnection ||
-        providerConnection.provider !== candidate.provider
-      ) {
-        throw new HttpError(
-          409,
-          "cloud_provider_connection_unavailable",
-          "The cloud provider connection is not available",
-        );
-      }
-
-      await copyGenerationPins(tx, {
-        workspaceId, organizationId: orgId, sourceGeneration: templateGeneration,
-        targetGeneration: candidateGeneration, actorUserId: user.id,
-        providerConnectionId: providerConnection.id, legacyProfile: candidate,
-        qualificationMode,
-        ...(upgradedRuntime ? { runtimeUpgrade: upgradedRuntime } : {}),
-        ...(upgradeCheckpointId ? { recoveryCheckpointId: upgradeCheckpointId } : {}),
-      });
-      const resolvedSettings =
-        body.operation === "rollback" || upgradeInput
-          ? await cloneDatabaseCloudWorkspaceSettingsForRollback(tx, {
-              workspaceId,
-              organizationId: orgId,
-              sourceGeneration: templateGeneration,
-              targetGeneration: candidateGeneration,
-              secretEncryptionKeys:
-                options.setupSecretKeyV1 !== undefined
-                  ? options.setupSecretKeyV1
-                    ? { 1: options.setupSecretKeyV1 }
-                    : {}
-                  : config.settingsSecretEncryptionKeys,
-              currentSecretEncryptionKeyVersion:
-                options.setupSecretKeyV1 !== undefined
-                  ? options.setupSecretKeyV1
-                    ? 1
-                    : null
-                  : config.currentSettingsSecretEncryptionKeyVersion,
-            })
-          : await resolveDatabaseCloudWorkspaceSettings(tx, {
-              organizationId: orgId,
-              repositoryId: workspace.repository_id,
-              workspaceId,
-              generation: candidateGeneration,
-              actorUserId: workspace.owner_user_id,
-              isPersonal: authorization.isPersonal,
-              secretEncryptionKeys:
-                options.setupSecretKeyV1 !== undefined
-                  ? options.setupSecretKeyV1
-                    ? { 1: options.setupSecretKeyV1 }
-                    : {}
-                  : config.settingsSecretEncryptionKeys,
-              currentSecretEncryptionKeyVersion:
-                options.setupSecretKeyV1 !== undefined
-                  ? options.setupSecretKeyV1
-                    ? 1
-                    : null
-                  : config.currentSettingsSecretEncryptionKeyVersion,
-            });
-      const settings = await persistDatabaseCloudWorkspaceSettings(tx, {
-        workspaceId,
-        organizationId: orgId,
-        generation: candidateGeneration,
-        actorUserId: user.id,
-        settings: resolvedSettings,
-      });
-      await tx.query(
-        `INSERT INTO cloud_workspace_setup_specs (
-           workspace_id, generation, org_id, spec_version,
-           repository_forge, repository_owner, repository_name,
-           repository_revision, github_installation_id, settings_snapshot,
-           settings_snapshot_sha256, workspace_settings_version_id
-         ) VALUES (
-           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb,
-           digest($10::jsonb::text, 'sha256'), $11
-         )`,
-        [
-          workspaceId,
-          candidateGeneration,
-          orgId,
-          source.spec_version,
-          source.repository_forge,
-          source.repository_owner,
-          source.repository_name,
-          source.repository_revision,
-          source.github_installation_id,
-          settings.document,
-          settings.id,
-        ],
-      );
-      await persistCloudWorkspaceSetupSecrets(tx, {
-        workspaceId,
-        organizationId: orgId,
-        generation: candidateGeneration,
-        secrets: resolvedSettings.setupSecrets,
-      });
-      await tx.query(
-        `INSERT INTO cloud_workspace_provider_bindings (
-           workspace_id, generation, org_id, provider
-         ) VALUES ($1, $2, $3, $4)`,
-        [workspaceId, candidateGeneration, orgId, candidate.provider],
-      );
-      const insertedIntent = await tx.query<IntentRow>(
-        `INSERT INTO cloud_workspace_lifecycle_intents (
-           id, workspace_id, generation, org_id, requested_by, operation,
-           idempotency_key, request_sha256, affects_workspace
-         ) VALUES ($1, $2, $3, $4, $5, 'stop', $6, $7, false)
-         RETURNING id, workspace_id, operation, request_sha256, state,
-                   attempt_count, created_at, updated_at`,
-        [
-          intentId,
-          workspaceId,
-          workspace.current_generation,
-          orgId,
-          user.id,
-          key,
-          digest,
-        ],
-      );
-      const insertedTransition = await tx.query<GenerationTransitionRow>(
-        `INSERT INTO cloud_workspace_generation_transitions (
-           id, workspace_id, org_id, requested_by, operation,
-           source_generation, template_generation, candidate_generation,
-           state, drain_intent_id
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draining', $9)
-         RETURNING id, operation, source_generation, template_generation,
-                   candidate_generation, state, error_code, error_message,
-                   created_at, updated_at, completed_at`,
-        [
-          transitionId,
-          workspaceId,
-          orgId,
-          user.id,
-          body.operation,
-          workspace.current_generation,
-          templateGeneration,
-          candidateGeneration,
-          intentId,
-        ],
-      );
-      await tx.query(
-        `UPDATE cloud_workspace_lifecycle_intents
-         SET generation_transition_id = $2
-         WHERE id = $1`,
-        [intentId, transitionId],
-      );
-      const checkpointRequest = upgradeCheckpointId ? null : await enqueueWorkspaceCheckpointRequest(tx, {
-        workspaceId,
-        organizationId: orgId,
-        generation: workspace.current_generation,
-        requestedBy: user.id,
-        lifecycleIntentId: intentId,
-        reason: "before_rebuild",
-        idempotencyKey: `generation.${transitionId}`,
-      });
-      if (upgradeCheckpointId) {
-        await retireCloudWorkspaceRuntimeAccess(tx, { workspaceId, organizationId: orgId, generation: workspace.current_generation, reason: "generation_replacement_requested" });
-        await tx.query(`UPDATE cloud_workspaces SET desired_state='running',status='stopping',authority_epoch=authority_epoch+1,
-          version=version+1,updated_at=now() WHERE id=$1 AND org_id=$2`, [workspaceId,orgId]);
-      }
-      await audit(
-        tx,
-        orgId,
-        user.id,
-        upgradeInput ? "cloud_workspace.runtime_upgrade_requested" : `cloud_workspace.generation_${body.operation}_requested`,
-        {
-          workspaceId,
-          transitionId,
-          drainIntentId: intentId,
-          sourceGeneration: workspace.current_generation,
-          templateGeneration,
-          candidateGeneration,
-          checkpointRequestId: checkpointRequest?.id ?? null,
-          checkpointDeadlineAt: checkpointRequest?.deadlineAt.toISOString() ?? null,
-        },
-      );
-      return {
-        workspace: await loadWorkspace(tx, orgId, workspaceId, user.id),
-        intent: insertedIntent.rows[0]!,
-        transition: insertedTransition.rows[0]!,
-        replayed: false,
-        ...(upgradeInput && upgradedRuntime ? { upgrade: {
-          operationId: upgradeInput.operationId, sourceGeneration: upgradeInput.expectedGeneration,
-          generation: candidateGeneration, runtimeId: upgradedRuntime.runtimeId, transitionId, unchanged: false,
-        } } : {}),
-      };
-    });
+    const result = await withSystemTx(pool, tx => createCloudWorkspaceGenerationReplacement(config, options)(tx,
+      { user, orgId, workspaceId, key, upgradeInput, body, normalize }));
 
     if (result.replayed) c.header("Idempotency-Replayed", "true");
     if ("upgrade" in result && result.upgrade) return c.json(result.upgrade, result.replayed || result.upgrade.unchanged ? 200 : 202);
@@ -3188,6 +3218,21 @@ export function createCloudWorkspaceRoutes(
         );
       }
       if (operation === "wake") {
+        const automatic = workspace.desired_state === "running" && workspace.runtime_id
+          ? (await tx.query(`SELECT 1 FROM cloud_workspace_generation_transitions transition
+            JOIN cloud_workspace_lifecycle_intents drain ON drain.id=transition.drain_intent_id
+            WHERE transition.workspace_id=$1 AND transition.org_id=$2
+              AND transition.state IN ('draining','provisioning','setting_up','rolling_back')
+              AND drain.idempotency_key LIKE 'runtime-upgrade:automatic-wake:%' LIMIT 1`, [workspaceId,orgId])).rowCount : 0;
+        if (automatic) {
+          // Each device retains its own replayable receipt; one shared
+          // generation transition owns all compute and setup work.
+          const receipt = (await tx.query<IntentRow>(`INSERT INTO cloud_workspace_lifecycle_intents
+            (id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,state,completed_at)
+            VALUES($1,$2,$3,$4,$5,'wake',$6,$7,'succeeded',now()) RETURNING *`,
+          [randomUUID(),workspaceId,workspace.current_generation,orgId,user.id,key,digest])).rows[0]!;
+          return { workspace,intent:receipt,replayed:false };
+        }
         await requireGenerationRuntime(tx, { workspaceId, organizationId: orgId, generation: workspace.current_generation },
           config?.runtime?.qualificationMode ?? cloudRuntimeQualificationMode());
         const quarantined = await tx.query(`SELECT 1 FROM cloud_workspace_restore_incidents

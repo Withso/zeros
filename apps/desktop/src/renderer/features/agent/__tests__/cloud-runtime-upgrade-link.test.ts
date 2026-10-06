@@ -31,7 +31,8 @@ describe("composer runtime update entry", () => {
       .toContain("{...cloudRuntimeUpgradeComposerContext(chatThread.folder, interactive)}");
   });
   it("discovers updates while the workspace details panel is closed", () => {
-    expect(render()).toContain("Update runtime");
+    expect(render()).toContain("Updates automatically the next time this workspace wakes");
+    expect(render()).not.toContain("<button");
     expect(state.reads).toHaveBeenCalledWith("runtime", "runtime-key", { enabled: true, maxAgeMs: 10_000 });
   });
   it("supports the optional agents discovery reason and a qualified-runtime fallback", () => {
@@ -39,7 +40,7 @@ describe("composer runtime update entry", () => {
     expect(render()).toBe("");
     expect(render({ required: true })).toContain("Agents need a runtime update");
     state.available = true;
-    expect(render()).toContain("Runtime update available");
+    expect(render()).toContain("Updates automatically the next time this workspace wakes");
   });
   it.each(["hidden", "nonstaff", "nonmanager", "local"])("keeps %s composer surfaces inert", reason => {
     if (reason === "nonstaff") state.internal = false;

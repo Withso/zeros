@@ -50,22 +50,22 @@ describe("staff runtime update controls", () => {
     state.internal = true;
     expect(render("/local/workspace")).toBe("");
   });
-  it("shows the current runtime and explicit update action only behind the effective staff feature gate", () => {
+  it("shows the current runtime and automatic update notice only behind the effective staff feature gate", () => {
     expect(render()).not.toContain("Runtime ·");
     expect(render()).not.toContain("Update runtime");
     state.internal = true;
     Object.assign(state.workspace!, { status: "ready", recovery: null });
     expect(render()).toContain("Runtime ·");
     expect(render()).toContain("r1-aaaaaaaa");
-    expect(render()).toContain("Update available");
-    expect(render()).toContain("Update runtime");
+    expect(render()).toContain("Updates automatically the next time this workspace wakes");
+    expect(render()).not.toContain("Update runtime");
   });
   it("disables the update for running work and non-managers", () => {
     state.internal = true;
     Object.assign(state.workspace!, { status: "ready", recovery: null });
     state.availability!.unavailableReason = "cloud_workspace_busy";
-    expect(render()).toContain('<button disabled="">Update runtime</button>');
-    expect(render()).toContain("Stop running agents");
+    expect(render()).not.toContain("Update runtime");
+    expect(render()).toContain("Updates automatically the next time this workspace wakes");
     state.workspace!.capabilities.canManage = false;
     expect(render()).not.toContain("Update runtime");
   });
@@ -75,16 +75,15 @@ describe("staff runtime update controls", () => {
     state.availability!.transition = { id: "33333333-3333-4333-8333-333333333333", generation: 2,
       runtimeId: state.availability!.latestRuntimeId!, state: "draining", error: null };
     state.availability!.unavailableReason = "cloud_generation_transition_active";
-    expect(render()).toContain("Updating runtime…");
-    expect(render()).toContain("Saving checkpoint");
+    expect(render()).toContain("Starting the cloud workspace…");
     expect(render()).not.toContain("Update available");
   });
   it("disables immediately for a locally observed turn before the server's busy projection arrives", () => {
     state.internal = true;
     state.running = true;
     Object.assign(state.workspace!, { status: "ready", recovery: null });
-    expect(render()).toContain('<button disabled="">Update runtime</button>');
-    expect(render()).toContain("Stop running agents");
+    expect(render()).not.toContain("Update runtime");
+    expect(render()).toContain("Updates automatically the next time this workspace wakes");
   });
 });
 describe("cloud checkpoint recovery controls", () => {

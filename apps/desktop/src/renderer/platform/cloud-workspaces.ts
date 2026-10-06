@@ -3,8 +3,7 @@ import { authorizeCloudGithubSource } from "./cloud-github";
 import { z } from "zod";
 import { CloudComputerAdminWorkspaceSchema } from "@zeros/protocol/cloud-computer-v2";
 import { CloudNativeCapabilitiesSchema } from "@zeros/protocol/cloud-agent-execution";
-import { CloudRuntimeUpgradeAvailabilitySchema, CloudRuntimeUpgradeRequestSchema, CloudRuntimeUpgradeResponseSchema,
-  type CloudRuntimeUpgradeAvailability, type CloudRuntimeUpgradeRequest, type CloudRuntimeUpgradeResponse } from "@zeros/protocol/cloud-runtime-lifecycle";
+import { CloudRuntimeUpgradeAvailabilitySchema, type CloudRuntimeUpgradeAvailability } from "@zeros/protocol/cloud-runtime-lifecycle";
 import { getSession } from "../features/auth/auth-store";
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
@@ -164,17 +163,6 @@ export async function getCloudRuntimeUpgradeAvailability(target: CloudWorkspaceT
   const result = await request(runtimeUpgradePath(target), CloudRuntimeUpgradeAvailabilitySchema);
   if (result.organizationId !== target.organizationId || result.workspaceId !== target.workspaceId)
     throw new Error("Cloud runtime details changed workspace identity");
-  return result;
-}
-
-export async function upgradeCloudWorkspaceRuntime(target: CloudWorkspaceTarget, input: CloudRuntimeUpgradeRequest): Promise<CloudRuntimeUpgradeResponse> {
-  const body = CloudRuntimeUpgradeRequestSchema.parse(input);
-  const result = await request(runtimeUpgradePath(target), CloudRuntimeUpgradeResponseSchema, {
-    body, idempotencyKey: body.operationId,
-  });
-  if (result.operationId !== body.operationId || result.sourceGeneration !== body.expectedGeneration ||
-      (result.unchanged ? result.generation !== body.expectedGeneration : result.generation <= body.expectedGeneration))
-    throw new Error("Cloud runtime update returned a different operation");
   return result;
 }
 
