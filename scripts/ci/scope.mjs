@@ -809,8 +809,13 @@ function assertAncestor(base, head, cwd, identity) {
 export function collectPrChanges({ env, cwd } = {}) {
   if (!env) throw new TypeError("Event environment is required.");
   let baseSha = validSha(comparisonBase(env));
-  let testedSha = validSha(env.GITHUB_SHA);
-  let sourceSha = validSha(env.PULL_REQUEST_HEAD_SHA) ?? testedSha;
+  // Event identities describe the source; only Git can confirm the checkout.
+  let testedSha = null;
+  let sourceSha = validSha(
+    env.EVENT_NAME === "pull_request"
+      ? env.PULL_REQUEST_HEAD_SHA
+      : env.GITHUB_SHA,
+  );
   try {
     if (!EVENTS.includes(env.EVENT_NAME))
       throw new GitEvidenceError(
@@ -824,7 +829,7 @@ export function collectPrChanges({ env, cwd } = {}) {
     sourceSha =
       env.EVENT_NAME === "pull_request"
         ? validSha(env.PULL_REQUEST_HEAD_SHA)
-        : testedSha;
+        : (sourceSha ?? testedSha);
     if (!sourceSha)
       throw new GitEvidenceError(
         "source-sha: PULL_REQUEST_HEAD_SHA is missing or invalid.",
@@ -922,7 +927,7 @@ export function collectLocalChanges({ cwd } = {}) {
 }
 
 function fullIdentity(env, cwd) {
-  let testedSha = validSha(env.GITHUB_SHA);
+  let testedSha = null;
   try {
     testedSha = gitSha(["rev-parse", "--verify", "HEAD^{commit}"], cwd);
   } catch (error) {
@@ -933,7 +938,7 @@ function fullIdentity(env, cwd) {
     sourceSha:
       env.EVENT_NAME === "pull_request"
         ? (validSha(env.PULL_REQUEST_HEAD_SHA) ?? testedSha)
-        : testedSha,
+        : (validSha(env.GITHUB_SHA) ?? testedSha),
     testedSha,
   };
 }

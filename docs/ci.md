@@ -157,7 +157,13 @@ reasons: [ <sorted reasons>, ... ]
 
 Unknown commit identities are `null`; known identities are full SHAs. Object
 keys are sorted recursively, requests are deduplicated, and lane values and
-`full` are real booleans. The SHA-256 policy digest includes the canonical registry
+`full` are real booleans. The tested identity is confirmed from checked-out
+`HEAD`, never inferred from event variables. Full mode preserves the declared
+event source (`PULL_REQUEST_HEAD_SHA` for PRs, `GITHUB_SHA` for other events),
+falling back to `HEAD` when no source is supplied. A missing checkout leaves
+`tested_sha` null while retaining a supplied source SHA.
+
+The SHA-256 policy digest includes the canonical registry
 and imported database input list. The ledger is at most 64 KiB; diagnostics retain
 up to 40 bounded reasons and an omitted-count reason when needed. Selection never
 depends on diagnostic truncation.
