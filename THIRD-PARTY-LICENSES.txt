@@ -30,7 +30,7 @@ TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 - @anthropic-ai/claude-agent-sdk@0.3.288: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.35: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (641 resolved package/version records)
+PACKAGE INVENTORY (640 resolved package/version records)
 -----------------
 
 @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.288
@@ -643,7 +643,7 @@ PACKAGE INVENTORY (641 resolved package/version records)
   Source: https://github.com/marijnh/find-cluster-break
   License documents: 9360b00fdd09
 
-@modelcontextprotocol/sdk@1.30.0
+@modelcontextprotocol/sdk@1.32.1
   License: MIT
   Surfaces: root pnpm workspace
   Author: Anthropic, PBC (https://anthropic.com)
@@ -4084,12 +4084,6 @@ tweetnacl@0.14.5
   Source: https://github.com/dchest/tweetnacl-js
   License documents: 88d9b4eb6057
 
-type-is@2.0.1
-  License: MIT
-  Surfaces: root pnpm workspace
-  Source: https://github.com/jshttp/type-is
-  License documents: 23d466b1b134
-
 type-is@2.1.0
   License: MIT
   Surfaces: root pnpm workspace
@@ -7205,8 +7199,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT 23d466b1b134
 SHA-256: 23d466b1b134b415b66fa50c6526b4cf3e7b9258554da88d3abb371721e7ce68
-Applies to: body-parser@2.3.0, type-is@2.0.1, type-is@2.1.0
-Source labels: body-parser@2.3.0 — LICENSE; type-is@2.0.1 — LICENSE; type-is@2.1.0 — LICENSE
+Applies to: body-parser@2.3.0, type-is@2.1.0
+Source labels: body-parser@2.3.0 — LICENSE; type-is@2.1.0 — LICENSE
 ================================================================================
 
 (The MIT License)
@@ -9499,8 +9493,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 DOCUMENT 5e13dbbc1d12
 SHA-256: 5e13dbbc1d120fc2a03cecde7c91424ae2d7de11b63d58ded2f4431e261ee50d
-Applies to: @modelcontextprotocol/sdk@1.30.0
-Source labels: @modelcontextprotocol/sdk@1.30.0 — LICENSE
+Applies to: @modelcontextprotocol/sdk@1.32.1
+Source labels: @modelcontextprotocol/sdk@1.32.1 — LICENSE
 ================================================================================
 
 MIT License

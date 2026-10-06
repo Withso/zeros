@@ -147,7 +147,7 @@
     "@fontsource-variable/geist": "^5.2.8",
     "@fontsource-variable/geist-mono": "^5.2.7",
     "@lezer/highlight": "^1.2.3",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "@octokit/rest": "^22.0.0",
     "@openai/codex": "0.160.0",
     "@pierre/diffs": "1.4.1",
