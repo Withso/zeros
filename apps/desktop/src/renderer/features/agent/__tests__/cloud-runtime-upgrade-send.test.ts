@@ -37,7 +37,7 @@ function harness(folder: string, cause = "cloud_runtime_upgrade_required", durin
   const draft = { text: "Preserve my prompt", json: { type: "doc" }, attachments: [] };
   setLiveChatDraft("chat", draft);
   useSessionsStore.setState({ sessions: { chat: { ...BLANK, cwd: folder, agentId: "codex", sessionId: "session", status: "ready", messages: [] } } });
-  const request = vi.fn(async () => { duringRequest?.(); return { type: "AGENT_PROMPT_FAILED", error: cause }; });
+  const request = vi.fn(async (_message: unknown) => { duringRequest?.(); return { type: "AGENT_PROMPT_FAILED", error: cause }; });
   const sending = new Set<string>(), pauseQueue = vi.fn(), drainOrDropQueue = vi.fn();
   const queue = new SendQueue<any>(), readiness = vi.fn(() => useSessionsStore.getState().patchSession("chat", { cloudSendWait: { state: "waiting" } }));
   const entry = { cloud: true, bubbleId: "accepted-prompt", args: ["chat", draft.text, draft.text], waitStartedAt: 42 };
@@ -69,9 +69,15 @@ function harness(folder: string, cause = "cloud_runtime_upgrade_required", durin
     drainNextQueued: vi.fn(), drainOrDropQueue, evictUnretainedTranscripts: vi.fn(),
   };
   vm.runInNewContext(code, context);
-  return { request, pauseQueue, drainOrDropQueue, sending, draft, queue, readiness,
-    send: () => (context.send as (...args: unknown[]) => Promise<void>)("chat", draft.text, draft.text, undefined, undefined, undefined, undefined,
-      () => setLiveChatDraft("chat", null)),
+  const send = () => (context.send as (...args: unknown[]) => Promise<void>)("chat", draft.text, draft.text, undefined, undefined, undefined, undefined,
+    () => setLiveChatDraft("chat", null));
+  return { request, pauseQueue, drainOrDropQueue, sending, draft, queue, readiness, send,
+    retry: () => {
+      const next = queue.get("chat")![0]; queue.delete("chat");
+      (context.flushBubbleRef as { current: Map<string, string> }).current.set("chat", next.bubbleId);
+      (context.cloudFlushRef as { current: Map<string, unknown> }).current.set("chat", next);
+      return send();
+    },
   };
 }
 
@@ -84,6 +90,11 @@ describe("production send callback on runtime rejection", () => {
     expect(useSessionsStore.getState().sessions.chat).toMatchObject({ failure: null, error: null, cloudSendWait: { state: "waiting" },
       messages: [expect.objectContaining({ id: "accepted-prompt", queued: true, queuedEditable: true })] });
     expect(getLiveChatDraft("chat")).toBeNull(); expect(mocks.refresh).not.toHaveBeenCalled();
+    await h.retry();
+    expect(h.request).toHaveBeenCalledTimes(2);
+    expect(h.request.mock.calls[1]![0]).toMatchObject({ userMessageId: "accepted-prompt" });
+    expect(h.queue.get("chat")![0]).toMatchObject({ bubbleId: "accepted-prompt", waitStartedAt: 42 });
+    expect(useSessionsStore.getState().sessions.chat.messages).toHaveLength(1);
   });
   it.each(["cloud_runtime_upgrade_required", "cloud_agent_model_not_authorized", "cloud_agent_credential_expired"])("keeps accepted %s editable with AG's terminal inline reason", async cause => {
     const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", cause, undefined, true);
@@ -93,6 +104,16 @@ describe("production send callback on runtime rejection", () => {
     expect(useSessionsStore.getState().sessions.chat).toMatchObject({ failure: null, error: null,
       cloudSendWait: { state: "failed", message: expect.any(String) }, cloudAdmissionFailure: { code: cause } });
     expect(getLiveChatDraft("chat")).toBeNull(); expect(mocks.refresh).toHaveBeenCalledOnce();
+  });
+  it("renews a terminal refused delivery only on explicit retry, avoiding its durable denial receipt", async () => {
+    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "cloud_agent_model_not_authorized", undefined, true);
+    await h.send(); expect(h.request).toHaveBeenCalledOnce(); expect(h.readiness).not.toHaveBeenCalled();
+    await h.retry();
+    const first = h.request.mock.calls[0]![0] as { userMessageId: string };
+    const second = h.request.mock.calls[1]![0] as { userMessageId: string };
+    expect(first.userMessageId).toBe("accepted-prompt"); expect(second.userMessageId).not.toBe(first.userMessageId);
+    expect(useSessionsStore.getState().sessions.chat.messages).toHaveLength(1);
+    expect(h.queue.get("chat")![0].bubbleId).toBe(second.userMessageId);
   });
   it.each(["cloud_runtime_upgrade_required", "cloud_agent_model_not_authorized", "cloud_agent_credential_expired", "cloud_agent_credential_revoked", "cloud_agent_credential_refresh_required"])("restores %s once with no resend or local auth failure", async code => {
     const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", code);

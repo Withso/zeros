@@ -1297,6 +1297,7 @@ export function AgentSessionsProvider({
       prepared?: boolean;
       cloudQueue?: CloudQueuedPrompt;
       waitStartedAt?: number;
+      retryAdmission?: boolean;
       /** Id of the greyed placeholder bubble shown while this send waits. */
       bubbleId: string;
     }>(),
@@ -1556,6 +1557,7 @@ export function AgentSessionsProvider({
         cloud?: boolean;
         prepared?: boolean;
         waitStartedAt?: number;
+        retryAdmission?: boolean;
       },
     ): Promise<boolean> => {
       if (!sendQueueRef.current.claim(chatId, entry.bubbleId)) return false;
@@ -2748,7 +2750,8 @@ export function AgentSessionsProvider({
             )
           : undefined;
         const userMessage: AgentTextMessage = {
-          id: admissionPlaceholder?.id ?? (cloudSend && flushBubbleId ? flushBubbleId : `user-${crypto.randomUUID()}`),
+          id: flushedCloud?.retryAdmission ? `user-${crypto.randomUUID()}`
+            : admissionPlaceholder?.id ?? (cloudSend && flushBubbleId ? flushBubbleId : `user-${crypto.randomUUID()}`),
           kind: "text",
           role: "user",
           text: displayText ?? text,
@@ -2765,6 +2768,10 @@ export function AgentSessionsProvider({
           ...(segments && segments.length > 0 ? { segments } : {}),
           ...(autoAction ? { autoAction } : {}),
         };
+        // A terminal admission receipt is durable. Only the explicit retry of
+        // that refused row renews its delivery identity; expected waits retain
+        // the same identity across reconnects and engine replacement.
+        if (flushedCloud) { flushedCloud.retryAdmission = false; flushedCloud.bubbleId = userMessage.id; }
         sentUserMessageId = userMessage.id;
         authPromptsRef.current.remember(
           chatId,
@@ -2888,6 +2895,7 @@ export function AgentSessionsProvider({
             if (!queue.some(entry => entry.bubbleId === flushedCloud.bubbleId)) queue.unshift(flushedCloud);
             sendQueueRef.current.set(chatId, queue);
             const waiting = admission.kind === "waiting";
+            flushedCloud.retryAdmission = !waiting;
             if (!waiting) {
               if (admission.kind === "runtime-upgrade-required") reportCloudAgentRuntimeUpgrade(current.cwd!, current.agentId!);
               else invalidateCloudAgentRegistry(current.cwd!);
