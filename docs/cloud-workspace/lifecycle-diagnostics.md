@@ -336,6 +336,12 @@ it. Legacy v1-v3 attester/proof snapshots are unchanged. Deploy the additive
 migration/reader first, then qualify and select a new runtime bundle to collect
 helper spans. Old pinned bundles still yield control-plane/transport timings.
 
+The read-only `workspace-perf-timeline.mjs` checks the catalog before selecting
+the new column, so it also works before migration 0136. It returns validated
+clocks per setup run and distinguishes `not_persisted`, `no_spans` and
+`persisted`; existing failure observations remain separate. Malformed timing
+documents are omitted, without returning their raw values.
+
 ### Local workspace impact
 
 Personal Local and organization-owned local workspaces do not run the cloud
