@@ -63,6 +63,7 @@ import {
 import { treeSelectionMirrorTarget } from "./tree-paths";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
 import { Stack } from "@/renderer/shared/ui/layout/stack";
+import { WorkbenchTabToolbar, useWorkbenchStatusSource } from "../tab-status";
 
 interface TabBodyProps {
   tab: WorkbenchTab;
@@ -114,6 +115,14 @@ export const FilesTab = React.memo(function FilesTab({
   const hasDesignSection = useHasDesignSection(cwd, gitRefresh, active);
 
   const filePath = tab.filePath ?? "";
+  useWorkbenchStatusSource(
+    {
+      error: tab.filePath ? githubReview.error : null,
+      pending: !!tab.filePath && !!githubReview.source?.loading,
+      retry: githubReview.refresh,
+    },
+    "github-comments",
+  );
   // Blank tabs start with a full-width tree. A filled tab restores its own
   // persisted tree visibility synchronously from the tab object.
   const layout = resolveFilesTabLayout(tab.filePath, tab.fileTreeVisible);
@@ -459,12 +468,14 @@ export const FilesTab = React.memo(function FilesTab({
         </div>
       ) : (
         <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <div
-            data-testid="files-tree-header"
-            className="border-border1 flex h-9 shrink-0 items-center justify-end gap-2 border-b px-2"
-          >
-            {sidebarActions}
-          </div>
+          <WorkbenchTabToolbar>
+            <div
+              data-testid="files-tree-header"
+              className="border-border1 flex h-9 shrink-0 items-center justify-end gap-2 border-b px-2"
+            >
+              {sidebarActions}
+            </div>
+          </WorkbenchTabToolbar>
           <div className="flex min-h-0 flex-1 overflow-hidden">
             {sidebarPane}
           </div>

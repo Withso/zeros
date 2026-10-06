@@ -23,6 +23,7 @@ const originalOrder = [
   "create-source-immediate-escape",
   "create-source-tooltip-escape",
   "cloud-workspace",
+  "workbench-status",
   "cloud-replica",
   "cloud-preview",
   "cloud-terminal",

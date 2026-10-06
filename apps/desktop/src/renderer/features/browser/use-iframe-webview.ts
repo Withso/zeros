@@ -57,6 +57,21 @@ export interface IframeWebviewState {
   canGoBack: boolean;
   canGoForward: boolean;
   isLoading: boolean;
+  loadError?: string | null;
+  loadedUrl?: string;
+}
+
+export function patchIframeWebviewState(
+  previous: IframeWebviewState,
+  patch: Partial<IframeWebviewState>,
+): IframeWebviewState {
+  return {
+    ...previous,
+    ...(patch.currentUrl !== undefined && patch.currentUrl !== previous.currentUrl
+      ? { loadError: null }
+      : {}),
+    ...patch,
+  };
 }
 
 /** Payload pushed by the in-iframe element picker. Field-for-field
@@ -115,6 +130,7 @@ function isPickerMessage(data: unknown): data is PickerInbound {
 interface UseIframeWebviewOptions {
   /** Initial URL to load. Empty string = blank iframe. */
   initialUrl?: string;
+  active?: boolean;
   /** Stable iframe `name`, used to route trusted main-process navigation events
    *  to the correct Browser tab when several iframes are mounted. */
   frameName?: string;
@@ -158,6 +174,7 @@ export interface UseIframeWebviewResult {
   back: () => void;
   forward: () => void;
   reload: () => void;
+  reloadAndWait: () => Promise<void>;
   /** Clear the shared iframe HTTP cache, then reload the current page. */
   hardReload: () => void;
   /** Clear HTTP cache for the iframe session (main-process call). */
@@ -324,9 +341,21 @@ export function useIframeWebview(
   const faviconDataUrl = useBrowserTabFavicon(frameName);
 
   // ── State sync helper ───────────────────────────────────
+  const loadWaiters = useRef(new Set<() => void>());
   const updateState = useCallback((patch: Partial<IframeWebviewState>) => {
-    setState((prev) => ({ ...prev, ...patch }));
+    setState((prev) => patchIframeWebviewState(prev, patch));
+    if (patch.isLoading === false) {
+      for (const resolve of loadWaiters.current) resolve();
+      loadWaiters.current.clear();
+    }
   }, []);
+  useEffect(
+    () => () => {
+      for (const resolve of loadWaiters.current) resolve();
+      loadWaiters.current.clear();
+    },
+    [],
+  );
 
   const recomputeNav = useCallback(() => {
     updateState({
@@ -535,7 +564,11 @@ export function useIframeWebview(
       const handleFailure = () => {
         if (documentGenerationRef.current !== generation) return;
         if (fallback) fallback();
-        else updateState({ isLoading: false });
+        else
+          updateState({
+            isLoading: false,
+            loadError: "Preview connection unavailable",
+          });
       };
       void nativeInvoke<{ ok: boolean }>("browser:control-iframe", {
         frameName,
@@ -716,6 +749,14 @@ export function useIframeWebview(
       }
     }
   }, [controlNativeFrame, updateState]);
+  const reloadAndWait = useCallback(() => {
+    if (!ref.current) return Promise.resolve();
+    const promise = new Promise<void>((resolve) =>
+      loadWaiters.current.add(resolve),
+    );
+    reload();
+    return promise;
+  }, [reload]);
 
   const hardReload = useCallback(() => {
     const iframe = ref.current;
@@ -859,7 +900,10 @@ export function useIframeWebview(
 
   handleLoadRef.current = () => {
     const iframe = ref.current;
-    const next: Partial<IframeWebviewState> = { isLoading: false };
+    const next: Partial<IframeWebviewState> = {
+      isLoading: false,
+      loadError: null,
+    };
     if (iframe) {
       try {
         // Same-origin happy path — read canonical URL + title. Cross-
@@ -872,6 +916,7 @@ export function useIframeWebview(
         /* cross-origin — keep the URL we navigated to */
       }
     }
+    next.loadedUrl = next.currentUrl ?? state.currentUrl;
     updateState(next);
     // Fresh document: drop stale picker selection + overlays and re-arm
     // design mode (the picker re-injects dormant on every load).
@@ -885,7 +930,10 @@ export function useIframeWebview(
     // document) fires `error`, not `load` — clear the spinner so it
     // doesn't hang. Most failures still render a Chromium error page
     // and fire `load`; this just covers the rest.
-    updateState({ isLoading: false });
+    updateState({
+      isLoading: false,
+      loadError: "Preview connection unavailable",
+    });
   };
 
   // Stable listeners delegating to the live handlers above.
@@ -917,10 +965,14 @@ export function useIframeWebview(
   // event), force isLoading off. Re-armed whenever loading starts;
   // cleared the moment it ends.
   useEffect(() => {
-    if (!state.isLoading) return;
-    const id = setTimeout(() => updateState({ isLoading: false }), 30_000);
+    if (!state.isLoading || opts.active === false) return;
+    const id = setTimeout(
+      () =>
+        updateState({ isLoading: false, loadError: "Preview load timed out" }),
+      30_000,
+    );
     return () => clearTimeout(id);
-  }, [state.isLoading, updateState]);
+  }, [state.isLoading, updateState, opts.active]);
 
   /** Capture a screenshot of the picked element via main process.
    *  Element rect comes from the picker in iframe-viewport CSS
@@ -1277,6 +1329,7 @@ export function useIframeWebview(
     back,
     forward,
     reload,
+    reloadAndWait,
     hardReload,
     clearCache,
     clearCookies,

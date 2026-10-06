@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { Button } from "@/renderer/shared/ui/primitives";
 import type { CodeReviewController } from "./use-code-review";
+import { useWorkbenchStatusSource } from "../../shell/workbench/tab-status";
 
 export function ReviewFeedback({ review }: { review: CodeReviewController }) {
   return <OwnerFeedback key={review.ownerKey} review={review} />;
@@ -16,6 +17,28 @@ function OwnerFeedback({ review }: { review: CodeReviewController }) {
   const [moreBusy, setMoreBusy] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);
   const moreFlight = useRef(false);
+  const managed = useWorkbenchStatusSource(
+    {
+      error: message ?? moreError,
+      pending: !!loading || moreBusy,
+      retry: async () => {
+        if (moreError && review.loadMore) {
+          try {
+            await review.loadMore();
+            setMoreError(null);
+          } catch (failure) {
+            setMoreError(
+                      failure instanceof Error
+                        ? failure.message
+                        : String(failure),
+                    );
+          }
+        }
+        await review.refresh();
+      },
+    },
+    review.ownerKey,
+  );
   if (
     !message &&
     !notice &&
@@ -35,7 +58,7 @@ function OwnerFeedback({ review }: { review: CodeReviewController }) {
           Loading comments…
         </p>
       )}
-      {message && (
+      {message && !managed && (
         <div role="alert" className="flex items-center gap-2">
           <span className="text-red-primary break-words">{message}</span>
           {review.error && (
@@ -78,7 +101,7 @@ function OwnerFeedback({ review }: { review: CodeReviewController }) {
           )}
         </div>
       )}
-      {moreError && (
+      {moreError && !managed && (
         <p role="alert" className="text-red-primary">
           {moreError}
         </p>

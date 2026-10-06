@@ -13,6 +13,8 @@ import {
   peekWorkspaceFileListing,
   type WorkspaceFileListing,
   resetWorkspaceFilesCacheForTests,
+  workspaceFileListingFailure,
+  subscribeWorkspaceFileListingFailure,
 } from "../workspace-files-cache";
 
 vi.mock("@/renderer/platform/git", () => ({
@@ -83,6 +85,43 @@ describe("workspace-files-cache invalidation", () => {
 
     await expect(loadWorkspaceFiles("/repo")).resolves.toBe(confirmed);
     expect(peekWorkspaceFiles("/repo")).toBe(confirmed);
+  });
+
+  it("publishes failure beside retained rows and clears it on successful revalidation", async () => {
+    const changed = vi.fn();
+    const stop = subscribeWorkspaceFileListingFailure("/repo/", changed);
+    listFiles.mockResolvedValueOnce(["kept.ts"]);
+    const confirmed = await loadWorkspaceFiles("/repo");
+    invalidateWorkspaceFiles("/repo");
+    const failure = new Error("engine disconnected");
+    listFiles.mockRejectedValueOnce(failure);
+    await expect(loadWorkspaceFiles("/repo")).resolves.toBe(confirmed);
+    expect(workspaceFileListingFailure("/repo/")).toBe(failure);
+    expect(workspaceFileListingFailure("/other")).toBeNull();
+    expect(changed).toHaveBeenCalled();
+    invalidateWorkspaceFiles("/repo");
+    listFiles.mockResolvedValueOnce(["recovered.ts"]);
+    await loadWorkspaceFiles("/repo");
+    expect(workspaceFileListingFailure("/repo")).toBeNull();
+    stop();
+  });
+
+  it("ignores an obsolete failure after a newer generation has recovered", async () => {
+    let reject!: (error: Error) => void;
+    listFiles
+      .mockReturnValueOnce(
+      new Promise((_, fail) => {
+        reject = fail;
+      }),
+    );
+    const old = loadWorkspaceFiles("/repo").catch(() => {});
+    invalidateWorkspaceFiles("/repo");
+    listFiles.mockResolvedValueOnce(["fresh.ts"]);
+    await loadWorkspaceFiles("/repo");
+    reject(new Error("late failure"));
+    await old;
+    expect(workspaceFileListingFailure("/repo")).toBeNull();
+    expect(peekWorkspaceFiles("/repo")).toEqual(["fresh.ts"]);
   });
 
   it("cannot let an older in-flight response resurrect a deleted file", async () => {

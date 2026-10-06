@@ -14,7 +14,7 @@ import {
 import { nativeInvoke } from "../../platform/runtime";
 import { getOrganizationStoreGeneration } from "../team/team-store";
 import { useInternalFeatureActive } from "../settings/internal-features";
-import { toast } from "../../shared/ui/primitives/elements";
+import { useWorkbenchStatusSource } from "../../shell/workbench/tab-status";
 import { useAgentSessions } from "../agent/sessions-hooks";
 import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 import {
@@ -62,6 +62,29 @@ export function useCloudPreviewAdmission(options: {
   currentUrl.current = url;
   const logicalOrigin = url ? new URL(url).origin : "";
   const navigationVersion = options.navigationVersion;
+  const ownerKey = JSON.stringify([
+    scope,
+    logicalOrigin,
+    navigationVersion,
+    options.source,
+  ]);
+  const [failure, setFailure] = useState<{
+    key: string;
+    error: unknown;
+  } | null>(null);
+  const [pending, setPending] = useState(false);
+  const retry = useRef<(() => Promise<void>) | null>(null);
+  useWorkbenchStatusSource(
+    {
+      error: failure?.key === ownerKey ? failure.error : null,
+      pending,
+      primary: true,
+      // Admission confirms access, not rendered content. The iframe source
+      // alone confirms that the exact preview loaded successfully.
+      retry: () => (active ? retry.current?.() : undefined),
+    },
+    ownerKey,
+  );
   const executionId = options.source?.executionId,
     portId = options.source?.portId;
   const chatId = options.source?.chatId,
@@ -94,106 +117,118 @@ export function useCloudPreviewAdmission(options: {
         return;
     }
     let cancelled = false;
-    let errorShown = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const epoch = accountGeneration;
-    const admit = async () => {
-      try {
-        let target: CloudAgentPreviewTarget | undefined;
-        if (agentPreview) {
-          const owner = sessions.getSession(chatId!);
-          const livePort = owner?.boundaryPorts?.ports.find((candidate) =>
-            portId ? candidate.id === portId : candidate.port === displayPort,
-          );
-          if (
-            !owner?.executionId ||
-            !livePort ||
-            (executionId && owner.executionId !== executionId)
-          )
-            throw new Error("preview listener is no longer active");
-          const opened = await sessions.openBoundaryPort(chatId!, livePort.id);
-          if (cancelled || epoch !== getOrganizationStoreGeneration()) return;
-          if (!opened.nativeTarget) {
-            const descriptor = previewNavigationDescriptor(opened);
-            if (descriptor.volatileOrigin) {
-              const authorization = await nativeInvoke<{ ok: boolean }>(
-                "browser:authorize-preview-origin",
-                {
-                  frameName,
-                  origin: descriptor.runtimeOrigin,
-                  expiresAt: descriptor.expiresAt,
-                },
+    let flight: Promise<void> | null = null;
+    const admit = () => {
+      if (flight) return flight;
+      clearTimeout(timer);
+      setPending(true);
+      flight = (async () => {
+        try {
+          let target: CloudAgentPreviewTarget | undefined;
+          if (agentPreview) {
+            const owner = sessions.getSession(chatId!);
+            const livePort = owner?.boundaryPorts?.ports.find((candidate) =>
+              portId ? candidate.id === portId : candidate.port === displayPort,
+            );
+            if (
+              !owner?.executionId ||
+              !livePort ||
+              (executionId && owner.executionId !== executionId)
+            )
+              throw new Error("preview listener is no longer active");
+            const opened = await sessions.openBoundaryPort(
+              chatId!,
+              livePort.id,
+            );
+            if (cancelled || epoch !== getOrganizationStoreGeneration()) return;
+            if (!opened.nativeTarget) {
+              const descriptor = previewNavigationDescriptor(opened);
+              if (descriptor.volatileOrigin) {
+                const authorization = await nativeInvoke<{ ok: boolean }>(
+                  "browser:authorize-preview-origin",
+                  {
+                    frameName,
+                    origin: descriptor.runtimeOrigin,
+                    expiresAt: descriptor.expiresAt,
+                  },
+                );
+                if (!authorization.ok)
+                  throw new Error("preview origin was not authorized");
+              }
+              if (cancelled || epoch !== getOrganizationStoreGeneration())
+                return;
+              await navigate(opened);
+              if (cancelled || epoch !== getOrganizationStoreGeneration())
+                return;
+              setFailure(null);
+              timer = setTimeout(
+                () => void admit(),
+                Math.max(1_000, opened.expiresAt - Date.now() - 5 * 60_000),
               );
-              if (!authorization.ok)
-                throw new Error("preview origin was not authorized");
+              return;
             }
-            if (cancelled || epoch !== getOrganizationStoreGeneration()) return;
-            await navigate(opened);
-            if (cancelled || epoch !== getOrganizationStoreGeneration()) return;
-            errorShown = false;
-            timer = setTimeout(
-              () => void admit(),
-              Math.max(1_000, opened.expiresAt - Date.now() - 5 * 60_000),
+            const scoped = parseCloudScopedId(owner.executionId);
+            if (
+              !executionId ||
+              !portId ||
+              !isCloudAgentPreviewTarget(opened.nativeTarget) ||
+              opened.nativeTarget.executionId !==
+                (scoped?.id ?? owner.executionId) ||
+              opened.nativeTarget.portId !== livePort.id
+            )
+              throw new Error("preview listener identity changed");
+            target = opened.nativeTarget;
+          }
+          const receipt = await openCloudWorkspacePreview({
+            ...workspace,
+            port,
+            frameName,
+            ...(target ? { target } : {}),
+          });
+          if (cancelled || epoch !== getOrganizationStoreGeneration()) {
+            await revokeCloudWorkspaceAccess(receipt.accessId).catch(
+              () => false,
             );
             return;
           }
-          const scoped = parseCloudScopedId(owner.executionId);
-          if (
-            !executionId ||
-            !portId ||
-            !isCloudAgentPreviewTarget(opened.nativeTarget) ||
-            opened.nativeTarget.executionId !==
-              (scoped?.id ?? owner.executionId) ||
-            opened.nativeTarget.portId !== livePort.id
-          )
-            throw new Error("preview listener identity changed");
-          target = opened.nativeTarget;
-        }
-        const receipt = await openCloudWorkspacePreview({
-          ...workspace,
-          port,
-          frameName,
-          ...(target ? { target } : {}),
-        });
-        if (cancelled || epoch !== getOrganizationStoreGeneration()) {
-          await revokeCloudWorkspaceAccess(receipt.accessId).catch(() => false);
-          return;
-        }
-        const url = currentUrl.current;
-        const destination = new URL(url);
-        const navigation = new URL(receipt.origin);
-        navigation.pathname = destination.pathname;
-        navigation.search = destination.search;
-        navigation.hash = destination.hash;
-        const expiresAt = Date.parse(receipt.expiresAt);
-        await navigate({
-          url,
-          admissionUrl: navigation.toString(),
-          expiresAt,
-          native: true,
-        });
-        if (cancelled || epoch !== getOrganizationStoreGeneration()) return;
-        errorShown = false;
-        timer = setTimeout(
-          () => void admit(),
-          Math.max(1_000, expiresAt - Date.now() - 5 * 60_000),
-        );
-      } catch {
-        if (!cancelled && epoch === getOrganizationStoreGeneration()) {
-          if (!errorShown) {
-            errorShown = true;
-            toast.error("Preview connection is unavailable", {
-              description:
-                "Check that the workspace and its server are running.",
-            });
+          const url = currentUrl.current;
+          const destination = new URL(url);
+          const navigation = new URL(receipt.origin);
+          navigation.pathname = destination.pathname;
+          navigation.search = destination.search;
+          navigation.hash = destination.hash;
+          const expiresAt = Date.parse(receipt.expiresAt);
+          await navigate({
+            url,
+            admissionUrl: navigation.toString(),
+            expiresAt,
+            native: true,
+          });
+          if (cancelled || epoch !== getOrganizationStoreGeneration()) return;
+          setFailure(null);
+          timer = setTimeout(
+            () => void admit(),
+            Math.max(1_000, expiresAt - Date.now() - 5 * 60_000),
+          );
+        } catch (error) {
+          if (!cancelled && epoch === getOrganizationStoreGeneration()) {
+            setFailure({ key: ownerKey, error });
+            timer = setTimeout(() => void admit(), 15_000);
           }
-          timer = setTimeout(() => void admit(), 15_000);
         }
-      }
+      })().finally(() => {
+        flight = null;
+        if (!cancelled) setPending(false);
+      });
+      return flight;
     };
+    retry.current = admit;
     void admit();
     return () => {
       cancelled = true;
+      if (retry.current === admit) retry.current = null;
       clearTimeout(timer);
       void nativeInvoke("browser:revoke-preview-origin", { frameName }).catch(
         () => undefined,
@@ -216,6 +251,7 @@ export function useCloudPreviewAdmission(options: {
     navigate,
     sessions,
     accountGeneration,
+    ownerKey,
     navigationVersion,
   ]);
 }

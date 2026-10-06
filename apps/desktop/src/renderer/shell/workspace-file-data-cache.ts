@@ -109,6 +109,13 @@ async function fetchWorkspaceFileRead(
 ): Promise<ReadFileResult> {
   const result = await readWorkspaceFile(query.cwd, query.path);
   if (!result) throw new Error("Workspace file reader unavailable");
+  // A transport/read failure is not a new file snapshot. Keep confirmed
+  // exact-key content; a confirmed deletion remains an authoritative result.
+  if (
+    result.kind === "error" &&
+    result.error !== "file no longer exists on disk"
+  )
+    throw new Error(result.error ?? "Workspace file read failed");
   return result;
 }
 

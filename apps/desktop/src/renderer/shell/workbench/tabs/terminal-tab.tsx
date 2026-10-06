@@ -50,6 +50,7 @@ import {
   type TerminalNavigationEntry,
 } from "../../terminal/terminal-workbench-layout";
 import { useRetainedViewKeySet } from "../../use-retained-view-keys";
+import { WorkbenchTabFrame, WorkbenchTabStatusProvider } from "../tab-status";
 import { cn } from "../../../shared/ui/cn";
 import { Button } from "../../../shared/ui";
 import { Badge, Tooltip } from "../../../shared/ui/primitives";
@@ -676,49 +677,58 @@ export function TerminalPanel({
     <>
       {workbenchHost &&
         createPortal(
-          <TerminalWorkbenchLayout
+          <WorkbenchTabFrame
+            terminalWorkbench
+            tab={
+              mainTab ?? { id: "terminal", type: "terminal", title: "Terminal" }
+            }
             folder={folderKey}
-            tab={mainTab}
-            entries={entries}
-            onSelect={handleActivate}
-            onClose={handleClose}
-            onAdd={() => addWorkbenchTerminal(folderKey, "tab", scope)}
-            onConfigure={openEnvironment}
-            onConfigureIntent={() => {
-              if (activeWs?.repoRoot)
-                prefetchSettingsForRepo(activeWs.repoRoot);
-            }}
-            onRun={startRun}
-            onRunSetup={handleRunSetup}
-            setupRunDisabled={setupRunDisabled}
-            onStop={stopRun}
-            onOpenPreview={openRunPreview}
-            onDock={() => {
-              if (mainTab?.terminalId)
-                openWorkbenchTerminal(
-                  folderKey,
-                  {
-                    terminalId: mainTab.terminalId,
-                    title: mainTab.title,
-                    placement: "panel",
-                  },
-                  scope,
-                );
-            }}
-            onToggleSidebar={() => {
-              if (mainTab)
-                dispatch({
-                  type: "UPDATE_WORKBENCH_TAB",
-                  scope,
-                  id: mainTab.id,
-                  updates: {
-                    terminalSidebarVisible:
-                      mainTab.terminalSidebarVisible === false,
-                  },
-                });
-            }}
-            bodyRef={setMainBody}
-          />,
+            active={surfaceActive && mainTab !== null}
+          >
+            <TerminalWorkbenchLayout
+              folder={folderKey}
+              tab={mainTab}
+              entries={entries}
+              onSelect={handleActivate}
+              onClose={handleClose}
+              onAdd={() => addWorkbenchTerminal(folderKey, "tab", scope)}
+              onConfigure={openEnvironment}
+              onConfigureIntent={() => {
+                if (activeWs?.repoRoot)
+                  prefetchSettingsForRepo(activeWs.repoRoot);
+              }}
+              onRun={startRun}
+              onRunSetup={handleRunSetup}
+              setupRunDisabled={setupRunDisabled}
+              onStop={stopRun}
+              onOpenPreview={openRunPreview}
+              onDock={() => {
+                if (mainTab?.terminalId)
+                  openWorkbenchTerminal(
+                    folderKey,
+                    {
+                      terminalId: mainTab.terminalId,
+                      title: mainTab.title,
+                      placement: "panel",
+                    },
+                    scope,
+                  );
+              }}
+              onToggleSidebar={() => {
+                if (mainTab)
+                  dispatch({
+                    type: "UPDATE_WORKBENCH_TAB",
+                    scope,
+                    id: mainTab.id,
+                    updates: {
+                      terminalSidebarVisible:
+                        mainTab.terminalSidebarVisible === false,
+                    },
+                  });
+              }}
+              bodyRef={setMainBody}
+            />
+          </WorkbenchTabFrame>,
           workbenchHost,
         )}
       {hasPanel && <TerminalPanelResizer containerRef={containerRef} />}
@@ -823,15 +833,28 @@ export function TerminalPanel({
             </>
           }
         />
-        <div
-          ref={setPanelBody}
-          {...(!expanded ? { inert: "" } : {})}
-          aria-hidden={!expanded}
-          className={cn(
-            "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
-            !expanded && "pointer-events-none invisible",
-          )}
-        />
+        <WorkbenchTabFrame
+          tab={
+            panelTab ?? {
+              id: "terminal-panel",
+              type: "terminal",
+              title: "Terminal",
+              terminalId: activeSubTab,
+            }
+          }
+          folder={folderKey}
+          active={surfaceActive && hasPanel && expanded}
+        >
+          <div
+            ref={setPanelBody}
+            {...(!expanded ? { inert: "" } : {})}
+            aria-hidden={!expanded}
+            className={cn(
+              "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
+              !expanded && "pointer-events-none invisible",
+            )}
+          />
+        </WorkbenchTabFrame>
       </div>
       <div ref={setParking} hidden {...{ inert: "" }} aria-hidden="true" />
       {/* Recent workspace terminals stay mounted (PTY + xterm survival); only
@@ -861,27 +884,38 @@ export function TerminalPanel({
               )}
               aria-hidden={!isActive}
             >
-              <TerminalSessionView
-                sessionId={s.id}
-                cwd={s.folder}
-                visible={isActive}
-                agentId={s.agentId}
-                initialCommand={s.initialCommand ?? null}
-                // A run terminal's restart affordance is its Rerun button —
-                // a key-restart would spawn a plain shell under the run id.
-                // attachOnly: its PTY is born only through workspace.startRun;
-                // a mount that finds none must not plant a shell there either.
-                restartOnKey={!isRunSessionId(s.id)}
-                attachOnly={isRunSessionId(s.id)}
-                // On an attach-only miss (the run exited before we attached),
-                // replay the engine's buffered output so a fast-failing run
-                // isn't a blank pane. Run sessions only; stable callback so the
-                // memoized view isn't re-rendered by status polls.
-                replayOnMiss={
-                  isRunSessionId(s.id) ? replayRunOnMiss : undefined
-                }
-                surfaceToken="--bg1"
-              />
+              <WorkbenchTabStatusProvider
+                tab={{
+                  id: s.id,
+                  type: "terminal",
+                  title: s.title,
+                  terminalId: s.id,
+                }}
+                folder={s.folder}
+                active={isActive}
+              >
+                <TerminalSessionView
+                  sessionId={s.id}
+                  cwd={s.folder}
+                  visible={isActive}
+                  agentId={s.agentId}
+                  initialCommand={s.initialCommand ?? null}
+                  // A run terminal's restart affordance is its Rerun button —
+                  // a key-restart would spawn a plain shell under the run id.
+                  // attachOnly: its PTY is born only through workspace.startRun;
+                  // a mount that finds none must not plant a shell there either.
+                  restartOnKey={!isRunSessionId(s.id)}
+                  attachOnly={isRunSessionId(s.id)}
+                  // On an attach-only miss (the run exited before we attached),
+                  // replay the engine's buffered output so a fast-failing run
+                  // isn't a blank pane. Run sessions only; stable callback so the
+                  // memoized view isn't re-rendered by status polls.
+                  replayOnMiss={
+                    isRunSessionId(s.id) ? replayRunOnMiss : undefined
+                  }
+                  surfaceToken="--bg1"
+                />
+              </WorkbenchTabStatusProvider>
             </div>
           </RetainedTerminalSurface>
         );
@@ -907,12 +941,23 @@ export function TerminalPanel({
               )}
               aria-hidden={!isActive}
             >
-              <SetupView
-                ref={setupFolderKey === folderKey ? setupViewRef : undefined}
-                workspace={setupWorkspaceByFolder.get(setupFolderKey) ?? null}
-                visible={isActive}
-                onBusyChange={handleSetupBusyChange}
-              />
+              <WorkbenchTabStatusProvider
+                tab={{
+                  id: "setup",
+                  type: "terminal",
+                  title: "Setup",
+                  terminalId: SETUP_SUBTAB,
+                }}
+                folder={setupFolderKey}
+                active={isActive}
+              >
+                <SetupView
+                  ref={setupFolderKey === folderKey ? setupViewRef : undefined}
+                  workspace={setupWorkspaceByFolder.get(setupFolderKey) ?? null}
+                  visible={isActive}
+                  onBusyChange={handleSetupBusyChange}
+                />
+              </WorkbenchTabStatusProvider>
             </div>
           </RetainedTerminalSurface>
         );

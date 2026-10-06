@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type {
   AuthStatusResult,
@@ -62,6 +62,50 @@ async function settleCalls(expected: () => boolean): Promise<void> {
 }
 
 describe("Review live-data races", () => {
+  it("retains the confirmed PR alongside a failed refresh and clears the failure on recovery", async () => {
+    const getPr = vi.fn(async () => pr("confirmed"));
+    const provider: ReviewProvider = {
+      family: "github",
+      hostOrigin: "github.com",
+      cacheKey: "github:retained-status",
+      hostLabel: "GitHub",
+      capabilities: {
+        reviewNoun: "pull request",
+        mergeMethods: [{ id: "merge", label: "Merge" }],
+      },
+      authStatus: async () => ({
+        authenticated: true,
+        login: "octocat",
+      }),
+      getPr,
+      getChecks: async () => emptyChecks,
+      getCommits: async () => [],
+      getTimeline: async () => [],
+      addComment: async () => ({ id: 1, url: "" }),
+      merge: async () => ({ sha: "abc" }),
+      markReady: async () => pr("ready"),
+    };
+    await prefetchReviewLiveData(provider, "workspace-retained", 42, {
+      force: true,
+    });
+    const confirmed = peekReviewLiveData(provider, "workspace-retained", 42).pr;
+    getPr.mockRejectedValueOnce(new Error("engine disconnected"));
+    await prefetchReviewLiveData(provider, "workspace-retained", 42, {
+      force: true,
+    });
+    expect(
+      peekReviewLiveData(provider, "workspace-retained", 42),
+    ).toMatchObject({ pr: confirmed, error: "engine disconnected" });
+    expect(
+      peekReviewLiveData(provider, "other-workspace", 42).error,
+    ).toBeNull();
+    await prefetchReviewLiveData(provider, "workspace-retained", 42, {
+      force: true,
+    });
+    expect(
+      peekReviewLiveData(provider, "workspace-retained", 42).error,
+    ).toBeNull();
+  });
   it("keeps bounded external refreshes live for terminal review resources", () => {
     expect(shouldRefreshReviewSnapshot("merged", "interval")).toBe(true);
     expect(shouldRefreshReviewSnapshot("closed", "resume")).toBe(true);
