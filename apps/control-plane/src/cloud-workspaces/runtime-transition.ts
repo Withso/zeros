@@ -1,5 +1,13 @@
 import type { Tx } from "../db.js";
 
+// A lifecycle cancellation can close the outer generation transition without
+// proving whether root consumed the old writer. That unresolved journal still
+// invalidates cached proof even when the outer transition says cancelled.
+const settledResidentHandoff = `NOT EXISTS(SELECT 1 FROM cloud_workspace_runtime_handoffs handoff
+  JOIN cloud_workspace_generation_transitions transition ON transition.id=handoff.transition_id
+  WHERE handoff.workspace_id=$1 AND handoff.org_id=$2 AND $3 IN (transition.source_generation,transition.candidate_generation)
+    AND handoff.phase NOT IN ('cancelled','source_retired'))`;
+
 /** Only the exact successfully enrolled engine of a retained transition may
  * inherit undispatched queue intent. Failed/ordinary replacement engines do
  * not acquire this exception. Dispatched commands remain uncertain. */
@@ -60,6 +68,7 @@ export async function readCloudRuntimeResumeProofEpoch(tx: Tx, input: {
       AND attestation.engine_instance_id=engine.id
     WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.current_generation=$3
       AND workspace.deleted_at IS NULL AND workspace.desired_state<>'deleted'
+      AND ${settledResidentHandoff}
       AND NOT EXISTS(SELECT 1 FROM cloud_workspace_engine_instances newer
         WHERE newer.workspace_id=engine.workspace_id AND newer.org_id=engine.org_id AND newer.generation=engine.generation
           AND newer.runtime_transition_enrollment_id IS NOT NULL AND newer.enrollment_order>engine.enrollment_order)
@@ -108,6 +117,7 @@ export async function readCloudRuntimeResumeProofEpoch(tx: Tx, input: {
     JOIN cloud_workspace_runtime_transitions runtime ON runtime.transition_id=enrollment.transition_id
     WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.current_generation=$3
       AND workspace.deleted_at IS NULL AND workspace.desired_state<>'deleted'
+      AND ${settledResidentHandoff}
       AND engine.state IN ('ready','revoked') AND engine.registered_at IS NOT NULL
       AND NOT EXISTS(SELECT 1 FROM cloud_workspace_runtime_transitions later
         JOIN cloud_workspace_generation_transitions transition ON transition.id=later.transition_id

@@ -181,6 +181,13 @@ import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
           prompt: [{ type: "text", text: "fixture prompt" }], modeRevision: 0 } } });
       expect((await commands.claim(scope, "after-cancel", "resumed-source"))?.commandId).toBe(commandId);
     });
+    it("keeps the resume proof epoch invalid when a lifecycle stop cancels an unresolved consumption", async () => {
+      const f = await prepared();
+      await service.authorizeResidentConsumption(f.claim, f);
+      await withSystemTx(pool, tx => cancelCloudWorkspaceGenerationTransition(tx, { ...f.claim, reason: "workspace_stop_requested" }));
+      expect(await journal(f.claim.transitionId)).toBe("consumption_authorized");
+      expect(await withSystemTx(pool, tx => readCloudRuntimeResumeProofEpoch(tx, { ...f.claim, generation: 1 }))).toBeNull();
+    });
     it.each(["foreign", "unfenced", "expired", "unqualified"] as const)("rejects %s handoff evidence without retiring source", async kind => {
       const f = await prepared();
       if (kind === "foreign") f.resident.workspaceId = randomUUID();
@@ -251,6 +258,7 @@ import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
       expect(await service.enroll(f.claim, { ...evidence, resident: { ...detached, fence: 4 } })).toBeNull();
       const enrollment = (await service.enroll(f.claim, { ...evidence, resident: detached }))!;
       expect(enrollment.resident).toEqual({ hostId: f.resident.hostId, fence: 3 });
+      await expect(pool.query("UPDATE cloud_workspace_runtime_enrollments SET resident_witness=NULL WHERE id=$1", [enrollment.id])).rejects.toMatchObject({ code: "23514" });
       await service.register({ ...f.claim, generation: 2, setupRunId: enrollment.id, executionFence: enrollment.executionFence,
         engineInstanceId: enrollment.engineInstanceId, token: enrollment.token, protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
         actorProtocolVersion: 2, agentRuntime: { ...report(active).runtime as object, profile: "zeros-cloud-worker-v4" } });
