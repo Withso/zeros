@@ -11,6 +11,7 @@ export const operationSchema = z.object({ version: z.literal(1), operationId: uu
   .refine(value => value.name === `zeros-v2-test-lu-${value.operationId}`);
 export const journalSchema = z.object({ version: z.literal(1), operationId: uuid,
   name: z.string(), workspace: workspaceSchema.optional(),
+  actions: z.object({ input: uuid, prompt: uuid, update: uuid, rollback: uuid }).strict().optional(),
   phase: z.enum(["allocated", "created", "cleanup_required", "cleaned"]) }).strict()
   .refine(value => operationSchema.safeParse({ version: value.version, operationId: value.operationId, name: value.name }).success);
 const preflightSchema = z.object({ version: z.literal(1), channel: z.literal("alpha"), staff: z.literal(true),
@@ -65,19 +66,19 @@ function retained(before: Observation, after: Observation): void {
 }
 
 export async function cleanupAcceptance(adapter: AlphaLiveUpdateAdapter, operation: Operation, options: Options,
-  workspace?: Workspace): Promise<boolean> {
+  workspace?: Workspace, actions?: Journal["actions"]): Promise<boolean> {
   const signal = AbortSignal.timeout(options.cleanupTimeoutMs ?? 90_000);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const result = await call(signal, s => adapter.cleanup(operation, s));
       const evidence = z.object({ complete: z.boolean(), remainingResources: count }).strict().safeParse(result);
       if (evidence.success && evidence.data.complete && evidence.data.remainingResources === 0) {
-        await options.journal({ ...operation, workspace, phase: "cleaned" }); return true;
+        await options.journal({ ...operation, workspace, actions, phase: "cleaned" }); return true;
       }
     } catch { /* Only closed cleanup state is reported; retain the operation. */ }
     if (signal.aborted) break;
   }
-  await options.journal({ ...operation, workspace, phase: "cleanup_required" }).catch(() => undefined);
+  await options.journal({ ...operation, workspace, actions, phase: "cleanup_required" }).catch(() => undefined);
   return false;
 }
 
@@ -86,6 +87,7 @@ export async function cleanupAcceptance(adapter: AlphaLiveUpdateAdapter, operati
 export async function runAcceptance(adapter: AlphaLiveUpdateAdapter, options: Options): Promise<Report> {
   const operationId = randomUUID();
   const operation: Operation = { version: 1, operationId, name: `zeros-v2-test-lu-${operationId}` };
+  const actions = { input: randomUUID(), prompt: randomUUID(), update: randomUUID(), rollback: randomUUID() };
   const report: Report = { version: 1, operationId, outcome: "failed", code: "adapter_failed", cleaned: true };
   const now = options.now ?? (() => performance.now());
   const controller = new AbortController();
@@ -96,7 +98,7 @@ export async function runAcceptance(adapter: AlphaLiveUpdateAdapter, options: Op
     let preflight;
     try { preflight = parsed(preflightSchema, await call(signal, s => adapter.preflight(s)), "capability_unqualified"); }
     catch { report.outcome = "blocked"; report.code = "capability_unqualified"; return report; }
-    await options.journal({ ...operation, phase: "allocated" });
+    await options.journal({ ...operation, actions, phase: "allocated" });
     mustClean = true; report.cleaned = false;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -106,7 +108,7 @@ export async function runAcceptance(adapter: AlphaLiveUpdateAdapter, options: Op
     }
     check(workspace && workspace.organizationId === preflight.organizationId, "scope_invalid");
     report.workspaceId = workspace.workspaceId;
-    await options.journal({ ...operation, workspace, phase: "created" });
+    await options.journal({ ...operation, workspace, actions, phase: "created" });
     for (const device of ["a", "b"] as const) devices.push(await call(signal, s => adapter.connect(workspace!, device, s)));
     await call(signal, s => devices[0].startWorkload({ operationId, terminalId: operation.name }, s));
     const observe = async (device: Device): Promise<Observation> => {
@@ -122,7 +124,7 @@ export async function runAcceptance(adapter: AlphaLiveUpdateAdapter, options: Op
       retained(source[0], state);
       check(state.engine.instanceId === source[0].engine.instanceId, "device_identity_mismatch");
     }
-    const inputId = randomUUID(), promptId = randomUUID();
+    const inputId = actions.input, promptId = actions.prompt;
     const input = async () => {
       const ack = await call(signal, s => devices[0].input(inputId, s));
       check(ack?.operationId === inputId && ack.applications === 1, "input_ack_invalid");
@@ -138,7 +140,7 @@ export async function runAcceptance(adapter: AlphaLiveUpdateAdapter, options: Op
     const transition = async (before: Observation[], targetRuntimeId: string, rollback: boolean): Promise<Observation[]> => {
       let complete = false, outcome: unknown, failed = false;
       const last = before.map(() => now()), first: Array<number | null> = [null, null];
-      const request = { workspace: workspace!, operationId: randomUUID(), targetRuntimeId, failTargetHealth: rollback };
+      const request = { workspace: workspace!, operationId: rollback ? actions.rollback : actions.update, targetRuntimeId, failTargetHealth: rollback };
       // Catch immediately: an adapter failure must not leak through an
       // unhandled rejection while the runner probes or releases the turn.
       const flight = call(signal, s => adapter.handoff(request, s), 240_000).then(value => {
@@ -226,7 +228,7 @@ export async function runAcceptance(adapter: AlphaLiveUpdateAdapter, options: Op
     controller.abort(); // Stop probes/uncertain transition calls before cleanup.
     await Promise.allSettled(devices.map(device => call(AbortSignal.timeout(2000), () => device.close(), 2000)));
     if (mustClean) {
-      report.cleaned = await cleanupAcceptance(adapter, operation, options, workspace);
+      report.cleaned = await cleanupAcceptance(adapter, operation, options, workspace, actions);
       if (!report.cleaned) { report.outcome = "cleanup_required"; report.code = "cleanup_unconfirmed"; }
     }
   }

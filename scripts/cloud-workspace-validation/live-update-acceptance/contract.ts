@@ -52,7 +52,9 @@ export interface AlphaLiveUpdateAdapter {
    * Retry idempotently; do not report complete from a DELETE acknowledgement. */
   cleanup(operation: Operation, signal: AbortSignal): Promise<{ complete: boolean; remainingResources: number }>;
 }
-export type Journal = Operation & { workspace?: Workspace; phase: "allocated" | "created" | "cleanup_required" | "cleaned" };
+export type Journal = Operation & { workspace?: Workspace;
+  actions?: { input: string; prompt: string; update: string; rollback: string };
+  phase: "allocated" | "created" | "cleanup_required" | "cleaned" };
 export type Report = { version: 1; operationId: string; workspaceId?: string;
   outcome: "passed" | "failed" | "blocked" | "cleanup_required"; code: string;
   updateGapMs?: number; rollbackGapMs?: number; cleaned: boolean };

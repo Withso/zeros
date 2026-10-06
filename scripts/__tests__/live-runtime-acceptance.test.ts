@@ -75,6 +75,15 @@ describe("Alpha live runtime acceptance runner", () => {
     expect(f.devices.every(device => vi.mocked(device.close).mock.calls.length === 1)).toBe(true);
     expect(f.journal.at(-1)?.phase).toBe("cleaned"); expect(f.created()).toBe(false);
   });
+  it("journals input, queue and transition identities before any resource mutation", async () => {
+    const f = fixture(); expect((await f.run()).outcome).toBe("passed");
+    const actions = f.journal[0].actions;
+    expect(actions).toEqual({ input: vi.mocked(f.devices[0].input).mock.calls[0][0],
+      prompt: vi.mocked(f.devices[1].enqueue).mock.calls[0][0],
+      update: vi.mocked(f.adapter.handoff).mock.calls[0][0].operationId,
+      rollback: vi.mocked(f.adapter.handoff).mock.calls[1][0].operationId });
+    expect(f.journal.at(-1)?.actions).toEqual(actions);
+  });
   it.each(["channel", "qualification"])("refuses %s before creating any resources", async kind => {
     const f = fixture();
     if (kind === "channel") f.evidence.channel = "production" as "alpha";

@@ -320,7 +320,9 @@ the harness is deliberately non-runnable against Alpha.
 
 Before provisioning, fsync a private
 `.context/zeros-v2-test-lu-<operation-id>.json` journal. All resources belong to
-that test operation and use its name prefix where supported. Lost create replies
+that test operation and use its name prefix where supported. The initial journal
+also records input, prompt, update and rollback idempotency IDs before mutation.
+Lost create replies
 reuse its idempotency key. Cleanup runs even after failure/interrupt and must
 reconcile ambiguous operations, every generation and pending deletion inventory;
 a DELETE acknowledgement is insufficient. A closed JSON report lists the test

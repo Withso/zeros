@@ -73,7 +73,7 @@ export async function main(args: string[]): Promise<number> {
         .parse(await adapter.preflight(AbortSignal.timeout(10_000)));
       if (saved.workspace && saved.workspace.organizationId !== preflight.organizationId) throw new Error();
       const operation: Operation = { version: 1, operationId: saved.operationId, name: saved.name };
-      const cleaned = await cleanupAcceptance(adapter, operation, { journal }, saved.workspace);
+      const cleaned = await cleanupAcceptance(adapter, operation, { journal }, saved.workspace, saved.actions);
       report = { version: 1, operationId: saved.operationId, workspaceId: saved.workspace?.workspaceId,
         outcome: cleaned ? "passed" : "cleanup_required", code: cleaned ? "cleanup_verified" : "cleanup_unconfirmed", cleaned };
     } else report = await runAcceptance(adapter, { journal, signal: controller.signal });
