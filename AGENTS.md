@@ -93,9 +93,16 @@ For provider event handling or tool transcript UI, also read
   echo a credential value, including in command arguments and test output.
 - Commits and pull requests use the workspace's own Git and GitHub identity,
   so authorship stays with whoever is working; the `Co-Authored-By` trailer
-  records the agent. Never author a commit as `zeros-agent[bot]`. Use the bot
-  only for automation that is not a person's work: merging a green pull
-  request (`pnpm agent:gh pr merge …`), cutting a release branch
+  records the agent. Never author a commit as `zeros-agent[bot]`.
+- Agents arm merges only through `pnpm agent:merge <pr-number>`, using the
+  workspace's own `gh` identity. Preview with `--dry-run`. Never bypass the
+  wrapper with `gh pr merge` or `pnpm agent:gh pr merge`. PRs that change
+  CI-definition paths require the owner to review and merge them. Only a human
+  may use `--force`, after documenting the override in a comment on that PR;
+  pass the comment URL with `--reason`. This overrides only the one-armed-PR
+  guard. See [docs/ci.md](docs/ci.md).
+- Use the bot only for automation that is not a person's work: cutting a release
+  branch
   (`pnpm agent:git push origin <sha>:refs/heads/release/X.Y.Z`), and
   dispatching or rerunning release workflows (`pnpm agent:gh …`).
   `pnpm agent:github:check` verifies access without printing a token. The App
