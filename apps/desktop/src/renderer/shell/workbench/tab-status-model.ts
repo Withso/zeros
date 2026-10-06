@@ -403,7 +403,11 @@ export class WorkbenchStatusSources {
       (source) => source.pending ||
         source.failurePhase === "waiting" || source.failurePhase === "retrying",
     );
-    const notice = failure ? null : sources.find(source => source.notice)?.notice ?? null;
+    // Information is persistent, so it has no grace/retry delay. Preserve its
+    // lowest priority even while a first failure is still being retried quietly.
+    const notice = sources.some(source => source.error)
+      ? null
+      : sources.find(source => source.notice)?.notice ?? null;
     this.scheduleAutomaticRetry();
     if (
       this.value.failure === failure &&

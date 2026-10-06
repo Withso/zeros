@@ -614,6 +614,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
           { exact: true },
         )
       ).toBeVisible();
+      await screenshot(type, "feature-retained-content");
     }
     check(
       `${type}: real feature reads use the frame, recover truthfully, and retain confirmed content`,

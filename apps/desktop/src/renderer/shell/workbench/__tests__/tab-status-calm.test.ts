@@ -299,4 +299,44 @@ describe("calm workbench status", () => {
     expect(sources.snapshot().failure).toBe("failed");
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("publishes persistent information immediately without retrying its action", async () => {
+    const sources = new WorkbenchStatusSources();
+    const run = vi.fn();
+    const notice = {
+      tone: "neutral" as const,
+      message: "Shallow Git history",
+      action: {
+        label: "Fetch full history",
+        busyLabel: "Fetching…",
+        busy: false,
+        run,
+      },
+    };
+    sources.update("history", { pending: false, notice });
+    expect(sources.snapshot().notice).toBe(notice);
+    expect(sources.snapshot().failure).toBeNull();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sources.snapshot().notice).toBe(notice);
+    expect(run).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    sources.update("history", { pending: false, notice, active: false });
+    expect(sources.snapshot().notice).toBeNull();
+  });
+
+  it("hides information behind every read failure, including a quiet first failure", async () => {
+    const sources = new WorkbenchStatusSources();
+    const notice = { tone: "neutral" as const, message: "Shallow Git history" };
+    const retry = vi.fn(async () => {});
+    sources.update("history", { pending: false, notice });
+    sources.update("read", { pending: false, error: "read failed", retry });
+    expect(sources.snapshot().failure).toBeNull();
+    expect(sources.snapshot().notice).toBeNull();
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(sources.snapshot().failure).toBe("read failed");
+    expect(sources.snapshot().notice).toBeNull();
+    sources.update("read", { pending: false, retry });
+    expect(sources.snapshot().failure).toBeNull();
+    expect(sources.snapshot().notice).toBe(notice);
+  });
 });

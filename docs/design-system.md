@@ -291,6 +291,9 @@ tabs observe the same thresholds. Silent read retries belong to the exact
 source/target, share one flight, and keep confirmed content through revalidation.
 Known transport gaps pause silent read retries; an offline rejection does not
 consume the recovery attempt or flash a read banner when the connection returns.
+Persistent informational notices (such as shallow Git history) appear immediately
+in the existing banner slot. These failure thresholds do not delay information;
+any availability/read failure hides the notice, including a silent first failure.
 Successful automatic recovery cancels the retry and clears the condition;
 failed retries remain visible until recovery. Hidden tabs and hidden documents
 run no status/retry timers; activation uses the original timestamp. Passive
