@@ -185,7 +185,7 @@ describe("cloud composer readiness queue", () => {
     expect(h.prepare).not.toHaveBeenCalled();
     expect(h.queue.size).toBe(0); expect(h.delivered).not.toHaveBeenCalled();
     expect(h.clear).not.toHaveBeenCalled(); expect(h.dispatch).not.toHaveBeenCalled();
-    expect(mocks.failureToast).toHaveBeenCalledExactlyOnceWith("Cloud runtime update required", expect.objectContaining({
+    expect(mocks.failureToast).toHaveBeenCalledExactlyOnceWith("This workspace is on an older runtime", expect.objectContaining({
       description: "Gets the new cloud runtime the next time this workspace wakes",
     }));
   });

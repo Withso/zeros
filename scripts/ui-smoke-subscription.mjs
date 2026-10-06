@@ -563,7 +563,7 @@ export async function runCloudAgentAccessSmoke({ page, check }) {
   await expect(page.getByRole("tooltip")).toHaveText("Gets the new cloud runtime the next time this workspace wakes");
   await composer.press("Enter");
   await expect(page.locator("[data-sonner-toast]")).toHaveCount(1);
-  await expect(page.locator("[data-sonner-toast]")).toContainText("Cloud runtime update required");
+  await expect(page.locator("[data-sonner-toast]")).toContainText("This workspace is on an older runtime");
   await composer.press("Enter");
   await expect(composer).toHaveText("Keep this draft until the runtime is updated");
   await expect(page.locator("[data-sonner-toast]")).toHaveCount(1);

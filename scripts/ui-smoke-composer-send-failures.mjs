@@ -41,6 +41,7 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
     ["cloud_agent_credential_expired", "Reconnect Codex to send messages", "Reconnect"],
     ["cloud_agent_credential_revoked", "Reconnect Codex to send messages", "Reconnect"],
     ["cloud_agent_credential_refresh_required", "Your Codex connection needs to be renewed", "Reconnect"],
+    ["cloud_runtime_upgrade_required", "This workspace is on an older runtime", null],
   ]) {
     await page.evaluate(code => window.composerSendFailureFixture.setFailure(code), code);
     await editor.fill("Keep this draft after refusal");
@@ -48,7 +49,8 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
     await page.clock.runFor(200);
     await expect(toasts).toHaveCount(1);
     await expect(toasts).toContainText(copy);
-    await expect(toasts.getByRole("button", { name: action, exact: true })).toBeVisible();
+    if (action) await expect(toasts.getByRole("button", { name: action, exact: true })).toBeVisible();
+    else await expect(toasts.getByRole("button")).toHaveCount(1); // Dismiss until RS wires the restart hook.
     await expect(editor).toHaveText("Keep this draft after refusal");
     await expect(composer).not.toContainText(copy);
     await expect(composer.locator('[role="status"], [role="alert"]')).toHaveCount(0);
@@ -59,13 +61,20 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
         await capture(`refused-send-${theme}`);
       }
     }
+    if (code === "cloud_runtime_upgrade_required") {
+      await expect(toasts).not.toContainText("couldn't be completed");
+      for (const theme of ["dark", "light"]) {
+        await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+        await capture(`runtime-refused-send-${theme}`);
+      }
+    }
     await dismiss();
     await page.getByRole("button", { name: "Remount chat", exact: true }).click();
     await page.evaluate(() => window.composerSendFailureFixture.refresh());
     await expect(editor).toHaveText("Keep this draft after refusal");
     await expect(toasts).toHaveCount(0);
   }
-  check("Refused cloud sends restore drafts, show one actionable toast and keep the composer clean across remount/refresh", true);
+  check("Refused cloud sends restore drafts, show one cause-specific toast and keep the composer clean across remount/refresh", true);
 
   await page.evaluate(() => window.composerSendFailureFixture.setFailure("command_dispatch_rejected"));
   await send.click();
@@ -103,7 +112,7 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   await editor.press("Enter");
   await page.clock.runFor(200);
   await expect(toasts).toHaveCount(1);
-  await expect(toasts).toContainText("Cloud runtime update required");
+  await expect(toasts).toContainText("This workspace is on an older runtime");
   // A pointer attempt and further keystrokes share the same acknowledgement.
   await send.click({ force: true });
   await editor.press("Enter");

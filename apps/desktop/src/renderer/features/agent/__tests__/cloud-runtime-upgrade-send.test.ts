@@ -132,6 +132,11 @@ describe("production send callback on runtime rejection", () => {
     expect(h.sending.size).toBe(0);
     expect(mocks.refresh).toHaveBeenCalledOnce();
     expect(mocks.toast).toHaveBeenCalledOnce();
+    if (code === "cloud_runtime_upgrade_required") {
+      expect(mocks.toast).toHaveBeenCalledWith("This workspace is on an older runtime", expect.objectContaining({
+        description: "Gets the new cloud runtime the next time this workspace wakes", action: undefined,
+      }));
+    }
   });
   it("labels the submitted model even when the user switches models during admission", async () => {
     mocks.workspace.chats[0].model = "gpt-6.1-sol";
