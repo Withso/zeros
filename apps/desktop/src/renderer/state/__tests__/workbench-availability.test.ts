@@ -140,6 +140,24 @@ describe("workbench availability observers", () => {
       )?.message,
     ).toBe("Can't reach the workspace.");
   });
+  it("shares local engine availability across Personal and organization folders independently of cloud setup", () => {
+    fixture.docs.set(folder, { status: "failed", setupFailure: {} });
+    workbenchAvailabilitySnapshot(folder);
+    fixture.localStatus = "connected";
+    const personal = workbenchAvailabilitySnapshot("/local/personal");
+    expect(workbenchAvailabilitySnapshot("/local/organization")).toBe(personal);
+    expect(describeWorkspaceAvailability(personal, Date.now())).toBeNull();
+    vi.setSystemTime(1_000);
+    fixture.localStatus = "disconnected";
+    for (const listener of fixture.localListeners) listener("disconnected");
+
+    const disconnected = workbenchAvailabilitySnapshot("/local/organization");
+    expect(disconnected).toMatchObject({ cloud: false, state: undefined, setupFailed: false, previouslyConnected: true, since: 1_000 });
+    expect(describeWorkspaceAvailability(disconnected, 2_999)).toBeNull();
+    expect(describeWorkspaceAvailability(disconnected, 3_000)?.message).toBe("Reconnecting to the Zeros engine…");
+    expect(describeWorkspaceAvailability(disconnected, 21_000)?.message).toBe("Can't reach the Zeros engine.");
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it("gives newly ready workspaces their own connection interval", () => {
     fixture.docs.set(folder, { status: "setting_up" });
     workbenchAvailabilitySnapshot(folder);

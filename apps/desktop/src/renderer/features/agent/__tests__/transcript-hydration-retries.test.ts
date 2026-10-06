@@ -53,6 +53,19 @@ afterEach(() => {
 });
 
 describe("transcript hydration after a workspace connection failure", () => {
+  it("continues local hydration when cloud background reads are unavailable", async () => {
+    transport();
+    availability.running = false;
+    const retry = vi.fn(async (_id: string, _current: () => boolean) => {});
+    const pending = new TranscriptHydrationRetries(retry);
+    cleanups.push(() => pending.clear());
+
+    pending.add("local-chat");
+    await settle();
+
+    expect(retry).toHaveBeenCalledExactlyOnceWith("local-chat", expect.any(Function));
+    expect(retry.mock.calls[0][1]()).toBe(true);
+  });
   it("keeps background retries inert while its cloud workspace is stopped or archived", async () => {
     const connection = transport("connected");
     availability.running = false;
