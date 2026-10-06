@@ -74,6 +74,9 @@ afterEach(() => {
 });
 
 describe("cloud runtime registration", () => {
+  it("leaves local engines outside the cloud registration path", () => {
+    expect(consumeCloudRuntimeEnvironment({}, () => NOW)).toBeNull();
+  });
   it("registers the complete v4 witness without a legacy image-contract claim", async () => {
     const runtime = consumeCloudRuntimeEnvironment({[CLOUD_RUNTIME_ENV]:encodedRuntime()},()=>NOW)!;
     const agentRuntime = {profile:"zeros-cloud-worker-v4" as const,runtimeId:`r1-${"a".repeat(64)}`,manifestSha256:"a".repeat(64),
@@ -337,6 +340,7 @@ describe("cloud runtime registration", () => {
     try {
       await registration.start();
       expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toMatchObject({actorProtocolVersion:2,agentRuntime});
+      expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).not.toHaveProperty("agentCustomizationVersion");
     } finally { await registration.stop(); }
   });
 

@@ -533,4 +533,17 @@ export async function runCloudAgentAccessSmoke({ page, check }) {
   await expect(notice).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeEnabled();
   check("Old cloud runtimes explain the required upgrade, block Enter and Send, and preserve the draft through upgrade", true);
+
+  await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-model-menu.html`);
+  await page.getByRole("button", { name: /^Model:/ }).click();
+  await page.getByPlaceholder("Search models…").fill("Opus");
+  await expect(page.getByRole("option").first()).toBeVisible();
+  await expect(page.getByText("Update the cloud runtime to use agents", { exact: true })).toHaveCount(0);
+  await page.evaluate(() => sessionStorage.removeItem("fixture:app-sidebar"));
+  await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-app-sidebar.html?conversation`);
+  await page.locator('[data-workspace-id="ws-atlanta"]').getByRole("button", { name: /^Open workspace atlanta/ }).click();
+  await page.locator(".zeros-agent-surface .composer-pm").first().fill("Local agent draft");
+  await expect(page.locator("[data-cloud-agent-runtime-upgrade]")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeEnabled();
+  check("Local model choices and composer sends remain available after cloud upgrade and consent restrictions", true);
 }
