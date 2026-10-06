@@ -99,6 +99,14 @@ export async function runCloudRuntimeUpgradeSmoke({ page, check, harnessBase }) 
   expect(mutations).toHaveLength(0);
   await page.keyboard.press("Escape");
   await expect(page.getByPlaceholder("Search models…")).toHaveCount(0);
+  await page.goto(`${harnessBase}/harness-cloud-workspace.html?runtime=1&agents-required=1`);
+  await page.getByRole("button", { name: /^Model:/ }).click();
+  await expect(page.getByText("This workspace gets the new cloud runtime the next time it wakes", { exact: true })).toBeVisible();
+  await expect(page.getByText("Updates automatically the next time this workspace wakes.", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Update runtime/ })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  expect(mutations).toHaveLength(0);
   check("Staff runtime details and composer explain automatic updates, follow wake/readiness, and stay inert while hidden or unauthorized", true);
+  check("The agents-required discovery flag supplies one next-wake notice in the model menu", true);
   check("Local chat tabs and model menu retain their behavior, with no runtime discovery or mutation HTTP", true);
 }

@@ -22,6 +22,7 @@ import { setInternalFeatureEnabled } from "../features/settings/internal-feature
 import { Toaster } from "../shared/ui/primitives/elements/toast";
 import { SetupView } from "../shell/workbench/tabs/setup-tab";
 import { ModelPill } from "../features/agent/composer-pills";
+import type { WorkspaceRegistryAgent } from "../features/agent/workspace-agent-registry";
 
 const target = {
   organizationId: "11111111-1111-4111-8111-111111111111",
@@ -63,6 +64,11 @@ const workspaceDocument: CloudWorkspaceDocument = {
 };
 const sharingFixture = new URLSearchParams(location.search).has("sharing");
 const runtimeFixture = new URLSearchParams(location.search).has("runtime");
+const runtimeAgentsRequired = new URLSearchParams(location.search).has("agents-required");
+const outdatedCloudAgents: WorkspaceRegistryAgent[] = [{
+  id: "claude", name: "Claude", version: "1.0.0", description: "", distribution: {},
+  installed: true, authenticated: false, runtimeUpgradeRequired: true, cloudModels: [],
+}];
 const ownerId = "33333333-3333-4333-8333-333333333333";
 const actorIds = { owner: ownerId, manager: ownerId,
   developer: "44444444-4444-4444-8444-444444444444",
@@ -181,7 +187,7 @@ function Harness() {
               canSplitDown={false}
             />
             {runtimeFixture && <div className="p-3" aria-label="Cloud composer model">
-              <ModelPill agents={[]} agentId="claude" initialize={null} value={null} effort="high" fast={false}
+              <ModelPill agents={cloud && runtimeAgentsRequired ? outdatedCloudAgents : []} agentId="claude" initialize={null} value={null} effort="high" fast={false}
                 workspaceFolder={cloud ? folder : "/fixture/local"} active={active} onChange={() => {}} onConfigure={() => {}} />
             </div>}
             {cloud && failedSetup && <section aria-label="Cloud Setup tab" className="h-64">

@@ -3,14 +3,11 @@ import type { CloudRuntimeUpgradeAvailability } from "@zeros/protocol/cloud-runt
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 
 const state = vi.hoisted(() => ({ account: 1, catalog: 1, workspace: null as CloudWorkspaceDocument | null,
-  read: vi.fn(), upgrade: vi.fn(), changed: null as (() => void) | null }));
-vi.mock("../../platform/cloud-workspaces", () => ({ getCloudRuntimeUpgradeAvailability: state.read, upgradeCloudWorkspaceRuntime: state.upgrade }));
+  read: vi.fn(), changed: null as (() => void) | null }));
+vi.mock("../../platform/cloud-workspaces", () => ({ getCloudRuntimeUpgradeAvailability: state.read }));
 vi.mock("../../features/team/team-store", () => ({ getOrganizationStoreGeneration: () => state.account }));
 vi.mock("../cloud-workspace-catalog", () => ({ cloudCatalogGeneration: () => state.catalog, cloudWorkspaceDocument: () => state.workspace,
   subscribeCloudWorkspaces: (changed: () => void) => { state.changed = changed; return () => {}; } }));
-vi.mock("../../features/team/control-plane", () => ({ ControlPlaneError: class extends Error {
-  constructor(public status: number, public code: string, message: string) { super(message); }
-} }));
 import { cloudRuntimeUpgradeAvailability, cloudRuntimeUpgradeAvailabilityKey, loadCloudRuntimeUpgradeAvailability,
   requestCloudRuntimeUpgradeDetails, subscribeCloudRuntimeUpgradeDetails } from "../cloud-runtime-upgrade";
 
@@ -19,7 +16,7 @@ const availability: CloudRuntimeUpgradeAvailability = { ...target, generation: 1
   currentRuntimeId: `r1-${"a".repeat(64)}`, latestRuntimeId: `r1-${"b".repeat(64)}`,
   updateAvailable: true, unavailableReason: null, transition: null };
 beforeEach(() => {
-  state.account++; state.catalog++; state.read.mockReset(); state.upgrade.mockReset(); cloudRuntimeUpgradeAvailability.clear();
+  state.account++; state.catalog++; state.read.mockReset(); cloudRuntimeUpgradeAvailability.clear();
   state.workspace = { generation: { number: 1 }, deletedAt: null, status: "ready" } as CloudWorkspaceDocument;
   state.read.mockResolvedValue(availability);
 });
@@ -71,7 +68,7 @@ describe("cloud runtime upgrade ownership and retries", () => {
     const unsubscribe = subscribeCloudRuntimeUpgradeDetails(opened);
     requestCloudRuntimeUpgradeDetails(`cloud://${target.organizationId}/${target.workspaceId}`);
     expect(opened).toHaveBeenCalledWith({ ...target, account: state.account, catalog: state.catalog });
-    expect(state.upgrade).not.toHaveBeenCalled();
+    expect(state.read).not.toHaveBeenCalled();
     requestCloudRuntimeUpgradeDetails("/local/workspace");
     expect(opened).toHaveBeenCalledOnce();
     unsubscribe();

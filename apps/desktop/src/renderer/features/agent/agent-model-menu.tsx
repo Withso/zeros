@@ -744,7 +744,7 @@ export function AgentModelMenu({
             </div>
           )}
         </Command>
-        {footer}
+        {(groups.length > 0 || !registry?.some(agent => agent.runtimeUpgradeRequired)) && footer}
       </PopoverContent>
     </Popover>
   );
