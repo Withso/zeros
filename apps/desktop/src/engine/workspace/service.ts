@@ -302,6 +302,8 @@ import { designRegistryAtGitRef } from "../design/metadata-git";
 import { repoPathOverlapsDesignRoot as sharedRepoPathOverlapsDesignRoot } from "../design/path-authority";
 import { withDesignWorkspaceMutation } from "../design/document-write-lock";
 import { initializeWorkspaceDesign } from "../git/design-mode";
+import { browseCloudDesignDirectories, createCloudDesignDirectory, selectCloudDesignDirectory } from "../design/cloud-directories";
+import { withDesignWriteAuthority } from "../design/write-authority";
 import { withWorkspaceGitMutation } from "../git/mutation-lock";
 import { unfenceDesignDirectory } from "../design/workspace-lock";
 
@@ -616,6 +618,8 @@ const WRITE_OPS = new Set<string>([
  * WRITE_OPS is a remote-security allowlist, and widening it would accidentally
  * expose local-only Git controls to relay clients. */
 const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
+  "design.createDirectory",
+  "design.selectDirectory",
   "design.page.create",
   "design.page.rename",
   "design.page.delete",
@@ -2460,7 +2464,9 @@ export class WorkspaceService {
     // relay flag. Never infer it from a path, client params, or remote alone.
     const cloudFileOperation = ["file.tree", "file.ignored", "file.read", "file.write",
       "context.graph.list", "context.graph.scaffold",
-      "workspace.listWorkingDirectories", "workspace.setWorkingDirectories"].includes(op) || isCodeReviewOperation(op) || isGitReviewOperation(op);
+      "workspace.listWorkingDirectories", "workspace.setWorkingDirectories",
+      "design.browseDirectories", "design.createDirectory", "design.selectDirectory",
+      "design.previewExistingDirectory", "design.adoptDirectory", "design.renameDirectory", "design.removeDirectory"].includes(op) || isCodeReviewOperation(op) || isGitReviewOperation(op);
     let cloudFiles: QualifiedCloudFilePolicy | undefined;
     if (cloudFileOperation && opts.cloudFileActor) {
       if (!remote || !opts.cloudWorker || !this.options.primaryDesignWorkspace || !opts.cloudActorIdentity ||
@@ -2623,11 +2629,16 @@ export class WorkspaceService {
         designHistoryState: (workspacePath: string, create?: boolean) => this.designHistoryState(workspacePath, create, humanActor.id),
         recordDesignHistory: (workspacePath: string, entry: WorkspaceDesignHistoryEntry) => this.recordDesignHistory(workspacePath, entry, humanActor.id),
       } : this.designRouteHost;
-      return handleDesignWorkspaceRoute(host, op, params, {
+      const dispatch = () => handleDesignWorkspaceRoute(host, op, params, {
         remote: designRemote,
         hostLocalResources,
         ...(humanActor ? { actor: humanActor, primaryRepositoryRoot: this.root } : {}),
+        ...(cloudFiles ? { cloudFiles } : {}),
       });
+      const policy = cloudFiles;
+      return policy && op !== "design.previewExistingDirectory"
+        ? withDesignWriteAuthority(() => policy.assertAuthorized(true), dispatch)
+        : dispatch();
     }
     if (isCodeReviewOperation(op)) {
       return handleCodeReviewRoute({
@@ -2649,6 +2660,22 @@ export class WorkspaceService {
       });
     }
     switch (op) {
+      case "design.browseDirectories":
+      case "design.createDirectory":
+      case "design.selectDirectory": {
+        if (!cloudDesign || !cloudFiles || !opts.cloudFileActor ||
+            !cloudActorCan(opts.cloudFileActor.role, op === "design.browseDirectories" ? "read" : "manage")) {
+          throw new GitError({ code: "REMOTE_RESTRICTED", message: "This operation requires the admitted cloud workspace role." });
+        }
+        if (op === "design.browseDirectories") return browseCloudDesignDirectories(params, cloudFiles);
+        const policy = cloudFiles;
+        const workspace = this.resolveDesignWorkspaceRecord(LOCAL_MAIN_WORKSPACE_ID, false);
+        return withDesignWriteAuthority(() => policy.assertAuthorized(true), () =>
+          op === "design.createDirectory"
+            ? createCloudDesignDirectory(workspace, params, policy)
+            : selectCloudDesignDirectory(workspace, params, policy, (targets, mutation) => this.withDesignTerritoryTransition(targets, mutation)),
+        );
+      }
       case "design.status": {
         const workspace = this.resolveDesignWorkspaceRecord(reqStr(params, "workspaceId"), designRemote);
         return readDesignCheckoutStatus(workspace.path);

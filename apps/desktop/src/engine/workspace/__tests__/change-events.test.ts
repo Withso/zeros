@@ -2,11 +2,23 @@ import { describe, expect, it } from "vitest";
 
 import {
   dbChangedIncludesOriginator,
+  dbChangedDesignRecognition,
   dbChangedKinds,
   LONG_LIFECYCLE_OPS,
 } from "../change-events";
 
 describe("dbChangedKinds", () => {
+  it.each(["design.renameDirectory", "design.adoptDirectory", "design.removeDirectory"])("preserves Local broadcast behavior for %s", op => {
+    expect(dbChangedKinds(op)).toEqual(["workspaces", "settings"]);
+    expect(dbChangedIncludesOriginator(op)).toBe(false);
+    expect(dbChangedDesignRecognition(op)).toBe(false);
+  });
+  it.each(["design.createDirectory", "design.selectDirectory"])("publishes %s to workspace and settings observers", op => {
+    expect(dbChangedKinds(op, undefined, true)).toEqual(["workspaces", "settings"]);
+    expect(dbChangedIncludesOriginator(op, true)).toBe(true);
+    expect(dbChangedDesignRecognition(op, true)).toBe(true);
+    expect(dbChangedKinds(op)).toBeNull();
+  });
   it("does not invalidate workspace views for a Design dry-run", () => {
     expect(dbChangedKinds("design.transaction.apply", { result: { dryRun: true } })).toBeNull();
   });

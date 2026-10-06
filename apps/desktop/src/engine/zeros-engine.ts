@@ -109,6 +109,7 @@ import {
 } from "./git/design-mode";
 import {
   dbChangedIncludesOriginator,
+  dbChangedDesignRecognition,
   dbChangedKinds,
 } from "./workspace/change-events";
 import { PtyService } from "./pty/service";
@@ -531,6 +532,7 @@ const DESIGN_OWNER_REGISTRY_CHANGE_OPS = new Set<string>([
   // These keep the physical project registered but can establish or rename
   // the semantic Design roots consumed by scoped tool admission.
   "design.renameDirectory",
+  "design.createDirectory",
   "design.removeDirectory",
   "design.adoptDirectory",
   "gh.publishRepo",
@@ -9179,11 +9181,11 @@ export class ZerosEngine {
                 // so the nested transition drains older work, not itself.
                 // Restricting this to Code→Design made Design→Code wait on its
                 // own promise until the 30-second bounded drain failed.
-                designTerritoryTransitionCaller: op === "workspace.setMode",
+                designTerritoryTransitionCaller: op === "workspace.setMode" || op === "design.selectDirectory",
               },
             )
           : await operation;
-      const changed = dbChangedKinds(op, result);
+      const changed = dbChangedKinds(op, result, !!this.cloudWorker);
       const workspaceIds = changed && (changed.includes("codeReview") || changed.includes("gitReview")) && typeof params.workspaceId === "string"
         ? [params.workspaceId]
         : changed?.includes("workspaces")
@@ -9256,8 +9258,9 @@ export class ZerosEngine {
           source: "engine",
           kinds: changed,
           ...(workspaceIds ? { workspaceIds } : {}),
+          ...(dbChangedDesignRecognition(op, !!this.cloudWorker) ? { designRecognitionChanged: true } : {}),
         });
-        if (dbChangedIncludesOriginator(op)) {
+        if (dbChangedIncludesOriginator(op, !!this.cloudWorker)) {
           this.router.broadcast(dbChangedMsg);
         } else {
           this.router.broadcastExcept(client.id, dbChangedMsg);

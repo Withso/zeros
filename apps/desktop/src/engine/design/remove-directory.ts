@@ -21,18 +21,23 @@ import {
   primeDesignDirectoryName,
 } from "./directory-registry";
 import { forgetRecognizedDesignDirectory } from "./recognition-store";
+import { assertDesignWriteAuthorized } from "./write-authority";
 
 /** Trusted desktop Settings operation; the engine hands off Design actors first. */
 export async function removeDesignDirectory(opts: {
   repoRoot: string;
   directory: string;
+  /** Server-admitted primary checkout. Its allocation cannot be archived by
+   * the local workspace lifecycle; the engine retires Design actors first. */
+  livePrimaryWorkspaceId?: string;
 }): Promise<void> {
   return withWorkspaceGitMutation(opts.repoRoot, async () => {
     const { repoRoot, directory } = opts;
     if (
       listWorkspaces({ archived: false }).some(
         (ws) =>
-          path.resolve(ws.repoRoot) === path.resolve(repoRoot),
+          path.resolve(ws.repoRoot) === path.resolve(repoRoot) &&
+          !(ws.id === opts.livePrimaryWorkspaceId && ws.placement === "cloud" && path.resolve(ws.path) === path.resolve(repoRoot)),
       )
     )
       throw new Error(
@@ -77,6 +82,7 @@ export async function removeDesignDirectory(opts: {
       ]);
       for (const file of head.stdout.split("\0")) tracked.add(file);
     }
+    assertDesignWriteAuthorized();
     removal.apply();
     const files = removal.changes
       .map((change) => change.file)

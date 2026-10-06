@@ -9,6 +9,7 @@ import React from "react";
 import { PanelRight } from "lucide-react";
 
 import type { Workspace } from "../../platform/git";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import {
   designDirectoryTargetKeyForWorkspace,
   useDesignDirectoryTarget,
@@ -42,6 +43,7 @@ export function DesignDirectoryPill({
       className="zd-design-floating-toolbar zd-design-directory-pill absolute flex items-center"
     >
       <DesignDirectoryMenu
+        key={isCloudWorkspace(workspace.id) ? workspace.id : undefined}
         workspace={workspace}
         active={active}
         name={directory.data?.directory ?? "Design"}

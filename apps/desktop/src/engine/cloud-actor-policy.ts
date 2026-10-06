@@ -12,6 +12,7 @@ type WorkspacePolicy={remoteReadable(op:string):boolean;isWriteOp(op:string):boo
 const reads=new Set([
   // Discovery copies GitHub's own PR metadata, never client-supplied content.
   "gh.prSync",
+  "design.browseDirectories",
   "design.page.select",
   "codeReview.list",
   "git.reviewHunks",
@@ -38,7 +39,7 @@ const edits=new Set([
   "git.stashApply","git.stashDrop","git.deleteBranch","git.stageHunk","git.unstageHunk","git.discardHunk","git.tagCreate","git.tagDelete",
   "workspace.continueOnNewBranch",
 ]);
-const managers=new Set(["design.initialize","design.adoptDirectory","design.removeDirectory","design.renameDirectory","workspace.setMode"]);
+const managers=new Set(["design.initialize","design.createDirectory","design.selectDirectory","design.adoptDirectory","design.removeDirectory","design.renameDirectory","workspace.setMode"]);
 const providerRuns=new Set([
   "AGENT_NEW_SESSION","AGENT_LOAD_SESSION","AGENT_FORK_CONVERSATION","AGENT_PROMPT","AGENT_GENERATE_TITLE",
   "AGENT_CANCEL","AGENT_STOP_BACKGROUND_TASK","AGENT_STEER","AGENT_PERMISSION_RESPONSE","AGENT_QUESTION_RESPONSE",

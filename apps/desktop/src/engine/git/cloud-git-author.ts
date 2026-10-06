@@ -32,7 +32,7 @@ export function scopedCloudGitAuthorEnvironment(): Record<string, string> {
 /** These managed operations can create commit/tag objects, including stashes
  * and Design commits. Other reads and edits do not require a GitHub identity. */
 const AUTHOR_OPERATIONS = new Set(["git.commit", "git.pull", "git.rebase", "git.merge", "git.cherryPick", "git.revert",
-  "git.continue", "git.stashSave", "git.tagCreate", "design.commit"]);
+  "git.continue", "git.stashSave", "git.tagCreate", "design.commit", "design.renameDirectory", "design.removeDirectory"]);
 export function needsCloudGitAuthor(op: string, params: Record<string, unknown> = {}): boolean {
   return AUTHOR_OPERATIONS.has(op) || (op === "git.changeTarget" && params.rebase === true);
 }
