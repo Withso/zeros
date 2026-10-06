@@ -184,6 +184,7 @@ import {
 } from "./design-text-editing";
 import { DesignThemeEditor } from "./design-theme-editor";
 import { DesignToolbarButton } from "./design-inspector-kit";
+import { CloudDesignImageUpload } from "./cloud-design-image-upload";
 import { designRuntimeLayerLabel } from "./design-layer-label";
 import { useDesignWorkspaceDisclosure } from "./state/design-layer-disclosure";
 import {
@@ -7501,6 +7502,7 @@ export function DesignCanvas({
             >
               <Type />
             </DesignToolbarButton>
+            <CloudDesignImageUpload workspaceId={workspaceId} directoryId={canvasDirectoryId} frame={selectedFrame} active={active} />
             <span className="zd-canvas-toolbar-divider" aria-hidden="true" />
             <DesignToolbarButton
               label="Toggle frame source"

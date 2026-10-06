@@ -35,6 +35,9 @@ import {
 } from "./adopt-directory";
 import { stageDesignRegistry } from "./metadata-git";
 import { createHash, randomUUID } from "node:crypto";
+import path from "node:path";
+import { designAssetUploadSchema, prepareDesignAssetUpload, withDesignAssetUpload } from "./asset-upload";
+import { escapeAttribute } from "./source";
 import {
   designDirectoryFromSettings,
   designDocumentMetadataPath,
@@ -249,6 +252,7 @@ const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.node.text",
   "design.node.html",
   "design.asset.insert",
+  "design.asset.upload",
   "design.stage",
   "design.unstage",
   "design.save",
@@ -1568,7 +1572,12 @@ export async function handleDesignWorkspaceRoute(
         },
       };
     }
-    case "design.asset.insert": {
+    case "design.asset.insert":
+    case "design.asset.upload": {
+      if (op === "design.asset.upload" && !options.primaryRepositoryRoot)
+        throw new Error("Image upload requires a cloud workspace.");
+      const uploadInput = op === "design.asset.upload" ? designAssetUploadSchema.parse(params) : undefined;
+      const asset = uploadInput ? prepareDesignAssetUpload(uploadInput) : undefined;
       const workspace = host.resolveDesignWorkspace(
         reqStr(params, "workspaceId"),
         remote,
@@ -1585,7 +1594,14 @@ export async function handleDesignWorkspaceRoute(
           message: `Design frame changed before the mutation: ${render.file}. Re-read it and retry.`,
         });
       }
-      const prepared = await prepareDesignAssetInsertion(workspace.path, {
+      const prepared = asset && uploadInput ? await (async () => {
+        const offsets = await readDesignElementOffsetMap(workspace.path, frame);
+        const root = offsets.find(element => element.tag === "main") ?? offsets[0];
+        if (!root) throw new Error("The frame has no editable root.");
+        const reference = path.posix.relative(path.posix.dirname(frame), asset.file);
+        return { nodeId: root.oid,
+          html: `<img data-oid="asset-${randomUUID()}" src="${escapeAttribute(reference)}" alt="${escapeAttribute(path.basename(uploadInput.name, path.extname(uploadInput.name)))}" style="position:absolute; left:${Math.round(uploadInput.x)}px; top:${Math.round(uploadInput.y)}px; max-width:320px; height:auto;">` };
+      })() : await prepareDesignAssetInsertion(workspace.path, {
         frame,
         sourceVersion,
         assetPath: reqStr(params, "assetPath"),
@@ -1593,10 +1609,10 @@ export async function handleDesignWorkspaceRoute(
         y: reqNum(params, "y"),
       });
       const operationId = randomUUID();
-      const applied = await applyDesktopDesignOperation(
+      const apply = () => applyDesktopDesignOperation(
         workspace.path,
         frame,
-        `Insert ${reqStr(params, "assetPath")}`,
+        `Insert ${asset?.file ?? reqStr(params, "assetPath")}`,
         {
           operationId,
           type: "node.set-html",
@@ -1607,6 +1623,7 @@ export async function handleDesignWorkspaceRoute(
         undefined,
         summary.revision,
       );
+      const applied = asset ? await withDesignAssetUpload(asset, apply) : await apply();
       const mutation = await readDesignMutationResult(
         workspace.path,
         frame,
@@ -1619,6 +1636,7 @@ export async function handleDesignWorkspaceRoute(
         );
       }
       return {
+        ...(asset ? { assetPath: asset.file, receipt: applied.receipt } : {}),
         mutation,
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,

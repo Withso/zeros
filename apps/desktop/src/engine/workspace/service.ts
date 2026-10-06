@@ -301,6 +301,7 @@ import { readDirectoryDesignLayout } from "../design/metadata";
 import { designRegistryAtGitRef } from "../design/metadata-git";
 import { repoPathOverlapsDesignRoot as sharedRepoPathOverlapsDesignRoot } from "../design/path-authority";
 import { withDesignWorkspaceMutation } from "../design/document-write-lock";
+import { withDesignWriteAuthority } from "../design/write-authority";
 import { initializeWorkspaceDesign } from "../git/design-mode";
 import { browseCloudDesignDirectories, createCloudDesignDirectory, selectCloudDesignDirectory } from "../design/cloud-directories";
 import { withDesignWriteAuthority } from "../design/write-authority";
@@ -649,6 +650,7 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "design.history.undo",
   "design.history.redo",
   "design.asset.insert",
+  "design.asset.upload",
   "design.token.update",
   "design.stage",
   "design.unstage",
@@ -787,6 +789,7 @@ const DESIGN_DOCUMENT_MUTATIONS = new Set<string>([
   "design.node.text",
   "design.node.html",
   "design.asset.insert",
+  "design.asset.upload",
   "design.stage",
   "design.unstage",
   "design.save",
@@ -2462,7 +2465,7 @@ export class WorkspaceService {
     const remote = opts.remote === true;
     // Qualified VM authority is server-owned, independent of the paired-host
     // relay flag. Never infer it from a path, client params, or remote alone.
-    const cloudFileOperation = ["file.tree", "file.ignored", "file.read", "file.write",
+    const cloudFileOperation = ["design.asset.upload", "file.tree", "file.ignored", "file.read", "file.write",
       "context.graph.list", "context.graph.scaffold",
       "workspace.listWorkingDirectories", "workspace.setWorkingDirectories",
       "design.browseDirectories", "design.createDirectory", "design.selectDirectory",
@@ -2635,6 +2638,13 @@ export class WorkspaceService {
         ...(humanActor ? { actor: humanActor, primaryRepositoryRoot: this.root } : {}),
         ...(cloudFiles ? { cloudFiles } : {}),
       });
+      if (op === "design.asset.upload") {
+        if (!cloudDesign || !cloudFiles) throw new Error("Image upload requires the admitted cloud workspace.");
+        const policy = cloudFiles;
+        const authorize = () => { policy.assertPath(`${designDirectoryNameFor(this.root)}/assets`, true); };
+        authorize();
+        return withDesignWriteAuthority(authorize, dispatch);
+      }
       const policy = cloudFiles;
       return policy && op !== "design.previewExistingDirectory"
         ? withDesignWriteAuthority(() => policy.assertAuthorized(true), dispatch)
