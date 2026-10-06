@@ -78,8 +78,10 @@ export async function runCloudDesignAssetsSmoke({ page, check, harnessBase }) {
   await page.evaluate(() => window.cloudAssetFixture.fail());
   await choose();
   await expect(
-    page.getByText("WebSocket closed before response"),
+    page.getByText("Check the canvas before trying again."),
   ).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("Command failed:");
+  await expect(page.locator("body")).not.toContainText("/srv/zeros/");
   expect(await count()).toBe(2);
   await expect(upload).toBeEnabled();
   check("an uncertain upload reports its failure without replay", true);

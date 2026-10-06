@@ -15,7 +15,6 @@ import { useInternalFeatureActive } from "../settings/internal-features";
 import { DesignToolbarButton } from "./design-inspector-kit";
 import { uploadDesignAssetCached } from "./state/design-workspace-cache";
 import { useDesignWorkspaceUiStore } from "./state/design-workspace-ui";
-import { errorMessage } from "./design-workspace-error";
 
 const types: Record<string, CloudDesignAssetUploadInput["mimeType"]> = {
   png: "image/png",
@@ -97,10 +96,13 @@ export function CloudDesignImageUpload({
         (file.type && file.type !== mimeType) ||
         !file.size ||
         file.size > 10 * 1024 * 1024
-      )
-        throw new Error(
-          "Choose a PNG, JPEG, GIF, WebP or AVIF image of at most 10 MiB.",
-        );
+      ) {
+        toast.error("Couldn't upload image", {
+          description:
+            "Choose a PNG, JPEG, GIF, WebP or AVIF image of at most 10 MiB.",
+        });
+        return;
+      }
       const bytes = new Uint8Array(await file.arrayBuffer());
       if (
         current.current !== picked.owner ||
@@ -125,10 +127,15 @@ export function CloudDesignImageUpload({
         x: 16,
         y: 16,
       });
-    } catch (error) {
+    } catch {
+      // Transport failures can include commands, VM paths or image bytes. Keep
+      // diagnostics closed, and do not replay a possibly committed insertion.
+      console.warn("Cloud Design image upload failed", {
+        reason: "upload_failed",
+      });
       if (current.current === picked.owner)
         toast.error("Couldn't upload image", {
-          description: errorMessage(error),
+          description: "Check the canvas before trying again.",
         });
     } finally {
       running.current = false;

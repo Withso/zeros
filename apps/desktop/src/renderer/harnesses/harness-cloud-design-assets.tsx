@@ -158,7 +158,7 @@ setActiveBridge({
     });
     if (fail) {
       fail = false;
-      throw new Error("WebSocket closed before response");
+      throw new Error("Command failed: upload /srv/zeros/workspace/private-input; connection closed");
     }
     const next = { ...frame, sourceVersion: "b".repeat(24) };
     return {

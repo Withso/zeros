@@ -301,7 +301,6 @@ import { readDirectoryDesignLayout } from "../design/metadata";
 import { designRegistryAtGitRef } from "../design/metadata-git";
 import { repoPathOverlapsDesignRoot as sharedRepoPathOverlapsDesignRoot } from "../design/path-authority";
 import { withDesignWorkspaceMutation } from "../design/document-write-lock";
-import { withDesignWriteAuthority } from "../design/write-authority";
 import { initializeWorkspaceDesign } from "../git/design-mode";
 import { browseCloudDesignDirectories, createCloudDesignDirectory, selectCloudDesignDirectory } from "../design/cloud-directories";
 import { withDesignWriteAuthority } from "../design/write-authority";
