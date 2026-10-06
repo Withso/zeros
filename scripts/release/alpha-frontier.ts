@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CHANNELS, PromotionError, SHA, requireCheck } from "./contracts";
+import { CHANNELS, PromotionError, ReleaseIdentity, SHA, requireCheck } from "./contracts";
 import { buildReleaseLedger, previousReleaseLedger, ReleaseLedger } from "./release-ledger";
 
 type Read = (route: string) => Promise<any>;
@@ -53,6 +53,32 @@ function requireDestination(condition: unknown, reason: string): asserts conditi
   if (!condition) throw new AlphaAdmissionRejectedError(reason);
 }
 
+// Admission needs the deployed source even when cloud readiness is false.
+// Retain the shared identity constraints, relaxing only readiness fields.
+const AlphaFrontierIdentity = ReleaseIdentity.extend({ ready: z.boolean(),
+  cloud: ReleaseIdentity.shape.cloud.extend({ ready: z.boolean(),
+    state: ReleaseIdentity.shape.cloud.shape.state.or(z.literal("unready")) }),
+});
+
+async function alphaFrontierIdentity(fetcher: typeof fetch) {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => { controller.abort(); reject(new Error("identity timeout")); }, 5_000);
+  });
+  try {
+    return await Promise.race([(async () => {
+      const response = await fetcher(`${CHANNELS.alpha.api}/v1/release-identity`, { method: "GET", credentials: "omit",
+        redirect: "error", cache: "no-store", headers: { accept: "application/json" }, signal: controller.signal });
+      if (response.status !== 200 && response.status !== 503) return null;
+      const text = await response.text();
+      if (text.length > 64 * 1024) return null;
+      const parsed = (response.status === 503 ? AlphaFrontierIdentity : ReleaseIdentity).safeParse(JSON.parse(text));
+      return parsed.success && parsed.data.channel === "alpha" && parsed.data.migrations.head === parsed.data.migrations.expectedHead ? parsed.data : null;
+    })(), deadline]);
+  } catch { return null; } finally { clearTimeout(timer); }
+}
+
 async function alphaTagSource(read: Read) {
   const ref = await read("/git/ref/tags/alpha");
   requireDestination(ref?.ref === "refs/tags/alpha", "Alpha rolling tag identity is unavailable");
@@ -70,11 +96,11 @@ async function alphaTagSource(read: Read) {
 
 export async function assertAlphaDestinations(candidate: { repository: string; sourceSha: string }, env: NodeJS.ProcessEnv,
   read: Read, ancestor: ReturnType<typeof alphaAncestry>, fetcher: typeof fetch = fetch) {
-  // Load the existing bounded, schema-aware public readers at use time. Their
+  // Load the existing bounded, schema-aware Pages reader at use time. Its
   // guard also uses githubClient; this avoids a module initialization cycle.
-  const { publicIdentity, publicPagesSource } = await import("./guard");
-  const [observed, app, ops, tag, previous] = await Promise.all([
-    publicIdentity("alpha", fetcher),
+  const { publicPagesSource } = await import("./guard");
+  const [identity, app, ops, tag, previous] = await Promise.all([
+    alphaFrontierIdentity(fetcher),
     publicPagesSource(CHANNELS.alpha.app, "app", fetcher),
     publicPagesSource(CHANNELS.alpha.ops, "ops", fetcher),
     alphaTagSource(read),
@@ -83,7 +109,6 @@ export async function assertAlphaDestinations(candidate: { repository: string; s
     if (error instanceof AlphaAdmissionRejectedError) throw error;
     throw new AlphaAdmissionRejectedError("Alpha live destination identity is unavailable; forward-only admission refused");
   });
-  const identity = observed.identity;
   requireDestination(identity, "Alpha live API/schema identity is unavailable; forward-only admission refused");
   requireDestination(!identity.cloud.enabled || identity.worker,
     "Alpha active worker identity is unavailable; forward-only admission refused");

@@ -907,12 +907,16 @@ At admission, the tag and latest ledger entry must agree. After admission, a
 parallel publisher may observe the current candidate's ledger before its tag
 update (or the older cached ledger after the tag update); both sources must
 still be at or before the candidate, and one must identify that candidate.
-Other disagreements block. The existing API identity reader rejects
-maintenance, unavailable readiness, or an actual migration ledger head that
-differs from the running package's expected head. Missing feeds or
+Other disagreements block. Missing feeds or
 unreadable/malformed identities are unknown, not a zero/genesis destination.
 The strict migrator still rejects unknown or newer schema rows; neither stage
 rolls schema back or authorizes a controlled migration.
+
+Stage 2 admission and later checkpoints read the deployed identity from a valid
+HTTP 503 readiness response so a newer candidate can repair an unready Alpha
+by moving forward. Maintenance, non-current or mismatched migration heads,
+channel mismatch, invalid or unreadable identities, other HTTP failures and
+destinations newer than or divergent from the candidate still refuse admission.
 
 A newer, divergent, unreadable or malformed destination can produce the existing
 green pre-mutation skip only at the initial barrier, after complete retained
