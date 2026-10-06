@@ -21,7 +21,7 @@ function fixture(overrides: NodeJS.ProcessEnv = {}, source: Partial<typeof candi
     head: sourceSha as string, api: ancestor as string, app: ancestor as string, ops: ancestor as string,
     tag: ancestor as string, ledger: ancestor as string, worker: null as any,
     identityStatus: 200, unready: false, maintenance: false, schemaAhead: false, compareError: false,
-    identityChannel: "alpha", migrationState: "current",
+    identityChannel: "alpha", migrationState: "current", cloudState: undefined as string | undefined,
     comparison: undefined as any, ledgerStatus: 200, tagType: "commit", parent: { ...parent },
     unreadable: "", ledgerValue: undefined as any, cloudEnabled: undefined as boolean | undefined,
     artifactPresent: true, artifactExpired: false,
@@ -58,7 +58,7 @@ function fixture(overrides: NodeJS.ProcessEnv = {}, source: Partial<typeof candi
       maintenance: state.maintenance, migrations: { state: state.migrationState, head: state.schemaAhead ? "0002_fixture.sql" : "0001_fixture.sql",
         expectedHead: "0001_fixture.sql", manifestSha256: "e".repeat(64) },
       cloud: { enabled: state.cloudEnabled ?? (state.worker !== null), ready: !state.unready,
-        state: state.unready ? "unready" : (state.cloudEnabled ?? (state.worker !== null)) ? "healthy" : "disabled" }, worker: state.worker,
+        state: state.cloudState ?? (state.unready ? "unready" : (state.cloudEnabled ?? (state.worker !== null)) ? "healthy" : "disabled") }, worker: state.worker,
       workerQualified: !state.unready,
     }, { status: state.identityStatus });
     if (route === "/zeros-deployment.json") {
@@ -172,6 +172,24 @@ describe("Stage 2 automatic Alpha admission", () => {
       expect(calls).toHaveLength(2);
       expect(calls[0][1]).toMatchObject({ method: "GET", credentials: "omit", redirect: "error", cache: "no-store" });
     });
+
+  it.each(["ci", "guard", "services", "worker", "promote", "publish", "runtime-publish"])(
+    "accepts a 503 unknown cloud health state at the automatic %s barrier or checkpoint", async job => {
+      const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: job });
+      test.state.head = descendant; test.state.identityStatus = 503; test.state.unready = true;
+      test.state.cloudEnabled = true; test.state.cloudState = "unknown";
+      test.state.worker = { provider: "boat", imageRef: `boat:fixture@sha256:${"e".repeat(64)}`, sourceSha: ancestor,
+        architecture: "linux/amd64", storageMiB: 4096 };
+      await expect(test.client.assertCurrent()).resolves.toBeUndefined();
+      test.state.api = sourceSha;
+      await expect(test.client.assertCurrent()).resolves.toBeUndefined();
+    });
+
+  it("refuses an arbitrary cloud state on HTTP 503", async () => {
+    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
+    test.state.identityStatus = 503; test.state.unready = true; test.state.cloudState = "invalid";
+    await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(AlphaAdmissionRejectedError);
+  });
 
   it.each(["maintenance", "schema ahead", "non-current schema", "wrong channel", "invalid source", "non-JSON"])(
     "refuses a 503 identity with %s", async failure => {

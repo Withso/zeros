@@ -57,7 +57,7 @@ function requireDestination(condition: unknown, reason: string): asserts conditi
 // Retain the shared identity constraints, relaxing only readiness fields.
 const AlphaFrontierIdentity = ReleaseIdentity.extend({ ready: z.boolean(),
   cloud: ReleaseIdentity.shape.cloud.extend({ ready: z.boolean(),
-    state: ReleaseIdentity.shape.cloud.shape.state.or(z.literal("unready")) }),
+    state: z.enum(["healthy", "disabled", "unready", "unknown"]) }),
 });
 
 async function alphaFrontierIdentity(fetcher: typeof fetch) {
