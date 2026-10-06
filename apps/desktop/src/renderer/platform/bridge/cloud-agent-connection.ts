@@ -57,6 +57,20 @@ const commandReceiptSchema = CloudCommandEntrySchema.extend({
   conversationId: CloudCommandSnapshotSchema.shape.conversationId,
 });
 
+/** A capability refusal occurs before a durable command is submitted. */
+export class CloudRuntimeCompatibilityError extends Error {
+  readonly code = "cloud_runtime_feature_unavailable";
+  readonly action: "update-runtime" | "update-desktop";
+  readonly feature = "native-commands-v1";
+  constructor(runtimeVersion: unknown) {
+    const newer = typeof runtimeVersion === "number" && Number.isInteger(runtimeVersion) && runtimeVersion > 1;
+    super(newer ? "Update Zeros to use native conversation operations on this cloud runtime"
+      : "Update the cloud runtime to use native conversation operations");
+    this.action = newer ? "update-desktop" : "update-runtime";
+    this.name = "CloudRuntimeCompatibilityError";
+  }
+}
+
 /** Each settled command advances the queue revision exactly once. Require all
  * intervening revisions to be explained by those exact dispatching commands:
  * another Stop advances it again even when the queue is already paused. */
@@ -596,7 +610,7 @@ export class CloudAgentConnection {
     const [grant,conversation,snapshot]=await Promise.all([this.grant(agentId,model),
       this.op("cloudCommands.conversation",{conversationId:owner.id}),
       this.op("cloudCommands.request",{request:{kind:"snapshot",conversationId:owner.id}})]);
-    if(conversation.nativeCommandsVersion!==1)throw new Error("Update the cloud runtime to use native conversation operations");
+    if(conversation.nativeCommandsVersion!==1)throw new CloudRuntimeCompatibilityError(conversation.nativeCommandsVersion);
     signal?.throwIfAborted();
     const queue=CloudCommandSnapshotSchema.parse(snapshot);
     if(![...queue.pending,...queue.receipts].some(row=>row.commandId===commandId)) {

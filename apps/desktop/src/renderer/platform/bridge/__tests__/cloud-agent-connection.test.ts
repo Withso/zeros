@@ -357,6 +357,22 @@ describe("cloud agent command adapter", () => {
     expect(await f.connection.request({type:"AGENT_GOAL_CLEAR",sessionId:`conversation:${chat}`,agentId:"codex"})).toMatchObject({type:"AGENT_GOAL_CHANGED",goal:null});
     expect(f.getEnqueued()).toMatchObject({kind:"enqueue",payload:{operation:{version:1,kind:"goal",action:"clear"},model:"test-model"}});
   });
+  it.each([undefined, 0, 2])("rejects unsupported native commands before queue mutation with an actionable typed error (version=%s)", async version => {
+    const f = fixture(), original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async message => {
+      const response = await original(message);
+      if (message.op === "cloudCommands.conversation" || message.op === "cloudCommands.createConversation")
+        return { ...response, result: { ...response.result as WireRecord, nativeCommandsVersion: version } };
+      return response;
+    });
+    try {
+      await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "test-model" } });
+      await expect(f.connection.request({ type: "AGENT_GOAL_CLEAR", sessionId: `conversation:${chat}`, agentId: "codex" }))
+        .rejects.toMatchObject({ code: "cloud_runtime_feature_unavailable", action: version === 2 ? "update-desktop" : "update-runtime", feature: "native-commands-v1",
+          message: version === 2 ? "Update Zeros to use native conversation operations on this cloud runtime" : "Update the cloud runtime to use native conversation operations" });
+      expect(f.getEnqueued()).toBeUndefined();
+    } finally { f.connection.dispose(); }
+  });
   it.each([
     ["retirement only", 1, "cancelled", true],
     ["another Stop during retirement", 2, "cancelled", false],
