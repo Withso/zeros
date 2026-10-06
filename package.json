@@ -207,7 +207,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "shiki": "^4.0.2",
-    "smol-toml": "^1.7.1",
+    "smol-toml": "^1.9.0",
     "sonner": "^2.0.7",
     "ssh2": "1.17.0",
     "tailwind-merge": "^3.0.0",
