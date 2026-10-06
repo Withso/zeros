@@ -789,6 +789,7 @@ describe("repository layout contracts", () => {
       "database-qualification.md",
       "engineering-reference.md",
       "enterprise-and-self-hosting.md",
+      "git-github-audit.md",
       "implementation-roadmap.md",
       "infrastructure-and-operations.md",
       "lifecycle-diagnostics.md",
