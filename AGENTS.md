@@ -127,3 +127,10 @@ Additional requirements:
   `pnpm check:licenses`.
 
 Never claim a platform-only check passed when it was not run on that platform.
+
+### CI selection
+
+Run `pnpm ci:plan` to preview the path-selected lanes, and add any extra `ci:*`
+labels before the final push. Labels only add checks; they cannot remove path
+floors. See [docs/ci.md](docs/ci.md) for the closed label vocabulary and fallback
+rules. CI-definition PRs need an owner merge; agents must not auto-merge them.
