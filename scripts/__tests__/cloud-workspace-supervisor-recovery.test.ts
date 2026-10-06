@@ -65,6 +65,43 @@ describe("cloud runtime activation", () => {
     } finally { f.tree.dispose(); }
   });
 
+  it.each(["unknown", "constructor", "__proto__", "toString", "select-runtime\0", ["select-runtime"], null])(
+    "rejects unknown or forged operations without consuming the session (%s)", async operation => {
+      const f = fixture();
+      try {
+        const prepared = await f.supervisor.apply({ operation: "prepare" });
+        const launch = vi.spyOn(f.supervisor, "launch").mockResolvedValue(42);
+        f.retire.mockClear();
+        const request = { version: 1, audience: CLOUD_WORKER_SUPERVISOR_AUDIENCE,
+          operation, session: prepared.session, active: f.active };
+        expect(parseCloudWorkerSupervisorRequest(request)).toBeNull();
+        expect(await f.supervisor.apply(request)).toMatchObject({ outcome: "rejected" });
+        expect(f.supervisor.session === prepared.session).toBe(true);
+        expect(f.retire).not.toHaveBeenCalled();
+        expect(launch).not.toHaveBeenCalled();
+        expect(f.verifySelectedRuntime).not.toHaveBeenCalled();
+      } finally { f.tree.dispose(); }
+    },
+  );
+
+  it.each(["start", "select-runtime"])("rejects stale and malformed sessions before %s", async operation => {
+    const f = fixture();
+    try {
+      const stale = await f.supervisor.apply({ operation: "prepare" });
+      const prepared = await f.supervisor.apply({ operation: "prepare" });
+      const launch = vi.spyOn(f.supervisor, "launch").mockResolvedValue(42);
+      f.retire.mockClear();
+      for (const session of [stale.session, undefined, null, 42, prepared.session.slice(1),
+        `${prepared.session}x`, `x${prepared.session.slice(1)}`]) {
+        expect(await f.supervisor.apply({ operation, session, active: f.active })).toMatchObject({ outcome: "rejected" });
+      }
+      expect(f.supervisor.session === prepared.session).toBe(true);
+      expect(f.retire).not.toHaveBeenCalled();
+      expect(launch).not.toHaveBeenCalled();
+      expect(f.verifySelectedRuntime).not.toHaveBeenCalled();
+    } finally { f.tree.dispose(); }
+  });
+
   it.each([
     ["baseCompatibilityId", `bc1-${"e".repeat(64)}`],
     ["bootId", "42345678-1234-4234-8234-123456789abc"],

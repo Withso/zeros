@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -253,6 +253,10 @@ function supervisorResponse(outcome, extra = {}) {
   };
 }
 
+function rejectSupervisorRequest() {
+  return supervisorResponse("rejected");
+}
+
 function childExit(child, timeoutMs) {
   if (child.exitCode !== null || child.signalCode !== null)
     return Promise.resolve(true);
@@ -313,6 +317,8 @@ export function verifySelectedCloudRuntime(expected) {
 }
 
 export class CloudWorkerSupervisor {
+  #handlers;
+
   constructor({
     socketPath = CLOUD_WORKER_SUPERVISOR_SOCKET,
     runtime = resolveCloudRuntime(),
@@ -337,6 +343,13 @@ export class CloudWorkerSupervisor {
     this.operation = Promise.resolve();
     this.stopping = false;
     this.lock = null;
+    this.#handlers = Object.freeze(new Map([
+      ["status", this.#status.bind(this)],
+      ["update-status", this.#updateStatus.bind(this)],
+      ["prepare", this.#prepare.bind(this)],
+      ["start", this.#startRuntime.bind(this)],
+      ["select-runtime", this.#selectRuntime.bind(this)],
+    ]));
   }
 
   async stopChild() {
@@ -425,33 +438,48 @@ export class CloudWorkerSupervisor {
   }
 
   async apply(request) {
-    if (this.stopping) return supervisorResponse("rejected");
-    if (request.operation === "status") return supervisorResponse("ready");
-    if (request.operation === "update-status") {
-      return this.runtime.profile === "v4"
-        ? supervisorResponse("ready", { controller: cloudActiveRuntimeDescriptor(this.runtime), selected: this.selectedRuntime })
-        : supervisorResponse("rejected");
-    }
-    if (request.operation === "prepare") {
-      this.session = null;
-      await this.stopChild();
-      this.session = `zsp_${randomBytes(32).toString("base64url")}`;
-      return supervisorResponse("prepared", { session: this.session });
-    }
-    if (!this.session || request.session !== this.session) {
-      return supervisorResponse("rejected");
-    }
-    if (request.operation === "select-runtime") {
-      if (this.runtime.profile !== "v4" || this.child)
-        return supervisorResponse("rejected");
-      const active = this.verifySelectedRuntime(request.active);
-      if (["baseCompatibilityId", "bootId", "cgroupRoot"].some(key => active[key] !== this.runtime[key]))
-        return supervisorResponse("rejected");
-      this.selectedRuntime = active;
-      this.binRoot = `${active.root}/bin`;
-      this.launcher = `${this.binRoot}/start-engine.sh`;
-      return supervisorResponse("selected");
-    }
+    if (this.stopping) return rejectSupervisorRequest();
+    return (this.#handlers.get(request?.operation) ?? rejectSupervisorRequest)(request);
+  }
+
+  #sessionMatches(candidate) {
+    if (!this.session || typeof candidate !== "string") return false;
+    const expected = Buffer.from(this.session, "utf8");
+    const supplied = Buffer.from(candidate, "utf8");
+    return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+  }
+
+  #status() {
+    return supervisorResponse("ready");
+  }
+
+  #updateStatus() {
+    return this.runtime.profile === "v4"
+      ? supervisorResponse("ready", { controller: cloudActiveRuntimeDescriptor(this.runtime), selected: this.selectedRuntime })
+      : supervisorResponse("rejected");
+  }
+
+  async #prepare() {
+    this.session = null;
+    await this.stopChild();
+    this.session = `zsp_${randomBytes(32).toString("base64url")}`;
+    return supervisorResponse("prepared", { session: this.session });
+  }
+
+  #selectRuntime(request) {
+    if (!this.#sessionMatches(request.session)) return rejectSupervisorRequest();
+    if (this.runtime.profile !== "v4" || this.child) return rejectSupervisorRequest();
+    const active = this.verifySelectedRuntime(request.active);
+    if (["baseCompatibilityId", "bootId", "cgroupRoot"].some(key => active[key] !== this.runtime[key]))
+      return rejectSupervisorRequest();
+    this.selectedRuntime = active;
+    this.binRoot = `${active.root}/bin`;
+    this.launcher = `${this.binRoot}/start-engine.sh`;
+    return supervisorResponse("selected");
+  }
+
+  async #startRuntime(request) {
+    if (!this.#sessionMatches(request.session)) return rejectSupervisorRequest();
     this.session = null;
     await this.stopChild();
     const pid = await this.launch(request.environment);
