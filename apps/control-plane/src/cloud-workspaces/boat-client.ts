@@ -121,6 +121,14 @@ export class BoatCreateRejectedError extends CloudProviderError {
   }
 }
 
+/** Preserve the public error code while retaining only Boat's closed boot
+ * classification. Raw provider codes/messages never leave this boundary. */
+export class BoatBootPendingError extends CloudProviderError {
+  constructor(options?: { retryAfterMs?: number }) {
+    super("provider_request_failed", "Boat API request did not succeed", true, { ...options, httpStatus: 409 });
+  }
+}
+
 /** Credentials are sent only to the provider's pinned API origin. Redirects,
  * response bodies and vendor error text never enter coordinator diagnostics. */
 export class BoatApiClient {
@@ -264,6 +272,8 @@ export class BoatApiClient {
         const retrySeconds = Number(response.headers.get("retry-after"));
         const retryOptions = { httpStatus: response.status, ...(Number.isFinite(retrySeconds) && retrySeconds > 0
           ? { retryAfterMs: Math.min(retrySeconds * 1000, 300_000) } : {}) };
+        if (response.status === 409 && ["boat_restoring", "boat_starting"].includes(String(value?.code)))
+          throw new BoatBootPendingError(retryOptions);
         const createRefusal = (path === "/sandboxes" || /^\/sandboxes\/[A-Za-z0-9_-]+\/fork$/.test(path)) &&
           input.method === "POST" && Boolean(input.idempotencyKey) && response.status === 429;
         const assessment = createRefusal ? assessCreateRefusal(value) : null;
