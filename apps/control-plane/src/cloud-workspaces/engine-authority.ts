@@ -120,6 +120,8 @@ export async function assertCurrentCloudEngineAuthority(
      * row it locks (event appends, device admission renewals, approval
      * rechecks). Other mutations retain exclusive workspace/engine locks. */
     lock?: "share" | "update";
+    /** Only durable record synchronization may run before transfer health. */
+    transitionRecordSync?: boolean;
   },
 ): Promise<CurrentCloudEngineAuthority> {
   if (!validIdentityInput(input)) {
@@ -132,8 +134,12 @@ export async function assertCurrentCloudEngineAuthority(
     heartbeat_token_hash: Buffer;
     live: boolean;
     fenced: boolean;
+    transition_ready: boolean;
   }>(
-    `SELECT authority_epoch, account_user_id, heartbeat_token_hash, live, fenced
+    `SELECT authority_epoch, account_user_id, heartbeat_token_hash, live, fenced,
+       ($7::boolean OR NOT EXISTS(SELECT 1 FROM cloud_workspace_runtime_transitions runtime
+         WHERE runtime.workspace_id=$1 AND runtime.org_id=$2
+           AND runtime.phase NOT IN ('offered','staged','healthy','rolled_back','cancelled'))) AS transition_ready
      FROM cloud_workspace_engine_authority_current($1, $2, $3, $4, $5, $6)`,
     [
       input.workspaceId,
@@ -142,6 +148,7 @@ export async function assertCurrentCloudEngineAuthority(
       input.engineInstanceId,
       input.workosEnabled,
       input.lock !== "share",
+      input.transitionRecordSync === true,
     ],
   );
   const row = authority.rows[0];
@@ -149,7 +156,7 @@ export async function assertCurrentCloudEngineAuthority(
     !row?.heartbeat_token_hash ||
     !equalHash(row.heartbeat_token_hash, tokenHash(input.heartbeatToken)) ||
     row.live !== true ||
-    row.fenced !== false
+    row.fenced !== false || row.transition_ready !== true
   ) {
     throw new CloudWorkspaceEngineAuthorityError();
   }

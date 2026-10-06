@@ -52,6 +52,9 @@ export async function requestManagedComputeStop(
       )
     ).rows[0];
     if (!workspace) return;
+    scope.generation=(await tx.query<{generation:number}>(`SELECT coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners
+      WHERE allocation_lease_id=$1 AND workspace_id=$2 AND org_id=$3),$4) AS generation`,
+    [input.leaseId,scope.workspace_id,scope.org_id,scope.generation])).rows[0]!.generation;
     const lease = (
       await tx.query<{ state: string; stop_intent_id: string | null; lease_owner: string | null; claim_live: boolean }>(
         "SELECT state,stop_intent_id,lease_owner,lease_expires_at>clock_timestamp() AS claim_live FROM managed_compute_allocation_leases WHERE id=$1 FOR UPDATE",

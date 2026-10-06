@@ -39,6 +39,7 @@ export async function copyGenerationPins(tx: Tx, input: {
   targetGeneration: number;
   actorUserId: string;
   providerConnectionId: string;
+  providerConnectionVersion?: number;
   legacyProfile: CloudWorkspaceProvisioningProfile;
   qualificationMode: CloudRuntimeQualificationMode;
   recoveryCheckpointId?: string;
@@ -56,10 +57,10 @@ export async function copyGenerationPins(tx: Tx, input: {
   await tx.query(`INSERT INTO cloud_workspace_generations (
     workspace_id, generation, org_id, provider, image_ref, architecture, cpu_millicores, memory_mib,
     storage_mib, source_commit, created_by, provider_connection_id, sandbox_class, recovery_checkpoint_id,
-    runtime_id, runtime_manifest_sha256, runtime_base_image_id, runtime_base_compatibility_id, runtime_profile, runtime_engine_protocol_version
-  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+    runtime_id, runtime_manifest_sha256, runtime_base_image_id, runtime_base_compatibility_id, runtime_profile, runtime_engine_protocol_version, provider_connection_version
+  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
   [input.workspaceId, input.targetGeneration, input.organizationId, profile.provider, profile.imageRef, profile.architecture,
     profile.cpuMillicores, profile.memoryMiB, profile.storageMiB, profile.sourceCommit, input.actorUserId,
-    input.providerConnectionId, profile.sandboxClass ?? null, input.recoveryCheckpointId ?? null, ...cloudRuntimePinValues(runtime)]);
+    input.providerConnectionId, profile.sandboxClass ?? null, input.recoveryCheckpointId ?? null, ...cloudRuntimePinValues(runtime), input.providerConnectionVersion ?? null]);
   await copyComputerWorkspaceSource(tx, input);
 }

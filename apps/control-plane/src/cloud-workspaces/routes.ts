@@ -47,7 +47,7 @@ import {
   authorizeCloudWorkspaceDataAccess,
   type CloudWorkspaceAuthorization,
 } from "./authorization.js";
-import { cancelCloudWorkspaceGenerationTransition } from "./generation-transitions.js";
+import { cancelCloudWorkspaceGenerationTransition, lockCloudWorkspaceGenerationTransition } from "./generation-transitions.js";
 import { enqueueWorkspaceCheckpointRequest, loadCommittedFinalCheckpoint } from "./checkpoint-requests.js";
 import { MAX_WORKSPACE_FILE_BYTES } from "./content-record.js";
 import {
@@ -1048,8 +1048,8 @@ export function createCloudWorkspaceGenerationReplacement(config: CloudWorkspace
       requireOrganizationCreationCapability(account?.staff_role ?? null);
     }
     if (!automaticWake) await requireOrganizationMembership(tx, orgId, user.id);
-    await lockCloudOrganization(tx, orgId);
-    const workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true, user.id);
+    await lockCloudWorkspaceGenerationTransition(tx, { workspaceId, organizationId: orgId });
+    const workspace = await loadWorkspaceRow(tx, orgId, workspaceId, false, user.id);
     if (automaticWake) {
       const parent = (await tx.query(`SELECT 1 FROM cloud_workspace_lifecycle_intents
         WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND generation=$4 AND state='dispatching'
