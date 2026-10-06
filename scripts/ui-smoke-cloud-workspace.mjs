@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runCloudRuntimeUpgradeSmoke } from "./ui-smoke-cloud-runtime-upgrade.mjs";
 
 export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
   await page.goto(`${harnessBase}/harness-cloud-workspace.html`);
@@ -125,6 +126,9 @@ export async function runCloudWorkspaceSharingSmoke({ page, check, harnessBase }
   const sharingWrites = [];
   let collaboratorReads = 0;
   const writers = () => ({ limit: 10, used, available: 10 - used });
+  await page.route("https://api.example.test/v1/organizations/*/cloud-workspaces/*/runtime-upgrade", route =>
+    route.fulfill({ json: { organizationId, workspaceId, generation: 1, currentRuntimeId: `r1-${"a".repeat(64)}`,
+      latestRuntimeId: `r1-${"a".repeat(64)}`, updateAvailable: false, unavailableReason: null, transition: null } }));
   await page.route("https://api.example.test/v1/cloud-workspaces/**", async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -303,4 +307,5 @@ export async function runCloudWorkspaceSharingWarmingSmoke({ page, check, harnes
     check(departure === "visible" ? "Delayed details response still warms collaborators for the current visible owner" :
       `Delayed details response leaves collaborator reads inert after the sharing surface is ${departure}`, true);
   }
+  await runCloudRuntimeUpgradeSmoke({ page, check, harnessBase });
 }

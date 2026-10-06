@@ -540,7 +540,32 @@ role check) can request `POST
 /v1/organizations/:organization/cloud-workspaces/:workspace/runtime-upgrade`
 with the strict body `{expectedGeneration, operationId}`. Normal workspace
 management, funding and quota authorization also applies. This internal HTTP
-contract is exported by `@zeros/protocol`; there is no renderer upgrade UI here.
+contract is exported by `@zeros/protocol`. The staff-gated workspace details
+popover exposes **Runtime · short ID** and an explicit **Update runtime** action.
+Its confirmation explains checkpoint preservation and process interruption;
+progress remains visible until the replacement generation is ready. Observed
+running turns disable the action immediately; the endpoint's active-work check
+remains authoritative for other devices and races. Action failures use toasts.
+
+The same staff and workspace management gates protect the read-only `GET` on
+that path. It returns the current runtime ID, latest runtime qualified for the
+exact saved base under the configured qualification mode, availability and
+closed transition progress/error fields. It includes every active delegated
+credential kind in addition to the existing three-kind lifecycle qualification
+floor. If its credential-qualified candidate differs from the unchanged POST
+selector, it reports `cloud_runtime_unavailable` and offers no update. Discovery
+does not alter runtime publication, qualifications or lifecycle semantics.
+
+The cloud composer's model menu also reads this availability while its surface
+is active, including when the details popover is closed. It shows an entry when
+a newer compatible qualified runtime exists. `ModelPill` optionally accepts
+`runtimeUpgradeRequiredForAgents` from agent discovery as an additional reason
+to show the entry, without depending on that workstream's transport. Its click
+calls `requestCloudRuntimeUpgradeDetails(folder)` to open and focus the exact
+workspace's runtime row; it never upgrades automatically. Hidden, concealed,
+nonstaff and nonmanager surfaces perform no runtime polling. Availability and
+operation intents are fenced by account, catalog, workspace and generation;
+unknown POST failures retain their original operation ID for replay.
 
 The endpoint selects the latest eligible runtime under
 `CLOUD_RUNTIME_QUALIFICATION_MODE` for the source's exact saved base. It keeps the
@@ -565,6 +590,24 @@ transition ID; their durable receipt never dispatches provider work. Failed
 candidates retain the source generation's pin; waking that source still checks
 revocation. If no later eligible runtime exists on the saved base, the endpoint
 fails closed instead of changing bases.
+
+Upgrade keeps the workspace identity, durable chat/transcript records and
+allowlisted native session history. The final checkpoint captures eligible
+working files and Git state (including staged/unstaged changes and local history)
+on the same base; ignored and secret-like files are excluded by the existing
+durability policy. Runnable queued turns, dispatching commands and live execution
+or service leases block admission; paused queued messages remain paused and are
+rebound by normal engine recovery. No running turn continues through an upgrade.
+Final drain stops setup, runs, code-agent sessions and terminals before capturing
+the checkpoint. Live terminals and preview/setup processes end; reopen terminals
+and restart previews afterward. Terminal scrollback is not promised. Setup runs
+again from the saved accepted settings/secrets snapshot; dependencies excluded
+from checkpoints may need regeneration. The candidate restores the checkpoint
+and registers a fresh engine instance, revoking old generation access; clients
+reattach through the existing transport. Candidate failure uses the existing
+rollback to preserve the source checkpoint and runtime pin, and a revoked source
+remains closed. GitHub remote state and credential/delegation records are not
+changed by this action.
 
 The [Alpha lifecycle acceptance runbook](runtime-lifecycle-acceptance.md) covers
 the disposable API exercise, cleanup and the remaining manual acceptance cases.

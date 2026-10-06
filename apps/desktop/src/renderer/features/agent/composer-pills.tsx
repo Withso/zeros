@@ -48,6 +48,7 @@ import {
   type PermissionFeedbackPlacement,
 } from "./permission-feedback-placement";
 import "./composer-pills.css";
+import { useCloudRuntimeUpgradeLink } from "./cloud-runtime-upgrade-link";
 
 // Wave 3 close-out (2026-05-16): the in-file useClickAway helper that
 // every pill once shared was deleted. All pills now use shadcn Popover,
@@ -120,6 +121,9 @@ export function ModelPill({
   onSelectAgentModel,
   redirectCrossAgent,
   selectionTiming,
+  workspaceFolder,
+  active = true,
+  runtimeUpgradeRequiredForAgents = false,
 }: {
   agents?: import("../../platform/bridge/messages").BridgeRegistryAgent[] | null;
   agentId: string | null;
@@ -142,6 +146,10 @@ export function ModelPill({
    *  agents' models then show a ↗ in the dropdown ("opens a new chat"). */
   redirectCrossAgent?: boolean;
   selectionTiming?: "next-message";
+  workspaceFolder?: string;
+  active?: boolean;
+  /** Optional stable reason supplied by cloud agent discovery. */
+  runtimeUpgradeRequiredForAgents?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   // Close while the host composer is concealed (see ComposerConcealedContext).
@@ -149,9 +157,10 @@ export function ModelPill({
   // one-frame strand at the viewport origin); the effect syncs local state so
   // the popover doesn't spring back open when the composer returns.
   const concealed = useContext(ComposerConcealedContext);
+  const runtimeUpgradeLink = useCloudRuntimeUpgradeLink(workspaceFolder, active && !concealed, runtimeUpgradeRequiredForAgents, () => setOpen(false));
   useEffect(() => {
-    if (concealed && open) setOpen(false);
-  }, [concealed, open]);
+    if ((concealed || !active) && open) setOpen(false);
+  }, [concealed, active, open]);
 
   // Curated rows, capability-overlaid from the agent's advertised
   // `_meta.models` (via the `initialize` prop) or the cold-start floor — both
@@ -186,10 +195,11 @@ export function ModelPill({
       agents={agents}
       initialize={initialize}
       value={{ agentId, model: activeValue, effort, fast }}
-      open={open && !concealed}
+      open={open && !concealed && active}
       onOpenChange={setOpen}
       redirectCrossAgent={redirectCrossAgent}
       selectionTiming={selectionTiming}
+      footer={runtimeUpgradeLink}
       onConfigure={onConfigure}
       onSelect={(sel) => {
         if (agentFamily(sel.agentId) === agentFamily(agentId)) {

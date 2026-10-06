@@ -14,6 +14,7 @@ import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-versi
 import { copyGenerationPins, loadGenerationSource, requireGenerationRuntime } from "./generation-pins.js";
 import { cloudRuntimeQualificationMode } from "./runtime-config.js";
 import { CloudRuntimeUpgradeRequestSchema } from "./runtime-upgrade-contract.js";
+import { readCloudRuntimeUpgradeAvailability } from "./runtime-upgrade-availability.js";
 import { cloudWorkspaceHasActiveWork } from "./idle-workloads.js";
 import { ensureWorkspaceDeletionJob } from "./workspace-deletion-job.js";
 import { assertCloudGithubSource } from "./github-user-access.js";
@@ -3101,6 +3102,28 @@ export function createCloudWorkspaceRoutes(
     );
   };
   app.post(`${base}/:workspace/generations`, c => replaceGeneration(c));
+  app.get(`${base}/:workspace/runtime-upgrade`, async c => {
+    c.header("Cache-Control", "no-store");
+    const user = c.get("user");
+    requireOrganizationCreationCapability(user.staffRole);
+    if (!config) throw new HttpError(503, "cloud_workspaces_not_configured", "Cloud workspace provisioning is not configured");
+    const orgId = uuidParam(c.req.param("organization")), workspaceId = uuidParam(c.req.param("workspace"));
+    const availability = await withSystemTx(pool, async tx => {
+      const account = (await tx.query<{ staff_role: StaffRole | null }>(
+        "SELECT staff_role FROM users WHERE id=$1 AND auth_status='active' AND deleted_at IS NULL FOR SHARE", [user.id])).rows[0];
+      requireOrganizationCreationCapability(account?.staff_role ?? null);
+      await requireOrganizationMembership(tx, orgId, user.id);
+      const workspace = await loadWorkspaceRow(tx, orgId, workspaceId, false, user.id);
+      await authorizeCloudWorkspaceCleanup(tx, { organizationId: orgId, workspaceId, actorUserId: user.id });
+      await authorizeCloudWorkspaceActor(tx, { organizationId: orgId, workspaceId, actorUserId: user.id, capability: "manage" });
+      return readCloudRuntimeUpgradeAvailability(tx, {
+        organizationId: orgId, workspaceId, generation: workspace.current_generation,
+        status: workspace.status, desiredState: workspace.desired_state, deleted: workspace.deleted_at !== null,
+        runtime: cloudRuntimePin(workspace), qualificationMode: config.runtime?.qualificationMode ?? cloudRuntimeQualificationMode(),
+      });
+    });
+    return c.json(availability);
+  });
   app.post(`${base}/:workspace/runtime-upgrade`,
     bodyLimit({ maxSize: 4096 }), rateLimit("cloud-runtime-upgrade", 30, 60_000), c => replaceGeneration(c, true));
 

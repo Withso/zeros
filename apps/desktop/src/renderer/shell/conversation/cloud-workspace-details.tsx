@@ -18,6 +18,7 @@ import {
 } from "../../shared/ui/primitives/popover";
 import {
   cloudWorkspaceDetails,
+  cloudCatalogGeneration,
   manageCloudWorkspace,
   manageCloudWorkspaceRecovery,
   refreshCloudWorkspace,
@@ -27,7 +28,7 @@ import {
   cloudWorkspaceKey,
   parseCloudWorkspaceKey,
 } from "../../platform/bridge/cloud-workspace-key";
-import { useTeams } from "../../features/team/team-store";
+import { getOrganizationStoreGeneration, useTeams } from "../../features/team/team-store";
 import { CloudWorkspaceSetupFailure } from "./cloud-workspace-setup-failure";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 import { toast } from "../../shared/ui/primitives/elements";
@@ -41,6 +42,8 @@ import { warmCloudWorkspaceReplicas } from "../../state/cloud-replica-cache";
 import { CloudWorkspaceSyncControls } from "./cloud-workspace-sync-controls";
 import { cloudWorkspaceCollaborationKey, cloudWorkspaceCollaborationOwner, warmCloudWorkspaceCollaboration } from "../../state/cloud-workspace-collaboration-cache";
 import { CloudWorkspaceSharingControls } from "./cloud-workspace-sharing-controls";
+import { CloudWorkspaceRuntimeControls } from "./cloud-workspace-runtime-controls";
+import { subscribeCloudRuntimeUpgradeDetails, warmCloudRuntimeUpgrade } from "../../state/cloud-runtime-upgrade";
 
 export function cloudStatusLabel(status: string): string {
   return (
@@ -160,6 +163,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
   const target = parseCloudWorkspaceKey(folder);
   const key = target ? cloudWorkspaceKey(target) : null;
   const [open, setOpen] = useState(false);
+  const [runtimeFocusRequest, setRuntimeFocusRequest] = useState(0);
   const [starting, setStarting] = useState(false);
   const [acknowledgedCheckpoint, setAcknowledgedCheckpoint] = useState<string | null>(null);
   const { me } = useTeams();
@@ -167,11 +171,18 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
   const native = useNativeRuntime().ready;
   const surfaceActive = useWorkspaceStore(state => state.activePage === "workspace");
   const sharingActive = useInternalFeatureActive("cloudComputerV2");
+  const account = getOrganizationStoreGeneration(), catalog = cloudCatalogGeneration();
+  useEffect(() => subscribeCloudRuntimeUpgradeDetails(intent => {
+    if (!nativeAccessEnabled || !surfaceActive || intent.account !== account || intent.catalog !== catalog ||
+      account !== getOrganizationStoreGeneration() || catalog !== cloudCatalogGeneration() || cloudWorkspaceKey(intent) !== key) return;
+    setRuntimeFocusRequest(version => version + 1);
+    setOpen(true);
+  }), [nativeAccessEnabled, surfaceActive, account, catalog, key]);
   const mounted = useRef(false);
   const warmSurface = useRef({ key, active: sharingActive && surfaceActive });
   warmSurface.current = { key, active: sharingActive && surfaceActive };
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  useEffect(() => { if (!surfaceActive) setOpen(false); }, [surfaceActive]);
+  useEffect(() => { if (!surfaceActive) { setOpen(false); setRuntimeFocusRequest(0); } }, [surfaceActive]);
   const details = useCachedRead(
     cloudWorkspaceDetails,
     key,
@@ -181,6 +192,8 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
   if (!key) return null;
   const warm = () => {
     if (!surfaceActive) return;
+    const confirmed = cloudWorkspaceDetails.peekSnapshot(key).data;
+    if (nativeAccessEnabled && confirmed?.capabilities.canManage) warmCloudRuntimeUpgrade(target!, confirmed.generation.number);
     if (nativeAccessEnabled && target) void warmCloudServiceAccess(target).catch(() => {});
     const owner = sharingActive ? cloudWorkspaceCollaborationOwner(target!) : null;
     const ownerKey = owner ? cloudWorkspaceCollaborationKey(owner) : null;
@@ -191,6 +204,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
       })
       .then(workspace => {
         if (mounted.current && warmSurface.current.active && warmSurface.current.key === key && ownerKey) {
+          if (workspace.capabilities.canManage) warmCloudRuntimeUpgrade(target!, workspace.generation.number);
           const currentOwner = cloudWorkspaceCollaborationOwner(target!);
           if (currentOwner && cloudWorkspaceCollaborationKey(currentOwner) === ownerKey)
             warmCloudWorkspaceCollaboration(target!);
@@ -202,7 +216,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
       .catch(() => {});
   };
   return (
-    <Popover open={open && surfaceActive} onOpenChange={setOpen}>
+    <Popover open={open && surfaceActive} onOpenChange={next => { setRuntimeFocusRequest(0); setOpen(next); }}>
       <Tooltip label="Cloud workspace details">
         <PopoverTrigger asChild>
           <Button
@@ -223,6 +237,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
         sideOffset={6}
         className="max-h-[min(80vh,var(--radix-popover-content-available-height))] w-[360px] overflow-y-auto"
         aria-label="Cloud workspace details"
+        onOpenAutoFocus={event => { if (runtimeFocusRequest) event.preventDefault(); }}
       >
         {details.data ? (
           <CloudWorkspaceDetailsContent
@@ -243,6 +258,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
             Couldn’t refresh. Showing the last confirmed details.
           </p>
         )}
+        {details.data && nativeAccessEnabled && <CloudWorkspaceRuntimeControls key={`${getOrganizationStoreGeneration()}:${key}`} workspace={details.data} active={open && surfaceActive} focusRequest={runtimeFocusRequest} />}
         {details.data && sharingActive && <CloudWorkspaceSharingControls workspace={details.data} active={open && surfaceActive} />}
         {details.data?.recovery?.checkpointId && details.data.recovery.state !== "restoring" &&
           (details.data.recovery.state || details.data.status === "failed") &&

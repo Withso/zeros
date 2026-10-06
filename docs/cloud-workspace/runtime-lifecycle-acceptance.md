@@ -107,6 +107,39 @@ and retain only closed diagnostics or nonsecret observations:
 - Run the required macOS engine smoke in a Mac checkout. Cloud Linux test
   results do not cover that platform gate or real native-provider turns.
 
+## Staff desktop acceptance
+
+Use the owner on their Mac against a separately authorized disposable Alpha
+workspace named `zeros-v2-test-*`; never mutate the shared audit workspace or its
+credentials/delegations. This is a manual checklist for the orchestrator, not
+authorization for an uncredentialed coding workspace to create live resources.
+
+1. On runtime A with an eligible newer runtime B on the same base, open the
+   composer model menu. Confirm **Update runtime…** opens workspace details,
+   scrolls to the runtime row and focuses **Update runtime**. This fallback must
+   work before agent discovery supplies `runtimeUpgradeRequiredForAgents`.
+2. Confirm a nonstaff account and a staff member without workspace management
+   rights see no runtime action. Running a real cloud turn disables the action;
+   runnable queued work or active access leases also make the API refuse it.
+3. Add a harmless tracked edit, staged change, untracked eligible file and local
+   commit; record the branch/status and existing chats/transcripts. Start a
+   terminal and preview, then finish active agent work. Keep paused messages
+   paused. Do not use ignored or secret-like files as persistence probes.
+4. Open the confirmation, cancel once, and verify no generation change. Confirm
+   again, record workspace/operation/transition IDs and source/candidate
+   generations, and verify checkpoint/restart/setup progress before ready.
+5. Check B's runtime row, unchanged saved base, restored files/Git/chats/session
+   history, and paused queue. Reopen terminals and restart previews. Confirm a
+   fresh engine instance and attachment from a second signed-in device, then
+   have the owner run a real provider turn. Restarting alone must retain B.
+6. Close details or navigate away during progress, then return; progress must
+   reflect server state. Exercise a lost response by replaying its operation
+   using the API runner, rather than creating a second operation. A fresh stale
+   `expectedGeneration` must receive `cloud_generation_changed`.
+7. Record nonsecret observations and resource IDs, delete only the disposable
+   workspace, and confirm ordinary deletion and pending-provider cleanup as
+   above. Run the macOS engine/UI smoke separately.
+
 Cloud Computer template-source pin copying is C5's extension of the shared
 `copyGenerationPins` transaction. Public API/UI, base migration, billing changes,
 and broad revocation/GC drills are outside this runbook.

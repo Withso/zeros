@@ -10,13 +10,52 @@ vi.mock("../../features/team/control-plane", () => ({
     constructor(public status: number, public code: string, message: string) { super(message); }
   },
 }));
-import { CloudWorkspaceDocumentSchema, cloudAccountRequest, cloudAgentGrant, createCloudWorkspaceDocument, getCloudWorkspaceDocument } from "../cloud-workspaces";
+import { CloudWorkspaceDocumentSchema, cloudAccountRequest, cloudAgentGrant, createCloudWorkspaceDocument, getCloudWorkspaceDocument,
+  getCloudRuntimeUpgradeAvailability, upgradeCloudWorkspaceRuntime } from "../cloud-workspaces";
 
 const session = { access_token: "synthetic-session", user: { sub: "test-user" } };
 beforeEach(() => { state.generation = 0; state.session.mockReset(); state.source.mockReset(); });
 afterEach(() => vi.unstubAllGlobals());
 
 describe("cloud request account boundaries", () => {
+  it("rejects local workspace targets before authentication or HTTP for runtime discovery and updates", async () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    const target = { organizationId: "personal", workspaceId: "/local/workspace" };
+    await expect(getCloudRuntimeUpgradeAvailability(target)).rejects.toThrow();
+    await expect(upgradeCloudWorkspaceRuntime(target, { expectedGeneration: 1,
+      operationId: "11111111-1111-4111-8111-111111111111" })).rejects.toThrow();
+    expect(state.session).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("reads staff runtime availability for the exact workspace and rejects a changed identity", async () => {
+    state.session.mockResolvedValue(session);
+    const organizationId = "11111111-1111-4111-8111-111111111111", workspaceId = "22222222-2222-4222-8222-222222222222";
+    const result = { organizationId, workspaceId, generation: 1, currentRuntimeId: `r1-${"a".repeat(64)}`,
+      latestRuntimeId: `r1-${"b".repeat(64)}`, updateAvailable: true, unavailableReason: null, transition: null };
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(result), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...result, workspaceId: organizationId }), { status: 200 }));
+    vi.stubGlobal("fetch", fetcher);
+    expect(await getCloudRuntimeUpgradeAvailability({ organizationId, workspaceId })).toEqual(result);
+    expect(fetcher.mock.calls[0][0]).toBe(`https://api.example.test/v1/organizations/${organizationId}/cloud-workspaces/${workspaceId}/runtime-upgrade`);
+    expect(fetcher.mock.calls[0][1]).toMatchObject({ method: "GET", cache: "no-store" });
+    await expect(getCloudRuntimeUpgradeAvailability({ organizationId, workspaceId })).rejects.toThrow("workspace identity");
+  });
+  it("posts only the explicit CAS and operation ID and validates the returned receipt", async () => {
+    state.session.mockResolvedValue(session);
+    const id = "11111111-1111-4111-8111-111111111111", target = { organizationId: id, workspaceId: id };
+    const input = { expectedGeneration: 3, operationId: id };
+    const result = { operationId: id, sourceGeneration: 3, generation: 4, runtimeId: `r1-${"b".repeat(64)}`,
+      transitionId: id, unchanged: false };
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(result), { status: 202 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...result, sourceGeneration: 2 }), { status: 200 }));
+    vi.stubGlobal("fetch", fetcher);
+    expect(await upgradeCloudWorkspaceRuntime(target, input)).toEqual(result);
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual(input);
+    expect(fetcher.mock.calls[0][1].method).toBe("POST");
+    expect(new Headers(fetcher.mock.calls[0][1].headers).get("Idempotency-Key")).toBe(id);
+    await expect(upgradeCloudWorkspaceRuntime(target, input)).rejects.toThrow("different operation");
+  });
   it("preserves optional server-derived edit access without inferring it from legacy write access", () => {
     const capabilities = { canWrite: true, canManage: false, canStart: false, startUnavailableReason: null };
     expect(CloudWorkspaceDocumentSchema.shape.capabilities.parse(capabilities).canEdit).toBeUndefined();

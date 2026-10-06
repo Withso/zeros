@@ -15,6 +15,7 @@
     "./cloud-events": "./src/cloud-events.ts",
     "./cloud-bridge-diagnostics": "./src/cloud-bridge-diagnostics.ts",
     "./cloud-commands": "./src/cloud-commands.ts",
+    "./cloud-runtime-lifecycle": "./src/cloud-runtime-lifecycle.ts",
     "./composer-mode": "./src/composer-mode.ts",
     "./attachment-policy": "./src/attachment-policy.ts",
     "./tool-artwork": "./src/tool-artwork.ts",

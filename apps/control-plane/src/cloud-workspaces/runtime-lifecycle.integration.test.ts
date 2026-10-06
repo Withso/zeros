@@ -55,7 +55,7 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
   });
   const scope = () => ({ workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1 });
   const pin = (generation = 1) => withSystemTx(pool, tx => loadGenerationSource(tx, { ...scope(), generation }));
-  const route = (path: string, body?: unknown, selectedConfig = config) => {
+  const route = (path: string, body?: unknown, selectedConfig = config, method = "POST") => {
     const app = new Hono();
     app.use("*", async (c, next) => { c.set("user", { id: fixture.userId, staffRole: "developer" }); await next(); });
     app.route("/", createCloudWorkspaceRoutes(pool, selectedConfig, { workosEnabled: false }));
@@ -64,11 +64,13 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
       throw error;
     });
     return app.request(`/v1/organizations/${fixture.organizationId}/cloud-workspaces/${fixture.workspaceId}${path}`, {
-      method: "POST", headers: { "content-type": "application/json", "idempotency-key": randomUUID() }, body: JSON.stringify(body ?? {}),
+      method, headers: { "content-type": "application/json", "idempotency-key": randomUUID() },
+      ...(method === "POST" ? { body: JSON.stringify(body ?? {}) } : {}),
     });
   };
   const upgrade = (operationId = randomUUID(), expectedGeneration = 1, selectedConfig = config) =>
     route("/runtime-upgrade", { operationId, expectedGeneration }, selectedConfig);
+  const availability = (selectedConfig = config) => route("/runtime-upgrade", undefined, selectedConfig, "GET");
   async function advanceHead(mode: "full" | "smoke" = "full") {
     return withSystemTx(pool, async tx => {
       const runtime = await seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2, mode });
@@ -129,6 +131,83 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     await worker.runOnce();
     return worker;
   }
+
+  it("discovers a compatible runtime update without changing pins or creating lifecycle work", async () => {
+    const source = await pin();
+    const next = await advanceHead();
+    const response = await availability();
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({
+      workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
+      currentRuntimeId: source.runtime!.runtimeId, latestRuntimeId: next.pin.runtimeId,
+      updateAvailable: true, unavailableReason: null, transition: null,
+    });
+    expect(await pin()).toEqual(source);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1", [fixture.workspaceId])).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_generations WHERE workspace_id=$1", [fixture.workspaceId])).rowCount).toBe(1);
+  });
+  it("does not advertise an unconfirmed, revoked, incompatible or partially qualified release", async () => {
+    const source = await pin();
+    await withSystemTx(pool, async tx => {
+      await seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2, kinds: ["codex-chatgpt"] });
+      await seedRuntimeBundle(tx, { digit: "3", releaseOrder: 3, confirmed: false });
+      await seedRuntimeBundle(tx, { digit: "4", releaseOrder: 4, engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION + 1 });
+      await seedRuntimeBundle(tx, { digit: "5", releaseOrder: 5 });
+      await tx.query("UPDATE cloud_runtime_bundles SET revoked_at=now() WHERE runtime_id=$1", [`r1-${"5".repeat(64)}`]);
+      await seedRuntimeBase(tx, { ...runtimeBase, id: "zeros-v2-test-incompatible-base", compatibilityId: `bc1-${"8".repeat(64)}` });
+      await seedRuntimeBundle(tx, { digit: "6", releaseOrder: 6, baseCompatibilityId: `bc1-${"8".repeat(64)}` });
+    });
+    expect(await (await availability()).json()).toMatchObject({ latestRuntimeId: source.runtime!.runtimeId, updateAvailable: false });
+  });
+  it("uses the configured qualification mode for discovery", async () => {
+    const source = await pin(), next = await advanceHead("smoke");
+    expect(await (await availability()).json()).toMatchObject({ latestRuntimeId: source.runtime!.runtimeId, updateAvailable: false });
+    expect(await (await availability({ ...config, runtime: { ...config.runtime!, qualificationMode: "smoke" } })).json())
+      .toMatchObject({ latestRuntimeId: next.pin.runtimeId, updateAvailable: true });
+  });
+  it("checks every live delegated credential kind and never advertises a different target from the POST", async () => {
+    const credentialId = randomUUID(), delegationId = randomUUID();
+    await pool.query(`INSERT INTO cloud_agent_credentials(id,owner_user_id,kind,display_name,last_operation_id,last_request_sha256)
+      VALUES($1,$2,'claude-api-key','Fixture',gen_random_uuid(),$3)`, [credentialId, fixture.userId, Buffer.alloc(32)]);
+    await pool.query(`INSERT INTO cloud_agent_credential_delegations(id,credential_id,owner_user_id,credential_revision,workspace_id,org_id,
+      grantee_user_id,owner_fingerprint,grantee_fingerprint,compute_fingerprint,compute_trust,models,expires_at)
+      VALUES($1,$2,$3,1,$4,$5,$3,$6,$6,$6,'zeros-managed',ARRAY['fixture-model'],now()+interval '5 minutes')`,
+    [delegationId, credentialId, fixture.userId, fixture.workspaceId, fixture.organizationId, "a".repeat(64)]);
+    const qualified = await withSystemTx(pool, tx => seedRuntimeBundle(tx, {
+      digit: "2", releaseOrder: 2, kinds: ["claude-setup-token", "codex-chatgpt", "cursor-api-key", "claude-api-key"],
+    }));
+    expect(await (await availability()).json()).toMatchObject({ latestRuntimeId: qualified.pin.runtimeId, updateAvailable: true });
+    const unqualified = await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "3", releaseOrder: 3 }));
+    expect(await (await availability()).json()).toMatchObject({ latestRuntimeId: qualified.pin.runtimeId, updateAvailable: false, unavailableReason: "cloud_runtime_unavailable" });
+    await pool.query("UPDATE cloud_agent_credential_delegations SET revoked_at=now() WHERE id=$1", [delegationId]);
+    expect(await (await availability()).json()).toMatchObject({ latestRuntimeId: unqualified.pin.runtimeId, updateAvailable: true });
+  });
+  it("closes discovery when the current database staff role is revoked", async () => {
+    await advanceHead();
+    await pool.query("UPDATE users SET staff_role='support_admin' WHERE id=$1", [fixture.userId]);
+    expect((await availability()).status).toBe(404);
+  });
+  it("keeps legacy workspaces readable without offering a v4 runtime upgrade", async () => {
+    fixture = await seedReadyCloudWorkspace(pool);
+    const response = await availability();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ currentRuntimeId: null, latestRuntimeId: null,
+      updateAvailable: false, unavailableReason: "cloud_runtime_upgrade_not_supported" });
+  });
+  it("projects the accepted transition and its closed failure for upgrade progress", async () => {
+    const next = await advanceHead();
+    const accepted = await (await upgrade()).json();
+    expect(await (await availability()).json()).toMatchObject({
+      unavailableReason: "cloud_generation_transition_active",
+      transition: { id: accepted.transitionId, generation: 2, runtimeId: next.pin.runtimeId, state: "draining", error: null },
+    });
+    await withSystemTx(pool, tx => rollbackCloudWorkspaceGenerationTransition(tx, { ...scope(), candidateGeneration: 2,
+      errorCode: "setup_command_failed", errorMessage: "Private infrastructure diagnostic" }));
+    const result = await (await availability()).json();
+    expect(result.transition).toMatchObject({ id: accepted.transitionId, state: "rolling_back", error: { code: "setup_command_failed" } });
+    expect(JSON.stringify(result)).not.toContain("Private infrastructure diagnostic");
+  });
 
   it.each(["wake", "retry", "recover", "automatic recovery", "upgrade"] as const)("retains the accepted computer source through %s after activation changes", async operation => {
     const accepted = await withSystemTx(pool, async tx => {
@@ -428,6 +507,7 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
   it("refuses busy workspaces without accepting an operation or selecting another pin", async () => {
     await advanceHead();
     await pool.query("UPDATE cloud_workspaces SET status='busy' WHERE id=$1", [fixture.workspaceId]);
+    expect(await (await availability()).json()).toMatchObject({ updateAvailable: true, unavailableReason: "cloud_workspace_busy" });
     const response = await upgrade();
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: { code: "cloud_workspace_busy" } });
@@ -452,6 +532,7 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
       engine_instance_id,actor_source_session_id,execution_id,provider,model,expires_at)
       VALUES($1,$2,$3,1,$4,$5,1,$6,$7,'fixture-execution','cursor','fixture-model',now()+interval '5 minutes')`,
     [leaseId,delegationId,credentialId,fixture.workspaceId,fixture.organizationId,fixture.engineInstanceId,sessionId]);
+    expect(await (await availability()).json()).toMatchObject({ updateAvailable: true, unavailableReason: "cloud_workspace_busy" });
     const refused = await upgrade();
     expect(refused.status).toBe(409);
     expect(await refused.json()).toMatchObject({ error: { code: "cloud_workspace_busy" } });

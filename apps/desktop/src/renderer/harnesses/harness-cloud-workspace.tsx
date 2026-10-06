@@ -21,6 +21,7 @@ import { acceptOrganizationSnapshot, clearTeamStore } from "../features/team/tea
 import { setInternalFeatureEnabled } from "../features/settings/internal-features";
 import { Toaster } from "../shared/ui/primitives/elements/toast";
 import { SetupView } from "../shell/workbench/tabs/setup-tab";
+import { ModelPill } from "../features/agent/composer-pills";
 
 const target = {
   organizationId: "11111111-1111-4111-8111-111111111111",
@@ -61,12 +62,14 @@ const workspaceDocument: CloudWorkspaceDocument = {
   },
 };
 const sharingFixture = new URLSearchParams(location.search).has("sharing");
+const runtimeFixture = new URLSearchParams(location.search).has("runtime");
 const ownerId = "33333333-3333-4333-8333-333333333333";
 const actorIds = { owner: ownerId, manager: ownerId,
   developer: "44444444-4444-4444-8444-444444444444",
   prompter: "55555555-5555-4555-8555-555555555555",
   viewer: "66666666-6666-4666-8666-666666666666" };
 let actorRole: CloudWorkspaceActorRole = "owner";
+let staffRole: "developer" | null = "developer";
 let fixtureDocument = workspaceDocument;
 function installActor(role: CloudWorkspaceActorRole) {
   actorRole = role;
@@ -77,7 +80,7 @@ function installActor(role: CloudWorkspaceActorRole) {
     workspaceCapabilities: { local: false, cloud: true },
     teamCapabilities: { multiple: false as const, canCreate: false as const } };
   acceptOrganizationSnapshot({
-    user: { id: actorIds[role], email: "fixture@example.test", displayName: "Fixture", staffRole: "developer" },
+    user: { id: actorIds[role], email: "fixture@example.test", displayName: "Fixture", staffRole },
     teams: [organization], organizations: [organization],
   });
   setInternalFeatureEnabled("cloudComputerV2", true);
@@ -87,7 +90,7 @@ function installActor(role: CloudWorkspaceActorRole) {
       canManage: ["owner", "manager"].includes(role) } };
   acceptCloudWorkspaceDocument(fixtureDocument);
 }
-if (sharingFixture) {
+if (sharingFixture || runtimeFixture) {
   window.__ZEROS_NATIVE__ = {
     async invoke<T>(command: string): Promise<T> {
       if (command === "auth_get_access_token") return { access_token: "fixture-session" } as T;
@@ -108,6 +111,14 @@ if (sharingFixture) {
       acceptCloudWorkspaceDocument(fixtureDocument);
     },
   } });
+  if (runtimeFixture) Object.assign(window, { cloudRuntimeFixture: {
+    get document() { return fixtureDocument; },
+    publish(patch: Partial<CloudWorkspaceDocument>) {
+      fixtureDocument = { ...fixtureDocument, ...patch, version: fixtureDocument.version + 1 };
+      acceptCloudWorkspaceDocument(fixtureDocument);
+    },
+    setStaff(role: "developer" | null) { staffRole = role; installActor("owner"); },
+  } });
   installActor("owner");
 } else acceptCloudWorkspaceDocument(workspaceDocument);
 const chats: ChatThread[] = Array.from({ length: 12 }, (_, i) => ({
@@ -127,6 +138,7 @@ function Harness() {
   const [cloud, setCloud] = useState(true);
   const [failedSetup, setFailedSetup] = useState(false);
   const [selected, setSelected] = useState(chats[0].id);
+  const active = useWorkspaceStore(state => state.activePage === "workspace");
   return (
     <ActionsCtx.Provider value={{} as SessionsActions}>
       <TooltipProvider>
@@ -135,7 +147,7 @@ function Harness() {
           <div className="mb-6 flex flex-wrap gap-2">
             <Button onClick={() => setCloud(true)}>Cloud fixture</Button>
             <Button onClick={() => setCloud(false)}>Local fixture</Button>
-            {sharingFixture && <>
+            {(sharingFixture || runtimeFixture) && <>
               <Button onClick={() => installActor("owner")}>Owner fixture</Button>
               <Button onClick={() => installActor("developer")}>Developer fixture</Button>
               <Button onClick={() => installActor("prompter")}>Prompter fixture</Button>
@@ -145,7 +157,7 @@ function Harness() {
               <Button onClick={() => dispatch({ type: "SET_ACTIVE_PAGE", page: "workspace" })}>Show workspace</Button>
             </>}
           </div>
-          {!sharingFixture && <Button onClick={() => {
+          {!sharingFixture && !runtimeFixture && <Button onClick={() => {
             acceptCloudWorkspaceDocument({ ...workspaceDocument, status: "stopped", version: 2,
               setupFailure: { code: "setup_image_contract_invalid", hasLog: false },
               error: { code: "cloud_workspace_safety_failure", message: "Managed compute stopped after a safety check failed" } });
@@ -168,6 +180,10 @@ function Harness() {
               canSplitRight={false}
               canSplitDown={false}
             />
+            {runtimeFixture && <div className="p-3" aria-label="Cloud composer model">
+              <ModelPill agents={[]} agentId="claude" initialize={null} value={null} effort="high" fast={false}
+                workspaceFolder={cloud ? folder : "/fixture/local"} active={active} onChange={() => {}} onConfigure={() => {}} />
+            </div>}
             {cloud && failedSetup && <section aria-label="Cloud Setup tab" className="h-64">
               <SetupView workspace={getCloudWorkspaceRows()[0]} visible onBusyChange={() => {}} />
             </section>}
