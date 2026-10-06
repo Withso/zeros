@@ -220,3 +220,31 @@ node scripts/ci/ci-definition.mjs --base origin/main --head HEAD
 The command lists sorted paths, including both sides of renames and deletions.
 A failed comparison exits nonzero so an unreadable diff cannot authorize an
 automatic merge. This is a definition detector, not a repository merge action.
+
+## Agent auto-merge
+
+Agents must arm merges with `pnpm agent:merge <pr-number>`. The wrapper uses
+the workspace's own `gh` identity, reads the complete PR diff and open-PR list,
+and queries GitHub's required checks. Use `pnpm agent:merge <pr-number> --dry-run`
+to print the decision without changing GitHub state. A refusal exits non-zero.
+
+CI-definition PRs require the owner to review and merge them. The shared
+`scripts/ci/ci-definition.mjs` policy must export `isCiDefinitionPath(path)`;
+the wrapper refuses to arm a merge when that policy is unavailable. Renamed
+files are checked under both paths. Drafts, forks, closed PRs, changes to
+`.github/ci-incidents/*.json` (including removals), skip markers in PR titles or
+bodies, and failed or cancelled required checks are also refused. Pending checks
+may wait for GitHub's normal auto-merge requirements.
+
+Only one open PR may have auto-merge enabled. Only a human may override this
+guard: first document the justification in a comment on the target PR using the
+same human GitHub identity, then run
+`pnpm agent:merge <pr-number> --force --reason <comment-URL>`. The wrapper verifies
+the comment's author and PR. This flag cannot override any other guard. Agents
+must never supply `--force`. The open-PR guard reads a snapshot; avoid concurrent
+arming from separate workspaces.
+
+The merge request uses `gh pr merge --auto --squash --match-head-commit` with the
+checked head SHA and explicit checked PR title and body. This keeps GitHub's
+squash-message defaults or later PR text changes from introducing a skip marker.
+Do not call `gh pr merge` or the bot merge command directly.
