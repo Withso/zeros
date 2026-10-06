@@ -141,6 +141,13 @@ describe("control-plane database scope inputs", () => {
 });
 
 describe("control-plane database scope decision", () => {
+  it("reports full assurance as selected even when only documentation changed", () => {
+    expect(decideControlPlaneScope({
+      base: BASE, changedFiles: ["README.md"], eventName: "pull_request",
+      ref: "refs/pull/123/merge", fullDatabase: true,
+    })).toEqual({ database: true, reason: "Full CI always runs every database shard." });
+  });
+
   it("measures each event from the base it is merged onto", () => {
     expect(
       comparisonBase({ EVENT_NAME: "pull_request", PULL_REQUEST_BASE_SHA: BASE }),
@@ -314,5 +321,34 @@ describe("control-plane database scope diff", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toBe("database=true\n");
     expect(result.stderr.trim()).toBe("main pushes always run the database suites");
+  });
+
+  it("writes consistent full-coverage output and summary for a docs-only PR", () => {
+    const { cwd, base } = repository();
+    const summary = path.join(cwd, "summary.md");
+    writeFileSync(path.join(cwd, "README.md"), "docs only\n");
+    git(cwd, "commit", "--quiet", "-am", "docs only");
+    const result = spawnSync(process.execPath, [SCOPE], {
+      cwd, encoding: "utf8",
+      env: { ...process.env, EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/123/merge",
+        PULL_REQUEST_BASE_SHA: base, CI_FULL_DATABASE: "true", GITHUB_STEP_SUMMARY: summary },
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("database=true\n");
+    expect(result.stderr.trim()).toBe("Full CI always runs every database shard.");
+    expect(readFileSync(summary, "utf8")).toContain("Run. Full CI always runs every database shard.");
+    expect(readFileSync(summary, "utf8")).not.toContain("Skipped");
+  });
+
+  it("rejects malformed full-coverage input before publishing a scope output", () => {
+    const { cwd, base } = repository();
+    const result = spawnSync(process.execPath, [SCOPE], {
+      cwd, encoding: "utf8",
+      env: { ...process.env, EVENT_NAME: "pull_request", PULL_REQUEST_BASE_SHA: base,
+        CI_FULL_DATABASE: "unexpected", GITHUB_STEP_SUMMARY: "" },
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("CI_FULL_DATABASE must be true or false");
   });
 });

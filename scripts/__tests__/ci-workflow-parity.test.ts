@@ -50,6 +50,7 @@ const SELECTION_INPUTS: Record<string, string> = {
   "Enforce the test result": "TEST_RESULT",
   "Enforce the source-sync result": "SOURCE_SYNC_RESULT",
   "Enforce control-plane results": "DATABASE_RESULT",
+  "Decide whether the database suites run": "CI_FULL_DATABASE",
 };
 const comparable = (job: Job) => ({
   name: job.name,

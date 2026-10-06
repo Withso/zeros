@@ -13,7 +13,12 @@ type Job = {
   environment?: unknown;
   with?: Record<string, unknown>;
   outputs?: Record<string, string>;
-  steps?: { uses?: string; with?: Record<string, unknown> }[];
+  steps?: {
+    name?: string;
+    uses?: string;
+    with?: Record<string, unknown>;
+    env?: Record<string, string>;
+  }[];
 };
 type Workflow = {
   name: string;
@@ -75,12 +80,16 @@ describe("independent full CI assurance", () => {
 
   it("forces all database shards even for a documentation-only assurance run", () => {
     const scope = read("preflight.yml").jobs["control-plane-scope"];
+    const decision = scope.steps!.find(
+      (step) => step.name === "Decide whether the database suites run",
+    )!;
     expect(
-      expression(scope.outputs!.database, {}, { full_database: true }),
-    ).toBe("true");
+      expression(decision.env!.CI_FULL_DATABASE, {}, { full_database: true }),
+    ).toBe(true);
     expect(
-      expression(scope.outputs!.database, {}, { full_database: false }),
-    ).toBe("false");
+      expression(decision.env!.CI_FULL_DATABASE, {}, { full_database: false }),
+    ).toBe(false);
+    expect(scope.outputs!.database).toBe("${{ steps.scope.outputs.database }}");
   });
 
   it("keeps native ABI and unsigned packaging coverage independent on PRs and every main/release push", () => {

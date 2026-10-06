@@ -2,8 +2,8 @@ name: Preflight
 
 # The full exact-source check suite. It runs independently for every main push,
 # on release-branch pushes, and on merge-queue commits. Pull
-# requests run the same jobs, under the same required check names, in `ci.yml`
-# ("CI"); the composer UI smoke runs only here, after merge. Releases read this
+# requests use selected required jobs in `ci.yml` ("CI") and this full graph
+# through `ci-full.yml` ("Full CI"), including composer smoke. Releases read this
 # workflow by name and path (scripts/release/ci.ts): Beta and Production
 # require a successful Preflight and CodeQL run on their exact release commit.
 # Automatic Alpha can opt in to the successful alpha-gate job alone while the
@@ -32,10 +32,10 @@ name: Preflight
 #             sharded across Postgres service containers whenever one of that
 #             suite's inputs changed. One aggregate job owns the required check.
 #   ui-smoke — the Playwright-driven renderer smoke pass (real browser, real CSS).
-#             It runs here, after merge; pull requests skip it.
+#             Full CI also runs all browser shards on every pull request.
 #
-# Heavier/secret macOS work (full electron-builder pack, native ABI rebuild, live
-# model-catalog drift) remains in the scheduled workflow, not on the per-PR path.
+# Additional secret-free macOS work (full electron-builder pack, native ABI
+# rebuild) and runtime drift share the scheduled workflow, also called by Full CI.
 # The credentialed live-agent smoke (`pnpm agents:smoke`) is NOT wired into any
 # workflow yet — only the offline variant runs here. The pnpm + Node setup mirrors
 # release.yml so the two stay consistent (pnpm via packageManager, Node 22, pnpm
@@ -617,9 +617,7 @@ jobs:
     name: control-plane scope
     runs-on: ubuntu-latest
     outputs:
-      # Full CI is additive: a docs-only PR still exercises every database
-      # shard. Direct release/main runs retain their existing scope policy.
-      database: ${{ inputs.full_database && 'true' || steps.scope.outputs.database }}
+      database: ${{ steps.scope.outputs.database }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -635,6 +633,9 @@ jobs:
         # Routed through `env:`: a `${{ github.event.* }}` value spliced into
         # `run:` is a shell-injection sink.
         env:
+          # Additive assurance override; the classifier emits the same full
+          # decision in its output and human-readable coverage summary.
+          CI_FULL_DATABASE: ${{ inputs.full_database }}
           EVENT_NAME: ${{ github.event_name }}
           PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
