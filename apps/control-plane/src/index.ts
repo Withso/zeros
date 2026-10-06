@@ -20,6 +20,8 @@ import { createRuntimeArtifactStore } from "./cloud-workspaces/runtime-artifact-
 import { cloudRuntimeQualificationMode } from "./cloud-workspaces/runtime-config.js";
 import { loadPinnedCloudRuntime } from "./cloud-workspaces/runtime-selection.js";
 import { createRuntimeQualificationWorker } from "./cloud-workspaces/runtime-qualification.js";
+import { createCloudRuntimeStagingWorker } from "./cloud-workspaces/runtime-staging.js";
+import { DatabaseCloudRuntimeTransitionService } from "./cloud-workspaces/runtime-transfer.js";
 import { BoatApiClient } from "./cloud-workspaces/boat-client.js";
 import { DatabaseBuilderVmOperationStore } from "./cloud-workspaces/cloud-builder-vm-store.js";
 import { CloudComputerTemplateRetentionWorker } from "./cloud-workspaces/computer-template-retention.js";
@@ -129,6 +131,7 @@ let stopCloudSetupWorker = async () => {};
 let stopCloudComputerBuildWorker = async () => {};
 let stopCloudComputerTemplateWorker = async () => {};
 let stopCloudRuntimeQualificationWorker = async () => {};
+let stopCloudRuntimeStagingWorker = async () => {};
 let stopCloudComputerTemplateRetentionWorker = async () => {};
 let stopCloudAccessRevocationWorker = async () => {};
 let stopCloudCheckpointRequestWorker = async () => {};
@@ -164,6 +167,13 @@ let cloudWorkspaceEngineClientAdmissionService:
   | undefined;
 const runtimeQualificationWorker = !config.databaseMaintenanceMode && migrationResult.status.state !== "controlled_migration_pending"
   ? createRuntimeQualificationWorker(config, pool, runtimeArtifacts) : null;
+const runtimeStagingWorker = !config.databaseMaintenanceMode && migrationResult.status.state !== "controlled_migration_pending"
+  ? createCloudRuntimeStagingWorker(config, pool, runtimeArtifacts, new DatabaseCloudRuntimeTransitionService({
+    pool, qualificationMode: config.cloudWorkspaces?.runtime?.qualificationMode ?? "full",
+    workosEnabled: config.auth.provider === "workos",
+    secretEncryptionKeys: config.cloudWorkspaces?.settingsSecretEncryptionKeys ?? {},
+    currentSecretEncryptionKeyVersion: config.cloudWorkspaces?.currentSettingsSecretEncryptionKeyVersion ?? null,
+  })) : null;
 if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
   const [
     { createCloudProviderDeployment },
@@ -591,6 +601,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     if (invitationWorker) stopCloudInvitationWorker=invitationWorker.start();
 
     if (setupWorker) { stopCloudSetupWorker = setupWorker.start(); stopCloudComputerBuildWorker = createCloudComputerBuildWorker(pool, cloud).start(); }
+    if (runtimeStagingWorker) stopCloudRuntimeStagingWorker = runtimeStagingWorker.start();
     // Reserve a separate session even without DATABASE_LISTEN_URL: long-held
     // listeners must not consume request/worker transaction pool capacity.
     const workerListenerPool = createPool(config.databaseListenUrl ?? config.databaseUrl, {
@@ -599,6 +610,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     const stopNotifications = startCloudWorkerNotifications(workerListenerPool, {
       lifecycle: () => lifecycle.reconciler.notify(),
       setup: () => setupWorker?.notify(),
+      ...(runtimeStagingWorker ? { runtimeStaging: () => runtimeStagingWorker.notify() } : {}),
     });
     stopCloudWorkerNotifications = async () => {
       try { await stopNotifications(); }
@@ -726,6 +738,7 @@ function shutdown(signal: string): void {
     stopCloudComputerBuildWorker(),
     stopCloudComputerTemplateWorker(),
     stopCloudRuntimeQualificationWorker(),
+    stopCloudRuntimeStagingWorker(),
     stopCloudComputerTemplateRetentionWorker(),
     stopCloudAccessRevocationWorker(),
     stopCloudCheckpointRequestWorker(),

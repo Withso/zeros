@@ -812,6 +812,7 @@ describe("repository layout contracts", () => {
       "runtime-hot-update.md",
       "runtime-lifecycle-acceptance.md",
       "runtime-skew-gate.md",
+      "runtime-staging.md",
       "security.md",
       "template-forks.md",
       "wake-performance.md",
