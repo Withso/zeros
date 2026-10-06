@@ -150,6 +150,7 @@ describe("release dependency and authority contracts", () => {
   it("keeps the hosted default DAG independent of Alpha outputs on every channel", () => {
     const parsed = load(workflow("hosted-promotion")) as any;
     expect(parsed.on.workflow_call.inputs.alpha_ci_fast_path).toMatchObject({ type: "string", default: "" });
+    expect(parsed.on.workflow_call.inputs.alpha_forward_only).toMatchObject({ type: "string", default: "" });
     expect(parsed.on.workflow_call.outputs).toBeUndefined();
     const { guard, services, worker, promote } = parsed.jobs;
     expect(guard.needs).toBeUndefined();
@@ -161,6 +162,7 @@ describe("release dependency and authority contracts", () => {
     expect(promote.if).toBe("always() && needs.guard.result == 'success' && needs.guard.outputs.enabled == 'true' && needs.services.result == 'success' && (needs.worker.result == 'success' || needs.worker.result == 'skipped')");
     for (const stage of [guard, services, promote]) {
       expect(stage.env.ZEROS_ALPHA_CI_FAST_PATH).toBe("${{ inputs.alpha_ci_fast_path }}");
+      expect(stage.env.ZEROS_ALPHA_FORWARD_ONLY).toBe("${{ inputs.alpha_forward_only }}");
       expect(stage.if ?? "").not.toMatch(/ready|alpha/);
     }
     expect(services.concurrency).toEqual(promote.concurrency);
@@ -172,8 +174,31 @@ describe("release dependency and authority contracts", () => {
     expect(parsed.jobs["source-sync-workload"].name).toBe("source-sync workload (macOS)");
   });
 
-  it.each(["release-beta", "release", "controlled-cutover", "cloud-worker-promotion"])("retains the full/default CI wiring in %s", name => {
-    expect(workflow(name)).not.toMatch(/ZEROS_ALPHA_CI_FAST_PATH|alpha_ci_fast_path|outputs\.ready/);
+  it.each(["release-beta", "release", "controlled-cutover", "staff-owner-bootstrap"])("retains the full/default CI wiring in %s", name => {
+    expect(workflow(name)).not.toMatch(/ZEROS_ALPHA_CI_FAST_PATH|alpha_ci_fast_path|ZEROS_ALPHA_FORWARD_ONLY|alpha_forward_only|outputs\.ready/);
+  });
+
+  it("passes forward-only only from the automatic Alpha parent and uploads only successful admission", () => {
+    const text = workflow("release-alpha"), ci = job(text, "ci"), parsed = load(text) as any;
+    for (const name of ["ci", "publish", "runtime-publish"]) expect(job(text, name)).toContain("ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}");
+    expect(job(text, "hosted")).toContain("alpha_forward_only: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}");
+    const receipt = parsed.jobs.ci.steps.find((step: any) => step.name === "Save Alpha admission receipt");
+    expect(receipt.if).toBe("success() && steps.barrier.outputs.admission_issued == 'true'");
+    expect(receipt.with).toMatchObject({ name: "alpha-admission-${{ github.sha }}", path: ".context/release/alpha-admission.json",
+      "include-hidden-files": true, "if-no-files-found": "error", overwrite: true });
+    expect(ci).not.toContain("contents: write");
+  });
+
+  it("carries both Alpha policies into the nested worker while direct dispatch defaults stay strict", () => {
+    const hosted = load(workflow("hosted-promotion")) as any, worker = load(workflow("cloud-worker-promotion")) as any;
+    for (const [input, variable] of [["alpha_ci_fast_path", "ZEROS_ALPHA_CI_FAST_PATH"], ["alpha_forward_only", "ZEROS_ALPHA_FORWARD_ONLY"]]) {
+      expect(hosted.jobs.worker.with[input]).toBe(`\${{ inputs.${input} }}`);
+      expect(worker.on.workflow_call.inputs[input]).toMatchObject({ default: "", type: "string" });
+      expect(worker.on.workflow_dispatch.inputs[input]).toBeUndefined();
+      expect(worker.jobs.worker.env[variable]).toBe(`\${{ inputs.${input} }}`);
+    }
+    expect(workflow("cloud-worker-promotion")).not.toMatch(/vars\.ZEROS_ALPHA_|outputs\.ready/);
+    expect(worker.jobs.worker.concurrency).toEqual(hosted.jobs.services.concurrency);
   });
   it.each(["preflight", "codeql"])("runs %s push checks on main and every release branch", name => {
     expect(workflow(name)).toContain('branches: [main, "release/**"]');

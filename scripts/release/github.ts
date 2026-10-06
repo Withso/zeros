@@ -4,7 +4,8 @@ import path from "node:path";
 import { CHANNELS, HostedReceipt, HostedServicesReceipt, SHA, requireCheck, type Channel, type PromotionConfig } from "./contracts";
 import { command, jsonClient, type Command } from "./io";
 import { assertRequiredCI, requiredCIEvidence, REQUIRED_CI } from "./ci";
-import { ALPHA_CI_FAILURE, ALPHA_REQUIRED_CI, alphaBarrierUnmutated, alphaRequiredChecks, automaticAlpha, supersededCandidate } from "./alpha-ci";
+import { ALPHA_CI_FAILURE, ALPHA_REQUIRED_CI, alphaBarrierUnmutated, alphaRequiredChecks, assertAlphaAdmission, automaticAlpha, supersededCandidate } from "./alpha-ci";
+import { alphaAdmissionArtifact, alphaAncestry, alphaForwardOnlyMode, assertAlphaDestinations } from "./alpha-frontier";
 import { CutoverReceipt } from "./cutover";
 
 function validateHostedReceipt(receipt: unknown, run: any, config: Pick<PromotionConfig, "sourceSha" | "branch" | "repository">, channel: Channel, jobs: any[], requireOverallSuccess: boolean) {
@@ -78,6 +79,23 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
   const fullChecks = () => Promise.all(REQUIRED_CI.map(async check => requiredCIEvidence(config, check.file, check.name,
     await read(`/actions/workflows/${check.file}/runs?head_sha=${config.sourceSha}&per_page=100`))));
   const requiredChecks = async () => await alphaFastPath() ? alphaRequiredChecks(config, read) : fullChecks();
+  let admissionProof: { key: string; confirmed: Promise<void> } | undefined;
+  async function ownAlphaAdmission() {
+    const name = alphaAdmissionArtifact(config.sourceSha), runId = env.GITHUB_RUN_ID!;
+    const list = await read(`/actions/runs/${runId}/artifacts?per_page=100`);
+    requireCheck(list && Number.isSafeInteger(list.total_count) && list.total_count >= 0 && list.total_count <= 100 &&
+      Array.isArray(list.artifacts) && list.artifacts.length === list.total_count, "Automatic Alpha admission artifact history is unavailable or exceeds its bound");
+    const artifacts = list.artifacts.filter((item: any) => item?.name === name && item.expired === false && item.workflow_run?.head_sha === config.sourceSha);
+    requireCheck(artifacts.length === 1, "Automatic Alpha has no unique authenticated admission receipt");
+    const directory = await mkdtemp(path.join(os.tmpdir(), "zeros-alpha-admission-"));
+    try {
+      await runCommand("gh", ["run", "download", runId, "--repo", config.repository, "--name", name, "--dir", directory],
+        { env: { PATH: env.PATH, HOME: env.HOME, GH_TOKEN: env.GH_TOKEN }, timeout: 60_000 });
+      const bytes = await readFile(path.join(directory, "alpha-admission.json"));
+      requireCheck(bytes.length <= 16 * 1024, "Automatic Alpha admission receipt exceeds its size bound");
+      await assertAlphaAdmission(config, env, read, JSON.parse(bytes.toString("utf8")));
+    } finally { await rm(directory, { force: true, recursive: true }); }
+  }
   async function receiptForRun(run: any, channel: Channel, requireOverallSuccess: boolean, kind: "hosted" | "services" | "worker" = "hosted") {
     requireCheck(Number.isSafeInteger(run.id), "Invalid hosted workflow run");
     const name = `${kind === "services" ? "hosted-services" : kind === "worker" ? "worker-promotion" : "hosted-promotion"}-${channel}-${config.sourceSha}`;
@@ -206,7 +224,24 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
     },
     async assertCurrent() {
       const commit = await read(`/commits/${encodeURIComponent(config.branch)}`);
-      if (commit.sha !== config.sourceSha) supersededCandidate(commit.sha);
+      const mode = alphaForwardOnlyMode(env);
+      if (mode === "off" || env.RELEASE_CHANNEL !== "alpha" || !await automaticAlpha(config, env, read) ||
+        mode === "admitted" && env.GITHUB_JOB === "ci") {
+        if (commit.sha !== config.sourceSha) supersededCandidate(commit.sha);
+        return;
+      }
+      if (env.GITHUB_JOB !== "ci") {
+        // Admission is immutable for this source/run/attempt. Keep its proof
+        // within this client; CI, parent identity, main and destinations still
+        // revalidate at every checkpoint, including the worker's hot loop.
+        const key = JSON.stringify([config.repository, config.sourceSha, env.GITHUB_RUN_ID, env.GITHUB_RUN_ATTEMPT]);
+        if (admissionProof?.key !== key) admissionProof = { key, confirmed: ownAlphaAdmission() };
+        await admissionProof.confirmed;
+      }
+      requireCheck(typeof commit?.sha === "string" && SHA.test(commit.sha), "Current main identity is unavailable for automatic Alpha");
+      const ancestor = alphaAncestry(read);
+      requireCheck(await ancestor(config.sourceSha, commit.sha), "Current main no longer contains the automatic Alpha candidate; no destination mutation is authorized");
+      if (mode === "enabled") await assertAlphaDestinations(config, env, read, ancestor, options.fetch);
     },
     async ownReceipt(channel: Channel, runId: string) {
       requireCheck(/^[1-9]\d*$/.test(runId), "Invalid publication run identity");

@@ -41,6 +41,14 @@ on:
       before_sha:
         default: ''
         type: string
+      alpha_ci_fast_path:
+        description: Critical CI only for an authenticated automatic Alpha parent
+        default: ''
+        type: string
+      alpha_forward_only:
+        description: Forward-only freshness only for an authenticated automatic Alpha parent
+        default: ''
+        type: string
       execute:
         default: false
         type: boolean
@@ -102,6 +110,8 @@ jobs:
       RELEASE_SHA: ${{ inputs.source_sha || github.sha }}
       RELEASE_BRANCH: ${{ inputs.branch || github.ref_name }}
       RELEASE_BASE: ${{ inputs.before_sha || '' }}
+      ZEROS_ALPHA_CI_FAST_PATH: ${{ inputs.alpha_ci_fast_path }}
+      ZEROS_ALPHA_FORWARD_ONLY: ${{ inputs.alpha_forward_only }}
       ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
       WORKER_EXECUTE: ${{ inputs.execute }}
       WORKER_RECONCILE_STORAGE: ${{ inputs.reconcile_storage }}
