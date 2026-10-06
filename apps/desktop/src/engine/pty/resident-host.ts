@@ -17,7 +17,7 @@ type Session = {
   info: ResidentPtySession; proc: IPty; mirror: TerminalMirror;
   redactor: CloudCustomizationRedactor; sequence: number; tail: Promise<unknown>;
   queuedBytes: number; paused: boolean; closed: boolean;
-  exited: Promise<void>;
+  exited: Promise<void>; exit: { exitCode: number; signal: number | null } | null;
   inputs: Map<string, { sequence: number; digest: string }>;
 };
 type Connection = { socket: net.Socket; authority: ResidentEngineAuthority | null; requests: number };
@@ -164,7 +164,8 @@ export class ResidentPtyHost {
       if (request.op === "snapshot") {
         const snapshot = await session.mirror.snapshot();
         this.requireAuthority(connection);
-        const parsed = ResidentPtySnapshotSchema.safeParse({ ...snapshot, sequence: session.sequence });
+        const parsed = ResidentPtySnapshotSchema.safeParse({ ...snapshot, sequence: session.sequence,
+          ...(request.includeExit && session.info.exited && session.exit ? { exit: session.exit } : {}) });
         if (!parsed.success) throw new ResidentPtyError("snapshot_unavailable");
         return parsed.data;
       }
@@ -178,6 +179,7 @@ export class ResidentPtyHost {
             })]);
           } finally { clearTimeout(timer); }
         }
+        await this.publishExit(session);
         session.closed = true; this.sessions.delete(request.sessionId);
         session.mirror.dispose();
         return true;
@@ -237,7 +239,7 @@ export class ResidentPtyHost {
         createdAt: Date.now(), actorUserId: launch.actorUserId ?? null, exited: false,
         registryWorkspaceId: launch.registryWorkspaceId ?? null, environmentOwnerId: launch.environmentOwnerId ?? null,
         brokerId: launch.brokerId ?? null, githubShared: false, lastInputAtMs: 0 },
-      proc, mirror, exited,
+      proc, mirror, exited, exit: null,
       redactor: new CloudCustomizationRedactor(launch.redactValues ?? []),
       sequence: 0, tail: Promise.resolve(), inputs: new Map(), queuedBytes: 0, paused: false, closed: false,
     };
@@ -256,12 +258,10 @@ export class ResidentPtyHost {
     proc.onExit(({ exitCode, signal }) => {
       // Close is itself serialized ahead of this mirror update. Resolve the
       // native exit witness before queueing so close cannot wait on itself.
-      markExited();
+      session.exit = { exitCode, signal: signal ?? null }; markExited();
       void this.serialize(session, async () => {
         if (session.closed) return;
-        await this.publish(session, session.redactor.finish("pty"));
-        session.info.exited = true;
-        if (this.engine) this.send(this.engine, { kind: "exit", sessionId: launch.sessionId, exitCode, signal: signal ?? null });
+        await this.publishExit(session);
       }).catch(() => this.stop());
     });
     return { ...session.info };
@@ -271,6 +271,13 @@ export class ResidentPtyHost {
     const next = session.tail.then(work);
     session.tail = next.catch(() => undefined);
     return next;
+  }
+
+  private async publishExit(session: Session): Promise<void> {
+    if (session.info.exited || !session.exit) return;
+    await this.publish(session, session.redactor.finish("pty"));
+    session.info.exited = true;
+    if (this.engine) this.send(this.engine, { kind: "exit", sessionId: session.info.sessionId, ...session.exit });
   }
 
   private async publish(session: Session, data: string): Promise<void> {

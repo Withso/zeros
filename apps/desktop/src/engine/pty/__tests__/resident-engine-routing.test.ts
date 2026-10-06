@@ -37,6 +37,12 @@ it("routes qualified persistent cloud terminals through the resident and restore
   await engine["handlePtyCreate"]({ ...base, type: "PTY_CREATE", cwd: root, cols: 80, rows: 24 }, a);
   expect(localCreate).not.toHaveBeenCalled();
   expect(a.send).toHaveBeenCalledWith(expect.objectContaining({ type: "PTY_CREATED", reattached: true, replay: "before" }));
+  // The shell can exit after has() admitted a reattach but before get(). Its
+  // final snapshot still belongs to this request; do not close it underneath.
+  session.exited = true;
+  await engine["handlePtyCreate"]({ ...base, type: "PTY_CREATE", cwd: root, cols: 80, rows: 24 }, a);
+  expect(resident.close).not.toHaveBeenCalled();
+  session.exited = false;
   await engine["handlePtyCreate"]({ ...base, type: "PTY_CREATE", cwd: root, cols: 80, rows: 24 }, b);
   expect(b.send).toHaveBeenCalledWith(expect.objectContaining({ type: "PTY_EXIT" }));
   await engine["handleMessage"]({ ...base, type: "PTY_WRITE", data: "blocked" }, b);

@@ -10097,7 +10097,6 @@ export class ZerosEngine {
   private async closeResidentTerminal(sessionId: string): Promise<void> {
     if (!this.residentTerminals?.get(sessionId)) return;
     await this.residentTerminals.close(sessionId);
-    this.residentReplay.publish({ kind: "exit", sessionId, exitCode: 0, signal: 9 });
     this.residentReplay.retire(sessionId);
     const broker = this.residentGithubBrokers.get(sessionId);
     if (broker) { await broker.stopAndProve(); this.residentGithubBrokers.delete(sessionId); }
@@ -10595,7 +10594,7 @@ export class ZerosEngine {
     try {
       if (resident) {
         const existing = resident.get(msg.sessionId);
-        if (existing?.exited) await resident.close(msg.sessionId);
+        if (existing?.exited && !reattach) await resident.close(msg.sessionId);
         if (reattach && existing && !existing.exited)
           await resident.resize(msg.sessionId, msg.cols ?? existing.cols, msg.rows ?? existing.rows);
         const session = reattach ? resident.get(msg.sessionId)! : await resident.create({
@@ -10635,11 +10634,14 @@ export class ZerosEngine {
     // only the multiplayer bookkeeping is skipped. On exit, markExited no-ops
     // (no entry) so no spurious terminals-changed broadcast fires.
     if (!info.reattached && !msg.ephemeral) {
+      // A resident shell can exit while create is awaiting its reply, before
+      // the exit listener has a registry entry to mark.
+      const exited = resident?.get(info.sessionId)?.exited === true;
       if (this.terminals.has(info.sessionId)) {
         // Restart in place of a previously-EXITED terminal (its old pty had died,
         // so this is a fresh spawn) — clear the exited flag so every device shows
         // it live again.
-        if (this.terminals.markAlive(info.sessionId))
+        if (exited ? this.terminals.markExited(info.sessionId) : this.terminals.markAlive(info.sessionId))
           this.broadcastTerminalsChanged();
       } else {
         const added = this.terminals.add({
@@ -10647,6 +10649,7 @@ export class ZerosEngine {
           workspaceId: canonicalWsId,
           cwd: info.cwd,
           createdAt: Date.now(),
+          ...(exited ? { exited: true } : {}),
         });
         if (added) this.broadcastTerminalsChanged();
       }

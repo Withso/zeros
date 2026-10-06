@@ -68,6 +68,16 @@ it.runIf(process.platform === "linux")("reattaches the real engine terminal path
     expect(other.send).toHaveBeenCalledWith(expect.objectContaining({ type: "PTY_EXIT" }));
     await second.engine["closeResidentTerminal"](sessionId);
     expect(() => process.kill(original.pid, 0)).toThrow();
+    const create = second.resident.create.bind(second.resident);
+    vi.spyOn(second.resident, "create").mockImplementationOnce(async launch => {
+      const result = await create({ ...launch, command: "exit 7" });
+      await expect.poll(() => second.resident.get(launch.sessionId)?.exited).toBe(true);
+      return result;
+    });
+    const shortLived = "pty-exited-before-registry";
+    await second.engine["handlePtyCreate"]({ ...message, sessionId: shortLived, id: randomUUID() }, next);
+    expect(second.engine["terminals"].get(shortLived)?.exited).toBe(true);
+    expect(next.send).toHaveBeenCalledWith(expect.objectContaining({ type: "PTY_EXIT", sessionId: shortLived, exitCode: 7 }));
   } finally {
     for (const engine of engines.reverse()) {
       engine["residentTerminals"]?.disconnect();

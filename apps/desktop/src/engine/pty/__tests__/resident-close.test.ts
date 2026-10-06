@@ -21,13 +21,15 @@ it.runIf(process.platform === "linux")("waits for native PTY exit before acknowl
   const client = new ResidentPtyClient({ socketPath, authority });
   try {
     await host.start(); host.authorize(authority); await client.connect();
+    const events = vi.fn(); client.events(events);
     await client.create({ sessionId: "closing", cwd: root, cols: 80, rows: 24, env: {} });
     let closed = false;
     const closing = client.close("closing").then(() => { closed = true; });
     await expect.poll(() => child.killed).toBe(true);
     await new Promise(resolve => setImmediate(resolve));
     expect(closed).toBe(false);
-    child.exit({ exitCode: 0 }); await closing;
+    child.exit({ exitCode: 7, signal: 15 }); await closing;
     expect(closed).toBe(true);
+    expect(events).toHaveBeenCalledExactlyOnceWith({ kind: "exit", sessionId: "closing", exitCode: 7, signal: 15 });
   } finally { child.exit({ exitCode: 0 }); client.disconnect(); await host.stop(); await rm(root, { recursive: true, force: true }); }
 });

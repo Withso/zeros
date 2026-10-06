@@ -1,6 +1,29 @@
 import { expect, it, vi } from "vitest";
 import { ResidentTerminalReplay } from "../resident-replay";
 
+it("replays an exit during engine absence once per device, after its snapshot", async () => {
+  const replay = new ResidentTerminalReplay<string>();
+  const observed: string[] = [];
+  const exit = { exitCode: 7, signal: null };
+  for (const client of ["a", "b"]) {
+    await replay.attach(client, "pty", () => true, async () => ({ sequence: 2, exit }),
+      () => observed.push(`${client}:snapshot`), event => observed.push(`${client}:${event.kind}`), vi.fn());
+  }
+  replay.publish({ kind: "exit", sessionId: "pty", ...exit });
+  expect(observed).toEqual(["a:snapshot", "a:exit", "b:snapshot", "b:exit"]);
+});
+
+it("deduplicates an exit received while the snapshot is pending", async () => {
+  const replay = new ResidentTerminalReplay<string>();
+  const exit = { exitCode: 7, signal: null }, send = vi.fn();
+  let finish!: (value: { sequence: number; exit: typeof exit }) => void;
+  const attaching = replay.attach("a", "pty", () => true,
+    () => new Promise<{ sequence: number; exit: typeof exit }>(resolve => { finish = resolve; }), vi.fn(), send, vi.fn());
+  replay.publish({ kind: "exit", sessionId: "pty", ...exit });
+  finish({ sequence: 1, exit }); await attaching;
+  expect(send).toHaveBeenCalledExactlyOnceWith({ kind: "exit", sessionId: "pty", ...exit });
+});
+
 it("holds live output until each device has its snapshot and drops only covered sequences", async () => {
   const replay = new ResidentTerminalReplay<string>();
   let finish!: (value: { sequence: number }) => void;

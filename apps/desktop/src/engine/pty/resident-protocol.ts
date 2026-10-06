@@ -51,9 +51,11 @@ export const ResidentPtySessionSchema = z.object({
   lastInputAtMs: z.number().int().nonnegative().default(0),
 }).strict();
 export type ResidentPtySession = z.infer<typeof ResidentPtySessionSchema>;
+const ResidentPtyExitSchema = z.object({ exitCode: z.number().int(), signal: z.number().int().nullable() }).strict();
 export const ResidentPtySnapshotSchema = z.object({
   data: z.string().max(256 * 1024), bytes: z.number().int().min(0).max(256 * 1024),
   truncated: z.boolean(), sequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  exit: ResidentPtyExitSchema.optional(),
 }).strict().refine(value => Buffer.byteLength(value.data) === value.bytes);
 export type ResidentPtySnapshot = z.infer<typeof ResidentPtySnapshotSchema>;
 
@@ -62,7 +64,7 @@ export const ResidentPtyRequestSchema = z.discriminatedUnion("op", [
   z.object({ id: requestId, op: z.literal("attach"), protocol: z.literal(RESIDENT_PTY_PROTOCOL), authority: ResidentEngineAuthoritySchema }).strict(),
   z.object({ id: requestId, op: z.literal("list") }).strict(),
   z.object({ id: requestId, op: z.literal("create"), launch: ResidentPtyCreateSchema }).strict(),
-  z.object({ id: requestId, op: z.literal("snapshot"), sessionId }).strict(),
+  z.object({ id: requestId, op: z.literal("snapshot"), sessionId, includeExit: z.literal(true).optional() }).strict(),
   z.object({ id: requestId, op: z.literal("write"), sessionId, input: ResidentPtyInputSchema }).strict(),
   z.object({ id: requestId, op: z.literal("cursor"), sessionId, producerId: z.uuid() }).strict(),
   z.object({ id: requestId, op: z.literal("resize"), sessionId, cols: dimension, rows: dimension }).strict(),

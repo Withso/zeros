@@ -50,16 +50,17 @@ export class ResidentTerminalService {
 
   async create(launch: ResidentPtyCreate): Promise<ResidentPtySession> {
     this.loading++;
+    let session: ResidentPtySession;
     try {
-      const session = await this.client.create({ ...launch, cols: coerceDim(launch.cols, 80), rows: coerceDim(launch.rows, 24) });
+      session = await this.client.create({ ...launch, cols: coerceDim(launch.cols, 80), rows: coerceDim(launch.rows, 24) });
       this.sessions.set(session.sessionId, session);
-      return { ...session };
     } finally { this.loading--; this.flushEvents(); }
+    return { ...session };
   }
 
   async snapshot(sessionId: string) {
     this.operations++;
-    try { return await this.client.snapshot(sessionId); }
+    try { return await this.client.snapshot(sessionId, true); }
     finally { this.operations--; }
   }
 

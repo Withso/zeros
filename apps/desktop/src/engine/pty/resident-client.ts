@@ -78,7 +78,9 @@ export class ResidentPtyClient {
 
   async list() { return z.array(ResidentPtySessionSchema).max(RESIDENT_MAX_SESSIONS).parse(await this.request({ op: "list" })); }
   async create(launch: ResidentPtyCreate) { return ResidentPtySessionSchema.parse(await this.request({ op: "create", launch })); }
-  async snapshot(sessionId: string) { return ResidentPtySnapshotSchema.parse(await this.request({ op: "snapshot", sessionId })); }
+  async snapshot(sessionId: string, includeExit = false) {
+    return ResidentPtySnapshotSchema.parse(await this.request({ op: "snapshot", sessionId, ...(includeExit ? { includeExit: true as const } : {}) }));
+  }
   async write(sessionId: string, input: ResidentPtyInput) {
     return z.enum(["applied", "duplicate"]).parse(await this.request({ op: "write", sessionId, input }));
   }

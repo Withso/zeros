@@ -51,6 +51,21 @@ afterEach(async () => {
 });
 
 describe.runIf(process.platform === "linux")("resident cloud terminals", () => {
+  it("retains exit status across replacement without changing legacy snapshots", async () => {
+    const f = await setup(), client = await f.connect();
+    const sessionId = "exit-while-detached";
+    await client.create({ sessionId, cwd: f.root, cols: 80, rows: 24, env: { PATH: "/usr/bin:/bin" },
+      command: "stty -echo; printf 'READY\\n'; read -r value; printf 'LAST\\n'; exit 7" });
+    await expect.poll(async () => (await client.snapshot(sessionId)).data).toContain("READY");
+    await client.write(sessionId, { producerId: randomUUID(), sequence: 1, data: "go\n" });
+    client.disconnect();
+    const target = authority(2); f.host.authorize(target); const next = await f.connect(target);
+    await expect.poll(async () => (await next.list())[0].exited).toBe(true);
+    const snapshot = await next.snapshot(sessionId, true);
+    expect(snapshot).toMatchObject({ exit: { exitCode: 7, signal: 0 } });
+    expect(snapshot.data).toContain("LAST");
+    expect(await next.snapshot(sessionId)).not.toHaveProperty("exit");
+  });
   it("admits separately configured managed roots but rejects symlinks outside their physical boundary", async () => {
     const managed = await mkdtemp(path.join(tmpdir(), "zeros-resident-managed-")); roots.push(managed);
     const f = await setup([managed]), client = await f.connect();

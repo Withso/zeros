@@ -10,6 +10,19 @@ const cleanup: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 
 describe.runIf(process.platform === "linux")("cloud resident engine adapter", () => {
+  it("returns the exited state when a shell exits before create is acknowledged", async () => {
+    const service = new ResidentTerminalService({ hostId: randomUUID(), socketPath: "/unused",
+      authority: { organizationId: randomUUID(), workspaceId: randomUUID(), engineId: randomUUID(), generation: 1,
+        fence: 1, token: randomBytes(32).toString("base64url") } });
+    vi.spyOn(service["client"], "create").mockImplementation(async launch => {
+      service["receive"]({ kind: "exit", sessionId: launch.sessionId, exitCode: 7, signal: null });
+      return { ...launch, pid: 123, createdAt: 1, exited: false, actorUserId: null,
+        registryWorkspaceId: null, environmentOwnerId: null, brokerId: null, githubShared: false, lastInputAtMs: 0 };
+    });
+    const session = await service.create({ sessionId: "short-lived", cwd: "/tmp", cols: 80, rows: 24, env: {} });
+    expect(session.exited).toBe(true);
+    expect(service.has(session.sessionId)).toBe(false);
+  });
   it("treats an unexpected host disconnect as busy until attachment is restored", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "zeros-resident-health-"));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
