@@ -32,6 +32,7 @@ import {
   parseRecoveryDesignSelection,
   redactCloudWorkspaceSetupHookLog,
   redeemMaterials,
+  runProcess,
 } from "../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
 import {
   CLOUD_WORKER_SUPERVISOR_AUDIENCE,
@@ -45,6 +46,21 @@ const ORGANIZATION_ID = "00000000-0000-4000-8000-000000000002";
 const SETUP_RUN_ID = "00000000-0000-4000-8000-000000000003";
 const ENGINE_INSTANCE_ID = "00000000-0000-4000-8000-000000000004";
 const execFileAsync = promisify(execFile);
+
+describe("bounded setup process cancellation", () => {
+  it("terminates an in-flight Git process group when the history guard aborts", async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 50);
+    try {
+      const result = await runProcess(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+        signal: controller.signal, timeoutMs: 5000,
+      });
+      expect(result.aborted).toBe(true);
+      expect(result.signal).toBe("SIGTERM");
+      expect(result.timedOut).toBe(false);
+    } finally { clearTimeout(timer); }
+  });
+});
 
 describe("versioned cloud recovery manifests", () => {
   it("retains only the closed revoked code from a bounded admission error", async () => {

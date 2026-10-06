@@ -1,3 +1,4 @@
+import type { CloudWorkspaceCheckoutSource } from "./computer-v2-contract.js";
 import {
   createCipheriv,
   createDecipheriv,
@@ -129,6 +130,8 @@ export type CloudWorkspaceSetupRedemptionInput = {
   runtime?: CloudRuntimeWitness | undefined;
   /** Omitted by legacy images. Version 2 requires measured resource admission. */
   materialVersion?: 2 | undefined;
+  /** Only upgraded setup helpers accept this optional source document. */
+  checkoutSourceVersion?: 1 | undefined;
   token: string;
   workspaceId: string;
   organizationId: string;
@@ -184,7 +187,7 @@ type ParsedSettings = {
 
 type RedemptionContract = {
   runtime: CloudRuntimePin | null;
-  computer: { source: CloudComputerWorkspaceSource; repositoryId: string; requestedRevision: string } | null;
+  computer: { source: CloudComputerWorkspaceSource; repositoryId: string; requestedRevision: string; checkoutSource: CloudWorkspaceCheckoutSource | null } | null;
   accountUserId: string;
   ownerSubject: string;
   imageRef: string;
@@ -1370,7 +1373,8 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           : {}),
       },
       ...(contract.computer ? { computer: { template: computerWorkspaceTemplateManifest(contract.computer.source),
-        primaryRepositoryId: contract.computer.repositoryId, requestedRevision: contract.computer.requestedRevision } } : {}),
+        primaryRepositoryId: contract.computer.repositoryId, requestedRevision: contract.computer.requestedRevision,
+        ...(input.checkoutSourceVersion === 1 && contract.computer.checkoutSource ? { checkoutSource: contract.computer.checkoutSource } : {}) } } : {}),
       repository: {
         forge: contract.repository.forge,
         owner: contract.repository.owner,

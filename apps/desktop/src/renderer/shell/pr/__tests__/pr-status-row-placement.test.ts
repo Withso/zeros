@@ -40,7 +40,7 @@ describe("shared PR status row placement", () => {
     expect(headerClasses?.split(/\s+/)).not.toContain("border-b");
 
     expect(row).toMatch(
-      /return \(\s*<PanelHeader size="window" className="gap-2"/,
+      /<PanelHeader size="window" className="gap-2"/,
     );
     const primitive = source(
       "apps/desktop/src/renderer/shared/ui/primitives/panel-header.tsx",

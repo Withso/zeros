@@ -26,6 +26,14 @@ import {
 afterEach(() => setActiveBridge(null));
 
 describe("engine-backed native façades", () => {
+  it("preserves the Local Git status payload and response without cloud fields", async () => {
+    const result = { staged: [], unstaged: [], untracked: [], conflicted: [], conflictState: null, ahead: null, behind: null, upstream: null };
+    const request = vi.fn().mockResolvedValue({ type: "WORKSPACE_RESPONSE", result });
+    setActiveBridge({ request } as unknown as RuntimeClient);
+    expect(await gitStatus("local-worktree")).toEqual(result);
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ op: "git.status", params: { workspaceId: "local-worktree" } }), expect.any(Number));
+  });
+
   it("rejects transport absence instead of publishing synthetic empty data", async () => {
     setActiveBridge(null);
 

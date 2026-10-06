@@ -2153,7 +2153,7 @@ export function createCloudWorkspaceRoutes(
         owner: body.repository.owner,
         repository: body.repository.name,
         ...(preflight.computer ? { repositoryId: preflight.installation.repositoryId!,
-          revision: body.repository.revision } : {}),
+          revision: body.repository.revision, includeCheckoutSource: true } : {}),
       });
     } catch {
       throw new HttpError(
@@ -2248,6 +2248,7 @@ export function createCloudWorkspaceRoutes(
       if (!runtime && profile.imageRef !== preflight.profile.imageRef)
         throw new HttpError(409, "cloud_computer_changed", "Cloud Computer changed during workspace creation. Try again.");
       if (computer && (!resolvedRepository.resolvedRevision || !FullCommitPattern.test(resolvedRepository.resolvedRevision) ||
+        !resolvedRepository.checkoutSource || resolvedRepository.checkoutSource.revision !== resolvedRepository.resolvedRevision ||
         (FullCommitPattern.test(body.repository.revision) && resolvedRepository.resolvedRevision !== body.repository.revision)))
         throw new HttpError(409, "cloud_computer_repository_unavailable", "The requested repository revision could not be verified.");
       const normalized = normalize(profile);
@@ -2379,7 +2380,8 @@ export function createCloudWorkspaceRoutes(
           ...cloudRuntimePinValues(runtime),
         ],
       );
-      if (computer) await pinComputerWorkspaceSource(tx, { workspaceId, organizationId: orgId, generation: 1, source: computer });
+      if (computer) await pinComputerWorkspaceSource(tx, { workspaceId, organizationId: orgId, generation: 1, source: computer,
+        checkoutSource: resolvedRepository.checkoutSource! });
       if (adminInput) await markAdminWorkspace(tx, { workspaceId, orgId, creatorUserId: user.id });
       const computerProfile = body.cloudComputerBuild ? await authorizeCloudComputerBuild(tx, {
         organizationId: orgId, actorUserId: user.id, version: body.cloudComputerBuild.version,

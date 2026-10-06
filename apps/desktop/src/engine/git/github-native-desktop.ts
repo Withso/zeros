@@ -34,7 +34,12 @@ export async function requestNativeGithubDesktop(request: CloudGithubNativeGrant
   // Snapshot at most four distinct ready devices. A null preparation can try
   // another exact-actor device; a disconnect, cancel or expired deadline ends
   // the operation. Never race preparations or restart the 15-second budget.
-  const candidates = [...new Set(clients().filter(matches))].slice(0, 4);
+  const devices = new Set<string>();
+  const candidates = clients().filter(client => {
+    if (!matches(client) || devices.has(client.cloudActor!.deviceId)) return false;
+    devices.add(client.cloudActor!.deviceId);
+    return true;
+  }).slice(0, 4);
   if (!candidates.length || signal.aborted || pending.size >= 16 || pending.has(request.native.requestId)) throw unavailable();
   const deadline = Date.now() + 15_000;
   return new Promise((resolve, reject) => {

@@ -64,6 +64,7 @@ describe("cloud setup runtime redemption witness", () => {
     const { runtimeId, manifestSha256, baseCompatibilityId, installerReceiptSha256, bootId, supervisorSessionId } = tree.descriptor;
     expect(await redemptionBody()).toEqual({
       ...legacyBody,
+      checkoutSourceVersion: 1,
       runtime: { runtimeId, manifestSha256, baseCompatibilityId, installerReceiptSha256, bootId, supervisorSessionId },
     });
   });

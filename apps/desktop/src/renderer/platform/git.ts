@@ -1283,6 +1283,8 @@ export interface StatusResult {
   behind?: number | null;
   /** Upstream tracking ref (e.g. `origin/zeros/foo`), or null when unset. */
   upstream?: string | null;
+  /** Present on cloud workers that can report bounded-history fallback. */
+  shallow?: boolean;
 }
 
 export interface ChangeCounts {

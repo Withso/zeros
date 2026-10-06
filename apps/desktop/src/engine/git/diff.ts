@@ -73,6 +73,8 @@ export interface StatusResult {
   behind: number | null;
   /** The upstream tracking ref (e.g. `origin/zeros/foo`), or null when unset. */
   upstream: string | null;
+  /** Cloud setup can fall back to bounded history; probe the current Git state. */
+  shallow?: boolean;
 }
 
 export interface StatusOptions {
@@ -225,10 +227,14 @@ export async function status(
   // can offer "Push" (unpushed local commits) / "Pull" (unpulled remote work).
   // A branch with no upstream (never pushed) yields null counts, which the UI
   // reads as "unknown" and skips those states.
-  const tracking =
+  const [tracking, shallow] = await Promise.all([
     options.includeTracking === false
-      ? { ahead: null, behind: null, upstream: null }
-      : await upstreamAheadBehind(ws.path);
+      ? Promise.resolve({ ahead: null, behind: null, upstream: null })
+      : upstreamAheadBehind(ws.path),
+    ws.placement === "cloud"
+      ? runGitRead(ws.path, ["rev-parse", "--is-shallow-repository"]).then(result => result.stdout.trim() === "true")
+      : undefined,
+  ]);
   return {
     staged: parsed.staged.filter((f) => !isInternal(f.path)),
     unstaged: parsed.unstaged.filter((f) => !isInternal(f.path)),
@@ -238,6 +244,7 @@ export async function status(
     ahead: tracking.ahead,
     behind: tracking.behind,
     upstream: tracking.upstream,
+    ...(shallow === undefined ? {} : { shallow }),
   };
 }
 

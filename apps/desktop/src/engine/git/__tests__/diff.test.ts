@@ -94,6 +94,12 @@ describe("diff / status / log", () => {
     }
   });
 
+  it("preserves the Local status shape without cloud history metadata", async () => {
+    const result = await status(workspaceId);
+    expect(result).toEqual({ staged: [], unstaged: [], untracked: [], conflicted: [], conflictState: null,
+      ahead: null, behind: null, upstream: null });
+  });
+
   it("returns complete file context only when explicitly requested", async () => {
     upsertRepoByRoot({ repoRoot, repoSlug: "test" });
     const before = Array.from({ length: 80 }, (_, i) => `line ${i + 1}`).join("\n") + "\n";

@@ -44,7 +44,7 @@ it("binds a reply to the requested actor and exact live connection", async () =>
 });
 it("drops an aborted request and leaves Local clients untouched", async () => {
   const input = request(), desktop = client(input.actorUserId);
-  const local = { ...desktop, kind: "local" as const };
+  const local = { ...desktop, kind: "local" as const, send: vi.fn() };
   configureNativeGithubDesktop(() => [local, desktop]);
   expect(acceptNativeGithubDesktop(local, { kind: "ready" })).toBe(false);
   acceptNativeGithubDesktop(desktop, { kind: "ready" });
@@ -52,6 +52,7 @@ it("drops an aborted request and leaves Local clients untouched", async () => {
   const waiting = requestNativeGithubDesktop(input, abort.signal);
   const rejected = expect(waiting).rejects.toThrow("Open Zeros");
   abort.abort(); await rejected;
+  expect(local.send).not.toHaveBeenCalled();
   expect(acceptNativeGithubDesktop(desktop, { kind: "reply", requestId: input.native.requestId, grant: null })).toBe(false);
 });
 
@@ -92,6 +93,21 @@ it("bounds fallback to four devices and a single overall deadline", async () => 
   expect(acceptNativeGithubDesktop(desktops[1]!, { kind: "reply", requestId: input.native.requestId, grant: `zgw_${"b".repeat(43)}` })).toBe(false);
 });
 
+it("counts eligible devices rather than duplicate connections against the fallback bound", async () => {
+  const input = request(), first = client(input.actorUserId), second = client(input.actorUserId);
+  const duplicates = Array.from({ length: 3 }, () => ({ ...client(input.actorUserId),
+    cloudActor: { ...first.cloudActor!, sessionId: randomUUID() } }));
+  configureNativeGithubDesktop(() => [first, ...duplicates, second]);
+  for (const desktop of [first, ...duplicates, second]) acceptNativeGithubDesktop(desktop, { kind: "ready" });
+  const abort = new AbortController();
+  const waiting = requestNativeGithubDesktop(input, abort.signal).catch(error => error);
+  acceptNativeGithubDesktop(first, { kind: "reply", requestId: input.native.requestId, grant: null });
+  const attempts = vi.mocked(second.send).mock.calls.length;
+  abort.abort(); await waiting;
+  expect(attempts).toBe(1);
+  expect(duplicates.every(desktop => vi.mocked(desktop.send).mock.calls.length === 0)).toBe(true);
+});
+
 it.each(["abort", "reconfigure", "session"])("ends fallback after %s without accepting a late grant", async cause => {
   vi.useFakeTimers();
   const input = request(), first = client(input.actorUserId), second = client(input.actorUserId), third = client(input.actorUserId);
@@ -103,7 +119,7 @@ it.each(["abort", "reconfigure", "session"])("ends fallback after %s without acc
   acceptNativeGithubDesktop(first, { kind: "reply", requestId: input.native.requestId, grant: null });
   if (cause === "abort") abort.abort();
   if (cause === "reconfigure") configureNativeGithubDesktop(() => [first, second, third]);
-  if (cause === "session") second.cloudActor = { ...second.cloudActor!, sessionId: randomUUID() };
+  if (cause === "session") Object.assign(second, { cloudActor: { ...second.cloudActor!, sessionId: randomUUID() } });
   expect(acceptNativeGithubDesktop(second, { kind: "reply", requestId: input.native.requestId, grant: `zgw_${"b".repeat(43)}` })).toBe(false);
   await vi.advanceTimersByTimeAsync(100);
   await rejection;
