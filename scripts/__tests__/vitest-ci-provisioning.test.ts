@@ -39,7 +39,7 @@ const WORKFLOWS_DIR = path.join(ROOT, ".github", "workflows");
 // spellings must be recognised, or a job silently drops out of this guard's
 // coverage — which is precisely how the release gates escaped it.
 const VITEST_COMMAND =
-  /^\s+(?:run:\s*)?(?:bash scripts\/ci\/with-userns\.sh )?pnpm test:git\s*$/m;
+  /^\s+(?:run:\s*)?(?:bash scripts\/ci\/with-userns\.sh )?pnpm test:git(?: --shard="\$\{VITEST_PART\}\/\d+")?\s*$/m;
 const CONTAINMENT_ACTION = "./.github/actions/contained-execution-runtime";
 const USERNS_WRAPPER = "bash scripts/ci/with-userns.sh pnpm test:git";
 
@@ -78,9 +78,11 @@ describe("Vitest CI provisioning", () => {
 
   it("finds every workflow job that runs the Vitest suite", () => {
     // Releases require the exact commit's successful Preflight instead of
-    // re-running the suite, so Preflight is the only Vitest job.
+    // re-running the suite. Pull requests run the same job in CI. Its two
+    // native shards are matrix legs of one job behind the `test` aggregate.
     expect(jobs.map(({ file, job }) => `${file}:${job}`).sort()).toEqual([
-      "preflight.yml:test",
+      "ci.yml:test-shard",
+      "preflight.yml:test-shard",
     ]);
   });
 

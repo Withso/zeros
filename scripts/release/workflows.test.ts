@@ -57,9 +57,11 @@ describe("cloud backend provisioning workflow", () => {
   });
 });
 describe("release dependency and authority contracts", () => {
-  it("builds the exact Alpha runtime after CI and publishes it after hosted promotion", () => {
+  it("builds the exact Alpha runtime without waiting for CI and publishes it after hosted promotion", () => {
     const text = workflow("release-alpha"), build = job(text, "runtime-build"), publish = job(text, "runtime-publish");
-    expect(build).toContain("needs: ci");
+    // The read-only build starts with the run; only publication waits for the
+    // CI barrier, through hosted promotion.
+    expect(build).not.toMatch(/^ {4}needs:/m);
     expect(build).toContain("runs-on: ubuntu-24.04");
     expect(build).toContain("timeout-minutes: 40");
     expect(build).toContain("pnpm cloud:runtime-bundle:build");

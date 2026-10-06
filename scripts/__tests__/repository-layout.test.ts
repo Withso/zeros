@@ -44,6 +44,24 @@ describe("repository layout contracts", () => {
     expect(workflowLint).not.toMatch(/\n  pull_request:\s*\n\s+paths:/);
   });
 
+  it("runs every other required check for every pull request in CI", () => {
+    const ci = read(".github/workflows/ci.yml");
+
+    expect(ci).toMatch(/\non:\n  pull_request:\n/);
+    expect(ci).not.toMatch(/\n  pull_request:\s*\n\s+paths:/);
+    for (const name of [
+      "quality",
+      "test",
+      "build",
+      "source-sync (macOS)",
+      "control plane",
+      "ui-smoke (composer)",
+      "secret scan (PR commit range)",
+    ]) {
+      expect(ci).toContain(`    name: ${name}\n`);
+    }
+  });
+
   it("runs the required CodeQL check for pull requests and merge queues", () => {
     const codeql = read(".github/workflows/codeql.yml");
 
@@ -221,7 +239,11 @@ describe("repository layout contracts", () => {
     const preflight = read(".github/workflows/preflight.yml");
     expect(preflight).not.toMatch(/working-directory:\s*backend(?:\/|\s|$)/);
     expect(preflight).toContain("working-directory: apps/control-plane");
-    expect(preflight).toContain("'apps/desktop/src/'");
+    // The advisory changed-files Prettier pass runs only for pull requests.
+    const ci = read(".github/workflows/ci.yml");
+    expect(ci).not.toMatch(/working-directory:\s*backend(?:\/|\s|$)/);
+    expect(ci).toContain("working-directory: apps/control-plane");
+    expect(ci).toContain("'apps/desktop/src/'");
 
     const schemas = read("scripts/build-settings-schemas.ts");
     expect(schemas).toContain('"apps", "marketing", "public", "schemas"');
