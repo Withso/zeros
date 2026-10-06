@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { BoatApiClient } from "../../apps/control-plane/src/cloud-workspaces/boat-client.ts";
 import { RuntimeBaseStatusSchema } from "../../apps/control-plane/src/cloud-workspaces/runtime-contract.ts";
 import { templateSetupReproConfig, privateFile, newTemplateSetupJournal, readTemplateSetupSource,
-  runTemplateSetupRepro, runTemplateSetupProbe, cleanupTemplateSetupFork } from "./template-setup-repro.mjs";
+  runTemplateSetupRepro, runTemplateSetupProbe, cleanupTemplateSetupFork, templateSetupErrorDiagnostic } from "./template-setup-repro.mjs";
 import { sanitizeProbeReport } from "./template-setup-probe.mjs";
 import { PERF_UUID, PERF_RESOURCE, perfCheck, perfPool, perfRead, readPerfEnvironment } from "./workspace-perf-timeline.mjs";
 
@@ -14,6 +14,58 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const STATUS = "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status";
 const name = journal => `zeros-v2-test-perf-${journal.id}`;
 const providerReady = state => ["ready", "idle", "running"].includes(state);
+
+export async function inspectPerfVmSource(pool, workspaceId, templateId, billingOrg, request, materialReader = readTemplateSetupSource) {
+  perfCheck(PERF_UUID.test(workspaceId) && PERF_RESOURCE.test(templateId), "input_invalid");
+  const rows = await perfRead(pool, async client => (await client.query(`SELECT workspace.id,workspace.current_generation,workspace.status,
+    source.build_id,template.provider_resource_id AS pinned_template_id,
+    source.workspace_id IS NOT NULL AS source_present,build.state='succeeded' AS build_succeeded,
+    template.state='ready' AS template_ready,template.stopped_at IS NOT NULL AS template_stopped,
+    octet_length(template.protected_contract_digest)=32 AS protected_digest,
+    source.template_id=source.build_id AS source_matches_build,
+    gen.image_ref='boat-template:'||template.provider_resource_id AS image_matches_template,
+    repo.repository_id IS NOT NULL AS repository_present,base.base_image_id IS NOT NULL AS base_present,
+    build.base_image_id LIKE 'zeros-v2-test-%' AS base_test_named,build.runtime_id=gen.runtime_id AS same_runtime
+    FROM cloud_workspaces workspace
+    LEFT JOIN cloud_workspace_generations gen ON gen.workspace_id=workspace.id AND gen.org_id=workspace.org_id AND gen.generation=workspace.current_generation
+    LEFT JOIN cloud_workspace_computer_sources source ON source.workspace_id=gen.workspace_id AND source.generation=gen.generation AND source.org_id=gen.org_id
+    LEFT JOIN cloud_computer_v2_builds build ON build.id=source.build_id AND build.config_id=source.config_id AND build.org_id=source.org_id
+    LEFT JOIN cloud_computer_templates template ON template.build_id=source.template_id AND template.org_id=source.org_id
+    LEFT JOIN cloud_runtime_base_images base ON base.base_image_id=build.base_image_id AND base.provider='boat'
+    LEFT JOIN cloud_workspace_setup_specs spec ON spec.workspace_id=gen.workspace_id AND spec.generation=gen.generation AND spec.org_id=gen.org_id
+    LEFT JOIN cloud_computer_v2_config_repositories repo ON repo.config_id=source.config_id AND repo.org_id=source.org_id
+      AND repo.repository_owner=lower(spec.repository_owner) AND repo.repository_name=lower(spec.repository_name)
+    WHERE workspace.id=$1 LIMIT 2`, [workspaceId])).rows);
+  const row = rows[0];
+  perfCheck(row?.id === workspaceId, "workspace_unavailable");
+  const checks = Object.fromEntries(["source_present", "build_succeeded", "template_ready", "template_stopped", "protected_digest",
+    "source_matches_build", "image_matches_template", "repository_present", "base_present", "base_test_named"].map(key => [key, row[key] === true]));
+  checks.requestedTemplateMatchesPin = row.pinned_template_id === templateId;
+  checks.sourceRowUnique = rows.length === 1;
+  let materialError = null;
+  if (Object.values(checks).every(Boolean)) {
+    try { await materialReader(pool, { workspaceId, generation: row.current_generation, templateId }); }
+    catch (error) { materialError = templateSetupErrorDiagnostic("source", error); }
+  }
+  let provider = null, providerError = null;
+  try {
+    const { sandbox } = await request(`/sandboxes/${templateId}`);
+    provider = { idMatches: sandbox?.id === templateId, walletMatches: sandbox?.team?.id?.toLowerCase() === billingOrg.toLowerCase(),
+      archived: sandbox?.state === "archived", snapshotAvailable: sandbox?.snapshotAvailable === true,
+      snapshotCompleted: sandbox?.lastSnapshotStatus === "completed" };
+  } catch (error) { providerError = templateSetupErrorDiagnostic("source", error); }
+  return { schema: "zeros.workspace-perf-source/v1", workspaceId, generation: row.current_generation,
+    workspaceStatus: ["ready", "busy", "stopped", "archived", "setting_up", "waking", "failed"].includes(row.status) ? row.status : "other",
+    requestedTemplateId: templateId, pinnedTemplateId: PERF_RESOURCE.test(row.pinned_template_id ?? "") ? row.pinned_template_id : null,
+    buildId: PERF_UUID.test(row.build_id ?? "") ? row.build_id : null, currentRuntimeMatchesTemplate: row.same_runtime === true,
+    checks, materialError, provider, providerError,
+    eligible: Object.values(checks).every(Boolean) && materialError === null && provider !== null && Object.values(provider).every(Boolean) };
+}
+
+function retainDiagnostic(journal, phase, error) {
+  const diagnostics = journal.perf.diagnostics ??= [];
+  if (diagnostics.length < 8) diagnostics.push(templateSetupErrorDiagnostic(phase, error));
+}
 
 /** Reuse the qualified fork/probe/cleanup boundary, changing only the
  * diagnostic resource namespace. Never pass arbitrary methods to the source. */
@@ -85,7 +137,7 @@ export async function runPerfVm(journal, config, deps) {
     throw new Error("bootstrap_timeout");
   };
   await runTemplateSetupRepro(journal, config.billingOrg, {
-    request, save, ready, diagnose: () => {}, wait: () => wait(5_000), attempts: 120,
+    request, save, ready, diagnose: (phase, error) => retainDiagnostic(journal, phase, error), wait: () => wait(5_000), attempts: 120,
     load: async () => { const material = await load(journal); cycleStarted = now(); return material; },
     probe: async (_journal, material) => {
       const createProbe = await probe(journal.childId, material);
@@ -116,12 +168,18 @@ export async function runPerfVm(journal, config, deps) {
 }
 
 async function main() {
-  const args = process.argv.slice(2), cleanup = args[0] === "--cleanup";
-  perfCheck(cleanup ? args.length === 2 && PERF_UUID.test(args[1]) : args.length === 6 && args[0] === "--run" &&
+  const args = process.argv.slice(2), cleanup = args[0] === "--cleanup", inspect = args[0] === "--inspect-source";
+  perfCheck(inspect ? args.length === 5 && args[1] === "--workspace" && PERF_UUID.test(args[2]) && args[3] === "--template" && PERF_RESOURCE.test(args[4]) :
+    cleanup ? args.length === 2 && PERF_UUID.test(args[1]) : args.length === 6 && args[0] === "--run" &&
     ["before", "after"].includes(args[1]) && args[2] === "--workspace" && PERF_UUID.test(args[3]) && args[4] === "--template" && PERF_RESOURCE.test(args[5]), "input_invalid");
   const env = readPerfEnvironment();
   const config = templateSetupReproConfig({ ...env, ZEROS_S1_ALPHA_DATABASE_URL: env.ZEROS_PERF_ALPHA_DATABASE_URL });
   const pool = perfPool(config), boat = new BoatApiClient({ apiKey: config.apiKey, billingOrg: config.billingOrg, timeoutMs: 30_000, diagnostics: () => {} });
+  if (inspect) {
+    try { process.stdout.write(JSON.stringify(await inspectPerfVmSource(pool, args[2], args[4], config.billingOrg, boat.request.bind(boat))) + "\n"); }
+    finally { await pool.end(); }
+    return;
+  }
   const directory = path.join(root, ".context", "zeros-v2-test-perf-vm"); mkdirSync(directory, { recursive: true, mode: 0o700 });
   const id = cleanup ? args[1] : randomUUID(), file = path.join(directory, `${id}.json`);
   const generation = cleanup ? null : await perfRead(pool, async client =>
@@ -142,7 +200,7 @@ async function main() {
   };
   const request = perfVmRequest(journal, config.billingOrg, boat.request.bind(boat));
   const deps = { request, save, load: () => readTemplateSetupSource(pool, journal),
-    probe: (child, material) => runTemplateSetupProbe(child, material, { request, diagnose: () => {} }) };
+    probe: (child, material) => runTemplateSetupProbe(child, material, { request, diagnose: (phase, error) => retainDiagnostic(journal, phase, error) }) };
   try {
     if (cleanup) await cleanupTemplateSetupFork(journal, { request, save, diagnose: () => {} });
     else await runPerfVm(journal, config, deps);

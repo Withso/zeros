@@ -10,10 +10,15 @@ does not establish usability. Desktop paint is a separate, additional endpoint.
 ## Evidence and current limits
 
 Audit date: 2026-10-06. Code baseline: `0600b6f5` (main before PERF's worker
-notification change). **No live before/after timings have been collected in
-the PERF workspace:** it has no `.env.agent`. There are no inferred Alpha
-measurements in the table below. Provider marketing, configured timers, test
-timeouts and historical timestamps are different kinds of evidence.
+notification change). PERF has no `.env.agent`; the orchestrator supplied a
+closed read-only Alpha timeline for workspace
+`c5f68576-41cb-4d1a-af6f-60b07f42e5fe`. Five completed setups took 116.422,
+128.850, 133.063, 130.325 and 130.399 seconds (median 130.325 s); a sixth was
+cancelled after 112.935 s. Setup repeats on wake. Queue-to-start was only
+0.372–1.202 s. This makes **avoiding repeated full setup the primary lever**;
+notifications alone cannot meet the goal. No matched after-run or complete
+client-to-paint measurement is available. Provider claims and configured timers
+remain separate from those historical measurements.
 
 The repeatable [measurement runbook](../../scripts/cloud-workspace-validation/workspace-perf.md)
 provides a read-only historical timeline, a disposable real workspace
@@ -49,10 +54,13 @@ columns, command output, setup logs or repository contents.
 | --- | --- | --- | --- |
 | Real create → CONNECTED probe | Not measured | Not measured | Target 3–4 s; includes operator ownership read, explicitly timed |
 | Real wake → CONNECTED probe | Not measured | Not measured | Target 1–2 s; renderer paint still additional |
-| Lifecycle queue → first dispatch | Not measured | Not measured | Notification change addresses initial and committed prerequisite handoffs |
-| Setup queue → first claim | Not measured | Not measured | Running binding/workspace and setup insertion each supply a hint |
+| Lifecycle queue → first dispatch | Stop example: 6.166 s; no-op wakes excluded | Not measured | Notification change addresses initial and committed prerequisite handoffs |
+| Setup queue → first claim | 0.372–1.202 s | Not measured | Orchestrator-supplied historical Alpha timeline |
+| Setup execution | Completed: 116.422–133.063 s, median 130.325 s (n=5); cancelled: 112.935 s | Not measured | Dominant observed cost; not a complete wake endpoint |
+| Engine row creation → registration | Approximately 17–23 s | Not measured | Includes prelaunch/startup; not pure registration HTTP time |
+| Actor creation → consumption | 2.718–3.447 s, median 2.999 s (five examples) | Not measured | Includes client scheduling/bridge; not complete CONNECTED probe or paint |
 | Boat fork / resume → observed base ready | Not measured | Not measured | Separate isolated VM experiment, not a real workspace endpoint |
-| Attester / containment / checkout / engine | Not measured | Not measured | Isolated stage probe plus production aggregate timestamps |
+| Attester / containment / checkout / engine sub-stages | Not measured | Not measured | Successful production stage spans are not persisted; failure observations are available |
 | Polling scheduler regression | Next periodic tick | Immediate scheduled pass | Deterministic fake-clock regression, **not live latency** |
 
 Record run IDs, resource IDs, exact runtime/base/template build, control-plane
@@ -60,6 +68,20 @@ commit, client version and region, elapsed totals, failures and cleanup status
 with each result. Compare matched configurations. Start with one before/after
 run; repeated samples require a deliberate resource budget. Never report a p95
 from a single run or quietly discard a failure/timeout.
+
+The orchestrator's isolated VM run using this workspace and `bx_dxzfh3p6`
+(current organization template, build prefix `d60cde4b`) failed before allocation:
+`verification_failed`, `childId: null`, `cleanup: not_created`. A stopped source
+workspace is permitted. The source reader requires the generation's pinned
+template, qualified source row, matching image reference and protected digest;
+the organization's current template alone is insufficient. A pin/source mismatch
+is a hypothesis until the runbook's new read-only `--inspect-source` reports its
+closed checks. No new VM was created by that failed run.
+
+The [resume proposal](resume-performance-design.md) prioritizes preparation reuse,
+fresh launch authority, integrity-bound qualification reuse, engine startup,
+registration/attachment measurement, and closed persisted stage spans for RU/HU
+coordination. It does not remove any verification in the current implementation.
 
 ## Boat capabilities relevant to the budget
 
@@ -118,8 +140,12 @@ and report the distinction rather than retrying fresh allocations.
    waiting, not provider/verification time. Migration 0134 is assigned by the
    orchestrator; reserved predecessors must land before the sequence check is
    green.
-2. **Measure before choosing the next runtime change.** Use the runbook, then
-   rank actual critical-path durations. A future `next_attempt_at` becoming due
+2. **Prioritize the resume proposal using the live baseline.** Full setup takes
+   about two minutes on every observed wake. Preserve existing checkout and
+   preparation on eligible same-generation resumes, with fresh authority and
+   integrity checks; coordinate the hook with RU/HU. Persist closed stage spans
+   to identify the expensive substeps before changing their guarantees. A
+   future `next_attempt_at` becoming due
    emits no PostgreSQL notification: provider observations and error backoff
    can still wait for polling. A bounded due-time scheduler or verified Boat
    webhook hint is a next scheduling candidate; preserve retry deadlines and
@@ -154,7 +180,8 @@ and report the distinction rather than retrying fresh allocations.
    compute authorization. Retain #330's CONNECTED-first replay order and exact
    owner/workspace/generation keys.
 
-Neither target is established by the current evidence. True stopped-to-usable
+Neither target is established by the current evidence. The before baseline
+establishes a dominant setup cost; after measurements remain necessary. True stopped-to-usable
 in 1–2 seconds may require a different provider capability or a deliberate
 keep-running policy; keeping a VM warm has a cost and does not count as a
 measured stopped-VM wake. Escalate that tradeoff with numbers, not an altered

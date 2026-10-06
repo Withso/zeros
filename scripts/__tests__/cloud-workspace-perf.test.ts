@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { perfDatabaseConfig, perfTimeline, elapsed, readPerfTimeline } from "../cloud-workspace-validation/workspace-perf-timeline.mjs";
 import { cleanupPerfRun, newPerfJournal, ownPerfWorkspace, perfAlphaRequest, perfHandshake, runPerfLive, validatePerfJournal } from "../cloud-workspace-validation/workspace-perf-live.mjs";
-import { perfVmRequest, runPerfVm } from "../cloud-workspace-validation/workspace-perf-vm.mjs";
+import { inspectPerfVmSource, perfVmRequest, runPerfVm } from "../cloud-workspace-validation/workspace-perf-vm.mjs";
 import { newTemplateSetupJournal } from "../cloud-workspace-validation/template-setup-repro.mjs";
 import { CloudProviderError } from "../../apps/control-plane/src/cloud-workspaces/provider";
 
@@ -56,6 +56,7 @@ describe("cloud performance measurement", () => {
     expect(elapsed(null, "2026-01-01")).toBeNull();
     expect(elapsed("2026-01-02", "2026-01-01")).toBeNull();
     expect(result.unmeasured).toContain("boat_api_duration");
+    expect(result.setupStageTimings.availability).toBe("not_persisted");
   });
 
   it("rolls back read-only SQL even on failure and never selects secret-bearing documents", async () => {
@@ -70,6 +71,17 @@ describe("cloud performance measurement", () => {
     expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
     expect(query.mock.calls.some(([sql]) => /SELECT \*|token_hash|log_excerpt|private_key/.test(sql))).toBe(false);
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("reports persisted failure observations without inventing successful stage spans", () => {
+    const result = perfTimeline({ workspace: { id: workspaceId }, intents: [], setups: [], engines: [], actors: [], providerCreates: [],
+      setupDiagnostics: [{ id: runId, setup_run_id: buildId, phase: "image_preflight", setup_phase: "image_preflight",
+        installer_stage: "check_cache", elapsed_ms: "75", first_at: "2026-01-01T00:00:00Z", last_at: "2026-01-01T00:00:01Z", secret: "private" },
+      { phase: "private_phase", installer_stage: "private_stage" }] });
+    expect(result.setupStageTimings.availability).toBe("not_persisted");
+    expect(result.setupStageTimings.failureEvents[0]).toMatchObject({ phase: "image_preflight", installerStage: "check_cache", reportedElapsedMs: 75 });
+    expect(result.setupStageTimings.failureEvents[1]).toMatchObject({ phase: "other", installerStage: null, reportedElapsedMs: null });
+    expect(JSON.stringify(result)).not.toContain("private");
   });
 
   it("rejects non-Alpha database configuration and foreign API destinations before I/O", async () => {
@@ -190,5 +202,43 @@ describe("cloud performance measurement", () => {
     await expect(request(`/sandboxes/${child}`, { method: "DELETE" })).resolves.toHaveProperty("operation");
     await expect(request(`/sandboxes/${source}`, { method: "DELETE" })).rejects.toThrow("request_scope_invalid");
     await expect(request("/sandboxes/bx_44444444/resume", { method: "POST" })).rejects.toThrow("request_scope_invalid");
+  });
+
+  it("retains closed source-failure diagnostics before allocation without exposing error text", async () => {
+    const journal = { ...newTemplateSetupJournal(workspaceId, 1, "bx_33333333", runId),
+      perf: { label: "before", cycle: "create", api: {}, create: {}, wake: {} } };
+    const request = vi.fn();
+    await runPerfVm(journal, { billingOrg: `team_${organizationId}` }, { request, save: vi.fn(), probe: vi.fn(),
+      load: async () => { throw Object.assign(new Error("private database details"), { code: "42P01" }); } });
+    expect(request).not.toHaveBeenCalled();
+    expect(journal.childId).toBeNull(); expect(journal.cleanup).toBe("not_created");
+    expect(journal.perf.diagnostics).toEqual([{ schema: "zeros.template-setup-error/v1", phase: "source", name: "Error", sqlstate: "42P01" }]);
+    expect(JSON.stringify(journal)).not.toContain("private database details");
+  });
+
+  it("inspects source pin mismatch read-only while allowing a stopped source workspace", async () => {
+    const query = vi.fn(async (sql: string) => ({ rows: sql.startsWith("SELECT workspace.id") ? [{
+      id: workspaceId, current_generation: 1, status: "stopped", pinned_template_id: "bx_33333333", build_id: buildId,
+      source_present: true, build_succeeded: true, template_ready: true, template_stopped: true, protected_digest: true,
+      source_matches_build: true, image_matches_template: true, repository_present: true, base_present: true,
+      base_test_named: true, same_runtime: true, secret: "private" }] : [] }));
+    const release = vi.fn();
+    const request = vi.fn(async () => ({ sandbox: { id: "bx_22222222", state: "archived", snapshotAvailable: true,
+      lastSnapshotStatus: "completed", team: { id: `team_${organizationId}` } } }));
+    const result = await inspectPerfVmSource({ connect: async () => ({ query, release }) }, workspaceId, "bx_22222222",
+      `team_${organizationId}`, request);
+    expect(result.workspaceStatus).toBe("stopped");
+    expect(result.pinnedTemplateId).toBe("bx_33333333");
+    expect(result.checks.requestedTemplateMatchesPin).toBe(false);
+    expect(result.eligible).toBe(false);
+    expect(query.mock.calls[0][0]).toContain("READ ONLY");
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    expect(request.mock.calls.every(call => call.length === 1)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("private");
+    const valid = await inspectPerfVmSource({ connect: async () => ({ query, release }) }, workspaceId, "bx_33333333",
+      `team_${organizationId}`, async () => ({ sandbox: { id: "bx_33333333", state: "archived", snapshotAvailable: true,
+        lastSnapshotStatus: "completed", team: { id: `team_${organizationId}` } } }), async () => ({}));
+    expect(valid.eligible).toBe(true);
+    expect(valid.workspaceStatus).toBe("stopped");
   });
 });

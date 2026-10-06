@@ -54,7 +54,19 @@ create attempts. It returns at most 32 rows in each history. The intervals
 overlap, describe first dispatch/claim through final completion, and cannot
 establish Boat API, boot, first-heartbeat or renderer durations. Missing values
 stay null. If more history is needed, add a separately reviewed bounded query;
-do not dump raw tables or Railway logs.
+do not dump raw tables or Railway logs. The designated read-only role also needs
+SELECT on `cloud_workspace_diagnostic_incidents`: the timeline projects at most
+128 closed setup failure observations (phase, installer stage, observation times
+and optional reported elapsed time). These are not successful stage start/end
+records. `setupStageTimings.availability: not_persisted` states that limitation;
+the VM's latest-stage diagnostic file cannot reconstruct overwritten history.
+`noOpWakeCandidate` marks succeeded wake intents with zero worker attempts;
+exclude those already-running candidates from stopped-wake measurements.
+
+Without a staff test access token, use this read-only command after the owner
+creates/wakes normally. Record the owner's actual action time and selected
+workspace/generation separately. Do not mint or borrow an owner token, and do
+not substitute no-op wake intents for real stopped resumes.
 
 ## Real create and wake through the control plane
 
@@ -107,7 +119,25 @@ follow-up; never report it as cleaned up.
 
 ## Isolated Boat restore and attester stages
 
-Use a qualified Alpha source workspace and its matching archived template:
+First inspect source preconditions without allocating anything. The template
+must be pinned to the source workspace's current generation; the organization's
+current template may be a different build. A stopped source workspace is allowed.
+This exact read-only invocation diagnoses the orchestrator's failed sample:
+
+```sh
+pnpm exec tsx scripts/cloud-workspace-validation/workspace-perf-vm.mjs --inspect-source --workspace c5f68576-41cb-4d1a-af6f-60b07f42e5fe --template bx_dxzfh3p6
+```
+
+It reports closed source/build/template/repository/base checks, the pinned
+template ID, qualified material validation and provider snapshot/wallet checks.
+It performs read-only SQL and a provider GET. If
+`requestedTemplateMatchesPin` is false, repeat inspection with the reported
+`pinnedTemplateId`. If `source_present` is false, this older workspace cannot
+supply the qualified template-backed source required by this probe; use a
+separately authorized matching workspace or continue passive timeline collection.
+Do not relax the source/qualification checks or modify the owner's source.
+
+Then use the verified source/template pair:
 
 ```sh
 pnpm exec tsx scripts/cloud-workspace-validation/workspace-perf-vm.mjs --run before --workspace WORKSPACE_UUID --template bx_TEMPLATE
