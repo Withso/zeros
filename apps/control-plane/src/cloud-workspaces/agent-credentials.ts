@@ -419,11 +419,15 @@ export class DatabaseCloudAgentCredentialService {
       const workspace=(await tx.query<{org_id:string}>("SELECT org_id FROM cloud_workspaces WHERE id=$1",[workspaceId])).rows[0];if(!workspace)unavailable();
       const actor=await authorizeCloudWorkspaceActor(tx,{workspaceId,organizationId:workspace.org_id,actorUserId,capability:"run"});
       const compute=await readCloudAgentComputeTrust(tx,workspaceId);if(!compute)unavailable();
-      const rows=await tx.query<{id:string;kind:CloudAgentCredentialKind;owner_user_id:string;models:string[];expires_at:Date;runtime_qualified:boolean;mcp_qualified:boolean;native_capabilities:unknown}>(`SELECT delegation.id,credential.kind,credential.owner_user_id,delegation.models,delegation.expires_at,
-        coalesce(runtime.runtime_qualified,false) AS runtime_qualified,coalesce(runtime.mcp_qualified,false) AS mcp_qualified,runtime.native_capabilities
+      const rows=await tx.query<{id:string;kind:CloudAgentCredentialKind;owner_user_id:string;models:string[];expires_at:Date;runtime_qualified:boolean;runtime_upgrade_required:boolean;mcp_qualified:boolean;native_capabilities:unknown}>(`SELECT delegation.id,credential.kind,credential.owner_user_id,delegation.models,delegation.expires_at,
+        coalesce(runtime.runtime_qualified,false) AS runtime_qualified,coalesce(runtime.runtime_upgrade_required,false) AS runtime_upgrade_required,
+        coalesce(runtime.mcp_qualified,false) AS mcp_qualified,runtime.native_capabilities
         FROM cloud_agent_credential_delegations delegation JOIN cloud_agent_credentials credential ON credential.id=delegation.credential_id
         LEFT JOIN LATERAL (SELECT qualification.mcp_qualified,qualification.native_capabilities,
-          (qualification.mcp_qualified OR NOT EXISTS(SELECT 1 FROM cloud_computer_admin_workspaces admin WHERE admin.workspace_id=workspace.id)) AS runtime_qualified
+          (qualification.mcp_qualified OR (COALESCE(engine.agent_customization_version,3)=3 AND
+            NOT EXISTS(SELECT 1 FROM cloud_computer_admin_workspaces admin WHERE admin.workspace_id=workspace.id))) AS runtime_qualified,
+          (generation.runtime_id IS NOT NULL AND NOT qualification.mcp_qualified AND engine.agent_customization_version IN (1,2)
+            AND NOT EXISTS(SELECT 1 FROM cloud_computer_admin_workspaces admin WHERE admin.workspace_id=workspace.id)) AS runtime_upgrade_required
           FROM cloud_workspaces workspace
           JOIN cloud_workspace_generations generation ON generation.workspace_id=workspace.id AND generation.generation=workspace.current_generation
           JOIN cloud_workspace_engine_instances engine ON engine.workspace_id=workspace.id AND engine.org_id=workspace.org_id AND engine.generation=generation.generation
@@ -438,7 +442,7 @@ export class DatabaseCloudAgentCredentialService {
           AND cloud_workspace_actor_role($1,credential.owner_user_id) IN ('prompter','developer','manager','owner')
         ORDER BY delegation.created_at DESC,delegation.id LIMIT 100`,[workspaceId,workspace.org_id,actorUserId,actor.fingerprint,compute.fingerprint,compute.trust,cloudRuntimeQualificationMode()]);
       return {compute,delegations:rows.rows.map(row=>({id:row.id,kind:row.kind,ownerUserId:row.owner_user_id,models:row.models,expiresAt:row.expires_at.toISOString(),
-        runtimeQualified:row.runtime_qualified,mcpQualified:row.mcp_qualified,...(runtimeNativeCapabilities(row.native_capabilities)?{nativeCapabilities:runtimeNativeCapabilities(row.native_capabilities)}:{})}))};
+        runtimeQualified:row.runtime_qualified,runtimeUpgradeRequired:row.runtime_upgrade_required,mcpQualified:row.mcp_qualified,...(runtimeNativeCapabilities(row.native_capabilities)?{nativeCapabilities:runtimeNativeCapabilities(row.native_capabilities)}:{})}))};
     });
   }
 }

@@ -572,7 +572,9 @@ d("cloud workspace setup material redemption", () => {
         .toBe("engine_registration_rejected");
     }
     // Failed comparisons roll back grant consumption; the exact witness can register once.
-    expect(await outcome(service.registerEngine({ ...input, agentRuntime: identity }))).toBe("accepted");
+    expect(await outcome(service.registerEngine({ ...input, agentRuntime: identity, agentCustomizationVersion: 3 }))).toBe("accepted");
+    expect((await pool.query("SELECT agent_customization_version FROM cloud_workspace_engine_instances WHERE id=$1", [materials.engine.instanceId])).rows[0])
+      .toEqual({ agent_customization_version: 3 });
     expect(await outcome(service.registerEngine({ ...input, agentRuntime: identity }))).toBe("engine_registration_rejected");
   });
   it.each(["before redemption", "during repository mint"])("rejects runtime revocation %s without releasing materials", async stage => {

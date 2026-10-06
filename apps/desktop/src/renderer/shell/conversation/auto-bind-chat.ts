@@ -1,4 +1,4 @@
-import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
+import type { WorkspaceRegistryAgent } from "../../features/agent/workspace-agent-registry";
 import { newChatBornDefaults } from "../../features/agent/new-chat-defaults";
 import { isAgentEnabled } from "../../features/agent/enabled-agents";
 import {
@@ -74,7 +74,7 @@ export interface PriorChatIdentity {
  * is what it lands back on.
  */
 export function resolveAutoBindChatSettings(
-  agents: BridgeRegistryAgent[] | null,
+  agents: WorkspaceRegistryAgent[] | null,
   preferredAgentId?: string | null,
   isEnabled: (id: string, beta?: boolean) => boolean = isAgentEnabled,
   prior: PriorChatIdentity = {},
@@ -83,7 +83,7 @@ export function resolveAutoBindChatSettings(
   // record onto a different provider than it ran on is a bigger surprise than
   // ignoring the default for this one chat.
   const priorFamily = agentFamily(prior.agentName ?? null);
-  const agent = pickAgentForNewChat(
+  const agent: WorkspaceRegistryAgent | null = pickAgentForNewChat(
     agents ?? [],
     priorFamily || (preferredAgentId ?? null),
     isEnabled,
@@ -95,7 +95,7 @@ export function resolveAutoBindChatSettings(
   const sameFamily = priorFamily !== "" && priorFamily === agentFamily(agentId);
   const keepsSession = Boolean(prior.sessionId) && sameFamily;
   const keepsBinding = Boolean(prior.providerBinding) && sameFamily;
-  const born = newChatBornDefaults(agentId);
+  const born = newChatBornDefaults(agentId, agent?.cloudModels);
   return {
     agentId,
     agentName: agent?.name ?? null,

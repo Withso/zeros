@@ -154,6 +154,7 @@ export type CloudWorkspaceEngineRegistrationInput = {
   engineInstanceId: string;
   protocolVersion: number;
   actorProtocolVersion?: 2;
+  agentCustomizationVersion?: 3;
   agentRuntime?: CloudAgentRuntime;
 };
 
@@ -1421,6 +1422,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       !validPositiveInteger(input.executionFence, Number.MAX_SAFE_INTEGER) ||
       input.protocolVersion !== this.engineProtocolVersion ||
       (input.actorProtocolVersion !== undefined && input.actorProtocolVersion !== 2) ||
+      (input.agentCustomizationVersion !== undefined && (input.agentCustomizationVersion !== 3 || input.agentRuntime?.profile !== "zeros-cloud-worker-v4")) ||
       (input.agentRuntime!==undefined && (input.actorProtocolVersion!==2 || !CloudAgentRuntimeSchema.safeParse(input.agentRuntime).success))
     ) {
       throw materialError("engine_registration_rejected", false);
@@ -1503,7 +1505,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
              registered_at = now(), last_heartbeat_at = now(),
              lease_expires_at = now() + ($3::bigint * interval '1 millisecond'),
              updated_at = now(), actor_protocol_version = $4,
-             agent_runtime_profile=$5, agent_runtime_contract_sha256=$6
+             agent_runtime_profile=$5, agent_runtime_contract_sha256=$6, agent_customization_version=$7
          WHERE id = $1 AND state = 'starting'
          RETURNING lease_expires_at`,
         [
@@ -1513,6 +1515,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           input.actorProtocolVersion ?? 1,
           identity?.profile === "zeros-cloud-worker-v3" ? identity.profile : null,
           identity?.profile === "zeros-cloud-worker-v3" ? identity.contractSha256 : null,
+          input.agentCustomizationVersion ?? null,
         ],
       );
       if ((updated.rowCount ?? 0) !== 1) {

@@ -122,6 +122,7 @@ const EngineRegistrationBody = z
     engineInstanceId: UUID,
     protocolVersion: POSITIVE_INTEGER.max(65_535),
     actorProtocolVersion: z.literal(2).optional(),
+    agentCustomizationVersion: z.literal(3).optional(),
     agentRuntime: CloudAgentRuntimeSchema.optional(),
   })
   .strict();
@@ -613,8 +614,9 @@ export function createCloudWorkspaceInternalRoutes(
     const input = await strictJson(c.req, EngineRegistrationBody);
     if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
     try {
-      const {actorProtocolVersion,agentRuntime,...binding}=input;
+      const {actorProtocolVersion,agentRuntime,agentCustomizationVersion,...binding}=input;
       return c.json(await service.registerEngine({ ...binding, token,
+        ...(agentCustomizationVersion===undefined?{}:{agentCustomizationVersion}),
         ...(actorProtocolVersion===undefined?{}:{actorProtocolVersion}),...(agentRuntime===undefined?{}:{agentRuntime}) }));
     } catch (error) {
       if (!(error instanceof CloudWorkspaceSetupMaterialError)) throw error;

@@ -467,6 +467,7 @@ export class CloudRuntimeRegistration {
         protocolVersion: this.config.engine.protocolVersion,
         actorProtocolVersion: 2,
         agentRuntime: this.agentRuntime,
+        ...(this.agentRuntime.profile === "zeros-cloud-worker-v4" ? { agentCustomizationVersion: 3 } : {}),
       },
     );
     const document = this.parseRegistration(raw);
