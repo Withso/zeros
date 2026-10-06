@@ -475,10 +475,12 @@ describe("selective pull-request CI", () => {
     (id, lane) => {
       const job = ci.jobs[id]!;
       expect(needsOf(job)).toContain("scope");
+      // !cancelled(), not always(): a superseded run must not start workloads
+      // that can only fail their scope guard. Aggregates keep always().
       expect(job.if).toBe(
         id === "control-plane-database"
-          ? "always() && (needs.scope.result != 'success' || needs.control-plane-scope.result != 'success' || needs.scope.outputs.job-control-plane-db == 'true' || needs.control-plane-scope.outputs.database == 'true')"
-          : `always() && (needs.scope.result != 'success' || needs.scope.outputs.job-${lane} == 'true')`,
+          ? "${{ !cancelled() && (needs.scope.result != 'success' || needs.control-plane-scope.result != 'success' || needs.scope.outputs.job-control-plane-db == 'true' || needs.control-plane-scope.outputs.database == 'true') }}"
+          : `\${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-${lane} == 'true') }}`,
       );
       const guard = job.steps[0]!;
       expect(guard.name).toBe("Verify scope result");
@@ -609,11 +611,9 @@ describe("selective pull-request CI", () => {
 
     const directory = temporaryDirectory();
     mkdirSync(path.join(directory, "scripts"));
-    cpSync(
-      path.join(ROOT, "scripts/ci"),
-      path.join(directory, "scripts/ci"),
-      { recursive: true },
-    );
+    cpSync(path.join(ROOT, "scripts/ci"), path.join(directory, "scripts/ci"), {
+      recursive: true,
+    });
     const clean = runStep(marker, {}, directory);
     expect(clean.status, clean.stderr).toBe(0);
     mkdirSync(path.join(directory, ".github/ci-incidents"), {

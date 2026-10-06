@@ -203,10 +203,13 @@ jobs:
           ].join("\n"));
           NODE
 
+  # Producers use !cancelled(): a superseded run must not start workloads that
+  # can only fail its scope guard. The required aggregates and ci-gate keep
+  # always(), so a cancelled run can never report a passing required check.
   quality-workload:
     name: quality-workload
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-quality == 'true')
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-quality == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - name: Verify scope result
@@ -328,7 +331,7 @@ jobs:
   test-shard:
     name: tests-vitest (${{ matrix.part }}/2)
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-vitest == 'true')
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-vitest == 'true') }}
     runs-on: ubuntu-latest
     strategy:
       # Every part reports, so one failure never hides another.
@@ -631,7 +634,7 @@ jobs:
   build:
     name: build
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-build == 'true')
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-build == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - name: Verify scope result
@@ -696,7 +699,7 @@ jobs:
   source-sync-workload:
     name: source-sync workload (macOS)
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-macos == 'true')
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-macos == 'true') }}
     runs-on: macos-latest
     steps:
       - name: Verify scope result
@@ -872,7 +875,7 @@ jobs:
   control-plane-scope:
     name: control-plane scope
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-control-plane-static == 'true')
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-control-plane-static == 'true') }}
     runs-on: ubuntu-latest
     outputs:
       database: ${{ steps.selection.outputs.database }}
@@ -925,7 +928,7 @@ jobs:
   control-plane-static:
     name: control-plane typecheck + audit
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-control-plane-static == 'true')
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-control-plane-static == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - name: Verify scope result
@@ -971,7 +974,7 @@ jobs:
     needs:
       - scope
       - control-plane-scope
-    if: always() && (needs.scope.result != 'success' || needs.control-plane-scope.result != 'success' || needs.scope.outputs.job-control-plane-db == 'true' || needs.control-plane-scope.outputs.database == 'true')
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.control-plane-scope.result != 'success' || needs.scope.outputs.job-control-plane-db == 'true' || needs.control-plane-scope.outputs.database == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -1119,7 +1122,7 @@ jobs:
   ui-smoke:
     name: ui-smoke (composer)
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-ui-smoke == 'true')
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-ui-smoke == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - name: Verify scope result
@@ -1152,7 +1155,7 @@ jobs:
   secret-scan:
     name: secret scan (PR commit range)
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-secret-scan == 'true')
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-secret-scan == 'true') }}
     runs-on: ubuntu-latest
     # ── Why the PR's COMMIT RANGE, not the tree and not all history ──
     #

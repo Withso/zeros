@@ -250,11 +250,13 @@ out of all-lanes fallback and select full composer smoke from paths for none.
 
 ## Fail-closed job results
 
-Every producer uses `always()` with a condition that runs when its trusted job
-output is selected or scope failed. Its first step fails unless scope succeeded.
-The database producer also guards its combined scope. A failed classifier
-therefore produces red checks. Control-plane static/audit and commit-range
-secrets remain always selected.
+Every producer uses `!cancelled()` with a condition that runs when its trusted
+job output is selected or scope failed. Its first step fails unless scope
+succeeded. The database producer also guards its combined scope. A failed
+classifier therefore produces red checks. A cancelled, superseded run starts no
+producer, while the required aggregates and `ci-gate` keep `always()` and fail
+closed, so a cancelled run never reports a passing required check.
+Control-plane static/audit and commit-range secrets remain always selected.
 
 The required aggregates validate raw selections and results before adapting
 proved unselected outcomes to their original enforcing commands. They accept
