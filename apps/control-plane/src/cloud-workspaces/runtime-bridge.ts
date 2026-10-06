@@ -14,7 +14,7 @@ import {
   type CloudProviderEngineEndpoint,
 } from "./provider.js";
 import { WebSocketFrameMeter } from "./runtime-bridge-frame-meter.js";
-import { cloudBridgeCloseDiagnostic } from "@zeros/protocol/cloud-bridge-diagnostics";
+import { cloudBridgeCloseDiagnostic } from "./bridge-close-diagnostic.js";
 import {
   CLOUD_RUNTIME_RELAY_MAX_MESSAGE_BYTES,
   cloudRuntimeRelayLimits,

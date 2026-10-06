@@ -1,7 +1,7 @@
 /** Close frames are untrusted. Only these engine-authored reason classes may
  * leave the transport in diagnostics; arbitrary reason text is never logged.
- * Mirrored in apps/control-plane/src/cloud-workspaces/bridge-close-diagnostic.ts
- * (the service type-checks without this package); parity is tested there. */
+ * Mirrored in packages/protocol/src/cloud-bridge-diagnostics.ts: the service
+ * type-checks and deploys without that package; parity is tested. */
 export const CLOUD_BRIDGE_CLOSE_REASONS: Readonly<Record<string, string>> = Object.freeze({
   "CONNECTED required": "handshake_required",
   "CONNECTED handler failed": "handshake_failed",
