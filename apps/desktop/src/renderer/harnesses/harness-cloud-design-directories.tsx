@@ -24,7 +24,9 @@ import type { RuntimeClient } from "../platform/bridge/ws-client";
 import { Button, TooltipProvider } from "../shared/ui/primitives";
 import { Toaster } from "../shared/ui/primitives/elements/toast";
 import { cloudDesignFolderCache } from "../state/read-caches";
+import type { Workspace } from "../platform/git";
 
+const local = new URLSearchParams(location.search).has("local");
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const ids = [
   "22222222-2222-4222-8222-222222222222",
@@ -96,7 +98,7 @@ function role(actorRole: CloudWorkspaceActorRole) {
 }
 role("manager");
 const states = new Map(
-  keys.map((key) => [
+  [...keys, "ws_local"].map((key) => [
     key,
     {
       directories: { Brand: "design_brand", Other: "design_other" } as Record<
@@ -139,6 +141,8 @@ setActiveBridge({
   request: async (message: { op: string; params: Record<string, unknown> }) => {
     const { op, params } = message;
     requests.push({ op, params });
+    if (local && op === "settings.write")
+      return { type: "WORKSPACE_RESPONSE", op, result: { ok: true } };
     const state = states.get(String(params.workspaceId));
     if (!state) throw new Error("Request escaped its cloud workspace");
     let result: unknown = {};
@@ -205,7 +209,10 @@ setActiveBridge({
 function Harness() {
   const [owner, setOwner] = useState(0);
   const [active, setActive] = useState(true);
-  const key = keys[owner];
+  const key = local ? "ws_local" : keys[owner];
+  const workspace = local
+    ? { ...getCloudWorkspaceRows()[0], id: key, path: "/repo", repoRoot: "/repo", placement: "local" } as Workspace
+    : getCloudWorkspaceRows().find((row) => row.id === key)!;
   return (
     <TooltipProvider>
       <Toaster />
@@ -219,11 +226,11 @@ function Harness() {
         </nav>
         <DesignDirectoryMenu
           key={`menu:${key}`}
-          workspace={getCloudWorkspaceRows().find((row) => row.id === key)!}
+          workspace={workspace}
           name="Brand"
           active={active}
         />
-        <section
+        {!local && <section
           className="mt-4 max-w-2xl"
           aria-label="Repository Design settings"
         >
@@ -231,7 +238,7 @@ function Harness() {
             project={cloudProjectForFolder(key)!}
             surfaceActive={active}
           />
-        </section>
+        </section>}
       </main>
     </TooltipProvider>
   );

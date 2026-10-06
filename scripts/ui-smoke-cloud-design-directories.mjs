@@ -126,4 +126,22 @@ export async function runCloudDesignDirectoriesSmoke({
     "a late VM folder reply cannot populate another workspace's picker",
     true,
   );
+  await page.goto(`${harnessBase}/harness-cloud-design-directories.html?local=1`, {
+    waitUntil: "networkidle",
+  });
+  await page.getByRole("button", { name: "Prompter", exact: true }).click();
+  await page.getByRole("button", { name: "Choose Design directory" }).click();
+  await page.getByRole("menuitem", { name: "Other", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.cloudDesignFixture.requests
+    .filter(request => request.op === "settings.write"))).toEqual([{
+      op: "settings.write",
+      params: {
+        layer: "workspace-local", repoRoot: "/repo",
+        patch: { design: { directory_id: "design_other", directory: null } },
+        confirmDesignDirectoryChange: true,
+      },
+    }]);
+  expect(await page.evaluate(() => window.cloudDesignFixture.requests.some(request =>
+    ["design.selectDirectory", "design.createDirectory", "design.browseDirectories"].includes(request.op)))).toBe(false);
+  check("Local canvas selection retains its settings operation and ignores cloud role changes", true);
 }

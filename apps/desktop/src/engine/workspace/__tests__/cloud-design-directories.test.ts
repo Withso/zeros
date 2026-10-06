@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudActorRole } from "@zeros/protocol/cloud-actors";
 import { cloudActorMaySend } from "../../cloud-actor-policy";
 import { resetWorkspaceDesignApisForTests } from "../../design/design-api";
-import { forgetDesignDirectoryName } from "../../design/directory-registry";
+import { forgetDesignDirectoryName, primeDesignDirectoryName } from "../../design/directory-registry";
 import { ensureCloudPrimaryWorkspace } from "../../git/cloud-primary-workspace";
 import { closeState, setStateRootForTesting } from "../../git/state";
 import type { EngineMessage } from "../../types";
@@ -234,6 +234,23 @@ describe("cloud Design directory management", () => {
     expect(await request("design.status")).not.toMatchObject({
       kind: "blocked",
     });
+  });
+
+  it("keeps cloud-only directory commands unavailable to Local workspaces", async () => {
+    const local = new WorkspaceService(root);
+    for (const op of ["design.browseDirectories", "design.createDirectory", "design.selectDirectory"]) {
+      await expect(local.handle(op, { workspaceId: "local-main", directory: "Brand" }))
+        .rejects.toThrow(/admitted cloud workspace role/);
+    }
+  });
+
+  it("preserves Local directory listing semantics while cloud selection uses its persisted pointer", async () => {
+    const created = await request("design.createDirectory", { directory: "Brand" }) as { directoryId: string };
+    await request("design.selectDirectory", { directoryId: created.directoryId, expectedDirectoryId: created.directoryId });
+    primeDesignDirectoryName(root, "Local cached directory");
+    const local = await new WorkspaceService(root).handle("design.listDirectories", { workspaceId: "local-main" });
+    expect(local).toMatchObject({ active: "Local cached directory", target: { directory: "Brand", exists: true } });
+    expect(await listing()).toMatchObject({ active: "Brand" });
   });
 
   it("limits lifecycle operations to managers and the admitted primary checkout", async () => {

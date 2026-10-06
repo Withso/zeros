@@ -9185,7 +9185,7 @@ export class ZerosEngine {
               },
             )
           : await operation;
-      const changed = dbChangedKinds(op, result);
+      const changed = dbChangedKinds(op, result, !!this.cloudWorker);
       const workspaceIds = changed && (changed.includes("codeReview") || changed.includes("gitReview")) && typeof params.workspaceId === "string"
         ? [params.workspaceId]
         : changed?.includes("workspaces")
@@ -9258,9 +9258,9 @@ export class ZerosEngine {
           source: "engine",
           kinds: changed,
           ...(workspaceIds ? { workspaceIds } : {}),
-          ...(dbChangedDesignRecognition(op) ? { designRecognitionChanged: true } : {}),
+          ...(dbChangedDesignRecognition(op, !!this.cloudWorker) ? { designRecognitionChanged: true } : {}),
         });
-        if (dbChangedIncludesOriginator(op)) {
+        if (dbChangedIncludesOriginator(op, !!this.cloudWorker)) {
           this.router.broadcast(dbChangedMsg);
         } else {
           this.router.broadcastExcept(client.id, dbChangedMsg);

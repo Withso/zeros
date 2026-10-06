@@ -71,7 +71,7 @@ export function DesignDirectoryMenu({
     setBusy(true);
     try {
       await waitForPendingDesignEdits(workspace.id);
-      if (!mounted.current || latest.current.id !== workspace.id || !latest.current.active || !latest.current.canManage) return;
+      if (cloud && (!mounted.current || latest.current.id !== workspace.id || !latest.current.active || !latest.current.canManage)) return;
       if (cloud) {
         if (!directoryId) throw new Error("Refresh the directory list before switching.");
         await bridgeCloudDesignSelectDirectory(bridge, workspace.id, directoryId, listing.data.directoryIds?.[listing.data.active] ?? null);
