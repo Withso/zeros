@@ -45,6 +45,7 @@
     "permission-hints",
     "folder-workspace",
     "composer-editor",
+    "composer-send-failures",
     "workspace-recovery-navigation",
     "cloud-replica",
     "create-source-immediate-escape",

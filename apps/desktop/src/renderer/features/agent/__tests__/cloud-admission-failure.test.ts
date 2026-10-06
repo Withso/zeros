@@ -13,6 +13,7 @@ describe("cloud admission presentation", () => {
     ["cloud_workspace_not_ready", "waiting", "Waiting for agent", "none"],
     ["CLOUD_WORKSPACE_CHECKPOINTING", "waiting", "Waiting for agent", "none"],
     ["command_dispatch_rejected", "unavailable", "The cloud agent request could not be completed. Review the conversation before trying again", "none"],
+    ["The cloud command outcome is unknown. Review the transcript before retrying.", "unavailable", "The cloud agent request could not be completed. Review the conversation before trying again", "none"],
   ])("maps only the closed cause %s", (code, kind, message, action) => {
     expect(classify({ code })).toMatchObject({ kind, message, action });
     expect(classify(new Error(code))).toEqual(classify({ code }));

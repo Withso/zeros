@@ -13,8 +13,11 @@ import { isRecoverable } from "../../../platform/bridge/failure";
 import { CloudWorkspaceWakeEndedError } from "../../../state/cloud-workspace-wake";
 import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode } from "../cloud-admission-failure";
 import { isCloudWorkspaceLifecyclePending } from "../../../state/cloud-workspace-catalog";
+import { notifyAgentSendFailure } from "../agent-send-failure-toast";
 
 const encoding = vi.hoisted(() => ({ run: vi.fn() }));
+const mocks = vi.hoisted(() => ({ failureToast: vi.fn() }));
+vi.mock("../../../shared/ui/primitives/elements/toast", () => ({ toast: { error: mocks.failureToast } }));
 vi.mock("../encode-attachments", async original => ({ ...await original<typeof import("../encode-attachments")>(), encodeAttachments: encoding.run }));
 
 const source = readFileSync(new URL("../agent-chat.tsx", import.meta.url), "utf8");
@@ -172,10 +175,19 @@ describe("cloud composer readiness queue", () => {
     await h.send(); h.ready(); await vi.advanceTimersByTimeAsync(0);
     expect(encoding.run).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ supportsImage: false }));
   });
-  it("accepts a message while the next wake must upgrade its cloud runtime", async () => {
-    const h = harness(); h.composer.runtimeUpgradeRequired = true; await h.send();
-    expect(h.queue.get("chat")).toHaveLength(1); expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting");
-    h.ready(); await vi.advanceTimersByTimeAsync(0); expect(h.delivered).toHaveBeenCalledOnce();
+  it.each(["stopped", "ready"])("retains the draft and notifies once without preparing or queueing on a known runtime block in %s", async status => {
+    mocks.failureToast.mockClear();
+    const h = harness(true, status);
+    h.composer.chatId = `runtime-blocked-${status}`;
+    h.composer.runtimeUpgradeRequired = true;
+    h.failureNotice.mockImplementation(notifyAgentSendFailure);
+    await h.send(); await h.send();
+    expect(h.prepare).not.toHaveBeenCalled();
+    expect(h.queue.size).toBe(0); expect(h.delivered).not.toHaveBeenCalled();
+    expect(h.clear).not.toHaveBeenCalled(); expect(h.dispatch).not.toHaveBeenCalled();
+    expect(mocks.failureToast).toHaveBeenCalledExactlyOnceWith("Cloud runtime update required", expect.objectContaining({
+      description: "Gets the new cloud runtime the next time this workspace wakes",
+    }));
   });
   it("keeps an undispatched row editable across N to N+1 and sends it once without a failure toast", async () => {
     const h = harness(); h.prepare.mockRejectedValueOnce(new Error("Connecting"));
@@ -313,12 +325,17 @@ describe("cloud composer readiness queue", () => {
     expect(h.failureNotice).not.toHaveBeenCalled();
   });
   it("uses the shared failure toast before a cloud row is accepted and preserves the editor draft", async () => {
+    mocks.failureToast.mockClear();
     const h = harness(); h.composer.session.sendPrompt = vi.fn(async () => { throw new Error("Admission unavailable"); });
+    h.failureNotice.mockImplementation(notifyAgentSendFailure);
     await h.send();
     expect(h.clear).not.toHaveBeenCalled(); expect(h.queue.size).toBe(0);
     expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ chatId: "chat", attemptId: expect.stringContaining("send-"),
       error: expect.objectContaining({ message: "Admission unavailable" }) }));
     expect(h.toasts.error).not.toHaveBeenCalled();
+    expect(mocks.failureToast).toHaveBeenCalledExactlyOnceWith("Message wasn't sent", expect.objectContaining({
+      description: "Review the conversation before retrying.",
+    }));
   });
   it.each(["Personal", "organization"])("preserves the existing %s Local send-error toast and draft", async owner => {
     const h = harness(false); h.composer.cloudComputerV2 = true; h.composer.chatThread.owner = owner;

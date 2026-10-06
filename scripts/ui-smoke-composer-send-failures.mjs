@@ -1,0 +1,144 @@
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { expect } from "@playwright/test";
+
+export async function runComposerSendFailuresSmoke({ page, check, harnessBase }) {
+  // Keep toast acknowledgement and screenshots independent of machine load.
+  await page.clock.install();
+  await page.clock.pauseAt(new Date());
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.route("https://api.example.test/v1/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/agent-credentials/prepare")) {
+      const required = await page.evaluate(() => window.composerSendFailureFixture.runtimeRequired);
+      return route.fulfill({ json: { delegations: [{ id: "33333333-3333-4333-8333-333333333333", kind: "codex-chatgpt",
+        models: ["gpt-6.1-sol"], expiresAt: "2099-01-01T00:00:00Z", runtimeQualified: !required, runtimeUpgradeRequired: required }] } });
+    }
+    throw new Error(`Unexpected composer fixture request: ${path}`);
+  });
+  const screenshotDir = process.env.ZEROS_UI_SMOKE_SCREENSHOT_DIR;
+  if (screenshotDir) await mkdir(screenshotDir, { recursive: true });
+  const capture = async name => {
+    await page.clock.runFor(200);
+    if (screenshotDir) await page.screenshot({ path: join(screenshotDir, `composer-${name}.png`), animations: "disabled" });
+  };
+  const composer = page.locator('[data-slot="prompt-input"]:visible').locator("..");
+  const editor = composer.locator('[contenteditable="true"]');
+  const send = composer.getByRole("button", { name: "Send message", exact: true });
+  const toasts = page.locator("[data-sonner-toast]");
+  const dismiss = async () => {
+    await page.getByRole("button", { name: "Dismiss", exact: true }).click();
+    await page.clock.runFor(500);
+    await expect(toasts).toHaveCount(0);
+  };
+
+  await page.goto(`${harnessBase}/harness-composer-send-failures.html`);
+  await expect(editor).toBeVisible();
+  for (const [code, copy, action] of [
+    ["cloud_agent_model_not_authorized", "GPT-6.1 Sol isn't enabled for this workspace", "Agent settings"],
+    ["cloud_agent_credential_required", "Connect Codex to send messages", "Reconnect"],
+    ["cloud_agent_credential_expired", "Reconnect Codex to send messages", "Reconnect"],
+    ["cloud_agent_credential_revoked", "Reconnect Codex to send messages", "Reconnect"],
+    ["cloud_agent_credential_refresh_required", "Your Codex connection needs to be renewed", "Reconnect"],
+  ]) {
+    await page.evaluate(code => window.composerSendFailureFixture.setFailure(code), code);
+    await editor.fill("Keep this draft after refusal");
+    await send.click();
+    await page.clock.runFor(200);
+    await expect(toasts).toHaveCount(1);
+    await expect(toasts).toContainText(copy);
+    await expect(toasts.getByRole("button", { name: action, exact: true })).toBeVisible();
+    await expect(editor).toHaveText("Keep this draft after refusal");
+    await expect(composer).not.toContainText(copy);
+    await expect(composer.locator('[role="status"], [role="alert"]')).toHaveCount(0);
+    await expect(page.getByText("AGENT STOPPED", { exact: true })).toHaveCount(0);
+    if (code === "cloud_agent_model_not_authorized") {
+      for (const theme of ["dark", "light"]) {
+        await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+        await capture(`refused-send-${theme}`);
+      }
+    }
+    await dismiss();
+    await page.getByRole("button", { name: "Remount chat", exact: true }).click();
+    await page.evaluate(() => window.composerSendFailureFixture.refresh());
+    await expect(editor).toHaveText("Keep this draft after refusal");
+    await expect(toasts).toHaveCount(0);
+  }
+  check("Refused cloud sends restore drafts, show one actionable toast and keep the composer clean across remount/refresh", true);
+
+  await page.evaluate(() => window.composerSendFailureFixture.setFailure("command_dispatch_rejected"));
+  await send.click();
+  await page.clock.runFor(200);
+  await expect(toasts).toHaveCount(1);
+  await expect(toasts).toContainText("Cloud request couldn't be completed");
+  await expect(toasts).toContainText("Review the conversation before retrying.");
+  await expect(toasts.getByRole("button")).toHaveCount(1); // Dismiss only.
+  await expect(page.getByText("Keep this draft after refusal", { exact: true })).toBeVisible();
+  await expect(editor).toBeEmpty();
+  await expect(composer).not.toContainText("Cloud request");
+  await dismiss();
+  await page.getByRole("button", { name: "Remount chat", exact: true }).click();
+  await expect(toasts).toHaveCount(0);
+  check("Ambiguous dispatch shows one review toast and preserves the transcript without restoring a possibly delivered draft", true);
+
+  await page.goto(`${harnessBase}/harness-composer-send-failures.html?blocked=1`);
+  await expect(editor).toBeVisible();
+  await expect(toasts).toHaveCount(0);
+  await editor.fill("Keep this blocked draft");
+  await expect(send).toBeDisabled();
+  await expect(send).toHaveAttribute("aria-disabled", "true");
+  const tooltipCopy = "Gets the new cloud runtime the next time this workspace wakes";
+  await send.hover();
+  await page.clock.runFor(200);
+  await expect(page.getByRole("tooltip")).toContainText(tooltipCopy);
+  await expect(composer).not.toContainText("cloud runtime");
+  await send.focus();
+  await expect(send).toBeFocused();
+  for (const theme of ["dark", "light"]) {
+    await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+    await capture(`blocked-tooltip-${theme}`);
+  }
+  // Explicitly force a pointer attempt on a semantically disabled control.
+  await send.click({ force: true });
+  await page.clock.runFor(200);
+  await expect(toasts).toHaveCount(1);
+  await expect(toasts).toContainText("Cloud runtime update required");
+  await editor.press("Enter");
+  await editor.press("Enter");
+  await expect(toasts).toHaveCount(1);
+  await expect(editor).toHaveText("Keep this blocked draft");
+  expect(await page.evaluate(() => window.composerSendFailureFixture.sends)).toBe(0);
+  for (const theme of ["dark", "light"]) {
+    await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+    await page.mouse.move(0, 0);
+    await editor.focus();
+    await page.clock.runFor(200);
+    await capture(`blocked-send-${theme}`);
+  }
+  await dismiss();
+  await page.getByRole("button", { name: "Remount chat", exact: true }).click();
+  await page.evaluate(() => window.composerSendFailureFixture.refresh());
+  await editor.press("Enter");
+  await send.click({ force: true });
+  await expect(toasts).toHaveCount(0);
+  await expect(send).toBeDisabled();
+  check("Known runtime blocks use accessible disabled Send and a tooltip; pointer/Enter attempts notify once per state", true);
+
+  for (const label of ["Local", "Organization local"]) {
+    await page.getByRole("button", { name: label, exact: true }).click();
+    await editor.fill(`${label} still sends`);
+    await expect(send).toBeEnabled();
+    await send.click();
+    await expect(editor).toBeEmpty();
+    await expect(toasts).toHaveCount(0);
+    await expect(composer.locator('[role="status"], [role="alert"]')).toHaveCount(0);
+  }
+  await page.getByRole("button", { name: "Cloud", exact: true }).click();
+  await expect(editor).toHaveText("Keep this blocked draft");
+  await expect(send).toBeDisabled();
+  await editor.press("Enter");
+  await expect(toasts).toHaveCount(0);
+  check("Local and organization-local sends remain available; A to B to A keeps the cloud draft and toast acknowledgement", true);
+  expect(errors).toEqual([]);
+}

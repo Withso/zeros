@@ -6,6 +6,7 @@ import { messageToEditorContent } from "./composer-editor/reconstruct";
 import type { SessionsStoreState } from "./sessions-store";
 import type { AgentTextMessage } from "./use-agent-session";
 import { reportCloudAgentRuntimeUpgrade, invalidateCloudAgentRegistry } from "./workspace-agent-registry";
+import { notifyAgentSendFailure } from "./agent-send-failure-toast";
 
 /** This closed code proves admission refused before provider execution. Return
  * the draft and hold queued successors; neither reconnect nor refresh resends. */
@@ -15,6 +16,8 @@ export function recoverCloudAdmissionFailure(input: {
   error: unknown;
   message: AgentTextMessage;
   model?: string | null;
+  /** Queues retain the original accepted UUID across delivery-ID renewal. */
+  toastAttemptId?: string;
   draft?: ComposerDraft | null;
   store: Pick<SessionsStoreState, "sessions" | "patchSession">;
   pauseQueue: (chatId: string) => void;
@@ -33,10 +36,13 @@ export function recoverCloudAdmissionFailure(input: {
   if (failure.kind === "runtime-upgrade-required") reportCloudAgentRuntimeUpgrade(input.folder!, slot.agentId);
   else invalidateCloudAgentRegistry(input.folder!);
   const cloudAdmissionFailure = { ...failure, code, turnId: message.id, agentId: slot.agentId, model };
+  const notifyFailure = () => notifyAgentSendFailure({ folder: input.folder, chatId,
+    attemptId: input.toastAttemptId ?? message.id, agentId: slot.agentId, model, error: input.error });
   if (failure.kind === "unavailable") {
     // A generic dispatch failure can occur after a quiet provider has started.
     // Retain the entire transcript and require review; never invent a refusal.
     store.patchSession(chatId, { status: "ready", error: null, failure: null, activeTurnStartedAt: null, cloudAdmissionFailure });
+    notifyFailure();
     return true;
   }
   const saved: AgentTextMessage = { ...message, queued: false, queuedPresentation: undefined, queuedEditable: undefined,
@@ -63,6 +69,7 @@ export function recoverCloudAdmissionFailure(input: {
     // prompt in the transcript so the user can copy/edit it after the wake.
     messages: restored ? slot.messages.filter(row => row.id !== message.id) : slot.messages.map(row => row.id === message.id ? saved : row),
   });
+  notifyFailure();
   return true;
 }
 
