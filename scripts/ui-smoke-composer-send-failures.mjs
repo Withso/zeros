@@ -7,13 +7,31 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   await page.clock.install();
   await page.clock.pauseAt(new Date());
   const errors = [];
+  const lifecycleWrites = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.route("https://api.example.test/v1/**", async route => {
-    const path = new URL(route.request().url()).pathname;
+    const request = route.request(), path = new URL(request.url()).pathname;
     if (path.endsWith("/agent-credentials/prepare")) {
       const required = await page.evaluate(() => window.composerSendFailureFixture.runtimeRequired);
       return route.fulfill({ json: { delegations: [{ id: "33333333-3333-4333-8333-333333333333", kind: "codex-chatgpt",
         models: ["gpt-6.1-sol"], expiresAt: "2099-01-01T00:00:00Z", runtimeQualified: !required, runtimeUpgradeRequired: required }] } });
+    }
+    if (request.method() === "GET" && path.endsWith("/runtime-upgrade")) {
+      return route.fulfill({ json: await page.evaluate(() => window.composerSendFailureFixture.runtimeAvailability) });
+    }
+    if (request.method() === "POST" && /\/(stop|wake)$/.test(path)) {
+      const operation = path.split("/").at(-1);
+      lifecycleWrites.push(operation);
+      const workspace = await page.evaluate(operation => {
+        const fixture = window.composerSendFailureFixture;
+        if (operation === "wake" && fixture.document.status !== "stopped") throw new Error("Restart must stop before wake");
+        return fixture.publish({ status: operation === "stop" ? "stopped" : "ready",
+          ...(operation === "wake" ? { generation: { ...fixture.document.generation, number: fixture.document.generation.number + 1 } } : {}) });
+      }, operation);
+      return route.fulfill({ json: { workspace } });
+    }
+    if (request.method() === "GET" && path.endsWith("/22222222-2222-4222-8222-222222222222")) {
+      return route.fulfill({ json: { workspace: await page.evaluate(() => window.composerSendFailureFixture.document) } });
     }
     throw new Error(`Unexpected composer fixture request: ${path}`);
   });
@@ -41,7 +59,7 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
     ["cloud_agent_credential_expired", "Reconnect Codex to send messages", "Reconnect"],
     ["cloud_agent_credential_revoked", "Reconnect Codex to send messages", "Reconnect"],
     ["cloud_agent_credential_refresh_required", "Your Codex connection needs to be renewed", "Reconnect"],
-    ["cloud_runtime_upgrade_required", "This workspace is on an older runtime", null],
+    ["cloud_runtime_upgrade_required", "This workspace is on an older runtime", "Restart workspace"],
   ]) {
     await page.evaluate(code => window.composerSendFailureFixture.setFailure(code), code);
     await editor.fill("Keep this draft after refusal");
@@ -50,7 +68,8 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
     await expect(toasts).toHaveCount(1);
     await expect(toasts).toContainText(copy);
     if (action) await expect(toasts.getByRole("button", { name: action, exact: true })).toBeVisible();
-    else await expect(toasts.getByRole("button")).toHaveCount(1); // Dismiss until RS wires the restart hook.
+    else await expect(toasts.getByRole("button")).toHaveCount(1);
+    await expect(toasts.getByRole("button")).toHaveCount(action ? 2 : 1); // Relevant action and Dismiss.
     await expect(editor).toHaveText("Keep this draft after refusal");
     await expect(composer).not.toContainText(copy);
     await expect(composer.locator('[role="status"], [role="alert"]')).toHaveCount(0);
@@ -63,6 +82,8 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
     }
     if (code === "cloud_runtime_upgrade_required") {
       await expect(toasts).not.toContainText("couldn't be completed");
+      await expect(toasts).toContainText("Restart this workspace to update its cloud runtime.");
+      await expect(toasts).not.toContainText("next time");
       for (const theme of ["dark", "light"]) {
         await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
         await capture(`runtime-refused-send-${theme}`);
@@ -113,6 +134,9 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   await page.clock.runFor(200);
   await expect(toasts).toHaveCount(1);
   await expect(toasts).toContainText("This workspace is on an older runtime");
+  await expect(toasts.getByRole("button", { name: "Restart workspace", exact: true })).toBeVisible();
+  await expect(toasts).toContainText("Restart this workspace to update its cloud runtime.");
+  await expect(toasts).not.toContainText("next time");
   // A pointer attempt and further keystrokes share the same acknowledgement.
   await send.click({ force: true });
   await editor.press("Enter");
@@ -151,5 +175,24 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   await editor.press("Enter");
   await expect(toasts).toHaveCount(0);
   check("Local and organization-local sends remain available; A to B to A keeps the cloud draft and toast acknowledgement", true);
+
+  // A fresh renderer acknowledgement lets the deliberate toast action exercise
+  // the shared production restart against synthetic lifecycle responses.
+  await page.goto(`${harnessBase}/harness-composer-send-failures.html?blocked=1`);
+  await editor.fill("Keep this draft through Restart");
+  await expect(send).toBeDisabled();
+  await editor.press("Enter");
+  await page.clock.runFor(200);
+  await expect(toasts).toHaveCount(1);
+  expect(lifecycleWrites).toEqual([]); // Showing a failure never restarts automatically.
+  await toasts.getByRole("button", { name: "Restart workspace", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.composerSendFailureFixture.reconnects)).toBe(1);
+  expect(lifecycleWrites).toEqual(["stop", "wake"]);
+  expect(await page.evaluate(() => window.composerSendFailureFixture.document.generation.number)).toBe(2);
+  expect(await page.evaluate(() => window.composerSendFailureFixture.sends)).toBe(0);
+  await page.evaluate(() => window.composerSendFailureFixture.refresh(false));
+  await expect(send).toBeEnabled();
+  await expect(editor).toHaveText("Keep this draft through Restart");
+  check("Runtime toast Restart uses an explicit Stop then fresh wake, reconnects, and preserves the unsent draft", true);
   expect(errors).toEqual([]);
 }

@@ -1,5 +1,8 @@
 import { toast } from "../../shared/ui/primitives/elements/toast";
-import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { cloudCatalogGeneration, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
+import { cloudWorkspaceRestartVisible, restartCloudWorkspace } from "../../state/cloud-workspace-restart";
+import { isInternalFeatureActive } from "../settings/internal-features";
 import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode } from "./cloud-admission-failure";
 import { openCloudAdmissionSettings } from "./cloud-admission-status";
 import { modelsForAgent } from "./model-catalog";
@@ -34,7 +37,8 @@ export interface AgentSendFailureInput {
   /** Explicit per-message retry supplied by the queue owner, never an
    * automatic resend. Only readiness failures offer this action. */
   onRetry?: () => void;
-  /** Runtime owner supplies an explicit stop → wake for this workspace. */
+  /** Optional runtime-owner override; otherwise uses the shared explicit
+   * stop → wake action. Both paths require cloud workspace run access. */
   onRestartWorkspace?: () => void;
 }
 
@@ -61,6 +65,25 @@ function sendFailureReason(input: AgentSendFailureInput): AgentSendFailureReason
     case "unavailable": return input.reason ?? "dispatch_ambiguous";
     default: return input.reason ?? "unknown";
   }
+}
+
+function runtimeRestartAction(input: AgentSendFailureInput) {
+  const target = parseCloudWorkspaceKey(input.folder);
+  if (!target) return undefined;
+  const canRestart = () => {
+    const workspace = cloudWorkspaceDocument(target);
+    return isInternalFeatureActive("cloudComputerV2") && workspace?.capabilities.canWrite &&
+      cloudWorkspaceRestartVisible(input.folder!, workspace);
+  };
+  if (!canRestart()) return undefined;
+  const account = cloudCatalogGeneration();
+  const onRestartWorkspace = input.onRestartWorkspace ?? (() => {
+    // The shared restart owner presents lifecycle failures once.
+    void restartCloudWorkspace(target).catch(() => {});
+  });
+  return { label: "Restart workspace", onClick: () => {
+    if (account === cloudCatalogGeneration() && canRestart()) onRestartWorkspace();
+  } };
 }
 
 /** Shared by direct and queued sends. Call only when an explicit attempt
@@ -96,8 +119,8 @@ export function notifyAgentSendFailure(input: AgentSendFailureInput): boolean {
       break;
     case "runtime_upgrade_required":
       message = "This workspace is on an older runtime";
-      description = CLOUD_RUNTIME_UPGRADE_TOOLTIP;
-      if (input.onRestartWorkspace) action = { label: "Restart workspace", onClick: input.onRestartWorkspace };
+      action = runtimeRestartAction(input);
+      description = action ? "Restart this workspace to update its cloud runtime." : CLOUD_RUNTIME_UPGRADE_TOOLTIP;
       break;
     case "model_not_enabled": {
       const model = input.agentId && input.model ? modelsForAgent(input.agentId, null).find(row => row.value === input.model)?.label : null;

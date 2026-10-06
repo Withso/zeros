@@ -13,6 +13,7 @@ import { recoverCloudAdmissionFailure } from "../features/agent/cloud-runtime-up
 import { invalidateCloudAgentRegistry, warmCloudAgentRegistry } from "../features/agent/workspace-agent-registry";
 import { loadAgents } from "../features/agent/agents-cache";
 import { acceptOrganizationSnapshot } from "../features/team/team-store";
+import { setInternalFeatureEnabled } from "../features/settings/internal-features";
 import { Button, TooltipProvider } from "../shared/ui/primitives";
 import { Toaster } from "../shared/ui/primitives/elements/toast";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
@@ -30,6 +31,7 @@ const agents = [{ id: "codex", name: "Codex", installed: true, authenticated: tr
 let runtimeRequired = new URLSearchParams(location.search).has("blocked");
 let error = "cloud_agent_model_not_authorized";
 let sends = 0;
+let reconnects = 0;
 
 window.__ZEROS_NATIVE__ = { on: () => () => {}, async invoke<T>(command: string): Promise<T> {
   if (command === "auth_get_access_token") return { access_token: "fixture-session" } as T;
@@ -39,6 +41,7 @@ window.__ZEROS_NATIVE__ = { on: () => () => {}, async invoke<T>(command: string)
   return null as T;
 } };
 setActiveBridge({ status: "connected", on: () => () => {}, onStatusChange: () => () => {},
+  forceReconnect: async () => { reconnects++; },
   request: async (request: { type: string; op: string }) => request.type === "AGENT_LIST_AGENTS"
     ? { type: "AGENT_AGENTS_LIST", agents }
     : { type: "WORKSPACE_RESPONSE", op: request.op, result: {} },
@@ -46,9 +49,10 @@ setActiveBridge({ status: "connected", on: () => () => {}, onStatusChange: () =>
 const organization = { id: organizationId, slug: "fixture", name: "Example organization", logo: null,
   isPersonal: false, role: "admin" as const, defaultTeamId: organizationId,
   workspaceCapabilities: { local: true, cloud: true }, teamCapabilities: { multiple: false as const, canCreate: false as const } };
-acceptOrganizationSnapshot({ user: { id: organizationId, email: "fixture@example.test", displayName: "Fixture", staffRole: null },
+acceptOrganizationSnapshot({ user: { id: organizationId, email: "fixture@example.test", displayName: "Fixture", staffRole: "developer" },
   organizations: [organization], teams: [organization] });
-const document: CloudWorkspaceDocument = {
+setInternalFeatureEnabled("cloudComputerV2", true);
+let document: CloudWorkspaceDocument = {
   id: workspaceId, organizationId, teamId: organizationId, createdBy: organizationId, name: "Composer fixture",
   placement: "cloud", status: "ready", version: 1, error: null, deletedAt: null,
   createdAt: "2026-10-01T10:00:00Z", updatedAt: "2026-10-01T10:00:00Z",
@@ -74,7 +78,7 @@ const actions = {
   ensureSession: async () => {},
   updateConfig: () => {},
   holdQueue: () => {}, releaseQueue: () => {},
-  sendPrompt: async (chatId, text, displayText, _attachments, bubbleAttachments, segments, _autoAction, onAccepted) => {
+  sendPrompt: async (chatId, text, displayText, _attachments, bubbleAttachments, segments, _autoAction, onAccepted, cloudQueue) => {
     sends++;
     const draft = getLiveChatDraft(chatId);
     const message = { id: crypto.randomUUID(), kind: "text" as const, role: "user" as const, text: displayText ?? text,
@@ -82,15 +86,33 @@ const actions = {
     const store = useSessionsStore.getState(), slot = store.sessions[chatId];
     store.patchSession(chatId, { messages: [...slot.messages, message], status: "streaming" });
     onAccepted?.();
-    if (isCloudWorkspace(slot.cwd)) recoverCloudAdmissionFailure({ folder: slot.cwd, chatId, error, message, draft,
-      model: "gpt-6.1-sol", store: useSessionsStore.getState(), pauseQueue: () => {} });
-    else store.patchSession(chatId, { status: "ready" });
+    if (isCloudWorkspace(slot.cwd)) {
+      const refuse = () => recoverCloudAdmissionFailure({ folder: slot.cwd, chatId, error, message, draft,
+        model: "gpt-6.1-sol", store: useSessionsStore.getState(), pauseQueue: () => {} });
+      // Queue acceptance returns before readiness/admission completes. Let the
+      // composer clear its accepted draft before delivering the refusal.
+      if (cloudQueue) setTimeout(refuse, 0);
+      else refuse();
+    } else store.patchSession(chatId, { status: "ready" });
   },
 } satisfies Partial<SessionsActions>;
 Object.assign(window, { composerSendFailureFixture: {
   get runtimeRequired() { return runtimeRequired; },
   get sends() { return sends; },
+  get reconnects() { return reconnects; },
+  get document() { return document; },
+  get runtimeAvailability() {
+    return { organizationId, workspaceId, generation: document.generation.number,
+      currentRuntimeId: `r1-${"a".repeat(64)}`, latestRuntimeId: `r1-${(runtimeRequired ? "b" : "a").repeat(64)}`,
+      updateAvailable: runtimeRequired, unavailableReason: null, transition: null };
+  },
   setFailure(code: string) { error = code; },
+  publish(patch: Partial<CloudWorkspaceDocument>) {
+    document = { ...document, ...patch, version: document.version + 1,
+      updatedAt: new Date(Date.UTC(2026, 9, 1, 10) + (document.version + 1) * 1000).toISOString() };
+    acceptCloudWorkspaceDocument(document);
+    return document;
+  },
   async refresh(required = runtimeRequired) {
     runtimeRequired = required;
     invalidateCloudAgentRegistry(folder);
