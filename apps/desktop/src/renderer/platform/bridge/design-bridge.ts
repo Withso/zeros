@@ -20,6 +20,7 @@ import type { DesignRuntimeMatchedDeclaration } from "@zeros/protocol/design-run
 import { designPageCatalogSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
 
 import type { RuntimeClient } from "./ws-client";
+import { isCloudWorkspace } from "./cloud-workspace-key";
 import { workspaceOp as rawWorkspaceOp } from "./workspace-bridge";
 
 const directoryIds = new Map<string, string>();
@@ -951,6 +952,30 @@ export async function bridgeDesignInsertAsset(
     }),
     "design.asset.insert",
   );
+}
+
+export interface CloudDesignAssetUploadInput {
+  directoryId: string;
+  frame: string;
+  sourceVersion: string;
+  name: string;
+  mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif";
+  data: string;
+  x: number;
+  y: number;
+}
+
+export async function bridgeCloudDesignUploadAsset(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  input: CloudDesignAssetUploadInput,
+): Promise<DesignMutationReplyWire> {
+  if (!isCloudWorkspace(workspaceId)) throw new Error("Image upload requires a cloud workspace.");
+  // The file selection captures its directory. Never replace that identity
+  // with a newer canvas pointer while bytes are being read or queued.
+  return designMutationReply(await rawWorkspaceOp(bridge, "design.asset.upload", {
+    workspaceId, ...input,
+  }), "design.asset.upload");
 }
 
 export async function bridgeDesignStage(

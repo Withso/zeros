@@ -1027,6 +1027,21 @@ it is not the authored autosave store. Undo/redo history is bounded in memory.
 For a cloud workspace, the workspace engine writes the cloud worktree and its
 own configured app-data directory.
 
+Cloud canvas image upload accepts PNG, JPEG, GIF, WebP and AVIF up to 10 MiB,
+within the existing 128-asset catalog limit. A developer or manager uploads to
+the captured registered directory and frame through `design.asset.upload`;
+prompters cannot upload. The engine checks the filename, type signature, bytes,
+role, source generation and write authority, then journals a content-addressed
+`assets/` file with the semantic HTML insertion. Peers receive the normal
+workspace change and the image appears in Changes without staging. Undo removes
+the insertion but keeps the asset for redo and other references. An uncertain
+response is never automatically replayed.
+
+Only cloud uploads use private document-journal version 2 to recover both the
+image and source after interruption; ordinary Local/API transactions retain
+version 1. Finish recovery with an upload-capable engine before downgrading an
+engine with a pending version-2 journal. Local image insertion is unchanged.
+
 The shared Files, Changes and Review tabs include Code and Design. Staging is
 an explicit action in Changes; include a new Design folder's registration,
 canvas, rules and referenced source together. Later edits can leave the same

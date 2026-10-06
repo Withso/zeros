@@ -83,6 +83,7 @@ const WORKSPACE_MUTATIONS = new Set([
   "design.node.text",
   "design.node.html",
   "design.asset.insert",
+  "design.asset.upload",
   "design.token.update",
   "design.stage",
   "design.unstage",

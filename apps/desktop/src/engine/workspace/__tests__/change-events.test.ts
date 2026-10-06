@@ -8,6 +8,12 @@ import {
 } from "../change-events";
 
 describe("dbChangedKinds", () => {
+  it("publishes cloud image uploads while preserving Local asset insertion notifications", () => {
+    expect(dbChangedKinds("design.asset.upload", undefined, true)).toEqual(["workspaces"]);
+    expect(dbChangedKinds("design.asset.insert")).toEqual(["workspaces"]);
+    expect(dbChangedIncludesOriginator("design.asset.insert")).toBe(false);
+    expect(dbChangedDesignRecognition("design.asset.insert")).toBe(false);
+  });
   it.each(["design.renameDirectory", "design.adoptDirectory", "design.removeDirectory"])("preserves Local broadcast behavior for %s", op => {
     expect(dbChangedKinds(op)).toEqual(["workspaces", "settings"]);
     expect(dbChangedIncludesOriginator(op)).toBe(false);

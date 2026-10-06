@@ -73,6 +73,7 @@ describe("cloud Design checkout round trips", () => {
               cloudWorker: true,
               hostLocalResources: false,
               cloudActorIdentity: { userId, deviceId },
+              cloudFileActor: { role, authorized: () => true },
             });
       return { type: "WORKSPACE_RESPONSE", op: message.op, result };
     });
@@ -392,6 +393,40 @@ describe("cloud Design checkout round trips", () => {
     expect(snapshot.frames[0]?.sourceVersion).toBe(
       inserted.mutation.frame.sourceVersion,
     );
+  });
+
+  it("uploads an image as an actor-attributed checked edit shared with other devices and Git", async () => {
+    const { bridge: owner } = client("device-a");
+    const { frame, directory } = await initialize(owner);
+    const { bridge } = client("device-b", "developer");
+    const image = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4, 0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 252, 255, 31, 0, 2, 235, 1, 245, 105, 122, 100, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]);
+    const input = { workspaceId: key, directoryId: (await bridgeDesignSnapshot(bridge, key)).directoryId,
+      frame: frame.file, sourceVersion: frame.sourceVersion, name: "pixel.png", mimeType: "image/png", data: image.toString("base64"), x: 8, y: 12 };
+    const head = git("rev-parse", "HEAD");
+    const index = git("write-tree");
+    const result = await workspaceOp(bridge, "design.asset.upload", input) as {
+      assetPath: string; receipt: { actor: unknown }; snapshot: DesignWorkspaceSnapshotWire;
+    };
+    expect(result.receipt.actor).toEqual({ kind: "human", id: `cloud:${userId}:device-b` });
+    expect(result.assetPath).toMatch(/^assets\/[a-f0-9]{64}\.png$/);
+    expect(await readFile(path.join(root, directory, result.assetPath))).toEqual(image);
+    expect((await bridgeDesignFrame(owner, key, frame.file)).srcDoc).toContain("data:image/png;base64,");
+    expect((await bridgeDesignSnapshot(owner, key)).assets.map(asset => asset.path)).toContain(result.assetPath);
+    expect(git("ls-files", "--others", "--exclude-standard")).toContain(`${directory}/${result.assetPath}`);
+    expect(git("rev-parse", "HEAD")).toBe(head);
+    expect(git("write-tree")).toBe(index);
+    // A stale retry cannot write another image/layer. Undo/redo keep the shared asset for other references.
+    await expect(workspaceOp(bridge, "design.asset.upload", input)).rejects.toThrow(/changed/);
+    const versions = async () => Object.fromEntries((await bridgeDesignSnapshot(bridge, key)).frames.map(({file, sourceVersion}) => [file, sourceVersion]));
+    await bridgeDesignHistory(bridge, key, null, "undo", await versions());
+    expect((await bridgeDesignFrame(owner, key, frame.file)).source).not.toContain(result.assetPath);
+    expect(await readFile(path.join(root, directory, result.assetPath))).toEqual(image);
+    await bridgeDesignHistory(bridge, key, null, "redo", await versions());
+    expect((await bridgeDesignFrame(owner, key, frame.file)).source).toContain(result.assetPath);
+    const prompter = client("device-c", "prompter").bridge;
+    await expect(workspaceOp(prompter, "design.asset.upload", input)).rejects.toThrow(/actor/);
+    await expect(new WorkspaceService(root).handle("design.asset.upload", { ...input, workspaceId: "local-main" }))
+      .rejects.toThrow(/cloud/);
   });
 
   it("does not replay an edit after its acknowledgement is lost", async () => {

@@ -26,6 +26,7 @@ const platformMocks = vi.hoisted(() => ({
   createPage: vi.fn(),
   renamePage: vi.fn(),
   deletePage: vi.fn(),
+  uploadAsset: vi.fn(),
 }));
 
 const runtimeMocks = vi.hoisted(() => ({
@@ -57,6 +58,7 @@ vi.mock("../../../platform/git", async (importOriginal) => ({
   designCreatePage: platformMocks.createPage,
   designRenamePage: platformMocks.renamePage,
   designDeletePage: platformMocks.deletePage,
+  designUploadAsset: platformMocks.uploadAsset,
 }));
 
 vi.mock("../../../platform/bridge/design-frame-runtime", () => ({
@@ -104,6 +106,7 @@ import {
   createDesignPageCached,
   renameDesignPageCached,
   deleteDesignPageCached,
+  uploadDesignAssetCached,
 } from "../state/design-workspace-cache";
 import {
   designWorkspaceSnapshotMatchesPath,
@@ -220,6 +223,7 @@ describe("design workspace cache", () => {
     platformMocks.updateCanvas.mockReset();
     platformMocks.updateStyles.mockReset();
     platformMocks.writeHtml.mockReset();
+    platformMocks.uploadAsset.mockReset();
     runtimeMocks.designFrameRuntime.mockReset();
     runtimeMocks.commitStyles.mockReset();
     resetDesignWorkspaceCacheForTests();
@@ -231,6 +235,17 @@ describe("design workspace cache", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("never routes a Local upload or replays an uncertain cloud upload", async () => {
+    const input = { directoryId: "design_fixture", frame: "home.html", sourceVersion: "a".repeat(24),
+      name: "pixel.png", mimeType: "image/png" as const, data: "image", x: 0, y: 0 };
+    await expect(uploadDesignAssetCached("ws_local", input)).rejects.toThrow(/cloud/);
+    expect(platformMocks.uploadAsset).not.toHaveBeenCalled();
+    platformMocks.uploadAsset.mockRejectedValue(new Error("Request timeout: WORKSPACE_REQUEST"));
+    await expect(uploadDesignAssetCached("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", input)).rejects.toThrow(/timeout/);
+    expect(platformMocks.uploadAsset).toHaveBeenCalledTimes(1);
+    expect(platformMocks.readSnapshot).not.toHaveBeenCalled();
   });
 
   describe("edits with asynchronous document metadata", () => {
