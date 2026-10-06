@@ -78,13 +78,14 @@ export async function designPromptContext(
   mode: "code" | "design",
   assertCurrent: () => void,
   authoringMethod: DesignAuthoringMethod = "native",
+  nativeVerification = authoringMethod === "native",
 ): Promise<string> {
   assertCurrent();
   let target: DesignCodeToolTarget | null = null;
   try {
     target = await resolveTarget();
     const context = await nativeDesignContext(target, mode, assertCurrent);
-    if (authoringMethod !== "native" || !target || !readDirectoryDesignManifest(target.workspacePath, target.directory)) return context;
+    if (!nativeVerification || !target || !readDirectoryDesignManifest(target.workspacePath, target.directory)) return context;
     const verification = await openDesignVerification(target);
     assertCurrent();
     return `${context}\nNative frame verification is available through ordinary shell commands: ${verification.command} <list|validate|capture|preview> --url '${verification.url}' --frame '<page.folder>/<name>.html'. Omit --frame for list. Capture requires --output '<png-output-path>'; use --revision to require a previously validated source revision. ${verification.captureAvailable ? "Capture uses the native PNG renderer; inspect its saved PNG with your normal image tool." : "PNG capture is unavailable on this host; validation and the HTTP preview remain available."} Preview returns an HTTP URL using the canvas's sanitized HTML/CSS and assets. Use the browser actually available through your provider's native browser tooling; do not assume an iab backend exists or navigate to file://. A successful lint or capture is not proof of visual inspection or application behavior. Verification URLs expire after 30 minutes; request fresh frame context if expired.`;
@@ -148,6 +149,7 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
       assertOwner(): void;
       resolveTarget(): Promise<DesignCodeToolTarget | null>;
       authoringMethod?: DesignAuthoringMethod;
+      nativeVerification?: boolean;
       renderer?: DesignHeadlessRenderer;
       onChanged?: () => void;
       workspaceTools?: AgentWorkspaceTools;
@@ -206,7 +208,7 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
       if (this.paused || this.options.mode.get().revision !== snapshot.revision)
         throw new Error("Composer mode or Design directory changed before dispatch; retry the prompt.");
     };
-    const context = await designPromptContext(() => this.options.resolveTarget(), snapshot.mode, assertCurrent, this.options.authoringMethod);
+    const context = await designPromptContext(() => this.options.resolveTarget(), snapshot.mode, assertCurrent, this.options.authoringMethod, this.options.nativeVerification);
     assertCurrent();
     return wrapSystemInstruction(`${composerModeInstruction(snapshot.mode, snapshot.revision, this.options.authoringMethod)} ${context}`);
   }
@@ -278,7 +280,7 @@ export class ConversationDesignTools implements DesignMcpToolHandler {
         this.assertActive(this.token);
         joined.throwIfAborted();
         if (this.options.mode.get().revision !== before.revision) throw new Error("Composer mode changed.");
-      }, this.options.authoringMethod);
+      }, this.options.authoringMethod, this.options.nativeVerification);
       joined.throwIfAborted();
       const composerMode = this.options.mode.set(
         input.mode,

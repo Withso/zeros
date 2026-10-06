@@ -237,6 +237,8 @@ export class DesignCodeToolAdmissions {
         assertOwner,
         resolveTarget,
         authoringMethod: this.options.cloudWorker ? "api" : "native",
+        // Read-only shell verification is independent of API-only authoring.
+        ...(this.options.cloudWorker ? { nativeVerification: true } : {}),
         renderer: createDesignCaptureRenderer(workspacePath),
         onChanged: () => this.options.onChanged?.(workspaceId),
         workspaceTools,

@@ -32,6 +32,24 @@ const snapshot: DesignWorkspaceSnapshotWire = {
 };
 
 describe("cloud Design snapshot ownership", () => {
+  it("maps only typed Design context owners and rejects a foreign preview reference", () => {
+    const native = { version: 1, workspaceId: scope.engineWorkspaceId, directoryId: "design_cloud",
+      frame: "page-1/home.html", frameId: "frame_a", revision: "a".repeat(24) };
+    for (const op of ["design.context.create", "design.context.inspect", "design.verification.open"]) {
+      expect(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op, result: { reference: native } }))
+        .toMatchObject({ result: { reference: { ...native, workspaceId: key } } });
+      expect(() => cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op,
+        result: { reference: { ...native, workspaceId: "another-workspace" } } })).toThrow(/workspace/);
+    }
+    expect(cloudOutgoing(scope, { type: "WORKSPACE_REQUEST", op: "design.context.inspect",
+      params: { workspaceId: key, reference: { ...native, workspaceId: key } } }))
+      .toMatchObject({ params: { workspaceId: "local-main", reference: native } });
+    expect(() => cloudOutgoing(scope, { type: "WORKSPACE_REQUEST", op: "design.context.inspect",
+      params: { workspaceId: key, reference: native } })).toThrow(/workspace/);
+    expect(native.workspaceId).toBe("local-main");
+    expect(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: "file.read", result: { reference: native } }))
+      .toMatchObject({ result: { reference: native } });
+  });
   it.each([
     "design.previewExistingDirectory",
     "design.adoptDirectory",
