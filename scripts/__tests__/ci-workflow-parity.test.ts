@@ -63,7 +63,8 @@ const comparable = (job: Job) => ({
   services: job.services,
   steps: (job.steps ?? [])
     .filter((step) => !PR_ONLY_STEPS.has(step.name ?? ""))
-    .map(({ name, run, uses, if: condition, env }) => ({
+    .map(({ name, run, uses, if: condition, env, ...settings }) => ({
+      ...settings,
       name,
       run,
       uses,
