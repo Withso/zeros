@@ -793,6 +793,7 @@ describe("repository layout contracts", () => {
       "implementation-roadmap.md",
       "infrastructure-and-operations.md",
       "lifecycle-diagnostics.md",
+      "local-workspace-impact-audit.md",
       "mcp-and-skills.md",
       "native-access-acceptance.md",
       "native-preview-acceptance.md",

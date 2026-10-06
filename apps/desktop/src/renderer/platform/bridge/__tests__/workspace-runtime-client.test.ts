@@ -89,6 +89,38 @@ function fakePeer(target: CloudWorkspaceTarget) {
 afterEach(() => vi.restoreAllMocks());
 
 describe("workspace runtime routing", () => {
+  it.each([null, organizationId])(
+    "keeps local-placement Git on the sidecar for owner %s while a cloud peer is open",
+    async (owner) => {
+      const peer = fakePeer(a);
+      const open = vi.fn(async () => peer.peer);
+      const prepareGithubWrite = vi.fn();
+      const row = { id: "ws_local", path: "/local/repository/worktree", placement: "local", organizationId: owner };
+      const client = new WorkspaceRuntimeClient({ open, workspaces: () => [row], prepareGithubWrite });
+      try {
+        await client.warmWorkspace(a);
+        open.mockClear();
+        peer.request.mockClear();
+        const response = { type: "WORKSPACE_RESPONSE", result: { ok: true } };
+        const local = vi.spyOn(RuntimeClient.prototype, "request").mockResolvedValue(response as never);
+        for (const op of ["git.fetch", "git.pull", "git.push"]) {
+          const message = {
+            type: "WORKSPACE_REQUEST" as const,
+            op,
+            params: { workspaceId: row.id, remote: "origin", strategy: "rebase", autoStash: true },
+          };
+          expect(await client.request(message)).toBe(response);
+          expect(local).toHaveBeenLastCalledWith(message, expect.anything());
+        }
+        expect(local).toHaveBeenCalledTimes(3);
+        expect(open).not.toHaveBeenCalled();
+        expect(prepareGithubWrite).not.toHaveBeenCalled();
+        expect(peer.request).not.toHaveBeenCalled();
+      } finally {
+        client.dispose();
+      }
+    },
+  );
   it("uses the Local transport for replica controls while a cloud workspace is open", async () => {
     const peer = fakePeer(a);
     const open = vi.fn(async () => peer.peer);
