@@ -1,7 +1,7 @@
 name: CI
 
-# Pull-request checks. Every job here reports the same required check name as
-# its Preflight twin, so the main ruleset is unchanged; Preflight (preflight.yml)
+# Pull-request checks. CI reports the same required check names as Preflight,
+# so the main ruleset is unchanged; Preflight (preflight.yml)
 # keeps running the full suite on every push to main, release branches and
 # merge-queue commits, and it remains the only workflow releases read as
 # exact-source evidence. The trusted-base scope selects whole existing jobs;
@@ -203,8 +203,8 @@ jobs:
           ].join("\n"));
           NODE
 
-  quality:
-    name: quality
+  quality-workload:
+    name: quality-workload
     needs: scope
     if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-quality == 'true')
     runs-on: ubuntu-latest
@@ -224,10 +224,6 @@ jobs:
           # Full history so the changed-files Prettier check can diff the PR
           # against its merge base.
           fetch-depth: 0
-
-      - name: Reject unresolved CI incident markers
-        if: github.event_name == 'pull_request'
-        run: node scripts/ci/recovery.mjs guard-markers
 
       - name: Setup pnpm
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -291,28 +287,43 @@ jobs:
             echo "No changed files to format-check."
           fi
 
-      - name: Prettier — changed files only (advisory)
-        # ADVISORY (continue-on-error) until a one-time `prettier --write .`
-        # baseline lands: the tree has a large legacy unformatted backlog and
-        # `prettier --check` is per-FILE, so editing a legacy-dirty file would
-        # otherwise fail the gate for unrelated reasons. This still surfaces "new
-        # unformatted code" as a signal; promote to blocking after the baseline.
-        # PR-only: on a push to main there's no meaningful diff base.
+  # Keep the cheap incident-marker guard in the required quality context on
+  # every PR, including documentation changes with no selected quality work.
+  quality:
+    name: quality
+    if: always()
+    needs:
+      - scope
+      - quality-workload
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Reject unresolved CI incident markers
         if: github.event_name == 'pull_request'
-        continue-on-error: true
+        run: node scripts/ci/recovery.mjs guard-markers
+      - name: Verify CI selection
+        if: always()
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          LANE_SELECTED: ${{ needs.scope.outputs.job-quality }}
+          LANE_RESULT: ${{ needs.quality-workload.result }}
         run: |
-          changed=$(git diff --name-only --diff-filter=ACMR "$BASE_SHA"...HEAD \
-            -- 'apps/desktop/src/' 'apps/desktop/electron/' 'packages/' 'scripts/' '*.json' '*.mjs' '*.mts' '*.ts' || true)
-          if [ -n "$changed" ]; then
-            echo "Changed files to format-check:"
-            printf '%s\n' "$changed"
-            # --ignore-unknown skips any extension Prettier can't parse (e.g. .jsonc).
-            printf '%s\n' "$changed" | xargs pnpm exec prettier --check --ignore-unknown
-          else
-            echo "No changed files to format-check."
+          set -euo pipefail
+          if [ "$SCOPE_RESULT" != "success" ]; then
+            echo "::error::The trusted scope decision was ${SCOPE_RESULT:-missing}."
+            exit 1
           fi
+          case "${LANE_SELECTED}:${LANE_RESULT}" in
+            true:success|false:skipped|false:success) ;;
+            *) echo "::error::Invalid quality selection/result: ${LANE_SELECTED}:${LANE_RESULT}"; exit 1 ;;
+          esac
 
   test-shard:
     name: tests-vitest (${{ matrix.part }}/2)
@@ -1120,22 +1131,22 @@ jobs:
             echo "::error::The trusted scope decision was ${SCOPE_RESULT:-missing}."
             exit 1
           fi
-      - name: Checkout
+      - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Setup pnpm
+      - name: Set up pnpm
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - name: Setup Node
+      - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
-      - name: Install JS dependencies
+      - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
       - name: Install control-plane dependencies for title smoke
         run: pnpm --dir apps/control-plane install --frozen-lockfile
       - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium
-      - name: Composer model-menu interaction contract
+      - name: Run composer UI smoke suite
         run: pnpm test:ui-smoke
 
   secret-scan:
@@ -1253,6 +1264,7 @@ jobs:
     needs:
       - scope
       - quality
+      - quality-workload
       - test-shard
       - test
       - build
@@ -1350,7 +1362,8 @@ jobs:
           }
           const selected = {
             scope: true,
-            quality: ledger.jobs.quality,
+            quality: true,
+            "quality-workload": ledger.jobs.quality,
             "test-shard": ledger.jobs.vitest,
             test: true,
             build: ledger.jobs.build,

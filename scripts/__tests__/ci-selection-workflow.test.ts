@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -18,6 +19,7 @@ type Step = {
   id?: string;
   run?: string;
   uses?: string;
+  if?: string;
   env?: Record<string, string>;
   with?: Record<string, unknown>;
 };
@@ -53,7 +55,7 @@ const JOBS = [
   "secret-scan",
 ] as const;
 const PRODUCERS: Record<string, (typeof JOBS)[number]> = {
-  quality: "quality",
+  "quality-workload": "quality",
   "test-shard": "vitest",
   build: "build",
   "source-sync-workload": "macos",
@@ -63,7 +65,7 @@ const PRODUCERS: Record<string, (typeof JOBS)[number]> = {
   "ui-smoke": "ui-smoke",
   "secret-scan": "secret-scan",
 };
-const AGGREGATES = ["test", "source-sync", "control-plane"] as const;
+const AGGREGATES = ["quality", "test", "source-sync", "control-plane"] as const;
 const RESULTS = ["success", "skipped", "failure", "cancelled", "neutral", ""];
 const temporaryDirectories: string[] = [];
 
@@ -583,6 +585,49 @@ describe("selective pull-request CI", () => {
     },
   );
 
+  it("runs the incident-marker guard in required quality even for unselected quality work", () => {
+    const job = ci.jobs.quality;
+    expect(job.name).toBe("quality");
+    expect(job.if).toBe("always()");
+    expect(needsOf(job)).toEqual(["scope", "quality-workload"]);
+    const marker = job.steps.find(
+      (step) => step.name === "Reject unresolved CI incident markers",
+    )!;
+    expect(marker).toBeDefined();
+    expect(marker.if).toBe("github.event_name == 'pull_request'");
+    expect(marker.run).toBe("node scripts/ci/recovery.mjs guard-markers");
+    expect(ci.jobs["quality-workload"].steps).not.toContainEqual(marker);
+    expect(selectionStep("quality").if).toBe("always()");
+    expect(selectionStep("quality").env).toEqual({
+      SCOPE_RESULT: "${{ needs.scope.result }}",
+      LANE_SELECTED: "${{ needs.scope.outputs.job-quality }}",
+      LANE_RESULT: "${{ needs.quality-workload.result }}",
+    });
+    expect(job.steps.indexOf(marker)).toBeLessThan(
+      job.steps.indexOf(selectionStep("quality")),
+    );
+
+    const directory = temporaryDirectory();
+    mkdirSync(path.join(directory, "scripts"));
+    cpSync(
+      path.join(ROOT, "scripts/ci"),
+      path.join(directory, "scripts/ci"),
+      { recursive: true },
+    );
+    const clean = runStep(marker, {}, directory);
+    expect(clean.status, clean.stderr).toBe(0);
+    mkdirSync(path.join(directory, ".github/ci-incidents"), {
+      recursive: true,
+    });
+    const file = path.join(directory, ".github/ci-incidents/unresolved.json");
+    writeFileSync(file, "{}\n");
+    const unresolved = runStep(marker, {}, directory);
+    expect(unresolved.status).not.toBe(0);
+    expect(unresolved.stderr).toContain("Unresolved CI incident marker");
+    rmSync(file);
+    expect(runStep(marker, {}, directory).status).toBe(0);
+  });
+
   it("keeps required aggregates' original enforcing commands behind raw-result validation", () => {
     expect(
       ci.jobs.test.steps.find((step) => step.name === "Enforce the test result")
@@ -720,7 +765,7 @@ describe("the CI gate's executable ledger validation", () => {
   });
 
   it.each([
-    "quality",
+    "quality-workload",
     "test-shard",
     "build",
     "source-sync-workload",

@@ -4,10 +4,9 @@ import path from "node:path";
 import { load } from "js-yaml";
 import { describe, expect, it } from "vitest";
 
-// Selection changes when a whole job runs, never its workload commands. CI
-// retains the required contexts while Preflight remains full release evidence.
-// The executable selection suite separately verifies every PR-only guard,
-// aggregate adapter, and trusted-policy boundary excluded from this comparison.
+// CI selects whole workloads while Preflight remains full release evidence.
+// Its required quality aggregate also runs the incident-marker guard on every
+// PR. The executable selection suite verifies each selection-only exception.
 
 type Step = {
   name?: string;
@@ -34,8 +33,8 @@ const workflow = (file: string) =>
     readFileSync(path.join(ROOT, ".github/workflows", file), "utf8"),
   ) as Workflow;
 
-const PR_ONLY_JOBS = new Set(["scope", "ci-gate"]);
-// Alpha's early release gate is exclusive to full post-merge Preflight.
+const PR_ONLY_JOBS = new Set(["scope", "quality", "ci-gate"]);
+// The Alpha gate and composer browser shards run only in full Preflight.
 const PREFLIGHT_ONLY_JOBS = new Set(["alpha-gate", "ui-smoke-shard"]);
 const PR_ONLY_STEPS = new Set([
   "Prettier — changed files only (advisory)",
@@ -44,9 +43,9 @@ const PR_ONLY_STEPS = new Set([
   "Verify CI selection",
   "Combine database selections",
 ]);
-// Keep the original enforcing commands after PR-only raw-result validation.
-// These three inputs adapt only proved unselected success/skip outcomes to
-// the legacy commands' stricter result vocabulary.
+// Preflight's quality workload has its own producer in CI so the required
+// quality check can enforce incident markers even when that workload skips.
+const CI_WORKLOADS: Record<string, string> = { quality: "quality-workload" };
 const SELECTION_INPUTS: Record<string, string> = {
   "Enforce the test result": "TEST_RESULT",
   "Enforce the source-sync result": "SOURCE_SYNC_RESULT",
@@ -85,12 +84,15 @@ describe("CI and Preflight job parity", () => {
     expect(
       Object.keys(ci.jobs)
         .filter((id) => !PR_ONLY_JOBS.has(id))
+        .map((id) => (id === "quality-workload" ? "quality" : id))
         .sort(),
     ).toEqual(
       Object.keys(preflight.jobs)
         .filter((id) => !PREFLIGHT_ONLY_JOBS.has(id))
         .sort(),
     );
+    expect(ci.jobs.quality.name).toBe("quality");
+    expect(ci.jobs["quality-workload"].name).toBe("quality-workload");
   });
 
   it.each(
@@ -100,7 +102,9 @@ describe("CI and Preflight job parity", () => {
   )(
     "keeps the %s workload identical apart from pull-request selection steps",
     (id) => {
-      expect(comparable(ci.jobs[id]!)).toEqual(comparable(preflight.jobs[id]!));
+      const candidate = comparable(ci.jobs[CI_WORKLOADS[id] ?? id]!);
+      if (CI_WORKLOADS[id]) candidate.name = preflight.jobs[id]!.name;
+      expect(candidate).toEqual(comparable(preflight.jobs[id]!));
     },
   );
 
@@ -143,6 +147,20 @@ describe("CI and Preflight job parity", () => {
     }
   });
 
+  it("reuses Preflight's browser setup for the full selected PR composer suite", () => {
+    expect(ci.jobs["ui-smoke"].name).toBe("ui-smoke (composer)");
+    const candidate = comparable(ci.jobs["ui-smoke"]).steps;
+    const full = comparable(preflight.jobs["ui-smoke-shard"]).steps;
+    expect(candidate.slice(0, -1)).toEqual(full.slice(0, -1));
+    expect(candidate.at(-1)).toEqual({
+      name: "Run composer UI smoke suite",
+      run: "pnpm test:ui-smoke",
+      uses: undefined,
+      if: undefined,
+      env: {},
+    });
+  });
+
   it("runs all browser shards only in post-merge Preflight", () => {
     expect(ci.jobs).not.toHaveProperty("ui-smoke-shard");
     expect(preflight.jobs["ui-smoke-shard"]?.name).toBe(
@@ -157,10 +175,13 @@ describe("CI and Preflight job parity", () => {
       env: { SHARD: "${{ matrix.shard }}" },
       run: 'pnpm test:ui-smoke --shard="${SHARD}/3"',
     });
+    expect(preflight.jobs["ui-smoke"].name).toBe("ui-smoke (composer)");
+    expect(preflight.jobs["ui-smoke"].if).toBe("always()");
+    expect(preflight.jobs["ui-smoke"].needs).toEqual(["ui-smoke-shard"]);
   });
 
   it.each(["success", "failure", "cancelled", "skipped"])(
-    "keeps the required composer aggregate red unless the matrix succeeds (%s)",
+    "keeps the required Preflight composer aggregate red unless its matrix succeeds (%s)",
     (result) => {
       const step = preflight.jobs["ui-smoke"]!.steps![0]!;
       const outcome = spawnSync("bash", ["-c", step.run!], {
