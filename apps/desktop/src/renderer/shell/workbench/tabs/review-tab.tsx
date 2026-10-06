@@ -55,12 +55,16 @@ import { humanGitError, useReviewLiveData } from "./review-data";
 import { reviewActionBlockReason, summarizeChecks } from "./review-model";
 import {
   Centered,
-  ErrorCallout,
   OutcomeGlyph,
   PrStateBadge,
   ReviewEmptyState,
 } from "./review-shared-components";
 import { ReviewChangesSection } from "./review-changes";
+import {
+  WorkbenchEmptyState,
+  WorkbenchTabToolbar,
+  useWorkbenchStatusSource,
+} from "../tab-status";
 import { ReviewCommitsSection } from "./review-commits";
 import { ReviewChecksSection } from "./review-checks";
 import { ReviewTimelineSection } from "./review-timeline";
@@ -428,6 +432,46 @@ export function ReviewView({
   }, [active, provider, workspaceId, prNumber, baseBranch, filesKey, refreshKey, filesReloadNonce, snap.pr?.headSha, reviewHeadSha, reviewBaseSha]);
 
   const pr = snap.pr;
+  useWorkbenchStatusSource(
+    {
+      error: snap.error ?? filesError,
+      pending: snap.refreshing || filesLoading,
+      primary: true,
+      hasContent:
+        !!pr &&
+        (sub === "changes"
+          ? cachedFiles !== undefined || files.length > 0
+          : sub === "commits"
+            ? snap.commits !== null
+            : sub === "checks"
+              ? snap.checks !== null
+              : sub === "reviews"
+                ? snap.timeline !== null
+                : true),
+      retry: async () => {
+        reviewFilesMeta.delete(filesKey);
+        setFilesReloadNonce((n) => n + 1);
+        await refresh();
+      },
+    },
+    filesKey,
+  );
+  useWorkbenchStatusSource(
+    {
+      error:
+        snap.resourceErrors.checks ??
+        snap.resourceErrors.commits ??
+        snap.resourceErrors.timeline ??
+        (sub === "changes" ? githubReview.error : null),
+      pending:
+        snap.refreshing ||
+        (sub === "changes" && !!githubReview.source?.loading),
+      retry: async () => {
+        await Promise.allSettled([refresh(), githubReview.refresh()]);
+      },
+    },
+    "review-resources",
+  );
   const checksSummary = summarizeChecks(snap.checks);
   const conversationCount = snap.timeline?.length ?? null;
 
@@ -476,7 +520,7 @@ export function ReviewView({
     if (snap.error) {
       return (
         <div className="p-3">
-          <ErrorCallout text={snap.error} onRetry={() => void refresh()} />
+          <WorkbenchEmptyState type="review" />
         </div>
       );
     }
@@ -511,95 +555,98 @@ export function ReviewView({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* ── PR header ── */}
-      <div className="border-border1 shrink-0 border-b px-3 pt-2.5 pb-2">
-        <div className="flex items-center gap-2">
-          <PrStateBadge state={pr.state} />
-          <span className="text-2xxs text-fg2 flex min-w-0 items-center gap-1 font-mono">
-            <span className="truncate">{pr.headBranch}</span>
-            <ArrowRight className="text-muted-fg size-3 shrink-0" />
-            <span className="shrink-0">{pr.baseBranch}</span>
-          </span>
-          <div className="flex-1" />
-          {(prUrl || pr.url) && (
-            <Tooltip label={`Open on ${provider.hostLabel}`}>
-              <a
-                href={prUrl ?? pr.url}
-                target="_blank"
-                rel="noreferrer"
-                className="text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-7 items-center justify-center rounded-sm transition-colors duration-120 ease-out"
-              >
-                <ExternalLink className="size-3.5" />
-              </a>
+      <WorkbenchTabToolbar>
+        {/* ── PR header ── */}
+        <div className="border-border1 shrink-0 border-b px-3 pt-2.5 pb-2">
+          <div className="flex items-center gap-2">
+            <PrStateBadge state={pr.state} />
+            <span className="text-2xxs text-fg2 flex min-w-0 items-center gap-1 font-mono">
+              <span className="truncate">{pr.headBranch}</span>
+              <ArrowRight className="text-muted-fg size-3 shrink-0" />
+              <span className="shrink-0">{pr.baseBranch}</span>
+            </span>
+            <div className="flex-1" />
+            {(prUrl || pr.url) && (
+              <Tooltip label={`Open on ${provider.hostLabel}`}>
+                <a
+                  href={prUrl ?? pr.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-7 items-center justify-center rounded-sm transition-colors duration-120 ease-out"
+                >
+                  <ExternalLink className="size-3.5" />
+                </a>
+              </Tooltip>
+            )}
+            <MergeControls
+              provider={provider}
+              pr={pr}
+              islandKind={islandKind}
+              busy={busy}
+              agentWorking={agentWorking}
+              onMarkReady={() => void runMarkReady()}
+              onMerge={(m) => void runMerge(m)}
+            />
+          </div>
+          <div className="mt-1.5 flex min-w-0 items-baseline gap-1.5">
+            <Tooltip label={pr.title}>
+              <h2 className="text-fg1 m-0 min-w-0 truncate text-sm font-medium">
+                {pr.title}
+              </h2>
             </Tooltip>
-          )}
-          <MergeControls
-            provider={provider}
-            pr={pr}
-            islandKind={islandKind}
-            busy={busy}
-            agentWorking={agentWorking}
-            onMarkReady={() => void runMarkReady()}
-            onMerge={(m) => void runMerge(m)}
-          />
+            <span className="text-muted-fg shrink-0 text-xs tabular-nums">
+              #{pr.number}
+            </span>
+          </div>
         </div>
-        <div className="mt-1.5 flex min-w-0 items-baseline gap-1.5">
-          <Tooltip label={pr.title}>
-            <h2 className="text-fg1 m-0 min-w-0 truncate text-sm font-medium">
-              {pr.title}
-            </h2>
-          </Tooltip>
-          <span className="text-muted-fg shrink-0 text-xs tabular-nums">
-            #{pr.number}
-          </span>
+
+        {/* ── sub-nav ── */}
+        <div
+          role="tablist"
+          className="border-border1 flex shrink-0 items-center gap-1 overflow-x-auto border-b px-2 py-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
+          {subTabs.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              aria-selected={sub === t.id}
+              onClick={() => onSubChange(t.id)}
+              className={cn(
+                "flex h-6 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors duration-120 ease-out",
+                sub === t.id
+                  ? "bg-bg2-hover text-fg1"
+                  : "text-fg2 hover:bg-bg2-hover/50 hover:text-fg1",
+              )}
+            >
+              {t.id === "checks" && checksSummary.tone !== "none" && (
+                <OutcomeGlyph
+                  outcome={
+                    checksSummary.tone === "failure"
+                      ? "failed"
+                      : checksSummary.tone === "pending"
+                        ? "pending"
+                        : "passed"
+                  }
+                />
+              )}
+              {t.label}
+              {t.id === "checks"
+                ? checksSummary.fraction && (
+                    <span className="text-muted-fg tabular-nums">
+                      {checksSummary.fraction}
+                    </span>
+                  )
+                : t.count != null &&
+                  t.count > 0 && (
+                    <span className="text-muted-fg tabular-nums">
+                      {t.count}
+                    </span>
+                  )}
+            </button>
+          ))}
         </div>
-      </div>
-
-      {/* ── sub-nav ── */}
-      <div
-        role="tablist"
-        className="border-border1 flex shrink-0 items-center gap-1 overflow-x-auto border-b px-2 py-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-      >
-        {subTabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            aria-selected={sub === t.id}
-            onClick={() => onSubChange(t.id)}
-            className={cn(
-              "flex h-6 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors duration-120 ease-out",
-              sub === t.id
-                ? "bg-bg2-hover text-fg1"
-                : "text-fg2 hover:bg-bg2-hover/50 hover:text-fg1",
-            )}
-          >
-            {t.id === "checks" && checksSummary.tone !== "none" && (
-              <OutcomeGlyph
-                outcome={
-                  checksSummary.tone === "failure"
-                    ? "failed"
-                    : checksSummary.tone === "pending"
-                      ? "pending"
-                      : "passed"
-                }
-              />
-            )}
-            {t.label}
-            {t.id === "checks"
-              ? checksSummary.fraction && (
-                  <span className="text-muted-fg tabular-nums">
-                    {checksSummary.fraction}
-                  </span>
-                )
-              : t.count != null &&
-                t.count > 0 && (
-                  <span className="text-muted-fg tabular-nums">{t.count}</span>
-                )}
-          </button>
-        ))}
-      </div>
-
+      </WorkbenchTabToolbar>
       {/* ── body ── */}
       <div ref={bodyScrollRef} className="min-h-0 flex-1 overflow-auto">
         {sub === "changes" && (
@@ -612,7 +659,7 @@ export function ReviewView({
             reviewExternal={githubReview.source}
             files={files}
             loading={filesLoading}
-            error={filesError}
+            error={null}
             baseBranch={baseBranch}
             onRetry={() => {
               reviewFilesMeta.delete(filesKey);
@@ -625,7 +672,7 @@ export function ReviewView({
           <ReviewCommitsSection
             commits={snap.commits}
             loading={snap.refreshing}
-            error={snap.resourceErrors.commits}
+            error={null}
             onRetry={() => void refresh()}
           />
         )}
@@ -633,7 +680,7 @@ export function ReviewView({
           <ReviewChecksSection
             data={snap.checks}
             loading={snap.refreshing}
-            error={snap.resourceErrors.checks}
+            error={null}
             prNumber={pr.number}
             branch={branch || pr.headBranch}
             onAddToChat={addToChat}
@@ -647,7 +694,7 @@ export function ReviewView({
             commits={snap.commits}
             timeline={snap.timeline}
             loading={snap.refreshing}
-            error={snap.resourceErrors.timeline}
+            error={null}
             scrollKey={JSON.stringify([
               "review-timeline",
               workspaceId,

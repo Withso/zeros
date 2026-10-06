@@ -30,6 +30,7 @@ import {
   DropdownMenuPortal,
 } from "@/renderer/shared/ui/primitives";
 import { type Scope } from "./changes-scope";
+import { useWorkbenchStatusManaged } from "../tab-status";
 
 const PAGE_SIZE = 50;
 const LATEST_TURN_LABEL = "Latest agent turn";
@@ -151,6 +152,7 @@ function HistoryItems({
   error?: string | null;
   onRetry?: () => void;
 }) {
+  const managed = useWorkbenchStatusManaged();
   const [visible, setVisible] = useState(PAGE_SIZE);
   const anchor = useRef<string | null>(null);
   const shift = useRef(false);
@@ -226,7 +228,7 @@ function HistoryItems({
           <span className="text-fg3">… {rows.length - visible} more</span>
         </DropdownMenuItem>
       )}
-      {error ? (
+      {error ? !managed && (
         <div role="alert" className="text-red-fg px-2 py-1.5 text-xs">
           <p className="m-0">{error}</p>
           <Button

@@ -1,5 +1,6 @@
 import { ChangesScopeMenu } from "./changes-scope-menu";
 import { scopeIdentity } from "./changes-scope";
+import { WorkbenchTabToolbar, useWorkbenchStatusSource } from "../tab-status";
 import {
   changesHistoryKey,
   changesHistorySchema,
@@ -143,6 +144,7 @@ export const ChangesWorkbenchSurface = React.memo(
             cwd={cwd}
             workspaceId={changesTarget}
             reviewExternal={githubReview.source}
+            retryReview={githubReview.refresh}
             baseBranch={workspace?.baseBranch ?? "main"}
             folder={workspace?.path ?? ""}
             refreshKey={gitRefresh}
@@ -168,6 +170,7 @@ interface ChangesSurfaceProps {
   cwd: string | undefined;
   workspaceId: string;
   reviewExternal?: CodeReviewExternalSource;
+  retryReview: () => Promise<void>;
   baseBranch: string;
   folder: string;
   refreshKey: number;
@@ -282,6 +285,7 @@ function ChangesSurface({
   cwd,
   workspaceId,
   reviewExternal,
+  retryReview,
   baseBranch,
   folder,
   refreshKey,
@@ -301,6 +305,27 @@ function ChangesSurface({
     refreshKey,
     onChanged,
   });
+  useWorkbenchStatusSource(
+    {
+      error: model.error,
+      pending: model.refreshing,
+      primary: true,
+      hasContent: model.hasContent,
+      retry: model.reload,
+    },
+    scopeIdentity(model.scope),
+  );
+  useWorkbenchStatusSource(
+    {
+      error: model.commitsError ?? model.turnsError ?? reviewExternal?.error,
+      pending:
+        model.commitsLoading || model.turnsLoading || !!reviewExternal?.loading,
+      retry: async () => {
+        await Promise.allSettled([model.retrySources(), retryReview()]);
+      },
+    },
+    "comparison-sources",
+  );
   const [search, setSearch] = useState("");
   const searchQuery = search.trim().toLowerCase();
   const visibleSections = useMemo(
@@ -807,32 +832,18 @@ function ChangesSurface({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div
-        data-testid="changes-toolbar"
-        className="border-border1 flex h-9 shrink-0 items-center border-b px-2"
-      >
-        {/* The history menu must survive file selection and empty results so
-          a first endpoint cannot dismiss the menu before the second click. */}
-        {toolbar}
-        <div ref={setHeaderContainer} className="h-full min-w-0 flex-1" />
-        {sidebarToggle}
-      </div>
-      {model.error && (
+      <WorkbenchTabToolbar>
         <div
-          role="alert"
-          className="bg-red-bg text-red-fg flex shrink-0 items-center gap-2 px-3 py-2 text-xs"
+          data-testid="changes-toolbar"
+          className="border-border1 flex h-9 shrink-0 items-center border-b px-2"
         >
-          <span className="min-w-0 flex-1">{model.error}</span>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => onChanged(folder)}
-            aria-label="Retry changes"
-          >
-            Retry
-          </Button>
+          {/* The history menu must survive file selection and empty results so
+          a first endpoint cannot dismiss the menu before the second click. */}
+          {toolbar}
+          <div ref={setHeaderContainer} className="h-full min-w-0 flex-1" />
+          {sidebarToggle}
         </div>
-      )}
+      </WorkbenchTabToolbar>
       <div ref={containerRef} className="flex min-h-0 flex-1">
         {/* Diff pane — one virtualized stream for every file by default, or
           the selected file when the user chooses focused presentation. */}

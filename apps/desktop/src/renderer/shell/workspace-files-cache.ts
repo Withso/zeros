@@ -35,6 +35,37 @@ type InflightEntry = {
 const cache = new Map<string, Entry>();
 const inflight = new Map<string, InflightEntry>();
 const generations = new Map<string, number>();
+const failures = new Map<string, unknown>();
+const failureListeners = new Map<string, Set<() => void>>();
+
+export function workspaceFileListingFailure(
+  cwd: string | undefined,
+): unknown | null {
+  return cwd ? (failures.get(workspaceCacheKey(cwd)) ?? null) : null;
+}
+export function subscribeWorkspaceFileListingFailure(
+  cwd: string | undefined,
+  listener: () => void,
+): () => void {
+  if (!cwd) return () => {};
+  const key = workspaceCacheKey(cwd);
+  const listeners = failureListeners.get(key) ?? new Set();
+  listeners.add(listener);
+  failureListeners.set(key, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (!listeners.size) failureListeners.delete(key);
+  };
+}
+function publishListingFailure(key: string, error: unknown | null): void {
+  if (error === null) failures.delete(key);
+  else failures.set(key, error);
+  for (const listener of failureListeners.get(key) ?? []) listener();
+  for (const oldest of failures.keys()) {
+    if (failures.size <= MAX_GENERATIONS) break;
+    if (!failureListeners.has(oldest)) failures.delete(oldest);
+  }
+}
 
 const FRESH_MS = 4_000;
 const MAX_ENTRIES = 12;
@@ -129,9 +160,12 @@ export async function loadWorkspaceFileListing(
               ...(designDirectories !== undefined ? { designDirectories } : {}),
             };
       writeCacheEntry(key, { listing: stable, at: Date.now(), stale: false });
+      publishListingFailure(key, null);
       return stable;
     })
     .catch((error: unknown) => {
+      if ((generations.get(key) ?? 0) === generation)
+        publishListingFailure(key, error);
       const retained = cache.get(key)?.listing;
       if (retained !== undefined) return retained;
       throw error;
@@ -182,6 +216,7 @@ export function resetWorkspaceFilesCacheForTests(): void {
   cache.clear();
   inflight.clear();
   generations.clear();
+  failures.clear();
 }
 
 /** Publish a listing directly into the cache (harness/tests) — lets the real

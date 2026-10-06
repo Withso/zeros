@@ -269,7 +269,18 @@ export function useGithubReview({
   return {
     source,
     snapshot: snapshot.data,
-    refresh: snapshot.refresh,
+    refresh: useCallback(
+      () =>
+        key && active
+          ? githubReviewCache
+      .load(key, () => readKey(key), { force: true })
+              .then(
+                () => {},
+                () => {},
+              )
+          : Promise.resolve(),
+      [key, active],
+    ),
     error,
     notice,
   };

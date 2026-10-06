@@ -42,7 +42,8 @@
 //      so the PTY and the xterm grid stay in lockstep.
 // ──────────────────────────────────────────────────────────
 
-import React, { useEffect, useLayoutEffect, useRef } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useWorkbenchStatusSource } from "../workbench/tab-status";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -208,6 +209,22 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
    *  `ptyResize` calls so a ResizeObserver firing during the spawn
    *  window doesn't IPC into a non-existent session. */
   const createdRef = useRef(false);
+  const [readFailure, setReadFailure] = useState<unknown>(null);
+  const [readPending, setReadPending] = useState(false);
+  const [hasScrollback, setHasScrollback] = useState(false);
+  const managed = useWorkbenchStatusSource(
+    {
+      error: readFailure,
+      pending: readPending,
+      primary: true,
+      hasContent: hasScrollback,
+      retry: async () => {
+        const term = xtermRef.current;
+        if (visible && term) await spawn(term, true);
+      },
+    },
+    sessionId,
+  );
   const attachInFlightRef = useRef(false);
   const reconnectPendingRef = useRef(false);
   const launchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -560,6 +577,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   const spawn = async (term: XTerm, reconnect = false) => {
     if (attachInFlightRef.current || xtermRef.current !== term) return;
     attachInFlightRef.current = true;
+    setReadPending(true);
     try {
       const { cols, rows } = lastDimsRef.current;
       if (attachOnly || (reconnect && createdRef.current)) {
@@ -569,7 +587,8 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
         const terms = await ptyTerminals(
           isCloudWorkspace(cwd) ? cwd : undefined,
         );
-        if (xtermRef.current !== term || terms === null) return;
+        if (xtermRef.current !== term) return;
+        if (terms === null) throw new Error("Terminal connection unavailable");
         const live = terms.some(
           (t) => t.sessionId === sessionId && t.exited !== true,
         );
@@ -606,16 +625,20 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       });
       if (xtermRef.current !== term) return;
       if (!info) {
+        setReadFailure(new Error("Terminal connection unavailable"));
         // No-bridge fallback only. An optional connected relay client gets a real
         // host shell; ptyCreate returns null when there is no engine connection.
-        term.writeln(
-          isCloudWorkspace(cwd)
+        if (!managed)
+          term.writeln(
+            isCloudWorkspace(cwd)
             ? "\x1b[33m(Cloud terminal unavailable — reconnect to this workspace to retry.)\x1b[0m"
             : "\x1b[33m(No host connection — terminal needs the Mac app or a paired relay session.)\x1b[0m",
-        );
+          );
         return;
       }
       createdRef.current = true;
+      setReadFailure(null);
+      setHasScrollback(true);
       if (loginProvider) term.focus();
       // A fresh/reattached PTY is live again — clear the exited latch so
       // keystrokes flow to the shell instead of triggering another
@@ -682,7 +705,10 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
           }, 200);
         }
       }
+    } catch (error) {
+      if (xtermRef.current === term) setReadFailure(error);
     } finally {
+      if (xtermRef.current === term) setReadPending(false);
       attachInFlightRef.current = false;
       // A newer connection may have arrived while the previous request was
       // failing. Coalesce those boundaries into one fresh attachment.

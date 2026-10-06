@@ -60,6 +60,12 @@ import { useScrollMemory, useScrollMemoryRef } from "../../scroll-memory";
 import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
 import { CodeBlockCopyButton } from "@/renderer/shared/ui/primitives/elements/code-block";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
+import {
+  WorkbenchTabToolbar,
+  WorkbenchTabStatusScope,
+  WorkbenchEmptyState,
+  useWorkbenchStatusSource,
+} from "../tab-status";
 import { cn } from "@/renderer/shared/ui/cn";
 import { useInstantViewSwitch } from "@/renderer/shared/ui/use-instant-view-switch";
 import { useWorkspaceDispatch } from "@/renderer/state/workspace-store";
@@ -381,6 +387,29 @@ export function FileViewer({
   const rawDiff = workspaceId ? (diffSnapshot.data ?? null) : "";
   const diffLoading = rawDiff === null && diffSnapshot.loading;
   const diffFailed = rawDiff === null && !diffLoading && !!diffSnapshot.error;
+  useWorkbenchStatusSource(
+    {
+      active,
+      error:
+        readSnapshot.error ?? (result?.kind === "error" ? result.error : null),
+      pending: readSnapshot.loading || readSnapshot.refreshing,
+      primary: true,
+      hasContent: !!result && result.kind !== "error",
+      retry: () => loadWorkspaceFileRead(readQuery, { force: true }),
+    },
+    JSON.stringify([cwd, path, "read"]),
+  );
+  useWorkbenchStatusSource(
+    {
+      active,
+      error: workspaceId ? diffSnapshot.error : null,
+      pending:
+        !!workspaceId && (diffSnapshot.loading || diffSnapshot.refreshing),
+      hasContent: rawDiff !== null,
+      retry: () => loadWorkspaceFileDiff(diffQuery, { force: true }),
+    },
+    JSON.stringify([workspaceId, path, diffQuery]),
+  );
 
   // The diff to render: the git patch if present; for a live-status-confirmed
   // new file opened from Changes — absent from `git diff` — synthesize an
@@ -746,161 +775,149 @@ export function FileViewer({
   );
 
   return (
-    <div ref={viewerRef} className="bg-bg1 flex h-full min-h-0 flex-col">
-      {headerContainer === undefined
-        ? header
-        : headerContainer
-          ? createPortal(header, headerContainer)
-          : null}
+    <WorkbenchTabStatusScope active={active}>
+      <div ref={viewerRef} className="bg-bg1 flex h-full min-h-0 flex-col">
+        {headerContainer === undefined ? (
+          <WorkbenchTabToolbar>{header}</WorkbenchTabToolbar>
+        ) : headerContainer ? (
+          createPortal(header, headerContainer)
+        ) : null}
 
-      {/* Body row. Optional trailing content starts below the fixed header. */}
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        <div
-          data-testid="files-viewer-body"
-          className="min-h-0 min-w-0 flex-1 overflow-hidden"
-          aria-busy={readLoading || diffLoading || undefined}
-        >
-          {readFailed && !diffShown && (
-            <Placeholder
-              Icon={FileX2}
-              text="Couldn't reach the file reader — try restarting the app"
-            />
-          )}
-          {result?.kind === "binary" && !diffShown && (
-            <Placeholder
-              Icon={FileX2}
-              text="Binary file — preview not available"
-            />
-          )}
-          {result?.kind === "too-large" && !diffShown && (
-            <Placeholder
-              Icon={FileX2}
-              text={`File too large to preview (${(result.bytes / 1_000_000).toFixed(1)} MB)`}
-            />
-          )}
-          {result?.kind === "error" && !fileMissing && !diffShown && (
-            <Placeholder
-              Icon={FileX2}
-              text={result.error ?? "Couldn't read this file"}
-            />
-          )}
-          {missingDisposition === "show-missing" && !diffShown && (
-            <Placeholder Icon={FileX2} text="file no longer exists on disk" />
-          )}
-          {result?.kind === "image" && !diffShown && (
-            <div className="flex h-full items-center justify-center overflow-auto p-4">
-              {result.dataUrl ? (
-                <img
-                  src={result.dataUrl}
-                  alt={path}
-                  className="max-h-full max-w-full object-contain"
-                />
-              ) : (
-                <Placeholder Icon={ImageOff} text="Image unavailable" />
-              )}
-            </div>
-          )}
-          {diffShown &&
-            (notInCommit ? (
-              <Placeholder
-                Icon={FileQuestion}
-                text={`${baseOf(path)} isn’t part of this commit`}
-              />
-            ) : diffFailed ? (
+        {/* Body row. Optional trailing content starts below the fixed header. */}
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <div
+            data-testid="files-viewer-body"
+            className="min-h-0 min-w-0 flex-1 overflow-hidden"
+            aria-busy={readLoading || diffLoading || undefined}
+          >
+            {readFailed && !diffShown && <WorkbenchEmptyState type="files" />}
+            {result?.kind === "binary" && !diffShown && (
               <Placeholder
                 Icon={FileX2}
-                text={
-                  diffSnapshot.error?.message ??
-                  "Couldn't read this file's diff"
-                }
+                text="Binary file — preview not available"
               />
-            ) : diffLoading ? (
-              <div className="h-full" aria-busy="true" />
-            ) : (
-              <DiffView
-                path={path}
-                patch={diffPatch}
-                diffStyle={diffStyle}
-                scrollKey={diffScrollKey}
-                review={review}
-                active={active}
-                hunkSource={hunkSource}
+            )}
+            {result?.kind === "too-large" && !diffShown && (
+              <Placeholder
+                Icon={FileX2}
+                text={`File too large to preview (${(result.bytes / 1_000_000).toFixed(1)} MB)`}
               />
-            ))}
-          {previewShown && previewHtml !== null && (
-            <div
-              ref={previewScrollRef}
-              className="h-full overflow-x-hidden overflow-y-auto px-5 py-4"
-            >
-              <MarkdownPreview html={previewHtml} />
-            </div>
-          )}
-          {sourceShown && sourceReadOnly && (
-            <div className="flex h-full min-h-0 flex-col">
-              {designReadOnly && (
-                <div className="text-fg3 bg-bg2 border-border1 shrink-0 border-b px-5 py-2 text-xs">
-                  Edit this cloud Design source through the Design tools.
-                </div>
-              )}
-              <div className="flex min-h-0 flex-1 flex-col">
-                <MergeConflictActions
-                  cwd={cwd ?? ""}
-                  path={path}
-                  content={result?.content ?? ""}
-                  isGitConflict={isGitConflict}
-                  active={active}
-                  readOnly
-                  designPath={designReadOnly}
-                  onPreview={() => {}}
-                  onSaved={() => {}}
+            )}
+            {result?.kind === "error" && !fileMissing && !diffShown && (
+              <WorkbenchEmptyState type="files" />
+            )}
+            {missingDisposition === "show-missing" && !diffShown && (
+              <Placeholder Icon={FileX2} text="file no longer exists on disk" />
+            )}
+            {result?.kind === "image" && !diffShown && (
+              <div className="flex h-full items-center justify-center overflow-auto p-4">
+                {result.dataUrl ? (
+                  <img
+                    src={result.dataUrl}
+                    alt={path}
+                    className="max-h-full max-w-full object-contain"
+                  />
+                ) : (
+                  <Placeholder Icon={ImageOff} text="Image unavailable" />
+                )}
+              </div>
+            )}
+            {diffShown &&
+              (notInCommit ? (
+                <Placeholder
+                  Icon={FileQuestion}
+                  text={`${baseOf(path)} isn’t part of this commit`}
                 />
-                <div className="min-h-0 flex-1">
-                  <ReadOnlySource
+              ) : diffFailed ? (
+                <WorkbenchEmptyState type="files" />
+              ) : diffLoading ? (
+                <div className="h-full" aria-busy="true" />
+              ) : (
+                <DiffView
+                  path={path}
+                  patch={diffPatch}
+                  diffStyle={diffStyle}
+                  scrollKey={diffScrollKey}
+                  review={review}
+                  active={active}
+                  hunkSource={hunkSource}
+                />
+              ))}
+            {previewShown && previewHtml !== null && (
+              <div
+                ref={previewScrollRef}
+                className="h-full overflow-x-hidden overflow-y-auto px-5 py-4"
+              >
+                <MarkdownPreview html={previewHtml} />
+              </div>
+            )}
+            {sourceShown && sourceReadOnly && (
+              <div className="flex h-full min-h-0 flex-col">
+                {designReadOnly && (
+                  <div className="text-fg3 bg-bg2 border-border1 shrink-0 border-b px-5 py-2 text-xs">
+                    Edit this cloud Design source through the Design tools.
+                  </div>
+                )}
+                <div className="flex min-h-0 flex-1 flex-col">
+                  <MergeConflictActions
+                    cwd={cwd ?? ""}
                     path={path}
                     content={result?.content ?? ""}
-                    scrollKey={JSON.stringify([scrollKeyBase, "source"])}
-                    review={review}
+                    isGitConflict={isGitConflict}
                     active={active}
+                    readOnly
+                    designPath={designReadOnly}
+                    onPreview={() => {}}
+                    onSaved={() => {}}
                   />
+                  <div className="min-h-0 flex-1">
+                    <ReadOnlySource
+                      path={path}
+                      content={result?.content ?? ""}
+                      scrollKey={JSON.stringify([scrollKeyBase, "source"])}
+                      review={review}
+                      active={active}
+                    />
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
-          {/* Keep a writable editor mounted while Diff/Preview is selected. Its
+            )}
+            {/* Keep a writable editor mounted while Diff/Preview is selected. Its
             draft + dirty registration then survive every workbench view switch;
             only the owning File tab closing (or a destructive reset revision)
             intentionally unmounts it. */}
-          {isText && !sourceReadOnly && (
-            <div
-              className={cn("h-full", !sourceShown && "hidden")}
-              aria-hidden={!sourceShown || !active || undefined}
-              {...(!sourceShown || !active ? { inert: "" } : {})}
-            >
-              <SourceEditor
-                key={`${cwd}::${path}::${contentRevision ?? 0}`}
-                editorId={tabId}
-                cwd={cwd ?? ""}
-                path={path}
-                content={result?.content ?? ""}
-                offscreen={!sourceShown || !active}
-                review={review}
-                isGitConflict={isGitConflict}
-              />
-            </div>
-          )}
+            {isText && !sourceReadOnly && (
+              <div
+                className={cn("h-full", !sourceShown && "hidden")}
+                aria-hidden={!sourceShown || !active || undefined}
+                {...(!sourceShown || !active ? { inert: "" } : {})}
+              >
+                <SourceEditor
+                  key={`${cwd}::${path}::${contentRevision ?? 0}`}
+                  editorId={tabId}
+                  cwd={cwd ?? ""}
+                  path={path}
+                  content={result?.content ?? ""}
+                  offscreen={!sourceShown || !active}
+                  review={review}
+                  isGitConflict={isGitConflict}
+                />
+              </div>
+            )}
+          </div>
+          {bodyTrailing}
         </div>
-        {bodyTrailing}
-      </div>
 
-      {discardTarget === path && (
-        <DiscardDialog
-          path={discardTarget}
-          isNew={isNewFile === true}
-          onCancel={() => setDiscardTarget(null)}
-          onConfirm={onDiscardConfirm}
-        />
-      )}
-    </div>
+        {discardTarget === path && (
+          <DiscardDialog
+            path={discardTarget}
+            isNew={isNewFile === true}
+            onCancel={() => setDiscardTarget(null)}
+            onConfirm={onDiscardConfirm}
+          />
+        )}
+      </div>
+    </WorkbenchTabStatusScope>
   );
 }
 

@@ -9,6 +9,7 @@ import {
   useStableRetainedViewOrder,
 } from "../use-retained-view-keys";
 import { DesignWorkbenchSurface } from "../../features/design-workspace/design-workbench-surface";
+import { WorkbenchTabFrame } from "./tab-status";
 
 interface DesignTarget {
   workspace: Workspace;
@@ -72,11 +73,17 @@ export function RetainedDesignDeck({
         aria-hidden={!visible}
         className={`absolute inset-0 flex min-h-0 min-w-0 overflow-hidden ${visible ? "pointer-events-auto visible" : "pointer-events-none invisible"}`}
       >
-        <DesignWorkbenchSurface
-          workspace={target.workspace}
+        <WorkbenchTabFrame
+          tab={{ id: "design", type: "design", title: "Design" }}
           folder={target.folder}
           active={visible}
-        />
+        >
+          <DesignWorkbenchSurface
+            workspace={target.workspace}
+            folder={target.folder}
+            active={visible}
+          />
+        </WorkbenchTabFrame>
       </div>
     );
   });

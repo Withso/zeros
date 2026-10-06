@@ -85,6 +85,46 @@ describe("workspace file data cache", () => {
     diffTurn.mockReset();
   });
 
+  it("retains confirmed content when the reader returns a transient failure", async () => {
+    const query = { cwd: "/repo", path: "src/a.ts" };
+    const confirmed = textResult(query.path, "confirmed");
+    primeWorkspaceFileRead(query, confirmed);
+    readFile.mockResolvedValueOnce({
+      kind: "error",
+      bytes: 0,
+      path: query.path,
+      error: "Request timeout: engine disconnected",
+    });
+
+    await expect(loadWorkspaceFileRead(query, { force: true })).rejects.toThrow(
+      "engine disconnected",
+    );
+    expect(peekWorkspaceFileRead(query)).toBe(confirmed);
+    expect(peekWorkspaceFileRead({ ...query, cwd: "/other" })).toBeUndefined();
+
+    readFile.mockResolvedValueOnce(textResult(query.path, "recovered"));
+    await loadWorkspaceFileRead(query, { force: true });
+    expect(peekWorkspaceFileRead(query)).toEqual(
+      textResult(query.path, "recovered"),
+    );
+  });
+
+  it("publishes an authoritative missing-file result instead of retaining deleted content", async () => {
+    const query = { cwd: "/repo", path: "deleted.ts" };
+    primeWorkspaceFileRead(query, textResult(query.path, "deleted"));
+    const missing = {
+      kind: "error" as const,
+      bytes: 0,
+      path: query.path,
+      error: "file no longer exists on disk",
+    };
+    readFile.mockResolvedValueOnce(missing);
+    await expect(loadWorkspaceFileRead(query, { force: true })).resolves.toBe(
+      missing,
+    );
+    expect(peekWorkspaceFileRead(query)).toBe(missing);
+  });
+
   it("deduplicates exact file reads and keeps other paths isolated", async () => {
     const pending = deferred<ReturnType<typeof textResult>>();
     readFile.mockReturnValueOnce(pending.promise);

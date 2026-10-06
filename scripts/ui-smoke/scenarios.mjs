@@ -99,6 +99,13 @@ export const scenarioRegistry = [
     900,
     650,
   ),
+  fresh(
+    "workbench-status",
+    "workbench-status",
+    "runWorkbenchStatusSmoke",
+    460,
+    650,
+  ),
   fresh("cloud-replica", "cloud-replicas", "runCloudReplicaSmoke", 1100, 850),
   fresh("cloud-preview", "cloud-previews", "runCloudPreviewSmoke", 900, 650),
   fresh("cloud-terminal", "cloud-terminal", "runCloudTerminalSmoke", 1100, 780),

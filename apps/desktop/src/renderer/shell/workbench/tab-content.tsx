@@ -8,6 +8,12 @@ import { ChangesWorkbenchSurface } from "./tabs/changes-surface";
 import { FilesTab } from "./tabs/files-tab";
 import { ReviewSurface } from "./tabs/review-surface";
 import type { WorkbenchTab, WorkbenchTabType } from "./tab-model";
+import { useWorkspaceStore, selectActiveFolder } from "../../state/store";
+import { WorkbenchTabFrame } from "./tab-status";
+import { WORKBENCH_STATUS_ADAPTERS } from "./tab-status-model";
+import { useSourceTarget } from "./tabs/changes-tab";
+import { useChangesFilter } from "./tabs/changes-filter-store";
+import { scopeIdentity } from "./tabs/changes-scope";
 
 interface TabBodyProps {
   tab: WorkbenchTab;
@@ -33,5 +39,33 @@ const TAB_BODY_MAP: Record<
 
 export function WorkbenchTabContent({ tab, active, scope }: TabBodyProps) {
   const Body = TAB_BODY_MAP[tab.type];
-  return <Body tab={tab} active={active} scope={scope} />;
+  const folder = useWorkspaceStore(selectActiveFolder);
+  const { workspace, changesTarget } = useSourceTarget();
+  const filter = useChangesFilter(changesTarget ?? "");
+  // Changes owns its comparison in the shared filter store, rather than the
+  // tab document. PR identity likewise belongs to workspace metadata.
+  const statusTarget =
+    tab.type === "changes" && changesTarget
+      ? JSON.stringify([
+          changesTarget,
+          scopeIdentity(filter.scope),
+          filter.turn,
+        ])
+      : tab.type === "review" && workspace
+        ? JSON.stringify([workspace.id, workspace.prNumber, tab.reviewSubtab])
+        : undefined;
+  // The exhaustive status adapter and unconditional frame make the contract
+  // structural for future bodies. Retained decks use the same frame below.
+  const adapter = WORKBENCH_STATUS_ADAPTERS[tab.type];
+  return (
+    <WorkbenchTabFrame
+      tab={tab}
+      folder={scope ?? folder ?? ""}
+      active={active}
+      key={adapter.noun}
+      statusTarget={statusTarget}
+    >
+      <Body tab={tab} active={active} scope={scope} />
+    </WorkbenchTabFrame>
+  );
 }

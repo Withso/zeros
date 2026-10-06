@@ -63,6 +63,7 @@ import {
 } from "react";
 import type { GitStatusEntry } from "@pierre/trees";
 
+import { useWorkbenchStatusSource } from "../tab-status";
 import { listIgnoredEntries } from "@/renderer/platform/git";
 
 import {
@@ -337,6 +338,23 @@ export function useIgnoredEntries(
   enabled = true,
 ): IgnoredEntriesState {
   const [state, setState] = useState<IgnoredState>(() => warmState(cwd));
+  const [failure, setFailure] = useState<{
+    cwd: string;
+    error: unknown;
+  } | null>(null);
+  const [readPending, setReadPending] = useState(false);
+  const retryListing = useRef<(() => Promise<void>) | null>(null);
+  const currentCwd = useRef(cwd);
+  currentCwd.current = cwd;
+  useWorkbenchStatusSource(
+    {
+      error: failure && failure.cwd === cwd ? failure.error : null,
+      pending: enabled && readPending,
+      active: enabled,
+      retry: () => retryListing.current?.(),
+    },
+    `ignored:${cwd}`,
+  );
   const active = state.cwd === cwd ? state : null;
   // A reused tree fiber can receive another workspace before the effect below
   // re-lists. Fall back to the NEW cwd's warm roots rather than to nothing — and
@@ -377,51 +395,66 @@ export function useIgnoredEntries(
       return;
     }
     let cancelled = false;
-    void (async () => {
-      try {
-        const roots = await listIgnoredEntries(cwd);
-        if (cancelled) return;
-        // Publish for the NEXT mount on this workspace, from the one place that
-        // holds an authoritative answer. Seeding from the hook's own state
-        // instead would also publish the empty starting value, and a workspace
-        // whose first listing failed would be cached as "ignores nothing".
-        rememberIgnoredRoots(cwd, roots);
-        setState((prev) => withRoots(prev, cwd, roots));
-      } catch {
-        // No bridge / not a repo — the tree simply shows what git tracks,
-        // which is strictly better than an error in a file browser.
-        return;
-      }
-      // In PARALLEL, not in sequence. reloadKey bumps faster than a chain of
-      // bridge round-trips can finish while an agent is writing, and each bump
-      // cancels the previous chain — so a serial loop would restart from the
-      // top every time and the branches at the end of the list would never be
-      // refreshed at all. The count is bounded by how many directories the user
-      // has open, which is a handful.
-      await Promise.all(
-        [...expandedRef.current].map(async (dir) => {
-          try {
-            const children = await listIgnoredEntries(cwd, dir);
-            if (cancelled) return;
-            setState((prev) => withRefreshedDir(prev, cwd, dir, children));
-          } catch {
-            /* keep the last good listing for this branch */
-          }
-        }),
-      );
-      if (cancelled) return;
-      // Both listings are now current, so anything still marked open that they
-      // no longer report is genuinely gone from disk (`rm -rf dist` while `dist/`
-      // was expanded). Drop it, or every later refresh spends a round-trip and an
-      // engine readdir on a directory that does not exist.
-      setState((prev) =>
-        prev.cwd === cwd
-          ? withoutVanishedDirs(prev, knownIgnoredDirs(prev.roots, prev.loaded))
-          : prev,
-      );
-    })();
+    let flight: Promise<void> | null = null;
+    const refresh = () => {
+      if (flight) return flight;
+      setReadPending(true);
+      let failed = false;
+      flight = (async () => {
+        try {
+          const roots = await listIgnoredEntries(cwd);
+          if (cancelled) return;
+          // Publish for the NEXT mount on this workspace, from the one place that
+          // holds an authoritative answer. Seeding from the hook's own state
+          // instead would also publish the empty starting value, and a workspace
+          // whose first listing failed would be cached as "ignores nothing".
+          rememberIgnoredRoots(cwd, roots);
+          setState((prev) => withRoots(prev, cwd, roots));
+        } catch (error) {
+          failed = true;
+          if (!cancelled) setFailure({ cwd, error });
+          return;
+        }
+        // In PARALLEL, not in sequence. reloadKey bumps faster than a chain of
+        // bridge round-trips can finish while an agent is writing, and each bump
+        // cancels the previous chain — so a serial loop would restart from the
+        // top every time and the branches at the end of the list would never be
+        // refreshed at all. The count is bounded by how many directories the user
+        // has open, which is a handful.
+        await Promise.all(
+          [...expandedRef.current].map(async (dir) => {
+            try {
+              const children = await listIgnoredEntries(cwd, dir);
+              if (cancelled) return;
+              setState((prev) => withRefreshedDir(prev, cwd, dir, children));
+            } catch (error) {
+              failed = true;
+              if (!cancelled) setFailure({ cwd, error });
+            }
+          }),
+        );
+        if (cancelled || failed) return;
+        setFailure(null);
+        // Both listings are now current, so anything still marked open that they
+        // no longer report is genuinely gone from disk (`rm -rf dist` while `dist/`
+        // was expanded). Drop it, or every later refresh spends a round-trip and an
+        // engine readdir on a directory that does not exist.
+        setState((prev) =>
+          prev.cwd === cwd
+            ? withoutVanishedDirs(prev, knownIgnoredDirs(prev.roots, prev.loaded))
+            : prev,
+        );
+      })().finally(() => {
+        flight = null;
+        if (!cancelled) setReadPending(false);
+      });
+      return flight;
+    };
+    retryListing.current = refresh;
+    void refresh();
     return () => {
       cancelled = true;
+      retryListing.current = null;
     };
   }, [cwd, enabled, reloadKey]);
 
@@ -431,7 +464,8 @@ export function useIgnoredEntries(
       let children: string[];
       try {
         children = await listIgnoredEntries(cwd, dir);
-      } catch {
+      } catch (error) {
+        if (currentCwd.current === cwd) setFailure({ cwd, error });
         // A FAILED listing is not an empty directory. Recording [] would cache
         // the failure as fact — `withLoadedDir` refuses to overwrite an existing
         // entry and a loaded dir is never "pending", so a single bridge timeout

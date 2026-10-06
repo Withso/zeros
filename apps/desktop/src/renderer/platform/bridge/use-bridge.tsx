@@ -24,22 +24,16 @@ import { prepareCloudGithubWrite } from "../cloud-github";
 import {
   RuntimeClient,
   invalidateEnginePort,
-  describeConnectionRejection,
   isRejectionRetryableAfterEngineRestart,
   type ConnectionStatus,
 } from "./ws-client";
 import { getActiveBridge, setActiveBridge, wireCloudRuntimeRetirement } from "./active-bridge";
 import { wireGithubCredentialWriteback } from "./github-token-sync";
 import { nativeListen, useNativeRuntime } from "../runtime";
-import { toast } from "../../shared/ui/primitives/elements";
 import { WorkspaceRuntimeClient } from "./workspace-runtime-client";
 import { openCloudRuntime } from "./open-cloud-runtime";
 import { readCloudWorkspaceHistory } from "../cloud-history";
 import { canReadCloudWorkspace, cloudCatalogGeneration, cloudWorkspaceCatalogConfirmed, cloudWorkspaceDocument, cloudWorkspaceOperation, getCloudWorkspaceRows } from "../../state/cloud-workspace-catalog";
-
-/** Stable toast key for the connection-rejected card: a re-rejection REPLACES
- *  the visible toast instead of stacking one per reconnect attempt. */
-const REJECTION_TOAST_ID = "bridge-connection-rejected";
 
 // ── Context ──────────────────────────────────────────────
 
@@ -95,26 +89,8 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
     // renderer sees only secret-free method-addressed invalidations.
     const offCredentialWriteback = wireGithubCredentialWriteback(client);
 
-    // CONNECTION_REJECTED consumer — the ONLY one. ws-client latches a terminal
-    // rejection and suspends its reconnect ladder (retrying the same
-    // client/token would just be refused again); before this subscriber
-    // existed, nothing consumed the event and the app silently wedged in a
-    // generic "disconnected" state until relaunch. Surface reason-specific
-    // copy on the app's single toast rail: persistent (the connection is
-    // unusable until the cause is resolved, so it must not auto-dismiss).
-    const offRejected = client.onConnectionRejected((rejection) => {
-      const copy = describeConnectionRejection(rejection);
-      toast.error(copy.headline, {
-        description: copy.description,
-        duration: Infinity,
-        id: REJECTION_TOAST_ID,
-      });
-    });
-    // …and retire the toast the moment ANY transport connects (a successful
-    // open also clears the rejection latch inside ws-client).
-    const offRejectionToast = client.onStatusChange((status) => {
-      if (status === "connected") toast.dismiss(REJECTION_TOAST_ID);
-    });
+    // Persistent engine availability is presented by workbench tab frames.
+    // Keep connection/rejection handling in the client; no duplicate load toast.
 
     // Watchdog respawn handler: when the Electron sidecar respawns
     // the engine on a NEW port (after detecting unresponsiveness),
@@ -167,8 +143,6 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
       if (offRestart) offRestart();
       if (offCloudRetired) offCloudRetired();
       offCredentialWriteback();
-      offRejected();
-      offRejectionToast();
       // React StrictMode replays passive setup immediately after cleanup. The
       // client is render-owned, so disposing it synchronously would leave that
       // second setup with a permanently dead transport. A real unmount has no

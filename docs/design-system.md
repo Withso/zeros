@@ -53,6 +53,10 @@ The full guide is `docs/design-system.md`; token values are in
    color as the only signal (pair status color with an icon or text). Don't
    build class names at runtime (`text-${tone}`): the checks can't see them —
    map states to complete class strings instead.
+   Workbench content load/availability failures use `WorkbenchTabFrame`'s
+   single persistent banner and neutral icon/line empty state. Action outcomes
+   use toasts. Report each read with `useWorkbenchStatusSource`; retain confirmed
+   exact-key content and never add a second error paragraph or Retry button.
 7. **Verify:** run `pnpm check:ui` (compiles every class, enforces the policy
    ratchet) plus `pnpm typecheck`, `pnpm lint`, and the nearby tests. Fix
    findings; never raise `styles/policy/ui-debt.json`, add a `check:ui ignore`
@@ -232,11 +236,39 @@ toasts) · `rounded-full` (true circles). Derived surface recipes:
 8 · 10 · 12, plus `px`. Half steps (2/6/10/14px) belong inside controls and dense
 rows; layout gaps prefer `gap-1` `gap-2` `gap-3` `gap-4` `gap-6`.
 
-**Feedback:** transient feedback (errors, successes, warnings, status) goes
-through the single app-wide toast surface — `toast` / `toast.error` /
-`toast.success` from `shared/ui/primitives/elements` — never an ad-hoc inline
-pill or banner (**judgment**). Persistent state (a failed row, a form error next
-to its field) stays inline with the status colors in §5.
+**Feedback:** outcomes of user actions (save, discard, merge, fork) use the
+single app-wide toast surface — `toast` / `toast.error` / `toast.success` from
+`shared/ui/primitives/elements`. Persistent state stays with its owner: a form
+error beside its field, or a workbench content load/availability failure in its
+tab's status banner. Never toast that same load failure.
+
+Every workbench body, including retained Design, Setup, terminal tabs and the
+bottom Terminals panel, uses one `WorkbenchTabFrame`. Its persistent full-width
+banner follows all of the tab's own toolbar rows. Workspace availability wins
+over primary data failure, then secondary reads (comments, history, ignored
+entries). It has no close button or timer and clears after successful recovery.
+Confirmed content for the exact workspace/target stays visible during refresh
+and failure. Without confirmed content, show the tab icon (`size-10`,
+`strokeWidth={1}`, `text-muted-fg`) and one neutral sentence of about eight words
+or fewer (`text-fg2 text-xs`), centred with no buttons or repeated error text.
+Legitimate non-error empty states may retain their creation/configuration action.
+
+Failures use `bg-red-bg text-red-fg` and a leading error icon. Self-resolving
+availability (setup, starting, reconnecting) uses `bg-yellow-bg text-yellow-fg`
+and a calm spinner with reduced-motion support. Archived workspaces use a neutral
+info tone. Visible copy is short, human and sentence case; enum values, stack
+traces, `Error:` prefixes and transport details belong only in sanitised title
+diagnostics. Copy describes the workspace condition or “Couldn't load files” /
+“Files took too long to load”, never a false unconfigured/empty result.
+
+The banner message wraps to two lines with full copy in its title. A single
+compact ghost action stays visible at narrow widths; Retry has a tab-specific
+accessible name, shares one flight across failed sources, and says “Retrying…”
+until settled. Keep the banner element/live region stable through retry and tone
+changes; announce message changes once without moving focus. Hidden retained tabs
+are inert and do not announce, animate, poll or run status timers. Reconnect
+grace (2 seconds) and escalation (20 seconds) use connection timestamps on
+activation. Passive reads/Retry admission never wake a cloud computer.
 
 ## 8. Building blocks
 
@@ -252,6 +284,8 @@ state, `aria-*`, `data-*` hooks) at the caller.
 | An icon-only action | `IconButton` | Required `label` (its accessible name); `size="inline"` = 20px action inside a row or tab, `size="standard"` = 28px chrome action (Button `icon-sm` geometry). Defaults: raised hover, 120ms color motion, `type="button"`; `asChild` keeps link semantics. |
 | Window chrome or a panel heading | `PanelHeader` | Required `size="window"` (40px, gap-1, px-2, `bg-bg1`) or `size="panel"` (36px, gap-2, px-3); border1 bottom divider; optional `div` / `section` / `header`. |
 | A compact tool disclosure or hover trigger | `ListRow` | Width-fit button row; the caller owns `aria-expanded`, `aria-controls`, labels, state, and events. |
+| Every workbench tab body | `WorkbenchTabFrame` + `WorkbenchTabToolbar` (`shell/workbench/tab-status.tsx`) | Structural single status slot under portalled toolbar rows; preserves confirmed content, otherwise supplies `WorkbenchEmptyState`. The exhaustive `WorkbenchTabType` adapter requires copy/icon for future tabs. |
+| A tab's persistent read status | `useWorkbenchStatusSource` + `describeWorkbenchFailure` | Exact-owner primary/secondary errors and awaitable retries feed one `WorkbenchTabBanner`; availability has priority. Action outcomes remain toasts. |
 
 - `Inline` / `Stack` accept only the gap steps `0`, `0.5`, `1`, `1.5`, `2`,
   `2.5`, `3`, `4`, `6`, `8`. Their `className` is for outer layout (sizing,

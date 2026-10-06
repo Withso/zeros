@@ -111,6 +111,11 @@ import {
 } from "@/renderer/features/browser/native-browser-overlay";
 import { listenForNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 import { PanelHeader } from "@/renderer/shared/ui/primitives/panel-header";
+import {
+  WorkbenchEmptyState,
+  WorkbenchTabToolbar,
+  useWorkbenchStatusSource,
+} from "../tab-status";
 
 // URL normalization lives in ./localhost-url. Browser navigation accepts
 // ordinary http(s) sites; Design/Canvas are gated separately to loopback URLs.
@@ -145,19 +150,26 @@ export function BrowserTab(props: BrowserTabProps) {
       isLoopbackUrl(normalizeBrowserUrl(props.tab.url ?? "") ?? "")) &&
     !workspacePreviewAvailable(props.scope ?? previewFolder ?? "")
   ) {
-    return (
-      <div
-        className="bg-bg1 text-fg2 flex min-h-0 flex-1 items-center justify-center p-4 text-sm"
-        role="status"
-      >
-        Cloud preview URLs are not configured for this build.
-      </div>
-    );
+    return <UnavailableBrowser />;
   }
   return props.tab.browserConversationId ? (
     <NativeAgentBrowserTab {...props} />
   ) : (
     <IframeBrowserTab {...props} scope={folder} />
+  );
+}
+
+function UnavailableBrowser() {
+  const message = "Cloud preview URLs are not configured for this build.";
+  const managed = useWorkbenchStatusSource({
+    error: message,
+    pending: false,
+    primary: true,
+  });
+  return managed ? (
+    <WorkbenchEmptyState type="browser" />
+  ) : (
+    <p className="text-fg2 p-4 text-sm">{message}</p>
   );
 }
 
@@ -182,6 +194,18 @@ function NativeAgentBrowserTab({ tab, active }: BrowserTabProps) {
   const [editingAddress, setEditingAddress] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [surfaceError, setSurfaceError] = useState<string | null>(null);
+  const retryAttach = useRef<(() => Promise<void>) | null>(null);
+  const managed = useWorkbenchStatusSource(
+    {
+      error: surfaceError,
+      pending: restoring,
+      primary: true,
+      hasContent:
+        attachedSessionRef.current === browserSessionId && !!browserSessionId,
+      retry: () => (active ? retryAttach.current?.() : undefined),
+    },
+    browserSessionId,
+  );
   const [blockingOverlayOpen, setBlockingOverlayOpen] = useState(false);
   const [overlayCapture, setOverlayCapture] = useState<string | null>(null);
   const lastOverlayCaptureRef = useRef<string | null>(null);
@@ -334,6 +358,7 @@ function NativeAgentBrowserTab({ tab, active }: BrowserTabProps) {
     let frame = 0;
     let request: Promise<unknown> | null = null;
     let rerun = false;
+    const retryWaiters = new Set<() => void>();
     const attach = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
@@ -382,9 +407,17 @@ function NativeAgentBrowserTab({ tab, active }: BrowserTabProps) {
               rerun = false;
               attach();
             }
+            for (const resolve of retryWaiters) resolve();
+            retryWaiters.clear();
           });
       });
     };
+    const retry = () =>
+      new Promise<void>((resolve) => {
+        retryWaiters.add(resolve);
+        attach();
+      });
+    retryAttach.current = retry;
     const observer = new ResizeObserver(attach);
     observer.observe(host);
     window.addEventListener("resize", attach);
@@ -392,6 +425,8 @@ function NativeAgentBrowserTab({ tab, active }: BrowserTabProps) {
     attach();
     return () => {
       disposed = true;
+      if (retryAttach.current === retry) retryAttach.current = null;
+      for (const resolve of retryWaiters) resolve();
       cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener("resize", attach);
@@ -461,7 +496,9 @@ function NativeAgentBrowserTab({ tab, active }: BrowserTabProps) {
   const placeholder = blockingOverlayOpen
     ? null
     : surfaceError
-      ? surfaceError
+      ? managed
+        ? "Retry to load the preview."
+        : surfaceError
       : closed
         ? "This browser session has closed. The agent can open it again."
         : !browserSessionId
@@ -472,113 +509,117 @@ function NativeAgentBrowserTab({ tab, active }: BrowserTabProps) {
 
   return (
     <div className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden">
-      <PanelHeader size="window" className="h-9">
-        <Tooltip label="Back">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
-            disabled={
-              !browserSessionId || browserLocked || activity?.canGoBack === false
-            }
-            onClick={() => void control("back")}
-            aria-label="Back"
-          >
-            <ChevronLeft size={14} />
-          </Button>
-        </Tooltip>
-        <Tooltip label="Forward">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
-            disabled={
-              !browserSessionId ||
-              browserLocked ||
-              activity?.canGoForward === false
-            }
-            onClick={() => void control("forward")}
-            aria-label="Forward"
-          >
-            <ChevronRight size={14} />
-          </Button>
-        </Tooltip>
-        <Tooltip label={activity?.loading ? "Loading…" : "Reload"}>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
-            disabled={!browserSessionId || browserLocked}
-            onClick={() => void control("reload")}
-            aria-label="Reload"
-          >
-            {activity?.loading ? (
-              <ZerosSpinner size={16} />
-            ) : (
-              <RotateCw size={14} />
-            )}
-          </Button>
-        </Tooltip>
-        <form
-          className="min-w-0 flex-1"
-          onSubmit={(event) => {
-            event.preventDefault();
-            navigate();
-          }}
-        >
-          <div className="bg-bg2 focus-within:border-highlighted-bright flex h-6 items-center rounded-sm border border-transparent px-2">
-            {activity?.faviconDataUrl ? (
-              <img
-                src={activity.faviconDataUrl}
-                alt=""
-                className="mr-1.5 size-3.5 shrink-0 rounded-[2px]"
-              />
-            ) : (
-              <Globe
-                className="text-fg3 mr-1.5 size-3.5 shrink-0"
-                aria-hidden="true"
-              />
-            )}
-            <input
-              ref={addressInputRef}
-              aria-label="Browser URL"
-              value={address}
-              onChange={(event) => setAddress(event.target.value)}
-              onFocus={(event) => {
-                setEditingAddress(true);
-                event.currentTarget.select();
-              }}
-              onBlur={() => setEditingAddress(false)}
-              disabled={!browserSessionId || browserLocked}
-              spellCheck={false}
-              autoCorrect="off"
-              autoCapitalize="off"
-              placeholder="Search or enter URL"
-              className="text-fg1 placeholder:text-fg3 min-w-0 flex-1 border-0 bg-transparent p-0 text-sm outline-none disabled:cursor-not-allowed"
-            />
-          </div>
-        </form>
-        <DropdownMenu>
-          <Tooltip label="More">
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="text-fg2 hover:text-fg1 data-[state=open]:bg-bg2-hover data-[state=open]:text-fg1 size-6"
-                disabled={!browserSessionId || browserLocked}
-                aria-label="More browser actions"
-              >
-                <MoreHorizontal size={14} />
-              </Button>
-            </DropdownMenuTrigger>
+      <WorkbenchTabToolbar>
+        <PanelHeader size="window" className="h-9">
+          <Tooltip label="Back">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+              disabled={
+                !browserSessionId ||
+                browserLocked ||
+                activity?.canGoBack === false
+              }
+              onClick={() => void control("back")}
+              aria-label="Back"
+            >
+              <ChevronLeft size={14} />
+            </Button>
           </Tooltip>
-          <DropdownMenuContent align="end" className="min-w-[150px]">
-            <DropdownMenuItem onClick={() => void control("reload")}>
-              Reload
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </PanelHeader>
+          <Tooltip label="Forward">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+              disabled={
+                !browserSessionId ||
+                browserLocked ||
+                activity?.canGoForward === false
+              }
+              onClick={() => void control("forward")}
+              aria-label="Forward"
+            >
+              <ChevronRight size={14} />
+            </Button>
+          </Tooltip>
+          <Tooltip label={activity?.loading ? "Loading…" : "Reload"}>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+              disabled={!browserSessionId || browserLocked}
+              onClick={() => void control("reload")}
+              aria-label="Reload"
+            >
+              {activity?.loading ? (
+                <ZerosSpinner size={16} />
+              ) : (
+                <RotateCw size={14} />
+              )}
+            </Button>
+          </Tooltip>
+          <form
+            className="min-w-0 flex-1"
+            onSubmit={(event) => {
+              event.preventDefault();
+              navigate();
+            }}
+          >
+            <div className="bg-bg2 focus-within:border-highlighted-bright flex h-6 items-center rounded-sm border border-transparent px-2">
+              {activity?.faviconDataUrl ? (
+                <img
+                  src={activity.faviconDataUrl}
+                  alt=""
+                  className="mr-1.5 size-3.5 shrink-0 rounded-[2px]"
+                />
+              ) : (
+                <Globe
+                  className="text-fg3 mr-1.5 size-3.5 shrink-0"
+                  aria-hidden="true"
+                />
+              )}
+              <input
+                ref={addressInputRef}
+                aria-label="Browser URL"
+                value={address}
+                onChange={(event) => setAddress(event.target.value)}
+                onFocus={(event) => {
+                  setEditingAddress(true);
+                  event.currentTarget.select();
+                }}
+                onBlur={() => setEditingAddress(false)}
+                disabled={!browserSessionId || browserLocked}
+                spellCheck={false}
+                autoCorrect="off"
+                autoCapitalize="off"
+                placeholder="Search or enter URL"
+                className="text-fg1 placeholder:text-fg3 min-w-0 flex-1 border-0 bg-transparent p-0 text-sm outline-none disabled:cursor-not-allowed"
+              />
+            </div>
+          </form>
+          <DropdownMenu>
+            <Tooltip label="More">
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="text-fg2 hover:text-fg1 data-[state=open]:bg-bg2-hover data-[state=open]:text-fg1 size-6"
+                  disabled={!browserSessionId || browserLocked}
+                  aria-label="More browser actions"
+                >
+                  <MoreHorizontal size={14} />
+                </Button>
+              </DropdownMenuTrigger>
+            </Tooltip>
+            <DropdownMenuContent align="end" className="min-w-[150px]">
+              <DropdownMenuItem onClick={() => void control("reload")}>
+                Reload
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </PanelHeader>
+      </WorkbenchTabToolbar>
       <div
         ref={hostRef}
         className="bg-bg1 relative min-h-0 flex-1"
@@ -680,7 +721,12 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   });
   const [previewRenewRetryAt, setPreviewRenewRetryAt] = useState(0);
   const previewRenewingRef = useRef(false);
-  const previewRenewalErrorShownRef = useRef(false);
+  const [previewRenewFailure, setPreviewRenewFailure] = useState<{
+    key: string;
+    error: unknown;
+  } | null>(null);
+  const [previewRenewPending, setPreviewRenewPending] = useState(false);
+  const retryRenew = useRef<(() => Promise<void>) | null>(null);
   // Preview admission capabilities never enter the persisted WorkbenchTab.
   // Peek is render-pure/idempotent for React Strict Mode; consume only after
   // this mount commits. Later remounts use the safe URL + established cookie.
@@ -695,6 +741,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   const frameName = `zeros-browser-${tab.id}`;
   const webview = useIframeWebview({
     initialUrl: initialFrameUrl,
+    active,
     frameName,
     trustedPreviewOrigin: previewRuntime?.origin,
     onNavigation: (url) => {
@@ -717,6 +764,29 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
         updateTab({ url, previewSource: undefined });
     },
   });
+  useWorkbenchStatusSource(
+    {
+      error: webview.state.loadError,
+      pending: webview.state.isLoading,
+      primary: true,
+      hasContent:
+        !!webview.state.loadedUrl &&
+        webview.state.loadedUrl === webview.state.currentUrl,
+      retry: webview.reloadAndWait,
+    },
+    safeTabUrl,
+  );
+  useWorkbenchStatusSource(
+    {
+      error:
+        previewRenewFailure?.key === safeTabUrl
+          ? previewRenewFailure.error
+          : null,
+      pending: previewRenewPending,
+      retry: () => retryRenew.current?.(),
+    },
+    "preview-renewal",
+  );
   const [previewFrameMounted, setPreviewFrameMounted] = useState(false);
   const attachWebviewFrame = webview.ref;
   const attachPreviewFrame = useCallback((node: HTMLIFrameElement | null) => {
@@ -731,8 +801,17 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     consumePreviewNavigation(tab.id);
     return replacePreviewUrl(input.admissionUrl, input.native ? { preserveFrame: true } : undefined);
   }, [tab.id, replacePreviewUrl]);
-  useCloudPreviewAdmission({ scope: nativeCloudPreview ? scope ?? "" : "", url: safeTabUrl, frameName,
-    active, ready: electron && previewFrameMounted, source: tab.previewSource, agentPreview: Boolean(tab.previewSource), navigate: navigateCloudPreview, navigationVersion: cloudNavigationVersion });
+  useCloudPreviewAdmission({
+    scope: nativeCloudPreview ? (scope ?? "") : "",
+    url: safeTabUrl,
+    frameName,
+    active,
+    ready: electron && previewFrameMounted,
+    source: tab.previewSource,
+    agentPreview: Boolean(tab.previewSource),
+    navigate: navigateCloudPreview,
+    navigationVersion: cloudNavigationVersion,
+  });
   const navigateLogicalCloud = useCallback(
     (url: string, source: WorkbenchTab["previewSource"], record = true) => {
       if (!previewAvailable && isLoopbackUrl(url)) return;
@@ -795,80 +874,74 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
       current ? current.expiresAt - PREVIEW_RENEW_AHEAD_MS : now,
     );
     let cancelled = false;
-    const timer = window.setTimeout(
-      () => {
-        if (previewRenewingRef.current) return;
-        previewRenewingRef.current = true;
-        void (async () => {
-          try {
-            const owner = sessions.getSession(source.chatId);
-            const livePort = owner?.boundaryPorts?.ports.find(
-              (port) => port.port === source.port,
-            );
-            if (!livePort) {
-              throw new Error("preview listener is not active");
-            }
-            const opened = await sessions.openBoundaryPort(
-              source.chatId,
-              livePort.id,
-            );
-            const descriptor = previewNavigationDescriptor(opened);
-            if (descriptor.volatileOrigin) {
-              if (!electron) {
-                throw new Error("native preview authorization is unavailable");
-              }
-              const authorized = await nativeInvoke<{ ok: boolean }>(
-                "browser:authorize-preview-origin",
-                {
-                  frameName,
-                  origin: descriptor.runtimeOrigin,
-                  expiresAt: descriptor.expiresAt,
-                },
-              );
-              if (!authorized.ok) {
-                throw new Error("preview origin was not authorized");
-              }
-            }
-            if (cancelled) return;
-            const staged = stagePreviewNavigation(tab.id, opened);
-            setPreviewRuntime({
-              origin: staged.runtimeOrigin,
-              expiresAt: staged.expiresAt,
-              volatileOrigin: staged.volatileOrigin,
-            });
-            consumePreviewNavigation(tab.id);
-            replacePreviewUrl(opened.admissionUrl);
-            previewRenewalErrorShownRef.current = false;
-            setPreviewRenewRetryAt(
-              staged.expiresAt - Date.now() <= PREVIEW_RENEW_AHEAD_MS
-                ? Date.now() + PREVIEW_RENEW_RETRY_MS
-                : 0,
-            );
-          } catch {
-            if (cancelled) return;
-            if (!current || current.expiresAt <= Date.now()) {
-              setPreviewRuntime(null);
-            }
-            if (
-              (!current || current.expiresAt <= Date.now()) &&
-              !previewRenewalErrorShownRef.current
-            ) {
-              previewRenewalErrorShownRef.current = true;
-              toast.error("Preview connection is being restored", {
-                description:
-                  "Zeros will reconnect when the session listener is ready.",
-              });
-            }
-            setPreviewRenewRetryAt(Date.now() + PREVIEW_RENEW_RETRY_MS);
-          } finally {
-            previewRenewingRef.current = false;
+    const renew = async () => {
+      if (cancelled || previewRenewingRef.current) return;
+      previewRenewingRef.current = true;
+      setPreviewRenewPending(true);
+      try {
+        const owner = sessions.getSession(source.chatId);
+        const livePort = owner?.boundaryPorts?.ports.find(
+          (port) => port.port === source.port,
+        );
+        if (!livePort) {
+          throw new Error("preview listener is not active");
+        }
+        const opened = await sessions.openBoundaryPort(
+          source.chatId,
+          livePort.id,
+        );
+        const descriptor = previewNavigationDescriptor(opened);
+        if (descriptor.volatileOrigin) {
+          if (!electron) {
+            throw new Error("native preview authorization is unavailable");
           }
-        })();
-      },
+          const authorized = await nativeInvoke<{ ok: boolean }>(
+            "browser:authorize-preview-origin",
+            {
+              frameName,
+              origin: descriptor.runtimeOrigin,
+              expiresAt: descriptor.expiresAt,
+            },
+          );
+          if (!authorized.ok) {
+            throw new Error("preview origin was not authorized");
+          }
+        }
+        if (cancelled) return;
+        const staged = stagePreviewNavigation(tab.id, opened);
+        setPreviewRuntime({
+          origin: staged.runtimeOrigin,
+          expiresAt: staged.expiresAt,
+          volatileOrigin: staged.volatileOrigin,
+        });
+        consumePreviewNavigation(tab.id);
+        replacePreviewUrl(opened.admissionUrl);
+        setPreviewRenewFailure(null);
+        setPreviewRenewRetryAt(
+          staged.expiresAt - Date.now() <= PREVIEW_RENEW_AHEAD_MS
+            ? Date.now() + PREVIEW_RENEW_RETRY_MS
+            : 0,
+        );
+      } catch (error) {
+        if (cancelled) return;
+        if (!current || current.expiresAt <= Date.now()) {
+          setPreviewRuntime(null);
+        }
+        setPreviewRenewFailure({ key: safeTabUrl, error });
+        setPreviewRenewRetryAt(Date.now() + PREVIEW_RENEW_RETRY_MS);
+      } finally {
+        previewRenewingRef.current = false;
+        if (!cancelled) setPreviewRenewPending(false);
+      }
+    };
+    retryRenew.current = renew;
+    const timer = window.setTimeout(
+      () => void renew(),
       Math.max(0, dueAt - now),
     );
     return () => {
       cancelled = true;
+      if (retryRenew.current === renew) retryRenew.current = null;
       window.clearTimeout(timer);
     };
   }, [
@@ -1537,21 +1610,25 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
 
   return (
     <div className="bg-bg1 flex h-full min-h-0 flex-col">
-      <BrowserChrome
-        webview={chromeWebview}
-        displayUrl={effectiveUrl}
-        onNavigate={(url) => {
-          if (!previewAvailable && isLoopbackUrl(url)) {
-            toast.error("Cloud preview URLs are not configured for this build.");
-            return;
-          }
-          navigateAddress(url);
-        }}
-        electron={electron}
-        localToolsEnabled={localToolsEnabled}
-        canvasMode={canvasMode}
-        onToggleCanvasMode={() => setCanvasMode(!canvasMode)}
-      />
+      <WorkbenchTabToolbar>
+        <BrowserChrome
+          webview={chromeWebview}
+          displayUrl={effectiveUrl}
+          onNavigate={(url) => {
+            if (!previewAvailable && isLoopbackUrl(url)) {
+              toast.error(
+                "Cloud preview URLs are not configured for this build.",
+              );
+              return;
+            }
+            navigateAddress(url);
+          }}
+          electron={electron}
+          localToolsEnabled={localToolsEnabled}
+          canvasMode={canvasMode}
+          onToggleCanvasMode={() => setCanvasMode(!canvasMode)}
+        />
+      </WorkbenchTabToolbar>
       {/* Browser body — a real <iframe>. CSS positions it; in
           canvas mode the iframe becomes a centered explicit-sized
           frame with edge resize handles and a viewport preset
