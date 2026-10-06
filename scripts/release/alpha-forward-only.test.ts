@@ -20,7 +20,8 @@ function fixture(overrides: NodeJS.ProcessEnv = {}, source: Partial<typeof candi
   const state = {
     head: sourceSha as string, api: ancestor as string, app: ancestor as string, ops: ancestor as string,
     tag: ancestor as string, ledger: ancestor as string, worker: null as any,
-    identityStatus: 200, maintenance: false, schemaAhead: false, compareError: false,
+    identityStatus: 200, unready: false, maintenance: false, schemaAhead: false, compareError: false,
+    identityChannel: "alpha", migrationState: "current", cloudState: undefined as string | undefined,
     comparison: undefined as any, ledgerStatus: 200, tagType: "commit", parent: { ...parent },
     unreadable: "", ledgerValue: undefined as any, cloudEnabled: undefined as boolean | undefined,
     artifactPresent: true, artifactExpired: false,
@@ -52,12 +53,14 @@ function fixture(overrides: NodeJS.ProcessEnv = {}, source: Partial<typeof candi
       return Response.json(state.comparison ?? { status, base_commit: { sha: base },
         merge_base_commit: { sha: status === "ahead" || status === "identical" ? base : ancestor } });
     }
-    if (route === "/v1/release-identity") return Response.json({ version: 1, ready: true, channel: "alpha", sourceSha: state.api,
-      maintenance: state.maintenance, migrations: { state: "current", head: state.schemaAhead ? "0002_fixture.sql" : "0001_fixture.sql",
+    if (route === "/v1/release-identity" && state.unreadable === "api") return new Response("unavailable", { status: 503 });
+    if (route === "/v1/release-identity") return Response.json({ version: 1, ready: !state.unready, channel: state.identityChannel, sourceSha: state.api,
+      maintenance: state.maintenance, migrations: { state: state.migrationState, head: state.schemaAhead ? "0002_fixture.sql" : "0001_fixture.sql",
         expectedHead: "0001_fixture.sql", manifestSha256: "e".repeat(64) },
-      cloud: { enabled: state.cloudEnabled ?? (state.worker !== null), ready: true,
-        state: (state.cloudEnabled ?? (state.worker !== null)) ? "healthy" : "disabled" }, worker: state.worker,
-    }, { status: state.unreadable === "api" ? 503 : state.identityStatus });
+      cloud: { enabled: state.cloudEnabled ?? (state.worker !== null), ready: !state.unready,
+        state: state.cloudState ?? (state.unready ? "unready" : (state.cloudEnabled ?? (state.worker !== null)) ? "healthy" : "disabled") }, worker: state.worker,
+      workerQualified: !state.unready,
+    }, { status: state.identityStatus });
     if (route === "/zeros-deployment.json") {
       const surface = url.hostname.startsWith("ops-") ? "ops" : "app";
       return Response.json({ version: 1, surface, commitSha: state[surface] }, { status: state.unreadable === surface ? 404 : 200 });
@@ -156,6 +159,104 @@ describe("automatic Alpha admitted freshness", () => {
 
 describe("Stage 2 automatic Alpha admission", () => {
   const destinations = ["api", "app", "ops", "tag", "ledger"] as const;
+  it.each(["ci", "guard", "services", "worker", "promote", "publish", "runtime-publish"])(
+    "accepts an unready 503 identity at the automatic %s barrier or checkpoint", async job => {
+      const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: job });
+      test.state.head = descendant; test.state.identityStatus = 503; test.state.unready = true;
+      test.state.worker = { provider: "boat", imageRef: `boat:fixture@sha256:${"e".repeat(64)}`, sourceSha: ancestor,
+        architecture: "linux/amd64", storageMiB: 4096 };
+      await expect(test.client.assertCurrent()).resolves.toBeUndefined();
+      test.state.api = sourceSha;
+      await expect(test.client.assertCurrent()).resolves.toBeUndefined();
+      const calls = test.fetcher.mock.calls.filter(([input]) => String(input).endsWith("/v1/release-identity"));
+      expect(calls).toHaveLength(2);
+      expect(calls[0][1]).toMatchObject({ method: "GET", credentials: "omit", redirect: "error", cache: "no-store" });
+    });
+
+  it.each(["ci", "guard", "services", "worker", "promote", "publish", "runtime-publish"])(
+    "accepts a 503 unknown cloud health state at the automatic %s barrier or checkpoint", async job => {
+      const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: job });
+      test.state.head = descendant; test.state.identityStatus = 503; test.state.unready = true;
+      test.state.cloudEnabled = true; test.state.cloudState = "unknown";
+      test.state.worker = { provider: "boat", imageRef: `boat:fixture@sha256:${"e".repeat(64)}`, sourceSha: ancestor,
+        architecture: "linux/amd64", storageMiB: 4096 };
+      await expect(test.client.assertCurrent()).resolves.toBeUndefined();
+      test.state.api = sourceSha;
+      await expect(test.client.assertCurrent()).resolves.toBeUndefined();
+    });
+
+  it("refuses an arbitrary cloud state on HTTP 503", async () => {
+    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
+    test.state.identityStatus = 503; test.state.unready = true; test.state.cloudState = "invalid";
+    await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(AlphaAdmissionRejectedError);
+  });
+
+  it.each(["maintenance", "schema ahead", "non-current schema", "wrong channel", "invalid source", "non-JSON"])(
+    "refuses a 503 identity with %s", async failure => {
+      const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
+      test.state.identityStatus = 503; test.state.unready = true;
+      if (failure === "maintenance") test.state.maintenance = true;
+      if (failure === "schema ahead") test.state.schemaAhead = true;
+      if (failure === "non-current schema") test.state.migrationState = "pending";
+      if (failure === "wrong channel") test.state.identityChannel = "beta";
+      if (failure === "invalid source") test.state.api = "invalid";
+      if (failure === "non-JSON") test.state.unreadable = "api";
+      await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(AlphaAdmissionRejectedError);
+    });
+
+  it.each([201, 403, 404, 500])("refuses API status %s even with a valid identity body", async status => {
+    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
+    test.state.identityStatus = status;
+    await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(AlphaAdmissionRejectedError);
+  });
+
+  it("preserves the existing identity schema for HTTP 200", async () => {
+    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
+    test.state.unready = true;
+    await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(AlphaAdmissionRejectedError);
+  });
+
+  it.each(["newer API", "newer worker", "missing active worker", "invalid worker"])(
+    "refuses a 503 identity with a %s source", async failure => {
+      const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
+      test.state.identityStatus = 503; test.state.unready = true; test.state.cloudEnabled = true;
+      test.state.worker = { provider: "boat", imageRef: `boat:fixture@sha256:${"e".repeat(64)}`, sourceSha: ancestor,
+        architecture: "linux/amd64", storageMiB: 4096 };
+      if (failure === "newer API") test.state.api = descendant;
+      if (failure === "newer worker") test.state.worker.sourceSha = descendant;
+      if (failure === "missing active worker") test.state.worker = null;
+      if (failure === "invalid worker") test.state.worker.imageRef = "invalid";
+      await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(AlphaAdmissionRejectedError);
+    });
+
+  it.each(["network error", "oversized body"])("refuses an API %s", async failure => {
+    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
+    test.state.identityStatus = 503;
+    const original = test.fetcher.getMockImplementation()!;
+    test.fetcher.mockImplementation(async (input, init) => {
+      if (!String(input).endsWith("/v1/release-identity")) return original(input, init);
+      if (failure === "network error") throw new Error("private-http-error");
+      const response = await original(input, init);
+      return new Response(`${await response.text()}${" ".repeat(64 * 1024)}`, { status: 503 });
+    });
+    await expect(test.client.assertCurrent()).rejects.toThrow("Alpha live API/schema identity is unavailable; forward-only admission refused");
+  });
+
+  it("refuses a stalled API within the existing five-second deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
+      const original = test.fetcher.getMockImplementation()!;
+      test.fetcher.mockImplementation(async (input, init) => String(input).endsWith("/v1/release-identity")
+        ? new Promise<Response>(() => {}) : original(input, init));
+      const rejected = expect(test.client.assertCurrent()).rejects.toBeInstanceOf(AlphaAdmissionRejectedError);
+      await vi.advanceTimersByTimeAsync(5_001);
+      await rejected;
+      const request = test.fetcher.mock.calls.find(([input]) => String(input).endsWith("/v1/release-identity"));
+      expect(request?.[1]?.signal?.aborted).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
+
   it.each(destinations)("accepts equal and ancestor %s sources before admission", async destination => {
     for (const sha of [sourceSha, ancestor]) {
       const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" }); test.state.head = descendant;
@@ -210,7 +311,7 @@ describe("Stage 2 automatic Alpha admission", () => {
   it.each(["API unavailable", "maintenance", "schema ahead", "ledger unavailable", "tag/ledger disagreement"])(
     "refuses %s before a migration role may be planned", async failure => {
       const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
-      if (failure === "API unavailable") test.state.identityStatus = 503;
+      if (failure === "API unavailable") test.state.identityStatus = 500;
       if (failure === "maintenance") test.state.maintenance = true;
       if (failure === "schema ahead") test.state.schemaAhead = true;
       if (failure === "ledger unavailable") test.state.ledgerStatus = 404;
