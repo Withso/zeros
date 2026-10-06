@@ -29,7 +29,6 @@ const readWorkflow = (file: string) =>
   ) as Workflow;
 const preflight = readWorkflow("preflight.yml");
 const ci = readWorkflow("ci.yml");
-const heavyJobs = ["source-sync-workload", "ui-smoke-shard"];
 const main = (run: number): GitHub => ({
   event_name: "push",
   ref: "refs/heads/main",
@@ -59,26 +58,52 @@ function evaluate(expression: string, github: GitHub, shard?: number): unknown {
   )(github, { shard }, format, endsWith);
 }
 
-function group(job: string, github: GitHub, shard?: number): string {
-  const concurrency = preflight.jobs[job].concurrency;
-  if (!concurrency) throw new Error(`Missing heavy concurrency for ${job}`);
-  return String(evaluate(concurrency.group, github, shard));
-}
+const workflowGroup = (github: GitHub) =>
+  String(evaluate(preflight.concurrency.group, github));
+const cancels = (github: GitHub) =>
+  evaluate(String(preflight.concurrency["cancel-in-progress"]), github);
 
-describe("Preflight heavy concurrency", () => {
-  it("queues only composer shards and the macOS workload, retaining Alpha producer capacity", () => {
+describe("Preflight main coalescing", () => {
+  it("coalesces every main push into one group that never cancels a run in progress", () => {
+    for (let run = 1; run <= 50; run++) {
+      // One shared group with cancellation off: GitHub keeps the run in
+      // progress and a single pending run, which a newer push replaces.
+      expect(workflowGroup(main(run))).toBe("preflight-main");
+      expect(cancels(main(run))).toBe(false);
+    }
+    expect(preflight.concurrency.queue).toBeUndefined();
+  });
+
+  it.each([
+    { event_name: "push", ref: "refs/heads/release/1.0.0" },
+    { event_name: "push", ref: "refs/heads/release/2.0.0" },
+    {
+      event_name: "merge_group",
+      ref: "refs/heads/gh-readonly-queue/main/pr-42",
+    },
+    { event_name: "merge_group", ref: "refs/heads/main" },
+  ])(
+    "keeps $event_name on $ref out of the main group and cancels its own superseded runs",
+    (context) => {
+      const github = { ...main(1), ...context };
+      expect(workflowGroup(github)).not.toBe("preflight-main");
+      expect(workflowGroup(github)).toBe(`preflight-${context.ref}`);
+      expect(cancels(github)).toBe(true);
+    },
+  );
+
+  it("keeps release branches independent of each other", () => {
+    expect(
+      workflowGroup({ ...main(1), ref: "refs/heads/release/1.0.0" }),
+    ).not.toBe(workflowGroup({ ...main(1), ref: "refs/heads/release/2.0.0" }));
+  });
+
+  it("has no job-level concurrency left in Preflight or CI", () => {
     expect(
       Object.entries(preflight.jobs)
         .filter(([, job]) => job.concurrency)
-        .map(([id]) => id)
-        .sort(),
-    ).toEqual(heavyJobs);
-    for (const id of heavyJobs) {
-      expect(preflight.jobs[id].concurrency).toMatchObject({ queue: "max" });
-      expect(
-        preflight.jobs[id].concurrency?.["cancel-in-progress"],
-      ).toBeUndefined();
-    }
+        .map(([id]) => id),
+    ).toEqual([]);
     expect(Object.values(ci.jobs).every((job) => !job.concurrency)).toBe(true);
   });
 
@@ -104,87 +129,5 @@ describe("Preflight heavy concurrency", () => {
       "fail-fast": false,
       matrix: { shard: [1, 2, 3] },
     });
-  });
-
-  it("bounds a burst to three composer groups and two balanced macOS groups", () => {
-    const composer = new Set<string>();
-    const macOS = new Set<string>();
-    const bucketCounts = new Map<string, number>();
-    for (let run = 1; run <= 200; run++) {
-      for (const shard of [1, 2, 3]) {
-        composer.add(group("ui-smoke-shard", main(run), shard));
-      }
-      const bucket = group("source-sync-workload", main(run));
-      macOS.add(bucket);
-      bucketCounts.set(bucket, (bucketCounts.get(bucket) ?? 0) + 1);
-    }
-    expect(composer.size).toBe(3);
-    expect(macOS.size).toBe(2);
-    expect([...bucketCounts.values()]).toEqual([100, 100]);
-    expect(new Set([...composer, ...macOS]).size).toBe(5);
-  });
-
-  it.each([
-    { event_name: "push", ref: "refs/heads/release/1.0.0" },
-    { event_name: "push", ref: "refs/heads/release/2.0.0" },
-    {
-      event_name: "merge_group",
-      ref: "refs/heads/gh-readonly-queue/main/pr-42",
-    },
-    { event_name: "merge_group", ref: "refs/heads/main" },
-    { event_name: "workflow_dispatch", ref: "refs/heads/main" },
-  ])(
-    "isolates $event_name on $ref from main and from another run",
-    (context) => {
-      for (const [job, shard] of [
-        ["source-sync-workload", undefined],
-        ["ui-smoke-shard", 1],
-        ["ui-smoke-shard", 2],
-        ["ui-smoke-shard", 3],
-      ] as const) {
-        const mainGroups = [
-          group(job, main(1), shard),
-          group(job, main(2), shard),
-        ];
-        const first = group(job, { ...main(1), ...context }, shard);
-        const second = group(job, { ...main(2), ...context }, shard);
-        expect(mainGroups).not.toContain(first);
-        expect(mainGroups).not.toContain(second);
-        expect(first).not.toBe(second);
-        expect(
-          group(job, { ...main(1), ...context, run_attempt: 2 }, shard),
-        ).not.toBe(first);
-      }
-    },
-  );
-
-  it("keeps distinct event and release-branch identities even with the same run context", () => {
-    for (const job of heavyJobs) {
-      const contexts = [
-        main(1),
-        { ...main(1), ref: "refs/heads/release/1.0.0" },
-        { ...main(1), ref: "refs/heads/release/2.0.0" },
-        { ...main(1), event_name: "merge_group" },
-        { ...main(1), event_name: "workflow_dispatch" },
-      ];
-      expect(
-        new Set(contexts.map((context) => group(job, context, 1))).size,
-      ).toBe(contexts.length);
-    }
-  });
-
-  it("retains a unique workflow group and never cancels or replaces another main SHA", () => {
-    const groups = new Set<string>();
-    for (let run = 1; run <= 200; run++) {
-      groups.add(String(evaluate(preflight.concurrency.group, main(run))));
-      expect(
-        evaluate(
-          String(preflight.concurrency["cancel-in-progress"]),
-          main(run),
-        ),
-      ).toBe(false);
-    }
-    expect(groups.size).toBe(200);
-    expect(preflight.concurrency.queue).toBeUndefined();
   });
 });

@@ -6,6 +6,11 @@ path, repositories, event, branch, SHA and attempt through GitHub's API. Its
 checkout is the immutable default-branch controller revision, and it executes
 only Node standard-library code. It never checks out the failed source.
 
+Main Preflight coalesces pushes ([CI concurrency](ci-concurrency.md)): one
+failing run can contain several merges, so the incident body links the commit
+range since the last green main run. A pending run replaced by a newer push
+completes as `cancelled` with no jobs and never opens an incident.
+
 ## Modes
 
 Set the repository variable `ZEROS_CI_RECOVERY`:
@@ -87,9 +92,10 @@ The controller creates `ci-fix/<64-hex signature>` from the current main head
 using blob, tree, commit and ref APIs. Its sole scaffold change is
 `.github/ci-incidents/<signature>.json`, at most 4 KiB. The draft title is
 `fix(ci): restore <lane> on main`; multiple lanes use `full suite`. The body
-contains canonical links, registered reproduction commands, retry history,
-possible commit-associated PRs with unknown culprit confidence, and one
-`zeros.ci-failure/v1` JSON block between:
+contains canonical links, the commit range since the last green main run,
+registered reproduction commands, retry history, possible commit-associated
+PRs with unknown culprit confidence, and one `zeros.ci-failure/v1` JSON block
+between:
 
 ```text
 <!-- zeros-ci-failure:v1:start -->

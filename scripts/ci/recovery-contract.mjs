@@ -338,6 +338,21 @@ export function renderBody(contract) {
     "The full Preflight suite failed on main at " + failure.sha + ".",
     "",
     "Source: " + failure.run_url + ", attempt " + failure.attempt + ".",
+    // Main Preflight coalesces bursts, so one run tests every merge since the
+    // last green run; the culprit can be any commit in this range.
+    failure.last_green_sha
+      ? "Commits under test: [" +
+        failure.last_green_sha.slice(0, 12) +
+        "..." +
+        failure.sha.slice(0, 12) +
+        "](https://github.com/" +
+        REPOSITORY +
+        "/compare/" +
+        failure.last_green_sha +
+        "..." +
+        failure.sha +
+        "), every merge since the last green main run."
+      : "Commits under test: unknown; no earlier green main run is recorded.",
     "Retry: " +
       failure.retry.result +
       "; automatic retries recorded: " +
