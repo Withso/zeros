@@ -448,18 +448,23 @@ export class DatabaseCloudWorkspaceCommandService {
       const row = (await tx.query<Command & { conversation_id: string }>(`SELECT * FROM cloud_workspace_commands WHERE workspace_id=$1 AND id=$2 FOR UPDATE`, [scope.workspaceId, input.commandId])).rows[0];
       if (!row || row.claim_id !== input.claimId || row.engine_instance_id !== scope.engineInstanceId || row.generation !== scope.generation)
         throw new CloudCommandError("command_conflict", "Command dispatch authority changed");
+      // Older engines collapse a pre-provider admission refusal to a generic
+      // failure. Keep the server's exact denial, including settlement replays.
+      const admissionDenied=row.result_code==="cloud_runtime_upgrade_required";
+      const state=admissionDenied?"failed":input.state;
+      const resultCode=admissionDenied?row.result_code:input.resultCode;
       let result:Command["result"]=row.result||input.result?{...row.result,...input.result,version:1,
         ...(row.result?.goalRevision!==undefined?{goal:row.result.goal,goalRevision:row.result.goalRevision,
           ...(row.result.goalSequence!==undefined?{goalSequence:row.result.goalSequence}:{})}:{})}:null;
       if (row.state !== "dispatching") {
-        if (row.state !== input.state || row.result_code !== input.resultCode || canonical(row.result ?? null) !== canonical(result))
+        if (row.state !== state || row.result_code !== resultCode || canonical(row.result ?? null) !== canonical(result))
           throw new CloudCommandError("command_conflict", "Command result already settled");
         return { ...(await this.view(tx, scope, row.conversation_id)), replayed: true };
       }
       const control=await this.control(tx, scope, row.conversation_id);
       if(result&&"goal" in result&&result.goalRevision===undefined)result={...result,goalRevision:safeInteger(control.revision)+1};
       await tx.query(`UPDATE cloud_workspace_commands SET state=$3,result_code=$4,result=$5::jsonb,payload=NULL,updated_at=now() WHERE workspace_id=$1 AND id=$2`,
-      [scope.workspaceId, input.commandId, input.state, input.resultCode, result ? JSON.stringify(result) : null]);
+      [scope.workspaceId, input.commandId, state, resultCode, result ? JSON.stringify(result) : null]);
       await this.bump(tx, scope, row.conversation_id);
       return { ...(await this.view(tx, scope, row.conversation_id)), replayed: false };
     });

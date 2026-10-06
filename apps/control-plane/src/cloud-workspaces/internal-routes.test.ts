@@ -62,8 +62,9 @@ describe("cloud workspace internal setup routes", () => {
     const { app, service } = harness();
     const headers = { authorization: `Bearer ${SETUP_TOKEN}`, "content-type": "application/json" };
     const redeemed = await app.request(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, { method: "POST", headers,
-      body: JSON.stringify({ ...body, materialVersion: 2, runtime: runtimeWitness }) });
+      body: JSON.stringify({ ...body, materialVersion: 2, runtime: runtimeWitness, checkoutSourceVersion: 1 }) });
     expect(redeemed.status).toBe(200);
+    expect(vi.mocked(service.redeem).mock.calls[0][0].checkoutSourceVersion).toBe(1);
     expect(vi.mocked(service.redeem).mock.calls[0][0].runtime).toEqual(runtimeWitness);
     const { expected: _expected, ...binding } = body;
     const registered = await app.request(CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH, { method: "POST", headers,

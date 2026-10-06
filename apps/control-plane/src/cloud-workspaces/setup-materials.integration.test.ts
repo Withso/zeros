@@ -145,7 +145,7 @@ d("cloud workspace setup material redemption", () => {
     await pool.end();
   });
 
-  async function seedMaterials(v4 = false, template = false, templateEnvironment: Record<string, string> = {}, repositorySettings?: Record<string, unknown>) {
+  async function seedMaterials(v4 = false, template = false, templateEnvironment: Record<string, string> = {}, repositorySettings?: Record<string, unknown>, checkoutSource: unknown = null) {
     await resetMigratedTestDatabase(pool);
     // These tests isolate setup authority; funded compute leases have their
     // own integration suite. Only this disposable test database is configured.
@@ -275,8 +275,8 @@ d("cloud workspace setup material redemption", () => {
       }
       const computer = template ? await seedComputerTemplate(tx, { organizationId, ownerUserId: accountUserId, installationId, sourceSandboxId, environment }) : null;
       if (computer) {
-        await tx.query(`INSERT INTO cloud_workspace_computer_sources(workspace_id,generation,org_id,build_id,template_id,config_id)
-          VALUES($1,1,$2,$3,$3,$4)`, [workspaceId, organizationId, computer.buildId, computer.configId]);
+        await tx.query(`INSERT INTO cloud_workspace_computer_sources(workspace_id,generation,org_id,build_id,template_id,config_id,checkout_source)
+          VALUES($1,1,$2,$3,$3,$4,$5::jsonb)`, [workspaceId, organizationId, computer.buildId, computer.configId, checkoutSource === null ? null : JSON.stringify(checkoutSource)]);
       }
       if (!v4) {
       await tx.query(
@@ -492,6 +492,14 @@ d("cloud workspace setup material redemption", () => {
     expect(document).not.toContain("synthetic-repository-value");
   });
 
+  it.each([undefined, 1 as const])("negotiates accepted checkout metadata with setup version %s", async checkoutSourceVersion => {
+    const checkoutSource = { kind: "default", revision: "4".repeat(40), headBranch: "main", targetBranch: "main", pullRequest: null };
+    await seedMaterials(true, true, {}, undefined, checkoutSource);
+    const material = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness, checkoutSourceVersion });
+    if (checkoutSourceVersion) expect(material.computer?.checkoutSource).toEqual(checkoutSource);
+    else expect(material.computer).not.toHaveProperty("checkoutSource");
+  });
+
   it("redeems a saved template with the org contents-only grant and fresh engine authority", async () => {
     await seedMaterials(true, true);
     const other = randomUUID();
@@ -572,7 +580,9 @@ d("cloud workspace setup material redemption", () => {
         .toBe("engine_registration_rejected");
     }
     // Failed comparisons roll back grant consumption; the exact witness can register once.
-    expect(await outcome(service.registerEngine({ ...input, agentRuntime: identity }))).toBe("accepted");
+    expect(await outcome(service.registerEngine({ ...input, agentRuntime: identity, agentCustomizationVersion: 3 }))).toBe("accepted");
+    expect((await pool.query("SELECT agent_customization_version FROM cloud_workspace_engine_instances WHERE id=$1", [materials.engine.instanceId])).rows[0])
+      .toEqual({ agent_customization_version: 3 });
     expect(await outcome(service.registerEngine({ ...input, agentRuntime: identity }))).toBe("engine_registration_rejected");
   });
   it.each(["before redemption", "during repository mint"])("rejects runtime revocation %s without releasing materials", async stage => {

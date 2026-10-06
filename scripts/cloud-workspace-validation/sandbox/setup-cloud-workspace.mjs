@@ -1347,6 +1347,7 @@ export async function redeemMaterials(request) {
         executionFence: request.execution.executionFence,
         expected: request.expected,
         ...(RUNTIME.profile === "v4" ? {
+          checkoutSourceVersion: 1,
           runtime: {
             runtimeId: RUNTIME.runtimeId,
             manifestSha256: RUNTIME.manifestSha256,
@@ -1405,7 +1406,7 @@ function killProcessGroup(child, signal) {
   }
 }
 
-function runProcess(file, args, options = {}) {
+export function runProcess(file, args, options = {}) {
   const timeoutMs = options.timeoutMs ?? 60_000;
   return new Promise((resolve, reject) => {
     const child = spawn(file, args, {
@@ -1423,6 +1424,17 @@ function runProcess(file, args, options = {}) {
     let timedOut = false;
     let overflow = false;
     let settled = false;
+    let abortKillTimer;
+    const abort = () => {
+      // Give Git a chance to remove shallow/ref locks and temporary packfiles,
+      // then bound termination of the entire detached process group.
+      killProcessGroup(child, "SIGTERM");
+      abortKillTimer = setTimeout(() => killProcessGroup(child, "SIGKILL"), 2000);
+      abortKillTimer.unref?.();
+    };
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
+    const cleanup = () => { clearTimeout(timer); clearTimeout(abortKillTimer); options.signal?.removeEventListener("abort", abort); };
     const timer = setTimeout(() => {
       timedOut = true;
       killProcessGroup(child, "SIGKILL");
@@ -1443,17 +1455,18 @@ function runProcess(file, args, options = {}) {
     child.once("error", (error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      cleanup();
       reject(error);
     });
     child.once("close", (code, signal) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      cleanup();
       resolve({
         code,
         signal,
         timedOut,
+        aborted: options.signal?.aborted === true,
         overflow,
         stdout: Buffer.concat(stdoutChunks).toString("utf8"),
         stderr: Buffer.concat(stderrChunks).toString("utf8"),
@@ -1655,7 +1668,7 @@ function journalMatches(journal, identity, commandCount, completedSetup) {
   );
 }
 
-async function gitCommand(repositoryDirectory, homeDirectory, args, token) {
+async function gitCommand(repositoryDirectory, homeDirectory, args, token, options = {}) {
   const env = {
     GIT_ASKPASS: ASKPASS,
     GIT_ASKPASS_REQUIRE: "force",
@@ -1691,7 +1704,7 @@ async function gitCommand(repositoryDirectory, homeDirectory, args, token) {
       "protocol.https.allow=always",
       ...args,
     ],
-    { cwd: repositoryDirectory, env, timeoutMs: 5 * 60_000 },
+    { cwd: repositoryDirectory, env, timeoutMs: 5 * 60_000, signal: options.signal },
   );
 }
 
@@ -2108,10 +2121,10 @@ export async function prepareCloudWorkspaceRepository(material, profile, journal
   hasSeed = () => existsSync(clonePaths(profile).seededRepositoryBackup),
   clone = () => cloneRepository(material, profile),
   checkoutComputer = () => checkoutCloudComputerPrimary(material.computer, material.repository, {
-    git: async (directory, args, token) => {
+    git: async (directory, args, token, options) => {
       const result = await gitCommand(directory, runtimeLayout.agentHome,
-        ["-c", "core.fsmonitor=false", "-c", "submodule.recurse=false", ...args], token);
-      if (result.code !== 0 || result.signal || result.timedOut || result.overflow)
+        ["-c", "core.fsmonitor=false", "-c", "submodule.recurse=false", ...args], token, options);
+      if (result.code !== 0 || result.signal || result.timedOut || result.aborted || result.overflow)
         throw failure(args[0] === "fetch" ? "repository_temporarily_unavailable" : "repository_revision_invalid");
       return result.stdout.trim();
     },
@@ -2129,6 +2142,7 @@ export async function prepareCloudWorkspaceRepository(material, profile, journal
       if (!commit) throw failure("repository_revision_invalid");
       return commit;
     } catch (error) {
+      if (error?.code === "repository_history_limit") throw failure("repository_history_limit");
       if (error?.message === "repository_revision_invalid" || error?.message === "image_contract_invalid")
         throw failure(error.message);
       throw error;

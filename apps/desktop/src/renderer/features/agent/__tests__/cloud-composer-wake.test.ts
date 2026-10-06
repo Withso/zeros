@@ -68,7 +68,7 @@ function harness(status = "stopped", enabled = true) {
   const sendPrompt = vi.fn(async (...args: unknown[]) => { (args[5] as (() => void) | undefined)?.(); });
   const state = { sessions: { chat: { transcriptState: "resident" } } };
   const context: Record<string, unknown> = {
-    chatId: "chat", readOnly: false, cloudComputerV2: enabled, workspaceProvisioning: status !== "ready",
+    chatId: "chat", readOnly: false, runtimeUpgradeRequired: false, cloudComputerV2: enabled, workspaceProvisioning: status !== "ready",
     chatThread: { id: "chat", folder, agentId: "codex" },
     session: { transcriptState: "resident", status: "reconnecting", agentId: "codex", startSession, sendPrompt },
     agentSessions: { getSendGeneration: () => generation, prepareForSend: prepare },
@@ -96,6 +96,27 @@ function harness(status = "stopped", enabled = true) {
 }
 
 describe("message wake before the provisioning queue", () => {
+  it("keeps local sends available without cloud preparation or an upgrade requirement", async () => {
+    const h = harness("ready");
+    h.context.chatThread = { id: "chat", folder: "/local/workspace", agentId: "codex" };
+    await h.send();
+    expect(h.prepare).not.toHaveBeenCalled();
+    expect(h.startSession).toHaveBeenCalledOnce();
+    expect(h.sendPrompt).toHaveBeenCalledOnce();
+    expect(h.clear).toHaveBeenCalledOnce();
+    expect((h.context.toast as { error: ReturnType<typeof vi.fn> }).error).not.toHaveBeenCalled();
+  });
+  it("retains the draft without preparing or sending when the runtime must be upgraded", async () => {
+    const h = harness("ready");
+    h.context.runtimeUpgradeRequired = true;
+    await h.send();
+    expect(h.prepare).not.toHaveBeenCalled();
+    expect(h.startSession).not.toHaveBeenCalled();
+    expect(h.sendPrompt).not.toHaveBeenCalled();
+    expect(h.clear).not.toHaveBeenCalled();
+    expect(h.dispatch).not.toHaveBeenCalled();
+    expect((h.context.toast as { error: ReturnType<typeof vi.fn> }).error).not.toHaveBeenCalled();
+  });
   it("retains the draft and surfaces a provider preparation failure after attachment encoding", async () => {
     const h = harness(); useActualProvider(h);
     h.prepare.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("Connection retired during attachment encoding"));

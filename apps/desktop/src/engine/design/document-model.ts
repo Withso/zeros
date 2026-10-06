@@ -254,7 +254,9 @@ export interface InlineStyleDeclaration {
 }
 
 export interface DesignTransactionJournal {
-  version: 1;
+  version: 1 | 2;
+  /** V2 is used only by a checked cloud image upload. V1 stays unchanged. */
+  asset?: import("./asset-upload").DesignUploadedAsset;
   documentId: string;
   entryFile: string;
   nextRevision: string;

@@ -31,7 +31,7 @@ const edits=new Set([
   "design.capture","design.review.capture","design.transaction.apply","design.review.resolve","design.history.undo","design.history.redo",
   "design.context.create","design.token.update","design.lint","design.selection.set","design.screenshot.set","design.runtime.audit",
   "design.frame.create","design.frame.rename","design.frame.duplicate","design.frame.delete","design.canvas.update",
-  "design.node.styles","design.node.transfer","design.node.text","design.node.html","design.asset.insert",
+  "design.node.styles","design.node.transfer","design.node.text","design.node.html","design.asset.insert","design.asset.upload",
   "design.stage","design.unstage","design.save","design.commit",
   "context.graph.scaffold","skills.saveZeros","skills.removeZeros",
   "workspace.setWorkingDirectories",

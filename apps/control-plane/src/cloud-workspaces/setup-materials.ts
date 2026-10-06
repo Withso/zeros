@@ -1,3 +1,4 @@
+import type { CloudWorkspaceCheckoutSource } from "./computer-v2-contract.js";
 import {
   createCipheriv,
   createDecipheriv,
@@ -129,6 +130,8 @@ export type CloudWorkspaceSetupRedemptionInput = {
   runtime?: CloudRuntimeWitness | undefined;
   /** Omitted by legacy images. Version 2 requires measured resource admission. */
   materialVersion?: 2 | undefined;
+  /** Only upgraded setup helpers accept this optional source document. */
+  checkoutSourceVersion?: 1 | undefined;
   token: string;
   workspaceId: string;
   organizationId: string;
@@ -154,6 +157,7 @@ export type CloudWorkspaceEngineRegistrationInput = {
   engineInstanceId: string;
   protocolVersion: number;
   actorProtocolVersion?: 2;
+  agentCustomizationVersion?: 3;
   agentRuntime?: CloudAgentRuntime;
 };
 
@@ -183,7 +187,7 @@ type ParsedSettings = {
 
 type RedemptionContract = {
   runtime: CloudRuntimePin | null;
-  computer: { source: CloudComputerWorkspaceSource; repositoryId: string; requestedRevision: string } | null;
+  computer: { source: CloudComputerWorkspaceSource; repositoryId: string; requestedRevision: string; checkoutSource: CloudWorkspaceCheckoutSource | null } | null;
   accountUserId: string;
   ownerSubject: string;
   imageRef: string;
@@ -1369,7 +1373,8 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           : {}),
       },
       ...(contract.computer ? { computer: { template: computerWorkspaceTemplateManifest(contract.computer.source),
-        primaryRepositoryId: contract.computer.repositoryId, requestedRevision: contract.computer.requestedRevision } } : {}),
+        primaryRepositoryId: contract.computer.repositoryId, requestedRevision: contract.computer.requestedRevision,
+        ...(input.checkoutSourceVersion === 1 && contract.computer.checkoutSource ? { checkoutSource: contract.computer.checkoutSource } : {}) } } : {}),
       repository: {
         forge: contract.repository.forge,
         owner: contract.repository.owner,
@@ -1421,6 +1426,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       !validPositiveInteger(input.executionFence, Number.MAX_SAFE_INTEGER) ||
       input.protocolVersion !== this.engineProtocolVersion ||
       (input.actorProtocolVersion !== undefined && input.actorProtocolVersion !== 2) ||
+      (input.agentCustomizationVersion !== undefined && (input.agentCustomizationVersion !== 3 || input.agentRuntime?.profile !== "zeros-cloud-worker-v4")) ||
       (input.agentRuntime!==undefined && (input.actorProtocolVersion!==2 || !CloudAgentRuntimeSchema.safeParse(input.agentRuntime).success))
     ) {
       throw materialError("engine_registration_rejected", false);
@@ -1503,7 +1509,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
              registered_at = now(), last_heartbeat_at = now(),
              lease_expires_at = now() + ($3::bigint * interval '1 millisecond'),
              updated_at = now(), actor_protocol_version = $4,
-             agent_runtime_profile=$5, agent_runtime_contract_sha256=$6
+             agent_runtime_profile=$5, agent_runtime_contract_sha256=$6, agent_customization_version=$7
          WHERE id = $1 AND state = 'starting'
          RETURNING lease_expires_at`,
         [
@@ -1513,6 +1519,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           input.actorProtocolVersion ?? 1,
           identity?.profile === "zeros-cloud-worker-v3" ? identity.profile : null,
           identity?.profile === "zeros-cloud-worker-v3" ? identity.contractSha256 : null,
+          input.agentCustomizationVersion ?? null,
         ],
       );
       if ((updated.rowCount ?? 0) !== 1) {

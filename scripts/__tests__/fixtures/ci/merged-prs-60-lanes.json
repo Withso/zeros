@@ -1,0 +1,1385 @@
+{
+  "258": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "264": {
+    "full": false,
+    "lanes": ["docs-only", "macos", "packaging", "runtime-bundle"],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "265": {
+    "full": false,
+    "lanes": ["docs-only", "macos", "packaging", "runtime-bundle"],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "266": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "267": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "268": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "269": {
+    "full": false,
+    "lanes": ["runtime-bundle", "smoke-harness"],
+    "jobs": ["control-plane-static", "quality", "secret-scan", "vitest"]
+  },
+  "270": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "271": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "desktop-renderer",
+      "macos",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "272": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "macos",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "273": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "desktop-renderer",
+      "docs-only",
+      "macos",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "274": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "protocol",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "275": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "276": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "docs-only",
+      "macos",
+      "repository-contracts",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "277": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "desktop-renderer",
+      "docs-only",
+      "macos",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "278": {
+    "full": false,
+    "lanes": ["control-plane", "control-plane-db"],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "279": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "desktop-renderer",
+      "docs-only",
+      "macos",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "280": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "desktop-engine",
+      "desktop-renderer",
+      "electron",
+      "macos",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "281": {
+    "full": false,
+    "lanes": [
+      "control-plane",
+      "control-plane-db",
+      "macos",
+      "packaging",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "282": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "283": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "284": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "285": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "286": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "287": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "desktop-renderer",
+      "macos",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "288": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "289": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "290": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "docs-only",
+      "macos",
+      "repository-contracts",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "291": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "macos",
+      "repository-contracts",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "292": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "design-containment",
+      "desktop-renderer",
+      "macos",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "293": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "desktop-engine",
+      "desktop-renderer",
+      "electron",
+      "macos",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "294": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "design-containment",
+      "desktop-engine",
+      "macos",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "295": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "desktop-engine",
+      "macos",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "296": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "297": {
+    "full": false,
+    "lanes": ["runtime-bundle", "smoke-harness"],
+    "jobs": ["control-plane-static", "quality", "secret-scan", "vitest"]
+  },
+  "298": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "macos",
+      "repository-contracts",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "299": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "300": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "301": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "302": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "303": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "macos",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "304": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "design-containment",
+      "desktop-engine",
+      "macos",
+      "repository-contracts",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "305": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "macos",
+      "repository-contracts",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "306": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "macos",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "307": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "macos",
+      "repository-contracts",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "308": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "desktop-renderer",
+      "docs-only",
+      "macos",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "309": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "protocol",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "310": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "macos",
+      "repository-contracts",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "311": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "312": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "desktop-renderer",
+      "docs-only",
+      "macos",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "313": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "desktop-engine",
+      "macos",
+      "repository-contracts",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "314": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "docs-only",
+      "macos",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "315": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "docs-only",
+      "macos",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "316": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "docs-only",
+      "macos",
+      "repository-contracts",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "317": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "design-containment",
+      "desktop-engine",
+      "macos",
+      "repository-contracts",
+      "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "318": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "319": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "macos",
+      "model-catalogs",
+      "packaging",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "320": {
+    "full": false,
+    "lanes": [
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "protocol",
+      "runtime-bundle",
+      "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  },
+  "321": {
+    "full": false,
+    "lanes": ["runtime-bundle", "smoke-harness"],
+    "jobs": ["control-plane-static", "quality", "secret-scan", "vitest"]
+  },
+  "322": {
+    "full": true,
+    "lanes": [
+      "ci-config",
+      "cloud-runtime",
+      "control-plane",
+      "control-plane-db",
+      "dependencies-toolchain",
+      "design-containment",
+      "desktop-engine",
+      "desktop-renderer",
+      "docs-only",
+      "electron",
+      "macos",
+      "marketing",
+      "model-catalogs",
+      "packaging",
+      "protocol",
+      "repository-contracts",
+      "runtime-bundle",
+      "smoke-harness",
+      "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
+  }
+}

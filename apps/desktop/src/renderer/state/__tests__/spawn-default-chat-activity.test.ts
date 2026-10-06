@@ -1,12 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  bornChatThread,
   spawnDefaultChatForWorkspace,
   spawnNewChatTab,
 } from "../spawn-default-chat";
 import type { Action } from "../workspace-store";
 
 describe("chat-tab workspace activity", () => {
+  it("starts cloud tabs with a delegated model instead of the global default", () => {
+    expect(bornChatThread({ id: "codex", name: "Codex", cloudModels: ["gpt-5.6-luna"] } as never,
+      "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222").model).toBe("gpt-5.6-luna");
+    const local = bornChatThread({ id: "codex", name: "Codex" } as never, "/local/workspace");
+    expect(local).toMatchObject({ model: "gpt-5.6-sol", effort: "high" });
+    expect(local).not.toHaveProperty("fast");
+  });
   it("records an explicit new tab but not automatic empty-workspace repair", async () => {
     const explicitActions: Action[] = [];
     const explicitFolder = `/explicit-chat-${Date.now()}`;

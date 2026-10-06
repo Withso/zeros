@@ -231,6 +231,17 @@ describe("favorite models — catalog fallbacks + user stars", () => {
     delete (globalThis as { localStorage?: Storage }).localStorage;
   });
 
+  it("uses an allowed cloud fallback without changing the favorite or its remembered configuration", () => {
+    setFavoriteModel("codex", "gpt-5.6-sol");
+    rememberModelConfiguration("codex", "gpt-5.6-luna", { effort: "low", fast: true });
+    expect(newChatBornDefaults("codex", ["gpt-5.6-luna"])).toMatchObject({ model: "gpt-5.6-luna", effort: "low", fast: true });
+    expect(getFavoriteModel("codex")).toBe("gpt-5.6-sol");
+    expect(newChatBornDefaults("codex").model).toBe("gpt-5.6-sol");
+    expect(newChatBornDefaults("codex", ["gpt-5.6-luna", "gpt-5.6-sol"]).model).toBe("gpt-5.6-sol");
+    expect(newChatBornDefaults("claude", ["claude-opus-5"]).model).toBeNull();
+    expect(newChatBornDefaults("codex", []).model).toBeNull();
+  });
+
   it("falls back to the curated defaultFavorites when nothing is starred", () => {
     expect(defaultFavoriteModelFor("claude")).toBe("claude-opus-5[1m]");
     expect(defaultFavoriteModelFor("codex")).toBe("gpt-5.6-sol");

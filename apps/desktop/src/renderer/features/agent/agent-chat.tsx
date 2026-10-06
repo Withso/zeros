@@ -865,6 +865,7 @@ export function AgentChat({
   // composer-draft seeding can read on
   // first render. The original declaration here was removed.)
   const agentsList = useWorkspaceAgents(chatThread?.folder, interactive);
+  const runtimeUpgradeRequired = agentsList?.find(agent => agent.id === (chatThread?.agentId ?? session.agentId))?.runtimeUpgradeRequired === true;
   const agentSessions = useAgentSessions();
   const cloudComputerV2 = useInternalFeatureActive("cloudComputerV2");
   const retryTurn = useCallback(
@@ -3465,6 +3466,7 @@ export function AgentChat({
   // explicit user send, never an automatic loop. The Send button keeps its
   // "error" tint (PromptInputSubmit status) so the state still reads.
   const canSend =
+    !runtimeUpgradeRequired &&
     session.transcriptState === "resident" &&
     !composerStreaming &&
     !composerEmpty;
@@ -4004,7 +4006,7 @@ export function AgentChat({
     extras?: Parameters<typeof runSend>[1],
     recordActivity = true,
   ): Promise<void> => {
-    if (readOnly || sendInFlightRef.current) return;
+    if (readOnly || runtimeUpgradeRequired || sendInFlightRef.current) return;
     sendInFlightRef.current = true;
     // Queueing behind a streaming turn cannot own that turn's next chunk.
     const cancelLatency = chatId && session.status !== "streaming"
@@ -5173,6 +5175,11 @@ export function AgentChat({
               so the popover matches the composer width,
               not the full-width wrapper above. */}
               {composerSuggestionPopup}
+              {runtimeUpgradeRequired && (
+                <p className="text-fg2 mb-2 text-2xxs" role="status" data-cloud-agent-runtime-upgrade="">
+                  This workspace gets the new cloud runtime the next time it wakes
+                </p>
+              )}
               {cloudLimitations.length > 0 && (
                 <p className="text-fg3 mb-2 text-2xxs" data-cloud-agent-limitations="">
                   Unavailable on this cloud runtime: {cloudLimitations.join(", ")}.

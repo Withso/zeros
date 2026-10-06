@@ -105,8 +105,8 @@ export function createCloudAgentExecutionRoutes(service:DatabaseCloudAgentExecut
     }catch(error){
       if(error instanceof CloudWorkspaceEngineAuthorityError)return c.json({error:"engine_authority_rejected"},401);
       if(request.kind==="computer-tool"&&error instanceof ComputerToolConflictError)return c.json({result:error.result},409);
-      if(request.kind==="admit"&&error instanceof HttpError&&error.code==="cloud_computer_tools_update_required")
-        return c.json({error:"cloud_computer_tools_update_required"},409);
+      if(request.kind==="admit"&&error instanceof HttpError&&["cloud_computer_tools_update_required","cloud_runtime_upgrade_required"].includes(error.code))
+        return c.json({error:error.code},409);
       if(error instanceof HttpError&&["computer_environment_revoked","computer_environment_runtime_required"].includes(error.code))return c.json({error:error.code},409);
       if(error instanceof HttpError)return c.json({error:"cloud_agent_authority_rejected"},error.status===503?503:error.status===429?429:403);
       return c.json({error:"cloud_agent_execution_unavailable"},503);

@@ -211,7 +211,8 @@ import {
   closeActivityForSession,
   closeRouteForSession,
 } from "./session-close-lifecycle";
-import { tryRestoreLiveChatDraft } from "./composer-live-drafts";
+import { recoverCloudRuntimeUpgrade } from "./cloud-runtime-upgrade";
+import { getLiveChatDraft, tryRestoreLiveChatDraft } from "./composer-live-drafts";
 
 // 2026-06-09: reconcile now runs on EVERY bind (new session, respawn, resume).
 // It used to run at most once per chat to avoid clobbering a mode the user
@@ -2796,6 +2797,11 @@ export function AgentSessionsProvider({
         // `warming` window it used to infer from is also every chat reopen. See
         // pendingLocalTurns / tailTurnInFlight.
         getStore().setPendingLocalTurn(chatId, userMessage.id);
+        const submittedDraft = isCloudWorkspace(current.cwd) ? getLiveChatDraft(chatId) : null;
+        const settleRuntimeUpgrade = (error: unknown) => recoverCloudRuntimeUpgrade({
+          folder: current.cwd, chatId, error, message: userMessage, draft: submittedDraft,
+          store: getStore(), pauseQueue,
+        });
         onAccepted?.();
 
         if (pendingAuth.length) {
@@ -3367,6 +3373,7 @@ export function AgentSessionsProvider({
               });
               return;
             }
+            if (settleRuntimeUpgrade(firstErr)) return;
             const failure = classifyRpcError({
               agentId: current.agentId!,
               stage: "prompt",
@@ -3418,6 +3425,7 @@ export function AgentSessionsProvider({
               settleStoppedSend();
               return;
             }
+            if (settleRuntimeUpgrade(resp.error)) return;
             const failure = failureFromAgentError(
               { ...resp, message: resp.error } as unknown as AgentErrorMessage,
               "prompt",
@@ -3448,6 +3456,7 @@ export function AgentSessionsProvider({
               });
               if (!retried) return;
               if (retried.type === "AGENT_PROMPT_FAILED") {
+                if (settleRuntimeUpgrade(retried.error)) return;
                 // The retry itself failed — surface the second failure
                 // without a third attempt. Two strikes is enough.
                 const retryFailure = failureFromAgentError(
@@ -3654,6 +3663,7 @@ export function AgentSessionsProvider({
             settleStoppedSend();
             return;
           }
+          if (settleRuntimeUpgrade(err)) return;
           const failure = classifyRpcError({
             agentId: current.agentId!,
             stage: "prompt",

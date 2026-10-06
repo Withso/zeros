@@ -255,6 +255,30 @@ describe("classifyGitTransportError", () => {
 });
 
 describe("runFile — Bun native subprocess boundary", () => {
+  it("terminates the opted-in cloud fetch process group, then bounds cleanup", async () => {
+    vi.useFakeTimers();
+    let finish!: (code: number) => void;
+    const exited = new Promise<number>(resolve => { finish = resolve; });
+    const kill = vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
+      if (signal === "SIGKILL") finish(137);
+      return true;
+    });
+    const spawn = vi.fn((_command: string[], _options: Record<string, unknown>) => ({ pid: 424242, stdout: new Response("").body, stderr: new Response("").body,
+      exited, signalCode: "SIGTERM", killed: true, kill: vi.fn() }));
+    vi.stubGlobal("Bun", { spawn });
+    try {
+      const controller = new AbortController();
+      const running = runFile("git", ["fetch", "--unshallow", "origin"], { signal: controller.signal, processGroup: true });
+      const rejected = expect(running).rejects.toThrow("history limit");
+      controller.abort(new Error("history limit"));
+      expect(spawn.mock.calls[0]?.[1]).toMatchObject({ detached: true });
+      expect(kill).toHaveBeenCalledWith(-424242, "SIGTERM");
+      await vi.advanceTimersByTimeAsync(2000);
+      await rejected;
+      expect(kill).toHaveBeenLastCalledWith(-424242, "SIGKILL");
+    } finally { kill.mockRestore(); vi.useRealTimers(); }
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });

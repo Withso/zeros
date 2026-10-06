@@ -2,7 +2,7 @@ import type pg from "pg";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { lockCloudComputerOrganization } from "./computer.js";
-import { CloudComputerV2RepositoryManifestSchema, type CloudComputerV2RepositoryManifest } from "./computer-v2-contract.js";
+import { CloudComputerV2RepositoryManifestSchema, type CloudComputerV2RepositoryManifest, CloudWorkspaceCheckoutSourceSchema, type CloudWorkspaceCheckoutSource } from "./computer-v2-contract.js";
 import { loadPinnedCloudRuntime, selectCloudRuntime, type CloudRuntimePin } from "./runtime-selection.js";
 import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
 import { CloudProviderError, type CloudProviderCreateInput } from "./provider.js";
@@ -155,10 +155,12 @@ export async function selectComputerWorkspaceSource(tx: Tx, input: {
 
 export async function pinComputerWorkspaceSource(tx: Tx, input: {
   workspaceId: string; generation: number; organizationId: string; source: CloudComputerWorkspaceSource;
+  checkoutSource: CloudWorkspaceCheckoutSource;
 }) {
-  await tx.query(`INSERT INTO cloud_workspace_computer_sources(workspace_id,generation,org_id,build_id,template_id,config_id)
-    VALUES($1,$2,$3,$4,$5,$6)`, [input.workspaceId, input.generation, input.organizationId,
-    input.source.buildId, input.source.templateId, input.source.configId]);
+  const checkoutSource = CloudWorkspaceCheckoutSourceSchema.parse(input.checkoutSource);
+  await tx.query(`INSERT INTO cloud_workspace_computer_sources(workspace_id,generation,org_id,build_id,template_id,config_id,checkout_source)
+    VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)`, [input.workspaceId, input.generation, input.organizationId,
+    input.source.buildId, input.source.templateId, input.source.configId, JSON.stringify(checkoutSource)]);
 }
 
 /** B8's single generation-pin copy helper calls this in its INSERT transaction.
@@ -166,8 +168,8 @@ export async function pinComputerWorkspaceSource(tx: Tx, input: {
 export async function copyComputerWorkspaceSource(tx: Tx, input: {
   workspaceId: string; organizationId: string; sourceGeneration: number; targetGeneration: number;
 }) {
-  await tx.query(`INSERT INTO cloud_workspace_computer_sources(workspace_id,generation,org_id,build_id,template_id,config_id)
-    SELECT workspace_id,$4,org_id,build_id,template_id,config_id FROM cloud_workspace_computer_sources
+  await tx.query(`INSERT INTO cloud_workspace_computer_sources(workspace_id,generation,org_id,build_id,template_id,config_id,checkout_source)
+    SELECT workspace_id,$4,org_id,build_id,template_id,config_id,checkout_source FROM cloud_workspace_computer_sources
     WHERE workspace_id=$1 AND org_id=$2 AND generation=$3`,
   [input.workspaceId, input.organizationId, input.sourceGeneration, input.targetGeneration]);
 }
@@ -198,7 +200,10 @@ export async function resolveComputerWorkspaceSetup(tx: Tx, input: {
   const source = await loadComputerWorkspaceSource(tx, input);
   if (!source) throw new HttpError(409, "cloud_computer_build_required", "The saved Cloud Computer template is unavailable.");
   const grant = await resolveComputerRepositoryGrant(tx, { ...input, configId: source.configId });
-  return { source, repositoryId: grant.repositoryId, requestedRevision: input.requestedRevision };
+  const saved = (await tx.query<{ checkout_source: unknown }>(`SELECT checkout_source FROM cloud_workspace_computer_sources
+    WHERE workspace_id=$1 AND generation=$2 AND org_id=$3`, [input.workspaceId, input.generation, input.organizationId])).rows[0];
+  const checkoutSource = saved?.checkout_source == null ? null : CloudWorkspaceCheckoutSourceSchema.parse(saved.checkout_source);
+  return { source, repositoryId: grant.repositoryId, requestedRevision: input.requestedRevision, checkoutSource };
 }
 
 export async function resolveComputerTemplateFork(pool: pg.Pool, accountScope: string, billingOrg: string, input: CloudProviderCreateInput) {

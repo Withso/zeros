@@ -26,6 +26,7 @@ const originalOrder = [
   "workbench-status",
   "cloud-replica",
   "cloud-preview",
+  "cloud-design-assets",
   "cloud-terminal",
   "cloud-settings",
   "cloud-design-directories",

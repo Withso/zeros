@@ -1,3 +1,5 @@
+import { CloudWorkspaceCheckoutSourceSchema, type CloudWorkspaceCheckoutSource } from "./computer-v2-contract.js";
+
 const GITHUB_API_VERSION = "2026-03-10";
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_RESPONSE_BYTES = 128 * 1024;
@@ -17,6 +19,7 @@ export type CloudWorkspaceRepositoryIdentity = {
   visibility: "private" | "internal" | "public";
   /** Present only when a create admission resolves a requested ref to a commit. */
   resolvedRevision?: string;
+  checkoutSource?: CloudWorkspaceCheckoutSource;
 };
 
 export interface CloudWorkspaceRepositoryResolver {
@@ -26,10 +29,12 @@ export interface CloudWorkspaceRepositoryResolver {
     repository: string;
     repositoryId?: string;
     revision?: string;
+    includeCheckoutSource?: boolean;
   }): Promise<CloudWorkspaceRepositoryIdentity>;
 }
 
 type RepositoryCredential = {
+  mintWorkspaceRead?(input: { installationId: number; repositoryId: number }): Promise<{ token: string; expiresAtMs: number }>;
   mintContentsRead?(input: { installationId: number; repositoryId: number }): Promise<{ token: string; expiresAtMs: number }>;
   mint(input: {
     installationId: number;
@@ -186,12 +191,61 @@ export class GithubCloudWorkspaceRepositoryResolver
 
   private readonly credential: RepositoryCredential;
 
+  private async checkoutSource(repository: CloudWorkspaceRepositoryIdentity, requested: string, revision: string, token: string): Promise<CloudWorkspaceCheckoutSource> {
+    const read = async (suffix: string) => {
+      const response = await this.fetch(`https://api.github.com/repos/${repository.owner}/${repository.name}${suffix}`, {
+        method: "GET", redirect: "error", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), headers: {
+          accept: "application/vnd.github+json", authorization: `Bearer ${token}`,
+          "user-agent": "zeros-control-plane", "x-github-api-version": GITHUB_API_VERSION,
+        },
+      });
+      if (response.status !== 200) { await response.body?.cancel().catch(() => undefined); throw unavailable(); }
+      return boundedJson(response);
+    };
+    const branch = requested.startsWith("refs/heads/") ? requested.slice(11) : requested;
+    const pull = /^refs\/pull\/([1-9][0-9]*)\/head$/.exec(requested);
+    const source: CloudWorkspaceCheckoutSource = { kind: "branch", revision, headBranch: branch,
+      targetBranch: repository.defaultBranch, pullRequest: null };
+    if (branch === repository.defaultBranch) source.kind = "default";
+    else if (!pull && (/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(branch) || branch.startsWith("refs/"))) {
+      source.kind = "commit"; source.headBranch = null;
+    } else {
+      let pr: unknown;
+      if (pull) {
+        const number = Number(pull[1]);
+        if (!Number.isSafeInteger(number) || number > 2_147_483_647) throw unavailable();
+        pr = await read(`/pulls/${number}`);
+        source.kind = "pull_request";
+      } else {
+        const list = await read(`/pulls?state=open&head=${encodeURIComponent(`${repository.owner}:${branch}`)}&per_page=100`);
+        if (!Array.isArray(list)) throw unavailable();
+        const matches = list.filter(item => item?.head?.ref === branch && item?.head?.sha === revision &&
+          String(item?.head?.repo?.id) === repository.forgeRepositoryId);
+        // Multiple PRs can share a head. Do not silently select one base.
+        if (matches.length === 1) pr = matches[0];
+      }
+      if (pr !== undefined) {
+        const body = pr as { number?: unknown; html_url?: unknown; state?: unknown; draft?: unknown; merged_at?: unknown;
+          head?: { ref?: unknown; sha?: unknown }; base?: { ref?: unknown; repo?: { id?: unknown } } } | null;
+        if (!body || typeof body.number !== "number" || (pull && body.number !== Number(pull[1])) ||
+          body.head?.sha !== revision || String(body.base?.repo?.id) !== repository.forgeRepositoryId ||
+          body.html_url !== `${repository.webUrl}/pull/${body.number}` || typeof body.draft !== "boolean" || !["open", "closed"].includes(String(body.state))) throw unavailable();
+        source.headBranch = requiredGitBranch(body.head?.ref);
+        source.targetBranch = requiredGitBranch(body.base?.ref);
+        source.pullRequest = { number: body.number, url: body.html_url,
+          state: body.merged_at ? "merged" : body.state === "closed" ? "closed" : body.draft ? "draft" : "ready" };
+      }
+    }
+    return CloudWorkspaceCheckoutSourceSchema.parse(source);
+  }
+
   async resolve(input: {
     installationId: number;
     owner: string;
     repository: string;
     repositoryId?: string;
     revision?: string;
+    includeCheckoutSource?: boolean;
   }): Promise<CloudWorkspaceRepositoryIdentity> {
     if (
       !Number.isSafeInteger(input.installationId) ||
@@ -204,9 +258,11 @@ export class GithubCloudWorkspaceRepositoryResolver
 
     if (input.revision !== undefined) requiredGitBranch(input.revision);
     const immutableId = input.repositoryId === undefined ? null : Number(repositoryId(input.repositoryId));
-    if (immutableId !== null && (!Number.isSafeInteger(immutableId) || !this.credential.mintContentsRead)) throw unavailable();
+    const scopedMint = input.includeCheckoutSource ? this.credential.mintWorkspaceRead : this.credential.mintContentsRead;
+    if ((input.includeCheckoutSource && (immutableId === null || input.revision === undefined)) ||
+      (immutableId !== null && (!Number.isSafeInteger(immutableId) || !scopedMint))) throw unavailable();
     const minted = await (immutableId === null ? this.credential.mint(input) :
-      this.credential.mintContentsRead!({ installationId: input.installationId, repositoryId: immutableId })).catch(() => {
+      scopedMint!.call(this.credential, { installationId: input.installationId, repositoryId: immutableId })).catch(() => {
       throw unavailable();
     });
     let resolved: CloudWorkspaceRepositoryIdentity | null = null;
@@ -279,6 +335,7 @@ export class GithubCloudWorkspaceRepositoryResolver
         if (!commit || typeof commit.sha !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit.sha) ||
           (/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(input.revision) && commit.sha !== input.revision)) throw unavailable();
         resolved.resolvedRevision = commit.sha;
+        if (input.includeCheckoutSource) resolved.checkoutSource = await this.checkoutSource(resolved, input.revision, commit.sha, minted.token);
       }
     } catch {
       resolutionFailed = true;

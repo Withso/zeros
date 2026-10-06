@@ -805,14 +805,16 @@ export class CloudAgentConnection {
               stopReason: entry.state === "cancelled" ? "cancelled" : "end_turn",
               response: {},
             };
-          if (entry && ["failed", "uncertain"].includes(entry.state))
+          if (entry && (["failed", "uncertain"].includes(entry.state) || entry.resultCode === "cloud_runtime_upgrade_required"))
             return {
               type: "AGENT_PROMPT_FAILED",
               agentId: owner.agentId,
               sessionId: routeId(owner.id),
               executionId: routeId(owner.id),
               error:
-                entry.state === "uncertain"
+                entry.resultCode === "cloud_runtime_upgrade_required"
+                  ? "cloud_runtime_upgrade_required"
+                  : entry.state === "uncertain"
                   ? "The cloud command outcome is unknown. Review the transcript before retrying."
                   : `Cloud command failed (${entry.resultCode ?? "unknown"})`,
             };
@@ -822,7 +824,20 @@ export class CloudAgentConnection {
           });
         }
       };
-      const result = await Promise.race([completed, observeReceipt()]);
+      let result = await Promise.race([completed, observeReceipt()]);
+      if (result.type === "AGENT_PROMPT_FAILED" && result.error !== "cloud_runtime_upgrade_required") {
+        // Deployed engines may discard the HTTP error code. Admission records
+        // its denial before responding, so even an early generic terminal event
+        // can recover this exact command's code without retrying the prompt.
+        try {
+          const receipt = commandReceiptSchema.parse(await this.op("cloudCommands.request", {
+            request: { kind: "read", commandId },
+          }));
+          if (receipt.commandId === commandId && receipt.conversationId === owner.id &&
+              receipt.resultCode === "cloud_runtime_upgrade_required")
+            result = { ...result, error: "cloud_runtime_upgrade_required" };
+        } catch { /* An unavailable receipt cannot prove a pre-provider denial. */ }
+      }
       // A terminal receipt also ends the execution's interactive controls when
       // its terminal event was lost. An interrupted observer proves nothing.
       owner.promptActive = false;

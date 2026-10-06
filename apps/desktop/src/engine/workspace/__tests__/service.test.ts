@@ -112,6 +112,17 @@ describe("WorkspaceService", () => {
     expect(local!.path).toBe(dir);
   });
 
+  it("forwards explicit history recovery and preserves ordinary Local fetch options", async () => {
+    const fetch = vi.spyOn(git, "fetch").mockResolvedValue({ summary: "", historyLimited: true });
+    try {
+      expect(await svc.handle("git.fetch", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, unshallow: true })).toEqual({ summary: "", historyLimited: true });
+      expect(fetch).toHaveBeenLastCalledWith({ workspaceId: LOCAL_MAIN_WORKSPACE_ID, prune: false, remote: undefined, unshallow: true });
+      fetch.mockResolvedValueOnce({ summary: "" });
+      expect(await svc.handle("git.fetch", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, prune: true })).toEqual({ summary: "" });
+      expect(fetch).toHaveBeenLastCalledWith({ workspaceId: LOCAL_MAIN_WORKSPACE_ID, prune: true, remote: undefined, unshallow: undefined });
+    } finally { fetch.mockRestore(); }
+  });
+
   it("serves Design through the admitted cloud primary checkout without local resource authority", async () => {
     const cloud = new WorkspaceService(dir, { primaryDesignWorkspace: true });
     const options = { remote: true, cloudWorker: true, hostLocalResources: false, cloudActorIdentity };
