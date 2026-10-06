@@ -12,6 +12,9 @@
 //   .claude/skills/zeros-ui/SKILL.md  ┐
 //   .agents/skills/zeros-ui/SKILL.md  ├ ← the agent brief in docs/design-system.md
 //   .cursor/rules/zeros-ui.mdc        ┘   (between the agent-brief markers)
+//   .claude/skills/zeros-workspaces/SKILL.md  ┐
+//   .agents/skills/zeros-workspaces/SKILL.md  ├ ← the workspace brief in RULES.md
+//   .cursor/rules/zeros-workspaces.mdc        ┘   (between the workspace-brief markers)
 //
 //   pnpm design:docs           write them
 //   pnpm check:ui              fails if any is stale (checkGeneratedDocs)
@@ -38,6 +41,9 @@ const GUIDE_FILE = "docs/design-system.md";
 const BRIEF_START = "<!-- agent-brief:start -->";
 const BRIEF_END = "<!-- agent-brief:end -->";
 const GENERATOR = "scripts/design-system/build-design-docs.mjs";
+const RULES_FILE = "RULES.md";
+const WORKSPACE_BRIEF_START = "<!-- workspace-brief:start -->";
+const WORKSPACE_BRIEF_END = "<!-- workspace-brief:end -->";
 
 const NEUTRAL_GROUPS = [
   ["Surfaces", ["bg0", "bg1", "bg1-hover", "bg1-highlight", "bg1-bright", "bg2", "bg2-hover", "bg2-highlight", "bg3", "bg3-hover", "bg4", "bg5", "sidebar-bg", "sidebar-bg-hover", "highlighted-bg"]],
@@ -254,10 +260,36 @@ export function renderAgentFiles(root) {
   };
 }
 
+export function workspaceBrief(root) {
+  const rules = readFileSync(join(root, RULES_FILE), "utf8");
+  const start = rules.indexOf(WORKSPACE_BRIEF_START);
+  const end = rules.indexOf(WORKSPACE_BRIEF_END);
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error(`${RULES_FILE} must contain ${WORKSPACE_BRIEF_START} … ${WORKSPACE_BRIEF_END}`);
+  }
+  return rules.slice(start + WORKSPACE_BRIEF_START.length, end).trim();
+}
+
+const WORKSPACE_SKILL_DESCRIPTION =
+  "Zeros Local and cloud workspaces: use for any change touching workspaces, the engine, bridge, Git/GitHub, agents, Design, terminals, previews, files, settings or their UI — every change must handle Local and organization owners, local and cloud placements, and switching between them.";
+
+export function renderWorkspaceAgentFiles(root) {
+  const brief = workspaceBrief(root);
+  const notice = `<!-- GENERATED from ${RULES_FILE} by ${GENERATOR}. Edit the workspace brief there, then run \`pnpm design:docs\`. -->`;
+  const description = JSON.stringify(WORKSPACE_SKILL_DESCRIPTION);
+  const skill = `---\nname: zeros-workspaces\ndescription: ${description}\n---\n\n${notice}\n\n${brief}\n`;
+  return {
+    ".claude/skills/zeros-workspaces/SKILL.md": skill,
+    ".agents/skills/zeros-workspaces/SKILL.md": skill,
+    ".cursor/rules/zeros-workspaces.mdc": `---\ndescription: ${description}\nglobs: apps/**,packages/**,scripts/**\nalwaysApply: false\n---\n\n${notice}\n\n${brief}\n`,
+  };
+}
+
 export function generatedFiles(root) {
   return {
     "docs/design-tokens.md": renderTokenReference(root),
     ...renderAgentFiles(root),
+    ...renderWorkspaceAgentFiles(root),
   };
 }
 
@@ -270,7 +302,7 @@ export function checkGeneratedDocs(root) {
       violations.push({
         file: rel,
         line: 1,
-        message: `Generated design-system file is stale — run \`pnpm design:docs\` (source: ${rel === "docs/design-tokens.md" ? `styles/tokens/ + ${CONTRACT_FILE}` : GUIDE_FILE}).`,
+        message: `Generated design-system file is stale — run \`pnpm design:docs\` (source: ${rel === "docs/design-tokens.md" ? `styles/tokens/ + ${CONTRACT_FILE}` : rel.includes("zeros-workspaces") ? RULES_FILE : GUIDE_FILE}).`,
       });
     }
   }

@@ -14,6 +14,8 @@ These instructions apply to the entire repository. Read and follow
   they are persisted or externally observable; document them as compatibility
   contracts instead of silently renaming them.
 - Keep changes scoped. Do not reformat or rewrite unrelated user work.
+- Every change must handle Local and cloud workspaces (owners and placements);
+  follow RULES.md §8, mirrored in the generated `zeros-workspaces` skills.
 - For a bug, add a failing regression test first, implement the fix, and retain
   the test.
 - Run adjacent Vitest suites after each meaningful edit, not only at handoff.
