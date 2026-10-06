@@ -21,8 +21,11 @@ const workflow = (file: string) =>
   ) as Workflow;
 
 // Pull requests skip the composer UI smoke (it runs after merge in Preflight)
-// and add an advisory Prettier pass over their changed files.
-const PR_ONLY_STEPS = new Set(["Prettier — changed files only (advisory)"]);
+// and add an advisory Prettier pass plus the incident-marker merge guard.
+const PR_ONLY_STEPS = new Set([
+  "Prettier — changed files only (advisory)",
+  "Reject unresolved CI incident markers",
+]);
 // Post-merge-only jobs: the Alpha gate and the composer browser matrix
 // (their required aggregate `ui-smoke (composer)` exists in both).
 const PREFLIGHT_ONLY_JOBS = new Set(["alpha-gate", "ui-smoke-shard"]);
