@@ -29,8 +29,9 @@ const stableReleaseWorkflow = readFileSync(
   "utf8",
 );
 // Both PRE-RELEASE channel workflows. Alpha (every merge to main) and Beta (a
-// release/* stabilization cut) are structurally identical — same publish shape,
-// same feed/blockmap handoff — so they get the SAME assertions. Adding a channel
+// release/* stabilization cut) keep the same feed/blockmap handoff, so they get
+// the SAME asset assertions. Alpha additionally gates its writers on explicit
+// CI readiness. Adding a channel
 // workflow without adding it here would ship a channel whose differential-update
 // blockmap is silently dropped: updates still work, but every client downloads the
 // full ~800 MB zip instead of a delta.
@@ -160,6 +161,18 @@ for (const { label, text, file } of channelReleaseWorkflows) {
   // And the job env must pin the channel, or electron-builder-run applies the
   // WRONG appId/feed overrides (or stable's, which are none at all).
   requireWorkflowToken(text, label, `ZEROS_CHANNEL: ${ch}`);
+  if (ch === "alpha") {
+    // These job/step identities are read by the publication baseline client.
+    // A green supersession must skip every destination, including runtime.
+    requireWorkflowToken(text, label, "name: Publish Alpha feed");
+    requireWorkflowToken(text, label, 'name: Publish rolling "alpha" prerelease');
+    requireWorkflowToken(text, label, "ready: ${{ steps.barrier.outputs.ready }}");
+    requireWorkflowToken(text, label,
+      "if: github.event.repository.fork == false && needs.ci.outputs.ready == 'true'", 3);
+    requireWorkflowToken(text, label, "ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}", 3);
+    requireWorkflowToken(text, label, "pnpm exec tsx scripts/release/ci-cli.ts --verify");
+    requireWorkflowToken(text, label, "pnpm exec tsx scripts/release/publication-cli.ts");
+  }
 }
 
 for (const from of froms) {

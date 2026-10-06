@@ -875,6 +875,22 @@ describe("repository layout contracts", () => {
     expect(stable).not.toContain("refs/heads/main|refs/heads/release/*");
   });
 
+  it("keeps Alpha fast evidence opt-in while preserving publication identities and shipping checks", () => {
+    const alpha = read(".github/workflows/release-alpha.yml");
+    const preflight = read(".github/workflows/preflight.yml");
+    expect(preflight).toContain("    needs: [quality, test, build, control-plane, secret-scan]");
+    expect(alpha).toContain("ready: ${{ steps.barrier.outputs.ready }}");
+    expect(alpha.match(/if: github\.event\.repository\.fork == false && needs\.ci\.outputs\.ready == 'true'/g)).toHaveLength(3);
+    expect(alpha).toContain("    name: Publish Alpha feed");
+    expect(alpha).toContain('      - name: Publish rolling "alpha" prerelease');
+    expect(alpha).toContain("pnpm check:zsr");
+    expect(alpha).toContain("pnpm smoke:engine");
+    expect(alpha).toContain("pnpm smoke:packaged-pty");
+    for (const workflow of ["release-beta", "release", "controlled-cutover", "cloud-worker-promotion"]) {
+      expect(read(`.github/workflows/${workflow}.yml`)).not.toContain("ZEROS_ALPHA_CI_FAST_PATH");
+    }
+  });
+
   it("bakes the default-off desktop cloud capability into every release process", () => {
     const releaseCapability =
       "ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}";

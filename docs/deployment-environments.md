@@ -722,9 +722,11 @@ crosses the artifact boundary, so its signed modes and symlinks remain inside th
 DMG/ZIP rather than being normalized by Actions artifact upload.
 
 1. Merge a green PR to `main`. Each release starts its signed Mac build **in
-   parallel** with the wait for successful **Preflight and CodeQL for its exact
-   event SHA**. `hosted-promotion.yml` starts after CI, without waiting for the
-   build. A separate feed publisher waits for both lanes and CI. PR checks for a
+   parallel** with the wait for **required CI for its exact event SHA**. By
+   default that is successful Preflight and CodeQL; automatic Alpha can opt in
+   to the critical evidence policy below. `hosted-promotion.yml` starts after CI,
+   without waiting for the build. A separate feed publisher waits for both lanes
+   and CI. PR checks for a
    different SHA, a fork's checks, or an older successful attempt cannot authorize
    mutation.
 2. Test Alpha, then cut an exact `release/X.Y.Z` branch. Beta uses one global
@@ -792,6 +794,75 @@ badge. The callable hosted guard, Apple jobs and every final publisher recheck
 required CI; the CI CLI and publisher also refuse a branch head that superseded
 their candidate. A release rerun reads the current exact-SHA check attempts,
 not a cached failure from the original release attempt.
+
+### Automatic Alpha CI evidence
+
+The repository variable `ZEROS_ALPHA_CI_FAST_PATH=enabled` opts automatic
+`release-alpha.yml` main pushes into Preflight's early `alpha-gate` plus CodeQL.
+An unset or other value retains the existing whole-run Preflight + CodeQL
+policy. Beta, Production, manual Alpha operations and direct worker/cutover
+paths keep that full policy and strict branch-HEAD equality. They do not read
+Alpha authority or consume Alpha readiness outputs.
+
+The release client authenticates `GITHUB_RUN_ID` through the Actions API. Its
+parent must be `.github/workflows/release-alpha.yml`, a `push` on `main`, at the
+exact `RELEASE_SHA` and current run attempt, with both repository identities
+matching the release repository. `GITHUB_WORKFLOW_REF` must also identify that
+caller; reusable hosted promotion retains the caller's workflow ref. Neither
+the flag nor the workflow ref alone grants fast evidence. The shared hosted
+input defaults to empty, so existing callers retain their original guard,
+services, optional worker, finalization and receipt conditions.
+
+Fast evidence selects the newest trusted exact-SHA **push/main** Preflight run
+without status filtering, ordered by run ID and attempt. Its current attempt's
+paginated jobs must list exactly one completed, successful `alpha-gate`. The
+gate depends on successful `quality`, `test`, `build`, `control-plane` and
+`secret-scan` aggregates. A carried gate cannot override a currently pending or
+failed critical aggregate. Every main push runs all database shards, including a
+docs-only push after an earlier service change. The newest exact-SHA push
+CodeQL run must still finish successfully. CodeQL selects the newest trusted
+push on that SHA across branches; a newer release-branch push defeats an older
+main success. PR, merge-group, fork and older-attempt proof cannot replace these
+producers, and Preflight from another branch is ineligible; cancellation refuses
+admission. A newer pending or failed gate defeats an older success. API-listed
+carried successes count on an ancillary-only retry; timestamps and certificate
+artifacts are not inferred as proof. History is bounded to 100 runs per
+workflow and 1,000 jobs, and an attempt change during job retrieval denies the
+old snapshot.
+
+The full Preflight run continues, including composer smoke and macOS workload.
+Pending macOS sandbox and credential proof is a deliberate Alpha deferral.
+Observed failures in the macOS runtime pins, agent boot, ZSR kernel, Design
+containment, GitHub credential or file-access checks veto later admission and
+publication even with a green gate. Only explicitly classified packaged-engine
+lifecycle, workspace-lifecycle and Changes/Review failures may be deferred;
+unknown or mixed failing macOS steps deny. Composer smoke failure may coexist
+with a successful critical gate. Signed Mac builds retain their own shipping
+kernel, engine, packaged terminal, artifact and signature checks.
+
+The initial automatic Alpha barrier writes `ready=true` after successful CI
+and freshness checks, including when the flag is off and full CI succeeds. A
+well-formed supersession before any destination mutation instead writes
+`ready=false`, emits a notice and exits successfully. It checks all retained
+parent attempts: a started destination, an earlier successful barrier that
+unblocked destinations, or unavailable mutation evidence keeps the retry red.
+Hosted promotion, desktop feed and runtime publication require `ready=true`.
+Other errors and downstream supersession remain failures; a green no-op never
+falls through to a provider, feed or runtime writer.
+
+Hosted guard, services, finalization and both final publishers re-read the
+selected evidence and keep strict HEAD equality. The optional native-worker
+callable retains its existing full-CI wait because it does not receive this
+Alpha-only input; releases requiring native worker promotion still wait for
+full Preflight there. Rapid main advancement can still supersede a candidate
+after admission. Forward-only admission and a deployed frontier are separate
+future work.
+
+Leave the flag unset until the ordered Alpha controller is rehearsed and
+independent Railway/Pages Git autodeploy is held. No repository or provider
+setting changes are part of this opt-in implementation. Served-deployment
+verification remains after deployment; `check:web-deploy` is not an early CI
+producer.
 
 When enabled, the hosted controller performs a read-only provider plan, a
 short-lived migration-role SQL plan, source retarget, a fresh successful

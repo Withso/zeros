@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { load } from "js-yaml";
 const workflow = (name: string) => readFileSync(`.github/workflows/${name}.yml`, "utf8");
 function job(text: string, name: string) {
   return text.split(`\n  ${name}:\n`)[1]?.split(/\n {2}[a-z][a-z_-]+:\n/)[0] ?? "";
@@ -71,11 +72,12 @@ describe("release dependency and authority contracts", () => {
     expect(build).toContain("if-no-files-found: error");
     expect(build).toContain("overwrite: true");
     for (const file of ["*.tar.gz", "descriptor.json", "manifest.json", "build-receipt.json"]) expect(build).toContain(`/cloud-runtime-bundle/${file}`);
-    expect(publish).toContain("needs: [runtime-build, hosted]");
+    expect(publish).toContain("needs: [ci, runtime-build, hosted]");
     expect(publish).toContain("environment: alpha");
     expect(publish).toContain("timeout-minutes: 15");
     expect(publish).toContain("uses: actions/download-artifact@");
     expect(publish).toContain("scripts/cloud-workspace-validation/runtime-bundle/publish.ts");
+    expect(publish).toContain("scripts/release/ci-cli.ts --verify");
     expect(publish).toContain("CLOUD_WORKSPACE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL }}");
     expect(publish).toContain("CLOUD_RUNTIME_OIDC_AUDIENCE: ${{ vars.CLOUD_RUNTIME_OIDC_AUDIENCE || 'zeros-control-plane-alpha' }}");
     for (const runtimeJob of [build, publish]) {
@@ -114,6 +116,53 @@ describe("release dependency and authority contracts", () => {
   });
   it("rechecks required CI inside the callable hosted workflow", () => {
     expect(job(workflow("hosted-promotion"), "guard")).toContain("pnpm exec tsx scripts/release/ci-cli.ts --verify");
+  });
+
+  it("routes automatic Alpha readiness to every hosted or publication destination", () => {
+    const text = workflow("release-alpha"), ci = job(text, "ci");
+    expect(ci).toContain("ready: ${{ steps.barrier.outputs.ready }}");
+    expect(ci).toContain("id: barrier");
+    expect(ci).toContain("ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}");
+    for (const name of ["hosted", "publish", "runtime-publish"]) {
+      expect(job(text, name)).toContain("if: github.event.repository.fork == false && needs.ci.outputs.ready == 'true'");
+    }
+    expect(job(text, "hosted")).toContain("alpha_ci_fast_path: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}");
+    expect(job(text, "publish")).toContain("ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}");
+    const runtime = job(text, "runtime-publish");
+    expect(runtime).toContain("ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}");
+    expect(runtime).toContain("actions: read");
+    expect(runtime.indexOf("ci-cli.ts --verify")).toBeLessThan(runtime.indexOf("runtime-bundle/publish.ts"));
+    expect(job(text, "publish")).toContain('name: Publish rolling "alpha" prerelease');
+    expect(job(text, "publish")).toContain("name: Publish Alpha feed");
+  });
+
+  it("keeps the hosted default DAG independent of Alpha outputs on every channel", () => {
+    const parsed = load(workflow("hosted-promotion")) as any;
+    expect(parsed.on.workflow_call.inputs.alpha_ci_fast_path).toMatchObject({ type: "string", default: "" });
+    expect(parsed.on.workflow_call.outputs).toBeUndefined();
+    const { guard, services, worker, promote } = parsed.jobs;
+    expect(guard.needs).toBeUndefined();
+    expect(services.needs).toBe("guard");
+    expect(services.if).toBe("needs.guard.outputs.enabled == 'true'");
+    expect(worker.needs).toEqual(["guard", "services"]);
+    expect(worker.if).toBe("needs.guard.outputs.enabled == 'true' && needs.guard.outputs.worker_enabled == 'true'");
+    expect(promote.needs).toEqual(["guard", "services", "worker"]);
+    expect(promote.if).toBe("always() && needs.guard.result == 'success' && needs.guard.outputs.enabled == 'true' && needs.services.result == 'success' && (needs.worker.result == 'success' || needs.worker.result == 'skipped')");
+    for (const stage of [guard, services, promote]) {
+      expect(stage.env.ZEROS_ALPHA_CI_FAST_PATH).toBe("${{ inputs.alpha_ci_fast_path }}");
+      expect(stage.if ?? "").not.toMatch(/ready|alpha/);
+    }
+    expect(services.concurrency).toEqual(promote.concurrency);
+    expect(promote.concurrency["cancel-in-progress"]).toBe(false);
+  });
+
+  it("keeps the deferred macOS producer identity used by the Alpha security veto", () => {
+    const parsed = load(workflow("preflight")) as any;
+    expect(parsed.jobs["source-sync-workload"].name).toBe("source-sync workload (macOS)");
+  });
+
+  it.each(["release-beta", "release", "controlled-cutover", "cloud-worker-promotion"])("retains the full/default CI wiring in %s", name => {
+    expect(workflow(name)).not.toMatch(/ZEROS_ALPHA_CI_FAST_PATH|alpha_ci_fast_path|outputs\.ready/);
   });
   it.each(["preflight", "codeql"])("runs %s push checks on main and every release branch", name => {
     expect(workflow(name)).toContain('branches: [main, "release/**"]');
