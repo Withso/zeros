@@ -2226,6 +2226,35 @@ describe("design workspace cache", () => {
     ).toBe(false);
   });
 
+  it.each(["undo", "redo"] as const)(
+    "keeps local %s free of cloud render preconditions and updates only its own snapshot",
+    async (direction) => {
+      const workspaceId = "ws_local_design";
+      const cloudId = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+      const current = snapshot([{ file: "home.html", x: 40 }, { file: "pricing.html" }]);
+      const confirmedVersion = current.frames[0].sourceVersion;
+      const restored = snapshot([{ file: "home.html", x: 0 }, { file: "pricing.html" }]);
+      restored.frames[0].sourceVersion = "f".repeat(24);
+      designWorkspaceSnapshotCache.setData(workspaceId, current);
+      designWorkspaceSnapshotCache.setData(cloudId, current);
+      platformMocks.history.mockResolvedValue({
+        result: {
+          revision: "previous-revision",
+          receipt: { status: "applied", beforeRevision: "local-revision", afterRevision: "previous-revision" },
+        },
+        historyFrame: "home.html",
+        snapshot: restored,
+      });
+
+      await applyDesignHistoryCached(workspaceId, "pricing.html", direction);
+
+      expect(platformMocks.history).toHaveBeenCalledExactlyOnceWith(workspaceId, "pricing.html", direction, undefined);
+      expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames[0]).toMatchObject({ x: 0, sourceVersion: "f".repeat(24) });
+      expect(designWorkspaceSnapshotCache.peekSnapshot(cloudId).data).toBe(current);
+      expect(designWorkspaceSnapshotCache.peekSnapshot(cloudId).data?.frames[0]).toMatchObject({ x: 40, sourceVersion: confirmedVersion });
+    },
+  );
+
   it("sends every confirmed cloud frame generation for history independently of focus", async () => {
     const workspaceId = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
     const current = snapshot([{ file: "home.html" }, { file: "pricing.html" }]);

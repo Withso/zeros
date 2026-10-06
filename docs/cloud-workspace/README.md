@@ -90,6 +90,8 @@ behavior from release qualification and deferred product surfaces.
   expansion for independent provider connections, shared Code/Design sessions,
   live access from multiple devices, and complete recovery. Its acceptance
   requirements are not claims of completed implementation or qualification.
+- [Local workspace impact audit](local-workspace-impact-audit.md) records the
+  shared-path review of the merged Cloud v2 changes and the local regression guards.
 - [Data, copies, and local sync](data-and-sync.md)
   defines sources of truth, recovery, conflict rules, Personal/Organization
   placement, repository settings, immutable forks, per-device replicas, SSH,
