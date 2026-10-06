@@ -5,7 +5,9 @@ import { CHANNELS, HostedReceipt, HostedServicesReceipt, SHA, requireCheck, type
 import { command, jsonClient, type Command } from "./io";
 import { assertRequiredCI, requiredCIEvidence, REQUIRED_CI } from "./ci";
 import { ALPHA_CI_FAILURE, ALPHA_REQUIRED_CI, alphaBarrierUnmutated, alphaRequiredChecks, assertAlphaAdmission, automaticAlpha, supersededCandidate } from "./alpha-ci";
-import { alphaAdmissionArtifact, alphaAncestry, alphaForwardOnlyMode, assertAlphaDestinations } from "./alpha-frontier";
+import { alphaAdmissionArtifact, alphaAncestry, alphaForwardOnlyMode, assertAlphaDestinations, assertAlphaReleaseOrder } from "./alpha-frontier";
+import { authenticatedAlphaParent } from "./alpha-build";
+import { previousReleaseLedger } from "./release-ledger";
 import { CutoverReceipt } from "./cutover";
 
 function validateHostedReceipt(receipt: unknown, run: any, config: Pick<PromotionConfig, "sourceSha" | "branch" | "repository">, channel: Channel, jobs: any[], requireOverallSuccess: boolean) {
@@ -75,7 +77,18 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
   const read = (route: string) => json(`https://api.github.com/repos/${config.repository}${route}`, { headers: {
     authorization: `Bearer ${env.GH_TOKEN}`, accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
   } });
-  const alphaFastPath = async () => env.ZEROS_ALPHA_CI_FAST_PATH === "enabled" && await automaticAlpha(config, env, read);
+  // A job claiming the original automatic parent must remain that current
+  // parent. Failed authentication is never ordinary/direct-caller authority.
+  const currentAlphaParent = async () => {
+    if (env.RELEASE_CHANNEL !== "alpha" || env.GITHUB_WORKFLOW_REF !== `${config.repository}/.github/workflows/release-alpha.yml@refs/heads/main`) return null;
+    requireCheck(env.GITHUB_REPOSITORY === config.repository && env.RELEASE_SHA === config.sourceSha && env.RELEASE_BRANCH === config.branch,
+      "Automatic Alpha parent source, repository or branch is invalid");
+    return authenticatedAlphaParent(env, read);
+  };
+  const alphaFastPath = async () => {
+    const parent = await currentAlphaParent();
+    return parent !== null && env.ZEROS_ALPHA_CI_FAST_PATH === "enabled";
+  };
   const fullChecks = () => Promise.all(REQUIRED_CI.map(async check => requiredCIEvidence(config, check.file, check.name,
     await read(`/actions/workflows/${check.file}/runs?head_sha=${config.sourceSha}&per_page=100`))));
   const requiredChecks = async () => await alphaFastPath() ? alphaRequiredChecks(config, read) : fullChecks();
@@ -133,6 +146,7 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
     async assertRequiredChecks() {
       if (await alphaFastPath()) assertRequiredCI(await alphaRequiredChecks(config, read), ALPHA_REQUIRED_CI, ALPHA_CI_FAILURE);
       else assertRequiredCI(await fullChecks());
+      await currentAlphaParent();
     },
     /** True only for a successful controlled-cutover run's own complete receipt
      * (API, every Pages surface and WorkOS) for this channel and exact SHA. */
@@ -181,6 +195,7 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
       const label = channel === "production" ? "Production" : channel === "alpha" ? "Alpha" : "Beta";
       const jobNames = [channel === "production" ? "Notarize + verify + publish (macOS arm64)"
         : `Build + publish ${label} (macOS arm64 · signed · NOT notarized)`, `Publish ${label} feed`];
+      if (channel === "alpha") jobNames.push("Alpha publication / Publish Alpha feed");
       const stepName = channel === "production" ? "Publish GitHub release" : `Publish rolling "${channel}" prerelease`;
       const runs: any[] = [];
       // Read bounded complete retained history: creation order alone misses a
@@ -223,11 +238,17 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
       return latest && { sourceSha: latest.sourceSha, runId: latest.runId };
     },
     async assertCurrent() {
+      const parent = await currentAlphaParent();
       const commit = await read(`/commits/${encodeURIComponent(config.branch)}`);
       const mode = alphaForwardOnlyMode(env);
-      if (mode === "off" || env.RELEASE_CHANNEL !== "alpha" || !await automaticAlpha(config, env, read) ||
+      if (mode === "off" || parent === null ||
         mode === "admitted" && env.GITHUB_JOB === "ci") {
         if (commit.sha !== config.sourceSha) supersededCandidate(commit.sha);
+        if (parent && env.GITHUB_JOB !== "ci") {
+          const previous = await previousReleaseLedger(config.repository, "alpha", env.GH_TOKEN, options.fetch);
+          assertAlphaReleaseOrder(config.sourceSha, parent.run_number, previous, env.ALPHA_PREPARED_VERSION);
+        }
+        await currentAlphaParent();
         return;
       }
       if (env.GITHUB_JOB !== "ci") {
@@ -241,7 +262,27 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
       requireCheck(typeof commit?.sha === "string" && SHA.test(commit.sha), "Current main identity is unavailable for automatic Alpha");
       const ancestor = alphaAncestry(read);
       requireCheck(await ancestor(config.sourceSha, commit.sha), "Current main no longer contains the automatic Alpha candidate; no destination mutation is authorized");
-      if (mode === "enabled") await assertAlphaDestinations(config, env, read, ancestor, options.fetch);
+      // A failed-job retry may carry the successful entry job from an older
+      // attempt. Every downstream checkpoint must reread frontiers/order as
+      // well, so that carried entry cannot regress a newer published candidate.
+      const previous = await assertAlphaDestinations(config, env, read, ancestor, options.fetch);
+      if (env.GITHUB_JOB !== "ci") {
+        assertAlphaReleaseOrder(config.sourceSha, parent.run_number, previous, env.ALPHA_PREPARED_VERSION);
+      }
+      await currentAlphaParent();
+    },
+    /** This read-only checkpoint runs after acquiring the encompassing Alpha
+     * publication lock. Initial ci alone retains green-skip/admission authority. */
+    async assertAlphaTransaction() {
+      requireCheck(env.GITHUB_JOB === "entry", "Alpha publication requires its in-lock entry checkpoint");
+      const parent = await authenticatedAlphaParent(env, read);
+      await this.assertRequiredChecks();
+      await this.assertCurrent();
+      const previous = alphaForwardOnlyMode(env) === "off"
+        ? await previousReleaseLedger(config.repository, "alpha", env.GH_TOKEN, options.fetch)
+        : await assertAlphaDestinations(config, env, read, alphaAncestry(read), options.fetch);
+      assertAlphaReleaseOrder(config.sourceSha, parent.run_number, previous, env.ALPHA_PREPARED_VERSION);
+      await authenticatedAlphaParent(env, read);
     },
     async ownReceipt(channel: Channel, runId: string) {
       requireCheck(/^[1-9]\d*$/.test(runId), "Invalid publication run identity");

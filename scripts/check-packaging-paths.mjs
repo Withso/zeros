@@ -38,7 +38,11 @@ const stableReleaseWorkflow = readFileSync(
 const channelReleaseWorkflows = [
   ["alpha release workflow", ".github/workflows/release-alpha.yml"],
   ["beta release workflow", ".github/workflows/release-beta.yml"],
-].map(([label, file]) => ({ label, file, text: readFileSync(file, "utf8") }));
+].map(([label, file]) => {
+  const parent = readFileSync(file, "utf8");
+  const publication = file.endsWith("release-alpha.yml") ? readFileSync(".github/workflows/alpha-publication.yml", "utf8") : parent;
+  return { label, file, parent, publication, text: publication === parent ? parent : `${parent}\n${publication}` };
+});
 const unquote = (s) => s.trim().replace(/^["']|["']$/g, "");
 
 // The engine binary is BUILT at pack time (gitignored) — don't fs-stat it; assert
@@ -129,7 +133,7 @@ requireWorkflowToken(
   "stable release workflow",
   '"release/Zeros-arm64.dmg"',
 );
-for (const { label, text, file } of channelReleaseWorkflows) {
+for (const { label, text, file, parent, publication } of channelReleaseWorkflows) {
   // `alpha` | `beta` — the rolling release tag AND the artifact basename. They
   // must agree, or the feed references assets that were never uploaded.
   const ch = /release-(\w+)\.yml$/.exec(file)?.[1];
@@ -163,15 +167,31 @@ for (const { label, text, file } of channelReleaseWorkflows) {
   requireWorkflowToken(text, label, `ZEROS_CHANNEL: ${ch}`);
   if (ch === "alpha") {
     // These job/step identities are read by the publication baseline client.
-    // A green supersession must skip every destination, including runtime.
+    // A green supersession skips the one callable transaction, including runtime.
     requireWorkflowToken(text, label, "name: Publish Alpha feed");
     requireWorkflowToken(text, label, 'name: Publish rolling "alpha" prerelease');
-    requireWorkflowToken(text, label, "ready: ${{ steps.barrier.outputs.ready }}");
-    requireWorkflowToken(text, label,
-      "if: github.event.repository.fork == false && needs.ci.outputs.ready == 'true'", 3);
-    requireWorkflowToken(text, label, "ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}", 3);
-    requireWorkflowToken(text, label, "ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}", 3);
-    requireWorkflowToken(text, label, "alpha_forward_only: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}");
+    requireWorkflowToken(parent, label, "ready: ${{ steps.barrier.outputs.ready }}");
+    requireWorkflowToken(parent, label, "if: github.event.repository.fork == false && needs.ci.outputs.ready == 'true'");
+    requireWorkflowToken(parent, label, "uses: ./.github/workflows/alpha-publication.yml");
+    requireWorkflowToken(parent, label, "needs: [ci, metadata]");
+    requireWorkflowToken(parent, label, "group: release-alpha");
+    requireWorkflowToken(parent, label, "cancel-in-progress: false");
+    requireWorkflowToken(publication, label, "workflow_call:");
+    requireWorkflowToken(publication, label, "needs: entry");
+    requireWorkflowToken(publication, label, "needs: [entry, hosted]", 2);
+    requireWorkflowToken(parent, label, "ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}");
+    requireWorkflowToken(parent, label, "ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}");
+    for (const [input, variable] of [["alpha_ci_fast_path", "ZEROS_ALPHA_CI_FAST_PATH"], ["alpha_forward_only", "ZEROS_ALPHA_FORWARD_ONLY"]]) {
+      requireWorkflowToken(parent, label, `${input}: \${{ vars.${variable} }}`);
+      requireWorkflowToken(publication, label, `${input}: \${{ inputs.${input} }}`);
+      requireWorkflowToken(publication, label, `${variable}: \${{ inputs.${input} }}`, 3);
+    }
+    requireWorkflowToken(parent, label, "alpha_prepared_version: ${{ needs.metadata.outputs.version }}");
+    requireWorkflowToken(publication, label, "ALPHA_PREPARED_VERSION: ${{ inputs.alpha_prepared_version }}", 3);
+    requireWorkflowToken(publication, label, "alpha-build-cli.ts --wait desktop");
+    requireWorkflowToken(publication, label, "alpha-build-cli.ts --wait runtime");
+    requireWorkflowToken(publication, label, "alpha-build-cli.ts --verify-metadata");
+    requireWorkflowToken(publication, label, "alpha-build-cli.ts --verify-producer runtime");
     requireWorkflowToken(text, label, "name: Save Alpha admission receipt");
     requireWorkflowToken(text, label, "if: success() && steps.barrier.outputs.admission_issued == 'true'");
     requireWorkflowToken(text, label, "name: alpha-admission-${{ github.sha }}");
@@ -184,7 +204,7 @@ for (const { label, text, file } of channelReleaseWorkflows) {
 // Alpha parent supplies these inputs, including through the nested worker.
 const hostedPromotionWorkflow = readFileSync(".github/workflows/hosted-promotion.yml", "utf8");
 const workerPromotionWorkflow = readFileSync(".github/workflows/cloud-worker-promotion.yml", "utf8");
-for (const [input, variable] of [["alpha_ci_fast_path", "ZEROS_ALPHA_CI_FAST_PATH"], ["alpha_forward_only", "ZEROS_ALPHA_FORWARD_ONLY"]]) {
+for (const [input, variable] of [["alpha_ci_fast_path", "ZEROS_ALPHA_CI_FAST_PATH"], ["alpha_forward_only", "ZEROS_ALPHA_FORWARD_ONLY"], ["alpha_prepared_version", "ALPHA_PREPARED_VERSION"]]) {
   requireWorkflowToken(hostedPromotionWorkflow, "hosted promotion workflow", `      ${input}:`);
   requireWorkflowToken(hostedPromotionWorkflow, "hosted promotion workflow", `      ${input}: \${{ inputs.${input} }}`);
   requireWorkflowToken(hostedPromotionWorkflow, "hosted promotion workflow", `      ${variable}: \${{ inputs.${input} }}`, 3);

@@ -865,10 +865,12 @@ describe("repository layout contracts", () => {
 
   it("limits release credentials to protected channel environments", () => {
     const alpha = read(".github/workflows/release-alpha.yml");
+    const alphaPublication = read(".github/workflows/alpha-publication.yml");
     const beta = read(".github/workflows/release-beta.yml");
     const stable = read(".github/workflows/release.yml");
 
     expect(alpha).toContain("environment: alpha");
+    expect(alphaPublication).toContain("environment: alpha");
     expect(beta).toContain("environment: beta");
     expect(alpha).not.toContain("workflow_dispatch:");
     expect(beta).not.toContain("workflow_dispatch:");
@@ -885,12 +887,18 @@ describe("repository layout contracts", () => {
 
   it("keeps Alpha policies opt-in while preserving publication identities and shipping checks", () => {
     const alpha = read(".github/workflows/release-alpha.yml");
+    const publication = read(".github/workflows/alpha-publication.yml");
     const preflight = read(".github/workflows/preflight.yml");
     expect(preflight).toContain("    needs: [quality, test, build, control-plane, secret-scan]");
     expect(alpha).toContain("ready: ${{ steps.barrier.outputs.ready }}");
-    expect(alpha.match(/if: github\.event\.repository\.fork == false && needs\.ci\.outputs\.ready == 'true'/g)).toHaveLength(3);
-    expect(alpha).toContain("    name: Publish Alpha feed");
-    expect(alpha).toContain('      - name: Publish rolling "alpha" prerelease');
+    expect(alpha.match(/if: github\.event\.repository\.fork == false && needs\.ci\.outputs\.ready == 'true'/g)).toHaveLength(1);
+    expect(alpha).toContain("uses: ./.github/workflows/alpha-publication.yml");
+    expect(alpha).toContain("needs: [ci, metadata]");
+    expect(publication).toContain("    name: Publish Alpha feed");
+    expect(publication).toContain('      - name: Publish rolling "alpha" prerelease');
+    expect(publication.match(/needs: \[entry, hosted\]/g)).toHaveLength(2);
+    expect(publication).toContain("    needs: entry");
+    expect(publication).not.toContain("workflow_dispatch:");
     expect(alpha).toContain("pnpm check:zsr");
     expect(alpha).toContain("pnpm smoke:engine");
     expect(alpha).toContain("pnpm smoke:packaged-pty");
@@ -902,7 +910,7 @@ describe("repository layout contracts", () => {
     const worker = read(".github/workflows/cloud-worker-promotion.yml");
     expect(worker).not.toMatch(/vars\.ZEROS_ALPHA_/);
     const [dispatch, callable] = worker.split("  workflow_call:\n");
-    for (const input of ["alpha_ci_fast_path", "alpha_forward_only"]) {
+    for (const input of ["alpha_ci_fast_path", "alpha_forward_only", "alpha_prepared_version"]) {
       expect(dispatch).not.toContain(`${input}:`);
       expect(callable).toMatch(new RegExp(`${input}:\\n        description: [^\\n]+\\n        default: ''\\n        type: string`));
     }
@@ -955,7 +963,8 @@ describe("repository layout contracts", () => {
 
     expect(existsSync(verifier)).toBe(true);
     for (const channel of channels) {
-      const workflow = read(channel.workflow);
+      const parent = read(channel.workflow);
+      const workflow = channel.appName === "Zeros Alpha.app" ? `${parent}\n${read(".github/workflows/alpha-publication.yml")}` : parent;
       const verifierIndex = workflow.indexOf(`node ${verifier}`);
       const publishIndex = workflow.indexOf(channel.publishStep);
 
@@ -967,6 +976,12 @@ describe("repository layout contracts", () => {
       expect(workflow).toMatch(
         /node scripts\/verify-macos-release-artifacts\.mjs[\s\S]*?--dmg "\$DMG"[\s\S]*?--zip "\$ZIP"/,
       );
+      if (channel.appName === "Zeros Alpha.app") {
+        expect(parent.indexOf("name: Save signed Alpha artifacts")).toBeGreaterThan(verifierIndex);
+        const publication = read(".github/workflows/alpha-publication.yml");
+        expect(publication.indexOf("alpha-build-cli.ts --wait desktop")).toBeLessThan(publication.indexOf(channel.publishStep));
+        expect(publication).toContain("alpha-build-cli.ts --verify-metadata");
+      }
     }
   });
 });

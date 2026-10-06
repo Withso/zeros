@@ -8,11 +8,11 @@ const preflight = { id: 100, run_attempt: 1, name: "Preflight", path: ".github/w
   repository: { full_name: candidate.repository }, head_repository: { full_name: candidate.repository }, head_branch: "main",
   event: "push", status: "in_progress", conclusion: null as string | null };
 const codeql = { ...preflight, id: 101, name: "CodeQL", path: ".github/workflows/codeql.yml", status: "completed", conclusion: "success" };
-const parent = { ...preflight, id: 300, name: "Release (alpha)", path: ".github/workflows/release-alpha.yml" };
+const parent = { ...preflight, id: 300, run_number: 150, name: "Release (alpha)", path: ".github/workflows/release-alpha.yml" };
 const gate = { id: 10, run_id: preflight.id, run_attempt: 1, head_sha: candidate.sourceSha, head_branch: "main",
   name: "alpha-gate", status: "completed", conclusion: "success" };
-const env = { GH_TOKEN: "fake-token", RELEASE_CHANNEL: "alpha", RELEASE_SHA: candidate.sourceSha, GITHUB_SHA: candidate.sourceSha,
-  GITHUB_REPOSITORY: candidate.repository, GITHUB_RUN_ID: String(parent.id), GITHUB_RUN_ATTEMPT: "1", GITHUB_JOB: "ci",
+const env = { GH_TOKEN: "fake-token", RELEASE_CHANNEL: "alpha", RELEASE_SHA: candidate.sourceSha, RELEASE_BRANCH: "main", GITHUB_SHA: candidate.sourceSha,
+  GITHUB_REPOSITORY: candidate.repository, GITHUB_RUN_ID: String(parent.id), GITHUB_RUN_ATTEMPT: "1", GITHUB_RUN_NUMBER: "150", GITHUB_JOB: "ci",
   GITHUB_WORKFLOW_REF: `${candidate.repository}/.github/workflows/release-alpha.yml@refs/heads/main`, ZEROS_ALPHA_CI_FAST_PATH: "enabled" };
 
 function fixture(overrides: {
@@ -251,7 +251,8 @@ describe("full release policy isolation", () => {
   it.each([undefined, "", "disabled", "observe", "true", "ENABLED"])("retains full evidence with fast-path flag %s", async flag => {
     const { client, requests } = fixture({ env: { ZEROS_ALPHA_CI_FAST_PATH: flag } });
     await expect(client.assertRequiredChecks()).rejects.toThrow();
-    expect(requests).toHaveLength(2);
+    expect(requests.filter(url => url.includes("/actions/workflows/"))).toHaveLength(2);
+    expect(requests[0]).toBe("/actions/runs/300");
     expect(requests.every(url => !url.includes("event="))).toBe(true);
   });
 
@@ -259,7 +260,7 @@ describe("full release policy isolation", () => {
     { path: ".github/workflows/cloud-worker-promotion.yml" }, { event: "workflow_dispatch" }, { head_branch: "release/1.2.3" },
     { head_sha: "b".repeat(40) }, { repository: { full_name: "fork/zeros" } }, { head_repository: { full_name: "fork/zeros" } },
     { id: 999 }, { run_attempt: 2 },
-  ])("retains full evidence for an unauthenticated automatic Alpha parent (%#)", async change => {
+  ])("refuses an unauthenticated apparent automatic Alpha parent (%#)", async change => {
     const { client, requests } = fixture({ parent: { ...parent, ...change } });
     await expect(client.assertRequiredChecks()).rejects.toThrow();
     expect(requests.every(url => !url.includes("/jobs"))).toBe(true);
@@ -270,11 +271,18 @@ describe("full release policy isolation", () => {
     await expect(fixture({ env: { GITHUB_WORKFLOW_REF: `${candidate.repository}/.github/workflows/release-beta.yml@refs/heads/main` } }).client.assertRequiredChecks()).rejects.toThrow();
   });
 
-  it("wrong parent workflow still accepts the unchanged full Preflight and CodeQL proof", async () => {
+  it("wrong apparent automatic parent cannot fall back to green full Preflight and CodeQL proof", async () => {
     const { client, requests } = fixture({ parent: { ...parent, path: ".github/workflows/cloud-worker-promotion.yml" },
       preflight: [{ ...preflight, status: "completed", conclusion: "success" }], jobs: [] });
+    await expect(client.assertRequiredChecks()).rejects.toThrow(/parent/);
+    expect(requests).toEqual(["/actions/runs/300"]);
+  });
+  it("legitimate direct callers still accept the unchanged full Preflight and CodeQL proof", async () => {
+    const { client, requests } = fixture({ env: { GITHUB_WORKFLOW_REF: `${candidate.repository}/.github/workflows/cloud-worker-promotion.yml@refs/heads/main` },
+      parent: { ...parent, path: ".github/workflows/cloud-worker-promotion.yml" }, preflight: [{ ...preflight, status: "completed", conclusion: "success" }], jobs: [] });
     await expect(client.assertRequiredChecks()).resolves.toBeUndefined();
-    expect(requests.every(url => !url.includes("/jobs"))).toBe(true);
+    expect(requests).toHaveLength(2);
+    expect(requests.every(url => url.includes("/actions/workflows/"))).toBe(true);
   });
 
   it.each(["beta", "production"])("never accepts an Alpha-gate-only success for %s or queries Alpha authority", async channel => {
@@ -300,6 +308,14 @@ describe("full release policy isolation", () => {
 
 describe("automatic Alpha pre-mutation supersession proof", () => {
   const barrierJob = { ...gate, run_id: parent.id, name: "Exact-source Preflight and CodeQL barrier", status: "in_progress", conclusion: null };
+  it("recognizes only the new exact read-only metadata producer before green supersession", async () => {
+    for (const name of ["Prepare Alpha version", "Alpha publication / Prepare Alpha version", "Untrusted metadata"]) {
+      const { client } = fixture({ parentJobs: [barrierJob,
+        { ...barrierJob, id: 11, name, status: "completed", conclusion: "success", started_at: "2020-01-01T00:00:00Z" },
+      ] });
+      await expect(client.alphaBarrierUnmutated()).resolves.toBe(name === "Prepare Alpha version");
+    }
+  });
 
   it("proves the initial barrier precedes every destination job", async () => {
     const { client, requests } = fixture({ parentJobs: [barrierJob,

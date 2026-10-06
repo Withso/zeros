@@ -39,6 +39,15 @@ function harness(channel: "alpha" | "beta", sameTag = false) {
 }
 
 describe("V6b existing rolling-tag bootstrap", () => {
+  it("recognizes the one nested Alpha publisher while preserving exact run/source/step authentication", async () => {
+    const fixture = harness("alpha");
+    fixture.job.name = "Alpha publication / Publish Alpha feed";
+    expect((await fixture.baseline())?.sourceSha).toBe(fixture.published.sha);
+    for (const name of ["Untrusted publication / Publish Alpha feed", "Alpha publication / Publish Beta feed", "Alpha publication / other / Publish Alpha feed"]) {
+      fixture.job.name = name;
+      expect(await fixture.client.lastPublication("alpha")).toBeNull();
+    }
+  });
   it.each(["alpha", "beta"] as const)("recognizes the separate %s publisher while retaining historical combined jobs", async channel => {
     const fixture = harness(channel);
     fixture.responses.jobs[0].name = `Publish ${channel === "alpha" ? "Alpha" : "Beta"} feed`;

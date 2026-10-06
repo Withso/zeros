@@ -782,6 +782,73 @@ target, not a measured guarantee**: provider deployment, cold worker/native
 canaries, CI failures/reruns, runner queues and Production's Apple queue can
 extend it. The `ui-smoke` job is unchanged by this restructuring.
 
+### Concurrent Alpha preparation
+
+Each `release-alpha.yml` push/main run starts its exact-source CI barrier,
+read-only version preparation and Linux runtime build independently. Protected
+macOS signing waits only for that small version job, independently of CI.
+There is no workflow-wide Alpha lock. Its `publication` job calls
+`alpha-publication.yml` after the CI barrier reports `ready=true` and version
+preparation succeeds, and holds `release-alpha` with cancellation disabled for
+that entire reusable call:
+entry revalidation, hosted services, optional worker qualification, final hosted
+receipt, desktop feed/ledger/tag/readback/retention and runtime publication.
+Individual hosted locks remain `hosted-mutation-<channel>`; their different
+group avoids nesting the outer lock into itself. Beta and Production retain
+their separate workflow-wide channel locks, full CI, branch gates and
+Production approval/notarization. Their builds already run alongside Alpha.
+
+The read-only `metadata` job computes `<next stable>-alpha.<parent run_number>`
+with the original `compute-version.mjs` and a full tagged exact-SHA checkout.
+Signing and publication consume that one output. The transaction passes it to
+every hosted/worker/publisher checkpoint; it never recomputes from later stable
+tags. Failed-job retries can carry the successful metadata job and its original
+version. A higher run counter with a lower prepared stable base must fail before
+hosted writes: `1.0.0-alpha.402` cannot follow `1.0.1-alpha.401`. Both counter/source
+and complete semantic-version/idempotency rules fence entry and downstream
+mutations in every automatic Alpha mode. Off/unset/invalid mode still requires
+exact current main and does not require an admission receipt. A context claiming
+the original automatic parent must authenticate its current attempt/status;
+failed authentication cannot fall back to ordinary full-CI/direct authority.
+
+Hosted promotion can start while signing continues. After hosted success,
+each publisher waits only for its own parent producer: up to 45 minutes,
+polling every 10 seconds. The wait authenticates the original repository and
+head repository, workflow path/name, push/main event, source SHA, run ID,
+attempt and run number, then the exact producer job and its successful upload
+and verification steps. Only the current attempt's jobs endpoint supplies
+proof; GitHub-listed successful producers carried from older attempts remain
+valid. Missing, ambiguous, malformed, failed, cancelled or skipped producer
+proof refuses publication promptly. A queued/running producer waits within the
+bound; a changed run attempt aborts. There is no cross-run fallback.
+
+The wait authenticates the existing SHA-named artifact and emits its immutable
+artifact ID. Download uses that ID from the original run, and post-download
+verification rereads the current parent, producer ID/attempt and artifact ID.
+A same-name overwrite or new attempt cannot replace the approved bytes. The
+signed producer includes `alpha-build-metadata.json` with its source, repository,
+parent run/counter, producing attempt, version and baked cloud boolean. The
+desktop publisher verifies that metadata against the producing attempt, the
+exact prepared version and updater feed before using the version/capability.
+Current environment variables
+cannot substitute for the capability already baked into the signed desktop.
+The runtime publisher revalidates its producer before the existing exact-source
+CI and OIDC publication, which still checks descriptor, manifest and archive
+identity and the original parent's `workflow_ref`.
+
+With an 8-minute gate, 11-minute signing build and 6-minute hosted deployment,
+the example critical path stays `max(8+6, 11) = 14` minutes before final
+publication when the small version job finishes during the gate and signing
+still finishes before hosted. Version preparation adds a short stage before
+signing; a delayed runner can extend that path. Waiting for signing before
+starting hosted work would take about 17 minutes. These figures illustrate
+overlap, not a measured latency guarantee;
+runner queues, native qualification and deployment readiness still add time.
+Concurrent preparation removes the previous release's build time from the
+next candidate's preparation queue. GitHub can replace a pending publication
+call, but never cancels an active transaction. A superseded initial CI barrier
+skips that call without cancelling independent builds.
+
 The read-only CI barrier checks the newest trusted run of each required workflow
 without filtering out failures. It waits up to 110 minutes, including through a
 failed Preflight attempt, and proceeds after that exact commit's rerun succeeds.
@@ -823,10 +890,11 @@ shards, including a docs-only push after an earlier service change. The fast pat
 for CodeQL: its findings are advisory, the scan still runs on every push, and
 Beta, Production and every full-policy caller keep requiring its exact-SHA
 success. PR, merge-group, fork and older-attempt proof cannot replace the gate, and Preflight from another branch is ineligible; cancellation refuses
-admission. Main Preflight coalesces pushes ([CI concurrency](ci-concurrency.md)),
-so a candidate whose pending run was replaced never receives a gate: once main
-has moved on, the barrier treats it as superseded, a green skip before any
-destination mutation, instead of waiting for the barrier timeout. A newer pending or failed gate defeats an older success. API-listed
+admission. Every main push has its own full Preflight
+([CI concurrency](ci-concurrency.md)). If a cancelled or failed candidate's gate
+cannot succeed and main has moved on, the barrier treats it as superseded, a
+green skip before any destination mutation, instead of waiting for the barrier
+timeout. A newer pending or failed gate defeats an older success. API-listed
 carried successes count on an ancillary-only retry; timestamps and certificate
 artifacts are not inferred as proof. History is bounded to 100 runs per
 workflow and 1,000 jobs, and an attempt change during job retrieval denies the
@@ -876,9 +944,9 @@ the immutable event SHA, including on reruns.
 
 | Value | Barrier admission | Checks after admission |
 | --- | --- | --- |
-| Unset or other | Candidate equals current main HEAD | Candidate equals current main HEAD |
-| `admitted` (Stage 1) | Candidate equals current main HEAD | Main must still contain the candidate |
-| `enabled` (Stage 2) | Main contains the candidate and every live Alpha destination is at or before it | Main still contains the candidate; re-read every destination and refuse regression |
+| Unset or other | Candidate equals current main HEAD | Candidate equals current main HEAD; authenticate parent and fence prepared version/publication order |
+| `admitted` (Stage 1) | Candidate equals current main HEAD | Main contains the candidate; re-read every destination and publication order and refuse regression |
+| `enabled` (Stage 2) | Main contains the candidate and every live Alpha destination is at or before it | Main contains the candidate; re-read every destination and publication order and refuse regression |
 
 Ancestry uses the GitHub compare API with immutable SHAs: `identical` or `ahead`
 is accepted only when the merge base is the base SHA. A rewritten main that
@@ -896,7 +964,8 @@ otherwise valid desktop-only retry of the same parent; an expired, missing or
 foreign receipt blocks forward-only freshness. Enabling a stage midway through
 an older unflagged run cannot manufacture admission.
 
-Stage 2 reads the existing bounded public Alpha API release identity, both
+Both stages read destinations after admission; Stage 2 also reads them at the
+initial barrier. The checks use the existing bounded public Alpha API release identity, both
 app and Ops `/zeros-deployment.json` manifests, the current rolling `alpha`
 Git tag (including annotated tags), and the feed's cumulative
 `alpha-release-ledger.json`. It compares each source separately with the
@@ -909,10 +978,24 @@ update (or the older cached ledger after the tag update); both sources must
 still be at or before the candidate, and one must identify that candidate.
 Other disagreements block. Missing feeds or
 unreadable/malformed identities are unknown, not a zero/genesis destination.
+The publication entry job repeats authentication, CI/admission and fresh
+frontier checks **inside** the encompassing lock before any provider writes.
+It compares the authenticated parent's immutable `run_number` with every
+retained Alpha ledger counter; an older order or another source claiming the
+same order refuses mutation, including when source ancestry alone is equal.
+It also validates the complete prepared version through the same semantic
+version/idempotency checks used when building the publication ledger, without
+waiting for signing. Signed metadata and the updater feed must match this
+immutable prepared version. Downstream checkpoints repeat parent, version and
+counter checks in every mode, plus frontier checks in both forward-only stages,
+because a failed-job rerun can carry an earlier successful entry
+job after a newer candidate has published. Only the original parent `ci` job
+can issue admission or a green pre-mutation skip; nested entry conflicts fail
+visibly.
 The strict migrator still rejects unknown or newer schema rows; neither stage
 rolls schema back or authorizes a controlled migration.
 
-Stage 2 admission and later checkpoints read the deployed identity from a valid
+Stage 2 admission and both stages' later checkpoints read the deployed identity from a valid
 HTTP 503 readiness response so a newer candidate can repair an unready Alpha
 by moving forward. Maintenance, non-current or mismatched migration heads,
 channel mismatch, invalid or unreadable identities, other HTTP failures and
@@ -935,8 +1018,9 @@ admission receipt. Main ancestry, authentication, admission proof and compare
 errors remain red. After admission or a possible mutation, every conflict or
 unknown check remains red; reconcile actual provider state and retained receipts
 before retrying. Locks remain
-`hosted-mutation-<channel>` with cancellation disabled, and automatic candidates
-remain serialized by the existing `release-alpha` workflow lock.
+`hosted-mutation-<channel>` with cancellation disabled. Automatic Alpha
+transactions remain serialized by `release-alpha` on the reusable publication
+call, while candidate CI and builds prepare concurrently.
 
 To enable, pause automatic Alpha delivery operationally, let running and
 pending Alpha work finish, and verify a healthy current Alpha API/schema,
@@ -1259,8 +1343,9 @@ See [Railway Wait for CI](https://docs.railway.com/deployments/github-autodeploy
 Before enabling the ordered controller, disable independent autodeploy and
 Wait for CI as below; otherwise the hosted-before-desktop order would deadlock.
 
-The channel lock protects the running workflow, but GitHub may replace a
-**pending** workflow with a later one. Every desktop writer reruns the complete
+The channel lock protects the running transaction (the full workflow for Beta
+and Production, the publication call for Alpha), but GitHub may replace a
+**pending** transaction with a later one. Every desktop writer reruns the complete
 guard decision, so a displaced guard cannot authorize a descendant's desktop
 publication. This is not a provider deployment barrier: Railway can ignore a
 cancelled workflow if another workflow for that commit passed. Hold independent

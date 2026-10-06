@@ -45,7 +45,7 @@ function newestRun(candidate: Candidate, file: string, name: string, value: unkn
     .sort((left, right) => right.id - left.id || right.run_attempt - left.run_attempt)[0];
 }
 
-async function jobPages(read: Read, route: string) {
+export async function jobPages(read: Read, route: string) {
   const jobs: any[] = [];
   let total: number | undefined;
   for (let page = 1; page <= 10; page++) {
@@ -132,7 +132,7 @@ export async function alphaRequiredChecks(candidate: Candidate, read: Read): Pro
 export async function alphaBarrierUnmutated(candidate: Candidate, env: NodeJS.ProcessEnv, read: Read) {
   if (env.GITHUB_JOB !== "ci" || !await automaticAlpha(candidate, env, read)) return false;
   const jobs = await jobPages(read, `/actions/runs/${env.GITHUB_RUN_ID}/jobs?filter=all`);
-  const readOnly = new Set(["Exact-source Preflight and CodeQL barrier", "Build Linux runtime bundle",
+  const readOnly = new Set(["Exact-source Preflight and CodeQL barrier", "Prepare Alpha version", "Build Linux runtime bundle",
     "Build + sign Alpha (macOS arm64 · NOT notarized)"]);
   requireCheck(jobs.length > 0 && jobs.every(job => job && job.run_id === Number(env.GITHUB_RUN_ID) && job.head_sha === candidate.sourceSha &&
     job.head_branch === "main" && typeof job.name === "string"), "Alpha parent mutation evidence is unavailable");
