@@ -70,6 +70,8 @@ behavior from release qualification and deferred product surfaces.
 - [Lifecycle diagnostics](lifecycle-diagnostics.md) defines setup progress, failure evidence and recovery diagnostics.
 - [In-place runtime updates](runtime-hot-update.md) proposes quiet engine updates,
   immutable generation handoff, rollback and the bootstrap qualification gates.
+- [Live runtime updates](live-runtime-updates.md) proposes staging qualified runtimes
+  in running workspaces and swapping the engine at a safe point without stopping user work.
 
 - [Qualification status](qualification-status.md) separates the current eight
   backend steps, native tool coverage, live evidence and remaining release gates.
