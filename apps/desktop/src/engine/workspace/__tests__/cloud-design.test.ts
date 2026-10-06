@@ -36,6 +36,10 @@ import { ensureCloudPrimaryWorkspace } from "../../git/cloud-primary-workspace";
 import { closeState, setStateRootForTesting } from "../../git/state";
 import type { EngineMessage } from "../../types";
 import { WorkspaceService } from "../service";
+import { openDesignFramePreview } from "../../../renderer/platform/bridge/design-context-bridge";
+import { setDesignCaptureConfig } from "../../design/capture-client";
+import { startDesignCaptureService } from "../../design/capture-service";
+import { runDesignVerificationCli } from "../../design/verification-cli";
 
 /** Real renderer routing, bridge schemas, worker role policy, Design store and
  * Git; only the network/worker attestation are replaced by an in-process peer. */
@@ -251,6 +255,47 @@ describe("cloud Design checkout round trips", () => {
     expect(
       git("worktree", "list", "--porcelain").match(/^worktree /gm),
     ).toHaveLength(1);
+  });
+
+  it("opens cloud frame verification and routes both shell and bridge captures to the admitted host", async () => {
+    const { frame, directory } = await initialize(client("manager").bridge);
+    const bridge = client("developer", "developer").bridge;
+    // Transport fixture only: the v4 qualifier must prove actual sandboxed
+    // Chromium pixels separately. This proves source/identity/host routing.
+    const capture = await startDesignCaptureService(async input => {
+      const bytes = Buffer.alloc(24);
+      Buffer.from("89504e470d0a1a0a", "hex").copy(bytes);
+      bytes.write("IHDR", 12); bytes.writeUInt32BE(input.width, 16); bytes.writeUInt32BE(input.height, 20);
+      return { bytes, renderer: "transport-fixture" };
+    });
+    setDesignCaptureConfig(capture);
+    try {
+      const snapshot = await bridgeDesignSnapshot(bridge, key);
+      const directoryId = snapshot.directoryId!;
+      const opened = await openDesignFramePreview(bridge, key, directoryId, frame.file);
+      expect(opened.reference).toMatchObject({ workspaceId: key, directoryId, frame: frame.file });
+      expect(opened.verification?.captureAvailable).toBe(true);
+      expect((await fetch(opened.previewUrl)).status).toBe(200);
+      const inspected = await workspaceOp(bridge, "design.context.inspect", { workspaceId: key, reference: opened.reference }) as { reference: { workspaceId: string }; verification: { captureAvailable: boolean } };
+      expect(inspected.reference.workspaceId).toBe(key);
+      expect(inspected.verification.captureAvailable).toBe(true);
+      // The host-local route still opens its own native reference unchanged.
+      const local = await service.handle("design.verification.open", { workspaceId: "local-main", directoryId, frame: frame.file }) as typeof opened;
+      expect(local.reference.workspaceId).toBe("local-main");
+      expect((await fetch(local.previewUrl)).status).toBe(200);
+      const output = path.join(root, ".context", "capture.png");
+      expect(await runDesignVerificationCli(["capture", "--url", opened.verification!.url,
+        "--frame", frame.file, "--output", output], () => {})).toBe(0);
+      expect((await readFile(output)).readUInt32BE(16)).toBeGreaterThan(0);
+      const foundation = await bridgeDesignFoundationOpen(bridge, key, frame.file);
+      const result = await workspaceOp(bridge, "design.capture", { workspaceId: key,
+        frame: frame.file, expectedRevision: foundation.summary.revision, width: 80, height: 48 }) as { data: string };
+      expect(Buffer.from(result.data, "base64").readUInt32BE(16)).toBe(80);
+      expect(await readFile(path.join(root, directory, frame.file), "utf8")).toBe(frame.source);
+      await expect(openDesignFramePreview(client("prompter", "prompter").bridge, key, directoryId, frame.file)).rejects.toThrow(/actor/);
+      await expect(service.handle("design.verification.open", { workspaceId: "local-main", directoryId, frame: frame.file },
+        { remote: true, hostLocalResources: false })).rejects.toThrow();
+    } finally { setDesignCaptureConfig(undefined); await capture.stop(); }
   });
 
   it("reads legacy root registration without migration or creating a replacement", async () => {

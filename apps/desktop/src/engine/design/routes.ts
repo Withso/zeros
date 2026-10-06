@@ -637,13 +637,15 @@ export async function handleDesignWorkspaceRoute(
       if (reqStr(params, "workspaceId") !== reference.workspaceId) throw new GitError({ code: "VALIDATION_FAILED", message: "The Design reference belongs to another workspace." });
       return host.withDesignReadWorkspace(reference.workspaceId, remote, async ({ root, designDirectory }) => {
         const inspection = await inspectDesignContext(root, reference);
-        if (inspection.status !== "ready" || remote || !hostLocalResources) return inspection;
+        if (inspection.status !== "ready" || remote || (!hostLocalResources && !options.primaryRepositoryRoot)) return inspection;
         const verification = await openDesignVerification({ workspaceId: reference.workspaceId, workspacePath: root, directory: designDirectory, directoryId: reference.directoryId });
         return { ...inspection, verification, previewUrl: designFramePreviewUrl(verification, reference) };
       });
     }
     case "design.verification.open": {
-      if (remote || !hostLocalResources) throw new Error("Frame preview is currently available in local workspaces.");
+      // The qualified cloud primary owns its loopback preview. Desktop clients
+      // reach it only through the existing authenticated Browser preview host.
+      if (remote || (!hostLocalResources && !options.primaryRepositoryRoot)) throw new Error("Frame preview is currently available in local workspaces.");
       const workspaceId = reqStr(params, "workspaceId");
       return host.withDesignReadWorkspace(workspaceId, false, async ({ root, designDirectory }) => {
         const reference = await createDesignContextReference(root, workspaceId, reqStr(params, "frame"), undefined, reqStr(params, "directoryId"));

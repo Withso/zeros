@@ -176,6 +176,16 @@ function cloudDesignReport(scope: CloudRuntimeScope, value: unknown): WireRecord
   return { ...report, workspacePath: cloudWorkspaceKey(scope) };
 }
 
+/** Only typed context ownership crosses this boundary. Preview URLs and
+ * authored text remain opaque, and foreign native owners fail closed. */
+function cloudDesignReference(scope: CloudRuntimeScope, value: unknown, direction: "in" | "out"): WireRecord {
+  const reference = record(value);
+  const key = cloudWorkspaceKey(scope);
+  if (reference.workspaceId !== (direction === "in" ? scope.engineWorkspaceId : key))
+    throw new Error("The Design reference belongs to another workspace.");
+  return { ...reference, workspaceId: direction === "in" ? key : scope.engineWorkspaceId };
+}
+
 export function cloudOutgoing(
   scope: CloudRuntimeScope,
   message: WireRecord,
@@ -184,6 +194,8 @@ export function cloudOutgoing(
   if (message.params) {
     const original = record(message.params);
     const params = mapFields(scope, original, "out");
+    if (message.op === "design.context.inspect" && original.reference)
+      params.reference = cloudDesignReference(scope, original.reference, "out");
     // Desktop directory lifecycle calls identify their repository by root.
     // The cloud worker additionally fences them to its admitted primary row.
     if (params.workspaceId === undefined && parseCloudWorkspaceKey(original.repoRoot) &&
@@ -250,6 +262,8 @@ export function cloudIncoming(
     const result = mapFields(scope, record(message.result), "in");
     if (typeof message.op === "string" &&
         (message.op.startsWith("design.") || message.op === "workspace.setMode")) {
+      if (["design.context.create", "design.context.inspect", "design.verification.open"].includes(message.op) && result.reference)
+        result.reference = cloudDesignReference(scope, result.reference, "in");
       if (result.snapshot) {
         const snapshot = record(result.snapshot);
         result.snapshot = { ...snapshot, protocolCapability: null,

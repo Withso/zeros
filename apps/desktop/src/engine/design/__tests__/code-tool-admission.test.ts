@@ -170,9 +170,24 @@ describe("Code Design target admission", () => {
       const instruction = await tools!.preparePrompt!();
       expect(instruction).toContain("design_transaction_apply");
       expect(instruction).not.toContain("Use your normal Read, Write, Edit");
+      expect(instruction).toContain("Native frame verification is available through ordinary shell commands");
+      expect(instruction).toContain("<list|validate|capture|preview>");
     } finally {
       await tools?.dispose();
     }
+  });
+
+  it.each([null, "11111111-1111-4111-8111-111111111111"])("keeps native verification and authoring for a Local workspace owned by %s", async organizationId => {
+    workspace = { ...workspace!, organizationId };
+    const owner = new DesignCodeToolAdmissions({ ...options,
+      mode: () => ({ get: () => ({ mode: "design", revision: 1 }), set: () => { throw new Error("unused"); } }) });
+    const tools = await owner.admit(input);
+    try {
+      const instruction = await tools!.preparePrompt!();
+      expect(instruction).toContain("Use your normal Read, Write, Edit");
+      expect(instruction).toContain("Native frame verification is available through ordinary shell commands");
+      expect(instruction).not.toContain("Native file writes to Design are unavailable");
+    } finally { await tools?.dispose(); }
   });
 
   it.each(["startup", "capacity"])(

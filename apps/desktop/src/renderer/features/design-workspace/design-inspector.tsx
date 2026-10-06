@@ -44,6 +44,13 @@ import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { openDesignFramePreview } from "../../platform/bridge/design-context-bridge";
 import { shellOpenUrl } from "../../platform/app";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
+import { cloudWorkspaceCanEdit, useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
+import { useWorkspaceStore, workbenchScopeForFolder } from "../../state/workspace-store";
+import { defaultScopeFor } from "../../shell/workbench/tab-model";
+import { planBrowserOpen } from "../../shell/workbench/use-open-browser";
+import { getOrganizationStoreGeneration } from "../team/team-store";
+import { isInternalFeatureActive, useInternalFeatureActive } from "../settings/internal-features";
 import { cn } from "../../shared/ui/cn";
 import {
   Button,
@@ -944,13 +951,18 @@ export function DesignInspector({
   onOpenMotionTimeline,
   zoomActionsRef,
 }: DesignInspectorProps) {
+  const cloudPreview = isCloudWorkspace(workspaceId);
+  const cloudPreviewsEnabled = useInternalFeatureActive("cloudComputerV2");
+  const cloudCanEdit = useCloudWorkspaceCanEdit(workspaceId ?? undefined);
+  const previewAllowed = !cloudPreview || (cloudPreviewsEnabled && cloudCanEdit && !!workspaceId && workspacePreviewAvailable(workspaceId));
+  const previewAccount = cloudPreview ? getOrganizationStoreGeneration() : 0;
   const previewDirectoryId = useDesignWorkspaceUiStore(state =>
     workspaceId ? state.byWorkspace[workspaceId]?.directoryId : undefined,
   );
   const previewOwner = useMemo(() => ({
     active, workspaceId, directoryId: previewDirectoryId,
-    file: frame?.file, frameId: frame?.frameId,
-  }), [active, workspaceId, previewDirectoryId, frame?.file, frame?.frameId]);
+    file: frame?.file, frameId: frame?.frameId, previewAllowed, previewAccount,
+  }), [active, workspaceId, previewDirectoryId, frame?.file, frame?.frameId, previewAllowed, previewAccount]);
   const [openingPreviewOwner, setOpeningPreviewOwner] = useState<typeof previewOwner | null>(null);
   const openingPreview = openingPreviewOwner === previewOwner;
   const previewOwnerRef = useRef<typeof previewOwner | null>(previewOwner);
@@ -961,7 +973,7 @@ export function DesignInspector({
   }, [previewOwner]);
   const openPreview = async () => {
     const previewBridge = getActiveBridge();
-    if (!active || !previewBridge || !workspaceId || !frame || openingPreview) return;
+    if (!active || !previewAllowed || !previewBridge || !workspaceId || !frame || openingPreview) return;
     const directoryId = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId;
     if (!directoryId || directoryId !== previewDirectoryId) return;
     setOpeningPreviewOwner(previewOwner);
@@ -971,10 +983,24 @@ export function DesignInspector({
           useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId !== directoryId ||
           result.reference.workspaceId !== workspaceId || result.reference.directoryId !== directoryId ||
           result.reference.frame !== frame.file || (frame.frameId && result.reference.frameId !== frame.frameId)) return;
-      await shellOpenUrl(result.previewUrl);
+      if (cloudPreview) {
+        if (getOrganizationStoreGeneration() !== previewAccount || !cloudWorkspaceCanEdit(workspaceId) ||
+            !isInternalFeatureActive("cloudComputerV2") || !workspacePreviewAvailable(workspaceId)) return;
+        const url = new URL(result.previewUrl);
+        if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password || Number(url.port) < 1024)
+          throw new Error("Invalid cloud Design preview destination.");
+        // Keep the logical VM URL in its exact workspace's Browser tab. That
+        // tab alone obtains/revokes the existing frame-bound preview grant.
+        const scope = workbenchScopeForFolder(workspaceId);
+        const state = useWorkspaceStore.getState();
+        const current = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
+        const action = planBrowserOpen(current.tabs, current.activeId, { url: result.previewUrl, title: frame.title });
+        if (!action) throw new Error("Invalid cloud Design preview destination.");
+        state.dispatch({ ...action, scope });
+      } else await shellOpenUrl(result.previewUrl);
     } catch (error) {
       if (previewOwnerRef.current === previewOwner)
-        toast.error("Couldn’t open frame preview", { description: errorMessage(error) });
+        toast.error("Couldn’t open frame preview", { description: cloudPreview ? "Refresh the canvas and try again." : errorMessage(error) });
     } finally {
       if (previewOwnerRef.current === previewOwner) setOpeningPreviewOwner(null);
     }
@@ -2167,8 +2193,8 @@ export function DesignInspector({
   const exportSection =
     frame && folder && (frameSelected || selectedNodeId) ? (
       <InspectorSection title="Export" data-design-export-section="">
-        {!isCloudWorkspace(folder) && (
-          <Button type="button" variant="secondary" className="w-full" disabled={openingPreview || !active} onClick={() => void openPreview()}>
+        {(!cloudPreview || cloudPreviewsEnabled) && (
+          <Button type="button" variant="secondary" className="w-full" disabled={openingPreview || !active || !previewAllowed} onClick={() => void openPreview()}>
             <ExternalLink /> Open preview
           </Button>
         )}
