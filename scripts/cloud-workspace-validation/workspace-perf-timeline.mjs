@@ -113,7 +113,7 @@ export async function readPerfTimeline(pool, workspaceId) {
     const query = async sql => (await client.query(sql, [workspaceId])).rows;
     const [workspace] = await query("SELECT id,current_generation,status FROM cloud_workspaces WHERE id=$1");
     perfCheck(workspace, "workspace_unavailable");
-    // This operator script also runs against Alpha before migration 0136.
+    // This operator script also runs against Alpha before migration 0135.
     // Select the new column only after a read-only catalog check; never catch a
     // missing-column error inside the transaction and continue after abort.
     const timingColumnAvailable = (await client.query(`SELECT EXISTS (SELECT 1 FROM pg_attribute

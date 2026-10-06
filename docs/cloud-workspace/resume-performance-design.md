@@ -154,7 +154,7 @@ stage; they do not preserve successful stage spans. The helper's
 `last-diagnostic.json` is overwritten per stage, so it cannot reconstruct them.
 
 Proposed additive storage: a bounded nullable JSON timing document on each setup
-execution (orchestrator-assigned migration **0136**, expand phase). No raw
+execution (orchestrator-assigned migration **0135**, expand phase). No raw
 stdout, paths, provider messages, repository names or credential fields.
 
 - Version 1; maximum 32 entries / 8 KiB. A closed source enum identifies
@@ -177,7 +177,7 @@ stdout, paths, provider messages, repository names or credential fields.
   mark a run ready. Partial failed/cancelled spans remain identifiable.
 
 PERF has scoped ownership of helper/runner/result-schema/persistence hooks and
-assigned migration 0136 for this storage. The read-only timeline
+assigned migration 0135 for this storage. The read-only timeline
 can then project successful spans alongside the existing failure observations.
 
 ## Required regression and rollout checks

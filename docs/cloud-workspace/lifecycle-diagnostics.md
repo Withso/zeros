@@ -296,7 +296,7 @@ owner/placement switching introduces no new client state or wake behavior.
 
 ## Closed setup stage timings
 
-Migration 0136 (expand) adds nullable `cloud_workspace_setup_runs.stage_timings`.
+Migration 0135 (expand) adds nullable `cloud_workspace_setup_runs.stage_timings`.
 A document has `version: 1` and at most five clocks / 32 total spans / 8 KiB.
 Each clock carries a closed source, random UUID, UTC anchor and spans with a
 closed stage/outcome plus integer start/end offsets, bounded to one hour. The
@@ -337,7 +337,7 @@ migration/reader first, then qualify and select a new runtime bundle to collect
 helper spans. Old pinned bundles still yield control-plane/transport timings.
 
 The read-only `workspace-perf-timeline.mjs` checks the catalog before selecting
-the new column, so it also works before migration 0136. It returns validated
+the new column, so it also works before migration 0135. It returns validated
 clocks per setup run and distinguishes `not_persisted`, `no_spans` and
 `persisted`; existing failure observations remain separate. Malformed timing
 documents are omitted, without returning their raw values.
