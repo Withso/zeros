@@ -44,7 +44,7 @@ export function useWorkbenchStatusManaged(): boolean {
   return useContext(StatusContext) !== null;
 }
 
-export function WorkbenchEmptyState({
+function WorkbenchEmptyStateContent({
   type,
   message,
 }: {
@@ -64,6 +64,16 @@ export function WorkbenchEmptyState({
       </p>
     </div>
   );
+}
+
+export function WorkbenchEmptyState(props: {
+  type: WorkbenchTabType;
+  message?: string;
+}) {
+  // A managed frame owns the only fallback, including portal-owned Setup.
+  // Raw child failures must not insert an icon during the silent retry or
+  // displace retained content; the frame centres persistent fallbacks itself.
+  return useWorkbenchStatusManaged() ? null : <WorkbenchEmptyStateContent {...props} />;
 }
 
 export function WorkbenchTabBanner({
@@ -263,7 +273,7 @@ export function WorkbenchTabFrame({
           </div>
           {blocked && (
             <div className="absolute inset-0 flex min-h-0 flex-col">
-              <WorkbenchEmptyState
+              <WorkbenchEmptyStateContent
                 type={tab.type}
                 message={describeWorkbenchEmptyState(
                   tab.type,
@@ -331,9 +341,10 @@ export function WorkbenchTabStatusProvider({
 }) {
   const key = workbenchStatusKey(folder, tab);
   const sources = useMemo(() => workbenchSourcesFor(key), [key]);
+  const { visible } = useWorkbenchAvailability(folder, active);
   const value = useMemo(
-    () => ({ sources, toolbar: null, active, type: tab.type }),
-    [sources, active, tab.type],
+    () => ({ sources, toolbar: null, active: visible, type: tab.type }),
+    [sources, visible, tab.type],
   );
   return (
     <StatusContext.Provider value={value}>{children}</StatusContext.Provider>
@@ -359,6 +370,7 @@ export function useWorkbenchStatusSource(
   retry.current = source.retry;
   const retrySource = useCallback(() => retry.current?.(), [retry]);
   const { error, pending, primary, hasContent, active, notice } = source;
+  const canRetry = !!source.retry;
   useLayoutEffect(() => {
     if (!context) return;
     context.sources.update(id, {
@@ -367,10 +379,11 @@ export function useWorkbenchStatusSource(
       active: context.active && active !== false,
       primary,
       hasContent,
-      retry: retrySource,
+      retry: canRetry ? retrySource : undefined,
+      retryKey: owner ?? id,
       notice,
     });
-  }, [context, id, error, pending, primary, hasContent, retrySource, active, notice]);
+  }, [context, id, owner, error, pending, primary, hasContent, retrySource, active, canRetry, notice]);
   useLayoutEffect(
     () => () => context?.sources.remove(id),
     [context?.sources, id],

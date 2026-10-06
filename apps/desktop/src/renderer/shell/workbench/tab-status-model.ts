@@ -107,8 +107,11 @@ export interface WorkspaceAvailability {
   setupFailed?: boolean;
 }
 
-export const WORKBENCH_RECONNECT_GRACE_MS = 2_000;
-export const WORKBENCH_RECONNECT_ERROR_MS = 20_000;
+// Transient gaps (<10s) keep the workbench quiet. Persistent gaps share one
+// pending decision at 10s and actionable failure at 45s, for both placements.
+export const WORKBENCH_RECONNECT_GRACE_MS = 10_000;
+export const WORKBENCH_RECONNECT_ERROR_MS = 45_000;
+export const WORKBENCH_SILENT_RETRY_MS = 1_500;
 export const WORKBENCH_RETRY_LIMIT_MS = 30_000;
 
 export function describeWorkbenchEmptyState(
@@ -196,12 +199,13 @@ export function describeWorkspaceAvailability(
     };
   if (input.connection === "connected") return null;
   if (elapsed < WORKBENCH_RECONNECT_GRACE_MS) return null;
-  const verb = input.previouslyConnected ? "Reconnecting" : "Connecting";
   return {
     tone: "pending",
-    message: input.cloud
-      ? `${verb} to the workspace…`
-      : `${verb} to the Zeros engine…`,
+    message: !input.previouslyConnected
+      ? "Connecting…"
+      : input.cloud
+        ? "Reconnecting to the workspace…"
+        : "Reconnecting to the Zeros engine…",
     connectionPhase: input.previouslyConnected ? "reconnecting" : "connecting",
   };
 }
@@ -308,6 +312,9 @@ export interface WorkbenchSource {
   primary?: boolean;
   hasContent?: boolean;
   retry?: () => void | Promise<unknown>;
+  /** Equivalent mounted consumers identify the same exact read, even when
+   * their retry closures or failure publication times differ. */
+  retryKey?: string;
   active?: boolean;
   /** Informational state, below every availability/read failure. */
   notice?: WorkbenchNotice;
@@ -321,13 +328,20 @@ interface StatusSnapshot {
   notice: WorkbenchNotice | null;
 }
 
+interface StatusSource extends WorkbenchSource {
+  failurePhase?: "waiting" | "retrying" | "persistent";
+  failedAt?: number;
+}
+
 /** One frame owns its exact target's sources. Old callbacks hold the old
  * instance, so late results cannot set or clear a new owner's banner. */
 export class WorkbenchStatusSources {
-  private sources = new Map<string, WorkbenchSource>();
+  private sources = new Map<string, StatusSource>();
   private listeners = new Set<() => void>();
   private flight: Promise<void> | null = null;
   private flightSettled: (() => void) | null = null;
+  private silentFlight = false;
+  private automaticTimer: ReturnType<typeof setTimeout> | undefined;
   private value: StatusSnapshot = {
     failure: null,
     hasContent: false,
@@ -347,9 +361,19 @@ export class WorkbenchStatusSources {
   };
   update(id: string, source: WorkbenchSource): void {
     const previous = this.sources.get(id);
+    const error = source.error || (source.pending ? previous?.error : null);
+    // One failed read is transient until its single silent, exact-key retry
+    // settles. Successful revalidation ends that episode; recurring failures
+    // get a new allowance. Explicit states/rejections bypass this in availability.
     this.sources.set(id, {
       ...source,
-      error: source.error || (source.pending ? previous?.error : null),
+      error,
+      failurePhase: error
+        ? !source.retry && previous?.failurePhase === "waiting"
+          ? "persistent"
+          : previous?.failurePhase ?? (source.retry ? "waiting" : "persistent")
+        : undefined,
+      failedAt: error ? previous?.failedAt ?? Date.now() : undefined,
     });
     this.publish();
   }
@@ -361,18 +385,23 @@ export class WorkbenchStatusSources {
     const sources = [...this.sources.values()].filter(
       (source) => source.active !== false,
     );
+    const failures = sources.filter(
+      (source) => source.failurePhase === "persistent",
+    );
     const failure =
-      sources.find((source) => source.primary && source.error)?.error ??
-      sources.find((source) => source.error)?.error ??
+      failures.find((source) => source.primary && source.error)?.error ??
+      failures.find((source) => source.error)?.error ??
       null;
     const hasContent = sources.some(
       (source) => source.primary && source.hasContent,
     );
-    const busy = this.flight !== null;
+    const busy = this.flight !== null && !this.silentFlight;
     const pending = sources.some(
-      (source) => source.active !== false && source.pending,
+      (source) => source.pending ||
+        source.failurePhase === "waiting" || source.failurePhase === "retrying",
     );
     const notice = failure ? null : sources.find(source => source.notice)?.notice ?? null;
+    this.scheduleAutomaticRetry();
     if (
       this.value.failure === failure &&
       this.value.hasContent === hasContent &&
@@ -387,20 +416,59 @@ export class WorkbenchStatusSources {
     for (const listener of this.listeners) listener();
     this.flightSettled?.();
   }
+  private scheduleAutomaticRetry(): void {
+    clearTimeout(this.automaticTimer);
+    this.automaticTimer = undefined;
+    if (this.flight) return;
+    const waiting = [...this.sources.values()].filter((source) =>
+      source.active !== false && !source.pending && source.retry && source.failurePhase === "waiting",
+    );
+    if (!waiting.length) return;
+    const deadline = Math.min(
+      ...waiting.map((source) => source.failedAt! + WORKBENCH_SILENT_RETRY_MS),
+    );
+    this.automaticTimer = setTimeout(() => {
+      this.automaticTimer = undefined;
+      const elapsed = waiting.filter(
+        (source) => source.failedAt! + WORKBENCH_SILENT_RETRY_MS <= Date.now(),
+      );
+      const due = waiting.filter((source) => elapsed.some((ready) =>
+        source === ready || source.retry === ready.retry ||
+        (source.retryKey !== undefined && source.retryKey === ready.retryKey),
+      ));
+      for (const source of due) source.failurePhase = "retrying";
+      void this.startRetry(due, undefined, true);
+    }, Math.max(0, deadline - Date.now()));
+  }
   retry(reconnect?: () => Promise<unknown>): Promise<void> {
     if (this.flight) return this.flight;
+    const selected = [...this.sources.values()].filter(
+      (source) => source.active !== false && (reconnect || source.error),
+    );
+    for (const source of selected)
+      if (source.error) source.failurePhase = "persistent";
+    return this.startRetry(selected, reconnect, false);
+  }
+  private startRetry(
+    selected: StatusSource[],
+    reconnect: (() => Promise<unknown>) | undefined,
+    silent: boolean,
+  ): Promise<void> {
+    if (this.flight) return this.flight;
+    clearTimeout(this.automaticTimer);
+    this.automaticTimer = undefined;
     const hadSources = this.sources.size > 0;
     // Snapshot the current sources. Navigating during retry cannot start reads
     // against another key through a caller's newly installed closure.
-    const callbacks = [
-      ...new Set(
-        [...this.sources.values()]
-          .filter(
-            (source) => source.active !== false && (reconnect || source.error),
-          )
-          .flatMap((source) => (source.retry ? [source.retry] : [])),
-      ),
-    ];
+    const callbacks: NonNullable<WorkbenchSource["retry"]>[] = [];
+    const seen = new Set<string | WorkbenchSource["retry"]>();
+    for (const source of selected) {
+      if (!source.retry) continue;
+      const key = source.retryKey ?? source.retry;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      callbacks.push(source.retry);
+    }
     let resolve!: () => void;
     const flight = new Promise<void>((done) => {
       resolve = done;
@@ -414,6 +482,8 @@ export class WorkbenchStatusSources {
       if (this.flight === flight) {
         this.flight = null;
         this.flightSettled = null;
+        for (const source of this.sources.values())
+          if (source.failurePhase === "retrying") source.failurePhase = "persistent";
         this.publish();
       }
       resolve();
@@ -421,7 +491,9 @@ export class WorkbenchStatusSources {
     const timer = setTimeout(finish, WORKBENCH_RETRY_LIMIT_MS);
     const settled = () => {
       if (
-        (completed && !this.value.pending) ||
+        (completed && ![...this.sources.values()].some(
+          (source) => source.active !== false && source.pending,
+        )) ||
         (hadSources &&
           ![...this.sources.values()].some((source) => source.active !== false))
       )
@@ -429,6 +501,7 @@ export class WorkbenchStatusSources {
     };
     this.flightSettled = settled;
     this.flight = flight;
+    this.silentFlight = silent;
     this.publish();
     void Promise.resolve()
       .then(async () => {

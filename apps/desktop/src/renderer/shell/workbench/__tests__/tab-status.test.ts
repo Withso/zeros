@@ -112,11 +112,11 @@ describe("workbench status contract", () => {
       since: 100,
       previouslyConnected: true,
     };
-    expect(describeWorkspaceAvailability(lost, 2_099)).toBeNull();
-    expect(describeWorkspaceAvailability(lost, 2_100)?.message).toBe(
+    expect(describeWorkspaceAvailability(lost, 10_099)).toBeNull();
+    expect(describeWorkspaceAvailability(lost, 10_100)?.message).toBe(
       "Reconnecting to the workspace…",
     );
-    expect(describeWorkspaceAvailability(lost, 20_100)).toMatchObject({
+    expect(describeWorkspaceAvailability(lost, 45_100)).toMatchObject({
       tone: "error",
       message: "Can't reach the workspace.",
       action: "Retry",
@@ -124,14 +124,14 @@ describe("workbench status contract", () => {
     expect(
       describeWorkspaceAvailability(
         { ...lost, connection: "connected" },
-        20_100,
+        45_100,
       ),
     ).toBeNull();
     expect(
       describeWorkspaceAvailability({ ...lost, rejected: true }, 101)?.tone,
     ).toBe("error");
     expect(
-      describeWorkspaceAvailability({ ...lost, cloud: false }, 20_100)?.message,
+      describeWorkspaceAvailability({ ...lost, cloud: false }, 45_100)?.message,
     ).toBe("Can't reach the Zeros engine.");
   });
 
@@ -208,17 +208,15 @@ describe("workbench status contract", () => {
     "graces the first connection and uses connecting copy (cloud=%s)",
     (cloud) => {
       const cold = { cloud, connection: "connecting" as const, since: 100 };
-      expect(describeWorkspaceAvailability(cold, 2_099)).toBeNull();
-      expect(describeWorkspaceAvailability(cold, 2_100)?.message).toBe(
-        cloud
-          ? "Connecting to the workspace…"
-          : "Connecting to the Zeros engine…",
+      expect(describeWorkspaceAvailability(cold, 10_099)).toBeNull();
+      expect(describeWorkspaceAvailability(cold, 10_100)?.message).toBe(
+        "Connecting…",
       );
-      expect(describeWorkspaceAvailability(cold, 20_100)?.tone).toBe("error");
+      expect(describeWorkspaceAvailability(cold, 45_100)?.tone).toBe("error");
       expect(
         describeWorkbenchEmptyState(
           "terminal",
-          describeWorkspaceAvailability(cold, 2_100),
+          describeWorkspaceAvailability(cold, 10_100),
         ),
       ).toBe("The terminal opens when the workspace is ready.");
       expect(
@@ -226,7 +224,7 @@ describe("workbench status contract", () => {
           "terminal",
           describeWorkspaceAvailability(
             { ...cold, previouslyConnected: true },
-            2_100,
+            10_100,
           ),
         ),
       ).toBe("Terminal reconnects automatically.");

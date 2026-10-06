@@ -53,12 +53,13 @@ The full guide is `docs/design-system.md`; token values are in
    color as the only signal (pair status color with an icon or text). Don't
    build class names at runtime (`text-${tone}`): the checks can't see them —
    map states to complete class strings instead.
-   Workbench content load/availability failures use `WorkbenchTabFrame`'s
+   Persistent workbench content load/availability failures use `WorkbenchTabFrame`'s
    single persistent banner and neutral icon/line empty state. Action outcomes
    use toasts. Connection failures fall back to their existing app toast only
    while no affected frame is visible. Report each read with
-   `useWorkbenchStatusSource`; retain confirmed exact-key content and never add
-   a second error paragraph or Retry button.
+   `useWorkbenchStatusSource`; one failed read gets a silent retry after 1.5
+   seconds. Connection gaps stay quiet for 10 seconds. Retain confirmed exact-key
+   content and never add a second error paragraph or Retry button.
 7. **Verify:** run `pnpm check:ui` (compiles every class, enforces the policy
    ratchet) plus `pnpm typecheck`, `pnpm lint`, and the nearby tests. Fix
    findings; never raise `styles/policy/ui-debt.json`, add a `check:ui ignore`
@@ -255,10 +256,10 @@ Engine rejection banners preserve the reason-specific update/sign-in headline.
 Every workbench body, including retained Design, Setup, terminal tabs and the
 bottom Terminals panel, uses one `WorkbenchTabFrame`. Its persistent full-width
 banner follows all of the tab's own toolbar rows. Workspace availability wins
-over primary data failure, then secondary reads (comments, history, ignored
+over persistent primary data failure, then secondary reads (comments, history, ignored
 entries). It has no close button or timer and clears after successful recovery.
 Confirmed content for the exact workspace/target stays visible during refresh
-and failure. Without confirmed content, show the tab icon (`size-10`,
+and failure. Without confirmed content and with a persistent status, show the tab icon (`size-10`,
 `strokeWidth={1}`, `text-muted-fg`) and one neutral sentence of about eight words
 or fewer (`text-fg2 text-xs`), centred with no buttons or repeated error text.
 Legitimate non-error empty states may retain their creation/configuration action.
@@ -267,6 +268,31 @@ Pending copy explains that content appears when the workspace is ready; Retry
 copy is reserved for a banner offering Retry. Archived or non-retryable states
 say the content is unavailable. A single-file viewer says “this file”. Terminal
 reconnections after a confirmed connection say “Terminal reconnects automatically.”
+
+**Transient** means a connection gap that recovers before 10 seconds, a read
+that fails once and succeeds on one silent automatic retry after about 1.5
+seconds, or a revalidation failure with confirmed content that recovers on the
+next automatic attempt. These conditions have no banner and no error empty
+state. Keep confirmed exact-key content mounted and visible, including Design's
+canvas or confirmed start surface. No extra indicator is needed: continuity
+keeps normal recovery quiet and avoids layout movement or status flashes.
+
+**Persistent** means a read that still fails after that one silent retry,
+terminal connection rejection, setup failure, or an explicit workspace state
+(setting up, starting/waking, stopping, stopped/sleeping, archived). These show
+the shared banner immediately when confirmed. A transport gap becomes pending
+at 10 seconds (“Reconnecting to the workspace…”), then actionable at 45 seconds
+(“Can't reach the workspace.” with Retry). Local engine gaps use the same
+thresholds with engine-specific reconnect/error copy. Cold first connection is
+normal startup for the first 10 seconds, then says “Connecting…”.
+
+Availability has one decision and clock per Local engine or cloud VM; all its
+tabs observe the same thresholds. Silent read retries belong to the exact
+source/target, share one flight, and keep confirmed content through revalidation.
+Successful automatic recovery cancels the retry and clears the condition;
+failed retries remain visible until recovery. Hidden tabs and hidden documents
+run no status/retry timers; activation uses the original timestamp. Passive
+reads and connection admission never wake a cloud computer.
 
 Failures use `bg-red-bg text-red-fg` and a leading error icon. Self-resolving
 availability (setup, starting, reconnecting) uses `bg-yellow-bg text-yellow-fg`
@@ -282,11 +308,8 @@ accessible name, shares one flight across failed sources, and says “Retrying�
 until settled, bounded to 30 seconds even if a source never settles. Keep the
 banner element/live region stable through retry and tone changes; announce
 message changes once without moving focus. Hidden retained tabs
-are inert and do not announce, animate, poll or run status timers. Reconnect
-grace (2 seconds, including the first connection) and escalation (20 seconds) use
-connection timestamps on activation. Passive reads/Retry admission never wake a
-cloud computer.
-Before a successful connection, use “Connecting”; reserve “Reconnecting” for
+are inert and do not announce, animate, poll or run status timers.
+Before a successful connection, use “Connecting…”; reserve “Reconnecting” for
 a lost confirmed connection. Stopping and stopped have distinct pending copy.
 
 ## 8. Building blocks
@@ -303,8 +326,8 @@ state, `aria-*`, `data-*` hooks) at the caller.
 | An icon-only action | `IconButton` | Required `label` (its accessible name); `size="inline"` = 20px action inside a row or tab, `size="standard"` = 28px chrome action (Button `icon-sm` geometry). Defaults: raised hover, 120ms color motion, `type="button"`; `asChild` keeps link semantics. |
 | Window chrome or a panel heading | `PanelHeader` | Required `size="window"` (40px, gap-1, px-2, `bg-bg1`) or `size="panel"` (36px, gap-2, px-3); border1 bottom divider; optional `div` / `section` / `header`. |
 | A compact tool disclosure or hover trigger | `ListRow` | Width-fit button row; the caller owns `aria-expanded`, `aria-controls`, labels, state, and events. |
-| Every workbench tab body | `WorkbenchTabFrame` + `WorkbenchTabToolbar` (`shell/workbench/tab-status.tsx`) | Structural single status slot under portalled toolbar rows; preserves confirmed content, otherwise supplies `WorkbenchEmptyState`. The exhaustive `WorkbenchTabType` adapter requires copy/icon for future tabs. |
-| A tab's persistent read status | `useWorkbenchStatusSource` + `describeWorkbenchFailure` | Exact-owner primary/secondary errors and awaitable retries feed one `WorkbenchTabBanner`; availability has priority. Action outcomes remain toasts. |
+| Every workbench tab body | `WorkbenchTabFrame` + `WorkbenchTabToolbar` (`shell/workbench/tab-status.tsx`) | Structural single status slot under portalled toolbar rows; preserves confirmed content. Supplies `WorkbenchEmptyState` only for a persistent condition without confirmed content; raw child fallbacks follow that same decision. The exhaustive `WorkbenchTabType` adapter requires copy/icon for future tabs. |
+| A tab's persistent read status | `useWorkbenchStatusSource` + `describeWorkbenchFailure` | Exact-owner primary/secondary errors get one silent automatic retry before feeding `WorkbenchTabBanner`; shared availability has priority. Action outcomes remain toasts. |
 
 - `Inline` / `Stack` accept only the gap steps `0`, `0.5`, `1`, `1.5`, `2`,
   `2.5`, `3`, `4`, `6`, `8`. Their `className` is for outer layout (sizing,
