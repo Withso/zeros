@@ -122,7 +122,7 @@ jobs:
         run: pnpm check:ui
 
   test-shard:
-    name: vitest (${{ matrix.part }}/2)
+    name: tests-vitest (${{ matrix.part }}/2)
     runs-on: ubuntu-latest
     strategy:
       # Every part reports, so one failure never hides another.
