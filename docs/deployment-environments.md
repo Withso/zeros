@@ -898,6 +898,8 @@ app and Ops `/zeros-deployment.json` manifests, the current rolling `alpha`
 Git tag (including annotated tags), and the feed's cumulative
 `alpha-release-ledger.json`. It compares each source separately with the
 candidate; a live worker tuple, when present, must also be at or before it.
+An enabled cloud API without a worker tuple is unknown and blocks admission;
+the explicit cloud-disabled null tuple remains supported.
 At admission, the tag and latest ledger entry must agree. After admission, a
 parallel publisher may observe the current candidate's ledger before its tag
 update (or the older cached ledger after the tag update); both sources must

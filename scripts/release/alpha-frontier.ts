@@ -76,6 +76,8 @@ export async function assertAlphaDestinations(candidate: { repository: string; s
   ]);
   const identity = observed.identity;
   requireCheck(identity, "Alpha live API/schema identity is unavailable; forward-only admission refused");
+  requireCheck(!identity.cloud.enabled || identity.worker,
+    "Alpha active worker identity is unavailable; forward-only admission refused");
   requireCheck(app && ops, "Alpha live Pages identity is unavailable; forward-only admission refused");
   const parsed = ReleaseLedger.safeParse(previous);
   requireCheck(parsed.success && parsed.data.channel === "alpha" && parsed.data.releases.length > 0,

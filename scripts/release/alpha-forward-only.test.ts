@@ -21,7 +21,7 @@ function fixture(overrides: NodeJS.ProcessEnv = {}, source: Partial<typeof candi
     tag: ancestor as string, ledger: ancestor as string, worker: null as any,
     identityStatus: 200, maintenance: false, schemaAhead: false, compareError: false,
     comparison: undefined as any, ledgerStatus: 200, tagType: "commit", parent: { ...parent },
-    unreadable: "", ledgerValue: undefined as any,
+    unreadable: "", ledgerValue: undefined as any, cloudEnabled: undefined as boolean | undefined,
     artifactPresent: true, artifactExpired: false,
     admission: { version: 1, channel: "alpha", sourceSha, repository: candidate.repository, branch: "main",
       runId: "300", runAttempt: "1", mode: "admitted" },
@@ -54,7 +54,8 @@ function fixture(overrides: NodeJS.ProcessEnv = {}, source: Partial<typeof candi
     if (route === "/v1/release-identity") return Response.json({ version: 1, ready: true, channel: "alpha", sourceSha: state.api,
       maintenance: state.maintenance, migrations: { state: "current", head: state.schemaAhead ? "0002_fixture.sql" : "0001_fixture.sql",
         expectedHead: "0001_fixture.sql", manifestSha256: "e".repeat(64) },
-      cloud: { enabled: state.worker !== null, ready: true, state: state.worker ? "healthy" : "disabled" }, worker: state.worker,
+      cloud: { enabled: state.cloudEnabled ?? (state.worker !== null), ready: true,
+        state: (state.cloudEnabled ?? (state.worker !== null)) ? "healthy" : "disabled" }, worker: state.worker,
     }, { status: state.unreadable === "api" ? 503 : state.identityStatus });
     if (route === "/zeros-deployment.json") {
       const surface = url.hostname.startsWith("ops-") ? "ops" : "app";
@@ -228,6 +229,12 @@ describe("Stage 2 automatic Alpha admission", () => {
     test.state.worker = { provider: "boat", imageRef: `boat:fixture@sha256:${"e".repeat(64)}`, sourceSha: descendant,
       architecture: "linux/amd64", storageMiB: 4096 };
     await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(PromotionError);
+  });
+
+  it("refuses an unknown active worker rather than inventing a disabled frontier", async () => {
+    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
+    test.state.cloudEnabled = true;
+    await expect(test.client.assertCurrent()).rejects.toThrow(/worker identity is unavailable/);
   });
 });
 
