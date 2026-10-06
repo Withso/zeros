@@ -1,17 +1,31 @@
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { load } from "js-yaml";
 import { describe, expect, it } from "vitest";
 
-// CI (pull requests) runs a copy of Preflight's jobs under the same required
-// check names. Until selective lanes replace that copy, the two must not
-// drift: a check that changes in one place but not the other would gate pull
-// requests differently from the exact-source run releases depend on.
+// Selection changes when a whole job runs, never its workload commands. CI
+// retains the required contexts while Preflight remains full release evidence.
+// The executable selection suite separately verifies every PR-only guard,
+// aggregate adapter, and trusted-policy boundary excluded from this comparison.
 
-type Step = { name?: string; run?: string; uses?: string; if?: string; env?: Record<string, string> };
-type Job = { name?: string; needs?: unknown; steps?: Step[]; strategy?: unknown; if?: string };
+type Step = {
+  name?: string;
+  run?: string;
+  uses?: string;
+  if?: string;
+  env?: Record<string, unknown>;
+};
+type Job = {
+  if?: string;
+  name?: string;
+  needs?: string | string[];
+  steps?: Step[];
+  strategy?: unknown;
+  "runs-on"?: unknown;
+  "timeout-minutes"?: unknown;
+  services?: unknown;
+};
 type Workflow = { jobs: Record<string, Job> };
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
@@ -20,26 +34,46 @@ const workflow = (file: string) =>
     readFileSync(path.join(ROOT, ".github/workflows", file), "utf8"),
   ) as Workflow;
 
-// Pull requests skip the composer UI smoke (it runs after merge in Preflight)
-// and add an advisory Prettier pass plus the incident-marker merge guard.
+const PR_ONLY_JOBS = new Set(["scope", "ci-gate"]);
+// Alpha's early release gate is exclusive to full post-merge Preflight.
+const PREFLIGHT_ONLY_JOBS = new Set(["alpha-gate", "ui-smoke-shard"]);
 const PR_ONLY_STEPS = new Set([
   "Prettier — changed files only (advisory)",
   "Reject unresolved CI incident markers",
+  "Verify scope result",
+  "Verify CI selection",
+  "Combine database selections",
 ]);
-// Post-merge-only jobs: the Alpha gate and the composer browser matrix
-// (their required aggregate `ui-smoke (composer)` exists in both).
-const PREFLIGHT_ONLY_JOBS = new Set(["alpha-gate", "ui-smoke-shard"]);
+// Keep the original enforcing commands after PR-only raw-result validation.
+// These three inputs adapt only proved unselected success/skip outcomes to
+// the legacy commands' stricter result vocabulary.
+const SELECTION_INPUTS: Record<string, string> = {
+  "Enforce the test result": "TEST_RESULT",
+  "Enforce the source-sync result": "SOURCE_SYNC_RESULT",
+  "Enforce control-plane results": "DATABASE_RESULT",
+};
 const comparable = (job: Job) => ({
   name: job.name,
-  needs: job.needs,
+  needs: (typeof job.needs === "string"
+    ? [job.needs]
+    : (job.needs ?? [])
+  ).filter((id) => id !== "scope"),
   strategy: job.strategy,
+  runner: job["runs-on"],
+  timeout: job["timeout-minutes"],
+  services: job.services,
   steps: (job.steps ?? [])
     .filter((step) => !PR_ONLY_STEPS.has(step.name ?? ""))
-    .map(({ name, run, uses, if: condition }) => ({
+    .map(({ name, run, uses, if: condition, env }) => ({
       name,
       run,
       uses,
       if: condition,
+      env: Object.fromEntries(
+        Object.entries(env ?? {}).filter(
+          ([key]) => key !== SELECTION_INPUTS[name ?? ""],
+        ),
+      ),
     })),
 });
 
@@ -47,8 +81,12 @@ describe("CI and Preflight job parity", () => {
   const ci = workflow("ci.yml");
   const preflight = workflow("preflight.yml");
 
-  it("defines the same jobs", () => {
-    expect(Object.keys(ci.jobs).sort()).toEqual(
+  it("defines the same workloads apart from explicit profile gates", () => {
+    expect(
+      Object.keys(ci.jobs)
+        .filter((id) => !PR_ONLY_JOBS.has(id))
+        .sort(),
+    ).toEqual(
       Object.keys(preflight.jobs)
         .filter((id) => !PREFLIGHT_ONLY_JOBS.has(id))
         .sort(),
@@ -59,16 +97,25 @@ describe("CI and Preflight job parity", () => {
     Object.keys(workflow("preflight.yml").jobs).filter(
       (id) => id !== "ui-smoke" && !PREFLIGHT_ONLY_JOBS.has(id),
     ),
-  )("keeps the %s job identical apart from pull-request-only steps", (id) => {
-    expect(comparable(ci.jobs[id]!)).toEqual(comparable(preflight.jobs[id]!));
-  });
+  )(
+    "keeps the %s workload identical apart from pull-request selection steps",
+    (id) => {
+      expect(comparable(ci.jobs[id]!)).toEqual(comparable(preflight.jobs[id]!));
+    },
+  );
 
   it("admits Alpha only through all five successful critical aggregates", () => {
     const gate = preflight.jobs["alpha-gate"];
     expect(gate).toBeDefined();
     expect(gate!.name).toBe("alpha-gate");
     expect(gate!.if).toBe("always()");
-    expect(gate!.needs).toEqual(["quality", "test", "build", "control-plane", "secret-scan"]);
+    expect(gate!.needs).toEqual([
+      "quality",
+      "test",
+      "build",
+      "control-plane",
+      "secret-scan",
+    ]);
     expect(ci.jobs["alpha-gate"]).toBeUndefined();
     const step = gate!.steps![0]!;
     expect(step.env).toEqual({
@@ -78,8 +125,14 @@ describe("CI and Preflight job parity", () => {
       CONTROL_PLANE_RESULT: "${{ needs.control-plane.result }}",
       SECRET_SCAN_RESULT: "${{ needs.secret-scan.result }}",
     });
-    const success = Object.fromEntries(Object.keys(step.env!).map(key => [key, "success"]));
-    const run = (env: Record<string, string>) => spawnSync("bash", ["-c", step.run!], { env: { ...process.env, ...env }, encoding: "utf8" });
+    const success = Object.fromEntries(
+      Object.keys(step.env!).map((key) => [key, "success"]),
+    );
+    const run = (env: Record<string, string>) =>
+      spawnSync("bash", ["-c", step.run!], {
+        env: { ...process.env, ...env },
+        encoding: "utf8",
+      });
     expect(run(success).status).toBe(0);
     for (const key of Object.keys(success)) {
       for (const result of ["failure", "cancelled", "skipped", ""]) {
@@ -88,19 +141,6 @@ describe("CI and Preflight job parity", () => {
         expect(rejected.stdout).toContain("::error::");
       }
     }
-  });
-
-  it("skips only the composer UI smoke on pull requests", () => {
-    const placeholder = ci.jobs["ui-smoke"]!;
-    expect(placeholder.name).toBe("ui-smoke (composer)");
-    expect((placeholder as Job & { if?: string }).if).toBe(
-      "github.event_name != 'pull_request'",
-    );
-    expect(preflight.jobs["ui-smoke"]!.name).toBe("ui-smoke (composer)");
-    expect((preflight.jobs["ui-smoke"] as Job & { if?: string }).if).toBe(
-      "always()",
-    );
-    expect(preflight.jobs["ui-smoke"]!.needs).toEqual(["ui-smoke-shard"]);
   });
 
   it("runs all browser shards only in post-merge Preflight", () => {

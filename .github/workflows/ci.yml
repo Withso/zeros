@@ -4,17 +4,14 @@ name: CI
 # its Preflight twin, so the main ruleset is unchanged; Preflight (preflight.yml)
 # keeps running the full suite on every push to main, release branches and
 # merge-queue commits, and it remains the only workflow releases read as
-# exact-source evidence. Keep the shared jobs in step with preflight.yml until
-# the selective lanes replace this copy (scripts/__tests__/ci-workflow-parity
-# fails on drift).
-#
-# The one intentional difference: the composer UI smoke (~21 minutes, the last
-# required check on 43 of 50 recent pull requests) runs only after merge in
-# Preflight. Here its required context is a placeholder job skipped by its
-# condition, which GitHub reports as success.
+# exact-source evidence. The trusted-base scope selects whole existing jobs;
+# their workload steps stay in parity with Preflight. A producer can skip only
+# after a successful scope decision. Composer runs on an explicit ci:ui-smoke
+# or ci:full label; path selection and missing-policy fallback do not add it.
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
 
 # No job here needs a secret. Fork pull requests run arbitrary install scripts,
 # so the token stays read-only; checkout and `git fetch` are its only consumers.
@@ -26,10 +23,191 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scope:
+    name: scope
+    runs-on: ubuntu-latest
+    outputs:
+      ledger: ${{ steps.scope.outputs.ledger }}
+      quality: ${{ steps.scope.outputs.quality }}
+      vitest: ${{ steps.scope.outputs.vitest }}
+      build: ${{ steps.scope.outputs.build }}
+      macos: ${{ steps.scope.outputs.macos }}
+      control-plane-db: ${{ steps.scope.outputs.control-plane-db }}
+      ui-smoke: ${{ steps.scope.outputs.ui-smoke }}
+      control-plane-static: ${{ steps.scope.outputs.control-plane-static }}
+      secret-scan: ${{ steps.scope.outputs.secret-scan }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Select trusted CI lanes
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_SHA: ${{ github.sha }}
+          LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          touch "$GITHUB_OUTPUT"
+          BASE_SHA="$PULL_REQUEST_BASE_SHA"
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The trusted base SHA is missing or invalid."
+            exit 1
+          fi
+          policy_dir="$RUNNER_TEMP/ci-policy"
+          mkdir -p "$policy_dir"
+          export POLICY_AVAILABLE=false
+          if git show "$BASE_SHA":scripts/ci/scope.mjs > "$policy_dir/scope.mjs" 2>/dev/null &&
+             git show "$BASE_SHA":scripts/ci/scope-rules.json > "$policy_dir/scope-rules.json" 2>/dev/null &&
+             git show "$BASE_SHA":scripts/ci/control-plane-scope.mjs > "$policy_dir/control-plane-scope.mjs" 2>/dev/null; then
+            export POLICY_AVAILABLE=true
+            # The policy lives outside the candidate checkout, including its
+            # relative imports. Only the trusted classifier examines PR paths.
+            env -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY \
+              node "$policy_dir/scope.mjs" --mode pr > "$policy_dir/classifier.outputs"
+          fi
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from "node:fs";
+          import path from "node:path";
+
+          const policyLanes = ["quality", "vitest", "build", "macos", "control-plane-db", "ui-smoke"];
+          const alwaysLanes = ["control-plane-static", "secret-scan"];
+          const laneIds = [...policyLanes, ...alwaysLanes];
+          const labelLanes = {
+            "ci:full": laneIds,
+            "ci:ui-smoke": ["ui-smoke"],
+            "ci:macos": ["macos"],
+            "ci:control-plane-db": ["control-plane-db"],
+            "ci:packaging": ["quality", "vitest", "build", "macos"],
+            "ci:web": ["quality", "vitest", "build"],
+          };
+          const fail = (message) => { throw new Error(message); };
+          const record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+          const reasonsValid = (value) => Array.isArray(value) && value.length > 0 && value.length <= 100 &&
+            value.every((reason) => typeof reason === "string" && reason.length > 0 && reason.length <= 2048 && !/[\r\n\0]/.test(reason));
+
+          if (process.env.EVENT_NAME !== "pull_request") fail("Only pull-request events may select PR lanes.");
+          for (const key of ["PULL_REQUEST_BASE_SHA", "PULL_REQUEST_HEAD_SHA", "GITHUB_SHA"]) {
+            if (!/^[0-9a-f]{40}$/.test(process.env[key] ?? "")) fail(`Missing or invalid ${key}.`);
+          }
+          const labels = JSON.parse(process.env.LABELS_JSON);
+          if (!Array.isArray(labels) || labels.length > 100 || labels.some((label) => typeof label !== "string")) {
+            fail("The label list is invalid.");
+          }
+          const requests = [...new Set(labels.filter((label) => label.startsWith("ci:")))].sort();
+          if (requests.some((label) => !Object.hasOwn(labelLanes, label))) fail("An unknown ci:* label was requested.");
+
+          const fallback = process.env.POLICY_AVAILABLE !== "true";
+          let sourceLedger = null;
+          let lanes;
+          let reasons;
+          if (fallback) {
+            lanes = Object.fromEntries(laneIds.map((lane) => [lane, lane !== "ui-smoke"]));
+            reasons = ["The trusted base lacks the complete CI policy; every PR lane except composer is selected."];
+          } else {
+            const raw = readFileSync(path.join(process.env.RUNNER_TEMP, "ci-policy/classifier.outputs"), "utf8");
+            if (Buffer.byteLength(raw) > 65536) fail("Classifier output exceeds 64 KiB.");
+            const outputs = new Map();
+            for (const line of raw.trim().split("\n")) {
+              const separator = line.indexOf("=");
+              const key = line.slice(0, separator);
+              if (separator < 1 || outputs.has(key) || !["ledger", ...laneIds].includes(key)) {
+                fail("Classifier output has an invalid or duplicate key.");
+              }
+              outputs.set(key, line.slice(separator + 1));
+            }
+            sourceLedger = JSON.parse(outputs.get("ledger"));
+            if (!record(sourceLedger) || sourceLedger.schema_version !== 1 || !record(sourceLedger.lanes) ||
+                !reasonsValid(sourceLedger.reasons) || Object.keys(sourceLedger.lanes).some((lane) => !laneIds.includes(lane))) {
+              fail("The classifier ledger is invalid.");
+            }
+            lanes = {};
+            for (const lane of policyLanes) {
+              const selected = outputs.get(lane);
+              if (!["true", "false"].includes(selected) || sourceLedger.lanes[lane] !== (selected === "true")) {
+                fail(`The classifier did not prove the ${lane} selection.`);
+              }
+              lanes[lane] = selected === "true";
+            }
+            for (const lane of alwaysLanes) {
+              if ((outputs.has(lane) && outputs.get(lane) !== "true") ||
+                  (Object.hasOwn(sourceLedger.lanes, lane) && sourceLedger.lanes[lane] !== true)) {
+                fail(`The ${lane} lane must always be selected.`);
+              }
+              lanes[lane] = true;
+            }
+            if (lanes["ui-smoke"] && !requests.some((label) => ["ci:full", "ci:ui-smoke"].includes(label))) {
+              fail("Composer requires an explicit ci:ui-smoke or ci:full label.");
+            }
+            reasons = [...sourceLedger.reasons];
+          }
+          // GitHub's permission to apply labels authorizes these additions.
+          // Neither a label nor its removal can subtract the path floor.
+          for (const request of requests) {
+            for (const lane of labelLanes[request]) lanes[lane] = true;
+            reasons.push(`Added the lanes requested by ${request}.`);
+          }
+          const jobs = {
+            scope: true,
+            quality: lanes.quality,
+            "test-shard": lanes.vitest,
+            test: true,
+            build: lanes.build,
+            "source-sync-workload": lanes.macos,
+            "source-sync": true,
+            "control-plane-scope": true,
+            "control-plane-static": true,
+            "control-plane-database": lanes["control-plane-db"],
+            "control-plane": true,
+            "ui-smoke": lanes["ui-smoke"],
+            "secret-scan": true,
+          };
+          const ledger = JSON.stringify({
+            schema_version: 1,
+            event_name: process.env.EVENT_NAME,
+            base_sha: process.env.PULL_REQUEST_BASE_SHA,
+            source_sha: process.env.PULL_REQUEST_HEAD_SHA,
+            tested_sha: process.env.GITHUB_SHA,
+            policy_sha: process.env.PULL_REQUEST_BASE_SHA,
+            lanes, jobs, reasons, requests, fallback, source_ledger: sourceLedger,
+          });
+          if (Buffer.byteLength(ledger) > 65536) fail("The selection ledger exceeds 64 KiB.");
+          // Publish atomically after validation, never partial false outputs.
+          appendFileSync(process.env.GITHUB_OUTPUT, [
+            `ledger=${ledger}`, ...laneIds.map((lane) => `${lane}=${lanes[lane]}`), "",
+          ].join("\n"));
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
+            "### Pull-request CI selection", "",
+            "| Lane | Selected |", "| --- | --- |",
+            ...laneIds.map((lane) => `| ${lane} | ${lanes[lane]} |`), "",
+            ...reasons.map((reason) => `- ${reason}`), "",
+            "```json", ledger, "```", "",
+          ].join("\n"));
+          NODE
+
   quality:
     name: quality
+    needs: scope
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.quality == 'true')
     runs-on: ubuntu-latest
     steps:
+      - name: Verify scope result
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SCOPE_RESULT" != "success" ]; then
+            echo "::error::The trusted scope decision was ${SCOPE_RESULT:-missing}."
+            exit 1
+          fi
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -128,6 +306,8 @@ jobs:
 
   test-shard:
     name: tests-vitest (${{ matrix.part }}/2)
+    needs: scope
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.vitest == 'true')
     runs-on: ubuntu-latest
     strategy:
       # Every part reports, so one failure never hides another.
@@ -139,6 +319,15 @@ jobs:
         # required aggregate.
         part: [1, 2]
     steps:
+      - name: Verify scope result
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SCOPE_RESULT" != "success" ]; then
+            echo "::error::The trusted scope decision was ${SCOPE_RESULT:-missing}."
+            exit 1
+          fi
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -381,7 +570,6 @@ jobs:
         if: matrix.part == 1
         run: pnpm schemas:build
 
-
   # The repository ruleset requires `test`. Keep that context as an explicit
   # aggregate of both Vitest parts; `always()` turns a failed or cancelled part
   # into a red required check rather than a skipped one that can be missed.
@@ -389,12 +577,29 @@ jobs:
     name: test
     if: always()
     needs:
+      - scope
       - test-shard
     runs-on: ubuntu-latest
     steps:
+      - name: Verify CI selection
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          LANE_SELECTED: ${{ needs.scope.outputs.vitest }}
+          LANE_RESULT: ${{ needs.test-shard.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SCOPE_RESULT" != "success" ]; then
+            echo "::error::The trusted scope decision was ${SCOPE_RESULT:-missing}."
+            exit 1
+          fi
+          case "${LANE_SELECTED}:${LANE_RESULT}" in
+            true:success|false:skipped|false:success) ;;
+            *) echo "::error::Invalid Vitest selection/result: ${LANE_SELECTED}:${LANE_RESULT}"; exit 1 ;;
+          esac
       - name: Enforce the test result
         env:
-          TEST_RESULT: ${{ needs.test-shard.result }}
+          # The preceding raw-result validation alone authorizes this adapter.
+          TEST_RESULT: ${{ needs.test-shard.result == 'skipped' && needs.scope.outputs.vitest == 'false' && 'success' || needs.test-shard.result }}
         run: |
           set -euo pipefail
           if [ "$TEST_RESULT" != "success" ]; then
@@ -404,8 +609,19 @@ jobs:
 
   build:
     name: build
+    needs: scope
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.build == 'true')
     runs-on: ubuntu-latest
     steps:
+      - name: Verify scope result
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SCOPE_RESULT" != "success" ]; then
+            echo "::error::The trusted scope decision was ${SCOPE_RESULT:-missing}."
+            exit 1
+          fi
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -458,8 +674,19 @@ jobs:
 
   source-sync-workload:
     name: source-sync workload (macOS)
+    needs: scope
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.macos == 'true')
     runs-on: macos-latest
     steps:
+      - name: Verify scope result
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SCOPE_RESULT" != "success" ]; then
+            echo "::error::The trusted scope decision was ${SCOPE_RESULT:-missing}."
+            exit 1
+          fi
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup pnpm
@@ -588,12 +815,28 @@ jobs:
     name: source-sync (macOS)
     if: always()
     needs:
+      - scope
       - source-sync-workload
     runs-on: ubuntu-latest
     steps:
+      - name: Verify CI selection
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          LANE_SELECTED: ${{ needs.scope.outputs.macos }}
+          LANE_RESULT: ${{ needs.source-sync-workload.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SCOPE_RESULT" != "success" ]; then
+            echo "::error::The trusted scope decision was ${SCOPE_RESULT:-missing}."
+            exit 1
+          fi
+          case "${LANE_SELECTED}:${LANE_RESULT}" in
+            true:success|false:skipped|false:success) ;;
+            *) echo "::error::Invalid macOS selection/result: ${LANE_SELECTED}:${LANE_RESULT}"; exit 1 ;;
+          esac
       - name: Enforce the source-sync result
         env:
-          SOURCE_SYNC_RESULT: ${{ needs.source-sync-workload.result }}
+          SOURCE_SYNC_RESULT: ${{ needs.source-sync-workload.result == 'skipped' && needs.scope.outputs.macos == 'false' && 'success' || needs.source-sync-workload.result }}
         run: |
           set -euo pipefail
           if [ "$SOURCE_SYNC_RESULT" != "success" ]; then
@@ -607,10 +850,21 @@ jobs:
   # split across shards that each own a Postgres service.
   control-plane-scope:
     name: control-plane scope
+    needs: scope
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.control-plane-static == 'true')
     runs-on: ubuntu-latest
     outputs:
-      database: ${{ steps.scope.outputs.database }}
+      database: ${{ steps.selection.outputs.database }}
     steps:
+      - name: Verify scope result
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SCOPE_RESULT" != "success" ]; then
+            echo "::error::The trusted scope decision was ${SCOPE_RESULT:-missing}."
+            exit 1
+          fi
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -631,10 +885,37 @@ jobs:
           PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: node scripts/ci/control-plane-scope.mjs >> "$GITHUB_OUTPUT"
 
+      - name: Combine database selections
+        id: selection
+        env:
+          DATABASE_FLOOR: ${{ needs.scope.outputs.control-plane-db }}
+          LEGACY_DATABASE: ${{ steps.scope.outputs.database }}
+        run: |
+          set -euo pipefail
+          case "${DATABASE_FLOOR}:${LEGACY_DATABASE}" in
+            true:true|true:false|false:true) selected=true ;;
+            false:false) selected=false ;;
+            *) echo "::error::A database selection is missing or invalid."; exit 1 ;;
+          esac
+          echo "database=$selected" >> "$GITHUB_OUTPUT"
+          printf '\n### Combined database selection\n\nTrusted floor: %s. Existing scope: %s. Run: %s.\n' \
+            "$DATABASE_FLOOR" "$LEGACY_DATABASE" "$selected" >> "$GITHUB_STEP_SUMMARY"
+
   control-plane-static:
     name: control-plane typecheck + audit
+    needs: scope
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.control-plane-static == 'true')
     runs-on: ubuntu-latest
     steps:
+      - name: Verify scope result
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SCOPE_RESULT" != "success" ]; then
+            echo "::error::The trusted scope decision was ${SCOPE_RESULT:-missing}."
+            exit 1
+          fi
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup pnpm
@@ -666,8 +947,10 @@ jobs:
 
   control-plane-database:
     name: control-plane database
-    needs: control-plane-scope
-    if: needs.control-plane-scope.outputs.database == 'true'
+    needs:
+      - scope
+      - control-plane-scope
+    if: always() && (needs.scope.result != 'success' || needs.control-plane-scope.result != 'success' || needs.scope.outputs.control-plane-db == 'true' || needs.control-plane-scope.outputs.database == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -696,6 +979,21 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
+      - name: Verify scope result
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          DATABASE_SCOPE_RESULT: ${{ needs.control-plane-scope.result }}
+          DATABASE_SELECTED: ${{ needs.control-plane-scope.outputs.database }}
+        run: |
+          set -euo pipefail
+          if [ "$SCOPE_RESULT" != "success" ] || [ "$DATABASE_SCOPE_RESULT" != "success" ]; then
+            echo "::error::The trusted or database scope decision failed."
+            exit 1
+          fi
+          if [ "$DATABASE_SELECTED" != "true" ] && [ "$DATABASE_SELECTED" != "false" ]; then
+            echo "::error::The database selection is missing or invalid."
+            exit 1
+          fi
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup pnpm
@@ -744,11 +1042,35 @@ jobs:
     name: control plane
     if: always()
     needs:
+      - scope
       - control-plane-scope
       - control-plane-static
       - control-plane-database
     runs-on: ubuntu-latest
     steps:
+      - name: Verify CI selection
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          DATABASE_SCOPE_RESULT: ${{ needs.control-plane-scope.result }}
+          STATIC_RESULT: ${{ needs.control-plane-static.result }}
+          DATABASE_FLOOR: ${{ needs.scope.outputs.control-plane-db }}
+          LANE_SELECTED: ${{ needs.control-plane-scope.outputs.database }}
+          LANE_RESULT: ${{ needs.control-plane-database.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SCOPE_RESULT" != "success" ] || [ "$DATABASE_SCOPE_RESULT" != "success" ] || [ "$STATIC_RESULT" != "success" ]; then
+            echo "::error::The trusted scope, database scope, or control-plane static job failed."
+            exit 1
+          fi
+          case "$DATABASE_FLOOR" in
+            true) [ "$LANE_SELECTED" = "true" ] || { echo "::error::Database scope subtracted the trusted floor."; exit 1; } ;;
+            false) ;;
+            *) echo "::error::The trusted database floor is missing or invalid."; exit 1 ;;
+          esac
+          case "${LANE_SELECTED}:${LANE_RESULT}" in
+            true:success|false:skipped|false:success) ;;
+            *) echo "::error::Invalid database selection/result: ${LANE_SELECTED}:${LANE_RESULT}"; exit 1 ;;
+          esac
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Node
@@ -769,22 +1091,47 @@ jobs:
           SCOPE_RESULT: ${{ needs.control-plane-scope.result }}
           DATABASE_SCOPE: ${{ needs.control-plane-scope.outputs.database }}
           STATIC_RESULT: ${{ needs.control-plane-static.result }}
-          DATABASE_RESULT: ${{ needs.control-plane-database.result }}
+          DATABASE_RESULT: ${{ needs.control-plane-scope.outputs.database == 'false' && needs.control-plane-database.result == 'success' && 'skipped' || needs.control-plane-database.result }}
           DATABASE_SHARDS: 4
         run: node scripts/ci/control-plane-results.mjs "$RUNNER_TEMP/control-plane-reports"
 
   ui-smoke:
     name: ui-smoke (composer)
-    # Runs after merge in Preflight. Skipped on pull requests so the required
-    # context reports success without occupying a runner.
-    if: github.event_name != 'pull_request'
+    needs: scope
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.ui-smoke == 'true')
     runs-on: ubuntu-latest
     steps:
-      - name: Composer UI smoke runs after merge
-        run: echo "The composer UI smoke runs in Preflight on every push to main."
+      - name: Verify scope result
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SCOPE_RESULT" != "success" ]; then
+            echo "::error::The trusted scope decision was ${SCOPE_RESULT:-missing}."
+            exit 1
+          fi
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install control-plane dependencies for title smoke
+        run: pnpm --dir apps/control-plane install --frozen-lockfile
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Composer model-menu interaction contract
+        run: pnpm test:ui-smoke
 
   secret-scan:
     name: secret scan (PR commit range)
+    needs: scope
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.secret-scan == 'true')
     runs-on: ubuntu-latest
     # ── Why the PR's COMMIT RANGE, not the tree and not all history ──
     #
@@ -806,6 +1153,15 @@ jobs:
     # Non-zero exit on a finding fails the job — no `continue-on-error`. A secret
     # scanner that reports and passes trains everyone to ignore it.
     steps:
+      - name: Verify scope result
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SCOPE_RESULT" != "success" ]; then
+            echo "::error::The trusted scope decision was ${SCOPE_RESULT:-missing}."
+            exit 1
+          fi
       - name: Checkout (full depth — gitleaks needs the commit graph)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -880,3 +1236,135 @@ jobs:
             -e GIT_CONFIG_VALUE_0=/github/workspace \
             "$GITLEAKS_IMAGE" \
             git . --redact --no-banner --verbose --log-opts="$LOG_OPTS"
+
+  ci-gate:
+    name: zeros/ci-gate
+    if: always()
+    needs:
+      - scope
+      - quality
+      - test-shard
+      - test
+      - build
+      - source-sync-workload
+      - source-sync
+      - control-plane-scope
+      - control-plane-static
+      - control-plane-database
+      - control-plane
+      - ui-smoke
+      - secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Verify CI selection
+        env:
+          LEDGER_JSON: ${{ needs.scope.outputs.ledger }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from "node:fs";
+
+          const fail = (message) => { throw new Error(message); };
+          const record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+          const parse = (text, name, limit = 65536) => {
+            if (!text || Buffer.byteLength(text) > limit) fail(`${name} is missing or oversized.`);
+            try { return JSON.parse(text); } catch { fail(`${name} is not valid JSON.`); }
+          };
+          const ledger = parse(process.env.LEDGER_JSON, "The selection ledger");
+          // toJSON(needs) also contains an escaped copy of the scope ledger.
+          const needs = parse(process.env.NEEDS_JSON, "The job results", 262144);
+          if (!record(needs) || needs.scope?.result !== "success") fail("The trusted scope job did not succeed.");
+          if (!record(ledger) || ledger.schema_version !== 1 || !record(ledger.lanes) || !record(ledger.jobs) ||
+              typeof ledger.fallback !== "boolean" || !Array.isArray(ledger.reasons) || ledger.reasons.length === 0 ||
+              ledger.reasons.some((reason) => typeof reason !== "string" || reason.length === 0)) {
+            fail("The selection ledger is invalid.");
+          }
+          for (const [key, expected] of Object.entries({
+            event_name: process.env.EVENT_NAME,
+            base_sha: process.env.PULL_REQUEST_BASE_SHA,
+            source_sha: process.env.PULL_REQUEST_HEAD_SHA,
+            tested_sha: process.env.GITHUB_SHA,
+            policy_sha: process.env.PULL_REQUEST_BASE_SHA,
+          })) {
+            if (!expected || ledger[key] !== expected) fail(`The ledger ${key} does not match this run.`);
+          }
+          if (ledger.event_name !== "pull_request") fail("The ledger is not a pull-request selection.");
+          const laneIds = ["quality", "vitest", "build", "macos", "control-plane-db", "ui-smoke", "control-plane-static", "secret-scan"];
+          const sameKeys = (value, keys) => record(value) && Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
+          if (!sameKeys(ledger.lanes, laneIds)) fail("The ledger lane inventory is incomplete or unknown.");
+          for (const lane of laneIds) {
+            if (typeof ledger.lanes[lane] !== "boolean" || needs.scope.outputs?.[lane] !== String(ledger.lanes[lane])) {
+              fail(`The ${lane} selection is missing, invalid, or inconsistent.`);
+            }
+          }
+          if (!ledger.lanes["control-plane-static"] || !ledger.lanes["secret-scan"]) fail("An always-selected lane was disabled.");
+          const labelLanes = {
+            "ci:full": laneIds,
+            "ci:ui-smoke": ["ui-smoke"],
+            "ci:macos": ["macos"],
+            "ci:control-plane-db": ["control-plane-db"],
+            "ci:packaging": ["quality", "vitest", "build", "macos"],
+            "ci:web": ["quality", "vitest", "build"],
+          };
+          const labelIds = Object.keys(labelLanes);
+          if (!Array.isArray(ledger.requests) || ledger.requests.some((label) => !labelIds.includes(label)) ||
+              new Set(ledger.requests).size !== ledger.requests.length ||
+              ledger.requests.join("\0") !== [...ledger.requests].sort().join("\0")) fail("The label requests are invalid.");
+          for (const request of ledger.requests) {
+            if (labelLanes[request].some((lane) => !ledger.lanes[lane])) fail(`The ${request} additions are incomplete.`);
+          }
+          if (ledger.fallback && laneIds.some((lane) => lane !== "ui-smoke" && !ledger.lanes[lane])) {
+            fail("The missing-policy fallback did not select every mandatory PR lane.");
+          }
+          if (ledger.lanes["ui-smoke"] && !ledger.requests.some((label) => ["ci:full", "ci:ui-smoke"].includes(label))) {
+            fail("Composer was selected without an explicit label request.");
+          }
+          const selected = {
+            scope: true,
+            quality: ledger.lanes.quality,
+            "test-shard": ledger.lanes.vitest,
+            test: true,
+            build: ledger.lanes.build,
+            "source-sync-workload": ledger.lanes.macos,
+            "source-sync": true,
+            "control-plane-scope": true,
+            "control-plane-static": true,
+            "control-plane-database": ledger.lanes["control-plane-db"],
+            "control-plane": true,
+            "ui-smoke": ledger.lanes["ui-smoke"],
+            "secret-scan": true,
+          };
+          const jobIds = Object.keys(selected);
+          if (!sameKeys(needs, jobIds) || !sameKeys(ledger.jobs, jobIds)) fail("The job inventory is incomplete or unknown.");
+          for (const id of jobIds) {
+            if (ledger.jobs[id] !== selected[id]) fail(`The ${id} job selection is invalid.`);
+          }
+          const database = needs["control-plane-scope"].outputs?.database;
+          if (!["true", "false"].includes(database) || (selected["control-plane-database"] && database !== "true")) {
+            fail("The combined database scope is missing, invalid, or subtracted the trusted floor.");
+          }
+          // The existing database selector can only add to the trusted floor.
+          selected["control-plane-database"] ||= database === "true";
+          const problems = [];
+          for (const id of jobIds) {
+            const result = needs[id]?.result;
+            if (result !== "success" && !(!selected[id] && result === "skipped")) {
+              problems.push(`${id}: selected=${selected[id]}, result=${result || "missing"}`);
+            }
+          }
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
+            "### CI selection results", "",
+            "| Job | Selected | Result |", "| --- | --- | --- |",
+            ...jobIds.map((id) => `| ${id} | ${selected[id]} | ${needs[id]?.result || "missing"} |`), "",
+          ].join("\n"));
+          if (problems.length) fail(`CI selection failed: ${problems.join("; ")}.`);
+          console.log("Every selected job succeeded; all skips were proved unselected.");
+          NODE
