@@ -30,6 +30,77 @@ function fixture(headless?:{prepare(claim:CloudCommandClaim):Promise<void>;retir
   return { claim, snapshot, completion, dependencies, runtime, send, stop, read };
 }
 describe("engine-owned cloud command dispatch", () => {
+  it("waits for an accepted queue mutation's reply before reporting drained", async () => {
+    const f = fixture(), reply = deferred<unknown>();
+    f.dependencies.request.mockImplementation(() => reply.promise);
+    try {
+      const sending = f.send();
+      f.runtime.pauseClaims();
+      expect(f.runtime.handoffDrained()).toBe(false);
+      reply.resolve(f.snapshot()); await sending;
+      await vi.waitFor(() => expect(f.runtime.handoffDrained()).toBe(true));
+      expect(f.dependencies.dispatch).not.toHaveBeenCalled();
+    } finally { reply.resolve(f.snapshot()); f.runtime.close(); }
+  });
+
+  it("queues new sends during a runtime handoff without claiming or cancelling them", async () => {
+    const f = fixture();
+    const request = f.dependencies.request.getMockImplementation()!;
+    f.dependencies.request.mockImplementation(async input => input.kind === "mutate" ? f.snapshot(2, false, true) : request(input));
+    try {
+      f.runtime.pauseClaims();
+      await f.send();
+      await new Promise(resolve => setImmediate(resolve));
+      expect(f.dependencies.request.mock.calls.some(([input]) => input.kind === "claim")).toBe(false);
+      expect(f.dependencies.dispatch).not.toHaveBeenCalled();
+      expect(f.runtime.handoffDrained()).toBe(true);
+      expect(f.runtime.hasActiveWork()).toBe(true); // Queued work still blocks idle sleep.
+      f.runtime.resumeClaims();
+      await vi.waitFor(() => expect(f.dependencies.dispatch).toHaveBeenCalledOnce());
+      f.completion.resolve({ state: "succeeded", resultCode: null });
+    } finally { f.runtime.close(); }
+  });
+
+  it("finishes the admitted turn and receipt before reporting a handoff safe point", async () => {
+    const f = fixture();
+    const settled = deferred<unknown>();
+    const request = f.dependencies.request.getMockImplementation()!;
+    f.dependencies.request.mockImplementation(async input => input.kind === "settle" ? settled.promise : request(input));
+    try {
+      await f.send(); await vi.waitFor(() => expect(f.dependencies.dispatch).toHaveBeenCalledOnce());
+      f.runtime.pauseClaims();
+      expect(f.runtime.handoffDrained()).toBe(false);
+      f.completion.resolve({ state: "succeeded", resultCode: null });
+      await vi.waitFor(() => expect(f.dependencies.request.mock.calls.some(([input]) => input.kind === "settle")).toBe(true));
+      expect(f.runtime.handoffDrained()).toBe(false);
+      settled.resolve(f.snapshot());
+      await vi.waitFor(() => expect(f.runtime.handoffDrained()).toBe(true));
+      expect(f.dependencies.request.mock.calls.filter(([input]) => input.kind === "claim")).toHaveLength(1);
+      expect(f.dependencies.cancel).not.toHaveBeenCalled();
+    } finally { settled.resolve(f.snapshot()); f.runtime.close(); }
+  });
+
+  it("reconciles a pre-fence lost claim before becoming safe, without admitting another claim", async () => {
+    const f = fixture(); let attempts = 0;
+    f.dependencies.request.mockImplementation(async input => {
+      if (input.kind !== "claim") return f.snapshot();
+      if (++attempts === 1) throw new Error("lost claim reply");
+      return { ...f.claim, claimId: input.claimId };
+    });
+    try {
+      await f.send(); await vi.waitFor(() => expect(attempts).toBe(1));
+      f.runtime.pauseClaims();
+      expect(f.runtime.handoffDrained()).toBe(false);
+      await new Promise(resolve => setImmediate(resolve));
+      f.runtime.kick("chat");
+      await vi.waitFor(() => expect(f.dependencies.dispatch).toHaveBeenCalledOnce());
+      f.completion.resolve({ state: "succeeded", resultCode: null });
+      await vi.waitFor(() => expect(f.runtime.handoffDrained()).toBe(true));
+      const claims = f.dependencies.request.mock.calls.flatMap(([input]) => input.kind === "claim" ? [input] : []);
+      expect(claims).toHaveLength(2); expect(claims[0]).toEqual(claims[1]);
+    } finally { f.runtime.close(); }
+  });
+
   it("retains queued and dispatching work through receipt settlement without counting completed history", async () => {
     const f = fixture();
     try {

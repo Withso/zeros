@@ -17,6 +17,7 @@ type Session = {
   info: ResidentPtySession; proc: IPty; mirror: TerminalMirror;
   redactor: CloudCustomizationRedactor; sequence: number; tail: Promise<unknown>;
   queuedBytes: number; paused: boolean; closed: boolean;
+  exited: Promise<void>;
   inputs: Map<string, { sequence: number; digest: string }>;
 };
 type Connection = { socket: net.Socket; authority: ResidentEngineAuthority | null; requests: number };
@@ -36,7 +37,7 @@ export class ResidentPtyHost {
   private readonly connections = new Set<Connection>();
 
   constructor(private readonly options: {
-    socketPath: string; root: string; organizationId: string; workspaceId: string;
+    socketPath: string; root: string; additionalRoots?: readonly string[]; organizationId: string; workspaceId: string;
     shell: string; identity: { uid: number; gid: number };
   }) {
     if (process.platform !== "linux" || !path.isAbsolute(options.shell) ||
@@ -159,6 +160,7 @@ export class ResidentPtyHost {
     return this.serialize(session, async () => {
       this.requireAuthority(connection);
       if (session.closed) throw new ResidentPtyError("session_not_found");
+      if (request.op === "cursor") return session.inputs.get(request.producerId)?.sequence ?? 0;
       if (request.op === "snapshot") {
         const snapshot = await session.mirror.snapshot();
         this.requireAuthority(connection);
@@ -167,8 +169,16 @@ export class ResidentPtyHost {
         return parsed.data;
       }
       if (request.op === "close") {
+        if (!session.info.exited) {
+          closeResidentPty(session.proc);
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([session.exited, new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(() => reject(new ResidentPtyError("host_unavailable")), 2500);
+            })]);
+          } finally { clearTimeout(timer); }
+        }
         session.closed = true; this.sessions.delete(request.sessionId);
-        if (!session.info.exited) closeResidentPty(session.proc);
         session.mirror.dispose();
         return true;
       }
@@ -185,13 +195,20 @@ export class ResidentPtyHost {
     let cwd: string;
     try { cwd = await realpath(launch.cwd); }
     catch { throw new ResidentPtyError("cwd_rejected"); }
-    const relative = path.relative(this.options.root, cwd);
-    if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`))
-      throw new ResidentPtyError("cwd_rejected");
+    let allowed = false;
+    for (const root of [this.options.root, ...this.options.additionalRoots ?? []]) {
+      try { if (await realpath(root) !== root) continue; } catch { continue; }
+      const relative = path.relative(root, cwd);
+      if (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`)) { allowed = true; break; }
+    }
+    if (!allowed) throw new ResidentPtyError("cwd_rejected");
     this.requireAuthority(connection); // Enrollment may change during realpath.
     const previous = this.sessions.get(launch.sessionId);
     if (previous) {
-      if (previous.info.actorUserId !== (launch.actorUserId ?? null) || previous.info.cwd !== cwd)
+      if (previous.info.actorUserId !== (launch.actorUserId ?? null) || previous.info.cwd !== cwd ||
+        previous.info.registryWorkspaceId !== (launch.registryWorkspaceId ?? null) ||
+        previous.info.environmentOwnerId !== (launch.environmentOwnerId ?? null) ||
+        previous.info.brokerId !== (launch.brokerId ?? null))
         throw new ResidentPtyError("authority_rejected");
       return { ...previous.info };
     }
@@ -213,10 +230,14 @@ export class ResidentPtyHost {
       proc = spawn(this.options.shell, args, { cwd, env: { ...launch.env },
         uid: identity.uid, gid: identity.gid, cols: launch.cols, rows: launch.rows, name: "xterm-256color" });
     } catch { mirror.dispose(); throw new ResidentPtyError("spawn_failed"); }
+    let markExited!: () => void;
+    const exited = new Promise<void>(resolve => { markExited = resolve; });
     const session: Session = {
       info: { sessionId: launch.sessionId, pid: proc.pid, cwd, cols: launch.cols, rows: launch.rows,
-        createdAt: Date.now(), actorUserId: launch.actorUserId ?? null, exited: false },
-      proc, mirror,
+        createdAt: Date.now(), actorUserId: launch.actorUserId ?? null, exited: false,
+        registryWorkspaceId: launch.registryWorkspaceId ?? null, environmentOwnerId: launch.environmentOwnerId ?? null,
+        brokerId: launch.brokerId ?? null, githubShared: false, lastInputAtMs: 0 },
+      proc, mirror, exited,
       redactor: new CloudCustomizationRedactor(launch.redactValues ?? []),
       sequence: 0, tail: Promise.resolve(), inputs: new Map(), queuedBytes: 0, paused: false, closed: false,
     };
@@ -233,6 +254,9 @@ export class ResidentPtyHost {
       }).catch(() => this.stop());
     });
     proc.onExit(({ exitCode, signal }) => {
+      // Close is itself serialized ahead of this mirror update. Resolve the
+      // native exit witness before queueing so close cannot wait on itself.
+      markExited();
       void this.serialize(session, async () => {
         if (session.closed) return;
         await this.publish(session, session.redactor.finish("pty"));
@@ -267,6 +291,8 @@ export class ResidentPtyHost {
   }
 
   private write(session: Session, input: ResidentPtyInput): "applied" | "duplicate" {
+    if (session.info.environmentOwnerId && session.info.environmentOwnerId !== input.actorUserId)
+      throw new ResidentPtyError("authority_rejected");
     const digest = createHash("sha256").update(input.data).digest("hex");
     const previous = session.inputs.get(input.producerId);
     if (previous && input.sequence === previous.sequence) {
@@ -275,7 +301,9 @@ export class ResidentPtyHost {
     }
     if (input.sequence !== (previous?.sequence ?? 0) + 1) throw new ResidentPtyError("input_sequence");
     if (!previous && session.inputs.size >= 16) throw new ResidentPtyError("input_limit");
+    if (session.info.actorUserId && session.info.actorUserId !== input.actorUserId) session.info.githubShared = true;
     session.proc.write(input.data);
+    session.info.lastInputAtMs = Date.now();
     session.inputs.set(input.producerId, { sequence: input.sequence, digest });
     return "applied";
   }

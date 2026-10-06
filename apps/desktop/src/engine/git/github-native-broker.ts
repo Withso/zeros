@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, chown, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, chown, lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import path from "node:path";
@@ -14,6 +14,9 @@ type Options = {
   source: CloudGithubNativeSource | (() => CloudGithubNativeSource); authorized(): boolean; signal?: AbortSignal;
   onAuthorityChange?: (invalidate: () => void) => void; onRetire?: () => void;
   identity?: { uid: number; gid: number }; peerProcess?: () => number | null;
+  // Stable path in the root-selected resident services mount. Only call after
+  // the preceding engine and its broker have been fenced and reaped.
+  resident?: boolean;
   request?: (request: NativeGitOperation, signal: AbortSignal) => Promise<NativeGitCredential>;
   forward?: (path: string, token: string, init: RequestInit) => Promise<Response>;
 };
@@ -24,14 +27,18 @@ type Operation = { source: string; controller: AbortController; branch: string |
 export async function createNativeGithubBroker(options: Options) {
   const controller = new AbortController(), operations = new Map<string, Operation>();
   const request = options.request ?? requestNativeGithub, forward = options.forward ?? forwardNativeGithub;
-  let retired = false;
-  const live = () => !retired && !options.signal?.aborted && options.authorized();
+  let retired = false, paused = false, requests = 0, releases = 0;
+  const live = () => !retired && !paused && !options.signal?.aborted && options.authorized();
   const source = () => typeof options.source === "function" ? options.source() : options.source;
   const sourceKey = () => { try { return JSON.stringify(source()); } catch { return null; } };
   const release = async (id: string) => {
     const operation = operations.get(id); operations.delete(id);
     operation?.controller.abort();
-    if (operation) await operation.credential.then(value => value.release()).catch(() => undefined);
+    if (operation) {
+      releases++;
+      try { await operation.credential.then(value => value.release()).catch(() => undefined); }
+      finally { releases--; }
+    }
   };
   options.onAuthorityChange?.(() => { for (const id of operations.keys()) void release(id); });
   const currentBranch = async () => {
@@ -44,9 +51,21 @@ export async function createNativeGithubBroker(options: Options) {
       throw new Error("Cloud Git branch inspection failed");
     }
   };
+  if (options.resident) {
+    const parent = path.dirname(options.directory), metadata = await lstat(parent);
+    if (!/^git-[a-f0-9-]{36}$/.test(path.basename(options.directory)) ||
+      !metadata.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== process.getuid?.() ||
+      metadata.mode & 0o022 || await realpath(parent) !== parent)
+      throw new Error("Resident Git directory rejected");
+    // Parent ownership prevents a human process swapping this entry during
+    // replacement. rm unlinks child symlinks; it never follows their targets.
+    await rm(options.directory, { recursive: true, force: true });
+  }
   await mkdir(options.directory, { recursive: true, mode: 0o700 });
   const socket = path.join(options.directory, "g");
   const http = createServer(async (incoming, outgoing) => {
+    requests++;
+    outgoing.once("close", () => { requests--; });
     outgoing.setHeader("cache-control", "no-store");
     try {
       const actor = source();
@@ -119,18 +138,21 @@ export async function createNativeGithubBroker(options: Options) {
     closing = (async () => {
       git.close(); await new Promise<void>(resolve => git.server.close(() => resolve()));
       await Promise.all([...operations.keys()].map(release));
-      await rm(options.directory, { recursive: true, force: true });
+      if (!options.resident) await rm(options.directory, { recursive: true, force: true });
     })();
     return closing;
   };
   const abort = () => { void stopAndProve().catch(() => undefined); };
   const timer = setInterval(() => {
-    if (!live()) abort();
+    if (!paused && !live()) abort();
     else for (const [id, operation] of operations) if (performance.now() >= operation.deadline || operation.source !== sourceKey()) void release(id);
   }, 1000);
   timer.unref(); options.signal?.addEventListener("abort", abort, { once: true });
   if (!live()) { await stopAndProve(); throw new Error("Cloud GitHub admission ended"); }
-  return { env: { PATH: `${options.visibleDirectory}:${options.path}` }, stopAndProve };
+  const busy = () => requests > 0 || operations.size > 0 || releases > 0;
+  return { env: { PATH: `${options.visibleDirectory}:${options.path}` }, stopAndProve, busy,
+    pauseIfIdle: () => { if (busy() || retired) return false; paused = true; return true; },
+    resume: () => { if (!retired) paused = false; } };
 }
 
 function nativeGitShim(socket: string): string {

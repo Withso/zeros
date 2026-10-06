@@ -81,6 +81,9 @@ export class ResidentPtyClient {
   async write(sessionId: string, input: ResidentPtyInput) {
     return z.enum(["applied", "duplicate"]).parse(await this.request({ op: "write", sessionId, input }));
   }
+  async cursor(sessionId: string, producerId: string) {
+    return z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).parse(await this.request({ op: "cursor", sessionId, producerId }));
+  }
   async resize(sessionId: string, cols: number, rows: number) { z.literal(true).parse(await this.request({ op: "resize", sessionId, cols, rows })); }
   async close(sessionId: string) { z.literal(true).parse(await this.request({ op: "close", sessionId })); }
 

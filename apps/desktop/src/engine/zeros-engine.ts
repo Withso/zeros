@@ -33,6 +33,10 @@ import { runWithGithubWriteCredential } from "./git/github-write-context";
 import { runWithGithubReadTransport } from "./git/github-read-context";
 import { cloudGitAuthorEnvironment, needsCloudGitAuthor, runWithCloudGitAuthor } from "./git/cloud-git-author";
 import { NativeGithubTerminals } from "./git/github-native-terminal";
+import { consumeResidentEnvironment } from "./pty/resident-environment";
+import { ResidentTerminalService } from "./pty/resident-service";
+import { ResidentTerminalReplay } from "./pty/resident-replay";
+import type { ResidentPtyFrame, ResidentPtySession } from "./pty/resident-protocol";
 import {
   personalRepoRoot,
   personalWorkspaceRoot,
@@ -839,6 +843,11 @@ export class ZerosEngine {
   /** Immutable cloud-image admission. This describes the engine deployment,
    * unlike `TransportClient.kind`, which describes only the caller. */
   private readonly cloudWorker: CloudWorkerConfiguration | null;
+  private readonly residentConfiguration: ReturnType<typeof consumeResidentEnvironment>;
+  private readonly residentTerminals: ResidentTerminalService | null;
+  private readonly residentReplay = new ResidentTerminalReplay<TransportClient>();
+  private readonly residentTerminalStarts = new Map<string, { tail: Promise<void>; count: number }>();
+  private readonly residentGithubBrokers = new Map<string, Awaited<ReturnType<typeof import("./git/github-native-broker").createNativeGithubBroker>>>();
   /** Shared multiplayer terminals: a PTY is an engine-owned shared
    *  resource, NOT owned by one client. Every paired device may attach to, watch,
    *  and drive the SAME terminal; the only gate is the per-workspace remote
@@ -1170,6 +1179,8 @@ export class ZerosEngine {
       ? null
       : loadCloudWorkerConfiguration();
     const cloudWorker = this.cloudWorker;
+    this.residentConfiguration = consumeResidentEnvironment(this.cloudRuntimeConfig, cloudWorker?.version);
+    this.residentTerminals = this.residentConfiguration ? new ResidentTerminalService(this.residentConfiguration) : null;
     if (cloudWorker) {
       assertQualifiedCloudAccountBinding(this.accountAuth);
       this.ownerAccountSub = cloudOwnerSubjectFromEnv();
@@ -1659,6 +1670,11 @@ export class ZerosEngine {
         const exitWaits = ptyIds.map((sessionId) =>
           this.pty.waitForExit(sessionId),
         );
+        // Resident children are outside the engine's process tree. Archive
+        // and deletion still own their workspace's process boundary.
+        for (const terminal of this.residentTerminals?.list() ?? []) {
+          if (belongsToWorkspace(terminal.cwd)) await this.closeResidentTerminal(terminal.sessionId);
+        }
         this.setup.stop(workspaceId);
         this.runs.stopAllForWorkspace(workspaceId);
         const terminalIds = new Set(
@@ -2681,6 +2697,7 @@ export class ZerosEngine {
     // The parent accepts readiness after both this private control message and
     // the owned runtime manifest arrive, so no renderer receives a token for
     // the wrong child generation.
+    await this.restoreResidentTerminals();
     this.publishLocalAuthorityToHost();
 
     // 1. Detect framework
@@ -3208,6 +3225,13 @@ export class ZerosEngine {
     if (mcpGateway) {
       await settle(() => mcpGateway.stop());
     }
+    // Root owns resident workload lifetime. An engine startup failure,
+    // authority transfer or crash must not destroy the shells needed by its
+    // replacement. Workspace stop still retires the root workload scope;
+    // explicit terminal close and archive/delete use closeResidentTerminal.
+    this.residentTerminals?.disconnect();
+    for (const broker of this.residentGithubBrokers?.values() ?? []) await settle(() => broker.stopAndProve());
+    this.residentGithubBrokers?.clear();
     await settle(() => this.pty.killAll());
     const cloudTerminalDesignWatchGuardsRoot =
       this.cloudTerminalDesignWatchGuardsRoot;
@@ -3216,7 +3240,7 @@ export class ZerosEngine {
     // reaches cleanup before this optimization cache was initialized. The
     // containment and transport stages below must still all be attempted.
     this.terminalDesignWatchGuardFlights?.clear();
-    if (cloudTerminalDesignWatchGuardsRoot) {
+    if (cloudTerminalDesignWatchGuardsRoot && !this.residentConfiguration) {
       await settle(async () => {
         const guardsRoot = await cloudTerminalDesignWatchGuardsRoot;
         await fs.promises.rm(guardsRoot, { recursive: true, force: true });
@@ -3278,13 +3302,13 @@ export class ZerosEngine {
       [...this.workspaceProcessStarts.values()].some(starts => starts.size > 0) ||
       this.setup.hasRepositoryCodeAuthority() || this.runs.hasRepositoryCodeAuthority() ||
       this.cloudCommands?.hasActiveWork() === true || this.cloudGoals.active() || this.activeAgentExecutionCount() > 0 ||
-      this.pty.hasRecentInput() ||
+      this.pty.hasRecentInput() || this.residentTerminals?.hasRecentInput() === true || this.residentTerminals?.busy() === true ||
       humanServices || (includePresence && this.cloudUserPresence.active());
   }
 
   private cloudIdleUserProcesses(): Promise<boolean> {
     const terminals = this.terminals.visibleTo({ isRemote: false, restricted: new Set() }).filter(terminal => !terminal.exited);
-    const processes = this.pty.list();
+    const processes = [...this.pty.list(), ...(this.residentTerminals?.list().filter(terminal => !terminal.exited) ?? [])];
     const pids = terminals.map(terminal => processes.find(pty => pty.sessionId === terminal.sessionId)?.pid ?? 0);
     if (pids.some(pid => !Number.isSafeInteger(pid) || pid <= 0)) return Promise.resolve(true);
     return hasCloudUserProcesses({ idleTerminalPids: pids, infrastructurePids: this.cloudLanguageServices?.idleProcessRoots() ?? [] });
@@ -5348,16 +5372,22 @@ export class ZerosEngine {
         // for a restricted/unknown workspace; local desktop always allowed).
         if (this.mayOperateTerminal(client, msg.sessionId)) {
           if (this.cloudWorker) this.nativeGithubTerminals.input(msg.sessionId, client);
-          this.pty.write(msg.sessionId, msg.data);
+          if (this.residentTerminals?.get(msg.sessionId))
+            await this.residentTerminals.write(msg.sessionId, msg.data, client.accountUserId ?? null);
+          else this.pty.write(msg.sessionId, msg.data);
         }
         break;
       case "PTY_RESIZE":
-        if (this.mayOperateTerminal(client, msg.sessionId))
-          this.pty.resize(msg.sessionId, msg.cols, msg.rows);
+        if (this.mayOperateTerminal(client, msg.sessionId)) {
+          if (this.residentTerminals?.get(msg.sessionId)) await this.residentTerminals.resize(msg.sessionId, msg.cols, msg.rows);
+          else this.pty.resize(msg.sessionId, msg.cols, msg.rows);
+        }
         break;
       case "PTY_KILL":
         if (this.mayOperateTerminal(client, msg.sessionId)) {
-          if (this.pty.has(msg.sessionId)) {
+          if (this.residentTerminals?.get(msg.sessionId)) {
+            await this.closeResidentTerminal(msg.sessionId);
+          } else if (this.pty.has(msg.sessionId)) {
             // EXPLICIT close of a LIVE terminal: flag it so onExit removes it for
             // every device (vs a natural exit, which keeps it as "(exited)").
             this.explicitlyClosing.add(msg.sessionId);
@@ -9935,6 +9965,65 @@ export class ZerosEngine {
 
   // ── Terminal (PTY) ─────────────────────────────────────
 
+  private async restoreResidentTerminals(): Promise<void> {
+    const resident = this.residentTerminals;
+    if (!resident) return;
+    resident.events(event => {
+      this.residentReplay.publish(event);
+      if (event.kind === "exit" && this.terminals.markExited(event.sessionId)) this.broadcastTerminalsChanged();
+    });
+    await resident.connect();
+    for (const terminal of resident.list()) {
+      this.terminals.add({ sessionId: terminal.sessionId, workspaceId: terminal.registryWorkspaceId,
+        cwd: terminal.cwd, createdAt: terminal.createdAt, exited: terminal.exited });
+      if (terminal.environmentOwnerId) this.cloudEnvironmentTerminals.set(terminal.sessionId, terminal.environmentOwnerId);
+      if (!terminal.exited && terminal.brokerId) await this.createResidentGithubBroker(terminal,
+        this.nativeGithubTerminals.restore(terminal.sessionId, { actorUserId: terminal.actorUserId, shared: terminal.githubShared }));
+    }
+  }
+
+  private async createResidentGithubBroker(terminal: Pick<ResidentPtySession, "sessionId" | "cwd" | "registryWorkspaceId" | "brokerId">,
+    route: ReturnType<NativeGithubTerminals["create"]>) {
+    if (!this.cloudWorker || !this.residentConfiguration || !this.residentTerminals || !terminal.brokerId)
+      throw new Error("Resident terminal broker unavailable");
+    const { createNativeGithubBroker } = await import("./git/github-native-broker");
+    const directory = path.join(this.residentConfiguration.servicesRoot, `git-${terminal.brokerId}`);
+    const preparedAt = Date.now();
+    let terminalPid: number | null = null;
+    const currentPid = () => {
+      const current = this.residentTerminals!.get(terminal.sessionId);
+      return current && !current.exited ? current.pid : null;
+    };
+    const broker = await createNativeGithubBroker({ directory, visibleDirectory: directory, cwd: terminal.cwd,
+      path: process.env.PATH ?? "/usr/bin:/bin", node: this.cloudWorker.toolchain.node, identity: this.cloudWorker,
+      resident: true, ...route, peerProcess: currentPid, authorized: () => {
+        if (this.cloudRuntimeAuthorityStopping || !this.workspaceAllowsProcessStart(terminal.registryWorkspaceId)) return false;
+        const pid = currentPid();
+        if (terminalPid !== null) return pid === terminalPid;
+        if (pid) { terminalPid = pid; return true; }
+        return Date.now() - preparedAt < 30000;
+      } });
+    this.residentGithubBrokers.set(terminal.sessionId, broker);
+    return broker;
+  }
+
+  private async closeResidentTerminal(sessionId: string): Promise<void> {
+    if (!this.residentTerminals?.get(sessionId)) return;
+    await this.residentTerminals.close(sessionId);
+    this.residentReplay.publish({ kind: "exit", sessionId, exitCode: 0, signal: 9 });
+    this.residentReplay.retire(sessionId);
+    const broker = this.residentGithubBrokers.get(sessionId);
+    if (broker) { await broker.stopAndProve(); this.residentGithubBrokers.delete(sessionId); }
+    this.cloudEnvironmentTerminals.delete(sessionId);
+    if (this.terminals.remove(sessionId)) this.broadcastTerminalsChanged();
+  }
+
+  private sendResidentEvent(client: TransportClient, event: Exclude<ResidentPtyFrame, { kind: "reply" | "error" }>): void {
+    client.send(event.kind === "data"
+      ? createMessage({ type: "PTY_DATA", source: "engine", sessionId: event.sessionId, data: event.data })
+      : createMessage({ type: "PTY_EXIT", source: "engine", sessionId: event.sessionId, exitCode: event.exitCode, signal: event.signal }));
+  }
+
   /** A non-local socket is not automatically a low-authority desktop relay.
    * In an attested cloud-worker deployment it is the owner's only workspace
    * UI and receives normal in-sandbox product authority after transport/account
@@ -10121,9 +10210,10 @@ export class ZerosEngine {
         // Qualified cloud mode is Linux-only. Use the system temp root
         // explicitly: root's TMPDIR may itself be private and therefore
         // untraversable after the terminal drops to the worker uid.
-        guardsRoot = await fs.promises.mkdtemp(
-          path.join("/tmp", "zeros-terminal-design-watch-"),
-        );
+        guardsRoot = this.residentConfiguration
+          ? path.join(this.residentConfiguration.servicesRoot, "design-watch-guards")
+          : await fs.promises.mkdtemp(path.join("/tmp", "zeros-terminal-design-watch-"));
+        if (this.residentConfiguration) await fs.promises.mkdir(guardsRoot, { recursive: true, mode: 0o710 });
         const ownerUid = process.geteuid?.() ?? process.getuid?.() ?? 0;
         await fs.promises.chown(guardsRoot, ownerUid, cloudWorker.gid);
         await fs.promises.chmod(guardsRoot, 0o710);
@@ -10150,7 +10240,25 @@ export class ZerosEngine {
 
   /** Spawn a host PTY for a client. Remote creation is gated by the
    *  remote-restriction list (trusted device; no per-spawn host prompt). */
-  private async handlePtyCreate(
+  private handlePtyCreate(msg: Extract<EngineMessage, { type: "PTY_CREATE" }>, client: TransportClient): Promise<void> {
+    if (!this.residentTerminals || msg.ephemeral) return this.handlePtyCreateOnce(msg, client);
+    // Credential preparation yields before the host publishes the actor
+    // binding. A second creator must observe that binding before preparing
+    // another broker for the same persisted terminal ID.
+    const entry = this.residentTerminalStarts.get(msg.sessionId) ?? { tail: Promise.resolve(), count: 0 };
+    if (entry.count >= 16 || this.residentTerminalStarts.size >= 32 && !this.residentTerminalStarts.has(msg.sessionId)) {
+      client.close(1013, "Terminal admission is busy"); return Promise.resolve();
+    }
+    entry.count++;
+    const flight = entry.tail.then(() => this.handlePtyCreateOnce(msg, client));
+    entry.tail = flight.catch(() => undefined).finally(() => {
+      if (--entry.count === 0 && this.residentTerminalStarts.get(msg.sessionId) === entry) this.residentTerminalStarts.delete(msg.sessionId);
+    });
+    this.residentTerminalStarts.set(msg.sessionId, entry);
+    return flight;
+  }
+
+  private async handlePtyCreateOnce(
     msg: Extract<EngineMessage, { type: "PTY_CREATE" }>,
     client: TransportClient,
   ): Promise<void> {
@@ -10172,7 +10280,7 @@ export class ZerosEngine {
     // (#9) Resolve the cwd ONCE — reused for the approval prompt AND the spawn —
     // so a symlink swapped during the (awaited) approval can't make the spawned
     // cwd differ from the path the operator approved.
-    const reattach = this.pty.has(msg.sessionId);
+    const reattach = this.residentTerminals?.has(msg.sessionId) === true || this.pty.has(msg.sessionId);
 
     // Shared-terminal reattach gate (multiplayer): a second device attaching to
     // an existing terminal is the intended behaviour — but a remote client may
@@ -10284,6 +10392,9 @@ export class ZerosEngine {
     let env: Record<string, string> | undefined;
     let environmentOwner: string | undefined;
     let outputFilter: { write(data: string): string; finish(): string } | undefined;
+    let redactValues: string[] | undefined;
+    const resident = !msg.ephemeral && !msg.loginProvider ? this.residentTerminals : null;
+    const brokerId = resident && !reattach && client.cloudActor ? randomUUID() : null;
     const fullHumanEnvironment = client.kind === "local" && this.cloudWorker === null;
     const scriptWorkspace = canonicalWsId ? getWorkspaceById(canonicalWsId) : null;
     if (!reattach && (fullHumanEnvironment || this.cloudWorker)) {
@@ -10309,6 +10420,7 @@ export class ZerosEngine {
             if (!client.accountUserId || client.authorized?.() !== true) { ptyExit(); return; }
             env = cloudComputerProcessEnvironment(env, material.environment, "terminal");
             environmentOwner = client.accountUserId;
+            redactValues = Object.values(material.environment);
             const redactor = new CloudCustomizationRedactor(Object.values(material.environment));
             outputFilter = { write: data => redactor.stream("pty", data), finish: () => redactor.finish("pty") };
           }
@@ -10320,6 +10432,13 @@ export class ZerosEngine {
         Object.assign(env, cloudGitAuthorEnvironment(author));
         for (const key of Object.keys(env)) if (/^(GH_|GITHUB_)/.test(key)) delete env[key];
         if (client.cloudActor) {
+          if (resident && brokerId) {
+            const previous = this.residentGithubBrokers.get(msg.sessionId);
+            if (previous) await previous.stopAndProve();
+            const github = await this.createResidentGithubBroker({ sessionId: msg.sessionId, cwd: resolvedCwd,
+              registryWorkspaceId: canonicalWsId, brokerId }, this.nativeGithubTerminals.create(msg.sessionId, client));
+            Object.assign(env, github.env);
+          } else {
           const { createNativeGithubBroker } = await import("./git/github-native-broker");
           const { mkdtemp } = await import("node:fs/promises");
           const directory = await mkdtemp("/tmp/zeros-native-github-");
@@ -10340,6 +10459,7 @@ export class ZerosEngine {
               return Date.now() - preparedAt < 30000;
             } });
           Object.assign(env, github.env);
+          }
         }
       }
     }
@@ -10385,7 +10505,20 @@ export class ZerosEngine {
       : undefined;
     if (environmentOwner) this.cloudEnvironmentTerminals.set(msg.sessionId, environmentOwner);
     let info: ReturnType<PtyService["create"]>;
-    try { info = this.pty.create({
+    try {
+      if (resident) {
+        const existing = resident.get(msg.sessionId);
+        if (existing?.exited) await resident.close(msg.sessionId);
+        if (reattach && existing && !existing.exited)
+          await resident.resize(msg.sessionId, msg.cols ?? existing.cols, msg.rows ?? existing.rows);
+        const session = reattach ? resident.get(msg.sessionId)! : await resident.create({
+          sessionId: msg.sessionId, cwd: resolvedCwd, cols: msg.cols ?? 80, rows: msg.rows ?? 24,
+          env: env ?? buildPtyEnv({ scrub: true, cwd: resolvedCwd, workspaceId: canonicalWsId, workspace: scriptWorkspace }),
+          actorUserId: client.accountUserId ?? null, environmentOwnerId: environmentOwner ?? null,
+          registryWorkspaceId: canonicalWsId, brokerId, redactValues,
+        });
+        info = { ...session, reattached: reattach };
+      } else info = this.pty.create({
       sessionId: msg.sessionId,
       resolvedCwd,
       ...(loginProvider && loginBinary
@@ -10398,7 +10531,7 @@ export class ZerosEngine {
       ...(env ? { env } : {}),
       ...(outputFilter ? { outputFilter } : {}),
     }); } catch (error) {
-      if (environmentOwner && !this.pty.has(msg.sessionId)) this.cloudEnvironmentTerminals.delete(msg.sessionId);
+      if (environmentOwner && !this.pty.has(msg.sessionId) && !resident?.get(msg.sessionId)) this.cloudEnvironmentTerminals.delete(msg.sessionId);
       throw error;
     }
     // Register a freshly-spawned terminal in the SHARED registry so every device
@@ -10435,6 +10568,18 @@ export class ZerosEngine {
     // scrollback snapshot so the client repaints the exact pre-existing screen
     // instead of a blank shell. Fresh spawns carry no replay. Best-effort — a
     // missing/expired mirror just yields an empty replay (live shell, no ghost).
+    if (resident) {
+      await this.residentReplay.attach(client, info.sessionId, () => this.mayOperateTerminal(client, info.sessionId),
+        () => resident.snapshot(info.sessionId), snap => {
+          client.send(createMessage({ type: "PTY_CREATED", source: "engine", requestId: msg.id, sessionId: info.sessionId,
+            pid: info.pid, cwd: info.cwd, cols: info.cols, rows: info.rows, reattached: info.reattached === true,
+            replay: info.reattached ? snap.data : "", replayTruncated: snap.truncated, replayBytes: snap.bytes }));
+          // Existing renderers consume replay only for reattachments. Deliver
+          // a new shell's initial screen after CREATED and before live bytes.
+          if (!info.reattached && snap.data) client.send(createMessage({ type: "PTY_DATA", source: "engine", sessionId: info.sessionId, data: snap.data }));
+        }, event => this.sendResidentEvent(client, event), () => client.close(1013, "Terminal replay must reconnect"));
+      return;
+    }
     const snap = info.reattached
       ? await this.pty.snapshot(info.sessionId)
       : null;
@@ -10461,6 +10606,7 @@ export class ZerosEngine {
    *  terminals are NOT torn down here — they're engine-owned and persist for the
    *  other devices (see the note at the end of this method). */
   private handleDisconnect(client: TransportClient): void {
+    this.residentReplay.release(client);
     if (this.cloudWorker) this.cloudUserPresence.release(client);
     void this.cloudLanguageServices?.release(client.id).catch(()=>this.handleCloudRuntimeAuthorityLoss());
     const owned = this.router.sessionsOwnedBy(client.id);

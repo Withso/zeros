@@ -27,12 +27,16 @@ export const ResidentPtyCreateSchema = z.object({
   // Retain only these literal redactions, in memory; never return launch env.
   redactValues: z.array(boundedString(32768).min(1)).max(256).optional(),
   actorUserId: boundedString(256).min(1).nullable().optional(),
+  registryWorkspaceId: boundedString(256).min(1).nullable().optional(),
+  environmentOwnerId: boundedString(256).min(1).nullable().optional(),
+  brokerId: z.uuid().nullable().optional(),
 }).strict();
 export type ResidentPtyCreate = z.infer<typeof ResidentPtyCreateSchema>;
 export const ResidentPtyInputSchema = z.object({
   producerId: z.uuid(), sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   // PTY input includes ordinary control bytes (including NUL/Ctrl+Space).
   data: z.string().min(1).max(64 * 1024),
+  actorUserId: boundedString(256).min(1).nullable().optional(),
 }).strict();
 export type ResidentPtyInput = z.infer<typeof ResidentPtyInputSchema>;
 
@@ -40,6 +44,11 @@ export const ResidentPtySessionSchema = z.object({
   sessionId, pid: z.number().int().positive(), cwd: z.string().max(4096),
   cols: dimension, rows: dimension, createdAt: z.number().int().nonnegative(),
   actorUserId: z.string().max(256).nullable(), exited: z.boolean(),
+  registryWorkspaceId: z.string().max(256).nullable().default(null),
+  environmentOwnerId: z.string().max(256).nullable().default(null),
+  brokerId: z.uuid().nullable().default(null),
+  githubShared: z.boolean().default(false),
+  lastInputAtMs: z.number().int().nonnegative().default(0),
 }).strict();
 export type ResidentPtySession = z.infer<typeof ResidentPtySessionSchema>;
 export const ResidentPtySnapshotSchema = z.object({
@@ -55,6 +64,7 @@ export const ResidentPtyRequestSchema = z.discriminatedUnion("op", [
   z.object({ id: requestId, op: z.literal("create"), launch: ResidentPtyCreateSchema }).strict(),
   z.object({ id: requestId, op: z.literal("snapshot"), sessionId }).strict(),
   z.object({ id: requestId, op: z.literal("write"), sessionId, input: ResidentPtyInputSchema }).strict(),
+  z.object({ id: requestId, op: z.literal("cursor"), sessionId, producerId: z.uuid() }).strict(),
   z.object({ id: requestId, op: z.literal("resize"), sessionId, cols: dimension, rows: dimension }).strict(),
   z.object({ id: requestId, op: z.literal("close"), sessionId }).strict(),
 ]);
