@@ -110,6 +110,7 @@ export const scenarioRegistry = [
   fresh("cloud-preview", "cloud-previews", "runCloudPreviewSmoke", 900, 650),
   fresh("cloud-terminal", "cloud-terminal", "runCloudTerminalSmoke", 1100, 780),
   fresh("cloud-settings", "cloud-settings", "runCloudSettingsSmoke", 1000, 850),
+  fresh("cloud-design-directories", "cloud-design-directories", "runCloudDesignDirectoriesSmoke", 1100, 850),
   {
     ...fresh(
       "cloud-computer-v2",

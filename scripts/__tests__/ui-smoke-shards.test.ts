@@ -28,6 +28,7 @@ const originalOrder = [
   "cloud-preview",
   "cloud-terminal",
   "cloud-settings",
+  "cloud-design-directories",
   "cloud-computer-v2",
   "context-gauge",
   "permission-hints",

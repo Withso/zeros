@@ -207,8 +207,13 @@ export const LONG_LIFECYCLE_OPS = new Set([
  *      Every `pick(resolved, …)` provenance tag on the repo settings pages had
  *      the same lag more quietly. Echoing costs one small resolve the poll was
  *      going to force moments later regardless. */
+export function dbChangedDesignRecognition(op: string): boolean {
+  return ["design.createDirectory", "design.selectDirectory", "design.renameDirectory", "design.adoptDirectory", "design.removeDirectory"].includes(op);
+}
+
 export function dbChangedIncludesOriginator(op: string): boolean {
   return (
+    dbChangedDesignRecognition(op) ||
     CODE_REVIEW_MUTATIONS.has(op) ||
     GIT_REVIEW_MUTATIONS.has(op) ||
     LONG_LIFECYCLE_OPS.has(op) ||
@@ -245,11 +250,7 @@ export function dbChangedKinds(op: string, result?: unknown): string[] | null {
   if (op === "workspace.restore" || op === "workspace.recover" || op === "workspace.locate") return ["workspaces", "chats"];
   // Design registration changes affect main-checkout Git state and private
   // selection, so both collections re-read.
-  if (
-    op === "design.renameDirectory" ||
-    op === "design.adoptDirectory" ||
-    op === "design.removeDirectory"
-  )
+  if (dbChangedDesignRecognition(op))
     return ["workspaces", "settings"];
   // The periodic PR detector is a read until it actually finds and persists a
   // PR. Avoid turning a once-per-minute null probe into a global Git refresh.

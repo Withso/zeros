@@ -1011,6 +1011,27 @@ export async function bridgeDesignListDirectories(
   })) as DesignDirectoryListingWire;
 }
 
+/** Lifecycle commands deliberately bypass the canvas identity decorator:
+ * their destination may be a different registered directory. */
+export async function bridgeCloudDesignSelectDirectory(bridge: RuntimeClient, workspaceId: string, directoryId: string, expectedDirectoryId: string | null) {
+  return rawWorkspaceOp(bridge, "design.selectDirectory", { workspaceId, directoryId, expectedDirectoryId });
+}
+
+export async function bridgeCloudDesignCreateDirectory(bridge: RuntimeClient, workspaceId: string, directory: string) {
+  return rawWorkspaceOp(bridge, "design.createDirectory", { workspaceId, directory });
+}
+
+export interface CloudDesignFolderListing {
+  directory: string;
+  directories: string[];
+  truncated: boolean;
+}
+export async function bridgeCloudDesignBrowseDirectories(bridge: RuntimeClient, workspaceId: string, directory: string): Promise<CloudDesignFolderListing> {
+  const result = await rawWorkspaceOp(bridge, "design.browseDirectories", { workspaceId, directory }) as CloudDesignFolderListing;
+  if (result.directory !== directory) throw new Error("The VM folder changed before it could be loaded.");
+  return result;
+}
+
 /** Rename the Design folder in one explicit main-checkout commit. Compatible
  * live workspaces keep their own checkout paths through stable directory IDs. */
 export async function bridgeDesignRenameDirectory(

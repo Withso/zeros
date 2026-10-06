@@ -7,6 +7,10 @@ import {
 } from "../change-events";
 
 describe("dbChangedKinds", () => {
+  it.each(["design.createDirectory", "design.selectDirectory"])("publishes %s to workspace and settings observers", op => {
+    expect(dbChangedKinds(op)).toEqual(["workspaces", "settings"]);
+    expect(dbChangedIncludesOriginator(op)).toBe(true);
+  });
   it("does not invalidate workspace views for a Design dry-run", () => {
     expect(dbChangedKinds("design.transaction.apply", { result: { dryRun: true } })).toBeNull();
   });

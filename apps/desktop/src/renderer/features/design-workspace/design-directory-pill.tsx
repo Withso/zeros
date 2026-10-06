@@ -42,6 +42,7 @@ export function DesignDirectoryPill({
       className="zd-design-floating-toolbar zd-design-directory-pill absolute flex items-center"
     >
       <DesignDirectoryMenu
+        key={workspace.id}
         workspace={workspace}
         active={active}
         name={directory.data?.directory ?? "Design"}

@@ -5,11 +5,17 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { runGit } from "../git-exec";
-import { cloudGitAuthorEnvironment, runWithCloudGitAuthor, scopedCloudGitAuthorEnvironment } from "../cloud-git-author";
+import { cloudGitAuthorEnvironment, needsCloudGitAuthor, runWithCloudGitAuthor, scopedCloudGitAuthorEnvironment } from "../cloud-git-author";
 
 const first = { name: "Member A", email: "1234+member-a@users.noreply.github.com" };
 const second = { name: "Member B", email: "5678+member-b@users.noreply.github.com" };
 describe("cloud Git author scope", () => {
+  it("attributes explicit Design lifecycle commits to the admitted member", () => {
+    expect(needsCloudGitAuthor("design.renameDirectory")).toBe(true);
+    expect(needsCloudGitAuthor("design.removeDirectory")).toBe(true);
+    expect(needsCloudGitAuthor("design.createDirectory")).toBe(false);
+    expect(needsCloudGitAuthor("design.selectDirectory")).toBe(false);
+  });
   it("commits without VM Git configuration and preserves authors during amend", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "zeros-author-"));
     const exec = promisify(execFile);

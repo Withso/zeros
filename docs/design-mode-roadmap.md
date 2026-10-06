@@ -242,6 +242,20 @@ opaque cloud key after verifying the worker root, leaving authored source and
 diagnostics untouched. Directory lifecycle requests carry both the resolved
 repository root and admitted primary workspace ID.
 
+Cloud directory selection uses `design.selectDirectory`, comparing the expected
+active directory ID under the canvas mutation lane before a scoped agent-access
+handoff. It does not open the generic remote `settings.write` Design denylist.
+Managers can create registrations without staging or committing, adopt VM
+folders after a revision-checked preview, and explicitly rename/unregister them.
+Rename and tracked registration removal retain their existing commit semantics,
+using the acting cloud member's Git identity. Only the admitted cloud primary is
+exempt from the local archive-before-unregister rule; source remains in place.
+The cloud picker uses `design.browseDirectories` with the qualified checkout
+policy, including empty folders and excluding links, private paths and nested
+owners. Repository settings select a concrete cloud workspace before managing
+its directories. Developers edit Design source; prompters inspect it; neither
+role changes registrations or the shared active directory.
+
 #### Source, metadata and personal state
 
 ```text

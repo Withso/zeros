@@ -1,0 +1,129 @@
+import { expect } from "@playwright/test";
+
+export async function runCloudDesignDirectoriesSmoke({
+  page,
+  check,
+  harnessBase,
+}) {
+  await page.goto(`${harnessBase}/harness-cloud-design-directories.html`, {
+    waitUntil: "networkidle",
+  });
+  const settings = page.getByRole("region", {
+    name: "Repository Design settings",
+  });
+  const row = (name) =>
+    settings
+      .locator("div.flex")
+      .filter({ has: page.getByText(name, { exact: true }) })
+      .filter({
+        has: page.getByRole("button", { name: "Rename", exact: true }),
+      })
+      .last();
+  await expect(settings.getByText("Brand", { exact: true })).toBeVisible();
+  await settings
+    .getByRole("textbox", { name: "New Design folder", exact: true })
+    .fill("Campaign");
+  await settings
+    .getByRole("button", { name: "Create folder", exact: true })
+    .click();
+  await expect(settings.getByText("Campaign", { exact: true })).toBeVisible();
+  await row("Other")
+    .getByRole("button", { name: "Use folder", exact: true })
+    .click();
+  await expect(
+    row("Other").getByRole("button", { name: "Use folder", exact: true }),
+  ).toBeDisabled();
+  check(
+    "cloud Design settings create and select through explicit lifecycle commands",
+    true,
+  );
+
+  await settings.getByRole("button", { name: "Browse VM folders…" }).click();
+  const picker = settings.getByRole("group", { name: "VM folder picker" });
+  await picker.getByRole("button", { name: "Empty", exact: true }).click();
+  await expect(picker.getByText("No subfolders.")).toBeVisible();
+  await picker.getByRole("button", { name: "Choose this folder" }).click();
+  await expect(picker.getByText(/with 2 frames/)).toBeVisible();
+  await picker.getByRole("button", { name: "Register folder" }).click();
+  await expect(settings.getByText("Empty", { exact: true })).toBeVisible();
+  check(
+    "cloud Design picker browses empty VM folders and confirms adoption",
+    true,
+  );
+
+  await row("Campaign")
+    .getByRole("button", { name: "Rename", exact: true })
+    .click();
+  await settings
+    .getByRole("textbox", { name: "Rename Design folder", exact: true })
+    .fill("Studio");
+  await settings.getByRole("button", { name: "Rename and commit" }).click();
+  await expect(settings.getByText("Studio", { exact: true })).toBeVisible();
+  await row("Studio")
+    .getByRole("button", { name: "Unregister", exact: true })
+    .click();
+  await settings
+    .getByRole("button", { name: "Unregister folder", exact: true })
+    .click();
+  await expect(settings.getByText("Studio", { exact: true })).toHaveCount(0);
+  check(
+    "cloud Design rename and registration removal require explicit confirmation",
+    true,
+  );
+
+  await page.getByRole("button", { name: "Choose Design directory" }).click();
+  await page.getByRole("menuitem", { name: "Manage directories…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Design directories" });
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  for (const role of ["Developer", "Prompter"]) {
+    await page.getByRole("button", { name: role, exact: true }).click();
+    await expect(
+      settings.getByRole("button", { name: "Create folder", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      settings.getByRole("button", { name: "Browse VM folders…" }),
+    ).toHaveCount(0);
+    await page.getByRole("button", { name: "Choose Design directory" }).click();
+    await expect(
+      page.getByRole("menuitem", { name: "Other", exact: true }),
+    ).toBeDisabled();
+    await expect(
+      page.getByRole("menuitem", { name: "Manage directories…" }),
+    ).toHaveCount(0);
+    await page.keyboard.press("Escape");
+  }
+  check(
+    "cloud Design management is manager-only in settings and the canvas menu",
+    true,
+  );
+  await page.getByRole("button", { name: "Manager", exact: true }).click();
+  await page.evaluate(() => window.cloudDesignFixture.holdNextBrowse());
+  await settings.getByRole("button", { name: "Browse VM folders…" }).click();
+  await expect
+    .poll(() => page.evaluate(() => window.cloudDesignFixture.pending))
+    .toBe(true);
+  await settings.getByRole("combobox", { name: "Design workspace" }).click();
+  await page.getByRole("option", { name: "Design VM B" }).click();
+  await page.evaluate(() => window.cloudDesignFixture.release());
+  await expect(
+    settings.getByRole("group", { name: "VM folder picker" }),
+  ).toHaveCount(0);
+  await expect(settings.getByText("Campaign", { exact: true })).toHaveCount(0);
+  const requests = await page.evaluate(
+    () => window.cloudDesignFixture.requests,
+  );
+  check(
+    "cloud directory requests stay scoped to cloud owners without native filesystem or generic settings calls",
+    requests.every(
+      (request) =>
+        request.params.workspaceId.startsWith("cloud:") &&
+        !["settings.write", "fs.listDir"].includes(request.op),
+    ),
+  );
+  check(
+    "a late VM folder reply cannot populate another workspace's picker",
+    true,
+  );
+}

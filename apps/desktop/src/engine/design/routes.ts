@@ -63,6 +63,7 @@ import {
   opSettingsResolveWithOverride,
 } from "../settings/ops";
 import { personalRepoRoot } from "../settings/personal-repo";
+import type { QualifiedCloudFilePolicy } from "../files/cloud-file-policy";
 import {
   designDocumentIdForFrame,
   forgetWorkspaceDesignApiFrames,
@@ -267,7 +268,7 @@ export async function handleDesignWorkspaceRoute(
   host: DesignWorkspaceRouteHost,
   op: string,
   params: Params,
-  options: { remote: boolean; hostLocalResources: boolean; actor?: DesignActor; primaryRepositoryRoot?: string },
+  options: { remote: boolean; hostLocalResources: boolean; actor?: DesignActor; primaryRepositoryRoot?: string; cloudFiles?: QualifiedCloudFilePolicy },
 ): Promise<unknown> {
   const { remote, hostLocalResources } = options;
   const applyDesktopDesignOperation = applyHumanDesignOperation.bind(null, options.actor ?? { kind: "human", id: "desktop" });
@@ -1780,7 +1781,7 @@ export async function handleDesignWorkspaceRoute(
           ).map(([id, entry]) => [entry.path, id]),
         ),
         pointer,
-        active: designDirectoryNameFor(cwd),
+        active: (options.primaryRepositoryRoot && entryTarget?.directory) || designDirectoryNameFor(cwd),
         target: entryTarget,
       };
     }
@@ -1799,6 +1800,7 @@ export async function handleDesignWorkspaceRoute(
           message: "Open this repository in Zeros first.",
         });
       const folder = reqStr(params, "folder");
+      options.cloudFiles?.assertPath(folder, op === "design.adoptDirectory");
       return op === "design.previewExistingDirectory"
         ? previewExistingDesignDirectory(repoRoot, folder)
         : adoptExistingDesignDirectory(
@@ -1855,9 +1857,11 @@ export async function handleDesignWorkspaceRoute(
           message: "Open this repository in Zeros first.",
         });
       }
+      options.cloudFiles?.assertPath(reqStr(params, "directory"), true);
       await removeDesignDirectory({
         repoRoot,
         directory: reqStr(params, "directory"),
+        ...(options.cloudFiles ? { livePrimaryWorkspaceId: reqStr(params, "workspaceId") } : {}),
       });
       return { removed: true };
     }
@@ -1881,6 +1885,8 @@ export async function handleDesignWorkspaceRoute(
             "That repository isn't open in Zeros — open the folder first.",
         });
       }
+      options.cloudFiles?.assertPath(reqStr(params, "from"), true);
+      options.cloudFiles?.assertPath(reqStr(params, "to"), true);
       return renameDesignDirectory({
         repoRoot,
         from: reqStr(params, "from"),
