@@ -289,6 +289,8 @@ normal startup for the first 10 seconds, then says “Connecting…”.
 Availability has one decision and clock per Local engine or cloud VM; all its
 tabs observe the same thresholds. Silent read retries belong to the exact
 source/target, share one flight, and keep confirmed content through revalidation.
+Known transport gaps pause silent read retries; an offline rejection does not
+consume the recovery attempt or flash a read banner when the connection returns.
 Successful automatic recovery cancels the retry and clears the condition;
 failed retries remain visible until recovery. Hidden tabs and hidden documents
 run no status/retry timers; activation uses the original timestamp. Passive

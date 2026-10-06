@@ -193,6 +193,63 @@ describe("calm workbench status", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("does not spend a read's silent retry during a known transport gap", async () => {
+    const sources = new WorkbenchStatusSources();
+    const retry = vi.fn();
+    const read = {
+      error: "transport disconnected",
+      pending: false,
+      primary: true,
+      hasContent: true,
+      retry,
+      retryAvailable: false,
+    };
+    sources.update("read", read);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(retry).not.toHaveBeenCalled();
+    expect(sources.snapshot().failure).toBeNull();
+    sources.update("read", { ...read, pending: true, retryAvailable: true });
+    expect(sources.snapshot().failure).toBeNull();
+    sources.update("read", {
+      ...read,
+      error: undefined,
+      retryAvailable: true,
+    });
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(retry).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("returns an interrupted silent retry to waiting without counting an offline failure", async () => {
+    const sources = new WorkbenchStatusSources();
+    let settle!: () => void;
+    const retry = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const read = { error: "read failed", pending: false, retry };
+    sources.update("read", read);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(retry).toHaveBeenCalledTimes(1);
+    sources.update("read", { ...read, retryAvailable: false });
+    expect(vi.getTimerCount()).toBe(0);
+    settle();
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(sources.snapshot().failure).toBeNull();
+    expect(retry).toHaveBeenCalledTimes(1);
+    retry.mockImplementation(async () => {
+      sources.update("read", { pending: false, retry, retryAvailable: true });
+    });
+    sources.update("read", { ...read, retryAvailable: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(retry).toHaveBeenCalledTimes(2);
+    expect(sources.snapshot().failure).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("shares one automatic flight for equivalent consumers and failed sources", async () => {
     const sources = new WorkbenchStatusSources();
     const retry = vi.fn(async () => {});

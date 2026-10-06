@@ -82,6 +82,38 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await page.evaluate(() => window.workbenchStatusFixture.connection("connected"));
     expect(await page.evaluate(() => window.fixtureTransientMutations)).toEqual([]);
     await page.evaluate(() => window.fixtureTransientObserver.disconnect());
+    // A read rejected by the same brief transport gap must not spend its
+    // silent retry while offline, then flash a read banner during recovery.
+    await page.evaluate(() => {
+      const fixture = window.workbenchStatusFixture;
+      window.fixtureGapReadCount = fixture.reads.length;
+      fixture.hold(true);
+      fixture.fail("Workspace transport disconnected");
+    });
+    await page.waitForFunction(() =>
+      window.workbenchStatusFixture.reads.length > window.fixtureGapReadCount,
+    );
+    await page.evaluate(() => {
+      const fixture = window.workbenchStatusFixture;
+      fixture.connection("disconnected");
+      fixture.release();
+    });
+    await page.clock.runFor(3_000);
+    await expect(banner()).toHaveCount(0);
+    await expect(content).toHaveCount(1);
+    await page.evaluate(() => {
+      const fixture = window.workbenchStatusFixture;
+      fixture.hold(true);
+      fixture.fail(null);
+      fixture.connection("connected");
+    });
+    await expect(banner()).toHaveCount(0);
+    await expect(empty()).toHaveCount(0);
+    await expect(content).toHaveCount(1);
+    await page.evaluate(() => window.workbenchStatusFixture.release());
+    await expect(banner()).toHaveCount(0);
+    await page.clock.runFor(1_600);
+    await expect(banner()).toHaveCount(0);
     await page.evaluate(() => window.workbenchStatusFixture.connection("disconnected"));
     await page.clock.fastForward(15_000);
     await expect(banner()).toContainText("Reconnecting to the workspace…");

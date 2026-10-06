@@ -315,6 +315,9 @@ export interface WorkbenchSource {
   /** Equivalent mounted consumers identify the same exact read, even when
    * their retry closures or failure publication times differ. */
   retryKey?: string;
+  /** Known transport gaps pause the silent retry; an offline attempt does not
+   * turn a transient disconnect into a persistent read failure on recovery. */
+  retryAvailable?: boolean;
   active?: boolean;
   /** Informational state, below every availability/read failure. */
   notice?: WorkbenchNotice;
@@ -421,7 +424,8 @@ export class WorkbenchStatusSources {
     this.automaticTimer = undefined;
     if (this.flight) return;
     const waiting = [...this.sources.values()].filter((source) =>
-      source.active !== false && !source.pending && source.retry && source.failurePhase === "waiting",
+      source.active !== false && source.retryAvailable !== false &&
+        !source.pending && source.retry && source.failurePhase === "waiting",
     );
     if (!waiting.length) return;
     const deadline = Math.min(
@@ -483,7 +487,8 @@ export class WorkbenchStatusSources {
         this.flight = null;
         this.flightSettled = null;
         for (const source of this.sources.values())
-          if (source.failurePhase === "retrying") source.failurePhase = "persistent";
+          if (source.failurePhase === "retrying")
+            source.failurePhase = source.retryAvailable === false ? "waiting" : "persistent";
         this.publish();
       }
       resolve();
@@ -491,6 +496,9 @@ export class WorkbenchStatusSources {
     const timer = setTimeout(finish, WORKBENCH_RETRY_LIMIT_MS);
     const settled = () => {
       if (
+        (silent && ![...this.sources.values()].some(
+          (source) => source.active !== false && source.retryAvailable !== false,
+        )) ||
         (completed && ![...this.sources.values()].some(
           (source) => source.active !== false && source.pending,
         )) ||

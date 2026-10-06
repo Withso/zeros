@@ -37,6 +37,7 @@ interface TabStatusContext {
   sources: WorkbenchStatusSources;
   toolbar: HTMLDivElement | null;
   active: boolean;
+  connected: boolean;
   type: WorkbenchTabType;
 }
 const StatusContext = createContext<TabStatusContext | null>(null);
@@ -194,9 +195,10 @@ export function WorkbenchTabFrame({
     if (visible) return registerWorkbenchFrameVisibility(folder);
   }, [folder, visible]);
   const [toolbar, setToolbar] = useState<HTMLDivElement | null>(null);
+  const connected = availability.connection === "connected";
   const context = useMemo(
-    () => ({ sources, toolbar, active: visible, type: tab.type }),
-    [sources, toolbar, visible, tab.type],
+    () => ({ sources, toolbar, active: visible, connected, type: tab.type }),
+    [sources, toolbar, visible, connected, tab.type],
   );
   const nextStatus =
     availabilityStatus ??
@@ -341,10 +343,11 @@ export function WorkbenchTabStatusProvider({
 }) {
   const key = workbenchStatusKey(folder, tab);
   const sources = useMemo(() => workbenchSourcesFor(key), [key]);
-  const { visible } = useWorkbenchAvailability(folder, active);
+  const { availability, visible } = useWorkbenchAvailability(folder, active);
+  const connected = availability.connection === "connected";
   const value = useMemo(
-    () => ({ sources, toolbar: null, active: visible, type: tab.type }),
-    [sources, visible, tab.type],
+    () => ({ sources, toolbar: null, active: visible, connected, type: tab.type }),
+    [sources, visible, connected, tab.type],
   );
   return (
     <StatusContext.Provider value={value}>{children}</StatusContext.Provider>
@@ -382,6 +385,7 @@ export function useWorkbenchStatusSource(
       retry: canRetry ? retrySource : undefined,
       retryKey: owner ?? id,
       notice,
+      retryAvailable: context.connected,
     });
   }, [context, id, owner, error, pending, primary, hasContent, retrySource, active, canRetry, notice]);
   useLayoutEffect(
