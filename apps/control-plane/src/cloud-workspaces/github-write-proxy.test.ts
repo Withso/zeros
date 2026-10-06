@@ -50,7 +50,7 @@ describe("GitHub proxy HTTP boundary", () => {
     const { createCloudGithubProxyRoutes, CLOUD_GITHUB_PROXY_PATH } = await import("./github-write-proxy.js");
     const { vi } = await import("vitest");
     const authorizeProxy = vi.fn(async (_proxy: string, _write: string | null = null) => ({ ...scope, operation: "git.fetch", expectedBody: null }));
-    const upstream = vi.fn(async (url: string | URL | Request) => String(url).startsWith("https://api.github.com")
+    const upstream = vi.fn(async (url: string | URL | Request) => new URL(url instanceof Request ? url.url : String(url)).host === "api.github.com"
       ? Response.json({ id: 123 }) : new Response("0000", { headers: { "content-type": "application/x-git-upload-pack-advertisement" } }));
     const app = createCloudGithubProxyRoutes({ authorizeProxy } as unknown as import("./github-write-grants.js").DatabaseCloudGithubWriteGrants, upstream);
     const headers = { authorization: `Bearer zgp_${"p".repeat(43)}` };
