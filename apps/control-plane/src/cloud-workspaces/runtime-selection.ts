@@ -118,8 +118,8 @@ async function lockQualifications(tx: Tx, runtimeId: string, compatibilityId: st
 /** The caller owns the organization admission transaction. Lock revocable
  * registry rows through generation INSERT; no provider/artifact I/O occurs here. */
 export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualificationMode, baseImageId?: string, additionalKinds: readonly string[] = []) {
-  // Discovery may require additional workspace credential kinds. Lifecycle
-  // admission retains its existing three-kind contract and target selection.
+  // Automatic updates require every delegated kind in addition to the
+  // existing three-kind floor. Other callers retain their default selection.
   const requiredKinds = [...new Set([...REQUIRED_KINDS, ...additionalKinds])];
   const base = (await tx.query<BaseRow>(`SELECT base.* FROM cloud_runtime_base_images base
     WHERE base.revoked_at IS NULL AND ($1::text IS NULL OR base.base_image_id=$1)
@@ -148,7 +148,7 @@ export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualification
 }
 
 /** Revalidate an existing pin without consulting either the create switch or
- * the current channel head. Wake and retry never silently choose a new runtime. */
+ * the current channel head. Ordinary resume and retry use this saved pin. */
 export async function loadPinnedCloudRuntime(tx: Tx, pin: CloudRuntimePin, mode: CloudRuntimeQualificationMode) {
   const bundle = (await tx.query<BundleRow>(`SELECT bundle.* FROM cloud_runtime_bundles bundle
     JOIN cloud_runtime_base_images base ON base.base_image_id=$3 AND base.base_compatibility_id=$4

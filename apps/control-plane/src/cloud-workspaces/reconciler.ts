@@ -528,9 +528,11 @@ export class CloudWorkspaceReconciler {
   async runOnce(): Promise<boolean> {
     const intent = await this.claimIntent();
     if (!intent) return false;
+    const mayUpgradeOnWake = !!this.runtimeUpgradeConfig && intent.affectsWorkspace &&
+      !intent.generationTransitionId && ["create", "wake"].includes(intent.operation);
     let provider: CloudWorkspaceProvider;
     try {
-      if (intent.operation === "create" || intent.operation === "wake") {
+      if (!mayUpgradeOnWake && (intent.operation === "create" || intent.operation === "wake")) {
         await withSystemTx(this.pool, tx => requireGenerationRuntime(tx, {
           workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
         }, this.runtimeUpgradeConfig?.runtime?.qualificationMode));
@@ -565,8 +567,6 @@ export class CloudWorkspaceReconciler {
 
     try {
       let current = await this.observe(provider, intent);
-      if(current?.state==='running'&&['create','wake'].includes(intent.operation))
-        await this.computeLeases.observeRunning({workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},provider,current);
       let providerAccessRevocationProven =
         current === null || current.state === "deleted";
 
@@ -581,12 +581,18 @@ export class CloudWorkspaceReconciler {
         return true;
       }
 
-      if (this.runtimeUpgradeConfig && intent.affectsWorkspace && !intent.generationTransitionId &&
-          ["create", "wake"].includes(intent.operation) && current && ["stopped", "archived"].includes(current.state) &&
-          await upgradeCloudRuntimeOnWake(this.pool, this.runtimeUpgradeConfig, {
+      if (mayUpgradeOnWake && current && ["stopped", "archived"].includes(current.state) &&
+          await upgradeCloudRuntimeOnWake(this.pool, this.runtimeUpgradeConfig!, {
             workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
             intentId: intent.id, workerId: this.workerId,
           }, this.workosEnabled)) return true;
+      // A replacement may repair a revoked stopped pin. Any ordinary resume
+      // still validates that saved pin before provider or compute-lease writes.
+      if (mayUpgradeOnWake) await withSystemTx(this.pool, tx => requireGenerationRuntime(tx, {
+        workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation,
+      },this.runtimeUpgradeConfig?.runtime?.qualificationMode));
+      if(current?.state==='running'&&['create','wake'].includes(intent.operation))
+        await this.computeLeases.observeRunning({workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},provider,current);
 
       // The provider adapter's destructive lifecycle contract includes
       // provider-wide access revocation. Even when provider state already

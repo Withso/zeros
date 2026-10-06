@@ -3224,7 +3224,12 @@ export function createCloudWorkspaceRoutes(
             WHERE transition.workspace_id=$1 AND transition.org_id=$2
               AND transition.state IN ('draining','provisioning','setting_up','rolling_back')
               AND drain.idempotency_key LIKE 'runtime-upgrade:automatic-wake:%' LIMIT 1`, [workspaceId,orgId])).rowCount : 0;
-        if (automatic) {
+        const starting = workspace.desired_state === "running" && workspace.status === "waking"
+          ? (await tx.query(`SELECT 1 FROM cloud_workspace_lifecycle_intents
+            WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND affects_workspace
+              AND generation_transition_id IS NULL AND operation IN ('create','wake')
+              AND state IN ('queued','dispatching','observing') LIMIT 1`,[workspaceId,orgId,workspace.current_generation])).rowCount : 0;
+        if (automatic || starting) {
           // Each device retains its own replayable receipt; one shared
           // generation transition owns all compute and setup work.
           const receipt = (await tx.query<IntentRow>(`INSERT INTO cloud_workspace_lifecycle_intents
@@ -3233,8 +3238,17 @@ export function createCloudWorkspaceRoutes(
           [randomUUID(),workspaceId,workspace.current_generation,orgId,user.id,key,digest])).rows[0]!;
           return { workspace,intent:receipt,replayed:false };
         }
-        await requireGenerationRuntime(tx, { workspaceId, organizationId: orgId, generation: workspace.current_generation },
-          config?.runtime?.qualificationMode ?? cloudRuntimeQualificationMode());
+        const qualificationMode=config?.runtime?.qualificationMode ?? cloudRuntimeQualificationMode();
+        try {
+          await requireGenerationRuntime(tx, { workspaceId, organizationId: orgId, generation: workspace.current_generation },qualificationMode);
+        } catch(error) {
+          // Only a compatible qualified successor can repair a stopped pin.
+          // The worker still validates the old pin if replacement is deferred.
+          if (!(error instanceof CloudRuntimeError) || !["stopped","archived"].includes(workspace.status) ||
+              !(await selectCloudWorkspaceRuntimeUpgrade(tx,{workspaceId,organizationId:orgId,
+                runtime:(await loadGenerationSource(tx,{workspaceId,organizationId:orgId,generation:workspace.current_generation})).runtime,
+                qualificationMode})).updateAvailable) throw error;
+        }
         const quarantined = await tx.query(`SELECT 1 FROM cloud_workspace_restore_incidents
           WHERE workspace_id=$1 AND source_generation=$2 AND (automatic_started_at IS NOT NULL OR state='recovery_needed')
           UNION ALL SELECT 1 FROM cloud_workspace_generation_transitions WHERE workspace_id=$1 AND source_generation=$2

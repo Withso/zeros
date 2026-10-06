@@ -234,6 +234,27 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     expect((await route("/wake", {}, config, "POST", secondKey)).status).toBe(200);
     expect((await pool.query("SELECT count(*)::int AS count FROM cloud_workspace_generation_transitions WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].count).toBe(1);
   });
+  it("joins a second device while the original wake is dispatching before runtime admission",async()=>{
+    await finalCheckpoint();await advanceHead();await route("/wake");
+    const {provider,calls}=stoppedProvider();
+    const inspect=provider.inspect.bind(provider);
+    provider.inspect=async id=>{expect((await route("/wake")).status).toBe(202);return inspect(id);};
+    await new CloudWorkspaceReconciler({pool,provider,runtimeUpgradeConfig:config,intervalMs:1000}).runOnce();
+    expect((await pool.query("SELECT count(*)::int AS count FROM cloud_workspace_generation_transitions WHERE workspace_id=$1",[fixture.workspaceId])).rows[0].count).toBe(1);
+    expect(calls).not.toContain("resume:1");
+  });
+  it("does not resume or upgrade when sleep wins the wake admission race",async()=>{
+    await finalCheckpoint();await advanceHead();await route("/wake");
+    const {provider,calls}=stoppedProvider();
+    const inspect=provider.inspect.bind(provider);
+    let stop=true;
+    provider.inspect=async id=>{if(stop){stop=false;expect((await route("/stop")).status).toBe(202);}return inspect(id);};
+    const reconciler=new CloudWorkspaceReconciler({pool,provider,runtimeUpgradeConfig:config,intervalMs:1000});
+    await reconciler.runOnce();await reconciler.runOnce();
+    expect(calls).not.toContain("resume:1");
+    expect((await pool.query("SELECT desired_state,status,current_generation FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId])).rows[0])
+      .toEqual({desired_state:"stopped",status:"stopped",current_generation:1});
+  });
   it("does not treat a later ordinary wake failure as an unfinished automatic update", async () => {
     await finalCheckpoint(); await advanceHead();
     await route("/wake");
@@ -498,7 +519,7 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
       .toEqual({ last_error_code: "cloud_runtime_revoked", last_error_message: expect.stringContaining("upgrade"), current_generation: 1 });
     expect((await pool.query("SELECT 1 FROM cloud_workspace_generations WHERE workspace_id=$1", [fixture.workspaceId])).rowCount).toBe(1);
   });
-  it.each(["base", "contract", "qualification"])("reports a revoked %s on wake without selecting another pin", async kind => {
+  it.each(["base", "contract", "qualification"])("keeps revoked %s fenced on wake while allowing a qualified successor", async kind => {
     const source = await pin();
     await finalCheckpoint(); await advanceHead();
     const sql = {
@@ -508,8 +529,8 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     }[kind]!;
     await pool.query(sql, [kind === "base" ? source.runtime!.baseImageId : kind === "contract" ? source.runtime!.baseCompatibilityId : source.runtime!.runtimeId]);
     const response = await route("/wake");
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ error: { code: "cloud_runtime_revoked" } });
+    expect(response.status).toBe(kind==="qualification"?202:409);
+    if(kind!=="qualification") expect(await response.json()).toMatchObject({ error: { code: "cloud_runtime_revoked" } });
     expect(await pin()).toEqual(source);
   });
   it("refuses a newer runtime qualified only for a different base", async () => {
