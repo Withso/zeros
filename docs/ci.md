@@ -1,10 +1,45 @@
-# CI selection
+# Pull-request CI and full Preflight
 
-`scripts/ci/scope.mjs` classifies changed paths using the versioned registry in
-`scripts/ci/scope-rules.json`. This is a policy seed for the future selective
-`CI` workflow. It changes no workflow, required status check, release evidence
-identity, publication step, or Beta/Production behavior. Existing Preflight and
-CodeQL execution remains in place until a separate workflow rollout.
+`CI` (`.github/workflows/ci.yml`) selects whole existing workloads for pull
+requests. `Preflight` (`.github/workflows/preflight.yml`) retains full post-merge
+and release-evidence behavior. Selection preserves workload commands, shards,
+runners, database reports, and artifacts.
+
+The ruleset still requires `quality`, `test`, `build`, `source-sync (macOS)`,
+`control plane`, `ui-smoke (composer)`, `secret scan (PR commit range)`,
+`actionlint`, and `codeql`. Every PR reports those contexts. `zeros/ci-gate`
+is an additional aggregate for a future ruleset migration; it is not required
+by this change. Actionlint and CodeQL retain their separate workflows.
+
+## Trusted workflow selection
+
+The `scope` job checks out full history and extracts `scripts/ci/scope.mjs`,
+`scope-rules.json`, and `control-plane-scope.mjs` with `git show` at the PR's base
+SHA. It puts them together in `$RUNNER_TEMP/ci-policy/`, preserving relative
+imports, and runs the trusted classifier with `--mode pr` against the candidate
+checkout. PR copies of the policy never authorize skips. Event identities and
+`LABELS_JSON` enter through `env:`; the workflow uses `pull_request` and
+`contents: read` permissions.
+
+The classifier owns path and label selection through the registry below.
+CI validates the `zeros.ci-selection/v1` ledger and output format, forwards the
+classifier ledger unchanged, and consumes only the classifier's `job-*` outputs.
+It does not translate path lanes or interpret labels itself. Missing, duplicate,
+unknown, inconsistent, or malformed outputs fail scope before any output is
+published.
+
+If any trusted policy file is missing, CI emits the same ledger schema with
+`policy_digest: null`, an empty `lanes` map and `requests` list, a
+`missing-policy:` reason, and every job selected except `ui-smoke`. Without a
+trusted classifier, label requests cannot be interpreted and composer remains
+off. A present policy that crashes or lacks the job-output contract fails
+scope; it does not receive this missing-file fallback. Land the classifier
+contract before the selective workflow.
+
+`test`, `source-sync`, and `control-plane` always run as required aggregates.
+The existing database scope is unioned with the trusted `job-control-plane-db`
+floor. It can add coverage and cannot subtract it. Selected database shards
+still require complete reports and no skipped database tests.
 
 ## Lanes and checks
 
@@ -70,7 +105,7 @@ the existing workload boundaries.
 | `job-macos`                | `source-sync-workload`, with the required `source-sync (macOS)` aggregate                  | `source-sync-macos`, `unsigned-packaging-proof`                                                                                                                                                                                                                                                                |
 | `job-control-plane-db`     | `control-plane-database`, with report validation in the required `control plane` aggregate | `control-plane-database`, `control-plane-reports`                                                                                                                                                                                                                                                              |
 | `job-ui-smoke`             | `ui-smoke (composer)`                                                                      | `composer-full`                                                                                                                                                                                                                                                                                                |
-| `job-control-plane-static` | `control-plane-static`                                                                     | `control-plane-static` (always selected)                                                                                                                                                                                                                                                                       |
+| `job-control-plane-static` | `control-plane-static` and `control-plane-scope`                                                                     | `control-plane-static` (always selected)                                                                                                                                                                                                                                                                       |
 | `job-secret-scan`          | `secret scan (PR commit range)`                                                            | `commit-range-secrets` (always selected)                                                                                                                                                                                                                                                                       |
 
 `tracked-secrets` runs in full Preflight and is also bundled into selected CI
@@ -95,8 +130,15 @@ then unions staged, unstaged, and untracked paths. It prints the base SHA and a
 table of lanes, selections, and reasons. Fetch `origin/main` if that comparison
 is unavailable. The same fail-closed rules apply to incomplete local evidence.
 
-Add labels to the PR before the final push so the future workflow receives the
-complete request. Labels are additive: removing one cannot remove the path floor.
+GitHub's permission to apply labels authorizes these additions, including
+maintainer labels on fork PRs. The classifier alone validates the closed
+vocabulary and computes additions. Removing a label recomputes optional
+coverage while retaining the path floor.
+
+CI runs for `opened`, `synchronize`, `reopened`, `ready_for_review`, `labeled`,
+and `unlabeled`. Label changes start a fresh run on the same PR head; per-PR
+concurrency cancels its predecessor. Selection uses the event's label snapshot.
+It does not provide an immutable merge request or an App-owned merge gate.
 
 | Label                 | Additional selection                           |
 | --------------------- | ---------------------------------------------- |
@@ -117,9 +159,8 @@ LABELS_JSON='["ci:web","ci:macos"]' pnpm ci:plan
 
 `FORCE_FULL=true` or `1` selects every PR lane except `ui-smoke`; `false`, `0`, or an
 unset value leaves path selection in place. Only `ci:ui-smoke` and `ci:full` add
-full composer smoke in PR/local mode. In the intended selective workflow, full
-composer UI smoke runs after merge through full mode on main/release pushes;
-the current workflows are unchanged by this seed.
+full composer smoke in PR/local mode. Full composer UI smoke continues to run in full Preflight after merge on
+main/release pushes.
 
 ## Fail-closed evidence
 
@@ -155,10 +196,9 @@ seed. Globs are anchored, case-sensitive POSIX paths: `*` and `?` exclude `/`,
 names. There is no brace expansion, negation, or first-match behavior.
 
 Malformed policy, unknown CI labels, invalid forced-selection configuration, or
-internal errors exit nonzero and emit no partial lane outputs. The future
-required gate must treat that failure as red. A candidate change to the selector,
-registry, or workflows is itself a global invalidator; the future workflow must
-load trusted baseline code rather than let a PR attest to its own skip claims.
+internal errors exit nonzero and emit no partial lane outputs. CI treats that failure as red. A candidate change to the selector, registry,
+or workflows is itself a global invalidator; CI loads trusted baseline code
+rather than letting a PR attest to its own skip claims.
 
 ## Output contract
 
@@ -201,6 +241,41 @@ depends on diagnostic truncation.
 The 60-PR replay fixture and per-PR JSON lane/job snapshot live under
 `scripts/__tests__/fixtures/ci/`. Replay must keep at least half of the sample
 out of all-lanes fallback and select full composer smoke from paths for none.
+
+## Fail-closed job results
+
+Every producer uses `always()` with a condition that runs when its trusted job
+output is selected or scope failed. Its first step fails unless scope succeeded.
+The database producer also guards its combined scope. A failed classifier
+therefore produces red checks. Control-plane static/audit and commit-range
+secrets remain always selected.
+
+The required aggregates validate raw selections and results before adapting
+proved unselected outcomes to their original enforcing commands. They accept
+exactly:
+
+| Selected | Job result | Verdict |
+| --- | --- | --- |
+| `true` | `success` | Pass |
+| `false` | `skipped` | Pass |
+| `false` | `success` | Pass |
+| `true` | `skipped` | Fail |
+| Either | Failure, cancellation, missing or unknown result | Fail |
+
+`ci-gate` runs with `if: always()` and directly needs every other CI job. It
+validates ledger schema, commit identities, job inventory, scope outputs,
+mandatory selections, and every result against the same truth table. It also
+checks the conservative missing-policy fallback and the effective database
+selection. Database report completeness remains enforced by the unchanged
+`control-plane-results.mjs` command in the required aggregate.
+
+Verification uses `pnpm check:actions` and the CI, repository-layout, Vitest
+provisioning, and database scope suites. The parity test compares every shared
+workload with Preflight, excluding explicit PR-only selection steps, adapters,
+and profile gates. Workflow tests execute the real trusted classifier in
+temporary repositories and cover policy replacement, label additions/removal,
+fallback, invalid outputs, database unions, failures, cancellation, and selected
+skips.
 
 ## Owner merges for CI definitions
 
