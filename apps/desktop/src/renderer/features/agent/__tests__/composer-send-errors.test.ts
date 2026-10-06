@@ -3,11 +3,12 @@ import { describe, expect, it } from "vitest";
 
 const chat = readFileSync(new URL("../agent-chat.tsx", import.meta.url), "utf8");
 describe("composer action outcome surfaces", () => {
-  it("keeps admission, runtime and capability status text out of the composer", () => {
+  it("keeps admission, runtime, capability and workspace status text out of the composer", () => {
     const composer = chat.slice(chat.indexOf("<ComposerConcealedContext.Provider"));
     expect(composer).not.toContain("<CloudAdmissionStatus");
     expect(composer).not.toContain("data-cloud-agent-runtime-upgrade");
     expect(composer).not.toContain("data-cloud-agent-limitations");
+    expect(composer).not.toContain("{cloudSleepNotice}");
   });
   it("keeps blocked Send focusable with disabled semantics, tooltip and attempt feedback", () => {
     expect(chat).toContain("aria-disabled={runtimeSendBlocked || undefined}");

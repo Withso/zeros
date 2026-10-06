@@ -242,7 +242,6 @@ import {
 } from "./agents-cache";
 import { useWorkspaceAgents } from "./workspace-agent-registry";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
-import { useWorkbenchAvailability } from "../../state/workbench-availability";
 import { cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
 import { isRunnableAgent } from "./agent-runnable";
 import { requestProviderSettings } from "../settings/settings-navigation";
@@ -362,16 +361,6 @@ interface AgentChatProps {
    * The composer remains interactive, but Send becomes an exact-chat intent
    * that drains only after provisioning and session readiness. */
   workspaceProvisioning?: boolean;
-}
-
-// Mount this observer only for cloud chats; Local composers keep their existing
-// subscriptions and lifecycle. Hidden cloud surfaces have no active effects.
-function CloudWorkspaceSleepNotice({ folder, active }: { folder: string; active: boolean }) {
-  const availability = useWorkbenchAvailability(folder, active);
-  if (!["stopped", "sleeping", "stopping", "waking"].includes(availability.availability.state ?? "") || !availability.status) return null;
-  return <p className="text-fg3 mb-2 text-2xxs" role="status" data-cloud-workspace-sleep="">
-    {availability.status.message}
-  </p>;
 }
 
 export function AgentChat({
@@ -1481,8 +1470,6 @@ export function AgentChat({
   const openBoundaryPort = session.openBoundaryPort;
   const cloudPreviewsEnabled = useInternalFeatureActive("cloudComputerV2");
   const cloudCanEdit = useCloudWorkspaceCanEdit(chatThread?.folder);
-  const cloudSleepNotice = cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && !session.cloudSendWait
-    ? <CloudWorkspaceSleepNotice folder={chatThread!.folder} active={surfaceActive} /> : null;
   const cloudPreviewsActive = cloudPreviewsEnabled && cloudCanEdit;
   const warmBoundaryPreview = useCallback(() => {
     if (interactive && cloudPreviewsActive && isCloudWorkspace(chatThread?.folder))
@@ -5229,7 +5216,6 @@ export function AgentChat({
               so the popover matches the composer width,
               not the full-width wrapper above. */}
               {composerSuggestionPopup}
-              {cloudSleepNotice}
               {dragActive && (
                 <div
                   className={cn(

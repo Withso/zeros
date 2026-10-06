@@ -344,24 +344,6 @@ describe("cloud composer readiness queue", () => {
     expect(h.clear).not.toHaveBeenCalled(); expect(h.failureNotice).not.toHaveBeenCalled();
     expect(h.toasts.error).toHaveBeenCalledExactlyOnceWith("Message wasn't sent", expect.anything());
   });
-  it("keeps Local availability subscriptions and expected cloud-wait sleep notices inert", () => {
-    let notice = "", component = "";
-    function collect(node: ts.Node) {
-      if (ts.isVariableDeclaration(node) && node.name.getText(ast) === "cloudSleepNotice") notice = `const ${node.getText(ast)};`;
-      if (ts.isFunctionDeclaration(node) && node.name?.text === "CloudWorkspaceSleepNotice") component = node.getText(ast);
-      ts.forEachChild(node, collect);
-    }
-    collect(ast);
-    const availability = vi.fn(() => ({ availability: { state: "stopped" }, status: { message: "Sleeping — resumes when you continue" } }));
-    const code = ts.transpileModule(`${component}\n${notice}\nglobalThis.result = cloudSleepNotice;`, {
-      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React },
-    }).outputText;
-    const context = { cloudComputerV2: true, chatThread: { folder: "/local" }, surfaceActive: true, session: {}, isCloudWorkspace, useWorkbenchAvailability: availability,
-      React: { createElement: (type: any, props: object) => typeof type === "function" ? type(props) : { type, props } } };
-    vm.runInNewContext(code, context); expect(availability).not.toHaveBeenCalled();
-    vm.runInNewContext(code, { ...context, chatThread: { folder: "cloud://fixture" }, session: { cloudSendWait: { state: "waiting" } } });
-    expect(availability).not.toHaveBeenCalled();
-  });
   it("suppresses readiness toasts only for cloud queued waits and preserves Local initialization errors", () => {
     let effect = "";
     function collect(node: ts.Node) {
