@@ -12,7 +12,7 @@ vi.mock("../../platform/cloud-workspaces", async original => ({
 import { wakeCloudWorkspace } from "../cloud-workspace-wake";
 import {
   acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog, cloudWorkspaceDocument,
-  refreshCloudWorkspaceCatalog,
+  refreshCloudWorkspaceCatalog, manageCloudWorkspace,
 } from "../cloud-workspace-catalog";
 
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
@@ -101,6 +101,19 @@ describe("explicit cloud wake readiness", () => {
     expect(api.wake).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(5_000);
     expect(api.read).toHaveBeenCalledTimes(2);
+  });
+  it("ends an older wake as soon as Stop is requested, before its HTTP response", async () => {
+    acceptCloudWorkspaceDocument(doc(1, "ready"));
+    let finishWake!: (value: CloudWorkspaceDocument) => void, finishStop!: (value: CloudWorkspaceDocument) => void;
+    api.wake.mockImplementation((_target, operation) => new Promise(resolve => {
+      if (operation === "stop") finishStop = resolve; else finishWake = resolve;
+    }));
+    const pending = wakeCloudWorkspace(target, doc(1, "ready"));
+    const ended = expect(pending).rejects.toMatchObject({ name: "CloudWorkspaceWakeEndedError", message: expect.stringContaining("stopped") });
+    const stopping = manageCloudWorkspace(target, "stop");
+    finishWake(doc(2, "ready")); await ended;
+    finishStop(doc(3, "stopped")); await stopping;
+    expect(api.read).not.toHaveBeenCalled();
   });
 
   it("bounds readiness polling and does not retry a failed lifecycle mutation", async () => {

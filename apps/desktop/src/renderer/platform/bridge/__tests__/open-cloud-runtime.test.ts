@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ enabled: true, epoch: 1, doc: { status: "ready", deletedAt: null, generation: { number: 1 }, capabilities: { canWrite: true } }, wake: vi.fn(), refresh: vi.fn(), admission: vi.fn(), close: vi.fn(async () => true), connect: vi.fn(async () => {}), dispose: vi.fn(), list: vi.fn(), listeners: new Set<() => void>() }));
 vi.mock("../../../features/settings/internal-features", () => ({ isInternalFeatureActive: () => mocks.enabled }));
 vi.mock("../../../state/cloud-workspace-catalog", () => ({
-  cloudCatalogGeneration: () => mocks.epoch, cloudWorkspaceDocument: () => mocks.doc,
+  cloudCatalogGeneration: () => mocks.epoch, cloudWorkspaceDocument: () => mocks.doc, cloudWorkspaceStopVersion: () => 0,
   refreshCloudWorkspace: mocks.refresh, acceptCloudEngineWorkspace: vi.fn(),
   manageCloudWorkspace: mocks.wake,
   canReadCloudWorkspace: (doc: { status: string }) => !["deleted", "deleting"].includes(doc.status),

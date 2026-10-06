@@ -17,7 +17,7 @@ vi.mock("../store", async original => {
 vi.mock("../../shared/ui/primitives/elements", () => ({ toast: { error: harness.error } }));
 import { CloudWorkspaceLifecycle } from "../cloud-workspace-lifecycle";
 import { requestCloudWorkspaceOpen } from "../cloud-workspace-open-intent";
-import { acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog } from "../cloud-workspace-catalog";
+import { acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog, manageCloudWorkspace } from "../cloud-workspace-catalog";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
 import { setActiveBridge } from "../../platform/bridge/active-bridge";
 import { useWorkspaceStore } from "../workspace-store";
@@ -77,6 +77,17 @@ describe("explicit cloud navigation intent", () => {
     const open = vi.spyOn(client, "openWorkspace").mockResolvedValue(undefined);
     const h = interactions(); h.input("pointerdown");
     expect(open).toHaveBeenCalledExactlyOnceWith(expect.objectContaining(target), { signal: expect.any(AbortSignal), reason: "interaction" });
+  });
+  it("keeps an explicit Stop stopped until input after that request", async () => {
+    acceptCloudWorkspaceDocument({ ...doc, status: "ready", version: 2 });
+    const api = await import("../../platform/cloud-workspaces");
+    vi.spyOn(api, "changeCloudWorkspaceLifecycle").mockResolvedValue({ ...doc, status: "stopping", version: 3 });
+    const open = vi.spyOn(client, "openWorkspace").mockResolvedValue(undefined);
+    const h = interactions(); h.input("pointerdown");
+    await manageCloudWorkspace(target, "stop");
+    acceptCloudWorkspaceDocument({ ...doc, status: "stopped", version: 4 });
+    expect(open).not.toHaveBeenCalled();
+    h.input("keydown"); expect(open).toHaveBeenCalledOnce();
   });
 
   it("wakes from actions on the selected workspace's own sidebar row", () => {

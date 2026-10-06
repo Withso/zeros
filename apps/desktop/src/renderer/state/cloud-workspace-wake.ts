@@ -5,6 +5,7 @@ import {
   canReadCloudWorkspace,
   cloudCatalogGeneration,
   cloudWorkspaceDocument,
+  cloudWorkspaceStopVersion,
   manageCloudWorkspace,
   refreshCloudWorkspace,
   subscribeCloudWorkspaces,
@@ -27,6 +28,7 @@ export async function wakeCloudWorkspace(
 ): Promise<CloudWorkspaceDocument> {
   const account = cloudCatalogGeneration();
   const generation = initial.generation.number;
+  const stopVersion = cloudWorkspaceStopVersion(target);
   const controller = new AbortController();
   const cancel = () => controller.abort();
   signal?.addEventListener("abort", cancel, { once: true });
@@ -38,6 +40,8 @@ export async function wakeCloudWorkspace(
       throw new Error("Cloud workspace generation or access changed while waking");
     if (!isInternalFeatureActive("cloudComputerV2") || !current.capabilities.canWrite)
       throw new Error("Cloud workspace run access is required to wake it");
+    if (cloudWorkspaceStopVersion(target) !== stopVersion)
+      throw new CloudWorkspaceWakeEndedError("Cloud workspace was stopped. Open it again to retry.");
     return current;
   };
   const off = subscribeCloudWorkspaces(() => {

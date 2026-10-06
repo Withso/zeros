@@ -21,6 +21,7 @@ import {
   cloudCatalogNeedsFastRefresh,
   cloudCatalogGeneration,
   cloudWorkspaceDocument,
+  cloudWorkspaceStopVersion,
   refreshCloudWorkspaceCatalog,
   subscribeCloudWorkspaces,
   subscribeCloudWorkspaceRows,
@@ -362,7 +363,9 @@ export function CloudWorkspaceLifecycle() {
       const document = target ? cloudWorkspaceDocument(target) : undefined;
       // Settings and other app actions can use the selected workspace too.
       // Selection is the owner; retained surfaces and hover cannot change it.
-      return target && document && canReadCloudWorkspace(document) ? { key: cloudWorkspaceKey(target), document } : null;
+      return target && document && canReadCloudWorkspace(document) ? {
+        key: cloudWorkspaceKey(target), document, stopVersion: cloudWorkspaceStopVersion(target),
+      } : null;
     };
     const controller = new CloudWorkspaceInteraction({
       current, visible: () => document.visibilityState === "visible", focused: () => document.hasFocus(), available: () => available,

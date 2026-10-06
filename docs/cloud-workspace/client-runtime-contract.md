@@ -191,6 +191,9 @@ dispatch result stays in the conversation for review and is never auto-replayed.
 An explicit retry after a durable terminal admission refusal renews only that
 refused delivery identity; automatic readiness retries keep their existing ID.
 A later Stop ends the wake intent; readiness retries cannot start it again.
+An explicit Stop in this app window invalidates older interaction gestures and
+pending automatic wakes. A gesture after that request may resume the workspace;
+the Stop click itself cannot be reused to undo its request.
 Expected waits suppress the composer's sleep notice. These queued drafts belong
 to the renderer's existing pending-send lifetime, rather than a durable server
 queue; Local submissions keep their existing pipeline and presentation.

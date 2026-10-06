@@ -20,6 +20,7 @@ import {
   getCloudProjects,
   cloudProjectForFolder,
   manageCloudWorkspace,
+  cloudWorkspaceStopVersion,
   cloudWorkspaceOperation,
   refreshCloudWorkspaceCatalog,
   cloudWorkspaceDetails,
@@ -71,6 +72,18 @@ beforeEach(() => {
   api.projects.mockReturnValue([]);
 });
 describe("cloud workspace catalog ownership", () => {
+  it("publishes a bounded local Stop fence before HTTP settles and clears it with the account", async () => {
+    acceptCloudWorkspaceDocument(doc(1));
+    let resolve!: (document: CloudWorkspaceDocument) => void;
+    api.lifecycle.mockImplementationOnce(() => new Promise<CloudWorkspaceDocument>(done => { resolve = done; }));
+    const changed = vi.fn(), off = subscribeCloudWorkspaces(changed);
+    const pending = manageCloudWorkspace(target, "stop");
+    expect(cloudWorkspaceStopVersion(target)).toBeGreaterThan(0); expect(changed).toHaveBeenCalled();
+    resolve(doc(2, "stopped")); await pending; off();
+    const other = { ...target, workspaceId: "33333333-3333-4333-8333-333333333333" };
+    expect(cloudWorkspaceStopVersion(other)).toBe(0);
+    clearCloudWorkspaceCatalog(); expect(cloudWorkspaceStopVersion(target)).toBe(0);
+  });
   it.each(["stopped", "archived", "stopping", "failed", "error"])("does not schedule background reads or mirrors for %s workspaces", status => {
     expect(canBackgroundSyncCloudWorkspace(target)).toBe(false);
     acceptCloudWorkspaceDocument(doc(1, status));

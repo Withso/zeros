@@ -40,6 +40,12 @@ const detailReads = new Map<string, Promise<CloudWorkspaceDocument>>();
 const detailOwnerGenerations = new Map<string, number>();
 let nextDetailOwnerGeneration = 0;
 const listeners = new Set<() => void>();
+// Renderer-owned Stop intent wins over input captured before that request.
+// Engine idle stops do not enter this map and still consume recent input.
+const localStopVersions = new Map<string, number>();
+let nextLocalStopVersion = 0;
+export const cloudWorkspaceStopVersion = (target: CloudWorkspaceTarget) =>
+  localStopVersions.get(cloudWorkspaceKey(target)) ?? 0;
 const refreshListeners = new Set<() => void>();
 export interface CloudWorkspaceRowsChange {
   workspaceIds: readonly string[];
@@ -351,6 +357,7 @@ export function clearCloudWorkspaceCatalog(): void {
   engineRows.clear();
   cloudWorkspaceDetails.clear();
   lifecycleIntents.clear();
+  localStopVersions.clear();
   rebuild(hadDocuments);
 }
 
@@ -393,6 +400,12 @@ export async function manageCloudWorkspace(
   const intent: LifecycleIntent = previous && (operation !== "wake" || previous.owner === owner && previous.generation === generation)
     ? previous : { id: crypto.randomUUID(), owner, generation, version: cloudWorkspaceDocument(target)?.version, reason: operation === "wake" ? reason : undefined };
   if (intent.task) return intent.task;
+  if (operation === "stop") {
+    localStopVersions.delete(workspaceKey);
+    localStopVersions.set(workspaceKey, ++nextLocalStopVersion);
+    while (localStopVersions.size > 256) localStopVersions.delete(localStopVersions.keys().next().value!);
+    for (const listener of listeners) listener();
+  }
   const version = epoch;
   const task = (async () => {
     // Preserve the initiating reason as well as the key on shared sends and

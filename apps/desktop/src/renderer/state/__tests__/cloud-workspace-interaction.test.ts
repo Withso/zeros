@@ -4,7 +4,7 @@ import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 
 function harness() {
   let now = 0, visible = true, focused = true, available = true;
-  let current: { key: string; document: CloudWorkspaceDocument } | null = { key: "cloud://fixture", document: {
+  let current: { key: string; document: CloudWorkspaceDocument; stopVersion?: number } | null = { key: "cloud://fixture", document: {
     status: "ready", generation: { number: 1 }, capabilities: { canWrite: true }, deletedAt: null, error: null,
   } as CloudWorkspaceDocument };
   const presence = vi.fn(() => true), wake = vi.fn(async (_key: string, _signal: AbortSignal) => {}), failed = vi.fn();
@@ -98,6 +98,20 @@ describe("selected cloud workspace interaction", () => {
     const h = harness(); h.controller.interact();
     h.tick(45_000); h.current!.document.status = "stopping"; h.controller.refresh();
     expect(h.wake).toHaveBeenCalledOnce();
+  });
+  it("does not let a stale gesture undo its own explicit Stop, while later input can wake", () => {
+    const h = harness(); h.current!.stopVersion = 0; h.controller.interact();
+    h.current!.stopVersion = 1; h.current!.document.status = "stopping"; h.controller.refresh();
+    h.current!.document.status = "stopped"; h.controller.refresh(); expect(h.wake).not.toHaveBeenCalled();
+    h.controller.interact(); expect(h.wake).toHaveBeenCalledOnce();
+  });
+  it("cancels a pending automatic wake when a later explicit Stop wins", async () => {
+    const h = harness(); h.current!.stopVersion = 0; h.current!.document.status = "stopped";
+    let reject!: (error: Error) => void; h.wake.mockImplementation(() => new Promise((_resolve, fail) => { reject = fail; }));
+    h.controller.interact(); const signal = h.wake.mock.calls[0]![1];
+    h.current!.stopVersion = 1; h.controller.refresh(); expect(signal.aborted).toBe(true);
+    reject(new Error("Old wake ended")); await Promise.resolve(); await Promise.resolve();
+    expect(h.failed).not.toHaveBeenCalled(); expect(h.wake).toHaveBeenCalledOnce();
   });
 
   it("expires an unconsumed gesture after two minutes without waking for a later passive refresh", () => {

@@ -16,12 +16,12 @@ export class CloudWorkspaceInteraction {
   private presentKey: string | null = null;
   private lastPresence = -Infinity;
   private readonly wakes = new Map<string, number>();
-  private pending: { key: string; controller: AbortController } | null = null;
-  private armed: { key: string; generation: number; at: number } | null = null;
+  private pending: { key: string; stopVersion?: number; controller: AbortController } | null = null;
+  private armed: { key: string; generation: number; stopVersion?: number; at: number } | null = null;
   private closed = false;
   constructor(private readonly options: {
     now?: () => number;
-    current(): { key: string; document: CloudWorkspaceDocument } | null;
+    current(): { key: string; document: CloudWorkspaceDocument; stopVersion?: number } | null;
     visible(): boolean;
     focused(): boolean;
     available(): boolean;
@@ -35,7 +35,7 @@ export class CloudWorkspaceInteraction {
     this.lastInput = this.now();
     const selected = this.options.current();
     this.armed = !otherWorkspaceRow && selected ? {
-      key: selected.key, generation: selected.document.generation.number, at: this.now(),
+      key: selected.key, generation: selected.document.generation.number, stopVersion: selected.stopVersion, at: this.now(),
     } : null;
     this.refresh();
   }
@@ -53,7 +53,7 @@ export class CloudWorkspaceInteraction {
     this.armed = null;
     this.wakes.delete(identity); this.wakes.set(identity, this.now());
     while (this.wakes.size > 64) this.wakes.delete(this.wakes.keys().next().value!);
-    const intent = { key: current.key, controller: new AbortController() };
+    const intent = { key: current.key, stopVersion: current.stopVersion, controller: new AbortController() };
     this.pending = intent;
     void this.options.wake(intent.key, intent.controller.signal).catch(error => {
       if (!intent.controller.signal.aborted && this.options.current()?.key === intent.key) this.options.failed?.(intent.key, error);
@@ -67,8 +67,10 @@ export class CloudWorkspaceInteraction {
     if (this.closed) return;
     const current = this.options.current();
     const available = this.options.visible() && this.options.focused() && this.options.available();
-    if (!available || current?.key !== this.armed?.key) this.armed = null;
-    if (this.pending && (current?.key !== this.pending.key || !available)) { this.pending.controller.abort(); this.pending = null; }
+    if (!available || current?.key !== this.armed?.key || current?.stopVersion !== this.armed?.stopVersion) this.armed = null;
+    if (this.pending && (current?.key !== this.pending.key || current?.stopVersion !== this.pending.stopVersion || !available)) {
+      this.pending.controller.abort(); this.pending = null;
+    }
     const key = current && !current.document.deletedAt && ["ready", "busy"].includes(current.document.status) &&
       available && this.now() - this.lastInput < INPUT_RECENCY_MS
       ? current.key : null;
