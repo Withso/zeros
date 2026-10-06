@@ -220,13 +220,9 @@ export async function runDesignPanelSharedWidthSmoke({ page, check }) {
         `[data-design-retained-workspace="ws_design_harness${suffix}"]`,
       );
     const activate = async (suffix) => {
-      await page.evaluate(async (value) => {
-        const { useWorkspaceStore } =
-          await import("/apps/desktop/src/renderer/state/store.tsx");
-        useWorkspaceStore.setState({
-          activeChatId: null,
-          newAgentFolder: `/Users/demo/zeros/design workspaces/north-one/launch-system${value ? "-second" : ""}`,
-        });
+      await page.evaluate((value) => {
+        // The loaded fixture owns its store; switching needs no module load.
+        window.__zerosHarnessSelectWorkspace(`ws_design_harness${value}`);
       }, suffix);
       await owner(suffix)
         .locator("[data-design-canvas-viewport]")
