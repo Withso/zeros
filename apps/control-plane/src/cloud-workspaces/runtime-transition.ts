@@ -1,0 +1,60 @@
+import type { Tx } from "../db.js";
+
+/** Cache invalidation only, never admission or qualification. The caller holds
+ * the workspace lifecycle lock and checks the full runtime key, current
+ * qualification, fresh launch proofs and restored-tree integrity separately.
+ * A completed enrollment survives an ordinary same-generation stop. A new
+ * enrollment (even one that fails) or unsettled transition invalidates it.
+ */
+export async function readCloudRuntimeResumeProofEpoch(tx: Tx, input: {
+  workspaceId: string;
+  organizationId: string;
+  generation: number;
+}): Promise<string | null> {
+  const result = await tx.query<{ id: string }>(`SELECT engine.id
+    FROM cloud_workspaces workspace
+    JOIN cloud_workspace_generations generation
+      ON generation.workspace_id=workspace.id AND generation.org_id=workspace.org_id
+      AND generation.generation=workspace.current_generation
+    JOIN cloud_workspace_setup_runs setup
+      ON setup.workspace_id=generation.workspace_id AND setup.org_id=generation.org_id AND setup.generation=generation.generation
+    JOIN cloud_workspace_engine_instances engine
+      ON engine.setup_run_id=setup.id AND engine.workspace_id=setup.workspace_id AND engine.org_id=setup.org_id
+      AND engine.generation=setup.generation AND engine.setup_execution_fence=setup.execution_fence
+    JOIN cloud_workspace_setup_attestations attestation
+      ON attestation.setup_run_id=setup.id AND attestation.workspace_id=setup.workspace_id AND attestation.org_id=setup.org_id
+      AND attestation.generation=setup.generation AND attestation.execution_fence=setup.execution_fence
+      AND attestation.engine_instance_id=engine.id
+    WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.current_generation=$3
+      AND workspace.deleted_at IS NULL AND workspace.desired_state<>'deleted'
+      AND generation.runtime_id IS NOT NULL AND setup.state='succeeded'
+      AND engine.state IN ('ready','revoked') AND engine.registered_at IS NOT NULL
+      AND ROW(engine.runtime_id,engine.runtime_manifest_sha256,engine.runtime_base_image_id,
+        engine.runtime_base_compatibility_id,engine.runtime_profile,engine.runtime_engine_protocol_version)
+        = ROW(generation.runtime_id,generation.runtime_manifest_sha256,generation.runtime_base_image_id,
+          generation.runtime_base_compatibility_id,generation.runtime_profile,generation.runtime_engine_protocol_version)
+      AND ROW(attestation.runtime_id,attestation.runtime_manifest_sha256,attestation.runtime_base_image_id,
+        attestation.runtime_base_compatibility_id,attestation.runtime_profile,attestation.runtime_engine_protocol_version,
+        attestation.runtime_installer_receipt_sha256,attestation.runtime_boot_id,attestation.runtime_supervisor_session_id)
+        = ROW(engine.runtime_id,engine.runtime_manifest_sha256,engine.runtime_base_image_id,
+          engine.runtime_base_compatibility_id,engine.runtime_profile,engine.runtime_engine_protocol_version,
+          engine.runtime_installer_receipt_sha256,engine.runtime_boot_id,engine.runtime_supervisor_session_id)
+      -- Attempts/fences order enrollment; transaction timestamps do not. Multiple
+      -- identities in the same fence are ambiguous, so none may reuse evidence.
+      AND NOT EXISTS (
+        SELECT 1 FROM cloud_workspace_engine_instances other
+        JOIN cloud_workspace_setup_runs other_setup ON other_setup.id=other.setup_run_id
+        WHERE other.workspace_id=engine.workspace_id AND other.org_id=engine.org_id AND other.generation=engine.generation
+          AND other.id<>engine.id
+          AND (other_setup.attempt,other.setup_execution_fence)>=(setup.attempt,engine.setup_execution_fence)
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM cloud_workspace_generation_transitions transition
+        WHERE transition.workspace_id=workspace.id AND transition.org_id=workspace.org_id
+          AND ((transition.state NOT IN ('succeeded','rolled_back','cancelled')
+            AND (transition.state<>'rollback_failed' OR $3 IN (transition.source_generation,transition.candidate_generation)))
+            OR (transition.state='rolled_back' AND transition.source_generation=$3
+              AND engine.registered_at<=transition.created_at))
+      )`, [input.workspaceId, input.organizationId, input.generation]);
+  return result.rows[0]?.id ?? null;
+}
