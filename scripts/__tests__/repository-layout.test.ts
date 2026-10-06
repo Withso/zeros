@@ -804,12 +804,14 @@ describe("repository layout contracts", () => {
       "qualification-status.md",
       "relay-capacity.md",
       "release-worker-qualification.md",
+      "resume-performance-design.md",
       "root-coordinator-threat-model.md",
       "runtime-bundles.md",
       "runtime-hot-update.md",
       "runtime-lifecycle-acceptance.md",
       "security.md",
       "template-forks.md",
+      "wake-performance.md",
     ];
 
     expect(readdirSync(cloudDocs).sort()).toEqual(expected);

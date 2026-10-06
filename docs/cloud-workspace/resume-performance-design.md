@@ -3,6 +3,9 @@
 Status: design for RU/HU review; no resume authority, runtime or setup semantics
 are changed by PERF's scheduler or measurement PRs. Live evidence supplied by
 the orchestrator on 2026-10-06 makes this the highest-priority next work.
+This proposal follows HU's merged [in-place update design](runtime-hot-update.md):
+RU remains the single transition owner, and changing the runtime requires a
+new immutable generation even when HU retains the allocation.
 
 ## Observed bottleneck
 
@@ -38,16 +41,21 @@ After that decision, a narrowly typed launch plan chooses one of:
 
 - `resume_existing`: same workspace, generation, provider resource and runtime;
   a previous successful setup exists and all resume eligibility checks pass.
-- `prepare_generation`: new workspace/generation, recovery, changed setup
+- `prepare_generation`: new workspace, recovery, changed setup
   contract, missing proof, or a migration that requires preparation.
 - `update_then_resume`: HU's authorized in-place update completes and provides
-  a new verified runtime identity, then applies the same fresh-launch checks.
+  a new immutable candidate generation and verified runtime identity, then
+  applies the same fresh-launch checks and HU's atomic authority transfer.
 
 These are proposed internal plan names, not new API states or enum migrations.
 Keep released workspace statuses, setup-run identities and actor protocol
 compatible. A new fenced execution record can still use the existing setup-run
 ledger while recording `resume` rather than running the full preparation path.
 The existing success/readiness publication must remain authoritative.
+For HU, use its transition-scoped enrollment and attestation rather than inventing
+an ordinary setup run. Reuse preparation across its new generation only through
+RU's validated provenance copy and the exact HU allocation-transfer fence. A new
+generation with no such authorized provenance takes normal preparation/recovery.
 
 PERF proposes owning performance instrumentation and the narrow resume launcher;
 RU/HU must agree on the hook and eligible runtime identity before implementation.
