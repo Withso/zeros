@@ -3,6 +3,16 @@ import type { Tx } from "../db.js";
 import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { HttpError } from "../authz.js";
+import { z } from "zod";
+
+// Mirrored at the private protocol boundary (the control plane uses Zod 3).
+const nativeCapabilitiesSchema = z.object({ version: z.literal(1), goals: z.boolean(),
+  nativeFork: z.boolean(), transcriptFork: z.boolean(), nativeReview: z.boolean(),
+  connectedApps: z.boolean(), multiAgent: z.boolean() }).strict();
+export function runtimeNativeCapabilities(value: unknown) {
+  const parsed = nativeCapabilitiesSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
 
 export class CloudRuntimeError extends HttpError {
   constructor(code: "cloud_runtime_revoked" | "cloud_runtime_unavailable") {
@@ -57,14 +67,14 @@ export function runtimeQualificationPredicate(mode: string, requireMcp = "false"
  * image/contract identity while v4 requires the saved generation pin. */
 export function runtimeCredentialQualificationJoin(mode: string, requireMcp: string): string {
   return `JOIN LATERAL (
-    SELECT qualification.native_capabilities FROM cloud_agent_runtime_qualifications qualification
+    SELECT qualification.native_capabilities,qualification.mcp_qualified FROM cloud_agent_runtime_qualifications qualification
     WHERE generation.runtime_id IS NULL AND engine.runtime_id IS NULL
       AND qualification.provider=generation.provider::text AND qualification.image_ref=generation.image_ref
       AND qualification.runtime_contract_sha256=engine.agent_runtime_contract_sha256 AND qualification.profile=engine.agent_runtime_profile
       AND qualification.profile='zeros-cloud-worker-v3' AND qualification.credential_kind=credential.kind AND qualification.enabled
       AND (NOT (${requireMcp}) OR qualification.mcp_qualified)
     UNION ALL
-    SELECT qualification.native_capabilities FROM cloud_runtime_qualifications qualification
+    SELECT qualification.native_capabilities,qualification.mcp_qualified FROM cloud_runtime_qualifications qualification
     JOIN cloud_runtime_bundles bundle ON bundle.runtime_id=qualification.runtime_id AND bundle.revoked_at IS NULL
     JOIN cloud_runtime_base_images base ON base.base_image_id=generation.runtime_base_image_id
       AND base.base_compatibility_id=qualification.base_compatibility_id AND base.revoked_at IS NULL

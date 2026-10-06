@@ -71,8 +71,10 @@ export class CloudAgentLease {
     if (!response.success || response.data.provider !== admission.provider || response.data.model !== admission.model)
       throw new Error("Cloud agent admission failed");
     const value = response.data;
-    if (admission.customization) {
-      if (!value.customization || !isDeepStrictEqual(value.customization.servers.filter(entry => entry.scope === "repository").map(entry => entry.server), admission.customization.repositoryServers))
+    if (admission.customization && !value.customization && admission.customization.version !== 3)
+      throw new Error("Cloud customization admission is unavailable. Update the cloud runtime and control plane.");
+    if (admission.customization && value.customization) {
+      if (!isDeepStrictEqual(value.customization.servers.filter(entry => entry.scope === "repository").map(entry => entry.server), admission.customization.repositoryServers))
         throw new Error("Cloud customization admission is unavailable. Update the cloud runtime and control plane.");
       const { digest, ...snapshot } = value.customization;
       if (digest !== cloudMcpDigest(snapshot)) throw new Error("Cloud customization admission is invalid");

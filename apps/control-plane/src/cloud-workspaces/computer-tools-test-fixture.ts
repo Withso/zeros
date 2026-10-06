@@ -37,7 +37,9 @@ async function insert(tx: Tx, table: string, row: Record<string, unknown>) {
 
 /** A valid registered v4 engine and recorded initiating lease. Tests can also
  * use its consent/session to exercise fresh runtime credential admission. */
-export async function seedComputerToolsFixture(pool: pg.Pool, marked = true) {
+export async function seedComputerToolsFixture(pool: pg.Pool, marked = true, qualification: {
+  mode?: "full" | "smoke"; mcpQualified?: boolean;
+} = {}) {
   const fixture = await seedReadyCloudWorkspace(pool);
   const config = { settingsSecretKeyV1: randomBytes(32).toString("base64url") } as CloudWorkspaceBackendConfig;
   const computer = new DatabaseCloudComputerV2Service(pool, config);
@@ -54,7 +56,8 @@ export async function seedComputerToolsFixture(pool: pg.Pool, marked = true) {
       expanded_bytes: 6, object_key: `runtime/v1/${runtimeId}.tar.gz`, source_commit: manifest.source.commit, architecture: "linux/amd64",
       node_version: "22.23.1", node_modules_abi: 127, bootstrap_protocol_version: 1, setup_protocol_version: 2, engine_protocol_version: 20, manifest_header: header });
     await insert(tx, "cloud_runtime_qualifications", { runtime_id: runtimeId, base_compatibility_id: compatibilityId, credential_kind: "cursor-api-key",
-      profile: "zeros-cloud-worker-v4", enabled: true, mcp_qualified: true, evidence: { mode: "full", checks: ["manifest_digest"] }, qualified_at: new Date() });
+      profile: "zeros-cloud-worker-v4", enabled: true, mcp_qualified: qualification.mcpQualified ?? true,
+      evidence: { mode: qualification.mode ?? "full", checks: ["manifest_digest"] }, qualified_at: new Date() });
     await insert(tx, "provider_connections", { id: providerId, org_id: fixture.organizationId, owner_kind: "organization", provider: "boat",
       display_name: "Computer tools fixture", credential_source: "hosted", current_version: 1, state: "active" });
     await insert(tx, "provider_connection_versions", { connection_id: providerId, org_id: fixture.organizationId, version: 1,

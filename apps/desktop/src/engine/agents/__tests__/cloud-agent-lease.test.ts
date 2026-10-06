@@ -13,6 +13,18 @@ function fixture(){
 }
 afterEach(()=>vi.useRealTimers());
 describe("private agent execution lifetime",()=>{
+  it("accepts a basic turn only when customization was explicitly optional", async () => {
+    vi.useFakeTimers(); const f = fixture();
+    const lease = await CloudAgentLease.admit({ ...admission, customization: { version: 3, repositoryServers: [] } },
+      f.request, new AbortController().signal, { onRetirementFailure: vi.fn() }, f.time);
+    expect(lease.customization).toBeNull();
+    expect(lease.nativeCapabilities).toBeNull();
+    await lease.close();
+    for (const version of [1, 2] as const) {
+      await expect(CloudAgentLease.admit({ ...admission, customization: { version, repositoryServers: [] } },
+        f.request, new AbortController().signal, { onRetirementFailure: vi.fn() }, f.time)).rejects.toThrow("customization admission is unavailable");
+    }
+  });
   it("freezes actor environment and retires the process when consent changes", async () => {
     vi.useFakeTimers(); const f=fixture();
     const environment={version:1,revision:"b".repeat(64),values:{ORG_SECRET:"synthetic-org-value"},

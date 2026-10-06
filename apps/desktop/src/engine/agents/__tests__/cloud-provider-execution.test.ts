@@ -10,8 +10,13 @@ import {AgentGateway} from "../gateway";
 import type {AgentAdapter} from "../types";
 import {testExecutionBoundary} from "./helpers/test-execution-boundary";
 import type { CloudComputerExecutionEnvironment } from "@zeros/protocol/cloud-agent-execution";
+import {readCloudRepositoryMcp} from "../cloud-mcp";
 
 vi.mock("../containment/cloud-native-boundary",()=>({CloudNativeBoundary:{prepare:vi.fn()}}));
+vi.mock("../cloud-mcp",async original=>{
+  const actual=await original<typeof import("../cloud-mcp")>();
+  return {...actual,readCloudRepositoryMcp:vi.fn(actual.readCloudRepositoryMcp)};
+});
 vi.mock("../containment/cloud-runtime-root.mjs",async original=>{
   const actual=await original<typeof import("../containment/cloud-runtime-root.mjs")>();
   return {...actual,resolveCloudRuntime:vi.fn(actual.resolveCloudRuntime)};
@@ -37,6 +42,18 @@ function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="c
   return {factory,input,workload,coordinator,controller};
 }
 describe("admitted native cloud diagnostic",()=>{
+  it("starts a v4 basic turn when optional customization is unqualified and reports the restriction", async () => {
+    vi.mocked(resolveCloudRuntime).mockReturnValue({ ...resolveCloudRuntime(), profile: "v4" } as ReturnType<typeof resolveCloudRuntime>);
+    vi.mocked(readCloudRepositoryMcp).mockResolvedValueOnce([]);
+    const { factory, input } = fixture();
+    const result = await factory.prepare({ ...input, customization: true });
+    try {
+      const execution = cloudProviderExecution(result.boundary)!;
+      expect(execution.lease.admission.customization?.version).toBe(3);
+      expect(execution.userServers).toEqual([]);
+      expect(result.boundary.status.parity.restrictions).toContain("user-mcp-disabled");
+    } finally { await result.boundary.stopAndProve(); }
+  });
   it.each(["claude","codex","cursor"] as const)("composes admitted computer and Design servers for %s and retires both with the execution",async provider=>{
     vi.mocked(resolveCloudRuntime).mockReturnValue({...resolveCloudRuntime(),profile:"v4"} as ReturnType<typeof resolveCloudRuntime>);
     const {factory,input}=fixture(provider,`${provider}-api-key`,1);

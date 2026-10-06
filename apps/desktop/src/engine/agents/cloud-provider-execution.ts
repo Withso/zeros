@@ -57,7 +57,8 @@ export function createCloudAgentExecutionFactory(options:{
     let redactor:CloudCustomizationRedactor|undefined;
     try{
       signal.throwIfAborted();
-      const requested=customization?{...admission,customization:{version:2 as const,repositoryServers:await readCloudRepositoryMcp(cwd)}}:admission;
+      const customizationVersion=resolveCloudRuntime().profile==="v4"?3 as const:2 as const;
+      const requested=customization?{...admission,customization:{version:customizationVersion,repositoryServers:await readCloudRepositoryMcp(cwd)}}:admission;
       lease=await CloudAgentLease.admit(requested,options.request,signal,options.supervisor);
       redactor=new CloudCustomizationRedactor([...Object.values(lease.environment?.values??{}),...(lease.customization?.servers??[]).flatMap(({server})=>
         Object.values(server.transport==="stdio"?server.env??{}:server.headers??{}))]);
