@@ -6,6 +6,7 @@ const migrations = [
   "0001_connections.sql",
   "0002_generation_revocations.sql",
   "0003_refresh_cooldown.sql",
+  "0004_all_models.sql",
 ] as const;
 /** Explicit owner-only command. The service never starts product migrations. */
 export async function migrateDevConnections(pool: pg.Pool) {

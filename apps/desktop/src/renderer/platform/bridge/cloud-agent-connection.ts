@@ -1,3 +1,4 @@
+import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
 import {
   CloudCommandSnapshotSchema,
   CloudCommandEntrySchema,
@@ -805,18 +806,18 @@ export class CloudAgentConnection {
               stopReason: entry.state === "cancelled" ? "cancelled" : "end_turn",
               response: {},
             };
-          if (entry && (["failed", "uncertain"].includes(entry.state) || entry.resultCode === "cloud_runtime_upgrade_required"))
+          if (entry && (["failed", "uncertain"].includes(entry.state) || isCloudAgentAdmissionCode(entry.resultCode)))
             return {
               type: "AGENT_PROMPT_FAILED",
               agentId: owner.agentId,
               sessionId: routeId(owner.id),
               executionId: routeId(owner.id),
               error:
-                entry.resultCode === "cloud_runtime_upgrade_required"
-                  ? "cloud_runtime_upgrade_required"
+                isCloudAgentAdmissionCode(entry.resultCode)
+                  ? entry.resultCode
                   : entry.state === "uncertain"
                   ? "The cloud command outcome is unknown. Review the transcript before retrying."
-                  : `Cloud command failed (${entry.resultCode ?? "unknown"})`,
+                  : "command_dispatch_rejected",
             };
           await new Promise<void>(resolve => {
             const timer = setTimeout(() => { wakeReceiptWait = undefined; resolve(); }, 1000);
@@ -825,7 +826,7 @@ export class CloudAgentConnection {
         }
       };
       let result = await Promise.race([completed, observeReceipt()]);
-      if (result.type === "AGENT_PROMPT_FAILED" && result.error !== "cloud_runtime_upgrade_required") {
+      if (result.type === "AGENT_PROMPT_FAILED" && !isCloudAgentAdmissionCode(result.error)) {
         // Deployed engines may discard the HTTP error code. Admission records
         // its denial before responding, so even an early generic terminal event
         // can recover this exact command's code without retrying the prompt.
@@ -834,8 +835,8 @@ export class CloudAgentConnection {
             request: { kind: "read", commandId },
           }));
           if (receipt.commandId === commandId && receipt.conversationId === owner.id &&
-              receipt.resultCode === "cloud_runtime_upgrade_required")
-            result = { ...result, error: "cloud_runtime_upgrade_required" };
+              isCloudAgentAdmissionCode(receipt.resultCode))
+            result = { ...result, error: receipt.resultCode };
         } catch { /* An unavailable receipt cannot prove a pre-provider denial. */ }
       }
       // A terminal receipt also ends the execution's interactive controls when
