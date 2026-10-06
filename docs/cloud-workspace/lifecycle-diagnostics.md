@@ -257,3 +257,39 @@ workspace; credentials must not be copied to an implementation workspace.
 
 The acceptance record must distinguish local tests, signed-Mac observations and
 provider evidence. No live resources are created by the E4 implementation tests.
+
+## Worker scheduling
+
+Lifecycle and setup workers accept payload-free PostgreSQL hints on
+`zeros_cloud_lifecycle_work` and `zeros_cloud_setup_work`. Migration 0134 emits
+these after committed eligible queue writes, prerequisite completion, and
+provider/workspace setup availability. The hints identify neither an owner nor
+an operation; each worker uses its existing authorized, fenced claim query.
+No start/stop/upgrade decision, setup verification, or retry deadline changes.
+
+One dedicated runtime-privilege connection per control-plane replica listens
+on both channels, using `DATABASE_LISTEN_URL` when configured and otherwise
+`DATABASE_URL`. It never consumes request-pool capacity. Reconnect repairs the
+notification gap by scheduling both workers; reconnect backoff is 1–30 seconds
+and sessions retire at the database connection lifetime. Notification failure
+leaves normal polling enabled. No new environment variable is required.
+
+Workers coalesce hints and retain one hint received during an active tick.
+They never overlap ticks. Notifications do not postpone the existing polling
+clock or accelerate lifecycle drift, lease/authority maintenance or orphan
+sweeps. Future retries and expired claims still progress through polling, using
+the existing `next_attempt_at`/lease checks. Stop discards pending hints, drains
+active lifecycle work, and retains setup cancellation behavior.
+
+The configured defaults are a 5,000 ms lifecycle interval and a 1,000 ms setup
+interval. Without contention, polling alone can add up to one interval at each
+handoff; notification delivery removes that intentional wait when available.
+This is a code-derived latency opportunity, not a live end-to-end measurement
+or a guarantee of 1–2 second wake. Provider restore, runtime verification,
+engine registration, client admission and the CONNECTED probe remain on the
+critical path. Validate live on disposable Alpha workspaces before claiming
+the target is met.
+
+Local workspaces (Personal or organization-owned) never enter these workers.
+Cloud authorization remains keyed by organization, workspace and generation;
+owner/placement switching introduces no new client state or wake behavior.
