@@ -58,6 +58,17 @@ describe("cloud backend provisioning workflow", () => {
   });
 });
 describe("release dependency and authority contracts", () => {
+  it("frees the Alpha slot only for a proven pre-mutation supersession", () => {
+    const text = workflow("release-alpha"), slot = job(text, "release-slot");
+    expect(slot).toContain("needs: ci");
+    expect(slot).toContain("if: github.event.repository.fork == false && needs.ci.result == 'success' && needs.ci.outputs.ready == 'false'");
+    expect(slot).toContain("permissions:\n      actions: write\n");
+    expect(slot).toContain('run: gh run cancel "$RUN_ID" --repo "$REPOSITORY"');
+    expect(slot).not.toMatch(/secrets\.|contents:|id-token:|environment:|actions\/checkout/);
+    // The barrier itself stays read-only; only this job may cancel the run.
+    expect(job(text, "ci")).not.toContain("actions: write");
+    for (const name of ["release-beta", "release"]) expect(workflow(name)).not.toContain("release-slot");
+  });
   it("builds the exact Alpha runtime without waiting for CI and publishes it after hosted promotion", () => {
     const text = workflow("release-alpha"), build = job(text, "runtime-build"), publish = job(text, "runtime-publish");
     // The read-only build starts with the run; only publication waits for the
