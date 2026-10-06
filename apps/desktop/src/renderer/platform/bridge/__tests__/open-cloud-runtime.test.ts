@@ -91,7 +91,7 @@ describe("cloud runtime admission fencing", () => {
     expect(mocks.admission).not.toHaveBeenCalled();
   });
   it.each(["abort", "account", "generation"])("does not admit after %s changes during an explicit wake", async reason => {
-    mocks.doc = { ...mocks.doc, status: "stopped" };
+    mocks.doc = { ...mocks.doc, status: "stopped", generation: { number: reason === "generation" ? 2 : 1 } };
     const wake = deferred<typeof mocks.doc>(); mocks.wake.mockReturnValue(wake.promise);
     const controller = new AbortController();
     const opening = openCloudRuntime(target, { wake: true, signal: controller.signal });
@@ -99,7 +99,7 @@ describe("cloud runtime admission fencing", () => {
     await vi.waitFor(() => expect(mocks.wake).toHaveBeenCalledOnce());
     if (reason === "abort") controller.abort();
     if (reason === "account") mocks.epoch++;
-    mocks.doc = { ...mocks.doc, status: "ready", generation: { number: reason === "generation" ? 0 : 1 } };
+    mocks.doc = { ...mocks.doc, status: "ready", generation: { number: 1 } };
     wake.resolve(mocks.doc);
     await rejected;
     expect(mocks.admission).not.toHaveBeenCalled();

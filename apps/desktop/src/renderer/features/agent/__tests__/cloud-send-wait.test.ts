@@ -47,14 +47,14 @@ describe("cloud queue readiness wait", () => {
   });
   it("caps a hung compute wait at fifteen minutes and observes terminal lifecycle errors while initialization is pending", async () => {
     const h = harness(); h.options.attempt.mockReturnValue(new Promise(() => {}));
-    let cause: Error | undefined;
-    h.wait.start("chat", { ...h.options, readiness: () => { if (cause) throw cause; return false; } });
+    const lifecycle: { cause?: Error } = {};
+    h.wait.start("chat", { ...h.options, readiness: () => { if (lifecycle.cause) throw lifecycle.cause; return false; } });
     await vi.advanceTimersByTimeAsync(899_999); expect(h.failed).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1); expect(h.failed).toHaveBeenCalledOnce();
     h.failed.mockClear();
-    h.wait.start("chat", { ...h.options, readiness: () => { if (cause) throw cause; return false; } });
-    cause = new CloudSendWaitError("Setup failed", "workspace_unavailable");
-    await vi.advanceTimersByTimeAsync(1_000); expect(h.failed).toHaveBeenCalledWith(cause); h.wait.clear();
+    h.wait.start("chat", { ...h.options, readiness: () => { if (lifecycle.cause) throw lifecycle.cause; return false; } });
+    lifecycle.cause = new CloudSendWaitError("Setup failed", "workspace_unavailable");
+    await vi.advanceTimersByTimeAsync(1_000); expect(h.failed).toHaveBeenCalledWith(lifecycle.cause); h.wait.clear();
   });
   it("keeps removal and a replacement wait independent of the cancelled completion", async () => {
     const h = harness(); let old!: (ready: boolean) => void;
