@@ -173,8 +173,6 @@ export async function runScopedCloudSetup(payload, {runtime = resolveCloudRuntim
 }
 
 function worker() {
-  const runtime = resolveCloudRuntimeChild();
-  const fixedEnvironment = {...FIXED_ENV, PATH:`${runtime.binRoot}:/usr/bin:/bin`};
   const privileged = process.argv[2] === "--worker";
   if (
     process.platform !== "linux" ||
@@ -183,6 +181,10 @@ function worker() {
     (!privileged && process.argv[2] !== "--unprivileged")
   )
     throw invalid();
+  // Computer admission binds the root worker to the full host runtime identity.
+  // After setpriv, the child can resolve only its pinned executable and paths.
+  const runtime = privileged ? resolveCloudRuntime() : resolveCloudRuntimeChild();
+  const fixedEnvironment = {...FIXED_ENV, PATH:`${runtime.binRoot}:/usr/bin:/bin`};
   if (privileged) {
     const gate = Buffer.alloc(1);
     if (readSync(3, gate, 0, 1, null) !== 1 || gate[0] !== 42) throw invalid();

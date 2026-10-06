@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import {
   closeSync,
   constants,
@@ -411,7 +412,7 @@ export async function runTemplateSetupRepro(journal, billingOrg, dependencies) {
     journal.phase = "probe";
     save(journal);
     journal.probe = sanitizeProbeReport(await probe(journal, material));
-    if (journal.probe.checks.some((check) => !check.ok))
+    if (journal.probe.checks.some((check) => !check.ok) || journal.probe.later?.some(stage => stage.outcome === "failed"))
       journal.failedChecks.push("probe_failed");
   } catch (error) {
     diagnose(journal.phase, error);
@@ -549,11 +550,13 @@ function privateFile(file, maximum = 256 * 1024) {
 // B4's commands API runs this program under sudo Python. It carries only the
 // probe source and secret-free expected material; no SSH or API stdin stream.
 function probeProgram(source, qualificationSource, material) {
-  return `import json,os,shutil,subprocess,sys,tempfile
+  // Compression keeps the one-shot source bundle inside Boat's command cap.
+  const payload = gzipSync(JSON.stringify({ source, qualificationSource, material })).toString("base64");
+  return `import base64,gzip,json,os,shutil,subprocess,sys,tempfile
 os.umask(0o077)
 directory=None
 try:
- data=json.loads(${JSON.stringify(JSON.stringify({ source, qualificationSource, material }))})
+ data=json.loads(gzip.decompress(base64.b64decode(${JSON.stringify(payload)})))
  directory=tempfile.mkdtemp(prefix='zeros-v2-test-s1-',dir='/run/zeros')
  file=directory+'/probe.mjs'
  with open(file,'x') as stream: stream.write(data['source'])

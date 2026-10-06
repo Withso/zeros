@@ -136,7 +136,10 @@ export function attestationFixture(version = 4) {
   const calls: { file: string; args: string[]; options: Record<string, unknown> }[] = [];
   let spawnOverride: ((file: string, args: string[]) => unknown) | undefined;
   let now = Date.parse("2026-10-04T00:00:00Z");
-  function execute(name = "attest-cloud-worker.mjs", args?: string[]) {
+  function execute(name = "attest-cloud-worker.mjs", args?: string[], observation: {
+    transform?: (source: string, name: string) => string;
+    globals?: Record<string, unknown>;
+  } = {}) {
     let stdout = "", stderr = "", exitCode = 0;
     const entry = path.join(sandbox, name), node = version === 4 ? `${root}/bin/node` : "/usr/local/bin/node";
     const token = "/run/zeros/.test-lock";
@@ -165,7 +168,9 @@ export function attestationFixture(version = 4) {
       if (cache.has(file)) return cache.get(file);
       const exports = {};
       cache.set(file, exports);
-      const source = fs.readFileSync(file, "utf8").replaceAll("import.meta.url", JSON.stringify(url.pathToFileURL(file).href));
+      const original = fs.readFileSync(file, "utf8");
+      const source = (observation.transform?.(original, path.basename(file)) ?? original)
+        .replaceAll("import.meta.url", JSON.stringify(url.pathToFileURL(file).href));
       const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
       const require = (id: string): unknown => {
         if (id === "node:fs") return filesystem;
@@ -187,7 +192,7 @@ export function attestationFixture(version = 4) {
         throw new Error(`Unexpected fixture import: ${id}`);
       };
       runInNewContext(compiled, { require, exports, module: { exports }, process: fakeProcess, Buffer, TextDecoder,
-        Date: class extends Date { static now() { return now; } }, setTimeout, clearTimeout }, { timeout: 5000 });
+        Date: class extends Date { static now() { return now; } }, setTimeout, clearTimeout, ...observation.globals }, { timeout: 5000 });
       return exports;
     }
     try { load(entry); } catch (error) {

@@ -10,7 +10,7 @@ import { useOrganizationProjects } from "../state/use-organization-projects";
 // ============================================
 //
 //   ┌──────────────────────────────┐
-//   │ ● ● ●            [cpu] [arch] │  40px title band (window drag)
+//   │ ● ● ● [▯]              [cpu] │  40px title band (window drag)
 //   │ ▭ Local ⌄                     │  organization switcher
 //   │ Home · Customize · Create     │  destinations (Create is an action)
 //   │ ───────────────────────────── │
@@ -34,14 +34,11 @@ import React, {
   useState,
 } from "react";
 import {
-  Archive,
   Blocks,
   Check,
   Ellipsis,
   Folder,
   House,
-  GitBranch,
-  PenTool,
   Plus,
   Settings,
 } from "lucide-react";
@@ -51,7 +48,6 @@ import { trackWorkspaceOpened } from "../platform/observability/analytics/agent-
 import { useNativeRuntime } from "../platform/runtime";
 import { useAuth } from "../features/auth";
 import { useAgentSessions } from "../features/agent/sessions-hooks";
-import { formatCompactAge } from "../features/agent/format-age";
 import {
   prefetchSettingsForRepo,
   usePrefetchSettings,
@@ -91,32 +87,18 @@ import { useOpenWorkspace } from "../state/use-open-workspace";
 import {
   notifyProjectsChanged,
   peekWorkspacesFor,
-  useArchivedWorkspaces,
   useLiveWorkspaces,
   useSyncProjectsToEngine,
   useWorkspacesFor,
 } from "../state/use-projects";
-import { useWarmWorkspaceHistory } from "../state/use-warm-workspace-history";
-import {
-  selectWorkspaceHistory,
-  workspaceIsReadOnly,
-} from "../state/workspace-history";
+import { workspaceIsReadOnly } from "../state/workspace-history";
 import {
   findProjectForFolder,
   findWorkspaceForFolder,
 } from "../state/workspace-resolution";
 import { cn } from "../shared/ui/cn";
 import { ZerosSpinner } from "../shared/ui/loading";
-import {
-  MENU_ITEM_RADIUS,
-  MENU_SURFACE_INSET,
-} from "../shared/ui/menu-surface";
 import { Button } from "../shared/ui/primitives/button";
-import {
-  Command,
-  CommandInput,
-  CommandList,
-} from "../shared/ui/primitives/command";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -124,11 +106,6 @@ import {
   DropdownMenuTrigger,
 } from "../shared/ui/primitives/dropdown-menu";
 import { toast } from "../shared/ui/primitives/elements";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "../shared/ui/primitives/popover";
 import { Tooltip } from "../shared/ui/primitives/tooltip";
 import { branchDisplayName } from "../shared/lib/branch-name";
 import { useAddProject } from "./add-project-provider";
@@ -172,11 +149,7 @@ import { useCustomWindowDrag } from "./use-custom-window-drag";
 import { useHomeSidebarResizeDrag } from "./use-home-sidebar-drag";
 import { useResizeHint } from "./use-resize-hint";
 import { warmWorkspaceFiles } from "./workspace-files-cache";
-import {
-  filterArchivedWorkspaces,
-  resolveRepoWorkspaceDestination,
-  workspaceLabel,
-} from "./workspace-tabs";
+import { resolveRepoWorkspaceDestination } from "./workspace-tabs";
 import { Surface } from "@/renderer/shared/ui/layout/surface";
 
 // --- CONSTANTS ---
@@ -189,9 +162,6 @@ import { Surface } from "@/renderer/shared/ui/layout/surface";
 // primitive's own `[&_svg]:` selector so twMerge drops its default size.
 const SIDEBAR_ENTRY_CLS =
   "flex h-7.5 w-full min-w-0 items-center justify-start gap-2.5 rounded-md border-0 bg-transparent px-2.5 py-0 text-left text-xs font-normal text-fg2 transition-colors duration-150 ease-out hover:bg-(--surface-hover) hover:text-fg2 data-[state=active]:bg-(--surface-hover) data-[state=active]:text-fg1 data-[state=active]:hover:text-fg1 [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg2 data-[state=active]:[&>svg]:text-fg1";
-// Title-band controls: 28px squares centred in the 40px band.
-const TITLE_ICON_BUTTON_CLS =
-  "h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-(--surface-hover) hover:text-fg1 data-[active=true]:bg-(--surface-hover) data-[active=true]:text-fg1";
 // The list's section label: 12px on the default fg2 tier.
 const SECTION_LABEL_CLS = "select-none truncate text-3xxs text-fg2";
 // The sidebar never squeezes the workspace below its column floors
@@ -274,173 +244,6 @@ function profileInitials(name: string | null, email: string | null): string {
   const first = words[0]?.[0] ?? "";
   const second = words.length > 1 ? (words[1][0] ?? "") : "";
   return (first + second).toUpperCase() || "·";
-}
-
-function archivedAge(workspace: Workspace): string {
-  const age = formatCompactAge(workspace.archivedAt ?? 0);
-  return age === "now"
-    ? "Archived now"
-    : age
-      ? `Archived ${age} ago`
-      : "Archived";
-}
-
-// --- CHILD COMPONENTS ---
-
-function ArchivedWorkspacePicker({ project }: { project: Project }) {
-  const warmHistory = useWarmWorkspaceHistory();
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const openWorkspace = useOpenWorkspace();
-  const activeOrganization = useActiveOrganization();
-  const { workspaces, loading, error, refresh } = useArchivedWorkspaces();
-  const { workspaces: live } = useWorkspacesFor(project.repoSlug);
-  const accessibleWorkspaces = useMemo(
-    () =>
-      filterRowsForOrganization(
-        selectWorkspaceHistory(live, workspaces),
-        activeOrganization,
-      ),
-    [activeOrganization, live, workspaces],
-  );
-
-  const allForProject = useMemo(
-    () => filterArchivedWorkspaces(accessibleWorkspaces, project.repoSlug, ""),
-    [accessibleWorkspaces, project.repoSlug],
-  );
-  const matches = useMemo(
-    () =>
-      filterArchivedWorkspaces(accessibleWorkspaces, project.repoSlug, query),
-    [accessibleWorkspaces, project.repoSlug, query],
-  );
-
-  useEffect(() => {
-    setQuery("");
-  }, [project.id]);
-
-  return (
-    <Popover
-      open={open}
-      onOpenChange={(nextOpen) => {
-        setOpen(nextOpen);
-        if (!nextOpen) setQuery("");
-      }}
-    >
-      <Tooltip label="Archived workspaces" side="bottom">
-        <PopoverTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className={TITLE_ICON_BUTTON_CLS}
-            data-active={open}
-            aria-label={`Archived workspaces for ${project.name}`}
-            aria-expanded={open}
-          >
-            <Archive className="size-3.5" strokeWidth={1.5} />
-          </Button>
-        </PopoverTrigger>
-      </Tooltip>
-      <PopoverContent
-        align="start"
-        sideOffset={5}
-        className="w-[320px] overflow-hidden p-0"
-      >
-        <Command shouldFilter={false}>
-          <CommandInput
-            autoFocus
-            aria-label="Search archived workspaces"
-            placeholder="Search archived workspaces…"
-            value={query}
-            onValueChange={setQuery}
-          />
-          <CommandList className="max-h-[320px]">
-            <div className="text-fg2 flex items-center gap-2 px-3 pt-2 pb-1 text-xs">
-              <span className="min-w-0 flex-1 truncate">{project.name}</span>
-              {!loading && !error && (
-                <span className="shrink-0 tabular-nums">
-                  {allForProject.length}
-                </span>
-              )}
-            </div>
-
-            {loading && allForProject.length === 0 ? (
-              <div className="min-h-12" aria-busy="true" />
-            ) : error ? (
-              <div className="px-3 py-4">
-                <p className="text-fg2 text-xs">
-                  Couldn’t load archived workspaces.
-                </p>
-                <button
-                  type="button"
-                  className="text-fg1 mt-2 text-xs hover:underline"
-                  onClick={refresh}
-                >
-                  Try again
-                </button>
-              </div>
-            ) : allForProject.length === 0 ? (
-              <div className="text-fg2 px-3 py-5 text-xs">
-                No archived workspaces in this repository.
-              </div>
-            ) : matches.length === 0 ? (
-              <div className="text-fg2 px-3 py-5 text-xs">
-                No archived workspaces match “{query.trim()}”.
-              </div>
-            ) : (
-              <div
-                className={MENU_SURFACE_INSET}
-                role="list"
-                aria-label={`${project.name} archived workspaces`}
-              >
-                {matches.map((workspace) => (
-                  <button
-                    type="button"
-                    key={workspace.id}
-                    onPointerEnter={() => warmHistory(workspace)}
-                    onFocus={() => warmHistory(workspace)}
-                    className={cn(
-                      "hover:bg-bg2 flex w-full min-w-0 items-center gap-2 px-2 py-2 text-left disabled:pointer-events-none disabled:opacity-60",
-                      MENU_ITEM_RADIUS,
-                    )}
-                    role="listitem"
-                    onClick={() => {
-                      setOpen(false);
-                      openWorkspace(workspace);
-                    }}
-                  >
-                    {workspace.kind === "design" ? (
-                      <PenTool
-                        className="text-fg2 size-3.5 shrink-0"
-                        strokeWidth={1.25}
-                        aria-hidden="true"
-                      />
-                    ) : (
-                      <GitBranch
-                        className="text-fg2 size-3.5 shrink-0"
-                        strokeWidth={1.25}
-                        aria-hidden="true"
-                      />
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="text-fg1 truncate text-xs">
-                        {workspaceLabel(workspace)}
-                      </div>
-                      <div className="text-fg2 truncate text-xs">
-                        {workspace.archivedAt == null
-                          ? "Folder missing"
-                          : archivedAge(workspace)}
-                      </div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </CommandList>
-        </Command>
-      </PopoverContent>
-    </Popover>
-  );
 }
 
 // --- ROOT COMPONENT ---
@@ -887,7 +690,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
         className="flex min-w-0 flex-1 flex-col overflow-hidden"
         aria-label="Workspace navigation"
       >
-        {/* 40px title band: the macOS traffic lights sit in its first 74px
+        {/* 40px title band: the macOS traffic lights sit in its first 80px
             (trafficLightPosition in electron/main.ts), the panel-left toggle
             right after them. The rest is a window drag handle carrying the
             app-level status controls. */}
@@ -899,29 +702,6 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
           <SidebarToggleButton collapsed={false} />
           <div className="min-w-0 flex-1" aria-hidden="true" />
           {!hidden && <ResourceMonitor />}
-          {contextProject?.isGitRepository !== false &&
-            (contextProject ? (
-              <ArchivedWorkspacePicker
-                key={contextProject.id}
-                project={contextProject}
-              />
-            ) : (
-              <Tooltip
-                label="Select a repository to view archived workspaces"
-                side="bottom"
-              >
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className={TITLE_ICON_BUTTON_CLS}
-                  aria-label="Archived workspaces"
-                  disabled
-                >
-                  <Archive className="size-3.5" strokeWidth={1.5} />
-                </Button>
-              </Tooltip>
-            ))}
         </div>
 
         <div className="flex shrink-0 flex-col gap-1 px-2">

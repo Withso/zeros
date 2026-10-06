@@ -6,6 +6,7 @@ import {
   syncBuiltinESMExports,
 } from "node:module";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url),
@@ -42,6 +43,9 @@ const SOURCES = new Set([
   "cloud-runtime-profile.mjs",
   "setup-cloud-workspace.mjs",
   "attest-cloud-worker.mjs",
+  "cloud-setup-process.mjs",
+  "cloud-engine-cgroup.mjs",
+  "cloud-engine-launcher.mjs",
 ]);
 const GATES = new Set([
   "execution",
@@ -139,11 +143,18 @@ const LAUNCHER_CODES = new Set([
   "ENOSPC",
   "EIO",
   "ETIMEDOUT",
+  "ENOBUFS",
+  "EPIPE",
   "ERR_MODULE_NOT_FOUND",
   "ERR_INVALID_ARG_TYPE",
   "ERR_DLOPEN_FAILED",
 ]);
 const LAUNCHER_MESSAGES = new Set([
+  "image_contract_invalid",
+  "repository_revision_invalid",
+  "Cloud runtime descriptor or installation is invalid",
+  "Invalid cloud setup process document",
+  "probe_command_failed",
   "Noncanonical cloud launch source",
   "Unsafe cloud launch source",
   "Unexpected cloud engine file projection",
@@ -276,6 +287,360 @@ export function sanitizeLauncherError(error) {
   };
   if (LAUNCHER_CODES.has(error?.code)) result.code = error.code;
   return result;
+}
+
+const SETUP_FIELDS = [
+  "secure",
+  "unprivileged",
+  "detachedDescendantsRetired",
+  "timeoutRetired",
+];
+const SETUP_PHASES = new Set([
+  "start",
+  "worker_runtime",
+  "worker_gate",
+  "worker_payload",
+  "worker_repository",
+  "worker_setpriv",
+  "worker_shell",
+  "worker_exit",
+  "qualify_start",
+  "qualify_canary",
+  "qualify_identity",
+  "qualify_retirement",
+  "qualify_timeout",
+  "qualify_cleanup",
+]);
+const SIGNALS = new Set([
+  "SIGTERM",
+  "SIGKILL",
+  "SIGINT",
+  "SIGABRT",
+  "SIGSEGV",
+  "SIGPIPE",
+]);
+const IDENTITY_FIELDS = [
+  "runtimeId",
+  "manifestSha256",
+  "baseCompatibilityId",
+  "bootId",
+  "supervisorSessionId",
+  "cgroupRoot",
+];
+const boundedMs = (value) =>
+  Number.isFinite(value) && value >= 0 && value <= 600000
+    ? Math.round(value)
+    : null;
+const exitCode = (value) =>
+  Number.isSafeInteger(value) && value >= -128 && value <= 255 ? value : null;
+
+/** Missing JSON means unobserved checks, not four false security predicates. */
+export function setupProbeResult(result, durationMs, timeoutMs) {
+  let report = null;
+  try {
+    const value = JSON.parse(result.stdout);
+    if (value && typeof value === "object" && !Array.isArray(value))
+      report = Object.fromEntries(
+        SETUP_FIELDS.map((key) => [
+          key,
+          typeof value[key] === "boolean" ? value[key] : null,
+        ]),
+      );
+  } catch {
+    /* Raw output stays private. */
+  }
+  return {
+    exitCode: exitCode(result.status),
+    signal: SIGNALS.has(result.signal) ? result.signal : null,
+    errorCode: LAUNCHER_CODES.has(result.error?.code)
+      ? result.error.code
+      : null,
+    durationMs: boundedMs(durationMs),
+    timeoutMs: boundedMs(timeoutMs),
+    timedOut: result.error?.code === "ETIMEDOUT",
+    outputLimit: result.error?.code === "ENOBUFS",
+    report,
+  };
+}
+
+function projectSetupResult(value) {
+  if (!value || typeof value !== "object") return undefined;
+  return setupProbeResult(
+    {
+      status: value.exitCode,
+      signal: value.signal,
+      error: { code: value.errorCode },
+      stdout: JSON.stringify(value.report),
+    },
+    value.durationMs,
+    value.timeoutMs,
+  );
+}
+
+function projectSetupEvent(value) {
+  if (
+    !value ||
+    !["phase", "error", "result", "identity"].includes(value.kind) ||
+    value.component !== "setup" ||
+    !["qualify", "worker", "probe"].includes(value.mode) ||
+    !SETUP_PHASES.has(value.phase)
+  )
+    return null;
+  const result = {
+    kind: value.kind,
+    component: "setup",
+    mode: value.mode,
+    phase: value.phase,
+    durationMs: boundedMs(value.durationMs),
+  };
+  if (value.error) result.error = sanitizeLauncherError(value.error);
+  if (value.result) result.result = projectSetupResult(value.result);
+  if (value.identity)
+    result.identity = Object.fromEntries(
+      IDENTITY_FIELDS.map((key) => [key, value.identity[key] === true]),
+    );
+  if (value.canary)
+    result.canary = Object.fromEntries(
+      ["exitZero", "ready", "timedOut", "overflow"].map((key) => [
+        key,
+        value.canary[key] === true,
+      ]),
+    );
+  if (value.observed) result.observed = projectMetadata(value.observed);
+  if (Array.isArray(value.sites))
+    result.sites = value.sites
+      .filter(
+        (site) =>
+          SOURCES.has(site?.source) &&
+          /^[A-Za-z_][A-Za-z0-9_]{0,80}$/.test(site.function ?? "") &&
+          !/(?:gh[spou]_|github_pat_|condw_|sk[_-])/.test(site.function) &&
+          Number.isSafeInteger(site.line) &&
+          site.line > 0 &&
+          site.line < 100000,
+      )
+      .slice(0, 8)
+      .map((site) => ({
+        source: site.source,
+        function: site.function,
+        line: site.line,
+      }));
+  return result;
+}
+
+function projectAttester(value) {
+  if (!value || typeof value !== "object") return undefined;
+  return {
+    stages: (Array.isArray(value.stages) ? value.stages : [])
+      .slice(0, STAGES.size)
+      .filter(
+        (item) =>
+          STAGES.has(item?.stage) &&
+          ["passed", "failed", "running", "not_reached"].includes(item.outcome),
+      )
+      .map((item) => ({
+        stage: item.stage,
+        outcome: item.outcome,
+        durationMs: boundedMs(item.durationMs),
+        failedChecks: (Array.isArray(item.failedChecks)
+          ? item.failedChecks
+          : []
+        )
+          .filter((check) => V4_CHECKS.has(check))
+          .slice(0, 32),
+      })),
+    ...(value.setup ? { setup: projectSetupResult(value.setup) } : {}),
+    events: (Array.isArray(value.events) ? value.events : [])
+      .slice(0, 64)
+      .map(projectSetupEvent)
+      .filter(Boolean),
+    ...(value.truncated === true ? { truncated: true } : {}),
+  };
+}
+
+/** Add observations only, on the same source lines. No admission predicate,
+ * timeout, command, payload, identity or return value is replaced. */
+export function instrumentSetupDiagnosticSource(source, name) {
+  const event = (kind, expression) =>
+    ` globalThis.__zerosTemplateSetupEvent?.(${JSON.stringify(kind)}, ${expression});`;
+  if (name === "attest-cloud-worker.mjs") {
+    source = source.replace(
+      "export function cloudV4Diagnostic(error, stage) {",
+      "export function cloudV4Diagnostic(error, stage) {" +
+        " globalThis.__zerosTemplateSetupObserve?.(error, stage);",
+    );
+    return source.replace(
+      /((?:let )?stage = "(validate_input|lock|verify_tree|qualify_engine|run_setup|publish_proof)";)/g,
+      (match, _assignment, stage) =>
+        match + event("stage", `{ stage: ${JSON.stringify(stage)} }`),
+    );
+  }
+  if (name !== "cloud-setup-process.mjs") return source;
+  source = source.replace(
+    '  } finally {\n    await new CloudEngineCgroup({runtime,kind:"setup"}).retire();',
+    "  } catch (error) {" +
+      event("error", "{ error }") +
+      ' throw error; } finally {\n    await new CloudEngineCgroup({runtime,kind:"setup"}).retire();',
+  );
+  const phase = (name) => event("phase", `{ phase: ${JSON.stringify(name)} }`);
+  for (const [anchor, label] of [
+    ["function worker() {", "worker_runtime"],
+    ["if (privileged) {", "worker_gate"],
+    ["const data = Buffer.alloc(MAX_DOCUMENT_BYTES + 1);", "worker_payload"],
+    [
+      "const encoded = Buffer.from(JSON.stringify(payload));",
+      "worker_repository",
+    ],
+    ["export async function qualifyCloudSetupProcess() {", "qualify_start"],
+    ["const command = `python3", "qualify_canary"],
+    [
+      'const identity = JSON.parse(readFileSync(marker, "utf8"));',
+      "qualify_identity",
+    ],
+    ['const before = readFileSync(counter, "utf8");', "qualify_retirement"],
+    ["const timeout = await runScopedCloudSetup({", "qualify_timeout"],
+    [
+      'await new CloudEngineCgroup({runtime,kind:"setup"}).retire();',
+      "qualify_cleanup",
+    ],
+  ]) {
+    // Function/gate anchors need the observation inside their body; other
+    // statements need it before evaluation so exceptions keep the right phase.
+    source = source.replace(
+      anchor,
+      anchor.endsWith("{") && !anchor.includes("await")
+        ? anchor + phase(label)
+        : phase(label) + " " + anchor,
+    );
+  }
+  source = source.replace(
+    /const runtime = (?:privileged \? resolveCloudRuntime\(\) : )?resolveCloudRuntimeChild\(\);/,
+    (match) =>
+      match +
+      event(
+        "identity",
+        `{ identity: Object.fromEntries(${JSON.stringify(IDENTITY_FIELDS)}.map(key => [key, typeof runtime[key] === 'string'])) }`,
+      ),
+  );
+  source = source.replace(
+    "process.exitCode = result.status ?? 125;",
+    (match) => event("result", "{ phase: 'worker_exit', result } ") + match,
+  );
+  source = source.replace(
+    'const identity = JSON.parse(readFileSync(marker, "utf8"));',
+    (match) =>
+      event(
+        "result",
+        "{ canary: { exitZero: result.code === 0, ready: result.stdout.trim() === 'ready', timedOut: result.timedOut, overflow: result.overflow } }",
+      ) + match,
+  );
+  return source.replace(
+    '} catch {\n    process.stderr.write("Cloud setup process could not be admitted\\n");',
+    "} catch (error) {" +
+      event("error", "{ error }") +
+      '\n    process.stderr.write("Cloud setup process could not be admitted\\n");',
+  );
+}
+
+const LATER_STAGES = {
+  proof_preconditions: [],
+  consume_proof: ["successful_attestation"],
+  serve_view: [],
+  checkout_identity: [],
+  checkout_branch: [],
+  checkout_revision: [],
+  hook_worker: [],
+  checkout_fetch_and_switch: ["org_read_grant", "accepted_commit_fetch"],
+  github_access: ["org_read_grant", "github_origin_fetch_and_revocation"],
+  repository_hooks: ["fresh_setup_materials", "revoked_org_read_grant"],
+  serve_engine: ["successful_attestation", "fresh_setup_materials"],
+  preview_links: ["registered_engine", "provider_ingress"],
+  engine_registration: ["fresh_setup_materials", "registered_engine"],
+  engine_readiness: ["registered_engine", "readiness_token"],
+};
+const PRECONDITIONS = new Set(
+  Object.values(LATER_STAGES)
+    .flat()
+    .concat(["probe_preparation", "deadline", "org_read_grant"]),
+);
+const LATER_CHECKS = new Set([
+  "identityUnchanged",
+  "namespaceUnchanged",
+  "directoryWritable",
+  "proofConsumed",
+  "primaryProjection",
+  "workerWritable",
+  "originsMatch",
+  "headsMatch",
+  "branchValid",
+  "revisionPresent",
+  "workerCwd",
+  "workerUid",
+  "exitZero",
+]);
+
+function projectLater(value) {
+  return (Array.isArray(value) ? value : [])
+    .slice(0, Object.keys(LATER_STAGES).length)
+    .filter(
+      (item) =>
+        Object.hasOwn(LATER_STAGES, item?.stage) &&
+        ["passed", "failed", "precondition"].includes(item.outcome),
+    )
+    .map((item) => ({
+      stage: item.stage,
+      outcome: item.outcome,
+      durationMs: boundedMs(item.durationMs),
+      ...(item.error ? { error: sanitizeLauncherError(item.error) } : {}),
+      ...(Array.isArray(item.requires)
+        ? {
+            requires: item.requires
+              .filter((key) => PRECONDITIONS.has(key))
+              .slice(0, 8),
+          }
+        : {}),
+      ...(item.checks
+        ? {
+            checks: Object.fromEntries(
+              Object.entries(item.checks).filter(
+                ([key, value]) =>
+                  LATER_CHECKS.has(key) && typeof value === "boolean",
+              ),
+            ),
+          }
+        : {}),
+      ...(item.process ? { process: projectSetupResult(item.process) } : {}),
+    }));
+}
+
+/** Independent preflights keep running after the original attestation fails.
+ * Only the attester can authorize proof consumption; never synthesize proof. */
+export async function runLaterSetupDiagnostics({
+  imagePassed,
+  operations = {},
+  deadlineMs = Date.now() + 90000,
+  now = Date.now,
+}) {
+  const results = [];
+  for (const [stage, requires] of Object.entries(LATER_STAGES)) {
+    const started = now();
+    const entry = { stage, outcome: "precondition", durationMs: 0 };
+    results.push(entry);
+    if (stage === "consume_proof" && !imagePassed) entry.requires = requires;
+    else if (!operations[stage])
+      entry.requires = requires.length ? requires : ["probe_preparation"];
+    else if (now() >= deadlineMs) entry.requires = ["deadline"];
+    else
+      try {
+        Object.assign(entry, { outcome: "passed" }, await operations[stage]());
+      } catch (error) {
+        Object.assign(entry, {
+          outcome: "failed",
+          error: sanitizeLauncherError(error),
+        });
+      }
+    entry.durationMs = now() - started;
+  }
+  return projectLater(results);
 }
 
 function projectQualification(value) {
@@ -545,12 +910,14 @@ export function sanitizeProbeReport(value) {
     if (item.check === "image")
       for (const key of ["qualification", "attesterQualification"])
         if (item[key]) result[key] = projectQualification(item[key]);
+    if (item.check === "image" && item.attester) result.attester = projectAttester(item.attester);
     return result;
   });
   return {
     schema: value.schema,
     checks,
     paths: value.paths.map(projectMetadata).filter(Boolean),
+    ...(Array.isArray(value.later) ? { later: projectLater(value.later) } : {}),
     ...(Array.isArray(value.directories)
       ? {
           directories: value.directories
@@ -568,7 +935,15 @@ export function serializeProbeReport(value) {
   const report = sanitizeProbeReport(value);
   let output = JSON.stringify(report) + "\n";
   while (Buffer.byteLength(output) > 65536) {
+    const trace = report.checks.flatMap(item => (item.attester?.events ?? [])
+      .filter(event => event.observed || event.sites?.length)
+      .map(event => ({ attester: item.attester, event })))[0];
     if (report.paths.length) report.paths.pop();
+    else if (trace) {
+      if (trace.event.observed) delete trace.event.observed;
+      else trace.event.sites.pop();
+      trace.attester.truncated = true;
+    }
     else {
       const listing = report.directories?.reduce(
         (largest, item) =>
@@ -675,12 +1050,75 @@ export function probeFailureSites(error) {
 
 const self = fileURLToPath(import.meta.url),
   traceFile = self + ".attester.json",
-  qualificationFile = self + ".qualification.json";
+  qualificationFile = self + ".qualification.json",
+  eventsFile = self + ".events.jsonl",
+  setupResultFile = self + ".setup.json";
 const observerUrl = pathToFileURL(self).href + "?observer";
 
 function observeAttester() {
   const trace = installFilesystemTrace();
+  const started = performance.now();
+  let phase = "start";
+  const mode =
+    process.argv[2] === "--worker"
+      ? "worker"
+      : process.argv[2] === "--qualify"
+        ? "qualify"
+        : "probe";
+  const append = (value) => {
+    try {
+      fs.appendFileSync(eventsFile, JSON.stringify(value) + "\n", {
+        mode: 0o600,
+      });
+    } catch {
+      /* Observation cannot change a result. */
+    }
+  };
+  globalThis.__zerosTemplateSetupEvent = (kind, value = {}) => {
+    if (kind === "stage") {
+      if (STAGES.has(value.stage) && process.argv.length === 4)
+        append({
+          component: "attester",
+          kind,
+          stage: value.stage,
+          atMs: Date.now(),
+        });
+      return;
+    }
+    if (SETUP_PHASES.has(value.phase)) phase = value.phase;
+    const projected = projectSetupEvent({
+      ...value,
+      kind,
+      component: "setup",
+      mode,
+      phase,
+      durationMs: performance.now() - started,
+      ...(value.error
+        ? { sites: probeFailureSites(value.error), observed: trace.observed() }
+        : {}),
+      ...(value.result
+        ? {
+            result: setupProbeResult(
+              value.result,
+              performance.now() - started,
+              undefined,
+            ),
+          }
+        : {}),
+    });
+    if (projected) append(projected);
+  };
   globalThis.__zerosTemplateSetupObserve = (error, stage) => {
+    if (process.argv.length === 4)
+      append({
+        component: "attester",
+        kind: "completion",
+        stage: STAGES.has(stage) ? stage : "done",
+        atMs: Date.now(),
+        failedChecks: error
+          ? [V4_CHECKS.has(error.check) ? error.check : "diagnostic_missing"]
+          : [],
+      });
     if (!error) return;
     try {
       fs.writeFileSync(
@@ -706,19 +1144,17 @@ function observeAttester() {
       const result = nextLoad(url, context);
       if (
         url.startsWith("file:///opt/zeros-infra/") &&
-        url.endsWith("/lib/zeros/attest-cloud-worker.mjs")
+        ["attest-cloud-worker.mjs", "cloud-setup-process.mjs"].some((name) =>
+          url.endsWith("/lib/zeros/" + name),
+        )
       ) {
         const source =
           typeof result.source === "string"
             ? result.source
             : Buffer.from(result.source).toString("utf8");
-        const anchor = "export function cloudV4Diagnostic(error, stage) {";
         return {
           ...result,
-          source: source.replace(
-            anchor,
-            anchor + " globalThis.__zerosTemplateSetupObserve?.(error, stage);",
-          ),
+          source: instrumentSetupDiagnosticSource(source, path.basename(url)),
         };
       }
       return result;
@@ -740,7 +1176,38 @@ function observeAttester() {
         observerUrl,
         ...args.slice(index + 1),
       ];
-    const result = spawnSync(file, args, options);
+    const setup =
+      file === process.execPath &&
+      args?.[0]?.endsWith("/cloud-setup-process.mjs") &&
+      args[1] === "--qualify";
+    const started = performance.now();
+    const result = spawnSync(
+      file,
+      setup ? ["--import", observerUrl, ...args] : args,
+      options,
+    );
+    if (setup) {
+      try {
+        fs.writeFileSync(
+          setupResultFile,
+          JSON.stringify(
+            setupProbeResult(
+              result,
+              performance.now() - started,
+              options?.timeout,
+            ),
+          ),
+          { mode: 0o600 },
+        );
+      } catch {
+        /* Original result stays intact. */
+      }
+    }
+    if (file === "/usr/bin/setpriv" || file === "/bin/bash")
+      globalThis.__zerosTemplateSetupEvent("result", {
+        phase: file === "/usr/bin/setpriv" ? "worker_setpriv" : "worker_shell",
+        result,
+      });
     if (
       file === process.execPath &&
       args?.[0]?.endsWith("/cloud-engine-launcher.mjs") &&
@@ -758,7 +1225,78 @@ function observeAttester() {
     }
     return result;
   };
+  const spawn = processes.spawn;
+  processes.spawn = (file, args, options) =>
+    spawn(
+      file,
+      file === process.execPath &&
+        args?.[0]?.endsWith("/cloud-setup-process.mjs") &&
+        args[1] === "--worker"
+        ? ["--import", observerUrl, ...args]
+        : args,
+      options,
+    );
   syncBuiltinESMExports();
+}
+
+function readAttesterDetails() {
+  let events = [],
+    setup;
+  try {
+    const bytes = native.readFileSync(eventsFile, "utf8");
+    if (Buffer.byteLength(bytes) <= 256 * 1024)
+      events = bytes
+        .trim()
+        .split("\n")
+        .slice(0, 256)
+        .flatMap((line) => {
+          try {
+            return [JSON.parse(line)];
+          } catch {
+            return [];
+          }
+        });
+  } catch {
+    /* Never copy raw child output. */
+  }
+  try {
+    setup = JSON.parse(native.readFileSync(setupResultFile, "utf8"));
+  } catch {
+    /* A skipped probe is explicit. */
+  }
+  const stageEvents = events.filter((event) => event.component === "attester");
+  const stages = [
+    "validate_input",
+    "lock",
+    "verify_tree",
+    "qualify_engine",
+    "run_setup",
+    "publish_proof",
+  ].map((stage) => {
+    const index = stageEvents.findIndex(
+      (event) => event.kind === "stage" && event.stage === stage,
+    );
+    const start = stageEvents[index],
+      end = stageEvents[index + 1];
+    const failedChecks = end?.kind === "completion" ? end.failedChecks : [];
+    return {
+      stage,
+      outcome: !start
+        ? "not_reached"
+        : !end
+          ? "running"
+          : failedChecks.length
+            ? "failed"
+            : "passed",
+      durationMs: start && end ? end.atMs - start.atMs : null,
+      failedChecks,
+    };
+  });
+  return projectAttester({
+    stages,
+    setup,
+    events: events.filter((event) => event.component === "setup"),
+  });
 }
 
 export function runQualificationDiagnostics(
@@ -810,6 +1348,8 @@ function exposeSetupHelpers() {
   registerHooks({
     load(url, context, nextLoad) {
       const result = nextLoad(url, context);
+      if (url.startsWith("file:///opt/zeros-infra/") && url.endsWith("/lib/zeros/cloud-computer-checkout.mjs"))
+        return { ...result, source: String(result.source) + "\nexport { identity as s1RepositoryIdentity };\n" };
       if (
         url.startsWith("file:///opt/zeros-infra/") &&
         url.endsWith("/lib/zeros/setup-cloud-workspace.mjs")
@@ -832,6 +1372,254 @@ function exposeSetupHelpers() {
   });
 }
 
+function laterOperations(
+  runtime,
+  material,
+  setup,
+  attester,
+  computer,
+  initialBinding,
+  deadlineMs,
+) {
+  const primaryRepo = material.computer.template.repositoryManifest.find(
+    (repo) => repo.id === material.computer.primaryRepositoryId,
+  );
+  const primary = `/srv/zeros/files/repos/${primaryRepo.owner}/${primaryRepo.name}`;
+  const run = (file, args, timeout = 15000) => {
+    timeout = Math.min(timeout, deadlineMs - Date.now());
+    if (timeout < 1)
+      throw Object.assign(new Error("probe_command_failed"), {
+        code: "ETIMEDOUT",
+      });
+    const started = performance.now();
+    const result = processes.spawnSync(file, args, {
+      cwd: "/",
+      encoding: "utf8",
+      timeout,
+      maxBuffer: 65536,
+      env: {
+        PATH: `${runtime.binRoot}:/usr/bin:/bin`,
+        HOME: "/srv/zeros/home/agent",
+        LANG: "C.UTF-8",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+    });
+    return {
+      result,
+      process: setupProbeResult(result, performance.now() - started, timeout),
+    };
+  };
+  const git = async (directory, args) => {
+    const { result } = run("/usr/bin/setpriv", [
+      "--no-new-privs",
+      "--bounding-set=-all",
+      "--inh-caps=-all",
+      "--ambient-caps=-all",
+      "--reuid=10001",
+      "--regid=10001",
+      "--clear-groups",
+      "/usr/bin/git",
+      "-C",
+      directory,
+      "-c",
+      "credential.helper=",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "core.fsmonitor=false",
+      "-c",
+      "protocol.allow=never",
+      ...args,
+    ]);
+    if (result.status !== 0 || result.error || result.signal)
+      throw new Error("repository_revision_invalid");
+    return result.stdout.trim();
+  };
+  return {
+    proof_preconditions: () => {
+      const current = attester.verifyCloudV4Installation();
+      const checks = {
+        identityUnchanged: [...IDENTITY_FIELDS, "installerReceiptSha256"].every(
+          (key) => runtime[key] === current[key],
+        ),
+        namespaceUnchanged:
+          JSON.stringify(attester.cloudV4LaunchBinding()) ===
+          JSON.stringify(initialBinding),
+        directoryWritable: false,
+      };
+      attester.requireCloudV4AdmissionDirectory();
+      const file = `/run/zeros/zeros-v2-test-proof-${randomUUID()}.json`;
+      try {
+        setup.s1AtomicWrite(file, '{"diagnostic":true}\n', { mode: 0o400 });
+        checks.directoryWritable = true;
+      } finally {
+        fs.rmSync(file, { force: true });
+      }
+      return {
+        outcome: Object.values(checks).every(Boolean) ? "passed" : "failed",
+        checks,
+      };
+    },
+    consume_proof: () => {
+      const result = run(
+        "/usr/bin/flock",
+        [
+          "--no-fork",
+          "--nonblock",
+          "--conflict-exit-code",
+          "75",
+          "/run/zeros/engine.lock",
+          runtime.node,
+          runtime.helpers.consumeAdmission,
+        ],
+        30000,
+      );
+      const proofConsumed =
+        result.result.status === 0 &&
+        !result.result.error &&
+        !result.result.signal;
+      return {
+        outcome: proofConsumed ? "passed" : "failed",
+        checks: { proofConsumed },
+        process: result.process,
+      };
+    },
+    serve_view: async () => {
+      const launcher = await import(pathToFileURL(runtime.helpers.launcher));
+      const view = await import(
+        pathToFileURL(`${runtime.libRoot}/cloud-engine-view.mjs`)
+      );
+      const source = {
+        ZEROS_CLOUD_RUNTIME_B64: Buffer.from(
+          JSON.stringify({
+            execution: material.execution,
+            engine: { instanceId: material.engine.instanceId },
+          }),
+        ).toString("base64url"),
+      };
+      const profile = launcher.prepareCloudEngineView(runtime, source, "serve");
+      try {
+        const args = view.cloudEngineViewArguments(
+          "serve",
+          4,
+          runtime,
+          profile.viewDirectory,
+          profile.primaryRepository,
+        );
+        view.cloudEngineViewEnvironment(source, "serve", runtime);
+        const writable = run("/usr/bin/setpriv", [
+          "--reuid=10001",
+          "--regid=10001",
+          "--clear-groups",
+          "/usr/bin/test",
+          "-w",
+          primary,
+        ]);
+        const checks = {
+          primaryProjection:
+            profile.primaryRepository === primary && args.includes(primary),
+          workerWritable:
+            writable.result.status === 0 &&
+            !writable.result.error &&
+            !writable.result.signal,
+        };
+        return {
+          outcome: Object.values(checks).every(Boolean) ? "passed" : "failed",
+          checks,
+        };
+      } finally {
+        profile.releaseView?.();
+      }
+    },
+    checkout_identity: async () => {
+      for (const repo of material.computer.template.repositoryManifest) {
+        const directory = `/srv/zeros/files/repos/${repo.owner}/${repo.name}`;
+        const head = await computer.s1RepositoryIdentity(
+          directory,
+          { cloneUrl: `https://github.com/${repo.owner}/${repo.name}.git` },
+          git,
+        );
+        if (
+          head !== repo.sha &&
+          !(
+            repo.id === material.computer.primaryRepositoryId &&
+            head === material.repository.revision
+          )
+        )
+          throw new Error("repository_revision_invalid");
+      }
+      return { checks: { originsMatch: true, headsMatch: true } };
+    },
+    checkout_branch: async () => {
+      const requested = material.computer.requestedRevision;
+      const branch = requested.startsWith("refs/heads/")
+        ? requested.slice(11)
+        : /^[a-f0-9]{40}$/.test(requested) || requested.startsWith("refs/")
+          ? null
+          : requested;
+      if (branch) await git(primary, ["check-ref-format", "--branch", branch]);
+      return { checks: { branchValid: true } };
+    },
+    checkout_revision: async () => {
+      try {
+        await git(primary, [
+          "cat-file",
+          "-e",
+          `${material.repository.revision}^{commit}`,
+        ]);
+      } catch {
+        return {
+          outcome: "precondition",
+          checks: { revisionPresent: false },
+          requires: ["org_read_grant"],
+        };
+      }
+      return { checks: { revisionPresent: true } };
+    },
+    hook_worker: async () => {
+      if (deadlineMs - Date.now() < 20000)
+        return { outcome: "precondition", requires: ["deadline"] };
+      const setupProcess = await import(
+        pathToFileURL(runtime.helpers.setupProcess)
+      );
+      const started = performance.now();
+      const result = await setupProcess.runScopedCloudSetup({
+        version: 1,
+        environment: {},
+        timeoutMs: 10000,
+        command: `test "$(id -u)" = 10001 && test "$PWD" = '${primary}' && printf zeros-template-hook-ok`,
+      });
+      const ok =
+        result.code === 0 &&
+        !result.signal &&
+        !result.timedOut &&
+        !result.overflow &&
+        result.stdout === "zeros-template-hook-ok";
+      return {
+        outcome: ok ? "passed" : "failed",
+        checks: { workerCwd: ok, workerUid: ok, exitZero: result.code === 0 },
+        process: setupProbeResult(
+          {
+            status: result.code,
+            signal: result.signal,
+            error: {
+              code: result.timedOut
+                ? "ETIMEDOUT"
+                : result.overflow
+                  ? "ENOBUFS"
+                  : undefined,
+            },
+          },
+          performance.now() - started,
+          10000,
+        ),
+      };
+    },
+  };
+}
+
 async function main() {
   process.umask(0o077);
   const deadlineMs = Date.now() + 400000;
@@ -848,6 +1636,7 @@ async function main() {
     paths: [],
     directories: collectProbeDirectories(),
   };
+  let imagePassed = false, operations = {};
   const step = async (check, run) => {
     const entry = { check, ok: false };
     report.checks.push(entry);
@@ -917,6 +1706,7 @@ async function main() {
       )
         throw new Error("runtime_pin_mismatch");
     });
+    observeAttester();
     exposeSetupHelpers();
     const setup = await import(
       pathToFileURL(`${lib}/setup-cloud-workspace.mjs`)
@@ -969,6 +1759,9 @@ async function main() {
       pathToFileURL(`${lib}/attest-cloud-worker.mjs`)
     );
     await step("v4_installation", () => attester.verifyCloudV4Installation());
+    const initialBinding = attester.cloudV4LaunchBinding();
+    // Construct operations without executing any later stage yet.
+    operations = laterOperations(runtime, material, setup, attester, computer, initialBinding, deadlineMs);
     const spawn = processes.spawn;
     processes.spawn = (file, args, options) =>
       spawn(
@@ -988,6 +1781,7 @@ async function main() {
         await setup.attestImage(material, profile, (gates) => {
           entry.gates = gates;
         });
+        imagePassed = true;
       } catch (error) {
         try {
           Object.assign(
@@ -997,27 +1791,22 @@ async function main() {
         } catch {
           /* Closed setup gates remain. */
         }
-        if (
-          entry.stage === "qualify_engine" &&
-          entry.failedChecks?.includes("containment_smoke")
-        ) {
-          try {
-            entry.attesterQualification = projectQualification(
-              JSON.parse(native.readFileSync(qualificationFile, "utf8")),
-            );
-          } catch {
-            /* The original launcher may have returned no report. */
-          }
+        if (entry.stage === "qualify_engine" && entry.failedChecks?.includes("containment_smoke")) {
           entry.qualification = runQualificationDiagnostics(runtime, {
-            deadlineMs,
+            deadlineMs: deadlineMs - 60000,
           });
         }
         throw error;
+      } finally {
+        entry.attester = readAttesterDetails();
+        try { entry.attesterQualification = projectQualification(JSON.parse(native.readFileSync(qualificationFile, "utf8"))); }
+        catch { /* The original launcher may have returned no report. */ }
       }
     });
   } catch {
     /* First failed original check is the result; no raw error output. */
   } finally {
+    report.later = await runLaterSetupDiagnostics({ imagePassed, operations, deadlineMs });
     trace.restore();
   }
   process.stdout.write(serializeProbeReport(report));
