@@ -81,6 +81,12 @@ export function canReadCloudWorkspace(doc: CloudWorkspaceDocument | undefined): 
   return doc !== undefined && doc.deletedAt === null &&
     doc.status !== "deleting" && doc.status !== "deleted";
 }
+/** Retained history stays readable on explicit access. Background retries and
+ * engine mirrors wait for a running generation instead of trying to wake it. */
+export function canBackgroundSyncCloudWorkspace(target: CloudWorkspaceTarget): boolean {
+  const doc = cloudWorkspaceDocument(target);
+  return canReadCloudWorkspace(doc) && (doc?.status === "ready" || doc?.status === "busy");
+}
 export function cloudCatalogNeedsFastRefresh(): boolean {
   // Provider storage deletion can take much longer than an interactive setup
   // transition. Keep observing it at the normal cadence without refetching

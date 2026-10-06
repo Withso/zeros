@@ -15,6 +15,7 @@ import {
   cloudCatalogNeedsFastRefresh,
   cloudWorkspaceDocument,
   canReadCloudWorkspace,
+  canBackgroundSyncCloudWorkspace,
   getCloudWorkspaceRows,
   getCloudProjects,
   cloudProjectForFolder,
@@ -70,6 +71,14 @@ beforeEach(() => {
   api.projects.mockReturnValue([]);
 });
 describe("cloud workspace catalog ownership", () => {
+  it.each(["stopped", "archived", "stopping", "failed", "error"])("does not schedule background reads or mirrors for %s workspaces", status => {
+    expect(canBackgroundSyncCloudWorkspace(target)).toBe(false);
+    acceptCloudWorkspaceDocument(doc(1, status));
+    expect(canBackgroundSyncCloudWorkspace(target)).toBe(false);
+    expect(canReadCloudWorkspace(cloudWorkspaceDocument(target))).toBe(true);
+    acceptCloudWorkspaceDocument(doc(2, "ready"));
+    expect(canBackgroundSyncCloudWorkspace(target)).toBe(true);
+  });
   it("retains failed setup state after compute cleanup and clears it for the next generation", () => {
     acceptCloudWorkspaceDocument(Object.assign(doc(1, "stopped"), { setupFailure: { code: "setup_image_contract_invalid", hasLog: false } }));
     expect(getCloudWorkspaceRows()[0].setupState).toBe("failed");

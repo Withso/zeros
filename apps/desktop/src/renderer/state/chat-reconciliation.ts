@@ -4,7 +4,7 @@ import {
 } from "@zeros/protocol/identities";
 
 import type { ChatThread } from "./store";
-import { cloudWorkspaceKey, isCloudWorkspace, parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
+import { cloudWorkspaceKey, isCloudWorkspace, parseCloudWorkspaceKey, type CloudWorkspaceTarget } from "../platform/bridge/cloud-workspace-key";
 
 /** A backend snapshot says nothing about an unqueried owner. Retain its boot
  * cache, but wait for that backend's confirmation before writing it back. */
@@ -12,11 +12,12 @@ export function canMirrorChat(
   chat: Pick<ChatThread, "folder">,
   confirmedCloudWorkspaces: ReadonlySet<string>,
   confirmedLocalChats = true,
+  canSyncCloud?: (target: CloudWorkspaceTarget) => boolean,
 ): boolean {
   if (!isCloudWorkspace(chat.folder)) return confirmedLocalChats;
   try {
     const owner = parseCloudWorkspaceKey(chat.folder);
-    return owner !== null && confirmedCloudWorkspaces.has(cloudWorkspaceKey(owner));
+    return owner !== null && confirmedCloudWorkspaces.has(cloudWorkspaceKey(owner)) && (canSyncCloud?.(owner) ?? true);
   } catch {
     return false;
   }

@@ -168,10 +168,12 @@ describe("qualified cloud runtime connection target", () => {
       const client = new RuntimeClient(cloudTarget(Date.now()));
       const send = vi.fn();
       const internals = client as unknown as {
-        send: (message: Record<string, unknown>) => void;
+        rawSend: (message: Record<string, unknown>) => void;
+        sendRequest: () => Promise<unknown>;
         onTransportOpen(): void;
       };
-      internals.send = send;
+      internals.rawSend = send;
+      internals.sendRequest = async () => ({ type: "WORKSPACE_RESPONSE" });
       internals.onTransportOpen();
 
       expect(send).toHaveBeenCalledWith(

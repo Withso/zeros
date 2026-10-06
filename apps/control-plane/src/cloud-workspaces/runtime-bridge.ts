@@ -14,6 +14,7 @@ import {
   type CloudProviderEngineEndpoint,
 } from "./provider.js";
 import { WebSocketFrameMeter } from "./runtime-bridge-frame-meter.js";
+import { cloudBridgeCloseDiagnostic } from "./bridge-close-diagnostic.js";
 import {
   CLOUD_RUNTIME_RELAY_MAX_MESSAGE_BYTES,
   cloudRuntimeRelayLimits,
@@ -266,6 +267,7 @@ export class CloudRuntimeBridgeRelay {
   private outboundQueued = 0;
   private inboundCharged = 0;
   private admittedTotal = 0;
+  private closeReports = { at: 0, count: 0, suppressed: 0 };
   private readonly rejected = counts(REFUSALS);
   private readonly retired = counts(RETIREMENTS);
   private peakOutbound = 0;
@@ -378,6 +380,7 @@ export class CloudRuntimeBridgeRelay {
     this.admissionTokens -= 1;
     let retired = false;
     let upgraded = false;
+    const startedAt = performance.now();
     let authorityTimer: ReturnType<typeof setInterval> | undefined;
     let authorityDeadline: ReturnType<typeof setTimeout> | undefined;
     let pingTimer: ReturnType<typeof setInterval> | undefined;
@@ -480,7 +483,8 @@ export class CloudRuntimeBridgeRelay {
         remoteSocket = response.socket;
         this.meter(pair, response.socket, remote, () => retired);
       });
-      remote.on("error", (error) =>
+      remote.on("error", (error) => {
+        if (!retired) this.reportUpstreamClose(destination, null, "", upgraded, startedAt, "transport_error");
         pair.retire(
           oversized(error)
             ? "message_limit"
@@ -488,15 +492,16 @@ export class CloudRuntimeBridgeRelay {
               ? "upstream_closed"
               : "upstream_failed",
           502,
-        ),
-      );
+        );
+      });
       remote.once("unexpected-response", (_request, response) => {
         response.destroy();
         pair.retire("upstream_failed", 502);
       });
-      remote.once("close", () =>
-        pair.retire(upgraded ? "upstream_closed" : "upstream_failed", 502),
-      );
+      remote.once("close", (code, reason) => {
+        if (!retired) this.reportUpstreamClose(destination, code, reason.toString(), upgraded, startedAt);
+        pair.retire(upgraded ? "upstream_closed" : "upstream_failed", 502);
+      });
       remote.once("open", () => {
         if (retired || this.closed) {
           pair.retire("shutdown");
@@ -666,6 +671,21 @@ export class CloudRuntimeBridgeRelay {
     let active = 0;
     for (const pair of this.pairs) if (pair.grant !== null) active += 1;
     return active;
+  }
+
+  private reportUpstreamClose(grant: CloudEngineRelayGrant, code: unknown, reason: string,
+    upgraded: boolean, startedAt: number, errorClass?: "transport_error"): void {
+    const now = performance.now(), previous = this.closeReports;
+    if (now - previous.at >= REPORT_INTERVAL_MS) this.closeReports = { at: now, count: 0, suppressed: previous.suppressed };
+    if (this.closeReports.count >= 8) { this.closeReports.suppressed++; return; }
+    this.closeReports.count++;
+    const diagnostic = cloudBridgeCloseDiagnostic(code, reason);
+    const uuid = (value: string) => /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(value) ? value : "invalid";
+    this.log(`[cloud-bridge] upstream close code=${diagnostic.code ?? "none"} class=${errorClass ?? diagnostic.class} ` +
+      `stage=${upgraded ? "relay" : "upgrade"} workspace=${uuid(grant.workspaceId)} ` +
+      `generation=${Number.isSafeInteger(grant.generation) ? grant.generation : 0} engine=${uuid(grant.engineInstanceId)} ` +
+      `elapsedMs=${Math.max(0, Math.round(now - startedAt))} suppressed=${this.closeReports.suppressed}`, "warn");
+    this.closeReports.suppressed = 0;
   }
 
   /** Watches one raw socket's frame headers and charges each message above

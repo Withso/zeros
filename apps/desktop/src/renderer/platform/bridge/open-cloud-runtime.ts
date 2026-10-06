@@ -99,14 +99,15 @@ export async function openCloudRuntime(
     if (!workspace?.path || !workspace.path.startsWith("/"))
       throw new Error("Cloud engine did not confirm its workspace root");
     acceptCloudEngineWorkspace(target, workspace, generation);
-    agents = new CloudAgentConnection(client, workspace.id, (agentId, model) =>
-      cloudAgentGrant(target, agentId, model),
-    );
     events = new CloudEventReader(client, () => {
-      void agents!.refreshAttachments();
+      void agents?.refreshAttachments();
     });
+    agents = new CloudAgentConnection(client, workspace.id, (agentId, model) =>
+      cloudAgentGrant(target, agentId, model), events,
+    );
     for (const type of ["AGENT_PROMPT_COMPLETE", "AGENT_PROMPT_FAILED"])
       listeners.push(events.on(type, message => {
+        agents!.incoming(message as unknown as Record<string, unknown>);
         agents!.observePromptResult(message as unknown as Record<string, unknown>);
       }));
     for (const type of [
@@ -115,13 +116,13 @@ export async function openCloudRuntime(
       "AGENT_SESSION_UPDATE",
     ])
       listeners.push(
-        client.on(type, (message) => {
+        events.on(type, (message) => {
           agents!.incoming(message as unknown as Record<string, unknown>);
         }),
       );
     let refreshing = false;
     listeners.push(
-      client.on("DB_CHANGED", () => {
+      events.on("DB_CHANGED", () => {
         if (refreshing) return;
         refreshing = true;
         void bridgeWorkspaceList(client, {})

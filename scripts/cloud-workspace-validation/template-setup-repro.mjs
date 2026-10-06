@@ -248,7 +248,7 @@ export function templateSetupForkBody(material) {
   return { type, ttlSeconds: 1800, noEnv: true, env: {} };
 }
 
-async function recoverFork(journal, { request, save }) {
+export async function recoverFork(journal, { request, save }) {
   requireCheck(
     journal.forkBody &&
       ["small", "default", "large"].includes(journal.forkBody.type) &&
@@ -527,7 +527,7 @@ export async function readTemplateSetupSource(pool, journal) {
   }
 }
 
-function privateFile(file, maximum = 256 * 1024) {
+export function privateFile(file, maximum = 256 * 1024) {
   const descriptor = openSync(
     file,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,

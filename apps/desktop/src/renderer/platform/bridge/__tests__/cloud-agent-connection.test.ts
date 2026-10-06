@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { CloudAgentConnection } from "../cloud-agent-connection";
+import { CloudEventReader } from "../cloud-event-reader";
+import type { BridgeMessage } from "../messages";
 import type { RuntimeClient } from "../ws-client";
 import type { WireRecord } from "../cloud-runtime-wire";
 import type {BackgroundTasksUpdate} from "@zeros/protocol/agent-events";
@@ -94,6 +96,56 @@ function fixture(receiptIdentity: Record<string, unknown> = {}) {
   };
 }
 afterEach(() => vi.restoreAllMocks());
+
+describe("cloud snapshot and replay installation", () => {
+  it.each([false, true])("does not resurrect a completed turn or settled permission from delayed state (retired=%s)", async retired => {
+    const f = fixture(), original = f.request.getMockImplementation()!;
+    const streamId = "33333333-3333-4333-8333-333333333333";
+    const handlers = new Map<string, (frame: BridgeMessage) => void>();
+    let finish!: (value: unknown) => void, snapshot: unknown;
+    const request = vi.fn(async (message: WireRecord) => {
+      if (message.op === "cloudEvents.request") {
+        if ((message.params as any).request.kind === "replay") return { type: "WORKSPACE_RESPONSE", result: {
+          streamId, firstRetained: 1, head: 12, cursor: 12, events: [],
+        } };
+        const response = await original(message);
+        snapshot = { ...response, result: { ...(response.result as object), cursor: { streamId, sequence: 10 } } };
+        return new Promise(resolve => { finish = resolve; });
+      }
+      return original(message);
+    });
+    const client = { request, on: (type: string, listener: (frame: BridgeMessage) => void) => {
+      handlers.set(type, listener); return () => handlers.delete(type);
+    }, onStatusChange: () => () => {} } as unknown as RuntimeClient;
+    const reader = new CloudEventReader(client);
+    const connection = new CloudAgentConnection(client, "local-main", f.authorize, reader);
+    let active = false;
+    const permissions = new Set<string>(), received: number[] = [];
+    connection.on("AGENT_SESSION_CREATED", frame => { active = (frame as any).promptActive; });
+    connection.on("AGENT_PERMISSION_REQUEST", frame => permissions.add((frame as any).permissionId));
+    reader.on("AGENT_PERMISSION_SETTLED", frame => { permissions.delete((frame as any).permissionId); received.push(frame.cloudStream!.sequence); });
+    reader.on("AGENT_PROMPT_COMPLETE", frame => { connection.incoming(frame as unknown as WireRecord); active = false; received.push(frame.cloudStream!.sequence); });
+    const load = connection.request({ type: "AGENT_LOAD_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "test-model" } });
+    void load.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+      for (const [sequence, type] of [[11, "AGENT_PERMISSION_SETTLED"], [12, "AGENT_PROMPT_COMPLETE"]] as const)
+        handlers.get(type)!({ type, id: `event-${sequence}`, source: "engine", timestamp: 1,
+          permissionId: "pending", requestId: "prompt", stopReason: "end_turn", response: { stopReason: "end_turn" },
+          chatId: chat, agentId: "codex", sessionId: "reconnected", executionId: "reconnected",
+          cloudStream: { streamId, sequence } } as BridgeMessage);
+      expect(received).toEqual([]);
+      if (retired) { reader.dispose(); connection.dispose(); }
+      finish(snapshot);
+      if (retired) await expect(load).rejects.toThrow(/closed|changed/);
+      else {
+        await load;
+        await vi.waitFor(() => expect(received).toEqual([11, 12]));
+      }
+      expect(active).toBe(false); expect(permissions.size).toBe(0);
+    } finally { reader.dispose(); connection.dispose(); f.connection.dispose(); }
+  });
+});
 
 function retainedTaskFixture(){
   const f=fixture(),original=f.request.getMockImplementation()!;
