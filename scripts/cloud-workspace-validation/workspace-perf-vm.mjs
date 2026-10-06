@@ -3,7 +3,10 @@ import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, wr
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BoatApiClient } from "../../apps/control-plane/src/cloud-workspaces/boat-client.ts";
-import { RuntimeBaseStatusSchema } from "../../apps/control-plane/src/cloud-workspaces/runtime-contract.ts";
+import { ClosedDiagnosticSchema, RuntimeBaseStatusSchema, RuntimeDescriptorSchema, RuntimeInstallInputSchema } from "../../apps/control-plane/src/cloud-workspaces/runtime-contract.ts";
+import { executeBoatPinnedSsh } from "../../apps/control-plane/src/cloud-workspaces/boat-pinned-ssh.ts";
+import { CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "../../apps/control-plane/src/cloud-workspaces/daytona-setup-executor.ts";
+import { createRuntimeArtifactStore, runtimeArtifactObjectKey } from "../../apps/control-plane/src/cloud-workspaces/runtime-artifact-store.ts";
 import { templateSetupReproConfig, privateFile, newTemplateSetupJournal, readTemplateSetupSource,
   runTemplateSetupRepro, runTemplateSetupProbe, cleanupTemplateSetupFork, templateSetupErrorDiagnostic } from "./template-setup-repro.mjs";
 import { sanitizeProbeReport } from "./template-setup-probe.mjs";
@@ -34,6 +37,22 @@ export function parsePerfBootstrapDetails(value) {
       .map(event => ({ event: event.event, waitedSeconds: boundedInteger(event.waitedSeconds, 600), observedMonotonicUs: boundedInteger(event.observedMonotonicUs) })),
   };
 }
+
+// The VM observation occurs somewhere inside the operator request bracket.
+// Subtract only same-VM monotonic intervals, then translate into a bounded
+// operator interval. A provider running observation is not its actual start.
+export function perfBootstrapAnchor(details, bracket) {
+  const { requestStartMs, requestEndMs, providerReadyObservedMs } = bracket;
+  if (![requestStartMs, requestEndMs].every(value => boundedInteger(value) !== null) || requestEndMs < requestStartMs) return null;
+  const observed = boundedInteger(details?.observedMonotonicUs);
+  const starts = (details?.units ?? []).map(unit => boundedInteger(unit.ExecMainStartTimestampMonotonic))
+    .filter(value => value !== null && value > 0);
+  if (observed === null || !starts.length || starts.some(value => value > observed)) return null;
+  const elapsedMs = (observed - Math.min(...starts)) / 1000;
+  const interval = offset => ({ lower: Math.floor(requestStartMs - elapsedMs - offset), upper: Math.ceil(requestEndMs - elapsedMs - offset) });
+  return { requestStartMs, requestEndMs, firstUnitStartFromCycleMs: interval(0),
+    firstUnitStartAfterProviderObservationMs: boundedInteger(providerReadyObservedMs) === null ? null : interval(providerReadyObservedMs) };
+}
 const bootstrapStages = new Set(["validate_input", "lock", "check_space", "check_cache", "download", "verify_archive", "verify_manifest",
   "extract", "verify_tree", "publish_receipt", "switch_pointer", "start_host", "run_setup", "done"]);
 const bootstrapChecks = new Set(["input_schema", "input_too_large", "artifact_host", "artifact_expired", "insufficient_space", "cache_conflict",
@@ -41,6 +60,68 @@ const bootstrapChecks = new Set(["input_schema", "input_too_large", "artifact_ho
   "archive_paths", "archive_member_type", "file_inventory", "file_digest", "file_mode", "symlink_escape", "root_ownership", "hard_link",
   "pointer_publish", "host_start", "setup_exit", "timeout", "process_signal", "diagnostic_missing", "lock_busy", "base_compatibility",
   "cgroup_retired", "uid_map", "apparmor", "cgroup_controllers"]);
+
+export function perfRuntimeArtifactStore(values) {
+  const s3 = { endpoint: values.ZEROS_R2_ALPHA_ENDPOINT ?? "", bucket: values.ZEROS_R2_ALPHA_BUCKET ?? "", region: "auto",
+    accessKeyId: values.ZEROS_R2_ALPHA_ACCESS_KEY_ID ?? "", secretAccessKey: values.ZEROS_R2_ALPHA_SECRET_ACCESS_KEY ?? "" };
+  perfCheck(s3.bucket === "zeros-cloud-workspaces-alpha" && /^https:\/\/[a-f0-9]{32}\.r2\.cloudflarestorage\.com\/?$/.test(s3.endpoint) &&
+    [s3.accessKeyId, s3.secretAccessKey].every(value => typeof value === "string" && /^[\x21-\x7e]{16,4096}$/.test(value)), "runtime_artifact_config_invalid");
+  return createRuntimeArtifactStore({ s3 });
+}
+
+export async function readPerfRuntimeArtifact(pool, material) {
+  const pin = material.runtimePin;
+  const rows = await perfRead(pool, async client => (await client.query(`SELECT bundle.runtime_id,bundle.manifest_sha256,
+    bundle.archive_sha256,bundle.archive_bytes,bundle.expanded_bytes,bundle.object_key,bundle.source_commit,
+    bundle.node_modules_abi,bundle.bootstrap_protocol_version,bundle.engine_protocol_version
+    FROM cloud_runtime_bundles bundle
+    JOIN cloud_runtime_base_images base ON base.base_image_id=$3 AND base.base_compatibility_id=$4 AND base.provider='boat'
+    JOIN cloud_runtime_base_contracts contract ON contract.base_compatibility_id=base.base_compatibility_id
+    WHERE bundle.runtime_id=$1 AND bundle.manifest_sha256=$2 AND bundle.revoked_at IS NULL
+      AND base.revoked_at IS NULL AND contract.revoked_at IS NULL LIMIT 2`,
+  [pin.runtimeId, pin.manifestSha256, material.baseImageId, pin.baseCompatibilityId])).rows);
+  perfCheck(rows.length === 1, "source_invalid");
+  const row = rows[0], descriptor = RuntimeDescriptorSchema.safeParse({ runtimeId: row.runtime_id, manifestSha256: row.manifest_sha256,
+    archiveSha256: row.archive_sha256, archiveBytes: Number(row.archive_bytes), expandedBytes: Number(row.expanded_bytes),
+    sourceCommit: row.source_commit, nodeModulesAbi: row.node_modules_abi,
+    bootstrapProtocolVersion: row.bootstrap_protocol_version, engineProtocolVersion: row.engine_protocol_version });
+  perfCheck(descriptor.success && row.object_key === runtimeArtifactObjectKey(pin.runtimeId, descriptor.data.archiveSha256), "source_invalid");
+  return { descriptor: descriptor.data, objectKey: row.object_key };
+}
+
+export async function preparePerfVmRuntime(childId, material, { request, artifactStore, execute = executeBoatPinnedSsh }) {
+  const runtime = RuntimeDescriptorSchema.safeParse(material.runtimeArtifact?.descriptor), pin = material.runtimePin;
+  perfCheck(PERF_RESOURCE.test(childId) && runtime.success && runtime.data.runtimeId === pin?.runtimeId &&
+    runtime.data.manifestSha256 === pin.manifestSha256 && pin.baseCompatibilityId === material.computer.template.baseCompatibilityId &&
+    material.runtimeArtifact.objectKey === runtimeArtifactObjectKey(runtime.data.runtimeId, runtime.data.archiveSha256), "source_invalid");
+  // Base-ready deliberately includes waiting_for_runtime. Reuse the production
+  // verified installer to publish the selected runtime and fresh descriptor;
+  // never try another Node, disable integrity checks, or alter the source VM.
+  const artifact = await artifactStore.presignGet(material.runtimeArtifact.objectKey, 900);
+  const input = RuntimeInstallInputSchema.safeParse({ schema: "zeros.runtime-install/v1", purpose: "qualification", runtime: runtime.data, artifact });
+  perfCheck(input.success, "runtime_prepare_failed");
+  const response = await execute({ resourceId: childId, command: CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND,
+    stdin: Buffer.from(JSON.stringify(input.data)).toString("base64url"), timeoutSeconds: 600 },
+  { client: { request }, maxOutputBytes: 16_384 }, AbortSignal.timeout(660_000));
+  let diagnostic;
+  try {
+    if (typeof response.output === "string" && Buffer.byteLength(response.output) <= 16_384)
+      diagnostic = ClosedDiagnosticSchema.safeParse(JSON.parse(response.output.trim())).data;
+  } catch { /* Never retain raw installer output or its artifact capability. */ }
+  if (response.exitCode !== 0 || response.timedOut || response.outputTruncated || diagnostic?.component !== "installer" ||
+    diagnostic.stage !== "done" || !diagnostic.ok || diagnostic.exitCode !== 0 || diagnostic.timedOut || diagnostic.failedChecks.length) {
+    const error = new Error("runtime_prepare_failed");
+    if (diagnostic?.component === "installer") error.installer = { stage: bootstrapStages.has(diagnostic.stage) ? diagnostic.stage : "unknown",
+      failedChecks: diagnostic.failedChecks.filter(check => bootstrapChecks.has(check)).slice(0, 32) };
+    throw error;
+  }
+  const status = await request(`/sandboxes/${childId}/commands`, { method: "POST", body: { command: STATUS, timeoutSeconds: 20 } });
+  let parsed;
+  try { if (typeof status.stdout === "string" && Buffer.byteLength(status.stdout) <= 16_384) parsed = RuntimeBaseStatusSchema.safeParse(JSON.parse(status.stdout)).data; }
+  catch { /* Readiness below fails closed. */ }
+  perfCheck(status.success === true && status.exitCode === 0 && !status.timedOut && !status.stdoutTruncated &&
+    parsed?.currentRuntimeId === pin.runtimeId && parsed?.baseCompatibilityId === pin.baseCompatibilityId && parsed?.hostState === "idle", "runtime_unavailable");
+}
 
 // Preserve the rejection reason, never the response, stderr or unrecognized
 // diagnostic text. Status polling is observational; it cannot restart a host
@@ -115,7 +196,14 @@ export async function inspectPerfVmSource(pool, workspaceId, templateId, billing
 
 function retainDiagnostic(journal, phase, error) {
   const diagnostics = journal.perf.diagnostics ??= [];
-  if (diagnostics.length < 8) diagnostics.push(templateSetupErrorDiagnostic(phase, error));
+  if (diagnostics.length >= 8) return;
+  const diagnostic = templateSetupErrorDiagnostic(phase, error);
+  if (["runtime_prepare_failed", "runtime_unavailable", "runtime_artifact_config_invalid"].includes(error?.message)) diagnostic.code = error.message;
+  if (error?.installer && Array.isArray(error.installer.failedChecks)) diagnostic.installer = {
+    stage: bootstrapStages.has(error.installer.stage) ? error.installer.stage : "unknown",
+    failedChecks: error.installer.failedChecks.filter(check => bootstrapChecks.has(check)).slice(0, 32),
+  };
+  if (!diagnostics.some(previous => JSON.stringify(previous) === JSON.stringify(diagnostic))) diagnostics.push(diagnostic);
 }
 
 /** Reuse the qualified fork/probe/cleanup boundary, changing only the
@@ -163,15 +251,26 @@ export function perfProbeStages(value) {
 }
 
 export async function runPerfVm(journal, config, deps) {
-  const { request, load, probe, save, wait = pause, now = performance.now.bind(performance) } = deps;
+  const { request, load, probe, prepareRuntime, save, wait = pause, now = performance.now.bind(performance) } = deps;
   let cycleStarted = now();
   const inspectBootstrap = async timings => {
+    const requestStartMs = Math.round(now() - cycleStarted);
     try {
       const response = await request(`/sandboxes/${journal.childId}/commands`, { method: "POST", body: { command: BOOT_DETAILS, timeoutSeconds: 20 } });
+      const requestEndMs = Math.round(now() - cycleStarted);
       timings.bootstrapDetails = response.success === true && response.exitCode === 0 && !response.timedOut && !response.stdoutTruncated &&
         typeof response.stdout === "string" && Buffer.byteLength(response.stdout) <= 16_384 ? parsePerfBootstrapDetails(JSON.parse(response.stdout)) : { availability: "unavailable" };
+      timings.bootstrapAnchor = perfBootstrapAnchor(timings.bootstrapDetails, { requestStartMs, requestEndMs,
+        providerReadyObservedMs: timings.providerReadyObservedMs });
     } catch { timings.bootstrapDetails = { availability: "unavailable" }; }
     save(journal);
+  };
+  const prepare = async material => {
+    const timings = journal.perf[journal.perf.cycle], started = now();
+    try {
+      await prepareRuntime(journal.childId, material);
+      timings.runtimeReadyObservedMs = Math.round(now() - cycleStarted);
+    } finally { timings.runtimePreparationMs = Math.round(now() - started); save(journal); }
   };
   const ready = async (_journal, material) => {
     const deadline = now() + 600_000;
@@ -211,6 +310,7 @@ export async function runPerfVm(journal, config, deps) {
     request, save, ready, diagnose: (phase, error) => retainDiagnostic(journal, phase, error), wait: () => wait(5_000), attempts: 120,
     load: async () => { const material = await load(journal); cycleStarted = now(); return material; },
     probe: async (_journal, material) => {
+      await prepare(material);
       const createProbe = await probe(journal.childId, material);
       journal.perf.create.stages = perfProbeStages(createProbe); save(journal);
       perfCheck(journal.perf.create.stages.checksPassed && !journal.perf.create.stages.later.some(stage => stage.outcome === "failed"), "probe_failed");
@@ -231,6 +331,7 @@ export async function runPerfVm(journal, config, deps) {
         idempotencyKey: `${name(journal)}.resume` });
       await ready(journal, material);
       journal.phase = "probe";
+      await prepare(material);
       const wakeProbe = await probe(journal.childId, material);
       journal.perf.wake.stages = perfProbeStages(wakeProbe); save(journal);
       return wakeProbe;
@@ -245,6 +346,7 @@ async function main() {
     ["before", "after"].includes(args[1]) && args[2] === "--workspace" && PERF_UUID.test(args[3]) && args[4] === "--template" && PERF_RESOURCE.test(args[5]), "input_invalid");
   const env = readPerfEnvironment();
   const config = templateSetupReproConfig({ ...env, ZEROS_S1_ALPHA_DATABASE_URL: env.ZEROS_PERF_ALPHA_DATABASE_URL });
+  const artifactStore = cleanup || inspect ? null : perfRuntimeArtifactStore(env);
   const pool = perfPool(config), boat = new BoatApiClient({ apiKey: config.apiKey, billingOrg: config.billingOrg, timeoutMs: 30_000, diagnostics: () => {} });
   if (inspect) {
     try { process.stdout.write(JSON.stringify(await inspectPerfVmSource(pool, args[2], args[4], config.billingOrg, boat.request.bind(boat))) + "\n"); }
@@ -270,7 +372,12 @@ async function main() {
     renameSync(temporary, file);
   };
   const request = perfVmRequest(journal, config.billingOrg, boat.request.bind(boat));
-  const deps = { request, save, load: () => readTemplateSetupSource(pool, journal),
+  const deps = { request, save, load: async () => {
+    const material = await readTemplateSetupSource(pool, journal);
+    material.runtimeArtifact = await readPerfRuntimeArtifact(pool, material);
+    return material;
+  },
+    prepareRuntime: (child, material) => preparePerfVmRuntime(child, material, { request, artifactStore }),
     probe: (child, material) => runTemplateSetupProbe(child, material, { request, diagnose: (phase, error) => retainDiagnostic(journal, phase, error) }) };
   try {
     if (cleanup) await cleanupTemplateSetupFork(journal, { request, save, diagnose: () => {} });

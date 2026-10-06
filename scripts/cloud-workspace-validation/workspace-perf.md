@@ -148,7 +148,8 @@ This wraps the existing qualified `template-setup-repro.mjs` boundary. It reads
 immutable runtime/image/template material, inspects the source without changing
 it, and forks exactly one disposable `zeros-v2-test-perf-*` child with no
 inherited environment and a 30-minute TTL. It observes provider and root
-bootstrap readiness, runs the existing isolated attester/setup diagnostic,
+bootstrap readiness, prepares the exact runtime with the verified base installer,
+then runs the existing isolated attester/setup diagnostic,
 stops **the child**, waits for a completed snapshot, resumes the child with
 the same TTL, and repeats the diagnostic before cleanup.
 
@@ -237,3 +238,30 @@ and hydration events filtered inside the VM, plus closed probe command/transport
 error categories. Return those fields even on failure. Unit timestamps are in
 microseconds from the VM's monotonic clock; do not subtract them from operator
 clock values. Absence of a hydration event does not prove hydration was instant.
+
+The third run (`bx_m5cdnkr6`, compute cleanup verified, storage pending uploads)
+measured base-ready at 36,723 ms, a 5.662 s boot unit and about 4 s hydration.
+It failed before Node started: the base was ready but the runtime descriptor was
+absent. The revised probe uses the production verified installer for the pinned
+runtime on the disposable child, through pinned SSH stdin, before running Node.
+Both create and wake report `runtimePreparationMs` and `runtimeReadyObservedMs`.
+This may download the immutable archive if the template lacks a complete cache;
+its time is included, not hidden. No source/template, DB row or R2 object is
+written. The signed artifact GET capability is never put in command arguments,
+Boat API command bodies, journals or output.
+
+The same invocation above now also requires these existing Alpha names in
+`.env.agent`: `ZEROS_R2_ALPHA_ENDPOINT`, `ZEROS_R2_ALPHA_BUCKET`,
+`ZEROS_R2_ALPHA_ACCESS_KEY_ID`, `ZEROS_R2_ALPHA_SECRET_ACCESS_KEY`. Configuration
+must identify the `zeros-cloud-workspaces-alpha` bucket. Missing or non-Alpha
+artifact configuration fails before allocation. Inspection and cleanup do not
+need artifact credentials. No staff principal access token is needed for this
+isolated probe.
+
+`bootstrapAnchor` records the local command request bracket and bounds on the
+first observed unit start relative to cycle start and to the first provider-ready
+observation. It uses only same-VM monotonic differences before translating into
+the local bracket. Negative bounds can mean the unit preceded the cycle (for
+example an already running VM); missing or inconsistent VM timestamps yield
+`null`. The provider observation is not a provider-reported restore timestamp.
+Report the bracket width with these bounds and keep polling/API overhead separate.

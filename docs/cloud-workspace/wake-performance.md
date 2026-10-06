@@ -59,7 +59,8 @@ columns, command output, setup logs or repository contents.
 | Setup execution | Completed: 116.422–133.063 s, median 130.325 s (n=5); cancelled: 112.935 s | Not measured | Dominant observed cost; not a complete wake endpoint |
 | Engine row creation → registration | Approximately 17–23 s | Not measured | Includes prelaunch/startup; not pure registration HTTP time |
 | Actor creation → consumption | 2.718–3.447 s, median 2.999 s (five examples) | Not measured | Includes client scheduling/bridge; not complete CONNECTED probe or paint |
-| Boat fork API / provider ready | 0.184 s / 4.481 s from cycle start (one failed sample) | Not measured | Base never became accepted-ready; not a successful workspace create |
+| Boat fork API / provider ready | Fork 0.184–0.186 s in runs 1–2; provider-ready observations 2.860–5.017 s across three failed samples | Not measured | Samples failed later; not successful workspace creates |
+| Base ready / boot unit / hydration | Latest run: 36.723 s from cycle start / 5.662 s / about 4 s | Not measured | Only boot and hydration are same-VM intervals; pre-unit delay needs the new clock bracket |
 | Attester / containment / checkout / engine sub-stages | Not measured | Not measured | Successful production stage spans are not persisted; failure observations are available |
 | Polling scheduler regression | Next periodic tick | Immediate scheduled pass | Deterministic fake-clock regression, **not live latency** |
 
@@ -93,7 +94,7 @@ snapshot. Host state, command exit and hydration cannot be recovered from the
 reported aggregates. The updated probe preserves bounded closed rejection
 counts and a whitelisted bootstrap diagnostic, and backs off 250 ms to 5 s.
 It keeps the same base identity/readiness checks and never restarts a host.
-A repeat of the pinned-template run is required to diagnose the actual gate.
+Later pinned-template runs below distinguish the actual gates.
 
 The second corrected run (probe commit `13cbf4ae`) created `bx_ddxjxhab`.
 Provider ready was observed at 5,017 ms and base ready at 43,555 ms; the
@@ -114,6 +115,39 @@ events can isolate the boot oneshot's interval. The Type=simple host's active
 state is not completion of dispatch verification or attestation. Missing events
 stay missing; no raw journal text or argv leaves the VM. This extra snapshot
 occurs after the recorded base-ready endpoint and adds overhead before setup.
+
+The third run (probe commit `14216cf0`) created `bx_m5cdnkr6`. Provider
+ready was observed at 2,860 ms and base ready at 36,723 ms. The boot unit's
+monotonic start/exit interval was **5.662079 s**; its hydration wait was about
+**4 s**. The host unit started 9.895 ms after the boot unit exited. These
+are in-VM intervals, not provider API time. The VM observation occurred
+9.202827 s after the boot unit started, but the old probe did not bracket that
+observation in its operator clock; an exact restore-to-unit offset cannot be
+recovered. Inference: most of the base-ready interval precedes the boot unit,
+rather than being time spent in hydration or that unit's startup work.
+
+This run's probe failed with exit 1, `FileNotFoundError` at `execute_node`,
+and `activeDescriptorPresent: false`. The wrapper accepted
+`waiting_for_runtime` as base ready and immediately invoked
+`/opt/zeros/current/bin/node`. That is a **measurement prerequisite bug**:
+base readiness explicitly permits an absent runtime. Production setup instead
+runs the protected base installer first. The revised probe uses that same
+verified installer with `purpose: qualification`, the exact selected immutable
+runtime and a short-lived read-only artifact capability sent over pinned SSH
+stdin. It then requires the selected runtime and an idle host before launching
+Node. It does not install a system Node, bypass a tree check or modify the
+source/template. Installer preparation has its own measured interval, and runs
+on the disposable child for both create and resume. A successful follow-up is
+still required; these failures establish no attester or usable-workspace result.
+
+The revised bootstrap snapshot includes an operator request start/end bracket.
+Subtracting the VM observation-to-first-unit interval from that bracket produces
+lower/upper unit-start bounds in the operator cycle clock, plus bounds relative
+to the first provider-running **observation**. It never subtracts independent
+clock epochs or labels that provider observation as the actual restore start.
+Compute cleanup for run three was verified; storage remained
+`waiting_for_uploads`. All three disposable child IDs and their pending storage
+receipts must stay in the orchestrator's cleanup ledger.
 
 The [resume proposal](resume-performance-design.md) prioritizes preparation reuse,
 fresh launch authority, integrity-bound qualification reuse, engine startup,
