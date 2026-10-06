@@ -136,8 +136,10 @@ export class RecoveryController {
     if (ancestor === head) return true;
     const key = ancestor + ":" + head;
     if (this.ancestry.has(key)) return this.ancestry.get(key);
+    // Changed files and patches appear only on the first compare page; page 2
+    // keeps the status and merge base within the 2 MiB response bound.
     const comparison = await this.read.get(
-      REPO_API + "/compare/" + ancestor + "..." + head,
+      REPO_API + "/compare/" + ancestor + "..." + head + "?per_page=1&page=2",
     );
     const result = isAncestorComparison(comparison, ancestor, head);
     this.ancestry.set(key, result);
@@ -201,6 +203,9 @@ export class RecoveryController {
         "/runs?branch=main&event=push&created=" +
         encodeURIComponent(">=" + since),
       "workflow_runs",
+      // Run objects embed head commit messages; 100 per page reached 1.2 MB.
+      20,
+      50,
     );
     return runs.filter((run) => isSourceRun(run, workflow)).sort(newestFirst);
   }
@@ -415,9 +420,14 @@ export class RecoveryController {
   }
 
   async incidents(metadata) {
+    // Full pull requests include their descriptions: 100 per page exceeded
+    // the 2 MiB response bound. Smaller pages keep the ~1,000-PR scan.
     const pulls = await paginate(
       this.read,
       REPO_API + "/pulls?state=all&sort=created&direction=desc",
+      null,
+      34,
+      30,
     );
     const records = [];
     for (const candidate of pulls.filter((pr) =>
