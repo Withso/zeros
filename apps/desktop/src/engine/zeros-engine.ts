@@ -8896,11 +8896,12 @@ export class ZerosEngine {
           ...(op.startsWith("codeReview.") ? { reviewUserId, reviewUserName } : {}),
           ...(client.cloudActor && client.accountUserId ? { cloudActorIdentity: { userId: client.accountUserId, deviceId: client.cloudActor.deviceId, sessionId: client.cloudActor.sessionId },
             cloudFileActor: { role: client.cloudActor.role, authorized: () => client.authorized?.() === true && !this.cloudRuntimeAuthorityStopping } } : {})});
-        if (this.cloudWorker && needsCloudGitAuthor(op, params)) {
+        const handleWithAuthor = async () => {
+          if (!this.cloudWorker || !needsCloudGitAuthor(op, params)) return handleWorkspace();
           if (!this.cloudRuntimeRegistration || !client.cloudActor) throw new Error("Cloud Git author is unavailable.");
           const author = await this.cloudRuntimeRegistration.gitAuthorRequest(client.cloudActor.sessionId);
           return runWithCloudGitAuthor(author, () => client.authorized?.() === true && !this.cloudRuntimeAuthorityStopping, handleWorkspace);
-        }
+        };
         if (this.cloudWorker && isCloudGithubWriteOperation(op)) {
           const runtime = this.cloudRuntimeRegistration;
           if (!runtime || !client.cloudActor || client.authorized?.() !== true || typeof $cloudGithubWriteGrant !== "string")
@@ -8911,7 +8912,7 @@ export class ZerosEngine {
             const credential = await runtime.githubWriteRequest({ kind: "redeem", grant: $cloudGithubWriteGrant,
               operation: op, paramsSha256, params, branch: publication.branch, baseBranch: publication.baseBranch, actorSessionId: client.cloudActor.sessionId });
             if (!credential) throw new Error("GitHub write authorization is unavailable.");
-            return await runWithGithubWriteCredential(credential, () => client.authorized?.() === true && !this.cloudRuntimeAuthorityStopping, handleWorkspace);
+            return await runWithGithubWriteCredential(credential, () => client.authorized?.() === true && !this.cloudRuntimeAuthorityStopping, handleWithAuthor);
           } finally {
             // The backend also expires the proxy and encrypted user token if the
             // response is lost or the engine exits before this release arrives.
@@ -8929,7 +8930,7 @@ export class ZerosEngine {
           : op.startsWith("cloudFork.")
             ? await this.handleCloudForkOperation(op, params)
             : this.cloudWorker&&op==="chats.delete"&&typeof params.id==="string"
-              ?this.deleteCloudConversation(params.id,msg.id,client,handleWorkspace):handleWorkspace();
+              ?this.deleteCloudConversation(params.id,msg.id,client,handleWorkspace):handleWithAuthor();
       };
       let inspectedHunkPaths: readonly string[] = [];
       if (
