@@ -21,6 +21,20 @@ function baseEnv(): NodeJS.ProcessEnv {
   };
 }
 
+describe("same-generation resume configuration", () => {
+  it("defaults off and enables only explicitly on Alpha", () => {
+    expect(loadConfig(baseEnv()).cloudWorkspaceResumeExistingEnabled).toBe(false);
+    expect(loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: "alpha",
+      CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "true" }).cloudWorkspaceResumeExistingEnabled).toBe(true);
+    for (const channel of ["development", "beta", "production"]) {
+      expect(() => loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
+        CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "true" })).toThrow(/resume.*Alpha/i);
+    }
+    expect(() => loadConfig({ ...baseEnv(), CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "invalid" }))
+      .toThrow(/resume configuration/i);
+  });
+});
+
 describe("runtime publication configuration", () => {
   const publicationEnv = () => ({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: "alpha",
     CLOUD_RUNTIME_PUBLICATION_ENABLED: "true", CLOUD_WORKSPACE_S3_ENDPOINT: "https://objects.example.test",

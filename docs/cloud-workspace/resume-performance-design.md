@@ -1,7 +1,7 @@
 # Resume without repeating full setup (Alpha proposal)
 
-Status: design for RU/HU review; no resume authority, runtime or setup semantics
-are changed by PERF's scheduler or measurement PRs. Live evidence supplied by
+Status: first same-generation preparation reuse implementation, disabled by
+default. PERF's scheduler and measurement changes do not alter resume authority. Live evidence supplied by
 the orchestrator on 2026-10-06 makes this the highest-priority next work.
 This proposal follows HU's merged [in-place update design](runtime-hot-update.md):
 RU remains the single transition owner, and changing the runtime requires a
@@ -60,9 +60,9 @@ generation with no such authorized provenance takes normal preparation/recovery.
 The orchestrator assigned PERF the timing transport/persistence and same-generation
 resume path on 2026-10-06. RU owns runtime selection; its wake implementation
 must land before the resume change ships. HU owns runtime transitions and the
-shared proof-cache invalidation interface. Until that interface exists, cache
-keys include generation, runtime ID, manifest digest, base compatibility and
-engine instance, so a transition or engine change misses by construction.
+shared proof-cache invalidation interface. The implementation uses HU's `readCloudRuntimeResumeProofEpoch` under the workspace
+lifecycle lock before enrolling the fresh engine. The completed engine UUID
+invalidates preparation evidence after any new or uncertain enrollment.
 Fresh launch proofs and full restored-tree integrity checks remain mandatory.
 
 ## Resume eligibility and fresh authority
@@ -196,3 +196,67 @@ current full-setup fallback. Record separate normal resume, upgrade/update and
 fallback samples, including failures. Obtain a real stopped-workspace before/
 after trace and owner-verified paint/agent continuity before claiming either
 target. No keep-running pool is enabled by this proposal.
+
+## First implementation: preparation reuse only
+
+Set `CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED=true` only on the Alpha control
+plane after its reader is deployed and a new qualified runtime contains the
+helper. Code defaults to false and rejects enabling the flag on other channels.
+The server additionally requires engineering staff, Boat, and a v4 runtime.
+New helpers negotiate `X-Zeros-Resume-Existing: 1`; old helpers get unchanged
+materials. New helpers talking to an older control plane take full setup.
+
+Under the existing live workspace/setup-run locks, before inserting a new engine,
+`setup-resume.ts` reads HU's completed enrollment epoch. The preparation key
+hashes the exact organization/workspace/generation, account, provider/resource,
+runtime/manifest/base/profile/protocol, image/resources, settings/spec/repository,
+and Cloud Computer source/config/build/environment tuple. It excludes ephemeral
+launch witnesses and changing compute-lease IDs: stop/resume replaces those.
+The key and staff gate are checked again after external credential minting.
+No previous capability, admission, registration or containment proof is reused.
+
+After full launch/readiness the root helper writes a bounded mode-0600 completion
+record keyed by that tuple and the freshly enrolled engine. A later resume
+requires HU to report that engine's successful setup/attestation, plus the exact
+protected completion record, completed repository journal, unchanged managed
+settings bytes and the existing physical checkout identity. Owner-created commits,
+dirty files, Design source and SQLite remain in place. Cache loss, corruption,
+key changes or incomplete setup select the existing preparation path; no cache
+fallback deletes data or resets history. Untrusted filesystem aliases are not
+accepted as a prepared checkout.
+
+Every execution still prepares a fresh supervisor session and workspace admission,
+verifies the Cloud Computer template, projects current credentials, runs the
+**full final attestation** (including restored-tree integrity and functional
+qualification), consumes a fresh launch proof, and waits for fresh registration
+and engine readiness. The existing worker checks authority, allocation, runtime,
+lease, run and execution fence before publishing ready. A cache hit skips only
+repository preparation and the duplicate preflight attestation. This first slice
+does not cache functional qualification or claim the 1–2-second target.
+
+### Regression and rollout evidence
+
+- Material integration tests cover negotiation/default-off, completed epochs,
+  changed allocations (including during credential mint), concurrent redemption,
+  new engine/registration/bridge credentials, revoked membership/entitlement,
+  obsolete fences and stop cancellation. HU's epoch suite covers new/failed
+  enrollment, exact pins, generation/tenant isolation and RU/HU transitions.
+- Persistence tests preserve edited files, Design and conversation bytes and
+  owner-created commits across cache hits and full-setup fallback. They reject
+  failed journals, changed managed settings, unsafe checkout aliases, a different
+  preparation key, a different epoch, a missing/corrupt cache and legacy profiles.
+- Launch tests require full final attestation and fresh launch/readiness on a
+  cache hit, do not rerun repository/hooks, and do not save completion after a
+  failed attestation, launch or readiness. Existing attester/launch-proof suites
+  retain changed-tree/base/mount, stale boot/session and one-use proof rejection.
+- Local-owner and organization-local workspaces use no modified path. Existing
+  legacy cloud request/launch coverage stays intact; runtime selection, upgrades,
+  transitions, rollback, actor admission and client transport are unchanged.
+
+The orchestrator enables the flag after merge and observes a full preparation to
+seed the new helper's record, then a real stop/wake using the same exact runtime.
+Use the passive timeline for elapsed/setup-stage data. The owner verifies dirty
+files, Design and conversation continuity, a real agent turn, a second authorized
+device, denied roles, Local/org-local workspaces and switching between owners and
+placements on the Mac. Revoke the flag to return to full preparation. No live
+wake, client paint, second-device or macOS claim is made from Linux test fixtures.

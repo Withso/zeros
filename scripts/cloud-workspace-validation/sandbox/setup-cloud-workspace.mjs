@@ -403,6 +403,7 @@ export function parseCloudWorkspaceSetupMaterials(
       "image",
       ...(raw.computer === undefined ? [] : ["computer"]),
       ...(raw.recovery === undefined ? [] : ["recovery"]),
+      ...(raw.resume === undefined ? [] : ["resume"]),
       "repository",
       "settings",
       "version",
@@ -559,6 +560,8 @@ export function parseCloudWorkspaceSetupMaterials(
     (raw.computer !== undefined && raw.version !== 2))
     throw new Error("cloud workspace setup materials are invalid");
   if (raw.computer !== undefined) parseCloudComputerSetup(raw.computer, raw.repository);
+  if (raw.resume !== undefined && (raw.version !== 2 || RUNTIME.profile !== "v4" || !validResumePlan(raw.resume)))
+    throw new Error("cloud workspace setup materials are invalid");
 
   const document = parseSetupDocument(
     raw.settings.documentB64,
@@ -1337,6 +1340,7 @@ export async function redeemMaterials(request) {
         Accept: "application/json",
         Authorization: `Bearer ${request.admission.token}`,
         "Content-Type": "application/json",
+        ...(RUNTIME.profile === "v4" ? { "X-Zeros-Resume-Existing": "1" } : {}),
       },
       body: JSON.stringify({
         materialVersion: 2,
@@ -1666,6 +1670,52 @@ function journalMatches(journal, identity, commandCount, completedSetup) {
       identity.settings.managedTomlSha256 &&
     journal.commandsCompleted <= commandCount
   );
+}
+
+function validResumePlan(value) {
+  return isRecord(value) && exactKeys(value, ["version", "mode", "keySha256", "proofEpoch"]) && value.version === 1 &&
+    SHA256_PATTERN.test(value.keySha256 ?? "") &&
+    ((value.mode === "prepare_generation" && value.proofEpoch === null) ||
+      (value.mode === "resume_existing" && UUID_PATTERN.test(value.proofEpoch ?? "")));
+}
+
+/** Root-controlled completion evidence is useful only with the control plane's
+ * completed engine epoch and exact preparation key. No launch proof is cached.
+ * A missing/unsafe/stale record takes the existing full preparation path.
+ */
+export async function readCompletedCloudWorkspacePreparation(material, profile, stringify = stringifyManagedSettings) {
+  if (profile.version !== 4 || !validResumePlan(material.resume) || material.resume.mode !== "resume_existing") return null;
+  try {
+    assertRootDirectory(profile.setupDirectory, 0o700);
+    assertRootDirectory(profile.managedSettingsDirectory, 0o750, WORKER_GID);
+    const completed = readPhysicalJson(path.join(profile.setupDirectory, "resume.json"), 1024);
+    if (!isRecord(completed) || !exactKeys(completed, ["version", "keySha256", "engineInstanceId"]) || completed.version !== 1 ||
+      completed.keySha256 !== material.resume.keySha256 || completed.engineInstanceId !== material.resume.proofEpoch) return null;
+    const journal = parseJournal(readPhysicalJson(path.join(profile.setupDirectory, "repository.json"), 64 * 1024));
+    if (journal.commandState || journal.commandsCompleted !== material.settings.setupCommands.length) return null;
+    const managedToml = await stringify(material.settings.document.values);
+    const managedSha256 = createHash("sha256").update(managedToml).digest("hex");
+    const file = path.join(profile.managedSettingsDirectory, "settings.managed.toml");
+    const fd = openSync(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    try {
+      const stat = fstatSync(fd), current = lstatSync(file);
+      if (!stat.isFile() || stat.uid !== 0 || stat.nlink !== 1 || (stat.mode & 0o027) !== 0 || stat.size > 256 * 1024 ||
+        current.isSymbolicLink() || stat.dev !== current.dev || stat.ino !== current.ino || realpathSync(file) !== file ||
+        createHash("sha256").update(readFileSync(fd)).digest("hex") !== managedSha256) return null;
+    } finally { closeSync(fd); }
+    const commit = await repositoryIdentity(hostRepository(material), runtimeLayout.agentHome, material.repository.cloneUrl);
+    return commit && journalMatches(journal, journalIdentity(material, commit, managedSha256), material.settings.setupCommands.length, true)
+      ? commit : null;
+  } catch { return null; }
+}
+
+export function saveCompletedCloudWorkspacePreparation(material, profile) {
+  if (profile.version !== 4 || !validResumePlan(material.resume)) return;
+  try {
+    assertRootDirectory(profile.setupDirectory, 0o700);
+    atomicWrite(path.join(profile.setupDirectory, "resume.json"), JSON.stringify({ version: 1,
+      keySha256: material.resume.keySha256, engineInstanceId: material.engine.instanceId }) + "\n", { mode: 0o600 });
+  } catch { /* Optional cache loss means full setup next time, never failed readiness. */ }
 }
 
 async function gitCommand(repositoryDirectory, homeDirectory, args, token, options = {}) {
@@ -2689,6 +2739,44 @@ function readyResult(material, commit, engine) {
   };
 }
 
+function projectLaunchCredentials(material, profile) {
+  if (!material.computer) installGithubProjection(material, profile);
+  removeRootRuntimeFile(
+    path.join(profile.runtimeDirectory, "github-credential-refresh.json"),
+    profile.engineUid,
+  );
+}
+
+/** The only branch is completed preparation reuse. Final attestation, fresh
+ * launch and readiness always run, including after a preparation cache hit. */
+export async function prepareAndLaunchCloudWorkspace(material, profile, session, record, {
+  readCompleted = readCompletedCloudWorkspacePreparation, attest = attestImage,
+  prepare = prepareRepositoryAndSettings, project = projectLaunchCredentials,
+  start = startEngine, ready = waitForReadiness, saveCompleted = saveCompletedCloudWorkspacePreparation,
+} = {}) {
+  let commit = await readCompleted(material, profile);
+  if (!commit) {
+    record("image-preflight");
+    await attest(material, profile, (checks, runtime, digests) =>
+      record("image-preflight", checks, runtime, digests),
+    );
+    record("repository");
+    commit = await prepare(material, profile);
+  }
+  record("credential-projection");
+  project(material, profile);
+  record("image-launch");
+  await attest(material, profile, (checks, runtime, digests) =>
+    record("image-launch", checks, runtime, digests),
+  );
+  record("engine-launch");
+  await start(material, session);
+  record("engine-readiness");
+  const engine = await ready(material);
+  saveCompleted(material, profile);
+  return readyResult(material, commit, engine);
+}
+
 async function executeSetup(encoded) {
   let request;
   try {
@@ -2736,29 +2824,10 @@ async function executeSetup(encoded) {
     // Reject an unqualified image or undersized allocation before running any
     // repository setup hook. Reattest below to mint a fresh launch proof after
     // potentially long hooks; that proof is intentionally short-lived.
-    record("image-preflight");
-    await attestImage(material, profile, (checks, runtime, digests) =>
-      record("image-preflight", checks, runtime, digests),
-    );
-    record("repository");
-    const commit = await prepareRepositoryAndSettings(material, profile);
-    record("credential-projection");
-    if (!material.computer) installGithubProjection(material, profile);
-    removeRootRuntimeFile(
-      path.join(profile.runtimeDirectory, "github-credential-refresh.json"),
-      profile.engineUid,
-    );
-    record("image-launch");
-    await attestImage(material, profile, (checks, runtime, digests) =>
-      record("image-launch", checks, runtime, digests),
-    );
-    record("engine-launch");
-    await startEngine(material, session);
-    record("engine-readiness");
-    const engine = await waitForReadiness(material);
+    const ready = await prepareAndLaunchCloudWorkspace(material, profile, session, record);
     record("complete");
     successful = true;
-    return readyResult(material, commit, engine);
+    return ready;
   } catch (error) {
     // Preserve v1 successes. Version 2 errors add only a closed, bounded
     // envelope; older control planes safely treat them as helper failures.
