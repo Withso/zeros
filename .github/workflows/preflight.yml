@@ -434,6 +434,21 @@ jobs:
   source-sync-workload:
     name: source-sync workload (macOS)
     runs-on: macos-latest
+    concurrency:
+      # Two main-push buckets leave macOS headroom for Alpha and PR jobs.
+      # Other events keep a unique group and never wait on main's backlog.
+      group: >-
+        ${{ github.event_name == 'push' && github.ref == 'refs/heads/main'
+          && format('preflight-main-macos-{0}',
+            (endsWith(format('{0}', github.run_number), '0')
+              || endsWith(format('{0}', github.run_number), '2')
+              || endsWith(format('{0}', github.run_number), '4')
+              || endsWith(format('{0}', github.run_number), '6')
+              || endsWith(format('{0}', github.run_number), '8'))
+            && 'even' || 'odd')
+          || format('preflight-{0}-{1}-{2}-{3}-macos',
+            github.event_name, github.ref, github.run_id, github.run_attempt) }}
+      queue: max
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -780,6 +795,15 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
+    concurrency:
+      # One main-push group per shard retains every SHA without unbounded
+      # composer runner usage. Release and merge-group runs stay independent.
+      group: >-
+        ${{ github.event_name == 'push' && github.ref == 'refs/heads/main'
+          && format('preflight-main-composer-{0}', matrix.shard)
+          || format('preflight-{0}-{1}-{2}-{3}-composer-{4}',
+            github.event_name, github.ref, github.run_id, github.run_attempt, matrix.shard) }}
+      queue: max
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
