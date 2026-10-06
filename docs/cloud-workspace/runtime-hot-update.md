@@ -523,6 +523,11 @@ attached cloud client. An explicit negative report proves absence for its
 unknown. Any present device blocks the default policy. No attached clients means
 absent. The renderer's existing presence rule is a visible window with input in
 the last 15 minutes, on a device that is neither locked nor suspended.
+IW2 currently sends a negative report on withdrawal, without periodic negative
+renewal (`CloudWorkspaceInteraction.refresh`). After 90 seconds an attached
+inactive client therefore becomes unknown and this policy defers until a new
+report or disconnect. Keeping absence continuously provable requires an IW2
+renewal change; this slice does not infer absence from an expired lease.
 
 The control-plane module
 `apps/control-plane/src/cloud-workspaces/runtime-quiet-trigger.ts` exports:
