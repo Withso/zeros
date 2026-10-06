@@ -23,6 +23,7 @@ const access = z.object({
       kind: z.string(),
       ownerUserId: z.string().uuid(),
       models: z.array(z.string()),
+      allModels: z.boolean().optional(),
       expiresAt: z.string(),
     }),
   ),
@@ -42,6 +43,7 @@ const organizationConnections = z.object({
         revision: z.number().int().positive(),
         credentialId: z.string().uuid().nullable(),
         models: z.array(z.string()).max(32),
+        allModels: z.boolean().optional(),
         connected: z.boolean(),
       }),
     )
@@ -123,6 +125,7 @@ export function selectCloudOrganizationCredential(
     credentialId: string | null;
     credentialRevision?: number;
     models?: string[];
+    allModels?: boolean;
     consent?: "zeros-managed";
   },
 ) {
@@ -149,6 +152,7 @@ export function authorizeCloudProvider(input: {
   workspaceId: string;
   granteeUserId: string;
   models: string[];
+  allModels?: boolean;
   expiresAt: string;
   computeConsent: z.infer<typeof access>["compute"];
 }) {

@@ -81,7 +81,17 @@ describe("cloud request account boundaries", () => {
       expiresAt: new Date(Date.now() + 60_000).toISOString(), runtimeQualified: false, runtimeUpgradeRequired: true,
     }] })));
     await expect(cloudAgentGrant({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333" }, "codex", "gpt-5.6-sol"))
-      .rejects.toThrow("This workspace gets the new cloud runtime the next time it wakes");
+      .rejects.toMatchObject({ code: "cloud_runtime_upgrade_required" });
+  });
+
+  it.each([false, true])("separates missing credentials from model consent (connected=%s)", async connected => {
+    state.session.mockResolvedValue(session);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ delegations: connected ? [{
+      id: "22222222-2222-4222-8222-222222222222", kind: "codex-chatgpt", models: ["gpt-5.5"],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(), runtimeQualified: true,
+    }] : [] })));
+    await expect(cloudAgentGrant({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333" }, "codex", "gpt-6.1-sol"))
+      .rejects.toMatchObject({ code: connected ? "cloud_agent_model_not_authorized" : "cloud_agent_credential_required" });
   });
 
   it("captures the account before its first asynchronous boundary", async () => {

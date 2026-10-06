@@ -110,3 +110,17 @@ export type CloudAgentExecutionRequest={kind:"admit";admission:CloudAgentExecuti
   {kind:"authorize-action";executionId:string;actorSessionId:string}|
   {kind:"customization";actorSessionId:string;operation:CloudCustomizationOperation;params:Record<string,unknown>}|
   {kind:"terminal-environment";actorSessionId:string};
+
+/** Admission refused before a provider turn started. Never attach private diagnostics. */
+export const CLOUD_AGENT_ADMISSION_CODES = [
+  "cloud_runtime_upgrade_required",
+  "cloud_agent_model_not_authorized",
+  "cloud_agent_credential_required",
+  "cloud_agent_credential_expired",
+  "cloud_agent_credential_revoked",
+  "cloud_agent_credential_refresh_required",
+] as const;
+export type CloudAgentAdmissionCode = typeof CLOUD_AGENT_ADMISSION_CODES[number];
+export function isCloudAgentAdmissionCode(code: unknown): code is CloudAgentAdmissionCode {
+  return typeof code === "string" && (CLOUD_AGENT_ADMISSION_CODES as readonly string[]).includes(code);
+}

@@ -1,3 +1,4 @@
+import { BLANK, useSessionsStore } from "../sessions-store";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -442,8 +443,23 @@ describe("turn footer first paint after a reopen", () => {
       ),
     );
 
-  beforeEach(() => turnRowCache.clear());
+  beforeEach(() => { turnRowCache.clear(); useSessionsStore.setState({ sessions: {} }); });
 
+  it.each(["cloud_runtime_upgrade_required", "cloud_agent_model_not_authorized", "cloud_agent_credential_expired", "cloud_agent_credential_revoked", "cloud_agent_credential_refresh_required"])("does not describe a rejected %s admission as a stopped agent", code => {
+    useSessionsStore.setState({ sessions: { "chat-1": { ...BLANK, agentId: "codex", cwd: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222" } } });
+    turnRowCache.setData(turnRowKey("chat-1", "user-1"), row({ status: "failed", stopReason: null }));
+    const html = renderFooter({ folder: useSessionsStore.getState().sessions["chat-1"].cwd, agentId: "codex", recoveryFailure: { kind: "cloud-admission", message: code } });
+    expect(html).not.toContain("AGENT STOPPED");
+    expect(html).not.toContain("0s");
+    expect(html).not.toContain(code);
+    expect(html).toContain("data-cloud-admission-status");
+  });
+  it.each(["/personal/local", "/organization/local"])("leaves stopped-turn behavior unchanged in %s", cwd => {
+    useSessionsStore.setState({ sessions: { "chat-1": { ...BLANK, cwd, agentId: "codex" } } });
+    turnRowCache.setData(turnRowKey("chat-1", "user-1"), row({ status: "failed", stopReason: null }));
+    expect(renderFooter({ folder: cwd })).toContain("AGENT STOPPED");
+    expect(renderFooter({ folder: cwd })).not.toContain("data-cloud-admission-status");
+  });
   it("paints a reopened failure outside activity and replaces the generic stopped pill", () => {
     turnRowCache.setData(turnRowKey("chat-1", "user-1"), row({ status: "failed", stopReason: null }));
     const html = renderFooter({

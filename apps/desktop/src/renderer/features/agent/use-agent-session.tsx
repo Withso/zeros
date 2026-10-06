@@ -1,3 +1,4 @@
+import type { CloudAdmissionState } from "./cloud-admission-failure";
 // ──────────────────────────────────────────────────────────
 // Agent session — type definitions + pure utilities
 // ──────────────────────────────────────────────────────────
@@ -103,6 +104,8 @@ export interface AgentUsage {
 }
 
 export interface AgentSessionState {
+  /** Cloud-only refusal before provider execution; independent of local auth. */
+  cloudAdmissionFailure?: CloudAdmissionState | null;
   /** Stop preserves follow-ups until the next explicit send resumes FIFO. */
   queuePaused?: boolean;
   /** The provider resumed into an empty conversation; carry visible context on

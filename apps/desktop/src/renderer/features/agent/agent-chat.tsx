@@ -1,3 +1,5 @@
+import { cloudAdmissionForTurn } from "./cloud-admission-failure";
+import { CloudAdmissionStatus } from "./cloud-admission-status";
 // ──────────────────────────────────────────────────────────
 // AgentChat — messages + tool cards + permission modal + composer
 // ──────────────────────────────────────────────────────────
@@ -4717,7 +4719,10 @@ export function AgentChat({
                 pendingLocalTurn: turnIsPendingLocal,
                 hasEvents: turn.events.length > 0,
               });
-              const authState = authenticationTurnState({
+              const cloudAdmission = cloudAdmissionForTurn({ folder: chatThread?.folder ?? session.cwd,
+                turnId: turn.userPrompt?.id, recoveryFailure: turn.userPrompt?.recoveryFailure,
+                current: session.cloudAdmissionFailure, agentId: signInAgentId });
+              const authState = cloudAdmission ? null : authenticationTurnState({
                 userPrompt: turn.userPrompt,
                 events: turn.events,
                 failureKind: session.failure?.kind,
@@ -4726,7 +4731,7 @@ export function AgentChat({
               });
               const authRequired = !readOnly && authState === "sign-in";
               const authStopped = authState === "stopped";
-              const visibleEvents = authState
+              const visibleEvents = cloudAdmission ? [] : authState
                 ? authenticationTurnOutput(turn.events)
                 : turn.events;
               return (
@@ -4832,7 +4837,7 @@ export function AgentChat({
                     {(!authRequired || visibleEvents.length > 0) && (
                       <TurnEventList
                         events={visibleEvents}
-                        failureTurnId={!authRequired && chatId ? turn.recordedTurnId ?? undefined : undefined}
+                        failureTurnId={!cloudAdmission && !authRequired && chatId ? turn.recordedTurnId ?? undefined : undefined}
                         isActive={isActiveProviderSegment}
                         isStreaming={turnInFlight && !authStopped}
                         showActivity={isVisualTail}
@@ -4858,6 +4863,8 @@ export function AgentChat({
                           chatId &&
                           ownsProviderFooter ? (
                             <TurnFooter
+                              folder={chatThread?.folder ?? session.cwd}
+                              agentId={chatThread?.agentId ?? session.agentId}
                               readOnly={readOnly}
                               surfaceActive={surfaceActive}
                               chatId={chatId}
@@ -5175,6 +5182,9 @@ export function AgentChat({
               so the popover matches the composer width,
               not the full-width wrapper above. */}
               {composerSuggestionPopup}
+              {!runtimeUpgradeRequired && <CloudAdmissionStatus folder={chatThread?.folder ?? session.cwd} agentId={signInAgentId}
+                failure={session.cloudAdmissionFailure?.agentId === signInAgentId &&
+                  (session.cloudAdmissionFailure.model === null || session.cloudAdmissionFailure.model === chatThread?.model) ? session.cloudAdmissionFailure : null} readOnly={readOnly} onRetry={() => void handleSend()} />}
               {runtimeUpgradeRequired && (
                 <p className="text-fg2 mb-2 text-2xxs" role="status" data-cloud-agent-runtime-upgrade="">
                   This workspace gets the new cloud runtime the next time it wakes

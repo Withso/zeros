@@ -1,3 +1,4 @@
+import { isCloudAgentAdmissionCode } from "./agent-admission-errors.js";
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { z } from "zod";
@@ -450,7 +451,7 @@ export class DatabaseCloudWorkspaceCommandService {
         throw new CloudCommandError("command_conflict", "Command dispatch authority changed");
       // Older engines collapse a pre-provider admission refusal to a generic
       // failure. Keep the server's exact denial, including settlement replays.
-      const admissionDenied=row.result_code==="cloud_runtime_upgrade_required";
+      const admissionDenied=isCloudAgentAdmissionCode(row.result_code);
       const state=admissionDenied?"failed":input.state;
       const resultCode=admissionDenied?row.result_code:input.resultCode;
       let result:Command["result"]=row.result||input.result?{...row.result,...input.result,version:1,

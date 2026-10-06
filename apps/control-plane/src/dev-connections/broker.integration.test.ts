@@ -193,6 +193,20 @@ suite("persistent Dev connection authority (real PostgreSQL)", () => {
     expect((await store.restore(a)).map(row => row.connectionId)).toEqual([input.id]);
     expect((await pool.query("SELECT count(*)::int n FROM dev_connections.refresh_fingerprints WHERE connection_id=$1", [ar.connectionId])).rows[0].n).toBeGreaterThan(0);
   });
+  it("persists explicit all-model self consent without authorizing another provider", async () => {
+    const id = randomUUID();
+    await store.connect(a, { id, accountId: id, appScope: "api", material: { kind: "cursor-api-key", apiKey: "synthetic-consent-test" },
+      consent: { models: ["grok-4.6"], repositories: [], scopes: ["agent"] } });
+    await store.consent(a, id, { models: ["grok-4.6"], allModels: true, repositories: [], scopes: ["agent"] });
+    const [ref] = await store.restore(b);
+    expect(ref!.consent).toMatchObject({ allModels: true });
+    const request = { action: "agent", workspaceId: randomUUID(), model: "grok-4.7" };
+    await expect(store.snapshot(b, ref!.bindingId, request)).resolves.toBeTruthy();
+    await expect(store.snapshot(b, ref!.bindingId, { ...request, model: "gpt-6.1-sol" })).rejects.toThrow();
+    await store.consent(a, id, { models: ["grok-4.6"], allModels: false, repositories: [], scopes: ["agent"] });
+    const [restricted] = await store.restore(b);
+    await expect(store.snapshot(b, restricted!.bindingId, request)).rejects.toThrow();
+  });
   it("persists one selected agent per provider across generations and consent retries",async()=>{
     const ids=[randomUUID(),randomUUID()];
     for(const id of ids)await store.connect(a,{id,accountId:id,appScope:'api',material:{kind:'cursor-api-key',apiKey:`synthetic-${id}`},consent:{models:[],repositories:[],scopes:['agent']}});

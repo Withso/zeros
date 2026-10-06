@@ -84,13 +84,13 @@ export class DatabaseDevConnectionRestore implements RestorePort {
         await tx.query("INSERT INTO cloud_agent_credential_organizations(credential_id,owner_user_id,org_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",[ref.bindingId,mapping.localUserId,mapping.localOrganizationId]);
         if(!ref.consent.scopes.includes('agent')||!ref.consent.models.length)continue;
         const provider=ref.kind.split('-')[0]!;
-        const consentHash=createHash('sha256').update(JSON.stringify([ref.bindingId,Number(credential.revision),ref.consent.models,fingerprint])).digest();
-        await tx.query(`INSERT INTO cloud_agent_organization_connections(org_id,owner_user_id,provider,revision,credential_id,credential_revision,models,consent_fingerprint,request_sha256)
-          VALUES($1,$2,$3,1,$4,$5,$6,$7,$8) ON CONFLICT(org_id,owner_user_id,provider) DO UPDATE SET
+        const consentHash=createHash('sha256').update(JSON.stringify([ref.bindingId,Number(credential.revision),ref.consent.models,fingerprint,...(ref.consent.allModels?["all-models"]:[])])).digest();
+        await tx.query(`INSERT INTO cloud_agent_organization_connections(org_id,owner_user_id,provider,revision,credential_id,credential_revision,models,consent_fingerprint,request_sha256,all_models)
+          VALUES($1,$2,$3,1,$4,$5,$6,$7,$8,$9) ON CONFLICT(org_id,owner_user_id,provider) DO UPDATE SET
           revision=cloud_agent_organization_connections.revision+1,credential_id=EXCLUDED.credential_id,credential_revision=EXCLUDED.credential_revision,
-          models=EXCLUDED.models,consent_fingerprint=EXCLUDED.consent_fingerprint,request_sha256=EXCLUDED.request_sha256,updated_at=now()
+          models=EXCLUDED.models,all_models=EXCLUDED.all_models,consent_fingerprint=EXCLUDED.consent_fingerprint,request_sha256=EXCLUDED.request_sha256,updated_at=now()
           WHERE cloud_agent_organization_connections.request_sha256 IS DISTINCT FROM EXCLUDED.request_sha256`,
-        [mapping.localOrganizationId,mapping.localUserId,provider,ref.bindingId,credential.revision,ref.consent.models,fingerprint,consentHash]);
+        [mapping.localOrganizationId,mapping.localUserId,provider,ref.bindingId,credential.revision,ref.consent.models,fingerprint,consentHash,ref.consent.allModels===true]);
       }
     });
   }

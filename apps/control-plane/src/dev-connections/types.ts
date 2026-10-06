@@ -57,13 +57,15 @@ export const repository = z
 export const ConsentSchema = z
   .object({
     models: z.array(CloudAgentModelSchema).max(32),
+    allModels: z.boolean().optional(),
     repositories: z.array(repository).max(100),
     scopes: z
       .array(z.enum(["agent", "github:read", "github:write"]))
       .min(1)
       .max(3),
   })
-  .strict();
+  .strict()
+  .refine(consent => !consent.allModels || consent.models.length > 0);
 export const ConnectSchema = z
   .object({
     id: uuid,
