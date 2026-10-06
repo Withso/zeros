@@ -46,6 +46,31 @@ suite("retirement progress health",()=>{
     await pool.query("UPDATE cloud_workspace_provider_bindings SET deletion_verified_at=now(),observed_state='deleted' WHERE workspace_id=$1",[f.workspaceId]);
     expect((await withSystemTx(pool,tx=>readPendingDeletionCapacity(tx,f.organizationId))).pendingDeletion).toEqual([]);
   });
+  const waitingDeletion=async(stage:string,requestedHoursAgo:number)=>{
+    // Boat retains a deleted sandbox while it finishes snapshot uploads or
+    // serves newer restores; those receipts can complete many hours later.
+    const resource=(await pool.query("SELECT provider_resource_id FROM cloud_workspace_provider_bindings WHERE workspace_id=$1",[f.workspaceId])).rows[0].provider_resource_id;
+    await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,operation,idempotency_key,request_sha256,affects_workspace,state,created_at,updated_at,next_attempt_at)
+      VALUES($1,$2,1,$3,'delete','synthetic-waiting-retirement',$4,false,'observing',now()-make_interval(hours=>$5),now(),now()+interval '1 minute')`,
+    [randomUUID(),f.workspaceId,f.organizationId,randomBytes(32),requestedHoursAgo]);
+    await pool.query(`INSERT INTO cloud_workspace_provider_operations(provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,resource_id,deletion_requested_at,deletion_operation_id)
+      VALUES('boat','synthetic',$1,1,$2,'synthetic-waiting',repeat('b',64),$3,now()-make_interval(hours=>$4),'receipt')`,[f.workspaceId,f.organizationId,resource,requestedHoursAgo]);
+    await new DatabaseCloudProviderOperationStore(pool,"boat","synthetic").recordDeletionProgress(resource,"receipt",stage);
+    await pool.query("UPDATE cloud_workspace_provider_operations SET deletion_progress_at=now()-interval '2 hours' WHERE workspace_id=$1",[f.workspaceId]);
+    return new DatabaseCloudWorkspaceHealthService(pool,{setupExecutionEnabled:false,durabilityEnabled:false,outboxDeliveryEnabled:false});
+  };
+  it.each(["waiting_for_uploads","kept_for_newer_snapshots","waiting_for_restore"])("keeps a provider-reported %s deletion healthy after an hour without stage progress",async stage=>{
+    const health=await waitingDeletion(stage,2);
+    expect((await health.read()).reasons).not.toContain("deletion_intent_stalled");
+  });
+  it.each(["waiting_for_uploads","kept_for_newer_snapshots","waiting_for_restore"])("still reports a %s deletion stalled at the 24-hour limit",async stage=>{
+    const health=await waitingDeletion(stage,25);
+    expect((await health.read()).reasons).toContain("deletion_intent_stalled");
+  });
+  it("still reports a generic blocked receipt after an hour without progress",async()=>{
+    const health=await waitingDeletion("blocked",2);
+    expect((await health.read()).reasons).toContain("deletion_intent_stalled");
+  });
   it("restricts the cleanup read model to an organization administrator",async()=>{
     const service=new DatabaseCloudWorkspaceManagementService(pool,{} as CloudWorkspaceBackendConfig,{workosEnabled:false});
     expect((await service.pendingDeletionCapacity({organizationId:f.organizationId,actorUserId:f.userId})).pendingDeletion).toEqual([]);
