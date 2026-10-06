@@ -109,6 +109,10 @@ export interface TerminalSession {
    *  not-yet-registered create isn't pruned) until it shows up in a list.
    *  Runtime-only — NOT persisted, so a reload never surprise-prunes a tab. */
   engineSeen?: boolean;
+  /** Cloud-only, runtime-only: a new engine lost this shell. Keep the tab and
+   * lazily recreate a plain shell when it is shown; never rerun a Run action. */
+  resumePending?: boolean;
+  engineInstanceId?: string;
   /** True once the user renames this terminal (via terminal panel's terminal
    *  dropdown). A renamed terminal KEEPS its title — renumberFolder skips it
    *  (like run terminals) so a later create/delete doesn't overwrite the custom
@@ -157,6 +161,7 @@ interface TerminalStoreState {
       exited?: boolean;
     }>,
     allEngineIds: string[],
+    engineInstanceId?: string,
   ): void;
   renameSession(id: string, title: string): void;
   markExited(id: string): void;
@@ -519,7 +524,9 @@ export const useTerminalStore = create<TerminalStoreState>((set, get) => ({
     return stored ?? session;
   },
 
-  syncEngineTerminals(folder, folderTerminals, allEngineIds) {
+  syncEngineTerminals(folder, folderTerminals, allEngineIds, engineInstanceId) {
+    // Both Personal and organization Local folders keep remove-on-vanish.
+    const engine = parseCloudWorkspaceKey(folder) ? engineInstanceId : undefined;
     set((s) => {
       const engineIds = new Set(allEngineIds.filter(Boolean));
       // sessionId → exited, for this folder's engine terminals (drives `alive`
@@ -552,6 +559,7 @@ export const useTerminalStore = create<TerminalStoreState>((set, get) => ({
           // terminal-agent auto-launch is a conversation pane concern, not this panel's.
           agentId: null,
           engineSeen: true,
+          ...(engine ? { engineInstanceId: engine } : {}),
         }));
       let changed = additions.length > 0;
       // RECONCILE existing sessions in THIS folder against the registry.
@@ -566,12 +574,20 @@ export const useTerminalStore = create<TerminalStoreState>((set, get) => ({
           // (so an exit/restart elsewhere flips this device's "(exited)" badge).
           const reported = exitedById.get(sess.id);
           const nextAlive = reported === undefined ? sess.alive : !reported;
-          if (!sess.engineSeen || sess.alive !== nextAlive) {
-            kept.push({ ...sess, engineSeen: true, alive: nextAlive });
+          if (!sess.engineSeen || sess.alive !== nextAlive || sess.resumePending || engine && sess.engineInstanceId !== engine) {
+            kept.push({ ...sess, engineSeen: true, alive: nextAlive, ...(engine ? { engineInstanceId: engine, resumePending: false } : {}) });
             changed = true;
           } else {
             kept.push(sess);
           }
+        } else if (engine && (sess.resumePending || sess.engineInstanceId && sess.engineInstanceId !== engine) &&
+            !isRunSessionId(sess.id) && !isSetupSessionId(sess.id)) {
+          // The replacement engine cannot know this device's old shells. Keep
+          // titles/selection/cwd; a hidden retained tab must not spawn anything.
+          if (!sess.resumePending || sess.engineInstanceId !== engine) {
+            kept.push({ ...sess, engineSeen: false, alive: true, resumePending: true, engineInstanceId: engine });
+            changed = true;
+          } else kept.push(sess);
         } else if (sess.engineSeen) {
           // Was registered, now GONE → CLOSED on another device. Drop it.
           changed = true;

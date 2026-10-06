@@ -43,7 +43,7 @@ export interface WorkspaceRuntimeOptions {
   open: (target: CloudWorkspaceTarget, options?: { signal: AbortSignal; wake?: boolean; reason?: "interaction" }) => Promise<CloudPeer>;
   /** Account/catalog epoch and generation; never a credential or admission. */
   identity?: (target: CloudWorkspaceTarget) => string;
-  /** Explicit wake ownership survives only forward generation replacements.
+  /** Explicit wake ownership follows replacements and in-progress rollbacks.
    * Undefined revokes run access; passive connections remain exact-generation. */
   wakeOwner?: (target: CloudWorkspaceTarget) => WakeOwner | undefined;
   workspaces: () => readonly WireRecord[];
@@ -55,7 +55,10 @@ export interface WorkspaceRuntimeOptions {
   readHistory?: (target: CloudWorkspaceTarget, op: string, params: WireRecord) => Promise<WireRecord>;
   prepareGithubWrite?: (target: CloudWorkspaceTarget, op: string, params: WireRecord) => Promise<string>;
 }
-interface WakeOwner { account: string; generation: number; stopVersion: number }
+interface WakeOwner { account: string; generation: number; stopVersion: number; lifecyclePending?: boolean; retargetVersion?: number }
+class CloudAdmissionGenerationChangedError extends Error {
+  constructor(readonly generation: number) { super("Cloud workspace generation changed during admission"); }
+}
 interface PeerEntry extends CloudPeer {
   unsubscribers: Map<string, () => void>;
   stopStatus: () => void;
@@ -330,16 +333,19 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       ? options.signal.reason : new Error("Cloud workspace open cancelled");
     const key = cloudWorkspaceKey(target);
     const identity = this.identity(target);
-    const owner = this.routing.wakeOwner?.(target);
+    const pending = this.opening.get(key);
+    const requestedOwner = this.routing.wakeOwner?.(target);
+    const owner = pending?.wake && pending.owner && requestedOwner &&
+      pending.owner.account === requestedOwner.account && pending.owner.stopVersion === requestedOwner.stopVersion
+      ? pending.owner : requestedOwner;
     const epoch = this.accountEpoch;
     const current = () => epoch === this.accountEpoch && (owner
       ? this.continuesWake(target, owner) : identity === this.identity(target));
-    const pending = this.opening.get(key);
     this.claimPeer(key);
     const open = () => {
       if (options.signal.aborted) return Promise.reject(cancelled());
       if (!current()) return Promise.reject(new Error("Cloud account changed while connecting"));
-      const promise = this.peer(target, true, options?.reason);
+      const promise = this.peer(target, true, options?.reason, owner);
       const flight = this.opening.get(key);
       if (flight) flight.consumers++;
       return new Promise<PeerEntry>((resolve, reject) => {
@@ -372,15 +378,23 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       }
     }
     let generation = owner?.generation;
+    let retargetVersion = owner?.retargetVersion ?? 0;
+    let retiredAdmission: number | undefined;
     for (;;) {
       try { await open(); return; }
       catch (error) {
         const next = this.routing.wakeOwner?.(target);
-        // An admission/connect/hydration for N can lose to N+1. Dispose N and
+        // Admission for N can lose to N+1 or a rollback. Dispose the old peer and
         // retarget the still-undispatched intent; never retry any command here.
-        if (options?.signal?.aborted || !current() || !this.continuesWake(target, owner) || !next ||
-            generation === undefined || next.generation <= generation) throw error;
+        const admitted = error instanceof CloudAdmissionGenerationChangedError ? error.generation : undefined;
+        // N -> N+1 -> N can finish at the original number while a late N+1
+        // admission arrives. Retire it and re-admit; bound duplicate stale replies.
+        if (options?.signal?.aborted || !current() || !this.continuesWake(target, owner) || !next || generation === undefined ||
+            next.generation === generation && (owner?.retargetVersion ?? 0) === retargetVersion &&
+              (admitted === undefined || admitted === next.generation || admitted === retiredAdmission)) throw error;
+        retiredAdmission = admitted;
         generation = next.generation;
+        retargetVersion = owner?.retargetVersion ?? 0;
       }
     }
   }
@@ -498,6 +512,17 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     return entry && !entry.retired ? entry.client.status : "disconnected";
   }
 
+  /** Renderer-only shell continuity. Admission IDs change on reconnect; only
+   * a different engine instance proves that the old PTY registry was reset. */
+  cloudEngineInstanceId(folder: string): string | undefined {
+    const target = parseCloudWorkspaceKey(folder);
+    if (!target) return undefined;
+    const entry = this.peers.get(cloudWorkspaceKey(target));
+    if (!entry || entry.retired || entry.identity !== this.identity(target)) return undefined;
+    const identity = entry.client.executionIdentity;
+    return identity?.kind === "cloud" ? identity.engineInstanceId : undefined;
+  }
+
   onWorkspaceStatusChange(folder: string, listener: () => void): () => void {
     const target = parseCloudWorkspaceKey(folder);
     if (!target) return this.onStatusChange(listener);
@@ -557,7 +582,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     );
   }
 
-  private peer(target: CloudWorkspaceTarget, wake = false, reason?: "interaction"): Promise<PeerEntry> {
+  private peer(target: CloudWorkspaceTarget, wake = false, reason?: "interaction", intentOwner?: WakeOwner): Promise<PeerEntry> {
     if (this.routing.canAccess && !this.routing.canAccess(target))
       return Promise.reject(
         new Error(
@@ -566,7 +591,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       );
     const key = cloudWorkspaceKey(target);
     let identity = this.identity(target);
-    const owner = wake ? this.routing.wakeOwner?.(target) : undefined;
+    const owner = wake ? intentOwner ?? this.routing.wakeOwner?.(target) : undefined;
     const pending = this.opening.get(key);
     if (pending && (pending.identity === identity || pending.wake && this.continuesWake(target, pending.owner))) return pending.promise;
     if (pending) {
@@ -620,7 +645,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       .then(async (opened) => {
         if (owner && opened.generation !== undefined && opened.generation !== this.routing.wakeOwner?.(target)?.generation) {
           if (opened === reusable) this.retirePeer(reusable); else opened.release();
-          throw new Error("Cloud workspace generation changed during admission");
+          throw new CloudAdmissionGenerationChangedError(opened.generation);
         }
         if (wake && this.continuesWake(target, owner)) identity = this.identity(target);
         if (
@@ -970,7 +995,11 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
 
   private continuesWake(target: CloudWorkspaceTarget, owner: WakeOwner | undefined): boolean {
     const current = this.routing.wakeOwner?.(target);
-    if (!owner || !current || current.account !== owner.account || current.stopVersion !== owner.stopVersion || current.generation < owner.generation) return false;
+    if (!owner || !current || current.account !== owner.account || current.stopVersion !== owner.stopVersion ||
+        current.generation < owner.generation && !current.lifecyclePending) return false;
+    // A complete upgrade/rollback cycle may finish at the original number.
+    // All waiters share these observed retargets, including native failures.
+    if (owner.generation !== current.generation) owner.retargetVersion = (owner.retargetVersion ?? 0) + 1;
     owner.generation = current.generation;
     return true;
   }

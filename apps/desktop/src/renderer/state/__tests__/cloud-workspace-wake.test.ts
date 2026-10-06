@@ -102,6 +102,17 @@ describe("explicit cloud wake readiness", () => {
     expect(api.wake).toHaveBeenCalledOnce();
   });
 
+  it("follows a failed replacement back to the source generation for shared navigation and send wakes", async () => {
+    const candidate = (version: number, status: string) => ({ ...doc(version, status), generation: { ...doc(version).generation, number: 8 } });
+    api.wake.mockResolvedValue(candidate(2, "provisioning"));
+    api.read.mockResolvedValueOnce(candidate(3, "setting_up")).mockResolvedValueOnce(doc(4, "waking")).mockResolvedValue(doc(5, "ready"));
+    const failed = vi.fn();
+    const completed = Promise.all([wakeCloudWorkspace(target, doc(1), undefined, "interaction"), wakeCloudWorkspace(target, doc(1))]).catch(failed);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect((await completed)?.map((value: CloudWorkspaceDocument) => value.generation.number)).toEqual([7, 7]);
+    expect(failed).not.toHaveBeenCalled(); expect(api.wake).toHaveBeenCalledOnce();
+  });
+
   it("waits through final capture before waking once, and lets a later Stop win", async () => {
     acceptCloudWorkspaceDocument(doc(1, "stopping"));
     api.read.mockResolvedValueOnce(doc(2, "stopped")).mockResolvedValueOnce(doc(4, "stopping"));

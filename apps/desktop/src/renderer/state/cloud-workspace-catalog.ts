@@ -29,6 +29,10 @@ let epoch = 0;
 let catalogConfirmed = false;
 export const cloudCatalogGeneration = () => epoch;
 export const cloudWorkspaceCatalogConfirmed = () => catalogConfirmed;
+/** A generation is a compute target, not wake ownership: replacement and
+ * rollback may both retarget an authorized intent during server progress. */
+export const isCloudWorkspaceLifecyclePending = (doc: Pick<CloudWorkspaceDocument, "status" | "error"> | undefined) =>
+  !!doc && !doc.error && ["stopping", "waking", "provisioning", "setting_up"].includes(doc.status);
 let inflight: Promise<void> | null = null;
 let catalogReadGeneration = 0;
 // Read provenance follows the published object without retaining removed owners.
@@ -331,7 +335,7 @@ export async function refreshCloudWorkspace(
       throw new Error("Cloud catalog returned a different workspace");
     const current = cloudWorkspaceDocument(target);
     if (current && current.generation.number !== doc.generation.number &&
-        (current.version >= doc.version || current.generation.number > doc.generation.number))
+        (current.version >= doc.version || current.generation.number > doc.generation.number && !isCloudWorkspaceLifecyclePending(doc)))
       throw new Error("Cloud workspace generation changed");
     // A newer stopped/deleted document must win over a late ready read, too.
     acceptCloudWorkspaceDocument(doc, readGeneration);
@@ -414,6 +418,9 @@ function settleLifecycleIntents(doc: CloudWorkspaceDocument): void {
     lifecycleIntents.delete(
       `${epoch}:${cloudWorkspaceKey({ organizationId: doc.organizationId, workspaceId: doc.id })}:${operation}`,
     );
+  // A late HTTP receipt may arrive after rollback has already become ready.
+  // Remember the target observed during progress even after the map settles.
+  if (wake && isCloudWorkspaceLifecyclePending(doc)) wake.generation = doc.generation.number;
 }
 export async function manageCloudWorkspace(
   target: CloudWorkspaceTarget,
@@ -429,7 +436,8 @@ export async function manageCloudWorkspace(
   const generation = cloudWorkspaceDocument(target)?.generation.number;
   const previous = lifecycleIntents.get(key);
   const intent: LifecycleIntent = previous && (operation !== "wake" || previous.owner === owner &&
-      (previous.generation === generation || generation !== undefined && previous.generation !== undefined && generation >= previous.generation))
+      (previous.generation === generation || generation !== undefined && previous.generation !== undefined &&
+        (generation >= previous.generation || isCloudWorkspaceLifecyclePending(cloudWorkspaceDocument(target)))))
     ? previous : { id: crypto.randomUUID(), owner, generation, version: cloudWorkspaceDocument(target)?.version, reason: operation === "wake" ? reason : undefined };
   if (intent.task) {
     const doc = await intent.task;
@@ -458,7 +466,10 @@ export async function manageCloudWorkspace(
       if (doc.id !== target.workspaceId || doc.organizationId !== target.organizationId)
         throw new Error("Cloud wake returned a different workspace");
       const current = cloudWorkspaceDocument(target);
-      if (generation !== undefined && (doc.generation.number < generation || !current || current.generation.number < generation))
+      const expected = intent.generation;
+      if (expected !== undefined && (!current ||
+          doc.generation.number < expected && !isCloudWorkspaceLifecyclePending(doc) ||
+          current.generation.number < expected && !isCloudWorkspaceLifecyclePending(current)))
         throw new Error("Cloud workspace generation changed while waking");
       if (generation !== undefined && (!canReadCloudWorkspace(current) || !current?.capabilities.canWrite))
         throw new Error("Cloud workspace access changed while waking");

@@ -47,7 +47,7 @@ beforeEach(() => {
 afterEach(() => { cleanup?.(); cleanup = undefined; client.dispose(); setActiveBridge(null); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("explicit cloud navigation intent", () => {
-  it.each(["navigation", "interaction"])("silently follows N to N+1 during a pending %s wake", async intent => {
+  it.each(["navigation", "interaction"].flatMap(intent => [false, true].map(rollback => ({ intent, rollback }))))("silently follows generation changes during a pending $intent wake (rollback=$rollback)", async ({ intent, rollback }) => {
     client.dispose(); let finish!: () => void;
     const ready = new Promise<void>(resolve => { finish = resolve; });
     const open = vi.fn(async () => {
@@ -58,13 +58,16 @@ describe("explicit cloud navigation intent", () => {
     });
     client = new WorkspaceRuntimeClient({ open, workspaces: () => [],
       identity: () => `${cloudCatalogGeneration()}:${cloudWorkspaceDocument(target)?.generation.number}`,
-      wakeOwner: () => ({ account: String(cloudCatalogGeneration()), generation: cloudWorkspaceDocument(target)!.generation.number, stopVersion: 0 }) });
+      wakeOwner: () => ({ account: String(cloudCatalogGeneration()), generation: cloudWorkspaceDocument(target)!.generation.number, stopVersion: 0,
+        lifecyclePending: ["stopping", "waking", "provisioning", "setting_up"].includes(cloudWorkspaceDocument(target)!.status) }) });
     setActiveBridge(client);
     if (intent === "navigation") { CloudWorkspaceLifecycle(); cleanup = harness.effects[3](); requestCloudWorkspaceOpen(folder); }
     else interactions().input("pointerdown");
     const pending = client.openWorkspace(target);
-    for (const [index, status] of ["stopping", "provisioning", "setting_up", "ready"].entries()) {
-      acceptCloudWorkspaceDocument({ ...doc, status, version: index + 2, generation: { ...doc.generation, number: 2 } });
+    const stages = rollback ? [[2, "provisioning"], [2, "setting_up"], [1, "waking"], [1, "ready"]] as const
+      : [[2, "stopping"], [2, "provisioning"], [2, "setting_up"], [2, "ready"]] as const;
+    for (const [index, [generation, status]] of stages.entries()) {
+      acceptCloudWorkspaceDocument({ ...doc, status, version: index + 2, generation: { ...doc.generation, number: generation } });
       client.pruneCloudConnections();
       expect(harness.failure).not.toHaveBeenCalled();
     }

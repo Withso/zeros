@@ -6,6 +6,7 @@ vi.mock("../../../state/cloud-workspace-catalog", () => ({
   refreshCloudWorkspace: mocks.refresh, acceptCloudEngineWorkspace: vi.fn(),
   manageCloudWorkspace: mocks.wake,
   canReadCloudWorkspace: (doc: { status: string }) => !["deleted", "deleting"].includes(doc.status),
+  isCloudWorkspaceLifecyclePending: (doc: { status: string }) => ["stopping", "waking", "provisioning", "setting_up"].includes(doc.status),
   subscribeCloudWorkspaces: (fn: () => void) => { mocks.listeners.add(fn); return () => mocks.listeners.delete(fn); },
 }));
 vi.mock("../../cloud-workspace-access", () => ({ openCloudWorkspaceRuntime: mocks.admission, closeCloudWorkspaceRuntime: mocks.close, refreshCloudWorkspaceRuntime: vi.fn() }));

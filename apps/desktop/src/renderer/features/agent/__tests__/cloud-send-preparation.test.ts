@@ -51,6 +51,17 @@ describe("cloud message preparation", () => {
     expect(preparation.prepare("chat", current, open, () => current)).toBe(first);
     wake.resolve(); await first; expect(open).toHaveBeenCalledOnce();
   });
+  it("retains the same preparation through a candidate rollback observed before readiness", async () => {
+    const preparation = new CloudSendPreparation(), wake = deferred(), open = vi.fn(() => wake.promise);
+    let current = { ...owner, lifecyclePending: true }, changed!: () => void;
+    const first = preparation.prepare("chat", current, open, () => current, listener => { changed = listener; return () => {}; });
+    await Promise.resolve(); current = { ...current, generation: 8 }; changed();
+    expect(preparation.prepare("chat", current, open, () => current)).toBe(first);
+    current = { ...current, generation: 7 }; changed();
+    expect(preparation.prepare("chat", current, open, () => current)).toBe(first);
+    current = { ...current, lifecyclePending: false }; changed();
+    wake.resolve(); await first; expect(open).toHaveBeenCalledOnce();
+  });
 
   it("cancels only the original chat and keeps a replacement intent after a late completion", async () => {
     const preparation = new CloudSendPreparation(), old = deferred(), next = deferred(), other = deferred();
