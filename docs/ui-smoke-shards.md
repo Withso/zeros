@@ -47,12 +47,17 @@ All phases are assigned to the same shard. Subscription remains last because it
 installs a clock that survives navigation; its shard context is also isolated.
 
 Every shard enforces the uncaught-page-error invariant. Its successful checkpoint
-is printed by shard 3 only, so the multiset of `check()` names from a full run
-equals the union of the shard logs. Any shard with uncaught errors prints the
+is printed by shard 3 only, avoiding duplicate copies of that suite-wide check
+when comparing full and shard logs. Any shard with uncaught errors prints the
 failed checkpoint and exits unsuccessfully. Scenario checks keep the original
-failure-accumulation semantics.
+output and failure-accumulation semantics.
 
-Preflight runs `ui-smoke (1/3)` through `ui-smoke (3/3)` with fail-fast disabled.
+The existing Archive checkpoint embeds measured milliseconds in its name. For
+cross-run coverage comparisons, treat only that elapsed-time field as diagnostic
+and match every other name exactly, because that measurement varies between runs.
+
+Preflight runs `tests-ui-smoke (1/3)` through `tests-ui-smoke (3/3)` with fail-fast
+disabled.
 The required `ui-smoke (composer)` aggregate runs even when a shard fails or is
 cancelled and succeeds only when the complete matrix succeeds. Pull request CI
 keeps its existing composer placeholder; the browser workload runs after merge.
