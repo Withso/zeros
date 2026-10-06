@@ -24,7 +24,7 @@
     "staff:manage": "tsx src/manage-staff.ts",
     "reset:database": "tsx src/reset-database.ts",
     "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node dist/copy-runtime-assets.js",
     "start": "node dist/index.js",
     "migrate": "tsx src/migrate.ts",
     "release-migration:manage": "tsx src/manage-release-migration.ts",

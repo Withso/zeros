@@ -46,6 +46,12 @@ const witness = z.object({ runtimeId, manifestSha256: digest, baseCompatibilityI
   installerReceiptSha256: digest, bootId: uuid, supervisorSessionId: uuid }).strict();
 export const CloudRuntimeWitnessSchema = witness.refine(sameIdentity);
 export type CloudRuntimeWitness = z.infer<typeof CloudRuntimeWitnessSchema>;
+export const CloudActiveRuntimeSchema = witness.extend({
+  schema: z.literal("zeros.active-runtime/v1"),
+  root: z.string(),
+  cgroupRoot: z.literal("/sys/fs/cgroup/system.slice/zeros-host.service"),
+}).strict().refine(value => sameIdentity(value) && value.root === `/opt/zeros-infra/${value.runtimeId}`);
+export type CloudActiveRuntime = z.infer<typeof CloudActiveRuntimeSchema>;
 export const CloudAgentRuntimeSchema = z.union([
   z.object({ profile: z.literal("zeros-cloud-worker-v3"), contractSha256: digest }).strict(),
   witness.extend({ profile: z.literal("zeros-cloud-worker-v4") }).strict().refine(sameIdentity),

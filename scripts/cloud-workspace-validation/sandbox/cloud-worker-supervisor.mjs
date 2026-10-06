@@ -16,7 +16,7 @@ import {
 import net from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { CloudEngineCgroup, CloudDelegatedCgroups } from "./cloud-engine-cgroup.mjs";
-import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
+import { cloudActiveRuntimeDescriptor, parseCloudActiveRuntime, resolveCloudRuntime } from "./cloud-runtime-root.mjs";
 import { readCloudHostRuntimeProfile } from "./cloud-runtime-profile.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -201,11 +201,11 @@ export function parseCloudWorkerSupervisorRequest(value) {
     !isRecord(value) ||
     value.version !== 1 ||
     value.audience !== CLOUD_WORKER_SUPERVISOR_AUDIENCE ||
-    !["status", "prepare", "start"].includes(value.operation)
+    !["status", "update-status", "prepare", "start", "select-runtime"].includes(value.operation)
   ) {
     return null;
   }
-  if (value.operation === "prepare" || value.operation === "status") {
+  if (["prepare", "status", "update-status"].includes(value.operation)) {
     return exactKeys(value, ["audience", "operation", "version"])
       ? {
           version: 1,
@@ -213,6 +213,12 @@ export function parseCloudWorkerSupervisorRequest(value) {
           operation: value.operation,
         }
       : null;
+  }
+  if (value.operation === "select-runtime") {
+    if (!exactKeys(value, ["audience", "active", "operation", "session", "version"]) ||
+      !SESSION_PATTERN.test(value.session ?? "")) return null;
+    try { return { ...value, active: parseCloudActiveRuntime(value.active) }; }
+    catch { return null; }
   }
   if (
     !exactKeys(value, [
@@ -263,6 +269,44 @@ function childExit(child, timeoutMs) {
   });
 }
 
+// Reuse the protected installer on the physical host. Do not override the
+// ordinary runtime resolver's pinned-executable check: this supervisor remains
+// controller H while it launches engine T. The adapter already hashed T; this
+// independent check also prevents a root caller selecting an unverified tree.
+const VERIFY_SELECTED_RUNTIME = `
+import importlib.util,json,sys
+sys.dont_write_bytecode=True
+s=importlib.util.spec_from_file_location('bootstrap','/opt/zeros-bootstrap/bootstrap.py')
+b=importlib.util.module_from_spec(s);s.loader.exec_module(b)
+try:
+ a=b.Bootstrap();a.base();a.require_persistence()
+ expected=b.strict_json(sys.stdin.buffer.read(4097),'input_schema')
+ active=b.strict_json(a.read(b.ACTIVE,4096,0o600),'input_schema')
+ b.require(active==expected and a.current()==active['runtimeId'] and active['baseCompatibilityId']==a.compat_id and active['bootId']==a.boot_id(),'input_schema')
+ _,receipt=a.verify_runtime(active['runtimeId'],full=True)
+ b.require(active['installerReceiptSha256']==b.sha(receipt),'input_schema')
+ print(json.dumps(active,separators=(',',':')))
+except Exception:
+ sys.exit(1)
+`;
+
+export function verifySelectedCloudRuntime(expected) {
+  if (process.platform !== "linux" || process.geteuid?.() !== 0)
+    throw new Error("Cloud runtime selection requires the root host");
+  const active = parseCloudActiveRuntime(expected);
+  const result = spawnSync("/usr/bin/python3", ["-I", "-c", VERIFY_SELECTED_RUNTIME], {
+    input: JSON.stringify(active), encoding: "utf8", timeout: 90_000, maxBuffer: 8192,
+    env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", HOME: "/root", LANG: "C.UTF-8" },
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  if (result.error || result.status !== 0 || result.signal)
+    throw new Error("Cloud runtime selection verification failed");
+  const verified = parseCloudActiveRuntime(JSON.parse(result.stdout));
+  if (Object.keys(active).some(key => active[key] !== verified[key]))
+    throw new Error("Cloud runtime selection changed");
+  return verified;
+}
+
 export class CloudWorkerSupervisor {
   constructor({
     socketPath = CLOUD_WORKER_SUPERVISOR_SOCKET,
@@ -271,6 +315,7 @@ export class CloudWorkerSupervisor {
     spawnProcess = spawn,
     engineScope = null,
     setupScope = null,
+    verifySelectedRuntime = verifySelectedCloudRuntime,
   } = {}) {
     this.socketPath = socketPath;
     this.runtime = runtime;
@@ -278,6 +323,9 @@ export class CloudWorkerSupervisor {
     this.spawnProcess = spawnProcess;
     this.engineScope = engineScope;
     this.setupScope = setupScope;
+    this.verifySelectedRuntime = verifySelectedRuntime;
+    this.selectedRuntime = runtime.profile === "v4" ? cloudActiveRuntimeDescriptor(runtime) : null;
+    this.binRoot = runtime.binRoot;
     this.server = null;
     this.child = null;
     this.session = null;
@@ -333,7 +381,7 @@ export class CloudWorkerSupervisor {
       env: {
         HOME: "/root",
         LANG: "C.UTF-8",
-        PATH: `${this.runtime.binRoot}:/usr/bin:/bin:/usr/sbin:/sbin`,
+        PATH: `${this.binRoot}:/usr/bin:/bin:/usr/sbin:/sbin`,
         ZEROS_ACCOUNT_JWT_AUD: environment.accountAudience,
         ...(environment.accountContract
           ? {
@@ -374,6 +422,11 @@ export class CloudWorkerSupervisor {
   async apply(request) {
     if (this.stopping) return supervisorResponse("rejected");
     if (request.operation === "status") return supervisorResponse("ready");
+    if (request.operation === "update-status") {
+      return this.runtime.profile === "v4"
+        ? supervisorResponse("ready", { controller: cloudActiveRuntimeDescriptor(this.runtime), selected: this.selectedRuntime })
+        : supervisorResponse("rejected");
+    }
     if (request.operation === "prepare") {
       this.session = null;
       await this.stopChild();
@@ -382,6 +435,16 @@ export class CloudWorkerSupervisor {
     }
     if (!this.session || request.session !== this.session) {
       return supervisorResponse("rejected");
+    }
+    if (request.operation === "select-runtime") {
+      if (this.runtime.profile !== "v4" || this.child ||
+        ["baseCompatibilityId", "bootId", "cgroupRoot"].some(key => request.active[key] !== this.runtime[key]))
+        return supervisorResponse("rejected");
+      const active = this.verifySelectedRuntime(request.active);
+      this.selectedRuntime = active;
+      this.binRoot = `${active.root}/bin`;
+      this.launcher = `${this.binRoot}/start-engine.sh`;
+      return supervisorResponse("selected");
     }
     this.session = null;
     await this.stopChild();
@@ -435,6 +498,7 @@ export class CloudWorkerSupervisor {
         reject();
         return;
       }
+      if (request.operation === "select-runtime") socket.setTimeout(100_000);
       complete = true;
       this.enqueue(request).then(
         (response) => socket.end(`${JSON.stringify(response)}\n`),

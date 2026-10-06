@@ -11,6 +11,78 @@ import {
   CLOUD_WORKER_SUPERVISOR_AUDIENCE,
 } from "../cloud-workspace-validation/sandbox/cloud-worker-supervisor.mjs";
 
+describe("cloud runtime activation", () => {
+  function fixture() {
+    const tree = cloudRuntimeFixture();
+    const runtime = createCloudRuntimeResolver({ filesystem: tree.filesystem }).resolve();
+    const active = { ...tree.descriptor, runtimeId: `r1-${"d".repeat(64)}`,
+      root: `/opt/zeros-infra/r1-${"d".repeat(64)}`, manifestSha256: "d".repeat(64),
+      supervisorSessionId: "32345678-1234-4234-8234-123456789abc" };
+    const verifySelectedRuntime = vi.fn(() => active);
+    const retire = vi.fn(async () => {});
+    const supervisor = new CloudWorkerSupervisor({ runtime, verifySelectedRuntime, engineScope: { retire } });
+    return { tree, runtime, active, verifySelectedRuntime, retire, supervisor };
+  }
+
+  it("accepts only an exact root activation request, never an arbitrary launcher", () => {
+    const f = fixture();
+    try {
+      const request = { version: 1, audience: CLOUD_WORKER_SUPERVISOR_AUDIENCE,
+        operation: "select-runtime", session: `zsp_${"S".repeat(43)}`, active: f.active };
+      expect(parseCloudWorkerSupervisorRequest(request)).toEqual(request);
+      for (const invalid of [ { ...request, command: "/tmp/launcher" },
+        { ...request, active: { ...f.active, root: "/tmp/runtime" } },
+        { ...request, session: "stale" } ]) expect(parseCloudWorkerSupervisorRequest(invalid)).toBeNull();
+    } finally { f.tree.dispose(); }
+  });
+
+  it("keeps the resident controller identity while selecting the new engine", async () => {
+    const f = fixture();
+    try {
+      const prepared = await f.supervisor.apply({ operation: "prepare" });
+      expect(await f.supervisor.apply({ operation: "select-runtime", session: prepared.session,
+        active: f.active })).toMatchObject({ outcome: "selected" });
+      expect(f.verifySelectedRuntime).toHaveBeenCalledWith(f.active);
+      expect(f.retire).toHaveBeenCalledOnce();
+      expect(f.supervisor.runtime).toBe(f.runtime);
+      expect(f.supervisor.launcher).toBe(`${f.active.root}/bin/start-engine.sh`);
+      expect(await f.supervisor.apply({ operation: "update-status" })).toMatchObject({
+        outcome: "ready", controller: f.tree.descriptor, selected: f.active,
+      });
+    } finally { f.tree.dispose(); }
+  });
+
+  it("rejects a stale session, live child, changed base or boot before selecting", async () => {
+    const f = fixture();
+    try {
+      const prepared = await f.supervisor.apply({ operation: "prepare" });
+      for (const fields of [{ session: "stale" },
+        { active: { ...f.active, bootId: "42345678-1234-4234-8234-123456789abc" } },
+        { active: { ...f.active, baseCompatibilityId: `bc1-${"e".repeat(64)}` } }]) {
+        expect(await f.supervisor.apply({ operation: "select-runtime", session: prepared.session,
+          active: f.active, ...fields })).toMatchObject({ outcome: "rejected" });
+      }
+      f.supervisor.child = { exitCode: null, signalCode: null };
+      expect(await f.supervisor.apply({ operation: "select-runtime", session: prepared.session,
+        active: f.active })).toMatchObject({ outcome: "rejected" });
+      expect(f.verifySelectedRuntime).not.toHaveBeenCalled();
+    } finally { f.tree.dispose(); }
+  });
+
+  it("retains the old launch selection on verification failure and rejects legacy hosts", async () => {
+    const f = fixture();
+    try {
+      const prepared = await f.supervisor.apply({ operation: "prepare" });
+      f.verifySelectedRuntime.mockImplementation(() => { throw new Error("verification failed"); });
+      await expect(f.supervisor.apply({ operation: "select-runtime", session: prepared.session,
+        active: f.active })).rejects.toThrow("verification failed");
+      expect(f.supervisor.launcher).toBe(f.runtime.startEngine);
+      const legacy = new CloudWorkerSupervisor();
+      expect(await legacy.apply({ operation: "update-status" })).toMatchObject({ outcome: "rejected" });
+    } finally { f.tree.dispose(); }
+  });
+});
+
 describe("cloud broker resume and ownership", () => {
   it("requires systemd ownership on v4 even when a broker is already healthy",async()=>{
     const tree=cloudRuntimeFixture();
