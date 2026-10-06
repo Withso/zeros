@@ -106,8 +106,25 @@ describe("migration guard baseline", () => {
     },
   );
 
+  it("compares a pull request's merge commit with the main it merged", () => {
+    const { checkout, before, tested } = repository();
+    // GitHub checks out a merge commit whose first parent is the base.
+    git(checkout, "checkout", "-q", "-b", "feature", before);
+    commit(checkout, "0002_feature.sql");
+    git(checkout, "checkout", "-q", "--detach", before);
+    git(checkout, "merge", "-q", "--no-ff", "-m", "merge", "feature");
+    expect(git(checkout, "rev-parse", "HEAD^1")).toBe(before);
+    expect(tested).not.toBe(before);
+    expect(
+      runStep("ci.yml", checkout, {
+        EVENT_NAME: "pull_request",
+        GITHUB_REF: "refs/pull/7/merge",
+        PUSH_BEFORE: "",
+      }),
+    ).toBe(before);
+  });
+
   it.each([
-    { EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/7/merge" },
     { EVENT_NAME: "push", GITHUB_REF: "refs/heads/release/1.2.3" },
     { EVENT_NAME: "merge_group", GITHUB_REF: "refs/heads/main" },
   ])(

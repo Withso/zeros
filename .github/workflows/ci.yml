@@ -166,9 +166,10 @@ jobs:
         uses: ./.github/actions/contained-execution-runtime
 
       - name: Fetch origin/main (for the migration forward-only guard)
-        # A main push compares with the main it was pushed onto. A delayed or
-        # coalesced run can start after later merges, and the current main tip
-        # would make their new migrations look deleted here. Other events keep
+        # Compare with the main this commit was built on, not the current tip:
+        # a run can start after later merges, whose new migrations would then
+        # look deleted here. A main push uses the main it was pushed onto; a
+        # pull request's merge commit uses its first parent. Other events keep
         # comparing with the fetched main.
         if: matrix.part == 1
         env:
@@ -181,6 +182,9 @@ jobs:
                ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
               base=$(git rev-parse --verify HEAD^) || { echo "No parent commit — guard runs HEAD-only"; exit 0; }
             fi
+            git update-ref refs/remotes/origin/main "$base"
+          elif [ "$EVENT_NAME" = pull_request ]; then
+            base=$(git rev-parse --verify HEAD^1) || { echo "No base parent — guard runs HEAD-only"; exit 0; }
             git update-ref refs/remotes/origin/main "$base"
           else
             git fetch --no-tags origin main || echo "origin/main unavailable — guard runs HEAD-only"
