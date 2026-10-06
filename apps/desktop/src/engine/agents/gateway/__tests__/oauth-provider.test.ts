@@ -1,4 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
+import {
+  OAuthClientInformationFullSchema,
+  OAuthTokensSchema,
+} from "@modelcontextprotocol/sdk/shared/auth.js";
 
 import { OAuthVault, ZerosOAuthProvider } from "../oauth-provider";
 
@@ -107,6 +111,32 @@ describe("ZerosOAuthProvider", () => {
     provider.saveTokens(tokens({ access_token: "fresh" }));
     expect(provider.tokens()?.access_token).toBe("fresh");
     expect(vault.getTokens("https://fabric/mcp")?.access_token).toBe("fresh"); // keyed by resource URI
+  });
+
+  it("preserves the SDK authorization-server binding through vault persistence", () => {
+    const { provider, vault } = make();
+    const issuer = "https://auth.example.com";
+    provider.saveTokens(
+      OAuthTokensSchema.parse(tokens({ refresh_token: "r1", issuer })),
+    );
+    provider.saveClientInformation(
+      OAuthClientInformationFullSchema.parse({
+        client_id: "dcr-id",
+        redirect_uris: [provider.redirectUrl],
+        issuer,
+      }),
+    );
+
+    const restoredVault = new OAuthVault();
+    restoredVault.restore(vault.snapshot());
+    const restored = new ZerosOAuthProvider(
+      makeDeps({ vault: restoredVault, openBrowser: vi.fn() }),
+    );
+    expect(restored.tokens()).toMatchObject({ refresh_token: "r1", issuer });
+    expect(restored.clientInformation()).toMatchObject({
+      client_id: "dcr-id",
+      issuer,
+    });
   });
 
   it("clientInformation: vault registration > static client id > undefined", () => {

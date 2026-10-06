@@ -643,7 +643,7 @@ PACKAGE INVENTORY (641 resolved package/version records)
   Source: https://github.com/marijnh/find-cluster-break
   License documents: 9360b00fdd09
 
-@modelcontextprotocol/sdk@1.30.0
+@modelcontextprotocol/sdk@1.31.0
   License: MIT
   Surfaces: root pnpm workspace
   Author: Anthropic, PBC (https://anthropic.com)
@@ -3904,7 +3904,7 @@ simple-get@4.0.1
   Source: https://github.com/feross/simple-get
   License documents: d4c2065e2b93
 
-smol-toml@1.7.1
+smol-toml@1.9.0
   License: BSD-3-Clause
   Surfaces: root pnpm workspace
   Author: Cynthia Rey <cynthia@cynthia.dev>
@@ -9499,8 +9499,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 DOCUMENT 5e13dbbc1d12
 SHA-256: 5e13dbbc1d120fc2a03cecde7c91424ae2d7de11b63d58ded2f4431e261ee50d
-Applies to: @modelcontextprotocol/sdk@1.30.0
-Source labels: @modelcontextprotocol/sdk@1.30.0 — LICENSE
+Applies to: @modelcontextprotocol/sdk@1.31.0
+Source labels: @modelcontextprotocol/sdk@1.31.0 — LICENSE
 ================================================================================
 
 MIT License
@@ -16949,8 +16949,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 DOCUMENT fa5659948374
 SHA-256: fa5659948374d4f555594f47f6da073b40dc503e921aeeece30df4362b3051a5
-Applies to: smol-toml@1.7.1
-Source labels: smol-toml@1.7.1 — LICENSE
+Applies to: smol-toml@1.9.0
+Source labels: smol-toml@1.9.0 — LICENSE
 ================================================================================
 
 Copyright (c) Squirrel Chat et al., All rights reserved.
