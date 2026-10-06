@@ -120,20 +120,27 @@ export async function assertCurrentCloudEngineAuthority(
      * row it locks (event appends, device admission renewals, approval
      * rechecks). Other mutations retain exclusive workspace/engine locks. */
     lock?: "share" | "update";
+    /** Only durable record synchronization may run before transfer health. */
+    transitionRecordSync?: boolean;
   },
 ): Promise<CurrentCloudEngineAuthority> {
   if (!validIdentityInput(input)) {
     throw new CloudWorkspaceEngineAuthorityError();
   }
-  // One round trip: every engine request holds these locks until it commits.
+  // Setup engines retain the original one-round-trip authority path. Every
+  // engine request holds these locks until it commits.
   const authority = await tx.query<{
     authority_epoch: string;
     account_user_id: string;
     heartbeat_token_hash: Buffer;
     live: boolean;
     fenced: boolean;
+    setup_enrolled: boolean;
   }>(
-    `SELECT authority_epoch, account_user_id, heartbeat_token_hash, live, fenced
+    `SELECT authority_epoch, account_user_id, heartbeat_token_hash, live, fenced,
+       EXISTS(SELECT 1 FROM cloud_workspace_engine_instances engine
+         WHERE engine.id=$4 AND engine.workspace_id=$1 AND engine.org_id=$2 AND engine.generation=$3
+           AND engine.setup_run_id IS NOT NULL) AS setup_enrolled
      FROM cloud_workspace_engine_authority_current($1, $2, $3, $4, $5, $6)`,
     [
       input.workspaceId,
@@ -152,6 +159,21 @@ export async function assertCurrentCloudEngineAuthority(
     row.fenced !== false
   ) {
     throw new CloudWorkspaceEngineAuthorityError();
+  }
+  // The enrollment-kind CHECK makes setup_run_id NULL exclusive to retained
+  // runtime enrollments. Source setup engines are revoked atomically at
+  // activation; only a freshly enrolled engine needs this additional fence.
+  // Do not reference the new journal on the legacy recovery/schema path.
+  if (!row.setup_enrolled && input.transitionRecordSync !== true) {
+    const ready = await tx.query(`SELECT 1 FROM cloud_workspace_engine_instances engine
+      JOIN cloud_workspace_runtime_enrollments enrollment ON enrollment.id=engine.runtime_transition_enrollment_id
+      JOIN cloud_workspace_runtime_transitions runtime ON runtime.transition_id=enrollment.transition_id
+      WHERE engine.id=$4 AND engine.workspace_id=$1 AND engine.org_id=$2 AND engine.generation=$3
+        AND engine.state='ready' AND engine.lease_expires_at>clock_timestamp()
+        AND enrollment.consumed_at IS NOT NULL AND enrollment.revoked_at IS NULL
+        AND enrollment.sequence=runtime.enrollment_sequence AND runtime.phase IN ('healthy','rolled_back')`,
+    [input.workspaceId, input.organizationId, input.generation, input.engineInstanceId]);
+    if (!ready.rowCount) throw new CloudWorkspaceEngineAuthorityError();
   }
   const authorityEpoch = Number(row.authority_epoch);
   if (!Number.isSafeInteger(authorityEpoch) || authorityEpoch < 1) {

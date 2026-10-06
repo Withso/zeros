@@ -228,6 +228,7 @@ export class DatabaseCloudWorkspaceDurableRecordService {
           engineInstanceId: input.engineInstanceId,
           heartbeatToken: input.heartbeatToken,
           workosEnabled: this.workosEnabled,
+          transitionRecordSync: true,
         });
         await tx.query(
           `INSERT INTO workspace_record_heads (workspace_id, org_id)
@@ -461,6 +462,7 @@ export class DatabaseCloudWorkspaceDurableRecordService {
           engineInstanceId: input.engineInstanceId,
           heartbeatToken: input.heartbeatToken,
           workosEnabled: this.workosEnabled,
+          transitionRecordSync: true,
           lock: "share",
         });
         const head = await tx.query<{ current_revision: string | number }>(

@@ -1,3 +1,4 @@
+import { DatabaseCloudRuntimeTransitionService } from "./runtime-transfer.js";
 import type { CloudWorkspaceCheckoutSource } from "./computer-v2-contract.js";
 import { readCloudWorkspaceResumePlan, type CloudWorkspaceResumePlan } from "./setup-resume.js";
 import {
@@ -1437,6 +1438,11 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
     };
   }
 
+  async registerTransitionEngine(input:CloudWorkspaceEngineRegistrationInput) {
+    return new DatabaseCloudRuntimeTransitionService({pool:this.pool,qualificationMode:cloudRuntimeQualificationMode(),
+      workosEnabled:this.accountIdentityProvider==='workos',heartbeatEndpoint:this.engineHeartbeatAudience}).register(input);
+  }
+
   async registerEngine(input: CloudWorkspaceEngineRegistrationInput) {
     if (
       !GRANT_TOKEN_PATTERN.test(input.token) ||
@@ -1695,7 +1701,9 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         organizationId: input.organizationId,
         generation: input.generation,
       });
-      if (!refresh) {
+      if (!refresh || (await tx.query(`SELECT 1 FROM cloud_workspace_runtime_transitions
+        WHERE workspace_id=$1 AND org_id=$2 AND phase NOT IN ('offered','staged','healthy','rolled_back','cancelled')`,
+      [input.workspaceId,input.organizationId])).rowCount) {
         return {
           leaseExpiresAtMs: renewed.rows[0]!.lease_expires_at.getTime(),
           repository: null,

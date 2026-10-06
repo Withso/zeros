@@ -27,6 +27,15 @@ export async function readCloudRuntimeResumeProofEpoch(tx: Tx, input: {
       AND attestation.engine_instance_id=engine.id
     WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.current_generation=$3
       AND workspace.deleted_at IS NULL AND workspace.desired_state<>'deleted'
+      AND NOT EXISTS(SELECT 1 FROM cloud_workspace_engine_instances newer
+        WHERE newer.workspace_id=engine.workspace_id AND newer.org_id=engine.org_id AND newer.generation=engine.generation
+          AND newer.runtime_transition_enrollment_id IS NOT NULL AND newer.enrollment_order>engine.enrollment_order)
+      AND NOT EXISTS(SELECT 1 FROM cloud_workspace_runtime_transitions runtime
+        JOIN cloud_workspace_generation_transitions transition ON transition.id=runtime.transition_id
+        JOIN cloud_workspace_engine_instances source_engine ON source_engine.id=runtime.source_engine_instance_id
+        WHERE runtime.workspace_id=engine.workspace_id AND runtime.org_id=engine.org_id
+          AND transition.source_generation=engine.generation AND runtime.activated_at IS NOT NULL
+          AND engine.enrollment_order<=source_engine.enrollment_order)
       AND generation.runtime_id IS NOT NULL AND setup.state='succeeded'
       AND engine.state IN ('ready','revoked') AND engine.registered_at IS NOT NULL
       AND ROW(engine.runtime_id,engine.runtime_manifest_sha256,engine.runtime_base_image_id,
@@ -56,5 +65,34 @@ export async function readCloudRuntimeResumeProofEpoch(tx: Tx, input: {
             OR (transition.state='rolled_back' AND transition.source_generation=$3
               AND engine.registered_at<=transition.created_at))
       )`, [input.workspaceId, input.organizationId, input.generation]);
-  return result.rows[0]?.id ?? null;
+  if (result.rows[0]) return result.rows[0].id;
+  const retained=await tx.query<{id:string}>(`SELECT engine.id FROM cloud_workspaces workspace
+    JOIN cloud_workspace_generations generation ON generation.workspace_id=workspace.id AND generation.org_id=workspace.org_id
+      AND generation.generation=workspace.current_generation
+    JOIN cloud_workspace_engine_instances engine ON engine.workspace_id=generation.workspace_id AND engine.org_id=generation.org_id AND engine.generation=generation.generation
+    JOIN cloud_workspace_runtime_enrollments enrollment ON enrollment.id=engine.runtime_transition_enrollment_id
+    JOIN cloud_workspace_runtime_attestations attestation ON attestation.enrollment_id=enrollment.id AND attestation.engine_instance_id=engine.id
+    JOIN cloud_workspace_runtime_transitions runtime ON runtime.transition_id=enrollment.transition_id
+    WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.current_generation=$3
+      AND workspace.deleted_at IS NULL AND workspace.desired_state<>'deleted'
+      AND engine.state IN ('ready','revoked') AND engine.registered_at IS NOT NULL
+      AND NOT EXISTS(SELECT 1 FROM cloud_workspace_runtime_transitions later
+        JOIN cloud_workspace_generation_transitions transition ON transition.id=later.transition_id
+        JOIN cloud_workspace_engine_instances source_engine ON source_engine.id=later.source_engine_instance_id
+        WHERE later.workspace_id=engine.workspace_id AND later.org_id=engine.org_id
+          AND transition.source_generation=engine.generation AND later.activated_at IS NOT NULL
+          AND engine.enrollment_order<=source_engine.enrollment_order)
+      AND runtime.phase IN ('healthy','rolled_back') AND enrollment.sequence=runtime.enrollment_sequence
+      AND enrollment.consumed_at IS NOT NULL AND enrollment.revoked_at IS NULL
+      AND ROW(engine.runtime_id,engine.runtime_manifest_sha256,engine.runtime_base_image_id,
+        engine.runtime_base_compatibility_id,engine.runtime_profile,engine.runtime_engine_protocol_version)
+        = ROW(generation.runtime_id,generation.runtime_manifest_sha256,generation.runtime_base_image_id,
+          generation.runtime_base_compatibility_id,generation.runtime_profile,generation.runtime_engine_protocol_version)
+      AND NOT EXISTS(SELECT 1 FROM cloud_workspace_engine_instances newer
+        WHERE newer.workspace_id=engine.workspace_id AND newer.org_id=engine.org_id AND newer.generation=engine.generation
+          AND newer.enrollment_order>engine.enrollment_order)
+      AND NOT EXISTS(SELECT 1 FROM cloud_workspace_generation_transitions transition
+        WHERE transition.workspace_id=workspace.id AND transition.org_id=workspace.org_id
+          AND transition.state NOT IN ('succeeded','rolled_back','cancelled'))`,[input.workspaceId,input.organizationId,input.generation]);
+  return retained.rows[0]?.id??null;
 }

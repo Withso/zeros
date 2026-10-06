@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 
 import type pg from "pg";
 
+import { bindCloudAllocationProvider } from "./allocation-provider.js";
 import { withSystemTx } from "../db.js";
 import {
   DaytonaWorkspaceProvider,
@@ -252,7 +253,8 @@ export class DatabaseCloudWorkspaceProviderResolver implements CloudWorkspacePro
         "Generation-bound cloud provider connection is unavailable",
       );
     }
-    return this.resolveRow(row, input.purpose);
+    const resolved=this.resolveRow(row, input.purpose);
+    return row.provider==="boat" ? {...resolved,provider:bindCloudAllocationProvider(this.pool,resolved.provider,input)} : resolved;
   }
 
   private resolveRow(

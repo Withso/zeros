@@ -7,6 +7,7 @@ import {
   CLOUD_WORKSPACE_CONTENT_APPEND_PATH,
   CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
   CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
+  CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH,
   CLOUD_WORKSPACE_RECORD_APPEND_PATH,
   CLOUD_WORKSPACE_RECORD_HEAD_PATH,
   CLOUD_WORKSPACE_CONTENT_HEAD_PATH,
@@ -90,6 +91,25 @@ describe("cloud workspace internal setup routes", () => {
       body: JSON.stringify({ ...body, runtime: { ...runtimeWitness, artifactUrl: "https://untrusted.example.test/" } }) });
     expect(rejected.status).toBe(422);
     expect(service.redeem).toHaveBeenCalledOnce();
+  });
+  it("uses a separate non-cacheable enrollment endpoint with closed diagnostics",async()=>{
+    const registerTransitionEngine=vi.fn(async()=>({version:1,registered:true}));
+    const {app,service}=harness({registerTransitionEngine});
+    const {expected:_expected,...binding}=body;
+    const payload=JSON.stringify({...binding,engineInstanceId:"44444444-4444-4444-8444-444444444444",
+      protocolVersion:CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,actorProtocolVersion:2,agentRuntime:{...runtimeWitness,profile:"zeros-cloud-worker-v4"}});
+    const request=(authorization?:string)=>app.request(CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH,{method:"POST",
+      headers:{"content-type":"application/json",...(authorization?{authorization}:{})},body:payload});
+    expect((await request()).status).toBe(401);
+    const response=await request(`Bearer ${SETUP_TOKEN}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(service.redeem).not.toHaveBeenCalled();
+    expect(service.registerEngine).not.toHaveBeenCalled();
+    registerTransitionEngine.mockRejectedValueOnce(new Error("Untrusted diagnostic"));
+    const denied=await request(`Bearer ${SETUP_TOKEN}`);
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).not.toContain("Untrusted diagnostic");
   });
   it("coalesces fragmented upload bodies without retaining a buffer per fragment", async () => {
     const { app } = harness({ putBlobBatch: vi.fn(async () => ({ blobs: [] })) });
