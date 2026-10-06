@@ -515,10 +515,14 @@ export async function runQueueSmoke({ page, check }) {
   await expect(page.getByRole("alert")).toHaveCount(0);
   await page.screenshot({ path: ".context/cloud-waiting-for-agent.png" });
   await page.evaluate(() => window.__cloudQueueWait("failed", "The agent did not become ready within three minutes. Your messages are still queued. Try again."));
-  await expect(page.getByRole("alert")).toContainText("three minutes");
-  await expect(rows.first().getByRole("button", { name: "Try again", exact: true })).toBeEnabled();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Not sent", exact: true })).toBeVisible();
+  await expect(rows.first().getByRole("button", { name: "Retry", exact: true })).toBeEnabled();
+  await expect(rows.first().getByRole("button", { name: "Remove", exact: true })).toBeEnabled();
   await expect(rows.first().getByRole("button", { name: "Edit", exact: true })).toBeEnabled();
-  check("Cloud readiness uses an editable/removable Waiting for agent card, then an inline error with retry", true);
+  await expect(page.locator("[data-queued-id]")).not.toContainText("three minutes");
+  await page.screenshot({ path: ".context/cloud-queue-not-sent.png" });
+  check("Cloud readiness uses an editable/removable Waiting for agent card, then neutral Not sent rows with retry", true);
 }
 
 /** Production picker/composer with renderer metadata supplied by the fixture. */

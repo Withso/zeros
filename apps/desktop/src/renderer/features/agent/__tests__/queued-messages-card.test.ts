@@ -22,18 +22,24 @@ describe("cloud readiness in the existing queued card", () => {
     expect(html).toMatch(/aria-label="Waiting for agent"[^>]*disabled/);
     expect(html).not.toContain('role="alert"'); expect(html).not.toContain("AGENT STOPPED");
   });
-  it("retains the queued row and retry/edit/remove controls alongside a terminal inline error", () => {
-    const html = render({ paused: true, error: "Connect this agent to continue." });
-    expect(html).toContain('role="alert"'); expect(html).toContain("Connect this agent to continue.");
-    expect(html).toContain('aria-label="Try again"'); expect(html).toContain('data-queued-id="queued"');
+  it("retains a neutral Not sent row with retry/edit/remove after a terminal cause or timeout", () => {
+    const html = render({ paused: true, notSent: true });
+    expect(html).toContain("Not sent"); expect(html).toContain('data-queued-id="queued"');
+    expect(html).toMatch(/aria-label="Edit"(?![^>]*disabled)/);
+    expect(html).toMatch(/aria-label="Remove"(?![^>]*disabled)/);
+    expect(html).toMatch(/aria-label="Retry"(?![^>]*disabled)/);
+    expect(html).not.toContain('role="alert"'); expect(html).not.toContain("text-red-fg");
+    expect(html).not.toContain("AGENT STOPPED");
   });
-  it("renders a cloud enqueue error inline even before a row was accepted", () => {
-    expect(render({ messages: [], error: "The workspace identity is unavailable." })).toContain('role="alert"');
+  it("never creates an error card when no queued message was accepted", () => {
+    expect(render({ messages: [], notSent: true })).toBe("");
   });
-  it("keeps admission recovery actions inside a terminal card, never an expected wait", () => {
-    const recovery = createElement("button", null, "Enable models");
-    expect(render({ error: "The model is not enabled.", recovery })).toContain("Enable models");
-    expect(render({ waiting: true, recovery })).not.toContain("Enable models");
+  it("keeps every message editable and individually retryable/removable after a shared readiness timeout", () => {
+    const html = render({ notSent: true, messages: [...props.messages, { ...props.messages[0], id: "second", text: "Second" }] });
+    expect(html.match(/aria-label="Retry"/g)).toHaveLength(2);
+    expect(html.match(/aria-label="Remove"/g)).toHaveLength(2);
+    expect(html.match(/aria-label="Edit"/g)).toHaveLength(2);
+    expect(html).not.toContain('role="alert"');
   });
   it("preserves the Local queue count, paused copy, send affordance and empty state with default props", () => {
     const html = render({ paused: true });

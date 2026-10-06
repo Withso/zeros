@@ -22,7 +22,7 @@ describe("cloud queue readiness wait", () => {
     const h = harness(); let finish!: (ready: boolean) => void;
     h.options.attempt.mockReturnValue(new Promise(resolve => { finish = resolve; })); h.wait.start("chat", h.options);
     await vi.advanceTimersByTimeAsync(179_999); expect(h.failed).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1); expect(h.failed).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("three minutes") }));
+    await vi.advanceTimersByTimeAsync(1); expect(h.failed).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("three minutes"), reason: "queued_timeout" }));
     expect(h.cancel).toHaveBeenCalledOnce(); finish(true); await vi.advanceTimersByTimeAsync(0); expect(h.ready).not.toHaveBeenCalled();
     h.options.attempt.mockResolvedValue(true); h.wait.start("chat", h.options); await vi.advanceTimersByTimeAsync(0);
     expect(h.ready).toHaveBeenCalledOnce();
@@ -34,7 +34,7 @@ describe("cloud queue readiness wait", () => {
     old(true); await vi.advanceTimersByTimeAsync(0); expect(h.ready).toHaveBeenCalledOnce(); expect(h.failed).not.toHaveBeenCalled();
     expect(h.options.attempt.mock.calls[0]![0].aborted).toBe(true);
   });
-  it("shows a terminal cause inline immediately and never retries it", async () => {
+  it("reports a terminal cause once immediately and never retries it", async () => {
     const h = harness(); h.options.attempt.mockRejectedValue(new CloudSendWaitError("Connect this agent to continue."));
     h.wait.start("chat", h.options); await vi.advanceTimersByTimeAsync(180_000);
     expect(h.failed).toHaveBeenCalledOnce(); expect(h.options.attempt).toHaveBeenCalledOnce(); expect(h.ready).not.toHaveBeenCalled();

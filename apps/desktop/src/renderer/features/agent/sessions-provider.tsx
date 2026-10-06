@@ -20,6 +20,7 @@ import { backfillLocalPromptTranscript, LocalPromptRecoveryError, requestLocalPr
 // ──────────────────────────────────────────────────────────
 
 import { SendQueue } from "./send-queue";
+import { notifyAgentSendFailure } from "./agent-send-failure-toast";
 import { hasPromptAttachmentReferences, refreshPromptAttachments } from "./refresh-prompt-attachments";
 import { reconcileHistoryMessages } from "./history-message-identity";
 import React, {
@@ -1298,6 +1299,8 @@ export function AgentSessionsProvider({
       cloudQueue?: CloudQueuedPrompt;
       waitStartedAt?: number;
       retryAdmission?: boolean;
+      /** Toast identity survives explicit renewal of a refused delivery ID. */
+      queueEntryId?: string;
       /** Id of the greyed placeholder bubble shown while this send waits. */
       bubbleId: string;
     }>(),
@@ -1321,6 +1324,14 @@ export function AgentSessionsProvider({
     },
     [getStore],
   );
+
+  const retryCloudQueuedPrompt = useCallback((chatId: string, entry: NonNullable<ReturnType<typeof sendQueueRef.current.get>>[number], account: number | undefined,
+    folder: string | null | undefined) => {
+    if (!entry.cloud || account !== cloudCatalogGeneration() || getStore().sessions[chatId]?.cwd !== folder ||
+        !sendQueueRef.current.get(chatId)?.includes(entry)) return;
+    for (const queued of sendQueueRef.current.get(chatId) ?? []) if (queued.cloud) queued.waitStartedAt = undefined;
+    resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId);
+  }, [getStore, resumeQueue]);
   const markQueuedDelivery = useCallback(
     (
       chatId: string,
@@ -1657,7 +1668,7 @@ export function AgentSessionsProvider({
       if (!queued || queued.length === 0 || !sendQueueRef.current.canDrain(chatId)) return;
       const settled = getStore().sessions[chatId];
       // An admitted cloud send waits in the editable FIFO. Readiness failures
-      // belong to its bounded inline wait, never the Local drop/toast path.
+      // belong to its bounded editable wait, never the Local drop path.
       if (queued.some(entry => entry.cloud)) {
         if (!settled?.cloudSendWait) beginCloudSendWaitRef.current?.(chatId);
         return;
@@ -2299,7 +2310,7 @@ export function AgentSessionsProvider({
         };
         const q = sendQueueRef.current.get(chatId) ?? [];
         if (sendQueueRef.current.isPaused(chatId)) for (const entry of q) if (entry.cloud) entry.waitStartedAt = undefined;
-        q.push({ cloud: true, bubbleId, cloudQueue, args: [chatId, text, displayText, attachments, bubbleAttachments, segments, autoAction] });
+        q.push({ cloud: true, bubbleId, queueEntryId: bubbleId, cloudQueue, args: [chatId, text, displayText, attachments, bubbleAttachments, segments, autoAction] });
         sendQueueRef.current.set(chatId, q);
         getStore().patchSession(chatId, { messages: capUserAppend(slot.messages, queuedMsg, slot.historyExpanded) });
         resumeQueue(chatId);
@@ -2771,7 +2782,10 @@ export function AgentSessionsProvider({
         // A terminal admission receipt is durable. Only the explicit retry of
         // that refused row renews its delivery identity; expected waits retain
         // the same identity across reconnects and engine replacement.
-        if (flushedCloud) { flushedCloud.retryAdmission = false; flushedCloud.bubbleId = userMessage.id; }
+        if (flushedCloud) {
+          flushedCloud.queueEntryId ??= flushedCloud.bubbleId;
+          flushedCloud.retryAdmission = false; flushedCloud.bubbleId = userMessage.id;
+        }
         sentUserMessageId = userMessage.id;
         authPromptsRef.current.remember(
           chatId,
@@ -2910,10 +2924,16 @@ export function AgentSessionsProvider({
                 ? { ...message, queued: true, queuedEditable: !autoAction && !text.trimStart().startsWith("<from_previous_chat"),
                   queuedPresentation: undefined, queuedDelivery: undefined, recoveryFailure: undefined } : message) });
             if (waiting) { resumeQueue(chatId); beginCloudSendWaitRef.current?.(chatId); }
+            else notifyAgentSendFailure({ folder: current.cwd, chatId, attemptId: flushedCloud.queueEntryId!,
+              agentId: current.agentId, model: submittedModel, error,
+              onRetry: () => retryCloudQueuedPrompt(chatId, flushedCloud, cloudAccount, current.cwd) });
             return true;
           }
+          if (admission?.kind === "unavailable") notifyAgentSendFailure({ folder: current.cwd, chatId,
+            attemptId: flushedCloud!.queueEntryId!, agentId: current.agentId, model: submittedModel, error });
           return recoverCloudAdmissionFailure({ folder: current.cwd, chatId, error, message: userMessage, draft: submittedDraft,
-            model: submittedModel, store: getStore(), pauseQueue, persist: persistAuthPrompt });
+            model: submittedModel, store: getStore(), pauseQueue, persist: persistAuthPrompt,
+            ...(flushedCloud?.queueEntryId ? { toastAttemptId: flushedCloud.queueEntryId } : {}) });
         };
         onAccepted?.();
 
@@ -3971,6 +3991,7 @@ export function AgentSessionsProvider({
       persistAuthPrompt,
       prepareForSend,
       cloudComputerV2,
+      retryCloudQueuedPrompt,
     ],
   );
   sendPromptRef.current = sendPrompt;
@@ -3994,10 +4015,11 @@ export function AgentSessionsProvider({
       attempt: async signal => {
         const doc = cloudWorkspaceDocument(target);
         if (generation !== undefined && doc && doc.generation.number !== generation)
-          throw new CloudSendWaitError("The workspace generation changed. Your messages are still queued. Try again.");
+          throw new CloudSendWaitError("The workspace generation changed. Your messages are still queued. Try again.", "workspace_unavailable");
         if (doc?.deletedAt || ["archived", "archiving", "deleting", "deleted", "failed", "error"].includes(doc?.status ?? ""))
-          throw new CloudSendWaitError(doc?.error?.message ?? `The workspace is ${doc?.status}. Your messages are still queued.`);
-        if (doc && !doc.capabilities.canWrite) throw new CloudSendWaitError("You do not have permission to run agents in this workspace.");
+          throw new CloudSendWaitError(doc?.error?.message ?? `The workspace is ${doc?.status}. Your messages are still queued.`,
+            doc?.deletedAt || ["archived", "archiving", "deleting", "deleted"].includes(doc?.status ?? "") ? "workspace_archived" : "workspace_unavailable");
+        if (doc && !doc.capabilities.canWrite) throw new CloudSendWaitError("You do not have permission to run agents in this workspace.", "workspace_unavailable");
         generation ??= doc?.generation.number;
         await prepareForSend(chatId);
         if (signal.aborted || !current()) return false;
@@ -4069,9 +4091,12 @@ export function AgentSessionsProvider({
         ).slice(0, 1000) }, ...(admission && admission.kind !== "waiting" && agentId && head ? {
           cloudAdmissionFailure: { ...admission, code: String(cloudAdmissionFailureCode(error)), turnId: head.bubbleId, agentId, model },
         } : {}) });
+        if (head) notifyAgentSendFailure({ folder, chatId, attemptId: head.queueEntryId ??= head.bubbleId, agentId, model, error,
+          reason: error instanceof CloudWorkspaceWakeEndedError ? "workspace_stopped" : error instanceof CloudSendWaitError ? error.reason : undefined,
+          onRetry: () => retryCloudQueuedPrompt(chatId, head, account, folder) });
       },
     });
-  }, [cloudComputerV2, getStore, prepareForSend, drainNextQueued, pauseQueue, refreshQueuedAttachments]);
+  }, [cloudComputerV2, getStore, prepareForSend, drainNextQueued, pauseQueue, refreshQueuedAttachments, retryCloudQueuedPrompt]);
   beginCloudSendWaitRef.current = beginCloudSendWait;
 
   const cancel = useCallback<SessionsActions["cancel"]>(

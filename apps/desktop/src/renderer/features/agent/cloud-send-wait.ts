@@ -1,7 +1,9 @@
 const WAIT_LIMIT_MS = 3 * 60_000;
 const RETRY_MS = 2_000;
 
-export class CloudSendWaitError extends Error {}
+export class CloudSendWaitError extends Error {
+  constructor(message: string, readonly reason?: AgentSendFailureReason) { super(message); }
+}
 
 /** Readiness only: retries never contain a prompt or replay a dispatched turn.
  * The existing FIFO keeps the editable payload and stable message identity. */
@@ -28,8 +30,9 @@ export class CloudSendWait {
       if (!owns()) return;
       controller.abort(); this.flights.delete(chatId); options.cancelPreparation(); options.failed(error);
     };
-    const timeoutError = () => new Error(
+    const timeoutError = () => new CloudSendWaitError(
       "The agent did not become ready within three minutes. Your messages are still queued. Try again.",
+      "queued_timeout",
     );
     const timeoutMs = Math.min(options.timeoutMs ?? WAIT_LIMIT_MS, WAIT_LIMIT_MS);
     if (timeoutMs <= 0) { fail(timeoutError()); return; }
@@ -65,3 +68,4 @@ export class CloudSendWait {
   }
   clear(): void { for (const chatId of this.flights.keys()) this.cancel(chatId); }
 }
+import type { AgentSendFailureReason } from "./agent-send-failure-toast";

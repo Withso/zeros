@@ -182,11 +182,13 @@ messages retain order, rich documents and attachment sources; edit/remove remain
 available before dispatch. Files resolve after fresh admission, then the stable
 message identity is promoted exactly once. Removing a message, Stop, changing
 account/workspace identity or closing its chat fences late readiness. A terminal
-cause or a three-minute readiness bound leaves the messages queued with a clear
-inline error and explicit retry, without an error toast or a stopped-turn pill.
+cause or a three-minute readiness bound leaves editable **Not sent** rows with
+Retry/Remove and shows one toast per accepted message/turn with the cause and a
+relevant action. The card has no inline error text or stopped-turn pill. Expected
+readiness waits produce no error toast.
 A closed admission refusal before provider execution restores the same editable
 row and retains its elapsed readiness budget. Terminal admission causes use the
-existing model/credential recovery actions inside that card. An ambiguous
+existing model/credential copy and recovery action in the toast. An ambiguous
 dispatch result stays in the conversation for review and is never auto-replayed.
 An explicit retry after a durable terminal admission refusal renews only that
 refused delivery identity; automatic readiness retries keep their existing ID.

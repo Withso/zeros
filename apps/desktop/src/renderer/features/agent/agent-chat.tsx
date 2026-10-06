@@ -1,4 +1,5 @@
 import { cloudAdmissionForTurn } from "./cloud-admission-failure";
+import { notifyAgentSendFailure } from "./agent-send-failure-toast";
 import { CloudAdmissionStatus } from "./cloud-admission-status";
 // ──────────────────────────────────────────────────────────
 // AgentChat — messages + tool cards + permission modal + composer
@@ -74,7 +75,6 @@ import {
 } from "./composer-editor";
 import { QueuedMessagesCard } from "./queued-messages-card";
 import { cloudQueuedPrompt } from "./cloud-queued-prompt";
-import { redactLogSecrets } from "@zeros/protocol/scrub";
 import { agentActivity } from "./agent-activity";
 import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
 import { AddedDirectories } from "./added-directories";
@@ -1972,7 +1972,6 @@ export function AgentChat({
   // spinner ("submitted") for it, so a composer that still holds the text reads
   // as "working on it" instead of an unresponsive button.
   const [sendPreparing, setSendPreparing] = useState(false);
-  const [cloudSendError, setCloudSendError] = useState<string | undefined>();
 
   // "Is this chat attached" is derived from the composer DOCUMENT, never from
   // a second list: that is what makes removing a chip with its × un-add the
@@ -3745,7 +3744,6 @@ export function AgentChat({
           return prepareDesignFrameAttachments(capabilitiesBridge, submittedDesignFrame);
         } : undefined });
       await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue);
-      setCloudSendError(undefined);
       const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
       if (unchanged) {
         clearComposer(); designFrameContext.pin(undefined);
@@ -4036,6 +4034,7 @@ export function AgentChat({
     const cancelLatency = chatId && session.status !== "streaming"
       ? startCloudSubmitSpan(chatId) : undefined;
     const generation = chatId ? agentSessions.getSendGeneration(chatId) : undefined;
+    const cloudAttemptId = cloudComputerV2 && isCloudWorkspace(chatThread?.folder) ? `send-${crypto.randomUUID()}` : undefined;
     try {
       const submitted = await runSend(override, extras, recordActivity);
       if (!submitted) cancelLatency?.();
@@ -4043,7 +4042,8 @@ export function AgentChat({
       cancelLatency?.();
       if (chatId && generation !== agentSessions.getSendGeneration(chatId)) return;
       if (cloudComputerV2 && isCloudWorkspace(chatThread?.folder)) {
-        setCloudSendError(redactLogSecrets(error instanceof Error ? error.message : "The message could not be queued. Try again."));
+        notifyAgentSendFailure({ folder: chatThread?.folder, chatId: chatId!, attemptId: cloudAttemptId!, agentId: session.agentId,
+          model: chatThread?.model, error });
         return;
       }
       toast.error("Message wasn't sent", {
@@ -4128,7 +4128,7 @@ export function AgentChat({
         const queued = cloudQueuedPrompt({ cwd: chatThread!.folder, chatId, agentId: session.agentId,
           text: wireText, displayText, snapshot: s, prepareAdditional: session.getQueuedDraft?.(id)?.prepareAdditional });
         session.editQueued?.(id, queued);
-        setCloudSendError(undefined); exitQueuedEdit(releaseQueue); return true;
+        exitQueuedEdit(releaseQueue); return true;
       }
       const { blocks, bubbleAttachments, bubbleAttachmentById, skipped } =
         await encodeComposerAttachments(localAttachments);
@@ -4166,7 +4166,8 @@ export function AgentChat({
       });
     } catch (error) {
       if (cloudComputerV2 && isCloudWorkspace(chatThread?.folder)) {
-        setCloudSendError(redactLogSecrets(error instanceof Error ? error.message : "The queued message could not be saved."));
+        notifyAgentSendFailure({ folder: chatThread?.folder, chatId: chatId!, attemptId: id, agentId: session.agentId,
+          model: chatThread?.model, error });
         return false;
       }
       toast.error("Queued message wasn't saved", {
@@ -5135,12 +5136,7 @@ export function AgentChat({
             streaming={composerStreaming}
             paused={session.queuePaused}
             waiting={cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait?.state === "waiting"}
-            error={cloudComputerV2 && isCloudWorkspace(chatThread?.folder) ? session.cloudSendWait?.message ?? cloudSendError : undefined}
-            recovery={cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait?.state === "failed" &&
-              session.cloudAdmissionFailure && queuedMessages.some(message => message.id === session.cloudAdmissionFailure?.turnId) &&
-              (session.cloudAdmissionFailure.action === "choose-model" || session.cloudAdmissionFailure.action === "reconnect") ?
-              <CloudAdmissionStatus folder={chatThread?.folder} agentId={session.cloudAdmissionFailure.agentId}
-                failure={{ ...session.cloudAdmissionFailure, message: "" }} readOnly={readOnly} /> : undefined}
+            notSent={cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait?.state === "failed"}
             agentName={steeringAgentName}
           />
           {/* Permission card (2026-07-02): the ONE permission gate. While a

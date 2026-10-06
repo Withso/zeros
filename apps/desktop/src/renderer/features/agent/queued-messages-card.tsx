@@ -71,8 +71,8 @@ export interface QueuedMessagesCardProps {
   paused?: boolean;
   /** Cloud readiness uses the existing editable queue; Local defaults match. */
   waiting?: boolean;
-  error?: string;
-  recovery?: ReactNode;
+  /** Cloud failures use one toast; pending rows retain neutral retry controls. */
+  notSent?: boolean;
   /** Name for a provider without mid-turn steering. */
   agentName: string;
 }
@@ -93,11 +93,10 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
   streaming,
   paused = false,
   waiting = false,
-  error,
-  recovery,
+  notSent = false,
   agentName,
 }: QueuedMessagesCardProps) {
-  if (messages.length === 0 && !error) return null;
+  if (messages.length === 0) return null;
   const editing = editingId != null;
   const sendBlocked = waiting || streaming && !steeringSupported;
   const sendLabel = waiting ? "Waiting for agent" : sendBlocked
@@ -118,7 +117,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
           className="text-fg2 hover:text-fg1 flex w-full items-center justify-between gap-2 px-3.5 py-2.5 text-left text-sm transition-colors"
         >
           <span>
-            {waiting ? "Waiting for agent" : error ? "Messages not sent" : `${messages.length} queued message${messages.length === 1 ? "" : "s"}${paused ? " · Paused" : ""}`}
+            {waiting ? "Waiting for agent" : notSent ? "Not sent" : `${messages.length} queued message${messages.length === 1 ? "" : "s"}${paused ? " · Paused" : ""}`}
           </span>
           {collapsed ? (
             <ChevronUp size={16} aria-hidden="true" />
@@ -126,8 +125,6 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
             <ChevronDown size={16} aria-hidden="true" />
           )}
         </button>
-        {error && <p role="alert" className="text-red-fg border-border1 border-t px-3.5 py-2 text-sm">{error}</p>}
-        {error && !waiting && recovery && <div className="px-3.5 pb-2">{recovery}</div>}
         {!collapsed && messages.length > 0 && (
           <>
             <div className="border-border1 flex flex-col gap-0.5 border-t px-1.5 py-1.5">
@@ -192,7 +189,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
                         </RowAction>
                       )}
                       <RowAction
-                        label="Delete"
+                        label={notSent ? "Remove" : "Delete"}
                         destructive
                         onClick={() => onDelete(m.id)}
                         disabled={!!m.queuedDelivery}
@@ -200,7 +197,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
                         <Trash2 size={14} aria-hidden="true" />
                       </RowAction>
                       <RowAction
-                        label={m.queuedDelivery === "sending" ? "Sending…" : m.queuedDelivery === "unconfirmed" ? "Retry delivery" : error ? "Try again" : sendLabel}
+                        label={m.queuedDelivery === "sending" ? "Sending…" : m.queuedDelivery === "unconfirmed" ? "Retry delivery" : notSent ? "Retry" : sendLabel}
                         onClick={() => onSendNow(m.id)}
                         disabled={sendBlocked || m.queuedDelivery === "sending"}
                       >

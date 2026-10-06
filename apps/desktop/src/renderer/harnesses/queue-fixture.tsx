@@ -105,7 +105,7 @@ export function QueueFixture({
           streaming={session.status === "streaming"}
           paused={session.queuePaused}
           waiting={cloudWaitFixture && session.cloudSendWait?.state === "waiting"}
-          error={cloudWaitFixture ? session.cloudSendWait?.message : undefined}
+          notSent={cloudWaitFixture && session.cloudSendWait?.state === "failed"}
           agentName={provider}
         />
         <input
