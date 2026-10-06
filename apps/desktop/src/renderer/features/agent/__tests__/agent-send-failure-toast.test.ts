@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
 import type { AgentSendFailureInput } from "../agent-send-failure-toast";
 
 const mocks = vi.hoisted(() => ({ error: vi.fn(), settings: vi.fn() }));
@@ -19,7 +20,7 @@ beforeEach(async () => {
 
 describe("agent send failure toasts", () => {
   it.each([
-    ["cloud_runtime_upgrade_required", "Cloud runtime update required", undefined],
+    ["cloud_runtime_upgrade_required", "This workspace is on an older runtime", undefined],
     ["cloud_agent_model_not_authorized", "GPT-6.1 Sol isn't enabled for this workspace", "Agent settings"],
     ["cloud_agent_credential_required", "Connect Codex to send messages", "Reconnect"],
     ["cloud_agent_credential_expired", "Reconnect Codex to send messages", "Reconnect"],
@@ -37,6 +38,14 @@ describe("agent send failure toasts", () => {
     if (action) {
       options.action.onClick();
       expect(mocks.settings).toHaveBeenCalledExactlyOnceWith(folder, "codex");
+    }
+    if (isCloudAgentAdmissionCode(code)) {
+      for (const reason of ["dispatch_ambiguous", "unknown"] as const) {
+        notify(input({ code, message: "command_dispatch_rejected" }, { reason, attemptId: reason }));
+        expect(mocks.error).toHaveBeenLastCalledWith(message, expect.objectContaining({
+          action: action ? expect.objectContaining({ label: action }) : undefined,
+        }));
+      }
     }
   });
 
@@ -97,7 +106,7 @@ describe("agent send failure toasts", () => {
     ["workspace_stopped", "Cloud workspace stopped", "Retry"],
     ["workspace_archived", "Cloud workspace is archived", undefined],
     ["workspace_unavailable", "Cloud workspace is unavailable", "Retry"],
-    ["runtime_upgrade_required", "Cloud runtime update required", undefined],
+    ["runtime_upgrade_required", "This workspace is on an older runtime", undefined],
     ["model_not_enabled", "GPT-6.1 Sol isn't enabled for this workspace", "Agent settings"],
     ["credential_missing", "Connect Codex to send messages", "Reconnect"],
     ["credential_expired_or_revoked", "Reconnect Codex to send messages", "Reconnect"],
@@ -122,5 +131,17 @@ describe("agent send failure toasts", () => {
     expect(notify(queued)).toBe(true);
     expect(notify({ ...queued, reason: "credential_missing" })).toBe(false);
     expect(mocks.error).toHaveBeenCalledOnce();
+  });
+
+  it("offers Restart workspace only through the named runtime restart hook", () => {
+    const restart = vi.fn(), retry = vi.fn();
+    notify(input("cloud_runtime_upgrade_required", { onRestartWorkspace: restart, onRetry: retry }));
+    const [copy, options] = mocks.error.mock.calls[0];
+    expect(copy).toBe("This workspace is on an older runtime");
+    expect(options.action.label).toBe("Restart workspace");
+    expect(restart).not.toHaveBeenCalled();
+    options.action.onClick();
+    expect(restart).toHaveBeenCalledOnce();
+    expect(retry).not.toHaveBeenCalled();
   });
 });

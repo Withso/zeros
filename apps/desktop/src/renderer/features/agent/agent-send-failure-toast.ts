@@ -34,6 +34,8 @@ export interface AgentSendFailureInput {
   /** Explicit per-message retry supplied by the queue owner, never an
    * automatic resend. Only readiness failures offer this action. */
   onRetry?: () => void;
+  /** Runtime owner supplies an explicit stop → wake for this workspace. */
+  onRestartWorkspace?: () => void;
 }
 
 // Event-owned acknowledgements survive chat remounts, reconnects and catalog
@@ -43,10 +45,10 @@ const notified = new Set<string>();
 
 function sendFailureReason(input: AgentSendFailureInput): AgentSendFailureReason | null {
   if (!isCloudWorkspace(input.folder)) return input.reason === "queued_timeout" ? input.reason : "unknown";
-  if (input.reason) return input.reason;
+  // The command receipt's exact admission cause wins over a queue/dispatch fallback.
   const failure = classifyCloudAdmissionFailure({ ...input, error: input.error });
   switch (failure?.kind) {
-    case "waiting": return null;
+    case "waiting": return input.reason ?? null;
     case "runtime-upgrade-required": return "runtime_upgrade_required";
     case "model-not-authorized": return "model_not_enabled";
     case "credential-required":
@@ -56,8 +58,8 @@ function sendFailureReason(input: AgentSendFailureInput): AgentSendFailureReason
         case "cloud_agent_credential_refresh_required": return "credential_refresh_required";
         default: return "credential_missing";
       }
-    case "unavailable": return "dispatch_ambiguous";
-    default: return "unknown";
+    case "unavailable": return input.reason ?? "dispatch_ambiguous";
+    default: return input.reason ?? "unknown";
   }
 }
 
@@ -93,8 +95,9 @@ export function notifyAgentSendFailure(input: AgentSendFailureInput): boolean {
       description = "Try sending again when the workspace is ready.";
       break;
     case "runtime_upgrade_required":
-      message = "Cloud runtime update required";
+      message = "This workspace is on an older runtime";
       description = CLOUD_RUNTIME_UPGRADE_TOOLTIP;
+      if (input.onRestartWorkspace) action = { label: "Restart workspace", onClick: input.onRestartWorkspace };
       break;
     case "model_not_enabled": {
       const model = input.agentId && input.model ? modelsForAgent(input.agentId, null).find(row => row.value === input.model)?.label : null;
