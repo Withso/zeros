@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { classifyCloudFailure } from "./cloud-diagnostics.js";
-import { BoatApiClient } from "./boat-client.js";
+import { BoatApiClient, BoatBootPendingError } from "./boat-client.js";
 
 function fixture() {
   const fetcher = vi.fn<typeof fetch>();
@@ -17,6 +17,14 @@ function fixture() {
   };
 }
 describe("Boat API boundary", () => {
+  it.each(["boat_starting", "boat_restoring"])("retains only the closed boot classification for %s", async code => {
+    const f = fixture();
+    f.fetcher.mockResolvedValue(Response.json({ ok: false, code, message: "private-canary" }, { status: 409 }));
+    const error = await f.client.request("/sandboxes/bx_23456789/commands", { method: "POST" }).catch(error => error);
+    expect(error).toBeInstanceOf(BoatBootPendingError);
+    expect(error).toMatchObject({ code: "provider_request_failed", retryable: true, httpStatus: 409 });
+    expect(JSON.stringify(error)).not.toContain("private-canary");
+  });
   it("carries only the HTTP status class into lifecycle diagnostics", async () => {
     const f=fixture();
     f.fetcher.mockResolvedValue(Response.json({ok:false,message:"credential-canary"},{status:503}));

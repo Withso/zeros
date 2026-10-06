@@ -1,4 +1,4 @@
-import { BOAT_RESOURCE_ID_PATTERN, type BoatApiClient } from "./boat-client.js";
+import { BOAT_RESOURCE_ID_PATTERN, BoatBootPendingError, type BoatApiClient } from "./boat-client.js";
 import { executeBoatPinnedSsh, type BoatBootstrapChannel } from "./boat-pinned-ssh.js";
 // Preserve existing imports of transport helpers while both runners share them.
 export { boatAuthorizedKeyCommand, isPublicBoatAddress, openBoatBootstrapChannel,
@@ -18,6 +18,41 @@ const BASE_STATUS_COMMAND = "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-boo
 // A fixed list, no path/argv disclosure and no dependency on the restored Node.
 const BOOTSTRAP_FILE_PROBE_COMMAND = "/bin/sh -c 'for f in /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs /opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs /opt/zeros/dist-engine/cli.js; do if test -f \"$f\"; then printf 1; else printf 0; fi; done'";
 type CommandResult = Awaited<ReturnType<CloudWorkspaceCommandRunner["execute"]>>;
+
+/** Before any admission or SSH key is sent, poll only the fixed read-only v4
+ * status command. A provider-running VM can still be restoring its overlay.
+ * All setup/installer/SSH failures retain the worker's ordinary retry policy.
+ */
+async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, resourceId: string, signal: AbortSignal, timeoutSeconds: number) {
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), Math.min(120_000, timeoutSeconds * 1000));
+  timer.unref();
+  const readinessSignal = AbortSignal.any([signal, deadline.signal]);
+  let previousError: unknown;
+  try {
+    for (;;) {
+      signal.throwIfAborted();
+      try {
+        return await client.request(`/sandboxes/${resourceId}/commands`, {
+          method: "POST", body: { command: BASE_STATUS_COMMAND, timeoutSeconds: 20 }, signal: readinessSignal,
+        });
+      } catch (error) {
+        signal.throwIfAborted();
+        if (deadline.signal.aborted) throw previousError ?? error;
+        const bootPending = error instanceof BoatBootPendingError || (error instanceof CloudProviderError &&
+          error.retryable && error.httpStatus !== undefined && error.httpStatus >= 500);
+        if (!bootPending || (error instanceof CloudProviderError && (error.retryAfterMs ?? 0) > 2000)) throw error;
+        previousError = error;
+        await new Promise<void>((resolve, reject) => {
+          const abort = () => { clearTimeout(wait); reject(error); };
+          const wait = setTimeout(() => { readinessSignal.removeEventListener("abort", abort); resolve(); }, 2000);
+          readinessSignal.addEventListener("abort", abort, { once: true });
+          if (readinessSignal.aborted) abort();
+        });
+      }
+    }
+  } finally { clearTimeout(timer); }
+}
 
 /** Boat commands do not have a separate stdin/environment carrier. Use its
  * authenticated API only for public SSH material, and use pinned OpenSSH for
@@ -88,11 +123,12 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
       // Boat cold resume restores disk, not the image's OCI entrypoint or /run.
       // This fixed, secret-free helper probes or starts the one root broker;
       // it cannot replace an active engine or consume a launch admission.
-      const prepared = await this.options.client.request(
+      const prepared = v4 ? await waitForBoatBaseStatus(this.options.client, input.resourceId, signal, input.timeoutSeconds)
+        : await this.options.client.request(
         `/sandboxes/${input.resourceId}/commands`,
         {
           method: "POST",
-          body: { command: v4 ? BASE_STATUS_COMMAND : ENSURE_SUPERVISOR_COMMAND, timeoutSeconds: 20 },
+          body: { command: ENSURE_SUPERVISOR_COMMAND, timeoutSeconds: 20 },
           signal,
         },
       );

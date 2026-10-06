@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { BoatBootPendingError } from "./boat-client.js";
+import { CloudProviderError } from "./provider.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
@@ -102,11 +104,92 @@ describe("Boat bootstrap transport", () => {
     const input = { ...f.input, command: CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND,
       runtimeBaseCompatibilityId: runtimeBase.compatibilityId,
       env: { ZEROS_CLOUD_WORKSPACE_SETUP_B64: Buffer.from(JSON.stringify(payload)).toString("base64url") } };
-    f.request.mockResolvedValueOnce({ ok: true, success: true, exitCode: 0,
+    const prepared = { ok: true, success: true, exitCode: 0,
       stdout: JSON.stringify({ schema: "zeros.base-status/v1", baseCompatibilityId: compatibilityId,
-        bootId: "11111111-1111-4111-8111-111111111111", currentRuntimeId: null, hostState }) + "\n", stderr: "", timedOut: false });
-    return { ...f, input };
+        bootId: "11111111-1111-4111-8111-111111111111", currentRuntimeId: null, hostState }) + "\n", stderr: "", timedOut: false };
+    f.request.mockResolvedValueOnce(prepared);
+    return { ...f, input, prepared };
   }
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("holds one claim and polls transient boot failures every two seconds before sending admission once", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture();
+    const implementation = fixture().request.getMockImplementation()!;
+    f.request.mockReset().mockImplementation(implementation)
+      .mockRejectedValueOnce(new BoatBootPendingError())
+      .mockRejectedValueOnce(new CloudProviderError("provider_request_failed", "closed", true, { httpStatus: 503 }))
+      .mockResolvedValueOnce(f.prepared);
+    const result = f.runner.execute(f.input, new AbortController().signal);
+    const settled = result.then(value => ({ value }), error => ({ error }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.request).toHaveBeenCalledTimes(1);
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(f.request).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.request).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2000);
+    const outcome = await settled;
+    expect("error" in outcome ? outcome.error?.code : "success").toBe("success");
+    expect(outcome).toHaveProperty("value.exitCode", 0);
+    expect(f.channel.execute).toHaveBeenCalledOnce();
+    expect(f.channel.dispose).toHaveBeenCalledOnce();
+    expect(JSON.stringify(f.request.mock.calls).includes(f.input.env.ZEROS_CLOUD_WORKSPACE_SETUP_B64)).toBe(false);
+  });
+
+  it("bounds boot polling to 120 seconds then returns the provider error to normal retry policy", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture(), error = new BoatBootPendingError();
+    f.input.timeoutSeconds = 600;
+    f.request.mockReset().mockRejectedValue(error);
+    const result = f.runner.execute(f.input, new AbortController().signal).catch(error => error);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(await result).toBe(error);
+    expect(f.request.mock.calls.length).toBeLessThanOrEqual(61);
+    expect(f.request.mock.calls.length).toBeGreaterThan(50);
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    expect(f.channel.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("aborts promptly during the readiness interval without installing access", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture(), controller = new AbortController();
+    f.request.mockReset().mockRejectedValue(new BoatBootPendingError());
+    const result = f.runner.execute(f.input, controller.signal).catch(error => error);
+    await vi.advanceTimersByTimeAsync(1);
+    controller.abort();
+    await result;
+    expect(f.request).toHaveBeenCalledOnce();
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    expect(f.channel.dispose).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    new CloudProviderError("provider_request_failed", "closed", true, { httpStatus: 409 }),
+    new CloudProviderError("provider_rate_limited", "closed", true, { httpStatus: 429, retryAfterMs: 10_000 }),
+    new CloudProviderError("provider_credential_rejected", "closed", false, { httpStatus: 403 }),
+    new CloudProviderError("provider_request_failed", "closed", true, { httpStatus: 503, retryAfterMs: 10_000 }),
+  ])("does not short-poll unrelated failures or override Retry-After", async error => {
+    const f = v4Fixture();
+    f.request.mockReset().mockRejectedValue(error);
+    await expect(f.runner.execute(f.input, new AbortController().signal)).rejects.toBe(error);
+    expect(f.request).toHaveBeenCalledOnce();
+  });
+
+  it("keeps legacy probes and post-readiness SSH failures on the normal retry policy", async () => {
+    const legacy = fixture(), pending = new BoatBootPendingError();
+    legacy.request.mockRejectedValueOnce(pending);
+    await expect(legacy.runner.execute(legacy.input, new AbortController().signal)).rejects.toBe(pending);
+    expect(legacy.request).toHaveBeenCalledOnce();
+    const f = v4Fixture(), failed = new CloudProviderError("provider_request_failed", "closed", true, { httpStatus: 503 });
+    f.channel.execute.mockRejectedValueOnce(failed);
+    await expect(f.runner.execute(f.input, new AbortController().signal)).rejects.toBe(failed);
+    expect(f.channel.execute).toHaveBeenCalledOnce();
+    expect(f.channel.dispose).toHaveBeenCalledOnce();
+    expect(f.request.mock.calls.filter(([, input]) => JSON.stringify(input).includes("bootstrap.py status"))).toHaveLength(1);
+  });
+
   it.each(["idle", "waiting_for_runtime"])("uses the base status probe and bounded v4 installer SSH stdin when %s", async state => {
     const f = v4Fixture(state);
     expect(f.input.env.ZEROS_CLOUD_WORKSPACE_SETUP_B64.length).toBeGreaterThan(48 * 1024);
