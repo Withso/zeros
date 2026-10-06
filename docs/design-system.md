@@ -64,6 +64,10 @@ The full guide is `docs/design-system.md`; token values are in
    findings; never raise `styles/policy/ui-debt.json`, add a `check:ui ignore`
    comment, or loosen `styles/policy/contrast-contract.json` to get green.
    Token or contract changes: run `pnpm design:docs` and say so in the handoff.
+8. **Local and cloud:** every surface renders correctly for Local and
+   organization workspaces with local and cloud placement, including each cloud
+   VM state (setting up, starting, sleeping, stopped, failed, archived). Follow
+   RULES.md §8 (the `zeros-workspaces` skill) and state both impacts in the PR.
 <!-- agent-brief:end -->
 
 ## 1. Workflow

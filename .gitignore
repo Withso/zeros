@@ -117,13 +117,14 @@ snapshots/diff/
 # into a production build, but it IS the design record and two of its files
 # carry third-party licences (THIRD-PARTY-NOTICES.md).
 
-# Claude Code runtime artifacts (locks, scheduled-task state). The one
-# exception is the generated, team-shared design-system skill
-# (scripts/design-system/build-design-docs.mjs writes it from docs/design-system.md).
+# Claude Code runtime artifacts (locks, scheduled-task state). The exceptions
+# are the generated, team-shared skills (scripts/design-system/build-design-docs.mjs
+# writes zeros-ui from docs/design-system.md and zeros-workspaces from RULES.md).
 .claude/*
 !.claude/skills/
 .claude/skills/*
 !.claude/skills/zeros-ui/
+!.claude/skills/zeros-workspaces/
 
 # Codex + Cursor harness config. Same class as .claude/ above: machine-local
 # agent state, never product source. Unlike .claude/ these were never listed,
@@ -135,6 +136,7 @@ snapshots/diff/
 !.cursor/rules/
 .cursor/rules/*
 !.cursor/rules/zeros-ui.mdc
+!.cursor/rules/zeros-workspaces.mdc
 
 # External worktree-tool config. Only the machine-local layer is ignored.
 #
