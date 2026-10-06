@@ -229,3 +229,11 @@ output. It probes immediately, then backs off from 250 ms to 5 s after failures;
 reported readiness includes that observation delay. Repeat the pinned-template
 command above and return the closed JSON to PERF. Do not patch or restart the
 source/template to make this probe pass.
+
+The second run (`bx_ddxjxhab`, compute cleanup verified, storage pending uploads)
+passed base readiness at 43,555 ms and failed the probe transport at 257 ms.
+The next run also returns `bootstrapDetails`: closed boot/host unit timestamps
+and hydration events filtered inside the VM, plus closed probe command/transport
+error categories. Return those fields even on failure. Unit timestamps are in
+microseconds from the VM's monotonic clock; do not subtract them from operator
+clock values. Absence of a hydration event does not prove hydration was instant.

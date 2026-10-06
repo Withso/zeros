@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BoatApiClient } from "../../apps/control-plane/src/cloud-workspaces/boat-client.ts";
@@ -14,6 +14,26 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const STATUS = "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status";
 const name = journal => `zeros-v2-test-perf-${journal.id}`;
 const providerReady = state => ["ready", "idle", "running"].includes(state);
+const BOOT_DETAILS = "/usr/bin/sudo -n /usr/bin/python3 -I - <<'PY_PERF'\n" +
+  readFileSync(new URL("./workspace-perf-bootstrap.py", import.meta.url), "utf8") + "\nPY_PERF";
+const unitStates = new Set(["active", "activating", "inactive", "deactivating", "failed", "reloading"]);
+const unitSubstates = new Set(["dead", "start", "start-pre", "start-post", "running", "exited", "failed", "auto-restart", "stop", "stop-sigterm", "stop-sigkill"]);
+const unitResults = new Set(["success", "exit-code", "signal", "timeout", "resources", "start-limit-hit", "core-dump", "watchdog", "oom-kill"]);
+const unitTimes = ["ExecMainStartTimestampMonotonic", "ExecMainExitTimestampMonotonic", "ActiveEnterTimestampMonotonic"];
+const boundedInteger = (value, maximum = 10 ** 15) => Number.isSafeInteger(value) && value >= 0 && value <= maximum ? value : null;
+export function parsePerfBootstrapDetails(value) {
+  if (value?.schema !== "zeros.workspace-perf-bootstrap/v1") return { availability: "invalid_response" };
+  return { schema: value.schema, observedMonotonicUs: boundedInteger(value.observedMonotonicUs),
+    hydrationDone: value.hydrationDone === true, activeDescriptorPresent: value.activeDescriptorPresent === true,
+    units: (Array.isArray(value.units) ? value.units : []).slice(0, 2).filter(unit => ["zeros-boot.service", "zeros-host.service"].includes(unit?.unit))
+      .map(unit => ({ unit: unit.unit, active: unitStates.has(unit.active) ? unit.active : "unknown",
+        sub: unitSubstates.has(unit.sub) ? unit.sub : "unknown", result: unitResults.has(unit.result) ? unit.result : "unknown",
+        exitCode: boundedInteger(unit.exitCode, 255), ...Object.fromEntries(unitTimes.map(key => [key, boundedInteger(unit[key])])) })),
+    hydrationEvents: (Array.isArray(value.hydrationEvents) ? value.hydrationEvents : []).slice(-8)
+      .filter(event => ["persistence_hydration_wait", "persistence_hydration_ready", "persistence_hydration_timeout"].includes(event?.event))
+      .map(event => ({ event: event.event, waitedSeconds: boundedInteger(event.waitedSeconds, 600), observedMonotonicUs: boundedInteger(event.observedMonotonicUs) })),
+  };
+}
 const bootstrapStages = new Set(["validate_input", "lock", "check_space", "check_cache", "download", "verify_archive", "verify_manifest",
   "extract", "verify_tree", "publish_receipt", "switch_pointer", "start_host", "run_setup", "done"]);
 const bootstrapChecks = new Set(["input_schema", "input_too_large", "artifact_host", "artifact_expired", "insufficient_space", "cache_conflict",
@@ -145,6 +165,14 @@ export function perfProbeStages(value) {
 export async function runPerfVm(journal, config, deps) {
   const { request, load, probe, save, wait = pause, now = performance.now.bind(performance) } = deps;
   let cycleStarted = now();
+  const inspectBootstrap = async timings => {
+    try {
+      const response = await request(`/sandboxes/${journal.childId}/commands`, { method: "POST", body: { command: BOOT_DETAILS, timeoutSeconds: 20 } });
+      timings.bootstrapDetails = response.success === true && response.exitCode === 0 && !response.timedOut && !response.stdoutTruncated &&
+        typeof response.stdout === "string" && Buffer.byteLength(response.stdout) <= 16_384 ? parsePerfBootstrapDetails(JSON.parse(response.stdout)) : { availability: "unavailable" };
+    } catch { timings.bootstrapDetails = { availability: "unavailable" }; }
+    save(journal);
+  };
   const ready = async (_journal, material) => {
     const deadline = now() + 600_000;
     const timings = journal.perf[journal.perf.cycle];
@@ -162,7 +190,8 @@ export async function runPerfVm(journal, config, deps) {
           observation = observeBootstrap(response, material.computer.template.baseCompatibilityId, timings);
           if (observation === "ready") {
             observations.ready = (observations.ready ?? 0) + 1;
-            timings.baseReadyObservedMs = Math.round(now() - cycleStarted); save(journal); return;
+            timings.baseReadyObservedMs = Math.round(now() - cycleStarted);
+            await inspectBootstrap(timings); return;
           }
         }
       } catch { observation = "request_failed"; }
@@ -175,6 +204,7 @@ export async function runPerfVm(journal, config, deps) {
       // and inspected the provider again after only 250 ms.
       pollMs = Math.min(5_000, pollMs * 2);
     }
+    await inspectBootstrap(timings);
     throw new Error("bootstrap_timeout");
   };
   await runTemplateSetupRepro(journal, config.billingOrg, {

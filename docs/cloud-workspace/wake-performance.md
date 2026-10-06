@@ -95,6 +95,26 @@ counts and a whitelisted bootstrap diagnostic, and backs off 250 ms to 5 s.
 It keeps the same base identity/readiness checks and never restarts a host.
 A repeat of the pinned-template run is required to diagnose the actual gate.
 
+The second corrected run (probe commit `13cbf4ae`) created `bx_ddxjxhab`.
+Provider ready was observed at 5,017 ms and base ready at 43,555 ms; the
+38,538 ms difference includes command duration and up to 5 s polling delay,
+not just VM execution. Observations: four provider-pending, three request
+failures, one stopped host, then ready. Five bootstrap commands took 18,467 ms
+summed (three failed, maximum 5,265 ms). This sample does not reproduce the
+first run's persistent bootstrap timeout. The following probe command failed
+in 257 ms with `probe_invalid`; its old wrapper discarded command exit and
+closed subprocess error details. No attester-stage result was returned.
+Compute cleanup was verified, with storage still `waiting_for_uploads`.
+
+The next diagnostic revision separates probe command failure/timeout/overflow
+and preserves only whitelisted subprocess identities. It also takes one
+read-only unit/hydration snapshot after base-ready observation (or at bootstrap
+timeout). Unit monotonic start/exit timestamps and filtered hydration wait/ready
+events can isolate the boot oneshot's interval. The Type=simple host's active
+state is not completion of dispatch verification or attestation. Missing events
+stay missing; no raw journal text or argv leaves the VM. This extra snapshot
+occurs after the recorded base-ready endpoint and adds overhead before setup.
+
 The [resume proposal](resume-performance-design.md) prioritizes preparation reuse,
 fresh launch authority, integrity-bound qualification reuse, engine startup,
 registration/attachment measurement, and closed persisted stage spans for RU/HU

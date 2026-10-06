@@ -1,8 +1,9 @@
 import { EventEmitter } from "node:events";
+import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { perfDatabaseConfig, perfTimeline, elapsed, readPerfTimeline } from "../cloud-workspace-validation/workspace-perf-timeline.mjs";
 import { cleanupPerfRun, newPerfJournal, ownPerfWorkspace, perfAlphaRequest, perfHandshake, runPerfLive, validatePerfJournal } from "../cloud-workspace-validation/workspace-perf-live.mjs";
-import { inspectPerfVmSource, perfVmRequest, runPerfVm } from "../cloud-workspace-validation/workspace-perf-vm.mjs";
+import { inspectPerfVmSource, perfVmRequest, runPerfVm, parsePerfBootstrapDetails } from "../cloud-workspace-validation/workspace-perf-vm.mjs";
 import { newTemplateSetupJournal } from "../cloud-workspace-validation/template-setup-repro.mjs";
 import { CloudProviderError } from "../../apps/control-plane/src/cloud-workspaces/provider";
 
@@ -211,6 +212,32 @@ describe("cloud performance measurement", () => {
     await expect(request(`/sandboxes/${child}`, { method: "DELETE" })).resolves.toHaveProperty("operation");
     await expect(request(`/sandboxes/${source}`, { method: "DELETE" })).rejects.toThrow("request_scope_invalid");
     await expect(request("/sandboxes/bx_44444444/resume", { method: "POST" })).rejects.toThrow("request_scope_invalid");
+  });
+
+  it("projects only closed bootstrap unit and hydration observations", () => {
+    const result = parsePerfBootstrapDetails({ schema: "zeros.workspace-perf-bootstrap/v1", observedMonotonicUs: 50_000_000,
+      hydrationDone: true, activeDescriptorPresent: false,
+      units: [{ unit: "zeros-boot.service", active: "active", sub: "exited", result: "success", exitCode: 0,
+        ExecMainStartTimestampMonotonic: 1_000_000, ExecMainExitTimestampMonotonic: 38_000_000, ActiveEnterTimestampMonotonic: 38_001_000,
+        text: "private" }], hydrationEvents: [{ event: "persistence_hydration_ready", waitedSeconds: 35, observedMonotonicUs: 36_000_000, text: "private" }] });
+    expect(result.units[0].ExecMainExitTimestampMonotonic - result.units[0].ExecMainStartTimestampMonotonic).toBe(37_000_000);
+    expect(result.hydrationEvents[0].waitedSeconds).toBe(35);
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(parsePerfBootstrapDetails({ ...result, units: [{ unit: "private", active: "private" }],
+      hydrationEvents: [{ event: "private", waitedSeconds: 2 }] }).units).toEqual([]);
+  });
+  it("filters journal messages on the VM before bootstrap diagnostics leave it", () => {
+    const output = execFileSync("python3", ["-I", "-B", "-c", `
+import importlib.util,json,sys
+spec=importlib.util.spec_from_file_location('perf','scripts/cloud-workspace-validation/workspace-perf-bootstrap.py')
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+print(json.dumps(module.project_events(sys.stdin.read())))
+`], { encoding: "utf8", input: [
+      { MESSAGE: "private output", __MONOTONIC_TIMESTAMP: "200" },
+      { MESSAGE: JSON.stringify({ event: "persistence_hydration_ready", waitedSeconds: 38, ignored: "private" }), __MONOTONIC_TIMESTAMP: "40000000" },
+      { MESSAGE: JSON.stringify({ event: "private", waitedSeconds: 12 }), __MONOTONIC_TIMESTAMP: "300" },
+    ].map(value => JSON.stringify(value)).join("\n") });
+    expect(JSON.parse(output)).toEqual([{ event: "persistence_hydration_ready", waitedSeconds: 38, observedMonotonicUs: 40000000 }]);
   });
 
   it("retains closed source-failure diagnostics before allocation without exposing error text", async () => {
