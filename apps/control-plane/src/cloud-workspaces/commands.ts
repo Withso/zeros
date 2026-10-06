@@ -7,6 +7,7 @@ import { assertCurrentCloudEngineAuthority } from "./engine-authority.js";
 import { HttpError } from "../authz.js";
 import { assertCloudRequestActor, assertRecordedCloudActor, type CloudRecordedActor } from "./actor-sessions.js";
 import { isAutomaticRuntimeWakeGeneration } from "./generation-transitions.js";
+import { cloudRuntimeHandoffBlocksClaims, isAutomaticRetainedRuntimeEngine } from "./runtime-transition.js";
 
 const identity = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/);
 const revision = z.number().int().safe().nonnegative();
@@ -221,13 +222,14 @@ export class DatabaseCloudWorkspaceCommandService {
       AND state='queued' AND (generation<>$3 OR engine_instance_id IS DISTINCT FROM $4::uuid) LIMIT 1`,
     [scope.workspaceId, conversationId, scope.generation, scope.engineInstanceId]);
     if (interrupted.rowCount || staleQueue.rowCount) {
-      const automaticWake = !interrupted.rowCount && await isAutomaticRuntimeWakeGeneration(tx, { ...scope, includeSource:true });
+      const automaticWake = !interrupted.rowCount && (await isAutomaticRuntimeWakeGeneration(tx, { ...scope, includeSource:true }) ||
+        await isAutomaticRetainedRuntimeEngine(tx, scope));
       await tx.query(`UPDATE cloud_workspace_conversation_controls
         SET paused=CASE WHEN $4::boolean THEN paused ELSE true END,revision=revision+1,updated_at=now()
         WHERE workspace_id=$1 AND conversation_id=$2 AND (NOT paused OR $3::boolean OR $4::boolean)`,
       [scope.workspaceId, conversationId, Boolean(interrupted.rowCount), automaticWake]);
-      // Only the first engine of an automatic wake preserves saved queue
-      // intent. Unknown dispatched outcomes and ordinary replacement engines
+      // A verified automatic transition preserves saved queue intent.
+      // Unknown dispatched outcomes and ordinary replacement engines
       // still pause; an explicit Resume accepts their undispatched entries.
       await tx.query(`UPDATE cloud_workspace_commands SET generation=$3,engine_instance_id=$4 WHERE workspace_id=$1 AND conversation_id=$2
         AND state='queued'`, [scope.workspaceId, conversationId, scope.generation, scope.engineInstanceId]);
@@ -391,6 +393,7 @@ export class DatabaseCloudWorkspaceCommandService {
       throw new CloudCommandError("invalid_command", "Invalid execution or claim identity");
     return withSystemTx(this.options.pool, async tx => {
       await this.authorize(tx, scope);
+      if (await cloudRuntimeHandoffBlocksClaims(tx, scope)) return null;
       if (await isAutomaticRuntimeWakeGeneration(tx, { ...scope, includeSource:true }) &&
           !(await tx.query("SELECT 1 FROM cloud_workspaces WHERE id=$1 AND status IN ('ready','busy')", [scope.workspaceId])).rowCount) return null;
       await this.control(tx, scope, conversationId);

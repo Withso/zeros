@@ -614,3 +614,79 @@ engine gaps are reported separately. Missing evidence fails closed.
 This commit publishes the composition types, not a live runner or CLI. HU's
 implementation will own activation and cleanup; LU-5 contributes the hooks
 rather than provisioning a second workspace or writing a second update runner.
+
+## Implemented resident handoff boundary (slice 4)
+
+The control-plane adapter implements LU-3's VM integration contract in
+`live-runtime-updates.md`. Resident activation is an explicit engine-mode
+request with `handoff: {challenge, organizationId, workspaceId, generation,
+engineInstanceId, hostId, fence, expiresAtMs}`. It cannot use the bootstrap path
+or fall back to ordinary `prepare`. The fixed adapter validates the complete
+source, controller, target and resident trees independently. Its cgroup census
+permits only the exact root-attested resident workload alongside the host;
+every engine/setup scope must be empty after retirement.
+
+Migration **0137** is additive expand; 0136 is unchanged and there are no new
+expand exceptions. `cloud_workspace_runtime_handoffs` records these separate
+commits under the existing per-workspace transition and worker fences:
+
+| Journal phase | Durable meaning | Recovery action |
+| --- | --- | --- |
+| `consumption_authorized` | Root supplied the scoped, fenced LU receipt; current candidate and independent resident qualification passed. Source record/heartbeat authority remains live, but new command claims are blocked. | Inspect the exact root receipt; no staging cancellation or ordinary prepare. |
+| `consumed` | Root's resident-aware prepare consumed the sealed source, detached its resident authority and proved engine/setup retirement. | A live claim can finish server retirement; `reconcile` does so within the bound. |
+| `source_retired` | Server source authority is revoked and the existing transfer phase is `activated`. | Existing fresh enrollment, registration, challenged health and rollback paths apply. |
+| `cancelled` | Root confirmed cancellation on the same live, still-attached source before consumption. | Cancel this offer, retain the source pin/epoch and queue pause state, permit a later offer. |
+| `uncertain` | The consumption deadline expired without a conclusive root receipt. | Retire server authority, preserve the VM and require recovery verification. Never infer that its writer can resume. |
+
+Authorization expires at the earlier of the LU receipt expiry and 90 seconds.
+The original stage deadline and worker claim also apply. The VM retries a lost
+prepare reply only with the identical handoff and resident fields, so the
+supervisor can replay its unspent one-use session. Neither this session nor
+enrollment credentials enter the database journal or diagnostics. A root
+process crash with an unfinished local journal blocks an ordinary activation
+retry; uncertain disk/controller state requires inspection, not an inferred
+rollback. Automatic target-health rollback still runs within the existing
+bounded conversation when source retirement is confirmed.
+
+The duplex protocol adds `authorize_consumption`, `consumed` and
+`cancel_consumption`. `createResidentRuntimeUpdateHandlers` in
+`apps/control-plane/src/cloud-workspaces/runtime-resident-update.ts` binds them
+to `DatabaseCloudRuntimeTransitionService.authorizeResidentConsumption`,
+`recordResidentConsumption`, `retireResidentSource` and
+`cancelResidentConsumption`. Consumption is committed before retirement in
+separate transactions. Missing resident handlers fail closed. The caller owns
+worker-lease renewal, an injected activation policy, construction of bounded
+enrollment material, a fresh pinned-root health probe and `finish` after the
+runner's final receipt. There is no new public/client mutation endpoint.
+
+`cloud_runtime_resident_transfer_qualifications` is an operator-published,
+revocable record for the exact source engine / target engine / controller /
+resident runtime / base / mode combination, with an evidence digest. Ordinary
+runtime-transfer qualification alone is insufficient. An older resident host
+can remain only when that exact combination qualifies its independent
+`zeros.resident-pty/v1` protocol; the current engine protocol does not attest the
+host. No broad version-range or N-1 exemption is inferred. Source/target runtime
+and credential-kind qualification remain mandatory at their existing joins.
+
+Every resident enrollment records its own detached witness. Target and rollback
+start with new engine UUIDs and a higher resident fence. Registration still
+uses the immutable generation pin and existing transfer service; authenticated,
+challenged health additionally verifies that exact resident host, generation,
+engine and attachment fence. Rollback never recycles a prior resume-proof epoch.
+
+Queue recovery shares RU's rule: undispatched commands retain their pause state
+only for the exact successfully enrolled target/rollback engine. Their durable
+command/claim identities remain unchanged; interrupted dispatched commands stay
+uncertain, and ordinary replacement engines still pause the queue. Actor and
+device authorization are checked again before dispatch. Source claims remain
+blocked between authorized consumption and confirmed cancellation/retirement.
+The client's existing FIFO/reconnect code remains responsible for retrying a
+send that has not yet reached the durable queue with the same command identity.
+
+This slice changes only organization-owned cloud execution. Local and
+organization-owned local workspaces do not call these control-plane adapters;
+owner/placement switching retains exact organization/workspace/engine scope.
+It does not enable a production activation worker, advertise resident support,
+relax presence/PTY eligibility, or claim a measured reconnect gap. Those gates
+still require qualification and the disposable acceptance run with LU's
+workload-survival assertions.

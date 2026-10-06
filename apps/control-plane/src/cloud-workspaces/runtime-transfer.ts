@@ -14,6 +14,9 @@ import { cloudRuntimePinValues, loadPinnedCloudRuntime } from "./runtime-selecti
 import { verifyRuntimeTransferReport } from "./runtime-transfer-proof.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
+import { CloudResidentWitnessSchema, CloudRuntimeHandoffRequestSchema, CloudRuntimeHandoffReceiptSchema,
+  detachedResident, sameHandoff, sameResidentHost, type CloudResidentWitness, type CloudRuntimeHandoffRequest,
+  type CloudRuntimeHandoffReceipt } from "./runtime-handoff-contract.js";
 import { cloneDatabaseCloudWorkspaceSettingsForRollback, persistCloudWorkspaceSetupSecrets,
   persistDatabaseCloudWorkspaceSettings } from "./settings.js";
 
@@ -35,7 +38,14 @@ export type CloudRuntimeActivationPolicy = {
 export type CloudRuntimeTransferEnrollment = {
   id: string; engineInstanceId: string; generation: number; executionFence: number;
   token: string; bridgeToken: string; readinessProbeToken: string; expiresAt: Date;
+  resident?: { hostId: string; fence: number };
 };
+
+type ResidentConsumption = { handoff: CloudRuntimeHandoffRequest; receipt: CloudRuntimeHandoffReceipt;
+  resident: CloudResidentWitness };
+type HandoffRow = { phase: "consumption_authorized" | "consumed" | "source_retired" | "uncertain" | "cancelled";
+  request: CloudRuntimeHandoffRequest; source_resident: CloudResidentWitness;
+  consumed_resident: CloudResidentWitness | null; deadline_at: Date };
 
 type TransitionRow = {
   transition_id: string; workspace_id: string; org_id: string;
@@ -64,6 +74,7 @@ export class DatabaseCloudRuntimeTransitionService {
 
   async enroll(claim: CloudRuntimeTransitionClaim, proof: {
     active: CloudActiveRuntime; controller: CloudActiveRuntime; report: Record<string, unknown>; rollback: boolean;
+    resident?: CloudResidentWitness;
   }): Promise<CloudRuntimeTransferEnrollment | null> {
     const active = CloudActiveRuntimeSchema.safeParse(proof.active), controller = CloudActiveRuntimeSchema.safeParse(proof.controller);
     if (!active.success || !controller.success) return null;
@@ -73,6 +84,21 @@ export class DatabaseCloudRuntimeTransitionService {
         active.data.bootId!==row.source_active.bootId || active.data.baseCompatibilityId!==row.source_active.baseCompatibilityId ||
         active.data.supervisorSessionId===row.source_active.supervisorSessionId ||
         (row.mode==='bootstrap' ? !same(active.data,controller.data) : !row.controller_active || !same(row.controller_active,controller.data))) return null;
+      const journal = await this.handoff(tx, claim.transitionId);
+      const resident = CloudResidentWitnessSchema.safeParse(proof.resident);
+      if (journal ? journal.phase !== "source_retired" || !resident.success || !journal.consumed_resident ||
+        !sameResidentHost(journal.consumed_resident, resident.data) || resident.data.engineId !== null ||
+        resident.data.fence < journal.consumed_resident.fence || !Number.isSafeInteger(resident.data.fence + 1)
+        : proof.resident !== undefined) return null;
+      if (journal && resident.success) {
+        // A rollback must prove the target's resident attachment was detached.
+        // A failed pre-start target may still have the original detached fence.
+        const previous = (await tx.query<{ resident_witness: CloudResidentWitness | null; consumed_at: Date | null }>(`SELECT resident_witness,consumed_at
+          FROM cloud_workspace_runtime_enrollments WHERE transition_id=$1 ORDER BY sequence DESC LIMIT 1`, [claim.transitionId])).rows[0];
+        const expected = previous?.resident_witness ?? journal.consumed_resident!;
+        const fences = previous ? previous.consumed_at ? [expected.fence + 2] : [expected.fence, expected.fence + 2] : [expected.fence];
+        if (!sameResidentHost(expected, resident.data) || !fences.includes(resident.data.fence)) return null;
+      }
       const generation = proof.rollback ? row.source_generation : row.candidate_generation;
       const saved = await loadGenerationSource(tx,{...claim,generation});
       if (!saved.runtime || active.data.runtimeId!==saved.runtime.runtimeId || active.data.manifestSha256!==saved.runtime.manifestSha256 ||
@@ -96,11 +122,11 @@ export class DatabaseCloudRuntimeTransitionService {
       await tx.query(`UPDATE cloud_workspace_runtime_transitions SET phase=$2,enrollment_sequence=$3,
         updated_at=clock_timestamp() WHERE transition_id=$1`, [claim.transitionId,proof.rollback?'rollback_enrolling':'enrolling',sequence]);
       await tx.query(`INSERT INTO cloud_workspace_runtime_enrollments(id,transition_id,workspace_id,org_id,generation,
-        engine_instance_id,account_user_id,execution_fence,sequence,direction,token_hash,expires_at,active,controller_active,report_sha256)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15)`,
+        engine_instance_id,account_user_id,execution_fence,sequence,direction,token_hash,expires_at,active,controller_active,report_sha256,resident_witness)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15,$16::jsonb)`,
       [id,claim.transitionId,claim.workspaceId,claim.organizationId,generation,engineInstanceId,authority.owner_user_id,
         claim.executionFence,sequence,proof.rollback?'rollback':'target',hash(token),authority.expires_at,JSON.stringify(active.data),
-        JSON.stringify(controller.data),reportDigest]);
+        JSON.stringify(controller.data),reportDigest,resident.success ? JSON.stringify(resident.data) : null]);
       await tx.query(`INSERT INTO cloud_workspace_engine_instances(id,workspace_id,generation,org_id,account_user_id,
         runtime_transition_enrollment_id,protocol_version,state,bridge_token_hash,
         runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version,
@@ -108,7 +134,8 @@ export class DatabaseCloudRuntimeTransitionService {
         VALUES($1,$2,$3,$4,$5,$6,$7,'starting',$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
       [engineInstanceId,claim.workspaceId,generation,claim.organizationId,authority.owner_user_id,id,saved.runtime.engineProtocolVersion,
         hash(bridgeToken),...cloudRuntimePinValues(saved.runtime),active.data.installerReceiptSha256,active.data.bootId,active.data.supervisorSessionId]);
-      return {id,engineInstanceId,generation,executionFence:sequence,token,bridgeToken,readinessProbeToken,expiresAt:authority.expires_at};
+      return {id,engineInstanceId,generation,executionFence:sequence,token,bridgeToken,readinessProbeToken,expiresAt:authority.expires_at,
+        ...(resident.success ? { resident: { hostId: resident.data.hostId, fence: resident.data.fence + 1 } } : {})};
     });
   }
 
@@ -178,9 +205,12 @@ export class DatabaseCloudRuntimeTransitionService {
     if (!source.runtime || !target.runtime ||
       !await loadPinnedCloudRuntime(tx,source.runtime,this.options.qualificationMode,kinds) ||
       (!rollback && !await loadPinnedCloudRuntime(tx,target.runtime,this.options.qualificationMode,kinds))) return false;
-    return (await tx.query<{qualified:boolean}>(`SELECT cloud_runtime_transfer_qualified($1,$2,$3,$4,$5,$6) AS qualified`,
+    const qualified = (await tx.query<{qualified:boolean}>(`SELECT cloud_runtime_transfer_qualified($1,$2,$3,$4,$5,$6) AS qualified`,
       [source.runtime.runtimeId,target.runtime.runtimeId,row.mode==='bootstrap'?target.runtime.runtimeId:row.controller_active?.runtimeId,
         source.runtime.baseCompatibilityId,row.mode,this.options.qualificationMode])).rows[0]?.qualified===true;
+    if (!qualified) return false;
+    const journal = await this.handoff(tx, transitionId);
+    return !journal || journal.phase === "source_retired" && await this.residentQualified(tx, row, journal.source_resident);
   }
 
   private async transfer(tx: Tx,input: {workspaceId:string;organizationId:string;transitionId:string;generation:number;engineInstanceId:string}) {
@@ -221,6 +251,7 @@ export class DatabaseCloudRuntimeTransitionService {
   async verifyHealth(claim: CloudRuntimeTransitionClaim, probe: (challenge:string)=>Promise<{
     challenge:string;executionFence:string;active:CloudActiveRuntime;engineInstanceId:string;
     protocolVersion:number;health:"ready";durableRecordConnected:true;
+    resident?: CloudResidentWitness;
   }>): Promise<boolean> {
     const challenge=capability("zuh_");
     const enrollmentId=await withSystemTx(this.options.pool,async tx=>{
@@ -242,7 +273,7 @@ export class DatabaseCloudRuntimeTransitionService {
     return withSystemTx(this.options.pool,async tx=>{
       const row=await this.locked(tx,claim);
       if (!row || !['checking','rollback_checking'].includes(row.phase) || !await this.qualified(tx,claim.transitionId,row.phase==='rollback_checking')) return false;
-      const enrollment=(await tx.query<{generation:number;active:CloudActiveRuntime}>(`SELECT enrollment.generation,enrollment.active
+      const enrollment=(await tx.query<{generation:number;active:CloudActiveRuntime;resident_witness:CloudResidentWitness|null}>(`SELECT enrollment.generation,enrollment.active,enrollment.resident_witness
         FROM cloud_workspace_runtime_enrollments enrollment JOIN cloud_workspace_engine_instances engine ON engine.id=enrollment.engine_instance_id
         JOIN cloud_workspaces workspace ON workspace.id=enrollment.workspace_id AND workspace.org_id=enrollment.org_id
         WHERE enrollment.id=$1 AND enrollment.sequence=$2 AND enrollment.engine_instance_id=$3
@@ -253,6 +284,10 @@ export class DatabaseCloudRuntimeTransitionService {
           AND cloud_workspace_runtime_authority_live(workspace.id,enrollment.generation,enrollment.account_user_id,$5)
           FOR UPDATE OF enrollment,engine`,[enrollmentId,row.enrollment_sequence,observation.engineInstanceId,hash(challenge),this.options.workosEnabled])).rows[0];
       if (!enrollment || !same(enrollment.active,observed.data)) return false;
+      const resident = CloudResidentWitnessSchema.safeParse(observation.resident);
+      if (enrollment.resident_witness ? !resident.success || !sameResidentHost(enrollment.resident_witness, resident.data) ||
+        resident.data.fence !== enrollment.resident_witness.fence + 1 || resident.data.engineId !== observation.engineInstanceId ||
+        resident.data.generation !== enrollment.generation : observation.resident !== undefined) return false;
       await tx.query(`INSERT INTO cloud_workspace_runtime_attestations(enrollment_id,engine_instance_id,health_challenge_sha256,engine_health,durable_record_connected)
         VALUES($1,$2,$3,'ready',true)`,[enrollmentId,observation.engineInstanceId,hash(challenge)]);
       await tx.query(`UPDATE cloud_workspace_runtime_enrollments SET health_challenge_sha256=NULL,health_deadline_at=NULL WHERE id=$1`,[enrollmentId]);
@@ -321,6 +356,26 @@ export class DatabaseCloudRuntimeTransitionService {
       const row=await this.locked(tx,claim);
       if (!row) return null;
       const now=(await tx.query<{now:Date}>("SELECT clock_timestamp() AS now")).rows[0]!.now;
+      const journal = await this.handoff(tx, claim.transitionId);
+      if (journal && journal.phase !== "source_retired") {
+        if (journal.phase !== "uncertain" && journal.deadline_at > now) {
+          if (journal.phase === "consumed") {
+            await this.retireSource(tx, claim, row.source_generation);
+            await tx.query(`UPDATE cloud_workspace_runtime_handoffs SET phase='source_retired',source_retired_at=clock_timestamp()
+              WHERE transition_id=$1`, [claim.transitionId]);
+          }
+          return "inspect";
+        }
+        // Consumption may have happened. Never cancel staging or resurrect a
+        // writer on the strength of an expired claim or a missing reply.
+        await retireCloudWorkspaceRuntimeAccess(tx, { ...claim, reason: "generation_candidate_rejected" });
+        await tx.query("UPDATE cloud_workspace_runtime_handoffs SET phase='uncertain' WHERE transition_id=$1", [claim.transitionId]);
+        await tx.query("UPDATE cloud_workspace_runtime_transitions SET phase='recovery_required',updated_at=clock_timestamp() WHERE transition_id=$1", [claim.transitionId]);
+        await tx.query(`UPDATE cloud_workspaces SET status='failed',authority_epoch=authority_epoch+1,version=version+1,updated_at=clock_timestamp(),
+          last_error_code='recovery_needed',last_error_message='Runtime handoff recovery needs verification. The allocation is preserved.'
+          WHERE id=$1 AND org_id=$2`, [claim.workspaceId, claim.organizationId]);
+        return "recovery_required";
+      }
       if (['offered','staged'].includes(row.phase)) {
         if (row.stage_live) return row.phase==='offered'?'stage':'activate';
         await tx.query(`UPDATE cloud_workspace_runtime_transitions SET phase='cancelled',completed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE transition_id=$1`,[claim.transitionId]);
@@ -393,6 +448,7 @@ export class DatabaseCloudRuntimeTransitionService {
         FOR UPDATE OF runtime,transition`,
       [claim.transitionId,claim.workspaceId,claim.organizationId,claim.workerId,claim.workerFence,claim.executionFence])).rows[0];
       if (!row || row.activated_at!==null) return false;
+      if (await this.handoff(tx, claim.transitionId)) return false;
       if (row.phase==='cancelled' && row.state==='cancelled') return true;
       if (!['offered','staged'].includes(row.phase) || row.state!=='draining') return false;
       const cancelled=await tx.query(`UPDATE cloud_workspace_runtime_transitions
@@ -422,7 +478,7 @@ export class DatabaseCloudRuntimeTransitionService {
   async staged(claim: CloudRuntimeTransitionClaim): Promise<boolean> {
     return withSystemTx(this.options.pool,async tx => {
       const row = await this.locked(tx,claim);
-      if (!row || !row.stage_live || !['offered','staged'].includes(row.phase)) return false;
+      if (!row || !row.stage_live || !['offered','staged'].includes(row.phase) || await this.handoff(tx, claim.transitionId)) return false;
       await tx.query("UPDATE cloud_workspace_runtime_transitions SET phase='staged',updated_at=clock_timestamp() WHERE transition_id=$1", [row.transition_id]);
       return true;
     });
@@ -431,10 +487,124 @@ export class DatabaseCloudRuntimeTransitionService {
   async activate(claim: CloudRuntimeTransitionClaim, input: {
     controller: CloudActiveRuntime | null; policy: CloudRuntimeActivationPolicy;
   }): Promise<boolean> {
+    return this.authorizeActivation(claim, input);
+  }
+
+  /** A root receipt is consumed while source server authority is still live.
+   * This commit is a durable intent, not permission to enroll the target. */
+  async authorizeResidentConsumption(claim: CloudRuntimeTransitionClaim, input: {
+    controller: CloudActiveRuntime; policy: CloudRuntimeActivationPolicy;
+    handoff: CloudRuntimeHandoffRequest; receipt: CloudRuntimeHandoffReceipt; resident: CloudResidentWitness;
+  }): Promise<boolean> {
+    const handoff = CloudRuntimeHandoffRequestSchema.safeParse(input.handoff);
+    const receipt = CloudRuntimeHandoffReceiptSchema.safeParse(input.receipt);
+    const resident = CloudResidentWitnessSchema.safeParse(input.resident);
+    if (!handoff.success || !receipt.success || !resident.success || !sameHandoff(handoff.data, receipt.data)) return false;
+    return this.authorizeActivation(claim, input, { handoff: handoff.data, receipt: receipt.data, resident: resident.data });
+  }
+
+  private async handoff(tx: Tx, transitionId: string): Promise<HandoffRow | null> {
+    return (await tx.query<HandoffRow>("SELECT * FROM cloud_workspace_runtime_handoffs WHERE transition_id=$1 FOR UPDATE", [transitionId])).rows[0] ?? null;
+  }
+
+  /** This API accepts only the exact detached witness returned by root's
+   * resident-aware prepare. Never call it using engine HTTP or client input. */
+  async recordResidentConsumption(claim: CloudRuntimeTransitionClaim, input: {
+    handoff: CloudRuntimeHandoffRequest; resident: CloudResidentWitness;
+  }): Promise<boolean> {
+    const request = CloudRuntimeHandoffRequestSchema.safeParse(input.handoff), resident = CloudResidentWitnessSchema.safeParse(input.resident);
+    if (!request.success || !resident.success) return false;
+    return withSystemTx(this.options.pool, async tx => {
+      const row = await this.locked(tx, claim), journal = row && await this.handoff(tx, claim.transitionId);
+      if (!row || !journal || ["uncertain", "cancelled"].includes(journal.phase) || !sameHandoff(journal.request, request.data) ||
+        !detachedResident(journal.source_resident, resident.data)) return false;
+      if (journal.phase !== "consumption_authorized") return true;
+      if (!(await tx.query("SELECT 1 WHERE $1::timestamptz>clock_timestamp()", [journal.deadline_at])).rowCount) return false;
+      await tx.query(`UPDATE cloud_workspace_runtime_handoffs SET phase='consumed',consumed_at=clock_timestamp(),
+        consumed_resident=$2::jsonb WHERE transition_id=$1`, [claim.transitionId, JSON.stringify(resident.data)]);
+      return true;
+    });
+  }
+
+  /** Root must have received an accepted cancel from the same live source
+   * writer and re-read its still-attached resident witness. Timeouts and a
+   * generic rejected prepare response are never cancellation evidence. */
+  async cancelResidentConsumption(claim: CloudRuntimeTransitionClaim, input: {
+    handoff: CloudRuntimeHandoffRequest; resident: CloudResidentWitness;
+  }): Promise<boolean> {
+    const request = CloudRuntimeHandoffRequestSchema.safeParse(input.handoff), resident = CloudResidentWitnessSchema.safeParse(input.resident);
+    if (!request.success || !resident.success) return false;
+    return withSystemTx(this.options.pool, async tx => {
+      const row = await this.locked(tx, claim), journal = row && await this.handoff(tx, claim.transitionId);
+      if (!row || !journal || journal.phase !== "consumption_authorized" || row.phase !== "staged" ||
+        !sameHandoff(journal.request, request.data) || !sameResidentHost(journal.source_resident, resident.data) ||
+        resident.data.fence !== journal.source_resident.fence || resident.data.engineId !== row.source_engine_instance_id ||
+        resident.data.generation !== row.source_generation) return false;
+      const live = await tx.query(`SELECT 1 FROM cloud_workspaces workspace
+        JOIN cloud_workspace_engine_instances engine ON engine.id=$4 AND engine.workspace_id=workspace.id AND engine.org_id=workspace.org_id
+        WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.current_generation=$3 AND engine.generation=$3
+          AND workspace.desired_state='running' AND workspace.deleted_at IS NULL AND workspace.status IN ('ready','busy')
+          AND engine.state='ready' AND engine.lease_expires_at>clock_timestamp() AND $5::timestamptz>clock_timestamp()
+          AND cloud_workspace_runtime_authority_live(workspace.id,$3,workspace.owner_user_id,$6)`,
+      [claim.workspaceId,claim.organizationId,row.source_generation,row.source_engine_instance_id,journal.deadline_at,this.options.workosEnabled]);
+      if (!live.rowCount) return false;
+      await tx.query("UPDATE cloud_workspace_runtime_handoffs SET phase='cancelled',cancelled_at=clock_timestamp() WHERE transition_id=$1", [claim.transitionId]);
+      await tx.query("UPDATE cloud_workspace_runtime_transitions SET phase='cancelled',completed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE transition_id=$1", [claim.transitionId]);
+      await tx.query("UPDATE cloud_workspace_generation_transitions SET state='cancelled',completed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1", [claim.transitionId]);
+      return true;
+    });
+  }
+
+  /** Separate commit after confirmed consumption. A crash between commits is
+   * inspectable; neither worker expiry nor a lost reply can cancel the offer. */
+  async retireResidentSource(claim: CloudRuntimeTransitionClaim): Promise<boolean> {
+    return withSystemTx(this.options.pool, async tx => {
+      const row = await this.locked(tx, claim), journal = row && await this.handoff(tx, claim.transitionId);
+      if (!row || !journal) return false;
+      if (journal.phase === "source_retired") return true;
+      if (row.phase !== "staged" || journal.phase !== "consumed") return false;
+      if (!(await tx.query("SELECT 1 WHERE $1::timestamptz>clock_timestamp()", [journal.deadline_at])).rowCount) return false;
+      await this.retireSource(tx, claim, row.source_generation);
+      await tx.query(`UPDATE cloud_workspace_runtime_handoffs SET phase='source_retired',source_retired_at=clock_timestamp()
+        WHERE transition_id=$1`, [claim.transitionId]);
+      return true;
+    });
+  }
+
+  private async retireSource(tx: Tx, claim: CloudRuntimeTransitionClaim, generation: number) {
+    await retireCloudWorkspaceRuntimeAccess(tx, { ...claim, generation, reason: "generation_replacement_requested" });
+    await tx.query(`UPDATE cloud_workspaces SET status='setting_up',authority_epoch=authority_epoch+1,
+      version=version+1,updated_at=clock_timestamp() WHERE id=$1 AND org_id=$2`, [claim.workspaceId, claim.organizationId]);
+    await tx.query(`UPDATE cloud_workspace_runtime_transitions SET phase='activated',activated_at=clock_timestamp(),
+      activation_deadline_at=clock_timestamp()+interval '240 seconds',updated_at=clock_timestamp() WHERE transition_id=$1`, [claim.transitionId]);
+    await tx.query("UPDATE cloud_workspace_generation_transitions SET state='setting_up',updated_at=clock_timestamp() WHERE id=$1", [claim.transitionId]);
+  }
+
+  private async residentQualified(tx: Tx, row: TransitionRow, resident: CloudResidentWitness): Promise<boolean> {
+    const source = await loadGenerationSource(tx, { workspaceId: row.workspace_id, organizationId: row.org_id, generation: row.source_generation });
+    const target = await loadGenerationSource(tx, { workspaceId: row.workspace_id, organizationId: row.org_id, generation: row.candidate_generation });
+    if (!source.runtime || !target.runtime || !row.controller_active) return false;
+    // The resident protocol is independent of the replaceable engine protocol.
+    // An older host is allowed only by this exact, revocable qualification; do
+    // not infer compatibility from a newly qualified engine or a version range.
+    return !!(await tx.query(`SELECT 1 FROM cloud_runtime_resident_transfer_qualifications qualification
+      JOIN cloud_runtime_bundles bundle ON bundle.runtime_id=qualification.resident_runtime_id
+      WHERE qualification.source_runtime_id=$1 AND qualification.target_runtime_id=$2 AND qualification.controller_runtime_id=$3
+        AND qualification.base_compatibility_id=$4 AND qualification.mode='engine' AND qualification.resident_runtime_id=$5
+        AND qualification.protocol=$6 AND qualification.enabled AND qualification.revoked_at IS NULL
+        AND (qualification.qualification_mode='full' OR qualification.qualification_mode=$7)
+        AND bundle.manifest_sha256=$8 AND bundle.revoked_at IS NULL FOR SHARE OF qualification,bundle`,
+    [source.runtime.runtimeId, target.runtime.runtimeId, row.controller_active.runtimeId, source.runtime.baseCompatibilityId,
+      resident.runtimeId, resident.protocol, this.options.qualificationMode, resident.manifestSha256])).rowCount;
+  }
+
+  private async authorizeActivation(claim: CloudRuntimeTransitionClaim, input: {
+    controller: CloudActiveRuntime | null; policy: CloudRuntimeActivationPolicy;
+  }, resident?: ResidentConsumption): Promise<boolean> {
     if (!/^[a-z][a-z0-9_-]{0,63}$/.test(input.policy.id)) return false;
     return withSystemTx(this.options.pool,async tx => {
       const row = await this.locked(tx,claim);
-      if (!row || row.phase!=='staged' || !row.stage_live) return false;
+      if (!row || row.phase!=='staged' || !row.stage_live || await this.handoff(tx, claim.transitionId)) return false;
       const sourceScope = { ...claim,generation:row.source_generation };
       const source = await loadGenerationSource(tx,sourceScope);
       const target = await loadGenerationSource(tx,{ ...claim,generation:row.candidate_generation });
@@ -449,6 +619,18 @@ export class DatabaseCloudRuntimeTransitionService {
       const qualified = await tx.query<{ qualified: boolean }>(`SELECT cloud_runtime_transfer_qualified($1,$2,$3,$4,$5,$6) AS qualified`,
       [source.runtime.runtimeId,target.runtime.runtimeId,controllerId,source.runtime.baseCompatibilityId,row.mode,this.options.qualificationMode]);
       if (!qualified.rows[0]?.qualified) return false;
+      if (resident) {
+        const { handoff, resident: witness } = resident;
+        const now = (await tx.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0]!.now.getTime();
+        if (row.mode !== "engine" || handoff.workspaceId !== claim.workspaceId || handoff.organizationId !== claim.organizationId ||
+          handoff.generation !== row.source_generation || handoff.engineInstanceId !== row.source_engine_instance_id ||
+          handoff.hostId !== witness.hostId || handoff.fence !== witness.fence || handoff.expiresAtMs <= now || handoff.expiresAtMs > now + 900_000 ||
+          witness.engineId !== handoff.engineInstanceId || witness.generation !== handoff.generation ||
+          witness.workspaceId !== claim.workspaceId || witness.organizationId !== claim.organizationId || witness.bootId !== row.source_active.bootId ||
+          !await this.residentQualified(tx, { ...row, controller_active: input.controller }, witness)) return false;
+        const latest = await selectCloudWorkspaceRuntimeUpgrade(tx, { ...sourceScope, runtime: source.runtime, qualificationMode: this.options.qualificationMode });
+        if (latest.selected?.pin.runtimeId !== target.runtime.runtimeId) return false;
+      }
       const live = () => tx.query(`SELECT 1 FROM cloud_workspaces workspace
         JOIN cloud_workspace_engine_instances engine ON engine.id=$4 AND engine.workspace_id=workspace.id
           AND engine.org_id=workspace.org_id AND engine.generation=$3
@@ -473,13 +655,16 @@ export class DatabaseCloudRuntimeTransitionService {
       // User code may have awaited fresh VM evidence. Recheck the worker and
       // wall-clock bounds under the still-held authority locks before fencing.
       if (!(await this.locked(tx,claim))?.stage_live || !(await live()).rowCount) return false;
-      await retireCloudWorkspaceRuntimeAccess(tx,{ ...sourceScope,reason:"generation_replacement_requested" });
-      await tx.query(`UPDATE cloud_workspaces SET status='setting_up',authority_epoch=authority_epoch+1,
-        version=version+1,updated_at=clock_timestamp() WHERE id=$1 AND org_id=$2`, [claim.workspaceId,claim.organizationId]);
-      await tx.query(`UPDATE cloud_workspace_runtime_transitions SET phase='activated',activated_at=clock_timestamp(),
-        activation_deadline_at=clock_timestamp()+interval '240 seconds',activation_policy=$2,controller_active=$3::jsonb,
+      if (resident && !(await tx.query("SELECT 1 WHERE clock_timestamp()<to_timestamp($1::double precision/1000)", [resident.handoff.expiresAtMs])).rowCount) return false;
+      await tx.query(`UPDATE cloud_workspace_runtime_transitions SET activation_policy=$2,controller_active=$3::jsonb,
         updated_at=clock_timestamp() WHERE transition_id=$1`, [claim.transitionId,input.policy.id,input.controller ? JSON.stringify(input.controller) : null]);
-      await tx.query("UPDATE cloud_workspace_generation_transitions SET state='setting_up',updated_at=clock_timestamp() WHERE id=$1", [claim.transitionId]);
+      if (resident) {
+        await tx.query(`INSERT INTO cloud_workspace_runtime_handoffs (transition_id,workspace_id,org_id,execution_fence,phase,
+          request,receipt,source_resident,deadline_at) VALUES($1,$2,$3,$4,'consumption_authorized',$5::jsonb,$6::jsonb,$7::jsonb,
+          least(to_timestamp($8::double precision/1000),clock_timestamp()+interval '90 seconds'))`,
+        [claim.transitionId,claim.workspaceId,claim.organizationId,claim.executionFence,JSON.stringify(resident.handoff),
+          JSON.stringify(resident.receipt),JSON.stringify(resident.resident),resident.handoff.expiresAtMs]);
+      } else await this.retireSource(tx, claim, row.source_generation);
       return true;
     });
   }
