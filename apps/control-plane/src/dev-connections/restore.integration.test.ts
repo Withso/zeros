@@ -37,6 +37,14 @@ suite("Dev reference persistence",()=>{
     await restore.replace(mapping(),generation,[]);
     expect(await service.organizationConnections(fixture.userId,fixture.organizationId)).toMatchObject({credentials:[]});
   });
+  it("restores explicit all-model consent without widening an older explicit list", async () => {
+    const ref = reference();
+    await restore.replace(mapping(), generation, [ref]);
+    const service = new DatabaseCloudAgentCredentialService(pool, keys);
+    expect((await service.organizationConnections(fixture.userId, fixture.organizationId)).connections[0]).toMatchObject({ allModels: false });
+    await restore.replace(mapping(), generation, [{ ...ref, consentRevision: 2, consent: { ...ref.consent, allModels: true } }]);
+    expect((await service.organizationConnections(fixture.userId, fixture.organizationId)).connections[0]).toMatchObject({ allModels: true });
+  });
   it("rejects a changed member revision between discovery and replacement",async()=>{
     const snapshot=await restore.mapping(fixture.userId,"https://identity.example.test","user_dev","org_dev");
     await pool.query("UPDATE organization_members SET authorization_revision=authorization_revision+1 WHERE user_id=$1",[fixture.userId]);

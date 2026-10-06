@@ -1,3 +1,5 @@
+import { cloudAgentModels, cloudAgentModelAllowed } from "./agent-models.js";
+import type { CloudAgentAdmissionCode } from "./agent-admission-errors.js";
 import { devConnectionRuntime } from "../dev-connections/runtime.js";
 import {createHash,createHmac,randomUUID} from "node:crypto";
 import { CloudRepositoryMcpSchema, customizationHistoryAuthority } from "./mcp-contract.js";
@@ -120,9 +122,10 @@ async function credentialBinding(tx:Tx,scope:EngineScope,input:Admission,actor:N
         AND ($9::text IS NULL OR (qualification.native_capabilities->>'version'='1' AND qualification.native_capabilities->>$9='true'))
       WHERE delegation.id=$1 AND delegation.workspace_id=$2 AND delegation.org_id=$3 AND delegation.grantee_user_id=$4
         AND credential.revoked_at IS NULL AND delegation.revoked_at IS NULL AND delegation.expires_at>clock_timestamp()+interval '5 seconds'
-        AND $7=ANY(delegation.models)
+        AND ((NOT delegation.all_models AND $7=ANY(delegation.models)) OR
+          (delegation.all_models AND delegation.owner_user_id=delegation.grantee_user_id AND $7=ANY($11::text[])))
       FOR SHARE OF delegation,material`,
-    [input.delegationId,scope.workspaceId,scope.organizationId,actor.actorUserId,scope.engineInstanceId,scope.generation,input.model,requireMcp&&!!input.customization&&input.customization.version!==3,actor.nativeCapability??null,cloudRuntimeQualificationMode()])).rows[0];
+    [input.delegationId,scope.workspaceId,scope.organizationId,actor.actorUserId,scope.engineInstanceId,scope.generation,input.model,requireMcp&&!!input.customization&&input.customization.version!==3,actor.nativeCapability??null,cloudRuntimeQualificationMode(),cloudAgentModels(input.provider)])).rows[0];
     if(!row||(!allowStale&&!row.material_ready))rejected();
     if(actor.nativeCapability&&!runtimeNativeCapabilities(row.native_capabilities)?.[actor.nativeCapability])rejected();
     if(!row.kind.startsWith(`${input.provider}-`))rejected();
@@ -143,6 +146,39 @@ async function credentialBinding(tx:Tx,scope:EngineScope,input:Admission,actor:N
     Object.assign(row,current);
     return row;
   }
+
+/** Classify only a known grant belonging to this fully authenticated actor.
+ * Unknown IDs and changed actor/compute trust retain the closed authority error. */
+async function admissionDenial(tx:Tx,scope:EngineScope,input:Admission,actor:NativeCommandActor):Promise<CloudAgentAdmissionCode|null>{
+  const row=(await tx.query<{kind:string;owner_user_id:string;owner_fingerprint:string;grantee_fingerprint:string;
+    compute_fingerprint:string;compute_trust:string;models:string[];all_models:boolean;revoked:boolean;expired:boolean}>(`SELECT
+      credential.kind,credential.owner_user_id,delegation.owner_fingerprint,delegation.grantee_fingerprint,
+      delegation.compute_fingerprint,delegation.compute_trust,delegation.models,delegation.all_models,
+      (credential.revoked_at IS NOT NULL OR delegation.revoked_at IS NOT NULL OR credential.revision<>delegation.credential_revision) AS revoked,
+      delegation.expires_at<=clock_timestamp()+interval '5 seconds' AS expired
+    FROM cloud_agent_credential_delegations delegation JOIN cloud_agent_credentials credential ON credential.id=delegation.credential_id
+    WHERE delegation.id=$1 AND delegation.workspace_id=$2 AND delegation.org_id=$3 AND delegation.grantee_user_id=$4`,
+  [input.delegationId,scope.workspaceId,scope.organizationId,actor.actorUserId])).rows[0];
+  if(!row||!row.kind.startsWith(`${input.provider}-`)||row.grantee_fingerprint!==actor.fingerprint)return null;
+  const compute=await readCloudAgentComputeTrust(tx,scope.workspaceId);
+  if(!compute||compute.fingerprint!==row.compute_fingerprint||compute.trust!==row.compute_trust)return null;
+  const owner=await authorizeCloudWorkspaceActor(tx,{...scope,actorUserId:row.owner_user_id,capability:"run"});
+  if(owner.fingerprint!==row.owner_fingerprint)return null;
+  if(row.revoked)return "cloud_agent_credential_revoked";
+  if(row.expired)return "cloud_agent_credential_expired";
+  if(!cloudAgentModelAllowed(row.kind,input.model,row.models,row.all_models))return "cloud_agent_model_not_authorized";
+  return null;
+}
+async function recordAdmissionDenial(tx:Tx,scope:EngineScope,input:Admission,code:CloudAgentAdmissionCode){
+  // Replaying an existing admission cannot prove that its provider never ran.
+  // Keep its transcript/receipt intact rather than labeling it an unsent turn.
+  if((await tx.query("SELECT 1 FROM cloud_agent_execution_leases WHERE engine_instance_id=$1 AND execution_id=$2",
+    [scope.engineInstanceId,input.executionId])).rowCount)rejected();
+  if(input.source.kind==="command")await tx.query(`UPDATE cloud_workspace_commands SET result_code=$4,updated_at=now()
+    WHERE id=$1 AND claim_id=$2 AND engine_instance_id=$3 AND state='dispatching'`,
+  [input.source.commandId,input.source.claimId,scope.engineInstanceId,code]);
+  return {admissionDenied:code};
+}
 
 /** Sharing a workspace does not share the original actor's paid credentials.
  * Revalidate that execution, then independently authorize the acting member's
@@ -167,9 +203,10 @@ export async function assertCloudAgentExecutionActor(tx:Tx,scope:EngineScope,exe
   const grant=(await tx.query<{id:string}>(`SELECT id FROM cloud_agent_credential_delegations
     WHERE credential_id=$1 AND credential_revision=$2 AND workspace_id=$3 AND org_id=$4 AND grantee_user_id=$5
       AND grantee_fingerprint=$6 AND owner_fingerprint=$7 AND compute_fingerprint=$8 AND compute_trust=$9
-      AND revoked_at IS NULL AND expires_at>clock_timestamp()+interval '5 seconds' AND $10=ANY(models)
+      AND revoked_at IS NULL AND expires_at>clock_timestamp()+interval '5 seconds'
+      AND ((NOT all_models AND $10=ANY(models)) OR (all_models AND owner_user_id=grantee_user_id AND $10=ANY($11::text[])))
     ORDER BY expires_at DESC,id LIMIT 1`,[lease.credential_id,lease.credential_revision,scope.workspaceId,scope.organizationId,actor.actorUserId,
-      actor.fingerprint,originalBinding.owner_fingerprint,originalBinding.compute_fingerprint,originalBinding.compute_trust,lease.model])).rows[0];
+      actor.fingerprint,originalBinding.owner_fingerprint,originalBinding.compute_fingerprint,originalBinding.compute_trust,lease.model,cloudAgentModels(lease.provider)])).rows[0];
   if(!grant)rejected();
   const actingBinding=await credentialBinding(tx,scope,{...input,delegationId:grant.id},actor);
   if(actingBinding.id!==lease.credential_id||actingBinding.revision!==lease.credential_revision)rejected();
@@ -271,19 +308,18 @@ export class DatabaseCloudAgentExecutionService {
             previous.command_id!==input.source.commandId||previous.command_claim_id!==input.source.claimId))rejected();
         if(!(await tx.query("SELECT 1 FROM cloud_agent_execution_leases WHERE id=$1 AND expires_at>clock_timestamp()",[previous.id])).rowCount)rejected();
       }
-      const actor=await source(tx,scope,input,previous?.actor_source_session_id),binding=await credentialBinding(tx,scope,input,actor,true,false);
+      const actor=await source(tx,scope,input,previous?.actor_source_session_id);
+      const denial=await admissionDenial(tx,scope,input,actor);
+      if(denial)return recordAdmissionDenial(tx,scope,input,denial);
+      const binding=await credentialBinding(tx,scope,input,actor,true,false);
       if(input.customization&&input.customization.version!==3&&!binding.mcp_qualified){
         if(!binding.runtime_id)rejected();
         // Persist only after exact engine, actor, consent and runtime checks.
         // A registered/observed v3 capability wins over required-only evidence.
         await tx.query(`UPDATE cloud_workspace_engine_instances SET agent_customization_version=$2
           WHERE id=$1 AND agent_customization_version IS DISTINCT FROM 3`,[scope.engineInstanceId,input.customization.version]);
-        if(input.source.kind==="command")await tx.query(`UPDATE cloud_workspace_commands
-          SET result_code='cloud_runtime_upgrade_required',updated_at=now()
-          WHERE id=$1 AND claim_id=$2 AND engine_instance_id=$3 AND state='dispatching'`,
-        [input.source.commandId,input.source.claimId,scope.engineInstanceId]);
         // Commit the evidence/receipt before raising the closed admission error.
-        return {runtimeUpgradeRequired:true as const};
+        return recordAdmissionDenial(tx,scope,input,"cloud_runtime_upgrade_required");
       }
       // v3 explicitly permits a basic turn when this exact runtime has no MCP
       // proof. v1/v2 remain required, and replay cannot gain or lose a snapshot.
@@ -293,9 +329,14 @@ export class DatabaseCloudAgentExecutionService {
       if(dev&&binding.material_mode!=='dev-reference')rejected();
       if(previous&&previous.credential_revision!==binding.revision)rejected();
       if(binding.material_mode!=="dev-reference"&&attempt===0&&binding.kind==="codex-chatgpt"&&binding.refresh_due){
-        const renewal=await this.codexRenewal.reserve(tx,binding);if(renewal){await this.publicationAuthority(tx,scope,input,actor,!!previous);return {renewal};}
+        try {
+          const renewal=await this.codexRenewal.reserve(tx,binding);if(renewal){await this.publicationAuthority(tx,scope,input,actor,!!previous);return {renewal};}
+        } catch(error) {
+          if(!(error instanceof HttpError)||error.code!=="codex_auth_reconnect_required")throw error;
+          return recordAdmissionDenial(tx,scope,input,"cloud_agent_credential_refresh_required");
+        }
       }
-      if(!binding.material_ready)rejected();
+      if(!binding.material_ready)return recordAdmissionDenial(tx,scope,input,"cloud_agent_credential_expired");
       if(previous&&!(await tx.query("SELECT 1 FROM cloud_agent_execution_leases WHERE id=$1 AND released_at IS NULL AND expires_at>clock_timestamp()",[previous.id])).rowCount)rejected();
       if(!previous){
         const count=(await tx.query<{n:number}>(`SELECT count(*)::int AS n FROM cloud_agent_execution_leases
@@ -340,8 +381,21 @@ export class DatabaseCloudAgentExecutionService {
         credentialKind:binding.kind,provider:input.provider,model:input.model,material,...(nativeCapabilitiesVersion===1&&runtimeNativeCapabilities(binding.native_capabilities)?{nativeCapabilities:runtimeNativeCapabilities(binding.native_capabilities)}:{}),...(customization?{customization}:{}),
         ...(includeGitAuthor?{gitAuthor:await readGithubGitAuthor(tx,actor.actorUserId)}:{})};
     });
-    if("runtimeUpgradeRequired" in result)throw new HttpError(409,"cloud_runtime_upgrade_required","This workspace gets the new cloud runtime the next time it wakes");
-    if("renewal" in result){await this.codexRenewal.complete(result.renewal!);continue;}
+    if("admissionDenied" in result)throw new HttpError(409,result.admissionDenied,"Cloud agent admission was refused");
+    if("renewal" in result){
+      try {await this.codexRenewal.complete(result.renewal!);}
+      catch(error){
+        if(!(error instanceof HttpError)||error.code!=="codex_auth_reconnect_required")throw error;
+        const denial=await this.transaction(async tx=>{
+          await assertCurrentCloudEngineAuthority(tx,{...scope,workosEnabled:this.workosEnabled});
+          const actor=await source(tx,scope,input);
+          const code=await admissionDenial(tx,scope,input,actor)??"cloud_agent_credential_refresh_required";
+          return recordAdmissionDenial(tx,scope,input,code);
+        });
+        throw new HttpError(409,denial.admissionDenied,"Cloud agent admission was refused");
+      }
+      continue;
+    }
     return result;
     }
     return rejected();
@@ -495,10 +549,12 @@ export class DatabaseCloudAgentExecutionService {
         WHERE credential.id=$1 AND credential.revision=$2 AND delegation.id=$3
           AND delegation.workspace_id=$4 AND delegation.org_id=$5 AND delegation.grantee_user_id=$6
           AND credential.revoked_at IS NULL AND delegation.revoked_at IS NULL
-          AND delegation.expires_at>clock_timestamp() AND $7=ANY(delegation.models)
+          AND delegation.expires_at>clock_timestamp()
+          AND ((NOT delegation.all_models AND $7=ANY(delegation.models)) OR
+            (delegation.all_models AND delegation.owner_user_id=delegation.grantee_user_id AND $7=ANY($8::text[])))
           AND (material.material_expires_at IS NULL OR material.material_expires_at>clock_timestamp())
         FOR SHARE OF credential,delegation,material SKIP LOCKED`,
-        [lease.credential_id,lease.credential_revision,lease.delegation_id,scope.workspaceId,scope.organizationId,actor.actorUserId,lease.model])).rows[0];
+        [lease.credential_id,lease.credential_revision,lease.delegation_id,scope.workspaceId,scope.organizationId,actor.actorUserId,lease.model,cloudAgentModels(lease.provider)])).rows[0];
       if(!consent||!consent.kind.startsWith(`${lease.provider}-`)||consent.grantee_fingerprint!==actor.fingerprint)rejected();
       const compute=await readCloudAgentComputeTrust(tx,scope.workspaceId);
       const owner=await authorizeCloudWorkspaceActor(tx,{...scope,actorUserId:consent.owner_user_id,capability:"run"});

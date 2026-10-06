@@ -1,3 +1,4 @@
+import { CloudAgentAdmissionError } from "./bridge/cloud-agent-errors";
 import { authorizeCloudGithubSource } from "./cloud-github";
 import { z } from "zod";
 import { CloudComputerAdminWorkspaceSchema } from "@zeros/protocol/cloud-computer-v2";
@@ -160,6 +161,7 @@ const AgentGrantsSchema = z.object({
         id: z.string().uuid(),
         kind: z.string(),
         models: z.array(z.string()),
+        allModels: z.boolean().optional(),
         expiresAt: z.string().datetime(),
         runtimeQualified: z.boolean().optional(),
         runtimeUpgradeRequired: z.boolean().optional(),
@@ -182,15 +184,12 @@ export async function cloudAgentGrant(
   );
   const grant = candidates.find((row) => row.runtimeQualified === true) ?? candidates.find((row) => row.runtimeQualified !== false);
   if (!candidates.length)
-    throw new Error(
-      "This agent and model need a cloud credential authorized for this workspace. Configure that authorization before sending.",
-    );
-  if (!grant)
-    throw new Error(
-      candidates.some(row => row.runtimeUpgradeRequired)
-        ? "This workspace gets the new cloud runtime the next time it wakes"
-        : "This workspace's agent runtime needs an update before this agent can run. Your account connection is saved.",
-    );
+    throw new CloudAgentAdmissionError(delegations.some(row => row.kind.startsWith(`${agentId}-`))
+      ? "cloud_agent_model_not_authorized" : "cloud_agent_credential_required");
+  if (!grant) {
+    if (candidates.some(row => row.runtimeUpgradeRequired)) throw new CloudAgentAdmissionError("cloud_runtime_upgrade_required");
+    throw new Error("This workspace's agent runtime needs an update before this agent can run. Your account connection is saved.");
+  }
   return grant.id;
 }
 

@@ -211,7 +211,7 @@ import {
   closeActivityForSession,
   closeRouteForSession,
 } from "./session-close-lifecycle";
-import { recoverCloudRuntimeUpgrade } from "./cloud-runtime-upgrade";
+import { recoverCloudAdmissionFailure } from "./cloud-runtime-upgrade";
 import { getLiveChatDraft, tryRestoreLiveChatDraft } from "./composer-live-drafts";
 
 // 2026-06-09: reconcile now runs on EVERY bind (new session, respawn, resume).
@@ -2766,6 +2766,7 @@ export function AgentSessionsProvider({
         // Append the user bubble immediately for instant UX feedback.
         getStore().patchSession(chatId, {
           status: "streaming",
+          ...(isCloudWorkspace(current.cwd) ? { cloudAdmissionFailure: null } : {}),
           error: null,
           failure: null,
           lastStopReason: null,
@@ -2798,9 +2799,10 @@ export function AgentSessionsProvider({
         // pendingLocalTurns / tailTurnInFlight.
         getStore().setPendingLocalTurn(chatId, userMessage.id);
         const submittedDraft = isCloudWorkspace(current.cwd) ? getLiveChatDraft(chatId) : null;
-        const settleRuntimeUpgrade = (error: unknown) => recoverCloudRuntimeUpgrade({
-          folder: current.cwd, chatId, error, message: userMessage, draft: submittedDraft,
-          store: getStore(), pauseQueue,
+        const submittedModel = isCloudWorkspace(current.cwd) ? useWorkspaceStore.getState().chats.find(chat => chat.id === chatId)?.model ?? null : null;
+        const settleCloudAdmission = (error: unknown) => recoverCloudAdmissionFailure({
+          folder: current.cwd, chatId, error, message: userMessage, draft: submittedDraft, model: submittedModel,
+          store: getStore(), pauseQueue, persist: persistAuthPrompt,
         });
         onAccepted?.();
 
@@ -3373,7 +3375,7 @@ export function AgentSessionsProvider({
               });
               return;
             }
-            if (settleRuntimeUpgrade(firstErr)) return;
+            if (settleCloudAdmission(firstErr)) return;
             const failure = classifyRpcError({
               agentId: current.agentId!,
               stage: "prompt",
@@ -3425,7 +3427,7 @@ export function AgentSessionsProvider({
               settleStoppedSend();
               return;
             }
-            if (settleRuntimeUpgrade(resp.error)) return;
+            if (settleCloudAdmission(resp.error)) return;
             const failure = failureFromAgentError(
               { ...resp, message: resp.error } as unknown as AgentErrorMessage,
               "prompt",
@@ -3456,7 +3458,7 @@ export function AgentSessionsProvider({
               });
               if (!retried) return;
               if (retried.type === "AGENT_PROMPT_FAILED") {
-                if (settleRuntimeUpgrade(retried.error)) return;
+                if (settleCloudAdmission(retried.error)) return;
                 // The retry itself failed — surface the second failure
                 // without a third attempt. Two strikes is enough.
                 const retryFailure = failureFromAgentError(
@@ -3663,7 +3665,7 @@ export function AgentSessionsProvider({
             settleStoppedSend();
             return;
           }
-          if (settleRuntimeUpgrade(err)) return;
+          if (settleCloudAdmission(err)) return;
           const failure = classifyRpcError({
             agentId: current.agentId!,
             stage: "prompt",

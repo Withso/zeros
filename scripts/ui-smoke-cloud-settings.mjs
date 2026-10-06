@@ -108,6 +108,7 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
         revision,
         credentialId: body.credentialId,
         models: body.models ?? [],
+        allModels: body.allModels ?? false,
         connected: body.credentialId !== null,
       });
       result = { revision };
@@ -178,6 +179,7 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
   await expect(
     dialog.getByRole("button", { name: "CLI", exact: true }),
   ).toHaveCount(0);
+  await expect(dialog.getByRole("checkbox", { name: "Allow all models", exact: true })).toBeChecked();
   await dialog
     .getByLabel("Account name", { exact: true })
     .fill("First subscription");
@@ -198,6 +200,7 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
   expect(grant.body).toMatchObject({
     expectedRevision: 0,
     consent: "zeros-managed",
+    allModels: true,
   });
   expect(grant.body.models).toContain("claude-opus-5[1m]");
   expect(grant.path).toContain(orgA);
@@ -221,6 +224,26 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
   await expect(page.getByText("Second API", { exact: true })).toBeVisible();
   await expect(page.getByRole("switch", { name: "Use for release checks", exact: true })).toHaveCount(0);
   expect(requests.some(row => row.path.endsWith("/release-canary"))).toBe(false);
+  // A released connection has an explicit list and no all-model flag.
+  const legacy = account(`${userA}:${orgA}`).connections.find(row => row.provider === "claude");
+  delete legacy.allModels; legacy.models = ["claude-haiku-4-5"];
+  await page.evaluate(async () => {
+    const { cloudOrganizationConnectionsCache } = await import("/apps/desktop/src/renderer/features/settings/cloud-provider-connection.ts");
+    cloudOrganizationConnectionsCache.invalidateAll();
+  });
+  await page.getByRole("button", { name: "Configure", exact: true }).click();
+  await expect(dialog.getByRole("checkbox", { name: "Allow all models", exact: true })).not.toBeChecked();
+  await expect(dialog.getByText("Allowed models (1)", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Connect account", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(requests.filter(row => row.path.endsWith("/agent-connections/claude") && row.method === "PUT").at(-1).body)
+    .toMatchObject({ allModels: false, models: ["claude-haiku-4-5"] });
+  await page.getByRole("button", { name: "Configure", exact: true }).click();
+  await dialog.getByText("Allow all models", { exact: true }).click();
+  await dialog.getByRole("button", { name: "Connect account", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(requests.filter(row => row.path.endsWith("/agent-connections/claude") && row.method === "PUT").at(-1).body.allModels).toBe(true);
+  check("New self connections default to all models; older explicit consent changes only after Allow all models is selected", true);
   ownerMode = true;
   await page.getByRole("button", { name: "Platform owner", exact: true }).click();
   const firstRow = page.locator("[data-release-canary-control]").locator("..").filter({ has: page.getByText("First subscription", { exact: true }) });

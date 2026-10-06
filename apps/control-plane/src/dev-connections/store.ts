@@ -1,3 +1,4 @@
+import { cloudAgentModelAllowed } from "../cloud-workspaces/agent-models.js";
 import {
   createHash,
   createHmac,
@@ -51,6 +52,7 @@ type Connection = {
 type Consent = {
   revision: number;
   models: string[];
+  all_models: boolean;
   repositories: string[];
   scopes: string[];
   revoked_at: Date | null;
@@ -511,13 +513,14 @@ export class DevConnectionStore {
       await this.rememberSeed(tx, c.id, material, true);
       await this.saveMaterial(tx, c, material, 1);
       await tx.query(
-        "INSERT INTO dev_connections.organization_consents(connection_id,organization,models,repositories,scopes) VALUES($1,$2,$3,$4,$5)",
+        "INSERT INTO dev_connections.organization_consents(connection_id,organization,models,repositories,scopes,all_models) VALUES($1,$2,$3,$4,$5,$6)",
         [
           c.id,
           ctx.member.organization,
           input.consent.models,
           input.consent.repositories,
           input.consent.scopes,
+          input.consent.allModels === true,
         ],
       );
       return { connectionId: c.id };
@@ -531,11 +534,12 @@ export class DevConnectionStore {
           Connection & {
             consent_revision: number;
             models: string[];
+            all_models: boolean;
             repositories: string[];
             scopes: ConnectionReference["consent"]["scopes"];
           }
         >(
-          `SELECT c.*,s.revision AS consent_revision,s.models,s.repositories,s.scopes FROM dev_connections.connections c
+          `SELECT c.*,s.revision AS consent_revision,s.models,s.repositories,s.scopes,s.all_models FROM dev_connections.connections c
         JOIN dev_connections.organization_consents s ON s.connection_id=c.id WHERE c.member_id=$1 AND s.organization=$2
         AND c.revoked_at IS NULL AND s.revoked_at IS NULL ORDER BY c.id LIMIT 101 FOR SHARE OF c,s`,
           [memberId, ctx.member.organization],
@@ -573,6 +577,7 @@ export class DevConnectionStore {
           consentRevision: c.consent_revision,
           consent: {
             models: c.models,
+            ...(c.all_models ? { allModels: true } : {}),
             repositories: c.repositories,
             scopes: c.scopes,
           },
@@ -622,7 +627,7 @@ export class DevConnectionStore {
       denied();
     if (
       scope.action === "agent"
-        ? c.kind === "github-app" || !s.models.includes(scope.model)
+        ? c.kind === "github-app" || !cloudAgentModelAllowed(c.kind, scope.model, s.models, s.all_models)
         : c.kind !== "github-app" || (scope.action !== "github:catalog" && !s.repositories.includes(scope.repository))
     )
       denied();
@@ -921,7 +926,7 @@ export class DevConnectionStore {
         // other connections for later selection, but only one provider consent
         // may automatically become the selected local organization credential.
         await tx.query(`WITH unselected AS (
-          UPDATE dev_connections.organization_consents s SET models='{}',revision=s.revision+1
+          UPDATE dev_connections.organization_consents s SET models='{}',all_models=false,revision=s.revision+1
           FROM dev_connections.connections c WHERE s.connection_id=c.id AND c.member_id=$1 AND c.id<>$2
             AND split_part(c.kind,'-',1)=$4 AND s.organization=$3 AND s.revoked_at IS NULL AND cardinality(s.models)>0 RETURNING s.connection_id
         ), invalidated AS (
@@ -931,17 +936,18 @@ export class DevConnectionStore {
         [memberId,id,ctx.member.organization,c.kind.split('-')[0]]);
       }
       if(consent&&(await tx.query(`SELECT 1 FROM dev_connections.organization_consents WHERE connection_id=$1 AND organization=$2
-        AND revoked_at IS NULL AND models=$3 AND repositories=$4 AND scopes=$5`,[id,ctx.member.organization,consent.models,consent.repositories,consent.scopes])).rowCount)return;
+        AND revoked_at IS NULL AND models=$3 AND repositories=$4 AND scopes=$5 AND all_models=$6`,[id,ctx.member.organization,consent.models,consent.repositories,consent.scopes,consent.allModels===true])).rowCount)return;
       if (consent)
         await tx.query(
-          `INSERT INTO dev_connections.organization_consents(connection_id,organization,models,repositories,scopes) VALUES($1,$2,$3,$4,$5)
-        ON CONFLICT(connection_id,organization) DO UPDATE SET revision=dev_connections.organization_consents.revision+1,models=excluded.models,repositories=excluded.repositories,scopes=excluded.scopes,revoked_at=NULL`,
+          `INSERT INTO dev_connections.organization_consents(connection_id,organization,models,repositories,scopes,all_models) VALUES($1,$2,$3,$4,$5,$6)
+        ON CONFLICT(connection_id,organization) DO UPDATE SET revision=dev_connections.organization_consents.revision+1,models=excluded.models,all_models=excluded.all_models,repositories=excluded.repositories,scopes=excluded.scopes,revoked_at=NULL`,
           [
             id,
             ctx.member.organization,
             consent.models,
             consent.repositories,
             consent.scopes,
+            consent.allModels === true,
           ],
         );
       else
