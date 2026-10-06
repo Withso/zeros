@@ -23,6 +23,7 @@ import { Toaster } from "../shared/ui/primitives/elements/toast";
 import { cn } from "../shared/ui/cn";
 import {
   WorkbenchTabFrame,
+  WorkbenchTabStatusProvider,
   WorkbenchTabToolbar,
   useWorkbenchStatusSource,
 } from "../shell/workbench/tab-status";
@@ -101,6 +102,8 @@ for (const target of Object.values(targets)) {
 const reads: { folder: string; op: string }[] = [];
 const failures = new Map<string, string>();
 const secondaryFailures = new Map<string, string>();
+const nextReadFailures = new Map<string, number>();
+const secondaryRetries = new Map<string, number>();
 const readCache = new KeyedAsyncCache<string>(32);
 let holdReads = false;
 const pendingReads: (() => void)[] = [];
@@ -159,6 +162,11 @@ class FixtureBridge extends WorkspaceRuntimeClient {
     reads.push({ folder, op: request.op ?? message.type });
     if (holdReads)
       await new Promise<void>((resolve) => pendingReads.push(resolve));
+    const remaining = nextReadFailures.get(folder) ?? 0;
+    if (request.op === "fixture.read" && remaining > 0) {
+      nextReadFailures.set(folder, remaining - 1);
+      throw new Error("Fixture read failed");
+    }
     const failure = failures.get(folder);
     if (failure) throw new Error(failure);
     let result: unknown = {};
@@ -316,8 +324,12 @@ function ContractBody({
       error: secondaryFailures.get(folder),
       pending: false,
       retry: async () => {
-        secondaryFailures.delete(folder);
-        publish();
+        const attempts = (secondaryRetries.get(folder) ?? 0) + 1;
+        secondaryRetries.set(folder, attempts);
+        if (attempts > 1) {
+          secondaryFailures.delete(folder);
+          publish();
+        }
       },
     },
     "comments",
@@ -443,6 +455,10 @@ function Harness() {
             >
               {config.surface === "feature" ? (
                 <FeatureBody tab={tab} folder={config.folder} />
+              ) : tab.type === "terminal" ? (
+                <WorkbenchTabStatusProvider tab={tab} folder={config.folder} active={config.active}>
+                  <ContractBody tab={tab} folder={config.folder} active={config.active} version={version} />
+                </WorkbenchTabStatusProvider>
               ) : (
                 <ContractBody
                   tab={tab}
@@ -502,7 +518,11 @@ const fixture = {
     const map = secondary ? secondaryFailures : failures;
     if (message) map.set(config.folder, message);
     else map.delete(config.folder);
+    if (secondary) secondaryRetries.set(config.folder, 0);
     publish();
+  },
+  failNextReads(count: number) {
+    nextReadFailures.set(config.folder, count);
   },
   hold(value: boolean) {
     holdReads = value;

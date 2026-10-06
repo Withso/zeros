@@ -6,6 +6,7 @@ import { resetWorkbenchAvailabilityForTests } from "../../../state/workbench-ava
 import { WorkbenchTabContent } from "../tab-content";
 import { TAB_TYPE_META, type WorkbenchTabType } from "../tab-model";
 import { workbenchSourcesFor, workbenchStatusKey } from "../tab-status-model";
+import { WorkbenchEmptyState, WorkbenchTabFrame, WorkbenchTabStatusProvider } from "../tab-status";
 
 const hooks = vi.hoisted(() => ({ target: vi.fn(), filter: vi.fn(), history: vi.fn(() => null),
   workspace: null as { id: string; placement: string; path: string; organizationId?: string | null } | null }));
@@ -48,6 +49,21 @@ describe("every WorkbenchTabType enters the status frame", () => {
       expect(hooks.history).toHaveBeenCalledTimes(placement === "cloud" ? 1 : 0);
       expect(markup).not.toContain("Shallow Git history");
     }
+  });
+  it("keeps portal-owned Setup/terminal fallbacks quiet during a silent retry", () => {
+    setActiveBridge({ status: "connected", onStatusChange: () => () => {} } as never);
+    const tab = { id: "setup", type: "terminal" as const, title: "Setup" };
+    const sources = workbenchSourcesFor(workbenchStatusKey("/portal", tab));
+    sources.update("fixture", { error: "first failure", pending: false, retry: vi.fn() });
+    const markup = renderToStaticMarkup(createElement(WorkbenchTabFrame, {
+      tab, folder: "/portal", active: true,
+      children: createElement(WorkbenchTabStatusProvider, {
+        tab, folder: "/portal", active: true,
+        children: createElement(WorkbenchEmptyState, { type: "terminal" }),
+      }),
+    }));
+    expect(markup).not.toContain("data-workbench-empty");
+    sources.remove("fixture");
   });
   it.each(Object.keys(TAB_TYPE_META) as WorkbenchTabType[])(
     "structurally supplies %s with one banner and neutral empty state",

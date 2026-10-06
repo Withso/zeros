@@ -13,6 +13,8 @@ import {
   workbenchAvailabilitySnapshot,
   registerWorkbenchFrameVisibility,
   wireWorkbenchConnectionRejection,
+  subscribeWorkbenchAvailability,
+  workbenchAvailabilityStatusSnapshot,
 } from "../workbench-availability";
 
 const fixture = vi.hoisted(() => ({
@@ -122,6 +124,35 @@ describe("workbench availability observers", () => {
     resetWorkbenchAvailabilityForTests();
     vi.useRealTimers();
   });
+  it.each(["cloud", "local"])("shares one clock and decision across %s frames", async (placement) => {
+    const path = placement === "cloud" ? folder : "/local";
+    const nested = `${path}/src`;
+    if (placement === "cloud") connection("connected");
+    else fixture.localStatus = "connected";
+    workbenchAvailabilitySnapshot(path);
+    const decisions: unknown[] = [];
+    const offA = subscribeWorkbenchAvailability(path, () => decisions.push(workbenchAvailabilityStatusSnapshot(path)));
+    const offB = subscribeWorkbenchAvailability(nested, () => decisions.push(workbenchAvailabilityStatusSnapshot(nested)));
+    if (placement === "cloud") connection("disconnected");
+    else {
+      fixture.localStatus = "disconnected";
+      for (const listener of fixture.localListeners) listener("disconnected");
+    }
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(workbenchAvailabilityStatusSnapshot(path).status).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(workbenchAvailabilityStatusSnapshot(path).status?.tone).toBe("pending");
+    expect(decisions.at(-1)).toBe(decisions.at(-2));
+    expect(vi.getTimerCount()).toBe(1);
+    offA();
+    expect(vi.getTimerCount()).toBe(1);
+    offB();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(35_000);
+    expect(workbenchAvailabilityStatusSnapshot(nested).status?.tone).toBe("error");
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it("records reconnect timestamps with passive subscriptions and no hidden timers", () => {
     connection("connected");
     workbenchAvailabilitySnapshot(folder);
@@ -132,7 +163,7 @@ describe("workbench availability observers", () => {
       since: 1_000,
     });
     expect(vi.getTimerCount()).toBe(0);
-    vi.setSystemTime(22_000);
+    vi.setSystemTime(46_000);
     expect(
       describeWorkspaceAvailability(
         workbenchAvailabilitySnapshot(folder),
@@ -153,10 +184,36 @@ describe("workbench availability observers", () => {
 
     const disconnected = workbenchAvailabilitySnapshot("/local/organization");
     expect(disconnected).toMatchObject({ cloud: false, state: undefined, setupFailed: false, previouslyConnected: true, since: 1_000 });
-    expect(describeWorkspaceAvailability(disconnected, 2_999)).toBeNull();
-    expect(describeWorkspaceAvailability(disconnected, 3_000)?.message).toBe("Reconnecting to the Zeros engine…");
-    expect(describeWorkspaceAvailability(disconnected, 21_000)?.message).toBe("Can't reach the Zeros engine.");
+    expect(describeWorkspaceAvailability(disconnected, 10_999)).toBeNull();
+    expect(describeWorkspaceAvailability(disconnected, 11_000)?.message).toBe("Reconnecting to the Zeros engine…");
+    expect(describeWorkspaceAvailability(disconnected, 46_000)?.message).toBe("Can't reach the Zeros engine.");
     expect(vi.getTimerCount()).toBe(0);
+  });
+  it("clears a recovered 3s gap and gives a later loss its full quiet interval", async () => {
+    connection("connected");
+    const off = subscribeWorkbenchAvailability(folder, vi.fn());
+    connection("disconnected");
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(workbenchAvailabilityStatusSnapshot(folder).status).toBeNull();
+    connection("connected");
+    expect(vi.getTimerCount()).toBe(0);
+    connection("disconnected");
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(workbenchAvailabilityStatusSnapshot(folder).status).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(workbenchAvailabilityStatusSnapshot(folder).status?.tone).toBe("pending");
+    off();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("does not let a hidden snapshot read consume the visible clock's publication", async () => {
+    const changes = vi.fn();
+    const off = subscribeWorkbenchAvailability(folder, changes);
+    vi.setSystemTime(10_100);
+    workbenchAvailabilityStatusSnapshot(`${folder}/hidden`);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(changes).toHaveBeenCalledTimes(1);
+    expect(workbenchAvailabilityStatusSnapshot(folder).status?.tone).toBe("pending");
+    off();
   });
   it("gives newly ready workspaces their own connection interval", () => {
     fixture.docs.set(folder, { status: "setting_up" });
@@ -171,13 +228,13 @@ describe("workbench availability observers", () => {
         Date.now(),
       ),
     ).toBeNull();
-    vi.setSystemTime(82_000);
+    vi.setSystemTime(90_000);
     expect(
       describeWorkspaceAvailability(
         workbenchAvailabilitySnapshot(folder),
         Date.now(),
       )?.message,
-    ).toBe("Connecting to the workspace…");
+    ).toBe("Connecting…");
   });
   it("isolates admission rejection by workspace and clears it on connection recovery", () => {
     recordWorkbenchConnectionFailure(

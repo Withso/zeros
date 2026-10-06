@@ -37,6 +37,7 @@ interface TabStatusContext {
   sources: WorkbenchStatusSources;
   toolbar: HTMLDivElement | null;
   active: boolean;
+  connected: boolean;
   type: WorkbenchTabType;
 }
 const StatusContext = createContext<TabStatusContext | null>(null);
@@ -44,7 +45,7 @@ export function useWorkbenchStatusManaged(): boolean {
   return useContext(StatusContext) !== null;
 }
 
-export function WorkbenchEmptyState({
+function WorkbenchEmptyStateContent({
   type,
   message,
 }: {
@@ -64,6 +65,16 @@ export function WorkbenchEmptyState({
       </p>
     </div>
   );
+}
+
+export function WorkbenchEmptyState(props: {
+  type: WorkbenchTabType;
+  message?: string;
+}) {
+  // A managed frame owns the only fallback, including portal-owned Setup.
+  // Raw child failures must not insert an icon during the silent retry or
+  // displace retained content; the frame centres persistent fallbacks itself.
+  return useWorkbenchStatusManaged() ? null : <WorkbenchEmptyStateContent {...props} />;
 }
 
 export function WorkbenchTabBanner({
@@ -184,9 +195,10 @@ export function WorkbenchTabFrame({
     if (visible) return registerWorkbenchFrameVisibility(folder);
   }, [folder, visible]);
   const [toolbar, setToolbar] = useState<HTMLDivElement | null>(null);
+  const connected = availability.connection === "connected";
   const context = useMemo(
-    () => ({ sources, toolbar, active: visible, type: tab.type }),
-    [sources, toolbar, visible, tab.type],
+    () => ({ sources, toolbar, active: visible, connected, type: tab.type }),
+    [sources, toolbar, visible, connected, tab.type],
   );
   const nextStatus =
     availabilityStatus ??
@@ -263,7 +275,7 @@ export function WorkbenchTabFrame({
           </div>
           {blocked && (
             <div className="absolute inset-0 flex min-h-0 flex-col">
-              <WorkbenchEmptyState
+              <WorkbenchEmptyStateContent
                 type={tab.type}
                 message={describeWorkbenchEmptyState(
                   tab.type,
@@ -331,9 +343,11 @@ export function WorkbenchTabStatusProvider({
 }) {
   const key = workbenchStatusKey(folder, tab);
   const sources = useMemo(() => workbenchSourcesFor(key), [key]);
+  const { availability, visible } = useWorkbenchAvailability(folder, active);
+  const connected = availability.connection === "connected";
   const value = useMemo(
-    () => ({ sources, toolbar: null, active, type: tab.type }),
-    [sources, active, tab.type],
+    () => ({ sources, toolbar: null, active: visible, connected, type: tab.type }),
+    [sources, visible, connected, tab.type],
   );
   return (
     <StatusContext.Provider value={value}>{children}</StatusContext.Provider>
@@ -359,6 +373,7 @@ export function useWorkbenchStatusSource(
   retry.current = source.retry;
   const retrySource = useCallback(() => retry.current?.(), [retry]);
   const { error, pending, primary, hasContent, active, notice } = source;
+  const canRetry = !!source.retry;
   useLayoutEffect(() => {
     if (!context) return;
     context.sources.update(id, {
@@ -367,10 +382,12 @@ export function useWorkbenchStatusSource(
       active: context.active && active !== false,
       primary,
       hasContent,
-      retry: retrySource,
+      retry: canRetry ? retrySource : undefined,
+      retryKey: owner ?? id,
       notice,
+      retryAvailable: context.connected,
     });
-  }, [context, id, error, pending, primary, hasContent, retrySource, active, notice]);
+  }, [context, id, owner, error, pending, primary, hasContent, retrySource, active, canRetry, notice]);
   useLayoutEffect(
     () => () => context?.sources.remove(id),
     [context?.sources, id],

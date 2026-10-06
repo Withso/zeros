@@ -23,11 +23,18 @@ import {
   WORKBENCH_RECONNECT_ERROR_MS,
   WORKBENCH_RECONNECT_GRACE_MS,
   type WorkspaceAvailability,
+  type WorkbenchStatus,
   workbenchFailureDiagnostic,
 } from "../shell/workbench/tab-status-model";
 
+interface AvailabilityDecision {
+  availability: WorkspaceAvailability;
+  status: WorkbenchStatus | null;
+}
 interface AvailabilityEntry {
   value: WorkspaceAvailability;
+  decision: AvailabilityDecision;
+  timer?: ReturnType<typeof setTimeout>;
   listeners: Set<() => void>;
   stop: () => void;
   notice?: {
@@ -39,6 +46,51 @@ interface AvailabilityEntry {
 }
 const entries = new Map<string, AvailabilityEntry>();
 const MAX_OBSERVED_WORKSPACES = 64;
+
+function updateDecision(entry: AvailabilityEntry): boolean {
+  const status = describeWorkspaceAvailability(entry.value, Date.now());
+  const previous = entry.decision.status;
+  const sameStatus =
+    status === previous ||
+    (!!status && !!previous &&
+      status.tone === previous.tone &&
+      status.message === previous.message &&
+      status.action === previous.action &&
+      status.diagnostic === previous.diagnostic &&
+      status.connectionPhase === previous.connectionPhase);
+  if (entry.decision.availability === entry.value && sameStatus) return false;
+  entry.decision = {
+    availability: entry.value,
+    status: sameStatus ? previous : status,
+  };
+  return true;
+}
+
+/** One clock/decision per Local engine or cloud VM, shared by every tab. A
+ * transient gap has no banner or empty state. Only visible subscribers own
+ * the 10s/45s timers; passive observers retain timestamps without timers/I/O. */
+function refreshAvailability(entry: AvailabilityEntry): void {
+  clearTimeout(entry.timer);
+  entry.timer = undefined;
+  const changed = updateDecision(entry);
+  const input = entry.value;
+  if (
+    entry.listeners.size && input.connection !== "connected" &&
+    !input.rejected && !input.rejection && !input.setupFailed &&
+    (!input.state || ["ready", "busy"].includes(input.state))
+  ) {
+    const elapsed = Date.now() - input.since;
+    const threshold =
+      elapsed < WORKBENCH_RECONNECT_GRACE_MS
+        ? WORKBENCH_RECONNECT_GRACE_MS
+        : WORKBENCH_RECONNECT_ERROR_MS;
+    if (elapsed < threshold)
+      entry.timer = setTimeout(
+        () => refreshAvailability(entry), threshold - elapsed,
+      );
+  }
+  if (changed) for (const listener of entry.listeners) listener();
+}
 
 // Only active, document-visible frames register. All local folders share the
 // Local engine; cloud folders (including nested paths) share their VM identity.
@@ -131,8 +183,12 @@ function entryFor(folder: string): AvailabilityEntry {
   const retained = entries.get(owner);
   if (retained) return retained;
   const target = parseCloudWorkspaceKey(folder);
+  const value: WorkspaceAvailability = {
+    cloud: !!target, connection: "disconnected", since: Date.now(),
+  };
   const entry: AvailabilityEntry = {
-    value: { cloud: !!target, connection: "disconnected", since: Date.now() },
+    value,
+    decision: { availability: value, status: null },
     listeners: new Set(),
     stop: () => {},
   };
@@ -148,7 +204,7 @@ function entryFor(folder: string): AvailabilityEntry {
     )
       return;
     entry.value = { ...entry.value, ...patch };
-    for (const listener of entry.listeners) listener();
+    refreshAvailability(entry);
   };
   const catalogChanged = () => {
     const doc = target ? cloudWorkspaceDocument(target) : undefined;
@@ -209,6 +265,7 @@ function entryFor(folder: string): AvailabilityEntry {
     ? subscribeCloudWorkspaces(catalogChanged)
     : () => {};
   entry.stop = () => {
+    clearTimeout(entry.timer);
     offStatus();
     offRejected();
     offBridge();
@@ -233,7 +290,7 @@ export function recordWorkbenchConnectionFailure(
 ): void {
   const entry = entryFor(folder);
   entry.value = { ...entry.value, rejected: true };
-  for (const listener of entry.listeners) listener();
+  refreshAvailability(entry);
   if (entry.notice?.id !== `cloud-connect:${folder}`)
     clearConnectionNotice(entry);
   entry.notice = {
@@ -259,13 +316,41 @@ export function clearWorkbenchConnectionFailure(folder: string): void {
   clearConnectionNotice(entry);
   if (!entry.value.rejected || entry.value.rejection) return;
   entry.value = { ...entry.value, rejected: false };
-  for (const listener of entry.listeners) listener();
+  refreshAvailability(entry);
 }
 
 export function workbenchAvailabilitySnapshot(
   folder: string,
 ): WorkspaceAvailability {
   return entryFor(folder).value;
+}
+
+export function workbenchAvailabilityStatusSnapshot(
+  folder: string,
+): AvailabilityDecision {
+  const entry = entryFor(folder);
+  // Activation presents elapsed time synchronously, even after a hidden gap.
+  // Reading alone never creates timers or wakes a workspace.
+  // With visible subscribers, the shared clock owns publication. A hidden
+  // render must not consume a threshold change before that clock notifies them.
+  if (!entry.listeners.size) updateDecision(entry);
+  return entry.decision;
+}
+
+export function subscribeWorkbenchAvailability(
+  folder: string,
+  listener: () => void,
+): () => void {
+  const entry = entryFor(folder);
+  entry.listeners.add(listener);
+  refreshAvailability(entry);
+  return () => {
+    entry.listeners.delete(listener);
+    if (!entry.listeners.size) {
+      clearTimeout(entry.timer);
+      entry.timer = undefined;
+    }
+  };
 }
 
 /** Retry admission without wake. The explicit workspace Start action remains
@@ -283,23 +368,6 @@ export async function reconnectWorkbenchWorkspace(
 }
 
 export function useWorkbenchAvailability(folder: string, active: boolean) {
-  const subscribe = useCallback(
-    (listener: () => void) => {
-      if (!active) return () => {};
-      const entry = entryFor(folder);
-      entry.listeners.add(listener);
-      return () => {
-        entry.listeners.delete(listener);
-      };
-    },
-    [active, folder],
-  );
-  const read = useCallback(
-    () => workbenchAvailabilitySnapshot(folder),
-    [folder],
-  );
-  const availability = useSyncExternalStore(subscribe, read, read);
-  const [now, setNow] = useState(Date.now);
   const [visible, setVisible] = useState(
     () =>
       typeof document === "undefined" || document.visibilityState !== "hidden",
@@ -308,44 +376,24 @@ export function useWorkbenchAvailability(folder: string, active: boolean) {
     if (!active) return;
     const changed = () => {
       setVisible(document.visibilityState !== "hidden");
-      setNow(Date.now());
     };
     changed();
     document.addEventListener("visibilitychange", changed);
     return () => document.removeEventListener("visibilitychange", changed);
   }, [active]);
-  useEffect(() => {
-    if (
-      !active ||
-      !visible ||
-      availability.connection === "connected" ||
-      availability.rejected ||
-      (availability.state && !["ready", "busy"].includes(availability.state))
-    )
-      return;
-    const elapsed = Date.now() - availability.since;
-    const threshold =
-      elapsed < WORKBENCH_RECONNECT_GRACE_MS
-        ? WORKBENCH_RECONNECT_GRACE_MS
-        : WORKBENCH_RECONNECT_ERROR_MS;
-    if (elapsed >= threshold) return;
-    const timer = setTimeout(() => setNow(Date.now()), threshold - elapsed);
-    return () => clearTimeout(timer);
-  }, [active, visible, availability, now]);
-  // Activation reads the wall clock immediately; hidden tabs do not run grace
-  // or escalation timers and do not wait another twenty seconds on reveal.
-  return {
-    availability,
-    status: describeWorkspaceAvailability(
-      availability,
-      Math.max(now, Date.now()),
-    ),
-    visible:
-      active &&
-      visible &&
-      (typeof document === "undefined" ||
-        document.visibilityState !== "hidden"),
-  };
+  const enabled =
+    active && visible &&
+    (typeof document === "undefined" || document.visibilityState !== "hidden");
+  const subscribe = useCallback(
+    (listener: () => void) =>
+      enabled ? subscribeWorkbenchAvailability(folder, listener) : () => {},
+    [enabled, folder],
+  );
+  const read = useCallback(
+    () => workbenchAvailabilityStatusSnapshot(folder), [folder],
+  );
+  const decision = useSyncExternalStore(subscribe, read, read);
+  return { ...decision, visible: enabled };
 }
 
 export function resetWorkbenchAvailabilityForTests(): void {

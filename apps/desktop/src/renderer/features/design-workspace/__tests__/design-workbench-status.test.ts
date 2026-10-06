@@ -98,6 +98,23 @@ describe("Design workbench status", () => {
     mocks.target.data = { directory: "design", exists: false };
     expect(markup()).toContain("Create design directory");
   });
+  it("retains the confirmed Design start surface during a connection gap", () => {
+    mocks.target.data = { directory: "design", exists: false };
+    mocks.checkout.data = { conflicts: [], paused: false, operation: null };
+    mocks.target.error = new Error("engine disconnected");
+    expect(markup()).toContain("Create design directory");
+    expect(mocks.source).toHaveBeenCalledWith(
+      expect.objectContaining({ hasContent: true }),
+      "ws:status-workspace",
+    );
+  });
+  it("retains a confirmed unknown directory and its settings action during failed revalidation", () => {
+    mocks.target.data = null;
+    mocks.checkout.data = { conflicts: [], paused: false, operation: null };
+    mocks.target.error = new Error("engine disconnected");
+    expect(markup()).toContain("Choose a Design directory");
+    expect(markup()).toContain("Design settings");
+  });
   it("preserves the Local main settings action while workspace lookup is inapplicable", () => {
     mocks.localMain = true;
     expect(markup()).toContain("Design settings");

@@ -69,7 +69,9 @@ export function DesignWorkbenchSurface({
           checkout.loading ||
           checkout.refreshing),
       primary: true,
-      hasContent: !!target.data?.exists && !!checkout.data,
+      // A confirmed empty directory is content too: retain its start surface
+      // through transient lookup/connection failures, just like the canvas.
+      hasContent: target.data !== undefined && !!checkout.data,
       retry: async () => {
         const bridge = getActiveBridge();
         if (!bridge || localMain) return;
@@ -143,7 +145,6 @@ export function DesignWorkbenchSurface({
       </div>
     );
   }
-  if (loadError) return <WorkbenchEmptyState type="design" />;
   if (!localMain && target.data?.exists === false) {
     return (
       <div
@@ -163,6 +164,8 @@ export function DesignWorkbenchSurface({
       </div>
     );
   }
+  if (loadError && (target.data === undefined || checkout.data === undefined))
+    return <WorkbenchEmptyState type="design" />;
   return (
     <div
       className="text-fg2 flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-4 text-sm"

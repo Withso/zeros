@@ -48,6 +48,123 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
   const noToast = () =>
     expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
   await page.clock.install();
+  // Every tab retains its exact-key pixels through short and prolonged gaps.
+  // Observe the DOM during the interval too: a banner/icon that flashes and
+  // clears before an assertion is still a regression.
+  for (const type of types) {
+    await page.goto(`${harnessBase}/harness-workbench-status.html`);
+    await page.waitForFunction(() => !!window.workbenchStatusFixture);
+    await page.evaluate((type) => window.workbenchStatusFixture.render(type, {
+      target: `calm-${type}`, surface: "contract", active: true,
+    }), type);
+    const content = page.locator("[data-confirmed-content]:visible");
+    await expect(content).toHaveCount(1);
+    const originalBox = await content.boundingBox();
+    await page.evaluate(() => {
+      window.fixtureTransientMutations = [];
+      window.fixtureTransientObserver = new MutationObserver(() => {
+        const visibleBanner = [...document.querySelectorAll("[data-workbench-banner]")]
+          .some((element) => !element.hidden);
+        const empty = document.querySelector("[data-workbench-empty]");
+        if (visibleBanner || empty) window.fixtureTransientMutations.push("status flash");
+      });
+      window.fixtureTransientObserver.observe(document.querySelector("main"), {
+        subtree: true, attributes: true, childList: true,
+      });
+      window.workbenchStatusFixture.connection("disconnected");
+    });
+    await page.clock.fastForward(3_000);
+    await expect(banner()).toHaveCount(0);
+    await expect(empty()).toHaveCount(0);
+    await expect(content).toHaveCount(1);
+    expect(await content.boundingBox()).toEqual(originalBox);
+    await screenshot(type, "3s-blip");
+    await page.evaluate(() => window.workbenchStatusFixture.connection("connected"));
+    expect(await page.evaluate(() => window.fixtureTransientMutations)).toEqual([]);
+    await page.evaluate(() => window.fixtureTransientObserver.disconnect());
+    // A read rejected by the same brief transport gap must not spend its
+    // silent retry while offline, then flash a read banner during recovery.
+    await page.evaluate(() => {
+      const fixture = window.workbenchStatusFixture;
+      window.fixtureGapReadCount = fixture.reads.length;
+      fixture.hold(true);
+      fixture.fail("Workspace transport disconnected");
+    });
+    await page.waitForFunction(() =>
+      window.workbenchStatusFixture.reads.length > window.fixtureGapReadCount,
+    );
+    await page.evaluate(() => {
+      const fixture = window.workbenchStatusFixture;
+      fixture.connection("disconnected");
+      fixture.release();
+    });
+    await page.clock.runFor(3_000);
+    await expect(banner()).toHaveCount(0);
+    await expect(content).toHaveCount(1);
+    await page.evaluate(() => {
+      const fixture = window.workbenchStatusFixture;
+      fixture.hold(true);
+      fixture.fail(null);
+      fixture.connection("connected");
+    });
+    await expect(banner()).toHaveCount(0);
+    await expect(empty()).toHaveCount(0);
+    await expect(content).toHaveCount(1);
+    await page.evaluate(() => window.workbenchStatusFixture.release());
+    await expect(banner()).toHaveCount(0);
+    await page.clock.runFor(1_600);
+    await expect(banner()).toHaveCount(0);
+    await page.evaluate(() => window.workbenchStatusFixture.connection("disconnected"));
+    await page.clock.fastForward(15_000);
+    await expect(banner()).toContainText("Reconnecting to the workspace…");
+    await expect(content).toHaveCount(1);
+    await expect(empty()).toHaveCount(0);
+    await screenshot(type, "15s-gap");
+    await page.evaluate(() => window.workbenchStatusFixture.connection("connected"));
+    await expect(banner()).toHaveCount(0);
+    await page.evaluate(() => window.workbenchStatusFixture.connection("disconnected"));
+    await page.clock.fastForward(60_000);
+    await expect(banner()).toContainText("Can't reach the workspace.");
+    await expect(banner().getByRole("button")).toHaveText("Retry");
+    await expect(content).toHaveCount(1);
+    await expect(empty()).toHaveCount(0);
+    await screenshot(type, "60s-gap");
+    await page.evaluate(() => window.workbenchStatusFixture.connection("connected"));
+    await expect(banner()).toHaveCount(0);
+
+    await page.evaluate((type) => {
+      const fixture = window.workbenchStatusFixture;
+      fixture.failNextReads(1);
+      fixture.render(type, { target: `once-${type}` });
+    }, type);
+    await expect(banner()).toHaveCount(0);
+    await expect(empty()).toHaveCount(0);
+    await page.clock.runFor(1_600);
+    await expect(content).toHaveCount(1);
+    await expect(banner()).toHaveCount(0);
+    await expect(empty()).toHaveCount(0);
+    await screenshot(type, "read-fails-once");
+    await page.evaluate((type) => {
+      const fixture = window.workbenchStatusFixture;
+      fixture.failNextReads(2);
+      fixture.render(type, { target: `twice-${type}` });
+    }, type);
+    await expect(banner()).toHaveCount(0);
+    await expect(empty()).toHaveCount(0);
+    await page.clock.runFor(1_600);
+    await expect(banner()).toContainText(`Couldn't load ${copy[type][1]}.`);
+    await expect(empty()).toHaveText(copy[type][2]);
+    // The frame centres its fallback inside the remaining body, including
+    // Design: no icon can be pushed against the bottom by retained children.
+    const frameBox = await page.locator("[data-workbench-frame]").boundingBox();
+    const bannerBox = await banner().boundingBox();
+    const iconBox = await empty().locator("svg").boundingBox();
+    expect(iconBox.y).toBeGreaterThan(bannerBox.y + bannerBox.height);
+    expect(iconBox.y + iconBox.height).toBeLessThan(frameBox.y + frameBox.height - 40);
+    await screenshot(type, "read-fails-twice");
+    await noToast();
+    check(`${type}: 3s quiet blip, 15s pending, 60s Retry, retained content, one silent read retry`, true);
+  }
   for (const type of types) {
     await page.goto(`${harnessBase}/harness-workbench-status.html?cold=1`);
     await page.waitForFunction(() => !!window.workbenchStatusFixture);
@@ -93,10 +210,10 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     // Readiness starts a cold connection interval with no initial flash.
     await page.evaluate(() => window.workbenchStatusFixture.state("ready"));
     await expect(banner()).toHaveCount(0);
-    await page.clock.fastForward(1_900);
+    await page.clock.fastForward(9_900);
     await expect(banner()).toHaveCount(0);
     await page.clock.fastForward(200);
-    await expect(banner()).toContainText("Connecting to the workspace…");
+    await expect(banner()).toContainText("Connecting…");
     await expect(empty()).toHaveText(pendingCopy[type]);
     await noToast();
     await screenshot(type, "connecting");
@@ -116,7 +233,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
       fixture.connection("disconnected");
       fixture.render(type, { target: `reconnect-${type}` });
     }, type);
-    await page.clock.fastForward(1_900);
+    await page.clock.fastForward(9_900);
     await expect(banner()).toHaveCount(0);
     await page.clock.fastForward(200);
     await expect(banner()).toHaveCount(1);
@@ -128,7 +245,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
         : pendingCopy[type],
     );
     await screenshot(type, "reconnecting");
-    await page.clock.fastForward(18_000);
+    await page.clock.fastForward(35_000);
     await expect(banner()).toContainText("Can't reach the workspace.");
     await expect(empty()).toHaveText(copy[type][2]);
     await noToast();
@@ -199,6 +316,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
       fixture.fail("Error: Request timeout: engine disconnected");
       fixture.render(type, { target: `failure-${type}` });
     }, type);
+    await page.clock.runFor(1_600);
     await expect(banner()).toHaveCount(1);
     await expect(banner()).toContainText(
       `${copy[type][0]} took too long to load.`,
@@ -214,6 +332,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await page.evaluate(() =>
       window.workbenchStatusFixture.fail("Comments unavailable", true),
     );
+    await page.clock.runFor(1_600);
     await expect(banner()).toContainText(`Couldn't load ${copy[type][1]}.`);
     await expect(page.locator("[data-confirmed-content]:visible")).toHaveCount(
       1,
@@ -244,6 +363,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await page.evaluate(() =>
       window.workbenchStatusFixture.fail("Comments unavailable", true),
     );
+    await page.clock.runFor(1_600);
     await expect(banner()).toHaveCount(1);
 
     await page.evaluate((type) => {
@@ -254,7 +374,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     const readsWhileHidden = await page.evaluate(
       () => window.workbenchStatusFixture.reads.length,
     );
-    await page.clock.fastForward(25_000);
+    await page.clock.fastForward(60_000);
     expect(
       await page.evaluate(() => window.workbenchStatusFixture.reads.length),
     ).toBe(readsWhileHidden);
@@ -281,6 +401,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     );
     fixture.render("files", { target: "shared", copies: 2 });
   });
+  await page.clock.runFor(1_600);
   await expect(banner()).toHaveCount(2);
   await page.evaluate(() => {
     const fixture = window.workbenchStatusFixture;
@@ -297,6 +418,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     fixture.fail("Old workspace error");
     fixture.render("files", { target: "old", copies: 1 });
   });
+  await page.clock.runFor(1_600);
   await expect(banner()).toHaveCount(1);
   await page.evaluate(() => {
     const fixture = window.workbenchStatusFixture;
@@ -316,6 +438,60 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     "Exact workspace/target switching isolates late failures; equivalent tabs share status and Retry",
     true,
   );
+
+  // Portal-owned Terminal/Setup sources must follow document visibility too.
+  await page.goto(`${harnessBase}/harness-workbench-status.html`);
+  await page.waitForFunction(() => !!window.workbenchStatusFixture);
+  await page.evaluate(() => {
+    const fixture = window.workbenchStatusFixture;
+    fixture.fail("Read unavailable");
+    fixture.render("terminal", { target: "hidden-document", copies: 1, surface: "contract" });
+  });
+  await page.clock.runFor(100);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect(page.locator("[data-workbench-banner] [role=status]")).toHaveAttribute("aria-live", "off");
+  const hiddenReads = await page.evaluate(() => window.workbenchStatusFixture.reads.length);
+  await page.clock.fastForward(5_000);
+  expect(await page.evaluate(() => window.workbenchStatusFixture.reads.length)).toBe(hiddenReads);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.clock.runFor(1_600);
+  await expect(banner()).toContainText("Couldn't load the terminal.");
+  check("Portal-owned Terminal/Setup sources stop silent retry timers while the document is hidden", true);
+
+  await page.goto(`${harnessBase}/harness-workbench-status.html`);
+  await page.waitForFunction(() => !!window.workbenchStatusFixture);
+  await page.evaluate(() => {
+    const fixture = window.workbenchStatusFixture;
+    fixture.failNextReads(1);
+    fixture.render("terminal", { target: "hidden-flight", surface: "contract" });
+  });
+  await page.clock.runFor(100);
+  await page.evaluate(() => window.workbenchStatusFixture.hold(true));
+  await page.clock.runFor(1_500);
+  const inFlightReads = await page.evaluate(() => window.workbenchStatusFixture.reads.length);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.clock.fastForward(200);
+  expect(await page.evaluate(() => window.workbenchStatusFixture.reads.length)).toBe(inFlightReads);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect(banner()).toHaveCount(0);
+  await expect(empty()).toHaveCount(0);
+  await page.evaluate(() => window.workbenchStatusFixture.release());
+  await expect(page.locator("[data-confirmed-content]:visible")).toHaveCount(1);
+  await expect(banner()).toHaveCount(0);
+  expect(await page.evaluate(() => window.workbenchStatusFixture.reads.length)).toBe(inFlightReads);
+  check("An in-flight silent retry stays quiet across document hiding and reveal without a second request", true);
 
   for (const kind of ["connect", "open"]) {
     await page.goto(`${harnessBase}/harness-workbench-status.html`);
@@ -384,6 +560,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     fixture.fail("Very long raw diagnostic ".repeat(30));
     fixture.render("files", { workspace: "b", target: "light-narrow" });
   });
+  await page.clock.runFor(1_600);
   await expect(banner()).toHaveCount(1);
   const narrowRetry = banner().getByRole("button");
   await expect(narrowRetry).toBeVisible();
@@ -413,6 +590,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
       fixture.fail("Request timeout: engine disconnected");
       fixture.render(type, { target: `real-${type}`, surface: "feature" });
     }, type);
+    await page.clock.runFor(1_600);
     await expect(banner()).toHaveCount(1);
     await expect(empty()).toHaveCount(1);
     await expect(empty()).toHaveText(
@@ -450,19 +628,22 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
         ),
       ).toBeVisible();
     // Confirmed feature content is preserved on subsequent exact-key failure.
-    if (type !== "design") {
+    {
       await page.evaluate(async () => {
         window.workbenchStatusFixture.fail("engine disconnected");
         await window.workbenchStatusFixture.refreshFeature();
       });
+      await page.clock.runFor(1_600);
       await expect(banner()).toHaveCount(1);
       await expect(empty()).toHaveCount(0);
-      await expect(
-        page.getByText(
+      await expect(type === "design"
+        ? page.getByRole("button", { name: "Create design directory", exact: true })
+        : page.getByText(
           type === "files" ? "Confirmed file content" : "Confirmed description",
           { exact: true },
-        ),
+        )
       ).toBeVisible();
+      await screenshot(type, "feature-retained-content");
     }
     check(
       `${type}: real feature reads use the frame, recover truthfully, and retain confirmed content`,
@@ -495,6 +676,10 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     "http://status-preview.invalid/real-browser",
   );
   await page.clock.fastForward(31_000);
+  await expect(banner()).toHaveCount(0);
+  await expect(empty()).toHaveCount(0);
+  await page.clock.runFor(1_600);
+  await page.clock.fastForward(31_000);
   await expect(banner()).toContainText("The preview took too long to load.");
   await expect(empty()).toHaveText(copy.browser[2]);
   await noToast();
@@ -510,7 +695,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     page.frameLocator("iframe").getByText("Confirmed preview content"),
   ).toBeVisible();
   await page.locator("iframe").dispatchEvent("error");
-  await expect(banner()).toContainText("Couldn't load the preview.");
+  await expect(banner()).toHaveCount(0);
   await expect(empty()).toHaveCount(0);
   await expect(
     page.frameLocator("iframe").getByText("Confirmed preview content"),
