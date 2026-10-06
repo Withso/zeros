@@ -19,7 +19,9 @@ export const alphaAdmissionArtifact = (sourceSha: string) => `alpha-admission-${
 export async function alphaAncestor(base: string, head: string, read: Read): Promise<boolean> {
   requireCheck(SHA.test(base) && SHA.test(head), "Alpha ancestry source is invalid");
   let value: any;
-  try { value = await read(`/compare/${base}...${head}`); }
+  // Changed files and patches appear only on the first compare page; page 2
+  // keeps the status and merge base without exceeding the JSON size bound.
+  try { value = await read(`/compare/${base}...${head}?per_page=1&page=2`); }
   catch { throw new PromotionError("Alpha ancestry comparison is unavailable; no destination mutation is authorized"); }
   requireCheck(value && ["identical", "ahead", "behind", "diverged"].includes(value.status) &&
     value.base_commit?.sha === base && typeof value.merge_base_commit?.sha === "string" && SHA.test(value.merge_base_commit.sha),

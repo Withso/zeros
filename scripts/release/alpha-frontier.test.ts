@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { alphaAncestor, alphaAncestry } from "./alpha-frontier";
 import { PromotionError } from "./contracts";
+import { jsonClient } from "./io";
 
 const base = "a".repeat(40), head = "b".repeat(40);
 describe("Alpha GitHub ancestry comparison", () => {
@@ -9,7 +10,17 @@ describe("Alpha GitHub ancestry comparison", () => {
     const read = vi.fn(async () => ({ status, base_commit: { sha: base },
       merge_base_commit: { sha: status === "diverged" ? "c".repeat(40) : base } }));
     await expect(alphaAncestor(base, target, read)).resolves.toBe(status === "identical" || status === "ahead");
-    expect(read).toHaveBeenCalledExactlyOnceWith(`/compare/${base}...${target}`);
+    expect(read).toHaveBeenCalledExactlyOnceWith(`/compare/${base}...${target}?per_page=1&page=2`);
+  });
+  it("reads ancestry from a comparison page without file patches", async () => {
+    // GitHub returns changed files (with patches) only on the first compare page.
+    // A distant live destination made that page exceed the 2 MiB JSON client cap.
+    const patches = "x".repeat(2 * 1024 * 1024 + 1);
+    const routed = jsonClient(async (url) => new Response(JSON.stringify(new URL(String(url)).searchParams.get("page") === "2"
+      ? { status: "ahead", base_commit: { sha: base }, merge_base_commit: { sha: base }, files: [] }
+      : { status: "ahead", base_commit: { sha: base }, merge_base_commit: { sha: base }, files: [{ patch: patches }] })),
+    async () => {});
+    await expect(alphaAncestor(base, head, (route) => routed(`https://api.github.com/repos/o/r${route}`))).resolves.toBe(true);
   });
   it.each([
     null, {}, { status: "unknown" }, { status: "ahead", base_commit: { sha: head }, merge_base_commit: { sha: base } },
