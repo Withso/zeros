@@ -137,11 +137,12 @@ describe("Boat image kit", () => {
     expect(script).toContain(migration);
     const resolver = " cloud-runtime-root.mjs";
     expect(script).toContain(`cloud-runtime-profile.mjs${resolver} cloud-engine-cgroup.mjs`);
+    const timings = " cloud-setup-timings.mjs";
     const checkout = " cloud-computer-checkout.mjs";
-    expect(script).toContain(`cloud-setup-process.mjs${checkout} cloud-engine-view.mjs`);
+    expect(script).toContain(`cloud-setup-process.mjs${timings}${checkout} cloud-engine-view.mjs`);
     // Historical recipe compatibility, not qualification of the new image.
     // The new layout/source still requires fresh immutable-image attestation.
-    expect(sha256(script.replace(migration, "").replace(resolver, "").replace(checkout, ""))).toBe("97e5b3b21438e85e53a22e2aec2d38436751c4efcb22aafa1f67ede3e336ddd9");
+    expect(sha256(script.replace(migration, "").replace(resolver, "").replace(timings, "").replace(checkout, ""))).toBe("97e5b3b21438e85e53a22e2aec2d38436751c4efcb22aafa1f67ede3e336ddd9");
   });
 
   it("keeps templates free of build identities and private paths", () => {

@@ -85,6 +85,27 @@ describe("cloud performance measurement", () => {
     expect(JSON.stringify(result)).not.toContain("private");
   });
 
+  it("reads closed setup clocks when migrated, while rejecting private or malformed spans", async () => {
+    const timings = { version: 1, clocks: [{ source: "attester_preflight", clockId: runId, startedAt: "2026-10-06T00:00:00.000Z",
+      spans: [{ stage: "verify_tree", startMs: 5, endMs: 20, outcome: "passed" }] }] };
+    const result = perfTimeline({ workspace: { id: workspaceId }, intents: [], setups: [{ id: runId, stage_timings: timings },
+      { id: buildId, stage_timings: { ...timings, private: "secret" } }], engines: [], actors: [], providerCreates: [], timingColumnAvailable: true });
+    expect(result.setupStageTimings.availability).toBe("persisted");
+    expect(result.setupStageTimings.runs).toEqual([{ setupRunId: runId, timings }]);
+    expect(JSON.stringify(result)).not.toContain("secret");
+    expect(result.unmeasured).not.toContain("verify_tree");
+    expect(result.unmeasured).toContain("containment_smoke");
+    for (const migrated of [true, false]) {
+      const query = vi.fn(async (sql: string) => ({ rows: sql.startsWith("SELECT id,current_generation,status") ? [{ id: workspaceId }] :
+        sql.includes("pg_attribute") ? [{ available: migrated }] : [] }));
+      const snapshot = await readPerfTimeline({ connect: async () => ({ query, release: vi.fn() }) }, workspaceId);
+      expect(snapshot.setupStageTimings.availability).toBe(migrated ? "no_spans" : "not_persisted");
+      const setupQuery = query.mock.calls.find(([sql]) => sql.includes("FROM cloud_workspace_setup_runs"))![0];
+      expect(setupQuery).toContain(migrated ? ",stage_timings" : ",NULL::jsonb AS stage_timings");
+      expect(query.mock.calls[0][0]).toContain("READ ONLY");
+    }
+  });
+
   it("rejects non-Alpha database configuration and foreign API destinations before I/O", async () => {
     const target = new URL("postgres://host.psdb.cloud/db?sslmode=verify-full");
     target.username = "reader.test";

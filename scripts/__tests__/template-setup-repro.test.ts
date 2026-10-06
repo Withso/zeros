@@ -40,6 +40,7 @@ import {
 } from "../cloud-workspace-validation/template-setup-probe.mjs";
 import { CloudProviderError } from "../../apps/control-plane/src/cloud-workspaces/provider";
 import { attestationFixture, proofPath } from "./cloud-worker-attestation-fixture";
+import { setupTimingsSchema } from "../../packages/protocol/src/cloud-runtime-bundle";
 
 const templateId = "bx_3456789a",
   childId = "bx_23456789";
@@ -233,7 +234,14 @@ try { worker(); } catch {
             __zerosTemplateSetupObserve: (error: any, stage: string) => completions.push({ stage, check: error?.check }),
           },
         });
-        expect(observed).toEqual(baseline);
+        const authorityOutput = (result: typeof baseline) => ({ ...result, stdout: result.stdout.trimEnd().split("\n").map(line => {
+          const value = JSON.parse(line);
+          if (value.schema !== "zeros.diagnostic/v1") return value;
+          const { timings, ...diagnostic } = value;
+          expect(setupTimingsSchema.safeParse(timings).success).toBe(true);
+          return diagnostic;
+        }) });
+        expect(authorityOutput(observed)).toEqual(authorityOutput(baseline));
         expect(stages).toEqual(["validate_input", "lock", "verify_tree", "qualify_engine", "run_setup", ...(secure ? ["publish_proof"] : [])]);
         expect(completions).toEqual([{ stage: secure ? "done" : "run_setup", check: secure ? undefined : "setup_exit" }]);
         if (!secure) expect(() => readFileSync(tree.physical(proofPath))).toThrow();

@@ -28,7 +28,7 @@ export function attestationFixture(version = 4) {
     "runtime-layout.json", "cloud-runtime-root.mjs", "cloud-runtime-profile.mjs", "cloud-engine-launcher.mjs",
     "cloud-engine-view.mjs", "cloud-engine-cgroup.mjs", "ensure-cloud-worker-supervisor.mjs",
     "cgroup-resources.mjs", "cloud-resource-admission.mjs", "image-build-contract.mjs",
-    "cloud-setup-process.mjs", "consume-cloud-admission.mjs", "install-cloud-preview-links.mjs",
+    "cloud-setup-process.mjs", "cloud-setup-timings.mjs", "consume-cloud-admission.mjs", "install-cloud-preview-links.mjs",
     "install-cloud-github-credential.mjs", "cloud-github-refresh-request.mjs", "cloud-git-askpass.mjs",
     "cloud-worker-supervisor.mjs", "setup-cloud-workspace.mjs", "attest-cloud-worker.mjs",
     "zeros-cloud-engine.apparmor",
@@ -192,7 +192,7 @@ export function attestationFixture(version = 4) {
         throw new Error(`Unexpected fixture import: ${id}`);
       };
       runInNewContext(compiled, { require, exports, module: { exports }, process: fakeProcess, Buffer, TextDecoder,
-        Date: class extends Date { static now() { return now; } }, setTimeout, clearTimeout, ...observation.globals }, { timeout: 5000 });
+        Date: class extends Date { static now() { return now; } }, setTimeout, clearTimeout, performance, ...observation.globals }, { timeout: 5000 });
       return exports;
     }
     try { load(entry); } catch (error) {

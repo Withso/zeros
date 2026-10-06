@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { parseDatabaseTarget } from "../../apps/control-plane/src/database-target.ts";
 import { diagnosticPhases } from "../../apps/control-plane/src/cloud-workspaces/cloud-diagnostics.ts";
+import { parseSetupTimings } from "../../apps/control-plane/src/cloud-workspaces/setup-timings.ts";
 import { privateFile } from "./template-setup-repro.mjs";
 
 export const PERF_UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
@@ -56,6 +57,12 @@ export async function perfRead(pool, read) {
  * These intervals overlap and are not additive. Retried operations include all
  * attempts; first dispatch/claim and last heartbeat are not per-stage spans. */
 export function perfTimeline(rows) {
+  const runs = rows.setups.slice(0, 32).flatMap(row => {
+    const timings = parseSetupTimings(row.stage_timings);
+    return timings ? [{ setupRunId: uuid(row.id), timings }] : [];
+  });
+  const measured = new Set(runs.flatMap(run => run.timings.clocks.flatMap(clock => clock.spans.map(span => span.stage))));
+  const stageNames = { verify_tree: "verify_tree", containment_smoke: "qualify_engine", run_setup_probe: "run_setup", publish_proof: "publish_proof" };
   return {
     schema: "zeros.workspace-perf-timeline/v1",
     workspaceId: uuid(rows.workspace?.id), generation: number(rows.workspace?.current_generation),
@@ -81,9 +88,9 @@ export function perfTimeline(rows) {
     providerCreates: rows.providerCreates.slice(0, 32).map(row => ({ generation: number(row.generation),
       dispatchedAt: timestamp(row.dispatched_at), rejectedAt: timestamp(row.rejected_at) })),
     setupStageTimings: {
-      // Successful stage spans are not persisted by the released helper.
-      // Incident events are failure observations, not start/end stage spans.
-      availability: "not_persisted",
+      availability: runs.length ? "persisted" : rows.timingColumnAvailable ? "no_spans" : "not_persisted",
+      runs,
+      // Incident events remain failure observations, not start/end spans.
       failureEvents: (rows.setupDiagnostics ?? []).slice(0, 128).map(row => ({
         incidentId: uuid(row.id), generation: number(row.generation), setupRunId: uuid(row.setup_run_id),
         phase: phase(row.phase), setupPhase: phase(row.setup_phase),
@@ -94,7 +101,7 @@ export function perfTimeline(rows) {
     },
     unmeasured: ["boat_api_duration", "vm_restore", "lazy_hydration", "verify_tree", "containment_smoke",
       "run_setup_probe", "publish_proof", "checkout", "node_sqlite_containment_start", "first_heartbeat",
-      "bridge_connected_probe", "renderer_paint"],
+      "bridge_connected_probe", "renderer_paint"].filter(name => !measured.has(stageNames[name])),
   };
 }
 
@@ -106,9 +113,14 @@ export async function readPerfTimeline(pool, workspaceId) {
     const query = async sql => (await client.query(sql, [workspaceId])).rows;
     const [workspace] = await query("SELECT id,current_generation,status FROM cloud_workspaces WHERE id=$1");
     perfCheck(workspace, "workspace_unavailable");
+    // This operator script also runs against Alpha before migration 0135.
+    // Select the new column only after a read-only catalog check; never catch a
+    // missing-column error inside the transaction and continue after abort.
+    const timingColumnAvailable = (await client.query(`SELECT EXISTS (SELECT 1 FROM pg_attribute
+      WHERE attrelid='cloud_workspace_setup_runs'::regclass AND attname='stage_timings' AND NOT attisdropped) AS available`)).rows[0]?.available === true;
     const intents = await query(`SELECT id,generation,operation,state,attempt_count,created_at,dispatched_at,completed_at
       FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC LIMIT 32`);
-    const setups = await query(`SELECT id,generation,attempt,claim_count,state,created_at,started_at,completed_at
+    const setups = await query(`SELECT id,generation,attempt,claim_count,state,created_at,started_at,completed_at,${timingColumnAvailable ? "stage_timings" : "NULL::jsonb AS stage_timings"}
       FROM cloud_workspace_setup_runs WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC LIMIT 32`);
     const engines = await query(`SELECT id,generation,setup_run_id,state,protocol_version,created_at,registered_at,last_heartbeat_at
       FROM cloud_workspace_engine_instances WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC LIMIT 32`);
@@ -125,7 +137,7 @@ export async function readPerfTimeline(pool, workspaceId) {
         WHERE workspace_id=$1 AND operation_kind='setup' ORDER BY last_at DESC,id DESC LIMIT 32) incident
       CROSS JOIN LATERAL jsonb_array_elements(incident.events) event(value)
       ORDER BY event.value->>'lastAt' DESC,incident.id LIMIT 128`);
-    return perfTimeline({ workspace, intents, setups, engines, actors, providerCreates, setupDiagnostics });
+    return perfTimeline({ workspace, intents, setups, engines, actors, providerCreates, setupDiagnostics, timingColumnAvailable });
   });
 }
 

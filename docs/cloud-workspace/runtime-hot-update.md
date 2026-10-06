@@ -315,7 +315,7 @@ repository setup rerun, Git rewrite or checkpoint restore is part of HU.
 ## Implementation slices and verification
 
 1. Verified installer/controller adapter and v4-5 bootstrap.
-2. Additive migration **0135** (assigned by the orchestrator), allocation transfer
+2. Additive migration **0136** (assigned by the orchestrator), allocation transfer
    and enrollment service, based on RU after its merge.
 3. Quiet trigger, including the measured-gap presence gate above.
 4. RU/IW2 durable queue integration.

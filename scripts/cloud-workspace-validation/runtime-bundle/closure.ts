@@ -34,6 +34,7 @@ export const RUNTIME_HELPERS = [
     "cloud-runtime-profile.mjs",
     "cloud-engine-cgroup.mjs",
     "cloud-setup-process.mjs",
+    "cloud-setup-timings.mjs",
     "cloud-computer-checkout.mjs",
     "cloud-engine-view.mjs",
     "cloud-engine-launcher.mjs",
