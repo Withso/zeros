@@ -1811,7 +1811,8 @@ managed integration protects dirty/untracked work before creating conflicts.
 Independently committed same-file edits proceed through Git. Source resolution
 and Continue/Abort are shared; semantic conflict resolution remains deferred.
 
-`design.context.create` and `design.context.inspect` are local, read-only routes.
+`design.context.create` and `design.context.inspect` are read-only routes for
+Local workspaces and the qualified cloud primary.
 The version-1 reference contains workspace ID, stable directory ID, portable
 HTML frame, optional node ID and exact semantic revision. Inspection returns
 `ready` with source/geometry, `stale` with the current revision, `missing`, or
