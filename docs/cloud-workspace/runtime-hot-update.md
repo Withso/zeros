@@ -567,3 +567,50 @@ This slice enables the hook and callable policy only. It does not enable
 production activation, supply the pinned-controller reader, implement LU's
 fence, or claim a measured gap or exactly-once queue handoff. Those remain the
 VM integration and later acceptance/queue slices.
+
+## Acceptance-runner composition interface (slice 5)
+
+The types-only module
+`scripts/cloud-workspace-validation/runtime-hot-update-contract.ts` is the
+shared HU/LU-5 interface. LU imports its hook/context/evidence types; HU will
+implement `runRuntimeHotUpdateAcceptance` with the exported
+`RuntimeHotUpdateAcceptanceRunner` signature:
+
+```ts
+runRuntimeHotUpdateAcceptance<State>(
+  options: RuntimeHotUpdateAcceptanceOptions,
+  hooks: RuntimeHotUpdateAcceptanceHooks<State>,
+): Promise<RuntimeHotUpdateAcceptanceResult>;
+```
+
+Options select the source/target qualified runtimes, `bootstrap-quiet`,
+`engine-quiet` or `engine-resident`, and `healthy` or `target-health-failure`.
+There is deliberately no existing-workspace input. HU reads `.env.agent`,
+creates a disposable `zeros-v2-test-hu-*` workspace, supplies two independently
+admitted reconnecting devices, stages the target and calls `hooks.prepare`.
+After that hook resolves, HU performs the authenticated activation, enrollment
+and health protocol (or its bounded rollback), then calls `hooks.verify` with
+the saved hook state and measured evidence. The failure scenario uses the
+bounded test-controller health refusal on that disposable transition; it does
+not revoke an owner's credentials or change global qualification settings.
+
+LU creates resident PTYs/dev servers and attaches listeners in `prepare`; those
+listeners remain active during the swap. Hook state is private and is never
+serialized into diagnostics. `context.addCleanup` is registered immediately
+for each probe, including partial preparation. HU always runs registered
+cleanup in reverse order before deleting its workspace/allocation/objects;
+the result records every owned resource ID and whether cleanup succeeded.
+Neither hook receives provider credentials or enrollment capabilities. Device
+requests use the existing typed bridge boundary, not a second provider runner.
+
+HU measures both devices on one monotonic clock, from the last successful
+source response to the first usable replacement response after registration,
+normal client admission and ordered snapshot replay. Evidence includes sample
+interval and exact old/new identities; rollback has a fresh engine UUID and
+proof epoch too. LU's `verify` checks PID/session/output survival and the
+at-most-two-second live-handoff bound against that evidence. Bootstrap and quiet
+engine gaps are reported separately. Missing evidence fails closed.
+
+This commit publishes the composition types, not a live runner or CLI. HU's
+implementation will own activation and cleanup; LU-5 contributes the hooks
+rather than provisioning a second workspace or writing a second update runner.
