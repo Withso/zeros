@@ -589,6 +589,13 @@ describe("CI scope Git evidence and CLI", () => {
       { EVENT_NAME: "push", PUSH_BEFORE_SHA: base, GITHUB_SHA: head },
     ]) {
       expect(collectPrChanges({ cwd, env: environment }).reason).toBeNull();
+      const mismatch = collectPrChanges({
+        cwd,
+        env: { ...environment, GITHUB_SHA: base },
+      });
+      expect(mismatch.reason).toMatch(/tested-sha/);
+      expect(mismatch.sourceSha).toBe(base);
+      expect(mismatch.testedSha).toBe(head);
     }
     expect(
       collectPrChanges({ cwd, env: { ...env(base, head), GITHUB_SHA: base } })
@@ -609,6 +616,9 @@ describe("CI scope Git evidence and CLI", () => {
     expect(
       collectPrChanges({ cwd: missingRepo, env: env(base, head) }).reason,
     ).toMatch(/diff-error/);
+    expect(
+      collectPrChanges({ cwd: missingRepo, env: env(base, head) }).testedSha,
+    ).toBeNull();
   });
 
   it("records a PR source separately from its synthetic merge checkout", () => {
@@ -751,5 +761,36 @@ describe("CI scope Git evidence and CLI", () => {
     expect(status).not.toBe(0);
     expect(stdout).toBe("");
     expect(stderr).toMatch(/policy/i);
+  });
+
+  it("preserves declared event source identity in full mode independently of the checkout", () => {
+    const { cwd, base } = repository();
+    for (const environment of [
+      { EVENT_NAME: "push", GITHUB_SHA: SHA },
+      { EVENT_NAME: "merge_group", GITHUB_SHA: SHA },
+      { EVENT_NAME: "pull_request", PULL_REQUEST_HEAD_SHA: SHA },
+    ]) {
+      const result = cli(cwd, environment, "full");
+      expect(result.status).toBe(0);
+      const ledger = JSON.parse(result.stdout.split("\n")[0]!.slice(7));
+      expect(ledger.source_sha).toBe(SHA);
+      expect(ledger.tested_sha).toBe(base);
+      expect(Object.values(ledger.lanes).every((value) => value === true)).toBe(
+        true,
+      );
+    }
+    const missingRepo = mkdtempSync(
+      path.join(tmpdir(), "ci-scope-full-not-git-"),
+    );
+    repositories.push(missingRepo);
+    const result = cli(
+      missingRepo,
+      { EVENT_NAME: "push", GITHUB_SHA: SHA },
+      "full",
+    );
+    expect(result.status).toBe(0);
+    const ledger = JSON.parse(result.stdout.split("\n")[0]!.slice(7));
+    expect(ledger.source_sha).toBe(SHA);
+    expect(ledger.tested_sha).toBeNull();
   });
 });
