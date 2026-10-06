@@ -1,5 +1,18 @@
 import { GitError } from "../git";
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
+import { isDesignFrameFile } from "@zeros/protocol/design-path";
+
+/** One confirmed render generation per frame; the canvas catalog caps at 256.
+ * The server chooses the history frame, which may differ from current focus. */
+export function designHistorySourceVersions(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).length > 256 ||
+      Object.entries(value).some(([frame, version]) => !isDesignFrameFile(frame) ||
+        typeof version !== "string" || !/^[a-f0-9]{24}$/.test(version))) {
+    throw new GitError({ code: "VALIDATION_FAILED", message: "Invalid Design history source versions." });
+  }
+  return value as Record<string, string>;
+}
 
 export function hasAsciiControl(
   value: string,

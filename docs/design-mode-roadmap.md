@@ -237,6 +237,10 @@ checked separately. The deployed cloud worker resolves the checkout; remote
 paths and repository-root substitution cannot select another owner. Cloud
 snapshots contain no host-local `zeros-design:` capability. Desktop relay
 restrictions and ordinary remote file/credential filtering remain independent.
+The renderer bridge translates the snapshot's typed checkout identity to its
+opaque cloud key after verifying the worker root, leaving authored source and
+diagnostics untouched. Directory lifecycle requests carry both the resolved
+repository root and admitted primary workspace ID.
 
 #### Source, metadata and personal state
 
@@ -958,6 +962,11 @@ screenshots are never copied into each entry. History is bounded and belongs to
 the opened document session. A shared-resource edit remains undoable only from
 the frame session that initiated it until a future workspace transaction can
 represent multi-frame history atomically.
+Cloud canvas history requests carry the confirmed render generations for the
+current frame catalog. The engine checks the generation of the history entry's
+frame, which may differ from the focused frame, before applying its semantic
+revision and actor checks. A stale or missing generation fails without consuming
+the history entry. Direct API callers may still supply `expectedRevision`.
 
 Frame create, rename, duplicate, and delete are atomic workspace lifecycle
 commands outside document undo. Subtree duplication assigns fresh stable IDs;
