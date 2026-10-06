@@ -17,6 +17,8 @@ import { readCloudRuntimeResumeProofEpoch } from "./runtime-transition.js";
 import { DatabaseCloudRuntimeTransitionService } from "./runtime-transfer.js";
 import type { CloudActiveRuntime } from "./runtime-contract.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
+import { DatabaseCloudRuntimeQuietTrigger } from "./runtime-quiet-trigger.js";
+import type { CloudRuntimeQuietSnapshot } from "./runtime-quiet-contract.js";
 
 (process.env.TEST_DATABASE_URL ? describe : describe.skip)("retained cloud runtime transitions", () => {
   let pool: pg.Pool;
@@ -89,6 +91,106 @@ import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-versi
     expect(await service.activate(claim,{controller:sourceActive(),policy:{id:"zeros_test_live_handoff",async authorize() {return true;} }})).toBe(true);
     return claim;
   }
+
+  describe("running quiet trigger", () => {
+    const scope = () => ({ workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
+      sourceEngineInstanceId: fixture.engineInstanceId, mode: "engine" as const });
+    function reader() {
+      const state = { version: 1 as const, workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
+        engineInstanceId: fixture.engineInstanceId, activityRevision: 3, quietForMs: 60_000, stable: true,
+        recordSync: "ready" as const, workloadBusy: false, livePty: false, userProcesses: "idle" as const, presence: "absent" as const };
+      const read = vi.fn(async ({ challenge }: { challenge: string }): Promise<CloudRuntimeQuietSnapshot> => ({ ...state, challenge }));
+      return { state, read, trigger: new DatabaseCloudRuntimeQuietTrigger({ service, readQuiet: read }) };
+    }
+    it("defers a present client, then joins one immutable candidate when quiet", async () => {
+      const f = reader(), read = f.read.getMockImplementation()!;
+      f.read.mockImplementation(async input => ({ ...await read(input), presence: "present" }));
+      expect(await f.trigger.consider(scope())).toBeNull();
+      expect((await pool.query("SELECT 1 FROM cloud_workspace_generations WHERE workspace_id=$1", [fixture.workspaceId])).rowCount).toBe(1);
+      f.read.mockImplementation(read);
+      const [first, second] = await Promise.all([f.trigger.consider(scope()), f.trigger.consider(scope())]);
+      expect(first).toMatchObject({ sourceGeneration: 1, candidateGeneration: 2, phase: "offered" });
+      expect(second?.transitionId).toBe(first?.transitionId);
+      expect((await pool.query("SELECT state FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0].state).toBe("ready");
+    });
+    it.each(["activity", "presence", "pty", "workload", "processes", "record", "engine"] as const)("rechecks %s at activation and keeps a refused source usable", async kind => {
+      const claim = await claimed(); await qualifyTransfer(); await service.staged(claim);
+      const f = reader(), policy = await f.trigger.prepareActivation(claim);
+      expect(policy).not.toBeNull();
+      const read = f.read.getMockImplementation()!;
+      f.read.mockImplementation(async input => ({ ...await read(input), ...{
+        activity: { activityRevision: 4 }, presence: { presence: "present" as const }, pty: { livePty: true },
+        workload: { workloadBusy: true }, processes: { userProcesses: "unknown" as const },
+        record: { recordSync: "pending" as const }, engine: { engineInstanceId: randomUUID() },
+      }[kind] }));
+      expect(await service.activate(claim, { controller: sourceActive(), policy: policy! })).toBe(false);
+      expect(f.read).toHaveBeenCalledTimes(2);
+      expect((await pool.query("SELECT phase FROM cloud_workspace_runtime_transitions WHERE transition_id=$1", [claim.transitionId])).rows[0].phase).toBe("staged");
+      expect((await pool.query("SELECT state FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0].state).toBe("ready");
+    });
+    it("authorizes only the prepared claim and fresh unchanged revision", async () => {
+      const claim = await claimed(); await qualifyTransfer(); await service.staged(claim);
+      const f = reader(), policy = await f.trigger.prepareActivation(claim);
+      expect(await withSystemTx(pool, tx => policy!.authorize(tx, { ...claim, workerFence: randomUUID() }))).toBe(false);
+      expect(await service.activate(claim, { controller: sourceActive(), policy: policy! })).toBe(true);
+      expect(f.read).toHaveBeenCalledTimes(2);
+      expect(f.read.mock.calls[0][0].challenge === f.read.mock.calls[1][0].challenge).toBe(false);
+    });
+    async function queue(paused: boolean) {
+      const conversationId = randomUUID(), commandId = randomUUID();
+      await pool.query(`INSERT INTO cloud_workspace_conversation_controls(workspace_id,org_id,conversation_id,paused,next_position)
+        VALUES($1,$2,$3,$4,2)`, [fixture.workspaceId, fixture.organizationId, conversationId, paused]);
+      await pool.query(`INSERT INTO cloud_workspace_commands(workspace_id,org_id,id,conversation_id,position,state,payload,generation,engine_instance_id,user_message_id)
+        VALUES($1,$2,$3,$4,1,'queued',$5,1,$6,$7)`, [fixture.workspaceId, fixture.organizationId, commandId, conversationId,
+        { agentId: "claude", userMessageId: commandId, prompt: [{ type: "text", text: "fixture" }], modeRevision: 0 }, fixture.engineInstanceId, commandId]);
+      return { conversationId, commandId };
+    }
+    it("defers queued runnable work before either probe without changing its pause state", async () => {
+      const claim = await claimed(); await service.staged(claim);
+      const { commandId } = await queue(false), f = reader();
+      expect(await f.trigger.consider(scope())).toBeNull();
+      expect(await f.trigger.prepareActivation(claim)).toBeNull();
+      expect(f.read).not.toHaveBeenCalled();
+      expect((await pool.query(`SELECT command.state,control.paused FROM cloud_workspace_commands command
+        JOIN cloud_workspace_conversation_controls control USING(workspace_id,org_id,conversation_id)
+        WHERE command.id=$1`, [commandId])).rows[0]).toEqual({ state: "queued", paused: false });
+    });
+    it.each(["before", "during"] as const)("rechecks server work %s the final VM read", async when => {
+      const claim = await claimed(); await qualifyTransfer(); await service.staged(claim);
+      const { conversationId } = await queue(true), f = reader();
+      const policy = await f.trigger.prepareActivation(claim);
+      expect(policy).not.toBeNull();
+      const unpause = () => pool.query(`UPDATE cloud_workspace_conversation_controls SET paused=false
+        WHERE workspace_id=$1 AND conversation_id=$2`, [fixture.workspaceId, conversationId]);
+      if (when === "before") await unpause();
+      else {
+        const read = f.read.getMockImplementation()!;
+        f.read.mockImplementation(async input => { await unpause(); return read(input); });
+      }
+      expect(await service.activate(claim, { controller: sourceActive(), policy: policy! })).toBe(false);
+      expect(f.read).toHaveBeenCalledTimes(when === "before" ? 1 : 2);
+      expect((await pool.query("SELECT state FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0].state).toBe("ready");
+    });
+    it("rejects an expired or reclaimed worker before probing and before activation", async () => {
+      const claim = await claimed(); await qualifyTransfer(); await service.staged(claim);
+      const f = reader(), policy = await f.trigger.prepareActivation(claim);
+      await pool.query(`UPDATE cloud_workspace_runtime_transitions SET worker_expires_at=clock_timestamp()-interval '1 second'
+        WHERE transition_id=$1`, [claim.transitionId]);
+      expect(await f.trigger.prepareActivation(claim)).toBeNull();
+      const replacement = await service.claim(claim, "replacement-worker");
+      expect(replacement).not.toBeNull();
+      expect(await service.activate(replacement!, { controller: sourceActive(), policy: policy! })).toBe(false);
+      expect(f.read).toHaveBeenCalledOnce();
+    });
+    it("keeps the observation policy replaceable for a qualified live handoff", async () => {
+      const f = reader(), read = f.read.getMockImplementation()!;
+      f.read.mockImplementation(async input => ({ ...await read(input), presence: "present" }));
+      const policy = { id: "zeros_test_safe_point", accepts: vi.fn(() => true) };
+      const trigger = new DatabaseCloudRuntimeQuietTrigger({ service, readQuiet: f.read, policy });
+      expect(await trigger.consider(scope())).not.toBeNull();
+      expect(policy.accepts).toHaveBeenCalledOnce();
+    });
+  });
 
   it("stages a new immutable generation without provider lifecycle intents or changing the source", async () => {
     const transition = await offer();

@@ -1260,6 +1260,16 @@ describe("CloudTransport — image-helper readiness", () => {
     expect(response.status).toBe(200);
     expect(JSON.parse(response.body)).toMatchObject({ challenge, engineInstanceId: readiness.instanceId, presence: "absent" });
     const saved = readQuiet.getMockImplementation()!;
+    for (const override of [
+      { challenge: "66666666-6666-4666-8666-666666666666" },
+      { engineInstanceId: "66666666-6666-4666-8666-666666666666" },
+      { privateData: "must not escape" },
+    ]) {
+      readQuiet.mockImplementation(async nonce => ({ ...await saved(nonce), ...override }));
+      const rejected = await httpRequest(port, { path: "/internal/runtime-quiet", headers });
+      expect(rejected.status).toBe(503);
+      expect(rejected.body).toBe("unavailable");
+    }
     readQuiet.mockImplementation(async nonce => { const state = await saved(nonce); ready = false; return state; });
     expect((await httpRequest(port, { path: "/internal/runtime-quiet", headers })).status).toBe(503);
   });

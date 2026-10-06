@@ -193,7 +193,8 @@ never argv or environments. Keep the existing UID process scan conservative.
 Until the disposable acceptance runner measures a reconnect gap **at most 10
 seconds**, automatic activation also requires **no present client on any device**.
 Use IW2's presence signal: no visible window with input in the preceding 15
-minutes on a device that is neither locked nor suspended. Unknown/stale presence blocks activation. After measured qualification
+minutes on a device that is neither locked nor suspended. Unknown/stale presence
+blocks activation. After measured qualification
 establishes the 10-second bound for the applicable execution path and runtime
 pair, a present user may be merely quiet under the same 60-second rule. Bootstrap
 and engine-only measurements are separate; a fast engine swap does not qualify
@@ -486,3 +487,78 @@ organization and workspace. This slice changes no renderer selection or local
 engine path. Automatic triggers, LU's VM-side behavior, RU/IW2 command-queue
 handoff and the disposable Alpha acceptance runner are separate slices; they
 must be integrated and verified before enabling automatic transfers.
+
+
+## Implemented quiet observation and trigger (slice 3)
+
+`apps/desktop/src/engine/cloud-runtime-quiet-state.ts` exports
+`CloudRuntimeQuietState`, `CloudRuntimeQuietStateOptions`,
+`CloudRuntimeQuietScope` and `CloudRuntimeQuietSnapshot`.
+`snapshot(challenge: string): Promise<CloudRuntimeQuietSnapshot | null>` is
+read-only: it does not drain work, reserve a safe point, change admission or
+stop a process. LU's handoff code can consume the same typed snapshot.
+
+Each version-1 snapshot binds a fresh UUID challenge to organization, workspace,
+generation and engine instance. It contains the monotonic activity revision,
+quiet duration, durable-record synchronization state, idle-stop workload guard,
+live PTY guard, process-scan result and presence state. The reader samples guards
+before and after process inspection; changed activity marks the snapshot
+unstable, a changed identity rejects it, and unavailable process evidence is
+unknown. `CloudIdleStopScheduler.readActivity()` does not renew activity or
+consume an idle-stop attempt. Idle-stop still includes presence in its busy
+check; the update snapshot reports presence separately for policy selection.
+
+The hook is exposed at `GET /internal/runtime-quiet` on the engine's existing
+internal-readiness boundary: loopback peer and Host, exact readiness capability,
+no query string, and `x-zeros-quiet-challenge`. It rechecks engine readiness after
+the asynchronous read. Missing hooks, old engines, invalid challenges and
+unavailable readiness never imply quiet. Responses contain only the closed
+snapshot schema; errors return the existing fixed unavailable/not-found body.
+There is no client RPC for this observation. Local and organization-owned local
+engines never perform the inspection.
+
+`CloudUserPresence.snapshot(attached)` requires a fresh admitted report for each
+attached cloud client. An explicit negative report proves absence for its
+90-second lease; a missing, expired, replaced or revoked client report is
+unknown. Any present device blocks the default policy. No attached clients means
+absent. The renderer's existing presence rule is a visible window with input in
+the last 15 minutes, on a device that is neither locked nor suspended.
+
+The control-plane module
+`apps/control-plane/src/cloud-workspaces/runtime-quiet-trigger.ts` exports:
+
+- `CloudRuntimeQuietReader`: an injected, authenticated pinned-controller reader
+  accepting the exact source scope, a fresh challenge and an abort signal.
+- `readFreshCloudRuntimeQuietSnapshot`: validates the closed schema, exact scope
+  and challenge, and a two-second monotonic bound. It aborts hung reads and
+  suppresses raw reader errors. The adapter must additionally bound response
+  bytes and authenticate the pinned source; the challenge is not authentication.
+- `cloudRuntimeQuietAbsentPolicy`: the default policy, requiring 60 quiet
+  seconds, stable activity, ready record synchronization, absent presence and
+  all workload/PTY/process guards clear. Unknown evidence defers activation.
+- `DatabaseCloudRuntimeQuietTrigger.consider(input)`: an optional quiet offer
+  entry point that reuses RU's server workload query and the transfer service's
+  selection and single-transition lock. It cannot activate a runtime.
+- `DatabaseCloudRuntimeQuietTrigger.prepareActivation(claim)`: returns a
+  `CloudRuntimeActivationPolicy` for a staged, live worker claim. Its `authorize`
+  callback runs under the transfer service's existing lock, requires the exact
+  claim, obtains a new snapshot with the same activity revision, and checks
+  server work before and after that read. A refusal leaves the transition staged
+  and the source usable; it changes no command or queue pause state.
+
+LU-4's background staging continues to call `offer` independently of quietness;
+this module adds no scheduler, poll interval or startup wiring. LU-3 owns the
+resident-host safe-point/attach fence and must combine it with the final
+observation policy before activating. A read-only snapshot cannot close the
+last race between an observation and new VM work. The policy is injectable so
+qualified live handoff can change the presence/PTY gates without duplicating
+selection, enrollment or transition ownership. No gate is relaxed automatically:
+that still requires the appropriate runtime/controller qualification and
+measured reconnect gap (at most 2 seconds for the live-handoff path). Until then
+the default remains absent clients and 60 quiet seconds. Bootstrap qualification
+and measurement remain separate.
+
+This slice enables the hook and callable policy only. It does not enable
+production activation, supply the pinned-controller reader, implement LU's
+fence, or claim a measured gap or exactly-once queue handoff. Those remain the
+VM integration and later acceptance/queue slices.

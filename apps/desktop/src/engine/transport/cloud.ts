@@ -38,6 +38,7 @@ import {
   MAX_BRIDGE_FRAME_BYTES,
   safeParseClientBridgeMessage,
 } from "@zeros/protocol/schemas";
+import { CloudRuntimeQuietSnapshotSchema, type CloudRuntimeQuietSnapshot } from "@zeros/protocol/cloud-runtime-lifecycle";
 import type { EngineMessage } from "../types";
 import type { Transport, TransportClient } from "./types";
 import type {
@@ -1257,4 +1258,3 @@ export class CloudTransport implements Transport {
     );
   }
 }
-import { CloudRuntimeQuietSnapshotSchema, type CloudRuntimeQuietSnapshot } from "@zeros/protocol/cloud-runtime-lifecycle";
