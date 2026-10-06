@@ -166,6 +166,30 @@ describe("control-plane database scope decision", () => {
     expect(decideControlPlaneScope({ base: BASE, changedFiles: null }).database).toBe(true);
   });
 
+  it("runs every database suite for a main push even when only docs changed", () => {
+    expect(decideControlPlaneScope({
+      base: BASE,
+      changedFiles: ["README.md"],
+      eventName: "push",
+      ref: "refs/heads/main",
+    })).toEqual({ database: true, reason: "main pushes always run the database suites" });
+  });
+
+  it.each([
+    ["push", "refs/heads/release/1.2.3"],
+    ["pull_request", "refs/pull/123/merge"],
+    ["merge_group", "refs/heads/gh-readonly-queue/main/pr-123"],
+    ["pull_request", "refs/heads/main"],
+  ])("preserves input-based scope for %s on %s", (eventName, ref) => {
+    expect(decideControlPlaneScope({ base: BASE, changedFiles: ["README.md"], eventName, ref }).database).toBe(false);
+    expect(decideControlPlaneScope({ base: BASE, changedFiles: ["apps/control-plane/src/index.ts"], eventName, ref }).database).toBe(true);
+  });
+
+  it.each(["ci.yml", "preflight.yml"])("passes the event ref to the scope in %s", (file) => {
+    const workflow = readFileSync(path.join(ROOT, ".github/workflows", file), "utf8");
+    expect(workflow).toContain("GITHUB_REF: ${{ github.ref }}");
+  });
+
   it("skips the database suites when no input changed", () => {
     expect(
       decideControlPlaneScope({
@@ -268,10 +292,27 @@ describe("control-plane database scope diff", () => {
     const result = spawnSync(process.execPath, [SCOPE], {
       cwd,
       encoding: "utf8",
-      env: { ...process.env, EVENT_NAME: "push", PUSH_BEFORE_SHA: BASE, GITHUB_STEP_SUMMARY: "" },
+      env: { ...process.env, EVENT_NAME: "push", GITHUB_REF: "refs/heads/release/1.2.3", PUSH_BEFORE_SHA: BASE, GITHUB_STEP_SUMMARY: "" },
     });
     expect(result.status).toBe(0);
     expect(result.stdout).toBe("database=true\n");
     expect(result.stderr).toContain(`Could not diff against ${BASE}`);
+  });
+
+  it("does not let a docs-only main push skip database validation after an earlier service change", () => {
+    const { cwd } = repository();
+    writeFileSync(path.join(cwd, "apps/control-plane/src/deleted.ts"), "export const previousChange = 1;\n");
+    git(cwd, "commit", "--quiet", "-am", "earlier service change");
+    const before = git(cwd, "rev-parse", "HEAD");
+    writeFileSync(path.join(cwd, "README.md"), "later docs only\n");
+    git(cwd, "commit", "--quiet", "-am", "docs only");
+    const result = spawnSync(process.execPath, [SCOPE], {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", PUSH_BEFORE_SHA: before, GITHUB_STEP_SUMMARY: "" },
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("database=true\n");
+    expect(result.stderr.trim()).toBe("main pushes always run the database suites");
   });
 });
