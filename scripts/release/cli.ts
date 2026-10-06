@@ -9,6 +9,7 @@ import { assertCheckout, migrationManifest, workerInputsSha256 } from "./source"
 import { command, jsonClient } from "./io";
 import { WorkerReceipt, validateWorkerReceipt } from "./worker";
 import { reusableWorker } from "./worker-reuse";
+import { alphaFrontierIdentity } from "./alpha-frontier";
 import type { z } from "zod";
 
 export async function main() {
@@ -29,6 +30,23 @@ export async function main() {
     worker = await reusableWorker(config, identity);
   };
   const prepareWorker = async () => {
+    // The old Alpha API may be unready because of the bug this candidate repairs.
+    // Read its identity without making old readiness a prerequisite for deployment.
+    if (config.channel === "alpha") {
+      const identity = await alphaFrontierIdentity();
+      requireCheck(identity && (!identity.cloud.enabled || identity.worker), "Pre-worker Alpha API identity is unavailable or invalid");
+      if (workerPending && config.cloudRequired) {
+        requireCheck(identity.worker && identity.worker.provider === config.provider, "Pre-worker API must keep its existing cloud provider available");
+        worker = identity.worker;
+      } else if (!workerPending && config.requireQualifiedWorker) {
+        requireCheck(identity.cloud.enabled && identity.worker && identity.worker.provider === config.provider && identity.workerQualified === true,
+          "Cloud worker qualification or identity is unavailable");
+        requireCheck(await workerInputsSha256(identity.worker.sourceSha) === await workerInputsSha256(config.sourceSha),
+          "Worker inputs changed; complete cloud-worker-promotion before hosted promotion");
+        worker = identity.worker;
+      } else worker = undefined;
+      return;
+    }
     if (!workerPending) return reuseWorker();
     const identity = ReleaseIdentity.parse(await jsonClient()(`${config.api}/v1/release-identity`));
     requireCheck(identity.channel === config.channel, "Pre-worker API identity does not belong to this channel");
