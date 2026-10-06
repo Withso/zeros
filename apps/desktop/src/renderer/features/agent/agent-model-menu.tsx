@@ -737,7 +737,7 @@ export function AgentModelMenu({
           ) : (
             <div className="text-fg2 px-3 pb-3 text-xs">
               {registry?.some(agent => agent.runtimeUpgradeRequired)
-                ? "Update the cloud runtime to use agents"
+                ? "This workspace gets the new cloud runtime the next time it wakes"
                 : "No connected agents."}
             </div>
           )}

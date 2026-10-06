@@ -188,7 +188,7 @@ export async function cloudAgentGrant(
   if (!grant)
     throw new Error(
       candidates.some(row => row.runtimeUpgradeRequired)
-        ? "Update the cloud runtime to use agents"
+        ? "This workspace gets the new cloud runtime the next time it wakes"
         : "This workspace's agent runtime needs an update before this agent can run. Your account connection is saved.",
     );
   return grant.id;

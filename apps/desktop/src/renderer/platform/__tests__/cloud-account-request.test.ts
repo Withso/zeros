@@ -81,7 +81,7 @@ describe("cloud request account boundaries", () => {
       expiresAt: new Date(Date.now() + 60_000).toISOString(), runtimeQualified: false, runtimeUpgradeRequired: true,
     }] })));
     await expect(cloudAgentGrant({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333" }, "codex", "gpt-5.6-sol"))
-      .rejects.toThrow("Update the cloud runtime to use agents");
+      .rejects.toThrow("This workspace gets the new cloud runtime the next time it wakes");
   });
 
   it("captures the account before its first asynchronous boundary", async () => {

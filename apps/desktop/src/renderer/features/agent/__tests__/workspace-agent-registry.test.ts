@@ -45,7 +45,7 @@ describe("workspace agent registry", () => {
     mock.grants.mockResolvedValue([{ kind: "codex-chatgpt", models: ["gpt-5.6-sol"], runtimeQualified: false, runtimeUpgradeRequired: true }]);
     expect((await warmCloudAgentRegistry(a))[0]).toMatchObject({
       authenticated: false, cloudModels: [], runtimeUpgradeRequired: true,
-      runtimeUnavailableReason: "Update the cloud runtime to use agents",
+      runtimeUnavailableReason: "This workspace gets the new cloud runtime the next time it wakes",
     });
     clearCloudAgentRegistry();
     mock.grants.mockResolvedValue([

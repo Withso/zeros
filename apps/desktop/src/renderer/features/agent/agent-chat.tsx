@@ -5177,7 +5177,7 @@ export function AgentChat({
               {composerSuggestionPopup}
               {runtimeUpgradeRequired && (
                 <p className="text-fg2 mb-2 text-2xxs" role="status" data-cloud-agent-runtime-upgrade="">
-                  Update the cloud runtime to use agents
+                  This workspace gets the new cloud runtime the next time it wakes
                 </p>
               )}
               {cloudLimitations.length > 0 && (

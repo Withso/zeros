@@ -93,7 +93,7 @@ async function readCloudAgentRegistry(
       runtimeUpgradeRequired,
       cloudModels: [...new Set(qualified.flatMap(grant => grant.models))],
       ...(qualified.length === 0 && grants.length > 0
-        ? {runtimeUnavailableReason: runtimeUpgradeRequired ? "Update the cloud runtime to use agents" : agent.runtimeUnavailableReason ?? "This workspace's agent runtime needs an update. Your account connection is saved."} : {}),
+        ? {runtimeUnavailableReason: runtimeUpgradeRequired ? "This workspace gets the new cloud runtime the next time it wakes" : agent.runtimeUnavailableReason ?? "This workspace's agent runtime needs an update. Your account connection is saved."} : {}),
       authenticated: !agent.runtimeUnavailableReason && qualified.length > 0,
     };
   });

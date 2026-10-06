@@ -360,9 +360,10 @@ that an old engine can request optional customization.
 Discovery returns the stable boolean `runtimeUpgradeRequired` for a v4
 delegation that has basic runtime qualification but cannot run because its
 engine lacks this capability and its credential kind lacks MCP proof. The
-renderer excludes that grant's models, shows “Update the cloud runtime to use
-agents” and blocks Send and Enter while preserving the draft. A provider remains
-usable if another matching grant qualifies. Runtime update controls can use
+renderer excludes that grant's models, shows “This workspace gets the new cloud
+runtime the next time it wakes” and blocks Send and Enter while preserving the
+draft. A provider remains usable if another matching grant qualifies. Lifecycle
+surfaces can use
 `delegations.some(grant => grant.runtimeUpgradeRequired)` from the existing
 prepare/discovery response; no credential material is involved. Missing or
 retired engines do not inherit the previous engine's capability.
@@ -385,10 +386,12 @@ these flags and is not evidence of a real provider turn.
 
 Deploy migration 0131 and the control-plane reader before a runtime containing
 the version-3 client and its registration capability.
-Existing pinned runtimes retain their old required-customization behavior until
-an explicit runtime upgrade; merely restarting them does not install this fix.
-Previously built v3-capable engines without the registration field are also
-unproven and need an explicitly upgraded bundle. Existing rows are not backfilled.
+The lifecycle service owns automatic runtime selection on wake. Existing engines
+retain their old required-customization behavior until the next sleep/wake selects
+a qualified bundle with the new registration capability. The composer does not
+initiate an upgrade. Previously built v3-capable engines without the registration
+field are also unproven; only registration from the newly selected engine clears
+this requirement. Existing rows are not backfilled.
 No qualification rows need to be rewritten for basic turns. Enabling MCP or
 native features requires separate per-kind evidence and a new qualified runtime
 identity under the immutable registry contract; rerunning today's smoke worker

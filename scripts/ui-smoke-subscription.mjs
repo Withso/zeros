@@ -515,14 +515,14 @@ export async function runCloudAgentAccessSmoke({ page, check }) {
 
   await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-model-menu.html?runtimeUpgrade`);
   await page.getByRole("button", { name: /^Model:/ }).click();
-  await expect(page.getByText("Update the cloud runtime to use agents", { exact: true })).toBeVisible();
+  await expect(page.getByText("This workspace gets the new cloud runtime the next time it wakes", { exact: true })).toBeVisible();
   await expect(page.getByText("No connected agents.", { exact: true })).toHaveCount(0);
 
   await page.evaluate(() => sessionStorage.removeItem("fixture:app-sidebar"));
   await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-app-sidebar.html?conversation&runtimeUpgrade`);
   await page.locator('[data-workspace-id="ws-atlanta"]').getByRole("button", { name: /^Open workspace atlanta/ }).click();
   const notice = page.locator("[data-cloud-agent-runtime-upgrade]");
-  await expect(notice).toHaveText("Update the cloud runtime to use agents");
+  await expect(notice).toHaveText("This workspace gets the new cloud runtime the next time it wakes");
   const composer = page.locator(".zeros-agent-surface .composer-pm").first();
   await composer.fill("Keep this draft until the runtime is updated");
   await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeDisabled();
@@ -532,13 +532,13 @@ export async function runCloudAgentAccessSmoke({ page, check }) {
   await page.evaluate(() => window.appSidebarUpgradeRuntime());
   await expect(notice).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeEnabled();
-  check("Old cloud runtimes explain the required upgrade, block Enter and Send, and preserve the draft through upgrade", true);
+  check("Old cloud runtimes explain availability after the next wake, block Enter and Send, and preserve the draft", true);
 
   await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-model-menu.html`);
   await page.getByRole("button", { name: /^Model:/ }).click();
   await page.getByPlaceholder("Search models…").fill("Opus");
   await expect(page.getByRole("option").first()).toBeVisible();
-  await expect(page.getByText("Update the cloud runtime to use agents", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("This workspace gets the new cloud runtime the next time it wakes", { exact: true })).toHaveCount(0);
   await page.evaluate(() => sessionStorage.removeItem("fixture:app-sidebar"));
   await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-app-sidebar.html?conversation`);
   await page.locator('[data-workspace-id="ws-atlanta"]').getByRole("button", { name: /^Open workspace atlanta/ }).click();
