@@ -45,6 +45,12 @@ eligible. A dependent failure with no identifiable producer remains unknown.
 Successful jobs from earlier attempts are retained when reducing a failed-job
 rerun.
 
+Recovery recognizes the precise historical Vitest and database job names when
+classifying a failure. Resolving a Vitest or database incident requires all four
+current Vitest legs or all eight current database legs respectively, each
+present exactly once and successful. A smaller historical matrix, duplicate
+job or missing final shard cannot count as current coverage.
+
 ## Owner setup
 
 1. Create a dedicated GitHub App for incident automation. Grant **Contents:
