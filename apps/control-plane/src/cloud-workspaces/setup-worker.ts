@@ -4,6 +4,7 @@ import type pg from "pg";
 
 import { audit } from "../audit.js";
 import { withSystemTx, type Tx } from "../db.js";
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
 import { parseCloudWorkspaceSetupHookLog, type CloudWorkspaceSetupHookLog } from "./setup-log.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { cloudRuntimePin, cloudRuntimePinValues, requirePinnedCloudRuntime, CloudRuntimeError, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
@@ -311,9 +312,7 @@ export class CloudWorkspaceSetupWorker {
   private readonly workosEnabled: boolean;
   private readonly recoveryConfig: CloudWorkspaceBackendConfig | null;
   private readonly activeControllers = new Set<AbortController>();
-  private timer: NodeJS.Timeout | null = null;
-  private activeTick: Promise<void> | null = null;
-  private started = false;
+  private readonly scheduler: CloudWorkerScheduler;
   private stopped = false;
   private ticking = false;
 
@@ -346,38 +345,22 @@ export class CloudWorkspaceSetupWorker {
     if (this.workerId.length < 1 || this.workerId.length > 255) {
       throw new Error("workerId must contain between 1 and 255 characters");
     }
+    this.scheduler = new CloudWorkerScheduler(this.intervalMs, () => this.tick(), () => {
+      this.logger.error("[cloud-workspace] setup tick failed; will retry");
+    });
   }
 
   start(): () => Promise<void> {
-    if (this.started || this.stopped) return () => this.stop();
-    this.started = true;
-    const run = () => {
-      if (this.stopped) return;
-      const task = this.tick().catch((error) => {
-        this.logger.error(
-          `[cloud-workspace] setup tick failed: ${
-            error instanceof Error ? error.name : "unknown"
-          }`,
-        );
-      });
-      this.activeTick = task;
-      void task.finally(() => {
-        if (this.activeTick === task) this.activeTick = null;
-        if (this.stopped) return;
-        this.timer = setTimeout(run, this.intervalMs);
-        this.timer.unref();
-      });
-    };
-    run();
+    this.scheduler.start();
     return () => this.stop();
   }
 
+  notify(): void { this.scheduler.notify(); }
+
   async stop(): Promise<void> {
     this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
     for (const controller of this.activeControllers) controller.abort();
-    await this.activeTick;
+    await this.scheduler.stop();
   }
 
   private async tick(): Promise<void> {

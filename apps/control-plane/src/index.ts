@@ -23,6 +23,7 @@ import { createRuntimeQualificationWorker } from "./cloud-workspaces/runtime-qua
 import { BoatApiClient } from "./cloud-workspaces/boat-client.js";
 import { DatabaseBuilderVmOperationStore } from "./cloud-workspaces/cloud-builder-vm-store.js";
 import { CloudComputerTemplateRetentionWorker } from "./cloud-workspaces/computer-template-retention.js";
+import { startCloudWorkerNotifications } from "./cloud-workspaces/worker-notifications.js";
 import { DatabaseCloudWorkspaceActionService } from "./cloud-workspaces/action-receipts.js";
 import { loadConfig } from "./config.js";
 import { createPool, createMigrationPool, withSystemTx } from "./db.js";
@@ -122,6 +123,7 @@ if (workosSync) {
   );
 }
 let stopCloudReconciler = async () => {};
+let stopCloudWorkerNotifications = async () => {};
 let stopCloudProAllowances = async () => {};
 let stopCloudSetupWorker = async () => {};
 let stopCloudComputerBuildWorker = async () => {};
@@ -563,7 +565,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       console.log("[control-plane] cloud workspace background workers paused");
       return;
     }
-    stopCloudReconciler = startCloudWorkspaceReconciler({
+    const lifecycle = startCloudWorkspaceReconciler({
       pool,
       provider,
       providerResolver,
@@ -572,7 +574,8 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       workosEnabled: config.auth.provider === "workos",
       intervalMs: cloud.reconcileIntervalMs,
       leaseMs: Math.max(10 * 60_000, cloud.operationTimeoutSeconds * 2_000),
-    }).stop;
+    });
+    stopCloudReconciler = lifecycle.stop;
     if(cloud.computePolicy)stopCloudProAllowances=new DatabaseProMonthlyAllowance(pool,cloud.computePolicy).start();
     stopCloudAccessRevocationWorker = accessRevocationWorker.start();
     stopCloudCheckpointRequestWorker = checkpointRequestWorker.start();
@@ -587,6 +590,19 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     if (invitationWorker) stopCloudInvitationWorker=invitationWorker.start();
 
     if (setupWorker) { stopCloudSetupWorker = setupWorker.start(); stopCloudComputerBuildWorker = createCloudComputerBuildWorker(pool, cloud).start(); }
+    // Reserve a separate session even without DATABASE_LISTEN_URL: long-held
+    // listeners must not consume request/worker transaction pool capacity.
+    const workerListenerPool = createPool(config.databaseListenUrl ?? config.databaseUrl, {
+      maxConnections: 1, applicationName: "zeros-cloud-worker-listener",
+    });
+    const stopNotifications = startCloudWorkerNotifications(workerListenerPool, {
+      lifecycle: () => lifecycle.reconciler.notify(),
+      setup: () => setupWorker?.notify(),
+    });
+    stopCloudWorkerNotifications = async () => {
+      try { await stopNotifications(); }
+      finally { await workerListenerPool.end(); }
+    };
     if (runtimeQualificationWorker) stopCloudRuntimeQualificationWorker = runtimeQualificationWorker.start();
     if (computerTemplateWorker) stopCloudComputerTemplateWorker = computerTemplateWorker.start();
     if (
@@ -702,6 +718,7 @@ function shutdown(signal: string): void {
   cloudRuntimeServiceRelay?.close();
   console.log(`[control-plane] ${signal}; draining`);
   const backgroundStopped = Promise.allSettled([
+    stopCloudWorkerNotifications(),
     cloudGithubReads?.close(),
     githubWriteCleanupPending,
     stopCloudSetupWorker(),

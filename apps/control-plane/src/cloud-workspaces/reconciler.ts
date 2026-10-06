@@ -19,6 +19,7 @@ import {
 } from "./provider.js";
 import type { CloudWorkspaceProviderResolver } from "./provider-resolver.js";
 import { isValidCloudWorkspaceWorkerId } from "./worker-identity.js";
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
 import {
   advanceCloudWorkspaceGenerationTransitionAfterDrain,
   failCloudWorkspaceGenerationRollback,
@@ -262,9 +263,7 @@ export class CloudWorkspaceReconciler {
   private readonly computeLeases: CloudWorkspaceComputeLeaseCoordinator;
   private readonly runtimeUpgradeConfig: CloudWorkspaceBackendConfig | null;
   private readonly workosEnabled: boolean;
-  private timer: NodeJS.Timeout | null = null;
-  private activeTick: Promise<void> | null = null;
-  private started = false;
+  private readonly scheduler: CloudWorkerScheduler;
   private stopped = false;
   private ticking = false;
   private tickCount = 0;
@@ -315,46 +314,30 @@ export class CloudWorkspaceReconciler {
       throw new Error("Cloud workspace reconciler worker identity is invalid");
     }
     this.logger = options.logger ?? console;
+    this.scheduler = new CloudWorkerScheduler(this.intervalMs, periodic => this.tick(periodic), () => {
+      this.logger.error("[cloud-workspace] reconcile tick failed; will retry");
+    });
   }
 
   start(): () => Promise<void> {
-    if (this.started || this.stopped) return () => this.stop();
-    this.started = true;
-    const run = () => {
-      if (this.stopped) return;
-      const task = this.tick().catch((error) => {
-        this.logger.error(
-          `[cloud-workspace] reconcile tick failed: ${
-            error instanceof Error ? error.name : "unknown"
-          }`,
-        );
-      });
-      this.activeTick = task;
-      void task.finally(() => {
-        if (this.activeTick === task) this.activeTick = null;
-        if (this.stopped) return;
-        this.timer = setTimeout(run, this.intervalMs);
-        this.timer.unref();
-      });
-    };
-    run();
+    this.scheduler.start();
     return () => this.stop();
   }
 
+  notify(): void { this.scheduler.notify(); }
+
   async stop(): Promise<void> {
     this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
-    await this.activeTick;
+    await this.scheduler.stop();
   }
 
-  private async tick(): Promise<void> {
+  private async tick(periodic = true): Promise<void> {
     if (this.ticking || this.stopped) return;
     this.ticking = true;
     try {
       let authorityProcessed = 0;
       while (
-        !this.stopped &&
+        periodic && !this.stopped &&
         authorityProcessed < 20 &&
         (await this.paidAuthority.runOnce()) !== null
       ) {
@@ -362,17 +345,17 @@ export class CloudWorkspaceReconciler {
       }
       let processed = 0;
       let unavailableEngines = 0;
-      while (!this.stopped && unavailableEngines < 20 && await stopUnavailableCloudEngine(this.pool, this.providerResolver ? null : this.provider.name)) {
+      while (periodic && !this.stopped && unavailableEngines < 20 && await stopUnavailableCloudEngine(this.pool, this.providerResolver ? null : this.provider.name)) {
         unavailableEngines += 1;
       }
       let computeProcessed = 0;
-      while (!this.stopped && computeProcessed < 20 && await this.computeLeases.runOnce()) computeProcessed += 1;
+      while (periodic && !this.stopped && computeProcessed < 20 && await this.computeLeases.runOnce()) computeProcessed += 1;
       while (!this.stopped && processed < 20 && (await this.runOnce())) {
         processed += 1;
       }
-      if (!this.stopped && processed === 0) await this.reconcileDriftOnce();
-      this.tickCount += 1;
-      if (!this.stopped && this.tickCount % 12 === 0) {
+      if (periodic && !this.stopped && processed === 0) await this.reconcileDriftOnce();
+      if (periodic) this.tickCount += 1;
+      if (periodic && !this.stopped && this.tickCount % 12 === 0) {
         await this.reconcileOrphansOnce();
       }
     } finally {

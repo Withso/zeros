@@ -710,6 +710,69 @@ d("cloud workspace reconciliation", () => {
       ...options,
     });
 
+  it("publishes payload-free work hints only after commit, without accelerating future retries", async () => {
+    const listener = await pool.connect();
+    const notices: string[] = [];
+    const onNotice = (notice: pg.Notification) => {
+      if (notice.channel !== "zeros_perf_test_barrier") {
+        expect(notice.payload).toBe("");
+        notices.push(notice.channel);
+      }
+    };
+    listener.on("notification", onNotice);
+    await listener.query("LISTEN zeros_cloud_lifecycle_work; LISTEN zeros_cloud_setup_work; LISTEN zeros_perf_test_barrier");
+    const barrier = async () => {
+      const arrived = new Promise<void>(resolve => {
+        const onBarrier = (notice: pg.Notification) => {
+          if (notice.channel === "zeros_perf_test_barrier") {
+            listener.removeListener("notification", onBarrier);
+            resolve();
+          }
+        };
+        listener.on("notification", onBarrier);
+      });
+      await pool.query("SELECT pg_notify('zeros_perf_test_barrier', '')");
+      await arrived;
+    };
+    try {
+      const seeded = await seedWorkspace();
+      await barrier();
+      expect(notices.splice(0)).toEqual(["zeros_cloud_lifecycle_work"]);
+      const writer = await pool.connect();
+      try {
+        await writer.query("BEGIN");
+        await writer.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now() WHERE id=$1", [seeded.intentId]);
+        await barrier();
+        expect(notices).toEqual([]);
+        await writer.query("ROLLBACK");
+        await barrier();
+        expect(notices).toEqual([]);
+      } finally { await writer.query("ROLLBACK"); writer.release(); }
+      await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now()+interval '1 hour' WHERE id=$1", [seeded.intentId]);
+      await barrier();
+      expect(notices).toEqual([]);
+      await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now() WHERE id=$1", [seeded.intentId]);
+      await barrier();
+      expect(notices.splice(0)).toEqual(["zeros_cloud_lifecycle_work"]);
+      await pool.query("UPDATE cloud_workspace_provider_bindings SET observed_state='running',provider_resource_id='test-provider' WHERE workspace_id=$1", [seeded.workspaceId]);
+      await barrier();
+      expect(notices.splice(0)).toEqual(["zeros_cloud_setup_work"]);
+      await pool.query("UPDATE cloud_workspaces SET status='setting_up' WHERE id=$1", [seeded.workspaceId]);
+      await barrier();
+      expect(notices.splice(0)).toEqual(["zeros_cloud_setup_work"]);
+      await pool.query(`INSERT INTO cloud_workspace_setup_runs (workspace_id,generation,org_id,attempt)
+        VALUES ($1,1,$2,1)`, [seeded.workspaceId, orgId]);
+      await barrier();
+      expect(notices.splice(0)).toEqual(["zeros_cloud_setup_work"]);
+      await pool.query("UPDATE cloud_workspace_setup_runs SET next_attempt_at=now()+interval '1 hour' WHERE workspace_id=$1", [seeded.workspaceId]);
+      await barrier();
+      expect(notices).toEqual([]);
+    } finally {
+      listener.removeListener("notification", onNotice);
+      listener.release(true);
+    }
+  });
+
   it.each(["identity", "entitlement", "provider"])("stops a checkpoint-gated delete after %s authority is revoked without discarding data", async (revoked) => {
     const seeded = await seedWorkspace({desiredState:"running",status:"ready",operation:"delete",providerResourceId:"bound-resource",observedState:"running"});
     await withSystemTx(pool,async tx=>{
