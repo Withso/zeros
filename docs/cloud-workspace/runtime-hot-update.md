@@ -192,8 +192,8 @@ never argv or environments. Keep the existing UID process scan conservative.
 
 Until the disposable acceptance runner measures a reconnect gap **at most 10
 seconds**, automatic activation also requires **no present client on any device**.
-Use IW2's presence signal: no window focused with input in the preceding 15
-minutes. Unknown/stale presence blocks activation. After measured qualification
+Use IW2's presence signal: no visible window with input in the preceding 15
+minutes on a device that is neither locked nor suspended. Unknown/stale presence blocks activation. After measured qualification
 establishes the 10-second bound for the applicable execution path and runtime
 pair, a present user may be merely quiet under the same 60-second rule. Bootstrap
 and engine-only measurements are separate; a fast engine swap does not qualify

@@ -3,6 +3,7 @@ import { githubWritePublication } from "./git/github-write-publication";
 import { configureNativeGithubDesktop, acceptNativeGithubDesktop } from "./git/github-native-desktop";
 import { readCloudAgentRuntimeAttestation } from "./cloud-runtime-attestation";
 import { CloudIdleStopScheduler, CloudUserPresence, hasCloudUserProcesses, isCloudIdleMaintenance } from "./cloud-idle-stop";
+import { CloudRuntimeQuietState } from "./cloud-runtime-quiet-state";
 import { conversationModePort } from "./design/conversation-mode";
 import { startCloudDesignCapture } from "./design/capture-cloud";
 import { setDesignCaptureConfig } from "./design/capture-client";
@@ -1105,6 +1106,18 @@ export class ZerosEngine {
     })),
     failed: () => console.warn("[Zeros cloud idle] stop attempt failed"),
   });
+  private readonly cloudRuntimeQuietState = new CloudRuntimeQuietState({
+    cloud: () => this.cloudWorker !== null,
+    scope: () => this.cloudRuntimeConfig && this.cloudRuntimeRegistration?.readiness() ? {
+      workspaceId: this.cloudRuntimeConfig.execution.workspaceId, organizationId: this.cloudRuntimeConfig.execution.organizationId,
+      generation: this.cloudRuntimeConfig.execution.generation, engineInstanceId: this.cloudRuntimeConfig.engine.instanceId,
+    } : null,
+    activity: () => this.cloudIdleStop.readActivity(),
+    busy: () => this.cloudRuntimeCheckpointQuiescing || this.cloudIdleBusy(false),
+    livePty: () => this.pty.list().length > 0 || this.terminals.visibleTo({ isRemote: false, restricted: new Set() }).some(terminal => !terminal.exited),
+    presence: () => this.cloudUserPresence.snapshot(this.router.clientsOfKind("cloud")),
+    inspectUserProcesses: () => this.cloudIdleUserProcesses(),
+  });
   /** Includes requests waiting on recognition/Git before their first write.
    * Kept separate from territory starts so a registry mutation cannot drain
    * its own outer request while establishing its new boundary. */
@@ -1946,6 +1959,7 @@ export class ZerosEngine {
               internalReadiness: {
                 token: this.cloudRuntimeConfig.engine.readinessProbeToken,
                 read: () => this.cloudRuntimeRegistration!.readiness(),
+                readQuiet: (challenge: string) => this.cloudRuntimeQuietState.snapshot(challenge),
               },
               verifyToken: (token: string) =>
                 this.cloudRuntimeRegistration!.verifyClientAdmission(token),
@@ -3253,7 +3267,7 @@ export class ZerosEngine {
       });
   }
 
-  private cloudIdleBusy(): boolean {
+  private cloudIdleBusy(includePresence = true): boolean {
     // Observe traffic even while another busy guard holds; a byte sampled
     // after a long turn must not be mistaken for freshly received traffic.
     const humanServices = this.cloudHumanServices?.hasActiveWork() === true;
@@ -3265,7 +3279,7 @@ export class ZerosEngine {
       this.setup.hasRepositoryCodeAuthority() || this.runs.hasRepositoryCodeAuthority() ||
       this.cloudCommands?.hasActiveWork() === true || this.cloudGoals.active() || this.activeAgentExecutionCount() > 0 ||
       this.pty.hasRecentInput() ||
-      humanServices || this.cloudUserPresence.active();
+      humanServices || (includePresence && this.cloudUserPresence.active());
   }
 
   private cloudIdleUserProcesses(): Promise<boolean> {

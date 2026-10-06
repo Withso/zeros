@@ -3,6 +3,19 @@ import { CloudIdleStopScheduler, hasCloudUserProcesses, isCloudIdleMaintenance }
 import type { CloudDurabilityAuthority } from "../cloud-durability-runtime";
 const authority = {} as CloudDurabilityAuthority;
 describe("cloud idle stop", () => {
+  it("exposes a read-only activity revision and record-sync state", () => {
+    let now = 0, busy = false;
+    const stop = vi.fn(async () => true);
+    const scheduler = new CloudIdleStopScheduler({ now: () => now, busy: () => busy, stop });
+    now = 60_000;
+    expect(scheduler.readActivity()).toEqual({ revision: 0, quietForMs: 60_000, recordSync: "ready" });
+    expect(scheduler.readActivity()).toEqual({ revision: 0, quietForMs: 60_000, recordSync: "ready" });
+    scheduler.recordSync("pending"); scheduler.activity();
+    expect(scheduler.readActivity()).toEqual({ revision: 1, quietForMs: 0, recordSync: "pending" });
+    busy = true; scheduler.consider(authority); now += 60_000;
+    expect(scheduler.readActivity()).toMatchObject({ revision: 2, quietForMs: 0 });
+    expect(stop).not.toHaveBeenCalled();
+  });
   it("ignores attested restartable language-server trees during observation, retaining unrelated work", async () => {
     const root = "State:\tS (sleeping)\nUid:\t10003\t10003\t10003\t10003\nPPid:\t1\n";
     const server = "State:\tS (sleeping)\nUid:\t10001\t10001\t10001\t10001\nPPid:\t12\n";

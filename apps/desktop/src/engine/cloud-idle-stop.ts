@@ -12,6 +12,7 @@ const PRESENCE_LEASE_MS = 90_000;
  * only an already connected, authorized cloud actor can renew this lease. */
 export class CloudUserPresence {
   private readonly clients = new Map<string, { client: TransportClient; at: number }>();
+  private readonly reports = new Map<string, { client: TransportClient; at: number; present: boolean }>();
   private readonly devices = new Map<string, number>();
   private readonly now: () => number;
   constructor(private readonly options: { now?: () => number; activity(): void }) {
@@ -21,17 +22,36 @@ export class CloudUserPresence {
     const parsed = CloudWorkspacePresenceSchema.safeParse(value);
     if (!parsed.success || client.kind !== "cloud" || !client.accountUserId || !client.cloudActor || client.authorized?.() !== true) return false;
     this.active();
-    if (!parsed.data.present) { this.release(client); return true; }
     const now = this.now(), key = `${client.accountUserId}:${client.cloudActor.deviceId}`;
+    for (const [id, row] of this.reports) if (now - row.at >= PRESENCE_LEASE_MS) this.reports.delete(id);
+    if (!parsed.data.present) {
+      this.release(client);
+      if (this.reports.size < 256) this.reports.set(client.id, { client, at: now, present: false });
+      return true;
+    }
     for (const [device, at] of this.devices) if (now - at >= PRESENCE_LEASE_MS) this.devices.delete(device);
     if ((!this.devices.has(key) && this.devices.size >= 256) || (!this.clients.has(client.id) && this.clients.size >= 256)) return false;
     const previous = this.devices.get(key);
     const at = previous !== undefined && now - previous < PRESENCE_INTERVAL_MS ? previous : now;
     this.clients.set(client.id, { client, at });
+    if (this.reports.has(client.id) || this.reports.size < 256) this.reports.set(client.id, { client, at, present: true });
     if (at !== previous) { this.devices.set(key, at); this.options.activity(); }
     return true;
   }
-  release(client: TransportClient): void { this.clients.delete(client.id); }
+  release(client: TransportClient): void { this.clients.delete(client.id); this.reports.delete(client.id); }
+  /** Unlike idle-stop's active(), automatic updates require a fresh report
+   * from every attached device. Missing/expired reports are not absence. */
+  snapshot(attached: readonly TransportClient[]): "present" | "absent" | "unknown" {
+    const now = this.now();
+    let unknown = false;
+    for (const client of attached) {
+      const row = this.reports.get(client.id);
+      if (client.kind !== "cloud" || !client.accountUserId || !client.cloudActor || client.authorized?.() !== true ||
+          !row || row.client !== client || now - row.at >= PRESENCE_LEASE_MS) { unknown = true; continue; }
+      if (row.present) return "present";
+    }
+    return unknown ? "unknown" : "absent";
+  }
   active(): boolean {
     const now = this.now();
     for (const [id, row] of this.clients) {
@@ -82,6 +102,11 @@ export class CloudIdleStopScheduler {
   }
   activity(): void { this.lastActivity = this.now(); this.revision++; this.attempts = 0; this.nextAttempt = 0; }
   recordSync(state: "ready" | "pending" | "failed"): void { this.syncState = state; }
+  /** A read cannot renew activity, consume an idle attempt or stop the VM. */
+  readActivity(): { revision: number; quietForMs: number; recordSync: "ready" | "pending" | "failed" } {
+    return { revision: this.revision, quietForMs: this.closed || this.wasBusy ? 0 : Math.max(0, Math.floor(this.now() - this.lastActivity)),
+      recordSync: this.syncState };
+  }
   /** Start independently of record synchronization, which can hang or fail.
    * The stop callback must revalidate live engine authority before admission. */
   observe(authority: CloudDurabilityAuthority): void {

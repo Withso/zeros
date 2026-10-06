@@ -71,4 +71,23 @@ describe("admitted cloud user presence", () => {
     await Promise.resolve(); presence.update(client("returning"), { present: true }); finish();
     await scheduler.settled(); expect(commit).not.toHaveBeenCalled();
   });
+  it("distinguishes absent presence from missing or expired reports without changing idle behavior", () => {
+    let now=0;
+    const activity=vi.fn(),presence=new CloudUserPresence({now:()=>now,activity});
+    const first=client("first"),second=client("second");
+    expect(presence.snapshot([])).toBe("absent");
+    expect(presence.snapshot([first])).toBe("unknown");
+    presence.update(first,{present:false});
+    expect(presence.snapshot([first])).toBe("absent");
+    expect(activity).not.toHaveBeenCalled();
+    presence.update(second,{present:true});
+    expect(presence.snapshot([first,second])).toBe("present");
+    now=90_000;
+    expect(presence.snapshot([first,second])).toBe("unknown");
+    expect(presence.active()).toBe(false);
+    presence.update(first,{present:false});
+    presence.release(second);
+    expect(presence.snapshot([first])).toBe("absent");
+  });
+
 });

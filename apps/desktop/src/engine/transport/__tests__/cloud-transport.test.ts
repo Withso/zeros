@@ -24,6 +24,7 @@ import { CloudTransport, parseCloudTransportPort } from "../cloud";
 import type { EngineMessage } from "../../types";
 import type { TransportClient } from "../types";
 import type { CloudRuntimeClientAdmission } from "../../cloud-runtime-registration";
+import type { CloudRuntimeQuietSnapshot } from "@zeros/protocol/cloud-runtime-lifecycle";
 
 const TOKEN = "worker-minted-conn-token";
 const ACCOUNT_USER_ID = "11111111-1111-4111-8111-111111111111";
@@ -57,6 +58,7 @@ async function startTransport(
     maxTotalBufferedBytes?: number;
     internalReadiness?: {
       token: string;
+      readQuiet?: (challenge: string) => Promise<CloudRuntimeQuietSnapshot | null>;
       read: () => {
         version: 1;
         instanceId: string;
@@ -1234,6 +1236,39 @@ describe("CloudTransport — /health is ungated", () => {
 });
 
 describe("CloudTransport — image-helper readiness", () => {
+  it("authenticates quiet snapshots, echoes the challenge, and rechecks readiness after the read", async () => {
+    const probeToken = `zwr_${"R".repeat(43)}`;
+    const challenge = "55555555-5555-4555-8555-555555555555";
+    const readiness = { version: 1 as const, instanceId: "44444444-4444-4444-8444-444444444444",
+      protocolVersion: PROTOCOL_VERSION, health: "ready" as const, durableRecordConnected: true as const };
+    let ready = true;
+    const readQuiet = vi.fn(async (nonce: string): Promise<CloudRuntimeQuietSnapshot> => ({
+      version: 1, challenge: nonce, workspaceId: ACCOUNT_USER_ID, organizationId: ACCOUNT_USER_ID,
+      generation: 1, engineInstanceId: readiness.instanceId, activityRevision: 1, quietForMs: 60_000,
+      stable: true, recordSync: "ready", workloadBusy: false, livePty: false, userProcesses: "idle", presence: "absent",
+    }));
+    const { port } = await startTransport({ token: TOKEN,
+      internalReadiness: { token: probeToken, read: () => ready ? readiness : null, readQuiet } });
+    const headers = { "x-zeros-readiness-token": probeToken, "x-zeros-quiet-challenge": challenge };
+    for (const request of [
+      { headers: {} }, { headers: { ...headers, "x-zeros-readiness-token": TOKEN } },
+      { headers: { ...headers, "x-zeros-quiet-challenge": "invalid" } },
+      { headers, host: "provider.example.test" },
+    ]) expect((await httpRequest(port, { path: "/internal/runtime-quiet", ...request })).status).toBe(404);
+    expect(readQuiet).not.toHaveBeenCalled();
+    const response = await httpRequest(port, { path: "/internal/runtime-quiet", headers });
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toMatchObject({ challenge, engineInstanceId: readiness.instanceId, presence: "absent" });
+    const saved = readQuiet.getMockImplementation()!;
+    readQuiet.mockImplementation(async nonce => { const state = await saved(nonce); ready = false; return state; });
+    expect((await httpRequest(port, { path: "/internal/runtime-quiet", headers })).status).toBe(503);
+  });
+
+  it("does not expose a quiet hook on a transport without runtime registration", async () => {
+    const { port } = await startTransport();
+    expect((await httpRequest(port, { path: "/internal/runtime-quiet" })).status).toBe(404);
+  });
+
   it("serves durable readiness only to a loopback request with the exact probe capability", async () => {
     const readiness = {
       version: 1 as const,
