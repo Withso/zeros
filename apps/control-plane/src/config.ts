@@ -350,6 +350,7 @@ export type Config = {
   cloudRuntimePublication?: CloudRuntimePublicationConfig;
   /** Metadata for release identity; workspace selection is owned separately. */
   cloudWorkspaceNewRuntimeProfile?: "legacy" | "v4";
+  cloudWorkspaceResumeExistingEnabled?: boolean;
 };
 
 export type CloudRuntimePublicationConfig = RuntimeOidcConfig & RuntimeArtifactStoreConfig & {
@@ -1744,6 +1745,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
   const e = parsed.data;
   const channel = (env.RAILWAY_ENVIRONMENT_NAME ?? "development").trim().toLowerCase();
   const deploymentChannel = channel === "alpha" || channel === "beta" || channel === "production" ? channel : "development";
+  const resumeFlag = env.CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED ?? "false";
+  if (!["true", "false"].includes(resumeFlag)) throw new Error("Invalid cloud workspace resume configuration");
+  if (resumeFlag === "true" && deploymentChannel !== "alpha") throw new Error("Cloud workspace resume is available only on Alpha");
   const runtime = loadCloudRuntimePublicationConfig(env, deploymentChannel);
   validateDatabaseConnections(e);
   const migrationRole = validateMigrationRole(e.DATABASE_MIGRATION_ROLE);
@@ -1818,5 +1822,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     selectedCloudWorker: loadSelectedCloudWorker(env),
     cloudRuntimePublication: runtime.publication,
     cloudWorkspaceNewRuntimeProfile: runtime.newWorkspaceProfile,
+    cloudWorkspaceResumeExistingEnabled: resumeFlag === "true",
   };
 }

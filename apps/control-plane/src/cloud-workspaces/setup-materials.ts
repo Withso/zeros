@@ -1,4 +1,5 @@
 import type { CloudWorkspaceCheckoutSource } from "./computer-v2-contract.js";
+import { readCloudWorkspaceResumePlan, type CloudWorkspaceResumePlan } from "./setup-resume.js";
 import {
   createCipheriv,
   createDecipheriv,
@@ -104,6 +105,8 @@ export type CloudWorkspaceAccountAuth = {
 
 export type CloudWorkspaceSetupMaterialServiceOptions = {
   pool: pg.Pool;
+  /** Supplied only by the Alpha configuration gate; staff is checked in SQL. */
+  resumeExistingEnabled?: boolean;
   setupAudience: string;
   engineRegistrationAudience: string;
   engineHeartbeatAudience: string;
@@ -127,6 +130,8 @@ export type CloudWorkspaceSetupMaterialServiceOptions = {
 };
 
 export type CloudWorkspaceSetupRedemptionInput = {
+  /** Internal HTTP capability negotiation, absent from legacy request bodies. */
+  resumeExistingVersion?: 1;
   runtime?: CloudRuntimeWitness | undefined;
   /** Omitted by legacy images. Version 2 requires measured resource admission. */
   materialVersion?: 2 | undefined;
@@ -186,6 +191,7 @@ type ParsedSettings = {
 };
 
 type RedemptionContract = {
+  resume: CloudWorkspaceResumePlan | undefined;
   runtime: CloudRuntimePin | null;
   computer: { source: CloudComputerWorkspaceSource; repositoryId: string; requestedRevision: string; checkoutSource: CloudWorkspaceCheckoutSource | null } | null;
   accountUserId: string;
@@ -725,6 +731,7 @@ async function cleanupEngineStart(
 }
 
 export class DatabaseCloudWorkspaceSetupMaterialService {
+  private readonly resumeExistingEnabled: boolean;
   private readonly pool: pg.Pool;
   private readonly setupAudience: string;
   private readonly engineRegistrationAudience: string;
@@ -741,6 +748,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
   private readonly now: () => number;
 
   constructor(options: CloudWorkspaceSetupMaterialServiceOptions) {
+    this.resumeExistingEnabled = options.resumeExistingEnabled === true;
     this.pool = options.pool;
     this.setupAudience = normalizeCloudWorkspaceGrantAudience(
       options.setupAudience,
@@ -1075,6 +1083,11 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         issuedBy: null,
         workosEnabled: this.accountIdentityProvider === "workos",
       });
+      // Read the completed enrollment before inserting its fresh replacement.
+      // No runtime selection/transition decision is made by this hint.
+      const resume = this.resumeExistingEnabled && input.resumeExistingVersion === 1 && pin
+        ? await readCloudWorkspaceResumePlan(tx, { ...input, accountUserId }, { computer, computerEnvironment })
+        : undefined;
       await tx.query(
         `UPDATE cloud_workspace_engine_instances
          SET state = 'superseded', revoked_at = coalesce(revoked_at, now()),
@@ -1123,6 +1136,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       );
       return {
         runtime: pin,
+        resume,
         computer,
         accountUserId,
         ownerSubject: row.owner_subject,
@@ -1335,6 +1349,13 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         if (contract.runtime && !await loadPinnedCloudRuntime(tx, contract.runtime, cloudRuntimeQualificationMode())) {
           throw materialError("setup_authority_changed", false);
         }
+        if (contract.resume) {
+          const current = await readCloudWorkspaceResumePlan(tx, { ...input, accountUserId: contract.accountUserId },
+            { computer: contract.computer, computerEnvironment: contract.computerEnvironment });
+          // Enrollment itself advances HU's epoch. Recheck the preparation
+          // tuple/staff gate here; normal current-run fences govern publication.
+          if (current?.keySha256 !== contract.resume.keySha256) contract.resume = undefined;
+        }
         return issueWorkspaceSetupRecoveryGrant(tx, {
           workspaceId: input.workspaceId,
           organizationId: input.organizationId,
@@ -1357,6 +1378,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
     );
     return {
       version: input.materialVersion === 2 ? (2 as const) : (1 as const),
+      ...(contract.resume ? { resume: contract.resume } : {}),
       audience: SETUP_MATERIALS_AUDIENCE,
       execution: {
         workspaceId: input.workspaceId,

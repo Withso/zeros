@@ -6,7 +6,7 @@ import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const fixture = vi.hoisted(() => ({
-  root: "", version: 4, failPublish: false, layout: {} as Record<string, unknown>,
+  root: "", head: "a".repeat(40), version: 4, failPublish: false, layout: {} as Record<string, unknown>,
   owners: new Map<string, [number, number]>(), renames: [] as [string, string][], spawn: vi.fn(),
 }));
 vi.mock("../cloud-workspace-validation/sandbox/runtime-layout.json", () => ({ default: fixture.layout }));
@@ -69,7 +69,7 @@ beforeEach(() => {
   const layout = JSON.parse(fs.readFileSync(path.resolve("scripts/cloud-workspace-validation/sandbox/runtime-layout.json"), "utf8"));
   Object.assign(fixture.layout, Object.fromEntries(Object.entries(layout).map(([key, value]) =>
     [key, typeof value === "string" && value.startsWith("/srv/zeros") ? fixture.root + value : value])));
-  fixture.version = 4; fixture.failPublish = false; fixture.renames.length = 0; fixture.owners.clear();
+  fixture.version = 4; fixture.head = commit; fixture.failPublish = false; fixture.renames.length = 0; fixture.owners.clear();
   directory(`${fixture.root}/srv/zeros/files`);
   directory(`${fixture.root}/srv/zeros/files/workspace`, 10001, 0o700);
   directory(`${fixture.root}/srv/zeros/files/workspace/.git`, 10001, 0o700);
@@ -89,7 +89,7 @@ beforeEach(() => {
         expect(options.env.HOME.startsWith(parent + "/")).toBe(true);
       }
       const stdout = args.includes("--show-toplevel") ? cwd : args.includes("--absolute-git-dir") ? `${cwd}/.git`
-        : args.includes("--verify") ? commit : args.includes("get-url") ? cloneUrl : "";
+        : args.includes("--verify") ? fixture.head : args.includes("get-url") ? cloneUrl : "";
       child.stdout.end(Buffer.from(stdout + "\n")); child.stderr.end(); child.emit("close", 0, null);
     });
     return child;
@@ -132,4 +132,61 @@ it("keeps the legacy staging and seed paths unchanged", async () => {
   await expect(setup(3)).resolves.toBe(commit);
   expect(fs.readFileSync(`${fixture.root}/srv/zeros/.zeros-image-seed/seed`, "utf8")).toBe("original checkout");
   expect(fs.existsSync(`${fixture.root}/srv/zeros/files/.zeros-setup`)).toBe(false);
+});
+
+it.each([
+  { keySha256: ["d".repeat(64)] },
+  { mode: "resume_existing", proofEpoch: ["44444444-4444-4444-8444-444444444444"] },
+])("does not publish completion from a coercible but non-string preparation identity (%j)", async invalid => {
+  await setup();
+  const helper = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
+  const setupDirectory = `${fixture.root}/srv/zeros/setup`;
+  helper.saveCompletedCloudWorkspacePreparation({ ...material,
+    engine: { instanceId: "44444444-4444-4444-8444-444444444444" },
+    resume: { version: 1, mode: "prepare_generation", keySha256: "d".repeat(64), proofEpoch: null, ...invalid },
+  }, { version: 4, setupDirectory });
+  expect(fs.existsSync(`${setupDirectory}/resume.json`)).toBe(false);
+});
+
+it("reuses only an exact completed enrollment and leaves dirty files, Design and conversation bytes alone", async () => {
+  await setup();
+  const helper = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
+  const profile = { version: 4, engineUid: 10003, engineGid: 10003,
+    setupDirectory: `${fixture.root}/srv/zeros/setup`, managedSettingsDirectory: `${fixture.root}/srv/zeros/managed-settings` };
+  const engineId = "44444444-4444-4444-8444-444444444444";
+  const prepared = { ...material, engine: { instanceId: engineId },
+    resume: { version: 1, mode: "prepare_generation", keySha256: "d".repeat(64), proofEpoch: null } };
+  const waking = { ...prepared, engine: { instanceId: "55555555-5555-4555-8555-555555555555" },
+    resume: { ...prepared.resume, mode: "resume_existing", proofEpoch: engineId } };
+  expect(await helper.readCompletedCloudWorkspacePreparation(waking, profile, async () => "")).toBeNull();
+  helper.saveCompletedCloudWorkspacePreparation(prepared, profile);
+  const files = `${fixture.root}/srv/zeros/files/workspace`;
+  for (const name of ["dirty.txt", "design.html", "engine.sqlite"]) fs.writeFileSync(`${files}/${name}`, `preserved ${name}`);
+  fixture.spawn.mockClear();
+  fixture.head = "f".repeat(40); // Preserve commits made by the owner after setup.
+  expect(await helper.readCompletedCloudWorkspacePreparation(waking, profile, async () => "")).toBe(fixture.head);
+  expect(fixture.spawn.mock.calls.every(([, args]) => !args.some((arg: string) => ["checkout", "init", "fetch", "reset"].includes(arg)))).toBe(true);
+  for (const name of ["dirty.txt", "design.html", "engine.sqlite"]) expect(fs.readFileSync(`${files}/${name}`, "utf8")).toBe(`preserved ${name}`);
+  for (const resume of [{ ...waking.resume, keySha256: "e".repeat(64) },
+    { ...waking.resume, proofEpoch: waking.engine.instanceId }, { ...waking.resume, mode: "prepare_generation", proofEpoch: null }])
+    expect(await helper.readCompletedCloudWorkspacePreparation({ ...waking, resume }, profile, async () => "")).toBeNull();
+  expect(await helper.readCompletedCloudWorkspacePreparation(waking, { ...profile, version: 3 }, async () => "")).toBeNull();
+  const journalPath = `${profile.setupDirectory}/repository.json`;
+  const journal = fs.readFileSync(journalPath, "utf8");
+  fs.writeFileSync(journalPath, JSON.stringify({ ...JSON.parse(journal), commandState: "failed" }));
+  expect(await helper.readCompletedCloudWorkspacePreparation(waking, profile, async () => "")).toBeNull();
+  fs.writeFileSync(journalPath, journal);
+  const settingsPath = `${profile.managedSettingsDirectory}/settings.managed.toml`;
+  fs.writeFileSync(settingsPath, "changed settings");
+  expect(await helper.readCompletedCloudWorkspacePreparation(waking, profile, async () => "")).toBeNull();
+  fs.writeFileSync(settingsPath, "");
+  fs.renameSync(`${files}/.git`, `${files}/.git-real`);
+  fs.symlinkSync(`${files}/.git-real`, `${files}/.git`);
+  expect(await helper.readCompletedCloudWorkspacePreparation(waking, profile, async () => "")).toBeNull();
+  fs.unlinkSync(`${files}/.git`);
+  fs.renameSync(`${files}/.git-real`, `${files}/.git`);
+  fs.writeFileSync(`${profile.setupDirectory}/resume.json`, "corrupt");
+  expect(await helper.readCompletedCloudWorkspacePreparation(waking, profile, async () => "")).toBeNull();
+  await expect(setup()).resolves.toBe(fixture.head);
+  for (const name of ["dirty.txt", "design.html", "engine.sqlite"]) expect(fs.readFileSync(`${files}/${name}`, "utf8")).toBe(`preserved ${name}`);
 });

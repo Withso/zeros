@@ -1,7 +1,7 @@
 # Resume without repeating full setup (Alpha proposal)
 
-Status: design for RU/HU review; no resume authority, runtime or setup semantics
-are changed by PERF's scheduler or measurement PRs. Live evidence supplied by
+Status: first same-generation preparation reuse implementation, disabled by
+default. PERF's scheduler and measurement changes do not alter resume authority. Live evidence supplied by
 the orchestrator on 2026-10-06 makes this the highest-priority next work.
 This proposal follows HU's merged [in-place update design](runtime-hot-update.md):
 RU remains the single transition owner, and changing the runtime requires a
@@ -25,6 +25,14 @@ The user-visible 2–2.5 minute wake is the orchestrator's interpretation of the
 timeline; no complete click-to-paint trace has been collected. Boat API, restore,
 hydration, attester substage, Node/SQLite and first-heartbeat timings remain
 unmeasured. Scheduler notifications alone cannot meet the target.
+
+`setup-worker.ts` keeps `started_at = coalesce(started_at, now())` when reclaiming
+a run, so this **execution interval includes retry backoff between claims**.
+The later 12:49:10–12:51:24 observation contains about 114 seconds before material
+admission and 20 seconds from admission to registration. It does not show 130
+seconds spent inside the guest helper. Readiness polling and preparation reuse
+address different parts of that interval; compare claim counts and per-claim
+clocks before attributing the saving to attestation.
 
 Code explains the repetition: a running provider result enters `setting_up`
 (`reconciler.ts:176`); the setup worker claims a new fenced attempt. The v4
@@ -60,9 +68,9 @@ generation with no such authorized provenance takes normal preparation/recovery.
 The orchestrator assigned PERF the timing transport/persistence and same-generation
 resume path on 2026-10-06. RU owns runtime selection; its wake implementation
 must land before the resume change ships. HU owns runtime transitions and the
-shared proof-cache invalidation interface. Until that interface exists, cache
-keys include generation, runtime ID, manifest digest, base compatibility and
-engine instance, so a transition or engine change misses by construction.
+shared proof-cache invalidation interface. The implementation uses HU's `readCloudRuntimeResumeProofEpoch` under the workspace
+lifecycle lock before enrolling the fresh engine. The completed engine UUID
+invalidates preparation evidence after any new or uncertain enrollment.
 Fresh launch proofs and full restored-tree integrity checks remain mandatory.
 
 ## Resume eligibility and fresh authority
@@ -196,3 +204,142 @@ current full-setup fallback. Record separate normal resume, upgrade/update and
 fallback samples, including failures. Obtain a real stopped-workspace before/
 after trace and owner-verified paint/agent continuity before claiming either
 target. No keep-running pool is enabled by this proposal.
+
+## First implementation: preparation reuse only
+
+Set `CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED=true` only on the Alpha control
+plane after its reader is deployed and a new qualified runtime contains the
+helper. Code defaults to false and rejects enabling the flag on other channels.
+The server additionally requires engineering staff, Boat, and a v4 runtime.
+New helpers negotiate `X-Zeros-Resume-Existing: 1`; old helpers get unchanged
+materials. New helpers talking to an older control plane take full setup.
+
+Under the existing live workspace/setup-run locks, before inserting a new engine,
+`setup-resume.ts` reads HU's completed enrollment epoch. The preparation key
+hashes the exact organization/workspace/generation, account, provider/resource,
+runtime/manifest/base/profile/protocol, image/resources, settings/spec/repository,
+and Cloud Computer source/config/build/environment tuple. It excludes ephemeral
+launch witnesses and changing compute-lease IDs: stop/resume replaces those.
+The key and staff gate are checked again after external credential minting.
+No previous capability, admission, registration or containment proof is reused.
+
+After full launch/readiness the root helper writes a bounded mode-0600 completion
+record keyed by that tuple and the freshly enrolled engine. A later resume
+requires HU to report that engine's successful setup/attestation, plus the exact
+protected completion record, completed repository journal, unchanged managed
+settings bytes and the existing physical checkout identity. Owner-created commits,
+dirty files, Design source and SQLite remain in place. Cache loss, corruption,
+key changes or incomplete setup select the existing preparation path; no cache
+fallback deletes data or resets history. Untrusted filesystem aliases are not
+accepted as a prepared checkout.
+
+Every execution still prepares a fresh supervisor session and workspace admission,
+verifies the Cloud Computer template, projects current credentials, runs the
+**full final attestation** (including restored-tree integrity and functional
+qualification), consumes a fresh launch proof, and waits for fresh registration
+and engine readiness. The existing worker checks authority, allocation, runtime,
+lease, run and execution fence before publishing ready. A cache hit skips only
+repository preparation and the duplicate preflight attestation. This first slice
+does not cache functional qualification or claim the 1–2-second target.
+
+### Regression and rollout evidence
+
+- Material integration tests cover negotiation/default-off, completed epochs,
+  changed allocations (including during credential mint), concurrent redemption,
+  new engine/registration/bridge credentials, revoked membership/entitlement,
+  obsolete fences and stop cancellation. HU's epoch suite covers new/failed
+  enrollment, exact pins, generation/tenant isolation and RU/HU transitions.
+- Persistence tests preserve edited files, Design and conversation bytes and
+  owner-created commits across cache hits and full-setup fallback. They reject
+  failed journals, changed managed settings, unsafe checkout aliases, a different
+  preparation key, a different epoch, a missing/corrupt cache and legacy profiles.
+- Launch tests require full final attestation and fresh launch/readiness on a
+  cache hit, do not rerun repository/hooks, and do not save completion after a
+  failed attestation, launch or readiness. Existing attester/launch-proof suites
+  retain changed-tree/base/mount, stale boot/session and one-use proof rejection.
+- Local-owner and organization-local workspaces use no modified path. Existing
+  legacy cloud request/launch coverage stays intact; runtime selection, upgrades,
+  transitions, rollback, actor admission and client transport are unchanged.
+
+The orchestrator enables the flag after merge and observes a full preparation to
+seed the new helper's record, then a real stop/wake using the same exact runtime.
+Use the passive timeline for elapsed/setup-stage data. The owner verifies dirty
+files, Design and conversation continuity, a real agent turn, a second authorized
+device, denied roles, Local/org-local workspaces and switching between owners and
+placements on the Mac. Revoke the flag to return to full preparation. No live
+wake, client paint, second-device or macOS claim is made from Linux test fixtures.
+
+## Revised latency plan (2026-10-06)
+
+The product budgets are create to **agent usable in 3–4 seconds** and true
+stop/wake or Restart to **agent usable in 1–2 seconds**. The supplied Conductor
+log establishes direct VM transport and durable session/feed behavior, but has
+no startup timing. Its incremental file-sync duration is not a wake benchmark.
+
+Ship these independent slices in this order; the timing reader is additive and
+does not need to delay the readiness polling fix:
+
+| Slice | Expected effect on its stage | Remaining limit / evidence required |
+| --- | --- | --- |
+| Persist setup clocks (#370, migration 0136) | No intended latency reduction | Separate installer/transport time from helper and repeated attestation spans; clocks overlap and must not be summed |
+| Readiness polling (#375) | At most one 2 s poll interval of detection delay, plus request time, during the first 120 s of recognized Boat boot failures | Retry-After, cancellation and exhausted windows retain normal policy; this cannot accelerate guest restoration |
+| Same-generation `resume_existing` | Zero repository preparation and zero preflight attestation on an eligible cache hit | Full final verification, fresh launch, installation and registration remain; their durations are not yet isolated |
+| Repair the VM probe and attribute boot | No product-path change | Return installer duration, boot critical chain and request-bracketed unit starts from the disposable child |
+| Optimize measured guest/runtime startup | Engineering budgets: engine initialization ≤1 s; registration plus initial durable sync ≤0.5 s; admission plus CONNECTED probe ≤0.5 s | Measure process entry, SQLite, required recovery, registration HTTP, durable sync and bridge separately before moving work off the critical path |
+| Prepared template / resident fork pilot, if needed | New-create budget: allocation ≤0.5 s, branch plus fresh verification/launch ≤2 s, registration/attach ≤1 s | Budgets, not measurements or an SLO; requires an eligible prepared template, ready pool capacity and verified launch within budget |
+
+The orchestrator's isolated cold forks reached provider-ready in 2.860–5.017 s
+and base-ready in 36.723–43.555 s. These are fork samples, not a measured stopped
+workspace resume distribution. They nevertheless rule out claiming the create
+target from the current cold path. A 5.662 s zeros-boot execution contained about
+4 s of hydration; the roughly 30 s before that unit needs the repaired probe.
+The engine-row-to-registration interval also includes helper work: it is not an
+18 s Node initialization measurement. Never subtract all 130 s of setup as the
+predicted saving from preparation reuse.
+
+### Boat capabilities and cost boundary
+
+Boat documents filesystem snapshots, not retained process memory, and offers no
+documented memory-suspend endpoint in the inspected [API guide](https://docs.boat.dev/api-v1).
+Its [snapshot guide](https://docs.boat.dev/snapshots) explains that enabled services
+restart and file contents hydrate lazily. The reconciler's generic
+`provider_paused_requires_stop` handling is not evidence of Boat memory resume.
+Do not map Stop/Restart to a resident VM or add an unsupported pause call.
+
+Boat already maintains a [ready machine pool](https://docs.boat.dev/machines).
+Its optional `failFast` gives a bounded allocation response or `no_ready_machine`;
+that response does not certify restored files, the Zeros host or an admitted agent.
+No caller-selected region was found in the inspected create/fork/resume contracts.
+The [FAQ](https://docs.boat.dev/faq) lists EU placement and an advertised 100–200 ms
+US/Latin America round trip; measure the actual control-plane/VM/client routes.
+
+The snapshot guide describes an inherited `.ascii/playbook.json` recording file
+opens during restore. A disposable template copy can train it with the actual
+startup reads, then finish hydration before being saved. This may improve read
+order; it does not authenticate bytes or permit removing the current hydration,
+mount, metadata or full-tree verification barriers. No owner template is changed
+by this proposal. Existing Cloud Computer builds already preserve prepared repos;
+a new template must also demonstrate a complete verified runtime cache and a
+freshly usable host after restore. No engine identity, session or launch proof
+from the builder can become workspace authority.
+
+A resident fork pool could remove restoration from **new workspace allocation**.
+It cannot restore a stopped user's latest mutable files in a generic pool VM.
+One default VM costs $0.036/hour under the published
+[pricing](https://docs.boat.dev/pricing): calculated $0.864/day or $26.28 for
+730 hours; keeping one warm for 15 minutes costs $0.009. Stopped VMs are free.
+Provider start-rate and concurrency limits also apply to replenishment.
+
+Before a pool implementation, assign a migration and review its allocation hook
+with RU/HU. Start disabled, Alpha staff only, with one unassigned fork per exact
+organization/template/runtime/base and a global hard cap plus expiry and daily
+spend limits. A fenced atomic claim must recheck membership, entitlement, template
+and runtime revocation; stale slots drain. Keep slots free of workspace/user
+capabilities, obtain fresh identity and attestation on assignment, and fall back
+to ordinary creation on miss or invalidation. Journal every allocation and bound
+cleanup/replenishment so upload-blocked deletion cannot multiply idle resources.
+
+A longer idle retention policy could improve a separate **still-running reattach**
+metric at that cost. It must be explicit, respect active-work and spending rules,
+and must not be reported as a 1–2 s true stopped wake. The latter target remains
+unproven pending restore measurements and a supported faster provider path.
