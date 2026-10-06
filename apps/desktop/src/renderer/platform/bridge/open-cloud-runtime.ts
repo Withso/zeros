@@ -23,7 +23,7 @@ import { wakeCloudWorkspace } from "../../state/cloud-workspace-wake";
 
 export async function openCloudRuntime(
   target: CloudWorkspaceTarget,
-  options?: { signal?: AbortSignal; wake?: boolean },
+  options?: { signal?: AbortSignal; wake?: boolean; reason?: "interaction" },
 ): Promise<CloudPeer> {
   const generation = cloudCatalogGeneration();
   const assertAccount = () => {
@@ -34,7 +34,7 @@ export async function openCloudRuntime(
   let document = await refreshCloudWorkspace(target);
   assertAccount();
   if (options?.wake) {
-    document = await wakeCloudWorkspace(target, document, options.signal);
+    document = await wakeCloudWorkspace(target, document, options.signal, options.reason);
     assertAccount();
   }
   if (!canReadCloudWorkspace(document) || !["ready", "busy"].includes(document.status))
@@ -158,10 +158,10 @@ export async function openCloudRuntime(
         },
       },
       runtimeId: descriptor.runtimeId,
-      async prepareForRun(signal) {
+      async prepareForRun(signal, reason) {
         const current = await refreshCloudWorkspace(target);
         assertAccount();
-        await wakeCloudWorkspace(target, current, signal);
+        await wakeCloudWorkspace(target, current, signal, reason);
         if (signal.aborted) throw new Error("Cloud workspace open cancelled");
         assertCurrent();
         // A committed capture retires this runtime while preparation waits.

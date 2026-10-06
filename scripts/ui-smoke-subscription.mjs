@@ -495,6 +495,30 @@ export async function runQueueSmoke({ page, check }) {
     await expect(page.locator("[data-queued-id]")).toHaveCount(0);
     check(`${provider}: slow steering settles; Stop restores edit/delete; selected sends preserve FIFO`, true);
   }
+  // Synthetic cloud readiness state on the real queue/composer controls. The
+  // actual cloud wake/FIFO lifecycle is covered by cloud-composer-wake.test.ts.
+  await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-subscription.html?queue=codex&cloud-wait`);
+  const prompt = page.getByLabel("Message", { exact: true });
+  for (const text of ["Running", "Waiting message", "Remove this message"]) {
+    await prompt.fill(text); await page.getByRole("button", { name: "Send message", exact: true }).click();
+  }
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  await page.evaluate(() => window.__cloudQueueWait("waiting"));
+  await expect(page.getByRole("button", { name: "Waiting for agent", exact: true }).first()).toBeVisible();
+  const rows = page.locator("[data-queued-id]");
+  await expect(rows).toHaveCount(2);
+  await rows.first().hover(); await rows.first().getByRole("button", { name: "Edit", exact: true }).click();
+  await prompt.fill("Edited while waiting"); await page.getByRole("button", { name: "Save message", exact: true }).click();
+  await expect(rows.first()).toContainText("Edited while waiting");
+  await rows.last().hover(); await rows.last().getByRole("button", { name: "Delete", exact: true }).click();
+  await expect(rows).toHaveCount(1);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await page.screenshot({ path: ".context/cloud-waiting-for-agent.png" });
+  await page.evaluate(() => window.__cloudQueueWait("failed", "The agent did not become ready within three minutes. Your messages are still queued. Try again."));
+  await expect(page.getByRole("alert")).toContainText("three minutes");
+  await expect(rows.first().getByRole("button", { name: "Try again", exact: true })).toBeEnabled();
+  await expect(rows.first().getByRole("button", { name: "Edit", exact: true })).toBeEnabled();
+  check("Cloud readiness uses an editable/removable Waiting for agent card, then an inline error with retry", true);
 }
 
 /** Production picker/composer with renderer metadata supplied by the fixture. */

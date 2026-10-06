@@ -1,4 +1,4 @@
-import { cloudActorCan,type CloudActorRole } from "@zeros/protocol/cloud-actors";
+import { cloudActorCan, CloudWorkspacePresenceSchema, type CloudActorRole } from "@zeros/protocol/cloud-actors";
 import { CloudCommandClientRequestSchema } from "@zeros/protocol/cloud-commands";
 import { CloudActionClientRequestSchema } from "@zeros/protocol/cloud-actions";
 import { CloudEventClientRequestSchema } from "@zeros/protocol/cloud-events";
@@ -48,6 +48,7 @@ const providerRuns=new Set([
 ]);
 
 export function cloudWorkspaceCapability(op:string,params:Record<string,unknown>,workspace:WorkspacePolicy):Capability|null {
+  if (op === "cloudPresence.update") return CloudWorkspacePresenceSchema.safeParse(params).success ? "read" : null;
   if(op==="github.nativeGrant")return cloudGithubNativeDesktopSchema.safeParse(params).success?"edit":null;
   if(op==="cloudLsp.request")return CloudLspRequestSchema.safeParse(params.request).success?"edit":null;
   if(op==="cloudCommands.request") {

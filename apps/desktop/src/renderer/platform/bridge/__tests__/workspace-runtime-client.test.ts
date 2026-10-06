@@ -121,6 +121,23 @@ describe("workspace runtime routing", () => {
       }
     },
   );
+  it("sends presence only on an existing exact admitted connection without opening compute", async () => {
+    const peer = fakePeer(a), open = vi.fn(async () => peer.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+    try {
+      expect(client.sendWorkspacePresence(a, true)).toBe(false);
+      expect(open).not.toHaveBeenCalled();
+      await client.warmWorkspace(a); peer.request.mockClear();
+      expect(client.sendWorkspacePresence(a, true)).toBe(true);
+      expect(peer.request).toHaveBeenCalledWith({ type: "WORKSPACE_REQUEST", op: "cloudPresence.update", params: { present: true } }, 5_000);
+      expect(client.sendWorkspacePresence(b, true)).toBe(false);
+      Object.defineProperty(peer.peer.client, "status", { value: "reconnecting" });
+      expect(client.sendWorkspacePresence(a, true)).toBe(false);
+      client.clearCloudConnections(); expect(client.sendWorkspacePresence(a, true)).toBe(false);
+      expect(open).toHaveBeenCalledOnce();
+    } finally { client.dispose(); }
+  });
+
   it("uses the Local transport for replica controls while a cloud workspace is open", async () => {
     const peer = fakePeer(a);
     const open = vi.fn(async () => peer.peer);
@@ -204,11 +221,11 @@ describe("workspace runtime routing", () => {
     const open = vi.fn<WorkspaceRuntimeOptions["open"]>(() => ready.promise);
     const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
     const navigation = new AbortController(), message = new AbortController();
-    const first = client.openWorkspace(a, { signal: navigation.signal });
+    const first = client.openWorkspace(a, { signal: navigation.signal, reason: "interaction" });
     const second = client.openWorkspace(a, { signal: message.signal });
     const cancelled = expect(first).rejects.toThrow(/cancel/i);
     expect(open).toHaveBeenCalledOnce();
-    expect(open).toHaveBeenCalledWith(a, expect.objectContaining({ wake: true }));
+    expect(open).toHaveBeenCalledWith(a, expect.objectContaining({ wake: true, reason: "interaction" }));
     navigation.abort();
     await cancelled;
     expect(open.mock.calls[0][1]?.signal.aborted).toBe(false);
@@ -309,7 +326,7 @@ describe("workspace runtime routing", () => {
     expect(peer.request.mock.calls.some(([message]) => message.op === "git.push")).toBe(false);
     client.dispose();
   });
-  it.each(["disconnected", "retired", "account-reset", "access-pruned"])("keeps command routes within their admitted workspace owner after %s", async cause => {
+  it.each(["disconnected", "retired", "account-reset", "access-pruned", "upgraded-on-wake"])("keeps command routes within their admitted workspace owner after %s", async cause => {
     const chat = "44444444-4444-4444-8444-444444444444";
     const old = fakePeer(a), replacement = fakePeer(a);
     const authorize = vi.fn(async () => "55555555-5555-4555-8555-555555555555");
@@ -333,6 +350,9 @@ describe("workspace runtime routing", () => {
       });
     }
     old.peer.runtimeId = "retired-conversation-owner";
+    replacement.peer.runtimeId = "upgraded-conversation-owner";
+    const upgraded = deferred<boolean>();
+    if (cause === "upgraded-on-wake") old.peer.prepareForRun = vi.fn(() => upgraded.promise);
     const open = vi.fn().mockResolvedValueOnce(old.peer).mockResolvedValueOnce(replacement.peer);
     let allowed = true;
     const client = new WorkspaceRuntimeClient({ open, canAccess: () => allowed, workspaces: () => [] });
@@ -348,9 +368,23 @@ describe("workspace runtime routing", () => {
       else if (cause === "access-pruned") {
         allowed = false; client.pruneCloudConnections(); allowed = true;
       } else if (cause === "retired") client.retireCloudRuntime(old.peer.runtimeId!);
+      else if (cause === "upgraded-on-wake") {
+        // The shared explicit wake replaces the engine before either intent
+        // acquires admission. Command ownership remains the same conversation.
+        const automaticWake = client.openWorkspace(a, { reason: "interaction" });
+        const preparingSend = client.openWorkspace(a);
+        await vi.waitFor(() => expect(old.peer.prepareForRun).toHaveBeenCalledOnce());
+        expect(old.peer.prepareForRun).toHaveBeenCalledWith(expect.any(AbortSignal), "interaction");
+        upgraded.resolve(false); await Promise.all([automaticWake, preparingSend]);
+        expect(open).toHaveBeenCalledTimes(2);
+        expect(open.mock.calls[1][1]?.wake).toBeUndefined();
+        expect(open.mock.calls[1][1]?.reason).toBeUndefined();
+      }
       else Object.assign(old.peer.client, { status: "disconnected" });
-      const pending = client.request({ type: "AGENT_PROMPT", sessionId, agentId: "codex",
-        userMessageId: "after-reconnect", prompt: [{ type: "text", text: "continue" }] } as never);
+      const prompt = { type: "AGENT_PROMPT", sessionId, agentId: "codex",
+        userMessageId: "after-reconnect", prompt: [{ type: "text", text: "continue" }] } as const;
+      const pending = client.request(prompt as never);
+      const repeated = cause === "upgraded-on-wake" ? client.request(prompt as never) : undefined;
       if (cause === "account-reset" || cause === "access-pruned") {
         await expect(pending).rejects.toThrow(/conversation.*reconnect/i);
         expect(authorize).not.toHaveBeenCalled();
@@ -358,6 +392,7 @@ describe("workspace runtime routing", () => {
         return;
       }
       const response = await pending;
+      if (repeated) await repeated;
       expect(response).toMatchObject({ type: "AGENT_PROMPT_COMPLETE", sessionId });
       expect(authorize).toHaveBeenCalledWith("codex", "gpt-5.6-luna");
       const enqueue = replacement.request.mock.calls.find(([m]) =>
@@ -367,6 +402,13 @@ describe("workspace runtime routing", () => {
       } } } } });
       expect(replacement.request.mock.calls.every(([m]) => m.type === "WORKSPACE_REQUEST")).toBe(true);
       expect(replacement.request.mock.calls.some(([m]) => m.op === "cloudCommands.createConversation")).toBe(false);
+      if (cause === "upgraded-on-wake") {
+        const enqueues = replacement.request.mock.calls.filter(([m]) =>
+          (m.params as { request?: { mutation?: { action?: { kind?: string } } } } | undefined)?.request?.mutation?.action?.kind === "enqueue");
+        expect(enqueues).toHaveLength(1);
+        expect(old.request.mock.calls.some(([m]) => m.op === "cloudCommands.request" &&
+          (m.params as { request?: { kind?: string } } | undefined)?.request?.kind === "mutate")).toBe(false);
+      }
       expect(old.release).toHaveBeenCalledOnce();
     } finally { client.dispose(); }
   });

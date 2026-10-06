@@ -160,12 +160,14 @@ export interface PtyMirror {
 export type PtyMirrorFactory = (cols: number, rows: number) => PtyMirror;
 
 export interface PtyServiceOptions {
+  now?: () => number;
   /** Attested non-root identity allowed to traverse the repository-free CLI
    * authentication cwd. Omitted on a desktop/relay engine. */
   agentAuthIdentity?: CloudWorkerIdentity;
 }
 
 interface Session {
+  lastInputAt?: number;
   proc: PtyHandle;
   cwd: string;
   cols: number;
@@ -472,7 +474,19 @@ export class PtyService {
     // A malformed/hostile remote frame can carry a non-string payload; node-pty
     // throws on anything but a string. Guard the type, not just truthiness.
     if (typeof data !== "string" || data.length === 0) return;
-    this.sessions.get(sessionId)?.proc.write(data);
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.proc.write(data);
+      if (this.options.agentAuthIdentity) session.lastInputAt = (this.options.now ?? (() => performance.now()))();
+    }
+  }
+
+  /** Only real input to a live PTY holds this guard. Output, reattach and
+   * scrollback hydration never renew its ten-minute recency window. */
+  hasRecentInput(): boolean {
+    if (!this.options.agentAuthIdentity) return false;
+    const now = (this.options.now ?? (() => performance.now()))();
+    return [...this.sessions.values()].some(session => session.lastInputAt !== undefined && now - session.lastInputAt < 10 * 60_000);
   }
 
   resize(sessionId: string, cols: number, rows: number): void {

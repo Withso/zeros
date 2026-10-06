@@ -1,7 +1,45 @@
 import { readdir, readFile } from "node:fs/promises";
 import type { CloudDurabilityAuthority } from "./cloud-durability-runtime";
+import { CloudWorkspacePresenceSchema } from "@zeros/protocol/cloud-actors";
+import type { TransportClient } from "./transport/types";
 
 export const CLOUD_IDLE_STOP_MS = 10 * 60_000;
+const PRESENCE_INTERVAL_MS = 60_000;
+const PRESENCE_LEASE_MS = 90_000;
+
+/** Any admitted device can keep an open, used workspace awake. Receipt time
+ * is monotonic and server-owned. A presence message never acquires compute;
+ * only an already connected, authorized cloud actor can renew this lease. */
+export class CloudUserPresence {
+  private readonly clients = new Map<string, { client: TransportClient; at: number }>();
+  private readonly devices = new Map<string, number>();
+  private readonly now: () => number;
+  constructor(private readonly options: { now?: () => number; activity(): void }) {
+    this.now = options.now ?? (() => performance.now());
+  }
+  update(client: TransportClient, value: unknown): boolean {
+    const parsed = CloudWorkspacePresenceSchema.safeParse(value);
+    if (!parsed.success || client.kind !== "cloud" || !client.accountUserId || !client.cloudActor || client.authorized?.() !== true) return false;
+    this.active();
+    if (!parsed.data.present) { this.release(client); return true; }
+    const now = this.now(), key = `${client.accountUserId}:${client.cloudActor.deviceId}`;
+    for (const [device, at] of this.devices) if (now - at >= PRESENCE_LEASE_MS) this.devices.delete(device);
+    if ((!this.devices.has(key) && this.devices.size >= 256) || (!this.clients.has(client.id) && this.clients.size >= 256)) return false;
+    const previous = this.devices.get(key);
+    const at = previous !== undefined && now - previous < PRESENCE_INTERVAL_MS ? previous : now;
+    this.clients.set(client.id, { client, at });
+    if (at !== previous) { this.devices.set(key, at); this.options.activity(); }
+    return true;
+  }
+  release(client: TransportClient): void { this.clients.delete(client.id); }
+  active(): boolean {
+    const now = this.now();
+    for (const [id, row] of this.clients) {
+      if (now - row.at >= PRESENCE_LEASE_MS || row.client.authorized?.() !== true) this.clients.delete(id);
+    }
+    return this.clients.size > 0;
+  }
+}
 
 /** PR discovery updates cached workspace metadata during ordinary polling.
  * It still needs write authorization and checkpoint draining, but it is not
@@ -10,13 +48,15 @@ export function isCloudIdleMaintenance(operation: string): boolean {
   return operation === "gh.prSync";
 }
 
-/** Activity-driven, independent of desktop connection lifetime. No polling
- * read, heartbeat or completed transcript can count as an active user job. */
+/** Ten quiet minutes after work or admitted user presence ends. A connected
+ * socket alone, polling read, heartbeat or completed transcript is not activity.
+ * stillIdle must also be checked immediately before checkpoint commitment. */
 export class CloudIdleStopScheduler {
   private readonly now: () => number;
   private lastActivity: number;
   private revision = 0;
   private active: Promise<void> | null = null;
+  private inspection: Promise<void> | null = null;
   private closed = false;
   private wasBusy = false;
   private nextObservation = 0;
@@ -29,6 +69,9 @@ export class CloudIdleStopScheduler {
   constructor(private readonly options: {
     now?: () => number;
     busy(): boolean;
+    /** Kernel workload reads run once per observation, independently of client
+     * polling. A failed inspection is busy and completion starts a quiet interval. */
+    inspectWorkload?(): Promise<boolean>;
     stop(authority: CloudDurabilityAuthority, stillIdle: () => boolean): Promise<void | boolean>;
     observed?(state: { busy: boolean; quietSeconds: number }): void;
     failed?(): void;
@@ -53,6 +96,15 @@ export class CloudIdleStopScheduler {
   consider(authority: CloudDurabilityAuthority): void {
     if (this.closed || this.active || this.completed) return;
     const busy = this.options.busy();
+    if (busy || !this.options.inspectWorkload) { this.considerObserved(authority, busy); return; }
+    if (this.inspection) return;
+    const revision = this.revision;
+    this.inspection = Promise.resolve().then(() => this.options.inspectWorkload!()).catch(() => true).then(workload => {
+      if (!this.closed && this.revision === revision) this.considerObserved(authority, workload || this.options.busy());
+    }).finally(() => { this.inspection = null; });
+  }
+  private considerObserved(authority: CloudDurabilityAuthority, busy: boolean): void {
+    if (this.closed || this.active || this.completed) return;
     if (this.now() >= this.nextObservation) {
       this.nextObservation = this.now() + 60_000;
       try { this.options.observed?.({ busy, quietSeconds: Math.floor((this.now() - this.lastActivity) / 1000) }); }
@@ -80,8 +132,8 @@ export class CloudIdleStopScheduler {
         quietSeconds: Math.floor((this.now() - this.lastActivity) / 1000), retrySeconds }); } catch { /* diagnostic only */ }
     });
   }
-  async settled(): Promise<void> { await this.active; }
-  async close(): Promise<void> { this.closed = true; if (this.timer) clearInterval(this.timer); this.timer = null; this.authority = null; await this.active; }
+  async settled(): Promise<void> { await this.inspection; await this.active; }
+  async close(): Promise<void> { this.closed = true; if (this.timer) clearInterval(this.timer); this.timer = null; this.authority = null; await this.settled(); }
 }
 
 /** The qualified worker maps these UIDs for human tools, capture, and native
@@ -91,6 +143,10 @@ export class CloudIdleStopScheduler {
 export async function hasCloudUserProcesses(options: {
   list?: () => Promise<string[]>;
   read?: (path: string) => Promise<string>;
+  idleTerminalPids?: readonly number[];
+  /** Engine-owned read-only language services are restartable infrastructure.
+   * Their live supervised roots, never names/argv, identify this exception. */
+  infrastructurePids?: readonly number[];
 } = {}): Promise<boolean> {
   if (process.platform !== "linux" && !options.list) return true;
   const read = options.read ?? (path => readFile(path, "utf8"));
@@ -98,6 +154,7 @@ export async function hasCloudUserProcesses(options: {
     const names = await (options.list ?? (() => readdir("/proc")))();
     const pids = names.filter(name => /^[1-9][0-9]{0,9}$/.test(name));
     if (pids.length > 8192) return true;
+    const infrastructure = new Set(options.infrastructurePids), statuses = new Map<string, string>();
     for (const pid of pids) {
       let status: string;
       try { status = await read(`/proc/${pid}/status`); }
@@ -106,7 +163,33 @@ export async function hasCloudUserProcesses(options: {
       const uid = /^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/m.exec(status);
       const state = /^State:\s+(\S)/m.exec(status)?.[1];
       if (!uid || !state) return true;
-      if (state !== "Z" && uid.slice(1).some(value => ["10001", "10002", "10004"].includes(value))) return true;
+      if (state !== "Z" && uid.slice(1).some(value => ["10001", "10002", "10004"].includes(value))) {
+        if (infrastructure.size) {
+          let ancestor = pid, source = status, restartable = false;
+          for (let depth = 0; depth < 64; depth++) {
+            if (infrastructure.has(Number(ancestor))) { restartable = true; break; }
+            const parent = /^PPid:\s+([1-9][0-9]{0,9})$/m.exec(source)?.[1];
+            if (!parent || parent === ancestor) break;
+            ancestor = parent;
+            if (infrastructure.has(Number(parent))) { restartable = true; break; }
+            source = statuses.get(parent) ?? await read(`/proc/${parent}/status`);
+            if (source.length > 16_384) return true;
+            statuses.set(parent, source);
+          }
+          if (restartable) continue;
+        }
+        // Only known shared interactive shell roots can be idle. Foreground
+        // groups, detached children and stopped commands still count. stat has
+        // kernel IDs/state only; never read argv or process environments.
+        if (state === "S" && options.idleTerminalPids?.includes(Number(pid))) {
+          const stat = await read(`/proc/${pid}/stat`);
+          if (stat.length > 16_384) return true;
+          const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
+          if (stat.startsWith(`${pid} (`) && fields[0] === "S" && /^[1-9][0-9]*$/.test(fields[2] ?? "") &&
+              /^-?[0-9]+$/.test(fields[4] ?? "") && Number(fields[4]) !== 0 && fields[2] === fields[5]) continue;
+        }
+        return true;
+      }
     }
     return false;
   } catch { return true; }

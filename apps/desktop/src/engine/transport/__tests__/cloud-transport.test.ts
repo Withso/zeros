@@ -795,12 +795,15 @@ describe("CloudTransport — connected peer is kind:cloud and messages round-tri
     const { t, port } = await startTransport({ token: TOKEN });
     let ordinaryStarted = 0;
     let cancelStarted = false;
+    let presenceStarted = false;
     let releaseHandlers!: () => void;
     const held = new Promise<void>((resolve) => {
       releaseHandlers = resolve;
     });
     t.onMessage(async (_client, msg) => {
-      if (msg.type === "WORKSPACE_REQUEST") {
+      if (msg.type === "WORKSPACE_REQUEST" && msg.op === "cloudPresence.update") {
+        presenceStarted = true;
+      } else if (msg.type === "WORKSPACE_REQUEST") {
         ordinaryStarted += 1;
         await held;
       } else if (msg.type === "AGENT_CANCEL") {
@@ -850,6 +853,9 @@ describe("CloudTransport — connected peer is kind:cloud and messages round-tri
     );
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(cancelStarted).toBe(true);
+    ws.send(JSON.stringify({ id: "presence-control-reserve", timestamp: Date.now(), type: "WORKSPACE_REQUEST",
+      source: "browser", op: "cloudPresence.update", params: { present: true } }));
+    await vi.waitFor(() => expect(presenceStarted).toBe(true));
 
     releaseHandlers();
     ws.close();

@@ -9,6 +9,13 @@ import { QueuedMessagesCard } from "../features/agent/queued-messages-card";
 import type { AgentTextMessage } from "../features/agent/use-agent-session";
 import { Button } from "../shared/ui";
 
+declare global {
+  interface Window {
+    __cloudQueueWait?: (state: "waiting" | "failed", message?: string) => void;
+  }
+}
+const cloudWaitFixture = new URLSearchParams(location.search).has("cloud-wait");
+
 /** Real provider callbacks and queue controls with deterministic native replies. */
 export function QueueFixture({
   provider,
@@ -45,8 +52,13 @@ export function QueueFixture({
     actions.setRetainedChatIds([chatId]);
     void loadAgents(actions.listAgents);
     const update = () => render((value) => value + 1);
+    if (cloudWaitFixture) window.__cloudQueueWait = (state, message) =>
+      useSessionsStore.getState().patchSession(chatId, { cloudSendWait: { state, message } });
     window.addEventListener("queue-fixture-change", update);
-    return () => window.removeEventListener("queue-fixture-change", update);
+    return () => {
+      window.removeEventListener("queue-fixture-change", update);
+      delete window.__cloudQueueWait;
+    };
   }, [actions, chatId, provider]);
   const save = () => {
     if (!editing) return;
@@ -92,6 +104,8 @@ export function QueueFixture({
           }
           streaming={session.status === "streaming"}
           paused={session.queuePaused}
+          waiting={cloudWaitFixture && session.cloudSendWait?.state === "waiting"}
+          error={cloudWaitFixture ? session.cloudSendWait?.message : undefined}
           agentName={provider}
         />
         <input

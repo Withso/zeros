@@ -92,7 +92,10 @@ vi.mock("../cloud-workspace-catalog", () => ({
   cloudWorkspaceDocument: (target: {
     organizationId: string;
     workspaceId: string;
-  }) => fixture.docs.get(cloudWorkspaceKey(target)),
+  }) => {
+    const doc = fixture.docs.get(cloudWorkspaceKey(target));
+    return doc ? { ...doc, capabilities: { canWrite: true }, error: null } : undefined;
+  },
   subscribeCloudWorkspaces: (callback: () => void) => {
     fixture.catalog.add(callback);
     return () => {
@@ -152,6 +155,18 @@ describe("workbench availability observers", () => {
     await vi.advanceTimersByTimeAsync(35_000);
     expect(workbenchAvailabilityStatusSnapshot(nested).status?.tone).toBe("error");
     expect(vi.getTimerCount()).toBe(0);
+  });
+  it("keeps local availability independent of cloud sleep metadata and admissions", () => {
+    fixture.localStatus = "connected";
+    const before = workbenchAvailabilitySnapshot("/local");
+    fixture.docs.set(folder, { status: "stopped" });
+    for (const listener of fixture.catalog) listener();
+    expect(workbenchAvailabilitySnapshot("/local")).toBe(before);
+    expect(before).toMatchObject({ cloud: false, connection: "connected" });
+    expect(before.stopError).toBeUndefined();
+    expect(before.canWake).toBeUndefined();
+    expect(fixture.warm).not.toHaveBeenCalled();
+    expect(describeWorkspaceAvailability(before, Date.now())).toBeNull();
   });
   it("records reconnect timestamps with passive subscriptions and no hidden timers", () => {
     connection("connected");

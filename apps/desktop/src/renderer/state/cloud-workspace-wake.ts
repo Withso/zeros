@@ -10,13 +10,20 @@ import {
   subscribeCloudWorkspaces,
 } from "./cloud-workspace-catalog";
 
-/** Only explicit open/send callers may enter here. Catalog/history/hover reads
+/** A later Stop or terminal lifecycle state ends this intent; readiness retries
+ * must keep the user's queued message instead of starting another wake. */
+export class CloudWorkspaceWakeEndedError extends Error {
+  readonly name = "CloudWorkspaceWakeEndedError";
+}
+
+/** Only explicit open/send/interaction callers may enter here. Catalog/history/hover reads
  * must not acquire compute. Cancellation ends the local intent, not an already
  * accepted server lifecycle operation. Admission is acquired or revalidated afterwards. */
 export async function wakeCloudWorkspace(
   target: CloudWorkspaceTarget,
   initial: CloudWorkspaceDocument,
   signal?: AbortSignal,
+  reason?: "interaction",
 ): Promise<CloudWorkspaceDocument> {
   const account = cloudCatalogGeneration();
   const generation = initial.generation.number;
@@ -55,20 +62,20 @@ export async function wakeCloudWorkspace(
     // transaction cancels an uncommitted idle checkpoint, or serializes a
     // committed drain before fresh runtime admission is allowed.
     if (["ready", "busy"].includes(current.status)) {
-      await wait(manageCloudWorkspace(target, "wake"));
+      await wait(manageCloudWorkspace(target, "wake", false, reason));
       current = assertCurrent();
     }
     const deadline = Date.now() + 120_000;
     while (!["ready", "busy"].includes(current.status)) {
       if (current.status === "stopped" && mayWake) {
         mayWake = false;
-        await wait(manageCloudWorkspace(target, "wake"));
+        await wait(manageCloudWorkspace(target, "wake", false, reason));
         current = assertCurrent();
         continue;
       }
       if (!["stopping", "waking", "provisioning", "setting_up"].includes(current.status) ||
           (current.status === "stopping" && !mayWake))
-        throw new Error(current.error?.message ?? `Cloud workspace is ${current.status}. Open it again to retry.`);
+        throw new CloudWorkspaceWakeEndedError(current.error?.message ?? `Cloud workspace is ${current.status}. Open it again to retry.`);
       if (Date.now() >= deadline)
         throw new Error("The cloud workspace is still starting. Open it again when it is ready.");
       await wait(new Promise<void>(resolve => { timer = setTimeout(resolve, 1_000); }));

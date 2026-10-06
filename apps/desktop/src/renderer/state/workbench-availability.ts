@@ -215,6 +215,8 @@ function entryFor(folder: string): AvailabilityEntry {
     publish({
       state: doc?.status,
       setupFailed: !!doc?.setupFailure,
+      stopError: doc?.error,
+      canWake: doc?.capabilities.canWrite,
       ...(becameReady && entry.value.connection !== "connected"
         ? { since: Date.now() }
         : {}),

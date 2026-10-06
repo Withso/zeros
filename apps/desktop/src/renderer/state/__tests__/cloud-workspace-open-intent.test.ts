@@ -46,6 +46,82 @@ beforeEach(() => {
 afterEach(() => { cleanup?.(); cleanup = undefined; client.dispose(); setActiveBridge(null); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("explicit cloud navigation intent", () => {
+  function interactions(native = false) {
+    const listeners = new Map<string, EventListener>();
+    const invoke = vi.fn(async () => ({ available: true }));
+    vi.stubGlobal("window", { addEventListener: (type: string, listener: EventListener) => { listeners.set(type, listener); },
+      removeEventListener: (type: string) => { listeners.delete(type); }, setInterval: vi.fn(() => 1), clearInterval: vi.fn(),
+      setTimeout: vi.fn(() => 1), clearTimeout: vi.fn(),
+      ...(native ? { __ZEROS_NATIVE__: { invoke, on: () => () => {} } } : {}) });
+    class InputElement { constructor(private readonly row: boolean | string = false) {} closest() { return this.row ? this : null; }
+      getAttribute() { return typeof this.row === "string" ? this.row : null; } }
+    vi.stubGlobal("Element", InputElement);
+    Object.assign(document, { hasFocus: () => true });
+    CloudWorkspaceLifecycle(); cleanup = harness.effects[4]();
+    return { listeners, invoke, input: (type: string, row: boolean | string = false, trusted = true) => listeners.get(type)?.({
+      isTrusted: trusted, target: new InputElement(row),
+    } as unknown as Event) };
+  }
+
+  it("keeps local app interactions free of cloud presence, wake and native presence queries", () => {
+    useWorkspaceStore.getState().dispatch({ type: "OPEN_WORKSPACE", folder: "/local", repoRoot: "/local", chatId: null });
+    const open = vi.spyOn(client, "openWorkspace"), send = vi.spyOn(client, "sendWorkspacePresence");
+    const h = interactions(true);
+    for (const event of ["pointerdown", "keydown", "wheel", "input", "focus", "blur"]) h.input(event);
+    acceptCloudWorkspaceDocument({ ...doc, status: "ready", version: 2 });
+    expect(open).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled(); expect(h.invoke).not.toHaveBeenCalled();
+  });
+
+  it("wakes the selected cloud workspace from actions on the Settings page", () => {
+    useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
+    const open = vi.spyOn(client, "openWorkspace").mockResolvedValue(undefined);
+    const h = interactions(); h.input("pointerdown");
+    expect(open).toHaveBeenCalledExactlyOnceWith(expect.objectContaining(target), { signal: expect.any(AbortSignal), reason: "interaction" });
+  });
+
+  it("wakes from actions on the selected workspace's own sidebar row", () => {
+    const open = vi.spyOn(client, "openWorkspace").mockResolvedValue(undefined);
+    const h = interactions(); h.input("pointerdown", folder);
+    expect(open).toHaveBeenCalledOnce();
+  });
+
+  it("keeps one incident retry budget when navigating within the same cloud workspace", async () => {
+    acceptCloudWorkspaceDocument({ ...doc, version: 2, error: { code: "safety_stop", message: "Safety stop" } });
+    const open = vi.spyOn(client, "openWorkspace").mockResolvedValue(undefined);
+    const h = interactions(); h.input("keydown");
+    await new Promise(resolve => setTimeout(resolve, 0));
+    useWorkspaceStore.getState().dispatch({ type: "OPEN_WORKSPACE", folder: `${folder}/src`, repoRoot: folder, chatId: null });
+    h.input("keydown"); expect(open).toHaveBeenCalledOnce();
+  });
+
+  it("wakes from trusted app input, keeps hover/programmatic focus inert, and shares repeated gestures", async () => {
+    const open = vi.spyOn(client, "openWorkspace").mockResolvedValue(undefined);
+    const h = interactions();
+    h.input("pointermove"); h.input("focusin"); h.input("pointerdown", false, false);
+    expect(open).not.toHaveBeenCalled();
+    h.input("pointerdown"); h.input("keydown"); h.input("input");
+    expect(open).toHaveBeenCalledExactlyOnceWith(expect.objectContaining(target), { signal: expect.any(AbortSignal), reason: "interaction" });
+    await Promise.resolve();
+    cleanup?.(); cleanup = undefined; expect(h.listeners.size).toBe(0);
+  });
+
+  it("does not wake the previous workspace from sidebar rows or retained surfaces", () => {
+    const open = vi.spyOn(client, "openWorkspace").mockResolvedValue(undefined);
+    const h = interactions();
+    h.input("pointerdown", true); h.input("keydown", true); expect(open).not.toHaveBeenCalled();
+    Object.defineProperty(document, "visibilityState", { value: "hidden" });
+    h.input("pointerdown"); expect(open).not.toHaveBeenCalled();
+  });
+
+  it("renews presence only for the exact connected selection and releases it on blur", () => {
+    acceptCloudWorkspaceDocument({ ...doc, status: "ready", version: 2 });
+    const send = vi.spyOn(client, "sendWorkspacePresence").mockReturnValue(true);
+    const h = interactions(); expect(send).not.toHaveBeenCalled();
+    h.input("wheel"); expect(send).toHaveBeenLastCalledWith(expect.objectContaining(target), true);
+    Object.assign(document, { hasFocus: () => false });
+    h.listeners.get("blur")!({} as Event); expect(send).toHaveBeenLastCalledWith(expect.objectContaining(target), false);
+  });
+
   it("keeps selection restore, catalog refresh and visibility inert; only a click opens compute", async () => {
     const open = vi.spyOn(client, "openWorkspace").mockResolvedValue(undefined);
     CloudWorkspaceLifecycle(); cleanup = harness.effects[3]();

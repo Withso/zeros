@@ -75,7 +75,17 @@ export interface QueuedEditPayload {
   attachments?: ContentBlock[];
   bubbleAttachments?: import("./use-agent-session").AgentTextMessageAttachment[];
   segments?: import("./use-agent-session").MessageContentSegment[];
+  /** Cloud-only, renderer-owned preparation; never serialized to the worker. */
+  cloudQueue?: CloudQueuedPrompt;
 }
+
+export interface CloudQueuedPrompt {
+  draft: CloudQueuedDraft;
+  prepare(supportsImage: boolean): Promise<QueuedEditPayload>;
+}
+export type CloudQueuedDraft = import("./composer-editor").ComposerInitialContent & {
+  prepareAdditional?: () => Promise<import("./composer-attachments").ComposerAttachment[]>;
+};
 
 /** Bridge-connected actions. The context value contains ONLY these —
  *  no session data — so the value is stable and downstream consumers
@@ -118,6 +128,7 @@ export interface SessionsActions {
     autoAction?: string,
     /** The provider now owns a pending message/queue entry; not turn completion. */
     onAccepted?: () => void,
+    cloudQueue?: CloudQueuedPrompt,
   ): Promise<void>;
   cancel(chatId: string): Promise<void>;
   /** Revoke only the active native Browser lease. If the official Browser
@@ -186,6 +197,7 @@ export interface SessionsActions {
   /** Drop a still-pending queued send (by its placeholder message id) and
    *  remove its greyed bubble, before it flushes. */
   removeQueued(chatId: string, messageId: string): void;
+  getQueuedDraft(chatId: string, messageId: string): CloudQueuedDraft | undefined;
   /** Replace a still-pending queued send's payload in place (before it
    *  flushes). Updates both the queued bubble and the prompt that will be
    *  sent. The payload is built by the composer's normal send pipeline

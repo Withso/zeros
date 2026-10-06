@@ -29,6 +29,16 @@ beforeEach(() => {
 });
 afterEach(() => { mocks.listeners.clear(); });
 describe("cloud runtime admission fencing", () => {
+  it("marks interaction wakes on the existing lifecycle path for both new and connected admissions", async () => {
+    const passive = await openCloudRuntime(target, { reason: "interaction" });
+    expect(mocks.wake).not.toHaveBeenCalled(); passive.release();
+    const peer = await openCloudRuntime(target, { wake: true, reason: "interaction" });
+    expect(mocks.wake).toHaveBeenCalledExactlyOnceWith(target, "wake", false, "interaction");
+    mocks.wake.mockClear();
+    await peer.prepareForRun!(new AbortController().signal, "interaction");
+    expect(mocks.wake).toHaveBeenCalledExactlyOnceWith(target, "wake", false, "interaction");
+    peer.release();
+  });
   it("serializes an explicit ready open with idle capture before acquiring admission", async () => {
     const capture = deferred<typeof mocks.doc>(); mocks.wake.mockReturnValue(capture.promise);
     const opening = openCloudRuntime(target, { wake: true });

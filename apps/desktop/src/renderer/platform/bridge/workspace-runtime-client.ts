@@ -34,10 +34,10 @@ export interface CloudPeer {
   events?: Pick<RuntimeClient, "on">;
   /** Serialize explicit work with idle capture and revalidate the admission.
    * False means the drain retired this connection and a fresh one is needed. */
-  prepareForRun?: (signal: AbortSignal) => Promise<boolean>;
+  prepareForRun?: (signal: AbortSignal, reason?: "interaction") => Promise<boolean>;
 }
 export interface WorkspaceRuntimeOptions {
-  open: (target: CloudWorkspaceTarget, options?: { signal: AbortSignal; wake?: boolean }) => Promise<CloudPeer>;
+  open: (target: CloudWorkspaceTarget, options?: { signal: AbortSignal; wake?: boolean; reason?: "interaction" }) => Promise<CloudPeer>;
   /** Account/catalog epoch and generation; never a credential or admission. */
   identity?: (target: CloudWorkspaceTarget) => string;
   workspaces: () => readonly WireRecord[];
@@ -293,9 +293,19 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     await this.peer(target);
   }
 
+  /** Presence is receive-only lifecycle evidence on an existing admission.
+   * Never open/refresh a peer or enqueue across a disconnected transport. */
+  sendWorkspacePresence(target: CloudWorkspaceTarget, present: boolean): boolean {
+    const peer = this.peers.get(cloudWorkspaceKey(target));
+    if (this.closed || !peer || peer.retired || peer.identity !== this.identity(target) ||
+        peer.client.status !== "connected" || this.routing.canAccess?.(target) === false) return false;
+    void peer.client.request({ type: "WORKSPACE_REQUEST", op: "cloudPresence.update", params: { present } }, 5_000).catch(() => {});
+    return true;
+  }
+
   /** Explicit navigation and message preparation share one wake/admission.
    * Each caller owns cancellation; a navigation away cannot cancel a send. */
-  async openWorkspace(target: CloudWorkspaceTarget, options?: { signal?: AbortSignal }): Promise<void> {
+  async openWorkspace(target: CloudWorkspaceTarget, options?: { signal?: AbortSignal; reason?: "interaction" }): Promise<void> {
     const key = cloudWorkspaceKey(target);
     const identity = this.identity(target);
     const pending = this.opening.get(key);
@@ -303,7 +313,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     const open = () => {
       if (options?.signal?.aborted) return Promise.reject(new Error("Cloud workspace open cancelled"));
       if (identity !== this.identity(target)) return Promise.reject(new Error("Cloud account changed while connecting"));
-      const promise = this.peer(target, true);
+      const promise = this.peer(target, true, options?.reason);
       const flight = this.opening.get(key);
       if (flight) flight.consumers++;
       return new Promise<PeerEntry>((resolve, reject) => {
@@ -510,7 +520,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     );
   }
 
-  private peer(target: CloudWorkspaceTarget, wake = false): Promise<PeerEntry> {
+  private peer(target: CloudWorkspaceTarget, wake = false, reason?: "interaction"): Promise<PeerEntry> {
     if (this.routing.canAccess && !this.routing.canAccess(target))
       return Promise.reject(
         new Error(
@@ -557,7 +567,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     let opening: Promise<CloudPeer>;
     try {
       opening = reusable
-        ? reusable.prepareForRun!(controller.signal).then(ready => {
+        ? reusable.prepareForRun!(controller.signal, reason).then(ready => {
             if (controller.signal.aborted) throw new Error("Cloud workspace open cancelled");
             if (ready && !reusable.retired && reusable.client.status === "connected") return reusable;
             this.retirePeer(reusable);
@@ -565,7 +575,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
             // a newer Stop must win instead of triggering another wake.
             return this.routing.open(target, { signal: controller.signal });
           })
-        : this.routing.open(target, { signal: controller.signal, ...(wake ? { wake: true } : {}) });
+        : this.routing.open(target, { signal: controller.signal, ...(wake ? { wake: true, ...(reason ? { reason } : {}) } : {}) });
     }
     catch (error) { this.ongoingOpens--; return Promise.reject(error); }
     const flight = opening

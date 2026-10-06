@@ -105,6 +105,26 @@ describe("cloud workspace catalog ownership", () => {
     await manageCloudWorkspace(target, "wake");
     expect(api.lifecycle.mock.calls[1][2]).toBe(api.lifecycle.mock.calls[0][2]);
   });
+  it("retains an interaction reason with an uncertain wake intent when a send retries it", async () => {
+    acceptCloudWorkspaceDocument(doc(1, "stopped"));
+    api.lifecycle.mockRejectedValueOnce(new Error("Transport response lost")).mockResolvedValueOnce(doc(2, "waking"));
+    await expect(manageCloudWorkspace(target, "wake", false, "interaction")).rejects.toThrow("Transport response lost");
+    await manageCloudWorkspace(target, "wake");
+    expect(api.lifecycle.mock.calls).toEqual([
+      [target, "wake", expect.any(String), "interaction"],
+      [target, "wake", api.lifecycle.mock.calls[0][2], "interaction"],
+    ]);
+  });
+  it("does not retag an uncertain ordinary wake when an interaction joins its retry", async () => {
+    acceptCloudWorkspaceDocument(doc(1, "stopped"));
+    api.lifecycle.mockRejectedValueOnce(new Error("Transport response lost")).mockResolvedValueOnce(doc(2, "waking"));
+    await expect(manageCloudWorkspace(target, "wake")).rejects.toThrow("Transport response lost");
+    await manageCloudWorkspace(target, "wake", false, "interaction");
+    expect(api.lifecycle.mock.calls).toEqual([
+      [target, "wake", expect.any(String)],
+      [target, "wake", api.lifecycle.mock.calls[0][2]],
+    ]);
+  });
   it("does not retain the wake key after a confirmed rejection", async () => {
     acceptCloudWorkspaceDocument(doc(1, "stopped"));
     api.lifecycle.mockRejectedValueOnce(new ControlPlaneError(409, "quota_exceeded", "No capacity"))

@@ -4,10 +4,21 @@ import {
   safeParseBridgeMessage,
   KNOWN_MESSAGE_TYPES,
 } from "../schemas";
+import { CloudWorkspacePresenceSchema } from "../cloud-actors";
 
 const base = { id: "1", timestamp: 0 } as const;
 
 describe("parseBridgeMessage — trust-boundary validation", () => {
+  it("keeps local workspace envelopes unchanged while validating cloud presence separately", () => {
+    const local = { ...base, source: "browser", type: "WORKSPACE_REQUEST", op: "file.read",
+      params: { workspaceId: "ws_local", path: "README.md" } };
+    expect(parseBridgeMessage(local)).toEqual(local);
+    const presence = { ...local, op: "cloudPresence.update", params: { present: true } };
+    expect(parseBridgeMessage(presence)).toEqual(presence);
+    expect(CloudWorkspacePresenceSchema.parse(presence.params)).toEqual({ present: true });
+    for (const params of [{ present: "true" }, { present: true, at: 999999 }, { present: true, deviceId: "override" }])
+      expect(CloudWorkspacePresenceSchema.safeParse(params).success).toBe(false);
+  });
   it("accepts DB_CHANGED (regression: was missing from KNOWN_MESSAGE_TYPES)", () => {
     expect(KNOWN_MESSAGE_TYPES).toContain("DB_CHANGED");
     const m = parseBridgeMessage({

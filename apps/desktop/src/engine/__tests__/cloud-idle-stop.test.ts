@@ -3,6 +3,40 @@ import { CloudIdleStopScheduler, hasCloudUserProcesses, isCloudIdleMaintenance }
 import type { CloudDurabilityAuthority } from "../cloud-durability-runtime";
 const authority = {} as CloudDurabilityAuthority;
 describe("cloud idle stop", () => {
+  it("ignores attested restartable language-server trees during observation, retaining unrelated work", async () => {
+    const root = "State:\tS (sleeping)\nUid:\t10003\t10003\t10003\t10003\nPPid:\t1\n";
+    const server = "State:\tS (sleeping)\nUid:\t10001\t10001\t10001\t10001\nPPid:\t12\n";
+    const user = "State:\tS (sleeping)\nUid:\t10001\t10001\t10001\t10001\nPPid:\t1\n";
+    const read = async (file: string) => file.includes("/12/") ? root : file.includes("/13/") ? server : user;
+    expect(await hasCloudUserProcesses({ list: async () => ["12", "13"], read, infrastructurePids: [12] })).toBe(false);
+    expect(await hasCloudUserProcesses({ list: async () => ["12", "13", "14"], read, infrastructurePids: [12] })).toBe(true);
+  });
+
+  it("observes foreground processes independently and waits ten minutes after they finish", async () => {
+    let now = 0, workload = true;
+    const stop = vi.fn(async () => true);
+    const scheduler = new CloudIdleStopScheduler({ now: () => now, busy: () => false,
+      inspectWorkload: async () => workload, stop });
+    now = 600_000; scheduler.consider(authority); await scheduler.settled(); expect(stop).not.toHaveBeenCalled();
+    workload = false; now += 15_000; scheduler.consider(authority); await scheduler.settled();
+    now += 599_999; scheduler.consider(authority); await scheduler.settled(); expect(stop).not.toHaveBeenCalled();
+    now++; scheduler.consider(authority); await scheduler.settled(); expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("lets an old idle terminal shell sleep but retains its foreground and detached children", async () => {
+    const list = async () => ["12", "13"];
+    const read = vi.fn(async (file: string): Promise<string> => file.endsWith("/stat")
+      ? "12 (login shell) S 1 12 12 7 12 0"
+      : file.includes("/13/") ? "State:\tZ (zombie)\nUid:\t10001\t10001\t10001\t10001\n"
+        : "State:\tS (sleeping)\nUid:\t10001\t10001\t10001\t10001\n");
+    expect(await hasCloudUserProcesses({ list, read, idleTerminalPids: [12] })).toBe(false);
+    read.mockImplementation(async file => file.endsWith("/stat") ? "12 (shell) S 1 12 12 7 13 0"
+      : "State:\tS (sleeping)\nUid:\t10001\t10001\t10001\t10001\n");
+    expect(await hasCloudUserProcesses({ list, read, idleTerminalPids: [12] })).toBe(true);
+    read.mockImplementation(async file => file.endsWith("/stat") ? "12 (shell) S 1 12 12 7 12 0"
+      : "State:\tS (sleeping)\nUid:\t10001\t10001\t10001\t10001\n");
+    expect(await hasCloudUserProcesses({ list, read, idleTerminalPids: [12] })).toBe(true);
+  });
   it("exempts only passive PR reconciliation from the user-activity clock", () => {
     expect(isCloudIdleMaintenance("gh.prSync")).toBe(true);
     for (const op of ["gh.prCreate", "gh.prUpdate", "gh.prMerge", "git.commit", "git.fetch", "chats.upsert", "unknown"])

@@ -105,6 +105,8 @@ export interface WorkspaceAvailability {
   rejected?: boolean;
   rejection?: ConnectionRejection;
   setupFailed?: boolean;
+  stopError?: { code: string; message: string } | null;
+  canWake?: boolean;
 }
 
 // Transient gaps (<10s) keep the workbench quiet. Persistent gaps share one
@@ -160,6 +162,9 @@ export function describeWorkspaceAvailability(
       return { tone: "pending", message: `Starting the ${workspace}…` };
     case "stopped":
     case "sleeping":
+      if (input.cloud && input.stopError) return { tone: "error", message: workbenchFailureDiagnostic(input.stopError.message) };
+      if (input.cloud) return { tone: "pending", message: input.canWake === false
+        ? "This cloud workspace is sleeping." : "Sleeping — resumes when you continue" };
       return { tone: "pending", message: `This ${workspace} is stopped.` };
     case "stopping":
       return { tone: "pending", message: `Stopping the ${workspace}…` };

@@ -354,7 +354,7 @@ export function clearCloudWorkspaceCatalog(): void {
   rebuild(hadDocuments);
 }
 
-type LifecycleIntent = { id: string; task?: Promise<CloudWorkspaceDocument>; owner?: number; generation?: number; version?: number };
+type LifecycleIntent = { id: string; task?: Promise<CloudWorkspaceDocument>; owner?: number; generation?: number; version?: number; reason?: "interaction" };
 const lifecycleIntents = new Map<string, LifecycleIntent>();
 function settleLifecycleIntents(doc: CloudWorkspaceDocument): void {
   const wakeKey = `${epoch}:${cloudWorkspaceKey({ organizationId: doc.organizationId, workspaceId: doc.id })}:wake`;
@@ -381,6 +381,7 @@ export async function manageCloudWorkspace(
   target: CloudWorkspaceTarget,
   operation: "wake" | "stop" | "archive" | "delete",
   wait = false,
+  reason?: "interaction",
 ): Promise<CloudWorkspaceDocument> {
   const workspaceKey = cloudWorkspaceKey(target);
   const key = `${epoch}:${workspaceKey}:${operation}`;
@@ -390,11 +391,15 @@ export async function manageCloudWorkspace(
   const generation = cloudWorkspaceDocument(target)?.generation.number;
   const previous = lifecycleIntents.get(key);
   const intent: LifecycleIntent = previous && (operation !== "wake" || previous.owner === owner && previous.generation === generation)
-    ? previous : { id: crypto.randomUUID(), owner, generation, version: cloudWorkspaceDocument(target)?.version };
+    ? previous : { id: crypto.randomUUID(), owner, generation, version: cloudWorkspaceDocument(target)?.version, reason: operation === "wake" ? reason : undefined };
   if (intent.task) return intent.task;
   const version = epoch;
   const task = (async () => {
-    let doc = await changeCloudWorkspaceLifecycle(target, operation, intent.id);
+    // Preserve the initiating reason as well as the key on shared sends and
+    // uncertain retries; never retag an already submitted lifecycle intent.
+    let doc = await (intent.reason
+      ? changeCloudWorkspaceLifecycle(target, operation, intent.id, intent.reason)
+      : changeCloudWorkspaceLifecycle(target, operation, intent.id));
     if (version !== epoch) throw new Error("Cloud account changed");
     if (operation === "wake") {
       if (detailOwnerGenerations.get(workspaceKey) !== owner)

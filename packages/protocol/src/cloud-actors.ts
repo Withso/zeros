@@ -2,6 +2,9 @@ import { z } from "zod";
 
 export const CloudActorRoleSchema = z.enum(["viewer","prompter","developer","manager","owner"]);
 export type CloudActorRole = z.infer<typeof CloudActorRoleSchema>;
+/** Existing WORKSPACE_REQUEST op cloudPresence.update. The admission supplies
+ * device identity; client timestamps and identity overrides are forbidden. */
+export const CloudWorkspacePresenceSchema = z.object({ present: z.boolean() }).strict();
 export type CloudActorContext = {
   sessionId:string;
   deviceId:string;

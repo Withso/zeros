@@ -90,7 +90,7 @@ export function useChatSession(
     // with the chat's id baked in.
     startSession: (agentId, options) =>
       ctx.ensureSession(chatId, agentId, options),
-    sendPrompt: (text, displayText, attachments, bubbleAttachments, segments, onAccepted) =>
+    sendPrompt: (text, displayText, attachments, bubbleAttachments, segments, onAccepted, cloudQueue) =>
       ctx.sendPrompt(
         chatId,
         text,
@@ -100,6 +100,7 @@ export function useChatSession(
         segments,
         undefined,
         onAccepted,
+        ...(cloudQueue ? [cloudQueue] : []),
       ),
     cancel: () => ctx.cancel(chatId),
     stopBackgroundTask,
@@ -115,6 +116,7 @@ export function useChatSession(
     clearGoal: () => ctx.clearGoal(chatId),
     retrySafetyReview: (retryId) => ctx.retrySafetyReview(chatId, retryId),
     removeQueued: (messageId: string) => ctx.removeQueued(chatId, messageId),
+    getQueuedDraft: (messageId: string) => ctx.getQueuedDraft(chatId, messageId),
     editQueued: (messageId: string, payload: QueuedEditPayload) =>
       ctx.editQueued(chatId, messageId, payload),
     steerQueued: (messageId: string) => ctx.steerQueued(chatId, messageId),

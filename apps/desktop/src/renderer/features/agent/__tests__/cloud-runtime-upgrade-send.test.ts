@@ -19,13 +19,15 @@ vi.mock("../../../state/workspace-store", () => ({ useWorkspaceStore: { getState
 const source = readFileSync(new URL("../sessions-provider.tsx", import.meta.url), "utf8");
 const ast = ts.createSourceFile("provider.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 let callback = "";
+let promotion = "";
 function collect(node: ts.Node) {
+  if (ts.isFunctionDeclaration(node) && node.name?.text === "promoteToEnd") promotion = node.getText(ast);
   if (ts.isVariableDeclaration(node) && node.name.getText(ast) === "sendPrompt" && node.initializer && ts.isCallExpression(node.initializer))
     callback = node.initializer.arguments[0].getText(ast);
   ts.forEachChild(node, collect);
 }
 collect(ast);
-const code = ts.transpileModule(`globalThis.send = ${callback};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const code = ts.transpileModule(`${promotion}\nglobalThis.send = ${callback};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 
 function harness(folder: string, cause = "cloud_runtime_upgrade_required", duringRequest?: () => void) {
   vi.clearAllMocks();
@@ -37,8 +39,11 @@ function harness(folder: string, cause = "cloud_runtime_upgrade_required", durin
   const failure = { kind: "protocol-error", stage: "prompt", message: cause };
   const context: Record<string, unknown> = {
     ...lifecycle, Error, DOMException, AbortController, setTimeout, clearTimeout, crypto: { randomUUID },
-    bridge: { request }, prepareForSend: () => null, getStore: useSessionsStore.getState,
-    flushBubbleRef: { current: new Map() }, getAgentsSnapshot: () => [], isCloudWorkspace,
+    bridge: { request }, cloudComputerV2: true, prepareForSend: () => null, getStore: useSessionsStore.getState,
+    // Exercise post-readiness dispatch; cloud FIFO preparation has its own
+    // integration suite and hands off the already-claimed stable bubble id.
+    flushBubbleRef: { current: new Map(isCloudWorkspace(folder) ? [["chat", "accepted-prompt"]] : []) },
+    getAgentsSnapshot: () => [], isCloudWorkspace,
     resumeQueue: () => false, sendingChatsRef: { current: sending }, sendQueueRef: { current: new Map() },
     queueHeldRef: { current: new Set() }, ensureSessionRef: { current: null }, chatComposerEnv: () => null,
     startCloudSubmitSpan: () => undefined, cancelGenerationsRef: { current: new Map() },

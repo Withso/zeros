@@ -3,9 +3,9 @@ import { clearCloudComputersV2 } from "../features/settings/cloud-computer-v2-cl
 import { cloudServiceAccessCache, cloudServiceContextCache } from "./read-caches";
 import { clearCloudGithub } from "../platform/cloud-github";
 import { useEffect } from "react";
-import { isLocalDevelopment } from "../platform/runtime";
+import { isLocalDevelopment, isElectron, nativeInvoke, nativeListen } from "../platform/runtime";
 import { cloudWorkspaceCapability } from "../platform/cloud-workspace-access";
-import { getActiveBridge } from "../platform/bridge/active-bridge";
+import { getActiveBridge, onActiveBridgeChange } from "../platform/bridge/active-bridge";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import { useInternalFeatureActive } from "../features/settings/internal-features";
@@ -47,6 +47,7 @@ import { toast } from "../shared/ui/primitives/elements";
 import { warmCloudWorkspaceDestination } from "./cloud-workspace-warmup";
 import { clearCloudLatencySpans, pruneCloudLatencySpans } from "./cloud-workspace-latency";
 import { clearWorkbenchConnectionFailure, recordWorkbenchConnectionFailure } from "./workbench-availability";
+import { CloudWorkspaceInteraction } from "./cloud-workspace-interaction";
 
 /** Account/catalog lifecycle, mounted once beside the existing persistence
  * controller. It never replaces the conversation or workbench renderers. */
@@ -350,6 +351,81 @@ export function CloudWorkspaceLifecycle() {
       off();
       offSelection();
       document.removeEventListener("visibilitychange", changed);
+    };
+  }, [cloudComputerV2]);
+  useEffect(() => {
+    if (!cloudComputerV2) return;
+    let available = !isElectron(), closed = false, nativeVersion = 0, nativeQueried = false;
+    const current = () => {
+      const state = useWorkspaceStore.getState(), key = selectActiveFolder(state);
+      const target = parseCloudWorkspaceKey(key);
+      const document = target ? cloudWorkspaceDocument(target) : undefined;
+      // Settings and other app actions can use the selected workspace too.
+      // Selection is the owner; retained surfaces and hover cannot change it.
+      return target && document && canReadCloudWorkspace(document) ? { key: cloudWorkspaceKey(target), document } : null;
+    };
+    const controller = new CloudWorkspaceInteraction({
+      current, visible: () => document.visibilityState === "visible", focused: () => document.hasFocus(), available: () => available,
+      presence: (key, present) => {
+        const target = parseCloudWorkspaceKey(key), bridge = getActiveBridge();
+        return !!target && bridge instanceof WorkspaceRuntimeClient && bridge.sendWorkspacePresence(target, present);
+      },
+      wake: async (key, signal) => {
+        const target = parseCloudWorkspaceKey(key), bridge = getActiveBridge();
+        if (!target || !(bridge instanceof WorkspaceRuntimeClient)) return;
+        await bridge.openWorkspace(target, { signal, reason: "interaction" });
+        if (!signal.aborted && current()?.key === key) clearWorkbenchConnectionFailure(key);
+      },
+      failed: (key, error) => recordWorkbenchConnectionFailure(key, error, "open"),
+    });
+    const input = (event: Event) => {
+      if (!event.isTrusted) return;
+      const element = event.target instanceof Element ? event.target : null;
+      // Another sidebar row owns its explicit open. Its capture must not wake
+      // the previous selection; actions on this workspace's own row still do.
+      const row = element?.closest('[data-workspace-tab="true"]');
+      const selected = parseCloudWorkspaceKey(current()?.key);
+      controller.interact(!!row && (!selected || row.getAttribute("data-workspace-id") !== cloudWorkspaceKey(selected)));
+    };
+    let offStatus = () => {}, statusKey: string | undefined, statusBridge: WorkspaceRuntimeClient | undefined;
+    const refresh = () => {
+      const key = current()?.key, bridge = getActiveBridge();
+      // Native presence is only consumed for a selected cloud workspace. Local
+      // navigation and typing retain their existing IPC and dispatch paths.
+      if (key && isElectron() && !nativeQueried) {
+        nativeQueried = true;
+        const version = nativeVersion;
+        void nativeInvoke<{ available: boolean }>("app_user_presence").then(value => {
+          if (!closed && version === nativeVersion) { available = value.available === true; refresh(); }
+        }).catch(() => {});
+      }
+      const runtime = bridge instanceof WorkspaceRuntimeClient ? bridge : undefined;
+      if (key !== statusKey || runtime !== statusBridge) {
+        offStatus(); statusKey = key; statusBridge = runtime;
+        offStatus = key && runtime ? runtime.onWorkspaceStatusChange(key, () => controller.reconnect()) : () => {};
+      }
+      controller.refresh();
+    };
+    const offSelection = useWorkspaceStore.subscribe(refresh);
+    const offCatalog = subscribeCloudWorkspaces(refresh);
+    const offBridge = onActiveBridgeChange(refresh);
+    refresh();
+    const offNative = nativeListen<{ available: boolean }>("desktop-user-presence", value => {
+      nativeVersion++; available = value.available === true; refresh();
+    });
+    // Programmatic focus and scroll can be trusted DOM events too. A focus
+    // reached by click/Tab is already covered by pointerdown/keydown.
+    const events = ["keydown", "pointerdown", "wheel", "input"];
+    for (const event of events) window.addEventListener(event, input, { capture: true, passive: true });
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh); window.addEventListener("blur", refresh);
+    const timer = window.setInterval(refresh, 15_000);
+    return () => {
+      closed = true; controller.close(); offSelection(); offCatalog(); offBridge(); offStatus(); void offNative.then(off => off());
+      window.clearInterval(timer);
+      for (const event of events) window.removeEventListener(event, input, true);
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh); window.removeEventListener("blur", refresh);
     };
   }, [cloudComputerV2]);
   return null;

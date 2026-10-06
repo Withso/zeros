@@ -37,6 +37,13 @@ beforeEach(() => {
 afterEach(() => { clearCloudWorkspaceCatalog(); vi.useRealTimers(); });
 
 describe("explicit cloud wake readiness", () => {
+  it("preserves an interaction wake reason when send preparation joins the same lifecycle intent", async () => {
+    const automatic = wakeCloudWorkspace(target, doc(1), undefined, "interaction");
+    const sending = wakeCloudWorkspace(target, doc(1));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await Promise.all([automatic, sending]);
+    expect(api.wake).toHaveBeenCalledExactlyOnceWith(target, "wake", expect.any(String), "interaction");
+  });
   it("shares the lifecycle intent for open and send, retains history ownership, and admits the same generation", async () => {
     const first = wakeCloudWorkspace(target, doc(1));
     const second = wakeCloudWorkspace(target, doc(1));
@@ -88,7 +95,7 @@ describe("explicit cloud wake readiness", () => {
     api.read.mockResolvedValueOnce(doc(2, "stopped")).mockResolvedValueOnce(doc(4, "stopping"));
     api.wake.mockResolvedValue(doc(3, "waking"));
     const pending = wakeCloudWorkspace(target, doc(1, "stopping"));
-    const rejected = expect(pending).rejects.toThrow(/stopping/);
+    const rejected = expect(pending).rejects.toMatchObject({ name: "CloudWorkspaceWakeEndedError", message: expect.stringContaining("stopping") });
     expect(api.wake).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(2_000); await rejected;
     expect(api.wake).toHaveBeenCalledOnce();
