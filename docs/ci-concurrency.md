@@ -38,10 +38,14 @@ scheduling, so jobs can still queue when the shared pool is occupied.
 - **Alpha.** With `ZEROS_ALPHA_CI_FAST_PATH=enabled`, automatic Alpha needs its
   candidate's exact-SHA `alpha-gate`; otherwise it retains full Preflight and
   CodeQL admission. If main advances, candidate supersession and
-  destination-mutation guards remain
-  in force. The release barrier retains compatibility with cancelled pending
+  destination-mutation guards remain in force. The release barrier retains
+  compatibility with cancelled pending
   runs from the previous coalescing policy; it can skip a superseded candidate
-  before any destination mutation.
+  before any destination mutation. CI, version preparation and builds can
+  overlap across Alpha candidates. The reusable publication call holds
+  `release-alpha` from fresh entry checks through hosted promotion and both
+  publishers. A pending publication can be replaced; an active transaction is
+  never cancelled by concurrency. See [concurrent Alpha preparation](deployment-environments.md#concurrent-alpha-preparation).
 - **Latency.** A newer main run can start alongside older runs as runners
   become available. Its critical aggregates can admit Alpha without waiting
   for an older Preflight to finish. Runner capacity and Alpha promotion
