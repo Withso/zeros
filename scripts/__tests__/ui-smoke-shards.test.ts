@@ -32,6 +32,7 @@ const originalOrder = [
   "cloud-design-directories",
   "cloud-computer-v2",
   "context-gauge",
+  "composer-send-failures",
   "permission-hints",
   "conversation-summary",
   "overlay-positioning",

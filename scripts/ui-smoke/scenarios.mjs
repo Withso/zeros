@@ -125,6 +125,7 @@ export const scenarioRegistry = [
     regressions: "cloudComputerV2ReviewRegressions",
   },
   fresh("context-gauge", "context-gauge", "runContextGaugeSmoke"),
+  fresh("composer-send-failures", "composer-send-failures", "runComposerSendFailuresSmoke", 1100, 760),
   fresh("permission-hints", "permission-hints", "runPermissionHintsSmoke"),
   fresh(
     "conversation-summary",

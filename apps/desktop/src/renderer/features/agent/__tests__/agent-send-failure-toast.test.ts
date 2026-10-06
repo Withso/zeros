@@ -1,9 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
 import type { AgentSendFailureInput } from "../agent-send-failure-toast";
 
-const mocks = vi.hoisted(() => ({ error: vi.fn(), settings: vi.fn() }));
+const mocks = vi.hoisted(() => ({ error: vi.fn(), settings: vi.fn(), restart: vi.fn(),
+  workspace: vi.fn(), account: vi.fn(), restartVisible: vi.fn(), internalFeature: vi.fn() }));
 vi.mock("../../../shared/ui/primitives/elements/toast", () => ({ toast: { error: mocks.error } }));
 vi.mock("../cloud-admission-status", () => ({ openCloudAdmissionSettings: mocks.settings }));
+vi.mock("../../../state/cloud-workspace-catalog", () => ({ cloudWorkspaceDocument: mocks.workspace, cloudCatalogGeneration: mocks.account }));
+vi.mock("../../../state/cloud-workspace-restart", () => ({ restartCloudWorkspace: mocks.restart, cloudWorkspaceRestartVisible: mocks.restartVisible }));
+vi.mock("../../settings/internal-features", () => ({ isInternalFeatureActive: mocks.internalFeature }));
 
 const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 let notify: typeof import("../agent-send-failure-toast").notifyAgentSendFailure;
@@ -14,12 +19,17 @@ const input = (error: unknown, extra: Partial<AgentSendFailureInput> = {}): Agen
 beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
+  mocks.workspace.mockReturnValue(undefined);
+  mocks.account.mockReturnValue(1);
+  mocks.restartVisible.mockReturnValue(true);
+  mocks.internalFeature.mockReturnValue(true);
+  mocks.restart.mockResolvedValue(undefined);
   notify = (await import("../agent-send-failure-toast")).notifyAgentSendFailure;
 });
 
 describe("agent send failure toasts", () => {
   it.each([
-    ["cloud_runtime_upgrade_required", "Cloud runtime update required", undefined],
+    ["cloud_runtime_upgrade_required", "This workspace is on an older runtime", undefined],
     ["cloud_agent_model_not_authorized", "GPT-6.1 Sol isn't enabled for this workspace", "Agent settings"],
     ["cloud_agent_credential_required", "Connect Codex to send messages", "Reconnect"],
     ["cloud_agent_credential_expired", "Reconnect Codex to send messages", "Reconnect"],
@@ -37,6 +47,14 @@ describe("agent send failure toasts", () => {
     if (action) {
       options.action.onClick();
       expect(mocks.settings).toHaveBeenCalledExactlyOnceWith(folder, "codex");
+    }
+    if (isCloudAgentAdmissionCode(code)) {
+      for (const reason of ["dispatch_ambiguous", "unknown"] as const) {
+        notify(input({ code, message: "command_dispatch_rejected" }, { reason, attemptId: reason }));
+        expect(mocks.error).toHaveBeenLastCalledWith(message, expect.objectContaining({
+          action: action ? expect.objectContaining({ label: action }) : undefined,
+        }));
+      }
     }
   });
 
@@ -97,7 +115,7 @@ describe("agent send failure toasts", () => {
     ["workspace_stopped", "Cloud workspace stopped", "Retry"],
     ["workspace_archived", "Cloud workspace is archived", undefined],
     ["workspace_unavailable", "Cloud workspace is unavailable", "Retry"],
-    ["runtime_upgrade_required", "Cloud runtime update required", undefined],
+    ["runtime_upgrade_required", "This workspace is on an older runtime", undefined],
     ["model_not_enabled", "GPT-6.1 Sol isn't enabled for this workspace", "Agent settings"],
     ["credential_missing", "Connect Codex to send messages", "Reconnect"],
     ["credential_expired_or_revoked", "Reconnect Codex to send messages", "Reconnect"],
@@ -121,6 +139,72 @@ describe("agent send failure toasts", () => {
     const queued = input(undefined, { attemptId: "queued-message-uuid", reason: "queued_timeout" });
     expect(notify(queued)).toBe(true);
     expect(notify({ ...queued, reason: "credential_missing" })).toBe(false);
+    expect(mocks.error).toHaveBeenCalledOnce();
+  });
+
+  it.each(["admission", "normalized"])("wires %s runtime failure to an explicit restart of the captured cloud workspace", source => {
+    mocks.workspace.mockReturnValue({ capabilities: { canWrite: true } });
+    const retry = vi.fn();
+    notify(input(source === "admission" ? "cloud_runtime_upgrade_required" : undefined,
+      { reason: "runtime_upgrade_required", onRetry: retry }));
+    const [copy, options] = mocks.error.mock.calls[0];
+    expect(copy).toBe("This workspace is on an older runtime");
+    expect(options.description).toBe("Restart this workspace to update its cloud runtime.");
+    expect(options.description).not.toContain("next time");
+    expect(options.action.label).toBe("Restart workspace");
+    expect(mocks.restart).not.toHaveBeenCalled();
+    options.action.onClick();
+    expect(mocks.restart).toHaveBeenCalledExactlyOnceWith({
+      organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222",
+      relativePath: "",
+    });
+    expect(retry).not.toHaveBeenCalled();
+  });
+
+  it("preserves the named restart hook behind the same cloud permission gate", () => {
+    mocks.workspace.mockReturnValue({ capabilities: { canWrite: true } });
+    const restart = vi.fn(), retry = vi.fn();
+    notify(input("cloud_runtime_upgrade_required", { onRestartWorkspace: restart, onRetry: retry }));
+    const [copy, options] = mocks.error.mock.calls[0];
+    expect(copy).toBe("This workspace is on an older runtime");
+    expect(options.action.label).toBe("Restart workspace");
+    expect(restart).not.toHaveBeenCalled();
+    options.action.onClick();
+    expect(restart).toHaveBeenCalledOnce();
+    expect(retry).not.toHaveBeenCalled();
+  });
+
+  it.each(["no-write", "no-document", "archived", "feature-off", "personal-local", "organization-local"])("offers no runtime restart for %s even with a caller hook", state => {
+    mocks.workspace.mockReturnValue(state === "no-document" ? undefined : { capabilities: { canWrite: state !== "no-write" } });
+    mocks.restartVisible.mockReturnValue(state !== "archived");
+    mocks.internalFeature.mockReturnValue(state !== "feature-off");
+    const restart = vi.fn();
+    notify(input("cloud_runtime_upgrade_required", {
+      folder: state.endsWith("local") ? `/${state}` : folder, onRestartWorkspace: restart,
+    }));
+    expect(mocks.error.mock.calls[0][1].action).toBeUndefined();
+    expect(restart).not.toHaveBeenCalled();
+    expect(mocks.restart).not.toHaveBeenCalled();
+  });
+
+  it.each(["account", "write-access", "lifecycle"])("retires a captured runtime restart action after %s changes", change => {
+    mocks.workspace.mockReturnValue({ capabilities: { canWrite: true } });
+    notify(input("cloud_runtime_upgrade_required"));
+    const action = mocks.error.mock.calls[0][1].action;
+    expect(action.label).toBe("Restart workspace");
+    if (change === "account") mocks.account.mockReturnValue(2);
+    if (change === "write-access") mocks.workspace.mockReturnValue({ capabilities: { canWrite: false } });
+    if (change === "lifecycle") mocks.restartVisible.mockReturnValue(false);
+    action.onClick();
+    expect(mocks.restart).not.toHaveBeenCalled();
+  });
+
+  it("leaves restart failure presentation with the shared restart owner", async () => {
+    mocks.workspace.mockReturnValue({ capabilities: { canWrite: true } });
+    mocks.restart.mockRejectedValue(new Error("Fixture restart failed"));
+    notify(input("cloud_runtime_upgrade_required"));
+    await mocks.error.mock.calls[0][1].action.onClick();
+    expect(mocks.restart).toHaveBeenCalledOnce();
     expect(mocks.error).toHaveBeenCalledOnce();
   });
 });

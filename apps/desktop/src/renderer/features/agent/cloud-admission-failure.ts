@@ -49,8 +49,11 @@ export function classifyCloudAdmissionFailure(input: {
     case "CLOUD_WORKSPACE_CHECKPOINTING":
     case "CLOUD_WORKSPACE_NOT_READY":
       return { kind: "waiting", message: "Waiting for agent", action: "none" };
+    // Compatibility: the cloud receipt observer emits this exact legacy
+    // sentinel for an uncertain command. Never match arbitrary provider prose.
     case "command_dispatch_rejected":
     case "cloud_agent_authority_rejected":
+    case "The cloud command outcome is unknown. Review the transcript before retrying.":
       return { kind: "unavailable", message: "The cloud agent request could not be completed. Review the conversation before trying again", action: "none" };
     default:
       return null;

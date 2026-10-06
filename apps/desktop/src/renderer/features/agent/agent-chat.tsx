@@ -1,6 +1,5 @@
 import { cloudAdmissionForTurn } from "./cloud-admission-failure";
-import { notifyAgentSendFailure } from "./agent-send-failure-toast";
-import { CloudAdmissionStatus } from "./cloud-admission-status";
+import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-send-failure-toast";
 // ──────────────────────────────────────────────────────────
 // AgentChat — messages + tool cards + permission modal + composer
 // ──────────────────────────────────────────────────────────
@@ -183,7 +182,6 @@ import {
 } from "./session-tools-cache";
 import { useBridge } from "../../platform/bridge/use-bridge";
 import { BoundaryPortsPill } from "./boundary-ports";
-import { cloudAgentLimitations } from "./cloud-native-ui";
 import { cloudRuntimeUpgradeComposerContext } from "./cloud-runtime-upgrade-link";
 import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 import type { ExecutionBoundaryPortStatus } from "@zeros/protocol/containment";
@@ -244,7 +242,7 @@ import {
 } from "./agents-cache";
 import { useWorkspaceAgents } from "./workspace-agent-registry";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
-import { useWorkbenchAvailability } from "../../state/workbench-availability";
+import { cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
 import { isRunnableAgent } from "./agent-runnable";
 import { requestProviderSettings } from "../settings/settings-navigation";
 import { isSubscriptionProvider } from "../settings/subscription-connection";
@@ -365,16 +363,6 @@ interface AgentChatProps {
   workspaceProvisioning?: boolean;
 }
 
-// Mount this observer only for cloud chats; Local composers keep their existing
-// subscriptions and lifecycle. Hidden cloud surfaces have no active effects.
-function CloudWorkspaceSleepNotice({ folder, active }: { folder: string; active: boolean }) {
-  const availability = useWorkbenchAvailability(folder, active);
-  if (!["stopped", "sleeping", "stopping", "waking"].includes(availability.availability.state ?? "") || !availability.status) return null;
-  return <p className="text-fg3 mb-2 text-2xxs" role="status" data-cloud-workspace-sleep="">
-    {availability.status.message}
-  </p>;
-}
-
 export function AgentChat({
   readOnly = false,
   composerReplacement,
@@ -402,7 +390,6 @@ export function AgentChat({
   // In particular, background continuation chrome is an Ultracode-only aid.
   const chatThread = useChatById(chatId);
   const cloudNativeCapabilities=session.boundary?.cloudExecution?.capabilities??session.session?.nativeCapabilities;
-  const cloudLimitations=cloudAgentLimitations(session.boundary);
   const goalsAvailable=!isCloudWorkspace(chatThread?.folder)||cloudNativeCapabilities?.goals===true;
   const browserConfirmation = useBrowserConfirmation(chatId);
   const workflows = session.workflows;
@@ -1483,8 +1470,6 @@ export function AgentChat({
   const openBoundaryPort = session.openBoundaryPort;
   const cloudPreviewsEnabled = useInternalFeatureActive("cloudComputerV2");
   const cloudCanEdit = useCloudWorkspaceCanEdit(chatThread?.folder);
-  const cloudSleepNotice = cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && !session.cloudSendWait
-    ? <CloudWorkspaceSleepNotice folder={chatThread!.folder} active={surfaceActive} /> : null;
   const cloudPreviewsActive = cloudPreviewsEnabled && cloudCanEdit;
   const warmBoundaryPreview = useCallback(() => {
     if (interactive && cloudPreviewsActive && isCloudWorkspace(chatThread?.folder))
@@ -3489,10 +3474,13 @@ export function AgentChat({
   // explicit user send, never an automatic loop. The Send button keeps its
   // "error" tint (PromptInputSubmit status) so the state still reads.
   const canSend =
-    (!runtimeUpgradeRequired || cloudComputerV2 && isCloudWorkspace(chatThread?.folder)) &&
+    !runtimeUpgradeRequired &&
     (session.transcriptState === "resident" || cloudComputerV2 && isCloudWorkspace(chatThread?.folder)) &&
     !composerStreaming &&
     !composerEmpty;
+  // Keep blocked Send focusable for its tooltip and explicit attempt feedback.
+  // Stop and queued editing retain their existing controls while agents run.
+  const runtimeSendBlocked = runtimeUpgradeRequired && !composerStreaming && !sendPreparing && !editingQueuedId;
 
   // Attach-time staging has normally completed already. Await the final
   // persistence check for every kind before publishing a reference to an agent.
@@ -4028,22 +4016,29 @@ export function AgentChat({
     extras?: Parameters<typeof runSend>[1],
     recordActivity = true,
   ): Promise<void> => {
-    if (readOnly || (runtimeUpgradeRequired && !(cloudComputerV2 && isCloudWorkspace(chatThread?.folder))) || sendInFlightRef.current) return;
+    if (readOnly || sendInFlightRef.current) return;
+    const folder = chatThread?.folder ?? session.cwd;
+    if (runtimeUpgradeRequired) {
+      const target = parseCloudWorkspaceKey(folder);
+      if (chatId && target) notifyAgentSendFailure({ folder, chatId,
+        attemptId: `runtime-upgrade:${chatThread?.agentId ?? session.agentId}:${cloudWorkspaceDocument(target)?.generation.number ?? "unknown"}`,
+        agentId: chatThread?.agentId ?? session.agentId, reason: "runtime_upgrade_required" });
+      return;
+    }
+    const attemptId = `send-${crypto.randomUUID()}`;
     sendInFlightRef.current = true;
     // Queueing behind a streaming turn cannot own that turn's next chunk.
     const cancelLatency = chatId && session.status !== "streaming"
       ? startCloudSubmitSpan(chatId) : undefined;
     const generation = chatId ? agentSessions.getSendGeneration(chatId) : undefined;
-    const cloudAttemptId = cloudComputerV2 && isCloudWorkspace(chatThread?.folder) ? `send-${crypto.randomUUID()}` : undefined;
     try {
       const submitted = await runSend(override, extras, recordActivity);
       if (!submitted) cancelLatency?.();
     } catch (error) {
       cancelLatency?.();
       if (chatId && generation !== agentSessions.getSendGeneration(chatId)) return;
-      if (cloudComputerV2 && isCloudWorkspace(chatThread?.folder)) {
-        notifyAgentSendFailure({ folder: chatThread?.folder, chatId: chatId!, attemptId: cloudAttemptId!, agentId: session.agentId,
-          model: chatThread?.model, error });
+      if (chatId && isCloudWorkspace(folder)) {
+        notifyAgentSendFailure({ folder, chatId, attemptId, agentId: chatThread?.agentId ?? session.agentId, model: chatThread?.model, error });
         return;
       }
       toast.error("Message wasn't sent", {
@@ -5221,20 +5216,6 @@ export function AgentChat({
               so the popover matches the composer width,
               not the full-width wrapper above. */}
               {composerSuggestionPopup}
-              {!runtimeUpgradeRequired && !(cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait) && <CloudAdmissionStatus folder={chatThread?.folder ?? session.cwd} agentId={signInAgentId}
-                failure={session.cloudAdmissionFailure?.agentId === signInAgentId &&
-                  (session.cloudAdmissionFailure.model === null || session.cloudAdmissionFailure.model === chatThread?.model) ? session.cloudAdmissionFailure : null} readOnly={readOnly} onRetry={() => void handleSend()} />}
-              {runtimeUpgradeRequired && !(cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait) && (
-                <p className="text-fg2 mb-2 text-2xxs" role="status" data-cloud-agent-runtime-upgrade="">
-                  This workspace gets the new cloud runtime the next time it wakes
-                </p>
-              )}
-              {cloudSleepNotice}
-              {cloudLimitations.length > 0 && (
-                <p className="text-fg3 mb-2 text-2xxs" data-cloud-agent-limitations="">
-                  Unavailable on this cloud runtime: {cloudLimitations.join(", ")}.
-                </p>
-              )}
               {dragActive && (
                 <div
                   className={cn(
@@ -5395,13 +5376,22 @@ export function AgentChat({
                               ? "Stop agent"
                               : editingQueuedId
                                 ? "Save message"
-                                : "Send"
+                                : runtimeSendBlocked
+                                  ? CLOUD_RUNTIME_UPGRADE_TOOLTIP
+                                  : "Send"
                         }
                         shortcut={
-                          composerStreaming || sendPreparing ? undefined : "↵"
+                          composerStreaming || sendPreparing || runtimeSendBlocked ? undefined : "↵"
                         }
                       >
                         <PromptInputSubmit
+                          aria-disabled={runtimeSendBlocked || undefined}
+                          onClick={(event) => {
+                            if (runtimeSendBlocked) {
+                              event.preventDefault();
+                              void handleSend();
+                            }
+                          }}
                           // `submitted` = this send is parked on a cold
                           // transcript read or a session (re)build with the
                           // text still in the composer. Without it the button
@@ -5423,9 +5413,9 @@ export function AgentChat({
                                 ? true
                                 : editingQueuedId
                                   ? composerEmpty
-                                  : !canSend
+                                  : !runtimeSendBlocked && !canSend
                           }
-                          className="disabled:bg-bg2-hover disabled:text-fg2 size-8 disabled:opacity-100"
+                          className="disabled:bg-bg2-hover disabled:text-fg2 aria-disabled:bg-bg2-hover aria-disabled:text-fg2 size-8 disabled:opacity-100"
                         >
                           {composerStreaming ? (
                             <Square className="size-3" />

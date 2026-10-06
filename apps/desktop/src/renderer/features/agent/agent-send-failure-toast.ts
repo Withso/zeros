@@ -1,5 +1,8 @@
 import { toast } from "../../shared/ui/primitives/elements/toast";
-import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { cloudCatalogGeneration, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
+import { cloudWorkspaceRestartVisible, restartCloudWorkspace } from "../../state/cloud-workspace-restart";
+import { isInternalFeatureActive } from "../settings/internal-features";
 import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode } from "./cloud-admission-failure";
 import { openCloudAdmissionSettings } from "./cloud-admission-status";
 import { modelsForAgent } from "./model-catalog";
@@ -34,6 +37,9 @@ export interface AgentSendFailureInput {
   /** Explicit per-message retry supplied by the queue owner, never an
    * automatic resend. Only readiness failures offer this action. */
   onRetry?: () => void;
+  /** Optional runtime-owner override; otherwise uses the shared explicit
+   * stop → wake action. Both paths require cloud workspace run access. */
+  onRestartWorkspace?: () => void;
 }
 
 // Event-owned acknowledgements survive chat remounts, reconnects and catalog
@@ -43,10 +49,10 @@ const notified = new Set<string>();
 
 function sendFailureReason(input: AgentSendFailureInput): AgentSendFailureReason | null {
   if (!isCloudWorkspace(input.folder)) return input.reason === "queued_timeout" ? input.reason : "unknown";
-  if (input.reason) return input.reason;
+  // The command receipt's exact admission cause wins over a queue/dispatch fallback.
   const failure = classifyCloudAdmissionFailure({ ...input, error: input.error });
   switch (failure?.kind) {
-    case "waiting": return null;
+    case "waiting": return input.reason ?? null;
     case "runtime-upgrade-required": return "runtime_upgrade_required";
     case "model-not-authorized": return "model_not_enabled";
     case "credential-required":
@@ -56,9 +62,28 @@ function sendFailureReason(input: AgentSendFailureInput): AgentSendFailureReason
         case "cloud_agent_credential_refresh_required": return "credential_refresh_required";
         default: return "credential_missing";
       }
-    case "unavailable": return "dispatch_ambiguous";
-    default: return "unknown";
+    case "unavailable": return input.reason ?? "dispatch_ambiguous";
+    default: return input.reason ?? "unknown";
   }
+}
+
+function runtimeRestartAction(input: AgentSendFailureInput) {
+  const target = parseCloudWorkspaceKey(input.folder);
+  if (!target) return undefined;
+  const canRestart = () => {
+    const workspace = cloudWorkspaceDocument(target);
+    return isInternalFeatureActive("cloudComputerV2") && workspace?.capabilities.canWrite &&
+      cloudWorkspaceRestartVisible(input.folder!, workspace);
+  };
+  if (!canRestart()) return undefined;
+  const account = cloudCatalogGeneration();
+  const onRestartWorkspace = input.onRestartWorkspace ?? (() => {
+    // The shared restart owner presents lifecycle failures once.
+    void restartCloudWorkspace(target).catch(() => {});
+  });
+  return { label: "Restart workspace", onClick: () => {
+    if (account === cloudCatalogGeneration() && canRestart()) onRestartWorkspace();
+  } };
 }
 
 /** Shared by direct and queued sends. Call only when an explicit attempt
@@ -93,8 +118,9 @@ export function notifyAgentSendFailure(input: AgentSendFailureInput): boolean {
       description = "Try sending again when the workspace is ready.";
       break;
     case "runtime_upgrade_required":
-      message = "Cloud runtime update required";
-      description = CLOUD_RUNTIME_UPGRADE_TOOLTIP;
+      message = "This workspace is on an older runtime";
+      action = runtimeRestartAction(input);
+      description = action ? "Restart this workspace to update its cloud runtime." : CLOUD_RUNTIME_UPGRADE_TOOLTIP;
       break;
     case "model_not_enabled": {
       const model = input.agentId && input.model ? modelsForAgent(input.agentId, null).find(row => row.value === input.model)?.label : null;

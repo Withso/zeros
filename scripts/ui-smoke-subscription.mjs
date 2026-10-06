@@ -546,21 +546,41 @@ export async function runCloudAgentAccessSmoke({ page, check }) {
   await expect(page.getByText("This workspace gets the new cloud runtime the next time it wakes", { exact: true })).toBeVisible();
   await expect(page.getByText("No connected agents.", { exact: true })).toHaveCount(0);
 
-  await page.evaluate(() => sessionStorage.removeItem("fixture:app-sidebar"));
-  await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-app-sidebar.html?conversation&runtimeUpgrade`);
-  await page.locator('[data-workspace-id="ws-atlanta"]').getByRole("button", { name: /^Open workspace atlanta/ }).click();
-  const notice = page.locator("[data-cloud-agent-runtime-upgrade]");
-  await expect(notice).toHaveText("This workspace gets the new cloud runtime the next time it wakes");
-  const composer = page.locator(".zeros-agent-surface .composer-pm").first();
+  const preparation = "https://api.example.test/v1/**/agent-credentials/prepare";
+  const runtimeAvailability = "https://api.example.test/v1/**/runtime-upgrade";
+  await page.route(preparation, async route => {
+    const required = await page.evaluate(() => window.composerSendFailureFixture.runtimeRequired);
+    return route.fulfill({ json: { delegations: [{ id: "33333333-3333-4333-8333-333333333333", kind: "codex-chatgpt",
+      models: ["gpt-6.1-sol"], expiresAt: "2099-01-01T00:00:00Z", runtimeQualified: !required, runtimeUpgradeRequired: required }] } });
+  });
+  await page.route(runtimeAvailability, async route => {
+    expect(route.request().method()).toBe("GET");
+    return route.fulfill({ json: await page.evaluate(() => window.composerSendFailureFixture.runtimeAvailability) });
+  });
+  await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-composer-send-failures.html?blocked=1`);
+  const composer = page.locator('[data-slot="prompt-input"]:visible').locator("..").locator('[contenteditable="true"]');
+  const send = page.getByRole("button", { name: "Send message", exact: true });
+  await expect(page.locator("[data-cloud-agent-runtime-upgrade]")).toHaveCount(0);
   await composer.fill("Keep this draft until the runtime is updated");
-  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeDisabled();
+  await expect(send).toBeDisabled();
+  await expect(send).toHaveAttribute("aria-disabled", "true");
+  await send.hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Gets the new cloud runtime the next time this workspace wakes");
+  await composer.press("Enter");
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(1);
+  await expect(page.locator("[data-sonner-toast]")).toContainText("This workspace is on an older runtime");
+  await expect(page.locator("[data-sonner-toast]")).toContainText("Restart this workspace to update its cloud runtime.");
+  await expect(page.locator("[data-sonner-toast]").getByRole("button", { name: "Restart workspace", exact: true })).toBeVisible();
+  await expect(page.locator("[data-sonner-toast]")).not.toContainText("next time");
   await composer.press("Enter");
   await expect(composer).toHaveText("Keep this draft until the runtime is updated");
-  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
-  await page.evaluate(() => window.appSidebarUpgradeRuntime());
-  await expect(notice).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeEnabled();
-  check("Old cloud runtimes explain availability after the next wake, block Enter and Send, and preserve the draft", true);
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(1);
+  await page.evaluate(() => window.composerSendFailureFixture.refresh(false));
+  await expect(send).toBeEnabled();
+  await expect(composer).toHaveText("Keep this draft until the runtime is updated");
+  await page.unroute(preparation);
+  await page.unroute(runtimeAvailability);
+  check("Old cloud runtimes disable Send with a tooltip, notify once on Enter, and preserve the draft through upgrade", true);
 
   await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-model-menu.html`);
   await page.getByRole("button", { name: /^Model:/ }).click();

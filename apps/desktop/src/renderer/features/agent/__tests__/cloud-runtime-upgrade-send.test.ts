@@ -131,6 +131,12 @@ describe("production send callback on runtime rejection", () => {
     expect(useSessionsStore.getState().sessions.chat.cloudAdmissionFailure).toMatchObject({ code, agentId: "codex" });
     expect(h.sending.size).toBe(0);
     expect(mocks.refresh).toHaveBeenCalledOnce();
+    expect(mocks.toast).toHaveBeenCalledOnce();
+    if (code === "cloud_runtime_upgrade_required") {
+      expect(mocks.toast).toHaveBeenCalledWith("This workspace is on an older runtime", expect.objectContaining({
+        description: "Gets the new cloud runtime the next time this workspace wakes", action: undefined,
+      }));
+    }
   });
   it("labels the submitted model even when the user switches models during admission", async () => {
     mocks.workspace.chats[0].model = "gpt-6.1-sol";
@@ -140,14 +146,29 @@ describe("production send callback on runtime rejection", () => {
     await h.send();
     expect(useSessionsStore.getState().sessions.chat.cloudAdmissionFailure).toMatchObject({ model: "gpt-6.1-sol", message: "GPT-6.1 Sol isn't enabled for this workspace" });
   });
-  it("never calls an ambiguous dispatch failure a proved admission refusal", async () => {
-    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "command_dispatch_rejected");
+  it.each(["command_dispatch_rejected", "The cloud command outcome is unknown. Review the transcript before retrying."])("never calls ambiguous %s a proved admission refusal", async code => {
+    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", code);
     await h.send();
     expect(h.request).toHaveBeenCalledOnce();
     expect(getLiveChatDraft("chat")).toBeNull();
     expect(useSessionsStore.getState().sessions.chat.messages).toHaveLength(1);
     expect(useSessionsStore.getState().sessions.chat.messages[0]).not.toHaveProperty("recoveryFailure");
     expect(useSessionsStore.getState().sessions.chat.cloudAdmissionFailure?.message).toContain("Review the conversation");
+    expect(mocks.toast).toHaveBeenCalledExactlyOnceWith("Cloud request couldn't be completed", expect.objectContaining({
+      description: "Review the conversation before retrying.",
+    }));
+  });
+  it.each(["cloud_agent_model_not_authorized", "command_dispatch_rejected"])("shares the original queue toast identity across renewed %s deliveries", code => {
+    const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    const h = harness(folder, code);
+    for (const id of ["first-delivery", "renewed-delivery"]) {
+      const message = { id, kind: "text" as const, role: "user" as const, text: h.draft.text, createdAt: 1 };
+      useSessionsStore.getState().patchSession("chat", { messages: [message] });
+      expect(recoverCloudAdmissionFailure({ folder, chatId: "chat", error: code, message, draft: h.draft,
+        toastAttemptId: `original-queue-entry-${code}`, store: useSessionsStore.getState(), pauseQueue: h.pauseQueue })).toBe(true);
+    }
+    expect(mocks.toast).toHaveBeenCalledOnce();
+    expect(h.request).not.toHaveBeenCalled();
   });
   it("never requeues an accepted message after an ambiguous dispatch result", async () => {
     const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "command_dispatch_rejected", undefined, true);
@@ -164,6 +185,7 @@ describe("production send callback on runtime rejection", () => {
     expect(useSessionsStore.getState().sessions.chat.status).toBe("failed");
     expect(h.pauseQueue).not.toHaveBeenCalled();
     expect(mocks.refresh).not.toHaveBeenCalled();
+    expect(mocks.toast).not.toHaveBeenCalled();
     expect(getLiveChatDraft("chat")).toBeNull();
     expect(h.sending.size).toBe(0);
   });
