@@ -22,6 +22,7 @@
 import type { BridgeMessage } from "./messages";
 import { createMessageId } from "./messages";
 import { PROTOCOL_VERSION } from "@zeros/protocol/version";
+import { cloudBridgeCloseDiagnostic } from "@zeros/protocol/cloud-bridge-diagnostics";
 import {
   MAX_BRIDGE_FRAME_BYTES,
   safeParseBridgeMessage,
@@ -223,6 +224,22 @@ export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 const CLOUD_RUNTIME_UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CLOUD_RUNTIME_TOKEN_PATTERN = /^zw[sa]_[A-Za-z0-9_-]{43}$/;
+const CLOUD_RPC_IN_FLIGHT = 16;
+const CLOUD_CONTROL_REQUESTS = new Set(["AGENT_CANCEL", "AGENT_STOP_BACKGROUND_TASK", "AGENT_STEER",
+  "AGENT_CLOSE_SESSION", "AGENT_PERMISSION_RESPONSE", "AGENT_QUESTION_RESPONSE"]);
+const DIAGNOSTIC_REQUEST_TYPES = new Set(["WORKSPACE_REQUEST", "PTY_LIST", "PTY_CREATE", "PTY_WRITE", "PTY_KILL",
+  "AGENT_LIST_AGENTS", "AGENT_INIT_AGENT", "AGENT_NEW_SESSION", "AGENT_LOAD_SESSION", "AGENT_PROMPT", ...CLOUD_CONTROL_REQUESTS]);
+const DIAGNOSTIC_OPERATIONS = new Set(["workspace.list", "workspace.get", "workspace.lifecycleStatus", "github.nativeGrant",
+  "cloudEvents.request", "cloudCommands.request", "cloudCommands.conversation", "cloudCommands.createConversation", "cloudCommands.setMode",
+  "cloudActions.request", "cloudLsp.request", "chats.list", "chats.replaceAll", "messages.window", "messages.windowOlder",
+  "git.status", "git.diff", "git.log", "git.reviewHunks", "file.read", "file.list", "design.status"]);
+type CloudDiagnosticScope = Pick<CloudRuntimeConnectionTarget, "workspaceId" | "generation" | "connectionSequence">;
+type CloudDiagnosticEvent = "close" | "request_failed" | "reconnect" | "connect" | "ready" | "rejection";
+function requestDiagnostic(msg: Partial<BridgeMessage> & { type: string }) {
+  const operation = "op" in msg ? msg.op : undefined;
+  return { requestType: DIAGNOSTIC_REQUEST_TYPES.has(msg.type) ? msg.type : "other",
+    operation: typeof operation === "string" && DIAGNOSTIC_OPERATIONS.has(operation) ? operation : "other" };
+}
 
 export type CloudRuntimeConnectionTarget = {
   readonly kind: "cloud";
@@ -506,6 +523,9 @@ interface PendingRequest {
   timer: number | null;
   signal?: AbortSignal;
   onAbort?: () => void;
+  diagnostic: ReturnType<typeof requestDiagnostic>;
+  scope?: CloudDiagnosticScope;
+  startedAt: number;
 }
 
 interface QueuedRequest {
@@ -631,6 +651,8 @@ export class RuntimeClient {
 
   /** Whether the engine is connected and ready */
   private _engineConnected = false;
+  private handshakeReady = false;
+  private diagnostics = { at: 0, suppressed: 0, counts: { close: 0, request_failed: 0, reconnect: 0, connect: 0, ready: 0, rejection: 0 } };
   get extensionConnected(): boolean {
     return this._engineConnected;
   }
@@ -701,6 +723,7 @@ export class RuntimeClient {
     if (this.pendingWs) return;
 
     this.setStatus("connecting");
+    this.cloudDiagnostic("connect", { attempt: this.reconnectAttempts });
 
     let ws: WebSocket;
     try {
@@ -742,7 +765,7 @@ export class RuntimeClient {
       if (msg) this.handleIncoming(msg);
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       // Clear whichever slot held this socket; an orphan that lost the
       // race could close after the winner promoted itself, and we
       // don't want to null out the live this.ws.
@@ -750,6 +773,8 @@ export class RuntimeClient {
       const wasPending = this.pendingWs === ws;
       if (wasPending) this.pendingWs = null;
       if (this.ws !== ws && !wasPending) return;
+      this.cloudDiagnostic("close", { ...cloudBridgeCloseDiagnostic(event?.code, event?.reason),
+        stage: wasPending ? "upgrade" : this.handshakeReady ? "ready" : "handshake" });
       if (this.ws === ws) this.ws = null;
       this.afterDisconnect();
     };
@@ -863,7 +888,8 @@ export class RuntimeClient {
   ): Promise<T> {
     const opts = normalizeRequestOptions(timeoutOrOptions);
     // Happy path — transport ready (local socket or relay channel), go now.
-    if (this.isOpen()) {
+    if (this.isOpen() && (this.connectionTarget.kind === "local" || CLOUD_CONTROL_REQUESTS.has(msg.type) ||
+        (this.pendingRequests.size < CLOUD_RPC_IN_FLIGHT && !this.queuedRequests.length))) {
       return this.sendRequest<T>(msg, opts.timeoutMs, opts.signal);
     }
     if (opts.signal?.aborted) {
@@ -899,6 +925,7 @@ export class RuntimeClient {
     }
 
     if (this.queuedRequests.length >= MAX_QUEUED_REQUESTS) {
+      this.cloudDiagnostic("request_failed", { ...requestDiagnostic(msg), class: "queue_full" });
       return Promise.reject(
         new Error(`Request timeout: ${msg.type} (queue full)`),
       );
@@ -1055,6 +1082,7 @@ export class RuntimeClient {
     try { retiredSocket?.close(); } catch { /* already dead */ }
     try { retiredPending?.close(); } catch { /* already dead */ }
     this._engineConnected = false;
+    this.handshakeReady = false;
     this.setStatus("disconnected");
     invalidateEnginePort();
     invalidateEngineToken();
@@ -1107,9 +1135,27 @@ export class RuntimeClient {
 
   // ── Internals ───────────────────────────────────────────
 
+  private diagnosticScope(): CloudDiagnosticScope | undefined {
+    const target = this.connectionTarget;
+    return target.kind === "cloud" ? { workspaceId: target.workspaceId, generation: target.generation,
+      connectionSequence: target.connectionSequence } : undefined;
+  }
+  private cloudDiagnostic(event: CloudDiagnosticEvent, data: Record<string, string | number | null | undefined>,
+    scope = this.diagnosticScope()): void {
+    if (!scope) return;
+    const now = performance.now();
+    if (now - this.diagnostics.at >= 60_000) {
+      this.diagnostics.at = now;
+      for (const key of Object.keys(this.diagnostics.counts) as CloudDiagnosticEvent[]) this.diagnostics.counts[key] = 0;
+    }
+    if (this.diagnostics.counts[event]++ >= 8) { this.diagnostics.suppressed++; return; }
+    console.warn("[Zeros cloud bridge] " + JSON.stringify({ event, ...scope, ...data, suppressed: this.diagnostics.suppressed }));
+    this.diagnostics.suppressed = 0;
+  }
+
   /** True when the local socket is ready to send. */
   private isOpen(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN;
+    return this.ws?.readyState === WebSocket.OPEN && this.handshakeReady;
   }
 
   /** Send a pre-built envelope over the local socket as JSON text. */
@@ -1122,12 +1168,10 @@ export class RuntimeClient {
   /** Shared post-connect handling for both transports: mark connected, reset
    *  backoff, announce ourselves, and flush the disconnect queue. */
   private onTransportOpen(): void {
-    this._engineConnected = true;
-    this.reconnectAttempts = 0;
+    this.handshakeReady = false;
     // A successful transport open clears any prior terminal rejection.
     this._rejected = false;
     this.lastRejection = null;
-    this.setStatus("connected");
 
     // Announce ourselves. Attach the current access token (when signed
     // in) so the engine can bind the connection to an account:
@@ -1142,18 +1186,41 @@ export class RuntimeClient {
     // never receive the reusable WorkOS bearer inside its sandbox.
     const authToken =
       this.connectionTarget.kind === "local" ? getAuthAccessToken() : "";
-    this.send({
+    this.rawSend({
+      id: createMessageId(), timestamp: Date.now(),
       type: "CONNECTED",
       source: "browser",
       capabilities: ["element-select"],
       protocolVersion: PROTOCOL_VERSION,
       ...(authToken ? { authToken } : {}),
-    } as BridgeMessage);
+    });
 
-    // Flush anything queued during the last disconnect. The soft-fail timer on
-    // each queued entry still decides whether to surface an error — flushing
-    // early just raises the chance of success. Deadline-expired entries reject.
-    this.flushQueue();
+    const socket = this.ws;
+    const ready = () => {
+      if (this._disposed || this.ws !== socket || socket?.readyState !== WebSocket.OPEN || this._rejected) return;
+      this.handshakeReady = true;
+      this._engineConnected = true;
+      this.reconnectAttempts = 0;
+      this.cloudDiagnostic("ready", {});
+      // Make room for synchronous status-listener RPCs even when the
+      // disconnect queue was full. The concurrency bound still applies.
+      if (this.connectionTarget.kind === "cloud") this.flushQueue();
+      this.setStatus("connected");
+      this.flushQueue();
+    };
+    if (this.connectionTarget.kind === "local") { ready(); return; }
+
+    // Existing engines announce ENGINE_READY before authenticating CONNECTED.
+    // One harmless read proves that their CONNECTED handler has settled. Keep
+    // application requests queued until then, so a 256-request reconnect and
+    // synchronous connected listeners cannot overflow the 64-frame auth queue.
+    void this.sendRequest({ type: "WORKSPACE_REQUEST", op: "workspace.list", params: {} }, 10_000)
+      .then(response => {
+        if (response.type !== "WORKSPACE_RESPONSE") throw new Error("Cloud handshake read failed");
+        ready();
+      }).catch(() => {
+        if (this.ws === socket) socket?.close(1000, "cloud handshake failed");
+      });
   }
 
   /** Shared inbound-message handling for both transports. The local socket
@@ -1161,7 +1228,7 @@ export class RuntimeClient {
    *  app message object. */
   private handleIncoming(msg: BridgeMessage): void {
     // ENGINE_READY confirms the engine is fully initialized.
-    if (msg.type === "ENGINE_READY") {
+    if (msg.type === "ENGINE_READY" && (this.connectionTarget.kind === "local" || this.handshakeReady)) {
       this._engineConnected = true;
     }
 
@@ -1179,6 +1246,8 @@ export class RuntimeClient {
         reason: m.reason ?? "unknown",
         message: m.message ?? "",
       };
+      this.cloudDiagnostic("rejection", { class: ["auth-required", "auth-invalid", "auth-wrong-account", "desktop-unbound",
+        "protocol-too-old", "protocol-too-new"].includes(m.reason ?? "") ? m.reason : "other" });
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = null;
@@ -1197,6 +1266,7 @@ export class RuntimeClient {
       const pending = this.pendingRequests.get(requestId)!;
       clearPendingRequest(pending);
       this.pendingRequests.delete(requestId);
+      queueMicrotask(() => this.flushQueue());
       // Correlated protocol envelopes resolve intact. Their owning façade
       // classifies domain errors: workspaceOp turns WORKSPACE_ERROR into a
       // structured error with code + remediation, while the agent façade reads
@@ -1216,6 +1286,7 @@ export class RuntimeClient {
    *  reject in-flight RPCs (soft-fail), schedule a reconnect, expire the
    *  queue. The caller has already cleared its transport slot. */
   private afterDisconnect(): void {
+    this.handshakeReady = false;
     this.setStatus("disconnected");
     this._engineConnected = false;
     const now = Date.now();
@@ -1246,15 +1317,19 @@ export class RuntimeClient {
         reject,
         timer: null,
         signal,
+        diagnostic: requestDiagnostic(msg), scope: this.diagnosticScope(), startedAt: performance.now(),
       };
       const rejectPending = (err: Error) => {
         clearPendingRequest(pending);
         this.pendingRequests.delete(id);
+        queueMicrotask(() => this.flushQueue());
         reject(err);
       };
 
       if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
         pending.timer = window.setTimeout(() => {
+          this.cloudDiagnostic("request_failed", { ...pending.diagnostic, class: "timeout",
+            elapsedMs: Math.round(performance.now() - pending.startedAt) }, pending.scope);
           rejectPending(new Error(`Request timeout: ${msg.type}`));
         }, timeoutMs);
       }
@@ -1266,18 +1341,24 @@ export class RuntimeClient {
       }
 
       this.pendingRequests.set(id, pending);
-      this.send({ ...msg, id });
+      this.rawSend({ source: "browser", timestamp: Date.now(), ...msg, id });
     });
   }
 
   private flushQueue(): void {
-    if (!this.queuedRequests.length) return;
+    if (!this.isOpen() || !this.queuedRequests.length) return;
     const now = Date.now();
     const pending = this.queuedRequests;
     this.queuedRequests = [];
     for (const q of pending) {
       if (q.deadline <= now) {
+        this.cloudDiagnostic("request_failed", { ...requestDiagnostic(q.msg), class: "queue_expired" });
         q.reject(new Error(`Request timeout: ${q.msg.type} (reconnecting)`));
+        continue;
+      }
+      if (this.connectionTarget.kind === "cloud" && this.pendingRequests.size >= CLOUD_RPC_IN_FLIGHT &&
+          !CLOUD_CONTROL_REQUESTS.has(q.msg.type)) {
+        this.queuedRequests.push(q);
         continue;
       }
       // Re-enter through sendRequest so the new request gets a fresh id
@@ -1297,6 +1378,7 @@ export class RuntimeClient {
     const keep: QueuedRequest[] = [];
     for (const q of this.queuedRequests) {
       if (q.deadline <= now) {
+        this.cloudDiagnostic("request_failed", { ...requestDiagnostic(q.msg), class: "queue_expired" });
         q.reject(new Error(`Request timeout: ${q.msg.type} (reconnecting)`));
       } else {
         keep.push(q);
@@ -1312,6 +1394,8 @@ export class RuntimeClient {
     // loops (sessions-provider.ensureSession) recognise this and back
     // off silently.
     for (const [id, pending] of this.pendingRequests) {
+      this.cloudDiagnostic("request_failed", { ...pending.diagnostic, class: "disconnected",
+        elapsedMs: Math.round(performance.now() - pending.startedAt) }, pending.scope);
       clearPendingRequest(pending);
       pending.reject(new Error("Request timeout: engine disconnected"));
       this.pendingRequests.delete(id);
@@ -1378,10 +1462,12 @@ export class RuntimeClient {
         Math.min(this.reconnectAttempts, RECONNECT_LADDER.length - 1)
       ];
     this.reconnectAttempts += 1;
+    this.cloudDiagnostic("reconnect", { attempt: this.reconnectAttempts, delayMs: delay });
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect().catch((err) => {
-        console.warn("[Zeros] reconnect failed:", err);
+        if (this.connectionTarget.kind === "cloud") this.cloudDiagnostic("connect", { class: "failed" });
+        else console.warn("[Zeros] reconnect failed:", err);
       });
     }, delay);
   }

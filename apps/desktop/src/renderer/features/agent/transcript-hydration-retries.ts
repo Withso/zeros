@@ -1,5 +1,6 @@
 import { onActiveBridgeConnected } from "../../platform/bridge/active-bridge";
 import { cloudWorkspaceKey, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
+import { canBackgroundSyncCloudWorkspace } from "../../state/cloud-workspace-catalog";
 
 interface PendingRead {
   stop: () => void;
@@ -52,14 +53,17 @@ export class TranscriptHydrationRetries {
   }
 
   private schedule(chatId: string, read: PendingRead): void {
+    const target = parseCloudScopedId(chatId);
+    const available = () => !target || canBackgroundSyncCloudWorkspace(target);
+    if (!available()) return;
     if (read.running || !read.pending || read.connection <= read.attemptedConnection) return;
     read.running = true;
     // Defer subscribe-time callbacks until the failed hydrate can settle.
     void Promise.resolve().then(async () => {
-      if (this.reads.get(chatId) !== read) return;
+      if (this.reads.get(chatId) !== read || !available()) { read.running = false; return; }
       read.attemptedConnection = read.connection;
       read.pending = false;
-      try { await this.retry(chatId, () => this.reads.get(chatId) === read); }
+      try { await this.retry(chatId, () => this.reads.get(chatId) === read && available()); }
       catch { read.pending = true; }
       finally {
         read.running = false;

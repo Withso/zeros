@@ -54,7 +54,7 @@ run:
 pnpm exec tsx scripts/cloud-workspace-validation/engine-connect-repro.mjs --cleanup RUN_UUID
 ```
 
-## Initial path audit
+## Initial path audit (before the client fix, ea34b8ac)
 
 - `apps/control-plane/src/cloud-workspaces/runtime-bridge.ts:498`: the reported
   `upstream_closed` category requires the desktop WebSocket upgrade to have
@@ -71,7 +71,7 @@ pnpm exec tsx scripts/cloud-workspace-validation/engine-connect-repro.mjs --clea
 - `apps/desktop/src/renderer/platform/bridge/ws-client.ts:1145`: cloud clients
   send protocol `CONNECTED` without a reusable WorkOS bearer. A socket upgrade
   marks transport connected before the initial workspace-list RPC completes.
-  At `:1130`, status listeners currently run before `CONNECTED` is sent.
+  At `:1130`, status listeners ran before `CONNECTED` was sent.
   `cloud-github-native.ts:32` registers a listener before the initial socket
   opens and immediately sends `github.nativeGrant`; reconnect replay listeners
   can do the same. This is a concrete first-frame ordering defect, not merely
@@ -88,3 +88,36 @@ pnpm exec tsx scripts/cloud-workspace-validation/engine-connect-repro.mjs --clea
 
 The operator should return the JSON report including `cleanup`, `timeline`,
 `previousLog` and `serve`; no raw logs or credentials are needed.
+
+## Client compatibility and recovery
+
+The fixed client sends `CONNECTED` first and waits for a successful
+`workspace.list` response before notifying connected listeners. That read is
+available on the deployed engine; `ENGINE_READY` alone cannot acknowledge
+authentication because the engine sends it before handling `CONNECTED`.
+Only that one small read can enter the pre-authentication queue. Afterward,
+ordinary client RPCs have a 16-request concurrency limit, preserving the
+engine's existing frame and byte limits even when a full disconnect queue
+drains. Dispatched requests are never automatically replayed.
+
+Attachment snapshots install their journal cursor before buffered live events
+and durable replay resume through one ordered reader. A connection or engine
+replacement retires older snapshot and replay work. Reconnect also revalidates
+Git and file views. Background history hydration and chat mirroring require a
+running workspace; explicitly opening retained history remains supported.
+
+Client and relay logs record allowlisted close/request classes, numeric close
+codes, reconnect delay and workspace/generation identity. They bound reports
+per minute and exclude arbitrary reasons, request arguments, credentials and
+endpoint URLs. The relay additionally identifies the engine and whether the
+failure occurred during upstream upgrade or an established relay.
+
+The attachment fix needs an app update only: it does not require a new engine
+runtime, base, or Cloud Computer rebuild. Deploying the control-plane change
+adds upstream diagnostics. VM supervision, command ownership and idle-stop
+policy are unchanged; closing a client does not stop accepted cloud work.
+
+The credential-free `scripts/__tests__/cloud-client-handshake.test.ts` exercises
+the actual desktop client, control-plane relay and engine WebSocket transport
+with slow authentication, initial/reconnect listeners and up to 256 queued
+requests. It does not replace a live app attachment through the provider proxy.

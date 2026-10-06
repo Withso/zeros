@@ -65,7 +65,7 @@ import { TranscriptHydrationRetries } from "./transcript-hydration-retries";
 import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
 import { useInternalFeatureActive } from "../settings/internal-features";
-import { cloudCatalogGeneration, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
+import { cloudCatalogGeneration, cloudWorkspaceDocument, canBackgroundSyncCloudWorkspace } from "../../state/cloud-workspace-catalog";
 import { CloudSendPreparation } from "./cloud-send-preparation";
 import { chatChangeTargets } from "../../state/chat-change-targets";
 import { BackgroundTaskSnapshots, loadedBackgroundTaskState } from "./background-task-state";
@@ -4840,6 +4840,8 @@ export function AgentSessionsProvider({
   const reconcileChatMessages = useCallback(
     (chatId: string): Promise<void> => {
       if (!chatId) return Promise.resolve();
+      const cloud = parseCloudScopedId(chatId);
+      if (cloud && !canBackgroundSyncCloudWorkspace(cloud)) return Promise.resolve();
       const existingRequest = reconcileInFlightRef.current.get(chatId);
       if (existingRequest) return existingRequest;
       let retryAfterChange = false;
@@ -5082,6 +5084,8 @@ export function AgentSessionsProvider({
     const unsub = bridge.on("DB_CHANGED", (raw) => {
       const targets = chatChangeTargets(raw, Object.keys(getStore().sessions));
       for (const id of targets) {
+        const cloud = parseCloudScopedId(id);
+        if (cloud && !canBackgroundSyncCloudWorkspace(cloud)) continue;
         if (parseCloudScopedId(id)) pendingHydratesRef.current.nudge(id);
         void reconcileChatMessages(id);
       }

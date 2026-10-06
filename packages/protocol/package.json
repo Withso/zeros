@@ -13,6 +13,7 @@
     "./cloud-actors": "./src/cloud-actors.ts",
     "./cloud-actions": "./src/cloud-actions.ts",
     "./cloud-events": "./src/cloud-events.ts",
+    "./cloud-bridge-diagnostics": "./src/cloud-bridge-diagnostics.ts",
     "./cloud-commands": "./src/cloud-commands.ts",
     "./composer-mode": "./src/composer-mode.ts",
     "./attachment-policy": "./src/attachment-policy.ts",

@@ -10,7 +10,7 @@ class Socket {
   static instances: Socket[] = [];
   readyState = 0;
   onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event?: { code: number; reason: string }) => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   onerror: (() => void) | null = null;
   constructor(
@@ -19,7 +19,12 @@ class Socket {
   ) {
     Socket.instances.push(this);
   }
-  send(_value: string) {}
+  send(value: string) {
+    const message = JSON.parse(value);
+    if (message.type === "WORKSPACE_REQUEST" && message.op === "workspace.list")
+      this.onmessage?.({ data: JSON.stringify({ id: randomUUID(), source: "engine", timestamp: Date.now(),
+        type: "WORKSPACE_RESPONSE", op: message.op, requestId: message.id, result: { workspaces: [] } }) });
+  }
   close() {
     this.readyState = 3;
   }
@@ -65,6 +70,44 @@ afterEach(() => {
 });
 
 describe("actor runtime socket lifecycle", () => {
+  it("bounds timeout logs and classifies arbitrary request operations without retaining their content", async () => {
+    setup();
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
+    client = new RuntimeClient(target());
+    try {
+      await client.connect(); Socket.instances[0].open(); await Promise.resolve();
+      for (let index = 0; index < 12; index++) {
+        const failed = expect(client.request({ type: "WORKSPACE_REQUEST", op: "private-operation", params: { private: "private-content" } }, 100)).rejects.toThrow(/timeout/);
+        await vi.advanceTimersByTimeAsync(100);
+        await failed;
+      }
+      const lines = log.mock.calls.flat().filter(line => String(line).includes('"event":"request_failed"'));
+      expect(lines).toHaveLength(8);
+      expect(lines[0]).toContain('"class":"timeout"');
+      expect(lines[0]).toContain('"operation":"other"');
+      expect(lines.join(" ")).not.toMatch(/private-operation|private-content/);
+    } finally { log.mockRestore(); }
+  });
+  it("logs closed socket/request/reconnect diagnostics with exact workspace identity and no bearer or URL", async () => {
+    setup();
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
+    client = new RuntimeClient(target(), { refreshCloudConnectionTarget: async current => ({ ...current, connectionSequence: current.connectionSequence + 1 }) });
+    try {
+      await client.connect(); Socket.instances[0].open(); await Promise.resolve();
+      const request = client.request({ type: "WORKSPACE_REQUEST", op: "git.status", params: { private: "private-params" } }, 100);
+      const failed = expect(request).rejects.toThrow(/disconnected/);
+      Socket.instances[0].close(); Socket.instances[0].onclose?.({ code: 1008, reason: "private-close-text" });
+      await failed;
+      const lines = log.mock.calls.flat().join(" ");
+      expect(lines).toContain(target().workspaceId);
+      expect(lines).toContain('"generation":1');
+      expect(lines).toContain('"code":1008');
+      expect(lines).toContain('"class":"other"');
+      expect(lines).toContain('"operation":"git.status"');
+      expect(lines).toContain('"delayMs":1000');
+      for (const privateText of ["private-close-text", "private-params", target().cloudToken, target().url]) expect(lines).not.toContain(privateText);
+    } finally { log.mockRestore(); }
+  });
   it.each([true, false])(
     "refuses a delayed descriptor after retirement (previously installed=%s)",
     async (installed) => {

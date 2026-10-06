@@ -12,6 +12,7 @@ import type { RuntimeClient } from "./ws-client";
 import type { BackgroundTasksUpdate } from "@zeros/protocol/agent-events";
 import type { BridgeMessage } from "./messages";
 import { record, type WireRecord } from "./cloud-runtime-wire";
+import type { CloudEventReader, CloudSnapshotInstallation } from "./cloud-event-reader";
 
 type Options = Exclude<
   Parameters<RuntimeClient["request"]>[1],
@@ -42,6 +43,8 @@ type NativeSnapshot = {
   revision: number;
   execution?: string;
   backgroundRevision: number;
+  cursor?: unknown;
+  restoration?: CloudSnapshotInstallation;
 };
 /** Device selection only. A replacement transport obtains fresh execution and
  * credential authority; neither can be transferred with an attachment. */
@@ -101,6 +104,7 @@ export class CloudAgentConnection {
     private readonly client: RuntimeClient,
     private readonly workspaceId: string,
     private readonly grant: (agentId: string, model: string) => Promise<string>,
+    private readonly events?: CloudEventReader,
   ) {}
 
   on(type: string, listener: (message: BridgeMessage) => void): () => void {
@@ -146,15 +150,18 @@ export class CloudAgentConnection {
   }
 
   private currentSnapshot(state: NativeSnapshot): boolean {
-    return this.conversations.get(state.owner.id) === state.owner &&
+    return !this.closed && (!state.restoration || state.restoration.current()) &&
+      this.conversations.get(state.owner.id) === state.owner &&
       state.owner.snapshotRevision === state.revision &&
       (state.owner.execution === state.execution || state.owner.execution === state.snapshot.executionId);
   }
 
   private attachSnapshot(state: NativeSnapshot): WireRecord {
-    if (!this.currentSnapshot(state)) throw new Error("Cloud execution changed during restore");
+    if (!this.currentSnapshot(state)) { state.restoration?.finish(); throw new Error("Cloud execution changed during restore"); }
     const { owner, snapshot } = state;
     const execution = typeof snapshot.executionId === "string" ? snapshot.executionId : undefined;
+    try { state.restoration?.install(state.cursor, { conversationId: owner.id, executionId: execution }); }
+    catch (error) { state.restoration?.finish(); throw error; }
     const previousBackground = owner.backgroundTasks;
     if (owner.execution !== execution) owner.backgroundTasks = undefined;
     owner.execution = execution;
@@ -178,6 +185,7 @@ export class CloudAgentConnection {
     // Let the caller bind the returned session before delivering its restored
     // controls. This is one event-loop task, not a delayed readiness heuristic.
     setTimeout(() => {
+      try {
       if (this.closed || !this.currentSnapshot(state)) return;
       const { snapshot } = state;
       const attached=this.conversations.get(String(snapshot.conversationId));
@@ -236,6 +244,7 @@ export class CloudAgentConnection {
             listener(frame as unknown as BridgeMessage);
         }
       }
+      } finally { state.restoration?.finish(); }
     }, 0);
   }
 
@@ -250,6 +259,8 @@ export class CloudAgentConnection {
   }
 
   private async restoreNativeState(owner:Conversation):Promise<NativeSnapshot> {
+    const restoration = this.events?.beginSnapshot();
+    try {
     const revision = owner.snapshotRevision = (owner.snapshotRevision ?? 0) + 1;
     const execution = owner.execution, backgroundRevision = owner.backgroundRevision ?? 0;
     if(owner.nativeCommandsVersion===undefined) {
@@ -260,7 +271,7 @@ export class CloudAgentConnection {
       this.op("cloudCommands.request",{request:{kind:"snapshot",conversationId:owner.id}})]);
     const queue=CloudCommandSnapshotSchema.parse(commands);
     if(queue.conversationId!==owner.id)throw new Error("Cloud state belongs to another conversation");
-    const state = { owner, snapshot: record(events.snapshot), revision, execution, backgroundRevision };
+    const state = { owner, snapshot: record(events.snapshot), cursor: events.cursor, restoration, revision, execution, backgroundRevision };
     if (state.snapshot.conversationId !== owner.id) throw new Error("Cloud state belongs to another conversation");
     if (!this.currentSnapshot(state)) throw new Error("Cloud execution changed during restore");
     const receipts=[...queue.receipts].sort((left,right)=>Date.parse(right.updatedAt)-Date.parse(left.updatedAt));
@@ -274,6 +285,7 @@ export class CloudAgentConnection {
     }else if(owner.goalRevision!==undefined)goal=owner.nativeResult;
     owner.nativeResult={version:1,...(confirmed??{}),...(goal&&"goal" in goal?{goal:goal.goal}:{})};
     return state;
+    } catch (error) { restoration?.finish(); throw error; }
   }
 
   private async op(op: string, params: WireRecord, submission?: {

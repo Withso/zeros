@@ -23,6 +23,7 @@ import { subscribeChatSnapshots } from "./state/chat-snapshot-subscription";
 
 import React, { useEffect, useRef } from "react";
 import { CloudWorkspaceLifecycle } from "./state/cloud-workspace-lifecycle";
+import { canBackgroundSyncCloudWorkspace } from "./state/cloud-workspace-catalog";
 import { isCloudWorkspace } from "./platform/bridge/cloud-workspace-key";
 import {
   useChats,
@@ -455,7 +456,7 @@ function ChatsPersistence() {
    * reconciliation cannot send a duplicate batch back to the engine. */
   const pushRowsToEngine = React.useCallback((candidates: ChatThread[]) => {
     const rows = candidates.filter((chat) =>
-      canMirrorChat(chat, confirmedCloudWorkspacesRef.current, confirmedLocalChatsRef.current),
+      canMirrorChat(chat, confirmedCloudWorkspacesRef.current, confirmedLocalChatsRef.current, canBackgroundSyncCloudWorkspace),
     );
     if (rows.length === 0) return;
     const engineRows = engineChatsRef.current;
