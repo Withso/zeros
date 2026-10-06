@@ -28,14 +28,14 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       ledger: ${{ steps.scope.outputs.ledger }}
-      quality: ${{ steps.scope.outputs.quality }}
-      vitest: ${{ steps.scope.outputs.vitest }}
-      build: ${{ steps.scope.outputs.build }}
-      macos: ${{ steps.scope.outputs.macos }}
-      control-plane-db: ${{ steps.scope.outputs.control-plane-db }}
-      ui-smoke: ${{ steps.scope.outputs.ui-smoke }}
-      control-plane-static: ${{ steps.scope.outputs.control-plane-static }}
-      secret-scan: ${{ steps.scope.outputs.secret-scan }}
+      job-quality: ${{ steps.scope.outputs.job-quality }}
+      job-vitest: ${{ steps.scope.outputs.job-vitest }}
+      job-build: ${{ steps.scope.outputs.job-build }}
+      job-macos: ${{ steps.scope.outputs.job-macos }}
+      job-control-plane-db: ${{ steps.scope.outputs.job-control-plane-db }}
+      job-ui-smoke: ${{ steps.scope.outputs.job-ui-smoke }}
+      job-control-plane-static: ${{ steps.scope.outputs.job-control-plane-static }}
+      job-secret-scan: ${{ steps.scope.outputs.job-secret-scan }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,7 +46,7 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-      - name: Select trusted CI lanes
+      - name: Select trusted CI jobs
         id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -58,8 +58,12 @@ jobs:
           set -euo pipefail
           touch "$GITHUB_OUTPUT"
           BASE_SHA="$PULL_REQUEST_BASE_SHA"
-          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+          if [[ ! "$BASE_SHA" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ || "$BASE_SHA" =~ ^0+$ ]]; then
             echo "::error::The trusted base SHA is missing or invalid."
+            exit 1
+          fi
+          if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            echo "::error::The trusted base commit is unavailable."
             exit 1
           fi
           policy_dir="$RUNNER_TEMP/ci-policy"
@@ -75,128 +79,134 @@ jobs:
               node "$policy_dir/scope.mjs" --mode pr > "$policy_dir/classifier.outputs"
           fi
           node --input-type=module <<'NODE'
+          import { execFileSync } from "node:child_process";
           import { appendFileSync, readFileSync } from "node:fs";
           import path from "node:path";
 
-          const policyLanes = ["quality", "vitest", "build", "macos", "control-plane-db", "ui-smoke"];
-          const alwaysLanes = ["control-plane-static", "secret-scan"];
-          const laneIds = [...policyLanes, ...alwaysLanes];
-          const labelLanes = {
-            "ci:full": laneIds,
-            "ci:ui-smoke": ["ui-smoke"],
-            "ci:macos": ["macos"],
-            "ci:control-plane-db": ["control-plane-db"],
-            "ci:packaging": ["quality", "vitest", "build", "macos"],
-            "ci:web": ["quality", "vitest", "build"],
-          };
+          const JOB_IDS = ["build", "control-plane-db", "control-plane-static", "macos", "quality", "secret-scan", "ui-smoke", "vitest"];
+          const LEDGER_FIELDS = ["base_sha", "event", "full", "jobs", "lanes", "mode", "policy_digest", "reasons", "requests", "schema", "source_sha", "tested_sha"];
           const fail = (message) => { throw new Error(message); };
           const record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-          const reasonsValid = (value) => Array.isArray(value) && value.length > 0 && value.length <= 100 &&
-            value.every((reason) => typeof reason === "string" && reason.length > 0 && reason.length <= 2048 && !/[\r\n\0]/.test(reason));
+          const sameKeys = (value, keys) => record(value) && Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
+          const sha = (value) => typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value) && !/^0+$/.test(value);
+          const parse = (text, name, limit = 65536) => {
+            if (!text || Buffer.byteLength(text) > limit) fail(`${name} is missing or oversized.`);
+            try { return JSON.parse(text); } catch { fail(`${name} is not valid JSON.`); }
+          };
 
-          if (process.env.EVENT_NAME !== "pull_request") fail("Only pull-request events may select PR lanes.");
-          for (const key of ["PULL_REQUEST_BASE_SHA", "PULL_REQUEST_HEAD_SHA", "GITHUB_SHA"]) {
-            if (!/^[0-9a-f]{40}$/.test(process.env[key] ?? "")) fail(`Missing or invalid ${key}.`);
+          function validateLedger(ledger) {
+            if (!sameKeys(ledger, LEDGER_FIELDS) || ledger.schema !== "zeros.ci-selection/v1" ||
+                ledger.event !== "pull_request" || ledger.mode !== "pr" || typeof ledger.full !== "boolean") {
+              fail("The classifier ledger format is invalid.");
+            }
+            for (const [key, expected] of Object.entries({
+              base_sha: process.env.PULL_REQUEST_BASE_SHA,
+              source_sha: process.env.PULL_REQUEST_HEAD_SHA,
+              tested_sha: process.env.GITHUB_SHA,
+            })) {
+              if (!sha(expected) || ledger[key] !== expected) fail(`The ledger ${key} does not match this run.`);
+            }
+            if (process.env.EVENT_NAME !== ledger.event) fail("The ledger event does not match this run.");
+            if (!sameKeys(ledger.jobs, JOB_IDS) || Object.values(ledger.jobs).some((value) => typeof value !== "boolean")) {
+              fail("The classifier job inventory is missing or invalid.");
+            }
+            if (!ledger.jobs["control-plane-static"] || !ledger.jobs["secret-scan"]) fail("A mandatory job was disabled.");
+            if (!record(ledger.lanes) || Object.entries(ledger.lanes).some(([id, selected]) =>
+                !/^[a-z][a-z\d]*(?:-[a-z\d]+)*$/.test(id) || typeof selected !== "boolean")) {
+              fail("The classifier path-lane inventory is invalid.");
+            }
+            if (!Array.isArray(ledger.reasons) || ledger.reasons.length === 0 || ledger.reasons.length > 41 ||
+                ledger.reasons.some((reason) => typeof reason !== "string" || !reason || Buffer.byteLength(JSON.stringify(reason)) > 1024)) {
+              fail("The classifier reasons are missing or invalid.");
+            }
+            if (!Array.isArray(ledger.requests) || ledger.requests.length > 100 ||
+                ledger.requests.some((request) => typeof request !== "string" || !/^ci:[a-z][a-z\d]*(?:-[a-z\d]+)*$/.test(request)) ||
+                ledger.requests.join("\0") !== [...new Set(ledger.requests)].sort().join("\0")) {
+              fail("The classifier request format is invalid.");
+            }
+            if (ledger.full && JOB_IDS.some((id) => id !== "ui-smoke" && !ledger.jobs[id])) {
+              fail("A full selection omitted a PR job.");
+            }
+            if (ledger.policy_digest === null) {
+              if (!ledger.full || Object.keys(ledger.lanes).length !== 0 || ledger.requests.length !== 0 ||
+                  ledger.jobs["ui-smoke"] || !ledger.reasons.some((reason) => reason.startsWith("missing-policy:"))) {
+                fail("The missing-policy fallback is invalid.");
+              }
+            } else if (typeof ledger.policy_digest !== "string" || !/^[0-9a-f]{64}$/.test(ledger.policy_digest) || Object.keys(ledger.lanes).length === 0) {
+              fail("The classifier policy digest or path-lane inventory is missing or invalid.");
+            }
           }
-          const labels = JSON.parse(process.env.LABELS_JSON);
-          if (!Array.isArray(labels) || labels.length > 100 || labels.some((label) => typeof label !== "string")) {
-            fail("The label list is invalid.");
-          }
-          const requests = [...new Set(labels.filter((label) => label.startsWith("ci:")))].sort();
-          if (requests.some((label) => !Object.hasOwn(labelLanes, label))) fail("An unknown ci:* label was requested.");
 
-          const fallback = process.env.POLICY_AVAILABLE !== "true";
-          let sourceLedger = null;
-          let lanes;
-          let reasons;
-          if (fallback) {
-            lanes = Object.fromEntries(laneIds.map((lane) => [lane, lane !== "ui-smoke"]));
-            reasons = ["The trusted base lacks the complete CI policy; every PR lane except composer is selected."];
+          const tested = execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], { encoding: "utf8" }).trim();
+          if (tested !== process.env.GITHUB_SHA) fail("GITHUB_SHA does not match the checked-out commit.");
+          let ledger;
+          let ledgerJson;
+          let outputs;
+          if (process.env.POLICY_AVAILABLE !== "true") {
+            // No path or label interpretation is safe without the trusted classifier.
+            ledger = {
+              base_sha: process.env.PULL_REQUEST_BASE_SHA,
+              event: process.env.EVENT_NAME,
+              full: true,
+              jobs: Object.fromEntries(JOB_IDS.map((id) => [id, id !== "ui-smoke"])),
+              lanes: {},
+              mode: "pr",
+              policy_digest: null,
+              reasons: ["missing-policy: The trusted base lacks the complete CI policy; every PR job except composer is selected."],
+              requests: [],
+              schema: "zeros.ci-selection/v1",
+              source_sha: process.env.PULL_REQUEST_HEAD_SHA,
+              tested_sha: tested,
+            };
+            ledgerJson = JSON.stringify(ledger);
+            outputs = new Map(JOB_IDS.map((id) => [`job-${id}`, String(ledger.jobs[id])]));
           } else {
-            const raw = readFileSync(path.join(process.env.RUNNER_TEMP, "ci-policy/classifier.outputs"), "utf8");
-            if (Buffer.byteLength(raw) > 65536) fail("Classifier output exceeds 64 KiB.");
-            const outputs = new Map();
-            for (const line of raw.trim().split("\n")) {
+            const directory = path.join(process.env.RUNNER_TEMP, "ci-policy");
+            const raw = readFileSync(path.join(directory, "classifier.outputs"), "utf8");
+            if (Buffer.byteLength(raw) > 131072 || !raw.endsWith("\n")) fail("Classifier output is oversized or incomplete.");
+            outputs = new Map();
+            for (const line of raw.slice(0, -1).split("\n")) {
               const separator = line.indexOf("=");
               const key = line.slice(0, separator);
-              if (separator < 1 || outputs.has(key) || !["ledger", ...laneIds].includes(key)) {
-                fail("Classifier output has an invalid or duplicate key.");
-              }
+              if (separator < 1 || outputs.has(key)) fail("Classifier output has an invalid or duplicate key.");
               outputs.set(key, line.slice(separator + 1));
             }
-            sourceLedger = JSON.parse(outputs.get("ledger"));
-            if (!record(sourceLedger) || sourceLedger.schema_version !== 1 || !record(sourceLedger.lanes) ||
-                !reasonsValid(sourceLedger.reasons) || Object.keys(sourceLedger.lanes).some((lane) => !laneIds.includes(lane))) {
-              fail("The classifier ledger is invalid.");
+            ledgerJson = outputs.get("ledger");
+            ledger = parse(ledgerJson, "The classifier ledger");
+            validateLedger(ledger);
+            if (ledger.policy_digest === null) fail("A present classifier cannot claim the missing-policy fallback.");
+            const policy = parse(readFileSync(path.join(directory, "scope-rules.json"), "utf8"), "The trusted policy", 131072);
+            if (!Array.isArray(policy.lane_names) || !sameKeys(ledger.lanes, policy.lane_names) || !sameKeys(policy.jobs, JOB_IDS)) {
+              fail("The classifier inventories do not match the trusted registry.");
             }
-            lanes = {};
-            for (const lane of policyLanes) {
-              const selected = outputs.get(lane);
-              if (!["true", "false"].includes(selected) || sourceLedger.lanes[lane] !== (selected === "true")) {
-                fail(`The classifier did not prove the ${lane} selection.`);
-              }
-              lanes[lane] = selected === "true";
+            const expectedKeys = ["ledger", ...Object.keys(ledger.lanes).sort(), ...JOB_IDS.map((id) => `job-${id}`)];
+            if ([...outputs.keys()].join("\0") !== expectedKeys.join("\0")) fail("Classifier output inventory or order is invalid.");
+            // Lane lines are checked for format only. Selection comes from job outputs.
+            for (const [id, selected] of Object.entries(ledger.lanes)) {
+              if (outputs.get(id) !== String(selected)) fail(`The ${id} path output does not match the ledger.`);
             }
-            for (const lane of alwaysLanes) {
-              if ((outputs.has(lane) && outputs.get(lane) !== "true") ||
-                  (Object.hasOwn(sourceLedger.lanes, lane) && sourceLedger.lanes[lane] !== true)) {
-                fail(`The ${lane} lane must always be selected.`);
-              }
-              lanes[lane] = true;
+            for (const id of JOB_IDS) {
+              if (outputs.get(`job-${id}`) !== String(ledger.jobs[id])) fail(`The ${id} job output does not match the ledger.`);
             }
-            if (lanes["ui-smoke"] && !requests.some((label) => ["ci:full", "ci:ui-smoke"].includes(label))) {
-              fail("Composer requires an explicit ci:ui-smoke or ci:full label.");
-            }
-            reasons = [...sourceLedger.reasons];
           }
-          // GitHub's permission to apply labels authorizes these additions.
-          // Neither a label nor its removal can subtract the path floor.
-          for (const request of requests) {
-            for (const lane of labelLanes[request]) lanes[lane] = true;
-            reasons.push(`Added the lanes requested by ${request}.`);
-          }
-          const jobs = {
-            scope: true,
-            quality: lanes.quality,
-            "test-shard": lanes.vitest,
-            test: true,
-            build: lanes.build,
-            "source-sync-workload": lanes.macos,
-            "source-sync": true,
-            "control-plane-scope": true,
-            "control-plane-static": true,
-            "control-plane-database": lanes["control-plane-db"],
-            "control-plane": true,
-            "ui-smoke": lanes["ui-smoke"],
-            "secret-scan": true,
-          };
-          const ledger = JSON.stringify({
-            schema_version: 1,
-            event_name: process.env.EVENT_NAME,
-            base_sha: process.env.PULL_REQUEST_BASE_SHA,
-            source_sha: process.env.PULL_REQUEST_HEAD_SHA,
-            tested_sha: process.env.GITHUB_SHA,
-            policy_sha: process.env.PULL_REQUEST_BASE_SHA,
-            lanes, jobs, reasons, requests, fallback, source_ledger: sourceLedger,
-          });
-          if (Buffer.byteLength(ledger) > 65536) fail("The selection ledger exceeds 64 KiB.");
-          // Publish atomically after validation, never partial false outputs.
+          validateLedger(ledger);
+          // Forward the classifier ledger unchanged and publish only validated jobs.
           appendFileSync(process.env.GITHUB_OUTPUT, [
-            `ledger=${ledger}`, ...laneIds.map((lane) => `${lane}=${lanes[lane]}`), "",
+            `ledger=${ledgerJson}`, ...JOB_IDS.map((id) => `job-${id}=${outputs.get(`job-${id}`)}`), "",
           ].join("\n"));
           appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
             "### Pull-request CI selection", "",
-            "| Lane | Selected |", "| --- | --- |",
-            ...laneIds.map((lane) => `| ${lane} | ${lanes[lane]} |`), "",
-            ...reasons.map((reason) => `- ${reason}`), "",
-            "```json", ledger, "```", "",
+            "| Job | Selected |", "| --- | --- |",
+            ...JOB_IDS.map((id) => `| ${id} | ${ledger.jobs[id]} |`), "",
+            ...ledger.reasons.map((reason) => `- ${reason}`), "",
+            "```json", ledgerJson, "```", "",
           ].join("\n"));
           NODE
 
   quality:
     name: quality
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.quality == 'true')
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-quality == 'true')
     runs-on: ubuntu-latest
     steps:
       - name: Verify scope result
@@ -307,7 +317,7 @@ jobs:
   test-shard:
     name: tests-vitest (${{ matrix.part }}/2)
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.vitest == 'true')
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-vitest == 'true')
     runs-on: ubuntu-latest
     strategy:
       # Every part reports, so one failure never hides another.
@@ -584,7 +594,7 @@ jobs:
       - name: Verify CI selection
         env:
           SCOPE_RESULT: ${{ needs.scope.result }}
-          LANE_SELECTED: ${{ needs.scope.outputs.vitest }}
+          LANE_SELECTED: ${{ needs.scope.outputs.job-vitest }}
           LANE_RESULT: ${{ needs.test-shard.result }}
         run: |
           set -euo pipefail
@@ -599,7 +609,7 @@ jobs:
       - name: Enforce the test result
         env:
           # The preceding raw-result validation alone authorizes this adapter.
-          TEST_RESULT: ${{ needs.test-shard.result == 'skipped' && needs.scope.outputs.vitest == 'false' && 'success' || needs.test-shard.result }}
+          TEST_RESULT: ${{ needs.test-shard.result == 'skipped' && needs.scope.outputs.job-vitest == 'false' && 'success' || needs.test-shard.result }}
         run: |
           set -euo pipefail
           if [ "$TEST_RESULT" != "success" ]; then
@@ -610,7 +620,7 @@ jobs:
   build:
     name: build
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.build == 'true')
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-build == 'true')
     runs-on: ubuntu-latest
     steps:
       - name: Verify scope result
@@ -675,7 +685,7 @@ jobs:
   source-sync-workload:
     name: source-sync workload (macOS)
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.macos == 'true')
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-macos == 'true')
     runs-on: macos-latest
     steps:
       - name: Verify scope result
@@ -822,7 +832,7 @@ jobs:
       - name: Verify CI selection
         env:
           SCOPE_RESULT: ${{ needs.scope.result }}
-          LANE_SELECTED: ${{ needs.scope.outputs.macos }}
+          LANE_SELECTED: ${{ needs.scope.outputs.job-macos }}
           LANE_RESULT: ${{ needs.source-sync-workload.result }}
         run: |
           set -euo pipefail
@@ -836,7 +846,7 @@ jobs:
           esac
       - name: Enforce the source-sync result
         env:
-          SOURCE_SYNC_RESULT: ${{ needs.source-sync-workload.result == 'skipped' && needs.scope.outputs.macos == 'false' && 'success' || needs.source-sync-workload.result }}
+          SOURCE_SYNC_RESULT: ${{ needs.source-sync-workload.result == 'skipped' && needs.scope.outputs.job-macos == 'false' && 'success' || needs.source-sync-workload.result }}
         run: |
           set -euo pipefail
           if [ "$SOURCE_SYNC_RESULT" != "success" ]; then
@@ -851,7 +861,7 @@ jobs:
   control-plane-scope:
     name: control-plane scope
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.control-plane-static == 'true')
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-control-plane-static == 'true')
     runs-on: ubuntu-latest
     outputs:
       database: ${{ steps.selection.outputs.database }}
@@ -888,7 +898,7 @@ jobs:
       - name: Combine database selections
         id: selection
         env:
-          DATABASE_FLOOR: ${{ needs.scope.outputs.control-plane-db }}
+          DATABASE_FLOOR: ${{ needs.scope.outputs.job-control-plane-db }}
           LEGACY_DATABASE: ${{ steps.scope.outputs.database }}
         run: |
           set -euo pipefail
@@ -904,7 +914,7 @@ jobs:
   control-plane-static:
     name: control-plane typecheck + audit
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.control-plane-static == 'true')
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-control-plane-static == 'true')
     runs-on: ubuntu-latest
     steps:
       - name: Verify scope result
@@ -950,7 +960,7 @@ jobs:
     needs:
       - scope
       - control-plane-scope
-    if: always() && (needs.scope.result != 'success' || needs.control-plane-scope.result != 'success' || needs.scope.outputs.control-plane-db == 'true' || needs.control-plane-scope.outputs.database == 'true')
+    if: always() && (needs.scope.result != 'success' || needs.control-plane-scope.result != 'success' || needs.scope.outputs.job-control-plane-db == 'true' || needs.control-plane-scope.outputs.database == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -1053,7 +1063,7 @@ jobs:
           SCOPE_RESULT: ${{ needs.scope.result }}
           DATABASE_SCOPE_RESULT: ${{ needs.control-plane-scope.result }}
           STATIC_RESULT: ${{ needs.control-plane-static.result }}
-          DATABASE_FLOOR: ${{ needs.scope.outputs.control-plane-db }}
+          DATABASE_FLOOR: ${{ needs.scope.outputs.job-control-plane-db }}
           LANE_SELECTED: ${{ needs.control-plane-scope.outputs.database }}
           LANE_RESULT: ${{ needs.control-plane-database.result }}
         run: |
@@ -1098,7 +1108,7 @@ jobs:
   ui-smoke:
     name: ui-smoke (composer)
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.ui-smoke == 'true')
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-ui-smoke == 'true')
     runs-on: ubuntu-latest
     steps:
       - name: Verify scope result
@@ -1131,7 +1141,7 @@ jobs:
   secret-scan:
     name: secret scan (PR commit range)
     needs: scope
-    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.secret-scan == 'true')
+    if: always() && (needs.scope.result != 'success' || needs.scope.outputs.job-secret-scan == 'true')
     runs-on: ubuntu-latest
     # ── Why the PR's COMMIT RANGE, not the tree and not all history ──
     #
@@ -1272,86 +1282,94 @@ jobs:
           node --input-type=module <<'NODE'
           import { appendFileSync } from "node:fs";
 
+          const JOB_IDS = ["build", "control-plane-db", "control-plane-static", "macos", "quality", "secret-scan", "ui-smoke", "vitest"];
+          const LEDGER_FIELDS = ["base_sha", "event", "full", "jobs", "lanes", "mode", "policy_digest", "reasons", "requests", "schema", "source_sha", "tested_sha"];
           const fail = (message) => { throw new Error(message); };
           const record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+          const sameKeys = (value, keys) => record(value) && Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
+          const sha = (value) => typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value) && !/^0+$/.test(value);
           const parse = (text, name, limit = 65536) => {
             if (!text || Buffer.byteLength(text) > limit) fail(`${name} is missing or oversized.`);
             try { return JSON.parse(text); } catch { fail(`${name} is not valid JSON.`); }
           };
+
+          function validateLedger(ledger) {
+            if (!sameKeys(ledger, LEDGER_FIELDS) || ledger.schema !== "zeros.ci-selection/v1" ||
+                ledger.event !== "pull_request" || ledger.mode !== "pr" || typeof ledger.full !== "boolean") {
+              fail("The classifier ledger format is invalid.");
+            }
+            for (const [key, expected] of Object.entries({
+              base_sha: process.env.PULL_REQUEST_BASE_SHA,
+              source_sha: process.env.PULL_REQUEST_HEAD_SHA,
+              tested_sha: process.env.GITHUB_SHA,
+            })) {
+              if (!sha(expected) || ledger[key] !== expected) fail(`The ledger ${key} does not match this run.`);
+            }
+            if (process.env.EVENT_NAME !== ledger.event) fail("The ledger event does not match this run.");
+            if (!sameKeys(ledger.jobs, JOB_IDS) || Object.values(ledger.jobs).some((value) => typeof value !== "boolean")) {
+              fail("The classifier job inventory is missing or invalid.");
+            }
+            if (!ledger.jobs["control-plane-static"] || !ledger.jobs["secret-scan"]) fail("A mandatory job was disabled.");
+            if (!record(ledger.lanes) || Object.entries(ledger.lanes).some(([id, selected]) =>
+                !/^[a-z][a-z\d]*(?:-[a-z\d]+)*$/.test(id) || typeof selected !== "boolean")) {
+              fail("The classifier path-lane inventory is invalid.");
+            }
+            if (!Array.isArray(ledger.reasons) || ledger.reasons.length === 0 || ledger.reasons.length > 41 ||
+                ledger.reasons.some((reason) => typeof reason !== "string" || !reason || Buffer.byteLength(JSON.stringify(reason)) > 1024)) {
+              fail("The classifier reasons are missing or invalid.");
+            }
+            if (!Array.isArray(ledger.requests) || ledger.requests.length > 100 ||
+                ledger.requests.some((request) => typeof request !== "string" || !/^ci:[a-z][a-z\d]*(?:-[a-z\d]+)*$/.test(request)) ||
+                ledger.requests.join("\0") !== [...new Set(ledger.requests)].sort().join("\0")) {
+              fail("The classifier request format is invalid.");
+            }
+            if (ledger.full && JOB_IDS.some((id) => id !== "ui-smoke" && !ledger.jobs[id])) {
+              fail("A full selection omitted a PR job.");
+            }
+            if (ledger.policy_digest === null) {
+              if (!ledger.full || Object.keys(ledger.lanes).length !== 0 || ledger.requests.length !== 0 ||
+                  ledger.jobs["ui-smoke"] || !ledger.reasons.some((reason) => reason.startsWith("missing-policy:"))) {
+                fail("The missing-policy fallback is invalid.");
+              }
+            } else if (typeof ledger.policy_digest !== "string" || !/^[0-9a-f]{64}$/.test(ledger.policy_digest) || Object.keys(ledger.lanes).length === 0) {
+              fail("The classifier policy digest or path-lane inventory is missing or invalid.");
+            }
+          }
+
           const ledger = parse(process.env.LEDGER_JSON, "The selection ledger");
           // toJSON(needs) also contains an escaped copy of the scope ledger.
           const needs = parse(process.env.NEEDS_JSON, "The job results", 262144);
           if (!record(needs) || needs.scope?.result !== "success") fail("The trusted scope job did not succeed.");
-          if (!record(ledger) || ledger.schema_version !== 1 || !record(ledger.lanes) || !record(ledger.jobs) ||
-              typeof ledger.fallback !== "boolean" || !Array.isArray(ledger.reasons) || ledger.reasons.length === 0 ||
-              ledger.reasons.some((reason) => typeof reason !== "string" || reason.length === 0)) {
-            fail("The selection ledger is invalid.");
+          validateLedger(ledger);
+          const outputIds = ["ledger", ...JOB_IDS.map((id) => `job-${id}`)];
+          if (!sameKeys(needs.scope.outputs, outputIds) || needs.scope.outputs.ledger !== process.env.LEDGER_JSON) {
+            fail("The scope output inventory or ledger is missing or inconsistent.");
           }
-          for (const [key, expected] of Object.entries({
-            event_name: process.env.EVENT_NAME,
-            base_sha: process.env.PULL_REQUEST_BASE_SHA,
-            source_sha: process.env.PULL_REQUEST_HEAD_SHA,
-            tested_sha: process.env.GITHUB_SHA,
-            policy_sha: process.env.PULL_REQUEST_BASE_SHA,
-          })) {
-            if (!expected || ledger[key] !== expected) fail(`The ledger ${key} does not match this run.`);
-          }
-          if (ledger.event_name !== "pull_request") fail("The ledger is not a pull-request selection.");
-          const laneIds = ["quality", "vitest", "build", "macos", "control-plane-db", "ui-smoke", "control-plane-static", "secret-scan"];
-          const sameKeys = (value, keys) => record(value) && Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
-          if (!sameKeys(ledger.lanes, laneIds)) fail("The ledger lane inventory is incomplete or unknown.");
-          for (const lane of laneIds) {
-            if (typeof ledger.lanes[lane] !== "boolean" || needs.scope.outputs?.[lane] !== String(ledger.lanes[lane])) {
-              fail(`The ${lane} selection is missing, invalid, or inconsistent.`);
-            }
-          }
-          if (!ledger.lanes["control-plane-static"] || !ledger.lanes["secret-scan"]) fail("An always-selected lane was disabled.");
-          const labelLanes = {
-            "ci:full": laneIds,
-            "ci:ui-smoke": ["ui-smoke"],
-            "ci:macos": ["macos"],
-            "ci:control-plane-db": ["control-plane-db"],
-            "ci:packaging": ["quality", "vitest", "build", "macos"],
-            "ci:web": ["quality", "vitest", "build"],
-          };
-          const labelIds = Object.keys(labelLanes);
-          if (!Array.isArray(ledger.requests) || ledger.requests.some((label) => !labelIds.includes(label)) ||
-              new Set(ledger.requests).size !== ledger.requests.length ||
-              ledger.requests.join("\0") !== [...ledger.requests].sort().join("\0")) fail("The label requests are invalid.");
-          for (const request of ledger.requests) {
-            if (labelLanes[request].some((lane) => !ledger.lanes[lane])) fail(`The ${request} additions are incomplete.`);
-          }
-          if (ledger.fallback && laneIds.some((lane) => lane !== "ui-smoke" && !ledger.lanes[lane])) {
-            fail("The missing-policy fallback did not select every mandatory PR lane.");
-          }
-          if (ledger.lanes["ui-smoke"] && !ledger.requests.some((label) => ["ci:full", "ci:ui-smoke"].includes(label))) {
-            fail("Composer was selected without an explicit label request.");
+          for (const id of JOB_IDS) {
+            if (needs.scope.outputs[`job-${id}`] !== String(ledger.jobs[id])) fail(`The ${id} job selection is inconsistent.`);
           }
           const selected = {
             scope: true,
-            quality: ledger.lanes.quality,
-            "test-shard": ledger.lanes.vitest,
+            quality: ledger.jobs.quality,
+            "test-shard": ledger.jobs.vitest,
             test: true,
-            build: ledger.lanes.build,
-            "source-sync-workload": ledger.lanes.macos,
+            build: ledger.jobs.build,
+            "source-sync-workload": ledger.jobs.macos,
             "source-sync": true,
-            "control-plane-scope": true,
-            "control-plane-static": true,
-            "control-plane-database": ledger.lanes["control-plane-db"],
+            "control-plane-scope": ledger.jobs["control-plane-static"],
+            "control-plane-static": ledger.jobs["control-plane-static"],
+            "control-plane-database": ledger.jobs["control-plane-db"],
             "control-plane": true,
-            "ui-smoke": ledger.lanes["ui-smoke"],
-            "secret-scan": true,
+            "ui-smoke": ledger.jobs["ui-smoke"],
+            "secret-scan": ledger.jobs["secret-scan"],
           };
           const jobIds = Object.keys(selected);
-          if (!sameKeys(needs, jobIds) || !sameKeys(ledger.jobs, jobIds)) fail("The job inventory is incomplete or unknown.");
-          for (const id of jobIds) {
-            if (ledger.jobs[id] !== selected[id]) fail(`The ${id} job selection is invalid.`);
-          }
+          if (!sameKeys(needs, jobIds)) fail("The workflow job inventory is incomplete or unknown.");
           const database = needs["control-plane-scope"].outputs?.database;
           if (!["true", "false"].includes(database) || (selected["control-plane-database"] && database !== "true")) {
             fail("The combined database scope is missing, invalid, or subtracted the trusted floor.");
           }
-          // The existing database selector can only add to the trusted floor.
+          // The existing database selector can only add to the trusted job floor.
           selected["control-plane-database"] ||= database === "true";
           const problems = [];
           for (const id of jobIds) {

@@ -11,6 +11,8 @@ import path from "node:path";
 import { load } from "js-yaml";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createLedger, decideScope, loadPolicy } from "../ci/scope.mjs";
+
 type Step = {
   name?: string;
   id?: string;
@@ -40,7 +42,7 @@ const source = readFileSync(
   "utf8",
 );
 const ci = load(source) as Workflow;
-const LANES = [
+const JOBS = [
   "quality",
   "vitest",
   "build",
@@ -50,7 +52,7 @@ const LANES = [
   "control-plane-static",
   "secret-scan",
 ] as const;
-const PRODUCERS: Record<string, (typeof LANES)[number]> = {
+const PRODUCERS: Record<string, (typeof JOBS)[number]> = {
   quality: "quality",
   "test-shard": "vitest",
   build: "build",
@@ -119,6 +121,12 @@ function readOutputs(file: string) {
   );
 }
 
+const POLICY = loadPolicy(path.join(ROOT, "scripts/ci/scope-rules.json"));
+const TRUSTED_POLICY = readFileSync(
+  path.join(ROOT, "scripts/ci/scope.mjs"),
+  "utf8",
+);
+
 function fixtureRepository(policy?: string) {
   const directory = temporaryDirectory();
   const git = (...args: string[]) =>
@@ -129,19 +137,27 @@ function fixtureRepository(policy?: string) {
   if (policy !== undefined) {
     mkdirSync(path.join(directory, "scripts/ci"), { recursive: true });
     writeFileSync(path.join(directory, "scripts/ci/scope.mjs"), policy);
-    writeFileSync(
-      path.join(directory, "scripts/ci/scope-rules.json"),
-      JSON.stringify({ quality: false }),
-    );
-    writeFileSync(
-      path.join(directory, "scripts/ci/control-plane-scope.mjs"),
-      "export const database = false;\n",
-    );
+    for (const file of ["scope-rules.json", "control-plane-scope.mjs"]) {
+      writeFileSync(
+        path.join(directory, "scripts/ci", file),
+        readFileSync(path.join(ROOT, "scripts/ci", file)),
+      );
+    }
   }
-  writeFileSync(path.join(directory, "README.md"), "Fixture\n");
+  mkdirSync(path.join(directory, "docs"));
+  writeFileSync(
+    path.join(directory, "docs/personal-settings.md"),
+    "Fixture documentation\n",
+  );
   git("add", ".");
   git("commit", "--quiet", "-m", "Create fixture base");
   const base = git("rev-parse", "HEAD");
+  writeFileSync(
+    path.join(directory, "docs/personal-settings.md"),
+    "Modified documentation\n",
+  );
+  git("commit", "--quiet", "-am", "Modify fixture documentation");
+  const head = git("rev-parse", "HEAD");
   const runner = temporaryDirectory();
   return {
     directory,
@@ -149,8 +165,8 @@ function fixtureRepository(policy?: string) {
     env: {
       EVENT_NAME: "pull_request",
       PULL_REQUEST_BASE_SHA: base,
-      PULL_REQUEST_HEAD_SHA: base,
-      GITHUB_SHA: base,
+      PULL_REQUEST_HEAD_SHA: head,
+      GITHUB_SHA: head,
       LABELS_JSON: "[]",
       RUNNER_TEMP: runner,
       GITHUB_OUTPUT: path.join(runner, "outputs"),
@@ -159,21 +175,28 @@ function fixtureRepository(policy?: string) {
   };
 }
 
-// This fixture supplies the classifier's output contract. Path classification
-// itself belongs to the trusted policy; these tests exercise the workflow's
-// trust boundary, fallback, output validation, and additive label handling.
-const TRUSTED_POLICY = `
-import { readFileSync } from "node:fs";
-import { database } from "./control-plane-scope.mjs";
-const rules = JSON.parse(readFileSync(new URL("./scope-rules.json", import.meta.url), "utf8"));
-if (process.argv.slice(2).join(" ") !== "--mode pr") process.exit(1);
-const lanes = {
-  quality: rules.quality, vitest: false, build: false, macos: false,
-  "control-plane-db": database, "ui-smoke": false,
-};
-console.log("ledger=" + JSON.stringify({ schema_version: 1, lanes, reasons: ["Trusted fixture policy."] }));
-for (const [lane, selected] of Object.entries(lanes)) console.log(lane + "=" + selected);
+// Fault fixtures exercise only output validation. Selection and label tests
+// execute the real classifier with its real registry and relative import.
+const OUTPUT_LEDGER = createLedger({
+  policy: POLICY,
+  decision: decideScope({
+    policy: POLICY,
+    changes: [{ path: "docs/personal-settings.md", status: "M" }],
+  }),
+  event: "pull_request",
+  mode: "pr",
+});
+function outputPolicy(patch: Record<string, unknown> = {}) {
+  return `
+const ledger = ${JSON.stringify({ ...OUTPUT_LEDGER, ...patch })};
+ledger.base_sha = process.env.PULL_REQUEST_BASE_SHA;
+ledger.source_sha = process.env.PULL_REQUEST_HEAD_SHA;
+ledger.tested_sha = process.env.GITHUB_SHA;
+console.log("ledger=" + JSON.stringify(ledger));
+for (const [id, selected] of Object.entries(ledger.lanes)) console.log(id + "=" + selected);
+for (const [id, selected] of Object.entries(ledger.jobs)) console.log("job-" + id + "=" + selected);
 `;
+}
 
 describe("selective pull-request CI", () => {
   it("reruns for label changes without path filters or elevated permissions", () => {
@@ -222,13 +245,36 @@ describe("selective pull-request CI", () => {
     ]) {
       expect(step.run).toContain(`git show "$BASE_SHA":scripts/ci/${file}`);
     }
-    for (const lane of LANES)
-      expect(ci.jobs.scope.outputs?.[lane]).toBe(
-        `\${{ steps.scope.outputs.${lane} }}`,
+    for (const lane of JOBS)
+      expect(ci.jobs.scope.outputs?.[`job-${lane}`]).toBe(
+        `\${{ steps.scope.outputs.job-${lane} }}`,
       );
   });
 
-  it("executes the base policy and relative imports even when the PR replaces them", () => {
+  it("forwards the real classifier ledger and only its job outputs", () => {
+    const fixture = fixtureRepository(TRUSTED_POLICY);
+    const execution = runStep(scopeStep(), fixture.env, fixture.directory);
+    expect(execution.status, execution.stderr).toBe(0);
+    const outputs = readOutputs(fixture.env.GITHUB_OUTPUT);
+    const classifier = readOutputs(
+      path.join(fixture.env.RUNNER_TEMP, "ci-policy/classifier.outputs"),
+    );
+    expect(Object.keys(outputs).sort()).toEqual(
+      ["ledger", ...JOBS.map((id) => `job-${id}`)].sort(),
+    );
+    expect(outputs.ledger).toBe(classifier.ledger);
+    const ledger = JSON.parse(outputs.ledger);
+    expect(ledger.schema).toBe("zeros.ci-selection/v1");
+    expect(Object.keys(ledger.lanes)).toHaveLength(20);
+    expect(ledger.jobs).toEqual(OUTPUT_LEDGER.jobs);
+    for (const id of JOBS)
+      expect(outputs[`job-${id}`]).toBe(classifier[`job-${id}`]);
+    expect(scopeStep().run).not.toMatch(
+      /labelLanes|REQUEST_LANES|selectChecks|decideScope/,
+    );
+  });
+
+  it("executes base policy and relative imports even when the PR replaces them", () => {
     const fixture = fixtureRepository(TRUSTED_POLICY);
     writeFileSync(
       path.join(fixture.directory, "scripts/ci/scope.mjs"),
@@ -251,45 +297,52 @@ describe("selective pull-request CI", () => {
     const result = runStep(scopeStep(), fixture.env, fixture.directory);
     expect(result.status, result.stderr).toBe(0);
     const outputs = readOutputs(fixture.env.GITHUB_OUTPUT);
-    expect(outputs.quality).toBe("false");
-    expect(outputs["control-plane-db"]).toBe("false");
-    expect(JSON.parse(outputs.ledger).policy_sha).toBe(
-      fixture.env.PULL_REQUEST_BASE_SHA,
-    );
+    for (const id of JOBS)
+      expect(outputs[`job-${id}`]).toBe(id === "ui-smoke" ? "false" : "true");
+    const ledger = JSON.parse(outputs.ledger);
+    expect(ledger.base_sha).toBe(fixture.env.PULL_REQUEST_BASE_SHA);
+    expect(ledger.full).toBe(true);
+    expect(ledger.policy_digest).toBe(OUTPUT_LEDGER.policy_digest);
     expect(readFileSync(fixture.env.GITHUB_STEP_SUMMARY, "utf8")).toContain(
-      "Trusted fixture policy.",
+      "global-invalidator:",
     );
   });
 
-  it("falls back to every PR lane except composer when any policy file is missing", () => {
-    const fixture = fixtureRepository(TRUSTED_POLICY);
-    fixture.git("rm", "scripts/ci/control-plane-scope.mjs");
-    fixture.git("commit", "--quiet", "-m", "Remove policy dependency");
-    fixture.env.PULL_REQUEST_BASE_SHA =
-      fixture.env.PULL_REQUEST_HEAD_SHA =
-      fixture.env.GITHUB_SHA =
-        fixture.git("rev-parse", "HEAD");
-    const result = runStep(scopeStep(), fixture.env, fixture.directory);
-    expect(result.status, result.stderr).toBe(0);
-    const outputs = readOutputs(fixture.env.GITHUB_OUTPUT);
-    for (const lane of LANES)
-      expect(outputs[lane]).toBe(lane === "ui-smoke" ? "false" : "true");
-    const ledger = JSON.parse(outputs.ledger);
-    expect(ledger.fallback).toBe(true);
-    expect(ledger.reasons.join(" ")).toContain("trusted base");
-    expect(readFileSync(fixture.env.GITHUB_STEP_SUMMARY, "utf8")).toContain(
-      outputs.ledger,
-    );
-  });
+  it.each(["scope.mjs", "scope-rules.json", "control-plane-scope.mjs"])(
+    "falls back when the trusted base lacks %s",
+    (file) => {
+      const fixture = fixtureRepository(TRUSTED_POLICY);
+      fixture.git("rm", `scripts/ci/${file}`);
+      fixture.git("commit", "--quiet", "-m", "Remove policy dependency");
+      fixture.env.PULL_REQUEST_BASE_SHA =
+        fixture.env.PULL_REQUEST_HEAD_SHA =
+        fixture.env.GITHUB_SHA =
+          fixture.git("rev-parse", "HEAD");
+      const result = runStep(scopeStep(), fixture.env, fixture.directory);
+      expect(result.status, result.stderr).toBe(0);
+      const outputs = readOutputs(fixture.env.GITHUB_OUTPUT);
+      for (const id of JOBS)
+        expect(outputs[`job-${id}`]).toBe(id === "ui-smoke" ? "false" : "true");
+      const ledger = JSON.parse(outputs.ledger);
+      expect(ledger.schema).toBe("zeros.ci-selection/v1");
+      expect(ledger.policy_digest).toBeNull();
+      expect(ledger.lanes).toEqual({});
+      expect(ledger.requests).toEqual([]);
+      expect(ledger.reasons.join(" ")).toContain("missing-policy:");
+      expect(readFileSync(fixture.env.GITHUB_STEP_SUMMARY, "utf8")).toContain(
+        outputs.ledger,
+      );
+    },
+  );
 
   it.each([
     ["ci:ui-smoke", ["ui-smoke"]],
-    ["ci:full", LANES],
+    ["ci:full", JOBS],
     ["ci:macos", ["macos"]],
-    ["ci:control-plane-db", ["control-plane-db"]],
+    ["ci:control-plane-db", ["quality", "vitest", "control-plane-db"]],
     ["ci:packaging", ["quality", "vitest", "build", "macos"]],
     ["ci:web", ["quality", "vitest", "build"]],
-  ])("adds the authorized %s label lanes", (label, selected) => {
+  ])("passes the %s request to the real classifier", (label, selected) => {
     const fixture = fixtureRepository(TRUSTED_POLICY);
     const result = runStep(
       scopeStep(),
@@ -298,17 +351,18 @@ describe("selective pull-request CI", () => {
     );
     expect(result.status, result.stderr).toBe(0);
     const outputs = readOutputs(fixture.env.GITHUB_OUTPUT);
-    for (const lane of LANES) {
-      expect(outputs[lane], lane).toBe(
-        selected.includes(lane) ||
-          ["control-plane-static", "secret-scan"].includes(lane)
+    for (const id of JOBS) {
+      expect(outputs[`job-${id}`], id).toBe(
+        selected.includes(id) ||
+          ["control-plane-static", "secret-scan"].includes(id)
           ? "true"
           : "false",
       );
     }
+    expect(JSON.parse(outputs.ledger).requests).toEqual([label]);
   });
 
-  it("honors explicit composer labels during missing-policy fallback", () => {
+  it("keeps composer off without a trusted classifier to interpret labels", () => {
     const fixture = fixtureRepository();
     const result = runStep(
       scopeStep(),
@@ -316,43 +370,97 @@ describe("selective pull-request CI", () => {
       fixture.directory,
     );
     expect(result.status, result.stderr).toBe(0);
-    expect(readOutputs(fixture.env.GITHUB_OUTPUT)["ui-smoke"]).toBe("true");
+    const outputs = readOutputs(fixture.env.GITHUB_OUTPUT);
+    expect(outputs["job-ui-smoke"]).toBe("false");
+    expect(JSON.parse(outputs.ledger).requests).toEqual([]);
   });
 
-  it("retains the path floor when optional labels are removed", () => {
-    const fixture = fixtureRepository(
-      TRUSTED_POLICY.replace("quality: rules.quality", "quality: true"),
+  it.each(["", "invalid", "0".repeat(40), "2".repeat(40)])(
+    "fails before making selection claims for unavailable base %j",
+    (base) => {
+      const fixture = fixtureRepository(TRUSTED_POLICY);
+      const result = runStep(
+        scopeStep(),
+        { ...fixture.env, PULL_REQUEST_BASE_SHA: base },
+        fixture.directory,
+      );
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(fixture.env.GITHUB_OUTPUT, "utf8")).toBe("");
+    },
+  );
+
+  it("retains the real path floor when an optional label is removed", () => {
+    const fixture = fixtureRepository(TRUSTED_POLICY);
+    mkdirSync(path.join(fixture.directory, "apps/desktop/src/renderer"), {
+      recursive: true,
+    });
+    writeFileSync(
+      path.join(fixture.directory, "apps/desktop/src/renderer/example.ts"),
+      "export const example = true;\n",
     );
-    for (const labels of ['["ci:macos"]', "[]"]) {
+    fixture.git("add", ".");
+    fixture.git("commit", "--quiet", "-m", "Change renderer source");
+    fixture.env.PULL_REQUEST_HEAD_SHA = fixture.env.GITHUB_SHA = fixture.git(
+      "rev-parse",
+      "HEAD",
+    );
+    for (const labels of ['["ci:ui-smoke"]', "[]"]) {
       const result = runStep(
         scopeStep(),
         { ...fixture.env, LABELS_JSON: labels },
         fixture.directory,
       );
       expect(result.status, result.stderr).toBe(0);
-      expect(readOutputs(fixture.env.GITHUB_OUTPUT).quality).toBe("true");
+      const outputs = readOutputs(fixture.env.GITHUB_OUTPUT);
+      expect(outputs["job-quality"]).toBe("true");
+      expect(outputs["job-ui-smoke"]).toBe(labels === "[]" ? "false" : "true");
     }
   });
 
   it.each(["ci:unknown", "ci:skip"])(
-    "rejects the unknown %s request",
+    "lets the classifier reject %s before publishing outputs",
     (label) => {
-      const fixture = fixtureRepository();
+      const fixture = fixtureRepository(TRUSTED_POLICY);
       const result = runStep(
         scopeStep(),
         { ...fixture.env, LABELS_JSON: JSON.stringify([label]) },
         fixture.directory,
       );
       expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("Unknown CI label");
+      expect(readFileSync(fixture.env.GITHUB_OUTPUT, "utf8")).toBe("");
     },
   );
 
   it.each([
     "throw new Error('Classifier failed');",
-    "console.log('quality=false');",
-    TRUSTED_POLICY.replace("schema_version: 1", "schema_version: 2"),
-    TRUSTED_POLICY.replace("quality: rules.quality", "quality: 'false'"),
-    TRUSTED_POLICY.replace('"ui-smoke": false', '"ui-smoke": true'),
+    "console.log('desktop-renderer=false');",
+    outputPolicy({ schema: "zeros.ci-selection/v2" }),
+    outputPolicy({ schema_version: 1 }),
+    outputPolicy({ mode: "full" }),
+    outputPolicy({ policy_digest: "invalid" }),
+    outputPolicy({ policy_digest: [OUTPUT_LEDGER.policy_digest] }),
+    outputPolicy({ jobs: { ...OUTPUT_LEDGER.jobs, quality: "false" } }),
+    outputPolicy({ jobs: { ...OUTPUT_LEDGER.jobs, "secret-scan": false } }),
+    outputPolicy({ jobs: { ...OUTPUT_LEDGER.jobs, unknown: false } }),
+    outputPolicy({
+      lanes: { ...OUTPUT_LEDGER.lanes, "desktop-renderer": "false" },
+    }),
+    outputPolicy({ reasons: [] }),
+    outputPolicy() + 'console.log("job-quality=false");',
+    outputPolicy() + 'console.log("unexpected=false");',
+    outputPolicy().replace(
+      'for (const [id, selected] of Object.entries(ledger.jobs)) console.log("job-" + id + "=" + selected);',
+      "",
+    ),
+    outputPolicy().replace(
+      '"job-" + id + "=" + selected',
+      '"job-" + id + "=" + (id === "quality" ? true : selected)',
+    ),
+    outputPolicy().replace(
+      "ledger.tested_sha = process.env.GITHUB_SHA;",
+      'ledger.tested_sha = "2".repeat(40);',
+    ),
   ])("fails scope on invalid policy execution or output %#", (policy) => {
     const fixture = fixtureRepository(policy);
     const result = runStep(scopeStep(), fixture.env, fixture.directory);
@@ -367,8 +475,8 @@ describe("selective pull-request CI", () => {
       expect(needsOf(job)).toContain("scope");
       expect(job.if).toBe(
         id === "control-plane-database"
-          ? "always() && (needs.scope.result != 'success' || needs.control-plane-scope.result != 'success' || needs.scope.outputs.control-plane-db == 'true' || needs.control-plane-scope.outputs.database == 'true')"
-          : `always() && (needs.scope.result != 'success' || needs.scope.outputs.${lane} == 'true')`,
+          ? "always() && (needs.scope.result != 'success' || needs.control-plane-scope.result != 'success' || needs.scope.outputs.job-control-plane-db == 'true' || needs.control-plane-scope.outputs.database == 'true')"
+          : `always() && (needs.scope.result != 'success' || needs.scope.outputs.job-${lane} == 'true')`,
       );
       const guard = job.steps[0]!;
       expect(guard.name).toBe("Verify scope result");
@@ -480,14 +588,14 @@ describe("selective pull-request CI", () => {
       ci.jobs.test.steps.find((step) => step.name === "Enforce the test result")
         ?.env?.TEST_RESULT,
     ).toBe(
-      "${{ needs.test-shard.result == 'skipped' && needs.scope.outputs.vitest == 'false' && 'success' || needs.test-shard.result }}",
+      "${{ needs.test-shard.result == 'skipped' && needs.scope.outputs.job-vitest == 'false' && 'success' || needs.test-shard.result }}",
     );
     expect(
       ci.jobs["source-sync"].steps.find(
         (step) => step.name === "Enforce the source-sync result",
       )?.env?.SOURCE_SYNC_RESULT,
     ).toBe(
-      "${{ needs.source-sync-workload.result == 'skipped' && needs.scope.outputs.macos == 'false' && 'success' || needs.source-sync-workload.result }}",
+      "${{ needs.source-sync-workload.result == 'skipped' && needs.scope.outputs.job-macos == 'false' && 'success' || needs.source-sync-workload.result }}",
     );
     const controlPlane = ci.jobs["control-plane"].steps.find(
       (step) => step.name === "Enforce control-plane results",
@@ -528,53 +636,50 @@ describe("selective pull-request CI", () => {
 });
 
 describe("the CI gate's executable ledger validation", () => {
-  function fixture() {
-    const lanes = Object.fromEntries(
-      LANES.map((lane) => [
-        lane,
-        ["control-plane-static", "secret-scan"].includes(lane),
-      ]),
-    );
-    const jobs = Object.fromEntries(
+  function fixture(labels: string[] = []) {
+    const sha = "1".repeat(40);
+    const ledger = createLedger({
+      policy: POLICY,
+      decision: decideScope({
+        policy: POLICY,
+        changes: [{ path: "docs/personal-settings.md", status: "M" }],
+        labels,
+      }),
+      event: "pull_request",
+      mode: "pr",
+      baseSha: sha,
+      sourceSha: sha,
+      testedSha: sha,
+    });
+    const jobs = ledger.jobs;
+    const selected = Object.fromEntries(
       Object.keys(ci.jobs)
         .filter((id) => id !== "ci-gate")
-        .map((id) => [id, PRODUCERS[id] ? lanes[PRODUCERS[id]!] : true]),
+        .map((id) => [id, PRODUCERS[id] ? jobs[PRODUCERS[id]!] : true]),
     );
     const needs: Record<
       string,
       { result: string; outputs: Record<string, string> }
     > = Object.fromEntries(
-      Object.entries(jobs).map(([id, selected]) => [
+      Object.entries(selected).map(([id, run]) => [
         id,
         {
-          result: selected ? "success" : "skipped",
+          result: run ? "success" : "skipped",
           outputs:
             id === "scope"
-              ? Object.fromEntries(
-                  LANES.map((lane) => [lane, String(lanes[lane])]),
-                )
+              ? {
+                  ledger: "",
+                  ...Object.fromEntries(
+                    JOBS.map((job) => [`job-${job}`, String(jobs[job])]),
+                  ),
+                }
               : id === "control-plane-scope"
-                ? { database: "false" }
+                ? { database: String(jobs["control-plane-db"]) }
                 : {},
         },
       ]),
     );
-    const sha = "1".repeat(40);
-    const ledger = {
-      schema_version: 1,
-      event_name: "pull_request",
-      base_sha: sha,
-      source_sha: sha,
-      tested_sha: sha,
-      policy_sha: sha,
-      lanes,
-      jobs,
-      reasons: ["Gate fixture."],
-      requests: [] as string[],
-      fallback: false,
-    };
     return {
-      lanes,
       jobs,
       needs,
       ledger,
@@ -592,6 +697,8 @@ describe("the CI gate's executable ledger validation", () => {
     state: ReturnType<typeof fixture>,
     ledger = JSON.stringify(state.ledger),
   ) {
+    if (state.needs.scope?.outputs.ledger === "")
+      state.needs.scope.outputs.ledger = JSON.stringify(state.ledger);
     return runStep(selectionStep("ci-gate"), {
       ...state.env,
       LEDGER_JSON: ledger,
@@ -599,24 +706,15 @@ describe("the CI gate's executable ledger validation", () => {
     });
   }
 
-  it("accepts a complete ledger with proven unselected skips", () => {
+  it("accepts the real classifier schema and proven unselected skips", () => {
     const state = fixture();
     const result = verdict(state);
     expect(result.status, result.stderr).toBe(0);
   });
 
-  it("accepts ci:full only when every producer is selected and successful", () => {
-    const state = fixture();
-    state.ledger.requests = ["ci:full"];
-    for (const lane of LANES) {
-      state.lanes[lane] = true;
-      state.needs.scope!.outputs[lane] = "true";
-    }
-    for (const id of Object.keys(state.jobs)) {
-      state.jobs[id] = true;
-      state.needs[id]!.result = "success";
-    }
-    state.needs["control-plane-scope"]!.outputs.database = "true";
+  it("accepts the classifier's ci:full selection when all jobs succeed", () => {
+    const state = fixture(["ci:full"]);
+    expect(Object.values(state.jobs).every(Boolean)).toBe(true);
     const result = verdict(state);
     expect(result.status, result.stderr).toBe(0);
   });
@@ -632,15 +730,12 @@ describe("the CI gate's executable ledger validation", () => {
     for (const selected of [true, false]) {
       for (const result of RESULTS) {
         const state = fixture();
-        const lane = PRODUCERS[id]!;
-        state.lanes[lane] = selected;
-        state.jobs[id] = selected;
-        state.needs.scope!.outputs[lane] = String(selected);
+        const job = PRODUCERS[id]!;
+        state.jobs[job] = selected;
+        state.needs.scope!.outputs[`job-${job}`] = String(selected);
         if (id === "control-plane-database")
           state.needs["control-plane-scope"]!.outputs.database =
             String(selected);
-        if (id === "ui-smoke" && selected)
-          state.ledger.requests = ["ci:ui-smoke"];
         state.needs[id]!.result = result;
         const execution = verdict(state);
         expect(execution.status === 0, `${selected}:${result}`).toBe(
@@ -650,12 +745,35 @@ describe("the CI gate's executable ledger validation", () => {
     }
   });
 
-  it("requires a legacy-selected database workload even when its policy lane is false", () => {
+  it("requires the legacy-selected database even when the trusted job floor is false", () => {
     const state = fixture();
     state.needs["control-plane-scope"]!.outputs.database = "true";
     expect(verdict(state).status).not.toBe(0);
     state.needs["control-plane-database"]!.result = "success";
     expect(verdict(state).status).toBe(0);
+  });
+
+  it("accepts the conservative missing-policy ledger and rejects a composer addition", () => {
+    const state = fixture();
+    state.ledger.policy_digest = null;
+    state.ledger.lanes = {};
+    state.ledger.full = true;
+    state.ledger.reasons = [
+      "missing-policy: The trusted base lacks the complete CI policy.",
+    ];
+    for (const id of JOBS) {
+      state.jobs[id] = id !== "ui-smoke";
+      state.needs.scope!.outputs[`job-${id}`] = String(state.jobs[id]);
+    }
+    for (const id of Object.keys(state.needs))
+      state.needs[id]!.result = id === "ui-smoke" ? "skipped" : "success";
+    state.needs["control-plane-scope"]!.outputs.database = "true";
+    expect(verdict(state).status).toBe(0);
+    state.jobs["ui-smoke"] = true;
+    state.needs.scope!.outputs["job-ui-smoke"] = "true";
+    state.needs.scope!.outputs.ledger = "";
+    state.needs["ui-smoke"]!.result = "success";
+    expect(verdict(state).status).not.toBe(0);
   });
 
   it.each(["", "null", "{}", "[]", "malformed"])(
@@ -667,38 +785,68 @@ describe("the CI gate's executable ledger validation", () => {
 
   it("rejects missing, extra, mismatched, or invalid selection evidence", () => {
     const mutations = [
-      (state: ReturnType<typeof fixture>) => {
-        delete state.needs.quality;
+      (s: ReturnType<typeof fixture>) => {
+        delete s.needs.quality;
       },
-      (state: ReturnType<typeof fixture>) => {
-        state.needs.unknown = { result: "success", outputs: {} };
+      (s: ReturnType<typeof fixture>) => {
+        s.needs.unknown = { result: "success", outputs: {} };
       },
-      (state: ReturnType<typeof fixture>) => {
-        delete state.lanes.quality;
+      (s: ReturnType<typeof fixture>) => {
+        delete s.jobs.quality;
       },
-      (state: ReturnType<typeof fixture>) => {
-        state.needs.scope!.outputs.quality = "true";
+      (s: ReturnType<typeof fixture>) => {
+        s.jobs.unknown = false;
       },
-      (state: ReturnType<typeof fixture>) => {
-        state.jobs.quality = true;
+      (s: ReturnType<typeof fixture>) => {
+        s.needs.scope!.outputs["job-quality"] = "true";
       },
-      (state: ReturnType<typeof fixture>) => {
-        state.jobs.test = false;
+      (s: ReturnType<typeof fixture>) => {
+        delete s.needs.scope!.outputs["job-vitest"];
       },
-      (state: ReturnType<typeof fixture>) => {
-        state.ledger.policy_sha = "2".repeat(40);
+      (s: ReturnType<typeof fixture>) => {
+        delete s.needs.scope!.outputs.ledger;
       },
-      (state: ReturnType<typeof fixture>) => {
-        state.ledger.schema_version = 2;
+      (s: ReturnType<typeof fixture>) => {
+        s.needs.scope!.outputs.ledger = "different ledger";
       },
-      (state: ReturnType<typeof fixture>) => {
-        state.ledger.requests = ["ci:full"];
+      (s: ReturnType<typeof fixture>) => {
+        s.jobs.quality = "false";
       },
-      (state: ReturnType<typeof fixture>) => {
-        state.ledger.fallback = true;
+      (s: ReturnType<typeof fixture>) => {
+        s.jobs["secret-scan"] = false;
       },
-      (state: ReturnType<typeof fixture>) => {
-        state.needs["control-plane-scope"]!.outputs.database = "";
+      (s: ReturnType<typeof fixture>) => {
+        s.ledger.source_sha = "2".repeat(40);
+      },
+      (s: ReturnType<typeof fixture>) => {
+        s.ledger.schema = "zeros.ci-selection/v2";
+      },
+      (s: ReturnType<typeof fixture>) => {
+        s.ledger.schema_version = 1;
+      },
+      (s: ReturnType<typeof fixture>) => {
+        s.ledger.mode = "full";
+      },
+      (s: ReturnType<typeof fixture>) => {
+        s.ledger.policy_digest = "invalid";
+      },
+      (s: ReturnType<typeof fixture>) => {
+        s.ledger.policy_digest = [s.ledger.policy_digest];
+      },
+      (s: ReturnType<typeof fixture>) => {
+        s.ledger.lanes.web = "false";
+      },
+      (s: ReturnType<typeof fixture>) => {
+        s.ledger.full = true;
+      },
+      (s: ReturnType<typeof fixture>) => {
+        s.ledger.policy_digest = null;
+      },
+      (s: ReturnType<typeof fixture>) => {
+        s.ledger.requests = ["ci:web", "ci:web"];
+      },
+      (s: ReturnType<typeof fixture>) => {
+        s.needs["control-plane-scope"]!.outputs.database = "";
       },
     ];
     for (const mutate of mutations) {

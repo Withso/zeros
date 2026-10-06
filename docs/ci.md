@@ -105,7 +105,7 @@ the existing workload boundaries.
 | `job-macos`                | `source-sync-workload`, with the required `source-sync (macOS)` aggregate                  | `source-sync-macos`, `unsigned-packaging-proof`                                                                                                                                                                                                                                                                |
 | `job-control-plane-db`     | `control-plane-database`, with report validation in the required `control plane` aggregate | `control-plane-database`, `control-plane-reports`                                                                                                                                                                                                                                                              |
 | `job-ui-smoke`             | `ui-smoke (composer)`                                                                      | `composer-full`                                                                                                                                                                                                                                                                                                |
-| `job-control-plane-static` | `control-plane-static` and `control-plane-scope`                                                                     | `control-plane-static` (always selected)                                                                                                                                                                                                                                                                       |
+| `job-control-plane-static` | `control-plane-static` and `control-plane-scope`                                           | `control-plane-static` (always selected)                                                                                                                                                                                                                                                                       |
 | `job-secret-scan`          | `secret scan (PR commit range)`                                                            | `commit-range-secrets` (always selected)                                                                                                                                                                                                                                                                       |
 
 `tracked-secrets` runs in full Preflight and is also bundled into selected CI
@@ -254,13 +254,13 @@ The required aggregates validate raw selections and results before adapting
 proved unselected outcomes to their original enforcing commands. They accept
 exactly:
 
-| Selected | Job result | Verdict |
-| --- | --- | --- |
-| `true` | `success` | Pass |
-| `false` | `skipped` | Pass |
-| `false` | `success` | Pass |
-| `true` | `skipped` | Fail |
-| Either | Failure, cancellation, missing or unknown result | Fail |
+| Selected | Job result                                       | Verdict |
+| -------- | ------------------------------------------------ | ------- |
+| `true`   | `success`                                        | Pass    |
+| `false`  | `skipped`                                        | Pass    |
+| `false`  | `success`                                        | Pass    |
+| `true`   | `skipped`                                        | Fail    |
+| Either   | Failure, cancellation, missing or unknown result | Fail    |
 
 `ci-gate` runs with `if: always()` and directly needs every other CI job. It
 validates ledger schema, commit identities, job inventory, scope outputs,
