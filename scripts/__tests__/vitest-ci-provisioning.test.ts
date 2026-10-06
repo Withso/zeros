@@ -1,4 +1,4 @@
-// The Vitest suite has TWO kinds of host prerequisite, and this guard used to
+// The Vitest suite has several host prerequisites, and this guard used to
 // check only the first — for only one workflow file:
 //
 //   1. Chromium. The suite includes two real-browser design-runtime contracts.
@@ -24,6 +24,10 @@
 //      own lockfile, not the root one. preflight.yml installed that graph; the
 //      three release gates did not, so the same suite failed there with
 //      "Cannot find package 'hono'".
+//
+//   4. The native PTY binding. A restored pnpm store can skip node-pty's build
+//      while leaving its native module unavailable. Rebuild and load it before
+//      the suite so real terminal and SSH tests have a working binding.
 //
 // Asserting the whole prerequisite set against EVERY job that runs the suite is
 // what makes that class of drift impossible to reintroduce quietly.
@@ -133,6 +137,21 @@ describe("Vitest CI provisioning", () => {
 
       expect(install).toBeGreaterThanOrEqual(0);
       expect(install).toBeLessThan(test);
+    },
+  );
+
+  it.each(jobs)(
+    "rebuilds and verifies the native PTY binding before $file:$job runs Vitest",
+    ({ body }) => {
+      const install = body.indexOf("pnpm install --frozen-lockfile");
+      const rebuild = body.indexOf("pnpm rebuild node-pty");
+      const verify = body.indexOf("node -e \"require('node-pty')\"");
+      const test = body.search(VITEST_COMMAND);
+
+      expect(install).toBeGreaterThanOrEqual(0);
+      expect(rebuild).toBeGreaterThan(install);
+      expect(verify).toBeGreaterThan(rebuild);
+      expect(verify).toBeLessThan(test);
     },
   );
 
