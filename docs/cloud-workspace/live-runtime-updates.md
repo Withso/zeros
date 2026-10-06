@@ -1,6 +1,6 @@
 # Live updates for running cloud workspaces
 
-Decision proposal, 2026-10-06. Internal Alpha only. Extends
+Approved decision, 2026-10-06. Internal Alpha only. Extends
 [HU's transition design](runtime-hot-update.md); does not enable live updates or
 claim measured process survival. Repository baseline: `41e84ffe`.
 
@@ -162,6 +162,13 @@ integer.** Current control plane and desktop must preserve all previously
 supported core operations with both. New features require an advertised
 runtime capability or a tested fallback; lack of support must be rejected before
 durable dispatch, never converted into `command_dispatch_rejected` mid-turn.
+The reported old-runtime agent refusal was subsequently identified by the
+orchestrator as deliberate control-plane admission policy: customization on a
+non-MCP-qualified runtime returns `cloud_runtime_upgrade_required`, which the
+old engine collapses to `command_dispatch_rejected`. Together with the failed
+wake upgrade, that explains the incident; it is not evidence of schema skew.
+The skew gate remains a preventive release requirement.
+
 Handshake range equality alone is insufficient: the existing
 [protocol check](../../scripts/check-protocol-version.mjs#L2) is advisory.
 
@@ -184,16 +191,18 @@ Wire this as a **required** compatibility/release-qualification gate before
 desktop/control-plane publication; neither successful N qualification nor an
 advisory protocol bump may bypass it. Roll-forward and rollback data-format
 tests are separate. Local tests with frozen schemas can be a first slice but
-must not be represented as full released-binary qualification. The supplied old
-runtime's source commit is absent from this shallow checkout; its exact verified
-artifact and the preceding desktop fixture need orchestrator confirmation.
+must not be represented as full released-binary qualification. Resolve runtime
+provenance through `cloud_runtime_bundles.source_commit`; a runtime ID suffix is
+not a source commit. The orchestrator has supplied the old runtime's provenance;
+the skew-gate owner must bind its fixtures to the verified manifest/artifact and
+the preceding desktop build.
 
 ## Ownership and PR slices
 
 | Slice | Owner / boundary | Evidence before enabling |
 | --- | --- | --- |
 | LU-0: this decision | LU; separate doc, no edits to HU's design | Sources and exact limitations above. |
-| LU-1: skew gate | LU; frozen contracts, compatibility harness and required CI integration | Deliberately incompatible request fails; both placements and released N/N−1 matrix pass. Baseline artifact/provenance must be agreed first. CI changes require owner merge. |
+| LU-1: skew gate | Separate agent assigned by the orchestrator; frozen contracts, compatibility harness and required CI integration | Deliberately incompatible request fails; both placements and released N/N−1 matrix pass. Baseline artifact/provenance must be agreed first. CI changes require owner merge. |
 | LU-2: resident workload host | LU; new host/engine adapter, terminal registry/mirror ownership and packaging | Real shell plus detached dev server keep PID/state/output across old-engine exit, target attach and rollback; stale engine/refused auth, bounded buffers, explicit close, stop and host-crash tests. |
 | LU-3: safe-point handoff | LU engine admission/drain; HU supervisor protocol, final decision and enrollment | No admitted mutation/claim crosses fence; source/candidate race, pending approval, drain failure, SQLite close/reopen and rollback tests. |
 | LU-4: qualification-driven staging | LU trigger/staging integration; HU transition APIs; PERF notification worker | Busy workspace stages without pointer/process change; duplicate/lost push, supersession, revocation and source-generation races. |
