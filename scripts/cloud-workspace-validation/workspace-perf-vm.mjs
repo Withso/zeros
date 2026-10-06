@@ -19,6 +19,37 @@ const name = journal => `zeros-v2-test-perf-${journal.id}`;
 const providerReady = state => ["ready", "idle", "running"].includes(state);
 const BOOT_DETAILS = "/usr/bin/sudo -n /usr/bin/python3 -I - <<'PY_PERF'\n" +
   readFileSync(new URL("./workspace-perf-bootstrap.py", import.meta.url), "utf8") + "\nPY_PERF";
+const bootstrapUnits = new Set([
+  "zeros-boot.service",
+  "zeros-host.service",
+  "systemd-tmpfiles-setup.service",
+  "systemd-tmpfiles-setup-dev.service",
+  "systemd-remount-fs.service",
+  "systemd-udev-trigger.service",
+  "systemd-udevd.service",
+  "systemd-sysusers.service",
+  "systemd-journal-flush.service",
+  "systemd-journald.service",
+  "systemd-modules-load.service",
+  "systemd-sysctl.service",
+  "systemd-networkd.service",
+  "systemd-networkd-wait-online.service",
+  "systemd-user-sessions.service",
+  "networking.service",
+  "network-online.target",
+  "network.target",
+  "basic.target",
+  "sysinit.target",
+  "local-fs.target",
+  "local-fs-pre.target",
+  "sockets.target",
+  "timers.target",
+  "paths.target",
+  "cloud-init.service",
+  "cloud-init-local.service",
+  "cloud-config.service",
+  "cloud-final.service",
+]);
 const unitStates = new Set(["active", "activating", "inactive", "deactivating", "failed", "reloading"]);
 const unitSubstates = new Set(["dead", "start", "start-pre", "start-post", "running", "exited", "failed", "auto-restart", "stop", "stop-sigterm", "stop-sigkill"]);
 const unitResults = new Set(["success", "exit-code", "signal", "timeout", "resources", "start-limit-hit", "core-dump", "watchdog", "oom-kill"]);
@@ -26,9 +57,19 @@ const unitTimes = ["ExecMainStartTimestampMonotonic", "ExecMainExitTimestampMono
 const boundedInteger = (value, maximum = 10 ** 15) => Number.isSafeInteger(value) && value >= 0 && value <= maximum ? value : null;
 export function parsePerfBootstrapDetails(value) {
   if (value?.schema !== "zeros.workspace-perf-bootstrap/v1") return { availability: "invalid_response" };
+  const analysis = value.bootAnalysis;
   return { schema: value.schema, observedMonotonicUs: boundedInteger(value.observedMonotonicUs),
     hydrationDone: value.hydrationDone === true, activeDescriptorPresent: value.activeDescriptorPresent === true,
-    units: (Array.isArray(value.units) ? value.units : []).slice(0, 2).filter(unit => ["zeros-boot.service", "zeros-host.service"].includes(unit?.unit))
+    ...(analysis ? { bootAnalysis: { available: analysis.available === true,
+      unknownCriticalChainUnits: boundedInteger(analysis.unknownCriticalChainUnits, 256),
+      unknownBlameUnits: boundedInteger(analysis.unknownBlameUnits, 256),
+      criticalChain: (Array.isArray(analysis.criticalChain) ? analysis.criticalChain : []).slice(0, 32)
+        .filter(row => bootstrapUnits.has(row?.unit)).map(row => ({ unit: row.unit,
+          activationUs: boundedInteger(row.activationUs), durationUs: boundedInteger(row.durationUs) })),
+      blame: (Array.isArray(analysis.blame) ? analysis.blame : []).slice(0, 32)
+        .filter(row => bootstrapUnits.has(row?.unit)).map(row => ({ unit: row.unit, durationUs: boundedInteger(row.durationUs) })),
+    } } : {}),
+    units: (Array.isArray(value.units) ? value.units : []).slice(0, 32).filter(unit => bootstrapUnits.has(unit?.unit))
       .map(unit => ({ unit: unit.unit, active: unitStates.has(unit.active) ? unit.active : "unknown",
         sub: unitSubstates.has(unit.sub) ? unit.sub : "unknown", result: unitResults.has(unit.result) ? unit.result : "unknown",
         exitCode: boundedInteger(unit.exitCode, 255), ...Object.fromEntries(unitTimes.map(key => [key, boundedInteger(unit[key])])) })),
@@ -50,7 +91,11 @@ export function perfBootstrapAnchor(details, bracket) {
   if (observed === null || !starts.length || starts.some(value => value > observed)) return null;
   const elapsedMs = (observed - Math.min(...starts)) / 1000;
   const interval = offset => ({ lower: Math.floor(requestStartMs - elapsedMs - offset), upper: Math.ceil(requestEndMs - elapsedMs - offset) });
-  return { requestStartMs, requestEndMs, firstUnitStartFromCycleMs: interval(0),
+  const unitStartsFromCycleMs = (details?.units ?? []).filter(unit => bootstrapUnits.has(unit.unit) &&
+    boundedInteger(unit.ExecMainStartTimestampMonotonic) !== null && unit.ExecMainStartTimestampMonotonic > 0)
+    .map(unit => { const elapsed = (observed - unit.ExecMainStartTimestampMonotonic) / 1000;
+      return { unit: unit.unit, lower: Math.floor(requestStartMs - elapsed), upper: Math.ceil(requestEndMs - elapsed) }; });
+  return { requestStartMs, requestEndMs, unitStartsFromCycleMs, firstUnitStartFromCycleMs: interval(0),
     firstUnitStartAfterProviderObservationMs: boundedInteger(providerReadyObservedMs) === null ? null : interval(providerReadyObservedMs) };
 }
 const bootstrapStages = new Set(["validate_input", "lock", "check_space", "check_cache", "download", "verify_archive", "verify_manifest",

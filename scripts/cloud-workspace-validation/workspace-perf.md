@@ -265,3 +265,9 @@ the local bracket. Negative bounds can mean the unit preceded the cycle (for
 example an already running VM); missing or inconsistent VM timestamps yield
 `null`. The provider observation is not a provider-reported restore timestamp.
 Report the bracket width with these bounds and keep polling/API overhead separate.
+
+The VM report now includes closed critical-chain/blame data for known boot units
+and request-bracketed starts for those units. Unknown unit names are omitted and
+counted. The first observed unit is not necessarily the first unit systemd started;
+provider-running is an observation, not an exact restore timestamp. Keep the
+reported lower/upper bounds when comparing create and resume samples.

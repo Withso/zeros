@@ -227,8 +227,14 @@ describe("cloud performance measurement", () => {
       units: [{ unit: "zeros-boot.service", ExecMainStartTimestampMonotonic: 251_637_114 }] });
     const anchor = perfBootstrapAnchor(details, { requestStartMs: 36_725, requestEndMs: 37_225, providerReadyObservedMs: 2_860 });
     expect(anchor).toEqual({ requestStartMs: 36_725, requestEndMs: 37_225,
+      unitStartsFromCycleMs: [{ unit: "zeros-boot.service", lower: 27_522, upper: 28_023 }],
       firstUnitStartFromCycleMs: { lower: 27_522, upper: 28_023 },
       firstUnitStartAfterProviderObservationMs: { lower: 24_662, upper: 25_163 } });
+    const earlier = perfBootstrapAnchor({ ...details, units: [...details.units,
+      { unit: "systemd-tmpfiles-setup.service", ExecMainStartTimestampMonotonic: 245_000_000 }] },
+      { requestStartMs: 36_725, requestEndMs: 37_225, providerReadyObservedMs: 2_860 });
+    expect(earlier.firstUnitStartFromCycleMs).toEqual({ lower: 20_885, upper: 21_386 });
+    expect(earlier.unitStartsFromCycleMs).toHaveLength(2);
     expect(perfBootstrapAnchor({ ...details, observedMonotonicUs: 1 }, { requestStartMs: 10, requestEndMs: 20 })).toBeNull();
     expect(perfBootstrapAnchor(details, { requestStartMs: 20, requestEndMs: 10 })).toBeNull();
     expect(perfBootstrapAnchor({ ...details, units: [] }, { requestStartMs: 10, requestEndMs: 20 })).toBeNull();
@@ -299,6 +305,33 @@ describe("cloud performance measurement", () => {
     expect(parsePerfBootstrapDetails({ ...result, units: [{ unit: "private", active: "private" }],
       hydrationEvents: [{ event: "private", waitedSeconds: 2 }] }).units).toEqual([]);
   });
+  it("filters boot critical-chain and blame on the VM and retains bounded named durations", () => {
+    const output = execFileSync("python3", ["-I", "-B", "-c", `
+import importlib.util,json,sys
+spec=importlib.util.spec_from_file_location('perf','scripts/cloud-workspace-validation/workspace-perf-bootstrap.py')
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+value=json.load(sys.stdin)
+print(json.dumps(module.project_analysis(value['chain'],value['blame'])))
+`], { encoding: "utf8", input: JSON.stringify({
+      chain: "zeros-boot.service @25.637s +5.662s\n└─systemd-tmpfiles-setup.service @20.000s +30ms\n  └─private-identity.service @1.2s +20s\n    └─local-fs.target @400ms\n",
+      blame: "1min 3.500s private-identity.service\n3.123s systemd-journal-flush.service\n550us systemd-tmpfiles-setup.service\n",
+    }) });
+    const analysis = JSON.parse(output);
+    expect(analysis.criticalChain).toEqual([
+      { unit: "zeros-boot.service", activationUs: 25_637_000, durationUs: 5_662_000 },
+      { unit: "systemd-tmpfiles-setup.service", activationUs: 20_000_000, durationUs: 30_000 },
+      { unit: "local-fs.target", activationUs: 400_000, durationUs: null },
+    ]);
+    expect(analysis.blame).toEqual([{ unit: "systemd-journal-flush.service", durationUs: 3_123_000 },
+      { unit: "systemd-tmpfiles-setup.service", durationUs: 550 }]);
+    expect(analysis.unknownCriticalChainUnits).toBe(1);
+    expect(analysis.unknownBlameUnits).toBe(1);
+    expect(output).not.toContain("private");
+    const projected = parsePerfBootstrapDetails({ schema: "zeros.workspace-perf-bootstrap/v1", bootAnalysis: {
+      ...analysis, private: "private", blame: [...analysis.blame, { unit: "private", durationUs: 1 }] } });
+    expect(projected.bootAnalysis).toEqual(analysis);
+  });
+
   it("filters journal messages on the VM before bootstrap diagnostics leave it", () => {
     const output = execFileSync("python3", ["-I", "-B", "-c", `
 import importlib.util,json,sys

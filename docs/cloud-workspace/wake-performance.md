@@ -273,3 +273,24 @@ new `zeros-v2-test-perf-*` workspace/VM only. Historical reads may inspect an
 explicitly selected Alpha workspace; they never mutate it. Owner switching,
 concurrent clients and agent continuity still need the Mac verification in
 the runbook.
+
+### Restore-to-unit attribution
+
+The disposable VM runner reads `systemd-analyze critical-chain zeros-boot.service`
+and `systemd-analyze blame`, then `systemctl show` for the allowlisted dependency
+units. Only closed unit names, numeric activation/duration values, state enums and
+counts of omitted unknown units leave the guest. No raw unit descriptions, journal
+messages, paths or command text enter the journal. Each read is bounded; unavailable
+analysis stays missing rather than becoming zero.
+
+`bootstrapAnchor.unitStartsFromCycleMs` translates each observed process start
+into an interval in the operator's create/wake clock using the request's start/end
+bracket and a same-VM monotonic delta. `firstUnitStartFromCycleMs` refers to the
+earliest **observed allowlisted** process start, which can precede zeros-boot.
+The separate offset after `providerReadyObservedMs` is relative to when the runner
+first observed provider running, not an undocumented provider boot timestamp.
+Critical-chain `@` values and blame durations retain systemd's own semantics and
+are not subtracted from the operator clock. Early units may precede overlay
+restoration; negative intervals are not clamped or counted as fresh restore work.
+This brackets the pre-zeros interval without pretending it is all hydration or
+all provider time. The orchestrator must collect a new sample to attribute it.
