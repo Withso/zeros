@@ -185,9 +185,9 @@ describe("control-plane database scope decision", () => {
     expect(decideControlPlaneScope({ base: BASE, changedFiles: ["apps/control-plane/src/index.ts"], eventName, ref }).database).toBe(true);
   });
 
-  it.each(["ci.yml", "preflight.yml"])("passes the event ref to the scope in %s", (file) => {
+  it.each(["ci.yml", "preflight.yml"])("uses the runner-provided event ref for scope in %s", (file) => {
     const workflow = readFileSync(path.join(ROOT, ".github/workflows", file), "utf8");
-    expect(workflow).toContain("GITHUB_REF: ${{ github.ref }}");
+    expect(workflow).not.toContain("GITHUB_REF:");
   });
 
   it("skips the database suites when no input changed", () => {

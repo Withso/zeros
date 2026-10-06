@@ -14,6 +14,10 @@ async function main() {
   requireCheck((await command("git", ["rev-parse", "HEAD"])).trim() === source.sourceSha, "CI gate checkout differs from the event SHA");
   const github = githubClient(source, process.env);
   const automaticAlpha = source.channel === "alpha" && await github.automaticAlpha();
+  const expectedAlphaBarrier = source.channel === "alpha" && mode === "--wait" && process.env.GITHUB_JOB === "ci" &&
+    process.env.GITHUB_WORKFLOW_REF?.includes("/.github/workflows/release-alpha.yml@");
+  requireCheck(!expectedAlphaBarrier || automaticAlpha,
+    "Automatic Alpha barrier identity could not be authenticated; verify the release-alpha.yml parent run, run attempt, repository, source SHA and GITHUB_WORKFLOW_REF before retrying.");
   const barrier = automaticAlpha && mode === "--wait" && process.env.GITHUB_JOB === "ci";
   const ready = async (value: boolean) => {
     requireCheck(process.env.GITHUB_OUTPUT, "Automatic Alpha barrier requires a readiness output destination");

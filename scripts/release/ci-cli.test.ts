@@ -51,6 +51,7 @@ async function automaticBarrier(flag = "enabled") {
   mocked.automaticAlpha.mockResolvedValue(true);
   process.argv[2] = "--wait";
   vi.stubEnv("GITHUB_JOB", "ci");
+  vi.stubEnv("GITHUB_WORKFLOW_REF", `${mocked.source.repository}/.github/workflows/release-alpha.yml@refs/heads/main`);
   vi.stubEnv("ZEROS_ALPHA_CI_FAST_PATH", flag);
   const directory = await mkdtemp(path.join(os.tmpdir(), "alpha-ci-output-"));
   directories.push(directory);
@@ -137,6 +138,20 @@ describe("exact-source CI CLI mutation authority", () => {
     expect(console.error).not.toHaveBeenCalled();
   });
 
+  it.each(["enabled", "disabled"])("refuses an unauthenticated automatic Alpha barrier with flag %s", async flag => {
+    const output = await automaticBarrier(flag);
+    mocked.automaticAlpha.mockResolvedValue(false);
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(console.error).toHaveBeenCalledOnce());
+    expect(process.exitCode).toBe(1);
+    expect(console.error).toHaveBeenCalledWith("Automatic Alpha barrier identity could not be authenticated; verify the release-alpha.yml parent run, run attempt, repository, source SHA and GITHUB_WORKFLOW_REF before retrying.");
+    expect(console.log).not.toHaveBeenCalled();
+    expect(mocked.waitForRequiredCI).not.toHaveBeenCalled();
+    expect(mocked.assertCurrent).not.toHaveBeenCalled();
+    expect(mocked.alphaBarrierUnmutated).not.toHaveBeenCalled();
+    await expect(readFile(output)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it.each(["enabled", "disabled"])("turns a proven pre-mutation Alpha supersession into ready=false and a green notice with flag %s", async flag => {
     const output = await automaticBarrier(flag);
     const { CandidateSupersededError } = await import("./alpha-ci");
@@ -214,6 +229,7 @@ describe("exact-source CI CLI mutation authority", () => {
 
   it("keeps unauthenticated manual Alpha on the full policy without ready output", async () => {
     const output = await automaticBarrier();
+    vi.stubEnv("GITHUB_WORKFLOW_REF", `${mocked.source.repository}/.github/workflows/controlled-cutover.yml@refs/heads/main`);
     mocked.automaticAlpha.mockResolvedValue(false);
     await import("./ci-cli");
     await vi.waitFor(() => expect(console.log).toHaveBeenCalledOnce());
