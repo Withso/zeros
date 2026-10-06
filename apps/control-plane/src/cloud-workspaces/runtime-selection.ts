@@ -149,7 +149,8 @@ export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualification
 
 /** Revalidate an existing pin without consulting either the create switch or
  * the current channel head. Ordinary resume and retry use this saved pin. */
-export async function loadPinnedCloudRuntime(tx: Tx, pin: CloudRuntimePin, mode: CloudRuntimeQualificationMode) {
+export async function loadPinnedCloudRuntime(tx: Tx, pin: CloudRuntimePin, mode: CloudRuntimeQualificationMode,
+  additionalKinds: readonly string[] = []) {
   const bundle = (await tx.query<BundleRow>(`SELECT bundle.* FROM cloud_runtime_bundles bundle
     JOIN cloud_runtime_base_images base ON base.base_image_id=$3 AND base.base_compatibility_id=$4
     JOIN cloud_runtime_base_contracts contract ON contract.base_compatibility_id=base.base_compatibility_id
@@ -158,7 +159,8 @@ export async function loadPinnedCloudRuntime(tx: Tx, pin: CloudRuntimePin, mode:
       AND bundle.engine_protocol_version=$5 AND bundle.engine_protocol_version=$6
     FOR SHARE OF base, contract, bundle`, [pin.runtimeId, pin.manifestSha256, pin.baseImageId, pin.baseCompatibilityId,
     pin.engineProtocolVersion, CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION])).rows[0];
-  if (!bundle || pin.profile !== "zeros-cloud-worker-v4" || !await lockQualifications(tx, pin.runtimeId, pin.baseCompatibilityId, mode)) return null;
+  if (!bundle || pin.profile !== "zeros-cloud-worker-v4" || !await lockQualifications(tx, pin.runtimeId, pin.baseCompatibilityId, mode,
+    [...new Set([...REQUIRED_KINDS,...additionalKinds])])) return null;
   return artifact(bundle);
 }
 

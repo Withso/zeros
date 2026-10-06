@@ -58,6 +58,7 @@ import {
 
 export const CLOUD_WORKSPACE_SETUP_ADMISSION_PATH =
   "/internal/v1/cloud-workspaces/setup/admission";
+export const CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH = "/internal/v1/cloud-workspaces/runtime/register";
 export const CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH =
   "/internal/v1/cloud-workspaces/engine/register";
 export const CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH =
@@ -358,6 +359,7 @@ export interface CloudWorkspaceInternalSetupService {
   events?: DatabaseCloudWorkspaceEventService;
   actions?: DatabaseCloudWorkspaceActionService;
   redeem(input: CloudWorkspaceSetupRedemptionInput): Promise<unknown>;
+  registerTransitionEngine?(input:CloudWorkspaceEngineRegistrationInput):Promise<unknown>;
   registerEngine(
     input: CloudWorkspaceEngineRegistrationInput,
   ): Promise<unknown>;
@@ -580,6 +582,7 @@ export function createCloudWorkspaceInternalRoutes(
   for (const path of [
     CLOUD_WORKSPACE_SETUP_ADMISSION_PATH,
     CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
+    CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH,
     CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
     CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH,
     CLOUD_ACTOR_ADMISSION_PATH,
@@ -632,6 +635,22 @@ export function createCloudWorkspaceInternalRoutes(
         { error: { code: error.code, retryable: error.retryable } },
         errorStatus(error),
       );
+    }
+  });
+
+  routes.post(CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH,async c=>{
+    const token=bearerToken(c.req.header("authorization"),SETUP_TOKEN_PATTERN);
+    if (!token) return c.json({error:{code:"invalid_capability"}},401);
+    const input=await strictJson(c.req,EngineRegistrationBody);
+    if (!input) return c.json({error:{code:"invalid_request"}},422);
+    if (!service.registerTransitionEngine) return c.json({error:{code:"engine_registration_rejected"}},403);
+    try {
+      const {actorProtocolVersion,agentRuntime,agentCustomizationVersion,...binding}=input;
+      return c.json(await service.registerTransitionEngine({...binding,token,
+        ...(actorProtocolVersion===undefined?{}:{actorProtocolVersion}),...(agentRuntime===undefined?{}:{agentRuntime}),
+        ...(agentCustomizationVersion===undefined?{}:{agentCustomizationVersion})}));
+    } catch {
+      return c.json({error:{code:"engine_registration_rejected",retryable:false}},403);
     }
   });
 

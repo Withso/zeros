@@ -160,8 +160,7 @@ by transition/engine identity, never by minting another active engine.
 PERF's resume cache keys `(generation, runtime_id, manifest_sha256,
 base_compatibility_id, engine_instance_id)` remain exact. HU never reuses cached
 functional qualification or workspace preparation during a runtime transition;
-it runs fresh attestation even if the source previously qualified. Slice 2 will
-expose `readCloudRuntimeResumeProofEpoch(tx, { workspaceId, organizationId,
+it runs fresh attestation even if the source previously qualified. Slice 2 exposes `readCloudRuntimeResumeProofEpoch(tx, { workspaceId, organizationId,
 generation })` from
 `apps/control-plane/src/cloud-workspaces/runtime-transition.ts`. Its epoch is the
 enrolled engine instance UUID, rather than a second mutable counter. A completed
@@ -395,3 +394,93 @@ changes. Reconnect and cached reads remain keyed to exact organization/workspace
 late source-engine events cannot replace the target snapshot. Owner/placement
 switching never transfers update state to another workspace. Multiple devices
 observe one transition and one queue. Local-owner cloud placement remains invalid.
+
+
+## Implemented control-plane transfer contract (slice 2)
+
+`DatabaseCloudRuntimeTransitionService` in
+`apps/control-plane/src/cloud-workspaces/runtime-transfer.ts` implements the
+retained-allocation executor. It has no automatic scheduler or activation
+policy installed. LU owns the resident workload host, engine adapter, resident
+scope and supervisor attach fence; this service owns the database transition,
+registration, health verification and crash deadlines. The subsequent trigger
+must supply a policy appropriate to the qualified VM controller. Presence,
+PTY survival and safe points are policy inputs, not hard-coded transfer rules.
+There is no measured reconnect-gap claim in this slice.
+
+The executor reuses RU's candidate selection and organization/workspace lock,
+and the existing single-active-generation-transition journal. Its
+`execution_mode='retain_allocation'` never owns provider lifecycle intents.
+Staging creates an immutable candidate generation while the source runs.
+Activation requires current runtime/base/credential qualification plus a
+separate operator-published source/target/controller compatibility record.
+Those records start disabled; runtime qualification alone cannot authorize a
+reversible database/history downgrade. Activation also rejects pending
+provider operations, compute claims and insufficient funded rollback runway.
+The trusted policy's decision is followed by another wall-clock authority
+check before the source is fenced.
+
+The controller integration contract is:
+
+| Call | Required evidence and result |
+| --- | --- |
+| `offer` | Current source engine and generation, operation UUID, engine/bootstrap mode. Returns the single transition or joins RU's existing one. |
+| `claim` / `renew` | Worker lease lasts 90 seconds. Reclaim changes the worker fence; the VM execution fence remains fixed. Renewal cannot extend phase deadlines. |
+| `staged` | Called only after the authenticated, pinned installer conversation returns its exact staged receipt. Staging expires after 15 minutes. |
+| `activate` | Verified controller descriptor and injected `CloudRuntimeActivationPolicy`. True is the source-admission fence; target registration is bounded to 240 seconds. |
+| `enroll` | Fresh verified active/controller identities and the complete normalized v4 attester report from the pinned root channel. Rejects a reused supervisor session, wrong boot/base/pin or incomplete containment evidence. Returns a fresh engine UUID and short-lived, one-use capabilities in memory only. |
+| transition registration | `POST /internal/v1/cloud-workspaces/runtime/register`, strict existing registration body, bearer capability. `setupRunId` carries the enrollment UUID and `executionFence` its sequence **only on this endpoint**. It cannot redeem setup, repository or settings grants. Registration moves the binding, logical allocation owner, current generation and ready engine atomically. |
+| `verifyHealth` | A fresh challenge sent over the authenticated root controller channel; the reply must bind the execution fence, active descriptor, engine UUID, protocol, ready health and durable-record connection. Ordinary engine HTTP input is never a health proof. A successful probe records evidence but keeps admissions closed. |
+| `finish` | Exact final `RuntimeUpdateResult` receipt from that controller's durable journal, matching the registered engine and fresh health evidence. Only this step publishes ready status and ordinary admissions. |
+| `beginRollback` / `reconcile` | Revoke target authority before VM rollback. Allocate a fresh source engine/enrollment rather than reviving an old UUID. A lost registration reply can be resolved by fresh health plus the final journal receipt. Activation and rollback each have a fixed 240-second bound. Unknown or expired rollback stays `recovery_required`, with the allocation preserved and admissions closed. |
+
+LU must expose fresh challenge-bound health and authenticated journal inspection
+for recovery after a worker dies. Wire these calls through the existing pinned
+installer conversation; do not expose `enroll`, `verifyHealth` or `finish` as
+ordinary client/engine routes. A reclaimed worker never reuses a plaintext
+registration or readiness capability from storage. The generation and engine
+keys are checked again under the common lifecycle lock at every publication.
+Only durable-record synchronization and heartbeat are available to a newly
+registered engine before the final receipt. Repository credential refresh,
+commands, tools, and client admission remain closed.
+
+`cloud_workspace_allocation_owners` records the VM's original provider identity
+and its current generation. `cloud_workspace_allocation_transfers` audits each
+ownership change. The existing allocation lease, reservations, funding window,
+meters and billing epoch retain their original identity, including on subsequent
+updates of the same VM. Loss settlement uses the original provider journal plus
+the audited current binding; legacy allocations keep their existing checks. Provider receipts and
+labels also retain their original generation. The provider adapter projects
+only that exact allocation onto its current owner and rejects stale destructive
+calls. A provider operation is journaled before I/O; an unknown outcome blocks
+activation even after the caller's lease expires. Clearing an unknown provider
+outcome requires independent provider completion evidence; a timeout or a
+single observation is insufficient. Automatic repair of such provider outcomes
+is deliberately not inferred by runtime crash reconciliation.
+
+`readCloudRuntimeResumeProofEpoch` now covers both ordinary setup and retained
+engine enrollment. A database-assigned order detects later incomplete launches,
+including copied legacy INSERT shapes. Cancellation after activation cannot
+resurrect an earlier cached epoch. A successful rollback has its own engine UUID.
+
+Migration 0136 is an expand migration with nine explicit, statement-scoped
+exceptions: three validated CHECK widenings, three nullable enrollment columns,
+two conditional legacy triggers, and the compute-authority function. The
+exception linter accepts only the annotated exact statements in this file; the
+function's entire body is pinned for review. Both legacy trigger functions are
+unchanged. New enrollment rows have a scoped FK, an immutable enrollment ID and
+a separate INSERT/UPDATE guard for pin, witness, sequence and capability state.
+The new CHECKs are added NOT VALID and validated before the old restrictions
+are removed, within the existing five-second lock timeout. Application RLS
+permits qualification row locking but forbids qualification publication. New
+workspace-owned records follow the existing workspace-erasure cascade. The
+migration is compatible with old-code writes, but activation of the new row
+shapes requires all control-plane replicas to run the transfer-aware code.
+Keep operator transfer qualifications disabled throughout a rolling deployment.
+
+Local and organization-owned local workspaces have no control-plane transition
+rows and keep their existing behavior. Cloud transitions remain scoped by both
+organization and workspace. This slice changes no renderer selection or local
+engine path. Automatic triggers, LU's VM-side behavior, RU/IW2 command-queue
+handoff and the disposable Alpha acceptance runner are separate slices; they
+must be integrated and verified before enabling automatic transfers.

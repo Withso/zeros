@@ -10,6 +10,26 @@ import { HttpError } from "../authz.js";
 import { audit } from "../audit.js";
 import {allocateComputeUserFunding,lockComputeUserFunding} from "./compute-funding.js";
 
+/** Retained allocations keep the provider journal and monetary identities at
+ * their original generation. Require the exact audited current binding before
+ * using that journal's operator-attested loss for settlement. */
+export async function readManagedComputeAllocationLost(tx:Tx,input:{
+  leaseId:string;workspaceId:string;organizationId:string;generation:number;resourceId:string;
+}):Promise<boolean> {
+  const result=await tx.query<{lost:boolean}>(`SELECT cloud_provider_allocation_lost($1,$2,$3,$4) OR EXISTS(
+    SELECT 1 FROM cloud_workspace_allocation_owners owner
+    JOIN managed_compute_allocation_leases lease ON lease.id=owner.allocation_lease_id
+      AND lease.workspace_id=owner.workspace_id AND lease.org_id=owner.org_id AND lease.provider_resource_id=owner.provider_resource_id
+    JOIN cloud_workspace_provider_bindings binding ON binding.workspace_id=owner.workspace_id AND binding.org_id=owner.org_id
+      AND binding.generation=owner.current_generation AND binding.provider_resource_id=owner.provider_resource_id
+    JOIN cloud_workspace_provider_operations operation ON operation.workspace_id=owner.workspace_id AND operation.org_id=owner.org_id
+      AND operation.generation=owner.original_generation AND operation.resource_id=owner.provider_resource_id
+      AND operation.provider=lease.provider AND operation.lost_at IS NOT NULL
+    WHERE owner.workspace_id=$1 AND lease.generation=$2 AND owner.org_id=$3 AND owner.provider_resource_id=$4 AND lease.id=$5
+  ) AS lost`,[input.workspaceId,input.generation,input.organizationId,input.resourceId,input.leaseId]);
+  return result.rows[0]?.lost===true;
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const POLICY = /^[A-Za-z0-9._:-]{1,128}$/;
 const KEY = /^[A-Za-z0-9._:-]{8,128}$/;
@@ -385,7 +405,10 @@ export class DatabaseManagedComputeCreditLedger {
         JOIN cloud_workspace_generations generation ON generation.workspace_id=workspace.id AND generation.org_id=workspace.org_id AND generation.generation=workspace.current_generation
         JOIN provider_connection_versions version ON version.connection_id=generation.provider_connection_id AND version.org_id=generation.org_id AND version.version=generation.provider_connection_version
         JOIN organizations org ON org.id=workspace.org_id
-        WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.current_generation=$3 AND workspace.current_billing_epoch=$4
+        WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.current_generation=coalesce((SELECT owner.current_generation FROM cloud_workspace_allocation_owners owner
+          JOIN managed_compute_allocation_leases lease ON lease.id=owner.allocation_lease_id
+          WHERE owner.allocation_lease_id=$6 AND owner.workspace_id=workspace.id AND owner.org_id=workspace.org_id AND lease.generation=$3),$3)
+          AND workspace.current_billing_epoch=$4
           AND workspace.desired_state='running' AND workspace.deleted_at IS NULL AND billing.ended_at IS NULL AND NOT org.is_personal`,
           [
             input.workspaceId,
@@ -393,6 +416,7 @@ export class DatabaseManagedComputeCreditLedger {
             input.generation,
             input.billingEpoch,
             this.options.workosEnabled,
+            input.reservationId,
           ],
         )
       ).rows[0];
@@ -575,8 +599,12 @@ export class DatabaseManagedComputeCreditLedger {
         const usage = input.usage;
         const binding = (
           await tx.query<{ provider_resource_id: string | null }>(
-            `SELECT provider_resource_id FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=$2 AND org_id=$3`,
-            [row.workspace_id, row.generation, row.org_id],
+            `SELECT coalesce(provider_resource_id,(SELECT lease.provider_resource_id FROM managed_compute_allocation_leases lease
+              JOIN cloud_workspace_allocation_owners owner ON owner.allocation_lease_id=lease.id
+                AND owner.workspace_id=lease.workspace_id AND owner.org_id=lease.org_id AND owner.provider_resource_id=lease.provider_resource_id
+              WHERE lease.id=$4 AND lease.workspace_id=$1 AND lease.generation=$2 AND lease.org_id=$3)) AS provider_resource_id
+              FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=$2 AND org_id=$3`,
+            [row.workspace_id, row.generation, row.org_id, input.reservationId],
           )
         ).rows[0];
         if (
@@ -643,8 +671,12 @@ export class DatabaseManagedComputeCreditLedger {
       async (tx, row) => {
         const binding = (
           await tx.query(
-            `SELECT provider_resource_id FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=$2 AND org_id=$3`,
-            [row.workspace_id, row.generation, row.org_id],
+            `SELECT coalesce(provider_resource_id,(SELECT lease.provider_resource_id FROM managed_compute_allocation_leases lease
+              JOIN cloud_workspace_allocation_owners owner ON owner.allocation_lease_id=lease.id
+                AND owner.workspace_id=lease.workspace_id AND owner.org_id=lease.org_id AND owner.provider_resource_id=lease.provider_resource_id
+              WHERE lease.id=$4 AND lease.workspace_id=$1 AND lease.generation=$2 AND lease.org_id=$3)) AS provider_resource_id
+              FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=$2 AND org_id=$3`,
+            [row.workspace_id, row.generation, row.org_id, input.reservationId],
           )
         ).rows[0];
         if (
@@ -686,9 +718,12 @@ export class DatabaseManagedComputeCreditLedger {
       async (tx, row, period) => {
         const binding = (
           await tx.query<{ provider_resource_id: string | null }>(
-            `SELECT provider_resource_id FROM cloud_workspace_provider_bindings
-        WHERE workspace_id=$1 AND generation=$2 AND org_id=$3`,
-            [row.workspace_id, row.generation, row.org_id],
+            `SELECT coalesce(provider_resource_id,(SELECT lease.provider_resource_id FROM managed_compute_allocation_leases lease
+              JOIN cloud_workspace_allocation_owners owner ON owner.allocation_lease_id=lease.id
+                AND owner.workspace_id=lease.workspace_id AND owner.org_id=lease.org_id AND owner.provider_resource_id=lease.provider_resource_id
+          WHERE lease.id=$4 AND lease.workspace_id=$1 AND lease.generation=$2 AND lease.org_id=$3)) AS provider_resource_id
+          FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=$2 AND org_id=$3`,
+            [row.workspace_id, row.generation, row.org_id, input.reservationId],
           )
         ).rows[0];
         if (
@@ -729,11 +764,8 @@ export class DatabaseManagedComputeCreditLedger {
       input.reservationId,
       input.periodId,
       async (tx, row) => {
-        const lost = await tx.query<{ lost: boolean }>(
-          "SELECT cloud_provider_allocation_lost($1,$2,$3,$4) AS lost",
-          [row.workspace_id, row.generation, row.org_id, input.resourceId],
-        );
-        if (!lost.rows[0]!.lost) deny("compute_credit_conflict");
+        if (!await readManagedComputeAllocationLost(tx,{leaseId:input.reservationId,workspaceId:row.workspace_id,
+          organizationId:row.org_id,generation:row.generation,resourceId:input.resourceId})) deny("compute_credit_conflict");
         if (row.state === "final") {
           if (row.final_reason !== "allocation_lost")
             deny("compute_credit_conflict");

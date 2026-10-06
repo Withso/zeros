@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withSystemTx } from "../db.js";
-import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
+import { DatabaseManagedComputeCreditLedger, readManagedComputeAllocationLost } from "./compute-credits.js";
 import {computeUserFundingAuthorityLive,lockComputeUserFunding,prepareComputeUserPeriods,readStaffComputeAllowance} from "./compute-funding.js";
 import {ensureProMonthlyAllowance} from "./pro-allowance.js";
 import {
@@ -36,6 +36,7 @@ export type ManagedComputeStart = CloudProviderCreateInput & {
   intentId: string;
 };
 type Lease = {
+  current_generation?: number;
   id: string;
   workspace_id: string;
   org_id: string;
@@ -492,7 +493,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     await withSystemTx(this.options.pool, async (tx) => {
       const lease = (
         await tx.query<Lease>(
-          `SELECT * FROM managed_compute_allocation_leases WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND state<>'settled' FOR UPDATE`,
+          `SELECT * FROM managed_compute_allocation_leases lease WHERE workspace_id=$1 AND org_id=$2 AND coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=lease.id),generation)=$3 AND state<>'settled' FOR UPDATE`,
           [input.workspaceId, input.organizationId, input.generation],
         )
       ).rows[0];
@@ -541,7 +542,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     return {
       workspaceId: lease.workspace_id,
       organizationId: lease.org_id,
-      generation: lease.generation,
+      generation: lease.current_generation ?? lease.generation,
     };
   }
   private async stillClaimed(lease: Lease): Promise<void> {
@@ -600,7 +601,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
   private async activeAllocationRetry(lease: Lease, now: number): Promise<boolean> {
     if (lease.state !== "active" || this.runwayDeadline(lease) - now <= PROVIDER_RETRY_SAFETY_MARGIN_MS) return false;
     const scope = await this.scope(this.identity(lease));
-    if (!scope.live || scope.desired_state !== "running" || scope.generation !== lease.generation ||
+    if (!scope.live || scope.desired_state !== "running" || scope.generation !== this.identity(lease).generation ||
         scope.user_id !== lease.user_id || money(scope.billing_epoch) !== money(lease.billing_epoch)) return false;
     if ((await this.boundAllocation(lease))?.lost) return false;
     await this.stillClaimed(lease);
@@ -642,7 +643,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         (
           await tx.query<Lease>(
             `SELECT * FROM managed_compute_allocation_leases
-      WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND state<>'settled'`,
+      WHERE workspace_id=$1 AND org_id=$2 AND coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=managed_compute_allocation_leases.id),generation)=$3 AND state<>'settled'`,
             [input.workspaceId, input.organizationId, input.generation],
           )
         ).rows[0],
@@ -687,6 +688,10 @@ export class CloudWorkspaceComputeLeaseCoordinator {
           await tx.query<Lease>(
             `WITH candidate AS (
       SELECT id FROM managed_compute_allocation_leases WHERE state<>'settled' AND next_check_at<=clock_timestamp()
+        AND NOT EXISTS(SELECT 1 FROM cloud_workspace_runtime_transitions runtime
+          WHERE runtime.workspace_id=managed_compute_allocation_leases.workspace_id
+            AND ((runtime.phase IN ('activated','enrolling','checking') AND runtime.activation_deadline_at>clock_timestamp())
+              OR (runtime.phase IN ('rolling_back','rollback_enrolling','rollback_checking') AND runtime.rollback_deadline_at>clock_timestamp())))
         AND (lease_owner IS NULL OR lease_expires_at<=clock_timestamp()) ORDER BY next_check_at,id FOR UPDATE SKIP LOCKED LIMIT 1)
       UPDATE managed_compute_allocation_leases lease SET lease_owner=$1,lease_expires_at=clock_timestamp()+interval '5 minutes'
       FROM candidate WHERE lease.id=candidate.id RETURNING lease.*`,
@@ -695,6 +700,9 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         ).rows[0],
     );
     if (!lease) return false;
+    lease.current_generation=await withSystemTx(this.options.pool,async tx=>(await tx.query<{generation:number}>(
+      `SELECT coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners WHERE allocation_lease_id=$1),$2) AS generation`,
+      [lease.id,lease.generation])).rows[0]!.generation);
     let recheckAt: Date | null = null, failed = false;
     let phase: CloudDiagnosticPhase = "provider_inspect", phaseStarted = performance.now();
     try {
@@ -829,13 +837,16 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       throw failure("provider_identity_mismatch");
     phase("ledger_commit");
     await withSystemTx(this.options.pool, async (tx) => {
+      const current=await tx.query(`SELECT id FROM managed_compute_allocation_leases
+        WHERE id=$1 AND lease_owner=$2 AND lease_expires_at>clock_timestamp() FOR UPDATE`,[lease.id,this.workerId]);
+      if (!current.rowCount) throw failure("compute_lease_superseded");
       const bound = await tx.query(
         `UPDATE cloud_workspace_provider_bindings SET provider_resource_id=$4
         WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND (provider_resource_id IS NULL OR provider_resource_id=$4) RETURNING workspace_id`,
         [
           lease.workspace_id,
           lease.org_id,
-          lease.generation,
+          identity.generation,
           resource.resourceId,
         ],
       );
@@ -936,12 +947,12 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       lease.state === "draining" ||
       !scope.live ||
       scope.desired_state !== "running" ||
-      scope.generation !== lease.generation ||
+      scope.generation !== this.identity(lease).generation ||
       scope.user_id !== lease.user_id ||
       money(scope.billing_epoch) !== money(lease.billing_epoch)
     ) {
       const setupCode = diagnosticCode(scope.setup_failure_code);
-      await this.stopAtBudget(lease, scope.generation === lease.generation && setupCode === scope.setup_failure_code
+      await this.stopAtBudget(lease, scope.generation === this.identity(lease).generation && setupCode === scope.setup_failure_code
         ? setupCode : "compute_scope_unavailable");
       return null;
     }
@@ -969,7 +980,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     if (
       !current.live ||
       current.desired_state !== "running" ||
-      current.generation !== lease.generation ||
+      current.generation !== identity.generation ||
       current.user_id !== lease.user_id ||
       money(current.billing_epoch) !== money(lease.billing_epoch)
     )
@@ -1009,10 +1020,8 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         [lease.workspace_id, lease.generation, lease.org_id],
       )).rows[0]?.provider_resource_id ?? null;
       if (!resourceId) return null;
-      const lost = (await tx.query<{ lost: boolean }>(
-        "SELECT cloud_provider_allocation_lost($1,$2,$3,$4) AS lost",
-        [lease.workspace_id, lease.generation, lease.org_id, resourceId],
-      )).rows[0]!.lost;
+      const lost = await readManagedComputeAllocationLost(tx,{leaseId:lease.id,workspaceId:lease.workspace_id,
+        generation:lease.generation,organizationId:lease.org_id,resourceId});
       return { resourceId, lost };
     });
   }

@@ -4,11 +4,22 @@ import { audit } from "../audit.js";
 import type { Tx } from "../db.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
 
+/** Shared owner for wake replacements and retained-allocation transitions.
+ * Keep organization -> workspace order, including before the unique active
+ * transition check. The returned lock lasts for the caller's transaction. */
+export async function lockCloudWorkspaceGenerationTransition(tx: Tx, input: {
+  workspaceId: string; organizationId: string;
+}): Promise<void> {
+  await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [input.organizationId]);
+  await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE", [input.workspaceId,input.organizationId]);
+}
+
 type TransitionRow = {
   id: string;
   source_generation: number;
   candidate_generation: number;
   state: "draining" | "provisioning" | "setting_up" | "rolling_back";
+  execution_mode: "replace_allocation" | "retain_allocation";
   operation?: "upgrade" | "rollback" | "recover";
 };
 
@@ -107,7 +118,7 @@ export async function rollbackCloudWorkspaceGenerationTransition(
      FROM cloud_workspace_generation_transitions gt
      JOIN cloud_workspaces cw
        ON cw.id = gt.workspace_id AND cw.org_id = gt.org_id
-     WHERE gt.workspace_id = $1 AND gt.org_id = $2
+     WHERE gt.workspace_id = $1 AND gt.org_id = $2 AND gt.execution_mode='replace_allocation'
        AND gt.candidate_generation = $3
        AND (gt.state IN ('draining', 'provisioning', 'setting_up') OR (gt.operation='recover' AND gt.state='rolling_back'))
        AND cw.current_generation IN (gt.source_generation, gt.candidate_generation)
@@ -260,7 +271,7 @@ export async function advanceCloudWorkspaceGenerationTransitionAfterDrain(
          THEN candidate.recovery_checkpoint_id ELSE checkpoint_request.checkpoint_id END
       AND checkpoint.workspace_id = gt.workspace_id AND checkpoint.org_id = gt.org_id
       AND checkpoint.state = 'durable'
-     WHERE gt.id = $1 AND gt.workspace_id = $2 AND gt.org_id = $3
+     WHERE gt.id = $1 AND gt.workspace_id = $2 AND gt.org_id = $3 AND gt.execution_mode='replace_allocation'
        AND gt.source_generation = $4 AND gt.state = 'draining'
        AND cw.current_generation = gt.source_generation
        AND cw.desired_state = 'running' AND cw.deleted_at IS NULL
@@ -383,7 +394,7 @@ export async function completeCloudWorkspaceGenerationTransition(
   const selected = await tx.query<TransitionRow>(
     `SELECT id, source_generation, candidate_generation, state
      FROM cloud_workspace_generation_transitions
-     WHERE workspace_id = $1 AND org_id = $2
+     WHERE workspace_id = $1 AND org_id = $2 AND execution_mode='replace_allocation'
        AND (
          (candidate_generation = $3 AND state IN ('provisioning', 'setting_up'))
          OR (source_generation = $3 AND state = 'rolling_back')
@@ -474,7 +485,7 @@ export async function failCloudWorkspaceGenerationRollback(
     `UPDATE cloud_workspace_generation_transitions
      SET state = 'rollback_failed', completed_at = now(), updated_at = now(),
          error_code = $4, error_message = $5
-     WHERE workspace_id = $1 AND org_id = $2 AND source_generation = $3
+     WHERE workspace_id = $1 AND org_id = $2 AND execution_mode='replace_allocation' AND source_generation = $3
        AND state = 'rolling_back'
      RETURNING id, candidate_generation`,
     [
@@ -524,7 +535,7 @@ export async function cancelCloudWorkspaceGenerationTransition(
   const selected = await tx.query<
     TransitionRow & { current_generation: number }
   >(
-    `SELECT gt.id, gt.source_generation, gt.candidate_generation, gt.state,
+    `SELECT gt.id, gt.source_generation, gt.candidate_generation, gt.state,gt.execution_mode,
             cw.current_generation
      FROM cloud_workspace_generation_transitions gt
      JOIN cloud_workspaces cw
@@ -536,6 +547,13 @@ export async function cancelCloudWorkspaceGenerationTransition(
   );
   const transition = selected.rows[0];
   if (!transition) return null;
+  if (transition.execution_mode==='retain_allocation') {
+    await retireCloudWorkspaceRuntimeAccess(tx,{...input,reason:input.reason});
+    await tx.query(`UPDATE cloud_workspace_runtime_enrollments SET revoked_at=coalesce(revoked_at,clock_timestamp()) WHERE transition_id=$1`,[transition.id]);
+    await tx.query(`UPDATE cloud_workspace_runtime_transitions SET phase='cancelled',completed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE transition_id=$1`,[transition.id]);
+    await tx.query(`UPDATE cloud_workspace_generation_transitions SET state='cancelled',completed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1`,[transition.id]);
+    return transition.current_generation;
+  }
 
   await retireCloudWorkspaceRuntimeAccess(tx, {
     workspaceId: input.workspaceId,
