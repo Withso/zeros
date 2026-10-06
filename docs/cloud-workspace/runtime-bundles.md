@@ -350,6 +350,23 @@ immutable qualification evidence is never overwritten or re-enabled by retry.
 
 Credential discovery reports `runtimeQualified` for basic turns, plus independent
 `mcpQualified` and optional versioned `nativeCapabilities` metadata per delegation.
+For v4, a smoke-only delegation is usable only when its exact live engine has
+recorded `agentCustomizationVersion: 3` during registration. Registration verifies
+the pinned runtime, manifest, base and installation witness before persisting
+`cloud_workspace_engine_instances.agent_customization_version`. Absence is
+unknown support; neither the v4 profile nor the smoke qualification date proves
+that an old engine can request optional customization.
+
+Discovery returns the stable boolean `runtimeUpgradeRequired` for a v4
+delegation that has basic runtime qualification but cannot run because its
+engine lacks this capability and its credential kind lacks MCP proof. The
+renderer excludes that grant's models, shows “Update the cloud runtime to use
+agents” and blocks Send and Enter while preserving the draft. A provider remains
+usable if another matching grant qualifies. Runtime update controls can use
+`delegations.some(grant => grant.runtimeUpgradeRequired)` from the existing
+prepare/discovery response; no credential material is involved. Missing or
+retired engines do not inherit the previous engine's capability.
+
 Legacy v3 gateways still require MCP in discovery because they always request
 required customization.
 The empty native capability object in a smoke row is absence of proof and is
@@ -366,9 +383,12 @@ The composer describes unavailable features, and goals, review and native fork
 remain gated by their independent capability flags. Smoke success never grants
 these flags and is not evidence of a real provider turn.
 
-Deploy the control-plane reader before a runtime containing the version-3 client.
+Deploy migration 0131 and the control-plane reader before a runtime containing
+the version-3 client and its registration capability.
 Existing pinned runtimes retain their old required-customization behavior until
 an explicit runtime upgrade; merely restarting them does not install this fix.
+Previously built v3-capable engines without the registration field are also
+unproven and need an explicitly upgraded bundle. Existing rows are not backfilled.
 No qualification rows need to be rewritten for basic turns. Enabling MCP or
 native features requires separate per-kind evidence and a new qualified runtime
 identity under the immutable registry contract; rerunning today's smoke worker

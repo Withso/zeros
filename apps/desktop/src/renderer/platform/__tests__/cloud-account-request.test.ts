@@ -74,6 +74,16 @@ describe("cloud request account boundaries", () => {
     }, "codex", "gpt-5.6-luna")).resolves.toBe(id);
   });
 
+  it("retains the runtime upgrade flag and explains it before a command can be queued", async () => {
+    state.session.mockResolvedValue(session);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ delegations: [{
+      id: "22222222-2222-4222-8222-222222222222", kind: "codex-chatgpt", models: ["gpt-5.6-sol"],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(), runtimeQualified: false, runtimeUpgradeRequired: true,
+    }] })));
+    await expect(cloudAgentGrant({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333" }, "codex", "gpt-5.6-sol"))
+      .rejects.toThrow("Update the cloud runtime to use agents");
+  });
+
   it("captures the account before its first asynchronous boundary", async () => {
     const fetch = vi.fn(async () => Response.json({ ok: true }));
     vi.stubGlobal("fetch", fetch);

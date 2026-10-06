@@ -30,6 +30,7 @@ export async function runSubscriptionSmoke({ page, check }) {
     "Disconnected providers never reappear as fallback composer models",
     true,
   );
+  await runCloudAgentAccessSmoke({ page, check });
   await page.goto(
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-subscription.html`,
   );
@@ -494,4 +495,42 @@ export async function runQueueSmoke({ page, check }) {
     await expect(page.locator("[data-queued-id]")).toHaveCount(0);
     check(`${provider}: slow steering settles; Stop restores edit/delete; selected sends preserve FIFO`, true);
   }
+}
+
+/** Production picker/composer with renderer metadata supplied by the fixture. */
+export async function runCloudAgentAccessSmoke({ page, check }) {
+  const base = new URL(page.url()).origin;
+  await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-model-menu.html?cloudModels`);
+  await page.getByRole("button", { name: /^Model:/ }).click();
+  // Persisted Opus stays on the trigger, but cannot re-enter through the
+  // retired-model fallback after workspace consent is narrowed.
+  await expect(page.getByRole("button", { name: "Browse models", exact: true })).toBeVisible();
+  await page.getByPlaceholder("Search models…").fill("Opus");
+  await expect(page.getByRole("option")).toHaveCount(0);
+  await page.getByPlaceholder("Search models…").fill("Sonnet");
+  await expect(page.getByRole("option")).toHaveCount(1);
+  await page.getByRole("option").click({ position: { x: 8, y: 8 } });
+  await expect(page.getByRole("button", { name: /^Model:.*Sonnet/ })).toBeVisible();
+  check("Cloud menus only offer delegated models, including the selected-row fallback", true);
+
+  await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-model-menu.html?runtimeUpgrade`);
+  await page.getByRole("button", { name: /^Model:/ }).click();
+  await expect(page.getByText("Update the cloud runtime to use agents", { exact: true })).toBeVisible();
+  await expect(page.getByText("No connected agents.", { exact: true })).toHaveCount(0);
+
+  await page.evaluate(() => sessionStorage.removeItem("fixture:app-sidebar"));
+  await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-app-sidebar.html?conversation&runtimeUpgrade`);
+  await page.locator('[data-workspace-id="ws-atlanta"]').getByRole("button", { name: /^Open workspace atlanta/ }).click();
+  const notice = page.locator("[data-cloud-agent-runtime-upgrade]");
+  await expect(notice).toHaveText("Update the cloud runtime to use agents");
+  const composer = page.locator(".zeros-agent-surface .composer-pm").first();
+  await composer.fill("Keep this draft until the runtime is updated");
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeDisabled();
+  await composer.press("Enter");
+  await expect(composer).toHaveText("Keep this draft until the runtime is updated");
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
+  await page.evaluate(() => window.appSidebarUpgradeRuntime());
+  await expect(notice).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeEnabled();
+  check("Old cloud runtimes explain the required upgrade, block Enter and Send, and preserve the draft through upgrade", true);
 }

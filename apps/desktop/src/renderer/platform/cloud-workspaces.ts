@@ -162,6 +162,7 @@ const AgentGrantsSchema = z.object({
         models: z.array(z.string()),
         expiresAt: z.string().datetime(),
         runtimeQualified: z.boolean().optional(),
+        runtimeUpgradeRequired: z.boolean().optional(),
         mcpQualified: z.boolean().optional(),
         nativeCapabilities: CloudNativeCapabilitiesSchema.optional(),
       }),
@@ -186,7 +187,9 @@ export async function cloudAgentGrant(
     );
   if (!grant)
     throw new Error(
-      "This workspace's agent runtime needs an update before this agent can run. Your account connection is saved.",
+      candidates.some(row => row.runtimeUpgradeRequired)
+        ? "Update the cloud runtime to use agents"
+        : "This workspace's agent runtime needs an update before this agent can run. Your account connection is saved.",
     );
   return grant.id;
 }

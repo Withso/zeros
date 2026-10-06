@@ -200,6 +200,16 @@ enabling this authentication kind.
 
 ## Device connection lifetime
 
+Cloud model discovery retains the exact model IDs from qualified delegations.
+The menu and new-chat defaults intersect those IDs with the provider catalog;
+context variants such as `[1m]` do not widen consent. A cloud fallback does not
+rewrite the user's global favorite. Existing conversations retain their recorded
+model and must select an authorized model before continuing if consent changed.
+The shared workspace catalog refresh invalidates cached agent discovery while
+retaining the last confirmed snapshot. Only active consumers revalidate, so
+credential changes on another device and runtime upgrades become visible without
+keeping hidden conversations polling.
+
 The native access client signs actor admission with its enrolled device and
 uses the configured control-plane WSS origin. It never sends a WorkOS bearer
 to the sandbox. The short admission deadline applies to the one-use upgrade;

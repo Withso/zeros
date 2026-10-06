@@ -27,6 +27,7 @@ d("v4 smoke agent discovery and admission", () => {
     vi.stubEnv("CLOUD_RUNTIME_QUALIFICATION_MODE", "smoke");
     await resetMigratedTestDatabase(pool);
     f = await seedComputerToolsFixture(pool, false, { mode: "smoke", mcpQualified: false });
+    await pool.query("UPDATE cloud_workspace_engine_instances SET agent_customization_version=3 WHERE id=$1", [f.scope.engineInstanceId]);
     credentials = new DatabaseCloudAgentCredentialService(pool, f.encryption);
     executions = new DatabaseCloudAgentExecutionService(pool, f.encryption, false);
   });
@@ -35,6 +36,20 @@ d("v4 smoke agent discovery and admission", () => {
     expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations).toEqual([
       expect.objectContaining({ id: f.initiating.delegationId, runtimeQualified: true, mcpQualified: false }),
     ]);
+  });
+
+  it("requires a runtime upgrade when the current v4 engine has no optional-customization evidence", async () => {
+    await pool.query("UPDATE cloud_workspace_engine_instances SET agent_customization_version=NULL WHERE id=$1", [f.scope.engineInstanceId]);
+    expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations[0])
+      .toMatchObject({ runtimeQualified: false, runtimeUpgradeRequired: true, mcpQualified: false });
+    await expect(executions.admit(f.scope, { ...input(), customization: { version: 2, repositoryServers: [] } })).rejects.toMatchObject({ status: 403 });
+    await pool.query("UPDATE cloud_workspace_engine_instances SET agent_customization_version=3 WHERE id=$1", [f.scope.engineInstanceId]);
+    expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations[0])
+      .toMatchObject({ runtimeQualified: true, runtimeUpgradeRequired: false });
+    // Capability on a retired engine stops satisfying discovery.
+    await pool.query("UPDATE cloud_workspace_engine_instances SET state='revoked',revoked_at=now() WHERE id=$1", [f.scope.engineInstanceId]);
+    expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations[0])
+      .toMatchObject({ runtimeQualified: false, runtimeUpgradeRequired: false });
   });
 
   it("discovers and admits all five smoke-qualified credential kinds", async () => {
@@ -69,7 +84,7 @@ d("v4 smoke agent discovery and admission", () => {
     credentials = new DatabaseCloudAgentCredentialService(pool, f.encryption);
     executions = new DatabaseCloudAgentExecutionService(pool, f.encryption, false);
     const request = { ...input(), customization: { version: 3, repositoryServers: [{ name: "fixture", transport: "stdio", command: "node", args: ["fixture.mjs"] }] } };
-    expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations[0]).toMatchObject({ runtimeQualified: true, mcpQualified: true });
+    expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations[0]).toMatchObject({ runtimeQualified: true, runtimeUpgradeRequired: false, mcpQualified: true });
     const lease = await executions.admit(f.scope, request, false, 1);
     expect(CloudAgentExecutionAuthoritySchema.safeParse(lease).success).toBe(true);
     expect(lease.customization?.servers).toHaveLength(1);

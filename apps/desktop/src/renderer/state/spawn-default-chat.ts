@@ -24,9 +24,8 @@
 // round-trips.
 // ──────────────────────────────────────────────────────────
 
-import type { BridgeRegistryAgent } from "../platform/bridge/messages";
 import type { SessionsCtx } from "../features/agent/sessions-context";
-import { workspaceAgentsSnapshot } from "../features/agent/workspace-agent-registry";
+import { workspaceAgentsSnapshot, type WorkspaceRegistryAgent } from "../features/agent/workspace-agent-registry";
 import { pickAgentForNewChat } from "../features/settings/default-agent";
 import { newChatBornDefaults } from "../features/agent/new-chat-defaults";
 import { newChatId } from "./chat-id";
@@ -41,10 +40,10 @@ type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
  *  is represented by a null agent; AutoBindAgent fills the binding when the
  *  tab mounts. Shared by every user-facing spawn path so they cannot drift. */
 export function bornChatThread(
-  agent: BridgeRegistryAgent | null,
+  agent: WorkspaceRegistryAgent | null,
   folder: string,
 ): ChatThread {
-  const born = newChatBornDefaults(agent?.id ?? null);
+  const born = newChatBornDefaults(agent?.id ?? null, agent?.cloudModels);
   return {
     id: newChatId(folder),
     folder,
@@ -61,7 +60,7 @@ export function bornChatThread(
   };
 }
 
-function cachedDefaultAgent(folder: string): BridgeRegistryAgent | null {
+function cachedDefaultAgent(folder: string): WorkspaceRegistryAgent | null {
   // pickAgentForNewChat relaxes from enabled+runnable down to best-detected,
   // so a warm snapshot binds the chat synchronously even on a machine where
   // nothing is signed in yet — the composer's sign-in flow is the recovery

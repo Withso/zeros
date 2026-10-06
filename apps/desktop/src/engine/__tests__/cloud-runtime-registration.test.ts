@@ -86,6 +86,7 @@ describe("cloud runtime registration", () => {
       await registration.start();
       const document=JSON.parse(fetcher.mock.calls[0][1].body);
       expect(document.agentRuntime).toEqual(agentRuntime);
+      expect(document.agentCustomizationVersion).toBe(3);
       expect(document.agentRuntime).not.toHaveProperty("contractSha256");
     } finally { await registration.stop(); }
     for(const change of [{runtimeId:`r1-${"d".repeat(64)}`},{bootId:"invalid"},{supervisorSessionId:"invalid"},{contractSha256:"a".repeat(64)}])
