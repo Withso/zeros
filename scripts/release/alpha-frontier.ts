@@ -53,14 +53,14 @@ function requireDestination(condition: unknown, reason: string): asserts conditi
   if (!condition) throw new AlphaAdmissionRejectedError(reason);
 }
 
-// Admission needs the deployed source even when cloud readiness is false.
+// Admission and pre-deploy Alpha preparation need the deployed source even when cloud readiness is false.
 // Retain the shared identity constraints, relaxing only readiness fields.
 const AlphaFrontierIdentity = ReleaseIdentity.extend({ ready: z.boolean(),
   cloud: ReleaseIdentity.shape.cloud.extend({ ready: z.boolean(),
     state: z.enum(["healthy", "disabled", "unready", "unknown"]) }),
 });
 
-async function alphaFrontierIdentity(fetcher: typeof fetch) {
+export async function alphaFrontierIdentity(fetcher: typeof fetch = fetch) {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {

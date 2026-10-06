@@ -918,6 +918,16 @@ by moving forward. Maintenance, non-current or mismatched migration heads,
 channel mismatch, invalid or unreadable identities, other HTTP failures and
 destinations newer than or divergent from the candidate still refuse admission.
 
+Alpha hosted plans and pre-deploy worker preparation use the same bounded
+identity reader even when forward-only mode is off. A valid 503 identity from
+the old API allows a candidate to deploy a health repair; worker provider,
+qualification and committed-input checks still apply when required. The newly
+deployed candidate must pass strict API readiness before Pages, worker execution,
+finalization or desktop publication. Include the health repair in that candidate;
+changing the desktop `ZEROS_CLOUD_WORKSPACES_ENABLED` flag does not disable the
+Railway backend's cloud service. Pause and drain automatic Alpha before using
+the documented manual cutover or recovery procedure.
+
 A newer, divergent, unreadable or malformed destination can produce the existing
 green pre-mutation skip only at the initial barrier, after complete retained
 parent job evidence proves no destination has started. It never issues an
