@@ -13,18 +13,18 @@ export function CloudWorkspaceRuntimeControls({ workspace, active, focusRequest 
     { enabled: enabled && active, maxAgeMs: 10_000 });
   const runtime = availability.data;
   const pending = runtime?.transition && ["draining", "provisioning", "setting_up", "rolling_back"].includes(runtime.transition.state);
+  const starting = ["waking", "provisioning", "setting_up"].includes(workspace.status);
   const row = useRef<HTMLElement>(null), focusedRequest = useRef(0);
   const catalog = cloudCatalogGeneration();
   useEffect(() => {
     if (!enabled || !active || !readKey) return;
     const timer = setInterval(() => {
-      void Promise.allSettled([
-        cloudRuntimeUpgradeAvailability.load(readKey, () => loadCloudRuntimeUpgradeAvailability(readKey), { force: true }),
-        refreshCloudWorkspace(target),
-      ]);
+      const reads: Promise<unknown>[] = [cloudRuntimeUpgradeAvailability.load(readKey, () => loadCloudRuntimeUpgradeAvailability(readKey), { force: true })];
+      if (pending || starting) reads.push(refreshCloudWorkspace(target));
+      void Promise.allSettled(reads);
     }, pending ? 2_000 : 5_000);
     return () => clearInterval(timer);
-  }, [enabled, active, readKey, pending, target, catalog]);
+  }, [enabled, active, readKey, pending, starting, target, catalog]);
   useEffect(() => {
     if (!enabled || !active || !runtime || !focusRequest || focusedRequest.current === focusRequest) return;
     focusedRequest.current = focusRequest;

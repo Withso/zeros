@@ -5,7 +5,7 @@ import { expect } from "@playwright/test";
 export async function runCloudRuntimeUpgradeSmoke({ page, check, harnessBase }) {
   const organizationId = "11111111-1111-4111-8111-111111111111", workspaceId = "22222222-2222-4222-8222-222222222222";
   const runtimeA = `r1-${"a".repeat(64)}`, runtimeB = `r1-${"b".repeat(64)}`;
-  let transition = null, availabilityReads = 0;
+  let transition = null, availabilityReads = 0, documentReads = 0;
   const mutations = [];
   await page.route("https://api.example.test/v1/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
@@ -25,7 +25,10 @@ export async function runCloudRuntimeUpgradeSmoke({ page, check, harnessBase }) 
     if (path.endsWith("/collaborators")) return route.fulfill({ json: { organizationId, workspaceId, accessRevision: 2,
       writers: { limit: 10, used: 1, available: 9 }, members: [], guests: [], invitations: [],
       guestCursor: null, invitationCursor: null, memberCursor: null } });
-    if (path.endsWith(workspaceId)) return route.fulfill({ json: { workspace: document } });
+    if (path.endsWith(workspaceId)) {
+      documentReads++;
+      return route.fulfill({ json: { workspace: document } });
+    }
     throw new Error(`Unexpected runtime fixture request: ${request.method()} ${path}`);
   });
   await page.goto(`${harnessBase}/harness-cloud-workspace.html?runtime=1`);
@@ -42,6 +45,10 @@ export async function runCloudRuntimeUpgradeSmoke({ page, check, harnessBase }) 
   await expect(runtime).toContainText("Updates automatically the next time this workspace wakes");
   await expect(details.getByRole("button", { name: "Manage sharing", exact: true })).toBeFocused();
   await expect(details.getByRole("button", { name: /Update runtime/ })).toHaveCount(0);
+  const idleDocumentReads = documentReads, idleAvailabilityReads = availabilityReads;
+  await page.clock.fastForward(5_001);
+  await expect.poll(() => availabilityReads).toBeGreaterThan(idleAvailabilityReads);
+  expect(documentReads).toBe(idleDocumentReads);
   await runtime.scrollIntoViewIfNeeded();
   await page.screenshot({ path: ".context/cloud-runtime-auto-update-available.png" });
   transition = { id: "77777777-7777-4777-8777-777777777777", generation: 2,

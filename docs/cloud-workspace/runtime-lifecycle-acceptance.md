@@ -116,7 +116,7 @@ authorization for an uncredentialed coding workspace to create live resources.
 
 1. On runtime A with eligible newer B on the same base, open details and the
    composer model menu. Confirm the runtime ID and next-wake explanation, with
-   no manual update action. This fallback works before AG supplies
+   no manual update action. The qualified-runtime fallback also works without
    `runtimeUpgradeRequiredForAgents`. Nonstaff/nonmanager accounts see no runtime
    row, and Local or organization-owned local workspaces make no runtime calls.
 2. While a real cloud turn runs, confirm it continues on A. Passive details,

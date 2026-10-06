@@ -579,12 +579,16 @@ gated details row shows **Runtime · short ID** and, when newer exists,
 it shows **Starting the cloud workspace…**. The cloud composer also discovers
 availability while details are closed; optional
 `ModelPill.runtimeUpgradeRequiredForAgents` supplies AG's stable additional reason
-and explains that installation happens on the next wake. There is no manual
+and explains that installation happens on the next wake. When agent discovery
+already supplies the empty-menu explanation, the availability footer is omitted
+to keep one notice. There is no manual
 update button or renderer POST caller. The keyed
 `requestCloudRuntimeUpgradeDetails(folder)` navigation interface remains available
 for a cloud caller to focus the informational row. Local folders are a no-op.
 Hidden, concealed, nonstaff and nonmanager surfaces do no runtime polling.
 Availability is fenced by account, catalog, workspace and generation.
+Idle runtime polling reads availability only; the details panel refreshes the
+workspace document during startup or an active replacement to follow readiness.
 
 Automatic replacement reuses the already committed current lossless final
 checkpoint. The existing freshness checks require current content/record revisions
