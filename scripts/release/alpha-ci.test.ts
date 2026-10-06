@@ -141,6 +141,22 @@ describe("automatic Alpha exact-source evidence", () => {
     await expect(fixture({ preflight: [{ ...preflight, status: "completed", conclusion: "cancelled" }] }).client.assertRequiredChecks()).rejects.toThrow();
   });
 
+  it("supersedes a candidate whose coalesced Preflight was cancelled after main moved on", async () => {
+    const cancelled = [{ ...preflight, status: "completed", conclusion: "cancelled" }];
+    await expect(fixture({ preflight: cancelled, branchSha: "b".repeat(40) }).client.assertRequiredChecks())
+      .rejects.toBeInstanceOf(CandidateSupersededError);
+    const current = await fixture({ preflight: cancelled }).client.assertRequiredChecks().catch(error => error);
+    expect(current).toBeInstanceOf(Error);
+    expect(current).not.toBeInstanceOf(CandidateSupersededError);
+  });
+
+  it("keeps waiting for a pending Preflight even when main has moved on", async () => {
+    const error = await fixture({ preflight: [{ ...preflight, status: "queued", conclusion: null }], jobs: [], branchSha: "b".repeat(40) })
+      .client.assertRequiredChecks().catch(error => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(CandidateSupersededError);
+  });
+
   it.each([
     { event: "pull_request" }, { event: "merge_group" }, { event: "workflow_dispatch" }, { head_branch: "release/1.2.3" },
     { head_sha: "b".repeat(40) }, { repository: { full_name: "fork/zeros" } }, { head_repository: { full_name: "fork/zeros" } },
