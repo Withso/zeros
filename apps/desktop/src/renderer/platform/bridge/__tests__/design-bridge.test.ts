@@ -1,10 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { bridgeDesignSnapshot, isDesignWorkspaceSnapshotWire, normalizeDesignWorkspaceSnapshotPages } from "../design-bridge";
+import { bridgeDesignHistory, bridgeDesignSnapshot, isDesignWorkspaceSnapshotWire, normalizeDesignWorkspaceSnapshotPages } from "../design-bridge";
 import type { RuntimeClient } from "../ws-client";
 import { bridgeCloudDesignUploadAsset, rememberDesignDirectoryIdentity } from "../design-bridge";
 
 describe("Design bridge read budgets", () => {
+  it.each(["undo", "redo"] as const)("preserves the local %s wire contract without cloud source versions", async direction => {
+    const request = vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result: { result: null, snapshot: { protocolCapability: null, frames: [] } } }));
+    const bridge = { request } as unknown as RuntimeClient;
+
+    await bridgeDesignHistory(bridge, "ws_local_design", "page-1/home.html", direction);
+
+    expect(request).toHaveBeenCalledExactlyOnceWith({
+      type: "WORKSPACE_REQUEST", op: `design.history.${direction}`,
+      params: { workspaceId: "ws_local_design", frame: "page-1/home.html" },
+    }, expect.anything());
+  });
+
   it("pins uploads to their captured cloud directory without changing Local dispatch", async () => {
     const request = vi.fn().mockRejectedValue(new Error("disconnected"));
     const bridge = { request } as unknown as RuntimeClient;

@@ -131,6 +131,14 @@ function setup() {
 }
 
 describe("GitHub inline review aggregate", () => {
+  it.each([true, false])("retains local GitHub viewer resolve permissions (%s)", async canResolve => {
+    const fixture = setup();
+    fixture.graphql.mockResolvedValue(page([{ ...thread(), viewerCanResolve: canResolve, viewerCanUnresolve: !canResolve }]));
+
+    const result = await fixture.service.get(target);
+
+    expect(result.threads[0]).toMatchObject({ canResolve, canUnresolve: !canResolve });
+  });
   it("rejects a published diff whose base changes while its head stays the same", async () => {
     const { service, get } = setup();
     get

@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import type { BridgeRegistryAgent } from "../../../platform/bridge/messages";
+import { isSelectableAgent } from "../agent-runnable";
 const mock = vi.hoisted(() => ({ request: vi.fn(), grants: vi.fn(), refreshListeners: new Set<() => void>() }));
 vi.mock("../../../platform/bridge/active-bridge", () => ({
   getActiveBridge: () => ({ request: mock.request }),
@@ -13,6 +17,8 @@ vi.mock("../../../state/cloud-workspace-catalog", () => ({
 }));
 import {
   clearCloudAgentRegistry,
+  hasConfirmedWorkspaceAgents,
+  useWorkspaceAgents,
   reportCloudAgentRuntimeUpgrade,
   modelsForWorkspaceAgent,
   warmCloudAgentRegistry,
@@ -29,6 +35,36 @@ beforeEach(() => {
   clearCloudAgentRegistry();
 });
 describe("workspace agent registry", () => {
+  it("preserves local registry and model choices while cloud qualification changes", async () => {
+    const local: BridgeRegistryAgent[] = ["claude", "codex", "cursor"].map(id => ({
+      id, name: id, version: "1", description: "Local provider", distribution: {},
+      installed: true, authenticated: id !== "cursor",
+    }));
+    await refreshAgents(async () => local);
+    const models = local.filter(isSelectableAgent).map(agent => modelsForAgent(agent.id, null));
+    mock.request.mockResolvedValue({ type: "AGENT_AGENTS_LIST", agents: local });
+    mock.grants.mockResolvedValue(local.map(agent => ({ kind: `${agent.id}-api-key`, runtimeQualified: false })));
+    await warmCloudAgentRegistry(a);
+
+    for (const folder of [null, "/local/personal", "/local/organization"]) {
+      expect(workspaceAgentsSnapshot(folder)).toBe(local);
+      expect(hasConfirmedWorkspaceAgents(folder)).toBe(true);
+      let rendered: BridgeRegistryAgent[] | null = null;
+      function LocalComposerRegistry() {
+        rendered = useWorkspaceAgents(folder);
+        return null;
+      }
+      renderToStaticMarkup(createElement(LocalComposerRegistry));
+      expect(rendered).toBe(local);
+      expect(workspaceAgentsSnapshot(folder)!.filter(isSelectableAgent).map(agent => modelsForWorkspaceAgent(agent, null))).toEqual(models);
+      expect(local.some(agent => agent.runtimeUnavailableReason)).toBe(false);
+    }
+    clearCloudAgentRegistry();
+    expect(workspaceAgentsSnapshot("/local/personal")).toBe(local);
+    expect(mock.request).toHaveBeenCalledOnce();
+    expect(mock.grants).toHaveBeenCalledOnce();
+  });
+
   it("publishes an exact-workspace rejection immediately and refreshes durable discovery", async () => {
     const local = [{ id: "codex", installed: true, authenticated: true }] as never;
     await refreshAgents(async () => local);
