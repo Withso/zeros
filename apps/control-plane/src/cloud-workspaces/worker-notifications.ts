@@ -6,7 +6,7 @@ import { DATABASE_CONNECTION_LIFETIME_SECONDS } from "../db.js";
  * fenced transactions. Polling remains active when this fast path is down. */
 export function startCloudWorkerNotifications(
   pool: pg.Pool,
-  workers: { lifecycle: () => void; setup: () => void },
+  workers: { lifecycle: () => void; setup: () => void; runtimeStaging?: () => void },
   logger: Pick<Console, "warn"> = console,
 ): () => Promise<void> {
   let stopped = false;
@@ -32,6 +32,7 @@ export function startCloudWorkerNotifications(
         if (stopped || disposed || notice.payload !== "") return;
         if (notice.channel === "zeros_cloud_lifecycle_work") workers.lifecycle();
         if (notice.channel === "zeros_cloud_setup_work") workers.setup();
+        if (notice.channel === "zeros_cloud_runtime_staging_work") workers.runtimeStaging?.();
       };
       const dispose = () => {
         if (disposed) return;
@@ -49,7 +50,8 @@ export function startCloudWorkerNotifications(
       client.on("end", dispose);
       disconnect = dispose;
       try {
-        await client.query("LISTEN zeros_cloud_lifecycle_work; LISTEN zeros_cloud_setup_work");
+        await client.query("LISTEN zeros_cloud_lifecycle_work; LISTEN zeros_cloud_setup_work" +
+          (workers.runtimeStaging ? "; LISTEN zeros_cloud_runtime_staging_work" : ""));
         if (disposed || stopped) { dispose(); return; }
         retryMs = 1_000;
         retirement = setTimeout(dispose, DATABASE_CONNECTION_LIFETIME_SECONDS * 1_000);
@@ -57,6 +59,7 @@ export function startCloudWorkerNotifications(
         // Commit(s) before LISTEN became active may have been missed.
         workers.lifecycle();
         workers.setup();
+        workers.runtimeStaging?.();
       } catch {
         dispose();
         throw new Error("worker_listener_unavailable");

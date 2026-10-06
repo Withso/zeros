@@ -17,6 +17,23 @@ function fixture() {
 afterEach(() => { vi.useRealTimers(); });
 
 describe("cloud worker notifications", () => {
+  it("wakes staging on committed qualification/release hints and after reconnect", async () => {
+    vi.useFakeTimers();
+    const connection = client(), runtimeStaging = vi.fn();
+    const stop = startCloudWorkerNotifications({ connect: async () => connection } as unknown as pg.Pool,
+      { lifecycle: vi.fn(), setup: vi.fn(), runtimeStaging });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(connection.query).toHaveBeenCalledWith(expect.stringContaining("LISTEN zeros_cloud_runtime_staging_work"));
+    expect(runtimeStaging).toHaveBeenCalledOnce();
+    connection.emit("notification", { channel: "zeros_cloud_runtime_staging_work", payload: "untrusted" });
+    expect(runtimeStaging).toHaveBeenCalledOnce();
+    connection.emit("notification", { channel: "zeros_cloud_runtime_staging_work", payload: "" });
+    expect(runtimeStaging).toHaveBeenCalledTimes(2);
+    await stop();
+    connection.emit("notification", { channel: "zeros_cloud_runtime_staging_work", payload: "" });
+    expect(runtimeStaging).toHaveBeenCalledTimes(2);
+  });
+
   it("listens before repairing the startup gap, and accepts only payload-free worker hints", async () => {
     const { first, lifecycle, setup, stop } = fixture();
     await vi.advanceTimersByTimeAsync(0);

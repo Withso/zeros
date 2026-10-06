@@ -8,6 +8,7 @@ import type { AuthedUser } from "../auth.js";
 import { HttpError } from "../authz.js";
 import type { Config } from "../config.js";
 import { withSystemTx, type Tx } from "../db.js";
+import { notifyRuntimeStaging } from "./runtime-staging-notification.js";
 import { ClosedDiagnosticSchema } from "./runtime-contract.js";
 import type { RuntimeRequalify } from "./runtime-qualification.js";
 import {
@@ -561,6 +562,7 @@ export class DatabaseRuntimePublicationService {
         WHERE channel='alpha' AND release_order=$1 AND confirmed_at IS NULL AND revoked_at IS NULL`,
         [body.releaseOrder],
       );
+      await notifyRuntimeStaging(tx);
     });
     // Idempotent enqueue belongs to B7. A scheduling failure must not reflect
     // a provider error or signed URL, and CI can retry after the commit.
@@ -962,6 +964,7 @@ export function createRuntimeStaffRoutes(config: Config, pool: pg.Pool, requalif
         `UPDATE cloud_runtime_qualifications SET revoked_at=COALESCE(revoked_at,now()),enabled=false,mcp_qualified=false WHERE runtime_id=$1`,
         [id],
       );
+      await notifyRuntimeStaging(tx);
     });
     console.info("[cloud-runtime] runtime_revoked", {
       runtimeId: id,
