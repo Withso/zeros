@@ -57,6 +57,13 @@ Chat/tool transcripts, Files, Changes, Review and PR controls keep
 their existing renderers and receive the selected workspace's backend data.
 The popover displays configured capacities; no utilization or cost is inferred.
 
+Staff cloud workspaces expose manual Restart in the Setup status row and workspace
+context menu. It joins the existing Stop (final checkpoint), waits for stopped,
+then issues a fresh explicit wake before normal admission. Wake retains the
+server's automatic runtime-upgrade policy. Renderer-observed work requires
+confirmation; Local, archived and deleting workspaces expose no Restart. The
+intent is ephemeral: closing the app between Stop and wake leaves compute asleep.
+
 PR creation preflight and composer PR suggestions carry the selected workspace
 identity through the same bridge. Remote discovery derives the repository from
 that registered checkout; caller-supplied origins cannot redirect its credentials.

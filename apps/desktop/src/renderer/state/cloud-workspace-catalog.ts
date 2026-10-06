@@ -363,6 +363,36 @@ export function clearCloudWorkspaceCatalog(): void {
 
 type LifecycleIntent = { id: string; task?: Promise<CloudWorkspaceDocument>; owner?: number; generation?: number; version?: number; reason?: "interaction" };
 const lifecycleIntents = new Map<string, LifecycleIntent>();
+export function cloudWorkspaceLifecycleTask(
+  target: CloudWorkspaceTarget,
+  operation: "wake" | "stop",
+): Promise<CloudWorkspaceDocument> | undefined {
+  return lifecycleIntents.get(`${epoch}:${cloudWorkspaceKey(target)}:${operation}`)?.task;
+}
+
+/** Observe an accepted lifecycle operation; never submit a second mutation. */
+export async function waitForCloudWorkspaceLifecycle(
+  target: CloudWorkspaceTarget,
+  operation: "wake" | "stop" | "archive" | "delete",
+  initial: CloudWorkspaceDocument,
+): Promise<CloudWorkspaceDocument> {
+  const account = epoch;
+  const terminal = operation === "wake" ? ["ready", "busy"]
+    : [operation === "archive" ? "archived" : operation === "delete" ? "deleted" : "stopped"];
+  const deadline = Date.now() + 60_000;
+  let doc = initial;
+  while (!terminal.includes(doc.status)) {
+    if (doc.error) throw new Error(doc.error.message);
+    if (Date.now() >= deadline)
+      throw new Error("The cloud workspace operation is still running. Its status will update when it finishes.");
+    await new Promise(resolve => setTimeout(resolve, 1_000));
+    if (account !== epoch) throw new Error("Cloud account changed");
+    const current = cloudWorkspaceDocument(target);
+    if (!current) throw new Error("Cloud workspace access changed");
+    doc = terminal.includes(current.status) ? current : await refreshCloudWorkspace(target);
+  }
+  return doc;
+}
 function settleLifecycleIntents(doc: CloudWorkspaceDocument): void {
   const wakeKey = `${epoch}:${cloudWorkspaceKey({ organizationId: doc.organizationId, workspaceId: doc.id })}:wake`;
   const wake = lifecycleIntents.get(wakeKey);
@@ -401,7 +431,10 @@ export async function manageCloudWorkspace(
   const intent: LifecycleIntent = previous && (operation !== "wake" || previous.owner === owner &&
       (previous.generation === generation || generation !== undefined && previous.generation !== undefined && generation >= previous.generation))
     ? previous : { id: crypto.randomUUID(), owner, generation, version: cloudWorkspaceDocument(target)?.version, reason: operation === "wake" ? reason : undefined };
-  if (intent.task) return intent.task;
+  if (intent.task) {
+    const doc = await intent.task;
+    return wait ? waitForCloudWorkspaceLifecycle(target, operation, doc) : doc;
+  }
   if (operation === "stop") {
     // A later explicit wake (including Restart) is a new intent. Do not reuse
     // the receipt for an upgrade that this Stop supersedes, even across N+1.
@@ -445,23 +478,13 @@ export async function manageCloudWorkspace(
                 ? "deleted"
                 : "stopped",
           ];
-    const deadline = Date.now() + 60_000;
-    while (wait && !terminal.includes(doc.status)) {
-      if (doc.error) throw new Error(doc.error.message);
-      if (Date.now() > deadline)
-        throw new Error(
-          "The cloud workspace operation is still running. Its status will update when it finishes.",
-        );
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      if (version !== epoch) throw new Error("Cloud account changed");
-      doc = await refreshCloudWorkspace(target);
-    }
+    if (wait) doc = await waitForCloudWorkspaceLifecycle(target, operation, doc);
     if (terminal.includes(doc.status)) lifecycleIntents.delete(key);
     return doc;
   })().catch(error => {
     // A definitive rejection cannot become a successful replay. Retain the
     // identity only when the server's outcome is still unknown (network/5xx).
-    if (operation === "wake" && error instanceof ControlPlaneError &&
+    if ((operation === "wake" || operation === "stop") && error instanceof ControlPlaneError &&
         error.status >= 400 && error.status < 500 && error.status !== 408 &&
         lifecycleIntents.get(key) === intent)
       lifecycleIntents.delete(key);

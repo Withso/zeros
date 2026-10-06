@@ -50,7 +50,8 @@ import {
   type TerminalNavigationEntry,
 } from "../../terminal/terminal-workbench-layout";
 import { useRetainedViewKeySet } from "../../use-retained-view-keys";
-import { WorkbenchTabFrame, WorkbenchTabStatusProvider } from "../tab-status";
+import { WorkbenchTabFrame, WorkbenchTabStatusProvider, WorkbenchTabToolbar } from "../tab-status";
+import { CloudWorkspaceStatusRow } from "../../conversation/cloud-workspace-restart-controls";
 import { cn } from "../../../shared/ui/cn";
 import { Button } from "../../../shared/ui";
 import { Badge, Tooltip } from "../../../shared/ui/primitives";
@@ -686,6 +687,7 @@ export function TerminalPanel({
             active={surfaceActive && mainTab !== null}
           >
             <TerminalWorkbenchLayout
+              active={surfaceActive && mainTab !== null}
               folder={folderKey}
               tab={mainTab}
               entries={entries}
@@ -845,6 +847,9 @@ export function TerminalPanel({
           folder={folderKey}
           active={surfaceActive && hasPanel && expanded}
         >
+          {activeSubTab === SETUP_SUBTAB && <WorkbenchTabToolbar>
+            <CloudWorkspaceStatusRow folder={folderKey} active={surfaceActive && hasPanel && expanded} />
+          </WorkbenchTabToolbar>}
           <div
             ref={setPanelBody}
             {...(!expanded ? { inert: "" } : {})}

@@ -72,6 +72,20 @@ beforeEach(() => {
   api.projects.mockReturnValue([]);
 });
 describe("cloud workspace catalog ownership", () => {
+  it("preserves waiting wake readiness across an accepted generation replacement", async () => {
+    vi.useFakeTimers();
+    try {
+      acceptCloudWorkspaceDocument(doc(1, "stopped"));
+      api.lifecycle.mockResolvedValueOnce(doc(2, "waking"));
+      const waiting = manageCloudWorkspace(target, "wake", true)
+        .then(value => ({ status: value.status, generation: value.generation.number }), error => ({ error: error.message }));
+      await vi.advanceTimersByTimeAsync(0);
+      acceptCloudWorkspaceDocument({ ...doc(3, "ready"), generation: { ...doc(3).generation, number: 2 } });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await waiting).toEqual({ status: "ready", generation: 2 });
+      expect(api.lifecycle).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
   it("publishes a bounded local Stop fence before HTTP settles and clears it with the account", async () => {
     acceptCloudWorkspaceDocument(doc(1));
     let resolve!: (document: CloudWorkspaceDocument) => void;
@@ -83,6 +97,25 @@ describe("cloud workspace catalog ownership", () => {
     const other = { ...target, workspaceId: "33333333-3333-4333-8333-333333333333" };
     expect(cloudWorkspaceStopVersion(other)).toBe(0);
     clearCloudWorkspaceCatalog(); expect(cloudWorkspaceStopVersion(target)).toBe(0);
+  });
+  it("a waiting Stop joins an in-flight non-waiting Stop and still waits for the final checkpoint", async () => {
+    vi.useFakeTimers();
+    try {
+      acceptCloudWorkspaceDocument(doc(1, "ready"));
+      let finish!: (document: CloudWorkspaceDocument) => void;
+      api.lifecycle.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+      api.list.mockResolvedValue([]);
+      const first = manageCloudWorkspace(target, "stop");
+      let settled = false;
+      const joined = manageCloudWorkspace(target, "stop", true).then(value => { settled = true; return value; });
+      finish(doc(2, "stopping"));
+      await first;
+      expect(settled).toBe(false);
+      acceptCloudWorkspaceDocument(doc(3, "stopped"));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect((await joined).status).toBe("stopped");
+      expect(api.lifecycle).toHaveBeenCalledExactlyOnceWith(target, "stop", expect.any(String));
+    } finally { vi.useRealTimers(); }
   });
   it.each(["stopped", "archived", "stopping", "failed", "error"])("does not schedule background reads or mirrors for %s workspaces", status => {
     expect(canBackgroundSyncCloudWorkspace(target)).toBe(false);
@@ -144,6 +177,14 @@ describe("cloud workspace catalog ownership", () => {
       .mockResolvedValueOnce(doc(2, "waking"));
     await expect(manageCloudWorkspace(target, "wake")).rejects.toThrow("No capacity");
     await manageCloudWorkspace(target, "wake");
+    expect(api.lifecycle.mock.calls[1][2]).not.toBe(api.lifecycle.mock.calls[0][2]);
+  });
+  it("does not retain the Stop key after a confirmed rejection", async () => {
+    acceptCloudWorkspaceDocument(doc(1, "ready"));
+    api.lifecycle.mockRejectedValueOnce(new ControlPlaneError(409, "checkpoint_failed", "Checkpoint unavailable"))
+      .mockResolvedValueOnce(doc(2, "stopping"));
+    await expect(manageCloudWorkspace(target, "stop")).rejects.toThrow("Checkpoint unavailable");
+    await manageCloudWorkspace(target, "stop");
     expect(api.lifecycle.mock.calls[1][2]).not.toBe(api.lifecycle.mock.calls[0][2]);
   });
   it.each(["account", "removed", "generation", "target"])("rejects a late wake response after its %s changes", async reason => {
