@@ -3560,7 +3560,7 @@ prosemirror-view@1.42.3
   Source: https://code.haverbeke.berlin/prosemirror/prosemirror-view
   License documents: ef0b452ced63
 
-proxy-addr@2.0.7
+proxy-addr@2.0.8
   License: MIT
   Surfaces: root pnpm workspace
   Author: Douglas Christopher Wilson <doug@somethingdoug.com>
@@ -3918,7 +3918,7 @@ sonner@2.0.7
   Source: https://github.com/emilkowalski/sonner
   License documents: da9201378c36
 
-source-map-js@1.2.1
+source-map-js@1.2.2
   License: BSD-3-Clause
   Surfaces: root pnpm workspace
   Author: Valentin 7rulnik Semirulnik <v7rulnik@gmail.com>
@@ -9970,8 +9970,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT 6cb0631f71c7
 SHA-256: 6cb0631f71c7749763fd3dd1d5bee52dd1070ec17f2edc1710079ad070bd2fbd
-Applies to: source-map-js@1.2.1
-Source labels: source-map-js@1.2.1 — LICENSE
+Applies to: source-map-js@1.2.2
+Source labels: source-map-js@1.2.2 — LICENSE
 ================================================================================
 
 
@@ -12295,8 +12295,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT a7996721249a
 SHA-256: a7996721249a136fbcfc1c201bcb5f414f38a701d4a24f28abe65e16cfcce813
-Applies to: etag@1.8.1, proxy-addr@2.0.7
-Source labels: etag@1.8.1 — LICENSE; proxy-addr@2.0.7 — LICENSE
+Applies to: etag@1.8.1, proxy-addr@2.0.8
+Source labels: etag@1.8.1 — LICENSE; proxy-addr@2.0.8 — LICENSE
 ================================================================================
 
 (The MIT License)
