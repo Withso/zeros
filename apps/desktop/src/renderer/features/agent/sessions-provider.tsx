@@ -66,7 +66,7 @@ import { TranscriptHydrationRetries } from "./transcript-hydration-retries";
 import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
 import { useInternalFeatureActive } from "../settings/internal-features";
-import { cloudCatalogGeneration, cloudWorkspaceDocument, cloudWorkspaceStopVersion, canBackgroundSyncCloudWorkspace, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
+import { cloudCatalogGeneration, cloudWorkspaceDocument, cloudWorkspaceStopVersion, canBackgroundSyncCloudWorkspace, canReadCloudWorkspace, isCloudWorkspaceLifecyclePending, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
 import { CloudWorkspaceWakeEndedError } from "../../state/cloud-workspace-wake";
 import { CloudSendPreparation } from "./cloud-send-preparation";
 import { CloudSendWait, CloudSendWaitError, type CloudSendWaitBudget } from "./cloud-send-wait";
@@ -1387,9 +1387,11 @@ export function AgentSessionsProvider({
       const folder = useWorkspaceStore.getState().chats.find(chat => chat.id === chatId)?.folder ??
         getStore().sessions[chatId]?.cwd;
       const target = parseCloudWorkspaceKey(folder);
-      return target && folder ? {
+      const doc = target ? cloudWorkspaceDocument(target) : undefined;
+      return target && folder && canReadCloudWorkspace(doc) && doc?.capabilities.canWrite ? {
         folder, account: cloudCatalogGeneration(),
-        generation: cloudWorkspaceDocument(target)?.generation.number,
+        generation: doc.generation.number, lifecyclePending: isCloudWorkspaceLifecyclePending(doc),
+        stopVersion: cloudWorkspaceStopVersion(target),
         cancellation: cancelGeneration(cancelGenerationsRef.current, chatId),
       } : undefined;
     };
@@ -1398,7 +1400,7 @@ export function AgentSessionsProvider({
     if (!(bridge instanceof WorkspaceRuntimeClient)) return Promise.reject(new Error("Cloud workspace connection is unavailable"));
     const target = parseCloudWorkspaceKey(owner.folder)!;
     return cloudSendPreparationRef.current.prepare(chatId, owner,
-      signal => bridge.openWorkspace(target, { signal }), current);
+      signal => bridge.openWorkspace(target, { signal }), current, subscribeCloudWorkspaces);
   }, [bridge, cloudComputerV2, getStore]);
 
   /** Dispose only the exact route returned by a create/load that completed
@@ -4015,13 +4017,13 @@ export function AgentSessionsProvider({
       if (cloudWorkspaceStopVersion(target) !== stopVersion)
         throw new CloudWorkspaceWakeEndedError("Cloud workspace was stopped. Your messages are still queued. Try again.");
       const doc = cloudWorkspaceDocument(target);
-      if (generation !== undefined && (!doc || doc.generation.number < generation))
+      if (generation !== undefined && (!doc || doc.generation.number < generation && !isCloudWorkspaceLifecyclePending(doc)))
         throw new CloudSendWaitError("The workspace generation or access changed. Your messages are still queued. Try again.", "workspace_unavailable");
       if (doc?.deletedAt || ["archived", "archiving", "deleting", "deleted", "failed", "error"].includes(doc?.status ?? "") || doc?.error && doc.status !== "stopped")
         throw new CloudSendWaitError(doc?.error?.message ?? `The workspace is ${doc?.status}. Your messages are still queued.`,
           doc?.deletedAt || ["archived", "archiving", "deleting", "deleted"].includes(doc?.status ?? "") ? "workspace_archived" : "workspace_unavailable");
       if (doc && !doc.capabilities.canWrite) throw new CloudSendWaitError("You do not have permission to run agents in this workspace.", "workspace_unavailable");
-      // Replacement lifecycle progress belongs to this same undispatched row.
+      // Replacement and rollback progress belong to this undispatched row.
       generation = doc?.generation.number ?? generation;
       return doc?.status === "ready" || doc?.status === "busy";
     };

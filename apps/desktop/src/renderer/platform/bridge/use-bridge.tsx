@@ -33,7 +33,7 @@ import { nativeListen, useNativeRuntime } from "../runtime";
 import { WorkspaceRuntimeClient } from "./workspace-runtime-client";
 import { openCloudRuntime } from "./open-cloud-runtime";
 import { readCloudWorkspaceHistory } from "../cloud-history";
-import { canReadCloudWorkspace, cloudCatalogGeneration, cloudWorkspaceCatalogConfirmed, cloudWorkspaceDocument, cloudWorkspaceOperation, cloudWorkspaceStopVersion, getCloudWorkspaceRows } from "../../state/cloud-workspace-catalog";
+import { canReadCloudWorkspace, cloudCatalogGeneration, cloudWorkspaceCatalogConfirmed, cloudWorkspaceDocument, cloudWorkspaceOperation, cloudWorkspaceStopVersion, getCloudWorkspaceRows, isCloudWorkspaceLifecyclePending } from "../../state/cloud-workspace-catalog";
 import { wireWorkbenchConnectionRejection } from "../../state/workbench-availability";
 
 // ── Context ──────────────────────────────────────────────
@@ -65,7 +65,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
           const doc = cloudWorkspaceDocument(target);
           return canReadCloudWorkspace(doc) && doc?.capabilities.canWrite &&
             !["archived", "archiving", "failed", "error"].includes(doc.status)
-            ? { account: String(cloudCatalogGeneration()), generation: doc.generation.number, stopVersion: cloudWorkspaceStopVersion(target) }
+            ? { account: String(cloudCatalogGeneration()), generation: doc.generation.number, stopVersion: cloudWorkspaceStopVersion(target), lifecyclePending: isCloudWorkspaceLifecyclePending(doc) }
             : undefined;
         },
         manage: cloudWorkspaceOperation,

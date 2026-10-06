@@ -212,8 +212,11 @@ queue; Local submissions keep their existing pipeline and presentation.
 Runtime upgrades are selected by the server's existing wake/start lifecycle;
 replacement-engine admission precedes delivery of the queued prompt.
 For the same account epoch and organization/workspace with readable, writable
-access, a newer generation is a continuation: retain undispatched rows, follow
-replacement drain/create/setup and admit its engine. Exact-generation transport
+access and the same explicit Stop revision, generation changes during lifecycle
+progress are continuations, including a failed upgrade rolling back from its
+candidate to the source. Retain undispatched rows, follow replacement or rollback
+drain/create/setup and admit whichever engine becomes ready. Dispose late
+candidate admission; never relabel it or dispatch to it. Exact-generation transport
 and passive-read fences remain strict. Account changes, revoked access/run
 permission, archive/delete and an explicit Stop still end the original intent.
 Automatic interaction wakes add the optional `reason: "interaction"` body field
@@ -221,6 +224,14 @@ to that same `/wake` request. Shared sends and uncertain retries retain the
 initiating reason and lifecycle identity; ordinary explicit wakes keep their
 existing empty body. No server-side interaction backoff is added in this Alpha
 change.
+
+Idle sleep loses the VM's shell registry. Preserve plain cloud terminal tabs,
+their titles, selection and cwd when the engine instance changes. Once ready,
+recreate a shell only when its tab is shown, with one dim line
+“Workspace resumed — new shell”. Do not replay its original command or agent
+launch. Hidden retained tabs stay inert; Run/Setup remain explicit actions.
+A same-engine shell closed on another device still disappears. Local tabs keep
+their existing pruning, reattachment and restart behavior for either owner.
 
 Presence cancels an uncommitted idle stop through the existing cancellation
 transaction and a final pre-commit `stillIdle` check. A gesture on a lagging ready

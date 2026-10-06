@@ -3,11 +3,14 @@ export interface CloudSendOwner {
   folder: string;
   generation: number | undefined;
   cancellation: number;
+  stopVersion?: number;
+  lifecyclePending?: boolean;
 }
 
 function sameOwner(a: CloudSendOwner, b: CloudSendOwner | undefined): boolean {
   return !!b && a.account === b.account && a.folder === b.folder &&
-    (a.generation === undefined || b.generation !== undefined && b.generation >= a.generation) && a.cancellation === b.cancellation;
+    (a.generation === undefined || b.generation !== undefined && (b.generation >= a.generation || b.lifecyclePending === true)) &&
+    a.cancellation === b.cancellation && a.stopVersion === b.stopVersion;
 }
 
 /** Preparation has no prompt payload or submission retry. The caller retains
@@ -17,6 +20,7 @@ export class CloudSendPreparation {
     owner: CloudSendOwner;
     controller: AbortController;
     task: Promise<void>;
+    off?: () => void;
   }>();
 
   prepare(
@@ -24,14 +28,18 @@ export class CloudSendPreparation {
     owner: CloudSendOwner,
     open: (signal: AbortSignal) => Promise<void>,
     current: () => CloudSendOwner | undefined,
+    observe?: (listener: () => void) => () => void,
   ): Promise<void> {
     const existing = this.flights.get(chatId);
-    if (existing && sameOwner(existing.owner, owner)) return existing.task;
+    if (existing && sameOwner(existing.owner, owner)) { existing.owner.generation = owner.generation; return existing.task; }
     this.cancel(chatId);
+    owner = { ...owner };
     const controller = new AbortController();
     const assertCurrent = () => {
       if (controller.signal.aborted) throw new Error("Message preparation cancelled");
-      if (!sameOwner(owner, current())) throw new Error("Cloud message owner changed before submission");
+      const next = current();
+      if (!sameOwner(owner, next)) throw new Error("Cloud message owner changed before submission");
+      owner.generation = next?.generation;
     };
     // Publish the cancellation owner before opening the bridge can notify any
     // subscribers. A same-turn Stop must prevent compute acquisition entirely.
@@ -40,9 +48,13 @@ export class CloudSendPreparation {
       await open(controller.signal);
       assertCurrent();
     }).finally(() => {
+      off?.();
       if (this.flights.get(chatId)?.task === task) this.flights.delete(chatId);
     });
-    this.flights.set(chatId, { owner, controller, task });
+    // Observe rollback while it is waking; readiness may resolve after the
+    // source is already ready. The bridge still fences each exact admission.
+    const off = observe?.(() => { try { assertCurrent(); } catch { controller.abort(); } });
+    this.flights.set(chatId, { owner, controller, task, off });
     return task;
   }
 
@@ -51,6 +63,7 @@ export class CloudSendPreparation {
   cancel(chatId: string): void {
     const pending = this.flights.get(chatId);
     this.flights.delete(chatId);
+    pending?.off?.();
     pending?.controller.abort();
   }
 

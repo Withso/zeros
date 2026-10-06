@@ -178,6 +178,30 @@ export async function runCloudTerminalSmoke({ page, check, harnessBase }) {
     (await fixtures()).messages.find((m) => m.op === "workspace.stopRun")
       .params,
   ).toMatchObject({ sessionId: run.id, workspaceId: run.folder });
+  const shells = await page.evaluate(() => {
+    const api = window.__zerosTerminalSmoke;
+    return api.sessions().filter(s => s.folder === api.folders.a && !s.id.includes("pty-run-"));
+  });
+  const createsBeforeSleep = (await fixtures()).messages.filter(m => m.type === "PTY_CREATE").length;
+  await page.evaluate(() => {
+    const api = window.__zerosTerminalSmoke; api.sleepCloudWorkspace(); api.resumeCloudWorkspace();
+  });
+  await expect.poll(async () => {
+    const { sessions } = await fixtures();
+    return shells.every(shell => sessions.some(s => s.id === shell.id && (shell.id === currentId || s.resumePending)));
+  }).toBe(true);
+  // Run remains selected in main; only the visible docked shell may resume.
+  await expect.poll(async () => (await fixtures()).messages.filter(m => m.type === "PTY_CREATE").length).toBe(createsBeforeSleep + 1);
+  expect((await fixtures()).messages.filter(m => m.type === "PTY_CREATE").slice(createsBeforeSleep).map(m => m.sessionId)).toEqual([currentId]);
+  const shell = shells.find(s => s.id !== currentId);
+  await sidebar.getByRole("tab", { name: shell.title, exact: true }).click();
+  await expect(main.locator(".xterm-rows")).toContainText("Workspace resumed — new shell");
+  expect((await main.locator(".xterm-rows").textContent()).match(/Workspace resumed — new shell/g)).toHaveLength(1);
+  const resumedCreates = (await fixtures()).messages.filter(m => m.type === "PTY_CREATE").slice(createsBeforeSleep);
+  expect(resumedCreates).toHaveLength(2);
+  expect(resumedCreates[1]).toMatchObject({ sessionId: shell.id, cwd: shell.folder });
+  await page.screenshot({ path: ".context/cloud-terminal-resumed.png", animations: "disabled" });
+  check("Idle sleep retains cloud terminal tabs and recreates only the shown shell with one dim resume line", true);
   await page
     .getByRole("button", { name: "Local workspace", exact: true })
     .click();

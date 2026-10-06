@@ -120,6 +120,29 @@ describe("terminal-store syncEngineTerminals", () => {
     s.syncEngineTerminals("/w", [], []);
     expect(ids("/w")).toEqual([]);
   });
+  it("keeps plain cloud tabs and their selection when a resumed engine has an empty registry", () => {
+    const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    const s = useTerminalStore.getState();
+    s.syncEngineTerminals(folder, [{ sessionId: "shell", createdAt: 1 }], ["shell"], "before-sleep");
+    s.renameSession("shell", "My shell"); s.setActiveTerminalTab(folder, "shell");
+    s.syncEngineTerminals(folder, [], [], "after-wake");
+    expect(ids(folder)).toEqual(["shell"]);
+    expect(useTerminalStore.getState().sessions[0]).toMatchObject({ title: "My shell", resumePending: true });
+    expect(useTerminalStore.getState().activeTerminalTabByFolder[folder]).toBe("shell");
+    const before = useTerminalStore.getState().sessions;
+    s.syncEngineTerminals(folder, [], [], "after-wake");
+    expect(useTerminalStore.getState().sessions).toBe(before);
+    s.syncEngineTerminals(folder, [{ sessionId: "shell", createdAt: 1 }], ["shell"], "after-wake");
+    expect(useTerminalStore.getState().sessions[0].resumePending).toBeFalsy();
+    s.syncEngineTerminals(folder, [], [], "after-wake");
+    expect(ids(folder)).toEqual([]); // Same-engine multiplayer close still prunes.
+  });
+  it.each(["Personal", "organization"])("keeps %s Local vanished-terminal pruning unchanged when an engine marker changes", () => {
+    const s = useTerminalStore.getState();
+    s.syncEngineTerminals("/local", [{ sessionId: "shell", createdAt: 1 }], ["shell"], "before");
+    s.syncEngineTerminals("/local", [], [], "after");
+    expect(ids("/local")).toEqual([]);
+  });
 
   it("does NOT remove a not-yet-registered local terminal (create in flight)", () => {
     const s = useTerminalStore.getState();

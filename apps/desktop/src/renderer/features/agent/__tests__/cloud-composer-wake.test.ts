@@ -12,6 +12,7 @@ import { cloudQueuedPrompt } from "../cloud-queued-prompt";
 import { isRecoverable } from "../../../platform/bridge/failure";
 import { CloudWorkspaceWakeEndedError } from "../../../state/cloud-workspace-wake";
 import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode } from "../cloud-admission-failure";
+import { isCloudWorkspaceLifecyclePending } from "../../../state/cloud-workspace-catalog";
 
 const encoding = vi.hoisted(() => ({ run: vi.fn() }));
 vi.mock("../encode-attachments", async original => ({ ...await original<typeof import("../encode-attachments")>(), encodeAttachments: encoding.run }));
@@ -59,7 +60,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
   const provider: any = { ...lifecycle, ...retention, Error, BLANK: {}, useCallback: (fn: unknown) => fn, isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId,
     cloudComputerV2: cloud, bridge: { status: "connected" }, getStore: () => store, useWorkspaceStore: { getState: () => workspace },
     cloudCatalogGeneration: () => 1, cloudWorkspaceDocument: () => doc, prepareForSend: prepare, cloudSendWaitRef: { current: wait },
-    subscribeCloudWorkspaces: () => () => {}, cloudWorkspaceStopVersion: () => 0,
+    subscribeCloudWorkspaces: () => () => {}, cloudWorkspaceStopVersion: () => 0, isCloudWorkspaceLifecyclePending,
     cloudSendPreparationRef: { current: { cancel: vi.fn() } }, beginCloudSendWaitRef: { current: null }, hydrateCloudSendRef: { current: null },
     sendQueueRef: { current: queue }, sendingChatsRef: { current: sending }, queueHeldRef: { current: new Set() },
     cancelGenerationsRef: { current: new Map() }, flushBubbleRef: { current: flush }, cloudFlushRef: { current: new Map() },
@@ -187,6 +188,21 @@ describe("cloud composer readiness queue", () => {
     doc.status = "setting_up"; h.ready(); await vi.advanceTimersByTimeAsync(0);
     expect(h.delivered).toHaveBeenCalledExactlyOnceWith(row.bubbleId, expect.arrayContaining(["Replacement"]));
     expect(h.failureNotice).not.toHaveBeenCalled();
+  });
+  it("keeps the rich queued row across a candidate rollback and dispatches once without a toast", async () => {
+    const h = harness(); await h.send(); const row = h.queue.get("chat")![0];
+    const doc = h.provider.cloudWorkspaceDocument();
+    doc.generation.number = 8; doc.status = "provisioning";
+    await vi.advanceTimersByTimeAsync(1_000); doc.status = "setting_up";
+    await vi.advanceTimersByTimeAsync(1_000);
+    doc.generation.number = 7; doc.status = "waking";
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.queue.get("chat")![0]).toBe(row);
+    expect(h.store.sessions.chat.cloudSendWait.state).toBe("waiting");
+    h.provider.actions.editQueued("chat", row.bubbleId, { text: "After rollback", displayText: "After rollback" });
+    h.ready(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.delivered).toHaveBeenCalledExactlyOnceWith(row.bubbleId, expect.arrayContaining(["After rollback"]));
+    expect(h.failureNotice).not.toHaveBeenCalled(); expect(h.composer.toast.error).not.toHaveBeenCalled();
   });
   it("preserves Local sends' existing runtime availability guard", async () => {
     const h = harness(false); h.composer.runtimeUpgradeRequired = true; await h.send();

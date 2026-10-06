@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ControlPlaneError } from "../../features/team/control-plane";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
-const api = vi.hoisted(() => ({ list: vi.fn(), lifecycle: vi.fn(), recover: vi.fn(), projects: vi.fn(() => [] as unknown[]) }));
+const api = vi.hoisted(() => ({ list: vi.fn(), read: vi.fn(), lifecycle: vi.fn(), recover: vi.fn(), projects: vi.fn(() => [] as unknown[]) }));
 vi.mock("../../platform/cloud-workspaces", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../platform/cloud-workspaces")>()),
   listCloudWorkspaceDocuments: api.list,
+  getCloudWorkspaceDocument: api.read,
   changeCloudWorkspaceLifecycle: api.lifecycle,
   recoverCloudWorkspace: api.recover,
 }));
@@ -23,6 +24,7 @@ import {
   cloudWorkspaceStopVersion,
   cloudWorkspaceOperation,
   refreshCloudWorkspaceCatalog,
+  refreshCloudWorkspace,
   cloudWorkspaceDetails,
   subscribeCloudWorkspaces,
   subscribeCloudWorkspaceRows,
@@ -186,6 +188,26 @@ describe("cloud workspace catalog ownership", () => {
     await manageCloudWorkspace(target, "wake");
     expect(api.lifecycle.mock.calls[2][2]).not.toBe(original);
     expect(cloudWorkspaceDocument(target)?.status).toBe("waking");
+  });
+  it.each(["waking", "ready"])("shares a candidate wake receipt through rollback to %s and ignores its late candidate response", async status => {
+    const candidate = { ...doc(1, "setting_up"), generation: { ...doc(1).generation, number: 2 } };
+    acceptCloudWorkspaceDocument(candidate);
+    let finish!: (document: CloudWorkspaceDocument) => void;
+    api.lifecycle.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const first = manageCloudWorkspace(target, "wake", false, "interaction");
+    const failed = vi.fn(); const completed = first.catch(failed);
+    let source = doc(3, "waking"); acceptCloudWorkspaceDocument(source);
+    const second = manageCloudWorkspace(target, "wake").catch(failed);
+    if (status === "ready") { source = doc(4, "ready"); acceptCloudWorkspaceDocument(source); }
+    expect(api.lifecycle).toHaveBeenCalledOnce();
+    finish({ ...candidate, version: 2 });
+    expect(await completed).toEqual(source); expect(await second).toEqual(source);
+    expect(failed).not.toHaveBeenCalled();
+  });
+  it("accepts a newer detail version that rolls a setting-up candidate back to waking", async () => {
+    acceptCloudWorkspaceDocument({ ...doc(1, "setting_up"), generation: { ...doc(1).generation, number: 2 } });
+    api.read.mockResolvedValue(doc(2, "waking"));
+    expect((await refreshCloudWorkspace(target)).generation.number).toBe(1);
   });
   it("returns a newer stop instead of the late wake receipt", async () => {
     acceptCloudWorkspaceDocument(doc(1, "stopped"));
