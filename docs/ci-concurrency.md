@@ -1,45 +1,63 @@
 # Main Preflight concurrency
 
-Main pushes share one Preflight concurrency group, `preflight-main`, with
-cancellation off. GitHub keeps the run in progress and at most one pending run.
-A newer push replaces the pending run, which completes as `cancelled` without
-starting any job. The newer run tests the replaced commit too, because main
-contains every earlier merge. A run in progress is never cancelled.
+Every push to `main` gets an independent full Preflight run. Its concurrency
+group is `preflight-main-${{ github.run_id }}`, with cancellation off. Distinct
+run IDs let newer pushes proceed while every older active or pending run stays
+eligible to finish. Rerun attempts retain their original run ID and group.
 
 Release-branch pushes and merge-group events keep their own per-ref groups and
-cancel their own superseded runs. They never wait behind main. Pull-request CI
-does not use the main group.
+cancel their own superseded runs. They do not share main's groups. Pull-request
+CI retains per-PR cancellation and its existing job-selection behavior.
 
-## Why main coalesces
+Cloud Runner Qualification also uses an independent, non-cancelling
+`cloud-runner-main-${{ github.run_id }}` group for every main push. Its PR and
+merge-group runs retain their existing per-ref cancellation. The isolated
+BuildKit builder still limits memory to 4 GiB with swap disabled, CPU to two
+cores and internal parallelism to two; those limits protect each runner's
+resources.
+Workflow Checks runs actionlint on every main push, with no push path filter,
+and keeps its unfiltered PR and merge-group triggers.
 
-GitHub Free allows 20 concurrent jobs, five of them macOS, shared by the whole
-organization. One full Preflight per merge filled that pool during merge
-bursts: older runs, already superseded for Alpha, held runners while the
-newest commit's jobs waited. Coalescing keeps at most one main Preflight
-active, so pull-request CI and the newest main commit get runners sooner.
+## Runner capacity
+
+The organization's GitHub Enterprise plan permits **500 total concurrent
+standard runner jobs, including up to 50 macOS jobs**, shared across workflows.
+These are job limits, not workflow limits: each running matrix leg or aggregate
+job consumes a runner slot. Preflight and pull-request CI have no job-level
+concurrency or matrix `max-parallel` caps. Available runner capacity controls
+scheduling, so jobs can still queue when the shared pool is occupied.
 
 ## Consequences
 
-- **Coverage.** Every merge is tested, sometimes together with later merges.
-  The culprit of a failure can be any commit since the last green main run;
-  CI Recovery's incident body links that compare range. Replaced runs have no
-  jobs and never open an incident.
+- **Coverage.** Every main push has its own exact-SHA Preflight evidence with
+  the existing full workload profile, shard matrices and safety checks. CI
+  Recovery continues to link the commit range since the last green main run;
+  a failure can still involve an earlier merge in that range.
 - **Alpha.** Automatic Alpha needs its candidate's exact-SHA `alpha-gate`. If
-  the candidate's pending run was replaced, the barrier supersedes it once
-  main has moved on: a green skip before any destination mutation, instead of
-  waiting for the barrier timeout. The newer commit's Alpha run ships the
-  combined change.
-- **Latency.** A merge can wait for the main run already in progress before
-  its own run starts. Alpha therefore ships at most about once per Preflight
-  run during a burst.
+  main advances, candidate supersession and destination-mutation guards remain
+  in force. The release barrier retains compatibility with cancelled pending
+  runs from the previous coalescing policy; it can skip a superseded candidate
+  before any destination mutation.
+- **Latency.** A newer main run can start alongside older runs as runners
+  become available. Its critical aggregates can admit Alpha without waiting
+  for an older Preflight to finish. Runner capacity and Alpha promotion
+  coordination still affect delivery time.
 - **Releases.** Beta and Production read Preflight on their release branch's
-  exact commit, which coalescing never touches.
+  exact commit, with the same release-branch cancellation semantics.
 
 ## Validation
 
 `scripts/__tests__/preflight-concurrency.test.ts` evaluates the group and
-cancellation expressions for main, release and merge-group contexts and
-asserts that no Preflight or CI job has job-level concurrency.
+cancellation expressions for distinct main runs, rerun attempts, release and
+merge-group contexts. It also preserves the full job inventory and shard
+matrices and asserts that no Preflight or CI job has job-level concurrency or
+`max-parallel` caps. CI/Preflight workload parity remains covered by
+`scripts/__tests__/ci-workflow-parity.test.ts`.
+
+The concurrency suite also verifies independent main Cloud Runner Qualification
+runs, its retained PR/merge-group cancellation and BuildKit limits, and
+Workflow Checks' unfiltered main trigger.
+
 `pnpm check:actions` runs the parsed-YAML validator before actionlint. The
 validator allows `queue` only on the manual Concurrency Canary job, whose one
 successful dispatch proved that GitHub accepts job-level `queue: max`.

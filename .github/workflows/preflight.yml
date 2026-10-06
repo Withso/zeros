@@ -1,7 +1,7 @@
 name: Preflight
 
-# The full exact-source check suite. It runs on pushes to main (coalesced; see
-# `concurrency:` below) and release branches, and on merge-queue commits. Pull
+# The full exact-source check suite. It runs independently for every main push,
+# on release-branch pushes, and on merge-queue commits. Pull
 # requests run the same jobs, under the same required check names, in `ci.yml`
 # ("CI"); the composer UI smoke runs only here, after merge. Releases read this
 # workflow by name and path (scripts/release/ci.ts): Beta and Production
@@ -70,14 +70,12 @@ on:
 permissions:
   contents: read
 
-# Release branches and merge groups cancel superseded runs. Main pushes
-# coalesce: one run in progress is never cancelled, and at most one newer push
-# waits behind it. A later push replaces the waiting run, so a burst of merges
-# is tested together by its newest commit, which contains every earlier merge.
-# CI Recovery reports the commit range since the last green run, and automatic
-# Alpha supersedes a candidate whose waiting run was replaced.
+# Each main push gets its own full Preflight run, keyed by run ID, so newer
+# pushes neither cancel active runs nor replace pending runs. Jobs compete
+# only for the organization's available runner capacity. Release branches
+# and merge groups retain per-ref cancellation of their superseded runs.
 concurrency:
-  group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'preflight-main' || format('preflight-{0}', github.ref) }}
+  group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('preflight-main-{0}', github.run_id) || format('preflight-{0}', github.ref) }}
   cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
 
 jobs:

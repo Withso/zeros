@@ -6,10 +6,18 @@ path, repositories, event, branch, SHA and attempt through GitHub's API. Its
 checkout is the immutable default-branch controller revision, and it executes
 only Node standard-library code. It never checks out the failed source.
 
-Main Preflight coalesces pushes ([CI concurrency](ci-concurrency.md)): one
-failing run can contain several merges, so the incident body links the commit
-range since the last green main run. A pending run replaced by a newer push
-completes as `cancelled` with no jobs and never opens an incident.
+Main Preflight runs independently for every push
+([CI concurrency](ci-concurrency.md)), so source runs can finish out of order.
+The incident body still links the commit range since the last green main run;
+green resolution requires full evidence at the current main head. Historical
+pending runs replaced under the previous coalescing policy completed as
+`cancelled` with no jobs and never open an incident.
+
+Cloud Runner Qualification also retains a full independent run for every main
+push, with its existing BuildKit resource limits. Workflow Checks runs
+actionlint on every main push. Recovery continues to observe Preflight only;
+these companion checks keep their own identities and do not change incident
+eligibility or PR job selection.
 
 ## Modes
 

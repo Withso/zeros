@@ -8,8 +8,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { load } from "js-yaml";
 
-// Preflight coalesces main pushes at the workflow level, so no Preflight job
-// needs a queue. Only the manual canary keeps proving the setting.
+// Preflight main pushes run independently without job-level queues or caps.
+// Only the manual canary keeps proving the queue setting.
 const QUEUED_JOBS = new Map([
   [".github/workflows/concurrency-canary.yml", new Set(["queue-canary"])],
 ]);

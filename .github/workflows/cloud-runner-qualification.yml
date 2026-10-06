@@ -11,9 +11,12 @@ on:
 permissions:
   contents: read
 
+# Keep full qualification for every main push, including queued runs. PRs and
+# merge groups retain per-ref cancellation of their superseded runs. BuildKit's
+# resource limits below bound each runner independently.
 concurrency:
-  group: cloud-runner-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('cloud-runner-main-{0}', github.run_id) || format('cloud-runner-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
 
 jobs:
   qualify:
