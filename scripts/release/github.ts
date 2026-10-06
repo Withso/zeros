@@ -4,6 +4,7 @@ import path from "node:path";
 import { CHANNELS, HostedReceipt, HostedServicesReceipt, SHA, requireCheck, type Channel, type PromotionConfig } from "./contracts";
 import { command, jsonClient, type Command } from "./io";
 import { assertRequiredCI, requiredCIEvidence, REQUIRED_CI } from "./ci";
+import { alphaBarrierUnmutated, alphaRequiredChecks, automaticAlpha, supersededCandidate } from "./alpha-ci";
 import { CutoverReceipt } from "./cutover";
 
 function validateHostedReceipt(receipt: unknown, run: any, config: Pick<PromotionConfig, "sourceSha" | "branch" | "repository">, channel: Channel, jobs: any[], requireOverallSuccess: boolean) {
@@ -73,8 +74,11 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
   const read = (route: string) => json(`https://api.github.com/repos/${config.repository}${route}`, { headers: {
     authorization: `Bearer ${env.GH_TOKEN}`, accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
   } });
-  const requiredChecks = () => Promise.all(REQUIRED_CI.map(async check => requiredCIEvidence(config, check.file, check.name,
-    await read(`/actions/workflows/${check.file}/runs?head_sha=${config.sourceSha}&per_page=100`))));
+  const requiredChecks = async () => {
+    if (env.ZEROS_ALPHA_CI_FAST_PATH === "enabled" && await automaticAlpha(config, env, read)) return alphaRequiredChecks(config, read);
+    return Promise.all(REQUIRED_CI.map(async check => requiredCIEvidence(config, check.file, check.name,
+      await read(`/actions/workflows/${check.file}/runs?head_sha=${config.sourceSha}&per_page=100`))));
+  };
   async function receiptForRun(run: any, channel: Channel, requireOverallSuccess: boolean, kind: "hosted" | "services" | "worker" = "hosted") {
     requireCheck(Number.isSafeInteger(run.id), "Invalid hosted workflow run");
     const name = `${kind === "services" ? "hosted-services" : kind === "worker" ? "worker-promotion" : "hosted-promotion"}-${channel}-${config.sourceSha}`;
@@ -104,6 +108,8 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
   }
   return {
     requiredChecks,
+    automaticAlpha: () => automaticAlpha(config, env, read),
+    alphaBarrierUnmutated: () => alphaBarrierUnmutated(config, env, read),
     async assertRequiredChecks() { assertRequiredCI(await requiredChecks()); },
     /** True only for a successful controlled-cutover run's own complete receipt
      * (API, every Pages surface and WorkOS) for this channel and exact SHA. */
@@ -195,7 +201,7 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
     },
     async assertCurrent() {
       const commit = await read(`/commits/${encodeURIComponent(config.branch)}`);
-      requireCheck(commit.sha === config.sourceSha, "Candidate was superseded before mutation; run the current branch SHA");
+      if (commit.sha !== config.sourceSha) supersededCandidate(commit.sha);
     },
     async ownReceipt(channel: Channel, runId: string) {
       requireCheck(/^[1-9]\d*$/.test(runId), "Invalid publication run identity");
