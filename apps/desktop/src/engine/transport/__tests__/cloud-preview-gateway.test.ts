@@ -73,6 +73,20 @@ afterEach(async () => {
 });
 
 describe("Zeros runtime preview gateway", () => {
+  it("fences new previews for handoff while an admitted response finishes", async () => {
+    let response!: ServerResponse;
+    const application = await serve((_req, res) => { response = res; });
+    const port = await gateway(async () => admission(application));
+    const handler = gateways.at(-1)!;
+    const existing = fetch(`http://127.0.0.1:${port}/`, { headers });
+    void existing.catch(() => undefined);
+    await vi.waitFor(() => expect(response).toBeDefined());
+    expect(handler.handoffBusy()).toBe(true);
+    handler.setHandoffFenced(true);
+    expect((await fetch(`http://127.0.0.1:${port}/`, { headers })).status).toBe(503);
+    response.end("completed"); expect(await (await existing).text()).toBe("completed");
+    await vi.waitFor(() => expect(handler.handoffBusy()).toBe(false));
+  });
   it("rejects a listener retired during the application response handshake", async () => {
     let live = true;
     const application = await serve((_req, res) => { live = false; res.end("retired application"); });

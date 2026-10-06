@@ -39,3 +39,118 @@ describe("read-only cloud runtime quiet state",()=>{
     expect(await f.reader.snapshot("invalid")).toBeNull();
   });
 });
+
+describe("resident engine safe point", () => {
+  const hostId = "55555555-5555-4555-8555-555555555555";
+  function handoffFixture() {
+    const f = fixture();
+    const controls = { resident: () => ({ hostId, fence: 7 }),
+      pauseClaims: vi.fn(), resumeClaims: vi.fn(), drained: () => true, busy: () => false,
+      fence: vi.fn(), inspectUserProcesses: vi.fn(async () => false), seal: vi.fn(async () => {}), unseal: vi.fn() };
+    const options = { ...f.options, handoff: controls };
+    const reader = new CloudRuntimeQuietState(options);
+    const request = { challenge, ...scope, hostId, fence: 7, expiresAtMs: Date.now() + 30_000 };
+    return { ...f, options, controls, reader, request };
+  }
+  it("pauses new claims while an admitted turn drains, then seals only at a stable safe point", async () => {
+    const f = handoffFixture(); f.controls.drained = () => false;
+    expect(await f.reader.prepareHandoff(f.request)).toMatchObject({ phase: "draining" });
+    expect(f.controls.pauseClaims).toHaveBeenCalledOnce();
+    expect(f.controls.seal).not.toHaveBeenCalled();
+    f.controls.drained = () => true;
+    expect(await f.reader.prepareHandoff(f.request)).toMatchObject({ phase: "fenced", ...scope, hostId, fence: 7 });
+    expect(f.controls.fence).toHaveBeenCalledWith(true);
+    expect(f.controls.seal).toHaveBeenCalledOnce();
+    expect(f.reader.consumeHandoff(f.request)).toBe(true);
+    expect(f.reader.consumeHandoff(f.request)).toBe(true);
+    expect(f.reader.consumeHandoff({ ...f.request, challenge: hostId })).toBe(false);
+    expect(await f.reader.cancelHandoff(f.request.challenge)).toBe(false);
+  });
+  it("uses the resident workload guards while preserving the conservative quiet reader", async () => {
+    const f = handoffFixture();
+    const reader = new CloudRuntimeQuietState({ ...f.options, busy: () => true, livePty: () => true,
+      presence: () => "present", inspectUserProcesses: async () => true, handoff: f.controls });
+    expect(await reader.snapshot(challenge)).toMatchObject({ workloadBusy: true, livePty: true, presence: "present" });
+    expect(await reader.prepareHandoff(f.request)).toMatchObject({ phase: "fenced" });
+    expect(await reader.cancelHandoff(challenge)).toBe(true);
+    expect(f.controls.unseal).toHaveBeenCalledOnce();
+    expect(f.controls.resumeClaims).toHaveBeenCalledOnce();
+  });
+  it("drops an admission fence if activity changes during the final process inspection", async () => {
+    const f = handoffFixture();
+    f.controls.inspectUserProcesses.mockImplementation(async () => { f.activity.revision++; return false; });
+    expect(await f.reader.prepareHandoff(f.request)).toMatchObject({ phase: "draining" });
+    expect(f.controls.fence.mock.calls.map(call => call[0])).toEqual([true, false]);
+    expect(f.controls.seal).not.toHaveBeenCalled();
+    await f.reader.cancelHandoff(challenge);
+  });
+  it("denies mismatched source, host, nonce and expired requests without changing admission", async () => {
+    const f = handoffFixture();
+    for (const invalid of [{ generation: 2 }, { organizationId: hostId }, { hostId: challenge },
+      { fence: 8 }, { challenge: "invalid" }, { expiresAtMs: Date.now() - 1 }])
+      expect(await f.reader.prepareHandoff({ ...f.request, ...invalid })).toBeNull();
+    expect(f.controls.pauseClaims).not.toHaveBeenCalled();
+    expect(f.controls.fence).not.toHaveBeenCalled();
+  });
+  it("never seals unknown processes, failed record sync, or an unreachable resident", async () => {
+    const f = handoffFixture();
+    f.controls.inspectUserProcesses.mockRejectedValueOnce(new Error("private inspection"));
+    expect(await f.reader.prepareHandoff(f.request)).toMatchObject({ phase: "draining" });
+    expect(f.controls.seal).not.toHaveBeenCalled();
+    await f.reader.cancelHandoff(challenge);
+    const local = new CloudRuntimeQuietState({ ...f.options, cloud: () => false, handoff: f.controls });
+    expect(await local.prepareHandoff(f.request)).toBeNull();
+  });
+  it("joins duplicate preparation and delays cancellation until sealing settles", async () => {
+    const f = handoffFixture(); let finish!: () => void;
+    f.controls.seal.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const first = f.reader.prepareHandoff(f.request), second = f.reader.prepareHandoff(f.request);
+    await vi.waitFor(() => expect(f.controls.seal).toHaveBeenCalledOnce());
+    const cancelling = f.reader.cancelHandoff(challenge);
+    expect(f.controls.resumeClaims).not.toHaveBeenCalled();
+    finish(); await Promise.all([first, second, cancelling]);
+    expect(f.controls.unseal).toHaveBeenCalledOnce();
+    expect(f.controls.resumeClaims).toHaveBeenCalledOnce();
+    expect(f.reader.consumeHandoff(f.request)).toBe(false);
+  });
+  it("does not restore old admission when source authority changes during preparation", async () => {
+    const f = handoffFixture();
+    f.controls.inspectUserProcesses.mockImplementation(async () => {
+      f.options.scope = () => ({ ...scope, generation: 2 }); return false;
+    });
+    expect(await f.reader.prepareHandoff(f.request)).toBeNull();
+    expect(f.controls.resumeClaims).not.toHaveBeenCalled();
+    expect(f.controls.fence.mock.calls.map(call => call[0])).toEqual([true]);
+    expect(f.controls.seal).not.toHaveBeenCalled();
+  });
+  it("restores a partially applied admission fence if its synchronous setup fails", async () => {
+    const f = handoffFixture();
+    f.controls.fence.mockImplementationOnce(() => { throw new Error("busy Git broker"); });
+    expect(await f.reader.prepareHandoff(f.request)).toBeNull();
+    expect(f.controls.fence.mock.calls.map(call => call[0])).toEqual([true, false]);
+    expect(f.controls.resumeClaims).toHaveBeenCalledOnce();
+    expect(f.controls.seal).not.toHaveBeenCalled();
+  });
+  it("expires an unconsumed fence and resumes only after restoring the writer", async () => {
+    vi.useFakeTimers();
+    try {
+      const f = handoffFixture(); const order: string[] = [];
+      f.controls.unseal.mockImplementation(() => { order.push("writer"); });
+      f.controls.resumeClaims.mockImplementation(() => { order.push("claims"); });
+      await f.reader.prepareHandoff(f.request);
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(order).toEqual(["writer", "claims"]);
+      expect(f.reader.consumeHandoff(f.request)).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+  it("does not fence a failed record projection or an unreachable resident", async () => {
+    const f = handoffFixture();
+    const lagging = new CloudRuntimeQuietState({ ...f.options, activity: () => ({ ...f.activity, recordSync: "failed" }) });
+    expect(await lagging.prepareHandoff(f.request)).toMatchObject({ phase: "draining" });
+    await lagging.cancelHandoff(challenge);
+    const unreachable = new CloudRuntimeQuietState({ ...f.options, handoff: { ...f.controls, resident: () => null } });
+    expect(await unreachable.prepareHandoff(f.request)).toBeNull();
+    expect(f.controls.fence).not.toHaveBeenCalled();
+    expect(f.controls.seal).not.toHaveBeenCalled();
+  });
+});

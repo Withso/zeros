@@ -202,18 +202,51 @@ function parseResidentFence(value, source = false) {
     positiveInteger(value.fence) ? { ...value } : null;
 }
 
+const HANDOFF_KEYS = ["challenge", "engineInstanceId", "expiresAtMs", "fence", "generation", "hostId", "organizationId", "workspaceId"];
+function parseHandoff(value) {
+  return isRecord(value) && exactKeys(value, HANDOFF_KEYS) &&
+    ["challenge", "engineInstanceId", "hostId", "organizationId", "workspaceId"].every(key => UUID_PATTERN.test(value[key] ?? "")) &&
+    ["generation", "fence", "expiresAtMs"].every(key => positiveInteger(value[key])) ? { ...value } : null;
+}
+const sameHandoff = (left, right) => !!parseHandoff(left) && !!parseHandoff(right) && HANDOFF_KEYS.every(key => left[key] === right[key]);
+
+/** The source port and credential come only from root's admitted start frame.
+ * Neither a control-plane request nor a user process selects a destination. */
+export async function requestCloudEngineHandoff(endpoint, command) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${endpoint.port}/internal/runtime-handoff`, {
+      method: "POST", redirect: "error", signal: AbortSignal.timeout(25_000),
+      headers: { "content-type": "application/json", "x-zeros-readiness-token": endpoint.token },
+      body: JSON.stringify(command),
+    });
+    if (response.status !== 200 || !response.body) throw new Error();
+    let size = 0; const chunks = [];
+    for await (const chunk of response.body) {
+      size += chunk.length; if (size > 4096) throw new Error(); chunks.push(chunk);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch { throw new Error("Cloud runtime handoff unavailable"); }
+}
+
 export function parseCloudWorkerSupervisorRequest(value) {
   if (
     !isRecord(value) ||
     value.version !== 1 ||
     value.audience !== CLOUD_WORKER_SUPERVISOR_AUDIENCE ||
-    !["status", "update-status", "resident-status", "prepare", "start", "select-runtime"].includes(value.operation)
+    !["status", "update-status", "resident-status", "runtime-handoff", "prepare", "start", "select-runtime"].includes(value.operation)
   ) {
     return null;
   }
   if (value.operation === "prepare" && Object.hasOwn(value, "resident")) {
     const resident = parseResidentFence(value.resident, true);
-    return resident && exactKeys(value, ["audience", "operation", "resident", "version"]) ? { ...value, resident } : null;
+    const handoff = Object.hasOwn(value, "handoff") ? parseHandoff(value.handoff) : undefined;
+    return resident && handoff !== null && exactKeys(value, ["audience", "operation", "resident", "version", ...(handoff ? ["handoff"] : [])])
+      ? { ...value, resident, ...(handoff ? { handoff } : {}) } : null;
+  }
+  if (value.operation === "runtime-handoff") {
+    const handoff = parseHandoff(value.handoff);
+    return handoff && ["prepare", "cancel"].includes(value.action) &&
+      exactKeys(value, ["version", "audience", "operation", "action", "handoff"]) ? { ...value, handoff } : null;
   }
   if (["prepare", "status", "update-status", "resident-status"].includes(value.operation)) {
     return exactKeys(value, ["audience", "operation", "version"])
@@ -331,6 +364,9 @@ export function verifySelectedCloudRuntime(expected) {
 
 export class CloudWorkerSupervisor {
   #handlers;
+  #engineHandoff = null;
+  #handoffReceipt = null;
+  #handoffPrepared = null;
 
   constructor({
     socketPath = CLOUD_WORKER_SUPERVISOR_SOCKET,
@@ -343,6 +379,7 @@ export class CloudWorkerSupervisor {
     // Legacy images retain their closed helper inventory. This v4-only entry
     // is part of the immutable runtime bundle, loaded only for explicit opt-in.
     createResident = async options => new (await import("./cloud-resident-workload.mjs")).CloudResidentWorkload(options),
+    requestEngineHandoff = requestCloudEngineHandoff,
   } = {}) {
     this.socketPath = socketPath;
     this.runtime = runtime;
@@ -352,6 +389,7 @@ export class CloudWorkerSupervisor {
     this.setupScope = setupScope;
     this.verifySelectedRuntime = verifySelectedRuntime;
     this.createResident = createResident;
+    this.requestEngineHandoff = requestEngineHandoff;
     this.resident = null;
     this.preparedResident = null;
     this.selectedRuntime = runtime.profile === "v4" ? cloudActiveRuntimeDescriptor(runtime) : null;
@@ -366,6 +404,7 @@ export class CloudWorkerSupervisor {
       ["status", this.#status.bind(this)],
       ["update-status", this.#updateStatus.bind(this)],
       ["resident-status", this.#residentStatus.bind(this)],
+      ["runtime-handoff", this.#runtimeHandoff.bind(this)],
       ["prepare", this.#prepare.bind(this)],
       ["start", this.#startRuntime.bind(this)],
       ["select-runtime", this.#selectRuntime.bind(this)],
@@ -422,6 +461,7 @@ export class CloudWorkerSupervisor {
       failure ??= error;
     }
     if (failure) throw failure;
+    this.#engineHandoff = null;
     if (this.child === child) this.child = null;
   }
 
@@ -499,7 +539,55 @@ export class CloudWorkerSupervisor {
     return supervisorResponse("ready", { resident: this.resident ? await this.resident.witness() : null });
   }
 
+  async #handoffSource(request, allowExpired = false) {
+    const endpoint = this.#engineHandoff;
+    if (!parseHandoff(request) || this.runtime.profile !== "v4" || !endpoint || !this.resident ||
+      (!allowExpired && request.expiresAtMs <= Date.now()) || request.expiresAtMs > Date.now() + 900_000 ||
+      ["workspaceId", "organizationId", "generation", "engineInstanceId"].some(key => endpoint.scope[key] !== request[key])) return null;
+    const witness = await this.resident.witness();
+    return witness.hostId === request.hostId && witness.fence === request.fence && witness.engineId === request.engineInstanceId &&
+      witness.generation === request.generation && witness.organizationId === request.organizationId && witness.workspaceId === request.workspaceId
+      ? endpoint : null;
+  }
+
+  async #engineHandoffRequest(action, request) {
+    const endpoint = await this.#handoffSource(request, action === "consume");
+    if (!endpoint) return null;
+    const result = await this.requestEngineHandoff(endpoint, { action, request });
+    if (!isRecord(result) || !exactKeys(result, ["version", "action", "request", "accepted", ...(Object.hasOwn(result, "receipt") ? ["receipt"] : [])]) ||
+      result.version !== 1 || result.action !== action || result.accepted !== true || !sameHandoff(result.request, request) ||
+      await this.#handoffSource(request, action === "consume") !== endpoint) return null;
+    if (action === "prepare") {
+      const receipt = result.receipt;
+      if (!isRecord(receipt) || !exactKeys(receipt, [...HANDOFF_KEYS, "version", "phase", "activityRevision"]) || receipt.version !== 1 ||
+        !["draining", "fenced"].includes(receipt.phase) || !Number.isSafeInteger(receipt.activityRevision) || receipt.activityRevision < 0 ||
+        HANDOFF_KEYS.some(key => receipt[key] !== request[key])) return null;
+    } else if (Object.hasOwn(result, "receipt")) return null;
+    return result;
+  }
+
+  async #runtimeHandoff(request) {
+    if (!["prepare", "cancel"].includes(request.action)) return rejectSupervisorRequest();
+    const result = await this.#engineHandoffRequest(request.action, request.handoff);
+    if (!result) return rejectSupervisorRequest();
+    if (request.action === "cancel") {
+      this.#handoffReceipt = null;
+      return supervisorResponse("cancelled");
+    }
+    this.#handoffReceipt = { request: { ...request.handoff }, receipt: result.receipt };
+    return supervisorResponse(result.receipt.phase, { handoff: result.receipt });
+  }
+
   async #prepare(request) {
+    if (request.handoff) {
+      const replay = this.#handoffPrepared;
+      if (replay && this.#sessionMatches(replay.response.session) && sameHandoff(request.handoff, replay.request) &&
+        request.resident?.hostId === replay.request.hostId && request.resident?.engineId === replay.request.engineInstanceId &&
+        request.resident?.fence === replay.request.fence) return replay.response;
+      if (this.#handoffReceipt?.receipt.phase !== "fenced" || !sameHandoff(request.handoff, this.#handoffReceipt.request) ||
+        request.resident?.hostId !== request.handoff.hostId || request.resident?.engineId !== request.handoff.engineInstanceId ||
+        request.resident?.fence !== request.handoff.fence || !await this.#engineHandoffRequest("consume", request.handoff)) return rejectSupervisorRequest();
+    } else if (request.resident && this.#handoffReceipt) return rejectSupervisorRequest();
     let resident = null;
     if (request.resident) {
       if (this.runtime.profile !== "v4" || !this.resident) return rejectSupervisorRequest();
@@ -507,11 +595,15 @@ export class CloudWorkerSupervisor {
       resident = await this.resident.detach(request.resident);
     }
     this.session = null;
+    this.#handoffReceipt = null;
+    this.#handoffPrepared = null;
     this.preparedResident = null;
     await this.stopChild(resident ? { preserveWorkload: resident.hostId } : undefined);
     this.preparedResident = resident;
     this.session = `zsp_${randomBytes(32).toString("base64url")}`;
-    return supervisorResponse("prepared", { session: this.session, ...(resident ? { resident } : {}) });
+    const response = supervisorResponse("prepared", { session: this.session, ...(resident ? { resident } : {}) });
+    if (request.handoff) this.#handoffPrepared = { request: { ...request.handoff }, response };
+    return response;
   }
 
   #selectRuntime(request) {
@@ -536,6 +628,7 @@ export class CloudWorkerSupervisor {
       return rejectSupervisorRequest();
     if (requested && this.runtime.profile !== "v4") return rejectSupervisorRequest();
     this.session = null;
+    this.#handoffPrepared = null;
     this.preparedResident = null;
     await this.stopChild(retained ? { preserveWorkload: retained.hostId } : undefined);
     let environment = request.environment;
@@ -557,7 +650,10 @@ export class CloudWorkerSupervisor {
         protocol: "zeros.resident-pty/v1", hostId: requested.hostId, authority,
       })).toString("base64url") };
     }
+    const scope = { workspaceId: execution.workspaceId, organizationId: execution.organizationId,
+      generation: execution.generation, engineInstanceId: environment.runtime.engine.instanceId };
     const pid = await this.launch(environment);
+    this.#engineHandoff = { scope, port: environment.port, token: environment.runtime.engine.readinessProbeToken };
     return supervisorResponse("started", { pid });
   }
 

@@ -2,6 +2,8 @@ export {
   closeZerosDb,
   latestSchemaVersion,
   openZerosDb,
+  resumeZerosDbAfterRuntimeHandoff,
+  sealZerosDbForRuntimeHandoff,
   setZerosDbPathForTesting,
   zerosDataDir,
   zerosDbPath,

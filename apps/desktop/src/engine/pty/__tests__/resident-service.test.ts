@@ -10,15 +10,33 @@ const cleanup: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 
 describe.runIf(process.platform === "linux")("cloud resident engine adapter", () => {
+  it("treats an unexpected host disconnect as busy until attachment is restored", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "zeros-resident-health-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const authority = { organizationId: randomUUID(), workspaceId: randomUUID(), engineId: randomUUID(), generation: 1,
+      fence: 1, token: randomBytes(32).toString("base64url") };
+    const socketPath = path.join(root, "host.sock");
+    const host = new ResidentPtyHost({ root, socketPath, organizationId: authority.organizationId, workspaceId: authority.workspaceId,
+      shell: "/bin/bash", identity: { uid: process.getuid!(), gid: process.getgid!() } });
+    cleanup.push(() => host.stop()); await host.start(); host.authorize(authority);
+    const service = new ResidentTerminalService({ hostId: randomUUID(), socketPath, authority });
+    cleanup.push(async () => service.disconnect());
+    await service.connect(); expect(service.busy()).toBe(false);
+    host.revoke(2);
+    await expect.poll(() => service.busy()).toBe(true);
+  });
   it("counts resize/close requests before awaiting them and rejects a disconnected hydration", async () => {
     const service = new ResidentTerminalService({ hostId: randomUUID(), socketPath: "/unused",
       authority: { organizationId: randomUUID(), workspaceId: randomUUID(), engineId: randomUUID(), generation: 1,
         fence: 1, token: randomBytes(32).toString("base64url") } });
+    vi.spyOn(service["client"], "isConnected").mockReturnValue(true);
+    vi.spyOn(service["client"], "connect").mockResolvedValue();
+    vi.spyOn(service["client"], "list").mockResolvedValue([]);
+    await service.connect();
     let finish!: () => void;
     vi.spyOn(service["client"], "resize").mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
     const resize = service.resize("test", 80, 24);
     expect(service.busy()).toBe(true); finish(); await resize; expect(service.busy()).toBe(false);
-    vi.spyOn(service["client"], "connect").mockResolvedValue();
     vi.spyOn(service["client"], "list").mockImplementation(() => new Promise(resolve => { finish = () => resolve([]); }));
     const connecting = service.connect();
     const failed = expect(connecting).rejects.toThrow("host_unavailable");

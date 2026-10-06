@@ -32,7 +32,7 @@ export class ResidentTerminalService {
     try {
       await this.client.connect();
       const sessions = await this.client.list();
-      if (epoch !== this.epoch) throw new ResidentPtyError("host_unavailable");
+      if (epoch !== this.epoch || !this.client.isConnected()) throw new ResidentPtyError("host_unavailable");
       this.sessions.clear();
       for (const session of sessions) this.sessions.set(session.sessionId, session);
       this.connected = true;
@@ -44,7 +44,8 @@ export class ResidentTerminalService {
     const session = this.sessions.get(sessionId); return session ? { ...session } : undefined;
   }
   has(sessionId: string): boolean { return this.sessions.get(sessionId)?.exited === false; }
-  busy(): boolean { return this.loading > 0 || this.operations > 0 || this.writes.size > 0; }
+  healthy(): boolean { return this.connected && this.client.isConnected(); }
+  busy(): boolean { return !this.healthy() || this.loading > 0 || this.operations > 0 || this.writes.size > 0; }
   hasRecentInput(): boolean { return [...this.sessions.values()].some(session => session.lastInputAtMs > 0 && Date.now() - session.lastInputAtMs < 10 * 60_000); }
 
   async create(launch: ResidentPtyCreate): Promise<ResidentPtySession> {

@@ -19,12 +19,14 @@ import { runMigrations } from "./migrations";
 
 let db: Database.Database | null = null;
 let pathOverride: string | null = null;
+let runtimeHandoffSealed = false;
 
 /** Test seam — point the DB at a tmpdir file (or ":memory:") without booting
  *  the engine. Production callers never set this. Closes any open handle so the
  *  next openZerosDb() re-opens at the new path. */
 export function setZerosDbPathForTesting(p: string | null): void {
   pathOverride = p;
+  runtimeHandoffSealed = false;
   if (db) {
     try {
       db.close();
@@ -37,6 +39,7 @@ export function setZerosDbPathForTesting(p: string | null): void {
 
 /** Open (once) the unified Zeros DB, applying pending migrations. Singleton. */
 export function openZerosDb(): Database.Database {
+  if (runtimeHandoffSealed) throw new Error("SQLite is sealed for runtime handoff");
   if (db) return db;
   const file = pathOverride ?? zerosDbPath();
   if (file !== ":memory:") {
@@ -65,6 +68,26 @@ export function closeZerosDb(): void {
     }
     db = null;
   }
+}
+
+/** Only the admitted cloud handoff path calls this after draining engine work
+ * and flushing the durable record. Unlike ordinary teardown, a failed close
+ * cannot be treated as proof that the old engine no longer owns a writer. */
+export function sealZerosDbForRuntimeHandoff(): void {
+  if (runtimeHandoffSealed) return;
+  if (db?.inTransaction) throw new Error("SQLite transaction blocks runtime handoff");
+  db?.close();
+  db = null;
+  runtimeHandoffSealed = true;
+}
+
+/** Cancellation may resume only before root consumes the exact source fence.
+ * Open successfully before admission is restored; retain the seal on failure. */
+export function resumeZerosDbAfterRuntimeHandoff(): void {
+  if (!runtimeHandoffSealed) return;
+  runtimeHandoffSealed = false;
+  try { openZerosDb(); }
+  catch { runtimeHandoffSealed = true; throw new Error("SQLite runtime handoff could not resume"); }
 }
 
 export {

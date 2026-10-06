@@ -23,6 +23,7 @@ export class ResidentPtyClient {
   constructor(private readonly options: { socketPath: string; authority: ResidentEngineAuthority }) {}
 
   events(listener: typeof this.onEvent): void { this.onEvent = listener; }
+  isConnected(): boolean { return this.ready && this.socket !== null && !this.socket.destroyed; }
 
   async connect(): Promise<void> {
     if (this.socket) throw new ResidentPtyError("host_unavailable");

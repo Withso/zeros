@@ -4,6 +4,7 @@ import { configureNativeGithubDesktop, acceptNativeGithubDesktop } from "./git/g
 import { readCloudAgentRuntimeAttestation } from "./cloud-runtime-attestation";
 import { CloudIdleStopScheduler, CloudUserPresence, hasCloudUserProcesses, isCloudIdleMaintenance } from "./cloud-idle-stop";
 import { CloudRuntimeQuietState } from "./cloud-runtime-quiet-state";
+import { resolveCloudRuntime } from "./agents/containment/cloud-runtime-root.mjs";
 import { conversationModePort } from "./design/conversation-mode";
 import { startCloudDesignCapture } from "./design/capture-cloud";
 import { setDesignCaptureConfig } from "./design/capture-client";
@@ -74,7 +75,7 @@ import {
 } from "./runtime";
 import { shouldLogAgentDispatch } from "./agent-dispatch-logging";
 import { engineRuntimeDir, zerosDataDir } from "./db/paths";
-import { openZerosDb } from "./db";
+import { openZerosDb, resumeZerosDbAfterRuntimeHandoff, sealZerosDbForRuntimeHandoff } from "./db";
 import {
   buildAccountAuthFromEnv,
   assertQualifiedCloudAccountBinding,
@@ -1078,6 +1079,9 @@ export class ZerosEngine {
   private cloudReplicaSessionChain: Promise<void> = Promise.resolve();
   private cloudRuntimeAuthorityStopping = false;
   private cloudRuntimeCheckpointQuiescing = false;
+  private cloudRuntimeHandoffFenced = false;
+  private cloudHandoffRequests = 0;
+  private cloudHandoffWatchersDirty = false;
   private cloudIdleReservation: (() => boolean) | null = null;
   private cloudIdleCheckpoint: { id: string; promise: Promise<void> } | null = null;
   private cloudIdleCaptureId: string | null = null;
@@ -1126,6 +1130,39 @@ export class ZerosEngine {
     livePty: () => this.pty.list().length > 0 || this.terminals.visibleTo({ isRemote: false, restricted: new Set() }).some(terminal => !terminal.exited),
     presence: () => this.cloudUserPresence.snapshot(this.router.clientsOfKind("cloud")),
     inspectUserProcesses: () => this.cloudIdleUserProcesses(),
+    handoff: {
+      resident: () => this.residentConfiguration && this.residentTerminals?.healthy() ? {
+        hostId: this.residentConfiguration.hostId, fence: this.residentConfiguration.authority.fence,
+      } : null,
+      scope: () => this.cloudRuntimeConfig && this.cloudRuntimeRegistration?.hasRuntimeHandoffAuthority() ? {
+        workspaceId: this.cloudRuntimeConfig.execution.workspaceId, organizationId: this.cloudRuntimeConfig.execution.organizationId,
+        generation: this.cloudRuntimeConfig.execution.generation, engineInstanceId: this.cloudRuntimeConfig.engine.instanceId,
+      } : null,
+      pauseClaims: () => this.cloudCommands?.pauseClaims(),
+      resumeClaims: () => this.cloudCommands?.resumeClaims(),
+      drained: () => this.cloudCommands?.handoffDrained() === true,
+      busy: () => this.cloudHandoffBusy(),
+      fence: fenced => this.setCloudHandoffFence(fenced),
+      inspectUserProcesses: () => {
+        if (!this.residentConfiguration || !this.residentTerminals?.healthy()) return Promise.resolve(true);
+        const runtime = resolveCloudRuntime();
+        if (runtime.profile !== "v4") return Promise.resolve(true);
+        return hasCloudUserProcesses({ infrastructurePids: this.cloudLanguageServices?.idleProcessRoots() ?? [],
+          residentScope: `${runtime.cgroupRoot.slice("/sys/fs/cgroup".length)}/engine-workload-${this.residentConfiguration.hostId}` });
+      },
+      seal: async () => {
+        if (!this.cloudRuntimeRegistration) throw new Error("Cloud runtime handoff unavailable");
+        await this.cloudCheckpointScheduler?.pause();
+        await this.cloudEvents?.flush();
+        await this.cloudRuntimeRegistration.pauseRecordForRuntimeHandoff();
+        sealZerosDbForRuntimeHandoff();
+      },
+      unseal: () => {
+        if (!this.cloudRuntimeRegistration?.hasRuntimeHandoffAuthority()) throw new Error("Cloud runtime handoff authority lost");
+        resumeZerosDbAfterRuntimeHandoff();
+        this.cloudRuntimeRegistration.resumeRecordAfterRuntimeHandoff();
+      },
+    },
   });
   /** Includes requests waiting on recognition/Git before their first write.
    * Kept separate from territory starts so a registry mutation cannot drain
@@ -1157,7 +1194,7 @@ export class ZerosEngine {
     this.cloudCheckpointScheduler = this.cloudDurabilityRuntime
       ? new CloudCheckpointScheduler({
           capture: (directive, authority) => this.cloudDurabilityRuntime!.checkpoint(directive, authority),
-          eligible: () => this.running && !this.cloudRuntimeAuthorityStopping && !this.cloudRuntimeCheckpointQuiescing,
+          eligible: () => this.running && !this.cloudRuntimeAuthorityStopping && !this.cloudRuntimeCheckpointQuiescing && !this.cloudRuntimeHandoffFenced,
           failed: () => console.warn("[Zeros cloud] periodic checkpoint deferred; last durable recovery point retained"),
         })
       : null;
@@ -1976,6 +2013,7 @@ export class ZerosEngine {
                 token: this.cloudRuntimeConfig.engine.readinessProbeToken,
                 read: () => this.cloudRuntimeRegistration!.readiness(),
                 readQuiet: (challenge: string) => this.cloudRuntimeQuietState.snapshot(challenge),
+                handoff: command => this.cloudRuntimeQuietState.handleHandoff(command),
               },
               verifyToken: (token: string) =>
                 this.cloudRuntimeRegistration!.verifyClientAdmission(token),
@@ -3048,8 +3086,9 @@ export class ZerosEngine {
     // to any settings.toml nudge every client to re-resolve. Stat-poll —
     // bun-safe, immune to phantom FSEvents (full metadata-signature guard).
     this.settingsWatcher = startSettingsWatcher(
-      () => this.workspace.settingsRepoRoots(),
+      () => this.cloudRuntimeHandoffFenced ? [] : this.workspace.settingsRepoRoots(),
       (changedPaths) => {
+        if (this.cloudRuntimeHandoffFenced) { this.cloudHandoffWatchersDirty = true; return; }
         // A settings file changed on disk (hand-edit or the Settings UI's
         // write). Re-resolve the global MCP registry so the change reaches each
         // agent's next session live, then tell clients to refetch.
@@ -3076,8 +3115,9 @@ export class ZerosEngine {
     // stat-poll tiny git-dir state (stage/commit/checkout), then broadcast one
     // workspaces invalidation so File / All Files / Changes re-pull together.
     this.gitWatcher = startGitWatcher(
-      () => this.workspace.gitWatchTargets(),
+      () => this.cloudRuntimeHandoffFenced ? [] : this.workspace.gitWatchTargets(),
       (change) => {
+        if (this.cloudRuntimeHandoffFenced) { this.cloudHandoffWatchersDirty = true; return; }
         this.broadcast(
           createMessage({
             type: "DB_CHANGED",
@@ -3291,11 +3331,52 @@ export class ZerosEngine {
       });
   }
 
+  /** Only resident workloads may outlive this engine. Live preview/SSH/tunnel
+   * streams and legacy PTYs still defer a swap; no guard stops them to pass. */
+  private cloudHandoffBusy(): boolean {
+    return !this.running || !this.cloudWorker || this.cloudRuntimeAuthorityStopping || this.cloudRuntimeCheckpointQuiescing ||
+      !this.residentTerminals?.healthy() || this.residentTerminals.busy() || this.cloudHandoffRequests > 0 ||
+      this.activePromptContexts.size > 0 || this.promptSessions.size > 0 || this.retiringCloudExecutions.size > 0 ||
+      this.pendingPermissionRequests.size > 0 || this.pendingQuestionRequests.size > 0 ||
+      this.cloudWorkspaceMutations.size > 0 || this.globalDesignAuthorityStarts.size > 0 ||
+      [...this.workspaceProcessStarts.values()].some(starts => starts.size > 0) ||
+      this.setup.hasRepositoryCodeAuthority() || this.runs.hasRepositoryCodeAuthority() ||
+      this.cloudCommands?.handoffDrained() !== true || this.cloudActions?.hasActiveWork() === true ||
+      this.cloudGoals.active() || this.activeAgentExecutionCount() > 0 || this.pty.list().length > 0 ||
+      this.cloud?.handoffBusy() === true || [...this.residentGithubBrokers.values()].some(broker => broker.busy());
+  }
+
+  private setCloudHandoffFence(fenced: boolean): void {
+    this.cloudRuntimeHandoffFenced = fenced;
+    this.cloud?.setHandoffFenced(fenced);
+    if (fenced) {
+      this.cloudHandoffWatchersDirty = true;
+      for (const broker of this.residentGithubBrokers.values())
+        if (!broker.pauseIfIdle()) throw new Error("Cloud runtime handoff Git operation is busy");
+    } else {
+      for (const broker of this.residentGithubBrokers.values()) broker.resume();
+      this.cloudCheckpointScheduler?.resume();
+      if (this.cloudHandoffWatchersDirty) {
+        this.cloudHandoffWatchersDirty = false;
+        // A cancelled reservation must rescan edits made by resident shells
+        // while watcher callbacks could not access the sealed database.
+        queueMicrotask(() => {
+          if (!this.running || this.cloudRuntimeHandoffFenced || this.cloudRuntimeAuthorityStopping) return;
+          try {
+            this.loadMcpRegistry(); this.reloadGateway();
+            this.scheduleDesignTerritoryReconcile(listWorkspaces({ archived: false }), "settings");
+            this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["settings", "workspaces"] }));
+          } catch { /* Existing watchers will retry from current on-disk state. */ }
+        });
+      }
+    }
+  }
+
   private cloudIdleBusy(includePresence = true): boolean {
     // Observe traffic even while another busy guard holds; a byte sampled
     // after a long turn must not be mistaken for freshly received traffic.
     const humanServices = this.cloudHumanServices?.hasActiveWork() === true;
-    return !this.running || !this.cloudWorker || this.cloudRuntimeAuthorityStopping ||
+    return !this.running || !this.cloudWorker || this.cloudRuntimeAuthorityStopping || this.cloudRuntimeHandoffFenced ||
       this.activePromptContexts.size > 0 || this.promptSessions.size > 0 || this.retiringCloudExecutions.size > 0 ||
       this.pendingPermissionRequests.size > 0 || this.pendingQuestionRequests.size > 0 ||
       this.cloudWorkspaceMutations.size > this.cloudWorkspaceIdleMaintenance.size || this.globalDesignAuthorityStarts.size > 0 ||
@@ -3316,7 +3397,7 @@ export class ZerosEngine {
 
   private async stopIdleCloudWorkspace(authority: CloudDurabilityAuthority, stillIdle: () => boolean): Promise<void> {
     const runtime = this.cloudRuntimeRegistration;
-    if (!runtime || this.cloudRuntimeCheckpointQuiescing || !stillIdle()) return;
+    if (!runtime || this.cloudRuntimeCheckpointQuiescing || this.cloudRuntimeHandoffFenced || !stillIdle()) return;
     this.cloudRuntimeCheckpointQuiescing = true;
     this.cloudIdleReservation = stillIdle;
     this.cloud?.setHumanServicesPaused(true);
@@ -3380,7 +3461,7 @@ export class ZerosEngine {
       throw new Error("Cloud workspace is no longer idle");
     }
     if (
-      !this.cloudDurabilityRuntime ||
+      this.cloudRuntimeHandoffFenced || !this.cloudDurabilityRuntime ||
       !this.cloudRecordRuntime ||
       (this.cloudRuntimeCheckpointQuiescing && !idleReserved)
     ) {
@@ -3892,6 +3973,7 @@ export class ZerosEngine {
   private workspaceProcessStartBlock(
     workspaceId: string | null | undefined,
   ): string | null {
+    if (this.cloudWorker && this.cloudRuntimeHandoffFenced) return "This cloud workspace is applying a runtime update.";
     if (this.cloudRuntimeCheckpointQuiescing) {
       return "This cloud workspace is creating a final durable checkpoint.";
     }
@@ -5249,14 +5331,19 @@ export class ZerosEngine {
     msg: EngineMessage,
     client: TransportClient,
   ): Promise<void> {
+    const cloud = !!this.cloudWorker;
+    if (cloud && this.cloudRuntimeHandoffFenced) { client.close(1012, "Runtime update"); return; }
+    if (cloud) this.cloudHandoffRequests++;
+    try {
     // Prompt activity belongs to the accepted turn, starting before its first
     // await. Its original RPC can remain unresolved after verified retirement;
     // counting that promise too would keep renewing an abandoned work lease.
     if (msg.type === "CONNECTED" || msg.type === "HEARTBEAT" || msg.type === "AGENT_PROMPT" ||
         (this.cloudWorker && msg.type === "WORKSPACE_REQUEST" && msg.op === "cloudPresence.update")) {
-      return this.dispatchMessage(msg, client);
+      return await this.dispatchMessage(msg, client);
     }
-    return this.activityHeartbeat.track(() => this.dispatchMessage(msg, client));
+    return await this.activityHeartbeat.track(() => this.dispatchMessage(msg, client));
+    } finally { if (cloud) this.cloudHandoffRequests--; }
   }
 
   private async dispatchMessage(
