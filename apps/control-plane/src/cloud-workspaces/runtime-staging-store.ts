@@ -26,9 +26,9 @@ export type RuntimeStagingStore = {
 };
 
 type Offer = Parameters<DatabaseCloudRuntimeTransitionService["offer"]>[0];
-function operationId(source: Omit<Offer, "operationId" | "mode">, runtimeId: string): string {
+function operationId(source: Omit<Offer, "operationId" | "mode">, runtimeId: string, previous: string | null): string {
   const bytes = createHash("sha256").update(JSON.stringify(["zeros.runtime-stage/v1", source.organizationId,
-    source.workspaceId, source.generation, source.sourceEngineInstanceId, runtimeId])).digest();
+    source.workspaceId, source.generation, source.sourceEngineInstanceId, runtimeId, previous])).digest();
   bytes[6] = (bytes[6]! & 15) | 0x50; bytes[8] = (bytes[8]! & 63) | 0x80;
   const hex = bytes.subarray(0, 16).toString("hex");
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
@@ -75,8 +75,19 @@ export class DatabaseRuntimeStagingStore implements RuntimeStagingStore {
           sourceEngineInstanceId: row.sourceEngineInstanceId };
         const selection = await selectCloudWorkspaceRuntimeUpgrade(tx, { ...scope, runtime: cloudRuntimePin(row),
           qualificationMode: this.options.qualificationMode });
-        if (selection.updateAvailable && selection.selected) items.push({ ...scope, mode: "engine",
-          operationId: operationId(scope, selection.selected.pin.runtimeId) });
+        if (!selection.updateAvailable || !selection.selected) continue;
+        // A long-running turn may outlive HU's offer deadline. Recover under
+        // a fresh durable operation identity, but never create a tight loop of
+        // cancelled generations after a staging failure or controller restart.
+        const previous = (await tx.query<{ transition_id: string; waiting: boolean }>(`SELECT transition_id,
+          stage_deadline_at>clock_timestamp() AS waiting FROM cloud_workspace_runtime_transitions
+          WHERE workspace_id=$1 AND org_id=$2 AND source_engine_instance_id=$3 AND mode='engine'
+            AND target_descriptor->>'runtimeId'=$4 AND phase='cancelled'
+          ORDER BY created_at DESC,transition_id DESC LIMIT 1`,
+        [scope.workspaceId, scope.organizationId, scope.sourceEngineInstanceId, selection.selected.pin.runtimeId])).rows[0];
+        if (previous?.waiting) continue;
+        items.push({ ...scope, mode: "engine",
+          operationId: operationId(scope, selection.selected.pin.runtimeId, previous?.transition_id ?? null) });
       }
       return { items, cursor: rows.length === limit ? rows.at(-1)!.workspaceId : null };
     });

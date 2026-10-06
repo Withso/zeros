@@ -79,6 +79,22 @@ import { notifyRuntimeStaging } from "./runtime-staging-notification.js";
     } finally { await stop(); }
   });
 
+  it("recovers an expired offer under a fresh idempotency key without looping inside its retry window", async () => {
+    const first = (await store.discover(null, 16)).items[0]!;
+    const owned = await claim();
+    expect(await transitions.cancelStaging(owned)).toBe(true);
+    expect((await store.discover(null, 16)).items).toEqual([]);
+    // The journal permits shortening a deadline, never extending one. No
+    // clock mocking or trigger bypass is needed to exercise expired recovery.
+    await pool.query("UPDATE cloud_workspace_runtime_transitions SET stage_deadline_at=clock_timestamp() WHERE transition_id=$1", [owned.transitionId]);
+    const retry = (await store.discover(null, 16)).items[0]!;
+    expect(retry.operationId).not.toBe(first.operationId);
+    expect((await store.discover(null, 16)).items[0]!.operationId).toBe(retry.operationId);
+    expect(await transitions.offer(retry)).toMatchObject({ sourceGeneration: 1, candidateGeneration: 3, phase: "offered" });
+    expect((await pool.query("SELECT current_generation,status FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0])
+      .toEqual({ current_generation: 1, status: "busy" });
+  });
+
   it("delivers empty qualification/release hints only after their transaction commits", async () => {
     const listener = await pool.connect(), notices: pg.Notification[] = [];
     listener.on("notification", notice => notices.push(notice));

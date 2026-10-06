@@ -23,13 +23,17 @@ does not change its exact organization/workspace/generation/engine scope.
 The worker calls HU's `offer`, `claim`, `renew`, `reconcile`, `staged`, `release`
 and `cancelStaging` APIs. HU owns the common lock and transition journal. No new
 migration or supervisor queue is introduced. The operation UUID is derived from
-the source identity and discovered target, so duplicate pushes and worker restarts
+the source identity, discovered target and previous expired cancellation, so duplicate pushes and worker restarts
 join the same offer. HU reselects and fences authoritative eligibility when offering.
 
 Each replica runs at most two downloads (the constructor caps this at four),
 reads pages of 16, and keeps at most 512 retry records. A transition gets three
 attempts per worker process with backoff. HU's durable 15-minute deadline bounds
 retries across crashes; exhaustion cancels that offer without changing the source.
+After the cancelled offer's original deadline, polling may create a fresh offer
+with a new durable idempotency key. A long-running turn therefore cannot strand
+an update permanently. A newly selected target need not wait for an older target's
+retry window. Duplicate scans inside each window join the same offer.
 The verified installer enforces archive/expanded-size and disk checks. This slice
 does not add runtime cache garbage collection.
 
