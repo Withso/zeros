@@ -422,6 +422,10 @@ jobs:
           VITEST_PART: ${{ matrix.part }}
         run: bash scripts/ci/with-userns.sh pnpm test:git --shard="${VITEST_PART}/2"
 
+      - name: Cloud runtime version-skew contracts
+        if: matrix.part == 1
+        run: pnpm check:runtime-skew
+
       - name: Code + Design containment matrix
         # Stable release gate for the promise shipped today: provider profiles,
         # real Linux sandbox attacks (including ignored drafts), hard-link
