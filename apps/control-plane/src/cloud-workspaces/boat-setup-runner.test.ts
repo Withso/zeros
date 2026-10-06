@@ -152,6 +152,34 @@ describe("Boat bootstrap transport", () => {
     expect(f.channel.dispose).toHaveBeenCalledOnce();
   });
 
+  it("keeps polling an exact-base stopped host while enabled restore units start", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture("stopped");
+    f.request.mockReset().mockImplementation(fixture().request.getMockImplementation()!)
+      .mockResolvedValueOnce(f.prepared).mockResolvedValueOnce(v4Fixture().prepared);
+    const result = f.runner.execute(f.input, new AbortController().signal).then(value => ({ value }), error => ({ error }));
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(f.request).toHaveBeenCalledOnce();
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    const outcome = await result;
+    expect("error" in outcome ? outcome.error?.code : "success").toBe("success");
+    expect(f.channel.execute).toHaveBeenCalledOnce();
+  });
+
+  it("bounds a permanently stopped host by the shorter execution timeout", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture("stopped");
+    f.input.timeoutSeconds = 6;
+    f.request.mockReset().mockResolvedValue(f.prepared);
+    const result = f.runner.execute(f.input, new AbortController().signal).catch(error => error);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(await result).toMatchObject({ code: "provider_bootstrap_unavailable", retryable: true });
+    expect(f.request).toHaveBeenCalledTimes(3);
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    expect(f.channel.dispose).toHaveBeenCalledOnce();
+  });
+
   it("aborts promptly during the readiness interval without installing access", async () => {
     vi.useFakeTimers();
     const f = v4Fixture(), controller = new AbortController();
@@ -200,16 +228,17 @@ describe("Boat bootstrap transport", () => {
     expect(JSON.stringify(f.request.mock.calls)).not.toContain("ensure-cloud-worker-supervisor");
     expect(JSON.stringify(f.request.mock.calls)).not.toContain("artifacts.example.test");
   });
-  it.each(["stopped", "failed", "unknown"])("rejects v4 base state %s before installing SSH access", async state => {
+  it.each(["failed", "unknown"])("rejects v4 base state %s before installing SSH access", async state => {
     const f = v4Fixture(state);
     await expect(f.runner.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "provider_bootstrap_unavailable" });
     expect(f.channel.execute).not.toHaveBeenCalled();
     expect(f.request).toHaveBeenCalledOnce();
     expect(f.channel.dispose).toHaveBeenCalledOnce();
   });
-  it("rejects the wrong compatibility id and a v4 request above 64 KiB", async () => {
-    const f = v4Fixture("idle", `bc1-${"d".repeat(64)}`);
+  it.each(["idle", "stopped"])("rejects the wrong compatibility id (%s) and a v4 request above 64 KiB", async state => {
+    const f = v4Fixture(state, `bc1-${"d".repeat(64)}`);
     await expect(f.runner.execute(f.input, new AbortController().signal)).rejects.toMatchObject({ code: "provider_bootstrap_unavailable" });
+    expect(f.request).toHaveBeenCalledOnce();
     const large = v4Fixture();
     large.input.env.ZEROS_CLOUD_WORKSPACE_SETUP_B64 = "A".repeat(64 * 1024 + 1);
     await expect(large.runner.execute(large.input, new AbortController().signal)).rejects.toMatchObject({ code: "provider_command_invalid" });

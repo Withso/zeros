@@ -19,27 +19,43 @@ const BASE_STATUS_COMMAND = "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-boo
 const BOOTSTRAP_FILE_PROBE_COMMAND = "/bin/sh -c 'for f in /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs /opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs /opt/zeros/dist-engine/cli.js; do if test -f \"$f\"; then printf 1; else printf 0; fi; done'";
 type CommandResult = Awaited<ReturnType<CloudWorkspaceCommandRunner["execute"]>>;
 
+function baseHostStopped(response: Record<string, unknown>, expectedBase: string): boolean {
+  if (response.success !== true || response.exitCode !== 0 || response.timedOut || response.stdoutTruncated ||
+    typeof response.stdout !== "string" || Buffer.byteLength(response.stdout) > 16_384 || !/^[^\r\n]+\n?$/.test(response.stdout)) return false;
+  try {
+    const status = RuntimeBaseStatusSchema.safeParse(JSON.parse(response.stdout));
+    return status.success && status.data.baseCompatibilityId === expectedBase && status.data.hostState === "stopped";
+  } catch { return false; }
+}
+
 /** Before any admission or SSH key is sent, poll only the fixed read-only v4
  * status command. A provider-running VM can still be restoring its overlay.
  * All setup/installer/SSH failures retain the worker's ordinary retry policy.
  */
-async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, resourceId: string, signal: AbortSignal, timeoutSeconds: number) {
+async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, resourceId: string, expectedBase: string, signal: AbortSignal, timeoutSeconds: number) {
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(), Math.min(120_000, timeoutSeconds * 1000));
   timer.unref();
   const readinessSignal = AbortSignal.any([signal, deadline.signal]);
+  const hostPending = Object.assign(new CloudProviderError("provider_bootstrap_unavailable", "Boat runtime broker is not ready", true),
+    { diagnostic: { version: 1, phase: "bootstrap", exit: "unknown" } });
   let previousError: unknown;
   try {
     for (;;) {
       signal.throwIfAborted();
       try {
-        return await client.request(`/sandboxes/${resourceId}/commands`, {
+        const response = await client.request(`/sandboxes/${resourceId}/commands`, {
           method: "POST", body: { command: BASE_STATUS_COMMAND, timeoutSeconds: 20 }, signal: readinessSignal,
         });
+        // Commands may work before the enabled host unit starts after overlay
+        // restoration. Observe only; never restart the host or accept a failed,
+        // malformed or foreign base as transient readiness.
+        if (baseHostStopped(response, expectedBase)) throw hostPending;
+        return response;
       } catch (error) {
         signal.throwIfAborted();
         if (deadline.signal.aborted) throw previousError ?? error;
-        const bootPending = error instanceof BoatBootPendingError || (error instanceof CloudProviderError &&
+        const bootPending = error === hostPending || error instanceof BoatBootPendingError || (error instanceof CloudProviderError &&
           error.retryable && error.httpStatus !== undefined && error.httpStatus >= 500);
         if (!bootPending || (error instanceof CloudProviderError && (error.retryAfterMs ?? 0) > 2000)) throw error;
         previousError = error;
@@ -123,7 +139,7 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
       // Boat cold resume restores disk, not the image's OCI entrypoint or /run.
       // This fixed, secret-free helper probes or starts the one root broker;
       // it cannot replace an active engine or consume a launch admission.
-      const prepared = v4 ? await waitForBoatBaseStatus(this.options.client, input.resourceId, signal, input.timeoutSeconds)
+      const prepared = v4 ? await waitForBoatBaseStatus(this.options.client, input.resourceId, input.runtimeBaseCompatibilityId!, signal, input.timeoutSeconds)
         : await this.options.client.request(
         `/sandboxes/${input.resourceId}/commands`,
         {

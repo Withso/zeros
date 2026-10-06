@@ -298,12 +298,13 @@ owner/placement switching introduces no new client state or wake behavior.
 
 The v4 setup transport can observe provider `running` before the guest accepts
 commands. Its fixed, secret-free base-status probe now retries classified Boat
-409 `boat_starting` / `boat_restoring` responses and retryable 5xx responses every
+409 `boat_starting` / `boat_restoring`, retryable 5xx responses, and a valid
+matching-base `stopped` host while enabled restore units start, every
 two seconds within one fenced setup claim. The phase is bounded to 120 seconds
 (or the configured command timeout when shorter) and honors cancellation.
 A longer provider Retry-After, other conflicts, rate limits, access failures,
 invalid base identity, and failed guest status go directly to normal setup
-failure handling. Once the status command responds, neither SSH nor installer,
+failure handling. Once the base reports ready, neither SSH nor installer,
 attestation or setup execution is retried by this phase.
 
 This avoids spending 5/10/20/40-second claim backoffs on an allocation whose
