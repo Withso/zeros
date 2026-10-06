@@ -5,6 +5,7 @@ export const REQUIRED_CI = [
   { file: "preflight.yml", name: "Preflight" },
   { file: "codeql.yml", name: "CodeQL" },
 ] as const;
+export type RequiredWorkflow = { readonly file: string; readonly name: string };
 type Candidate = { repository: string; sourceSha: string };
 type WorkflowRun = {
   id: number; run_attempt: number; name: string; path: string; head_sha: string;
@@ -27,14 +28,16 @@ export function requiredCIEvidence(candidate: Candidate, file: string, name: str
     succeeded: latest?.status === "completed" && latest.conclusion === "success" };
 }
 
-export function assertRequiredCI(evidence: RequiredCIEvidence): void {
-  requireCheck(evidence.length === REQUIRED_CI.length && REQUIRED_CI.every(check => evidence.some(item => item.workflow === check.name && item.succeeded)),
-    "Exact-source Preflight and CodeQL must both succeed before any provider or feed mutation");
+export function assertRequiredCI(evidence: RequiredCIEvidence, required: readonly RequiredWorkflow[] = REQUIRED_CI,
+  failure = "Exact-source Preflight and CodeQL must both succeed before any provider or feed mutation"): void {
+  requireCheck(evidence.length === required.length && required.every(check => evidence.some(item => item.workflow === check.name && item.succeeded)),
+    failure);
 }
 
-export async function waitForRequiredCI(read: () => Promise<RequiredCIEvidence>, options: Parameters<typeof poll>[1] = {}) {
+export async function waitForRequiredCI(read: () => Promise<RequiredCIEvidence>, options: Parameters<typeof poll>[1] = {},
+  required: readonly RequiredWorkflow[] = REQUIRED_CI) {
   return poll(async () => {
     const evidence = await read();
-    return REQUIRED_CI.every(check => evidence.some(item => item.workflow === check.name && item.succeeded)) ? evidence : false;
+    return required.every(check => evidence.some(item => item.workflow === check.name && item.succeeded)) ? evidence : false;
   }, { attempts: 660, timeoutMs: 110 * 60_000, ...options });
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { assertRequiredCI, waitForRequiredCI } from "./ci";
 import { githubClient } from "./github";
-import { CandidateSupersededError } from "./alpha-ci";
+import { ALPHA_REQUIRED_CI, CandidateSupersededError } from "./alpha-ci";
 
 const candidate = { repository: "example/zeros", sourceSha: "a".repeat(40), branch: "main" };
 const preflight = { id: 100, run_attempt: 1, name: "Preflight", path: ".github/workflows/preflight.yml", head_sha: candidate.sourceSha,
@@ -92,7 +92,7 @@ describe("automatic Alpha exact-source evidence", () => {
   });
 
   it.each(["failure", "cancelled", "skipped", "neutral", null])("rejects an alpha-gate conclusion of %s", async conclusion => {
-    await expect(fixture({ jobs: [{ ...gate, conclusion }] }).client.assertRequiredChecks()).rejects.toThrow(/Preflight and CodeQL/);
+    await expect(fixture({ jobs: [{ ...gate, conclusion }] }).client.assertRequiredChecks()).rejects.toThrow(/Alpha gate/);
   });
 
   it.each([
@@ -100,7 +100,7 @@ describe("automatic Alpha exact-source evidence", () => {
     [{ ...gate, run_id: 999 }], [{ ...gate, head_sha: "b".repeat(40) }], [{ ...gate, head_branch: "release/1.2.3" }],
     [{ ...gate, name: "other / alpha-gate" }], [{ ...gate, run_attempt: 2 }],
   ].map(jobs => ({ jobs })))("rejects missing, unfinished, duplicate or mismatched gate jobs (%#)", async ({ jobs }) => {
-    await expect(fixture({ jobs }).client.assertRequiredChecks()).rejects.toThrow(/Preflight and CodeQL/);
+    await expect(fixture({ jobs }).client.assertRequiredChecks()).rejects.toThrow(/Alpha gate/);
   });
 
   it("never substitutes a fully successful run for a missing fast gate", async () => {
@@ -156,21 +156,22 @@ describe("automatic Alpha exact-source evidence", () => {
 
   it.each([
     { status: "in_progress", conclusion: null }, { conclusion: "failure" }, { conclusion: "cancelled" },
-    { event: "pull_request" }, { event: "merge_group" }, { head_repository: { full_name: "fork/zeros" } },
-  ])("keeps CodeQL completion and provenance mandatory (%#)", async change => {
-    await expect(fixture({ codeql: [{ ...codeql, ...change }] }).client.assertRequiredChecks()).rejects.toThrow();
+    { event: "pull_request" }, { head_repository: { full_name: "fork/zeros" } },
+  ])("does not wait for CodeQL on the automatic Alpha fast path (%#)", async change => {
+    const { client, requests } = fixture({ codeql: [{ ...codeql, ...change }] });
+    await expect(client.assertRequiredChecks()).resolves.toBeUndefined();
+    expect(requests.some(url => url.includes("codeql.yml"))).toBe(false);
   });
 
-  it("a newer pending CodeQL attempt defeats an older success", async () => {
-    await expect(fixture({ codeql: [codeql, { ...codeql, run_attempt: 2, status: "in_progress", conclusion: null }] }).client.assertRequiredChecks()).rejects.toThrow();
-  });
-
-  it("a newer CodeQL push on the same SHA defeats an older main success regardless of branch", async () => {
-    await expect(fixture({ codeql: [codeql, { ...codeql, id: 102, head_branch: "release/1.2.3", conclusion: "failure" }] }).client.assertRequiredChecks()).rejects.toThrow();
-  });
-
-  it("accepts the newest successful CodeQL push for the exact SHA while requiring main-push Preflight", async () => {
-    await expect(fixture({ codeql: [{ ...codeql, head_branch: "release/1.2.3" }] }).client.assertRequiredChecks()).resolves.toBeUndefined();
+  it("keeps CodeQL mandatory whenever the fast path does not apply", async () => {
+    const fullPreflight = [{ ...preflight, status: "completed", conclusion: "success" }];
+    const failingCodeql = [{ ...codeql, conclusion: "failure" }];
+    for (const env of [{ ZEROS_ALPHA_CI_FAST_PATH: "" },
+      { GITHUB_WORKFLOW_REF: `${candidate.repository}/.github/workflows/release-beta.yml@refs/heads/main` }]) {
+      await expect(fixture({ env, preflight: fullPreflight, codeql: failingCodeql }).client.assertRequiredChecks())
+        .rejects.toThrow(/Preflight and CodeQL/);
+      await expect(fixture({ env, preflight: fullPreflight }).client.assertRequiredChecks()).resolves.toBeUndefined();
+    }
   });
 
   it("reads every attempt job page before deciding whether the gate succeeded", async () => {
@@ -201,8 +202,8 @@ describe("automatic Alpha exact-source evidence", () => {
     const evidence = await waitForRequiredCI(async () => {
       if (++reads === 2) state.conclusion = "success";
       return client.requiredChecks();
-    }, { attempts: 2, sleep: async () => {} });
-    expect(() => assertRequiredCI(evidence)).not.toThrow();
+    }, { attempts: 2, sleep: async () => {} }, ALPHA_REQUIRED_CI);
+    expect(() => assertRequiredCI(evidence, ALPHA_REQUIRED_CI)).not.toThrow();
     state.conclusion = "failure";
     await expect(client.assertRequiredChecks()).rejects.toThrow();
   });

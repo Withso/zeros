@@ -6,7 +6,7 @@ import path from "node:path";
 const mocked = vi.hoisted(() => ({
   source: { channel: "production", sourceSha: "a".repeat(40), repository: "Withso/zeros", branch: "release/0.1.20" },
   command: vi.fn(), assertRequiredChecks: vi.fn(), assertCurrent: vi.fn(), betaReceipt: vi.fn(), requiredChecks: vi.fn(), waitForRequiredCI: vi.fn(),
-  automaticAlpha: vi.fn(), alphaBarrierUnmutated: vi.fn(),
+  automaticAlpha: vi.fn(), alphaBarrierUnmutated: vi.fn(), requiredWorkflows: vi.fn(),
 }));
 vi.mock("./github", () => ({ githubClient: () => mocked }));
 vi.mock("./ci", () => ({ waitForRequiredCI: mocked.waitForRequiredCI }));
@@ -34,6 +34,7 @@ beforeEach(() => {
   mocked.waitForRequiredCI.mockImplementation(async (read: () => Promise<unknown>) => read());
   mocked.automaticAlpha.mockResolvedValue(false);
   mocked.alphaBarrierUnmutated.mockResolvedValue(true);
+  mocked.requiredWorkflows.mockResolvedValue([{ file: "preflight.yml", name: "Preflight" }, { file: "codeql.yml", name: "CodeQL" }]);
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -53,6 +54,7 @@ async function automaticBarrier(flag = "enabled") {
   vi.stubEnv("GITHUB_JOB", "ci");
   vi.stubEnv("GITHUB_WORKFLOW_REF", `${mocked.source.repository}/.github/workflows/release-alpha.yml@refs/heads/main`);
   vi.stubEnv("ZEROS_ALPHA_CI_FAST_PATH", flag);
+  if (flag === "enabled") mocked.requiredWorkflows.mockResolvedValue([{ file: "preflight.yml", name: "Preflight" }]);
   const directory = await mkdtemp(path.join(os.tmpdir(), "alpha-ci-output-"));
   directories.push(directory);
   const output = path.join(directory, "output");

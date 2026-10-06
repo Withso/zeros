@@ -23,11 +23,12 @@ async function main() {
     requireCheck(process.env.GITHUB_OUTPUT, "Automatic Alpha barrier requires a readiness output destination");
     await appendFile(process.env.GITHUB_OUTPUT, `ready=${value}\n`);
   };
+  const required = await github.requiredWorkflows();
   try {
     if (mode === "--wait") await waitForRequiredCI(async () => {
       await github.assertCurrent();
       return github.requiredChecks();
-    });
+    }, {}, required);
     else await github.assertRequiredChecks();
     await github.assertCurrent();
   } catch (error) {
@@ -40,7 +41,7 @@ async function main() {
   }
   if (process.argv[3] === "--beta" && process.env.ZEROS_HOSTED_PROMOTION === "enabled") await github.betaReceipt();
   if (barrier) await ready(true);
-  const checks = automaticAlpha && process.env.ZEROS_ALPHA_CI_FAST_PATH === "enabled" ? "Alpha gate and CodeQL" : "Preflight and CodeQL";
+  const checks = required.length === 1 ? "Alpha gate" : "Preflight and CodeQL";
   console.log(`${checks} succeeded for the exact ${source.channel} source ${source.sourceSha}.`);
 }
 
