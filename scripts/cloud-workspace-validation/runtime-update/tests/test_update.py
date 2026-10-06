@@ -1,6 +1,8 @@
 """Exercise the unchanged v4 installer through the update adapter, rootlessly."""
 import copy
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -95,6 +97,37 @@ class UpdateTests(unittest.TestCase):
         request = {key: value for key, value in self.request.items() if key != "install"}
         request.update(operation="activate", mode=mode, target=self.install["runtime"])
         return self.adapter.run(request)
+
+    def verify_supervisor_selection(self, expected):
+        source = (ROOT / "scripts/cloud-workspace-validation/sandbox/cloud-worker-supervisor.mjs").read_text()
+        program = source.split("const VERIFY_SELECTED_RUNTIME = `", 1)[1].split("`;", 1)[0]
+        # Exercise the shipped verification body against the real protected
+        # installer with a temporary fixture root, replacing only its loader.
+        body = "try:" + program.split("\ntry:", 1)[1]
+        output = io.StringIO()
+        stdin = io.TextIOWrapper(io.BytesIO(json.dumps(expected).encode()))
+        with mock.patch.object(b, "Bootstrap", return_value=self.app), mock.patch.object(sys, "stdin", stdin), contextlib.redirect_stdout(output):
+            exec(body, {"b": b, "sys": sys, "json": json})
+        return json.loads(output.getvalue())
+
+    def test_supervisor_selection_returns_the_verified_install_identity(self):
+        self.assertEqual(self.verify_supervisor_selection(self.source), self.source)
+
+    def test_supervisor_selection_rejects_matching_descriptor_with_tampered_tree(self):
+        file = self.case.runtime() / "worker/data.txt"
+        file.chmod(0o755)
+        file.write_bytes(b"x" * file.stat().st_size)
+        file.chmod(0o555)
+        with self.assertRaises(SystemExit) as failure:
+            self.verify_supervisor_selection(self.source)
+        self.assertEqual(failure.exception.code, 1)
+
+    def test_supervisor_selection_does_not_echo_an_unverified_cgroup(self):
+        active = dict(self.source, cgroupRoot="/sys/fs/cgroup/other.slice/zeros-host.service")
+        self.app.atomic(b.ACTIVE, json.dumps(active).encode())
+        with self.assertRaises(SystemExit) as failure:
+            self.verify_supervisor_selection(active)
+        self.assertEqual(failure.exception.code, 1)
 
     def test_stage_verifies_and_preserves_source_without_host_or_hooks(self):
         self.assertEqual(self.stage()["outcome"], "staged")

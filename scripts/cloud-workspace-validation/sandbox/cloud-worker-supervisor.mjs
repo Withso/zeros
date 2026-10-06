@@ -282,10 +282,15 @@ try:
  a=b.Bootstrap();a.base();a.require_persistence()
  expected=b.strict_json(sys.stdin.buffer.read(4097),'input_schema')
  active=b.strict_json(a.read(b.ACTIVE,4096,0o600),'input_schema')
- b.require(active==expected and a.current()==active['runtimeId'] and active['baseCompatibilityId']==a.compat_id and active['bootId']==a.boot_id(),'input_schema')
- _,receipt=a.verify_runtime(active['runtimeId'],full=True)
- b.require(active['installerReceiptSha256']==b.sha(receipt),'input_schema')
- print(json.dumps(active,separators=(',',':')))
+ _,receipt=a.verify_runtime(a.current(),full=True)
+ installed=b.strict_json(receipt,'cache_conflict')
+ b.text_match(active['supervisorSessionId'],b.UUID,'input_schema')
+ verified={'schema':'zeros.active-runtime/v1','runtimeId':installed['runtimeId'],
+  'manifestSha256':installed['manifestSha256'],'root':b.INFRA+'/'+installed['runtimeId'],
+  'baseCompatibilityId':a.compat_id,'installerReceiptSha256':b.sha(receipt),
+  'bootId':a.boot_id(),'cgroupRoot':b.CGROUP,'supervisorSessionId':active['supervisorSessionId']}
+ b.require(active==verified and expected==verified,'input_schema')
+ print(json.dumps(verified,separators=(',',':')))
 except Exception:
  sys.exit(1)
 `;
@@ -437,10 +442,11 @@ export class CloudWorkerSupervisor {
       return supervisorResponse("rejected");
     }
     if (request.operation === "select-runtime") {
-      if (this.runtime.profile !== "v4" || this.child ||
-        ["baseCompatibilityId", "bootId", "cgroupRoot"].some(key => request.active[key] !== this.runtime[key]))
+      if (this.runtime.profile !== "v4" || this.child)
         return supervisorResponse("rejected");
       const active = this.verifySelectedRuntime(request.active);
+      if (["baseCompatibilityId", "bootId", "cgroupRoot"].some(key => active[key] !== this.runtime[key]))
+        return supervisorResponse("rejected");
       this.selectedRuntime = active;
       this.binRoot = `${active.root}/bin`;
       this.launcher = `${this.binRoot}/start-engine.sh`;

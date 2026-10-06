@@ -52,20 +52,34 @@ describe("cloud runtime activation", () => {
     } finally { f.tree.dispose(); }
   });
 
-  it("rejects a stale session, live child, changed base or boot before selecting", async () => {
+  it("rejects a stale session or live child before verification", async () => {
     const f = fixture();
     try {
       const prepared = await f.supervisor.apply({ operation: "prepare" });
-      for (const fields of [{ session: "stale" },
-        { active: { ...f.active, bootId: "42345678-1234-4234-8234-123456789abc" } },
-        { active: { ...f.active, baseCompatibilityId: `bc1-${"e".repeat(64)}` } }]) {
-        expect(await f.supervisor.apply({ operation: "select-runtime", session: prepared.session,
-          active: f.active, ...fields })).toMatchObject({ outcome: "rejected" });
-      }
+      expect(await f.supervisor.apply({ operation: "select-runtime", session: "stale",
+        active: f.active })).toMatchObject({ outcome: "rejected" });
       f.supervisor.child = { exitCode: null, signalCode: null };
       expect(await f.supervisor.apply({ operation: "select-runtime", session: prepared.session,
         active: f.active })).toMatchObject({ outcome: "rejected" });
       expect(f.verifySelectedRuntime).not.toHaveBeenCalled();
+    } finally { f.tree.dispose(); }
+  });
+
+  it.each([
+    ["baseCompatibilityId", `bc1-${"e".repeat(64)}`],
+    ["bootId", "42345678-1234-4234-8234-123456789abc"],
+    ["cgroupRoot", "/sys/fs/cgroup/other.slice/zeros-host.service"],
+  ])("rejects a forged matching request when the verified %s differs", async (key, value) => {
+    const f = fixture();
+    try {
+      const prepared = await f.supervisor.apply({ operation: "prepare" });
+      f.verifySelectedRuntime.mockReturnValue({ ...f.active, [key]: value });
+      expect(f.active[key]).toBe(f.runtime[key]);
+      expect(await f.supervisor.apply({ operation: "select-runtime", session: prepared.session,
+        active: f.active })).toMatchObject({ outcome: "rejected" });
+      expect(f.verifySelectedRuntime).toHaveBeenCalledWith(f.active);
+      expect(f.supervisor.selectedRuntime).toEqual(f.tree.descriptor);
+      expect(f.supervisor.launcher).toBe(f.runtime.startEngine);
     } finally { f.tree.dispose(); }
   });
 
