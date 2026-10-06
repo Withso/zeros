@@ -1,3 +1,4 @@
+import { applyReviewedExpandExceptions } from "./migration-expand-exceptions.js";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,7 +11,7 @@ export function lintMigrationPhase(file: string, sql: string): string[] {
   try {
     const declaration = migrationPhase(file, sql);
     return declaration.phase === "expand"
-      ? expandMigrationViolations(sql).map(
+      ? expandMigrationViolations(applyReviewedExpandExceptions(file, sql)).map(
           (statement) =>
             `${file}: expand migrations may not contain ${statement}.`,
         )

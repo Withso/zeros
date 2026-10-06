@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { launchCloudEngine, assertCloudEngineFilesProjection } from "../cloud-workspace-validation/sandbox/cloud-engine-launcher.mjs";
+import { createCloudRuntimeResolver } from "../../apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
+import { cloudRuntimeFixture } from "../../apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-fixture";
 
 function fixture() {
   const order: string[] = [];
@@ -56,6 +58,21 @@ function fixture() {
 }
 
 describe("cloud engine admission and lifecycle", () => {
+  it("keeps the resident control pipe open and retires its separate scope when the host dies", async () => {
+    const tree = cloudRuntimeFixture();
+    try {
+      const runtime = createCloudRuntimeResolver({ filesystem: tree.filesystem }).resolve();
+      const f = fixture();
+      const options = { ...f.options, operation: "resident", runtime,
+        prepare: () => ({ version: 4, runtime, viewDirectory: "/run/zeros/view/runtime-11111111-1111-4111-8111-111111111111" }) };
+      f.barrier.once("finish", () => queueMicrotask(() => f.finish(125)));
+      await expect(launchCloudEngine(options)).resolves.toBe(125);
+      const call = f.options.spawnProcess.mock.calls[0] as unknown as [string, string[], { stdio: string[] }];
+      expect(call[1].at(-1)).toBe("--resident");
+      expect(call[2].stdio).toEqual(["inherit", "inherit", "inherit", "pipe"]);
+      expect(f.scope.retire).toHaveBeenCalledOnce();
+    } finally { tree.dispose(); }
+  });
   it("admits the protected repos root only on v4 while rejecting setup and broker authority", () => {
     const root = mkdtempSync(path.join(tmpdir(), "zeros-v2-test-projection-"));
     const rootPath = vi.fn();

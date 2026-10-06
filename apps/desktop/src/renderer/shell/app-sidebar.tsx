@@ -10,7 +10,7 @@ import { useOrganizationProjects } from "../state/use-organization-projects";
 // ============================================
 //
 //   ┌──────────────────────────────┐
-//   │ ● ● ● [▯]              [cpu] │  40px title band (window drag)
+//   │ ● ● ● [▯]        [cpu][←][→] │  40px title band (window drag)
 //   │ ▭ Local ⌄                     │  organization switcher
 //   │ Home · Customize · Create     │  destinations (Create is an action)
 //   │ ───────────────────────────── │
@@ -115,12 +115,17 @@ import {
   setHomeSidebarWidth,
   useHomeSidebarWidth,
 } from "./home-sidebar-width";
-import { prefetchWorkspaceSurface } from "./prefetch-workspace-surface";
+import {
+  prefetchWorkspaceSurface,
+  type WorkspaceNavigationTarget,
+} from "./prefetch-workspace-surface";
 import { ResourceMonitor } from "./resource-monitor";
 import {
   setRepositoryCollapsed,
   useCollapsedRepositories,
 } from "./sidebar-collapsed-repositories";
+import { SidebarHistoryButtons } from "./sidebar-history-buttons";
+import type { SidebarHistoryScope } from "./sidebar-navigation-history";
 import {
   SIDEBAR_ROW_ACTION_CLS,
   SidebarRepositoryHeader,
@@ -378,6 +383,15 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     () => dedupePendingCreates(allPendingCreates, accessibleWorkspaces),
     [allPendingCreates, accessibleWorkspaces],
   );
+  // Back/forward reopen only what this sidebar lists right now.
+  const historyScope = useMemo<SidebarHistoryScope>(
+    () => ({
+      projects,
+      workspaces: realWorkspaces,
+      pendingCreates: dedupedPendingCreates,
+    }),
+    [dedupedPendingCreates, projects, realWorkspaces],
+  );
 
   const chatIdsByWorkspace = useMemo(() => {
     const liveChats = chats.filter((chat) => !chat.archived);
@@ -577,7 +591,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   );
 
   const handlePrefetchWorkspace = useCallback(
-    (workspace: Workspace) => {
+    (workspace: WorkspaceNavigationTarget) => {
       // Warm the workbench and the existing conversation together.
       prefetchWorkspaceSurface(workspace);
       const chatId = selectChatToRestoreForFolder(
@@ -675,7 +689,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
       {...(hidden ? { inert: "" } : {})}
       aria-hidden={hidden || undefined}
       className={cn(
-        "relative flex min-w-[200px] shrink-0",
+        "relative flex min-w-[220px] shrink-0",
         SIDEBAR_MAX_WIDTH_CLS,
         // Out of flow and invisible rather than display:none, which would
         // reset the workspace list's scroll offset while Settings is open.
@@ -693,15 +707,23 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
         {/* 40px title band: the macOS traffic lights sit in its first 80px
             (trafficLightPosition in electron/main.ts), the panel-left toggle
             right after them. The rest is a window drag handle carrying the
-            app-level status controls. */}
+            app-level controls at its end: resources, then back and forward.
+            These four 28px controls set the sidebar's 220px floor. */}
         <div
           ref={titleBandRef}
           className="flex h-10 shrink-0 items-center gap-1 pr-2"
         >
           <div className={TRAFFIC_LIGHT_RESERVE_CLS} aria-hidden="true" />
           <SidebarToggleButton collapsed={false} />
-          <div className="min-w-0 flex-1" aria-hidden="true" />
-          {!hidden && <ResourceMonitor />}
+          <div className="ml-auto flex h-full shrink-0 items-center gap-1">
+            {!hidden && <ResourceMonitor />}
+            {!hidden && (
+              <SidebarHistoryButtons
+                scope={historyScope}
+                onPrefetchWorkspace={handlePrefetchWorkspace}
+              />
+            )}
+          </div>
         </div>
 
         <div className="flex shrink-0 flex-col gap-1 px-2">

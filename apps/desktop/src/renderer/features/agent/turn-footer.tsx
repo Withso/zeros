@@ -1,3 +1,6 @@
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { cloudAdmissionForTurn } from "./cloud-admission-failure";
+import { CloudAdmissionStatus } from "./cloud-admission-status";
 import { TurnUsageCard } from "./turn-usage-card";
 // ──────────────────────────────────────────────────────────
 // TurnFooter — the footer below a settled turn's answer
@@ -335,6 +338,9 @@ export const TurnFilePill = memo(function TurnFilePill({
 });
 
 interface TurnFooterProps {
+  /** Exact workspace owner, available before a session hydrates. */
+  folder?: string | null;
+  agentId?: string | null;
   /** Archived/missing workspaces expose saved metadata and copy only. */
   readOnly?: boolean;
   surfaceActive?: boolean;
@@ -373,6 +379,7 @@ interface TurnFooterProps {
 }
 
 export const TurnFooter = memo(function TurnFooter({
+  folder, agentId,
   readOnly = false,
   surfaceActive = true,
   chatId,
@@ -394,6 +401,7 @@ export const TurnFooter = memo(function TurnFooter({
   onForkIntent,
 }: TurnFooterProps) {
   const openInWorkbench = useOpenFileInWorkbench();
+  const admission = useSessionsStore(state => isCloudWorkspace(folder) ? state.sessions[chatId]?.cloudAdmissionFailure : null);
   // Stable actions context — identity doesn't change on store mutations, so
   // reading it here doesn't defeat this component's memo. Used to cancel an
   // in-flight turn before a reset spans it.
@@ -585,6 +593,12 @@ export const TurnFooter = memo(function TurnFooter({
   // blue directly under the grey shimmer.
   // The footer appears once the turn settles.
   if (live) return null;
+  const cloudAdmission = cloudAdmissionForTurn({ folder, turnId, recoveryFailure,
+    current: admission, agentId });
+  // Admission never started an agent turn: no duration, stopped pill or retry
+  // card. The active refusal is already beside the restored composer draft.
+  if (cloudAdmission) return isLastTurn && admission?.turnId === turnId ? null :
+    <CloudAdmissionStatus folder={folder} agentId={agentId} failure={cloudAdmission} readOnly={readOnly} />;
 
   const durationMs = turnFooterDuration(turn, events, startedAt);
   // File pills are deliberately disk-authoritative. A rendered tool call is a

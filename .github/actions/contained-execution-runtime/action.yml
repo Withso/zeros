@@ -1,4 +1,4 @@
-name: Contained-execution runtime
+name: Contained Execution Runtime
 description: >-
   Install the Linux host prerequisites the contained-execution (ZSR) suites need
   and prove the pinned seccomp helper runs inside a nested user namespace. Run
@@ -16,7 +16,7 @@ description: >-
 runs:
   using: composite
   steps:
-    - name: Install bubblewrap + socat
+    - name: Install bubblewrap and socat
       # Codex uses bubblewrap; Claude's strict sandbox also requires socat.
       shell: bash
       run: |
@@ -38,7 +38,7 @@ runs:
         sudo apt-get update
         sudo apt-get install --yes bubblewrap socat
 
-    - name: Prove the pinned seccomp helper runs nested
+    - name: Verify nested seccomp execution
       # Cheap up-front proof that the host can actually host the runtime, so a
       # missing prerequisite surfaces here instead of as a suite-wide failure
       # tens of minutes into a release.

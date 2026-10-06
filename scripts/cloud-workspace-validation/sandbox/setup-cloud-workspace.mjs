@@ -2,6 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { mergeSetupTimings, parseSetupTimings, setupTimingClock } from "./cloud-setup-timings.mjs";
 import {
   chmodSync,
   chownSync,
@@ -403,6 +404,7 @@ export function parseCloudWorkspaceSetupMaterials(
       "image",
       ...(raw.computer === undefined ? [] : ["computer"]),
       ...(raw.recovery === undefined ? [] : ["recovery"]),
+      ...(raw.resume === undefined ? [] : ["resume"]),
       "repository",
       "settings",
       "version",
@@ -559,6 +561,8 @@ export function parseCloudWorkspaceSetupMaterials(
     (raw.computer !== undefined && raw.version !== 2))
     throw new Error("cloud workspace setup materials are invalid");
   if (raw.computer !== undefined) parseCloudComputerSetup(raw.computer, raw.repository);
+  if (raw.resume !== undefined && (raw.version !== 2 || RUNTIME.profile !== "v4" || !validResumePlan(raw.resume)))
+    throw new Error("cloud workspace setup materials are invalid");
 
   const document = parseSetupDocument(
     raw.settings.documentB64,
@@ -1322,6 +1326,9 @@ export function parseRecoveryDesignSelection(value) {
   return value;
 }
 
+const timingNegotiatedMaterials = new WeakSet();
+export const hasCloudSetupTimingSupport = material => timingNegotiatedMaterials.has(material);
+
 export async function redeemMaterials(request) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
@@ -1337,6 +1344,8 @@ export async function redeemMaterials(request) {
         Accept: "application/json",
         Authorization: `Bearer ${request.admission.token}`,
         "Content-Type": "application/json",
+        "X-Zeros-Setup-Timings": "1",
+        ...(RUNTIME.profile === "v4" ? { "X-Zeros-Resume-Existing": "1" } : {}),
       },
       body: JSON.stringify({
         materialVersion: 2,
@@ -1347,6 +1356,7 @@ export async function redeemMaterials(request) {
         executionFence: request.execution.executionFence,
         expected: request.expected,
         ...(RUNTIME.profile === "v4" ? {
+          checkoutSourceVersion: 1,
           runtime: {
             runtimeId: RUNTIME.runtimeId,
             manifestSha256: RUNTIME.manifestSha256,
@@ -1389,7 +1399,9 @@ export async function redeemMaterials(request) {
   try {
     raw = await boundedResponseJson(response, MAX_MATERIAL_BYTES);
     if (raw?.version !== 2) throw failure("image_contract_invalid");
-    return parseCloudWorkspaceSetupMaterials(raw, request);
+    const material = parseCloudWorkspaceSetupMaterials(raw, request);
+    if (response.headers.get("x-zeros-setup-timings") === "1") timingNegotiatedMaterials.add(material);
+    return material;
   } catch (error) {
     if (error instanceof SetupFailure) throw error;
     throw failure("settings_invalid");
@@ -1405,7 +1417,7 @@ function killProcessGroup(child, signal) {
   }
 }
 
-function runProcess(file, args, options = {}) {
+export function runProcess(file, args, options = {}) {
   const timeoutMs = options.timeoutMs ?? 60_000;
   return new Promise((resolve, reject) => {
     const child = spawn(file, args, {
@@ -1423,6 +1435,17 @@ function runProcess(file, args, options = {}) {
     let timedOut = false;
     let overflow = false;
     let settled = false;
+    let abortKillTimer;
+    const abort = () => {
+      // Give Git a chance to remove shallow/ref locks and temporary packfiles,
+      // then bound termination of the entire detached process group.
+      killProcessGroup(child, "SIGTERM");
+      abortKillTimer = setTimeout(() => killProcessGroup(child, "SIGKILL"), 2000);
+      abortKillTimer.unref?.();
+    };
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
+    const cleanup = () => { clearTimeout(timer); clearTimeout(abortKillTimer); options.signal?.removeEventListener("abort", abort); };
     const timer = setTimeout(() => {
       timedOut = true;
       killProcessGroup(child, "SIGKILL");
@@ -1443,17 +1466,18 @@ function runProcess(file, args, options = {}) {
     child.once("error", (error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      cleanup();
       reject(error);
     });
     child.once("close", (code, signal) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      cleanup();
       resolve({
         code,
         signal,
         timedOut,
+        aborted: options.signal?.aborted === true,
         overflow,
         stdout: Buffer.concat(stdoutChunks).toString("utf8"),
         stderr: Buffer.concat(stderrChunks).toString("utf8"),
@@ -1655,7 +1679,53 @@ function journalMatches(journal, identity, commandCount, completedSetup) {
   );
 }
 
-async function gitCommand(repositoryDirectory, homeDirectory, args, token) {
+function validResumePlan(value) {
+  return isRecord(value) && exactKeys(value, ["version", "mode", "keySha256", "proofEpoch"]) && value.version === 1 &&
+    typeof value.keySha256 === "string" && SHA256_PATTERN.test(value.keySha256) &&
+    ((value.mode === "prepare_generation" && value.proofEpoch === null) ||
+      (value.mode === "resume_existing" && typeof value.proofEpoch === "string" && UUID_PATTERN.test(value.proofEpoch)));
+}
+
+/** Root-controlled completion evidence is useful only with the control plane's
+ * completed engine epoch and exact preparation key. No launch proof is cached.
+ * A missing/unsafe/stale record takes the existing full preparation path.
+ */
+export async function readCompletedCloudWorkspacePreparation(material, profile, stringify = stringifyManagedSettings) {
+  if (profile.version !== 4 || !validResumePlan(material.resume) || material.resume.mode !== "resume_existing") return null;
+  try {
+    assertRootDirectory(profile.setupDirectory, 0o700);
+    assertRootDirectory(profile.managedSettingsDirectory, 0o750, WORKER_GID);
+    const completed = readPhysicalJson(path.join(profile.setupDirectory, "resume.json"), 1024);
+    if (!isRecord(completed) || !exactKeys(completed, ["version", "keySha256", "engineInstanceId"]) || completed.version !== 1 ||
+      completed.keySha256 !== material.resume.keySha256 || completed.engineInstanceId !== material.resume.proofEpoch) return null;
+    const journal = parseJournal(readPhysicalJson(path.join(profile.setupDirectory, "repository.json"), 64 * 1024));
+    if (journal.commandState || journal.commandsCompleted !== material.settings.setupCommands.length) return null;
+    const managedToml = await stringify(material.settings.document.values);
+    const managedSha256 = createHash("sha256").update(managedToml).digest("hex");
+    const file = path.join(profile.managedSettingsDirectory, "settings.managed.toml");
+    const fd = openSync(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    try {
+      const stat = fstatSync(fd), current = lstatSync(file);
+      if (!stat.isFile() || stat.uid !== 0 || stat.nlink !== 1 || (stat.mode & 0o027) !== 0 || stat.size > 256 * 1024 ||
+        current.isSymbolicLink() || stat.dev !== current.dev || stat.ino !== current.ino || realpathSync(file) !== file ||
+        createHash("sha256").update(readFileSync(fd)).digest("hex") !== managedSha256) return null;
+    } finally { closeSync(fd); }
+    const commit = await repositoryIdentity(hostRepository(material), runtimeLayout.agentHome, material.repository.cloneUrl);
+    return commit && journalMatches(journal, journalIdentity(material, commit, managedSha256), material.settings.setupCommands.length, true)
+      ? commit : null;
+  } catch { return null; }
+}
+
+export function saveCompletedCloudWorkspacePreparation(material, profile) {
+  if (profile.version !== 4 || !validResumePlan(material.resume)) return;
+  try {
+    assertRootDirectory(profile.setupDirectory, 0o700);
+    atomicWrite(path.join(profile.setupDirectory, "resume.json"), JSON.stringify({ version: 1,
+      keySha256: material.resume.keySha256, engineInstanceId: material.engine.instanceId }) + "\n", { mode: 0o600 });
+  } catch { /* Optional cache loss means full setup next time, never failed readiness. */ }
+}
+
+async function gitCommand(repositoryDirectory, homeDirectory, args, token, options = {}) {
   const env = {
     GIT_ASKPASS: ASKPASS,
     GIT_ASKPASS_REQUIRE: "force",
@@ -1691,7 +1761,7 @@ async function gitCommand(repositoryDirectory, homeDirectory, args, token) {
       "protocol.https.allow=always",
       ...args,
     ],
-    { cwd: repositoryDirectory, env, timeoutMs: 5 * 60_000 },
+    { cwd: repositoryDirectory, env, timeoutMs: 5 * 60_000, signal: options.signal },
   );
 }
 
@@ -2108,10 +2178,10 @@ export async function prepareCloudWorkspaceRepository(material, profile, journal
   hasSeed = () => existsSync(clonePaths(profile).seededRepositoryBackup),
   clone = () => cloneRepository(material, profile),
   checkoutComputer = () => checkoutCloudComputerPrimary(material.computer, material.repository, {
-    git: async (directory, args, token) => {
+    git: async (directory, args, token, options) => {
       const result = await gitCommand(directory, runtimeLayout.agentHome,
-        ["-c", "core.fsmonitor=false", "-c", "submodule.recurse=false", ...args], token);
-      if (result.code !== 0 || result.signal || result.timedOut || result.overflow)
+        ["-c", "core.fsmonitor=false", "-c", "submodule.recurse=false", ...args], token, options);
+      if (result.code !== 0 || result.signal || result.timedOut || result.aborted || result.overflow)
         throw failure(args[0] === "fetch" ? "repository_temporarily_unavailable" : "repository_revision_invalid");
       return result.stdout.trim();
     },
@@ -2129,6 +2199,7 @@ export async function prepareCloudWorkspaceRepository(material, profile, journal
       if (!commit) throw failure("repository_revision_invalid");
       return commit;
     } catch (error) {
+      if (error?.code === "repository_history_limit") throw failure("repository_history_limit");
       if (error?.message === "repository_revision_invalid" || error?.message === "image_contract_invalid")
         throw failure(error.message);
       throw error;
@@ -2491,7 +2562,7 @@ export function cloudWorkspaceImageDigests(build, observed) {
   return result;
 }
 
-export async function attestImage(material, profile, recordChecks) {
+export async function attestImage(material, profile, recordChecks, recordTimings = () => {}) {
   if (
     material.repository.credential.expiresAtMs - Date.now() < 5 * 60_000 ||
     material.engine.registration.expiresAtMs - Date.now() < 5 * 60_000
@@ -2509,6 +2580,11 @@ export async function attestImage(material, profile, recordChecks) {
   );
   let report;
   if (profile.version === 4) {
+    try {
+      const diagnostic = JSON.parse(result.stdout.trimEnd().split("\n").at(-1));
+      const timings = parseSetupTimings(diagnostic?.timings);
+      if (timings) recordTimings(timings);
+    } catch { /* Telemetry cannot supply an admission or leak raw output. */ }
     report = readCloudWorkspaceV4Attestation(result);
   } else {
     try {
@@ -2675,6 +2751,47 @@ function readyResult(material, commit, engine) {
   };
 }
 
+function projectLaunchCredentials(material, profile) {
+  if (!material.computer) installGithubProjection(material, profile);
+  removeRootRuntimeFile(
+    path.join(profile.runtimeDirectory, "github-credential-refresh.json"),
+    profile.engineUid,
+  );
+}
+
+/** The only branch is completed preparation reuse. Final attestation, fresh
+ * launch and readiness always run, including after a preparation cache hit. */
+export async function prepareAndLaunchCloudWorkspace(material, profile, session, record, {
+  readCompleted = readCompletedCloudWorkspacePreparation, attest = attestImage,
+  prepare = prepareRepositoryAndSettings, project = projectLaunchCredentials,
+  start = startEngine, ready = waitForReadiness, saveCompleted = saveCompletedCloudWorkspacePreparation,
+  recordAttesterTimings = () => () => {},
+} = {}) {
+  let commit = await readCompleted(material, profile);
+  if (!commit) {
+    record("image-preflight");
+    await attest(material, profile, (checks, runtime, digests) =>
+      record("image-preflight", checks, runtime, digests),
+      recordAttesterTimings("attester_preflight"),
+    );
+    record("repository");
+    commit = await prepare(material, profile);
+  }
+  record("credential-projection");
+  project(material, profile);
+  record("image-launch");
+  await attest(material, profile, (checks, runtime, digests) =>
+    record("image-launch", checks, runtime, digests),
+    recordAttesterTimings("attester_launch"),
+  );
+  record("engine-launch");
+  await start(material, session);
+  record("engine-readiness");
+  const engine = await ready(material);
+  saveCompleted(material, profile);
+  return readyResult(material, commit, engine);
+}
+
 async function executeSetup(encoded) {
   let request;
   try {
@@ -2686,8 +2803,21 @@ async function executeSetup(encoded) {
   let supervisorPrepared = false;
   let successful = false;
   let profile;
+  const timing = RUNTIME.profile === "v4" && hasCloudSetupTimingSupport(material) ? setupTimingClock("setup") : null;
+  const childTimings = [];
+  let finishStage;
+  const snapshotTimings = () => mergeSetupTimings(timing?.snapshot(), ...childTimings);
+  const recordAttesterTimings = source => value => {
+    const parsed = parseSetupTimings(value);
+    if (parsed?.clocks.length === 1 && parsed.clocks[0].source === "attester_preflight")
+      childTimings.push({ version: 1, clocks: [{ ...parsed.clocks[0], source }] });
+  };
   let diagnostic = { version: 1, stage: "runtime", outcome: "running" };
   const record = (stage, checks, runtime, digests) => {
+    if (stage !== diagnostic.stage) {
+      finishStage?.();
+      finishStage = stage === "complete" ? undefined : timing?.start(stage.replaceAll("-", "_"));
+    }
     diagnostic = {
       version: 1,
       stage,
@@ -2713,7 +2843,9 @@ async function executeSetup(encoded) {
       if (RUNTIME.profile !== "v4") throw failure("image_contract_invalid");
       // The root-only, boot/session-bound document routes all host work and
       // selects the primary alias for each fresh engine mount namespace.
-      verifyCloudComputerTemplate(material.computer, material.repository);
+      const verified = timing?.start("template_verify");
+      try { verifyCloudComputerTemplate(material.computer, material.repository); verified?.(); }
+      catch (error) { verified?.("failed"); throw error; }
       atomicWrite(CLOUD_COMPUTER_WORKSPACE_ADMISSION,
         `${JSON.stringify(createCloudComputerWorkspaceAdmission(material, RUNTIME))}\n`, { mode: 0o600 });
       for (const name of ["github-credential.json", "github-credential-refresh.json"])
@@ -2722,33 +2854,16 @@ async function executeSetup(encoded) {
     // Reject an unqualified image or undersized allocation before running any
     // repository setup hook. Reattest below to mint a fresh launch proof after
     // potentially long hooks; that proof is intentionally short-lived.
-    record("image-preflight");
-    await attestImage(material, profile, (checks, runtime, digests) =>
-      record("image-preflight", checks, runtime, digests),
-    );
-    record("repository");
-    const commit = await prepareRepositoryAndSettings(material, profile);
-    record("credential-projection");
-    if (!material.computer) installGithubProjection(material, profile);
-    removeRootRuntimeFile(
-      path.join(profile.runtimeDirectory, "github-credential-refresh.json"),
-      profile.engineUid,
-    );
-    record("image-launch");
-    await attestImage(material, profile, (checks, runtime, digests) =>
-      record("image-launch", checks, runtime, digests),
-    );
-    record("engine-launch");
-    await startEngine(material, session);
-    record("engine-readiness");
-    const engine = await waitForReadiness(material);
+    const ready = await prepareAndLaunchCloudWorkspace(material, profile, session, record, { recordAttesterTimings });
     record("complete");
     successful = true;
-    return readyResult(material, commit, engine);
+    return timing ? { ...ready, version: 4, timings: snapshotTimings() } : ready;
   } catch (error) {
     // Preserve v1 successes. Version 2 errors add only a closed, bounded
     // envelope; older control planes safely treat them as helper failures.
     const normalized = error instanceof SetupFailure ? error : failure("image_contract_invalid");
+    finishStage?.("failed");
+    if (timing) normalized.timings = snapshotTimings();
     normalized.diagnostic = {
       version: 1, phase: diagnostic.stage.replaceAll("-", "_"),
       ...(diagnostic.checks ? { checks: diagnostic.checks } : {}),
@@ -2865,13 +2980,14 @@ async function main() {
   } catch (error) {
     exitCode = 1;
     response = {
-      version: error instanceof SetupFailure && error.hookLog ? 3 : error instanceof SetupFailure && error.diagnostic ? 2 : 1,
+      version: error instanceof SetupFailure && error.timings ? 4 : error instanceof SetupFailure && error.hookLog ? 3 : error instanceof SetupFailure && error.diagnostic ? 2 : 1,
       audience: CLOUD_WORKSPACE_SETUP_RESULT_AUDIENCE,
       outcome: "error",
       code:
         error instanceof SetupFailure ? error.code : "image_contract_invalid",
       ...(error instanceof SetupFailure && error.diagnostic ? { diagnostic: error.diagnostic } : {}),
       ...(error instanceof SetupFailure && error.hookLog ? { hookLog: error.hookLog } : {}),
+      ...(error instanceof SetupFailure && error.timings ? { timings: error.timings } : {}),
     };
   }
   process.stdout.write(JSON.stringify(response));

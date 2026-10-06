@@ -1,3 +1,4 @@
+import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
 import {
   CloudCommandSnapshotSchema,
   CloudCommandEntrySchema,
@@ -12,6 +13,7 @@ import type { RuntimeClient } from "./ws-client";
 import type { BackgroundTasksUpdate } from "@zeros/protocol/agent-events";
 import type { BridgeMessage } from "./messages";
 import { record, type WireRecord } from "./cloud-runtime-wire";
+import type { CloudEventReader, CloudSnapshotInstallation } from "./cloud-event-reader";
 
 type Options = Exclude<
   Parameters<RuntimeClient["request"]>[1],
@@ -42,6 +44,8 @@ type NativeSnapshot = {
   revision: number;
   execution?: string;
   backgroundRevision: number;
+  cursor?: unknown;
+  restoration?: CloudSnapshotInstallation;
 };
 /** Device selection only. A replacement transport obtains fresh execution and
  * credential authority; neither can be transferred with an attachment. */
@@ -52,6 +56,20 @@ const routeId = (id: string) => `conversation:${id}`;
 const commandReceiptSchema = CloudCommandEntrySchema.extend({
   conversationId: CloudCommandSnapshotSchema.shape.conversationId,
 });
+
+/** A capability refusal occurs before a durable command is submitted. */
+export class CloudRuntimeCompatibilityError extends Error {
+  readonly code = "cloud_runtime_feature_unavailable";
+  readonly action: "update-runtime" | "update-desktop";
+  readonly feature = "native-commands-v1";
+  constructor(runtimeVersion: unknown) {
+    const newer = typeof runtimeVersion === "number" && Number.isInteger(runtimeVersion) && runtimeVersion > 1;
+    super(newer ? "Update Zeros to use native conversation operations on this cloud runtime"
+      : "Update the cloud runtime to use native conversation operations");
+    this.action = newer ? "update-desktop" : "update-runtime";
+    this.name = "CloudRuntimeCompatibilityError";
+  }
+}
 
 /** Each settled command advances the queue revision exactly once. Require all
  * intervening revisions to be explained by those exact dispatching commands:
@@ -101,6 +119,7 @@ export class CloudAgentConnection {
     private readonly client: RuntimeClient,
     private readonly workspaceId: string,
     private readonly grant: (agentId: string, model: string) => Promise<string>,
+    private readonly events?: CloudEventReader,
   ) {}
 
   on(type: string, listener: (message: BridgeMessage) => void): () => void {
@@ -146,15 +165,18 @@ export class CloudAgentConnection {
   }
 
   private currentSnapshot(state: NativeSnapshot): boolean {
-    return this.conversations.get(state.owner.id) === state.owner &&
+    return !this.closed && (!state.restoration || state.restoration.current()) &&
+      this.conversations.get(state.owner.id) === state.owner &&
       state.owner.snapshotRevision === state.revision &&
       (state.owner.execution === state.execution || state.owner.execution === state.snapshot.executionId);
   }
 
   private attachSnapshot(state: NativeSnapshot): WireRecord {
-    if (!this.currentSnapshot(state)) throw new Error("Cloud execution changed during restore");
+    if (!this.currentSnapshot(state)) { state.restoration?.finish(); throw new Error("Cloud execution changed during restore"); }
     const { owner, snapshot } = state;
     const execution = typeof snapshot.executionId === "string" ? snapshot.executionId : undefined;
+    try { state.restoration?.install(state.cursor, { conversationId: owner.id, executionId: execution }); }
+    catch (error) { state.restoration?.finish(); throw error; }
     const previousBackground = owner.backgroundTasks;
     if (owner.execution !== execution) owner.backgroundTasks = undefined;
     owner.execution = execution;
@@ -178,6 +200,7 @@ export class CloudAgentConnection {
     // Let the caller bind the returned session before delivering its restored
     // controls. This is one event-loop task, not a delayed readiness heuristic.
     setTimeout(() => {
+      try {
       if (this.closed || !this.currentSnapshot(state)) return;
       const { snapshot } = state;
       const attached=this.conversations.get(String(snapshot.conversationId));
@@ -236,6 +259,7 @@ export class CloudAgentConnection {
             listener(frame as unknown as BridgeMessage);
         }
       }
+      } finally { state.restoration?.finish(); }
     }, 0);
   }
 
@@ -250,6 +274,8 @@ export class CloudAgentConnection {
   }
 
   private async restoreNativeState(owner:Conversation):Promise<NativeSnapshot> {
+    const restoration = this.events?.beginSnapshot();
+    try {
     const revision = owner.snapshotRevision = (owner.snapshotRevision ?? 0) + 1;
     const execution = owner.execution, backgroundRevision = owner.backgroundRevision ?? 0;
     if(owner.nativeCommandsVersion===undefined) {
@@ -260,7 +286,7 @@ export class CloudAgentConnection {
       this.op("cloudCommands.request",{request:{kind:"snapshot",conversationId:owner.id}})]);
     const queue=CloudCommandSnapshotSchema.parse(commands);
     if(queue.conversationId!==owner.id)throw new Error("Cloud state belongs to another conversation");
-    const state = { owner, snapshot: record(events.snapshot), revision, execution, backgroundRevision };
+    const state = { owner, snapshot: record(events.snapshot), cursor: events.cursor, restoration, revision, execution, backgroundRevision };
     if (state.snapshot.conversationId !== owner.id) throw new Error("Cloud state belongs to another conversation");
     if (!this.currentSnapshot(state)) throw new Error("Cloud execution changed during restore");
     const receipts=[...queue.receipts].sort((left,right)=>Date.parse(right.updatedAt)-Date.parse(left.updatedAt));
@@ -274,6 +300,7 @@ export class CloudAgentConnection {
     }else if(owner.goalRevision!==undefined)goal=owner.nativeResult;
     owner.nativeResult={version:1,...(confirmed??{}),...(goal&&"goal" in goal?{goal:goal.goal}:{})};
     return state;
+    } catch (error) { restoration?.finish(); throw error; }
   }
 
   private async op(op: string, params: WireRecord, submission?: {
@@ -583,7 +610,7 @@ export class CloudAgentConnection {
     const [grant,conversation,snapshot]=await Promise.all([this.grant(agentId,model),
       this.op("cloudCommands.conversation",{conversationId:owner.id}),
       this.op("cloudCommands.request",{request:{kind:"snapshot",conversationId:owner.id}})]);
-    if(conversation.nativeCommandsVersion!==1)throw new Error("Update the cloud runtime to use native conversation operations");
+    if(conversation.nativeCommandsVersion!==1)throw new CloudRuntimeCompatibilityError(conversation.nativeCommandsVersion);
     signal?.throwIfAborted();
     const queue=CloudCommandSnapshotSchema.parse(snapshot);
     if(![...queue.pending,...queue.receipts].some(row=>row.commandId===commandId)) {
@@ -793,16 +820,18 @@ export class CloudAgentConnection {
               stopReason: entry.state === "cancelled" ? "cancelled" : "end_turn",
               response: {},
             };
-          if (entry && ["failed", "uncertain"].includes(entry.state))
+          if (entry && (["failed", "uncertain"].includes(entry.state) || isCloudAgentAdmissionCode(entry.resultCode)))
             return {
               type: "AGENT_PROMPT_FAILED",
               agentId: owner.agentId,
               sessionId: routeId(owner.id),
               executionId: routeId(owner.id),
               error:
-                entry.state === "uncertain"
+                isCloudAgentAdmissionCode(entry.resultCode)
+                  ? entry.resultCode
+                  : entry.state === "uncertain"
                   ? "The cloud command outcome is unknown. Review the transcript before retrying."
-                  : `Cloud command failed (${entry.resultCode ?? "unknown"})`,
+                  : "command_dispatch_rejected",
             };
           await new Promise<void>(resolve => {
             const timer = setTimeout(() => { wakeReceiptWait = undefined; resolve(); }, 1000);
@@ -810,7 +839,20 @@ export class CloudAgentConnection {
           });
         }
       };
-      const result = await Promise.race([completed, observeReceipt()]);
+      let result = await Promise.race([completed, observeReceipt()]);
+      if (result.type === "AGENT_PROMPT_FAILED" && !isCloudAgentAdmissionCode(result.error)) {
+        // Deployed engines may discard the HTTP error code. Admission records
+        // its denial before responding, so even an early generic terminal event
+        // can recover this exact command's code without retrying the prompt.
+        try {
+          const receipt = commandReceiptSchema.parse(await this.op("cloudCommands.request", {
+            request: { kind: "read", commandId },
+          }));
+          if (receipt.commandId === commandId && receipt.conversationId === owner.id &&
+              isCloudAgentAdmissionCode(receipt.resultCode))
+            result = { ...result, error: receipt.resultCode };
+        } catch { /* An unavailable receipt cannot prove a pre-provider denial. */ }
+      }
       // A terminal receipt also ends the execution's interactive controls when
       // its terminal event was lost. An interrupted observer proves nothing.
       owner.promptActive = false;

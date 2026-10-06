@@ -21,6 +21,20 @@ function baseEnv(): NodeJS.ProcessEnv {
   };
 }
 
+describe("same-generation resume configuration", () => {
+  it("defaults off and enables only explicitly on Alpha", () => {
+    expect(loadConfig(baseEnv()).cloudWorkspaceResumeExistingEnabled).toBe(false);
+    expect(loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: "alpha",
+      CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "true" }).cloudWorkspaceResumeExistingEnabled).toBe(true);
+    for (const channel of ["development", "beta", "production"]) {
+      expect(() => loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
+        CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "true" })).toThrow(/resume.*Alpha/i);
+    }
+    expect(() => loadConfig({ ...baseEnv(), CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "invalid" }))
+      .toThrow(/resume configuration/i);
+  });
+});
+
 describe("runtime publication configuration", () => {
   const publicationEnv = () => ({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: "alpha",
     CLOUD_RUNTIME_PUBLICATION_ENABLED: "true", CLOUD_WORKSPACE_S3_ENDPOINT: "https://objects.example.test",
@@ -83,13 +97,13 @@ describe("runtime publication configuration", () => {
 describe("v4 runtime admission configuration", () => {
   it("defaults new workspaces to legacy and qualifications to full, with the staff gate enabled", () => {
     expect(loadConfig(cloudSetupEnv()).cloudWorkspaces?.runtime).toEqual({
-      newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full", qualificationEnabled: false,
+      newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full", qualificationEnabled: false, stagingEnabled: false,
     });
   });
   it("accepts only the explicit runtime switches", () => {
     expect(loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE: "v4",
       CLOUD_RUNTIME_V4_STAFF_ONLY: "false", CLOUD_RUNTIME_QUALIFICATION_MODE: "smoke", CLOUD_RUNTIME_QUALIFICATION_ENABLED: "true" }).cloudWorkspaces?.runtime)
-      .toEqual({ newWorkspaceProfile: "v4", staffOnly: false, qualificationMode: "smoke", qualificationEnabled: true });
+      .toEqual({ newWorkspaceProfile: "v4", staffOnly: false, qualificationMode: "smoke", qualificationEnabled: true, stagingEnabled: false });
     for (const name of ["CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE", "CLOUD_RUNTIME_V4_STAFF_ONLY", "CLOUD_RUNTIME_QUALIFICATION_MODE", "CLOUD_RUNTIME_QUALIFICATION_ENABLED"]) {
       expect(() => loadConfig({ ...cloudSetupEnv(), [name]: "invalid" })).toThrow(name);
     }
@@ -904,7 +918,7 @@ describe("cloud workspace backend configuration", () => {
 
   it("loads one pinned Daytona provider contract behind the gate", () => {
     expect(loadConfig(cloudEnv()).cloudWorkspaces).toEqual({
-      runtime: { newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full", qualificationEnabled: false },
+      runtime: { newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full", qualificationEnabled: false, stagingEnabled: false },
       provider: "daytona",
       apiKey: "daytona-api-key-for-control-plane-tests",
       apiUrl: "https://app.daytona.io/api",

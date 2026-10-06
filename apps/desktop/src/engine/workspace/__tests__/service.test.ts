@@ -52,6 +52,7 @@ import {
 import { getDesignSelection } from "../../design/selection";
 import { getDesignScreenshot } from "../../design/screenshots";
 import { setDesignCaptureConfig } from "../../design/capture-client";
+import { stopDesignVerification } from "../../design/verification-service";
 import { MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES } from "../../files/context-graph";
 import { rememberRecognizedDesignDirectories } from "../../design/recognition-store";
 import { withWorkspaceGitMutation } from "../../git/mutation-lock";
@@ -110,6 +111,17 @@ describe("WorkspaceService", () => {
     const local = r.workspaces.find((w) => w.id === LOCAL_MAIN_WORKSPACE_ID);
     expect(local).toBeTruthy();
     expect(local!.path).toBe(dir);
+  });
+
+  it("forwards explicit history recovery and preserves ordinary Local fetch options", async () => {
+    const fetch = vi.spyOn(git, "fetch").mockResolvedValue({ summary: "", historyLimited: true });
+    try {
+      expect(await svc.handle("git.fetch", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, unshallow: true })).toEqual({ summary: "", historyLimited: true });
+      expect(fetch).toHaveBeenLastCalledWith({ workspaceId: LOCAL_MAIN_WORKSPACE_ID, prune: false, remote: undefined, unshallow: true });
+      fetch.mockResolvedValueOnce({ summary: "" });
+      expect(await svc.handle("git.fetch", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, prune: true })).toEqual({ summary: "" });
+      expect(fetch).toHaveBeenLastCalledWith({ workspaceId: LOCAL_MAIN_WORKSPACE_ID, prune: true, remote: undefined, unshallow: undefined });
+    } finally { fetch.mockRestore(); }
   });
 
   it("serves Design through the admitted cloud primary checkout without local resource authority", async () => {
@@ -4357,6 +4369,33 @@ describe("WorkspaceService", () => {
     expect(svc.isWriteOp("gh.prComment")).toBe(true);
     expect(svc.isWriteOp("gh.prGet")).toBe(false);
     expect(svc.isWriteOp("gh.authStatus")).toBe(false);
+  });
+
+  it.each([null, "11111111-1111-4111-8111-111111111111"])("keeps local Design preview available without cloud admission (owner %s)", async organizationId => {
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "init"], { cwd: dir });
+    await initializeDesignDocument(dir);
+    const { workspaces } = await svc.handle("workspace.list") as { workspaces: Workspace[] };
+    // Existing org-owned local rows remain readable; new creation is cloud-only.
+    insertWorkspace({ ...workspaces.find(row => row.id === LOCAL_MAIN_WORKSPACE_ID)!, organizationId, kind: "design", viewMode: "design" });
+    const workspace = { workspaceId: LOCAL_MAIN_WORKSPACE_ID, path: dir };
+    const frame = await createDesignFrame(workspace.path, { title: "Local frame" });
+    const created = await svc.handle("design.context.create", { workspaceId: workspace.workspaceId, frame: frame.file }) as {
+      reference: { workspaceId: string; directoryId: string };
+    };
+    try {
+      const opened = await svc.handle("design.verification.open", { workspaceId: workspace.workspaceId,
+        directoryId: created.reference.directoryId, frame: frame.file }) as { reference: unknown; previewUrl: string };
+      expect(opened.reference).toEqual(created.reference);
+      expect((await fetch(opened.previewUrl)).status).toBe(200);
+      const inspected = await svc.handle("design.context.inspect", { workspaceId: workspace.workspaceId, reference: created.reference }) as {
+        reference: unknown; verification: { url: string }; previewUrl: string;
+      };
+      expect(inspected.reference).toEqual(created.reference);
+      expect(inspected.previewUrl).toBe(opened.previewUrl);
+      expect(new URL(inspected.verification.url).hostname).toBe("127.0.0.1");
+      await expect(svc.handle("design.verification.open", { workspaceId: workspace.workspaceId,
+        directoryId: created.reference.directoryId, frame: frame.file }, { remote: true })).rejects.toThrow();
+    } finally { await stopDesignVerification(); }
   });
 
   // This full Design API and Git round trip needs headroom on Intel CI runners.

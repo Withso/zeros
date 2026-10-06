@@ -144,6 +144,16 @@ describe("release provider adapters", () => {
     await expect(strict.waitIdentity(manifest)).rejects.toThrow("timed out");
     expect(reads).toBeGreaterThan(1);
   });
+  it.each(["unready", "unknown"])("refuses a newly deployed Alpha 503 with cloud %s even when worker promotion is off", async state => {
+    const manifest = { head: "0134_fixture.sql", sha256: "e".repeat(64) };
+    const worker = { provider: "boat", imageRef: `boat:zeros-alpha-fixture@sha256:${"d".repeat(64)}`, sourceSha: sha, architecture: "linux/amd64", storageMiB: 4096 };
+    const identity = { version: 1, ready: false, sourceSha: sha, channel: "alpha", maintenance: false,
+      migrations: { state: "current", head: manifest.head, expectedHead: manifest.head, manifestSha256: manifest.sha256 },
+      cloud: { enabled: true, ready: false, state }, worker, workerQualified: false };
+    const provider = createProviders({ ...config, channel: "alpha", api: "https://api-alpha.zeros.build", cloudRequired: true, requireQualifiedWorker: false, provider: "boat" }, {},
+      { fetch: async () => Response.json(identity, { status: 503 }), pause: async () => {} });
+    await expect(provider.waitIdentity(manifest, undefined, false)).rejects.toThrow("timed out");
+  });
   it("rejects a successful Railway deployment with another SHA", async () => {
     const provider = createProviders(config, {}, { fetch: async () => Response.json({ data: { deployment: {
       id: "d1", status: "SUCCESS", projectId: config.projectId, environmentId: config.environmentId, serviceId: config.serviceId,

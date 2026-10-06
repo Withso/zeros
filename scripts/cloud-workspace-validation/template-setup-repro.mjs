@@ -60,6 +60,7 @@ const ERROR_NAMES = new Set([
   "DatabaseError",
   "error", // pg-protocol's ErrorResponse name.
   "CloudProviderError",
+  "ValueError", "OSError", "FileNotFoundError", "PermissionError", "TimeoutExpired",
 ]);
 const ERROR_CODES = new Set([
   "input_invalid",
@@ -146,6 +147,16 @@ export function templateSetupErrorDiagnostic(phase, error) {
       : undefined;
   if (code) diagnostic.code = code;
   if (SQLSTATES.has(error?.code)) diagnostic.sqlstate = error.code;
+  if (["nonzero", "timeout", "overflow", "unsuccessful", "invalid_output"].includes(error?.command?.outcome)) {
+    diagnostic.command = { outcome: error.command.outcome,
+      exitCode: Number.isInteger(error.command.exitCode) && error.command.exitCode >= 0 && error.command.exitCode <= 255 ? error.command.exitCode : null };
+  }
+  if (ERROR_NAMES.has(error?.transport?.name) && ["probe_transport_failed", "probe_failed", "ERR_MODULE_NOT_FOUND",
+    "ERR_UNKNOWN_BUILTIN_MODULE", "ERR_REQUIRE_ESM"].includes(error.transport.code)) {
+    diagnostic.transport = { name: error.transport.name, code: error.transport.code };
+    if (["decode_payload", "prepare_directory", "write_sources", "execute_node", "read_result"].includes(error.transport.step))
+      diagnostic.transport.step = error.transport.step;
+  }
   const check =
     error instanceof BaseFailure
       ? error.diagnostic.failedChecks[0]
@@ -248,7 +259,7 @@ export function templateSetupForkBody(material) {
   return { type, ttlSeconds: 1800, noEnv: true, env: {} };
 }
 
-async function recoverFork(journal, { request, save }) {
+export async function recoverFork(journal, { request, save }) {
   requireCheck(
     journal.forkBody &&
       ["small", "default", "large"].includes(journal.forkBody.type) &&
@@ -527,7 +538,7 @@ export async function readTemplateSetupSource(pool, journal) {
   }
 }
 
-function privateFile(file, maximum = 256 * 1024) {
+export function privateFile(file, maximum = 256 * 1024) {
   const descriptor = openSync(
     file,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -555,21 +566,40 @@ function probeProgram(source, qualificationSource, material) {
   return `import base64,gzip,json,os,shutil,subprocess,sys,tempfile
 os.umask(0o077)
 directory=None
+step='decode_payload'
 try:
  data=json.loads(gzip.decompress(base64.b64decode(${JSON.stringify(payload)})))
+ step='prepare_directory'
  directory=tempfile.mkdtemp(prefix='zeros-v2-test-s1-',dir='/run/zeros')
  file=directory+'/probe.mjs'
+ step='write_sources'
  with open(file,'x') as stream: stream.write(data['source'])
  with open(directory+'/template-setup-qualification.py','x') as stream: stream.write(data['qualificationSource'])
  node=os.path.realpath('/opt/zeros/current/bin/node')
+ step='execute_node'
  result=subprocess.run([node,file],input=json.dumps(data['material']).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=420,env={'PATH':'/usr/bin:/bin','HOME':'/root'})
+ step='read_result'
  if len(result.stdout)>65536: raise ValueError()
+ if result.returncode != 0:
+  detail={'schema':'zeros.template-setup-error/v1','phase':'probe','name':'Error','code':'probe_failed','step':step}
+  raw=result.stderr[-8192:].decode('utf-8','replace')
+  try:
+   candidate=json.loads(raw)
+   if candidate.get('schema')=='zeros.template-setup-error/v1':
+    if candidate.get('name') in ('Error','SyntaxError','TypeError','ReferenceError','RangeError'): detail['name']=candidate['name']
+    if candidate.get('code') in ('probe_failed','ERR_MODULE_NOT_FOUND','ERR_UNKNOWN_BUILTIN_MODULE','ERR_REQUIRE_ESM'): detail['code']=candidate['code']
+  except (ValueError,AttributeError):
+   for category in ('SyntaxError','TypeError','ReferenceError','RangeError'):
+    if category+':' in raw: detail['name']=category; break
+   for code in ('ERR_MODULE_NOT_FOUND','ERR_UNKNOWN_BUILTIN_MODULE','ERR_REQUIRE_ESM'):
+    if code in raw: detail['code']=code; break
+  print(json.dumps(detail,separators=(',',':')),file=sys.stderr)
  sys.stdout.buffer.write(result.stdout)
  sys.exit(result.returncode)
 except Exception as error:
  name=type(error).__name__
  if name not in ('ValueError','OSError','FileNotFoundError','PermissionError','TimeoutExpired'): name='UnknownError'
- print(json.dumps({'schema':'zeros.template-setup-error/v1','phase':'probe','name':name,'code':'probe_transport_failed'},separators=(',',':')),file=sys.stderr)
+ print(json.dumps({'schema':'zeros.template-setup-error/v1','phase':'probe','name':name,'code':'probe_transport_failed','step':step},separators=(',',':')),file=sys.stderr)
  sys.exit(1)
 finally:
  if directory is not None: shutil.rmtree(directory)
@@ -615,16 +645,27 @@ export async function runTemplateSetupProbe(
     480,
   );
   const result = response.body;
-  requireCheck(
-    response.status === 200 &&
+  const valid = response.status === 200 &&
       result?.success === true &&
       result.exitCode === 0 &&
       !result.timedOut &&
       !result.stdoutTruncated &&
       typeof result.stdout === "string" &&
-      Buffer.byteLength(result.stdout) <= 65536,
-    "probe_invalid",
-  );
+      Buffer.byteLength(result.stdout) <= 65536;
+  if (!valid) {
+    const error = Object.assign(new Error("probe_invalid"), { command: {
+      outcome: result?.timedOut ? "timeout" : result?.stdoutTruncated ? "overflow" : result?.exitCode !== 0 ? "nonzero" :
+        result?.success !== true ? "unsuccessful" : "invalid_output", exitCode: result?.exitCode,
+    } });
+    if (typeof result?.stderr === "string" && Buffer.byteLength(result.stderr) <= 8192) {
+      try {
+        const value = JSON.parse(result.stderr);
+        if (value?.schema === "zeros.template-setup-error/v1" && value.phase === "probe") error.transport = value;
+      } catch { /* Raw subprocess/provider stderr is never a diagnostic. */ }
+    }
+    diagnose("probe", error);
+    throw error;
+  }
   return JSON.parse(result.stdout);
 }
 

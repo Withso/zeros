@@ -10,8 +10,9 @@ import type {CloudAgentCredentialConfig} from "./agent-credential-config.js";
 import {readCloudAgentComputeTrust} from "./agent-compute-trust.js";
 import {CODEX_AUTH_RUNTIME_VERSION,parseCodexNativeCache,sealCodexNativeCache,type CodexNativeAuthCache} from "./codex-auth-cache.js";
 import {rememberCodexRefreshSeed} from "./codex-auth-renewal.js";
+import {cloudAgentModels} from "./agent-models.js";
 import {cloudRuntimeQualificationMode} from "./runtime-config.js";
-import {runtimeCredentialQualificationJoin} from "./runtime-selection.js";
+import {runtimeCredentialQualificationJoin,runtimeNativeCapabilities} from "./runtime-selection.js";
 
 // Keep the shared schema/projection import acyclic; disabled paths do not load
 // the Dev adapter or read its authority configuration.
@@ -24,23 +25,23 @@ const uuid=z.string().uuid().transform(value=>value.toLowerCase()),revision=z.nu
 // Native context suffixes are part of the exact model identity, not a label.
 export const CloudAgentModelSchema=z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/);
 export const CloudAgentDelegationSchema=z.object({id:uuid,credentialId:uuid,expectedRevision:revision,workspaceId:uuid,
-  granteeUserId:uuid,models:z.array(CloudAgentModelSchema).min(1).max(32),expiresAt:z.string().datetime(),
+  granteeUserId:uuid,models:z.array(CloudAgentModelSchema).min(1).max(32),allModels:z.boolean().optional(),expiresAt:z.string().datetime(),
   computeConsent:z.object({fingerprint:z.string().regex(/^[a-f0-9]{64}$/),trust:z.enum(["zeros-managed","compute-administrator"])}).strict().optional()}).strict();
 type Credential={id:string;owner_user_id:string;kind:CloudAgentCredentialKind;display_name:string;revision:string;current_version:number;
   revoked_at:Date|null;last_operation_id:string;last_request_sha256:Buffer;connection_method:"api"|"account";usable?:boolean};
 type Delegation={id:string;credential_id:string;owner_user_id:string;credential_revision:string;workspace_id:string;org_id:string;
-  grantee_user_id:string;owner_fingerprint:string;grantee_fingerprint:string;compute_fingerprint:string;compute_trust:"zeros-managed"|"compute-administrator";models:string[];expires_at:Date;revoked_at:Date|null};
-type OrganizationConnection={provider:string;revision:string;credential_id:string|null;credential_revision:string|null;models:string[];consent_fingerprint:string;request_sha256:Buffer};
+  grantee_user_id:string;owner_fingerprint:string;grantee_fingerprint:string;compute_fingerprint:string;compute_trust:"zeros-managed"|"compute-administrator";models:string[];all_models:boolean;expires_at:Date;revoked_at:Date|null};
+type OrganizationConnection={provider:string;revision:string;credential_id:string|null;credential_revision:string|null;models:string[];all_models:boolean;consent_fingerprint:string;request_sha256:Buffer};
 const organizationConnectionInput=z.union([
   z.object({expectedRevision:z.number().int().nonnegative().safe(),credentialId:uuid,credentialRevision:revision,
-    models:z.array(CloudAgentModelSchema).min(1).max(32),consent:z.literal("zeros-managed")}).strict(),
+    models:z.array(CloudAgentModelSchema).min(1).max(32),allModels:z.boolean().optional(),consent:z.literal("zeros-managed")}).strict(),
   z.object({expectedRevision:z.number().int().nonnegative().safe(),credentialId:z.null()}).strict(),
 ]);
 function invalid():never{throw new HttpError(422,"invalid_agent_credential_request","Invalid agent credential request");}
 function unavailable():never{throw new HttpError(404,"agent_credential_unavailable","Agent credential access is unavailable");}
 const metadata=(row:Credential)=>({id:row.id,kind:row.kind,displayName:row.display_name,revision:Number(row.revision),revoked:row.revoked_at!==null,connectionMethod:row.connection_method});
 const grantMetadata=(row:Delegation)=>({id:row.id,credentialId:row.credential_id,credentialRevision:Number(row.credential_revision),
-  workspaceId:row.workspace_id,granteeUserId:row.grantee_user_id,models:row.models,expiresAt:row.expires_at.toISOString(),revoked:row.revoked_at!==null,
+  workspaceId:row.workspace_id,granteeUserId:row.grantee_user_id,models:row.models,allModels:row.all_models,expiresAt:row.expires_at.toISOString(),revoked:row.revoked_at!==null,
   computeConsent:{fingerprint:row.compute_fingerprint,trust:row.compute_trust}});
 
 /** Pure metadata port shared by credential stores; authorization stays with each store. */
@@ -131,7 +132,7 @@ export class DatabaseCloudAgentCredentialService {
       const connections=(await tx.query<OrganizationConnection>(`SELECT * FROM cloud_agent_organization_connections
         WHERE org_id=$1 AND owner_user_id=$2 ORDER BY provider`,[organizationId,ownerUserId])).rows;
       return {credentials:credentials.map(metadata),connections:connections.map(row=>({provider:row.provider,revision:Number(row.revision),
-        credentialId:row.credential_id,models:row.models,connected:row.consent_fingerprint===fingerprint&&credentials.some(
+        credentialId:row.credential_id,models:row.models,allModels:row.all_models,connected:row.consent_fingerprint===fingerprint&&credentials.some(
           credential=>credential.id===row.credential_id&&credential.revision===row.credential_revision&&credential.usable)}))};
     });
   }
@@ -145,7 +146,7 @@ export class DatabaseCloudAgentCredentialService {
     const dev=await devConnectionRuntime(this.pool,this.encryption);
     if(dev&&input.credentialId) {
       const reference=await withSystemTx(this.pool,tx=>tx.query("SELECT 1 FROM dev_connection_references WHERE binding_id=$1 AND owner_user_id=$2 AND org_id=$3 AND reference->>'kind' LIKE $4",[input.credentialId,ownerUserId,organizationId,`${provider}-%`]));
-      if(reference.rowCount)return dev.selectAgent(ownerUserId,organizationId,input.credentialId,input.models,input.expectedRevision,input.credentialRevision);
+      if(reference.rowCount)return dev.selectAgent(ownerUserId,organizationId,input.credentialId,input.models,input.expectedRevision,input.credentialRevision,input.allModels===true);
     }
     if(dev&&!input.credentialId){
       const selected=await withSystemTx(this.pool,async tx=>(await tx.query<{credential_id:string;revision:string}>(`SELECT c.credential_id,c.revision FROM cloud_agent_organization_connections c
@@ -162,7 +163,9 @@ export class DatabaseCloudAgentCredentialService {
       const fingerprint=await this.organizationConsent(tx,ownerUserId,organizationId);
       await this.reconcileLegacyOrganizations(tx,ownerUserId,organizationId);
       const models=input.credentialId?[...new Set(input.models)].sort():[];
-      const hash=createHash("sha256").update(JSON.stringify([input.credentialId,input.credentialId?input.credentialRevision:null,models,fingerprint])).digest();
+      const allModels=input.credentialId!==null&&input.allModels===true;
+      // Preserve released request hashes when the additive flag is absent/false.
+      const hash=createHash("sha256").update(JSON.stringify([input.credentialId,input.credentialId?input.credentialRevision:null,models,fingerprint,...(allModels?["all-models"]:[])])).digest();
       const previous=(await tx.query<OrganizationConnection>(`SELECT * FROM cloud_agent_organization_connections
         WHERE org_id=$1 AND owner_user_id=$2 AND provider=$3 FOR UPDATE`,[organizationId,ownerUserId,provider])).rows[0];
       if(previous&&Number(previous.revision)===input.expectedRevision+1&&previous.request_sha256.equals(hash))
@@ -178,11 +181,11 @@ export class DatabaseCloudAgentCredentialService {
         if(Number(credential.revision)!==input.credentialRevision)throw new HttpError(409,"agent_credential_conflict","Agent credential changed");
       }
       const next=input.expectedRevision+1;
-      await tx.query(`INSERT INTO cloud_agent_organization_connections(org_id,owner_user_id,provider,revision,credential_id,credential_revision,models,consent_fingerprint,request_sha256)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(org_id,owner_user_id,provider) DO UPDATE SET
-        revision=EXCLUDED.revision,credential_id=EXCLUDED.credential_id,credential_revision=EXCLUDED.credential_revision,models=EXCLUDED.models,
+      await tx.query(`INSERT INTO cloud_agent_organization_connections(org_id,owner_user_id,provider,revision,credential_id,credential_revision,models,consent_fingerprint,request_sha256,all_models)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(org_id,owner_user_id,provider) DO UPDATE SET
+        revision=EXCLUDED.revision,credential_id=EXCLUDED.credential_id,credential_revision=EXCLUDED.credential_revision,models=EXCLUDED.models,all_models=EXCLUDED.all_models,
         consent_fingerprint=EXCLUDED.consent_fingerprint,request_sha256=EXCLUDED.request_sha256,updated_at=now()`,
-      [organizationId,ownerUserId,provider,next,input.credentialId,input.credentialId?input.credentialRevision:null,models,fingerprint,hash]);
+      [organizationId,ownerUserId,provider,next,input.credentialId,input.credentialId?input.credentialRevision:null,models,fingerprint,hash,allModels]);
       await tx.query(`UPDATE cloud_agent_credential_delegations SET revoked_at=coalesce(revoked_at,now())
         WHERE org_id=$1 AND owner_user_id=$2 AND organization_provider=$3 AND revoked_at IS NULL`,[organizationId,ownerUserId,provider]);
       return {revision:next,replayed:false};
@@ -244,7 +247,7 @@ export class DatabaseCloudAgentCredentialService {
           WHERE workspace_id=$1 AND owner_user_id=$2 AND organization_provider=$3 AND revoked_at IS NULL`,[workspaceId,ownerUserId,connection.provider]);
         const id=randomUUID();
         await this.delegateInTransaction(tx,ownerUserId,{id,workspaceId,credentialId:connection.credential_id!,expectedRevision:Number(connection.credential_revision),
-          granteeUserId:ownerUserId,models:connection.models,expiresAt:new Date(Date.now()+86400_000).toISOString(),computeConsent:compute});
+          granteeUserId:ownerUserId,models:connection.models,allModels:connection.all_models,expiresAt:new Date(Date.now()+86400_000).toISOString(),computeConsent:compute});
         await tx.query("UPDATE cloud_agent_credential_delegations SET organization_provider=$2,organization_connection_revision=$3 WHERE id=$1",[id,connection.provider,connection.revision]);
       }
     });
@@ -358,7 +361,8 @@ export class DatabaseCloudAgentCredentialService {
   }
 
   private async delegateInTransaction(tx:Tx,ownerUserId:string,input:z.infer<typeof CloudAgentDelegationSchema>){
-      const models=[...new Set(input.models)].sort();
+      const models=[...new Set(input.models)].sort(),allModels=input.allModels===true;
+      if(allModels&&ownerUserId.toLowerCase()!==input.granteeUserId)invalid();
       await this.owner(tx,ownerUserId,true);
       if(!(await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE SKIP LOCKED",[input.granteeUserId])).rowCount)unavailable();
       const workspace=(await tx.query<{org_id:string}>("SELECT org_id FROM cloud_workspaces WHERE id=$1 AND deleted_at IS NULL",[input.workspaceId])).rows[0];
@@ -376,7 +380,7 @@ export class DatabaseCloudAgentCredentialService {
       const existing=(await tx.query<Delegation>("SELECT * FROM cloud_agent_credential_delegations WHERE id=$1",[input.id])).rows[0];
       if(existing){
         if(existing.owner_user_id!==ownerUserId||existing.credential_id!==input.credentialId||existing.workspace_id!==input.workspaceId||
-          existing.grantee_user_id!==input.granteeUserId||Number(existing.credential_revision)!==input.expectedRevision||
+          existing.grantee_user_id!==input.granteeUserId||existing.all_models!==allModels||Number(existing.credential_revision)!==input.expectedRevision||
           existing.owner_fingerprint!==owner.fingerprint||existing.grantee_fingerprint!==grantee.fingerprint||existing.revoked_at||
           existing.compute_fingerprint!==compute.fingerprint||existing.compute_trust!==compute.trust||
           existing.expires_at.toISOString()!==new Date(input.expiresAt).toISOString()||JSON.stringify(existing.models)!==JSON.stringify(models))
@@ -388,8 +392,8 @@ export class DatabaseCloudAgentCredentialService {
       const count=(await tx.query<{n:number}>("SELECT count(*)::int AS n FROM cloud_agent_credential_delegations WHERE credential_id=$1 AND revoked_at IS NULL AND expires_at>clock_timestamp()",[credential.id])).rows[0]!.n;
       if(count>=100)throw new HttpError(429,"agent_delegation_limit","Agent delegation limit reached");
       const row=(await tx.query<Delegation>(`INSERT INTO cloud_agent_credential_delegations(id,credential_id,owner_user_id,credential_revision,workspace_id,org_id,
-        grantee_user_id,owner_fingerprint,grantee_fingerprint,models,expires_at,compute_fingerprint,compute_trust) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
-      [input.id,credential.id,ownerUserId,input.expectedRevision,input.workspaceId,scope.organizationId,input.granteeUserId,owner.fingerprint,grantee.fingerprint,models,input.expiresAt,compute.fingerprint,compute.trust])).rows[0]!;
+        grantee_user_id,owner_fingerprint,grantee_fingerprint,models,expires_at,compute_fingerprint,compute_trust,all_models) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+      [input.id,credential.id,ownerUserId,input.expectedRevision,input.workspaceId,scope.organizationId,input.granteeUserId,owner.fingerprint,grantee.fingerprint,models,input.expiresAt,compute.fingerprint,compute.trust,allModels])).rows[0]!;
       await this.reconcileLegacyOrganizations(tx,ownerUserId,scope.organizationId);
       return {delegation:grantMetadata(row),replayed:false};
   }
@@ -419,22 +423,30 @@ export class DatabaseCloudAgentCredentialService {
       const workspace=(await tx.query<{org_id:string}>("SELECT org_id FROM cloud_workspaces WHERE id=$1",[workspaceId])).rows[0];if(!workspace)unavailable();
       const actor=await authorizeCloudWorkspaceActor(tx,{workspaceId,organizationId:workspace.org_id,actorUserId,capability:"run"});
       const compute=await readCloudAgentComputeTrust(tx,workspaceId);if(!compute)unavailable();
-      const rows=await tx.query<{id:string;kind:CloudAgentCredentialKind;owner_user_id:string;models:string[];expires_at:Date;runtime_qualified:boolean}>(`SELECT delegation.id,credential.kind,credential.owner_user_id,delegation.models,delegation.expires_at,
-        EXISTS(SELECT 1 FROM cloud_workspaces workspace
+      const rows=await tx.query<{id:string;kind:CloudAgentCredentialKind;owner_user_id:string;models:string[];all_models:boolean;expires_at:Date;runtime_qualified:boolean;runtime_upgrade_required:boolean;mcp_qualified:boolean;native_capabilities:unknown}>(`SELECT delegation.id,credential.kind,credential.owner_user_id,delegation.models,delegation.all_models,delegation.expires_at,
+        coalesce(runtime.runtime_qualified,false) AS runtime_qualified,coalesce(runtime.runtime_upgrade_required,false) AS runtime_upgrade_required,
+        coalesce(runtime.mcp_qualified,false) AS mcp_qualified,runtime.native_capabilities
+        FROM cloud_agent_credential_delegations delegation JOIN cloud_agent_credentials credential ON credential.id=delegation.credential_id
+        LEFT JOIN LATERAL (SELECT qualification.mcp_qualified,qualification.native_capabilities,
+          (qualification.mcp_qualified OR (COALESCE(engine.agent_customization_version,3)=3 AND
+            NOT EXISTS(SELECT 1 FROM cloud_computer_admin_workspaces admin WHERE admin.workspace_id=workspace.id))) AS runtime_qualified,
+          (generation.runtime_id IS NOT NULL AND NOT qualification.mcp_qualified AND engine.agent_customization_version IN (1,2)
+            AND NOT EXISTS(SELECT 1 FROM cloud_computer_admin_workspaces admin WHERE admin.workspace_id=workspace.id)) AS runtime_upgrade_required
+          FROM cloud_workspaces workspace
           JOIN cloud_workspace_generations generation ON generation.workspace_id=workspace.id AND generation.generation=workspace.current_generation
           JOIN cloud_workspace_engine_instances engine ON engine.workspace_id=workspace.id AND engine.org_id=workspace.org_id AND engine.generation=generation.generation
             AND engine.state='ready' AND engine.revoked_at IS NULL AND engine.lease_expires_at>clock_timestamp() AND engine.actor_protocol_version=2
-          ${runtimeCredentialQualificationJoin("$7", "true")}
-          WHERE workspace.id=delegation.workspace_id) AS runtime_qualified
-        FROM cloud_agent_credential_delegations delegation JOIN cloud_agent_credentials credential ON credential.id=delegation.credential_id
+          ${runtimeCredentialQualificationJoin("$7", "generation.runtime_id IS NULL")}
+          WHERE workspace.id=delegation.workspace_id) runtime ON true
         WHERE delegation.workspace_id=$1 AND delegation.org_id=$2 AND delegation.grantee_user_id=$3
-          AND delegation.revoked_at IS NULL AND delegation.expires_at>clock_timestamp() AND credential.revoked_at IS NULL
+          AND delegation.revoked_at IS NULL AND delegation.expires_at>clock_timestamp()+interval '5 seconds' AND credential.revoked_at IS NULL
           AND credential.revision=delegation.credential_revision AND delegation.grantee_fingerprint=$4
           AND delegation.compute_fingerprint=$5 AND delegation.compute_trust=$6
           AND delegation.owner_fingerprint=cloud_workspace_actor_fingerprint($1,credential.owner_user_id)
           AND cloud_workspace_actor_role($1,credential.owner_user_id) IN ('prompter','developer','manager','owner')
         ORDER BY delegation.created_at DESC,delegation.id LIMIT 100`,[workspaceId,workspace.org_id,actorUserId,actor.fingerprint,compute.fingerprint,compute.trust,cloudRuntimeQualificationMode()]);
-      return {compute,delegations:rows.rows.map(row=>({id:row.id,kind:row.kind,ownerUserId:row.owner_user_id,models:row.models,expiresAt:row.expires_at.toISOString(),runtimeQualified:row.runtime_qualified}))};
+      return {compute,delegations:rows.rows.map(row=>({id:row.id,kind:row.kind,ownerUserId:row.owner_user_id,models:row.all_models?cloudAgentModels(row.kind):row.models,allModels:row.all_models,expiresAt:row.expires_at.toISOString(),
+        runtimeQualified:row.runtime_qualified,runtimeUpgradeRequired:row.runtime_upgrade_required,mcpQualified:row.mcp_qualified,...(runtimeNativeCapabilities(row.native_capabilities)?{nativeCapabilities:runtimeNativeCapabilities(row.native_capabilities)}:{})}))};
     });
   }
 }

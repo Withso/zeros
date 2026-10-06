@@ -141,25 +141,26 @@ export async function runRuntimeLifecycle(config, {
           (value.evidenceMode === "full" || config.qualificationMode === "smoke" && value.evidenceMode === "smoke")));
     }, "later_runtime_timeout");
     accepted(await request(`${workspacePath()}/wake`, "POST", {}, operations.wake));
-    const woken = generation(await waitWorkspace("ready", source.number));
-    check(JSON.stringify(woken) === JSON.stringify(source), "wake_pins");
-    report.checks.push("wake_pins");
-    const upgradeBody = { expectedGeneration: source.number, operationId: operations.upgrade };
-    const upgrade = accepted(await request(`${workspacePath()}/runtime-upgrade`, "POST", upgradeBody));
-    check(upgrade.operationId === operations.upgrade && upgrade.sourceGeneration === source.number && !upgrade.unchanged &&
-      upgrade.runtimeId === config.nextRuntimeId && Number.isSafeInteger(upgrade.generation) && upgrade.generation > source.number &&
-      UUID.test(upgrade.transitionId ?? ""), "replacement_generation");
-    report.transitionId = upgrade.transitionId;
-    report.upgradedGeneration = upgrade.generation;
+    const woken = generation(await waitWorkspace("ready"));
+    check(woken.number > source.number && woken.pin.runtimeId === config.nextRuntimeId, "replacement_generation");
+    check(woken.pin.baseImageId === source.pin.baseImageId && woken.pin.baseCompatibilityId === source.pin.baseCompatibilityId,
+      "same_base_upgrade");
+    const availability = accepted(await request(`${workspacePath()}/runtime-upgrade`));
+    check(UUID.test(availability.transition?.id ?? "") && availability.transition.generation === woken.number &&
+      availability.transition.runtimeId === config.nextRuntimeId && availability.transition.state === "succeeded", "wake_upgrade");
+    report.transitionId = availability.transition.id;
+    report.upgradedGeneration = woken.number;
+    report.checks.push("wake_upgrade", "same_base_upgrade");
     await reportProgress(report);
-    const upgraded = generation(await waitWorkspace("ready", upgrade.generation));
-    check(upgraded.pin.runtimeId === upgrade.runtimeId && upgraded.pin.baseImageId === source.pin.baseImageId &&
-      upgraded.pin.baseCompatibilityId === source.pin.baseCompatibilityId, "same_base_upgrade");
+    const upgradeBody = { expectedGeneration: woken.number, operationId: operations.upgrade };
+    const upgrade = accepted(await request(`${workspacePath()}/runtime-upgrade`, "POST", upgradeBody));
+    check(upgrade.operationId === operations.upgrade && upgrade.sourceGeneration === woken.number && upgrade.unchanged &&
+      upgrade.runtimeId === config.nextRuntimeId && upgrade.generation === woken.number && upgrade.transitionId === null, "current_runtime_noop");
     const replay = await request(`${workspacePath()}/runtime-upgrade`, "POST", upgradeBody);
     check(replay.status === 200 && replay.replayed && JSON.stringify(replay.data) === JSON.stringify(upgrade), "upgrade_replay");
-    const stale = await request(`${workspacePath()}/runtime-upgrade`, "POST", { ...upgradeBody, operationId: operations.stale });
+    const stale = await request(`${workspacePath()}/runtime-upgrade`, "POST", { ...upgradeBody, expectedGeneration:source.number, operationId: operations.stale });
     check(stale.status === 409 && stale.data?.error?.code === "cloud_generation_changed", "generation_cas");
-    report.checks.push("same_base_upgrade", "upgrade_replay", "generation_cas");
+    report.checks.push("current_runtime_noop", "upgrade_replay", "generation_cas");
   } catch (error) {
     failed.push(error instanceof CheckFailure ? error.check : "lifecycle_failed");
   } finally {

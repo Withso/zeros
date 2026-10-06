@@ -2,6 +2,7 @@ import type { CloudAgentRuntimeAttestation } from "./cloud-runtime-attestation";
 import { isCloudAgentPreviewTarget } from "@zeros/protocol/containment";
 import { configureNativeGithubTransport } from "./git/github-native-client";
 import { requestCloudGithubWrite, type CloudGithubWriteRequest } from "./cloud-github-write-client";
+import { requestCloudGithubRead } from "./cloud-github-read-client";
 import type { CloudCommandEngineRequest } from "@zeros/protocol/cloud-commands";
 import { CloudActorAdmissionResponseSchema, type CloudActorContext } from "@zeros/protocol/cloud-actors";
 import type { CloudEventEngineRequest } from "@zeros/protocol/cloud-events";
@@ -466,6 +467,7 @@ export class CloudRuntimeRegistration {
         protocolVersion: this.config.engine.protocolVersion,
         actorProtocolVersion: 2,
         agentRuntime: this.agentRuntime,
+        ...(this.agentRuntime.profile === "zeros-cloud-worker-v4" ? { agentCustomizationVersion: 3 } : {}),
       },
     );
     const document = this.parseRegistration(raw);
@@ -526,6 +528,14 @@ export class CloudRuntimeRegistration {
     if (request.kind !== "release" && !this.hasControlAuthority(document))
       throw new Error("GitHub write authorization is unavailable.");
     return result;
+  }
+
+  async githubReadRequest(actorSessionId: string, input: Parameters<typeof fetch>[0], init?: RequestInit): Promise<Response> {
+    const document = this.document;
+    if (!document || !this.hasControlAuthority(document)) throw new Error("GitHub read authorization is unavailable.");
+    const response = await requestCloudGithubRead(this.authority(document), actorSessionId, this.abortController.signal, input, init, this.fetch);
+    if (!this.hasControlAuthority(document)) { await response.body?.cancel(); throw new Error("GitHub read authorization is unavailable."); }
+    return response;
   }
 
   async gitAuthorRequest(actorSessionId: string) {

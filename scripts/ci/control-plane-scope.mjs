@@ -4,9 +4,10 @@
 // ──────────────────────────────────────────────────────────
 //
 // The database suites need four Postgres jobs and most of a Preflight run's
-// minutes. Their outcome can only change when one of their inputs changes, so
-// the `control plane` gate skips them when a change touches none. The
-// typecheck and dependency audit still run on every change.
+// minutes. Main pushes always run them: an earlier failing service change must
+// not escape validation on a later docs-only push. Other events skip them when
+// a change touches none of their inputs. The typecheck and dependency audit
+// still run on every change.
 //
 // The inputs are more than apps/control-plane/: the admission contracts import
 // the real desktop engine clients and protocol schemas through the root package
@@ -40,6 +41,7 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   "apps/desktop/src/engine/cloud-command-client.ts",
   "apps/desktop/src/engine/cloud-event-client.ts",
   "apps/desktop/src/engine/cloud-github-write-client.ts",
+  "apps/desktop/src/engine/cloud-github-read-client.ts",
   "apps/desktop/src/engine/cloud-runtime-registration.ts",
   "apps/desktop/src/engine/git/github-native-client.ts",
   "apps/desktop/src/engine/git/github-native-desktop.ts",
@@ -47,6 +49,7 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   "packages/protocol/tsconfig.json",
   "packages/protocol/src/cloud-actors.ts",
   "packages/protocol/src/cloud-agent-execution.ts",
+  "packages/protocol/src/cloud-bridge-diagnostics.ts",
   "packages/protocol/src/cloud-commands.ts",
   "packages/protocol/src/cloud-computer-tools.ts",
   "packages/protocol/src/cloud-computer-v2.ts",
@@ -108,7 +111,13 @@ export function changedFilesSince(base, { cwd } = {}) {
   }
 }
 
-export function decideControlPlaneScope({ base, changedFiles }) {
+export function decideControlPlaneScope({ base, changedFiles, eventName, ref }) {
+  if (eventName === "push" && ref === "refs/heads/main") {
+    return {
+      database: true,
+      reason: "main pushes always run the database suites",
+    };
+  }
   if (!base) {
     return {
       database: true,
@@ -141,6 +150,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const decision = decideControlPlaneScope({
     base,
     changedFiles: base ? changedFilesSince(base) : null,
+    eventName: process.env.EVENT_NAME,
+    ref: process.env.GITHUB_REF,
   });
   process.stdout.write(`database=${decision.database}\n`);
   console.error(decision.reason);

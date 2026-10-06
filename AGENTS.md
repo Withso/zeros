@@ -14,6 +14,8 @@ These instructions apply to the entire repository. Read and follow
   they are persisted or externally observable; document them as compatibility
   contracts instead of silently renaming them.
 - Keep changes scoped. Do not reformat or rewrite unrelated user work.
+- Every change must handle Local and cloud workspaces (owners and placements);
+  follow RULES.md §8, mirrored in the generated `zeros-workspaces` skills.
 - For a bug, add a failing regression test first, implement the fix, and retain
   the test.
 - Run adjacent Vitest suites after each meaningful edit, not only at handoff.
@@ -91,9 +93,16 @@ For provider event handling or tool transcript UI, also read
   echo a credential value, including in command arguments and test output.
 - Commits and pull requests use the workspace's own Git and GitHub identity,
   so authorship stays with whoever is working; the `Co-Authored-By` trailer
-  records the agent. Never author a commit as `zeros-agent[bot]`. Use the bot
-  only for automation that is not a person's work: merging a green pull
-  request (`pnpm agent:gh pr merge …`), cutting a release branch
+  records the agent. Never author a commit as `zeros-agent[bot]`.
+- Agents arm merges only through `pnpm agent:merge <pr-number>`, using the
+  workspace's own `gh` identity. Preview with `--dry-run`. Never bypass the
+  wrapper with `gh pr merge` or `pnpm agent:gh pr merge`. PRs that change
+  CI-definition paths require the owner to review and merge them. Only a human
+  may use `--force`, after documenting the override in a comment on that PR;
+  pass the comment URL with `--reason`. This overrides only the one-armed-PR
+  guard. See [docs/ci.md](docs/ci.md).
+- Use the bot only for automation that is not a person's work: cutting a release
+  branch
   (`pnpm agent:git push origin <sha>:refs/heads/release/X.Y.Z`), and
   dispatching or rerunning release workflows (`pnpm agent:gh …`).
   `pnpm agent:github:check` verifies access without printing a token. The App
@@ -125,3 +134,10 @@ Additional requirements:
   `pnpm check:licenses`.
 
 Never claim a platform-only check passed when it was not run on that platform.
+
+### CI selection
+
+Run `pnpm ci:plan` to preview the path-selected lanes, and add any extra `ci:*`
+labels before the final push. Labels only add checks; they cannot remove path
+floors. See [docs/ci.md](docs/ci.md) for the closed label vocabulary and fallback
+rules. CI-definition PRs need an owner merge; agents must not auto-merge them.

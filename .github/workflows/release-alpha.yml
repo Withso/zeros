@@ -38,6 +38,9 @@ name: Release (alpha)
 # a private repo's release assets.
 #
 # Exact-source Preflight and CodeQL gate hosted mutation and feed publication.
+# With ZEROS_ALPHA_CI_FAST_PATH=enabled, automatic Alpha uses Preflight's
+# successful alpha-gate job alone (no CodeQL wait) while the deferred jobs finish. Other callers and
+# an unset/disabled flag retain the full-workflow policy.
 # Signing starts in parallel; only the final publisher has repository write scope.
 
 on:
@@ -66,10 +69,14 @@ jobs:
     permissions:
       contents: read
       actions: read
+    outputs:
+      ready: ${{ steps.barrier.outputs.ready }}
     env:
       RELEASE_CHANNEL: alpha
       RELEASE_SHA: ${{ github.sha }}
       RELEASE_BRANCH: ${{ github.ref_name }}
+      ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}
+      ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -82,12 +89,44 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm exec tsx scripts/release/ci-cli.ts --wait
+      - name: Wait for exact-source Alpha CI
+        id: barrier
+        run: pnpm exec tsx scripts/release/ci-cli.ts --wait
+      - name: Save Alpha admission receipt
+        if: success() && steps.barrier.outputs.admission_issued == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: alpha-admission-${{ github.sha }}
+          path: .context/release/alpha-admission.json
+          overwrite: true
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+
+  # A candidate proven superseded before any destination mutation (ready=false)
+  # still holds the release-alpha concurrency slot until its read-only builds
+  # finish. Cancel this run so the newest pending main run starts at once.
+  # Hosted promotion and both publishers are already skipped on this path.
+  release-slot:
+    name: Release the superseded Alpha slot
+    needs: ci
+    if: github.event.repository.fork == false && needs.ci.result == 'success' && needs.ci.outputs.ready == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the remaining read-only jobs of this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPOSITORY: ${{ github.repository }}
+        run: gh run cancel "$RUN_ID" --repo "$REPOSITORY"
 
   hosted:
     name: Hosted promotion (alpha)
     needs: ci
-    if: github.event.repository.fork == false
+    if: github.event.repository.fork == false && needs.ci.outputs.ready == 'true'
     permissions:
       contents: read
       actions: read
@@ -97,11 +136,15 @@ jobs:
       source_sha: ${{ github.sha }}
       branch: ${{ github.ref_name }}
       before_sha: ${{ github.event.before || '' }}
+      alpha_ci_fast_path: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}
+      alpha_forward_only: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}
     secrets: inherit
 
   runtime-build:
     name: Build Linux runtime bundle
-    needs: ci
+    # Read-only exact-source build: it starts with the run instead of waiting
+    # for the CI barrier. Publication still needs this job and hosted promotion,
+    # which itself needs the barrier.
     if: github.event.repository.fork == false
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -137,14 +180,15 @@ jobs:
 
   runtime-publish:
     name: Publish Alpha runtime bundle
-    needs: [runtime-build, hosted]
-    if: github.event.repository.fork == false
+    needs: [ci, runtime-build, hosted]
+    if: github.event.repository.fork == false && needs.ci.outputs.ready == 'true'
     runs-on: ubuntu-24.04
     environment: alpha
     timeout-minutes: 15
     permissions:
       id-token: write
       contents: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -163,9 +207,18 @@ jobs:
           path: ${{ runner.temp }}/cloud-runtime-bundle
       - name: Publish using GitHub Actions OIDC
         env:
+          RELEASE_CHANNEL: alpha
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_BRANCH: ${{ github.ref_name }}
+          ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}
+          ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}
+          GH_TOKEN: ${{ github.token }}
           CLOUD_WORKSPACE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL }}
           CLOUD_RUNTIME_OIDC_AUDIENCE: ${{ vars.CLOUD_RUNTIME_OIDC_AUDIENCE || 'zeros-control-plane-alpha' }}
-        run: pnpm exec tsx scripts/cloud-workspace-validation/runtime-bundle/publish.ts --out-dir "$RUNNER_TEMP/cloud-runtime-bundle"
+        run: |
+          set -euo pipefail
+          pnpm exec tsx scripts/release/ci-cli.ts --verify
+          pnpm exec tsx scripts/cloud-workspace-validation/runtime-bundle/publish.ts --out-dir "$RUNNER_TEMP/cloud-runtime-bundle"
 
   build:
     name: Build + sign Alpha (macOS arm64 · NOT notarized)
@@ -401,7 +454,7 @@ jobs:
   publish:
     name: Publish Alpha feed
     needs: [ci, build, hosted]
-    if: github.event.repository.fork == false
+    if: github.event.repository.fork == false && needs.ci.outputs.ready == 'true'
     runs-on: ubuntu-latest
     environment: alpha
     permissions:
@@ -411,6 +464,8 @@ jobs:
       RELEASE_CHANNEL: alpha
       RELEASE_SHA: ${{ github.sha }}
       RELEASE_BRANCH: ${{ github.ref_name }}
+      ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}
+      ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}
       ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
       ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
       ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}

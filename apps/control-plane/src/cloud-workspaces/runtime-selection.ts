@@ -3,6 +3,16 @@ import type { Tx } from "../db.js";
 import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { HttpError } from "../authz.js";
+import { z } from "zod";
+
+// Mirrored at the private protocol boundary (the control plane uses Zod 3).
+const nativeCapabilitiesSchema = z.object({ version: z.literal(1), goals: z.boolean(),
+  nativeFork: z.boolean(), transcriptFork: z.boolean(), nativeReview: z.boolean(),
+  connectedApps: z.boolean(), multiAgent: z.boolean() }).strict();
+export function runtimeNativeCapabilities(value: unknown) {
+  const parsed = nativeCapabilitiesSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
 
 export class CloudRuntimeError extends HttpError {
   constructor(code: "cloud_runtime_revoked" | "cloud_runtime_unavailable") {
@@ -57,14 +67,14 @@ export function runtimeQualificationPredicate(mode: string, requireMcp = "false"
  * image/contract identity while v4 requires the saved generation pin. */
 export function runtimeCredentialQualificationJoin(mode: string, requireMcp: string): string {
   return `JOIN LATERAL (
-    SELECT qualification.native_capabilities FROM cloud_agent_runtime_qualifications qualification
+    SELECT qualification.native_capabilities,qualification.mcp_qualified FROM cloud_agent_runtime_qualifications qualification
     WHERE generation.runtime_id IS NULL AND engine.runtime_id IS NULL
       AND qualification.provider=generation.provider::text AND qualification.image_ref=generation.image_ref
       AND qualification.runtime_contract_sha256=engine.agent_runtime_contract_sha256 AND qualification.profile=engine.agent_runtime_profile
       AND qualification.profile='zeros-cloud-worker-v3' AND qualification.credential_kind=credential.kind AND qualification.enabled
       AND (NOT (${requireMcp}) OR qualification.mcp_qualified)
     UNION ALL
-    SELECT qualification.native_capabilities FROM cloud_runtime_qualifications qualification
+    SELECT qualification.native_capabilities,qualification.mcp_qualified FROM cloud_runtime_qualifications qualification
     JOIN cloud_runtime_bundles bundle ON bundle.runtime_id=qualification.runtime_id AND bundle.revoked_at IS NULL
     JOIN cloud_runtime_base_images base ON base.base_image_id=generation.runtime_base_image_id
       AND base.base_compatibility_id=qualification.base_compatibility_id AND base.revoked_at IS NULL
@@ -97,17 +107,20 @@ function artifact(row: BundleRow): { descriptor: RuntimeDescriptor; objectKey: s
   return { descriptor: parsed.data, objectKey: row.object_key };
 }
 
-async function lockQualifications(tx: Tx, runtimeId: string, compatibilityId: string, mode: CloudRuntimeQualificationMode) {
+async function lockQualifications(tx: Tx, runtimeId: string, compatibilityId: string, mode: CloudRuntimeQualificationMode, kinds: readonly string[] = REQUIRED_KINDS) {
   const result = await tx.query(`SELECT qualification.credential_kind FROM cloud_runtime_qualifications qualification
     WHERE qualification.runtime_id=$1 AND qualification.base_compatibility_id=$2
       AND qualification.credential_kind=ANY($3::text[]) AND ${runtimeQualificationPredicate("$4")}
-    ORDER BY qualification.credential_kind FOR SHARE OF qualification`, [runtimeId, compatibilityId, REQUIRED_KINDS, mode]);
-  return result.rowCount === REQUIRED_KINDS.length;
+    ORDER BY qualification.credential_kind FOR SHARE OF qualification`, [runtimeId, compatibilityId, kinds, mode]);
+  return kinds.length > 0 && result.rowCount === kinds.length;
 }
 
 /** The caller owns the organization admission transaction. Lock revocable
  * registry rows through generation INSERT; no provider/artifact I/O occurs here. */
-export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualificationMode, baseImageId?: string) {
+export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualificationMode, baseImageId?: string, additionalKinds: readonly string[] = []) {
+  // Automatic updates require every delegated kind in addition to the
+  // existing three-kind floor. Other callers retain their default selection.
+  const requiredKinds = [...new Set([...REQUIRED_KINDS, ...additionalKinds])];
   const base = (await tx.query<BaseRow>(`SELECT base.* FROM cloud_runtime_base_images base
     WHERE base.revoked_at IS NULL AND ($1::text IS NULL OR base.base_image_id=$1)
     ORDER BY base.approved_at DESC, base.base_image_id LIMIT 1 FOR SHARE OF base`, [baseImageId ?? null])).rows[0];
@@ -125,8 +138,8 @@ export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualification
           AND qualification.credential_kind=required.kind AND ${runtimeQualificationPredicate("$4")}
       ))
     ORDER BY release.release_order DESC LIMIT 1 FOR SHARE OF release, bundle`,
-  [CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, REQUIRED_KINDS, base.base_compatibility_id, mode])).rows[0];
-  if (!bundle || !await lockQualifications(tx, bundle.runtime_id, base.base_compatibility_id, mode)) return null;
+  [CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, requiredKinds, base.base_compatibility_id, mode])).rows[0];
+  if (!bundle || !await lockQualifications(tx, bundle.runtime_id, base.base_compatibility_id, mode, requiredKinds)) return null;
   return { ...artifact(bundle), releaseOrder: BigInt(bundle.release_order), base: { id: base.base_image_id, compatibilityId: base.base_compatibility_id,
     imageRef: base.image_ref, sourceCommit: base.source_commit, architecture: base.architecture, storageMiB: Number(base.storage_mib) },
   pin: { runtimeId: bundle.runtime_id, manifestSha256: bundle.manifest_sha256,
@@ -135,8 +148,9 @@ export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualification
 }
 
 /** Revalidate an existing pin without consulting either the create switch or
- * the current channel head. Wake and retry never silently choose a new runtime. */
-export async function loadPinnedCloudRuntime(tx: Tx, pin: CloudRuntimePin, mode: CloudRuntimeQualificationMode) {
+ * the current channel head. Ordinary resume and retry use this saved pin. */
+export async function loadPinnedCloudRuntime(tx: Tx, pin: CloudRuntimePin, mode: CloudRuntimeQualificationMode,
+  additionalKinds: readonly string[] = []) {
   const bundle = (await tx.query<BundleRow>(`SELECT bundle.* FROM cloud_runtime_bundles bundle
     JOIN cloud_runtime_base_images base ON base.base_image_id=$3 AND base.base_compatibility_id=$4
     JOIN cloud_runtime_base_contracts contract ON contract.base_compatibility_id=base.base_compatibility_id
@@ -145,7 +159,8 @@ export async function loadPinnedCloudRuntime(tx: Tx, pin: CloudRuntimePin, mode:
       AND bundle.engine_protocol_version=$5 AND bundle.engine_protocol_version=$6
     FOR SHARE OF base, contract, bundle`, [pin.runtimeId, pin.manifestSha256, pin.baseImageId, pin.baseCompatibilityId,
     pin.engineProtocolVersion, CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION])).rows[0];
-  if (!bundle || pin.profile !== "zeros-cloud-worker-v4" || !await lockQualifications(tx, pin.runtimeId, pin.baseCompatibilityId, mode)) return null;
+  if (!bundle || pin.profile !== "zeros-cloud-worker-v4" || !await lockQualifications(tx, pin.runtimeId, pin.baseCompatibilityId, mode,
+    [...new Set([...REQUIRED_KINDS,...additionalKinds])])) return null;
   return artifact(bundle);
 }
 

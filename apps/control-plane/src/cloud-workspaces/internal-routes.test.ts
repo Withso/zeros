@@ -7,6 +7,7 @@ import {
   CLOUD_WORKSPACE_CONTENT_APPEND_PATH,
   CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
   CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
+  CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH,
   CLOUD_WORKSPACE_RECORD_APPEND_PATH,
   CLOUD_WORKSPACE_RECORD_HEAD_PATH,
   CLOUD_WORKSPACE_CONTENT_HEAD_PATH,
@@ -58,12 +59,26 @@ function harness(overrides: Partial<CloudWorkspaceInternalSetupService> = {}) {
 }
 
 describe("cloud workspace internal setup routes", () => {
+  it("negotiates timing output outside the immutable setup material only after successful v4 redemption", async () => {
+    const { app, service } = harness();
+    const headers = { authorization: `Bearer ${SETUP_TOKEN}`, "content-type": "application/json", "x-zeros-setup-timings": "1" };
+    const input = { ...body, materialVersion: 2, runtime: runtimeWitness };
+    const response = await app.request(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, { method: "POST", headers, body: JSON.stringify(input) });
+    expect(response.headers.get("x-zeros-setup-timings")).toBe("1");
+    expect(await response.json()).toEqual({ version: 1, material: "secret" });
+    const legacy = await app.request(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, { method: "POST", headers, body: JSON.stringify(body) });
+    expect(legacy.headers.get("x-zeros-setup-timings")).toBeNull();
+    vi.mocked(service.redeem).mockRejectedValueOnce(new CloudWorkspaceSetupMaterialError("setup_admission_rejected", "closed", false));
+    const rejected = await app.request(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, { method: "POST", headers, body: JSON.stringify(input) });
+    expect(rejected.headers.get("x-zeros-setup-timings")).toBeNull();
+  });
   it("passes strict v4 redemption and registration witnesses to the generation-bound service", async () => {
     const { app, service } = harness();
     const headers = { authorization: `Bearer ${SETUP_TOKEN}`, "content-type": "application/json" };
     const redeemed = await app.request(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH, { method: "POST", headers,
-      body: JSON.stringify({ ...body, materialVersion: 2, runtime: runtimeWitness }) });
+      body: JSON.stringify({ ...body, materialVersion: 2, runtime: runtimeWitness, checkoutSourceVersion: 1 }) });
     expect(redeemed.status).toBe(200);
+    expect(vi.mocked(service.redeem).mock.calls[0][0].checkoutSourceVersion).toBe(1);
     expect(vi.mocked(service.redeem).mock.calls[0][0].runtime).toEqual(runtimeWitness);
     const { expected: _expected, ...binding } = body;
     const registered = await app.request(CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH, { method: "POST", headers,
@@ -76,6 +91,25 @@ describe("cloud workspace internal setup routes", () => {
       body: JSON.stringify({ ...body, runtime: { ...runtimeWitness, artifactUrl: "https://untrusted.example.test/" } }) });
     expect(rejected.status).toBe(422);
     expect(service.redeem).toHaveBeenCalledOnce();
+  });
+  it("uses a separate non-cacheable enrollment endpoint with closed diagnostics",async()=>{
+    const registerTransitionEngine=vi.fn(async()=>({version:1,registered:true}));
+    const {app,service}=harness({registerTransitionEngine});
+    const {expected:_expected,...binding}=body;
+    const payload=JSON.stringify({...binding,engineInstanceId:"44444444-4444-4444-8444-444444444444",
+      protocolVersion:CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,actorProtocolVersion:2,agentRuntime:{...runtimeWitness,profile:"zeros-cloud-worker-v4"}});
+    const request=(authorization?:string)=>app.request(CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH,{method:"POST",
+      headers:{"content-type":"application/json",...(authorization?{authorization}:{})},body:payload});
+    expect((await request()).status).toBe(401);
+    const response=await request(`Bearer ${SETUP_TOKEN}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(service.redeem).not.toHaveBeenCalled();
+    expect(service.registerEngine).not.toHaveBeenCalled();
+    registerTransitionEngine.mockRejectedValueOnce(new Error("Untrusted diagnostic"));
+    const denied=await request(`Bearer ${SETUP_TOKEN}`);
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).not.toContain("Untrusted diagnostic");
   });
   it("coalesces fragmented upload bodies without retaining a buffer per fragment", async () => {
     const { app } = harness({ putBlobBatch: vi.fn(async () => ({ blobs: [] })) });

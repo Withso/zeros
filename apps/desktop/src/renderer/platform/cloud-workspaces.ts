@@ -1,6 +1,9 @@
+import { CloudAgentAdmissionError } from "./bridge/cloud-agent-errors";
 import { authorizeCloudGithubSource } from "./cloud-github";
 import { z } from "zod";
 import { CloudComputerAdminWorkspaceSchema } from "@zeros/protocol/cloud-computer-v2";
+import { CloudNativeCapabilitiesSchema } from "@zeros/protocol/cloud-agent-execution";
+import { CloudRuntimeUpgradeAvailabilitySchema, type CloudRuntimeUpgradeAvailability } from "@zeros/protocol/cloud-runtime-lifecycle";
 import { getSession } from "../features/auth/auth-store";
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
@@ -152,6 +155,17 @@ export async function cloudAccountRequest<T>(
 
 const request = cloudAccountRequest;
 
+function runtimeUpgradePath(target: CloudWorkspaceTarget): string {
+  return `${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}/runtime-upgrade`;
+}
+
+export async function getCloudRuntimeUpgradeAvailability(target: CloudWorkspaceTarget): Promise<CloudRuntimeUpgradeAvailability> {
+  const result = await request(runtimeUpgradePath(target), CloudRuntimeUpgradeAvailabilitySchema);
+  if (result.organizationId !== target.organizationId || result.workspaceId !== target.workspaceId)
+    throw new Error("Cloud runtime details changed workspace identity");
+  return result;
+}
+
 const AgentGrantsSchema = z.object({
   delegations: z
     .array(
@@ -159,8 +173,12 @@ const AgentGrantsSchema = z.object({
         id: z.string().uuid(),
         kind: z.string(),
         models: z.array(z.string()),
+        allModels: z.boolean().optional(),
         expiresAt: z.string().datetime(),
         runtimeQualified: z.boolean().optional(),
+        runtimeUpgradeRequired: z.boolean().optional(),
+        mcpQualified: z.boolean().optional(),
+        nativeCapabilities: CloudNativeCapabilitiesSchema.optional(),
       }),
     )
     .max(100),
@@ -178,13 +196,12 @@ export async function cloudAgentGrant(
   );
   const grant = candidates.find((row) => row.runtimeQualified === true) ?? candidates.find((row) => row.runtimeQualified !== false);
   if (!candidates.length)
-    throw new Error(
-      "This agent and model need a cloud credential authorized for this workspace. Configure that authorization before sending.",
-    );
-  if (!grant)
-    throw new Error(
-      "This workspace's agent runtime needs an update before this agent can run. Your account connection is saved.",
-    );
+    throw new CloudAgentAdmissionError(delegations.some(row => row.kind.startsWith(`${agentId}-`))
+      ? "cloud_agent_model_not_authorized" : "cloud_agent_credential_required");
+  if (!grant) {
+    if (candidates.some(row => row.runtimeUpgradeRequired)) throw new CloudAgentAdmissionError("cloud_runtime_upgrade_required");
+    throw new Error("This workspace's agent runtime needs an update before this agent can run. Your account connection is saved.");
+  }
   return grant.id;
 }
 
@@ -248,12 +265,15 @@ export async function changeCloudWorkspaceLifecycle(
   target: CloudWorkspaceTarget,
   operation: "wake" | "stop" | "archive" | "delete",
   idempotencyKey: string,
+  reason?: "interaction",
 ): Promise<CloudWorkspaceDocument> {
   const { workspace } = await request(
     `${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}${operation === "delete" ? "" : `/${operation}`}`,
     z.object({ workspace: CloudWorkspaceDocumentSchema }),
     {
-      body: {},
+      // Additive hint on the existing wake path; server-side cross-device
+      // interaction backoff can use it later without changing clients.
+      body: operation === "wake" && reason ? { reason } : {},
       idempotencyKey,
       method: operation === "delete" ? "DELETE" : "POST",
     },

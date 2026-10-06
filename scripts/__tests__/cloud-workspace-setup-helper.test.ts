@@ -32,6 +32,8 @@ import {
   parseRecoveryDesignSelection,
   redactCloudWorkspaceSetupHookLog,
   redeemMaterials,
+  hasCloudSetupTimingSupport,
+  runProcess,
 } from "../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
 import {
   CLOUD_WORKER_SUPERVISOR_AUDIENCE,
@@ -45,6 +47,21 @@ const ORGANIZATION_ID = "00000000-0000-4000-8000-000000000002";
 const SETUP_RUN_ID = "00000000-0000-4000-8000-000000000003";
 const ENGINE_INSTANCE_ID = "00000000-0000-4000-8000-000000000004";
 const execFileAsync = promisify(execFile);
+
+describe("bounded setup process cancellation", () => {
+  it("terminates an in-flight Git process group when the history guard aborts", async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 50);
+    try {
+      const result = await runProcess(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+        signal: controller.signal, timeoutMs: 5000,
+      });
+      expect(result.aborted).toBe(true);
+      expect(result.signal).toBe("SIGTERM");
+      expect(result.timedOut).toBe(false);
+    } finally { clearTimeout(timer); }
+  });
+});
 
 describe("versioned cloud recovery manifests", () => {
   it("retains only the closed revoked code from a bounded admission error", async () => {
@@ -181,6 +198,22 @@ describe("cloud image admission diagnostics", () => {
 });
 
 describe("cloud setup credential transport", () => {
+  it("keeps legacy output until the redeemed response explicitly negotiates timings", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+    try {
+      const body = { ...materialDocument(), version: 2, image: { ...materialDocument().image,
+        resources: { architecture: "linux/amd64", cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 } } };
+      for (const accepted of [undefined, "1", "private"]) {
+        const headers = { "content-type": "application/json", ...(accepted ? { "x-zeros-setup-timings": accepted } : {}) };
+        const fetch = vi.fn(async () => new Response(JSON.stringify(body), { headers }));
+        vi.stubGlobal("fetch", fetch);
+        const material = await redeemMaterials(requestDocument());
+        expect(hasCloudSetupTimingSupport(material)).toBe(accepted === "1");
+        expect(Object.keys(material).sort()).toEqual(Object.keys(body).sort());
+        expect((fetch.mock.calls[0] as any)[1].headers["X-Zeros-Setup-Timings"]).toBe("1");
+      }
+    } finally { vi.restoreAllMocks(); vi.unstubAllGlobals(); }
+  });
   it("requires the saved Cloud Computer tuple for a template image and refuses it on other images", () => {
     const request = requestDocument();
     request.expected.imageRef = "boat-template:bx_3456789a";

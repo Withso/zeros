@@ -40,6 +40,7 @@ import {
 } from "../cloud-workspace-validation/template-setup-probe.mjs";
 import { CloudProviderError } from "../../apps/control-plane/src/cloud-workspaces/provider";
 import { attestationFixture, proofPath } from "./cloud-worker-attestation-fixture";
+import { setupTimingsSchema } from "../../packages/protocol/src/cloud-runtime-bundle";
 
 const templateId = "bx_3456789a",
   childId = "bx_23456789";
@@ -233,7 +234,14 @@ try { worker(); } catch {
             __zerosTemplateSetupObserve: (error: any, stage: string) => completions.push({ stage, check: error?.check }),
           },
         });
-        expect(observed).toEqual(baseline);
+        const authorityOutput = (result: typeof baseline) => ({ ...result, stdout: result.stdout.trimEnd().split("\n").map(line => {
+          const value = JSON.parse(line);
+          if (value.schema !== "zeros.diagnostic/v1") return value;
+          const { timings, ...diagnostic } = value;
+          expect(setupTimingsSchema.safeParse(timings).success).toBe(true);
+          return diagnostic;
+        }) });
+        expect(authorityOutput(observed)).toEqual(authorityOutput(baseline));
         expect(stages).toEqual(["validate_input", "lock", "verify_tree", "qualify_engine", "run_setup", ...(secure ? ["publish_proof"] : [])]);
         expect(completions).toEqual([{ stage: secure ? "done" : "run_setup", check: secure ? undefined : "setup_exit" }]);
         if (!secure) expect(() => readFileSync(tree.physical(proofPath))).toThrow();
@@ -640,6 +648,15 @@ print(json.dumps({'sourceMatches':data['source']==source,'qualificationMatches':
         runTemplateSetupProbe(childId, f.material, { request }),
       ).rejects.toThrow(/^probe_invalid$/);
     }
+    const diagnose = vi.fn();
+    request.mockResolvedValueOnce({ success: false, exitCode: 1, timedOut: false, stdoutTruncated: false,
+      stdout: "private stdout", stderr: JSON.stringify({ schema: "zeros.template-setup-error/v1", phase: "probe",
+        name: "FileNotFoundError", code: "probe_transport_failed" }) });
+    await expect(runTemplateSetupProbe(childId, f.material, { request, diagnose })).rejects.toThrow("probe_invalid");
+    const diagnostic = templateSetupErrorDiagnostic("probe", diagnose.mock.calls[0]?.[1]);
+    expect(diagnostic).toMatchObject({ command: { outcome: "nonzero", exitCode: 1 },
+      transport: { name: "FileNotFoundError", code: "probe_transport_failed" } });
+    expect(JSON.stringify(diagnostic)).not.toContain("private");
   });
 
   it("bounds snapshot output while retaining the first failing check and its metadata", async () => {
@@ -1172,7 +1189,7 @@ print(json.dumps({'network':all(c[0][:3]==['/usr/bin/unshare','--net','--'] for 
       expect(result.sites).toContainEqual({
         source: "cloud-computer-checkout.mjs",
         function: "walk",
-        line: 104,
+        line: 123,
       });
       expect(result.observed).toMatchObject({
         type: "symlink",

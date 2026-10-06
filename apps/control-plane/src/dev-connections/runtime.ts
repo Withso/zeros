@@ -164,14 +164,15 @@ export class DevConnectionRuntime {
     await this.consumeInvalidations();
     await this.client.restoreAfterSignIn(token,mapping(row),this.restore);
   }
-  async selectAgent(user:string,org:string,id:string,models:string[],expectedRevision:number,credentialRevision:number) {
+  async selectAgent(user:string,org:string,id:string,models:string[],expectedRevision:number,credentialRevision:number,allModels=false) {
     const row=await withSystemTx(this.pool,tx=>this.reference(tx,id,user,org)),token=await withSystemTx(this.pool,tx=>this.token(tx,row));
     await withSystemTx(this.pool,async tx=>{
       const selected=(await tx.query<{revision:string}>("SELECT revision FROM cloud_agent_organization_connections WHERE org_id=$1 AND owner_user_id=$2 AND provider=$3",[org,user,row.reference.kind.split('-')[0]])).rows[0];
       const credential=(await tx.query<{revision:string}>("SELECT revision FROM cloud_agent_credentials WHERE id=$1 AND owner_user_id=$2 AND revoked_at IS NULL",[id,user])).rows[0];
       if(Number(selected?.revision??0)!==expectedRevision||Number(credential?.revision)!==credentialRevision)throw new HttpError(409,'agent_connection_conflict','Agent connection changed');
     });
-    await this.client.consent(token,row.reference.connectionId,{...row.reference.consent,models,scopes:['agent']});
+    const {allModels:_previousAllModels,...consent}=row.reference.consent;
+    await this.client.consent(token,row.reference.connectionId,{...consent,models,...(allModels?{allModels:true}:{}),scopes:['agent']});
     await this.consumeInvalidations();
     await this.client.restoreAfterSignIn(token,mapping(row),this.restore);
     return withSystemTx(this.pool,async tx=>({revision:Number((await tx.query<{revision:string}>("SELECT revision FROM cloud_agent_organization_connections WHERE org_id=$1 AND owner_user_id=$2 AND provider=$3",[org,user,row.reference.kind.split('-')[0]])).rows[0]!.revision),replayed:false}));

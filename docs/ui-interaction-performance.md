@@ -154,15 +154,25 @@ keepers: project sync, settings prefetch, run-activity sync, idle file warming,
 and validation of a remembered workspace once its exact repository list settles.
 
 - Its 40px title band holds the macOS traffic lights, the panel-left toggle
-  right after them, and drags the window. Resources and Archive use 28px icon
-  buttons so both fit at the supported 200px sidebar width. Resource totals
-  remain available in the tooltip and details popover. The organization switcher
-  names device Personal "Local" and sizes to its label, truncating long names.
-  Destinations are Home (the Dashboard) and Customize; Create is an action and,
-  like a repository's +, never paints as selected. The profile row opens
-  Settings. Rows are 30px, labels 13px, with 2px between repository and
-  workspace rows; repository names and workspace glyphs stay on fg2. Adding a
-  repository lives on Create, the welcome view and the menu bar.
+  right after them, and drags the window. Resources, Go back and Go forward sit
+  at its end as 28px icon buttons; these four controls set the sidebar's 220px
+  floor. Resource totals remain available in the tooltip and details popover.
+- Go back and Go forward step through the destinations shown this session:
+  Home, Customize, Create, repository pages and workspaces, however they were
+  reached. Settings is never an entry, and chat, workbench and repository hub
+  tabs stay with their own owners. The history is in-memory and bounded,
+  restarts when another organization becomes active, and skips without pruning
+  a repository or workspace the sidebar no longer lists. Each step reuses the
+  sidebar's own open actions, and pointer or focus intent warms its target. A
+  step with nowhere to go is `aria-disabled`, not disabled, so a quick second
+  click cannot fall through to the title band's double-click zoom.
+- The organization switcher names device Personal "Local" and sizes to its
+  label, truncating long names. Destinations are Home (the Dashboard) and
+  Customize; Create is an action and, like a repository's +, never paints as
+  selected. The profile row opens Settings. Rows are 30px, labels 13px, with 2px
+  between repository and workspace rows; repository names and workspace glyphs
+  stay on fg2. Adding a repository lives on Create, the welcome view and the
+  menu bar.
 - Collapsing is one persisted app preference. The sidebar stays mounted but
   hidden; the traffic lights and the toggle then float over the content's
   top-left corner at the same position, the first chat strip reserves that

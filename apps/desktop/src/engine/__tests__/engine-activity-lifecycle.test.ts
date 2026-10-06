@@ -89,6 +89,26 @@ describe("engine private activity integration", () => {
     expect(frames.map((frame) => frame.sequence)).toEqual(frames.map((_frame, index) => index + 1));
   });
 
+  it("keeps the ordinary local workspace dispatcher and activity tracking for cloud-only operations", async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const handler = vi.spyOn(state, "handleWorkspaceMessage").mockReturnValue(held);
+    state.activityHeartbeat.start();
+    const localRuntime = engine as unknown as { cloudWorker: unknown; cloudCommands: unknown; cloudDurabilityRuntime: unknown;
+      cloudHumanServices: unknown; cloudLanguageServices: unknown; cloudIdleBusy(): boolean };
+    for (const service of [localRuntime.cloudWorker, localRuntime.cloudCommands, localRuntime.cloudDurabilityRuntime,
+      localRuntime.cloudHumanServices, localRuntime.cloudLanguageServices]) expect(service).toBeNull();
+    expect(localRuntime.cloudIdleBusy()).toBe(true);
+    const request = state.handleMessage({ type: "WORKSPACE_REQUEST", id: "local-presence", source: "browser", timestamp: 1,
+      op: "cloudPresence.update", params: { present: true } }, client);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(handler).toHaveBeenCalledOnce();
+    expect(frames.at(-1)).toMatchObject({ activeRequests: 1 });
+    release(); await request;
+    expect(frames.at(-1)).toMatchObject({ activeRequests: 0 });
+  });
+
   it("publishes immediate turn activity edges and preserves a sibling turn's lease", () => {
     vi.useFakeTimers();
     state.activityHeartbeat.start();

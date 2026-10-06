@@ -148,6 +148,9 @@ export async function queueCloudWorkspaceSetupVerification(
     organizationId: string;
   },
 ): Promise<void> {
+  if ((await tx.query(`SELECT 1 FROM cloud_workspace_runtime_transitions
+    WHERE workspace_id=$1 AND org_id=$2 AND phase NOT IN ('healthy','rolled_back','cancelled')`,
+  [input.workspaceId,input.organizationId])).rowCount) return;
   await tx.query(
     `INSERT INTO cloud_workspace_setup_runs (
        workspace_id, generation, org_id, attempt

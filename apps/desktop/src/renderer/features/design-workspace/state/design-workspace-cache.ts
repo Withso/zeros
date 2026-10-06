@@ -22,6 +22,8 @@ import {
   designDeletePage,
   designFrame,
   designInsertAsset,
+  designUploadAsset,
+  type CloudDesignAssetUploadInput,
   designFoundationOpen,
   designHistory,
   designRenameFrame,
@@ -49,6 +51,7 @@ import type { DesignTransaction } from "@zeros/design-core";
 import type { DesignRuntimeGenerationPatch } from "@zeros/protocol/design-runtime";
 import { KeyedAsyncCache } from "../../../shared/lib/keyed-async-cache";
 import { onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
+import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 import { classifyRpcError } from "../../../platform/bridge/failure";
 import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
 import { designStylePropertyAffectsLayout } from "../design-style-values";
@@ -1376,6 +1379,21 @@ export async function appendDesignNodeHtmlCached(
   );
 }
 
+/** Uploads have the same pending-write lane and peer refresh behavior as
+ * canvas edits, but are never automatically replayed after a lost reply. */
+export async function uploadDesignAssetCached(workspaceId: string, input: CloudDesignAssetUploadInput): Promise<DesignMutationResultWire> {
+  if (!isCloudWorkspace(workspaceId)) throw new Error("Image upload requires a cloud workspace.");
+  return runLocalDesignMutation(workspaceId, async () => {
+    const sourceVersion = resolveLocalFrameSourceVersion(workspaceId, input.frame, input.sourceVersion);
+    const result = await designUploadAsset(workspaceId, { ...input, sourceVersion });
+    recordLocalFrameGeneration(workspaceId, input.frame, sourceVersion,
+      result.snapshot.frames.find(frame => frame.file === input.frame)?.sourceVersion);
+    const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
+    settleFoundationMutation(workspaceId, input.frame, snapshot, result.foundationRevision);
+    return result.mutation;
+  });
+}
+
 export async function insertDesignAssetCached(
   workspaceId: string,
   input: {
@@ -1951,7 +1969,8 @@ export async function applyDesignHistoryCached(
         []
       ).map((candidate) => [candidate.file, candidate.sourceVersion]),
     );
-    const result = await designHistory(workspaceId, frame, direction);
+    const result = await designHistory(workspaceId, frame, direction,
+      isCloudWorkspace(workspaceId) ? Object.fromEntries(previousSourceVersions) : undefined);
     const historyFrame = result.result ? (result.historyFrame ?? frame) : null;
     const revisionKey = historyFrame
       ? frameMutationKey(workspaceId, historyFrame)

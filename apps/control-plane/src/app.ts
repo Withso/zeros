@@ -14,6 +14,8 @@ import { CLOUD_GITHUB_PROXY_PATH, createCloudGithubProxyRoutes } from "./cloud-w
 import { Hono, type Context } from "hono";
 import { createCloudGithubWriteRoutes, CLOUD_GITHUB_WRITE_PATH } from "./cloud-workspaces/github-write-routes.js";
 import type { DatabaseCloudGithubWriteGrants } from "./cloud-workspaces/github-write-grants.js";
+import type { DatabaseCloudGithubReads } from "./cloud-workspaces/github-read-proxy.js";
+import { CLOUD_GITHUB_READ_PATH, createCloudGithubReadRoutes } from "./cloud-workspaces/github-read-routes.js";
 import { createCloudIdleStopRoutes, CLOUD_IDLE_STOP_PATH, type DatabaseCloudIdleStop } from "./cloud-workspaces/idle-stop.js";
 import {isCustomerCloudPath,publicCloudError} from "./cloud-workspaces/public-contract.js";
 import { HTTPException } from "hono/http-exception";
@@ -90,6 +92,7 @@ export type CreateAppDependencies = {
   releaseCanaryDesignations?: DatabaseReleaseCanaryDesignationService;
   clientCompatibility?: ClientCompatibility;
   cloudGithubWriteGrants?: DatabaseCloudGithubWriteGrants;
+  cloudGithubReads?: DatabaseCloudGithubReads;
   cloudIdleStop?: DatabaseCloudIdleStop;
   cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
   cloudWorkspaceAccessService?: CloudWorkspaceAccessService;
@@ -393,6 +396,11 @@ export function createApp(
       CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
       CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
     ]);
+    if (dependencies.cloudGithubReads) {
+      app.use(CLOUD_GITHUB_READ_PATH, cloudWorkspaceInternalResponseHeaders);
+      app.use(CLOUD_GITHUB_READ_PATH, internalPreAuthLimit);
+      app.route("/", createCloudGithubReadRoutes(dependencies.cloudGithubReads));
+    }
     if (dependencies.cloudGithubWriteGrants) {
       app.use(CLOUD_GITHUB_WRITE_PATH, cloudWorkspaceInternalResponseHeaders);
       app.use(CLOUD_GITHUB_WRITE_PATH, internalPreAuthLimit);

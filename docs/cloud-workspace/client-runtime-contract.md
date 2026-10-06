@@ -57,6 +57,13 @@ Chat/tool transcripts, Files, Changes, Review and PR controls keep
 their existing renderers and receive the selected workspace's backend data.
 The popover displays configured capacities; no utilization or cost is inferred.
 
+Staff cloud workspaces expose manual Restart in the Setup status row and workspace
+context menu. It joins the existing Stop (final checkpoint), waits for stopped,
+then issues a fresh explicit wake before normal admission. Wake retains the
+server's automatic runtime-upgrade policy. Renderer-observed work requires
+confirmation; Local, archived and deleting workspaces expose no Restart. The
+intent is ephemeral: closing the app between Stop and wake leaves compute asleep.
+
 PR creation preflight and composer PR suggestions carry the selected workspace
 identity through the same bridge. Remote discovery derives the repository from
 that registered checkout; caller-supplied origins cannot redirect its credentials.
@@ -140,6 +147,110 @@ and unproven retirement still use normal failure and authority-loss handling.
 Archive, wake and delete use control-plane lifecycle operations. The existing
 deployment, entitlement and provider qualification gates remain authoritative;
 desktop wiring is not evidence of live macOS/provider qualification.
+
+### Cloud workspace idle and wake
+
+A workspace stays active while any admitted device is using it or any workload
+remains: running/queued/dispatching turns, preparations, approvals/questions,
+background tasks, an active goal, Setup/Run scripts, a terminal foreground or
+detached user process, an SSH session, or recent terminal input/forwarding and
+preview traffic. **Recent workload input/traffic means the last ten minutes.**
+An interactive terminal shell at its prompt alone is idle; foreground groups,
+detached children and suspended processes remain work. Kernel inspection fails
+closed and never reads process arguments or environments. The quiet interval
+starts after these guards clear and lasts ten minutes before checkpoint + stop.
+Existing control-plane workload/authority guards still apply, including the
+bounded lifetime of outstanding human-service grants.
+
+User presence requires a selected cloud workspace, a signed-in/admitted client,
+a visible, available app window, and keyboard/pointer/scroll input in the last
+fifteen minutes. Window focus is required to capture trusted input and arm wake,
+but presence continues when a visible Zeros window sits beside another app.
+Settings and other app controls count for the selected workspace.
+Main reports screen lock and system suspend; either withdraws presence. The
+client renews `cloudPresence.update` over the existing `WORKSPACE_REQUEST` bridge
+every sixty seconds and immediately when presence returns. The engine uses a
+ninety-second monotonic receipt lease, rechecks admission and rate limits by the
+server-asserted account/device across reconnects. Any device, including a viewer,
+can hold a running workspace awake. Payloads contain only a strict `present`
+boolean; clients cannot supply identity or time. Presence uses an existing
+connected admission, never acquires compute and never wakes a stopped VM.
+
+Trusted key presses, pointer down, wheel/input and composer clicks/typing anywhere
+in the app automatically wake its selected sleeping workspace through the same
+explicit open/send path. Hover, programmatic focus/scroll, polling, catalog/PR
+refresh, history hydration, presence-free heartbeats and completed transcripts
+are not activity or wake intent. Another workspace's sidebar row owns its own
+navigation and cannot wake the previous selection. Hidden retained surfaces have
+no presence or wake controller. Archived/deleting/deleted workspaces never wake.
+Prompters with `canWrite` may wake, matching existing run authorization; viewers
+may not. A wake shares in-flight admission with sends. Cloud submissions enter
+the existing editable FIFO immediately and show **Waiting for agent** above the
+composer while compute, history or the agent session becomes ready. Multiple
+messages retain order, rich documents and attachment sources; edit/remove remain
+available before dispatch. Files resolve after fresh admission, then the stable
+message identity is promoted exactly once. Removing a message, Stop, changing
+account/workspace identity or closing its chat fences late readiness. A terminal
+cause or an exhausted readiness budget leaves editable **Not sent** rows with
+Retry/Remove and shows one toast per accepted message/turn with the cause and a
+relevant action. The card has no inline error text or stopped-turn pill. Expected
+readiness waits produce no error toast.
+Drain, waking, provisioning and setup with no document error have no short
+client deadline. Wake/open and queued preparation keep waiting through a
+150-second wake or a replacement taking several minutes, with a fifteen-minute
+elapsed safety cap. A client reaching that cap while compute is still progressing
+does not record a workbench connection failure; the shared lifecycle state stays
+calm. The three-minute agent/session admission budget starts only at ready/busy,
+pauses during further lifecycle progress, and survives automatic readiness retries.
+Document errors and terminal lifecycle outcomes end the wait immediately.
+A closed admission refusal before provider execution restores the same editable
+row and retains its elapsed readiness budget. Terminal admission causes use the
+existing model/credential copy and recovery action in the toast. An ambiguous
+dispatch result stays in the conversation for review and is never auto-replayed.
+An explicit retry after a durable terminal admission refusal renews only that
+refused delivery identity; automatic readiness retries keep their existing ID.
+A later Stop ends the wake intent; readiness retries cannot start it again.
+An explicit Stop in this app window invalidates older interaction gestures and
+pending automatic wakes. A gesture after that request may resume the workspace;
+the Stop click itself cannot be reused to undo its request.
+Expected waits suppress the composer's sleep notice. These queued drafts belong
+to the renderer's existing pending-send lifetime, rather than a durable server
+queue; Local submissions keep their existing pipeline and presentation.
+Runtime upgrades are selected by the server's existing wake/start lifecycle;
+replacement-engine admission precedes delivery of the queued prompt.
+For the same account epoch and organization/workspace with readable, writable
+access and the same explicit Stop revision, generation changes during lifecycle
+progress are continuations, including a failed upgrade rolling back from its
+candidate to the source. Retain undispatched rows, follow replacement or rollback
+drain/create/setup and admit whichever engine becomes ready. Dispose late
+candidate admission; never relabel it or dispatch to it. Exact-generation transport
+and passive-read fences remain strict. Account changes, revoked access/run
+permission, archive/delete and an explicit Stop still end the original intent.
+Automatic interaction wakes add the optional `reason: "interaction"` body field
+to that same `/wake` request. Shared sends and uncertain retries retain the
+initiating reason and lifecycle identity; ordinary explicit wakes keep their
+existing empty body. No server-side interaction backoff is added in this Alpha
+change.
+
+Idle sleep loses the VM's shell registry. Preserve plain cloud terminal tabs,
+their titles, selection and cwd when the engine instance changes. Once ready,
+recreate a shell only when its tab is shown, with one dim line
+“Workspace resumed — new shell”. Do not replay its original command or agent
+launch. Hidden retained tabs stay inert; Run/Setup remain explicit actions.
+A same-engine shell closed on another device still disappears. Local tabs keep
+their existing pruning, reattachment and restart behavior for either owner.
+
+Presence cancels an uncommitted idle stop through the existing cancellation
+transaction and a final pre-commit `stillIdle` check. A gesture on a lagging ready
+snapshot retains a two-minute intent across publication of a committed stop,
+then wakes once; navigation, hiding or losing focus cancels that local intent.
+Automatic wake attempts are debounced for thirty seconds and limited to one per
+five minutes per app window and canonical workspace when the document carries a
+stop error/incident, even after a failed attempt. Cross-device backoff is deferred
+and can use the optional interaction reason without a client change.
+The shared workbench banner and composer show “Sleeping — resumes when
+you continue” for clean stops; incident stops retain their public reason. Local
+workspaces and serialized lifecycle/command identities are unchanged.
 
 ### Network contracts
 

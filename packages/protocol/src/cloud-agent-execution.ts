@@ -67,11 +67,13 @@ export const CloudBrowserCapabilitySchema = z.discriminatedUnion("state", [
     context.addIssue({ code: "custom", message: "Browser capability scope is inconsistent" });
 });
 export type CloudBrowserCapability = z.infer<typeof CloudBrowserCapabilitySchema>;
+// Customization v1/v2 requires MCP qualification. v3 requests the same
+// history-backed snapshot as v2 when qualified, otherwise permits a basic turn.
 export const CloudAgentExecutionAdmissionSchema=z.object({executionId:identity,delegationId:uuid,provider:CloudAgentProviderSchema,
   model:z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/),source:z.discriminatedUnion("kind",[
     z.object({kind:z.literal("session"),actorSessionId:uuid}).strict(),
     z.object({kind:z.literal("command"),commandId:uuid,claimId:uuid}).strict(),
-  ]),customization:z.object({version:z.union([z.literal(1),z.literal(2)]),repositoryServers:CloudRepositoryMcpSchema}).strict().optional()}).strict();
+  ]),customization:z.object({version:z.union([z.literal(1),z.literal(2),z.literal(3)]),repositoryServers:CloudRepositoryMcpSchema}).strict().optional()}).strict();
 export const CloudAgentAccessMaterialSchema=z.discriminatedUnion("kind",[
   z.object({kind:z.literal("claude-api-key"),apiKey:token}).strict(),
   z.object({kind:z.literal("claude-setup-token"),accessToken:token}).strict(),
@@ -108,3 +110,17 @@ export type CloudAgentExecutionRequest={kind:"admit";admission:CloudAgentExecuti
   {kind:"authorize-action";executionId:string;actorSessionId:string}|
   {kind:"customization";actorSessionId:string;operation:CloudCustomizationOperation;params:Record<string,unknown>}|
   {kind:"terminal-environment";actorSessionId:string};
+
+/** Admission refused before a provider turn started. Never attach private diagnostics. */
+export const CLOUD_AGENT_ADMISSION_CODES = [
+  "cloud_runtime_upgrade_required",
+  "cloud_agent_model_not_authorized",
+  "cloud_agent_credential_required",
+  "cloud_agent_credential_expired",
+  "cloud_agent_credential_revoked",
+  "cloud_agent_credential_refresh_required",
+] as const;
+export type CloudAgentAdmissionCode = typeof CLOUD_AGENT_ADMISSION_CODES[number];
+export function isCloudAgentAdmissionCode(code: unknown): code is CloudAgentAdmissionCode {
+  return typeof code === "string" && (CLOUD_AGENT_ADMISSION_CODES as readonly string[]).includes(code);
+}

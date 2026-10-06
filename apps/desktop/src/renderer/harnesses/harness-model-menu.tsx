@@ -42,6 +42,11 @@ const agents = [
 ];
 const disconnected =
   new URLSearchParams(location.search).get("disconnected")?.split(",") ?? [];
+const runtimeUpgradeRequired = new URLSearchParams(location.search).has("runtimeUpgrade");
+const cloudModels = new URLSearchParams(location.search).has("cloudModels") || runtimeUpgradeRequired
+  ? agents.map(agent => ({ ...agent, authenticated: !runtimeUpgradeRequired, runtimeUpgradeRequired,
+    cloudModels: agent.id === "claude" && !runtimeUpgradeRequired ? ["claude-sonnet-5[1m]"] : [] }))
+  : undefined;
 for (const agent of agents)
   if (disconnected.includes(agent.id)) agent.authenticated = false;
 localStorage.setItem(
@@ -150,6 +155,7 @@ async function main() {
                   onIntent={() => {}}
                 />
                 <ModelPill
+                  agents={cloudModels}
                   agentId="claude"
                   initialize={null}
                   value={value}

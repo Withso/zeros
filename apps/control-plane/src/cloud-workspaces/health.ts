@@ -2,6 +2,11 @@ import type pg from "pg";
 
 import { withSystemTx } from "../db.js";
 
+/** Provider-reported deletion stages that legitimately hold a receipt for
+ * hours (Boat finishing snapshot uploads or serving newer restores). They are
+ * progress, not a stall, until the 24-hour retirement limit. */
+const PROVIDER_DELETION_WAITING_STAGES = ["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"];
+
 export type CloudWorkspaceHealth = {
   enabled: true;
   backgroundWorkers?: "enabled" | "paused";
@@ -90,9 +95,11 @@ export class DatabaseCloudWorkspaceHealthService {
                WHERE intent.operation='delete' AND intent.state IN ('queued','dispatching','observing','failed')
                  AND binding.deletion_verified_at IS NULL AND operation.deleted_at IS NULL
                  AND (intent.state='failed' OR least(intent.created_at,operation.deletion_requested_at)<now()-interval '24 hours'
-                   OR coalesce(operation.deletion_progress_at,operation.deletion_requested_at,intent.created_at)<now()-interval '1 hour'))
+                   OR (coalesce(operation.deletion_progress_at,operation.deletion_requested_at,intent.created_at)<now()-interval '1 hour'
+                     AND NOT coalesce(operation.deletion_stage,'') = ANY($4::text[]))))
                OR EXISTS (SELECT 1 FROM cloud_workspace_provider_operations WHERE deletion_requested_at IS NOT NULL AND deleted_at IS NULL
-                 AND (deletion_requested_at<now()-interval '24 hours' OR coalesce(deletion_progress_at,deletion_requested_at)<now()-interval '1 hour')) AS deletion_intent_stalled,
+                 AND (deletion_requested_at<now()-interval '24 hours' OR (coalesce(deletion_progress_at,deletion_requested_at)<now()-interval '1 hour'
+                   AND NOT coalesce(deletion_stage,'') = ANY($4::text[])))) AS deletion_intent_stalled,
              EXISTS (SELECT 1 FROM workspace_checkpoint_requests WHERE idle_engine_instance_id IS NOT NULL
                AND state IN ('queued','delivered') AND created_at<now()-interval '5 minutes') AS idle_stop_blocked,
              CASE WHEN $2::boolean THEN EXISTS (
@@ -146,6 +153,7 @@ export class DatabaseCloudWorkspaceHealthService {
             this.posture.outboxDeliveryEnabled,
             this.posture.durabilityEnabled,
             this.posture.setupExecutionEnabled,
+            PROVIDER_DELETION_WAITING_STAGES,
           ],
         )
       ).rows[0]!,

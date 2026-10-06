@@ -1,0 +1,242 @@
+name: CI Recovery
+
+on:
+  workflow_run:
+    workflows: [Preflight]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: "*/15 * * * *"
+
+permissions: {}
+
+concurrency:
+  group: ci-recovery
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: inspect
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_run' || github.event_name == 'schedule')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      retries: ${{ steps.inspect.outputs.retries }}
+      upserts: ${{ steps.inspect.outputs.upserts }}
+      resolutions: ${{ steps.inspect.outputs.resolutions }}
+      has_retries: ${{ steps.inspect.outputs.has_retries }}
+      has_upserts: ${{ steps.inspect.outputs.has_upserts }}
+      has_resolutions: ${{ steps.inspect.outputs.has_resolutions }}
+    steps:
+      - name: Checkout trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - name: Inspect canonical main failures
+        id: inspect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZEROS_CI_RECOVERY: ${{ vars.ZEROS_CI_RECOVERY || 'off' }}
+          ZEROS_CI_INCIDENT_APP_CLIENT_ID: ${{ vars.ZEROS_CI_INCIDENT_APP_CLIENT_ID }}
+          ZEROS_CI_INCIDENT_APP_SLUG: ${{ vars.ZEROS_CI_INCIDENT_APP_SLUG }}
+        run: node scripts/ci/recovery.mjs inspect --event-file "$GITHUB_EVENT_PATH"
+
+  retry:
+    name: retry
+    needs: inspect
+    if: needs.inspect.outputs.has_retries == 'true' && (vars.ZEROS_CI_RECOVERY == 'retry' || vars.ZEROS_CI_RECOVERY == 'enabled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include: ${{ fromJSON(needs.inspect.outputs.retries) }}
+    steps:
+      - name: Checkout trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - name: Revalidate and reserve recovery decision
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZEROS_CI_RECOVERY: ${{ vars.ZEROS_CI_RECOVERY || 'off' }}
+          RECOVERY_SIGNATURE: ${{ matrix.signature }}
+          RECOVERY_RUN_ID: ${{ matrix.run_id }}
+          RECOVERY_RUN_ATTEMPT: ${{ matrix.attempt }}
+        run: node scripts/ci/recovery.mjs prepare --intent retry --out-file "$RUNNER_TEMP/recovery-reservation.json"
+      - name: Save recovery reservation
+        id: reservation
+        if: steps.prepare.outputs.proceed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ steps.prepare.outputs.artifact_name }}
+          path: ${{ runner.temp }}/recovery-reservation.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Apply recovery decision
+        if: steps.prepare.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZEROS_CI_RECOVERY: ${{ vars.ZEROS_CI_RECOVERY || 'off' }}
+          RESERVATION_ARTIFACT_ID: ${{ steps.reservation.outputs.artifact-id }}
+          RESERVATION_ARTIFACT_DIGEST: ${{ steps.reservation.outputs.artifact-digest }}
+        run: node scripts/ci/recovery.mjs apply --intent retry --reservation "$RUNNER_TEMP/recovery-reservation.json"
+
+  upsert:
+    name: upsert
+    needs: [inspect, retry]
+    if: always() && needs.inspect.result == 'success' && needs.inspect.outputs.has_upserts == 'true' && vars.ZEROS_CI_RECOVERY == 'enabled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ci-automation
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include: ${{ fromJSON(needs.inspect.outputs.upserts) }}
+    steps:
+      - name: Checkout trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - name: Revalidate and reserve recovery decision
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZEROS_CI_RECOVERY: ${{ vars.ZEROS_CI_RECOVERY || 'off' }}
+          ZEROS_CI_INCIDENT_APP_CLIENT_ID: ${{ vars.ZEROS_CI_INCIDENT_APP_CLIENT_ID }}
+          ZEROS_CI_INCIDENT_APP_SLUG: ${{ vars.ZEROS_CI_INCIDENT_APP_SLUG }}
+          RECOVERY_SIGNATURE: ${{ matrix.signature }}
+          RECOVERY_RUN_ID: ${{ matrix.run_id }}
+          RECOVERY_RUN_ATTEMPT: ${{ matrix.attempt }}
+        run: node scripts/ci/recovery.mjs prepare --intent upsert --out-file "$RUNNER_TEMP/recovery-reservation.json"
+      - name: Save recovery reservation
+        id: reservation
+        if: steps.prepare.outputs.proceed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ steps.prepare.outputs.artifact_name }}
+          path: ${{ runner.temp }}/recovery-reservation.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Mint incident writer token
+        id: incident-token
+        if: steps.prepare.outputs.proceed == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ vars.ZEROS_CI_INCIDENT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ZEROS_CI_INCIDENT_APP_PRIVATE_KEY }}
+          owner: Withso
+          repositories: zeros
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Apply recovery decision
+        if: steps.prepare.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INCIDENT_WRITE_TOKEN: ${{ steps.incident-token.outputs.token }}
+          INCIDENT_APP_SLUG: ${{ steps.incident-token.outputs.app-slug }}
+          ZEROS_CI_RECOVERY: ${{ vars.ZEROS_CI_RECOVERY || 'off' }}
+          ZEROS_CI_INCIDENT_APP_CLIENT_ID: ${{ vars.ZEROS_CI_INCIDENT_APP_CLIENT_ID }}
+          ZEROS_CI_INCIDENT_APP_SLUG: ${{ vars.ZEROS_CI_INCIDENT_APP_SLUG }}
+          RESERVATION_ARTIFACT_ID: ${{ steps.reservation.outputs.artifact-id }}
+          RESERVATION_ARTIFACT_DIGEST: ${{ steps.reservation.outputs.artifact-digest }}
+        run: node scripts/ci/recovery.mjs apply --intent upsert --reservation "$RUNNER_TEMP/recovery-reservation.json"
+
+  resolve:
+    name: resolve
+    needs: [inspect, retry, upsert]
+    if: always() && needs.inspect.result == 'success' && needs.inspect.outputs.has_resolutions == 'true' && vars.ZEROS_CI_RECOVERY == 'enabled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ci-automation
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include: ${{ fromJSON(needs.inspect.outputs.resolutions) }}
+    steps:
+      - name: Checkout trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - name: Revalidate and reserve recovery decision
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZEROS_CI_RECOVERY: ${{ vars.ZEROS_CI_RECOVERY || 'off' }}
+          ZEROS_CI_INCIDENT_APP_CLIENT_ID: ${{ vars.ZEROS_CI_INCIDENT_APP_CLIENT_ID }}
+          ZEROS_CI_INCIDENT_APP_SLUG: ${{ vars.ZEROS_CI_INCIDENT_APP_SLUG }}
+          RECOVERY_SIGNATURE: ${{ matrix.signature }}
+          RECOVERY_RUN_ID: ${{ matrix.run_id }}
+          RECOVERY_RUN_ATTEMPT: ${{ matrix.attempt }}
+        run: node scripts/ci/recovery.mjs prepare --intent resolve --out-file "$RUNNER_TEMP/recovery-reservation.json"
+      - name: Save recovery reservation
+        id: reservation
+        if: steps.prepare.outputs.proceed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ steps.prepare.outputs.artifact_name }}
+          path: ${{ runner.temp }}/recovery-reservation.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Mint incident writer token
+        id: incident-token
+        if: steps.prepare.outputs.proceed == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ vars.ZEROS_CI_INCIDENT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ZEROS_CI_INCIDENT_APP_PRIVATE_KEY }}
+          owner: Withso
+          repositories: zeros
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Apply recovery decision
+        if: steps.prepare.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INCIDENT_WRITE_TOKEN: ${{ steps.incident-token.outputs.token }}
+          INCIDENT_APP_SLUG: ${{ steps.incident-token.outputs.app-slug }}
+          ZEROS_CI_RECOVERY: ${{ vars.ZEROS_CI_RECOVERY || 'off' }}
+          ZEROS_CI_INCIDENT_APP_CLIENT_ID: ${{ vars.ZEROS_CI_INCIDENT_APP_CLIENT_ID }}
+          ZEROS_CI_INCIDENT_APP_SLUG: ${{ vars.ZEROS_CI_INCIDENT_APP_SLUG }}
+          RESERVATION_ARTIFACT_ID: ${{ steps.reservation.outputs.artifact-id }}
+          RESERVATION_ARTIFACT_DIGEST: ${{ steps.reservation.outputs.artifact-digest }}
+        run: node scripts/ci/recovery.mjs apply --intent resolve --reservation "$RUNNER_TEMP/recovery-reservation.json"

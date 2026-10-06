@@ -1,8 +1,12 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { ChevronDown, Check, Folder, Settings } from "lucide-react";
 import type { Workspace } from "../../platform/git";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
-import { bridgeDesignListDirectories } from "../../platform/bridge/design-bridge";
+import { bridgeCloudDesignSelectDirectory, bridgeDesignListDirectories } from "../../platform/bridge/design-bridge";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { Dialog, DialogContent, DialogHeader, DialogBody, DialogTitle, DialogDescription } from "../../shared/ui/primitives/dialog";
+import { CloudDesignDirectories } from "./cloud-design-directories";
+import { useCloudDesignManagement } from "./use-cloud-design-management";
 import { workspaceOp } from "../../platform/bridge/workspace-bridge";
 import { useCachedRead } from "../../state/use-cached-read";
 import {
@@ -11,7 +15,7 @@ import {
 } from "../../state/read-caches";
 import { useWorkspaceDispatch } from "../../state/store";
 import { useProjectForFolder } from "../../state/use-projects";
-import { Tooltip, toast } from "../../shared/ui/primitives";
+import { Tooltip } from "../../shared/ui/primitives";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,7 +28,7 @@ import {
   waitForPendingDesignEdits,
 } from "./state/design-workspace-cache";
 import { triggerGitRefresh } from "../../shell/use-git-refresh-key";
-import { errorMessage } from "./design-workspace-error";
+import { reportDesignDirectoryFailure } from "./design-directory-failure";
 
 /** Selecting a directory changes only this workspace's personal pointer.
  * Rename/adoption remain explicit repository lifecycle actions in Settings.
@@ -40,6 +44,14 @@ export function DesignDirectoryMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [managing, setManaging] = useState(false);
+  const cloud = isCloudWorkspace(workspace.id);
+  const cloudCanManage = useCloudDesignManagement(workspace.id, active);
+  const canManage = !cloud || cloudCanManage;
+  const latest = useRef({ id: workspace.id, active, canManage });
+  latest.current = { id: workspace.id, active, canManage };
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const project = useProjectForFolder(workspace.path);
   const dispatch = useWorkspaceDispatch();
   const listing = useCachedRead(
@@ -53,13 +65,17 @@ export function DesignDirectoryMenu({
     { enabled: active && open, maxAgeMs: 10_000 },
   );
   const choose = async (directory: string, directoryId?: string) => {
-    if (!active || busy || directory === name) return;
+    if (!active || !canManage || busy || directory === name || !listing.data || listing.error) return;
     const bridge = getActiveBridge();
     if (!bridge) return;
     setBusy(true);
     try {
       await waitForPendingDesignEdits(workspace.id);
-      await workspaceOp(bridge, "settings.write", {
+      if (cloud && (!mounted.current || latest.current.id !== workspace.id || !latest.current.active || !latest.current.canManage)) return;
+      if (cloud) {
+        if (!directoryId) throw new Error("Refresh the directory list before switching.");
+        await bridgeCloudDesignSelectDirectory(bridge, workspace.id, directoryId, listing.data.directoryIds?.[listing.data.active] ?? null);
+      } else await workspaceOp(bridge, "settings.write", {
         layer: "workspace-local",
         repoRoot: workspace.path,
         patch: {
@@ -73,15 +89,13 @@ export function DesignDirectoryMenu({
       invalidateDesignDirectoryTargetReadCache();
       triggerGitRefresh(workspace.path);
     } catch (error) {
-      toast.error("Couldn't open Design directory", {
-        description: errorMessage(error),
-      });
+      reportDesignDirectoryFailure(workspace.id, "open", error);
     } finally {
-      setBusy(false);
+      if (mounted.current) setBusy(false);
     }
   };
   return (
-    <DropdownMenu open={active && open} onOpenChange={setOpen}>
+    <><DropdownMenu open={active && open} onOpenChange={setOpen}>
       <Tooltip label="Switch Design directory" side="bottom">
         <DropdownMenuTrigger asChild>
           <button
@@ -110,6 +124,7 @@ export function DesignDirectoryMenu({
         {listing.data?.directories.map((directory) => (
           <DropdownMenuItem
             key={directory}
+            disabled={!canManage || busy || !!listing.error}
             onSelect={() =>
               void choose(directory, listing.data?.directoryIds?.[directory])
             }
@@ -118,12 +133,12 @@ export function DesignDirectoryMenu({
             {directory === name && <Check className="size-3" />}
           </DropdownMenuItem>
         ))}
-        {project && (
+        {canManage && (cloud || project) && (
           <>
             <DropdownMenuSeparator />
             <DropdownMenuItem
               onSelect={() =>
-                dispatch({
+                cloud ? setManaging(true) : project && dispatch({
                   type: "OPEN_REPO_PAGE",
                   projectId: project.id,
                   view: "design-preferences",
@@ -137,5 +152,11 @@ export function DesignDirectoryMenu({
         )}
       </DropdownMenuContent>
     </DropdownMenu>
+    {cloud && <Dialog open={active && managing && canManage} onOpenChange={setManaging}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader><DialogTitle>Design directories</DialogTitle><DialogDescription>Manage folders in this cloud workspace.</DialogDescription></DialogHeader>
+        <DialogBody><CloudDesignDirectories key={workspace.id} workspaceId={workspace.id} active={active && managing && canManage} /></DialogBody>
+      </DialogContent>
+    </Dialog>}</>
   );
 }

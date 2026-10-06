@@ -14,7 +14,7 @@
 // Shown under the repository's Design mode → Directory tab.
 // ──────────────────────────────────────────────────────────
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Check, Folder, Pencil, Trash2 } from "lucide-react";
 
 import type { Project } from "../../state/projects-store";
@@ -50,6 +50,10 @@ import {
 } from "../../state/read-caches";
 import { dialogPickFolder } from "../../platform/git";
 import { deriveDesignDirectoryOptions } from "./design-directory-options";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { CloudDesignDirectories } from "../design-workspace/cloud-design-directories";
+import { getCloudWorkspaceRows, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../shared/ui/primitives/select";
 
 /** Read `design.directory` out of the resolved tree with its provenance. */
 function pickPointer(resolved: {
@@ -68,6 +72,29 @@ function pickPointer(resolved: {
 }
 
 export function DesignSection({
+  project, surfaceActive = true,
+}: { project: Project; surfaceActive?: boolean }) {
+  return isCloudWorkspace(project.repoRoot)
+    ? <CloudRepositoryDesignSection key={project.id} project={project} active={surfaceActive} />
+    : <LocalDesignSection project={project} surfaceActive={surfaceActive} />;
+}
+
+function CloudRepositoryDesignSection({ project, active }: { project: Project; active: boolean }) {
+  const subscribe = useCallback((listener: () => void) => active ? subscribeCloudWorkspaces(listener) : () => {}, [active]);
+  const rows = useSyncExternalStore(subscribe, getCloudWorkspaceRows, getCloudWorkspaceRows);
+  const workspaces = rows.filter(row => row.repoSlug === project.repoSlug);
+  const [selected, setSelected] = useState(project.repoRoot);
+  const workspace = workspaces.find(row => row.id === selected) ?? workspaces.find(row => row.id === project.repoRoot) ?? workspaces[0];
+  return <div className="flex flex-col gap-3">
+    <Select value={workspace?.id ?? ""} onValueChange={setSelected} disabled={!active}>
+      <SelectTrigger aria-label="Design workspace"><SelectValue placeholder="Choose a cloud workspace" /></SelectTrigger>
+      <SelectContent>{workspaces.map(row => <SelectItem key={row.id} value={row.id}>{row.branch}</SelectItem>)}</SelectContent>
+    </Select>
+    {workspace && <CloudDesignDirectories key={workspace.id} workspaceId={workspace.id} active={active} />}
+  </div>;
+}
+
+function LocalDesignSection({
   project,
   surfaceActive = true,
 }: {

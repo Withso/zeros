@@ -30,6 +30,16 @@ function fixture(headless?:{prepare(claim:CloudCommandClaim):Promise<void>;retir
   return { claim, snapshot, completion, dependencies, runtime, send, stop, read };
 }
 describe("engine-owned cloud command dispatch", () => {
+  it("retains queued and dispatching work through receipt settlement without counting completed history", async () => {
+    const f = fixture();
+    try {
+      expect(f.runtime.hasActiveWork()).toBe(false);
+      await f.send(); await vi.waitFor(() => expect(f.dependencies.dispatch).toHaveBeenCalledOnce());
+      expect(f.runtime.hasActiveWork()).toBe(true);
+      f.completion.resolve({ state: "succeeded", resultCode: null });
+      await vi.waitFor(() => expect(f.runtime.hasActiveWork()).toBe(false));
+    } finally { f.runtime.close(); }
+  });
   it("claims a queued turn against the retained background execution",async()=>{
     const prepare=vi.fn(async()=>{}),retire=vi.fn(async()=>{}),f=fixture({prepare,retire});
     Object.assign(f.dependencies,{retainedExecution:()=>"execution"});

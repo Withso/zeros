@@ -39,6 +39,11 @@ export class CloudCommandRuntime {
   private readonly receiptRetries = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly retryDelays = new Map<string, number>();
   private closed = false;
+  /** Queue ownership outlives client sockets and foreground preparation.
+   * Empty snapshot/claim polling and completed receipts are not work. */
+  hasActiveWork(): boolean {
+    return this.pendingConversations.size > 0 || this.active.size > 0 || this.unsettled.size > 0;
+  }
   constructor(private readonly dependencies: Dependencies) {
     if(Boolean(dependencies.prepare)!==Boolean(dependencies.retire))throw new Error("Cloud command admission requires paired retirement");
   }

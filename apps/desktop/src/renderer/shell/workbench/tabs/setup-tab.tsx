@@ -70,6 +70,7 @@ import { createTerminalResizeScheduler } from "../../terminal/terminal-resize-sc
 import { isUsableTerminalDimensions } from "../../terminal/terminal-dimensions";
 import { parseCloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
 import { cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../../../state/cloud-workspace-catalog";
+import { WorkbenchEmptyState, useWorkbenchStatusSource } from "../tab-status";
 import { CloudWorkspaceSetupFailure } from "../../conversation/cloud-workspace-setup-failure";
 import { Stack } from "@/renderer/shared/ui/layout/stack";
 
@@ -128,14 +129,21 @@ export const SetupView = forwardRef<
   const cloud = target !== null;
   const subscribe = useCallback((listener: () => void) =>
     visible && cloud ? subscribeCloudWorkspaces(listener) : () => {}, [visible, cloud]);
-  const snapshot = () => target ? cloudWorkspaceDocument(target) : undefined;
+  const snapshot = () => (target ? cloudWorkspaceDocument(target) : undefined);
   const failure = useSyncExternalStore(subscribe, snapshot, snapshot)?.setupFailure;
-  if (!workspace) return <SetupLoading />;
-  if (failure) return (
-    <div className="flex h-full min-h-0 items-center justify-center p-6">
-      <CloudWorkspaceSetupFailure failure={failure} />
-    </div>
+  const managed = useWorkbenchStatusSource(
+    { error: failure ? "Setup failed" : null, pending: false },
+    workspace?.id,
   );
+  if (!workspace) return <SetupLoading />;
+  if (failure)
+    return managed ? (
+      <WorkbenchEmptyState type="terminal" />
+    ) : (
+      <div className="flex h-full min-h-0 items-center justify-center p-6">
+        <CloudWorkspaceSetupFailure failure={failure} />
+      </div>
+    );
   return (
     <WorkspaceSetup
       // Remount on workspace switch so the xterm + buffer cursor reset cleanly.
@@ -215,6 +223,8 @@ function WorkspaceSetup({
   // How many chars of the engine buffer we've already written to the xterm.
   const writtenRef = useRef(0);
   const [info, setInfo] = useState<WorkspaceSetupInfo | null>(null);
+  const [readFailure, setReadFailure] = useState<unknown>(null);
+  const [readPending, setReadPending] = useState(false);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const updateBusy = useCallback(
@@ -229,46 +239,64 @@ function WorkspaceSetup({
 
   // Pull the buffer + state and delta-append any new bytes into the xterm. A
   // shrinking buffer (a fresh run reset it) → reset the grid + cursor.
-  const refetch = useCallback((ensureLatest = false): Promise<void> => {
-    const existing = refetchRequestRef.current;
-    if (existing) {
-      if (ensureLatest) refetchQueuedRef.current = true;
-      return existing;
-    }
-    const request = (async () => {
-      do {
-        refetchQueuedRef.current = false;
-        let next: WorkspaceSetupInfo;
-        try {
-          next = await workspaceSetupInfo({ workspaceId, repoRoot });
-        } catch {
-          // Bridge not ready / transient — keep showing what we have. A real
-          // invalidation that arrived during the failed read still gets its
-          // trailing attempt; otherwise the first-snapshot retry handles it.
-          if (refetchQueuedRef.current) continue;
-          return;
-        }
-        const term = xtermRef.current;
-        if (term) {
-          if (next.log.length < writtenRef.current) {
-            term.reset();
-            writtenRef.current = 0;
-          }
-          if (next.log.length > writtenRef.current) {
-            term.write(next.log.slice(writtenRef.current));
-            writtenRef.current = next.log.length;
-          }
-        }
-        setInfo(next);
-      } while (refetchQueuedRef.current);
-    })().finally(() => {
-      if (refetchRequestRef.current === request) {
-        refetchRequestRef.current = null;
+  const refetch = useCallback(
+    (ensureLatest = false): Promise<void> => {
+      if (!visibleRef.current) return Promise.resolve();
+      const existing = refetchRequestRef.current;
+      if (existing) {
+        if (ensureLatest) refetchQueuedRef.current = true;
+        return existing;
       }
-    });
-    refetchRequestRef.current = request;
-    return request;
-  }, [workspaceId, repoRoot]);
+      const request = (async () => {
+        setReadPending(true);
+        do {
+          refetchQueuedRef.current = false;
+          let next: WorkspaceSetupInfo;
+          try {
+            next = await workspaceSetupInfo({ workspaceId, repoRoot });
+          } catch (error) {
+            setReadFailure(error);
+            // Bridge not ready / transient — keep showing what we have. A real
+            // invalidation that arrived during the failed read still gets its
+            // trailing attempt; otherwise the first-snapshot retry handles it.
+            if (refetchQueuedRef.current) continue;
+            return;
+          }
+          const term = xtermRef.current;
+          if (term) {
+            if (next.log.length < writtenRef.current) {
+              term.reset();
+              writtenRef.current = 0;
+            }
+            if (next.log.length > writtenRef.current) {
+              term.write(next.log.slice(writtenRef.current));
+              writtenRef.current = next.log.length;
+            }
+          }
+          setInfo(next);
+          setReadFailure(null);
+        } while (refetchQueuedRef.current);
+      })().finally(() => {
+        setReadPending(false);
+        if (refetchRequestRef.current === request) {
+          refetchRequestRef.current = null;
+        }
+      });
+      refetchRequestRef.current = request;
+      return request;
+    },
+    [workspaceId, repoRoot],
+  );
+  useWorkbenchStatusSource(
+    {
+      error: readFailure,
+      pending: readPending,
+      primary: true,
+      hasContent: info !== null,
+      retry: () => refetch(true),
+    },
+    workspaceId,
+  );
 
   // Setup may start/finish outside this component: automatic setup after a
   // branch workspace is created, or a control action from another connected

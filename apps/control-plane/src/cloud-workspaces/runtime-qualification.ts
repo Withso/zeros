@@ -9,6 +9,7 @@ import { RUNTIME_SMOKE_CHECKS, type ClosedDiagnostic } from "./cloud-builder-com
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { RuntimeDescriptorSchema, RuntimeInstallInputSchema, type RuntimeDescriptor } from "./runtime-contract.js";
 import type { RuntimeArtifactStore } from "./runtime-artifact-store.js";
+import { notifyRuntimeStaging } from "./runtime-staging-notification.js";
 
 export const RUNTIME_QUALIFICATION_KINDS = ["claude-setup-token", "codex-chatgpt", "cursor-api-key", "claude-api-key", "codex-api-key"] as const;
 const RUN_MS = 25 * 60_000;
@@ -282,6 +283,7 @@ export class RuntimeQualificationWorker {
           SELECT $1,$2,kind,'zeros-cloud-worker-v4',true,false,'{}'::jsonb,$4::jsonb,clock_timestamp()
           FROM unnest($3::text[]) AS required(kind) ON CONFLICT DO NOTHING`,
         [run.runtime_id, run.base_compatibility_id, RUNTIME_QUALIFICATION_KINDS, JSON.stringify(evidence)]);
+        await notifyRuntimeStaging(tx);
       }
       await tx.query(`UPDATE cloud_runtime_qualification_runs SET state=$2,diagnostic=$3,finished_at=clock_timestamp(),
         cleanup_confirmed_at=clock_timestamp(),cleanup_lease_until=NULL WHERE id=$1`,

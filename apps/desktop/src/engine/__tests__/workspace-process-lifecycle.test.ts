@@ -20,6 +20,7 @@ import * as gitState from "../git/state";
 import type { CloudCheckpointDirective, CloudDurabilityAuthority } from "../cloud-durability-runtime";
 
 interface ReaperInternals {
+  designTerritoryTransitionCallers: Set<Promise<unknown>>;
   cloudRuntimeCheckpointQuiescing: boolean;
   cloudWorkspaceMutations: Set<Promise<unknown>>;
   cloudDurabilityRuntime: { checkpoint: ReturnType<typeof vi.fn> } | null;
@@ -1248,6 +1249,22 @@ describe("workspace terminal start barrier", () => {
 });
 
 describe("qualified cloud workspace authority", () => {
+  it("excludes a Design directory switch from its own territory drain and broadcasts recognition", async () => {
+    const state = internals(new ZerosEngine({ root: "/tmp/zeros-v2-test-directory-drain", port: 29_903 }));
+    state.cloudWorker = qualifiedCloudWorker();
+    let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    vi.spyOn(state.workspace, "handle").mockImplementation(async () => { await gate; return { directory: "Brand", directoryId: "design_brand" }; });
+    const remote = client("cloud");
+    state.router.register(remote);
+    const primary = vi.spyOn(gitState, "getWorkspaceById").mockReturnValue({ id: "local-main", path: "/tmp/zeros-v2-test-directory-drain", repoRoot: "/tmp/zeros-v2-test-directory-drain", archivedAt: null } as ReturnType<typeof gitState.getWorkspaceById>);
+    const request = state.handleWorkspaceMessage({ type: "WORKSPACE_REQUEST", id: "select", source: "browser", timestamp: 1, op: "design.selectDirectory", params: { workspaceId: "local-main" } }, remote);
+    try {
+      await vi.waitFor(() => expect(state.designTerritoryTransitionCallers.size).toBe(1));
+    } finally { finish(); await request; primary.mockRestore(); }
+    expect(remote.send).toHaveBeenCalledWith(expect.objectContaining({ type: "DB_CHANGED", kinds: ["workspaces", "settings"], workspaceIds: ["local-main"], designRecognitionChanged: true }));
+    expect(state.designTerritoryTransitionCallers.size).toBe(0);
+  });
   it("blocks new cloud workspace edits during a final checkpoint while retaining reads", async () => {
     const state = internals(new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_914 }));
     state.cloudWorker = qualifiedCloudWorker();state.cloudRuntimeCheckpointQuiescing = true;

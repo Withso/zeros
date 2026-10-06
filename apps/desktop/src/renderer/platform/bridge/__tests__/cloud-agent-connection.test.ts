@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { CloudAgentConnection } from "../cloud-agent-connection";
+import { CloudEventReader } from "../cloud-event-reader";
+import type { BridgeMessage } from "../messages";
 import type { RuntimeClient } from "../ws-client";
 import type { WireRecord } from "../cloud-runtime-wire";
 import type {BackgroundTasksUpdate} from "@zeros/protocol/agent-events";
@@ -94,6 +96,56 @@ function fixture(receiptIdentity: Record<string, unknown> = {}) {
   };
 }
 afterEach(() => vi.restoreAllMocks());
+
+describe("cloud snapshot and replay installation", () => {
+  it.each([false, true])("does not resurrect a completed turn or settled permission from delayed state (retired=%s)", async retired => {
+    const f = fixture(), original = f.request.getMockImplementation()!;
+    const streamId = "33333333-3333-4333-8333-333333333333";
+    const handlers = new Map<string, (frame: BridgeMessage) => void>();
+    let finish!: (value: unknown) => void, snapshot: unknown;
+    const request = vi.fn(async (message: WireRecord) => {
+      if (message.op === "cloudEvents.request") {
+        if ((message.params as any).request.kind === "replay") return { type: "WORKSPACE_RESPONSE", result: {
+          streamId, firstRetained: 1, head: 12, cursor: 12, events: [],
+        } };
+        const response = await original(message);
+        snapshot = { ...response, result: { ...(response.result as object), cursor: { streamId, sequence: 10 } } };
+        return new Promise(resolve => { finish = resolve; });
+      }
+      return original(message);
+    });
+    const client = { request, on: (type: string, listener: (frame: BridgeMessage) => void) => {
+      handlers.set(type, listener); return () => handlers.delete(type);
+    }, onStatusChange: () => () => {} } as unknown as RuntimeClient;
+    const reader = new CloudEventReader(client);
+    const connection = new CloudAgentConnection(client, "local-main", f.authorize, reader);
+    let active = false;
+    const permissions = new Set<string>(), received: number[] = [];
+    connection.on("AGENT_SESSION_CREATED", frame => { active = (frame as any).promptActive; });
+    connection.on("AGENT_PERMISSION_REQUEST", frame => permissions.add((frame as any).permissionId));
+    reader.on("AGENT_PERMISSION_SETTLED", frame => { permissions.delete((frame as any).permissionId); received.push(frame.cloudStream!.sequence); });
+    reader.on("AGENT_PROMPT_COMPLETE", frame => { connection.incoming(frame as unknown as WireRecord); active = false; received.push(frame.cloudStream!.sequence); });
+    const load = connection.request({ type: "AGENT_LOAD_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "test-model" } });
+    void load.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+      for (const [sequence, type] of [[11, "AGENT_PERMISSION_SETTLED"], [12, "AGENT_PROMPT_COMPLETE"]] as const)
+        handlers.get(type)!({ type, id: `event-${sequence}`, source: "engine", timestamp: 1,
+          permissionId: "pending", requestId: "prompt", stopReason: "end_turn", response: { stopReason: "end_turn" },
+          chatId: chat, agentId: "codex", sessionId: "reconnected", executionId: "reconnected",
+          cloudStream: { streamId, sequence } } as BridgeMessage);
+      expect(received).toEqual([]);
+      if (retired) { reader.dispose(); connection.dispose(); }
+      finish(snapshot);
+      if (retired) await expect(load).rejects.toThrow(/closed|changed/);
+      else {
+        await load;
+        await vi.waitFor(() => expect(received).toEqual([11, 12]));
+      }
+      expect(active).toBe(false); expect(permissions.size).toBe(0);
+    } finally { reader.dispose(); connection.dispose(); f.connection.dispose(); }
+  });
+});
 
 function retainedTaskFixture(){
   const f=fixture(),original=f.request.getMockImplementation()!;
@@ -305,6 +357,22 @@ describe("cloud agent command adapter", () => {
     expect(await f.connection.request({type:"AGENT_GOAL_CLEAR",sessionId:`conversation:${chat}`,agentId:"codex"})).toMatchObject({type:"AGENT_GOAL_CHANGED",goal:null});
     expect(f.getEnqueued()).toMatchObject({kind:"enqueue",payload:{operation:{version:1,kind:"goal",action:"clear"},model:"test-model"}});
   });
+  it.each([undefined, 0, 2])("rejects unsupported native commands before queue mutation with an actionable typed error (version=%s)", async version => {
+    const f = fixture(), original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async message => {
+      const response = await original(message);
+      if (message.op === "cloudCommands.conversation" || message.op === "cloudCommands.createConversation")
+        return { ...response, result: { ...response.result as WireRecord, nativeCommandsVersion: version } };
+      return response;
+    });
+    try {
+      await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "test-model" } });
+      await expect(f.connection.request({ type: "AGENT_GOAL_CLEAR", sessionId: `conversation:${chat}`, agentId: "codex" }))
+        .rejects.toMatchObject({ code: "cloud_runtime_feature_unavailable", action: version === 2 ? "update-desktop" : "update-runtime", feature: "native-commands-v1",
+          message: version === 2 ? "Update Zeros to use native conversation operations on this cloud runtime" : "Update the cloud runtime to use native conversation operations" });
+      expect(f.getEnqueued()).toBeUndefined();
+    } finally { f.connection.dispose(); }
+  });
   it.each([
     ["retirement only", 1, "cancelled", true],
     ["another Stop during retirement", 2, "cancelled", false],
@@ -508,6 +576,44 @@ describe("cloud agent command adapter", () => {
     await expect(after.connection.request({ type: "AGENT_PROMPT", agentId: "codex", sessionId: `conversation:${chat}`,
       userMessageId: "local-directory", prompt: [] })).rejects.toThrow(/local folders/i);
     expect(after.authorize).not.toHaveBeenCalled();
+  });
+
+  it.each(["dispatching", "failed"].flatMap(state => ["cloud_runtime_upgrade_required", "cloud_agent_model_not_authorized", "cloud_agent_credential_expired", "cloud_agent_credential_revoked", "cloud_agent_credential_refresh_required"].map(code => ({ state, code }))))("recovers the exact upgrade denial from a %s receipt without resending", async ({ state, code }) => {
+    const f = fixture(); f.setState(state);
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async message => {
+      const response = await original(message);
+      if (message.op === "cloudCommands.request" && ((message.params as WireRecord).request as WireRecord).kind === "read")
+        (response.result as WireRecord).resultCode = code;
+      return response;
+    });
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "gpt-5.6" } });
+    const flight = f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "upgrade-receipt", prompt: [] });
+    try {
+      await expect(flight).resolves.toMatchObject({ type: "AGENT_PROMPT_FAILED", error: code });
+      expect(f.request.mock.calls.filter(([m]) => m.op === "cloudCommands.request" && ((m.params as WireRecord).request as WireRecord).kind === "mutate")).toHaveLength(1);
+    } finally { f.setState("succeeded"); f.connection.dispose(); }
+  });
+
+  it.each(["cloud_runtime_upgrade_required", "cloud_agent_model_not_authorized", "cloud_agent_credential_expired", "cloud_agent_credential_revoked", "cloud_agent_credential_refresh_required"])("recovers the admission code when an old engine's generic terminal event wins the receipt race", async code => {
+    const f = fixture(); f.setState("dispatching");
+    const original = f.request.getMockImplementation()!;
+    let marker = false;
+    f.request.mockImplementation(async message => {
+      const response = await original(message);
+      if (marker && message.op === "cloudCommands.request" && ((message.params as WireRecord).request as WireRecord).kind === "read")
+        (response.result as WireRecord).resultCode = code;
+      return response;
+    });
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "gpt-5.6" } });
+    const flight = f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "old-engine-upgrade", prompt: [] });
+    try {
+      await vi.waitFor(() => expect(f.getEnqueued()).toBeDefined());
+      marker = true;
+      f.connection.observePromptResult({ type: "AGENT_PROMPT_FAILED", requestId: f.getEnqueued()!.commandId,
+        agentId: "codex", executionId: "execution", error: "Cloud agent execution authority is unavailable" });
+      await expect(flight).resolves.toMatchObject({ type: "AGENT_PROMPT_FAILED", error: code });
+    } finally { f.setState("succeeded"); f.connection.dispose(); }
   });
 
   it("accepts the terminal frame while a receipt read is still outstanding", async () => {

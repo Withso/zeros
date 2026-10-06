@@ -20,9 +20,12 @@ import { createRuntimeArtifactStore } from "./cloud-workspaces/runtime-artifact-
 import { cloudRuntimeQualificationMode } from "./cloud-workspaces/runtime-config.js";
 import { loadPinnedCloudRuntime } from "./cloud-workspaces/runtime-selection.js";
 import { createRuntimeQualificationWorker } from "./cloud-workspaces/runtime-qualification.js";
+import { createCloudRuntimeStagingWorker } from "./cloud-workspaces/runtime-staging.js";
+import { DatabaseCloudRuntimeTransitionService } from "./cloud-workspaces/runtime-transfer.js";
 import { BoatApiClient } from "./cloud-workspaces/boat-client.js";
 import { DatabaseBuilderVmOperationStore } from "./cloud-workspaces/cloud-builder-vm-store.js";
 import { CloudComputerTemplateRetentionWorker } from "./cloud-workspaces/computer-template-retention.js";
+import { startCloudWorkerNotifications } from "./cloud-workspaces/worker-notifications.js";
 import { DatabaseCloudWorkspaceActionService } from "./cloud-workspaces/action-receipts.js";
 import { loadConfig } from "./config.js";
 import { createPool, createMigrationPool, withSystemTx } from "./db.js";
@@ -32,6 +35,8 @@ import { loadEmailConfig, sendEmailStrict } from "./email.js";
 import { startGithubOauthCleanup } from "./github.js";
 import { createApp } from "./app.js";
 import { DatabaseCloudGithubWriteGrants } from "./cloud-workspaces/github-write-grants.js";
+import { DatabaseCloudGithubReads } from "./cloud-workspaces/github-read-proxy.js";
+import { GithubCloudWorkspaceCredentialBroker } from "./cloud-workspaces/github-credentials.js";
 import { DatabaseCloudIdleStop } from "./cloud-workspaces/idle-stop.js";
 import {
   CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
@@ -120,11 +125,13 @@ if (workosSync) {
   );
 }
 let stopCloudReconciler = async () => {};
+let stopCloudWorkerNotifications = async () => {};
 let stopCloudProAllowances = async () => {};
 let stopCloudSetupWorker = async () => {};
 let stopCloudComputerBuildWorker = async () => {};
 let stopCloudComputerTemplateWorker = async () => {};
 let stopCloudRuntimeQualificationWorker = async () => {};
+let stopCloudRuntimeStagingWorker = async () => {};
 let stopCloudComputerTemplateRetentionWorker = async () => {};
 let stopCloudAccessRevocationWorker = async () => {};
 let stopCloudCheckpointRequestWorker = async () => {};
@@ -160,6 +167,13 @@ let cloudWorkspaceEngineClientAdmissionService:
   | undefined;
 const runtimeQualificationWorker = !config.databaseMaintenanceMode && migrationResult.status.state !== "controlled_migration_pending"
   ? createRuntimeQualificationWorker(config, pool, runtimeArtifacts) : null;
+const runtimeStagingWorker = !config.databaseMaintenanceMode && migrationResult.status.state !== "controlled_migration_pending"
+  ? createCloudRuntimeStagingWorker(config, pool, runtimeArtifacts, new DatabaseCloudRuntimeTransitionService({
+    pool, qualificationMode: config.cloudWorkspaces?.runtime?.qualificationMode ?? "full",
+    workosEnabled: config.auth.provider === "workos",
+    secretEncryptionKeys: config.cloudWorkspaces?.settingsSecretEncryptionKeys ?? {},
+    currentSecretEncryptionKeyVersion: config.cloudWorkspaces?.currentSettingsSecretEncryptionKeyVersion ?? null,
+  })) : null;
 if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
   const [
     { createCloudProviderDeployment },
@@ -425,6 +439,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     });
     const materials = new DatabaseCloudWorkspaceSetupMaterialService({
       pool,
+      resumeExistingEnabled: config.cloudWorkspaceResumeExistingEnabled === true,
       setupAudience: endpoint(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH),
       engineRegistrationAudience: endpoint(
         CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
@@ -561,15 +576,17 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       console.log("[control-plane] cloud workspace background workers paused");
       return;
     }
-    stopCloudReconciler = startCloudWorkspaceReconciler({
+    const lifecycle = startCloudWorkspaceReconciler({
       pool,
       provider,
       providerResolver,
+      runtimeUpgradeConfig: cloud,
       ...(cloud.computePolicy?{computePolicy:cloud.computePolicy}:{}),
       workosEnabled: config.auth.provider === "workos",
       intervalMs: cloud.reconcileIntervalMs,
       leaseMs: Math.max(10 * 60_000, cloud.operationTimeoutSeconds * 2_000),
-    }).stop;
+    });
+    stopCloudReconciler = lifecycle.stop;
     if(cloud.computePolicy)stopCloudProAllowances=new DatabaseProMonthlyAllowance(pool,cloud.computePolicy).start();
     stopCloudAccessRevocationWorker = accessRevocationWorker.start();
     stopCloudCheckpointRequestWorker = checkpointRequestWorker.start();
@@ -584,6 +601,21 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     if (invitationWorker) stopCloudInvitationWorker=invitationWorker.start();
 
     if (setupWorker) { stopCloudSetupWorker = setupWorker.start(); stopCloudComputerBuildWorker = createCloudComputerBuildWorker(pool, cloud).start(); }
+    if (runtimeStagingWorker) stopCloudRuntimeStagingWorker = runtimeStagingWorker.start();
+    // Reserve a separate session even without DATABASE_LISTEN_URL: long-held
+    // listeners must not consume request/worker transaction pool capacity.
+    const workerListenerPool = createPool(config.databaseListenUrl ?? config.databaseUrl, {
+      maxConnections: 1, applicationName: "zeros-cloud-worker-listener",
+    });
+    const stopNotifications = startCloudWorkerNotifications(workerListenerPool, {
+      lifecycle: () => lifecycle.reconciler.notify(),
+      setup: () => setupWorker?.notify(),
+      ...(runtimeStagingWorker ? { runtimeStaging: () => runtimeStagingWorker.notify() } : {}),
+    });
+    stopCloudWorkerNotifications = async () => {
+      try { await stopNotifications(); }
+      finally { await workerListenerPool.end(); }
+    };
     if (runtimeQualificationWorker) stopCloudRuntimeQualificationWorker = runtimeQualificationWorker.start();
     if (computerTemplateWorker) stopCloudComputerTemplateWorker = computerTemplateWorker.start();
     if (
@@ -623,6 +655,8 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
 
 const cloudGithubWriteGrants = config.github && cloudWorkspaceInternalSetupService
   ? new DatabaseCloudGithubWriteGrants(pool, config.auth.provider === "workos") : undefined;
+const cloudGithubReads = config.github && cloudWorkspaceInternalSetupService
+  ? new DatabaseCloudGithubReads(pool, config.auth.provider === "workos", new GithubCloudWorkspaceCredentialBroker(config.github)) : undefined;
 let githubWriteCleanup: ReturnType<typeof setInterval> | undefined;
 let githubWriteCleanupPending = Promise.resolve();
 let githubWriteCleanupRunning = false;
@@ -632,6 +666,7 @@ const app = createApp(config, pool, emailConfig, {
       requalify: (id: string) => runtimeQualificationWorker.enqueue(id, { force: true }) } : {}) },
   ...(cloudWorkspaceInternalSetupService ? { cloudIdleStop: new DatabaseCloudIdleStop(pool, config.auth.provider === "workos") } : {}),
   ...(cloudGithubWriteGrants ? { cloudGithubWriteGrants } : {}),
+  ...(cloudGithubReads ? { cloudGithubReads } : {}),
   securityEventBroker,
   migrationStatus: migrationResult.status,
   ...(workosProvider ? { workosProvider } : {}),
@@ -655,11 +690,12 @@ let shuttingDown = false;
 const server = serve({ fetch: app.fetch, port: config.port, ...(config.host ? { hostname: config.host } : {}) }, (info) => {
   if (shuttingDown) return;
   if(migrationResult.status.state==="current"){
-    if (cloudGithubWriteGrants) {
+    if (cloudGithubWriteGrants || cloudGithubReads) {
       const sweep = () => {
         if (githubWriteCleanupRunning) return;
         githubWriteCleanupRunning = true;
-        githubWriteCleanupPending = cloudGithubWriteGrants.cleanup().catch(() => undefined).finally(() => { githubWriteCleanupRunning = false; });
+        githubWriteCleanupPending = Promise.all([cloudGithubWriteGrants?.cleanup(), cloudGithubReads?.cleanup()])
+          .then(() => undefined).catch(() => undefined).finally(() => { githubWriteCleanupRunning = false; });
       };
       sweep();
       githubWriteCleanup = setInterval(sweep, 30_000);
@@ -695,11 +731,14 @@ function shutdown(signal: string): void {
   cloudRuntimeServiceRelay?.close();
   console.log(`[control-plane] ${signal}; draining`);
   const backgroundStopped = Promise.allSettled([
+    stopCloudWorkerNotifications(),
+    cloudGithubReads?.close(),
     githubWriteCleanupPending,
     stopCloudSetupWorker(),
     stopCloudComputerBuildWorker(),
     stopCloudComputerTemplateWorker(),
     stopCloudRuntimeQualificationWorker(),
+    stopCloudRuntimeStagingWorker(),
     stopCloudComputerTemplateRetentionWorker(),
     stopCloudAccessRevocationWorker(),
     stopCloudCheckpointRequestWorker(),

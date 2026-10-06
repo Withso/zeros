@@ -98,7 +98,8 @@ import {
   writePrivateDesignState,
 } from "./metadata";
 import { readSafeRegularFile } from "./safe-files";
-import { safeLocalReference } from "./assets";
+import { safeLocalReference, listDesignAssets, MAX_DESIGN_ASSETS } from "./assets";
+import { assertDesignAssetUploadTarget, parseDesignUploadedAsset, publishDesignUploadedAsset, type DesignUploadedAsset } from "./asset-upload";
 
 async function unlinkDesignArtifact(target: string): Promise<void> {
   await unlink(target);
@@ -535,7 +536,7 @@ function parseDesignTransactionJournal(
   const entryFile = assertFrameFile(String(journal.entryFile ?? ""));
   const documentId = designWebDocumentId(entryFile);
   if (
-    journal.version !== 1 ||
+    (journal.version !== 1 && journal.version !== 2) ||
     journal.documentId !== documentId ||
     typeof journal.nextRevision !== "string" ||
     !/^[a-f0-9]{24}$/.test(journal.nextRevision) ||
@@ -544,6 +545,9 @@ function parseDesignTransactionJournal(
   ) {
     throw new Error("Malformed design transaction journal.");
   }
+  if (journal.version === 1 && journal.asset !== undefined)
+    throw new Error("Unexpected asset in a V1 Design transaction.");
+  const asset = journal.version === 2 ? parseDesignUploadedAsset(journal.asset) : undefined;
   const files = journal.files.map((candidate) => {
     if (
       !candidate ||
@@ -615,7 +619,8 @@ function parseDesignTransactionJournal(
     z: 0,
   });
   return {
-    version: 1,
+    version: journal.version,
+    ...(asset ? { asset } : {}),
     documentId,
     entryFile,
     nextRevision: journal.nextRevision,
@@ -662,6 +667,7 @@ async function applyDesignTransactionJournalUnlocked(
         );
     }
   }
+  if (journal.asset) publishDesignUploadedAsset(workspacePath, journal.asset);
   canvas.foundation = journal.foundation;
   canvas.frames[journal.entryFile] = {
     ...canvas.frames[journal.entryFile],
@@ -895,7 +901,7 @@ export async function commitDesignWebDocumentState(
   frame: string,
   expectedRevision: string,
   next: DesignWebDocumentState,
-  options: { assertAuthorized?: () => void } = {},
+  options: { assertAuthorized?: () => void; asset?: DesignUploadedAsset } = {},
 ): Promise<void> {
   const file = assertFrameFile(frame);
   await withDocumentWrite(workspacePath, async () => {
@@ -1028,8 +1034,12 @@ export async function commitDesignWebDocumentState(
         },
       },
     };
+    const asset = options.asset ? parseDesignUploadedAsset(options.asset) : undefined;
+    if (asset && !assertDesignAssetUploadTarget(workspacePath, asset) && (await listDesignAssets(workspacePath)).length >= MAX_DESIGN_ASSETS)
+      throw new Error("This Design directory already has 128 images. Remove an unused image before uploading.");
     const journal: DesignTransactionJournal = {
-      version: 1,
+      version: asset ? 2 : 1,
+      ...(asset ? { asset } : {}),
       documentId: normalized.documentId,
       entryFile: file,
       nextRevision: normalized.revision,

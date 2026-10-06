@@ -215,6 +215,21 @@ afterEach(async () => {
 });
 
 describe("portable cloud runtime relay", () => {
+  it("reports bounded upstream close codes and classes without arbitrary reasons or credentials", async () => {
+    const f = await fixture({}, { upstream: "record" });
+    for (const reason of ["CONNECTED required", ...Array.from({ length: 10 }, () => "private-upstream-text")]) {
+      const socket = f.connect(); await once(socket, "open");
+      const closed = once(socket, "close");
+      f.engines.at(-1)!.close(1008, reason); await closed;
+    }
+    const logs = f.logs.filter(line => line.includes("upstream close"));
+    expect(logs[0]).toContain("code=1008");
+    expect(logs[0]).toContain("class=handshake_required");
+    expect(logs[0]).toContain("stage=relay");
+    expect(logs.length).toBeLessThanOrEqual(8);
+    expect(JSON.stringify(f.logs)).not.toMatch(/private-upstream-text|outer-provider-secret/);
+    expect(JSON.stringify(f.logs)).not.toContain(token);
+  });
   it("accepts one canonical header or browser subprotocol token, never credentials in a URL", () => {
     expect(runtimeBridgeToken({ "x-zeros-cloud-token": token })).toBe(token);
     expect(

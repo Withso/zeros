@@ -46,6 +46,24 @@ describe("GitHub write proxy admission", () => {
 });
 
 describe("GitHub proxy HTTP boundary", () => {
+  it("limits the managed fetch/pull capability to upload-pack without spending a write", async () => {
+    const { createCloudGithubProxyRoutes, CLOUD_GITHUB_PROXY_PATH } = await import("./github-write-proxy.js");
+    const { vi } = await import("vitest");
+    const authorizeProxy = vi.fn(async (_proxy: string, _write: string | null = null) => ({ ...scope, operation: "git.fetch", expectedBody: null }));
+    const upstream = vi.fn(async (url: string | URL | Request) => new URL(url instanceof Request ? url.url : String(url)).host === "api.github.com"
+      ? Response.json({ id: 123 }) : new Response("0000", { headers: { "content-type": "application/x-git-upload-pack-advertisement" } }));
+    const app = createCloudGithubProxyRoutes({ authorizeProxy } as unknown as import("./github-write-grants.js").DatabaseCloudGithubWriteGrants, upstream);
+    const headers = { authorization: `Bearer zgp_${"p".repeat(43)}` };
+    const read = await app.request(`${CLOUD_GITHUB_PROXY_PATH}/git/org/repo.git/info/refs?service=git-upload-pack`, { headers });
+    expect(read.status).toBe(200);
+    expect(await read.text()).toBe("0000");
+    expect(authorizeProxy.mock.calls.every(call => call.length === 1 || call[1] === null)).toBe(true);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect((await app.request(`${CLOUD_GITHUB_PROXY_PATH}/git/org/repo.git/info/refs?service=git-receive-pack`, { headers })).status).toBe(403);
+      expect((await app.request(`${CLOUD_GITHUB_PROXY_PATH}/api/repos/org/repo/pulls`, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: "{}" })).status).toBe(403);
+    } finally { warning.mockRestore(); }
+  });
   it("acknowledges only an exact empty authentication probe without spending a write", async () => {
     const { createCloudGithubProxyRoutes, CLOUD_GITHUB_PROXY_PATH } = await import("./github-write-proxy.js");
     const { vi } = await import("vitest");

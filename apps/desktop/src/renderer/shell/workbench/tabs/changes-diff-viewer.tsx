@@ -26,6 +26,8 @@ import {
   ChevronsUpDown,
 } from "lucide-react";
 import { Button, Checkbox, Tooltip } from "@/renderer/shared/ui/primitives";
+import { toast } from "@/renderer/shared/ui/primitives/elements";
+import { useWorkbenchStatusSource } from "../tab-status";
 import { FileTypeIcon } from "@/renderer/features/agent/composer-editor/file-type-icon";
 import { useCodeTheme } from "@/renderer/shared/theme/use-code-theme";
 import { finishDiffRender } from "@/renderer/shared/theme/diff-theme";
@@ -654,7 +656,16 @@ function ChangesDiffHeader({
   ) => void;
 }) {
   const key = changesDiffDataKey(query, file, refreshKey);
-  const [error, setError] = useState<string | null>(null);
+  const [failure, setFailure] = useState<{ key: string; error: string | null }>(
+    { key, error: null },
+  );
+  const error = failure.key === key ? failure.error : null;
+  const setError = useCallback(
+    (error: string | null) => setFailure({ key, error }),
+    [key],
+  );
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const pending = pendingKey === key;
   const [copied, setCopied] = useState(false);
   const openFile = useOpenFileInWorkbench();
   const readQuery = useMemo(() => ({ cwd, path: file.path }), [cwd, file.path]);
@@ -664,6 +675,26 @@ function ChangesDiffHeader({
     !file.binary &&
     file.status !== "conflicted" &&
     !!reviewComparisonForScope(query.diffScope);
+  const managed = useWorkbenchStatusSource(
+    {
+      active,
+      error: error ?? (supportsHunks ? readSnapshot.error : null),
+      pending:
+        pending ||
+        (supportsHunks &&
+          !collapsed &&
+          (readSnapshot.loading || readSnapshot.refreshing)),
+      retry: async () => {
+        await Promise.allSettled([
+          load(),
+          ...(supportsHunks
+            ? [loadWorkspaceFileRead(readQuery, { force: true })]
+            : []),
+        ]);
+      },
+    },
+    key,
+  );
   useEffect(() => {
     if (active && !collapsed && supportsHunks)
       void loadWorkspaceFileRead(readQuery, { maxAgeMs: 15_000 }).catch(
@@ -701,13 +732,22 @@ function ChangesDiffHeader({
   const latest = useRef({ file, query, cwd, onData });
   latest.current = { file, query, cwd, onData };
   const load = useCallback(async () => {
-    const args = latest.current;
-    const value =
+    setPendingKey(key);
+    try {
+      const args = latest.current;
+      const value =
       peekChangesDiffData(key) ??
       (await loadChangesDiffData(key, args.query, args.file, args.cwd));
-    args.onData(args.file, key, value);
-    return value;
-  }, [key]);
+      args.onData(args.file, key, value);
+      setError(null);
+      return value;
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+      throw failure;
+    } finally {
+      setPendingKey((current) => (current === key ? null : current));
+    }
+  }, [key, setError]);
   useEffect(() => {
     if (!active || collapsed || file.binary || !hydrateOnMount) return;
     let cancelled = false;
@@ -719,7 +759,7 @@ function ChangesDiffHeader({
     return () => {
       cancelled = true;
     };
-  }, [active, collapsed, file.binary, hydrateOnMount, load]);
+  }, [active, collapsed, file.binary, hydrateOnMount, load, setError]);
   useEffect(() => {
     if (!copied) return;
     const id = setTimeout(() => setCopied(false), 1500);
@@ -808,16 +848,17 @@ function ChangesDiffHeader({
               .then((copyText) => navigator.clipboard.writeText(copyText))
               .then(() => setCopied(true))
               .catch((error) =>
-                setError(
-                  error instanceof Error ? error.message : String(error),
-                ),
+                toast.error("Couldn't copy the diff", {
+                  description:
+                    error instanceof Error ? error.message : String(error),
+                }),
               );
           }}
         >
           {copied ? <Check /> : <Copy />}
         </Button>
       </Tooltip>
-      {error && (
+      {error && !managed && (
         <Tooltip label={error}>
           <Button
             variant="ghost"

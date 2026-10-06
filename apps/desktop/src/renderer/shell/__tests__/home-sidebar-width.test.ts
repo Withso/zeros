@@ -19,6 +19,12 @@ describe("clampHomeSidebarWidth", () => {
     expect(clampHomeSidebarWidth(-100)).toBe(HOME_SIDEBAR_MIN_PX);
   });
 
+  it("opens a width saved under the old 200px floor wide enough for the title band", () => {
+    // Traffic-light reserve, then toggle, resources, back and forward.
+    expect(HOME_SIDEBAR_MIN_PX).toBe(220);
+    expect(clampHomeSidebarWidth(200)).toBe(220);
+  });
+
   it("caps at the rail maximum", () => {
     expect(clampHomeSidebarWidth(9999)).toBe(HOME_SIDEBAR_MAX_PX);
   });

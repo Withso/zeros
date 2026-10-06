@@ -21,8 +21,10 @@ const STORAGE_KEY = "zeros:home-sidebar-width:v1";
 /** Fresh-install default — wider than the legacy 208px fixed rail so the
  *  Dashboard label, repo names, and the profile row breathe. */
 export const HOME_SIDEBAR_DEFAULT_PX = 256;
-/** Narrowest useful rail — repo names + the profile row stay readable. */
-export const HOME_SIDEBAR_MIN_PX = 200;
+/** Narrowest useful rail. The title band needs 216px: the 80px traffic-light
+ *  reserve, then the sidebar toggle, resources, back and forward (28px each)
+ *  with their gaps and end padding. Mirrored by AppSidebar's `min-w-[220px]`. */
+export const HOME_SIDEBAR_MIN_PX = 220;
 /** Widest the rail may grow — keeps the content pane usable on laptops. */
 export const HOME_SIDEBAR_MAX_PX = 420;
 

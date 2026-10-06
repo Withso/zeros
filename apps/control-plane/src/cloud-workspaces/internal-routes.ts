@@ -58,6 +58,7 @@ import {
 
 export const CLOUD_WORKSPACE_SETUP_ADMISSION_PATH =
   "/internal/v1/cloud-workspaces/setup/admission";
+export const CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH = "/internal/v1/cloud-workspaces/runtime/register";
 export const CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH =
   "/internal/v1/cloud-workspaces/engine/register";
 export const CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH =
@@ -94,6 +95,7 @@ const BLOB_BODY_BYTES = 64 * 1024 * 1024;
 const SetupAdmissionBody = z
   .object({
     materialVersion: z.literal(2).optional(),
+    checkoutSourceVersion: z.literal(1).optional(),
     runtime: CloudRuntimeWitnessSchema.optional(),
     workspaceId: UUID,
     organizationId: UUID,
@@ -122,6 +124,7 @@ const EngineRegistrationBody = z
     engineInstanceId: UUID,
     protocolVersion: POSITIVE_INTEGER.max(65_535),
     actorProtocolVersion: z.literal(2).optional(),
+    agentCustomizationVersion: z.literal(3).optional(),
     agentRuntime: CloudAgentRuntimeSchema.optional(),
   })
   .strict();
@@ -356,6 +359,7 @@ export interface CloudWorkspaceInternalSetupService {
   events?: DatabaseCloudWorkspaceEventService;
   actions?: DatabaseCloudWorkspaceActionService;
   redeem(input: CloudWorkspaceSetupRedemptionInput): Promise<unknown>;
+  registerTransitionEngine?(input:CloudWorkspaceEngineRegistrationInput):Promise<unknown>;
   registerEngine(
     input: CloudWorkspaceEngineRegistrationInput,
   ): Promise<unknown>;
@@ -578,6 +582,7 @@ export function createCloudWorkspaceInternalRoutes(
   for (const path of [
     CLOUD_WORKSPACE_SETUP_ADMISSION_PATH,
     CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
+    CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH,
     CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
     CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH,
     CLOUD_ACTOR_ADMISSION_PATH,
@@ -594,7 +599,14 @@ export function createCloudWorkspaceInternalRoutes(
     const input = await strictJson(c.req, SetupAdmissionBody);
     if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
     try {
-      return c.json(await service.redeem({ ...input, token }));
+      const material = await service.redeem({ ...input, token,
+        ...(input.runtime && c.req.header("X-Zeros-Resume-Existing") === "1" ? { resumeExistingVersion: 1 as const } : {}),
+      });
+      // Keep immutable JSON material and old strict request schemas unchanged.
+      // An older reader ignores this header; a new helper emits timed results
+      // only after a supporting control plane acknowledges it.
+      if (input.runtime && c.req.header("x-zeros-setup-timings") === "1") c.header("x-zeros-setup-timings", "1");
+      return c.json(material);
     } catch (error) {
       if (!(error instanceof CloudWorkspaceSetupMaterialError)) throw error;
       return c.json(
@@ -613,8 +625,9 @@ export function createCloudWorkspaceInternalRoutes(
     const input = await strictJson(c.req, EngineRegistrationBody);
     if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
     try {
-      const {actorProtocolVersion,agentRuntime,...binding}=input;
+      const {actorProtocolVersion,agentRuntime,agentCustomizationVersion,...binding}=input;
       return c.json(await service.registerEngine({ ...binding, token,
+        ...(agentCustomizationVersion===undefined?{}:{agentCustomizationVersion}),
         ...(actorProtocolVersion===undefined?{}:{actorProtocolVersion}),...(agentRuntime===undefined?{}:{agentRuntime}) }));
     } catch (error) {
       if (!(error instanceof CloudWorkspaceSetupMaterialError)) throw error;
@@ -622,6 +635,22 @@ export function createCloudWorkspaceInternalRoutes(
         { error: { code: error.code, retryable: error.retryable } },
         errorStatus(error),
       );
+    }
+  });
+
+  routes.post(CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH,async c=>{
+    const token=bearerToken(c.req.header("authorization"),SETUP_TOKEN_PATTERN);
+    if (!token) return c.json({error:{code:"invalid_capability"}},401);
+    const input=await strictJson(c.req,EngineRegistrationBody);
+    if (!input) return c.json({error:{code:"invalid_request"}},422);
+    if (!service.registerTransitionEngine) return c.json({error:{code:"engine_registration_rejected"}},403);
+    try {
+      const {actorProtocolVersion,agentRuntime,agentCustomizationVersion,...binding}=input;
+      return c.json(await service.registerTransitionEngine({...binding,token,
+        ...(actorProtocolVersion===undefined?{}:{actorProtocolVersion}),...(agentRuntime===undefined?{}:{agentRuntime}),
+        ...(agentCustomizationVersion===undefined?{}:{agentCustomizationVersion})}));
+    } catch {
+      return c.json({error:{code:"engine_registration_rejected",retryable:false}},403);
     }
   });
 

@@ -10,13 +10,55 @@ vi.mock("../../features/team/control-plane", () => ({
     constructor(public status: number, public code: string, message: string) { super(message); }
   },
 }));
-import { CloudWorkspaceDocumentSchema, cloudAccountRequest, cloudAgentGrant, createCloudWorkspaceDocument, getCloudWorkspaceDocument } from "../cloud-workspaces";
+import { CloudWorkspaceDocumentSchema, changeCloudWorkspaceLifecycle, cloudAccountRequest, cloudAgentGrant, createCloudWorkspaceDocument, getCloudWorkspaceDocument,
+  getCloudRuntimeUpgradeAvailability } from "../cloud-workspaces";
 
 const session = { access_token: "synthetic-session", user: { sub: "test-user" } };
 beforeEach(() => { state.generation = 0; state.session.mockReset(); state.source.mockReset(); });
 afterEach(() => vi.unstubAllGlobals());
 
 describe("cloud request account boundaries", () => {
+  it("rejects local workspace targets before authentication or HTTP for runtime discovery", async () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    const target = { organizationId: "personal", workspaceId: "/local/workspace" };
+    await expect(getCloudRuntimeUpgradeAvailability(target)).rejects.toThrow();
+    expect(state.session).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("reads staff runtime availability for the exact workspace and rejects a changed identity", async () => {
+    state.session.mockResolvedValue(session);
+    const organizationId = "11111111-1111-4111-8111-111111111111", workspaceId = "22222222-2222-4222-8222-222222222222";
+    const result = { organizationId, workspaceId, generation: 1, currentRuntimeId: `r1-${"a".repeat(64)}`,
+      latestRuntimeId: `r1-${"b".repeat(64)}`, updateAvailable: true, unavailableReason: null, transition: null };
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(result), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...result, workspaceId: organizationId }), { status: 200 }));
+    vi.stubGlobal("fetch", fetcher);
+    expect(await getCloudRuntimeUpgradeAvailability({ organizationId, workspaceId })).toEqual(result);
+    expect(fetcher.mock.calls[0][0]).toBe(`https://api.example.test/v1/organizations/${organizationId}/cloud-workspaces/${workspaceId}/runtime-upgrade`);
+    expect(fetcher.mock.calls[0][1]).toMatchObject({ method: "GET", cache: "no-store" });
+    await expect(getCloudRuntimeUpgradeAvailability({ organizationId, workspaceId })).rejects.toThrow("workspace identity");
+  });
+  it.each([undefined, "interaction"] as const)("uses the existing wake endpoint with optional reason %s, preserving other lifecycle bodies", async reason => {
+    state.session.mockResolvedValue(session);
+    const id = "11111111-1111-4111-8111-111111111111";
+    const workspace = {
+      id, organizationId: id, teamId: id, name: "Wake fixture", createdBy: id, placement: "cloud", status: "ready",
+      capabilities: { canWrite: true, canManage: false, canStart: false, startUnavailableReason: null },
+      repository: { forge: "github.com", owner: "sample", name: "repo", revision: "main" },
+      generation: { number: 1, architecture: "linux/amd64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 },
+        observedState: "ready", lastObservedAt: null },
+      version: 1, error: null, createdAt: "2026-10-04T00:00:00.000Z", updatedAt: "2026-10-04T00:00:00.000Z", deletedAt: null,
+    };
+    const fetch = vi.fn(async () => Response.json({ workspace })); vi.stubGlobal("fetch", fetch);
+    const target = { organizationId: id, workspaceId: id };
+    await changeCloudWorkspaceLifecycle(target, "wake", "fixture-intent", reason);
+    expect(fetch).toHaveBeenCalledWith(`https://api.example.test/v1/organizations/${id}/cloud-workspaces/${id}/wake`,
+      expect.objectContaining({ method: "POST", body: JSON.stringify(reason ? { reason } : {}) }));
+    fetch.mockClear();
+    await changeCloudWorkspaceLifecycle(target, "stop", "fixture-stop", reason);
+    expect(fetch).toHaveBeenCalledWith(expect.stringMatching(/\/stop$/), expect.objectContaining({ body: "{}" }));
+  });
   it("preserves optional server-derived edit access without inferring it from legacy write access", () => {
     const capabilities = { canWrite: true, canManage: false, canStart: false, startUnavailableReason: null };
     expect(CloudWorkspaceDocumentSchema.shape.capabilities.parse(capabilities).canEdit).toBeUndefined();
@@ -72,6 +114,26 @@ describe("cloud request account boundaries", () => {
       organizationId: "11111111-1111-4111-8111-111111111111",
       workspaceId: "33333333-3333-4333-8333-333333333333",
     }, "codex", "gpt-5.6-luna")).resolves.toBe(id);
+  });
+
+  it("retains the runtime upgrade flag and explains it before a command can be queued", async () => {
+    state.session.mockResolvedValue(session);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ delegations: [{
+      id: "22222222-2222-4222-8222-222222222222", kind: "codex-chatgpt", models: ["gpt-5.6-sol"],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(), runtimeQualified: false, runtimeUpgradeRequired: true,
+    }] })));
+    await expect(cloudAgentGrant({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333" }, "codex", "gpt-5.6-sol"))
+      .rejects.toMatchObject({ code: "cloud_runtime_upgrade_required" });
+  });
+
+  it.each([false, true])("separates missing credentials from model consent (connected=%s)", async connected => {
+    state.session.mockResolvedValue(session);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ delegations: connected ? [{
+      id: "22222222-2222-4222-8222-222222222222", kind: "codex-chatgpt", models: ["gpt-5.5"],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(), runtimeQualified: true,
+    }] : [] })));
+    await expect(cloudAgentGrant({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333" }, "codex", "gpt-6.1-sol"))
+      .rejects.toMatchObject({ code: connected ? "cloud_agent_model_not_authorized" : "cloud_agent_credential_required" });
   });
 
   it("captures the account before its first asynchronous boundary", async () => {

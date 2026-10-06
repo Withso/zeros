@@ -38,6 +38,7 @@ import { addWorkbenchTerminal } from "../shell/workbench/open-terminal";
 import { useWorkbenchFolder } from "../shell/workbench/use-workbench-folder";
 import {
   acceptCloudWorkspaceDocument,
+  cloudWorkspaceDocument,
   getCloudWorkspaceRows,
 } from "../state/cloud-workspace-catalog";
 
@@ -60,6 +61,7 @@ const folderA = cloudFixture ? repoA : `${repoA}/worktree`;
 const folderB = cloudFixture ? repoB : `${repoB}/worktree`;
 const cloudStatuses = new Map<string, ConnectionStatus>();
 const cloudStatusListeners = new Map<string, Set<() => void>>();
+const cloudEngineVersions = new Map<string, number>();
 if (cloudFixture) {
   for (const target of [cloudA, cloudB])
     acceptCloudWorkspaceDocument({
@@ -209,6 +211,7 @@ RuntimeClient.prototype.request = async function <
     } as unknown as T;
   if (message.type === "PTY_CREATE") {
     const sessionId = String(message.sessionId);
+    const resumed = cloudFixture && (cloudEngineVersions.get(String(message.cwd)) ?? 1) > 1 && !ptys.has(sessionId);
     if (cloudStatuses.get(String(message.cwd)) === "disconnected")
       throw new Error("Offline fixture");
     if (delayNextAttach) {
@@ -227,11 +230,12 @@ RuntimeClient.prototype.request = async function <
       createdAt: Date.now(),
     });
     queueMicrotask(() => emit("PTY_TERMINALS_CHANGED"));
+    if (resumed) setTimeout(() => emit("PTY_DATA", { sessionId, data: `Ready ${message.cwd}\r\n$ ` }), 0);
     return {
       ...message,
       type: "PTY_CREATED",
       pid: 1,
-      reattached: true,
+      reattached: !resumed,
       replay: `${runLogs[sessionId] ?? ""}Ready ${message.cwd}\r\n$ `,
     } as unknown as T;
   }
@@ -381,6 +385,8 @@ if (cloudFixture) {
   WorkspaceRuntimeClient.prototype.send = RuntimeClient.prototype.send;
   WorkspaceRuntimeClient.prototype.statusForWorkspace = (folder) =>
     cloudStatuses.get(folder ?? "") ?? "connected";
+  WorkspaceRuntimeClient.prototype.cloudEngineInstanceId = folder =>
+    isCloudWorkspace(folder) ? `fixture-engine:${folder}:${cloudEngineVersions.get(folder) ?? 1}` : undefined;
   WorkspaceRuntimeClient.prototype.onWorkspaceStatusChange = (
     folder,
     listener,
@@ -424,6 +430,23 @@ Object.assign(window, {
     setConnectionStatus: (folder: string, status: ConnectionStatus) => {
       cloudStatuses.set(folder, status);
       for (const listener of cloudStatusListeners.get(folder) ?? []) listener();
+    },
+    sleepCloudWorkspace: () => {
+      if (!cloudFixture) return;
+      const doc = cloudWorkspaceDocument(cloudA)!;
+      acceptCloudWorkspaceDocument({ ...doc, status: "stopped", version: doc.version + 1 });
+      cloudStatuses.set(folderA, "disconnected");
+      for (const listener of cloudStatusListeners.get(folderA) ?? []) listener();
+      for (const [id, pty] of ptys) if (pty.cwd === folderA) ptys.delete(id);
+      emit("PTY_TERMINALS_CHANGED");
+    },
+    resumeCloudWorkspace: () => {
+      if (!cloudFixture) return;
+      const doc = cloudWorkspaceDocument(cloudA)!;
+      cloudEngineVersions.set(folderA, (cloudEngineVersions.get(folderA) ?? 1) + 1);
+      acceptCloudWorkspaceDocument({ ...doc, status: "ready", version: doc.version + 1 });
+      cloudStatuses.set(folderA, "connected");
+      for (const listener of cloudStatusListeners.get(folderA) ?? []) listener();
     },
     finishRun: (actionId?: string) =>
       (actionId

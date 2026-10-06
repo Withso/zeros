@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { HOME_SIDEBAR_MIN_PX } from "../home-sidebar-width";
+
 function source(relativePath: string): string {
   return readFileSync(resolve(process.cwd(), relativePath), "utf8");
 }
@@ -96,6 +98,30 @@ describe("app shell navigation", () => {
     // Hidden on Settings: inert, and its polling resource monitor unmounted.
     expect(SIDEBAR).toContain('{...(hidden ? { inert: "" } : {})}');
     expect(SIDEBAR).toContain("{!hidden && <ResourceMonitor />}");
+  });
+
+  it("follows resources with Go back and Go forward in the title band", () => {
+    const band = between(
+      SIDEBAR,
+      "ref={titleBandRef}",
+      "<OrganizationSwitcher",
+    );
+    const resources = band.indexOf("{!hidden && <ResourceMonitor />}");
+    expect(resources).toBeGreaterThan(0);
+    expect(band.indexOf("<SidebarHistoryButtons")).toBeGreaterThan(resources);
+    expect(band).toMatch(/\{!hidden && \(\s*<SidebarHistoryButtons/);
+    const buttons = source(
+      "apps/desktop/src/renderer/shell/sidebar-history-buttons.tsx",
+    );
+    expect(buttons).toContain('label="Go back"');
+    expect(buttons).toContain('label="Go forward"');
+    expect(classConstant(buttons, "HISTORY_BUTTON_CLS")).toMatch(
+      /^h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 /,
+    );
+    // A disabled button drops pointer events, which would hand a quick second
+    // click to the title band's double-click zoom.
+    expect(buttons).toContain("aria-disabled={!available || undefined}");
+    expect(buttons).not.toMatch(/\sdisabled=/);
   });
 
   it("has no archived-workspaces picker in the title band", () => {
@@ -271,6 +297,12 @@ describe("sidebar collapse and geometry", () => {
     );
     expect(TOGGLE).toContain("aria-controls={APP_SIDEBAR_ID}");
     expect(SIDEBAR).toContain("id={APP_SIDEBAR_ID}");
+  });
+
+  it("floors the sidebar at the width its title band controls need", () => {
+    expect(SIDEBAR).toContain(
+      `"relative flex min-w-[${HOME_SIDEBAR_MIN_PX}px] shrink-0"`,
+    );
   });
 
   it("keeps the corner the collapsed controls float over clear", () => {

@@ -5,10 +5,11 @@
 //
 // Authorship stays with people: commits and pull requests use the workspace's
 // own Git and GitHub identity. Agents use `zeros-agent[bot]` only for
-// automation that is not a person's work — merging a green pull request,
-// cutting a release branch, dispatching or rerunning a release workflow — so
+// automation that is not a person's work — cutting a release branch,
+// dispatching or rerunning a release workflow — so
 // those steps are attributed to automation. The App is installed on this
-// repository only.
+// repository only. PR merges use `pnpm agent:merge <pr-number>` with the
+// workspace's own gh identity; CI-definition PRs require an owner merge.
 //
 // The App key never enters the repository. It is read, in order, from
 // `ZEROS_AGENT_GITHUB_APP_B64` (Conductor cloud workspaces),
@@ -18,7 +19,7 @@
 // passed as a command argument: git's credential helper and gh read the token
 // from their environment.
 //
-// Run: `pnpm agent:gh pr merge …`, `pnpm agent:git push origin <sha>:refs/heads/release/X.Y.Z`,
+// Run: `pnpm agent:git push origin <sha>:refs/heads/release/X.Y.Z`,
 // `pnpm agent:gh workflow run …`, and `pnpm agent:github:check`.
 // ──────────────────────────────────────────────────────────
 

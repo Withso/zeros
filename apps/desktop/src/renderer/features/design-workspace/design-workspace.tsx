@@ -106,7 +106,13 @@ export function DesignWorkspaceColumn({
     folder,
     surfaceActive,
   );
-  useDesignLifecycleFeedback(workspaceId, surfaceActive, snapshot.error, snapshot.refresh);
+  useDesignLifecycleFeedback(
+    workspaceId,
+    surfaceActive,
+    snapshot.error,
+    !!snapshot.data,
+    snapshot.loading || snapshot.refreshing,
+  );
   const activePageId = useDesignWorkspaceUiStore(state =>
     workspaceId ? state.byWorkspace[workspaceId]?.activePageId : undefined,
   );

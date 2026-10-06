@@ -18,6 +18,7 @@ export async function requestManagedComputeStop(
     leaseId: string;
     reason: string;
     incidentId?: string;
+    stopReason?: "provider_outage";
     force?: boolean;
     checkpointDeadlineMs?: number;
     expectedLeaseOwner?: string;
@@ -51,6 +52,9 @@ export async function requestManagedComputeStop(
       )
     ).rows[0];
     if (!workspace) return;
+    scope.generation=(await tx.query<{generation:number}>(`SELECT coalesce((SELECT current_generation FROM cloud_workspace_allocation_owners
+      WHERE allocation_lease_id=$1 AND workspace_id=$2 AND org_id=$3),$4) AS generation`,
+    [input.leaseId,scope.workspace_id,scope.org_id,scope.generation])).rows[0]!.generation;
     const lease = (
       await tx.query<{ state: string; stop_intent_id: string | null; lease_owner: string | null; claim_live: boolean }>(
         "SELECT state,stop_intent_id,lease_owner,lease_expires_at>clock_timestamp() AS claim_live FROM managed_compute_allocation_leases WHERE id=$1 FOR UPDATE",
@@ -120,12 +124,14 @@ export async function requestManagedComputeStop(
       workspaceStopping:workspace.desired_state !== "running" || ["stopping","stopped","failed","archiving","archived"].includes(workspace.status),
     });
     const code = initiating ? diagnosticCode(initiating.code) : input.reason;
+    const stopReason = initiating ? initiating.stopReason : input.stopReason;
     const incidentId = initiating?.id ?? input.incidentId ?? await tryRetainCloudDiagnosticTx(tx, {
       workspaceId: scope.workspace_id, organizationId: scope.org_id, generation: scope.generation,
       operationKind: "compute", operationId: input.leaseId, ...(input.expectedLeaseOwner ? { leaseOwner: input.expectedLeaseOwner } : {}),
     }, { phase: "authority_check", code: diagnosticCode(code), errorClass: "unknown", retryable: false,
+      ...(stopReason ? { stopReason } : {}),
       decision: input.force ? "direct_stop" : "checkpoint", claim: "current" });
-    const reason = cloudStopReason(code);
+    const reason = cloudStopReason(code, stopReason);
     await tx.query("UPDATE managed_compute_allocation_leases SET last_error_code=$2 WHERE id=$1",[input.leaseId,code]);
     const key = `system:compute-stop:${randomUUID()}`;
     if (affectsWorkspace) {

@@ -23,7 +23,7 @@ import { wakeCloudWorkspace } from "../../state/cloud-workspace-wake";
 
 export async function openCloudRuntime(
   target: CloudWorkspaceTarget,
-  options?: { signal?: AbortSignal; wake?: boolean },
+  options?: { signal?: AbortSignal; wake?: boolean; reason?: "interaction" },
 ): Promise<CloudPeer> {
   const generation = cloudCatalogGeneration();
   const assertAccount = () => {
@@ -34,7 +34,7 @@ export async function openCloudRuntime(
   let document = await refreshCloudWorkspace(target);
   assertAccount();
   if (options?.wake) {
-    document = await wakeCloudWorkspace(target, document, options.signal);
+    document = await wakeCloudWorkspace(target, document, options.signal, options.reason);
     assertAccount();
   }
   if (!canReadCloudWorkspace(document) || !["ready", "busy"].includes(document.status))
@@ -99,14 +99,15 @@ export async function openCloudRuntime(
     if (!workspace?.path || !workspace.path.startsWith("/"))
       throw new Error("Cloud engine did not confirm its workspace root");
     acceptCloudEngineWorkspace(target, workspace, generation);
-    agents = new CloudAgentConnection(client, workspace.id, (agentId, model) =>
-      cloudAgentGrant(target, agentId, model),
-    );
     events = new CloudEventReader(client, () => {
-      void agents!.refreshAttachments();
+      void agents?.refreshAttachments();
     });
+    agents = new CloudAgentConnection(client, workspace.id, (agentId, model) =>
+      cloudAgentGrant(target, agentId, model), events,
+    );
     for (const type of ["AGENT_PROMPT_COMPLETE", "AGENT_PROMPT_FAILED"])
       listeners.push(events.on(type, message => {
+        agents!.incoming(message as unknown as Record<string, unknown>);
         agents!.observePromptResult(message as unknown as Record<string, unknown>);
       }));
     for (const type of [
@@ -115,13 +116,13 @@ export async function openCloudRuntime(
       "AGENT_SESSION_UPDATE",
     ])
       listeners.push(
-        client.on(type, (message) => {
+        events.on(type, (message) => {
           agents!.incoming(message as unknown as Record<string, unknown>);
         }),
       );
     let refreshing = false;
     listeners.push(
-      client.on("DB_CHANGED", () => {
+      events.on("DB_CHANGED", () => {
         if (refreshing) return;
         refreshing = true;
         void bridgeWorkspaceList(client, {})
@@ -157,15 +158,17 @@ export async function openCloudRuntime(
         },
       },
       runtimeId: descriptor.runtimeId,
-      async prepareForRun(signal) {
+      generation: descriptor.generation,
+      async prepareForRun(signal, reason) {
         const current = await refreshCloudWorkspace(target);
         assertAccount();
-        await wakeCloudWorkspace(target, current, signal);
+        await wakeCloudWorkspace(target, current, signal, reason);
         if (signal.aborted) throw new Error("Cloud workspace open cancelled");
-        assertCurrent();
         // A committed capture retires this runtime while preparation waits.
-        // The caller must obtain a fresh native admission in that case.
+        // A replacement generation does too. Wake already revalidated the
+        // account/access/Stop intent; the caller now needs fresh admission.
         if (released) return false;
+        assertCurrent();
         // Revalidate the still-live connection and root without disrupting an
         // active turn. Reads do not prove the capture fence has cleared;
         // CloudAgentConnection waits on explicit checkpointing rejections.

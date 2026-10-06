@@ -51,20 +51,22 @@ function fixture(options: { channel?: string; corruptWake?: boolean; rejectUpgra
       if (creates <= (options.lostCreateReplies ?? 0)) throw new Error(privateValue);
       return json({ workspace: workspace() }, creates > 1 ? 200 : 202);
     }
+    if (method === "GET" && path.endsWith("/runtime-upgrade")) return json({ transition: {
+      id: transitionId, generation: 2, runtimeId: nextRuntimeId, state: "succeeded" } });
     if (method === "GET") return json({ workspace: workspace() });
     if (path.endsWith("/stop")) { state = "stopped"; return json({}, 202); }
     if (path.endsWith("/wake")) {
       state = "ready";
-      if (options.corruptWake) current = { number: 1, runtime: { ...pin, runtimeId: nextRuntimeId, manifestSha256: "b".repeat(64) } };
+      current = { number: 2, runtime: { ...pin, runtimeId: nextRuntimeId, manifestSha256: "b".repeat(64),
+        ...(options.corruptWake ? { baseImageId: "zeros-v2-test-other-base" } : {}) } };
       return json({}, 202);
     }
     if (path.endsWith("/runtime-upgrade")) {
       if (options.rejectUpgrade) return json({ error: { message: privateValue } }, 500);
       if (receipt?.operationId === body.operationId) return json(receipt, 200, true);
       if (body.expectedGeneration !== current.number) return json({ error: { code: "cloud_generation_changed" } }, 409);
-      receipt = { operationId: body.operationId, sourceGeneration: 1, generation: 2, runtimeId: nextRuntimeId, transitionId, unchanged: false };
-      current = { number: 2, runtime: { ...pin, runtimeId: nextRuntimeId, manifestSha256: "b".repeat(64) } };
-      return json(receipt, 202);
+      receipt = { operationId: body.operationId, sourceGeneration: 2, generation: 2, runtimeId: nextRuntimeId, transitionId: null, unchanged: true };
+      return json(receipt);
     }
     throw new Error("Unexpected fixture request");
   };
@@ -75,11 +77,11 @@ function fixture(options: { channel?: string; corruptWake?: boolean; rejectUpgra
 }
 
 describe("Alpha runtime lifecycle runbook", () => {
-  it("uses ordinary workspace APIs, compares all pins, upgrades once, replays and deletes", async () => {
+  it("uses ordinary wake APIs, verifies the automatic replacement, replays the current-pin no-op and deletes", async () => {
     const test = fixture(), result = await test.run();
     expect(ClosedDiagnosticSchema.parse(result.diagnostic).ok).toBe(true);
     expect(result).toMatchObject({ workspaceId, transitionId, sourceGeneration: 1, upgradedGeneration: 2, providerCleanupConfirmed: true });
-    expect(result.checks).toContain("wake_pins");
+    expect(result.checks).toContain("wake_upgrade");
     expect(result.checks).toContain("upgrade_replay");
     expect(result.checks).toContain("generation_cas");
     expect(test.deletes()).toBe(1);
@@ -93,7 +95,7 @@ describe("Alpha runtime lifecycle runbook", () => {
     expect(test.requests.every(value => value.method === "GET")).toBe(true);
     expect(test.deletes()).toBe(0);
   });
-  it.each([{ corruptWake: true, check: "wake_pins" }, { rejectUpgrade: true, check: "http_status" }])(
+  it.each([{ corruptWake: true, check: "same_base_upgrade" }, { rejectUpgrade: true, check: "http_status" }])(
     "cleans its workspace after $check fails without reflecting secret response text", async ({ check, ...options }) => {
       const test = fixture(options), result = await test.run();
       expect(result.diagnostic.failedChecks).toEqual([check]);

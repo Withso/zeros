@@ -237,6 +237,24 @@ checked separately. The deployed cloud worker resolves the checkout; remote
 paths and repository-root substitution cannot select another owner. Cloud
 snapshots contain no host-local `zeros-design:` capability. Desktop relay
 restrictions and ordinary remote file/credential filtering remain independent.
+The renderer bridge translates the snapshot's typed checkout identity to its
+opaque cloud key after verifying the worker root, leaving authored source and
+diagnostics untouched. Directory lifecycle requests carry both the resolved
+repository root and admitted primary workspace ID.
+
+Cloud directory selection uses `design.selectDirectory`, comparing the expected
+active directory ID under the canvas mutation lane before a scoped agent-access
+handoff. It does not open the generic remote `settings.write` Design denylist.
+Managers can create registrations without staging or committing, adopt VM
+folders after a revision-checked preview, and explicitly rename/unregister them.
+Rename and tracked registration removal retain their existing commit semantics,
+using the acting cloud member's Git identity. Only the admitted cloud primary is
+exempt from the local archive-before-unregister rule; source remains in place.
+The cloud picker uses `design.browseDirectories` with the qualified checkout
+policy, including empty folders and excluding links, private paths and nested
+owners. Repository settings select a concrete cloud workspace before managing
+its directories. Developers edit Design source; prompters inspect it; neither
+role changes registrations or the shared active directory.
 
 #### Source, metadata and personal state
 
@@ -639,6 +657,20 @@ application behavior test. CSS animation phase selection is not implemented.
 The Inspector's **Open preview** opens the same HTTP frame preview supplied to
 agents. A pending open belongs to that view, workspace, directory and frame;
 changing its owner or unmounting the view discards the late response.
+Local workspaces open it through the OS browser, including signed-out Local
+and existing organization-owned local workspaces. In an enabled cloud workspace,
+developers/managers/owners open the logical VM loopback URL in that workspace's
+Browser tab. The existing Browser service admits its exact frame/account/device
+through the authenticated cloud preview host; no public listener is added.
+Prompters cannot open a new cloud preview. Account/role changes and inactive
+views retire pending opens. Cloud wire translation maps only typed reference
+owners between the cloud workspace key and the engine's primary workspace ID;
+authored source and preview URLs are not rewritten.
+
+Cloud conversation context also supplies the native verification command. This
+enables shell validation/capture inside the VM without changing cloud API-only
+Design authoring, provider permissions or Plan behavior. A Mac must use the
+Browser tab's cloud host rather than opening the VM's loopback URL directly.
 `verification-service.ts` uses existing composition/sanitization and
 inlines the same local CSS/assets. The only script belongs to a trusted wrapper;
 authored content lives in a separate iframe with scripts, network, forms and
@@ -958,6 +990,11 @@ screenshots are never copied into each entry. History is bounded and belongs to
 the opened document session. A shared-resource edit remains undoable only from
 the frame session that initiated it until a future workspace transaction can
 represent multi-frame history atomically.
+Cloud canvas history requests carry the confirmed render generations for the
+current frame catalog. The engine checks the generation of the history entry's
+frame, which may differ from the focused frame, before applying its semantic
+revision and actor checks. A stale or missing generation fails without consuming
+the history entry. Direct API callers may still supply `expectedRevision`.
 
 Frame create, rename, duplicate, and delete are atomic workspace lifecycle
 commands outside document undo. Subtree duplication assigns fresh stable IDs;
@@ -1003,6 +1040,21 @@ and tests. Repository `.zeros/` holds private settings and compatibility state;
 it is not the authored autosave store. Undo/redo history is bounded in memory.
 For a cloud workspace, the workspace engine writes the cloud worktree and its
 own configured app-data directory.
+
+Cloud canvas image upload accepts PNG, JPEG, GIF, WebP and AVIF up to 10 MiB,
+within the existing 128-asset catalog limit. A developer or manager uploads to
+the captured registered directory and frame through `design.asset.upload`;
+prompters cannot upload. The engine checks the filename, type signature, bytes,
+role, source generation and write authority, then journals a content-addressed
+`assets/` file with the semantic HTML insertion. Peers receive the normal
+workspace change and the image appears in Changes without staging. Undo removes
+the insertion but keeps the asset for redo and other references. An uncertain
+response is never automatically replayed.
+
+Only cloud uploads use private document-journal version 2 to recover both the
+image and source after interruption; ordinary Local/API transactions retain
+version 1. Finish recovery with an upload-capable engine before downgrading an
+engine with a pending version-2 journal. Local image insertion is unchanged.
 
 The shared Files, Changes and Review tabs include Code and Design. Staging is
 an explicit action in Changes; include a new Design folder's registration,
@@ -1567,6 +1619,39 @@ group on cancellation, and escalates to a kill after one second. There is no
 unsandboxed fallback. Failed preflight omits capture while source tools remain
 usable. [Playwright launch options](https://playwright.dev/docs/api/class-browsertype#browser-type-launch).
 
+For v4, `boat-image/templates/v4/build.sh` supplies Chromium's Ubuntu 24.04
+native libraries/fonts, UID 10002 and the AppArmor user-namespace profile.
+`runtime-bundle/build.ts` supplies pinned Chromium under `worker/design-browsers`
+and the capture worker/CLI. The dependency comparison in
+`scripts/__tests__/design-cloud-preview-runtime.test.ts` checks the base recipe
+against the installed pinned Playwright native dependency list. This is source
+coverage, not evidence that an installed Alpha base renders successfully; a
+failed live library/sandbox probe must identify the missing package or policy
+before requesting an orchestrator-run base rebuild.
+
+Both full worker attestation and the smoke self-test enter the installed v4
+engine view with `<runtime.node> <runtime.root>/lib/zeros/cloud-engine-launcher.mjs
+--qualify`. Inside that view, `qualify-cloud-engine.mjs` runs
+`<runtime.node> --import tsx <workerRoot>/scripts/cloud-workspace-validation/sandbox/qualify-cloud-capture.ts`
+from `<workerRoot>`. The capture probe uses the production host and validates a
+real 80 × 48 PNG; its closed `capture.secure` verdict is required by
+`runtime-self-test.mjs`'s `containment_smoke` and full worker attestation. Smoke
+must retain this renderer gate. These commands require the installed runtime's
+qualification layout and authority; do not run them in an owner's active VM.
+
+The current persisted smoke diagnostic keeps only the aggregate
+`containment_smoke` result. It does not retain the nested capture result, and
+does not qualify provider MCP (`mcp_qualified`/native capabilities are separate).
+An operator can schedule a fresh disposable Alpha qualification with
+`node scripts/cloud-workspace-validation/runtime-qualification-live.mjs --runtime <runtime-id>`;
+the runbook reads private `.env.agent`, records the runtime/base/run IDs and
+requires confirmed cleanup. Its report alone remains aggregate evidence. A
+future explicit capture record must be versioned, bound to that exact runtime
+and base, and retain the closed probe result; never infer a new capture check
+retroactively from an old empty `failedChecks` list. End-to-end deployment proof
+also requires opening a cloud frame and running its supplied native capture
+command inside that VM, then inspecting the resulting PNG.
+
 A result snapshots source, tokens and component inputs inside a short mutation
 lane, then renders the frozen composition outside that lane. Human editing can
 continue during capture. Finalization reloads the current request ledger rather
@@ -1726,7 +1811,8 @@ managed integration protects dirty/untracked work before creating conflicts.
 Independently committed same-file edits proceed through Git. Source resolution
 and Continue/Abort are shared; semantic conflict resolution remains deferred.
 
-`design.context.create` and `design.context.inspect` are local, read-only routes.
+`design.context.create` and `design.context.inspect` are read-only routes for
+Local workspaces and the qualified cloud primary.
 The version-1 reference contains workspace ID, stable directory ID, portable
 HTML frame, optional node ID and exact semantic revision. Inspection returns
 `ready` with source/geometry, `stale` with the current revision, `missing`, or

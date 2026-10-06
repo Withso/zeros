@@ -39,9 +39,28 @@ describe("cloud message preparation", () => {
     let current = owner;
     const sending = preparation.prepare("chat", owner, () => wake.promise, () => current).then(submit);
     const rejected = expect(sending).rejects.toThrow(/owner changed/);
-    current = { ...owner, [field]: field === "folder" ? `${owner.folder}-other` : 99 };
+    current = { ...owner, [field]: field === "folder" ? `${owner.folder}-other` : field === "generation" ? 6 : 99 };
     wake.resolve(); await rejected;
     expect(submit).not.toHaveBeenCalled();
+  });
+  it("shares a pending wake across a forward replacement while retaining its original chat/account owner", async () => {
+    const preparation = new CloudSendPreparation(), wake = deferred(), open = vi.fn(() => wake.promise);
+    let current = owner;
+    const first = preparation.prepare("chat", owner, open, () => current);
+    await Promise.resolve(); current = { ...owner, generation: 8 };
+    expect(preparation.prepare("chat", current, open, () => current)).toBe(first);
+    wake.resolve(); await first; expect(open).toHaveBeenCalledOnce();
+  });
+  it("retains the same preparation through a candidate rollback observed before readiness", async () => {
+    const preparation = new CloudSendPreparation(), wake = deferred(), open = vi.fn(() => wake.promise);
+    let current = { ...owner, lifecyclePending: true }, changed!: () => void;
+    const first = preparation.prepare("chat", current, open, () => current, listener => { changed = listener; return () => {}; });
+    await Promise.resolve(); current = { ...current, generation: 8 }; changed();
+    expect(preparation.prepare("chat", current, open, () => current)).toBe(first);
+    current = { ...current, generation: 7 }; changed();
+    expect(preparation.prepare("chat", current, open, () => current)).toBe(first);
+    current = { ...current, lifecyclePending: false }; changed();
+    wake.resolve(); await first; expect(open).toHaveBeenCalledOnce();
   });
 
   it("cancels only the original chat and keeps a replacement intent after a late completion", async () => {

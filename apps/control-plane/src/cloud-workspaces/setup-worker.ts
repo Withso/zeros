@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
 
 import type pg from "pg";
+import { parseSetupTimings, type SetupTimings } from "./setup-timings.js";
 
 import { audit } from "../audit.js";
 import { withSystemTx, type Tx } from "../db.js";
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
 import { parseCloudWorkspaceSetupHookLog, type CloudWorkspaceSetupHookLog } from "./setup-log.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { cloudRuntimePin, cloudRuntimePinValues, requirePinnedCloudRuntime, CloudRuntimeError, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
 import { publicCloudError } from "./public-contract.js";
+import { cloudDiagnosticSchema, type CloudDiagnostic } from "./cloud-diagnostics.js";
+import { tryRetainCloudDiagnosticTx } from "./cloud-diagnostic-store.js";
 import type { CloudRuntimeWitnessRow } from "./runtime-contract.js";
 import { cloudRuntimeQualificationMode } from "./runtime-config.js";
 import { advanceCloudAutomaticRecovery, classifyCloudRestoreEvidence, enqueueCloudAutomaticRecovery, recordCloudRestoreEvidence } from "./automatic-recovery.js";
@@ -91,6 +95,7 @@ export type CloudWorkspaceSetupReadiness = {
 };
 
 export type CloudWorkspaceSetupResult = {
+  timings?: SetupTimings | undefined;
   /** Exact helper/engine proof required before the worker publishes `ready`. */
   readiness: CloudWorkspaceSetupReadiness;
   /** Raw bounded excerpt; the worker applies its required sanitizer. */
@@ -110,7 +115,9 @@ export interface CloudWorkspaceSetupExecutor {
 }
 
 export class CloudWorkspaceSetupError extends Error {
+  timings?: SetupTimings | undefined;
   hookLog?: CloudWorkspaceSetupHookLog;
+  providerDiagnostic?: CloudDiagnostic;
   constructor(
     public readonly code: string,
     message: string,
@@ -149,10 +156,12 @@ type ClaimDecision =
   | { kind: "claimed"; setup: ClaimedSetup };
 
 type SafeSetupFailure = {
+  timings?: SetupTimings | undefined;
   code: string;
   retryable: boolean;
   restoreEvidence?: string | undefined;
   hookLog?: CloudWorkspaceSetupHookLog | undefined;
+  providerDiagnostic?: CloudDiagnostic | undefined;
 };
 
 function safeInteger(
@@ -224,11 +233,14 @@ export function cloudWorkspaceSetupReadinessMatches(
 function safeFailure(error: unknown): SafeSetupFailure {
   if (error instanceof CloudRuntimeError) return { code: error.code, retryable: false };
   if (error instanceof CloudWorkspaceSetupError) {
+    const providerDiagnostic = cloudDiagnosticSchema.safeParse(error.providerDiagnostic);
     return {
       code: /^[a-z][a-z0-9_]{0,127}$/.test(error.code)
         ? error.code
         : "setup_executor_failure",
       retryable: error.retryable,
+      timings: parseSetupTimings(error.timings),
+      providerDiagnostic: providerDiagnostic.success ? providerDiagnostic.data : undefined,
       hookLog: ["setup_command_failed", "setup_hook_retry_required"].includes(error.code) ? parseCloudWorkspaceSetupHookLog(error.hookLog) ?? undefined : undefined,
       restoreEvidence: classifyCloudRestoreEvidence(error.code, "diagnostic" in error ? error.diagnostic : null) ?? undefined,
     };
@@ -304,9 +316,7 @@ export class CloudWorkspaceSetupWorker {
   private readonly workosEnabled: boolean;
   private readonly recoveryConfig: CloudWorkspaceBackendConfig | null;
   private readonly activeControllers = new Set<AbortController>();
-  private timer: NodeJS.Timeout | null = null;
-  private activeTick: Promise<void> | null = null;
-  private started = false;
+  private readonly scheduler: CloudWorkerScheduler;
   private stopped = false;
   private ticking = false;
 
@@ -339,38 +349,22 @@ export class CloudWorkspaceSetupWorker {
     if (this.workerId.length < 1 || this.workerId.length > 255) {
       throw new Error("workerId must contain between 1 and 255 characters");
     }
+    this.scheduler = new CloudWorkerScheduler(this.intervalMs, () => this.tick(), () => {
+      this.logger.error("[cloud-workspace] setup tick failed; will retry");
+    });
   }
 
   start(): () => Promise<void> {
-    if (this.started || this.stopped) return () => this.stop();
-    this.started = true;
-    const run = () => {
-      if (this.stopped) return;
-      const task = this.tick().catch((error) => {
-        this.logger.error(
-          `[cloud-workspace] setup tick failed: ${
-            error instanceof Error ? error.name : "unknown"
-          }`,
-        );
-      });
-      this.activeTick = task;
-      void task.finally(() => {
-        if (this.activeTick === task) this.activeTick = null;
-        if (this.stopped) return;
-        this.timer = setTimeout(run, this.intervalMs);
-        this.timer.unref();
-      });
-    };
-    run();
+    this.scheduler.start();
     return () => this.stop();
   }
 
+  notify(): void { this.scheduler.notify(); }
+
   async stop(): Promise<void> {
     this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
     for (const controller of this.activeControllers) controller.abort();
-    await this.activeTick;
+    await this.scheduler.stop();
   }
 
   private async tick(): Promise<void> {
@@ -598,7 +592,7 @@ export class CloudWorkspaceSetupWorker {
              execution_fence = execution_fence + 1, lease_owner = $2,
              lease_expires_at = now() + ($3::bigint * interval '1 millisecond'),
              last_heartbeat_at = now(), started_at = coalesce(started_at, now()),
-             completed_at = NULL, error_code = NULL, updated_at = now()
+             completed_at = NULL, error_code = NULL, updated_at = now(), stage_timings = NULL
          WHERE id = $1
          RETURNING claim_count, execution_fence`,
         [row.id, this.workerId, this.leaseMs],
@@ -732,10 +726,22 @@ export class CloudWorkspaceSetupWorker {
     });
   }
 
+  private async retainTimings(tx: Tx, setup: ClaimedSetup, value: unknown): Promise<void> {
+    const timings = parseSetupTimings(value);
+    if (!timings) return;
+    // Called only after the existing current-claim lock. Repeat the exact
+    // owner/run/fence scope so stale completions can never replace telemetry.
+    await tx.query(`UPDATE cloud_workspace_setup_runs SET stage_timings=$6::jsonb
+      WHERE id=$1 AND org_id=$2 AND workspace_id=$3 AND generation=$4
+        AND execution_fence=$5 AND lease_owner=$7 AND state='running'`,
+    [setup.setupRunId, setup.organizationId, setup.workspaceId, setup.generation, setup.executionFence, JSON.stringify(timings), this.workerId]);
+  }
+
   private async recordSuccess(
     setup: ClaimedSetup,
     readiness: CloudWorkspaceSetupReadiness,
     log: { value: string; truncated: boolean },
+    timings?: SetupTimings,
   ): Promise<boolean> {
     return withSystemTx(this.pool, async (tx) => {
       const workspace = await tx.query<{
@@ -794,6 +800,7 @@ export class CloudWorkspaceSetupWorker {
         [setup.setupRunId, this.workerId, setup.executionFence],
       );
       if ((owned.rowCount ?? 0) !== 1) return false;
+      await this.retainTimings(tx, setup, timings);
 
       // Membership/lifecycle retirement locks endpoint grants before engine
       // instances. Lock the exact consumed registration grant in that order,
@@ -1027,6 +1034,7 @@ export class CloudWorkspaceSetupWorker {
       );
       const run = owned.rows[0];
       if (!run) return false;
+      await this.retainTimings(tx, setup, failure.timings);
 
       await revokeSetupExecutionGrants(tx, setup);
       await retireCloudWorkspaceEngineInstances(tx, setup);
@@ -1079,6 +1087,9 @@ export class CloudWorkspaceSetupWorker {
         return true;
       }
 
+      if (failure.providerDiagnostic) await tryRetainCloudDiagnosticTx(tx, {
+        ...setup, operationKind: "setup", operationId: setup.setupRunId,
+      }, { ...failure.providerDiagnostic, retryCount: Math.min(10000,run.claim_count), decision: "reject_setup", claim: "current" });
       await tx.query(
         `UPDATE cloud_workspace_setup_runs
          SET state = 'failed', completed_at = now(), updated_at = now(),
@@ -1253,7 +1264,7 @@ export class CloudWorkspaceSetupWorker {
       return;
     }
     try {
-      await this.recordSuccess(setup, result.readiness, this.executionLog(result));
+      await this.recordSuccess(setup, result.readiness, this.executionLog(result), parseSetupTimings(result.timings));
     } catch (error) {
       if (!(error instanceof CloudRuntimeError)) throw error;
       await this.recordFailure(setup, safeFailure(error));

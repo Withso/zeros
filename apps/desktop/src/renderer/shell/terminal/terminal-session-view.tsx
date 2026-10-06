@@ -42,7 +42,8 @@
 //      so the PTY and the xterm grid stay in lockstep.
 // ──────────────────────────────────────────────────────────
 
-import React, { useEffect, useLayoutEffect, useRef } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useWorkbenchStatusSource } from "../workbench/tab-status";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -91,8 +92,16 @@ import {
 import { isContinuousLayoutResizeActive } from "./continuous-layout-resize";
 import { isUsableTerminalDimensions } from "./terminal-dimensions";
 import { recordWorkspaceActivity } from "../../state/workspace-store";
-import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
-import { onActiveBridgeConnected } from "../../platform/bridge/active-bridge";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { getActiveBridge, onActiveBridgeConnected } from "../../platform/bridge/active-bridge";
+import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
+import { cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
+
+function cloudTerminalEngineId(cwd: string): string | undefined {
+  if (!isCloudWorkspace(cwd)) return undefined;
+  const bridge = getActiveBridge();
+  return bridge instanceof WorkspaceRuntimeClient ? bridge.cloudEngineInstanceId(cwd) : undefined;
+}
 
 // Mirrors `--font-mono` in `styles/zeros-tokens.css` exactly — xterm can't
 // read a CSS variable, so this string has to be kept in sync by hand.
@@ -129,6 +138,8 @@ interface TerminalSessionViewProps {
    *  (e.g. `'/abs/claude' /mcp`). Takes priority over `agentId`. Written with a
    *  leading space so HIST_IGNORE_SPACE keeps it out of the user's history. */
   initialCommand?: string | null;
+  /** Cloud registry reset: retain this tab and resume a plain shell on reveal. */
+  resumePending?: boolean;
   loginProvider?: "claude" | "codex";
   onTerminalReady?: (terminal: Pick<XTerm, "paste" | "focus"> | null) => void;
   /** Called when the PTY exits. When provided (ephemeral mode) the view does
@@ -175,6 +186,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   agentId,
   ephemeral,
   initialCommand,
+  resumePending = false,
   loginProvider,
   onTerminalReady,
   onExit,
@@ -208,6 +220,23 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
    *  `ptyResize` calls so a ResizeObserver firing during the spawn
    *  window doesn't IPC into a non-existent session. */
   const createdRef = useRef(false);
+  const engineInstanceRef = useRef<string | undefined>(undefined);
+  const [readFailure, setReadFailure] = useState<unknown>(null);
+  const [readPending, setReadPending] = useState(false);
+  const [hasScrollback, setHasScrollback] = useState(false);
+  const managed = useWorkbenchStatusSource(
+    {
+      error: readFailure,
+      pending: readPending,
+      primary: true,
+      hasContent: hasScrollback,
+      retry: async () => {
+        const term = xtermRef.current;
+        if (visible && term) await spawn(term, true);
+      },
+    },
+    sessionId,
+  );
   const attachInFlightRef = useRef(false);
   const reconnectPendingRef = useRef(false);
   const launchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -556,24 +585,45 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const canResumeCloudTerminal = () => {
+    const target = parseCloudWorkspaceKey(cwd);
+    if (!target || attachOnly || ephemeral || loginProvider) return false;
+    const doc = cloudWorkspaceDocument(target), engine = cloudTerminalEngineId(cwd);
+    return !!doc?.capabilities.canWrite && !doc.deletedAt && !doc.error && ["ready", "busy"].includes(doc.status) && !!engine &&
+      (!!engineInstanceRef.current && engineInstanceRef.current !== engine ||
+        useTerminalStore.getState().sessions.some(s => s.id === sessionId && s.resumePending));
+  };
+
   /** Spawn the PTY on the main process, wire stdin/stdout. */
   const spawn = async (term: XTerm, reconnect = false) => {
     if (attachInFlightRef.current || xtermRef.current !== term) return;
+    const target = parseCloudWorkspaceKey(cwd);
+    if (target && !attachOnly && !ephemeral && !loginProvider &&
+        !["ready", "busy"].includes(cloudWorkspaceDocument(target)?.status ?? "")) {
+      // A shown shell waits calmly for the existing wake path. Merely showing
+      // a retained terminal never starts compute or retries an agent command.
+      reconnectPendingRef.current = true;
+      return;
+    }
+    let resuming = canResumeCloudTerminal();
     attachInFlightRef.current = true;
+    setReadPending(true);
     try {
       const { cols, rows } = lastDimsRef.current;
-      if (attachOnly || (reconnect && createdRef.current)) {
+      if (attachOnly || (reconnect && (createdRef.current || resuming))) {
         // Reattach-or-nothing: consult the engine's shared registry first. A
         // PTY_CREATE for a missing session would SPAWN a fresh login shell
         // under this id — exactly what attach-only exists to prevent.
         const terms = await ptyTerminals(
           isCloudWorkspace(cwd) ? cwd : undefined,
         );
-        if (xtermRef.current !== term || terms === null) return;
+        if (xtermRef.current !== term) return;
+        resuming ||= canResumeCloudTerminal();
+        if (terms === null) throw new Error("Terminal connection unavailable");
         const live = terms.some(
           (t) => t.sessionId === sessionId && t.exited !== true,
         );
-        if (!live) {
+        if (!live && !resuming) {
           // The PTY exited before we could attach — its live mirror is gone, but
           // the engine may still hold the run's output buffer. Replay it so a
           // fast run (an instant build/lint failure, a dev server that died on
@@ -596,6 +646,12 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
           return;
         }
       }
+      if (resuming && (!visibleRef.current || !canResumeCloudTerminal())) {
+        // Registry discovery may finish after navigation, Stop or withdrawal.
+        // Preserve the tab; only a shown, authorized ready owner may create.
+        reconnectPendingRef.current = true;
+        return;
+      }
       const info = await ptyCreate({
         sessionId,
         cwd,
@@ -606,16 +662,22 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       });
       if (xtermRef.current !== term) return;
       if (!info) {
+        setReadFailure(new Error("Terminal connection unavailable"));
         // No-bridge fallback only. An optional connected relay client gets a real
         // host shell; ptyCreate returns null when there is no engine connection.
-        term.writeln(
-          isCloudWorkspace(cwd)
+        if (!managed)
+          term.writeln(
+            isCloudWorkspace(cwd)
             ? "\x1b[33m(Cloud terminal unavailable — reconnect to this workspace to retry.)\x1b[0m"
             : "\x1b[33m(No host connection — terminal needs the Mac app or a paired relay session.)\x1b[0m",
-        );
+          );
         return;
       }
+      resuming ||= canResumeCloudTerminal();
       createdRef.current = true;
+      engineInstanceRef.current = cloudTerminalEngineId(cwd);
+      setReadFailure(null);
+      setHasScrollback(true);
       if (loginProvider) term.focus();
       // A fresh/reattached PTY is live again — clear the exited latch so
       // keystrokes flow to the shell instead of triggering another
@@ -634,6 +696,11 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
         // Queue the reset with the snapshot, after any already queued live bytes.
         // Reconnect replaces the old grid instead of appending duplicate history.
         term.write(`\x1bc${info.replay}`);
+      }
+      if (resuming) {
+        markAlive(sessionId);
+        agentLaunchedRef.current = true; // Resume a shell; never replay a launch command.
+        if (!info.reattached) term.writeln("\r\n\x1b[2mWorkspace resumed — new shell\x1b[0m");
       }
       // If the main-side PTY's dims drifted from what we just measured
       // (re-attach into a session that was resized in another renderer),
@@ -682,7 +749,10 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
           }, 200);
         }
       }
+    } catch (error) {
+      if (xtermRef.current === term) setReadFailure(error);
     } finally {
+      if (xtermRef.current === term) setReadPending(false);
       attachInFlightRef.current = false;
       // A newer connection may have arrived while the previous request was
       // failing. Coalesce those boundaries into one fresh attachment.
@@ -698,7 +768,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       !term ||
       !spawnStartedRef.current ||
       attachInFlightRef.current ||
-      exitedRef.current
+      exitedRef.current && !canResumeCloudTerminal()
     )
       return;
     reconnectPendingRef.current = false;
@@ -711,7 +781,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   useEffect(() => {
     if (!isCloudWorkspace(cwd)) return;
     return onActiveBridgeConnected((_client, { initial }) => {
-      if (initial || !spawnStartedRef.current || exitedRef.current) return;
+      if (initial || !spawnStartedRef.current) return;
       reconnectPendingRef.current = true;
       resumeAfterReconnect();
     }, cwd);
@@ -720,10 +790,19 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   }, [cwd, sessionId]);
 
   useEffect(() => {
+    if (resumePending && !attachInFlightRef.current && engineInstanceRef.current !== cloudTerminalEngineId(cwd))
+      reconnectPendingRef.current = true;
     if (visible) resumeAfterReconnect();
     // The pending connection and current terminal are read from refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible]);
+  }, [visible, resumePending]);
+
+  useEffect(() => {
+    if (!visible || !isCloudWorkspace(cwd)) return;
+    return subscribeCloudWorkspaces(() => resumeAfterReconnect());
+    // No presence, wake, reads or shell creation from a hidden retained view.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cwd, sessionId, visible]);
 
   /** Respawn a fresh shell in place after the PTY exited. Triggered by
    *  the first keystroke on an exited terminal (see the once-bound

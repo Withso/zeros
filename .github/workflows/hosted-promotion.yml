@@ -14,6 +14,14 @@ on:
       before_sha:
         default: ""
         type: string
+      alpha_ci_fast_path:
+        description: Opt in to critical CI only for an authenticated automatic Alpha parent
+        default: ""
+        type: string
+      alpha_forward_only:
+        description: Finish admitted Alpha candidates, or also admit candidates behind main, only for an authenticated automatic Alpha parent
+        default: ""
+        type: string
 permissions:
   contents: read
   actions: read
@@ -30,6 +38,8 @@ jobs:
       RELEASE_SHA: ${{ inputs.source_sha }}
       RELEASE_BRANCH: ${{ inputs.branch }}
       RELEASE_BASE: ${{ inputs.before_sha }}
+      ZEROS_ALPHA_CI_FAST_PATH: ${{ inputs.alpha_ci_fast_path }}
+      ZEROS_ALPHA_FORWARD_ONLY: ${{ inputs.alpha_forward_only }}
       ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
       ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
@@ -79,6 +89,8 @@ jobs:
       source_sha: ${{ inputs.source_sha }}
       branch: ${{ inputs.branch }}
       before_sha: ${{ inputs.before_sha }}
+      alpha_ci_fast_path: ${{ inputs.alpha_ci_fast_path }}
+      alpha_forward_only: ${{ inputs.alpha_forward_only }}
       execute: true
       # Production reaches this only through release.yml's approval job.
       caller_gated: true
@@ -97,6 +109,8 @@ jobs:
       RELEASE_CHANNEL: ${{ inputs.channel }}
       RELEASE_SHA: ${{ inputs.source_sha }}
       RELEASE_BRANCH: ${{ inputs.branch }}
+      ZEROS_ALPHA_CI_FAST_PATH: ${{ inputs.alpha_ci_fast_path }}
+      ZEROS_ALPHA_FORWARD_ONLY: ${{ inputs.alpha_forward_only }}
       ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
       RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
@@ -165,6 +179,8 @@ jobs:
       RELEASE_CHANNEL: ${{ inputs.channel }}
       RELEASE_SHA: ${{ inputs.source_sha }}
       RELEASE_BRANCH: ${{ inputs.branch }}
+      ZEROS_ALPHA_CI_FAST_PATH: ${{ inputs.alpha_ci_fast_path }}
+      ZEROS_ALPHA_FORWARD_ONLY: ${{ inputs.alpha_forward_only }}
       ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
       RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}

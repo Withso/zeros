@@ -7,6 +7,24 @@ const admission={executionId:randomUUID(),delegationId:randomUUID(),provider:"cu
 const grant={leaseId:randomUUID(),authorityId:"a".repeat(64),expiresAt:new Date(Date.now()+45_000).toISOString(),credentialVersion:1,credentialKind:"cursor-api-key",
   provider:"cursor",model:"grok-4.6",material:{kind:"cursor-api-key",apiKey:"synthetic-private-cursor-token"}};
 describe("private agent execution client",()=>{
+  it.each(["cloud_agent_model_not_authorized", "cloud_agent_credential_required", "cloud_agent_credential_expired", "cloud_agent_credential_revoked", "cloud_agent_credential_refresh_required"])("preserves the closed %s admission cause without retrying", async code => {
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ error: code }, { status: 409 }));
+    await expect(requestCloudAgentExecution(authority, { kind: "admit", admission }, new AbortController().signal, fetcher)).rejects.toThrow(code);
+    expect(fetcher).toHaveBeenCalledOnce();
+    fetcher.mockResolvedValueOnce(Response.json({ error: code, details: "private" }, { status: 409 }));
+    await expect(requestCloudAgentExecution(authority, { kind: "admit", admission }, new AbortController().signal, fetcher)).rejects.toThrow(/^Cloud agent execution authority is unavailable$/);
+  });
+  it("preserves only the closed runtime-upgrade admission error without retrying",async()=>{
+    const fetcher=vi.fn().mockResolvedValue(new Response(JSON.stringify({error:"cloud_runtime_upgrade_required"}),{status:409}));
+    await expect(requestCloudAgentExecution(authority,{kind:"admit",admission},new AbortController().signal,fetcher))
+      .rejects.toThrow(/^cloud_runtime_upgrade_required$/);
+    expect(fetcher).toHaveBeenCalledOnce();
+    for(const [status,body] of [[403,{error:"cloud_runtime_upgrade_required"}],[409,{error:"cloud_runtime_upgrade_required",details:"private"}]] as const){
+      fetcher.mockResolvedValueOnce(new Response(JSON.stringify(body),{status}));
+      await expect(requestCloudAgentExecution(authority,{kind:"admit",admission},new AbortController().signal,fetcher))
+        .rejects.toThrow(/^Cloud agent execution authority is unavailable$/);
+    }
+  });
   it("preserves only typed computer conflicts and never retries the mutation",async()=>{
     const input={kind:"computer-tool" as const,leaseId:randomUUID(),toolCallId:"native-call",
       tool:{name:"CreateComputerConfiguration" as const,arguments:{installScript:"echo ready",expectedRevision:1,previousBuildId:null}}};

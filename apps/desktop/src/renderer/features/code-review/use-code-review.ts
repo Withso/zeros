@@ -224,7 +224,7 @@ export interface CodeReviewController {
   external?: CodeReviewExternalSource;
   loading: boolean;
   error: Error | null;
-  refresh: () => void;
+  refresh: () => void | Promise<void>;
   partial?: boolean;
   nextCursor?: string;
   viewerActorId?: string;
@@ -276,7 +276,7 @@ export function useCodeReview({
     if (!active || !key || !cwd) return;
     return onActiveBridgeConnected((_bridge, { initial }) => {
       if (!initial) codeReviewCache.invalidate(key);
-      void loadCodeReview(key).catch(() => {});
+      return loadCodeReview(key).catch(() => {});
     }, cwd);
   }, [active, key, cwd]);
 

@@ -1116,13 +1116,14 @@ export class CloudWorkspaceDurabilityRuntime {
   checkpoint(
     directive: CloudCheckpointCapture,
     authority: CloudDurabilityAuthority,
+    stillIdle?: () => boolean,
   ): Promise<void> {
     if (this.active) {
       return Promise.reject(
         new Error("cloud checkpoint is already in progress"),
       );
     }
-    const task = this.runCheckpoint(directive, authority).finally(() => {
+    const task = this.runCheckpoint(directive, authority, stillIdle).finally(() => {
       if (this.active === task) this.active = null;
     });
     this.active = task;
@@ -1534,6 +1535,7 @@ export class CloudWorkspaceDurabilityRuntime {
   private async runCheckpoint(
     directive: CloudCheckpointCapture,
     authority: CloudDurabilityAuthority,
+    stillIdle?: () => boolean,
   ): Promise<void> {
     if (
       !UUID_PATTERN.test(directive.id) ||
@@ -1844,6 +1846,9 @@ export class CloudWorkspaceDurabilityRuntime {
       } finally {
         manifestBytes.fill(0);
       }
+      // Uploading a checkpoint can take minutes. Presence or explicit work
+      // received during capture must cancel before the final stop commits.
+      if (stillIdle && !stillIdle()) throw new Error("Cloud workspace is no longer idle; final checkpoint cancelled");
       const committed = await this.postJson(
         authority,
         CHECKPOINT_PATH,

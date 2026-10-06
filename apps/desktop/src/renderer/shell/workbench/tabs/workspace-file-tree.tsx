@@ -28,6 +28,7 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import {
   FileTree,
@@ -45,9 +46,13 @@ import { createMenuAnchor } from "@/renderer/shared/ui/menu-anchor";
 import {
   loadWorkspaceFileListing,
   peekWorkspaceFileListing,
+  invalidateWorkspaceFiles,
+  workspaceFileListingFailure,
+  subscribeWorkspaceFileListingFailure,
   type WorkspaceFileListing,
 } from "../../workspace-files-cache";
 import { prefetchWorkspaceFileRead } from "../../workspace-file-data-cache";
+import { useWorkbenchStatusSource } from "../tab-status";
 import { canOpenPathLocally, revealInFinder } from "@/renderer/platform/app";
 import { cn } from "@/renderer/shared/ui/cn";
 import {
@@ -468,6 +473,36 @@ export const WorkspaceFileTree = React.forwardRef<
     [cwd, pathsSnapshot],
   );
   const rawTrackedPaths = listing.files;
+  const failure = useSyncExternalStore(
+    useCallback(
+      (listener: () => void) =>
+        active ? subscribeWorkspaceFileListingFailure(cwd, listener) : () => {
+        // Keep the last exact-key tree (or a stable cold blank). A reconnect
+        // advances reloadKey and retries without publishing a false empty list.
+      },
+      [active, cwd],
+    ),
+    useCallback(() => workspaceFileListingFailure(cwd), [cwd]),
+    () => null,
+  );
+  const loadFolderRef = useRef(cwd);
+  loadFolderRef.current = cwd;
+  useWorkbenchStatusSource(
+    {
+      error: failure,
+      pending: false,
+      primary: true,
+      hasContent: !!cwd && peekWorkspaceFileListing(cwd) !== null,
+      retry: async () => {
+        if (!cwd || !active) return;
+        invalidateWorkspaceFiles(cwd);
+        const next = await loadWorkspaceFileListing(cwd);
+        if (loadFolderRef.current === cwd)
+          setPathsSnapshot({ cwd, listing: next });
+      },
+    },
+    cwd,
+  );
   const trackedPaths = useMemo(
     () => reconcileTreePathList(splitListing(listing, designFilterRef.current)),
     [listing],

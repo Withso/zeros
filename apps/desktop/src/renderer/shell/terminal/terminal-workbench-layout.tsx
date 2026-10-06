@@ -15,6 +15,8 @@ import { useSidebarResizeDrag } from "../workbench/tabs/use-sidebar-drag";
 import { useResizeHint } from "../use-resize-hint";
 import { CloudTerminalIndicator } from "./cloud-terminal-indicator";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
+import { WorkbenchTabToolbar, useWorkbenchStatusManaged } from "../workbench/tab-status";
+import { CloudWorkspaceStatusRow } from "../conversation/cloud-workspace-restart-controls";
 
 export interface TerminalNavigationEntry {
   id: string;
@@ -47,6 +49,7 @@ export function TerminalWorkbenchLayout({
   onDock,
   onToggleSidebar,
   bodyRef,
+  active = true,
 }: {
   folder: string;
   tab: WorkbenchTab | null;
@@ -64,8 +67,10 @@ export function TerminalWorkbenchLayout({
   onDock(): void;
   onToggleSidebar(): void;
   bodyRef(node: HTMLDivElement | null): void;
+  active?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const managed = useWorkbenchStatusManaged();
   const sidebarRef = useRef<HTMLDivElement | null>(null);
   const fraction = useFilesSidebarFraction();
   const onResize = useSidebarResizeDrag(containerRef, sidebarRef, "right");
@@ -104,9 +109,10 @@ export function TerminalWorkbenchLayout({
   return (
     <div
       className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
-      data-terminal-workbench=""
+      data-terminal-workbench={managed ? undefined : ""}
     >
-      <div
+      <WorkbenchTabToolbar>
+        <div
         className="border-border1 @container/terminal-header flex h-9 shrink-0 items-center justify-between gap-2 border-b px-2"
         data-terminal-header=""
       >
@@ -188,6 +194,8 @@ export function TerminalWorkbenchLayout({
           </Tooltip>
         </Inline>
       </div>
+      {tab?.terminalId === "setup" && <CloudWorkspaceStatusRow folder={folder} active={active} />}
+      </WorkbenchTabToolbar>
       <div
         ref={containerRef}
         className="flex min-h-0 min-w-0 flex-1 overflow-hidden"

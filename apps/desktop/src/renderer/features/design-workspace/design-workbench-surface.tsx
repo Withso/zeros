@@ -17,11 +17,21 @@ import {
   designDirectoryTargetKeyForWorkspace,
   markDesignDirectoryTargetExists,
   useDesignDirectoryTarget,
+  fetchDesignDirectoryTarget,
 } from "../../state/design-directory-target";
+import {
+  designDirectoryTargetCache,
+  designCheckoutStatusCache,
+} from "../../state/read-caches";
+import { readDesignCheckoutStatus } from "../../platform/bridge/design-context-bridge";
+import {
+  WorkbenchEmptyState,
+  useWorkbenchStatusSource,
+} from "../../shell/workbench/tab-status";
 import { Button } from "../../shared/ui/primitives/button";
 import { primeDesignWorkspaceSnapshot } from "./state/design-workspace-cache";
 import { DesignWorkspaceColumn } from "./design-workspace";
-import { errorMessage } from "./design-workspace-error";
+import { reportDesignDirectoryFailure } from "./design-directory-failure";
 import { DesignGitSetup } from "./design-git-setup";
 
 /** Human authoring surface; selecting it has no effect on agent authority. */
@@ -48,13 +58,44 @@ export function DesignWorkbenchSurface({
   const project = useProjectForFolder(folder);
   const dispatch = useWorkspaceDispatch();
   const [creating, setCreating] = useState(false);
-  const [failure, setFailure] = useState<string | null>(null);
+  const loadError = target.error ?? checkout.error;
+  useWorkbenchStatusSource(
+    {
+      error: loadError,
+      pending:
+        !localMain &&
+        (target.loading ||
+          target.refreshing ||
+          checkout.loading ||
+          checkout.refreshing),
+      primary: true,
+      // A confirmed empty directory is content too: retain its start surface
+      // through transient lookup/connection failures, just like the canvas.
+      hasContent: target.data !== undefined && !!checkout.data,
+      retry: async () => {
+        const bridge = getActiveBridge();
+        if (!bridge || localMain) return;
+        await Promise.allSettled([
+          designDirectoryTargetCache.load(
+            key,
+            () => fetchDesignDirectoryTarget(key),
+            { force: true },
+          ),
+          designCheckoutStatusCache.load(
+            JSON.stringify([workspace.id, workspace.path]),
+            () => readDesignCheckoutStatus(bridge, workspace.id),
+            { force: true },
+          ),
+        ]);
+      },
+    },
+    key,
+  );
   const initialize = useCallback(async () => {
     if (!active || creating) return;
     const bridge = getActiveBridge();
     if (!bridge) return;
     setCreating(true);
-    setFailure(null);
     try {
       const { snapshot } = (await workspaceOp(bridge, "design.initialize", {
         workspaceId: workspace.id,
@@ -63,7 +104,7 @@ export function DesignWorkbenchSurface({
       markDesignDirectoryTargetExists(key);
       refreshTarget();
     } catch (error) {
-      setFailure(errorMessage(error));
+      reportDesignDirectoryFailure(workspace.id, "create", error);
     } finally {
       setCreating(false);
     }
@@ -88,7 +129,7 @@ export function DesignWorkbenchSurface({
         }}
       />
     );
-  if (!localMain && checkout.data && !checkout.error && target.data?.exists) {
+  if (!localMain && checkout.data && target.data?.exists) {
     // The canvas is full bleed; the directory switcher, tools, and the
     // Layers + Inspector panel float over it (see DesignWorkspaceColumn).
     return (
@@ -120,27 +161,11 @@ export function DesignWorkbenchSurface({
           {creating ? "Creating…" : "Create design directory"}
         </Button>
         <p className="text-fg2 max-w-sm text-xs">Start designing</p>
-        {(failure || target.error || checkout.error) && (
-          <p role="alert" className="text-red-fg max-w-lg text-xs">
-            {failure ?? errorMessage(target.error ?? checkout.error)}
-          </p>
-        )}
-        {(target.error || checkout.error) && (
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={!active}
-            onClick={() => {
-              checkout.refresh();
-              target.refresh();
-            }}
-          >
-            Retry
-          </Button>
-        )}
       </div>
     );
   }
+  if (loadError && (target.data === undefined || checkout.data === undefined))
+    return <WorkbenchEmptyState type="design" />;
   return (
     <div
       className="text-fg2 flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-4 text-sm"
@@ -149,16 +174,11 @@ export function DesignWorkbenchSurface({
       <p>
         {localMain
           ? "Open a workspace to edit Design."
-          : target.loading || checkout.loading
+          : target.data !== null || target.loading || checkout.loading
             ? "Checking Design directory…"
             : "Choose a Design directory in repository settings."}
       </p>
-      {(failure || target.error || checkout.error) && (
-        <p role="alert" className="text-red-fg max-w-lg">
-          {failure ?? errorMessage(target.error ?? checkout.error)}
-        </p>
-      )}
-      {project && target.data?.exists !== false && (
+      {project && (localMain || target.data !== undefined) && target.data?.exists !== false && (
         <Button
           variant="ghost"
           disabled={!active || creating}
@@ -171,18 +191,6 @@ export function DesignWorkbenchSurface({
           }
         >
           Design settings
-        </Button>
-      )}
-      {!localMain && (target.error || checkout.error) && (
-        <Button
-          variant="ghost"
-          disabled={!active}
-          onClick={() => {
-            checkout.refresh();
-            target.refresh();
-          }}
-        >
-          Retry
         </Button>
       )}
     </div>

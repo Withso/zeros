@@ -1,4 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+const availability = vi.hoisted(() => ({ running: true }));
+vi.mock("../../../state/cloud-workspace-catalog", async original => ({
+  ...(await original<typeof import("../../../state/cloud-workspace-catalog")>()),
+  canBackgroundSyncCloudWorkspace: () => availability.running,
+}));
 import { setActiveBridge } from "../../../platform/bridge/active-bridge";
 import { cloudScopedId } from "../../../platform/bridge/cloud-workspace-key";
 import { WorkspaceRuntimeClient } from "../../../platform/bridge/workspace-runtime-client";
@@ -13,6 +18,7 @@ const cloudChat = cloudScopedId(target, "conversation");
 const folder = `cloud://${target.organizationId}/${target.workspaceId}`;
 const cleanups: (() => void)[] = [];
 const settle = async () => { for (let n = 0; n < 12; n++) await Promise.resolve(); };
+beforeEach(() => { availability.running = true; });
 
 function transport(initial: ConnectionStatus = "disconnected") {
   const listeners = new Map<string, Set<() => void>>();
@@ -47,7 +53,32 @@ afterEach(() => {
 });
 
 describe("transcript hydration after a workspace connection failure", () => {
-  it("retries a stopped cloud chat on a database nudge without reconnecting its VM", async () => {
+  it("continues local hydration when cloud background reads are unavailable", async () => {
+    transport();
+    availability.running = false;
+    const retry = vi.fn(async (_id: string, _current: () => boolean) => {});
+    const pending = new TranscriptHydrationRetries(retry);
+    cleanups.push(() => pending.clear());
+
+    pending.add("local-chat");
+    await settle();
+
+    expect(retry).toHaveBeenCalledExactlyOnceWith("local-chat", expect.any(Function));
+    expect(retry.mock.calls[0][1]()).toBe(true);
+  });
+  it("keeps background retries inert while its cloud workspace is stopped or archived", async () => {
+    const connection = transport("connected");
+    availability.running = false;
+    const retry = vi.fn(async () => {}), pending = new TranscriptHydrationRetries(retry);
+    cleanups.push(() => pending.clear());
+    pending.add(cloudChat);
+    for (let index = 0; index < 20; index++) { pending.nudge(cloudChat); connection.connect(); }
+    await settle(); expect(retry).not.toHaveBeenCalled();
+    availability.running = true;
+    connection.disconnect(); connection.connect(); await settle();
+    expect(retry).toHaveBeenCalledOnce();
+  });
+  it("retries readable cloud history on a database nudge without reconnecting its VM", async () => {
     transport();
     const retry = vi.fn(async () => { pending.add(cloudChat); });
     const pending = new TranscriptHydrationRetries(retry);

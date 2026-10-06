@@ -1,3 +1,6 @@
+import { DatabaseCloudRuntimeTransitionService } from "./runtime-transfer.js";
+import type { CloudWorkspaceCheckoutSource } from "./computer-v2-contract.js";
+import { readCloudWorkspaceResumePlan, type CloudWorkspaceResumePlan } from "./setup-resume.js";
 import {
   createCipheriv,
   createDecipheriv,
@@ -103,6 +106,8 @@ export type CloudWorkspaceAccountAuth = {
 
 export type CloudWorkspaceSetupMaterialServiceOptions = {
   pool: pg.Pool;
+  /** Supplied only by the Alpha configuration gate; staff is checked in SQL. */
+  resumeExistingEnabled?: boolean;
   setupAudience: string;
   engineRegistrationAudience: string;
   engineHeartbeatAudience: string;
@@ -126,9 +131,13 @@ export type CloudWorkspaceSetupMaterialServiceOptions = {
 };
 
 export type CloudWorkspaceSetupRedemptionInput = {
+  /** Internal HTTP capability negotiation, absent from legacy request bodies. */
+  resumeExistingVersion?: 1;
   runtime?: CloudRuntimeWitness | undefined;
   /** Omitted by legacy images. Version 2 requires measured resource admission. */
   materialVersion?: 2 | undefined;
+  /** Only upgraded setup helpers accept this optional source document. */
+  checkoutSourceVersion?: 1 | undefined;
   token: string;
   workspaceId: string;
   organizationId: string;
@@ -154,6 +163,7 @@ export type CloudWorkspaceEngineRegistrationInput = {
   engineInstanceId: string;
   protocolVersion: number;
   actorProtocolVersion?: 2;
+  agentCustomizationVersion?: 3;
   agentRuntime?: CloudAgentRuntime;
 };
 
@@ -182,8 +192,9 @@ type ParsedSettings = {
 };
 
 type RedemptionContract = {
+  resume: CloudWorkspaceResumePlan | undefined;
   runtime: CloudRuntimePin | null;
-  computer: { source: CloudComputerWorkspaceSource; repositoryId: string; requestedRevision: string } | null;
+  computer: { source: CloudComputerWorkspaceSource; repositoryId: string; requestedRevision: string; checkoutSource: CloudWorkspaceCheckoutSource | null } | null;
   accountUserId: string;
   ownerSubject: string;
   imageRef: string;
@@ -721,6 +732,7 @@ async function cleanupEngineStart(
 }
 
 export class DatabaseCloudWorkspaceSetupMaterialService {
+  private readonly resumeExistingEnabled: boolean;
   private readonly pool: pg.Pool;
   private readonly setupAudience: string;
   private readonly engineRegistrationAudience: string;
@@ -737,6 +749,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
   private readonly now: () => number;
 
   constructor(options: CloudWorkspaceSetupMaterialServiceOptions) {
+    this.resumeExistingEnabled = options.resumeExistingEnabled === true;
     this.pool = options.pool;
     this.setupAudience = normalizeCloudWorkspaceGrantAudience(
       options.setupAudience,
@@ -1071,6 +1084,11 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         issuedBy: null,
         workosEnabled: this.accountIdentityProvider === "workos",
       });
+      // Read the completed enrollment before inserting its fresh replacement.
+      // No runtime selection/transition decision is made by this hint.
+      const resume = this.resumeExistingEnabled && input.resumeExistingVersion === 1 && pin
+        ? await readCloudWorkspaceResumePlan(tx, { ...input, accountUserId }, { computer, computerEnvironment })
+        : undefined;
       await tx.query(
         `UPDATE cloud_workspace_engine_instances
          SET state = 'superseded', revoked_at = coalesce(revoked_at, now()),
@@ -1119,6 +1137,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       );
       return {
         runtime: pin,
+        resume,
         computer,
         accountUserId,
         ownerSubject: row.owner_subject,
@@ -1331,6 +1350,13 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         if (contract.runtime && !await loadPinnedCloudRuntime(tx, contract.runtime, cloudRuntimeQualificationMode())) {
           throw materialError("setup_authority_changed", false);
         }
+        if (contract.resume) {
+          const current = await readCloudWorkspaceResumePlan(tx, { ...input, accountUserId: contract.accountUserId },
+            { computer: contract.computer, computerEnvironment: contract.computerEnvironment });
+          // Enrollment itself advances HU's epoch. Recheck the preparation
+          // tuple/staff gate here; normal current-run fences govern publication.
+          if (current?.keySha256 !== contract.resume.keySha256) contract.resume = undefined;
+        }
         return issueWorkspaceSetupRecoveryGrant(tx, {
           workspaceId: input.workspaceId,
           organizationId: input.organizationId,
@@ -1353,6 +1379,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
     );
     return {
       version: input.materialVersion === 2 ? (2 as const) : (1 as const),
+      ...(contract.resume ? { resume: contract.resume } : {}),
       audience: SETUP_MATERIALS_AUDIENCE,
       execution: {
         workspaceId: input.workspaceId,
@@ -1369,7 +1396,8 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           : {}),
       },
       ...(contract.computer ? { computer: { template: computerWorkspaceTemplateManifest(contract.computer.source),
-        primaryRepositoryId: contract.computer.repositoryId, requestedRevision: contract.computer.requestedRevision } } : {}),
+        primaryRepositoryId: contract.computer.repositoryId, requestedRevision: contract.computer.requestedRevision,
+        ...(input.checkoutSourceVersion === 1 && contract.computer.checkoutSource ? { checkoutSource: contract.computer.checkoutSource } : {}) } } : {}),
       repository: {
         forge: contract.repository.forge,
         owner: contract.repository.owner,
@@ -1410,6 +1438,11 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
     };
   }
 
+  async registerTransitionEngine(input:CloudWorkspaceEngineRegistrationInput) {
+    return new DatabaseCloudRuntimeTransitionService({pool:this.pool,qualificationMode:cloudRuntimeQualificationMode(),
+      workosEnabled:this.accountIdentityProvider==='workos',heartbeatEndpoint:this.engineHeartbeatAudience}).register(input);
+  }
+
   async registerEngine(input: CloudWorkspaceEngineRegistrationInput) {
     if (
       !GRANT_TOKEN_PATTERN.test(input.token) ||
@@ -1421,6 +1454,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       !validPositiveInteger(input.executionFence, Number.MAX_SAFE_INTEGER) ||
       input.protocolVersion !== this.engineProtocolVersion ||
       (input.actorProtocolVersion !== undefined && input.actorProtocolVersion !== 2) ||
+      (input.agentCustomizationVersion !== undefined && (input.agentCustomizationVersion !== 3 || input.agentRuntime?.profile !== "zeros-cloud-worker-v4")) ||
       (input.agentRuntime!==undefined && (input.actorProtocolVersion!==2 || !CloudAgentRuntimeSchema.safeParse(input.agentRuntime).success))
     ) {
       throw materialError("engine_registration_rejected", false);
@@ -1503,7 +1537,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
              registered_at = now(), last_heartbeat_at = now(),
              lease_expires_at = now() + ($3::bigint * interval '1 millisecond'),
              updated_at = now(), actor_protocol_version = $4,
-             agent_runtime_profile=$5, agent_runtime_contract_sha256=$6
+             agent_runtime_profile=$5, agent_runtime_contract_sha256=$6, agent_customization_version=$7
          WHERE id = $1 AND state = 'starting'
          RETURNING lease_expires_at`,
         [
@@ -1513,6 +1547,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           input.actorProtocolVersion ?? 1,
           identity?.profile === "zeros-cloud-worker-v3" ? identity.profile : null,
           identity?.profile === "zeros-cloud-worker-v3" ? identity.contractSha256 : null,
+          input.agentCustomizationVersion ?? null,
         ],
       );
       if ((updated.rowCount ?? 0) !== 1) {
@@ -1666,7 +1701,9 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         organizationId: input.organizationId,
         generation: input.generation,
       });
-      if (!refresh) {
+      if (!refresh || (await tx.query(`SELECT 1 FROM cloud_workspace_runtime_transitions
+        WHERE workspace_id=$1 AND org_id=$2 AND phase NOT IN ('offered','staged','healthy','rolled_back','cancelled')`,
+      [input.workspaceId,input.organizationId])).rowCount) {
         return {
           leaseExpiresAtMs: renewed.rows[0]!.lease_expires_at.getTime(),
           repository: null,

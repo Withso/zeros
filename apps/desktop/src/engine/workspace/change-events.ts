@@ -83,6 +83,7 @@ const WORKSPACE_MUTATIONS = new Set([
   "design.node.text",
   "design.node.html",
   "design.asset.insert",
+  "design.asset.upload",
   "design.token.update",
   "design.stage",
   "design.unstage",
@@ -207,8 +208,13 @@ export const LONG_LIFECYCLE_OPS = new Set([
  *      Every `pick(resolved, …)` provenance tag on the repo settings pages had
  *      the same lag more quietly. Echoing costs one small resolve the poll was
  *      going to force moments later regardless. */
-export function dbChangedIncludesOriginator(op: string): boolean {
+export function dbChangedDesignRecognition(op: string, cloudWorker = false): boolean {
+  return cloudWorker && ["design.createDirectory", "design.selectDirectory", "design.renameDirectory", "design.adoptDirectory", "design.removeDirectory"].includes(op);
+}
+
+export function dbChangedIncludesOriginator(op: string, cloudWorker = false): boolean {
   return (
+    dbChangedDesignRecognition(op, cloudWorker) ||
     CODE_REVIEW_MUTATIONS.has(op) ||
     GIT_REVIEW_MUTATIONS.has(op) ||
     LONG_LIFECYCLE_OPS.has(op) ||
@@ -229,7 +235,7 @@ export function dbChangedIncludesOriginator(op: string): boolean {
 }
 
 /** Which renderer server-state collections a successful operation changed. */
-export function dbChangedKinds(op: string, result?: unknown): string[] | null {
+export function dbChangedKinds(op: string, result?: unknown, cloudWorker = false): string[] | null {
   if (CODE_REVIEW_MUTATIONS.has(op)) return ["codeReview"];
   if (GIT_REVIEW_MUTATIONS.has(op)) return ["workspaces", "gitReview"];
   if (op === "design.transaction.apply" && result && typeof result === "object" &&
@@ -245,11 +251,8 @@ export function dbChangedKinds(op: string, result?: unknown): string[] | null {
   if (op === "workspace.restore" || op === "workspace.recover" || op === "workspace.locate") return ["workspaces", "chats"];
   // Design registration changes affect main-checkout Git state and private
   // selection, so both collections re-read.
-  if (
-    op === "design.renameDirectory" ||
-    op === "design.adoptDirectory" ||
-    op === "design.removeDirectory"
-  )
+  if (dbChangedDesignRecognition(op, cloudWorker) ||
+      op === "design.renameDirectory" || op === "design.adoptDirectory" || op === "design.removeDirectory")
     return ["workspaces", "settings"];
   // The periodic PR detector is a read until it actually finds and persists a
   // PR. Avoid turning a once-per-minute null probe into a global Git refresh.

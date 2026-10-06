@@ -217,14 +217,19 @@ function legacyMigrationAgentId(): string | null {
  *  source of truth shared by every spawn path (new workspace, "+" → Chat,
  *  ⌘T). Model = the global default when this agent owns it, otherwise the
  *  family fallback. Effort/Fast restore this exact model's last user choice. */
-export function newChatBornDefaults(agentId: string | null): {
+export function newChatBornDefaults(agentId: string | null, cloudModels?: readonly string[]): {
   model: string | null;
   effort: ChatEffort;
   permissionMode: ChatPermissionMode;
   lastModeId?: string;
   fast: boolean;
 } {
-  const model = effectiveFavoriteModel(agentId);
+  const favorite = effectiveFavoriteModel(agentId);
+  // Workspace consent is exact, including context suffixes. Choosing a cloud
+  // fallback must not change the user's global favorite or local defaults.
+  const model = cloudModels === undefined || (favorite !== null && cloudModels.includes(favorite))
+    ? favorite
+    : modelsForAgent(agentId, null).find(option => cloudModels.includes(option.value))?.value ?? null;
   migrateLegacyConfigurationFor(agentId, model);
   const { effort, fast } = resolveModelConfiguration(agentId, model, null);
   // Default exact native modes: Claude Auto, Codex Approve for me, Cursor Auto.

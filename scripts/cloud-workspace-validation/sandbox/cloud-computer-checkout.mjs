@@ -27,7 +27,7 @@ const canonical = value => JSON.stringify(value, (_key, item) => object(item)
 
 export function parseCloudComputerSetup(value, repository) {
   const template = value?.template;
-  if (!keys(value, ["template", "primaryRepositoryId", "requestedRevision"]) ||
+  if (!keys(value, ["template", "primaryRepositoryId", "requestedRevision", ...(value?.checkoutSource === undefined ? [] : ["checkoutSource"])]) ||
     !keys(template, ["schema", "buildId", "configId", "baseImageId", "runtimeId", "baseCompatibilityId", "repositoryManifest", "protectedContractDigest"]) ||
     template.schema !== "zeros.computer-template/v1" || !UUID.test(template.buildId ?? "") || !UUID.test(template.configId ?? "") ||
     typeof template.baseImageId !== "string" || !/^[A-Za-z0-9_.:-]{1,512}$/.test(template.baseImageId) ||
@@ -46,6 +46,25 @@ export function parseCloudComputerSetup(value, repository) {
   if (!primary || primary.owner !== repository.owner.toLowerCase() || primary.name !== repository.name.toLowerCase() ||
     !SHA.test(repository.revision ?? "") || repository.cloneUrl?.toLowerCase() !== `https://github.com/${primary.owner}/${primary.name}.git`)
     throw revisionInvalid();
+  if (value.checkoutSource !== undefined) parseCheckoutSource(value.checkoutSource, repository);
+  return value;
+}
+
+// Mirrors CloudWorkspaceCheckoutSourceSchema at the root setup boundary. This
+// document is display/checkout metadata and never carries GitHub authority.
+function parseCheckoutSource(value, repository) {
+  const branch = ref => typeof ref === "string" && ref.length > 0 && ref.length <= 512 && ref !== "@" &&
+    !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(ref) && !/[\x00-\x20\x7f~^:?*\[\\]/.test(ref) &&
+    !ref.startsWith("-") && !ref.endsWith(".") && !ref.includes("..") && !ref.includes("@{") &&
+    !ref.split("/").some(part => !part || part.startsWith(".") || part.endsWith(".lock"));
+  if (!keys(value, ["kind", "revision", "headBranch", "targetBranch", "pullRequest"]) ||
+    !["default", "branch", "pull_request", "commit"].includes(value.kind) || value.revision !== repository.revision ||
+    !branch(value.targetBranch) || (value.kind === "commit" ? value.headBranch !== null : !branch(value.headBranch)) ||
+    (value.kind === "default" && (value.headBranch !== value.targetBranch || value.pullRequest !== null)) ||
+    (value.kind === "pull_request" && value.pullRequest === null)) throw revisionInvalid();
+  const pr = value.pullRequest;
+  if (pr !== null && (!keys(pr, ["number", "url", "state"]) || !Number.isSafeInteger(pr.number) || pr.number < 1 || pr.number > 2_147_483_647 ||
+    !["draft", "ready", "closed", "merged"].includes(pr.state) || pr.url !== `https://github.com/${repository.owner}/${repository.name}/pull/${pr.number}`)) throw revisionInvalid();
   return value;
 }
 
@@ -254,6 +273,67 @@ function resetReadConfig(checkout, repository, options) {
   } finally { closeSync(descriptor); }
 }
 
+const HISTORY_TIMEOUT_MS = 60_000;
+const HISTORY_MAX_ADDED_BYTES = 256 * 1024 * 1024;
+const HISTORY_FALLBACK_DEPTH = 128;
+
+function objectBytes(checkout) {
+  let bytes = 0, count = 0;
+  const pending = [path.join(checkout, ".git/objects")];
+  while (pending.length) {
+    const current = pending.pop();
+    for (const entry of readdirSync(current)) {
+      const file = path.join(current, entry);
+      let stat;
+      try { stat = lstatSync(file); } catch (error) { if (error?.code === "ENOENT") continue; throw error; }
+      if (++count > 250000 || stat.isSymbolicLink()) throw revisionInvalid();
+      if (stat.isDirectory()) pending.push(file);
+      else if (stat.isFile()) bytes += stat.size;
+      else throw revisionInvalid();
+    }
+  }
+  return bytes;
+}
+
+async function fetchWithHistoryBudget(checkout, args, token, options) {
+  const budget = { timeoutMs: HISTORY_TIMEOUT_MS, maxBytes: HISTORY_MAX_ADDED_BYTES, pollIntervalMs: 250, ...options.historyBudget };
+  const baseline = objectBytes(checkout), controller = new AbortController();
+  const limit = () => controller.abort();
+  const sizeCheck = () => {
+    try { if (objectBytes(checkout) - baseline > budget.maxBytes) limit(); }
+    catch { limit(); }
+  };
+  const timer = setTimeout(limit, budget.timeoutMs);
+  const interval = setInterval(sizeCheck, budget.pollIntervalMs);
+  timer.unref?.(); interval.unref?.();
+  let error;
+  try { await options.git(checkout, args, token, { signal: controller.signal }); }
+  catch (caught) { error = caught; }
+  finally { clearTimeout(timer); clearInterval(interval); }
+  sizeCheck();
+  if (controller.signal.aborted) throw Object.assign(new Error("repository_history_limit"), { code: "repository_history_limit" });
+  if (error) throw error;
+}
+
+async function fetchPrimaryHistory(checkout, computer, repository, options) {
+  const source = computer.checkoutSource;
+  const refs = [repository.revision, source ? `+refs/heads/${source.targetBranch}:refs/remotes/origin/${source.targetBranch}` :
+    "+refs/heads/*:refs/remotes/origin/*"];
+  const common = ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-auto-maintenance"];
+  const shallow = await options.git(checkout, ["rev-parse", "--is-shallow-repository"]) === "true";
+  try {
+    await fetchWithHistoryBudget(checkout, [...common, ...(shallow ? ["--unshallow"] : []), "--", "origin", ...refs], repository.credential.token, options);
+  } catch (error) {
+    if (error?.code !== "repository_history_limit") throw error;
+    // Only a resource limit permits fallback. Authentication/transport errors
+    // remain errors. The fallback has the same time/byte budget and fails closed
+    // if even bounded history exceeds it. Git cleans its temporary files on TERM.
+    await fetchWithHistoryBudget(checkout, [...common, `--depth=${HISTORY_FALLBACK_DEPTH}`, "--", "origin", ...refs], repository.credential.token, options);
+  }
+  if (source?.kind === "branch")
+    await options.git(checkout, ["update-ref", `refs/remotes/origin/${source.headBranch}`, repository.revision]);
+}
+
 /** Fetch the accepted commit into the existing clone. Git's process wrapper
  * receives the grant separately from argv and discards command output on error. */
 export async function checkoutCloudComputerPrimary(computer, repository, overrides) {
@@ -269,13 +349,17 @@ export async function checkoutCloudComputerPrimary(computer, repository, overrid
   }
   resetReadConfig(checkout, repository, options);
   await (options.verifyOrigin ?? verifyCloudComputerRepositoryOrigin)(repository, computer.primaryRepositoryId);
-  await git(checkout, ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--depth=1", "--", "origin", repository.revision], repository.credential.token);
+  await fetchPrimaryHistory(checkout, computer, repository, options);
   const requested = computer.requestedRevision;
-  const branch = requested.startsWith("refs/heads/") ? requested.slice(11) : SHA.test(requested) || requested.startsWith("refs/") ? null : requested;
+  const accepted = computer.checkoutSource;
+  const branch = accepted ? (accepted.kind === "default" || accepted.kind === "commit" ? null : accepted.headBranch) :
+    requested.startsWith("refs/heads/") ? requested.slice(11) : SHA.test(requested) || requested.startsWith("refs/") ? null : requested;
   if (branch) await git(checkout, ["check-ref-format", "--branch", branch]);
   await git(checkout, ["checkout", "--quiet", ...(branch ? ["-B", branch] : ["--detach"]), repository.revision]);
   const commit = await identity(checkout, repository, git);
   if (commit !== repository.revision) throw revisionInvalid();
+  if (accepted) await git(checkout, ["config", "--local", "zeros.cloud-source", JSON.stringify(accepted)]);
+  if (accepted?.kind === "branch") await git(checkout, ["branch", "--set-upstream-to", `origin/${branch}`, branch]);
   return commit;
 }
 

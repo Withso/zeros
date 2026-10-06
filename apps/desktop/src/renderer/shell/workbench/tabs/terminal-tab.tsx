@@ -32,7 +32,8 @@ import {
 import { useShallow } from "zustand/react/shallow";
 import { type RunAction } from "@zeros/protocol/run-actions";
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
-import { onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
+import { getActiveBridge, onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
+import { WorkspaceRuntimeClient } from "../../../platform/bridge/workspace-runtime-client";
 
 import { createPortal } from "react-dom";
 import { defaultScopeFor } from "../tab-model";
@@ -50,6 +51,8 @@ import {
   type TerminalNavigationEntry,
 } from "../../terminal/terminal-workbench-layout";
 import { useRetainedViewKeySet } from "../../use-retained-view-keys";
+import { WorkbenchTabFrame, WorkbenchTabStatusProvider, WorkbenchTabToolbar } from "../tab-status";
+import { CloudWorkspaceStatusRow } from "../../conversation/cloud-workspace-restart-controls";
 import { cn } from "../../../shared/ui/cn";
 import { Button } from "../../../shared/ui";
 import { Badge, Tooltip } from "../../../shared/ui/primitives";
@@ -146,8 +149,11 @@ function useEngineTerminalSync(
     const excluded = new Set(chatTerminalIds);
     const refresh = async () => {
       const request = ++generation;
+      const bridge = isCloudWorkspace(folder) ? getActiveBridge() : null;
+      const engine = bridge instanceof WorkspaceRuntimeClient ? bridge.cloudEngineInstanceId(folder) : undefined;
       const terms = await ptyTerminals(isCloudWorkspace(folder) ? folder : undefined);
       if (cancelled || request !== generation) return;
+      if (bridge instanceof WorkspaceRuntimeClient && engine !== bridge.cloudEngineInstanceId(folder)) return;
       // null = engine unreachable: don't reconcile (would wrongly prune tabs).
       if (terms !== null) {
         const { inFolder, aliveIds } = selectPanelTerminals(
@@ -155,7 +161,8 @@ function useEngineTerminalSync(
           excluded,
           folder,
         );
-        sync(folder, inFolder, aliveIds);
+        if (engine) sync(folder, inFolder, aliveIds, engine);
+        else sync(folder, inFolder, aliveIds);
         setSyncedFolder(folder);
       }
     };
@@ -676,49 +683,59 @@ export function TerminalPanel({
     <>
       {workbenchHost &&
         createPortal(
-          <TerminalWorkbenchLayout
+          <WorkbenchTabFrame
+            terminalWorkbench
+            tab={
+              mainTab ?? { id: "terminal", type: "terminal", title: "Terminal" }
+            }
             folder={folderKey}
-            tab={mainTab}
-            entries={entries}
-            onSelect={handleActivate}
-            onClose={handleClose}
-            onAdd={() => addWorkbenchTerminal(folderKey, "tab", scope)}
-            onConfigure={openEnvironment}
-            onConfigureIntent={() => {
-              if (activeWs?.repoRoot)
-                prefetchSettingsForRepo(activeWs.repoRoot);
-            }}
-            onRun={startRun}
-            onRunSetup={handleRunSetup}
-            setupRunDisabled={setupRunDisabled}
-            onStop={stopRun}
-            onOpenPreview={openRunPreview}
-            onDock={() => {
-              if (mainTab?.terminalId)
-                openWorkbenchTerminal(
-                  folderKey,
-                  {
-                    terminalId: mainTab.terminalId,
-                    title: mainTab.title,
-                    placement: "panel",
-                  },
-                  scope,
-                );
-            }}
-            onToggleSidebar={() => {
-              if (mainTab)
-                dispatch({
-                  type: "UPDATE_WORKBENCH_TAB",
-                  scope,
-                  id: mainTab.id,
-                  updates: {
-                    terminalSidebarVisible:
-                      mainTab.terminalSidebarVisible === false,
-                  },
-                });
-            }}
-            bodyRef={setMainBody}
-          />,
+            active={surfaceActive && mainTab !== null}
+          >
+            <TerminalWorkbenchLayout
+              active={surfaceActive && mainTab !== null}
+              folder={folderKey}
+              tab={mainTab}
+              entries={entries}
+              onSelect={handleActivate}
+              onClose={handleClose}
+              onAdd={() => addWorkbenchTerminal(folderKey, "tab", scope)}
+              onConfigure={openEnvironment}
+              onConfigureIntent={() => {
+                if (activeWs?.repoRoot)
+                  prefetchSettingsForRepo(activeWs.repoRoot);
+              }}
+              onRun={startRun}
+              onRunSetup={handleRunSetup}
+              setupRunDisabled={setupRunDisabled}
+              onStop={stopRun}
+              onOpenPreview={openRunPreview}
+              onDock={() => {
+                if (mainTab?.terminalId)
+                  openWorkbenchTerminal(
+                    folderKey,
+                    {
+                      terminalId: mainTab.terminalId,
+                      title: mainTab.title,
+                      placement: "panel",
+                    },
+                    scope,
+                  );
+              }}
+              onToggleSidebar={() => {
+                if (mainTab)
+                  dispatch({
+                    type: "UPDATE_WORKBENCH_TAB",
+                    scope,
+                    id: mainTab.id,
+                    updates: {
+                      terminalSidebarVisible:
+                        mainTab.terminalSidebarVisible === false,
+                    },
+                  });
+              }}
+              bodyRef={setMainBody}
+            />
+          </WorkbenchTabFrame>,
           workbenchHost,
         )}
       {hasPanel && <TerminalPanelResizer containerRef={containerRef} />}
@@ -823,15 +840,31 @@ export function TerminalPanel({
             </>
           }
         />
-        <div
-          ref={setPanelBody}
-          {...(!expanded ? { inert: "" } : {})}
-          aria-hidden={!expanded}
-          className={cn(
-            "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
-            !expanded && "pointer-events-none invisible",
-          )}
-        />
+        <WorkbenchTabFrame
+          tab={
+            panelTab ?? {
+              id: "terminal-panel",
+              type: "terminal",
+              title: "Terminal",
+              terminalId: activeSubTab,
+            }
+          }
+          folder={folderKey}
+          active={surfaceActive && hasPanel && expanded}
+        >
+          {activeSubTab === SETUP_SUBTAB && <WorkbenchTabToolbar>
+            <CloudWorkspaceStatusRow folder={folderKey} active={surfaceActive && hasPanel && expanded} />
+          </WorkbenchTabToolbar>}
+          <div
+            ref={setPanelBody}
+            {...(!expanded ? { inert: "" } : {})}
+            aria-hidden={!expanded}
+            className={cn(
+              "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
+              !expanded && "pointer-events-none invisible",
+            )}
+          />
+        </WorkbenchTabFrame>
       </div>
       <div ref={setParking} hidden {...{ inert: "" }} aria-hidden="true" />
       {/* Recent workspace terminals stay mounted (PTY + xterm survival); only
@@ -861,27 +894,39 @@ export function TerminalPanel({
               )}
               aria-hidden={!isActive}
             >
-              <TerminalSessionView
-                sessionId={s.id}
-                cwd={s.folder}
-                visible={isActive}
-                agentId={s.agentId}
-                initialCommand={s.initialCommand ?? null}
-                // A run terminal's restart affordance is its Rerun button —
-                // a key-restart would spawn a plain shell under the run id.
-                // attachOnly: its PTY is born only through workspace.startRun;
-                // a mount that finds none must not plant a shell there either.
-                restartOnKey={!isRunSessionId(s.id)}
-                attachOnly={isRunSessionId(s.id)}
-                // On an attach-only miss (the run exited before we attached),
-                // replay the engine's buffered output so a fast-failing run
-                // isn't a blank pane. Run sessions only; stable callback so the
-                // memoized view isn't re-rendered by status polls.
-                replayOnMiss={
-                  isRunSessionId(s.id) ? replayRunOnMiss : undefined
-                }
-                surfaceToken="--bg1"
-              />
+              <WorkbenchTabStatusProvider
+                tab={{
+                  id: s.id,
+                  type: "terminal",
+                  title: s.title,
+                  terminalId: s.id,
+                }}
+                folder={s.folder}
+                active={isActive}
+              >
+                <TerminalSessionView
+                  sessionId={s.id}
+                  cwd={s.folder}
+                  visible={isActive}
+                  agentId={s.agentId}
+                  initialCommand={s.initialCommand ?? null}
+                  resumePending={s.resumePending}
+                  // A run terminal's restart affordance is its Rerun button —
+                  // a key-restart would spawn a plain shell under the run id.
+                  // attachOnly: its PTY is born only through workspace.startRun;
+                  // a mount that finds none must not plant a shell there either.
+                  restartOnKey={!isRunSessionId(s.id)}
+                  attachOnly={isRunSessionId(s.id)}
+                  // On an attach-only miss (the run exited before we attached),
+                  // replay the engine's buffered output so a fast-failing run
+                  // isn't a blank pane. Run sessions only; stable callback so the
+                  // memoized view isn't re-rendered by status polls.
+                  replayOnMiss={
+                    isRunSessionId(s.id) ? replayRunOnMiss : undefined
+                  }
+                  surfaceToken="--bg1"
+                />
+              </WorkbenchTabStatusProvider>
             </div>
           </RetainedTerminalSurface>
         );
@@ -907,12 +952,23 @@ export function TerminalPanel({
               )}
               aria-hidden={!isActive}
             >
-              <SetupView
-                ref={setupFolderKey === folderKey ? setupViewRef : undefined}
-                workspace={setupWorkspaceByFolder.get(setupFolderKey) ?? null}
-                visible={isActive}
-                onBusyChange={handleSetupBusyChange}
-              />
+              <WorkbenchTabStatusProvider
+                tab={{
+                  id: "setup",
+                  type: "terminal",
+                  title: "Setup",
+                  terminalId: SETUP_SUBTAB,
+                }}
+                folder={setupFolderKey}
+                active={isActive}
+              >
+                <SetupView
+                  ref={setupFolderKey === folderKey ? setupViewRef : undefined}
+                  workspace={setupWorkspaceByFolder.get(setupFolderKey) ?? null}
+                  visible={isActive}
+                  onBusyChange={handleSetupBusyChange}
+                />
+              </WorkbenchTabStatusProvider>
             </div>
           </RetainedTerminalSurface>
         );

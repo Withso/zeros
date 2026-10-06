@@ -1,6 +1,6 @@
 import React, { useRef, type MouseEvent, type ReactNode } from "react";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
-import { Archive, Check } from "lucide-react";
+import { Archive, Check, RotateCw } from "lucide-react";
 
 import {
   workspaceSetStatus,
@@ -12,6 +12,7 @@ import { LIFECYCLE_STATUSES } from "@/renderer/shared/lib/workspace-status";
 import { getLastInputModality } from "@/renderer/shared/ui/overlay-focus";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { StatusIcon } from "@/renderer/shared/ui/primitives/status-icon";
+import { Tooltip } from "./primitives/tooltip";
 import { useWorkspaceArchiving } from "@/renderer/state/pending-workspaces";
 import {
   ContextMenu,
@@ -30,6 +31,9 @@ export interface WorkspaceContextMenuProps {
   onArchive?: () => void;
   /** Show the Archive item greyed-out and inert for a caller-owned reason. */
   archiveDisabled?: boolean;
+  /** Optional placement-owned lifecycle action; Local callers omit it. */
+  onRestart?: () => void;
+  restartDisabledReason?: string;
   /** The right-click target — wrapped as the menu trigger via `asChild`. */
   children: ReactNode;
   /** Top-bar tabs anchor their context menu to the trigger's bottom-left rather
@@ -56,6 +60,8 @@ export function WorkspaceContextMenu({
   workspace,
   onArchive,
   archiveDisabled = false,
+  onRestart,
+  restartDisabledReason,
   children,
   placement = "pointer",
 }: WorkspaceContextMenuProps) {
@@ -144,6 +150,20 @@ export function WorkspaceContextMenu({
             ))}
           </ContextMenuSubContent>
         </ContextMenuSub>
+
+        {onRestart && (
+          <>
+            <ContextMenuSeparator />
+            <Tooltip label={restartDisabledReason}>
+              <div>
+                <ContextMenuItem onSelect={onRestart} disabled={!!restartDisabledReason}>
+                  <RotateCw />
+                  <span>Restart workspace</span>
+                </ContextMenuItem>
+              </div>
+            </Tooltip>
+          </>
+        )}
 
         {onArchive && (
           <>

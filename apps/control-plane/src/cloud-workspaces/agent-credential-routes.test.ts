@@ -72,6 +72,11 @@ describe("personal cloud credential HTTP boundaries",()=>{
     expect((await call(background)).status).toBe(200);
     expect(service.background).toHaveBeenCalledWith({...scope,heartbeatToken:token},background.leaseId,background.operation);
     expect((await call({...background,operation:{...background.operation,snapshot:{...background.operation.snapshot,material:"forbidden"}}})).status).toBe(422);
+    for(const code of ["cloud_runtime_upgrade_required","cloud_agent_model_not_authorized","cloud_agent_credential_required","cloud_agent_credential_expired","cloud_agent_credential_revoked","cloud_agent_credential_refresh_required"]){
+    service.admit.mockRejectedValueOnce(new HttpError(409,code,"private admission details"));
+    const upgrade=await call(request);expect(upgrade.status).toBe(409);
+    expect(await upgrade.json()).toEqual({error:code});
+    }
     for(const [error,status] of [[new CloudWorkspaceEngineAuthorityError(),401],[new HttpError(403,"private","private"),403],[new HttpError(503,"busy","private"),503],[new Error("secret SQL material"),503]] as const){
       service.admit.mockRejectedValueOnce(error);const failed=await call(request);expect(failed.status).toBe(status);expect(await failed.text()).not.toMatch(/secret|SQL|material/);
     }

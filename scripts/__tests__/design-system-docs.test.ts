@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   agentBrief,
+  generatedFiles,
   renderAgentFiles,
   renderTokenReference,
+  renderWorkspaceAgentFiles,
+  workspaceBrief,
 } from "../design-system/build-design-docs.mjs";
 import { loadDesignSystem } from "../design-system/check-compiled-classes.mjs";
 import { checkDesignDocs } from "../design-system/check-design-docs.mjs";
@@ -88,5 +91,24 @@ describe("generated design docs", () => {
     }
     expect(files[".cursor/rules/zeros-ui.mdc"]).toMatch(/globs: apps\/desktop\/src\/renderer/);
     expect(files[".claude/skills/zeros-ui/SKILL.md"]).toMatch(/^---\nname: zeros-ui\n/);
+  });
+
+  it("mirrors the RULES.md workspace brief into every provider's zeros-workspaces skill", () => {
+    const brief = workspaceBrief(ROOT);
+    expect(brief).toMatch(/^## Agent brief: local and cloud workspaces/);
+    const files = renderWorkspaceAgentFiles(ROOT);
+    expect(Object.keys(files).sort()).toEqual(
+      [
+        ".agents/skills/zeros-workspaces/SKILL.md",
+        ".claude/skills/zeros-workspaces/SKILL.md",
+        ".cursor/rules/zeros-workspaces.mdc",
+      ].sort(),
+    );
+    for (const content of Object.values(files)) {
+      expect(content).toContain(brief);
+      expect(content).toContain("GENERATED from RULES.md");
+    }
+    expect(files[".claude/skills/zeros-workspaces/SKILL.md"]).toMatch(/^---\nname: zeros-workspaces\n/);
+    expect(Object.keys(generatedFiles(ROOT))).toEqual(expect.arrayContaining(Object.keys(files)));
   });
 });

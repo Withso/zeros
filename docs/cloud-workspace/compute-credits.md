@@ -54,6 +54,17 @@ nonrecoverable provider error, policy mismatch or exhausted balance starts a bou
 checkpoint and stop. Near the deadline it stops directly, retaining the last
 durable checkpoint. Budget enforcement never permanently deletes the VM.
 
+Retryable provider failures on an active allocation retain its credit hold and
+retry with the existing 15-second to five-minute backoff while payer, generation,
+engine and paid authority remain current. The retry window ends 315 seconds
+before the earlier confirmed provider/funding deadline: the existing five-minute
+checkpoint cap plus 15 seconds for stopping. Backoff cannot cross that boundary.
+The first successful recovery pass attempts provider TTL renewal even before the
+normal half-TTL renewal threshold. Funding alone never clears a failed renewal's
+error clock. An exhausted outage runway requests a checkpoint stop, escalating
+to the existing direct-stop fallback below 45 seconds; it never invents usage
+or releases an unsettled reservation.
+
 A ready/busy workspace must also have a live current-generation engine before
 its compute lease can renew. Expired engine authority stops compute even when
 credit remains. Bootstrap uses the existing setup deadline; a failed workspace

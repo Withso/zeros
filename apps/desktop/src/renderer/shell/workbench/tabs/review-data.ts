@@ -316,10 +316,11 @@ async function refreshFull(
                   ? humanGitError(timeline.reason)
                   : null,
             };
-            if (pr.status === "rejected" && !e.snap.pr) {
-              // Nothing to show at all — surface the PR fetch failure.
+            if (pr.status === "rejected") {
+              // Retain the confirmed PR and expose revalidation failure to the
+              // tab's banner, even when there is still useful content.
               next.error = humanGitError(pr.reason);
-            } else if (pr.status === "fulfilled" || e.snap.pr) {
+            } else if (pr.status === "fulfilled") {
               next.error = null;
             }
             if (pr.status === "fulfilled") next.loadedAt = Date.now();
@@ -328,10 +329,10 @@ async function refreshFull(
         }
       }
     } catch (err) {
-      // authStatus threw (network / engine down): keep prior data, note error
-      // only when there's nothing cached to render.
+      // authStatus threw (network / engine down): retain prior exact-key data
+      // and expose the persistent failure to the tab's banner.
       if (e.generation !== generation) superseded = true;
-      else if (!e.snap.pr) patch(key, { error: humanGitError(err) });
+      else patch(key, { error: humanGitError(err) });
     } finally {
       e.inflightFull = null;
       patch(key, { refreshing: false });

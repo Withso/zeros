@@ -20,6 +20,7 @@ import type { DesignRuntimeMatchedDeclaration } from "@zeros/protocol/design-run
 import { designPageCatalogSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
 
 import type { RuntimeClient } from "./ws-client";
+import { isCloudWorkspace } from "./cloud-workspace-key";
 import { workspaceOp as rawWorkspaceOp } from "./workspace-bridge";
 
 const directoryIds = new Map<string, string>();
@@ -438,11 +439,13 @@ export async function bridgeDesignHistory(
   workspaceId: string,
   frame: string | null,
   direction: "undo" | "redo",
+  expectedSourceVersions?: Record<string, string>,
 ): Promise<DesignApiMutationReplyWire> {
   return designApiMutationReply(
     await workspaceOp(bridge, `design.history.${direction}`, {
       workspaceId,
       ...(frame ? { frame } : {}),
+      ...(expectedSourceVersions ? { expectedSourceVersions } : {}),
     }),
     `design.history.${direction}`,
     true,
@@ -951,6 +954,30 @@ export async function bridgeDesignInsertAsset(
   );
 }
 
+export interface CloudDesignAssetUploadInput {
+  directoryId: string;
+  frame: string;
+  sourceVersion: string;
+  name: string;
+  mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif";
+  data: string;
+  x: number;
+  y: number;
+}
+
+export async function bridgeCloudDesignUploadAsset(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  input: CloudDesignAssetUploadInput,
+): Promise<DesignMutationReplyWire> {
+  if (!isCloudWorkspace(workspaceId)) throw new Error("Image upload requires a cloud workspace.");
+  // The file selection captures its directory. Never replace that identity
+  // with a newer canvas pointer while bytes are being read or queued.
+  return designMutationReply(await rawWorkspaceOp(bridge, "design.asset.upload", {
+    workspaceId, ...input,
+  }), "design.asset.upload");
+}
+
 export async function bridgeDesignStage(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -1007,6 +1034,27 @@ export async function bridgeDesignListDirectories(
   return (await workspaceOp(bridge, "design.listDirectories", {
     workspaceId,
   })) as DesignDirectoryListingWire;
+}
+
+/** Lifecycle commands deliberately bypass the canvas identity decorator:
+ * their destination may be a different registered directory. */
+export async function bridgeCloudDesignSelectDirectory(bridge: RuntimeClient, workspaceId: string, directoryId: string, expectedDirectoryId: string | null) {
+  return rawWorkspaceOp(bridge, "design.selectDirectory", { workspaceId, directoryId, expectedDirectoryId });
+}
+
+export async function bridgeCloudDesignCreateDirectory(bridge: RuntimeClient, workspaceId: string, directory: string) {
+  return rawWorkspaceOp(bridge, "design.createDirectory", { workspaceId, directory });
+}
+
+export interface CloudDesignFolderListing {
+  directory: string;
+  directories: string[];
+  truncated: boolean;
+}
+export async function bridgeCloudDesignBrowseDirectories(bridge: RuntimeClient, workspaceId: string, directory: string): Promise<CloudDesignFolderListing> {
+  const result = await rawWorkspaceOp(bridge, "design.browseDirectories", { workspaceId, directory }) as CloudDesignFolderListing;
+  if (result.directory !== directory) throw new Error("The VM folder changed before it could be loaded.");
+  return result;
 }
 
 /** Rename the Design folder in one explicit main-checkout commit. Compatible

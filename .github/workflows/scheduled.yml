@@ -1,4 +1,4 @@
-name: Scheduled smokes
+name: Scheduled Checks
 
 # Checks that don't belong on the per-PR path. Weekly + on-demand
 # (workflow_dispatch). Three reasons something lands here rather than in
@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   runtime-drift:
-    name: bundled runtime staleness (ubuntu)
+    name: checks-runtime-drift
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -70,7 +70,7 @@ jobs:
           exit "$status"
 
   native-abi:
-    name: native-module ABI smoke (macOS)
+    name: checks-native-abi-macos
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -94,7 +94,7 @@ jobs:
           ELECTRON_RUN_AS_NODE=1 ./node_modules/.bin/electron -e "require('better-sqlite3')(':memory:').prepare('select 1').get(); require('node-pty'); console.log('native ABI OK')"
 
   electron-pack:
-    name: electron-builder pack smoke (macOS, unsigned)
+    name: checks-packaging-macos
     runs-on: macos-latest
     steps:
       - name: Checkout

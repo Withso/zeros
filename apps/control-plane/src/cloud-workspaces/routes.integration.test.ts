@@ -279,7 +279,10 @@ d("cloud workspace API contracts", () => {
       configureApp(false, templateConfig());
       const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
       vi.mocked(repositoryResolver.resolve).mockImplementation(async input => ({ ...await resolve(input),
-        resolvedRevision: /^[a-f0-9]{40}$/.test(input.revision ?? "") ? input.revision! : "4".repeat(40) }));
+        resolvedRevision: /^[a-f0-9]{40}$/.test(input.revision ?? "") ? input.revision! : "4".repeat(40),
+        checkoutSource: /^[a-f0-9]{40}$/.test(input.revision ?? "")
+          ? { kind: "commit" as const, revision: input.revision!, headBranch: null, targetBranch: "main", pullRequest: null }
+          : { kind: "default" as const, revision: "4".repeat(40), headBranch: "main", targetBranch: "main", pullRequest: null } }));
       return template;
     };
 
@@ -576,8 +579,10 @@ d("cloud workspace API contracts", () => {
       .toEqual([{ build_id: source.buildId, template_id: source.templateId, config_id: source.configId }]);
     expect((await pool.query("SELECT repository_revision FROM cloud_workspace_setup_specs WHERE workspace_id=$1", [workspaceId])).rows)
       .toEqual([{ repository_revision: "4".repeat(40) }]);
+    expect((await pool.query("SELECT row_to_json(source)->'checkout_source' AS checkout_source FROM cloud_workspace_computer_sources source WHERE workspace_id=$1", [workspaceId])).rows)
+      .toEqual([{ checkout_source: { kind: "default", revision: "4".repeat(40), headBranch: "main", targetBranch: "main", pullRequest: null } }]);
     expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros",
-      repositoryId: "123456789", revision: "main" });
+      repositoryId: "123456789", revision: "main", includeCheckoutSource: true });
     await seedTemplate({ version: 2 });
     const replay = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key, body: createBody() });
     expect(replay.status).toBe(200);
@@ -747,6 +752,8 @@ d("cloud workspace API contracts", () => {
     await expect(withSystemTx(pool, async tx => { await insertCandidate(tx); throw new Error("rollback fixture"); })).rejects.toThrow("rollback fixture");
     expect((await pool.query("SELECT 1 FROM cloud_workspace_computer_sources WHERE workspace_id=$1 AND generation=2", [workspaceId])).rowCount).toBe(0);
     await withSystemTx(pool, insertCandidate);
+    expect((await pool.query("SELECT row_to_json(source)->'checkout_source' AS checkout_source FROM cloud_workspace_computer_sources source WHERE workspace_id=$1 ORDER BY generation", [workspaceId])).rows)
+      .toEqual([1, 2].map(() => ({ checkout_source: { kind: "default", revision: "4".repeat(40), headBranch: "main", targetBranch: "main", pullRequest: null } })));
     expect((await pool.query("SELECT build_id,template_id,config_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1 AND generation=2", [workspaceId])).rows)
       .toEqual([{ build_id: source.buildId, template_id: source.templateId, config_id: source.configId }]);
     await withSystemTx(pool, tx => copyComputerWorkspaceSource(tx, { workspaceId, organizationId: randomUUID(), sourceGeneration: 1, targetGeneration: 3 }));
@@ -1331,7 +1338,9 @@ d("cloud workspace API contracts", () => {
           webUrl: "https://github.com/withso/zeros",
           defaultBranch: "main",
           visibility: "private" as const,
-          ...("revision" in input ? { resolvedRevision: "4".repeat(40) } : {}),
+          ...("revision" in input ? { resolvedRevision: "4".repeat(40), checkoutSource: {
+            kind: "default" as const, revision: "4".repeat(40), headBranch: "main", targetBranch: "main", pullRequest: null,
+          } } : {}),
         };
       }),
     };

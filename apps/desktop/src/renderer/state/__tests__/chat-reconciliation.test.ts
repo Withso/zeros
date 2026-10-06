@@ -49,6 +49,12 @@ describe("chat snapshot reconciliation", () => {
     expect(canMirrorChat({ folder: cloudFolder + "/../other" }, confirmed)).toBe(false);
     expect(canMirrorChat({ folder: "cloud://invalid" }, confirmed)).toBe(false);
   });
+  it("keeps confirmed cloud metadata inert when background writes are unavailable", () => {
+    const confirmed = new Set([cloudFolder]);
+    expect(canMirrorChat({ folder: cloudFolder }, confirmed, true, () => false)).toBe(false);
+    expect(canMirrorChat({ folder: cloudFolder }, confirmed, true, () => true)).toBe(true);
+    expect(canMirrorChat({ folder: "/local" }, confirmed, true, () => false)).toBe(true);
+  });
   it("accepts an engine mode change despite a newer local title and rejects an older mode response", () => {
     const local = { ...chat("a", 5, "new title"), composerMode: "code" as const, composerModeRevision: 0 };
     const remote = { ...chat("a", 2), composerMode: "design" as const, composerModeRevision: 1 };

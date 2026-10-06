@@ -149,6 +149,7 @@ const agents = [
     distribution: {},
     installed: true,
     authenticated: true,
+    runtimeUpgradeRequired: params.has("runtimeUpgrade"),
   },
 ];
 localStorage.setItem(
@@ -336,6 +337,11 @@ const auth = {
 
 Object.assign(window, {
   appSidebarSetWidth: setHomeSidebarWidth,
+  appSidebarUpgradeRuntime: async () => {
+    for (const agent of agents) agent.runtimeUpgradeRequired = false;
+    const { refreshAgents } = await import("../features/agent/agents-cache");
+    await refreshAgents(async () => agents);
+  },
   appSidebarNavigate: (page: "customize" | "settings" | "dashboard") =>
     useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_PAGE", page }),
   appSidebarSetChangeLines: (

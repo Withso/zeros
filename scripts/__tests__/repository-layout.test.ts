@@ -44,6 +44,24 @@ describe("repository layout contracts", () => {
     expect(workflowLint).not.toMatch(/\n  pull_request:\s*\n\s+paths:/);
   });
 
+  it("runs every other required check for every pull request in CI", () => {
+    const ci = read(".github/workflows/ci.yml");
+
+    expect(ci).toMatch(/\non:\n  pull_request:\n/);
+    expect(ci).not.toMatch(/\n  pull_request:\s*\n\s+paths:/);
+    for (const name of [
+      "quality",
+      "test",
+      "build",
+      "source-sync (macOS)",
+      "control plane",
+      "ui-smoke (composer)",
+      "secret scan (PR commit range)",
+    ]) {
+      expect(ci).toContain(`    name: ${name}\n`);
+    }
+  });
+
   it("runs the required CodeQL check for pull requests and merge queues", () => {
     const codeql = read(".github/workflows/codeql.yml");
 
@@ -221,7 +239,11 @@ describe("repository layout contracts", () => {
     const preflight = read(".github/workflows/preflight.yml");
     expect(preflight).not.toMatch(/working-directory:\s*backend(?:\/|\s|$)/);
     expect(preflight).toContain("working-directory: apps/control-plane");
-    expect(preflight).toContain("'apps/desktop/src/'");
+    // The advisory changed-files Prettier pass runs only for pull requests.
+    const ci = read(".github/workflows/ci.yml");
+    expect(ci).not.toMatch(/working-directory:\s*backend(?:\/|\s|$)/);
+    expect(ci).toContain("working-directory: apps/control-plane");
+    expect(ci).toContain("'apps/desktop/src/'");
 
     const schemas = read("scripts/build-settings-schemas.ts");
     expect(schemas).toContain('"apps", "marketing", "public", "schemas"');
@@ -767,9 +789,12 @@ describe("repository layout contracts", () => {
       "database-qualification.md",
       "engineering-reference.md",
       "enterprise-and-self-hosting.md",
+      "git-github-audit.md",
       "implementation-roadmap.md",
       "infrastructure-and-operations.md",
       "lifecycle-diagnostics.md",
+      "live-runtime-updates.md",
+      "local-workspace-impact-audit.md",
       "mcp-and-skills.md",
       "native-access-acceptance.md",
       "native-preview-acceptance.md",
@@ -781,11 +806,16 @@ describe("repository layout contracts", () => {
       "qualification-status.md",
       "relay-capacity.md",
       "release-worker-qualification.md",
+      "resume-performance-design.md",
       "root-coordinator-threat-model.md",
       "runtime-bundles.md",
+      "runtime-hot-update.md",
       "runtime-lifecycle-acceptance.md",
+      "runtime-skew-gate.md",
+      "runtime-staging.md",
       "security.md",
       "template-forks.md",
+      "wake-performance.md",
     ];
 
     expect(readdirSync(cloudDocs).sort()).toEqual(expected);
@@ -851,6 +881,31 @@ describe("repository layout contracts", () => {
       "Production must be dispatched from 'release/X.Y.Z' after Beta validation",
     );
     expect(stable).not.toContain("refs/heads/main|refs/heads/release/*");
+  });
+
+  it("keeps Alpha policies opt-in while preserving publication identities and shipping checks", () => {
+    const alpha = read(".github/workflows/release-alpha.yml");
+    const preflight = read(".github/workflows/preflight.yml");
+    expect(preflight).toContain("    needs: [quality, test, build, control-plane, secret-scan]");
+    expect(alpha).toContain("ready: ${{ steps.barrier.outputs.ready }}");
+    expect(alpha.match(/if: github\.event\.repository\.fork == false && needs\.ci\.outputs\.ready == 'true'/g)).toHaveLength(3);
+    expect(alpha).toContain("    name: Publish Alpha feed");
+    expect(alpha).toContain('      - name: Publish rolling "alpha" prerelease');
+    expect(alpha).toContain("pnpm check:zsr");
+    expect(alpha).toContain("pnpm smoke:engine");
+    expect(alpha).toContain("pnpm smoke:packaged-pty");
+    expect(alpha).toContain("ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}");
+    expect(alpha).toContain("if: success() && steps.barrier.outputs.admission_issued == 'true'");
+    for (const workflow of ["release-beta", "release", "controlled-cutover", "staff-owner-bootstrap"]) {
+      expect(read(`.github/workflows/${workflow}.yml`)).not.toMatch(/ZEROS_ALPHA_CI_FAST_PATH|ZEROS_ALPHA_FORWARD_ONLY/);
+    }
+    const worker = read(".github/workflows/cloud-worker-promotion.yml");
+    expect(worker).not.toMatch(/vars\.ZEROS_ALPHA_/);
+    const [dispatch, callable] = worker.split("  workflow_call:\n");
+    for (const input of ["alpha_ci_fast_path", "alpha_forward_only"]) {
+      expect(dispatch).not.toContain(`${input}:`);
+      expect(callable).toMatch(new RegExp(`${input}:\\n        description: [^\\n]+\\n        default: ''\\n        type: string`));
+    }
   });
 
   it("bakes the default-off desktop cloud capability into every release process", () => {

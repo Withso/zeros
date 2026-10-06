@@ -4,6 +4,7 @@ import { BlockList, isIP } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { BoatApiClient } from "./boat-client.js";
+import { BoatBootstrapDialog, type BoatBootstrapFrameHandler } from "./boat-bootstrap-dialog.js";
 import { CloudProviderError, type CloudWorkspaceCommandRunner } from "./provider.js";
 
 const HOST_KEY_COMMAND = "/usr/bin/sudo -n /usr/bin/cat /etc/ssh/ssh_host_ed25519_key.pub";
@@ -111,6 +112,7 @@ export type BoatBootstrapExecution = {
   command: string;
   stdin: string;
   timeoutSeconds: number;
+  onFrame?: BoatBootstrapFrameHandler;
 };
 type CommandResult = Awaited<
   ReturnType<CloudWorkspaceCommandRunner["execute"]>
@@ -133,6 +135,7 @@ async function nativeCommand(
   timeoutMs: number,
   maxOutputBytes: number,
   signal: AbortSignal,
+  onFrame?: BoatBootstrapFrameHandler,
 ): Promise<CommandResult> {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
@@ -147,7 +150,9 @@ async function nativeCommand(
     let errorBytes = 0;
     let failed = false;
     let settled = false;
+    let finishing = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let dialog: BoatBootstrapDialog | undefined;
     const kill = (signal: NodeJS.Signals) => {
       if (child.pid)
         try {
@@ -159,13 +164,18 @@ async function nativeCommand(
     const abort = () => {
       if (failed || settled) return;
       failed = true;
+      dialog?.cancel();
       kill("SIGTERM");
       killTimer = setTimeout(() => kill("SIGKILL"), 1000);
       killTimer.unref();
     };
     const deadline = setTimeout(abort, timeoutMs);
-    const finish = (code: number | null) => {
-      if (settled) return;
+    const finish = async (code: number | null) => {
+      if (finishing) return;
+      finishing = true;
+      if (!failed) {
+        try { await dialog?.finish(); } catch { failed = true; }
+      }
       settled = true;
       clearTimeout(deadline);
       clearTimeout(killTimer);
@@ -179,10 +189,11 @@ async function nativeCommand(
           outputTruncated: false,
         });
     };
+    if (onFrame) dialog = new BoatBootstrapDialog(onFrame, bytes => { child.stdin.write(bytes); }, abort);
     child.stdout.on("data", (chunk: Buffer) => {
       outputBytes += chunk.length;
       if (outputBytes > maxOutputBytes) abort();
-      else chunks.push(chunk);
+      else { chunks.push(chunk); dialog?.feed(chunk); }
     });
     child.stderr.on("data", (chunk: Buffer) => {
       errorBytes += chunk.length;
@@ -196,7 +207,8 @@ async function nativeCommand(
     child.once("close", finish);
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort();
-    child.stdin.end(input);
+    if (dialog) child.stdin.write(input);
+    else child.stdin.end(input);
   });
 }
 
@@ -291,6 +303,7 @@ export async function openBoatBootstrapChannel(
           (input.timeoutSeconds + 15) * 1000,
           maxOutputBytes,
           signal,
+          input.onFrame,
         );
       },
       async dispose() {
@@ -390,7 +403,7 @@ export type BoatPinnedSshOptions = {
 /** Fixed commands only. Public key material uses the provider API; private
  * command inputs use the pinned channel and never enter provider commands. */
 export async function executeBoatPinnedSsh(
-  input: { resourceId: string; command: string; stdin: string; timeoutSeconds: number },
+  input: { resourceId: string; command: string; stdin: string; timeoutSeconds: number; onFrame?: BoatBootstrapFrameHandler },
   options: BoatPinnedSshOptions,
   signal: AbortSignal,
   prepare?: () => Promise<void>,
@@ -460,6 +473,7 @@ export async function executeBoatPinnedSsh(
           command,
           stdin: input.stdin,
           timeoutSeconds: input.timeoutSeconds,
+          ...(input.onFrame ? { onFrame: input.onFrame } : {}),
         },
         signal,
       );

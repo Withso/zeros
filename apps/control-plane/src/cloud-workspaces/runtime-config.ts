@@ -5,6 +5,7 @@ const schema = z.object({
   CLOUD_RUNTIME_V4_STAFF_ONLY: z.enum(["true", "false"]).default("true"),
   CLOUD_RUNTIME_QUALIFICATION_MODE: z.enum(["full", "smoke"]).default("full"),
   CLOUD_RUNTIME_QUALIFICATION_ENABLED: z.enum(["true", "false"]).default("false"),
+  CLOUD_RUNTIME_STAGING_ENABLED: z.enum(["true", "false"]).default("false"),
 });
 
 export type CloudRuntimeQualificationMode = "full" | "smoke";
@@ -13,6 +14,7 @@ export type CloudRuntimeConfig = {
   staffOnly: boolean;
   qualificationMode: CloudRuntimeQualificationMode;
   qualificationEnabled?: boolean;
+  stagingEnabled?: boolean;
 };
 
 export function loadCloudRuntimeConfig(env: NodeJS.ProcessEnv = process.env): CloudRuntimeConfig {
@@ -21,7 +23,8 @@ export function loadCloudRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Cl
   return { newWorkspaceProfile: parsed.data.CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE,
     staffOnly: parsed.data.CLOUD_RUNTIME_V4_STAFF_ONLY === "true",
     qualificationMode: parsed.data.CLOUD_RUNTIME_QUALIFICATION_MODE,
-    qualificationEnabled: parsed.data.CLOUD_RUNTIME_QUALIFICATION_ENABLED === "true" };
+    qualificationEnabled: parsed.data.CLOUD_RUNTIME_QUALIFICATION_ENABLED === "true",
+    stagingEnabled: parsed.data.CLOUD_RUNTIME_STAGING_ENABLED === "true" };
 }
 
 // Credential discovery, foreground admission, action admission and renewal all

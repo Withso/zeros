@@ -8,7 +8,7 @@ trust boundary: repository code and native tools must be trusted with the
 active account. Delegation and model checks govern admission; they are not a
 credential proxy that limits arbitrary uses of an exported provider token.
 Other accounts, control-plane credentials and refresh tokens stay outside it. Each delegation
-names one current collaborator, workspace, compute trust boundary, model list
+names one current collaborator, workspace, compute trust boundary, model consent
 and expiry. The immutable workspace sponsor funds compute independently.
 Every execution is bound to the initiating actor/device session, exact durable
 command (when queued), engine instance and generation. Stop, revocation,
@@ -199,6 +199,44 @@ separate real native-cache rotation and database-publication evidence before
 enabling this authentication kind.
 
 ## Device connection lifetime
+
+Owner-to-self connections can explicitly consent to all current and future
+provider models (`allModels: true`). New cloud connection dialogs select this
+option by default. Migration 0133 leaves every existing list restrictive;
+configuring an older connection keeps that restriction until its owner chooses
+**Allow all models**. The API and database prohibit all-model grants to another
+member. Grant renewal preserves the selected policy and the existing expiry,
+actor and compute trust checks.
+
+All-model discovery and admission use the control plane's curated provider
+catalog. `agent-models.test.ts` checks the standalone server mirror against
+`catalogs/models-v1.json`; update both when curating provider models. All-model
+consent cannot authorize unknown or cross-provider IDs. Explicit lists retain
+their existing exact-ID semantics, including legacy IDs. Runtime/credential
+qualification is still required; catalog inclusion is not a paid-turn proof.
+The Dev connection broker preserves the same flag through its separate additive
+0004 migration, renewal and metadata restore. Canary consent remains separate.
+
+Cloud model discovery retains the effective model IDs from qualified delegations.
+The menu and new-chat defaults intersect those IDs with the provider catalog;
+context variants such as `[1m]` do not widen consent. A cloud fallback does not
+rewrite the user's global favorite. Existing conversations retain their recorded
+model and must select an authorized model before continuing if consent changed.
+The shared workspace catalog refresh invalidates cached agent discovery while
+retaining the last confirmed snapshot. Only active consumers revalidate, so
+credential changes on another device and runtime upgrades become visible without
+keeping hidden conversations polling.
+
+Admission reports closed model-consent, credential-expiry/revocation and runtime
+upgrade causes. Exact command receipts retain the cause even when an older
+engine settles a generic dispatch failure. The renderer restores a refused
+prompt without resending it, refreshes discovery, and offers cloud provider
+settings for model consent or reconnection. Persisted refused prompts are not
+agent turns and show neither an elapsed timer nor an “Agent stopped” footer.
+Generic dispatch failures are ambiguous: retain the transcript and ask the user
+to review it, rather than assuming the provider never started. Wake waits belong
+to the preparation queue. Local provider authentication and transcripts do not
+use this classification.
 
 The native access client signs actor admission with its enrolled device and
 uses the configured control-plane WSS origin. It never sends a WorkOS bearer

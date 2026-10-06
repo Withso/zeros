@@ -638,6 +638,10 @@ export interface ChangesModel {
   loading: boolean;
   error: string | null;
   busy: boolean;
+  refreshing: boolean;
+  hasContent: boolean;
+  reload: () => Promise<void>;
+  retrySources: () => Promise<void>;
   discardTarget: ChangedFile | null;
   setDiscardTarget: (f: ChangedFile | null) => void;
   runDiscard: (f: ChangedFile) => void;
@@ -834,32 +838,53 @@ export function useChangesModel({
   // overwrite a newer authoritative list and resurrect a removed file.
   const reloadRequest = useRef(0);
 
+  const historyRetries = useRef<{
+    commits?: () => Promise<void>;
+    turns?: () => Promise<void>;
+  }>({});
+  const retrySources = useCallback(async () => {
+    await Promise.allSettled([
+      historyRetries.current.commits?.(),
+      historyRetries.current.turns?.(),
+    ]);
+  }, []);
+
   // Commits this worktree added on top of its base (`base..HEAD`, newest
   // first) — NOT the base branch's whole history. Reloaded per workspace /
   // base / refresh.
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
-    setCommitRequest({ key: commitKey, loading: true, error: null });
-    void commitsForGeneration(workspaceId, baseBranch, refreshKey)
-      .then((c) => {
-        if (!cancelled) {
-          writeBoundedCache(changesCommitsCache, commitKey, c);
-          setCommitsSnapshot({ key: commitKey, commits: c });
-          setCommitRequest({ key: commitKey, loading: false, error: null });
-        }
-      })
-      .catch((error) => {
-        // A transient git error must not blank a confirmed scope menu.
-        if (!cancelled)
-          setCommitRequest({
-            key: commitKey,
-            loading: false,
-            error: isGitErrorShape(error) ? error.message : String(error),
-          });
-      });
+    const retries = historyRetries.current;
+    const load = () => {
+      setCommitRequest((current) => ({
+        key: commitKey,
+        loading: true,
+        error: current.key === commitKey ? current.error : null,
+      }));
+      return commitsForGeneration(workspaceId, baseBranch, refreshKey)
+        .then((c) => {
+          if (!cancelled) {
+            writeBoundedCache(changesCommitsCache, commitKey, c);
+            setCommitsSnapshot({ key: commitKey, commits: c });
+            setCommitRequest({ key: commitKey, loading: false, error: null });
+          }
+        })
+        .catch((error) => {
+          // A transient git error must not blank a confirmed scope menu.
+          if (!cancelled)
+            setCommitRequest({
+              key: commitKey,
+              loading: false,
+              error: isGitErrorShape(error) ? error.message : String(error),
+            });
+        });
+    };
+    retries.commits = load;
+    void load();
     return () => {
       cancelled = true;
+      retries.commits = undefined;
     };
   }, [active, workspaceId, baseBranch, commitKey, refreshKey]);
 
@@ -871,32 +896,44 @@ export function useChangesModel({
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
-    setTurnRequest({ key: workspaceId, loading: true, error: null });
-    void turnsForGeneration(workspaceId, refreshKey)
-      .then((t) => {
-        if (cancelled) return;
-        writeBoundedCache(changesTurnsCache, workspaceId, t);
-        setTurnsSnapshot({ workspaceId, turns: t });
-        setTurnRequest({ key: workspaceId, loading: false, error: null });
-        const saved = getChangesFilter(workspaceId).turn;
-        if (
-          saved &&
-          !t.some((x) => x.chatId === saved.chatId && x.turnId === saved.turnId)
-        ) {
-          setChangesTurnFilter(workspaceId, null);
-        }
-      })
-      .catch((error) => {
-        // Preserve the last confirmed turn menu until a later refresh succeeds.
-        if (!cancelled)
-          setTurnRequest({
-            key: workspaceId,
-            loading: false,
-            error: isGitErrorShape(error) ? error.message : String(error),
-          });
-      });
+    const retries = historyRetries.current;
+    const load = () => {
+      setTurnRequest((current) => ({
+        key: workspaceId,
+        loading: true,
+        error: current.key === workspaceId ? current.error : null,
+      }));
+      return turnsForGeneration(workspaceId, refreshKey)
+        .then((t) => {
+          if (cancelled) return;
+          writeBoundedCache(changesTurnsCache, workspaceId, t);
+          setTurnsSnapshot({ workspaceId, turns: t });
+          setTurnRequest({ key: workspaceId, loading: false, error: null });
+          const saved = getChangesFilter(workspaceId).turn;
+          if (
+            saved &&
+            !t.some(
+              (x) => x.chatId === saved.chatId && x.turnId === saved.turnId,
+            )
+          ) {
+            setChangesTurnFilter(workspaceId, null);
+          }
+        })
+        .catch((error) => {
+          // Preserve the last confirmed turn menu until a later refresh succeeds.
+          if (!cancelled)
+            setTurnRequest({
+              key: workspaceId,
+              loading: false,
+              error: isGitErrorShape(error) ? error.message : String(error),
+            });
+        });
+    };
+    retries.turns = load;
+    void load();
     return () => {
       cancelled = true;
+      retries.turns = undefined;
     };
   }, [active, workspaceId, refreshKey]);
 
@@ -1244,6 +1281,10 @@ export function useChangesModel({
     loading,
     error,
     busy,
+    refreshing: requestSnapshot.key === sectionKey && requestSnapshot.loading,
+    hasContent: hasChangesSections(sectionKey) || !!turnFilter,
+    reload,
+    retrySources,
     discardTarget,
     setDiscardTarget,
     runDiscard,

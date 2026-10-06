@@ -8,6 +8,22 @@ import {
 } from "../cloud-workspace-validation/sandbox/cloud-engine-view.mjs";
 
 describe("fixed cloud engine mount and environment contract", () => {
+  it("admits the fixed resident entry only in v4 without giving it registration credentials", () => {
+    const tree = cloudRuntimeFixture();
+    try {
+      const runtime = createCloudRuntimeResolver({ filesystem: tree.filesystem }).resolve();
+      const view = "/run/zeros/view/runtime-11111111-1111-4111-8111-111111111111";
+      expect(cloudEngineViewArguments("resident", 4, runtime, view).slice(-3)).toEqual([
+        "--runtime-id", runtime.runtimeId, "--resident",
+      ]);
+      expect(() => cloudEngineViewArguments("resident", 3)).toThrow();
+      const environment = cloudEngineViewEnvironment({ ZEROS_CLOUD_TOKEN: "synthetic",
+        ZEROS_CLOUD_RUNTIME_B64: "synthetic", ZEROS_RESIDENT_PTY_B64: "synthetic" }, "resident", runtime);
+      expect(environment).not.toHaveProperty("ZEROS_CLOUD_TOKEN");
+      expect(environment).not.toHaveProperty("ZEROS_CLOUD_RUNTIME_B64");
+      expect(environment).not.toHaveProperty("ZEROS_RESIDENT_PTY_B64");
+    } finally { tree.dispose(); }
+  });
   it("binds the admitted primary only inside the v4 engine namespace and retains all repos read-write", () => {
     const tree = cloudRuntimeFixture();
     try {

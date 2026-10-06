@@ -2,8 +2,29 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import * as wire from "../cloud-computer-v2";
 import * as backend from "../../../../apps/control-plane/src/cloud-workspaces/computer-v2-contract";
+import { parseBridgeMessage } from "../schemas";
 
 describe("Cloud Computer v2 request contracts", () => {
+  const checkout = { kind: "default", revision: "a".repeat(40), headBranch: "main", targetBranch: "main", pullRequest: null };
+  it.each(["workspace.create", "git.status"])("keeps Local %s messages unchanged without checkout metadata", op => {
+    wire.CloudWorkspaceCheckoutSourceSchema.parse(checkout);
+    const request = { id: "local-request", timestamp: 0, source: "browser", type: "WORKSPACE_REQUEST", op,
+      params: op === "workspace.create" ? { repoRoot: "/local/repo" } : { workspaceId: "local-worktree" } };
+    expect(parseBridgeMessage(request)).toEqual(request);
+  });
+  it.each([
+    [checkout, true],
+    [{ ...checkout, kind: "commit", headBranch: null }, true],
+    [{ ...checkout, kind: "branch", headBranch: "feature/topic" }, true],
+    [{ ...checkout, targetBranch: "b".repeat(40) }, false],
+    [{ ...checkout, targetBranch: "HEAD~1" }, false],
+    [{ ...checkout, kind: "pull_request" }, false],
+    [{ ...checkout, headBranch: null }, false],
+    [{ ...checkout, token: "untrusted-extra-field" }, false],
+  ])("keeps accepted checkout metadata in parity (%#)", (input, accepted) => {
+    expect(wire.CloudWorkspaceCheckoutSourceSchema.safeParse(input).success).toBe(accepted);
+    expect(backend.CloudWorkspaceCheckoutSourceSchema.safeParse(input).success).toBe(accepted);
+  });
   it.each(["ZEROS_INTERNAL_TOKEN", "ZEROS_GIT_AUTH_TOKEN", "NODE_REPL_EXTERNAL_MODULE", "BASHOPTS", "SHELLOPTS", "PROMPT_COMMAND", "SSH_ASKPASS", "EDITOR", "VISUAL", "PAGER", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "NODE_TLS_REJECT_UNAUTHORIZED"])("rejects execution control name %s in both draft validators", name => {
     const operation={op:"set",name,value:"synthetic-value"};
     expect(wire.CloudComputerV2EnvironmentOperationSchema.safeParse(operation).success).toBe(false);

@@ -1,4 +1,4 @@
-import { cloudActorCan,type CloudActorRole } from "@zeros/protocol/cloud-actors";
+import { cloudActorCan, CloudWorkspacePresenceSchema, type CloudActorRole } from "@zeros/protocol/cloud-actors";
 import { CloudCommandClientRequestSchema } from "@zeros/protocol/cloud-commands";
 import { CloudActionClientRequestSchema } from "@zeros/protocol/cloud-actions";
 import { CloudEventClientRequestSchema } from "@zeros/protocol/cloud-events";
@@ -10,6 +10,9 @@ import { PTY_AGENT_AUTH_CWD } from "@zeros/protocol/messages";
 type Capability="read"|"run"|"edit"|"manage";
 type WorkspacePolicy={remoteReadable(op:string):boolean;isWriteOp(op:string):boolean;isRemoteAllowed(op:string):boolean};
 const reads=new Set([
+  // Discovery copies GitHub's own PR metadata, never client-supplied content.
+  "gh.prSync",
+  "design.browseDirectories",
   "design.page.select",
   "codeReview.list",
   "git.reviewHunks",
@@ -26,9 +29,9 @@ const edits=new Set([
   "codeReview.create", "codeReview.reply", "codeReview.setResolved",
   "git.reviewHunk", "git.resolveConflict",
   "design.capture","design.review.capture","design.transaction.apply","design.review.resolve","design.history.undo","design.history.redo",
-  "design.context.create","design.token.update","design.lint","design.selection.set","design.screenshot.set","design.runtime.audit",
+  "design.context.create","design.verification.open","design.token.update","design.lint","design.selection.set","design.screenshot.set","design.runtime.audit",
   "design.frame.create","design.frame.rename","design.frame.duplicate","design.frame.delete","design.canvas.update",
-  "design.node.styles","design.node.transfer","design.node.text","design.node.html","design.asset.insert",
+  "design.node.styles","design.node.transfer","design.node.text","design.node.html","design.asset.insert","design.asset.upload",
   "design.stage","design.unstage","design.save","design.commit",
   "context.graph.scaffold","skills.saveZeros","skills.removeZeros",
   "workspace.setWorkingDirectories",
@@ -36,7 +39,7 @@ const edits=new Set([
   "git.stashApply","git.stashDrop","git.deleteBranch","git.stageHunk","git.unstageHunk","git.discardHunk","git.tagCreate","git.tagDelete",
   "workspace.continueOnNewBranch",
 ]);
-const managers=new Set(["design.initialize","design.adoptDirectory","design.removeDirectory","design.renameDirectory","workspace.setMode"]);
+const managers=new Set(["design.initialize","design.createDirectory","design.selectDirectory","design.adoptDirectory","design.removeDirectory","design.renameDirectory","workspace.setMode"]);
 const providerRuns=new Set([
   "AGENT_NEW_SESSION","AGENT_LOAD_SESSION","AGENT_FORK_CONVERSATION","AGENT_PROMPT","AGENT_GENERATE_TITLE",
   "AGENT_CANCEL","AGENT_STOP_BACKGROUND_TASK","AGENT_STEER","AGENT_PERMISSION_RESPONSE","AGENT_QUESTION_RESPONSE",
@@ -45,6 +48,7 @@ const providerRuns=new Set([
 ]);
 
 export function cloudWorkspaceCapability(op:string,params:Record<string,unknown>,workspace:WorkspacePolicy):Capability|null {
+  if (op === "cloudPresence.update") return CloudWorkspacePresenceSchema.safeParse(params).success ? "read" : null;
   if(op==="github.nativeGrant")return cloudGithubNativeDesktopSchema.safeParse(params).success?"edit":null;
   if(op==="cloudLsp.request")return CloudLspRequestSchema.safeParse(params.request).success?"edit":null;
   if(op==="cloudCommands.request") {

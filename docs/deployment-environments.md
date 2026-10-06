@@ -722,9 +722,11 @@ crosses the artifact boundary, so its signed modes and symlinks remain inside th
 DMG/ZIP rather than being normalized by Actions artifact upload.
 
 1. Merge a green PR to `main`. Each release starts its signed Mac build **in
-   parallel** with the wait for successful **Preflight and CodeQL for its exact
-   event SHA**. `hosted-promotion.yml` starts after CI, without waiting for the
-   build. A separate feed publisher waits for both lanes and CI. PR checks for a
+   parallel** with the wait for **required CI for its exact event SHA**. By
+   default that is successful Preflight and CodeQL; automatic Alpha can opt in
+   to the critical evidence policy below. `hosted-promotion.yml` starts after CI,
+   without waiting for the build. A separate feed publisher waits for both lanes
+   and CI. PR checks for a
    different SHA, a fork's checks, or an older successful attempt cannot authorize
    mutation.
 2. Test Alpha, then cut an exact `release/X.Y.Z` branch. Beta uses one global
@@ -792,6 +794,176 @@ badge. The callable hosted guard, Apple jobs and every final publisher recheck
 required CI; the CI CLI and publisher also refuse a branch head that superseded
 their candidate. A release rerun reads the current exact-SHA check attempts,
 not a cached failure from the original release attempt.
+
+### Automatic Alpha CI evidence
+
+The repository variable `ZEROS_ALPHA_CI_FAST_PATH=enabled` opts automatic
+`release-alpha.yml` main pushes into Preflight's early `alpha-gate` alone.
+An unset or other value retains the existing whole-run Preflight + CodeQL
+policy. Beta, Production, manual Alpha operations and direct worker/cutover
+paths keep that full policy and strict branch-HEAD equality. They do not read
+Alpha authority or consume Alpha readiness outputs.
+
+The release client authenticates `GITHUB_RUN_ID` through the Actions API. Its
+parent must be `.github/workflows/release-alpha.yml`, a `push` on `main`, at the
+exact `RELEASE_SHA` and current run attempt, with both repository identities
+matching the release repository. `GITHUB_WORKFLOW_REF` must also identify that
+caller; reusable hosted promotion retains the caller's workflow ref. Neither
+the flag nor the workflow ref alone grants fast evidence. The shared hosted
+input defaults to empty, so existing callers retain their original guard,
+services, optional worker, finalization and receipt conditions.
+
+Fast evidence selects the newest trusted exact-SHA **push/main** Preflight run
+without status filtering, ordered by run ID and attempt. Its current attempt's
+paginated jobs must list exactly one completed, successful `alpha-gate`. The
+gate depends on successful `quality`, `test`, `build`, `control-plane` and
+`secret-scan` aggregates. A carried gate cannot override a currently pending or
+failed critical aggregate. Every main Preflight run executes all database
+shards, including a docs-only push after an earlier service change. The fast path does not wait
+for CodeQL: its findings are advisory, the scan still runs on every push, and
+Beta, Production and every full-policy caller keep requiring its exact-SHA
+success. PR, merge-group, fork and older-attempt proof cannot replace the gate, and Preflight from another branch is ineligible; cancellation refuses
+admission. Main Preflight coalesces pushes ([CI concurrency](ci-concurrency.md)),
+so a candidate whose pending run was replaced never receives a gate: once main
+has moved on, the barrier treats it as superseded, a green skip before any
+destination mutation, instead of waiting for the barrier timeout. A newer pending or failed gate defeats an older success. API-listed
+carried successes count on an ancillary-only retry; timestamps and certificate
+artifacts are not inferred as proof. History is bounded to 100 runs per
+workflow and 1,000 jobs, and an attempt change during job retrieval denies the
+old snapshot.
+
+The full Preflight run continues, including composer smoke and macOS workload.
+Pending macOS sandbox and credential proof is a deliberate Alpha deferral.
+Observed failures in the macOS runtime pins, agent boot, ZSR kernel, Design
+containment, GitHub credential or file-access checks veto later admission and
+publication even with a green gate. Only explicitly classified packaged-engine
+lifecycle, workspace-lifecycle and Changes/Review failures may be deferred;
+unknown or mixed failing macOS steps deny. Composer smoke failure may coexist
+with a successful critical gate. Signed Mac builds retain their own shipping
+kernel, engine, packaged terminal, artifact and signature checks.
+
+The initial automatic Alpha barrier writes `ready=true` after successful CI
+and freshness checks, including when the flag is off and full CI succeeds. A
+well-formed supersession before any destination mutation instead writes
+`ready=false`, emits a notice and exits successfully. It checks all retained
+parent attempts: a started destination, an earlier successful barrier that
+unblocked destinations, or unavailable mutation evidence keeps the retry red.
+Hosted promotion, desktop feed and runtime publication require `ready=true`.
+Other errors and downstream supersession remain failures; a green no-op never
+falls through to a provider, feed or runtime writer.
+
+Hosted guard, services, finalization and both final publishers re-read the
+selected evidence. Hosted promotion passes the optional Alpha CI input to its
+nested native-worker callable, so that authenticated automatic Alpha parent
+uses the same evidence at the worker wait and every worker checkpoint. Both
+reusable inputs default to empty; direct worker dispatch, controlled cutover,
+staff bootstrap, Beta and Production keep full CI and strict HEAD equality.
+
+Leave the flag unset until the ordered Alpha controller is rehearsed and
+independent Railway/Pages Git autodeploy is held. No repository or provider
+setting changes are part of this opt-in implementation. Served-deployment
+verification remains after deployment; `check:web-deploy` is not an early CI
+producer.
+
+### Automatic Alpha forward-only stages
+
+`ZEROS_ALPHA_FORWARD_ONLY` is a separate repository variable from the CI fast
+path. It defaults off: unset, empty or any value other than exactly `admitted`
+or `enabled` preserves strict branch-HEAD equality. Only the authenticated
+automatic `release-alpha.yml` push/main identity can use either stage; setting
+the variable or reusable input alone grants no authority. The source remains
+the immutable event SHA, including on reruns.
+
+| Value | Barrier admission | Checks after admission |
+| --- | --- | --- |
+| Unset or other | Candidate equals current main HEAD | Candidate equals current main HEAD |
+| `admitted` (Stage 1) | Candidate equals current main HEAD | Main must still contain the candidate |
+| `enabled` (Stage 2) | Main contains the candidate and every live Alpha destination is at or before it | Main still contains the candidate; re-read every destination and refuse regression |
+
+Ancestry uses the GitHub compare API with immutable SHAs: `identical` or `ahead`
+is accepted only when the merge base is the base SHA. A rewritten main that
+removes the candidate, missing main/admission identity, malformed comparison or
+compare error fails red. Run IDs, publication times and identical input trees do not prove
+Git ancestry. Main advancing to a descendant after admission allows the same
+candidate to finish; all exact-source CI, services/worker/final receipts and
+live API/Pages/schema/worker checks remain required.
+
+The flagged barrier saves `alpha-admission-<sha>` only after successful CI and
+freshness checks. Later checks require its own source/run/attempt-bound receipt
+and the successful producing barrier and upload steps. A green `ready=false`
+skip has no admission receipt. An earlier admitted attempt can support an
+otherwise valid desktop-only retry of the same parent; an expired, missing or
+foreign receipt blocks forward-only freshness. Enabling a stage midway through
+an older unflagged run cannot manufacture admission.
+
+Stage 2 reads the existing bounded public Alpha API release identity, both
+app and Ops `/zeros-deployment.json` manifests, the current rolling `alpha`
+Git tag (including annotated tags), and the feed's cumulative
+`alpha-release-ledger.json`. It compares each source separately with the
+candidate; a live worker tuple, when present, must also be at or before it.
+An enabled cloud API without a worker tuple is unknown and blocks admission;
+the explicit cloud-disabled null tuple remains supported.
+At admission, the tag and latest ledger entry must agree. After admission, a
+parallel publisher may observe the current candidate's ledger before its tag
+update (or the older cached ledger after the tag update); both sources must
+still be at or before the candidate, and one must identify that candidate.
+Other disagreements block. Missing feeds or
+unreadable/malformed identities are unknown, not a zero/genesis destination.
+The strict migrator still rejects unknown or newer schema rows; neither stage
+rolls schema back or authorizes a controlled migration.
+
+Stage 2 admission and later checkpoints read the deployed identity from a valid
+HTTP 503 readiness response so a newer candidate can repair an unready Alpha
+by moving forward. Maintenance, non-current or mismatched migration heads,
+channel mismatch, invalid or unreadable identities, other HTTP failures and
+destinations newer than or divergent from the candidate still refuse admission.
+
+Alpha hosted plans and pre-deploy worker preparation use the same bounded
+identity reader even when forward-only mode is off. A valid 503 identity from
+the old API allows a candidate to deploy a health repair; worker provider,
+qualification and committed-input checks still apply when required. The newly
+deployed candidate must pass strict API readiness before Pages, worker execution,
+finalization or desktop publication. Include the health repair in that candidate;
+changing the desktop `ZEROS_CLOUD_WORKSPACES_ENABLED` flag does not disable the
+Railway backend's cloud service. Pause and drain automatic Alpha before using
+the documented manual cutover or recovery procedure.
+
+A newer, divergent, unreadable or malformed destination can produce the existing
+green pre-mutation skip only at the initial barrier, after complete retained
+parent job evidence proves no destination has started. It never issues an
+admission receipt. Main ancestry, authentication, admission proof and compare
+errors remain red. After admission or a possible mutation, every conflict or
+unknown check remains red; reconcile actual provider state and retained receipts
+before retrying. Locks remain
+`hosted-mutation-<channel>` with cancellation disabled, and automatic candidates
+remain serialized by the existing `release-alpha` workflow lock.
+
+To enable, pause automatic Alpha delivery operationally, let running and
+pending Alpha work finish, and verify a healthy current Alpha API/schema,
+Pages, worker and feed/tag/ledger baseline. Hold independent provider Git
+autodeploy. Start with `ZEROS_ALPHA_FORWARD_ONLY=admitted`; after observing
+successful admitted candidates finish while main advances, set it to `enabled`
+to admit candidates already behind main. `ZEROS_ALPHA_CI_FAST_PATH` remains an
+independent choice of exact-source evidence. No repository variable or provider
+setting is changed by this implementation.
+
+The pilot requires exclusive automatic Alpha writers across its stages.
+Individual hosted locks are released between services, worker and finalization;
+they do not provide cross-destination atomicity or exclude a direct operation
+between stages. Before a manual Alpha cutover, direct worker/runtime/feed
+operation or recovery, pause and drain automatic releases, perform the existing
+strict full/current operation, verify every destination and cleanup receipt,
+then resume. Unknown partial mutations require owner reconciliation; this
+change does not introduce an automatic recovery journal. GitHub's pending slot
+coalesces queued arrivals, so out-of-order main events may still affect liveness;
+frontier checks prevent an older source from overwriting a newer destination.
+
+To roll back Stage 2, pause and drain before setting the variable to `admitted`.
+To restore today's strict policy, pause and drain before unsetting it (or use
+any other value). Existing receipts remain valid for their original protocols;
+there is no tag, feed, provider or schema rollback. An in-flight variable change
+can stop a later checkpoint, so drain before toggling. Beta, Production and
+direct/manual paths keep their existing policy throughout.
 
 When enabled, the hosted controller performs a read-only provider plan, a
 short-lived migration-role SQL plan, source retarget, a fresh successful

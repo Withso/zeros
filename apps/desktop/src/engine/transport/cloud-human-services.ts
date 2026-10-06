@@ -2,7 +2,7 @@ import {resolveCloudRuntime} from "../agents/containment/cloud-runtime-root.mjs"
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstatSync } from 'node:fs';
-import { connect } from 'node:net';
+import { connect, type Socket } from 'node:net';
 import path from 'node:path';
 import { Duplex } from 'node:stream';
 import type { CloudWorkerConfiguration } from '../agents/containment/cloud-worker-config';
@@ -44,9 +44,17 @@ export function parseCloudSshIntro(source: string): Extract<CloudRuntimeServiceS
 export class CloudRuntimeHumanServices {
   private paused = false;
   private readonly workers = new Set<{ close(): void; retired: Promise<void> }>();
-  private readonly tunnels = new Set<Duplex>();
-  hasActiveWork(): boolean { return this.workers.size > 0 || this.tunnels.size > 0; }
-  constructor(private readonly worker: CloudWorkerConfiguration, private readonly forbiddenPorts: () => readonly number[]) {}
+  private readonly tunnels = new Map<Socket, { bytes: number; at: number }>();
+  hasActiveWork(): boolean {
+    const now = this.now();
+    for (const [stream, traffic] of this.tunnels) {
+      const bytes = stream.bytesRead + stream.bytesWritten;
+      if (bytes !== traffic.bytes) { traffic.bytes = bytes; traffic.at = now; }
+    }
+    return this.workers.size > 0 || [...this.tunnels.values()].some(traffic => now - traffic.at < 10 * 60_000);
+  }
+  constructor(private readonly worker: CloudWorkerConfiguration, private readonly forbiddenPorts: () => readonly number[],
+    private readonly now: () => number = () => performance.now()) {}
 
   /** Kernel PID namespaces include detached descendants. Closing the worker
    * and awaiting its namespace supervisor makes final checkpoints wait for
@@ -71,7 +79,9 @@ export class CloudRuntimeHumanServices {
     if (grant.kind !== 'tunnel' || !Number.isSafeInteger(grant.remotePort) || grant.remotePort! < 1024 || grant.remotePort! > 65535 ||
         grant.remotePort === 22222 || this.forbiddenPorts().includes(grant.remotePort!)) throw new Error('Cloud tunnel destination is unavailable');
     const stream = connect({ host: '127.0.0.1', port: grant.remotePort! });
-    this.tunnels.add(stream);
+    // Traffic, rather than an unused listener or authority heartbeat, is work.
+    // Socket byte counters observe both directions without consuming data.
+    this.tunnels.set(stream, { bytes: 0, at: this.now() });
     stream.once('close', () => this.tunnels.delete(stream));
     stream.on('error', () => {});
     try {

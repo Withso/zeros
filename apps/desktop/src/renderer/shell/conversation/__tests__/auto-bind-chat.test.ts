@@ -108,6 +108,14 @@ describe("cold chat default binding", () => {
     });
   });
 
+  it("uses the workspace's allowed model for a fresh chat without rewriting a resumed chat", () => {
+    const cloudAgent = { ...agent("codex"), cloudModels: ["gpt-5.6-luna"] };
+    expect(resolveAutoBindChatSettings([cloudAgent])).toMatchObject({ model: "gpt-5.6-luna" });
+    expect(resolveAutoBindChatSettings([cloudAgent], null, undefined, {
+      agentName: "Codex", sessionId: "existing-session", model: "gpt-5.6-sol",
+    })).toMatchObject({ model: "gpt-5.6-sol", sessionId: "existing-session" });
+  });
+
   it("restores the selected default model's remembered configuration", () => {
     setModelPreference("codex", "gpt-5.6-sol", {
       effort: "max",

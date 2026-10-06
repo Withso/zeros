@@ -54,6 +54,25 @@ budget code stays compatible; the message includes only the fixed reason and
 incident UUID. Ready publication clears this active error while retaining history,
 even when incident recovery bookkeeping is still waiting to run.
 
+Active allocation retries retain their closed error code and first-error time
+on the lease, without appending an incident on each transient provider failure.
+A complete successful recovery, including any required renewal, clears those
+fields and recovers existing incidents. If the provider outage consumes the
+checkpoint runway, its incident carries additive `stopReason: "provider_outage"`
+JSON evidence. The stored legacy reason remains `safety_failure`; management
+projects `provider_outage`, and the workspace error uses
+`cloud_workspace_provider_outage` with fixed outage copy and the same incident
+UUID. Stop escalation preserves that classification. No database migration is
+required, and genuine safety failures retain their existing reason and message.
+
+The setup executor passes closed transient provider diagnostics to the setup
+worker instead of recording `reject_setup` immediately. The worker keeps its
+existing retry backoff (five-second base in production) and records the diagnostic
+only when retries are exhausted. Successful retries leave no rejection incident.
+Nonrecoverable provider errors, helper failures and integrity rejections still
+retain evidence immediately. The existing setup fence and admission revocation
+apply to each retry.
+
 Setup success and exact-key v1 failure parsing remain compatible. New helpers
 return **version 2 failures only**, using the existing result audience and a
 strict version 1 `diagnostic` envelope. Older control planes fail closed on these
@@ -82,7 +101,9 @@ It never releases disk without the binding's deletion proof. Receipt progress
 advances only at a new monotonic stage, not retries or blocked/processing
 oscillation. Health reports `deletion_intent_stalled` for failed intents,
 one-hour lack of progress, or 24-hour total age, including retirement while a
-replacement workspace remains active. Old pending idle checkpoints report
+replacement workspace remains active. Provider-reported waiting stages (Boat's
+`waiting_for_uploads`, `kept_for_newer_snapshots` and `waiting_for_restore`)
+count as progress until the 24-hour limit. Old pending idle checkpoints report
 `idle_stop_blocked`. These are aggregate health reasons without tenant IDs.
 
 Legacy credential compatibility is reconciled at organization discovery/selection
@@ -238,3 +259,124 @@ workspace; credentials must not be copied to an implementation workspace.
 
 The acceptance record must distinguish local tests, signed-Mac observations and
 provider evidence. No live resources are created by the E4 implementation tests.
+
+## Worker scheduling
+
+Lifecycle and setup workers accept payload-free PostgreSQL hints on
+`zeros_cloud_lifecycle_work` and `zeros_cloud_setup_work`. Migration 0134 emits
+these after committed eligible queue writes, prerequisite completion, and
+provider/workspace setup availability. The hints identify neither an owner nor
+an operation; each worker uses its existing authorized, fenced claim query.
+No start/stop/upgrade decision, setup verification, or retry deadline changes.
+
+One dedicated runtime-privilege connection per control-plane replica listens
+on both channels, using `DATABASE_LISTEN_URL` when configured and otherwise
+`DATABASE_URL`. It never consumes request-pool capacity. Reconnect repairs the
+notification gap by scheduling both workers; reconnect backoff is 1–30 seconds
+and sessions retire at the database connection lifetime. Notification failure
+leaves normal polling enabled. No new environment variable is required.
+
+Workers coalesce hints and retain one hint received during an active tick.
+They never overlap ticks. Notifications do not postpone the existing polling
+clock or accelerate lifecycle drift, lease/authority maintenance or orphan
+sweeps. Future retries and expired claims still progress through polling, using
+the existing `next_attempt_at`/lease checks. Stop discards pending hints, drains
+active lifecycle work, and retains setup cancellation behavior.
+
+The configured defaults are a 5,000 ms lifecycle interval and a 1,000 ms setup
+interval. Without contention, polling alone can add up to one interval at each
+handoff; notification delivery removes that intentional wait when available.
+This is a code-derived latency opportunity, not a live end-to-end measurement
+or a guarantee of 1–2 second wake. Provider restore, runtime verification,
+engine registration, client admission and the CONNECTED probe remain on the
+critical path. Validate live on disposable Alpha workspaces before claiming
+the target is met.
+
+Local workspaces (Personal or organization-owned) never enter these workers.
+Cloud authorization remains keyed by organization, workspace and generation;
+owner/placement switching introduces no new client state or wake behavior.
+
+## Closed setup stage timings
+
+Migration 0135 (expand) adds nullable `cloud_workspace_setup_runs.stage_timings`.
+A document has `version: 1` and at most five clocks / 32 total spans / 8 KiB.
+Each clock carries a closed source, random UUID, UTC anchor and spans with a
+closed stage/outcome plus integer start/end offsets, bounded to one hour. The
+control-plane, shipped helper and SQL validators reject unknown fields and
+values, duplicate clocks, reversed offsets and oversized documents. No logs,
+command text, repository paths, credentials or arbitrary error strings enter
+this column.
+
+Clocks are independent monotonic domains. Durations are `endMs - startMs`
+within one clock; UTC anchors locate observations but do not synchronize hosts.
+`provider_command` includes the complete runner; `ssh_transport` includes
+channel/key/command/cleanup and overlaps `bootstrap_probe`. Setup `image_*`
+spans include child attester spans; do not sum overlapping clocks. Attester
+spans cover lock, tree verification, engine qualification, setup qualification
+and proof publication. The same checks, short-lived proof and engine readiness
+barrier still run. `engine_readiness` includes observation polling; this is not
+an independent Node, SQLite, registration HTTP or first-heartbeat measurement.
+
+The worker writes timings only under the current setup-run lease/fence, scoped
+to organization/workspace/generation, for both success and returned failure.
+Reclaim clears the previous attempt's document; a late previous claimant cannot
+overwrite the winner. This column describes the last claim, not a full retry
+history. An abruptly killed or unresponsive helper may return no partial spans.
+Malformed optional telemetry is dropped at the result boundary; it cannot
+supply missing readiness or replace a failed proof. Existing setup-run RLS,
+retention and deletion apply.
+
+Runtime rollout is negotiated over the existing authenticated material
+redemption: the helper sends `X-Zeros-Setup-Timings: 1`, and a supporting
+control plane echoes it only after successful v4 redemption. No JSON request
+or immutable material field is added. The new helper emits a strict version-4
+ready/error envelope with timings only after that acknowledgement; otherwise
+it keeps existing v1 ready / v1-v3 error envelopes. New readers accept both.
+Within the new bundle, attester completion diagnostics have an optional closed
+timing document; their report hash, proof bytes and admission checks do not use
+it. Legacy v1-v3 attester/proof snapshots are unchanged. Deploy the additive
+migration/reader first, then qualify and select a new runtime bundle to collect
+helper spans. Old pinned bundles still yield control-plane/transport timings.
+
+The read-only `workspace-perf-timeline.mjs` checks the catalog before selecting
+the new column, so it also works before migration 0135. It returns validated
+clocks per setup run and distinguishes `not_persisted`, `no_spans` and
+`persisted`; existing failure observations remain separate. Malformed timing
+documents are omitted, without returning their raw values.
+
+### Local workspace impact
+
+Personal Local and organization-owned local workspaces do not run the cloud
+setup worker or consume these setup envelopes. Local files, settings, engine
+launch, owner selection and switching are unchanged.
+
+### Cloud workspace impact
+
+Cloud setup retains exact organization/workspace/generation and execution-fence
+checks, registration, containment and durable readiness. Telemetry grants no
+new authority and adds no per-stage network requests. This change does not
+implement resume reuse or a runtime transition; RU/HU's decision paths remain
+unchanged.
+
+### Boat restore readiness polling
+
+The v4 setup transport can observe provider `running` before the guest accepts
+commands. Its fixed, secret-free base-status probe now retries classified Boat
+409 `boat_starting` / `boat_restoring`, retryable 5xx responses, and a valid
+matching-base `stopped` host while enabled restore units start, every
+two seconds within one fenced setup claim. The phase is bounded to 120 seconds
+(or the configured command timeout when shorter) and honors cancellation.
+A longer provider Retry-After, other conflicts, rate limits, access failures,
+invalid base identity, and failed guest status go directly to normal setup
+failure handling. Once the base reports ready, neither SSH nor installer,
+attestation or setup execution is retried by this phase.
+
+This avoids spending 5/10/20/40-second claim backoffs on an allocation whose
+restored guest is almost command-ready. It does not change the worker's retry,
+upgrade/rollback or readiness publication decisions. Exhaustion returns the
+closed provider error to those existing policies. A persistent provider outage
+can occupy a setup slot for the bounded phase; it cannot publish readiness.
+Local and organization-owned local workspaces, legacy cloud setup and owner
+switching use their existing paths. No new environment flag or migration is
+required. Measure a real stopped wake after deployment before claiming a saved
+latency; a 5xx response alone is not proof of the guest's boot state.

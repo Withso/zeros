@@ -34,6 +34,7 @@ export const RUNTIME_HELPERS = [
     "cloud-runtime-profile.mjs",
     "cloud-engine-cgroup.mjs",
     "cloud-setup-process.mjs",
+    "cloud-setup-timings.mjs",
     "cloud-computer-checkout.mjs",
     "cloud-engine-view.mjs",
     "cloud-engine-launcher.mjs",
@@ -45,6 +46,7 @@ export const RUNTIME_HELPERS = [
     "cloud-github-refresh-request.mjs",
     "cloud-git-askpass.mjs",
     "cloud-worker-supervisor.mjs",
+    "cloud-resident-workload.mjs",
     "ensure-cloud-worker-supervisor.mjs",
     "setup-cloud-workspace.mjs",
     "zeros-cloud-engine.apparmor",
@@ -56,6 +58,11 @@ export const RUNTIME_HELPERS = [
   {
     source: "apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs",
     target: "lib/zeros/cloud-runtime-root.mjs",
+    optional: false,
+  },
+  {
+    source: "apps/control-plane/src/cloud-workspaces/runtime-update-adapter.py",
+    target: "lib/zeros/runtime-update-adapter.py",
     optional: false,
   },
   {

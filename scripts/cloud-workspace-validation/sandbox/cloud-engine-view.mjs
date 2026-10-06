@@ -15,10 +15,11 @@ export function cloudEngineWorkspacePaths(primaryRepository) {
  * Private broker authority, provider login homes and the host shadow/SSH files
  * have no mount in this view. */
 export function cloudEngineViewArguments(operation = "serve",version=2,runtime=resolveCloudRuntime(),viewDirectory,primaryRepository) {
-  if (!["serve", "qualify", "qualify-agent"].includes(operation))
+  if (!["serve", "qualify", "qualify-agent", "resident"].includes(operation))
     throw new Error("Invalid cloud engine launch operation");
   if(![2,3,4].includes(version)||(version===4)!==(runtime.profile==="v4"))throw new Error("Invalid cloud engine profile version");
   if(operation==="qualify-agent"&&version<3)throw new Error("Native agent qualification requires v3 or v4");
+  if(operation==="resident"&&version!==4)throw new Error("Resident workloads require v4");
   if(version===4&&(!/^\/run\/zeros\/view\/runtime-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(viewDirectory??"")))
     throw new Error("Invalid cloud engine runtime projection");
   if (primaryRepository !== undefined && (version !== 4 || !isCloudComputerRepositoryDirectory(primaryRepository)))
@@ -172,6 +173,7 @@ export function cloudEngineViewArguments(operation = "serve",version=2,runtime=r
   if(version===4)args.push("--runtime-id",runtime.runtimeId);
   if (operation === "qualify") args.push("--qualify");
   if (operation === "qualify-agent") args.push("--qualify-agent");
+  if (operation === "resident") args.push("--resident");
   return args;
 }
 
@@ -179,7 +181,8 @@ export function cloudEngineViewArguments(operation = "serve",version=2,runtime=r
  * listings. Every authority-bearing variable is selected explicitly from the
  * existing supervisor contract; ambient provider/loader variables are absent. */
 export function cloudEngineViewEnvironment(source, operation = "serve", runtime=resolveCloudRuntime()) {
-  if (!["serve", "qualify", "qualify-agent"].includes(operation))
+  if (!["serve", "qualify", "qualify-agent", "resident"].includes(operation) ||
+    operation === "resident" && runtime.profile !== "v4")
     throw new Error("Invalid cloud engine launch operation");
   const environment = {
     PATH: `${runtime.binRoot}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
@@ -218,6 +221,7 @@ export function cloudEngineViewEnvironment(source, operation = "serve", runtime=
       "ZEROS_CLOUD_TOKEN",
       "ZEROS_REQUIRE_ACCOUNT",
       "ZEROS_REQUIRE_EXACT_MODEL",
+      "ZEROS_RESIDENT_PTY_B64",
     ])
       if (typeof source[name] === "string") environment[name] = source[name];
   }

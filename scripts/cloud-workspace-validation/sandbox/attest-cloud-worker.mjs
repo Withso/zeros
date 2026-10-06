@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash, randomBytes } from "node:crypto";
+import { parseSetupTimings, setupTimingClock } from "./cloud-setup-timings.mjs";
 import * as filesystem from "node:fs";
 import { cloudComputerHostRepository } from "./cloud-computer-checkout.mjs";
 import {
@@ -919,7 +920,8 @@ function v4DelegatedResources(runtime, qualification) {
 }
 
 export function validV4Diagnostic(value) {
-  return exactKeys(value, ["schema", "component", "stage", "ok", "exitCode", "timedOut", "failedChecks"]) &&
+  return exactKeys(value, ["schema", "component", "stage", "ok", "exitCode", "timedOut", "failedChecks", ...(value?.timings === undefined ? [] : ["timings"])]) &&
+    (value.timings === undefined || parseSetupTimings(value.timings) !== undefined) &&
     value.schema === "zeros.diagnostic/v1" && value.component === "attester" && V4_STAGES.has(value.stage) &&
     typeof value.ok === "boolean" && value.exitCode === (value.ok ? 0 : 1) && typeof value.timedOut === "boolean" &&
     Array.isArray(value.failedChecks) && value.failedChecks.length <= 32 && new Set(value.failedChecks).size === value.failedChecks.length &&
@@ -929,9 +931,13 @@ export function validV4Diagnostic(value) {
 
 function attestV4CloudWorker() {
   let stage = "validate_input";
+  const timings = setupTimingClock("attester_preflight");
+  let finished;
+  const next = value => { finished?.(); finished = timings.start(value); };
   try {
     requireCloudV4Check(process.platform === "linux" && process.geteuid?.() === 0, "root_ownership");
     stage = "lock";
+    next(stage);
     requireCloudV4AdmissionDirectory();
     if (process.argv[2] !== LOCKED_ARGUMENT) {
       requireCloudV4Check(process.argv.length === 2, "input_schema");
@@ -968,9 +974,11 @@ function attestV4CloudWorker() {
     // Hold the engine lock before invalidating any prior unconsumed authority.
     rmSync(ADMISSION_PROOF, { force: true });
     stage = "verify_tree";
+    next(stage);
     const runtime = verifyCloudV4Installation(), binding = cloudV4LaunchBinding();
     const helpers = verifyV4Helpers(runtime);
     stage = "qualify_engine";
+    next(stage);
     const qualification = runV4Probe(runtime, runtime.helpers.launcher, 180_000, "containment_smoke");
     requireCloudV4Check(qualification?.identity?.hostUid === 10003 && qualification?.identity?.namespaceUid === 0, "uid_map");
     requireCloudV4Check(cloudRuntimeProcessSecurityQualified(4, null, qualification?.identity), "seccomp");
@@ -978,9 +986,11 @@ function attestV4CloudWorker() {
       ["workload", "capture", "humanServices", "actorTools"].every(name => qualification[name]?.secure === true), "containment_smoke");
     const resources = attemptV4("cgroup_controllers", () => v4DelegatedResources(runtime, qualification));
     stage = "run_setup";
+    next(stage);
     const setup = runV4Probe(runtime, runtime.helpers.setupProcess, 30_000, "setup_exit");
     requireCloudV4Check(["secure", "unprivileged", "detachedDescendantsRetired", "timeoutRetired"].every(name => setup?.[name] === true), "setup_exit");
     stage = "publish_proof";
+    next(stage);
     const current = verifyCloudV4Installation();
     requireCloudV4Check([...CLOUD_V4_IDENTITY_FIELDS, "cgroupRoot"].every(key => current[key] === runtime[key]), "active_descriptor");
     requireCloudV4Check(JSON.stringify(cloudV4LaunchBinding()) === JSON.stringify(binding), "namespace_binding");
@@ -1001,9 +1011,11 @@ function attestV4CloudWorker() {
       } finally { rmSync(temporary, { force: true }); }
     });
     process.stdout.write(serialized);
-    process.stdout.write(`${JSON.stringify(cloudV4Diagnostic(null, "done"))}\n`);
+    finished?.();
+    process.stdout.write(`${JSON.stringify({ ...cloudV4Diagnostic(null, "done"), timings: timings.snapshot() })}\n`);
   } catch (error) {
-    process.stdout.write(`${JSON.stringify(cloudV4Diagnostic(error ?? {}, stage))}\n`);
+    finished?.("failed");
+    process.stdout.write(`${JSON.stringify({ ...cloudV4Diagnostic(error ?? {}, stage), timings: timings.snapshot() })}\n`);
     process.exitCode = 1;
   }
 }

@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ enabled: true, epoch: 1, doc: { status: "ready", deletedAt: null, generation: { number: 1 }, capabilities: { canWrite: true } }, wake: vi.fn(), refresh: vi.fn(), admission: vi.fn(), close: vi.fn(async () => true), connect: vi.fn(async () => {}), dispose: vi.fn(), list: vi.fn(), listeners: new Set<() => void>() }));
 vi.mock("../../../features/settings/internal-features", () => ({ isInternalFeatureActive: () => mocks.enabled }));
 vi.mock("../../../state/cloud-workspace-catalog", () => ({
-  cloudCatalogGeneration: () => mocks.epoch, cloudWorkspaceDocument: () => mocks.doc,
+  cloudCatalogGeneration: () => mocks.epoch, cloudWorkspaceDocument: () => mocks.doc, cloudWorkspaceStopVersion: () => 0,
   refreshCloudWorkspace: mocks.refresh, acceptCloudEngineWorkspace: vi.fn(),
   manageCloudWorkspace: mocks.wake,
   canReadCloudWorkspace: (doc: { status: string }) => !["deleted", "deleting"].includes(doc.status),
+  isCloudWorkspaceLifecyclePending: (doc: { status: string }) => ["stopping", "waking", "provisioning", "setting_up"].includes(doc.status),
   subscribeCloudWorkspaces: (fn: () => void) => { mocks.listeners.add(fn); return () => mocks.listeners.delete(fn); },
 }));
 vi.mock("../../cloud-workspace-access", () => ({ openCloudWorkspaceRuntime: mocks.admission, closeCloudWorkspaceRuntime: mocks.close, refreshCloudWorkspaceRuntime: vi.fn() }));
@@ -29,6 +30,16 @@ beforeEach(() => {
 });
 afterEach(() => { mocks.listeners.clear(); });
 describe("cloud runtime admission fencing", () => {
+  it("marks interaction wakes on the existing lifecycle path for both new and connected admissions", async () => {
+    const passive = await openCloudRuntime(target, { reason: "interaction" });
+    expect(mocks.wake).not.toHaveBeenCalled(); passive.release();
+    const peer = await openCloudRuntime(target, { wake: true, reason: "interaction" });
+    expect(mocks.wake).toHaveBeenCalledExactlyOnceWith(target, "wake", false, "interaction");
+    mocks.wake.mockClear();
+    await peer.prepareForRun!(new AbortController().signal, "interaction");
+    expect(mocks.wake).toHaveBeenCalledExactlyOnceWith(target, "wake", false, "interaction");
+    peer.release();
+  });
   it("serializes an explicit ready open with idle capture before acquiring admission", async () => {
     const capture = deferred<typeof mocks.doc>(); mocks.wake.mockReturnValue(capture.promise);
     const opening = openCloudRuntime(target, { wake: true });
@@ -81,7 +92,7 @@ describe("cloud runtime admission fencing", () => {
     expect(mocks.admission).not.toHaveBeenCalled();
   });
   it.each(["abort", "account", "generation"])("does not admit after %s changes during an explicit wake", async reason => {
-    mocks.doc = { ...mocks.doc, status: "stopped" };
+    mocks.doc = { ...mocks.doc, status: "stopped", generation: { number: reason === "generation" ? 2 : 1 } };
     const wake = deferred<typeof mocks.doc>(); mocks.wake.mockReturnValue(wake.promise);
     const controller = new AbortController();
     const opening = openCloudRuntime(target, { wake: true, signal: controller.signal });
@@ -89,10 +100,23 @@ describe("cloud runtime admission fencing", () => {
     await vi.waitFor(() => expect(mocks.wake).toHaveBeenCalledOnce());
     if (reason === "abort") controller.abort();
     if (reason === "account") mocks.epoch++;
-    mocks.doc = { ...mocks.doc, status: "ready", generation: { number: reason === "generation" ? 2 : 1 } };
+    mocks.doc = { ...mocks.doc, status: "ready", generation: { number: 1 } };
     wake.resolve(mocks.doc);
     await rejected;
     expect(mocks.admission).not.toHaveBeenCalled();
+  });
+  it("admits the replacement generation after wake and retires a reused older connection calmly", async () => {
+    const peer = await openCloudRuntime(target);
+    const capture = deferred<typeof mocks.doc>(); mocks.wake.mockReturnValue(capture.promise);
+    const preparing = peer.prepareForRun!(new AbortController().signal);
+    await vi.waitFor(() => expect(mocks.wake).toHaveBeenCalledOnce());
+    mocks.doc = { ...mocks.doc, generation: { number: 2 } };
+    for (const listener of mocks.listeners) listener();
+    capture.resolve(mocks.doc);
+    expect(await preparing).toBe(false);
+    mocks.admission.mockResolvedValue({ ...descriptor, generation: 2 });
+    const replacement = await openCloudRuntime(target);
+    expect(mocks.admission).toHaveBeenCalledTimes(2); replacement.release();
   });
   it("never requests admission from a ready read when a newer stopped document won", async () => {
     const opening = openCloudRuntime(target);

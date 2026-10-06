@@ -1,3 +1,4 @@
+import { isCloudAgentAdmissionCode, type CloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
 import {CloudAgentExecutionAuthoritySchema,CloudAgentExecutionLeaseSchema,CloudAgentActionAuthoritySchema,CloudBackgroundStateSchema,CloudComputerTerminalEnvironmentSchema,type CloudAgentExecutionRequest} from "@zeros/protocol/cloud-agent-execution";
 import type {CloudRuntimeAuthority} from "./cloud-runtime-registration";
 import { CloudCustomizationResultSchema } from "@zeros/protocol/cloud-customization";
@@ -5,6 +6,12 @@ import { CLOUD_COMPUTER_TOOL_MAX_RESPONSE_BYTES, CloudComputerToolConflictSchema
 
 export class CloudAgentExecutionError extends Error{
   constructor(){super("Cloud agent execution authority is unavailable");this.name="CloudAgentExecutionError";}
+}
+export class CloudAgentAdmissionError extends Error {
+  constructor(readonly code:CloudAgentAdmissionCode){super(code);this.name="CloudAgentAdmissionError";}
+}
+export class CloudRuntimeUpgradeRequiredError extends CloudAgentAdmissionError {
+  constructor(){super("cloud_runtime_upgrade_required");this.name="CloudRuntimeUpgradeRequiredError";}
 }
 export class CloudComputerToolsUpdateRequiredError extends Error {
   constructor(){super("Update the cloud runtime and control plane to configure this computer.");this.name="CloudComputerToolsUpdateRequiredError";}
@@ -47,6 +54,11 @@ export async function requestCloudAgentExecution(authority:CloudRuntimeAuthority
     if(request.kind==="admit"&&response.status===409&&document&&typeof document==="object"&&
       Object.keys(document).join()==="error"&&(document as {error?:unknown}).error==="cloud_computer_tools_update_required")
       throw new CloudComputerToolsUpdateRequiredError();
+    if(request.kind==="admit"&&response.status===409&&document&&typeof document==="object"&&
+      Object.keys(document).join()==="error"&&isCloudAgentAdmissionCode((document as {error?:unknown}).error)) {
+      const code=(document as {error:CloudAgentAdmissionCode}).error;
+      throw code==="cloud_runtime_upgrade_required"?new CloudRuntimeUpgradeRequiredError():new CloudAgentAdmissionError(code);
+    }
     if(!document||typeof document!=="object"||Array.isArray(document)||Object.keys(document).join()!=="result")throw new CloudAgentExecutionError();
     const value=(document as {result:unknown}).result;
     if(request.kind==="computer-tool"){
@@ -80,5 +92,5 @@ export async function requestCloudAgentExecution(authority:CloudRuntimeAuthority
     }
     if(!value||typeof value!=="object"||Object.keys(value).join()!=="released"||(value as {released?:unknown}).released!==true)throw new CloudAgentExecutionError();
     return {released:true};
-  }catch(error){await reader.cancel().catch(()=>{});if(error instanceof CloudComputerToolsUpdateRequiredError)throw error;throw new CloudAgentExecutionError();}finally{reader.releaseLock();}
+  }catch(error){await reader.cancel().catch(()=>{});if(error instanceof CloudComputerToolsUpdateRequiredError||error instanceof CloudAgentAdmissionError)throw error;throw new CloudAgentExecutionError();}finally{reader.releaseLock();}
 }

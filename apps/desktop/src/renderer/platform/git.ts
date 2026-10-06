@@ -23,6 +23,8 @@ import type {
 import { refreshDetectedOpenApps } from "./open-apps";
 import { getActiveBridge } from "./bridge/active-bridge";
 import { isCloudWorkspace } from "./bridge/cloud-workspace-key";
+import { bridgeCloudDesignUploadAsset, type CloudDesignAssetUploadInput } from "./bridge/design-bridge";
+export type { CloudDesignAssetUploadInput } from "./bridge/design-bridge";
 import type {
   WorkingDirectoriesWire,
   WorkspaceFileListing,
@@ -48,6 +50,7 @@ import {
   bridgeGitCommit,
   bridgeGitPush,
   bridgeGitPull,
+  bridgeGitFetch,
   bridgeGitRenameBranch,
   bridgeGitChangeTargetBranch,
   bridgeGhPrGet,
@@ -515,12 +518,14 @@ export async function designHistory(
   workspaceId: string,
   frame: string | null,
   direction: "undo" | "redo",
+  expectedSourceVersions?: Record<string, string>,
 ): Promise<DesignApiMutationReplyWire> {
   return bridgeDesignHistory(
     requireBridge(`${direction} a design edit`),
     workspaceId,
     frame,
     direction,
+    expectedSourceVersions,
   );
 }
 
@@ -797,6 +802,10 @@ export async function designInsertAsset(
 
 export async function designStage(workspaceId: string): Promise<{ ok: true }> {
   return bridgeDesignStage(requireBridge("stage designs"), workspaceId);
+}
+
+export async function designUploadAsset(workspaceId: string, input: CloudDesignAssetUploadInput): Promise<DesignMutationReplyWire> {
+  return bridgeCloudDesignUploadAsset(requireBridge("upload a design image"), workspaceId, input);
 }
 
 export async function designSave(workspaceId: string): Promise<{ ok: true }> {
@@ -1281,6 +1290,8 @@ export interface StatusResult {
   behind?: number | null;
   /** Upstream tracking ref (e.g. `origin/zeros/foo`), or null when unset. */
   upstream?: string | null;
+  /** Present on cloud workers that can report bounded-history fallback. */
+  shallow?: boolean;
 }
 
 export interface ChangeCounts {
@@ -1650,6 +1661,13 @@ export async function gitCommit(args: {
   amend?: boolean;
 }): Promise<{ sha: string; branch: string }> {
   return bridgeGitCommit(requireBridge("create the Git commit"), args);
+}
+
+export async function gitFetch(args: {
+  workspaceId: string;
+  unshallow?: boolean;
+}): Promise<{ summary: string; historyLimited?: true }> {
+  return bridgeGitFetch(requireBridge("fetch Git history"), args);
 }
 
 export async function gitPush(args: {

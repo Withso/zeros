@@ -4,7 +4,7 @@ vi.mock("./agent-compute-trust.js", () => ({ readCloudAgentComputeTrust: async (
 import { DatabaseCloudAgentCredentialService } from "./agent-credentials.js";
 
 describe("cloud grant runtime qualification metadata", () => {
-  it("binds offered grants to the live engine's exact image, profile, contract and MCP proof", async () => {
+  it("binds basic grants to the live runtime and reports MCP proof separately", async () => {
     let selection = "";
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("SELECT org_id FROM cloud_workspaces")) return { rowCount: 1, rows: [{ org_id: "11111111-1111-4111-8111-111111111111" }] };
@@ -18,6 +18,8 @@ describe("cloud grant runtime qualification metadata", () => {
     expect(selection).toContain("qualification.profile=engine.agent_runtime_profile");
     expect(selection).toContain("qualification.profile='zeros-cloud-worker-v3'");
     expect(selection).toContain("qualification.mcp_qualified");
+    expect(selection).toContain("NOT (generation.runtime_id IS NULL) OR qualification.mcp_qualified");
+    expect(selection).toContain("cloud_computer_admin_workspaces");
     expect(selection).toContain("engine.state='ready'");
     expect(selection).toContain("engine.lease_expires_at>clock_timestamp()");
   });

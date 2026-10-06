@@ -145,7 +145,7 @@ d("cloud workspace setup material redemption", () => {
     await pool.end();
   });
 
-  async function seedMaterials(v4 = false, template = false, templateEnvironment: Record<string, string> = {}, repositorySettings?: Record<string, unknown>) {
+  async function seedMaterials(v4 = false, template = false, templateEnvironment: Record<string, string> = {}, repositorySettings?: Record<string, unknown>, checkoutSource: unknown = null, resumeExistingEnabled = false) {
     await resetMigratedTestDatabase(pool);
     // These tests isolate setup authority; funded compute leases have their
     // own integration suite. Only this disposable test database is configured.
@@ -275,8 +275,8 @@ d("cloud workspace setup material redemption", () => {
       }
       const computer = template ? await seedComputerTemplate(tx, { organizationId, ownerUserId: accountUserId, installationId, sourceSandboxId, environment }) : null;
       if (computer) {
-        await tx.query(`INSERT INTO cloud_workspace_computer_sources(workspace_id,generation,org_id,build_id,template_id,config_id)
-          VALUES($1,1,$2,$3,$3,$4)`, [workspaceId, organizationId, computer.buildId, computer.configId]);
+        await tx.query(`INSERT INTO cloud_workspace_computer_sources(workspace_id,generation,org_id,build_id,template_id,config_id,checkout_source)
+          VALUES($1,1,$2,$3,$3,$4,$5::jsonb)`, [workspaceId, organizationId, computer.buildId, computer.configId, checkoutSource === null ? null : JSON.stringify(checkoutSource)]);
       }
       if (!v4) {
       await tx.query(
@@ -426,6 +426,7 @@ d("cloud workspace setup material redemption", () => {
     };
     service = new DatabaseCloudWorkspaceSetupMaterialService({
       pool,
+      resumeExistingEnabled,
       setupAudience: SETUP_AUDIENCE,
       engineRegistrationAudience: ENGINE_AUDIENCE,
       engineHeartbeatAudience: HEARTBEAT_AUDIENCE,
@@ -477,6 +478,102 @@ d("cloud workspace setup material redemption", () => {
     return { ...fixture, repositoryId };
   }
 
+  it("negotiates Alpha staff preparation reuse without changing legacy materials", async () => {
+    await seedMaterials(true, true);
+    const disabled = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness, resumeExistingVersion: 1 });
+    expect(disabled).not.toHaveProperty("resume");
+    await seedMaterials(true, true, {}, undefined, null, true);
+    const legacy = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness });
+    expect(legacy).not.toHaveProperty("resume");
+    await seedMaterials(true, true, {}, undefined, null, true);
+    const first = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness, resumeExistingVersion: 1 });
+    expect(first.resume).toEqual({ version: 1, mode: "prepare_generation", keySha256: expect.stringMatching(/^[a-f0-9]{64}$/), proofEpoch: null });
+  });
+
+  async function completedResume() {
+    await seedMaterials(true, true, {}, undefined, null, true);
+    const prior = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness, resumeExistingVersion: 1 });
+    await service.registerEngine({ token: prior.engine.registration.token, ...prior.execution,
+      engineInstanceId: prior.engine.instanceId, protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, actorProtocolVersion: 2,
+      agentRuntime: { ...runtimeWitness, profile: "zeros-cloud-worker-v4" } });
+    await pool.query(`INSERT INTO cloud_workspace_setup_attestations (
+      setup_run_id,workspace_id,generation,org_id,execution_fence,
+      image_ref,image_source_commit,repository_revision,repository_commit,settings_version,settings_snapshot_sha256,
+      engine_instance_id,engine_protocol_version,engine_health,durable_record_connected,
+      runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version,
+      runtime_installer_receipt_sha256,runtime_boot_id,runtime_supervisor_session_id)
+      SELECT run.id,run.workspace_id,run.generation,run.org_id,run.execution_fence,
+        g.image_ref,g.source_commit,spec.repository_revision,$2,spec.spec_version,spec.settings_snapshot_sha256,engine.id,engine.protocol_version,'ready',true,
+        g.runtime_id,g.runtime_manifest_sha256,g.runtime_base_image_id,g.runtime_base_compatibility_id,g.runtime_profile,g.runtime_engine_protocol_version,
+        engine.runtime_installer_receipt_sha256,engine.runtime_boot_id,engine.runtime_supervisor_session_id
+      FROM cloud_workspace_setup_runs run
+      JOIN cloud_workspace_generations g USING(workspace_id,generation,org_id)
+      JOIN cloud_workspace_setup_specs spec USING(workspace_id,generation,org_id)
+      JOIN cloud_workspace_engine_instances engine ON engine.setup_run_id=run.id
+      WHERE engine.id=$1`, [prior.engine.instanceId, "c".repeat(40)]);
+    await pool.query("UPDATE cloud_workspace_setup_runs SET state='succeeded',completed_at=now(),lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [seed.execution.setupRunId]);
+    await withSystemTx(pool, tx => retireCloudWorkspaceRuntimeAccess(tx, { workspaceId: seed.execution.workspaceId,
+      organizationId: seed.execution.organizationId, generation: 1, reason: "workspace_stop_requested" }));
+    seed.execution.setupRunId = randomUUID();
+    seed.execution.executionFence = 1;
+    seed.execution.attempt = 2;
+    await pool.query(`INSERT INTO cloud_workspace_setup_runs(id,workspace_id,generation,org_id,attempt,state,claim_count,execution_fence,lease_owner,lease_expires_at,started_at,last_heartbeat_at)
+      VALUES($1,$2,1,$3,2,'running',1,1,'fixture',now()+interval '10 minutes',now(),now())`,
+      [seed.execution.setupRunId, seed.execution.workspaceId, seed.execution.organizationId]);
+    seed.setupAdmission = await new DatabaseCloudWorkspaceSetupAdmissionBroker({ pool, endpoint: SETUP_AUDIENCE, ttlSeconds: 120 })
+      .issue(seed.execution, new AbortController().signal);
+    return prior;
+  }
+
+  const resumeInput = () => ({ ...redemptionInput(), materialVersion: 2 as const, runtime: { ...runtimeWitness, supervisorSessionId: randomUUID() }, resumeExistingVersion: 1 as const });
+
+  it("uses HU's completed epoch while enrolling a fresh engine and rejecting a duplicate wake", async () => {
+    const prior = await completedResume();
+    const results = await Promise.allSettled([service.redeem(resumeInput()), service.redeem(resumeInput())]);
+    const accepted = results.filter(result => result.status === "fulfilled");
+    expect(accepted).toHaveLength(1);
+    const next = accepted[0]!.value;
+    expect(next.resume).toEqual({ ...prior.resume, mode: "resume_existing", proofEpoch: prior.engine.instanceId });
+    expect(next.engine.instanceId).not.toBe(prior.engine.instanceId);
+    expect(next.engine.registration.token === prior.engine.registration.token).toBe(false);
+    expect(next.engine.bridgeToken === prior.engine.bridgeToken).toBe(false);
+    expect(await outcome(service.registerEngine({ token: prior.engine.registration.token, ...prior.execution,
+      engineInstanceId: prior.engine.instanceId, protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, actorProtocolVersion: 2,
+      agentRuntime: { ...runtimeWitness, profile: "zeros-cloud-worker-v4" } }))).toBe("engine_registration_rejected");
+  });
+
+  it("invalidates preparation on a different allocation and after an incomplete enrollment", async () => {
+    const prior = await completedResume();
+    await pool.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id='replacement-fixture' WHERE workspace_id=$1", [seed.execution.workspaceId]);
+    const changed = await service.redeem(resumeInput());
+    expect(changed.resume?.keySha256 === prior.resume?.keySha256).toBe(false);
+    // An unsuccessful newly enrolled engine also invalidates the old epoch.
+    const { readCloudRuntimeResumeProofEpoch } = await import("./runtime-transition.js");
+    expect(await withSystemTx(pool, async tx => {
+      await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE", [seed.execution.workspaceId]);
+      return readCloudRuntimeResumeProofEpoch(tx, seed.execution);
+    })).toBeNull();
+  });
+
+  it("drops the reuse hint if the allocation changes while minting the new repository credential", async () => {
+    await completedResume();
+    const mint = vi.mocked(github.mintContentsRead!).getMockImplementation()!;
+    vi.mocked(github.mintContentsRead!).mockImplementationOnce(async input => {
+      await pool.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id='replacement-during-mint' WHERE workspace_id=$1", [seed.execution.workspaceId]);
+      return mint(input);
+    });
+    expect(await service.redeem(resumeInput())).not.toHaveProperty("resume");
+  });
+
+  it.each(["owner", "entitlement", "fence", "cancelled"])("never exchanges cached preparation for current %s authority", async change => {
+    await completedResume();
+    if (change === "owner") await pool.query("DELETE FROM team_members WHERE user_id=$1", [seed.execution.authority.accountUserId]);
+    if (change === "entitlement") await pool.query("UPDATE organizations SET cloud_workspaces_allowed=false WHERE id=$1", [seed.execution.organizationId]);
+    if (change === "fence") await pool.query("UPDATE cloud_workspace_setup_runs SET execution_fence=execution_fence+1 WHERE id=$1", [seed.execution.setupRunId]);
+    if (change === "cancelled") await pool.query("UPDATE cloud_workspaces SET desired_state='stopped',status='stopping' WHERE id=$1", [seed.execution.workspaceId]);
+    expect(await outcome(service.redeem(resumeInput()))).toBe("setup_admission_rejected");
+  });
+
   it("redeems template generations with C4's pinned org environment and primary repository hook", async () => {
     const name = "ORG_TEMPLATE_VALUE", value = "synthetic-template-org-value";
     await seedMaterials(true, true, { [name]: value }, {
@@ -490,6 +587,14 @@ d("cloud workspace setup material redemption", () => {
     const document = Buffer.from(material.settings.documentB64, "base64url").toString("utf8");
     expect(document).not.toContain(value);
     expect(document).not.toContain("synthetic-repository-value");
+  });
+
+  it.each([undefined, 1 as const])("negotiates accepted checkout metadata with setup version %s", async checkoutSourceVersion => {
+    const checkoutSource = { kind: "default", revision: "4".repeat(40), headBranch: "main", targetBranch: "main", pullRequest: null };
+    await seedMaterials(true, true, {}, undefined, checkoutSource);
+    const material = await service.redeem({ ...redemptionInput(), materialVersion: 2, runtime: runtimeWitness, checkoutSourceVersion });
+    if (checkoutSourceVersion) expect(material.computer?.checkoutSource).toEqual(checkoutSource);
+    else expect(material.computer).not.toHaveProperty("checkoutSource");
   });
 
   it("redeems a saved template with the org contents-only grant and fresh engine authority", async () => {
@@ -572,7 +677,9 @@ d("cloud workspace setup material redemption", () => {
         .toBe("engine_registration_rejected");
     }
     // Failed comparisons roll back grant consumption; the exact witness can register once.
-    expect(await outcome(service.registerEngine({ ...input, agentRuntime: identity }))).toBe("accepted");
+    expect(await outcome(service.registerEngine({ ...input, agentRuntime: identity, agentCustomizationVersion: 3 }))).toBe("accepted");
+    expect((await pool.query("SELECT agent_customization_version FROM cloud_workspace_engine_instances WHERE id=$1", [materials.engine.instanceId])).rows[0])
+      .toEqual({ agent_customization_version: 3 });
     expect(await outcome(service.registerEngine({ ...input, agentRuntime: identity }))).toBe("engine_registration_rejected");
   });
   it.each(["before redemption", "during repository mint"])("rejects runtime revocation %s without releasing materials", async stage => {

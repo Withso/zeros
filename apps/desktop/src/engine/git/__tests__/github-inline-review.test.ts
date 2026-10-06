@@ -1,11 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 import { Octokit } from "@octokit/rest";
+import { runWithGithubReadTransport } from "../github-read-context";
 import {
   createGithubInlineReviewService,
   githubThreadContext,
 } from "../github-inline-review";
 
 const target = { workspaceId: "workspace-a", prNumber: 7 };
+it("offers cloud courier writes by workspace role, not the read-only installation viewer", async () => {
+  const fixture = setup();
+  fixture.graphql.mockResolvedValue(page([{ ...thread(), viewerCanResolve: false }]));
+  for (const canEdit of [true, false]) {
+    const result = await runWithGithubReadTransport(vi.fn(), () => true, () => fixture.service.get(target), canEdit);
+    expect(result.threads[0]?.canResolve).toBe(canEdit);
+  }
+});
 const sha = "a".repeat(40);
 const baseSha = "b".repeat(40);
 const pageInfo = { hasNextPage: false, endCursor: null };
@@ -122,6 +131,14 @@ function setup() {
 }
 
 describe("GitHub inline review aggregate", () => {
+  it.each([true, false])("retains local GitHub viewer resolve permissions (%s)", async canResolve => {
+    const fixture = setup();
+    fixture.graphql.mockResolvedValue(page([{ ...thread(), viewerCanResolve: canResolve, viewerCanUnresolve: !canResolve }]));
+
+    const result = await fixture.service.get(target);
+
+    expect(result.threads[0]).toMatchObject({ canResolve, canUnresolve: !canResolve });
+  });
   it("rejects a published diff whose base changes while its head stays the same", async () => {
     const { service, get } = setup();
     get

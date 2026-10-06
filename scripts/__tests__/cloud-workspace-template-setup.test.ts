@@ -47,6 +47,14 @@ describe("template setup dispatch and transient read authority", () => {
     expect(f.operations.clone).not.toHaveBeenCalled();
   });
 
+  it("reports exhausted history budgets as a closed setup failure and revokes the token", async () => {
+    const f = fixture();
+    f.operations.checkoutComputer.mockRejectedValue(Object.assign(new Error("repository_history_limit"), { code: "repository_history_limit" }));
+    await expect(prepareCloudWorkspaceRepository(f.material, {}, null, f.operations))
+      .rejects.toMatchObject({ name: "SetupFailure", code: "repository_history_limit" });
+    expect(f.operations.revokeReadToken).toHaveBeenCalledOnce();
+  });
+
   it("revokes on checkout failure and does not continue to hooks after an unconfirmed revoke", async () => {
     const f = fixture();
     f.operations.checkoutComputer.mockRejectedValue(new Error("repository_revision_invalid"));

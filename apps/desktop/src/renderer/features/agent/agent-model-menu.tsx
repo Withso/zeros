@@ -65,7 +65,6 @@ import {
   effectiveEffort,
   effortLabel,
   effortLevelsFor,
-  modelsForAgent,
   resolveModelOption,
   type ModelOption,
 } from "./model-catalog";
@@ -87,6 +86,7 @@ import { useEnabledAgents } from "./enabled-agents";
 import { pickDefaultAgent } from "../settings/default-agent";
 import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 import type { InitializeResponse } from "../../platform/bridge/agent-events";
+import { modelsForWorkspaceAgent, type WorkspaceRegistryAgent } from "./workspace-agent-registry";
 
 /** A resolved agent + model choice. `model` is always concrete here — a row
  *  IS a model. */
@@ -115,7 +115,7 @@ const MODEL_COMMAND_ITEM_STACK =
   "[&_[cmdk-list-sizer]]:flex [&_[cmdk-list-sizer]]:flex-col [&_[cmdk-list-sizer]]:gap-px";
 
 interface AgentGroup {
-  agent: BridgeRegistryAgent;
+  agent: WorkspaceRegistryAgent;
   family: string;
   models: ModelOption[];
 }
@@ -167,11 +167,12 @@ export function AgentModelMenu({
   triggerTooltip = "Change model",
   redirectCrossAgent = false,
   selectionTiming,
+  footer,
   children,
 }: {
   /** Registry snapshot override (the dispatcher passes its own). When
    *  omitted, the shared agents cache is used (the chat composer). */
-  agents?: BridgeRegistryAgent[] | null;
+  agents?: WorkspaceRegistryAgent[] | null;
   /** Live capability snapshot for the active chat's agent. Other agent groups
    *  have no active session here and intentionally use the curated fallback. */
   initialize?: InitializeResponse | null;
@@ -194,6 +195,7 @@ export function AgentModelMenu({
    *  DIFFERENT agent opens a new chat tab instead of switching in place. */
   redirectCrossAgent?: boolean;
   selectionTiming?: "next-message";
+  footer?: React.ReactNode;
   /** The trigger element (rendered via PopoverTrigger asChild). */
   children: React.ReactNode;
 }) {
@@ -204,7 +206,7 @@ export function AgentModelMenu({
   useFavoritesVersion();
   useModelPreferencesVersion();
 
-  const registry = agentsProp !== undefined ? agentsProp : snapshot;
+  const registry: WorkspaceRegistryAgent[] | null = agentsProp !== undefined ? agentsProp : snapshot;
 
   // Only confirmed connections supply selectable models. The chat's persisted
   // identity stays on the trigger while its provider needs configuration.
@@ -214,8 +216,8 @@ export function AgentModelMenu({
       .map((agent) => ({
         agent,
         family: agentFamily(agent.id),
-        models: modelsForAgent(
-          agent.id,
+        models: modelsForWorkspaceAgent(
+          agent,
           agent.id === value?.agentId ? initialize : null,
         ),
       }))
@@ -320,6 +322,7 @@ export function AgentModelMenu({
       groups.find((candidate) => candidate.agent.id === value.agentId) ??
       groups.find((candidate) => candidate.family === currentFamily);
     if (!group) return null;
+    if (group.agent.cloudModels && !group.agent.cloudModels.includes(activeModel)) return null;
     const model = group.models.find((option) => option.value === activeModel) ??
       resolveModelOption(value.agentId, activeModel, initialize) ?? {
         value: activeModel,
@@ -735,10 +738,13 @@ export function AgentModelMenu({
             </Popover>
           ) : (
             <div className="text-fg2 px-3 pb-3 text-xs">
-              No connected agents.
+              {registry?.some(agent => agent.runtimeUpgradeRequired)
+                ? "This workspace gets the new cloud runtime the next time it wakes"
+                : "No connected agents."}
             </div>
           )}
         </Command>
+        {(groups.length > 0 || !registry?.some(agent => agent.runtimeUpgradeRequired)) && footer}
       </PopoverContent>
     </Popover>
   );

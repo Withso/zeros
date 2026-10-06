@@ -35,6 +35,9 @@ import {
 } from "./adopt-directory";
 import { stageDesignRegistry } from "./metadata-git";
 import { createHash, randomUUID } from "node:crypto";
+import path from "node:path";
+import { designAssetUploadSchema, prepareDesignAssetUpload, withDesignAssetUpload } from "./asset-upload";
+import { escapeAttribute } from "./source";
 import {
   designDirectoryFromSettings,
   designDocumentMetadataPath,
@@ -63,6 +66,7 @@ import {
   opSettingsResolveWithOverride,
 } from "../settings/ops";
 import { personalRepoRoot } from "../settings/personal-repo";
+import type { QualifiedCloudFilePolicy } from "../files/cloud-file-policy";
 import {
   designDocumentIdForFrame,
   forgetWorkspaceDesignApiFrames,
@@ -126,6 +130,7 @@ import {
   designSelectionStyles,
   designMatchedDeclarations,
   designMutationStyles,
+  designHistorySourceVersions,
 } from "./route-params";
 import {
   transferDesignHistoryBytes,
@@ -247,6 +252,7 @@ const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.node.text",
   "design.node.html",
   "design.asset.insert",
+  "design.asset.upload",
   "design.stage",
   "design.unstage",
   "design.save",
@@ -266,7 +272,7 @@ export async function handleDesignWorkspaceRoute(
   host: DesignWorkspaceRouteHost,
   op: string,
   params: Params,
-  options: { remote: boolean; hostLocalResources: boolean; actor?: DesignActor; primaryRepositoryRoot?: string },
+  options: { remote: boolean; hostLocalResources: boolean; actor?: DesignActor; primaryRepositoryRoot?: string; cloudFiles?: QualifiedCloudFilePolicy },
 ): Promise<unknown> {
   const { remote, hostLocalResources } = options;
   const applyDesktopDesignOperation = applyHumanDesignOperation.bind(null, options.actor ?? { kind: "human", id: "desktop" });
@@ -458,6 +464,8 @@ export async function handleDesignWorkspaceRoute(
         remote,
       );
       const direction = op === "design.history.undo" ? "undo" : "redo";
+      const expectedSources = options.actor && params.expectedSourceVersions !== undefined
+        ? designHistorySourceVersions(params.expectedSourceVersions) : undefined;
       const history = host.designHistoryState(workspace.path);
       const source = history?.[direction];
       const entry = source?.pop();
@@ -557,10 +565,20 @@ export async function handleDesignWorkspaceRoute(
         const documentId = designDocumentIdForFrame(entry.frame);
         let result;
         try {
+          let expectedRevision = options.actor && !expectedSources
+            ? reqStr(params, "expectedRevision") : undefined;
+          if (expectedSources) {
+            // Read the semantic revision BEFORE checking the rendered source.
+            // A write racing either read still fails the API's revision CAS.
+            expectedRevision = (await api.open(documentId)).revision;
+            const current = await readDesignFrameRenderIdentity(workspace.path, entry.frame);
+            if (expectedSources[entry.frame] !== current.sourceVersion)
+              throw new GitError({ code: "VALIDATION_FAILED", message: "Design source changed. Refresh before undoing or redoing." });
+          }
           result =
             direction === "undo"
-              ? await api.undo(documentId, options.actor, options.actor ? { expectedRevision: reqStr(params, "expectedRevision") } : {})
-              : await api.redo(documentId, options.actor, options.actor ? { expectedRevision: reqStr(params, "expectedRevision") } : {});
+              ? await api.undo(documentId, options.actor, { expectedRevision })
+              : await api.redo(documentId, options.actor, { expectedRevision });
           if (!result && options.actor) throw new GitError({ code: "VALIDATION_FAILED", message: "Another collaborator changed Design history. Refresh before undoing." });
         } catch (error) {
           if (error instanceof DesignPageTargetError)
@@ -619,13 +637,15 @@ export async function handleDesignWorkspaceRoute(
       if (reqStr(params, "workspaceId") !== reference.workspaceId) throw new GitError({ code: "VALIDATION_FAILED", message: "The Design reference belongs to another workspace." });
       return host.withDesignReadWorkspace(reference.workspaceId, remote, async ({ root, designDirectory }) => {
         const inspection = await inspectDesignContext(root, reference);
-        if (inspection.status !== "ready" || remote || !hostLocalResources) return inspection;
+        if (inspection.status !== "ready" || remote || (!hostLocalResources && !options.primaryRepositoryRoot)) return inspection;
         const verification = await openDesignVerification({ workspaceId: reference.workspaceId, workspacePath: root, directory: designDirectory, directoryId: reference.directoryId });
         return { ...inspection, verification, previewUrl: designFramePreviewUrl(verification, reference) };
       });
     }
     case "design.verification.open": {
-      if (remote || !hostLocalResources) throw new Error("Frame preview is currently available in local workspaces.");
+      // The qualified cloud primary owns its loopback preview. Desktop clients
+      // reach it only through the existing authenticated Browser preview host.
+      if (remote || (!hostLocalResources && !options.primaryRepositoryRoot)) throw new Error("Frame preview is currently available in local workspaces.");
       const workspaceId = reqStr(params, "workspaceId");
       return host.withDesignReadWorkspace(workspaceId, false, async ({ root, designDirectory }) => {
         const reference = await createDesignContextReference(root, workspaceId, reqStr(params, "frame"), undefined, reqStr(params, "directoryId"));
@@ -1554,7 +1574,12 @@ export async function handleDesignWorkspaceRoute(
         },
       };
     }
-    case "design.asset.insert": {
+    case "design.asset.insert":
+    case "design.asset.upload": {
+      if (op === "design.asset.upload" && !options.primaryRepositoryRoot)
+        throw new Error("Image upload requires a cloud workspace.");
+      const uploadInput = op === "design.asset.upload" ? designAssetUploadSchema.parse(params) : undefined;
+      const asset = uploadInput ? prepareDesignAssetUpload(uploadInput) : undefined;
       const workspace = host.resolveDesignWorkspace(
         reqStr(params, "workspaceId"),
         remote,
@@ -1571,7 +1596,14 @@ export async function handleDesignWorkspaceRoute(
           message: `Design frame changed before the mutation: ${render.file}. Re-read it and retry.`,
         });
       }
-      const prepared = await prepareDesignAssetInsertion(workspace.path, {
+      const prepared = asset && uploadInput ? await (async () => {
+        const offsets = await readDesignElementOffsetMap(workspace.path, frame);
+        const root = offsets.find(element => element.tag === "main") ?? offsets[0];
+        if (!root) throw new Error("The frame has no editable root.");
+        const reference = path.posix.relative(path.posix.dirname(frame), asset.file);
+        return { nodeId: root.oid,
+          html: `<img data-oid="asset-${randomUUID()}" src="${escapeAttribute(reference)}" alt="${escapeAttribute(path.basename(uploadInput.name, path.extname(uploadInput.name)))}" style="position:absolute; left:${Math.round(uploadInput.x)}px; top:${Math.round(uploadInput.y)}px; max-width:320px; height:auto;">` };
+      })() : await prepareDesignAssetInsertion(workspace.path, {
         frame,
         sourceVersion,
         assetPath: reqStr(params, "assetPath"),
@@ -1579,10 +1611,10 @@ export async function handleDesignWorkspaceRoute(
         y: reqNum(params, "y"),
       });
       const operationId = randomUUID();
-      const applied = await applyDesktopDesignOperation(
+      const apply = () => applyDesktopDesignOperation(
         workspace.path,
         frame,
-        `Insert ${reqStr(params, "assetPath")}`,
+        `Insert ${asset?.file ?? reqStr(params, "assetPath")}`,
         {
           operationId,
           type: "node.set-html",
@@ -1593,6 +1625,7 @@ export async function handleDesignWorkspaceRoute(
         undefined,
         summary.revision,
       );
+      const applied = asset ? await withDesignAssetUpload(asset, apply) : await apply();
       const mutation = await readDesignMutationResult(
         workspace.path,
         frame,
@@ -1605,6 +1638,7 @@ export async function handleDesignWorkspaceRoute(
         );
       }
       return {
+        ...(asset ? { assetPath: asset.file, receipt: applied.receipt } : {}),
         mutation,
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
@@ -1767,7 +1801,7 @@ export async function handleDesignWorkspaceRoute(
           ).map(([id, entry]) => [entry.path, id]),
         ),
         pointer,
-        active: designDirectoryNameFor(cwd),
+        active: (options.primaryRepositoryRoot && entryTarget?.directory) || designDirectoryNameFor(cwd),
         target: entryTarget,
       };
     }
@@ -1786,6 +1820,7 @@ export async function handleDesignWorkspaceRoute(
           message: "Open this repository in Zeros first.",
         });
       const folder = reqStr(params, "folder");
+      options.cloudFiles?.assertPath(folder, op === "design.adoptDirectory");
       return op === "design.previewExistingDirectory"
         ? previewExistingDesignDirectory(repoRoot, folder)
         : adoptExistingDesignDirectory(
@@ -1842,9 +1877,11 @@ export async function handleDesignWorkspaceRoute(
           message: "Open this repository in Zeros first.",
         });
       }
+      options.cloudFiles?.assertPath(reqStr(params, "directory"), true);
       await removeDesignDirectory({
         repoRoot,
         directory: reqStr(params, "directory"),
+        ...(options.cloudFiles ? { livePrimaryWorkspaceId: reqStr(params, "workspaceId") } : {}),
       });
       return { removed: true };
     }
@@ -1868,6 +1905,8 @@ export async function handleDesignWorkspaceRoute(
             "That repository isn't open in Zeros — open the folder first.",
         });
       }
+      options.cloudFiles?.assertPath(reqStr(params, "from"), true);
+      options.cloudFiles?.assertPath(reqStr(params, "to"), true);
       return renameDesignDirectory({
         repoRoot,
         from: reqStr(params, "from"),

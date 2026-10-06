@@ -68,6 +68,10 @@ behavior from release qualification and deferred product surfaces.
 - [Computer agent tools](computer-tools.md) defines marked admin workspaces, execution authority and the five computer tools.
 - [Provider background work](provider-background-work.md) defines retained native tasks, renewable leases and task recovery.
 - [Lifecycle diagnostics](lifecycle-diagnostics.md) defines setup progress, failure evidence and recovery diagnostics.
+- [In-place runtime updates](runtime-hot-update.md) proposes quiet engine updates,
+  immutable generation handoff, rollback and the bootstrap qualification gates.
+- [Live runtime updates](live-runtime-updates.md) proposes staging qualified runtimes
+  in running workspaces and swapping the engine at a safe point without stopping user work.
 
 - [Qualification status](qualification-status.md) separates the current eight
   backend steps, native tool coverage, live evidence and remaining release gates.
@@ -88,6 +92,8 @@ behavior from release qualification and deferred product surfaces.
   expansion for independent provider connections, shared Code/Design sessions,
   live access from multiple devices, and complete recovery. Its acceptance
   requirements are not claims of completed implementation or qualification.
+- [Local workspace impact audit](local-workspace-impact-audit.md) records the
+  shared-path review of the merged Cloud v2 changes and the local regression guards.
 - [Data, copies, and local sync](data-and-sync.md)
   defines sources of truth, recovery, conflict rules, Personal/Organization
   placement, repository settings, immutable forks, per-device replicas, SSH,

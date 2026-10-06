@@ -80,6 +80,13 @@ d("private provider execution leases",()=>{
     service = new DatabaseCloudAgentExecutionService(pool, encryption, false, undefined, undefined, { setupSecretKeyV1: key });
     return { consent };
   }
+  it("never labels an already admitted execution replay as a pre-provider refusal", async () => {
+    const f=await backgroundFixture();
+    await credentials.revokeDelegation(owner.id,delegationId);
+    await expect(service.admit(engine(),f.input)).rejects.toMatchObject({status:403,code:"cloud_agent_authority_rejected"});
+    expect((await pool.query("SELECT result_code FROM cloud_workspace_commands WHERE id=$1",[f.commandId])).rows[0].result_code).toBeNull();
+    expect((await pool.query("SELECT id FROM cloud_agent_execution_leases WHERE id=$1",[f.lease.leaseId])).rowCount).toBe(1);
+  });
   it("delivers v2 org env only to opted-in executions and revalidates personal consent and pinned versions", async () => {
     const { consent } = await computerEnvironment();
     await expect(service.admit(engine(), admission())).rejects.toMatchObject({ code: "computer_environment_runtime_required" });
@@ -245,6 +252,11 @@ d("private provider execution leases",()=>{
   });
   it("requires exact-image MCP qualification for customization admission",async()=>{
     await expect(service.admit(engine(),{...admission(),customization:{version:1,repositoryServers:[]}})).rejects.toMatchObject({status:403});
+  });
+  it("keeps legacy discovery aligned with its gateway's required customization", async () => {
+    expect((await credentials.forWorkspace(owner.id, fixture.workspaceId)).delegations[0]?.runtimeQualified).toBe(false);
+    await pool.query("UPDATE cloud_agent_runtime_qualifications SET mcp_qualified=true");
+    expect((await credentials.forWorkspace(owner.id, fixture.workspaceId)).delegations[0]?.runtimeQualified).toBe(true);
   });
   it("delivers history authority only to version-2 admitted executions and binds it through renewals",async()=>{
     await pool.query("UPDATE cloud_agent_runtime_qualifications SET mcp_qualified=true");
@@ -437,11 +449,27 @@ d("private provider execution leases",()=>{
     await expect(service.validate(engine(),leaseId,true,authority.credentialVersion,true)).rejects.toMatchObject({status:403});
     expect((await pool.query("SELECT material_version FROM cloud_codex_auth_caches WHERE credential_id=$1",[c.input.credentialId])).rows[0]!.material_version).toBe(2);
   });
+  it.each(["renewal", "uncertain"])("retains the closed reconnect cause when Codex %s cannot refresh", async state => {
+    const c=await codexCredential(Math.floor(Date.now()/1000)+120),commandId=randomUUID();
+    const renew=vi.fn(async(_cache,dispatch)=>{await dispatch();throw new Error("synthetic refresh refusal");});
+    service=new DatabaseCloudAgentExecutionService(pool,encryption,false,new DatabaseCodexAuthRenewal(pool,encryption,renew));
+    if(state==="uncertain")await pool.query("UPDATE cloud_codex_auth_caches SET state='uncertain',attempt_id=$2,attempt_started_at=now() WHERE credential_id=$1",[c.input.credentialId,randomUUID()]);
+    const commands=new DatabaseCloudWorkspaceCommandService({pool});
+    await commands.mutate({...engine(),actorSessionId},{conversationId:"refresh-refusal",operationId:randomUUID(),expectedRevision:0,
+      action:{kind:"enqueue",commandId,payload:{agentId:"codex",model:c.request.model,userMessageId:randomUUID(),prompt:[{type:"text",text:"Keep my prompt"}],modeRevision:0,agentCredentialGrantId:c.grant}}});
+    const claim=(await commands.claim(engine(),"refresh-refusal",c.request.executionId))!;
+    await expect(service.admit(engine(),{...c.request,source:{kind:"command",commandId,claimId:claim.claimId}}))
+      .rejects.toMatchObject({status:409,code:"cloud_agent_credential_refresh_required"});
+    await commands.settle(engine(),{commandId,claimId:claim.claimId,state:"failed",resultCode:"command_dispatch_rejected"});
+    expect((await pool.query("SELECT result_code FROM cloud_workspace_commands WHERE id=$1",[commandId])).rows[0].result_code).toBe("cloud_agent_credential_refresh_required");
+    expect((await pool.query("SELECT 1 FROM cloud_agent_execution_leases")).rowCount).toBe(0);
+    expect(renew).toHaveBeenCalledTimes(state==="renewal"?1:0);
+  });
   it("preserves rotated cache but withholds delivery when delegation is revoked during refresh",async()=>{
     const c=await codexCredential(Math.floor(Date.now()/1000)+120);
     const renew=vi.fn(async(_cache,dispatch)=>{await dispatch();await credentials.revokeDelegation(owner.id,c.grant);return syntheticCodexCache({refresh:`rotated-refresh-${randomUUID()}`});});
     service=new DatabaseCloudAgentExecutionService(pool,encryption,false,new DatabaseCodexAuthRenewal(pool,encryption,renew));
-    await expect(service.admit(engine(),c.request)).rejects.toMatchObject({status:403});
+    await expect(service.admit(engine(),c.request)).rejects.toMatchObject({status:409,code:"cloud_agent_credential_revoked"});
     expect((await pool.query("SELECT state,material_version FROM cloud_codex_auth_caches WHERE credential_id=$1",[c.input.credentialId])).rows[0]).toEqual({state:"ready",material_version:2});
     expect((await pool.query("SELECT 1 FROM cloud_agent_execution_leases")).rowCount).toBe(0);
   });
@@ -454,7 +482,7 @@ d("private provider execution leases",()=>{
   });
   it("denies unqualified images, authentication modes, models, and a forged engine",async()=>{
     await expect(service.admit({...engine(),heartbeatToken:`zwh_${randomBytes(32).toString("base64url")}`},admission())).rejects.toThrow();
-    await expect(service.admit(engine(),{...admission(),model:"another-model"})).rejects.toMatchObject({status:403});
+    await expect(service.admit(engine(),{...admission(),model:"another-model"})).rejects.toMatchObject({status:409,code:"cloud_agent_model_not_authorized"});
     await expect(service.admit(engine(),{...admission(),provider:"codex"})).rejects.toMatchObject({status:403});
     await pool.query("UPDATE cloud_agent_runtime_qualifications SET enabled=false");
     await expect(service.admit(engine(),admission())).rejects.toMatchObject({status:403});

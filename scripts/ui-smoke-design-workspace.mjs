@@ -10,6 +10,7 @@ import { runDesignWorkbenchSmoke } from "./ui-smoke-design-workbench.mjs";
 import { runDesignLayoutGesturesSmoke } from "./ui-smoke-design-layout-gestures.mjs";
 import { runDesignInspectorRacesSmoke } from "./ui-smoke-design-inspector-races.mjs";
 import { runDesignInspectorEditsSmoke } from "./ui-smoke-design-inspector-edits.mjs";
+import { runDesignInspectorShortcutsSmoke } from "./ui-smoke-design-inspector-shortcuts.mjs";
 import { runDesignAutoLayoutSmoke } from "./ui-smoke-design-auto-layout.mjs";
 import { runDesignLayoutSmoke } from "./ui-smoke-design-layout.mjs";
 import { runDesignFrameRecoverySmoke } from "./ui-smoke-design-frame-recovery.mjs";
@@ -39,6 +40,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await runDesignLayoutGesturesSmoke({ page, check });
   await runDesignInspectorRacesSmoke({ page, check });
   await runDesignInspectorEditsSmoke({ page, check });
+  await runDesignInspectorShortcutsSmoke({ page, check });
   await runDesignLayoutSmoke({ page, waitFor, check });
   await runDesignLayoutChildrenSmoke({ page, waitFor, check });
   await runDesignFrameChildrenSmoke({ page, waitFor, check });
@@ -3032,164 +3034,6 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
           .catch(() => false),
       "design-style-preview-escape",
     ),
-  );
-  const xField = page.getByLabel("X", { exact: true });
-  await xField.fill("12px");
-  await xField.press("Enter");
-  check(
-    "X/Y fields make offsets effective on static HTML elements",
-    await waitFor(
-      () =>
-        selectedHeading
-          .evaluate(
-            (element) =>
-              element.style.getPropertyValue("position") === "relative" &&
-              element.style.getPropertyValue("left") === "12px",
-          )
-          .catch(() => false),
-      "design-static-offset-preview",
-    ),
-  );
-  await xField.fill("");
-  await xField.press("Enter");
-  check(
-    "clearing the field removes the offset it authored",
-    await waitFor(
-      () =>
-        selectedHeading
-          .evaluate((element) => element.style.getPropertyValue("left") === "")
-          .catch(() => false),
-      "design-static-offset-removal",
-    ),
-  );
-  await waitFor(
-    () =>
-      page.evaluate(() => {
-        const operations = window.__zerosHarnessDesignShortcutOperations ?? [];
-        const starts = operations.filter(
-          (operation) => operation === "style:start",
-        ).length;
-        const ends = operations.filter(
-          (operation) => operation === "style:end",
-        ).length;
-        return starts === ends;
-      }),
-    "design-static-offset-removal-settled",
-  );
-  check(
-    "Design uses the shared Git tabs without a second review dialog",
-    (await page.getByRole("button", { name: "Review Design changes", exact: true }).count()) === 0 &&
-      (await page.getByRole("dialog", { name: "Review Design changes", exact: true }).count()) === 0,
-  );
-  const beforeSaveShortcut = await page.evaluate(
-    () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
-  );
-  await xField.fill("16px");
-  await xField.press("ControlOrMeta+S");
-  const saveShortcutSettled = await waitFor(
-    async () =>
-      (await page.evaluate(
-        (start) =>
-          (window.__zerosHarnessDesignShortcutOperations?.length ?? 0) >=
-          start + 4,
-        beforeSaveShortcut,
-      )) === true,
-    "design-command-save",
-  );
-  const saveShortcutOperations = await page.evaluate(
-    (start) =>
-      (window.__zerosHarnessDesignShortcutOperations ?? []).slice(start),
-    beforeSaveShortcut,
-  );
-  check(
-    "Command-S saves a focused draft without staging or committing",
-    saveShortcutSettled &&
-      saveShortcutOperations.slice(0, 4).join(",") ===
-        "style:start,style:end,save:start,save:end" &&
-      (await selectedHeading.evaluate(
-        (element) => element.style.getPropertyValue("left") === "16px",
-      )),
-    JSON.stringify(saveShortcutOperations),
-  );
-  const beforeRapidSaveShortcuts = await page.evaluate(
-    () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
-  );
-  await xField.fill("20px");
-  await xField.press("ControlOrMeta+S");
-  await xField.fill("24px");
-  await xField.press("ControlOrMeta+S");
-  const rapidSaveShortcutsSettled = await waitFor(
-    async () =>
-      (await page.evaluate(
-        (start) =>
-          (window.__zerosHarnessDesignShortcutOperations?.length ?? 0) >=
-          start + 8,
-        beforeRapidSaveShortcuts,
-      )) === true,
-    "design-rapid-command-save",
-  );
-  const rapidSaveShortcutOperations = await page.evaluate(
-    (start) =>
-      (window.__zerosHarnessDesignShortcutOperations ?? []).slice(start),
-    beforeRapidSaveShortcuts,
-  );
-  check(
-    "rapid Command-S requests validate every newly published inspector draft",
-    rapidSaveShortcutsSettled &&
-      rapidSaveShortcutOperations.slice(0, 8).join(",") ===
-        "style:start,style:end,save:start,save:end,style:start,style:end,save:start,save:end" &&
-      (await selectedHeading.evaluate(
-        (element) => element.style.getPropertyValue("left") === "24px",
-      )),
-    JSON.stringify(rapidSaveShortcutOperations),
-  );
-  const beforeSaveShortcutReset = await page.evaluate(
-    () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
-  );
-  await xField.fill("");
-  await xField.press("Enter");
-  await waitFor(
-    async () =>
-      (await selectedHeading
-        .evaluate((element) => element.style.getPropertyValue("left") === "")
-        .catch(() => false)) &&
-      (await page.evaluate(
-        (start) =>
-          (window.__zerosHarnessDesignShortcutOperations?.length ?? 0) >=
-          start + 2,
-        beforeSaveShortcutReset,
-      )),
-    "design-command-save-reset",
-  );
-
-  const beforeHistoryShortcuts = await page.evaluate(
-    () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
-  );
-  await page.getByLabel("Design canvas").focus();
-  await page.keyboard.press("ControlOrMeta+Z");
-  await page.keyboard.press("ControlOrMeta+Z");
-  await page.keyboard.press("ControlOrMeta+Shift+Z");
-  const historyShortcutsSettled = await waitFor(
-    async () =>
-      (await page.evaluate(
-        (start) =>
-          (window.__zerosHarnessDesignShortcutOperations?.length ?? 0) >=
-          start + 6,
-        beforeHistoryShortcuts,
-      )) === true,
-    "design-rapid-history-shortcuts",
-  );
-  const historyShortcutOperations = await page.evaluate(
-    (start) =>
-      (window.__zerosHarnessDesignShortcutOperations ?? []).slice(start),
-    beforeHistoryShortcuts,
-  );
-  check(
-    "rapid undo and redo keypresses execute once each in input order",
-    historyShortcutsSettled &&
-      historyShortcutOperations.slice(0, 6).join(",") ===
-        "undo:start,undo:end,undo:start,undo:end,redo:start,redo:end",
-    JSON.stringify(historyShortcutOperations),
   );
   await expandStyleSection("Transform");
   await page.getByRole("button", { name: "Edit transform" }).click();

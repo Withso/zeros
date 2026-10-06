@@ -88,6 +88,7 @@ import {
 } from "./workspace-glyph";
 import { workspaceLabel, workspaceTabDescription } from "./workspace-tabs";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
+import { useCloudWorkspaceRestartAction } from "./conversation/cloud-workspace-restart-controls";
 
 // --- CONSTANTS ---
 
@@ -221,6 +222,7 @@ export function SidebarWorkspaceRow({
   rowRef,
   onOpenSettings,
 }: SidebarWorkspaceRowProps) {
+  const restart = useCloudWorkspaceRestartAction(workspace.path, surfaceActive);
   const requestedMode = usePendingWorkspaceMode(workspace.id);
   const modeSwitching = requestedMode !== null;
   const designWorkspace = workspace.kind === "design";
@@ -438,13 +440,18 @@ export function SidebarWorkspaceRow({
   );
 
   return (
-    <WorkspaceContextMenu
-      workspace={workspace}
-      onArchive={() => onArchive(workspace)}
-      archiveDisabled={archiving || modeSwitching}
-    >
-      {row}
-    </WorkspaceContextMenu>
+    <>
+      <WorkspaceContextMenu
+        workspace={workspace}
+        onArchive={() => onArchive(workspace)}
+        archiveDisabled={archiving || modeSwitching}
+        onRestart={restart.visible ? restart.request : undefined}
+        restartDisabledReason={restart.disabledReason}
+      >
+        {row}
+      </WorkspaceContextMenu>
+      {restart.dialog}
+    </>
   );
 }
 

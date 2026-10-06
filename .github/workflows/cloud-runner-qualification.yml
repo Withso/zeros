@@ -1,4 +1,4 @@
-name: Cloud runner qualification
+name: Cloud Runner Qualification
 
 # Prove the runner used by the protected, main-only cloud workflows before
 # merge. Publication and paid provider qualification keep their own gates.
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   qualify:
-    name: cloud runner (Ubuntu 26.04)
+    name: checks-cloud-runner
     runs-on: ubuntu-26.04
     timeout-minutes: 35
     services:

@@ -15,6 +15,7 @@ vi.mock("../../platform/bridge/use-bridge", () => ({ useBridge: () => ({}) }));
 vi.mock("../../shared/theme/use-theme-variant", () => ({ useThemeId: () => "dark" }));
 vi.mock("../../state/cloud-workspace-catalog", () => ({
   subscribeCloudWorkspaces: () => () => {},
+  subscribeCloudWorkspaceRefresh: () => () => {},
   cloudWorkspaceDocument: (target: { workspaceId: string }) => target.workspaceId === state.document?.id ? state.document : undefined,
 }));
 import { SetupView } from "../workbench/tabs/setup-tab";

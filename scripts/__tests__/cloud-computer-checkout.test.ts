@@ -84,6 +84,100 @@ function fixture() {
 }
 
 describe("Cloud Computer fork checkout", () => {
+  it("fetches source and target ancestry from a shallow template so their merge-base exists", async () => {
+    const f = fixture();
+    f.git(f.source, ["branch", "-M", "main"]);
+    const base = f.git(f.source, ["rev-parse", "HEAD"]);
+    f.git(f.source, ["checkout", "-b", "feature/topic"]);
+    for (let i = 0; i < 4; i++) f.git(f.source, ["commit", "--allow-empty", "-m", `Feature ${i}`]);
+    const head = f.git(f.source, ["rev-parse", "HEAD"]);
+    f.git(f.source, ["checkout", "main"]);
+    for (let i = 0; i < 3; i++) f.git(f.source, ["commit", "--allow-empty", "-m", `Main ${i}`]);
+    const target = f.git(f.source, ["rev-parse", "HEAD"]);
+    const remote = path.join(f.root, "remote.git");
+    f.git(f.root, ["clone", "--bare", "--no-hardlinks", f.source, remote]);
+    rmSync(f.source, { recursive: true });
+    f.git(f.root, ["clone", "--depth=1", "--branch=main", `file://${remote}`, f.source]);
+    f.git(f.source, ["remote", "set-url", "origin", f.repository.cloneUrl]);
+    f.template.repositoryManifest[0]!.sha = target;
+    rmSync(f.templateFile);
+    writeFileSync(f.templateFile, JSON.stringify(f.template), { mode: 0o444 });
+    const repository = { ...f.repository, revision: head };
+    const computer = { ...f.computer, requestedRevision: "feature/topic", checkoutSource: {
+      kind: "branch", revision: head, headBranch: "feature/topic", targetBranch: "main", pullRequest: null,
+    } };
+    const git = vi.fn(async (directory: string, args: string[]) => f.git(directory,
+      args[0] === "fetch" ? args.map(arg => arg === "origin" ? `file://${remote}` : arg) : args));
+    await checkoutCloudComputerPrimary(computer, repository, { ...f.options, git, verifyOrigin: async () => {} });
+    expect(f.git(f.source, ["rev-parse", "--is-shallow-repository"])).toBe("false");
+    expect(f.git(f.source, ["rev-parse", "origin/main"])).toBe(target);
+    expect(f.git(f.source, ["merge-base", "HEAD", "origin/main"])).toBe(base);
+    expect(Number(f.git(f.source, ["rev-list", "--count", "HEAD", "origin/main"]))).toBe(8);
+    expect(git.mock.calls.find(([, args]) => args[0] === "fetch")?.[1]).not.toContain("--depth=1");
+  });
+
+  it.each(["time", "size"])("falls back to bounded history after the %s guard, leaving an observable shallow checkout", async limit => {
+    const f = fixture();
+    let fetches = 0;
+    const git = vi.fn(async (directory: string, args: string[], _token?: string, options?: { signal: AbortSignal }) => {
+      if (args[0] !== "fetch") return f.git(directory, args);
+      fetches++;
+      if (fetches === 1) {
+        if (limit === "size") writeFileSync(path.join(f.source, ".git/objects/pack/tmp_pack_fixture"), Buffer.alloc(2048));
+        await new Promise((_resolve, reject) => options?.signal.addEventListener("abort", () => {
+          rmSync(path.join(f.source, ".git/objects/pack/tmp_pack_fixture"), { force: true });
+          reject(new Error("fetch interrupted"));
+        }, { once: true }));
+      }
+      writeFileSync(path.join(f.source, ".git/shallow"), `${f.repository.revision}\n`);
+      return "";
+    });
+    await checkoutCloudComputerPrimary(f.computer, f.repository, { ...f.options, git, verifyOrigin: async () => {},
+      historyBudget: { timeoutMs: limit === "time" ? 25 : 1000, maxBytes: 1024, pollIntervalMs: 5 } });
+    expect(fetches).toBe(2);
+    expect(git.mock.calls.filter(([, args]) => args[0] === "fetch")[1]?.[1]).toContain("--depth=128");
+    expect(f.git(f.source, ["rev-parse", "--is-shallow-repository"])).toBe("true");
+  });
+
+  it("does not disguise an ordinary Git authentication failure as a history fallback", async () => {
+    const f = fixture();
+    const git = vi.fn(async (directory: string, args: string[]) => {
+      if (args[0] === "fetch") throw new Error("repository_temporarily_unavailable");
+      return f.git(directory, args);
+    });
+    await expect(checkoutCloudComputerPrimary(f.computer, f.repository, { ...f.options, git, verifyOrigin: async () => {} }))
+      .rejects.toThrow("repository_temporarily_unavailable");
+    expect(git.mock.calls.filter(([, args]) => args[0] === "fetch")).toHaveLength(1);
+  });
+
+  it("bounds the fallback too and stops after two resource-limited attempts", async () => {
+    const f = fixture();
+    let fetches = 0;
+    const git = async (directory: string, args: string[], _token?: string, options?: { signal: AbortSignal }) => {
+      if (args[0] !== "fetch") return f.git(directory, args);
+      fetches++;
+      return new Promise((_resolve, reject) => options?.signal.addEventListener("abort", () => reject(new Error("interrupted")), { once: true }));
+    };
+    await expect(checkoutCloudComputerPrimary(f.computer, f.repository, { ...f.options, git, verifyOrigin: async () => {},
+      historyBudget: { timeoutMs: 5, maxBytes: 1024, pollIntervalMs: 5 } })).rejects.toMatchObject({ code: "repository_history_limit" });
+    expect(fetches).toBe(2);
+  });
+
+  it.each(["default", "pull_request"])("carries accepted %s source metadata into engine registration", async kind => {
+    const f = fixture();
+    const checkoutSource = { kind, revision: f.repository.revision, headBranch: kind === "default" ? "main" : "feature/topic",
+      targetBranch: kind === "default" ? "main" : "release/stable",
+      pullRequest: kind === "default" ? null : { number: 42, url: "https://github.com/fixture/primary/pull/42", state: "ready" } };
+    const computer = { ...f.computer, requestedRevision: kind === "default" ? "main" : "refs/pull/42/head", checkoutSource };
+    const git = async (directory: string, args: string[]) => args[0] === "fetch" ? "" : f.git(directory, args);
+    await checkoutCloudComputerPrimary(computer, f.repository, { ...f.options, git, verifyOrigin: async () => {} });
+    expect(f.git(f.source, ["branch", "--show-current"])).toBe(kind === "default" ? "" : "feature/topic");
+    expect(JSON.parse(f.git(f.source, ["config", "--local", "--get", "zeros.cloud-source"]))).toEqual(checkoutSource);
+    expect(readFileSync(path.join(f.source, ".git/config"), "utf8").includes(token)).toBe(false);
+    expect(() => parseCloudComputerSetup({ ...computer, checkoutSource: { ...checkoutSource, targetBranch: f.repository.revision } }, f.repository)).toThrow();
+    expect(() => parseCloudComputerSetup({ ...computer, checkoutSource: { ...checkoutSource, revision: "f".repeat(40) } }, f.repository)).toThrow();
+  });
+
   it("reads the verified manifest inode when its pathname is replaced after the metadata check", () => {
     const f = fixture();
     rmSync(f.templateFile);

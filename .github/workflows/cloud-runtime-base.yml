@@ -1,4 +1,4 @@
-name: Cloud runtime base
+name: Cloud Runtime Base
 
 on:
   workflow_dispatch:
@@ -22,6 +22,7 @@ concurrency:
 
 jobs:
   build:
+    name: build-runtime-base
     if: github.event.repository.fork == false && github.ref == 'refs/heads/main'
     permissions:
       contents: read

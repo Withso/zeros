@@ -33,6 +33,10 @@ export const CLOUD_HOST_LIMITS = Object.freeze({
   "memory.oom.group": "1",
 });
 const INSTANCE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+// The protected v4 base's final stop verifier admits engine-* leaf names.
+// Retain that namespace without changing base bytes or its compatibility ID.
+const WORKLOAD_PREFIX = "engine-workload-";
+const workloadLeaf = name => name.startsWith(WORKLOAD_PREFIX) && INSTANCE.test(name.slice(WORKLOAD_PREFIX.length));
 const CONTROL_NAMES = new Set([
   ...Object.keys(CLOUD_ENGINE_LIMITS),
   "cgroup.procs",
@@ -178,7 +182,7 @@ export class CloudEngineCgroup {
     const leaf = directory.slice(runtime.cgroupRoot.length + 1);
     const valid = runtime.profile === "v4"
       ? isCloudRuntimeCgroupRoot(runtime.cgroupRoot) && path.dirname(directory) === runtime.cgroupRoot &&
-        (leaf === "setup" || leaf.startsWith("engine-") && INSTANCE.test(leaf.slice(7)))
+        (leaf === "setup" || leaf.startsWith("engine-") && INSTANCE.test(leaf.slice(7)) || workloadLeaf(leaf))
       : /^\/sys\/fs\/cgroup\/zeros-cloud-(?:engine(?:-[a-f0-9-]{36})?|setup)$/.test(directory);
     if (!valid)
       throw new Error("Invalid cloud engine scope identity");
@@ -237,11 +241,12 @@ export class CloudEngineCgroup {
 }
 
 export function cloudCgroupDirectory(runtime, kind, instanceId) {
-  if (kind !== "setup" && kind !== "engine") throw new Error("Invalid cloud engine scope identity");
-  if (runtime.profile !== "v4") return kind === "setup" ? CLOUD_SETUP_CGROUP : CLOUD_ENGINE_CGROUP;
-  if (!isCloudRuntimeCgroupRoot(runtime.cgroupRoot) || kind === "engine" && !INSTANCE.test(instanceId ?? ""))
+  if (!["setup", "engine", "workload"].includes(kind) || kind === "workload" && runtime.profile !== "v4")
     throw new Error("Invalid cloud engine scope identity");
-  return `${runtime.cgroupRoot}/${kind === "setup" ? "setup" : `engine-${instanceId}`}`;
+  if (runtime.profile !== "v4") return kind === "setup" ? CLOUD_SETUP_CGROUP : CLOUD_ENGINE_CGROUP;
+  if (!isCloudRuntimeCgroupRoot(runtime.cgroupRoot) || kind !== "setup" && !INSTANCE.test(instanceId ?? ""))
+    throw new Error("Invalid cloud engine scope identity");
+  return `${runtime.cgroupRoot}/${kind === "setup" ? "setup" : `${kind === "workload" ? WORKLOAD_PREFIX : "engine-"}${instanceId}`}`;
 }
 
 /** The systemd dispatcher already occupies DelegateSubgroup=host. Only VM
@@ -260,7 +265,7 @@ export class CloudDelegatedCgroups {
     if (!this.io.exists(root)) throw new Error("Cloud delegated parent is missing");
     const children = this.io.children(root);
     if (children.length > 1024 || children.some(name => name !== "host" && name !== "setup" &&
-      !(name.startsWith("engine-") && INSTANCE.test(name.slice(7)))))
+      !(name.startsWith("engine-") && INSTANCE.test(name.slice(7))) && !workloadLeaf(name)))
       throw new Error("Unexpected cloud delegated cgroup child");
     return children;
   }
@@ -283,10 +288,17 @@ export class CloudDelegatedCgroups {
       if (this.io.read(host, name) !== value) throw new Error("Cloud host limit was not confirmed");
     }
   }
-  async retire() {
+  async retire({ preserveWorkload } = {}) {
+    const leaves = this.leaves();
+    // A caller may preserve only its currently witnessed resident host. Missing
+    // or malformed witnesses fail before any engine is disturbed. Ordinary
+    // stop/recovery still retires every workload, including detached descendants.
+    if (preserveWorkload !== undefined && (!INSTANCE.test(preserveWorkload) ||
+      !leaves.includes(`${WORKLOAD_PREFIX}${preserveWorkload}`)))
+      throw new Error("Invalid resident workload preservation witness");
     // Keep the service process in host alive to prove every workload leaf
     // empty. systemd's KillMode=control-group owns the final host-leaf exit.
-    for (const name of this.leaves().filter(name => name !== "host"))
+    for (const name of leaves.filter(name => name !== "host" && name !== `${WORKLOAD_PREFIX}${preserveWorkload}`))
       await new CloudEngineCgroup({ runtime: this.runtime, directory: `${this.runtime.cgroupRoot}/${name}`, io: this.io }).retire();
   }
 }
