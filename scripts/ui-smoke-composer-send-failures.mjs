@@ -99,11 +99,13 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
     await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
     await capture(`blocked-tooltip-${theme}`);
   }
-  // Explicitly force a pointer attempt on a semantically disabled control.
-  await send.click({ force: true });
+  // Prove keyboard feedback before any pointer attempt can consume the state.
+  await editor.press("Enter");
   await page.clock.runFor(200);
   await expect(toasts).toHaveCount(1);
   await expect(toasts).toContainText("Cloud runtime update required");
+  // A pointer attempt and further keystrokes share the same acknowledgement.
+  await send.click({ force: true });
   await editor.press("Enter");
   await editor.press("Enter");
   await expect(toasts).toHaveCount(1);
