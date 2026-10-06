@@ -4644,6 +4644,7 @@ export class WorkspaceService {
           workspaceId: reqStr(params, "workspaceId"),
           prune: optBool(params, "prune") ?? false,
           remote: optStr(params, "remote"),
+          unshallow: optBool(params, "unshallow"),
         });
       case "git.stashSave":
         return stashSave({

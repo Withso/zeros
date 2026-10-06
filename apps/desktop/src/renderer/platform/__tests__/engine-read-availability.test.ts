@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ghPrGet,
   gitDiff,
+  gitFetch,
   gitStage,
   gitStatus,
   listWorkspaceFiles,
@@ -26,6 +27,16 @@ import {
 afterEach(() => setActiveBridge(null));
 
 describe("engine-backed native façades", () => {
+  it("preserves ordinary Local fetch and forwards explicit cloud history recovery with its guard result", async () => {
+    const request = vi.fn().mockResolvedValue({ type: "WORKSPACE_RESPONSE", result: { summary: "" } });
+    setActiveBridge({ request } as unknown as RuntimeClient);
+    expect(await gitFetch({ workspaceId: "local-worktree" })).toEqual({ summary: "" });
+    expect(request).toHaveBeenLastCalledWith(expect.objectContaining({ op: "git.fetch", params: { workspaceId: "local-worktree" } }), 60_000);
+    request.mockResolvedValueOnce({ type: "WORKSPACE_RESPONSE", result: { summary: "", historyLimited: true } });
+    expect(await gitFetch({ workspaceId: "cloud-workspace", unshallow: true })).toEqual({ summary: "", historyLimited: true });
+    expect(request).toHaveBeenLastCalledWith(expect.objectContaining({ op: "git.fetch", params: { workspaceId: "cloud-workspace", unshallow: true } }), 90_000);
+  });
+
   it("preserves the Local Git status payload and response without cloud fields", async () => {
     const result = { staged: [], unstaged: [], untracked: [], conflicted: [], conflictState: null, ahead: null, behind: null, upstream: null };
     const request = vi.fn().mockResolvedValue({ type: "WORKSPACE_RESPONSE", result });

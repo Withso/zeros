@@ -113,6 +113,20 @@ suite("cloud GitHub single-operation writes", () => {
     await service.release(engine(), prepared.grant);
     await expect(service.authorizeProxy(credential.token)).rejects.toThrow();
   });
+  it("binds cloud unshallow to the exact managed fetch digest", async () => {
+    const operation = "git.fetch" as const;
+    const params = { workspaceId: "local-main", unshallow: true };
+    const hash = (value: object) => createHash("sha256").update(JSON.stringify([operation, value])).digest("hex");
+    const prepared = await service.prepare({ ...input(), operation, paramsSha256: hash(params) }, fixture.userId, verified, "synthetic-user-token");
+    const redemption = { grant: prepared.grant, operation, params, paramsSha256: hash(params), branch: "test", baseBranch: "main" };
+    for (const changed of [{ workspaceId: "local-main" }, { ...params, unshallow: false }, { ...params, depth: 1000 }]) {
+      await expect(service.redeem(engine(), { ...redemption, params: changed, paramsSha256: hash(changed) })).rejects.toBeDefined();
+    }
+    const proxy = await service.redeem(engine(), redemption);
+    expect(await service.authorizeProxy(proxy.token)).toMatchObject({ operation, expectedBody: null });
+    await service.release(engine(), prepared.grant);
+    await expect(service.authorizeProxy(proxy.token)).rejects.toBeDefined();
+  });
   it("keeps the user token on the backend and exchanges a grant only once", async () => {
     const { grant } = await prepare();
     const row = (await pool.query("SELECT * FROM cloud_github_write_grants")).rows[0];

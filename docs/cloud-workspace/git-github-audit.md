@@ -93,7 +93,7 @@ configured prefix/collision rules), and `worktree.ts:1547` uses that allocator.
 identity. Local adoption can fall back to a configured base or `main`; the
 approved Cloud policy explicitly uses GitHub's verified default/PR base.
 
-Migration `0131_cloud_workspace_checkout_source.sql` adds a nullable JSON column
+Migration `0132_cloud_workspace_checkout_source.sql` adds a nullable JSON column
 to the immutable accepted source. Generation copies retain it. The upgraded
 setup helper requests `checkoutSourceVersion: 1`; old helpers keep their exact
 existing material shape. New helpers validate it and write only secret-free
@@ -134,11 +134,24 @@ fetch errors fail directly. Exhausting the fallback reports the closed
 the two attempts can together add up to twice the per-attempt budget. This is
 an internal Alpha guard, not an exact network-byte or total-disk quota.
 
-The actual Git shallow flag is returned in cloud `git.status`. Shared
-Changes/Review chrome displays a persistent “Shallow Git history” notice,
-retains the exact-workspace snapshot during refresh/failure, and clears the
-notice after an explicit successful full-history fetch. Hidden/local surfaces
-make no new notice reads. No automatic fetch accompanies target selection.
+The actual Git shallow flag is returned in cloud `git.status`. Changes and
+Review publish “Shallow Git history — older commits and comparisons may be
+incomplete.” into their single `WorkbenchTabFrame` banner slot. This neutral
+notice has lower priority than availability or load failures and never blocks
+content. It retains the exact-workspace snapshot during refresh/failure;
+hidden/local surfaces make no new notice reads.
+
+The explicit **Fetch full history** action runs managed `git.fetch` with
+`unshallow: true` included in the courier grant's request digest. It preserves
+the source/target refs, unpublished HEAD and worktree, and uses the same
+60-second / 256 MiB object-growth guard and TERM/KILL cleanup. The renderer
+allows 90 seconds for the guard, cleanup and request overhead; ordinary Local
+fetch retains its existing 60-second request/command budget. Changes and Review
+share a bounded flight per workspace. A guard limit keeps the notice and adds
+“Fetch stopped at the 60-second or 256 MiB limit.”; other action failures use a
+closed toast. No automatic retry/depth fallback is initiated by this action.
+Only a confirmed non-shallow `git.status` clears the notice. Target selection
+still performs no automatic fetch.
 
 Local verification includes a real depth-1 template with divergent source and
 target branches: setup restores all eight commits and the correct merge-base.
@@ -170,7 +183,7 @@ Line numbers refer to the audited source and may move in later fixes.
 | Create from PR or pinned commit | F2 fixed; Alpha pending | `github-repositories.ts`; `cloud-computer-checkout.test.ts`; `cloud-primary-workspace.test.ts` | PR head is checked out; number/head/base/state are linked. Pinned commits use a generated branch and the named default target. |
 | Checkout and branch naming | F2 fixed | `cloud-primary-workspace.ts`; `worktree.ts:1119`; `cloud-primary-workspace.test.ts` | Use the Local branch allocator for default/commit sources; preserve adopted head names and durable selections on restart. |
 | Target picker | Covered | `apps/desktop/src/engine/git/ops.ts:1134`; `git/__tests__/ops.test.ts:1127` | Default changes metadata only. Rebase/autostash require explicit options; preserved by this fix. |
-| Managed Fetch | Fixed in #339 | `packages/protocol/src/github-auth.ts:298`; `apps/control-plane/src/cloud-workspaces/github-write-grants.ts`; `apps/desktop/src/engine/__tests__/cloud-managed-git.test.ts` | Obtain a desktop grant, redeem upload-pack authority, release it after the operation. |
+| Managed Fetch and explicit full-history recovery | Fixed in #339; guarded history action fixed in F4 | `github-write-grants.integration.test.ts`; `cloud-managed-git.test.ts`; `cloud-history-fetch.integration.test.ts`; `cloud-history-notice.test.ts` | Obtain a desktop grant, bind `unshallow` in the digest, redeem upload-pack authority, release after the operation. One neutral tab banner offers the bounded, single-flight action; non-shallow status clears it. |
 | Managed Pull, merge/rebase strategies, autostash | Authentication fixed in #339; integration covered | Same grant tests; `apps/desktop/src/engine/zeros-engine.ts` (`handleWithAuthor`); `git/ops.ts:829`; `git/__tests__/ops.test.ts:733` | Compose commit identity with fetch authority. Existing explicit strategy, stale-HEAD checks, Design guards and conflict results remain in force. |
 | Explicit local rebase/merge; Continue/Abort | Covered; F4 full ancestry fixed | `git/ops.ts:904,1188`; `git/__tests__/advanced-git-operations.test.ts`; `scripts/__tests__/cloud-computer-checkout.test.ts` | Explicit history operations keep their existing conflict/Design guards. Full source/target history supplies the merge-base; guarded fallback is visibly shallow. |
 | Conflicts and Design canvas | Covered at engine boundary; Mac pending | `apps/desktop/src/engine/design/checkout-status.ts:6`; `workspace/service.ts:2070,2660`; `workspace/__tests__/design-workbench.test.ts:302` | Conflicted checkout is refused before manifest parsing. Verify pause, shared file resolution, Continue/Abort, and recovery in the cloud canvas. |
@@ -210,15 +223,34 @@ as follows; their regression tests remain in the repository.
 | `apps/desktop/src/engine/git/cloud-primary-workspace.ts` | Startup calls this only under `cloudWorker && cloudRuntimeConfig` (`zeros-engine.ts`). A Local row is rejected unchanged; `cloud-primary-workspace.test.ts` checks row and HEAD preservation. The existing Local branch allocator is reused without editing it. |
 | `apps/desktop/src/engine/git/github-native-desktop.ts` | Eligibility requires `client.kind === "cloud"`; `github-native-desktop.test.ts` retains the Local-client refusal/cancel case. Local credentials never enter device fallback. |
 | `apps/desktop/src/engine/git/diff.ts` | The shallow probe/field require `ws.placement === "cloud"`; `diff.test.ts` checks the complete unchanged Local status shape and retains Local comparison tests. |
-| `apps/desktop/src/renderer/platform/git.ts` | Type-only optional status field; `engine-read-availability.test.ts` checks the unchanged Local request and exact response. |
-| `apps/desktop/src/renderer/shell/pr/pr-status-row.tsx` | The new reader mounts only for `placement === "cloud"`; `pr-status-row-local.test.ts` checks target/Create PR states, exclusive PR island and zero cloud-reader mounts. |
-| `apps/desktop/src/renderer/shell/pr/cloud-history-notice.tsx` | Only cloud workspace IDs receive a cache/read key; `cloud-history-notice.test.ts` verifies no Local/hidden reads plus exact-key/race behavior. |
+| `apps/desktop/src/engine/git/fetch.ts` | Full-history path requires explicit `unshallow` and cloud placement; `fetch.test.ts` refuses it on Local and checks unchanged ordinary Local Git args/result/timeout. |
+| `apps/desktop/src/engine/git/cloud-history-fetch.ts` | New helper is called only by the cloud-only path above. `fetch.test.ts` proves ordinary Local fetch does not enter it; guard and real ancestry tests cover cloud recovery. |
+| `apps/desktop/src/engine/git/git-exec.ts` | Group cancellation/detachment is opt-in, used only by cloud history recovery. `git-exec.test.ts` retains default Local Node/Bun arguments, timeout and abort behavior and tests cloud TERM/KILL. |
+| `apps/desktop/src/engine/workspace/service.ts` | Forwards the optional flag; the Git handler refuses it on Local. `service.test.ts` checks ordinary Local fetch options/result and the explicit option. |
+| `apps/desktop/src/renderer/platform/git.ts` | Optional shallow status and additive fetch facade; only the cloud banner requests unshallow. `engine-read-availability.test.ts` checks exact unchanged Local status/fetch requests and responses. |
+| `apps/desktop/src/renderer/platform/bridge/workspace-bridge.ts` | Includes `unshallow` only when specified, with a longer budget only for that request. Platform and bridge tests retain ordinary Local payloads and 60-second timeouts. |
+| `apps/desktop/src/renderer/shell/pr/cloud-history-notice.tsx` | Only cloud workspace IDs receive a cache/read/action key; `cloud-history-notice.test.ts` verifies no Local/hidden reads or actions plus exact-key/race/single-flight behavior. |
+| `apps/desktop/src/renderer/shell/workbench/tab-content.tsx` | Mounts the publisher only for cloud Changes/Review. `tab-status-contract.test.ts` checks no Local publisher mount and one banner for every tab. |
+| `apps/desktop/src/renderer/shell/workbench/tab-status-model.ts` | Optional notice has only the cloud publisher. `tab-status.test.ts` keeps existing failure/retry semantics for sources without notices; failure always wins. |
+| `apps/desktop/src/renderer/shell/workbench/tab-status.tsx` | Uses the existing slot for the optional cloud notice; tabs without one retain original availability/failure/recovery behavior. `tab-notice.test.ts` and existing tab contract tests verify this Local path, priorities and one banner. |
 | `packages/protocol/src/cloud-computer-v2.ts` | Adds a separate cloud-only metadata schema, without changing existing messages; `cloud-computer-v2.test.ts` checks unchanged Local create/status message round trips without checkout metadata and existing cloud schema parity. |
 
 The changed tests under these engine/renderer/protocol paths add or maintain
-the above assertions; they do not run in the product. No Design implementation
-or Local creation, Git credential, target-picker mutation, or courier path was
-changed. The setup runtime tests retain the exact v1–v3 request contract.
+the above assertions; they do not run in the product. The PR header's original
+implementation is preserved; its Local target/Create PR and exclusive PR island
+tests remain. No Design implementation or Local creation, Git credential,
+target-picker mutation, or courier path was changed. The setup runtime tests
+retain the exact v1–v3 request contract.
+
+## Cloud workspace impact (F2–F4)
+
+Only cloud primary checkouts acquire the accepted source/target metadata and
+guarded history behavior. The notice action uses existing actor-bound courier
+authority; tokens are not persisted in the VM, and the new option cannot be
+added, removed or altered under an already prepared digest. Existing read and
+write role boundaries remain in effect. A disconnected/stopped/archived tab or
+a failed load displays its existing higher-priority banner, never a second
+strip. The button is disabled while its fetch is running or its tab is hidden.
 
 ## Exact owner verification checklist
 
@@ -242,9 +274,15 @@ belong in public logs or PR text.
    named refs/merge-base needed for the comparison. A normal checkout must be
    non-shallow and show older commits. Restart/stop-resume and verify branch,
    target, PR linkage and staged/unstaged edits survive. In the scripted local
-   guard fixture, confirm the depth-128 fallback shows the shallow notice; an
-   explicit full-history fetch must clear it. Never dump environments, process
-   arguments or credential files.
+   guard fixture, confirm the depth-128 fallback shows exactly one neutral
+   shallow-history banner in Changes and Review. Click **Fetch full history**;
+   confirm **Fetching…**/disabled state, no duplicate fetch when switching tabs,
+   unchanged HEAD/index/edits, and clearing only after status is non-shallow.
+   Exercise the scripted limit fixture: the notice must remain and say the
+   60-second or 256 MiB limit was reached. A connection/load failure must replace
+   this notice in the same slot; recovery may reveal it again. Local Changes
+   and Review must retain their original controls and never show this notice.
+   Never dump environments, process arguments or credential files.
 3. Select a test branch and a real named target. Before changing the target,
    record HEAD, index contents and a worktree edit; change the target alone and
    verify all three stay unchanged.

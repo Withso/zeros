@@ -7,11 +7,13 @@ import { WorkbenchTabContent } from "../tab-content";
 import { TAB_TYPE_META, type WorkbenchTabType } from "../tab-model";
 import { workbenchSourcesFor, workbenchStatusKey } from "../tab-status-model";
 
-const hooks = vi.hoisted(() => ({ target: vi.fn(), filter: vi.fn() }));
+const hooks = vi.hoisted(() => ({ target: vi.fn(), filter: vi.fn(), history: vi.fn(() => null),
+  workspace: null as { id: string; placement: string; path: string } | null }));
+vi.mock("../../pr/cloud-history-notice", () => ({ CloudHistoryNotice: hooks.history }));
 vi.mock("../tabs/changes-tab", () => ({
   useSourceTarget: () => {
     hooks.target();
-    return {};
+    return { workspace: hooks.workspace };
   },
 }));
 vi.mock("../tabs/changes-filter-store", () => ({
@@ -31,8 +33,21 @@ vi.mock("../tabs/browser-tab", () => ({ BrowserTab: () => null }));
 
 describe("every WorkbenchTabType enters the status frame", () => {
   afterEach(() => {
+    hooks.workspace = null;
+    hooks.history.mockClear();
     resetWorkbenchAvailabilityForTests();
     setActiveBridge(null);
+  });
+  it.each(["changes", "review"] as const)("mounts the %s history source only for cloud workspaces", type => {
+    const tab = { id: type, type, title: type };
+    for (const placement of ["local", "cloud"]) {
+      hooks.workspace = { id: "history-workspace", path: "/history", placement };
+      hooks.history.mockClear();
+      const markup = renderToStaticMarkup(createElement(WorkbenchTabContent, { tab, active: true, scope: "/history" }));
+      expect(markup.match(/data-workbench-banner=/g)).toHaveLength(1);
+      expect(hooks.history).toHaveBeenCalledTimes(placement === "cloud" ? 1 : 0);
+      expect(markup).not.toContain("Shallow Git history");
+    }
   });
   it.each(Object.keys(TAB_TYPE_META) as WorkbenchTabType[])(
     "structurally supplies %s with one banner and neutral empty state",

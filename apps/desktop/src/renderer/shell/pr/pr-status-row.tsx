@@ -29,7 +29,6 @@ import { TargetBranchButton } from "./target-branch-select";
 import { useWorkspaceHasChanges } from "./use-workspace-has-changes";
 import { isGithubDotComRemote } from "./github-url";
 import { PanelHeader } from "@/renderer/shared/ui/primitives/panel-header";
-import { CloudHistoryNotice } from "./cloud-history-notice";
 
 export function PrStatusRow({
   workspace,
@@ -52,53 +51,40 @@ export function PrStatusRow({
   if (prWorkspace && prWorkspace.prNumber != null) {
     // key: reset island state on workspace switch (same as the old render site).
     return (
-      <>
-        {prWorkspace.placement === "cloud" && (
-          <CloudHistoryNotice workspace={prWorkspace} active={active} />
-        )}
-        <PrStatusIsland
-          key={prWorkspace.id}
-          workspace={prWorkspace}
-          active={active}
-          localDesktop={nativeReady}
-        />
-      </>
+      <PrStatusIsland
+        key={prWorkspace.id}
+        workspace={prWorkspace}
+        active={active}
+        localDesktop={nativeReady}
+      />
     );
   }
   return (
-    <>
-      {prWorkspace?.placement === "cloud" && (
-        <CloudHistoryNotice workspace={prWorkspace} active={active} />
-      )}
-      <PanelHeader size="window" className="gap-2">
-        {prWorkspace ? (
-          <>
-            {/* Left: pick the base branch (remote-only). Right: Create PR. */}
-            <TargetBranchButton
+    <PanelHeader size="window" className="gap-2">
+      {prWorkspace ? (
+        <>
+          {/* Left: pick the base branch (remote-only). Right: Create PR. */}
+          <TargetBranchButton workspace={prWorkspace} disabled={!nativeReady} />
+          <div className="flex-1" />
+          {/* `originUrl` is only the project row's boot cache and is legitimately
+              blank for folders registered without one (bind-folder, quick start,
+              pre-backfill rows). Hide the button only when we positively know the
+              remote is a non-GitHub host; the engine re-resolves the real remote
+              per op, so a blank cache must not remove PR creation. */}
+          {nativeReady && (!originUrl || isGithubDotComRemote(originUrl)) && (
+            <CreatePrButton
               workspace={prWorkspace}
-              disabled={!nativeReady}
+              originUrl={originUrl}
+              disabled={!hasChanges}
+              disabledReason="Nothing to PR yet — this branch has no changes"
             />
-            <div className="flex-1" />
-            {/* `originUrl` is only the project row's boot cache and is legitimately
-                blank for folders registered without one (bind-folder, quick start,
-                pre-backfill rows). Hide the button only when we positively know the
-                remote is a non-GitHub host; the engine re-resolves the real remote
-                per op, so a blank cache must not remove PR creation. */}
-            {nativeReady && (!originUrl || isGithubDotComRemote(originUrl)) && (
-              <CreatePrButton
-                workspace={prWorkspace}
-                originUrl={originUrl}
-                disabled={!hasChanges}
-                disabledReason="Nothing to PR yet — this branch has no changes"
-              />
-            )}
-          </>
-        ) : (
-          <span className="text-fg2 min-w-0 flex-1 truncate text-xs">
-            No workspace selected.
-          </span>
-        )}
-      </PanelHeader>
-    </>
+          )}
+        </>
+      ) : (
+        <span className="text-fg2 min-w-0 flex-1 truncate text-xs">
+          No workspace selected.
+        </span>
+      )}
+    </PanelHeader>
   );
 }

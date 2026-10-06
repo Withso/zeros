@@ -48,6 +48,7 @@ import {
   bridgeGitCommit,
   bridgeGitPush,
   bridgeGitPull,
+  bridgeGitFetch,
   bridgeGitRenameBranch,
   bridgeGitChangeTargetBranch,
   bridgeGhPrGet,
@@ -1654,6 +1655,13 @@ export async function gitCommit(args: {
   amend?: boolean;
 }): Promise<{ sha: string; branch: string }> {
   return bridgeGitCommit(requireBridge("create the Git commit"), args);
+}
+
+export async function gitFetch(args: {
+  workspaceId: string;
+  unshallow?: boolean;
+}): Promise<{ summary: string; historyLimited?: true }> {
+  return bridgeGitFetch(requireBridge("fetch Git history"), args);
 }
 
 export async function gitPush(args: {

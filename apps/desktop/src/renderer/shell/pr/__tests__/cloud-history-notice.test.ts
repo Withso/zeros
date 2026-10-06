@@ -1,16 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Workspace } from "../../../platform/git";
+import type { WorkbenchSource } from "../../workbench/tab-status-model";
 
 const fixture = vi.hoisted(() => ({ effects: [] as Array<() => void | (() => void)>, refs: [] as Array<{ current: unknown }>,
-  cursor: 0, generation: 1, status: vi.fn(), refresh: vi.fn() }));
+  cursor: 0, generation: 1, status: vi.fn(), refresh: vi.fn(), fetch: vi.fn(), publish: vi.fn(), toast: vi.fn(), changed: vi.fn() }));
 vi.mock("react", async original => ({ ...await original<typeof import("react")>(),
   useRef: (initial: unknown) => fixture.refs[fixture.cursor++] ??= { current: initial },
   useCallback: (callback: unknown) => callback,
+  useMemo: (factory: () => unknown) => factory(),
   useEffect: (effect: () => void | (() => void)) => fixture.effects.push(effect),
   useSyncExternalStore: (_subscribe: unknown, snapshot: () => unknown) => snapshot(),
 }));
 vi.mock("../../workbench/tabs/changes-tab", () => ({ statusForGeneration: fixture.status }));
-vi.mock("../../use-git-refresh-key", () => ({ useGitRefreshKey: (...args: unknown[]) => { fixture.refresh(...args); return fixture.generation; } }));
+vi.mock("../../../platform/git", () => ({ gitFetch: fixture.fetch }));
+vi.mock("../../../shared/ui/primitives/elements", () => ({ toast: { error: fixture.toast } }));
+vi.mock("../../workbench/tab-status", () => ({ useWorkbenchStatusSource: fixture.publish }));
+vi.mock("../../use-git-refresh-key", () => ({ triggerGitRefresh: fixture.changed,
+  useGitRefreshKey: (...args: unknown[]) => { fixture.refresh(...args); return fixture.generation; } }));
 let notice: typeof import("../cloud-history-notice").CloudHistoryNotice;
 let forget: typeof import("../pr-cache-forget").forgetPrCachesForWorkspace;
 const cleanups: Array<() => void> = [];
@@ -22,6 +28,7 @@ function mount(id = "a", active = true) {
   for (const effect of fixture.effects) { const cleanup = effect(); if (cleanup) cleanups.push(cleanup); }
   return result;
 }
+const source = () => fixture.publish.mock.lastCall![0] as WorkbenchSource;
 beforeEach(async () => {
   vi.resetModules(); vi.clearAllMocks(); fixture.refs = []; fixture.generation = 1;
   ({ CloudHistoryNotice: notice } = await import("../cloud-history-notice"));
@@ -33,15 +40,21 @@ describe("cloud shallow-history notice", () => {
   it("retains only the matching workspace snapshot through A-B-A and refresh failure", async () => {
     fixture.status.mockResolvedValueOnce({ shallow: true });
     expect(mount()).toBeNull(); await flush();
-    expect(mount()?.props.children).toContain("Shallow Git history");
+    expect(mount()).toBeNull();
+    expect(source().notice?.message).toBe("Shallow Git history — older commits and comparisons may be incomplete.");
     expect(mount("b", false)).toBeNull();
-    expect(mount("a", false)?.props.children).toContain("Shallow Git history");
+    expect(source().notice).toBeUndefined();
+    mount("a", false);
+    expect(source().notice?.message).toContain("Shallow Git history");
+    expect(source().active).toBe(false);
     expect(fixture.status).toHaveBeenCalledTimes(1);
     fixture.status.mockRejectedValueOnce(new Error("offline")); fixture.generation++;
     mount(); await flush(); mount(); await flush();
-    expect(mount("a", false)?.props.children).toContain("Shallow Git history");
+    mount("a", false);
+    expect(source().notice?.message).toContain("Shallow Git history");
+    expect(source().error).toBeInstanceOf(Error);
     expect(fixture.refresh).toHaveBeenLastCalledWith("/repo/a", "a", false);
-    forget("a"); expect(mount("a", false)).toBeNull();
+    forget("a"); mount("a", false); expect(source().notice).toBeUndefined();
   });
 
   it("rejects a stale generation and clears the notice after a confirmed full-history fetch", async () => {
@@ -52,7 +65,51 @@ describe("cloud shallow-history notice", () => {
     fixture.status.mockResolvedValue({ shallow: false });
     fixture.generation++; mount(); await flush(); mount();
     finish({ shallow: true }); await flush(); mount(); await flush();
-    expect(mount()).toBeNull();
+    mount(); expect(source().notice).toBeUndefined();
+  });
+
+  it("shares a busy managed fetch across tab mounts and only clears after non-shallow status", async () => {
+    fixture.status.mockResolvedValue({ shallow: true }); mount(); await flush(); mount();
+    let finish!: (result: { summary: string; historyLimited?: true }) => void;
+    fixture.fetch.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const first = source().notice!.action!.run();
+    mount();
+    expect(source().notice?.action).toMatchObject({ label: "Fetch full history", busy: true, busyLabel: "Fetching…" });
+    const second = source().notice!.action!.run();
+    expect(first).toBe(second);
+    await flush();
+    expect(fixture.fetch).toHaveBeenCalledExactlyOnceWith({ workspaceId: "a", unshallow: true });
+    finish({ summary: "", historyLimited: true }); await first; mount();
+    expect(source().notice?.message).toContain("Fetch stopped at the 60-second or 256 MiB limit.");
+    expect(source().notice?.action?.busy).toBe(false);
+    expect(fixture.changed).toHaveBeenCalledExactlyOnceWith("/repo/a");
+    fixture.status.mockResolvedValue({ shallow: false }); fixture.generation++;
+    mount(); await flush(); mount(); await flush(); mount();
+    expect(source().notice).toBeUndefined();
+  });
+
+  it("retains the notice until status confirms success and closes fetch errors", async () => {
+    fixture.status.mockResolvedValue({ shallow: true }); mount(); await flush(); mount();
+    fixture.fetch.mockResolvedValueOnce({ summary: "done" });
+    await source().notice!.action!.run(); mount(); await flush(); mount();
+    expect(source().notice?.message).toContain("Shallow Git history");
+    fixture.fetch.mockRejectedValueOnce(new Error("private provider diagnostic"));
+    await source().notice!.action!.run(); mount();
+    expect(fixture.toast).toHaveBeenCalledExactlyOnceWith("Couldn't fetch full Git history. Try again.");
+    expect(source().notice?.action?.busy).toBe(false);
+  });
+
+  it("ignores deleted owner replies and keeps other workspace actions isolated", async () => {
+    fixture.status.mockResolvedValue({ shallow: true }); mount(); await flush(); mount();
+    let finish!: (result: { summary: string; historyLimited?: true }) => void;
+    fixture.fetch.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const pending = source().notice!.action!.run(); await flush();
+    mount("b"); await flush(); mount("b");
+    expect(source().notice?.action?.busy).toBe(false);
+    forget("a"); finish({ summary: "", historyLimited: true }); await pending;
+    mount("a", false);
+    expect(source().notice).toBeUndefined();
+    expect(fixture.changed).not.toHaveBeenCalled();
   });
 
   it("does not issue reads for hidden or local surfaces", async () => {
@@ -61,5 +118,19 @@ describe("cloud shallow-history notice", () => {
     expect(notice({ workspace: { ...workspace("local"), placement: "local" }, active: true })).toBeNull();
     for (const effect of fixture.effects) { const cleanup = effect(); if (cleanup) cleanups.push(cleanup); }
     await flush(); expect(fixture.status).not.toHaveBeenCalled();
+    expect(source().active).toBe(false);
+    expect(source().notice).toBeUndefined();
+    expect(fixture.fetch).not.toHaveBeenCalled();
+  });
+
+  it("gives the shared Retry action an awaitable status read", async () => {
+    fixture.status.mockRejectedValueOnce(new Error("read failed")); mount(); await flush(); mount();
+    let finish!: (result: { shallow: boolean }) => void;
+    fixture.status.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const retry = source().retry!();
+    expect(retry).toBeInstanceOf(Promise);
+    await flush(); finish({ shallow: true }); await retry; mount();
+    expect(source().error).toBeNull();
+    expect(source().notice?.message).toContain("Shallow Git history");
   });
 });

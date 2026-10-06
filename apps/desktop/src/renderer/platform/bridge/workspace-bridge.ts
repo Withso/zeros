@@ -1329,8 +1329,8 @@ export async function bridgeGitRebase(
 
 export async function bridgeGitFetch(
   bridge: RuntimeClient,
-  args: { workspaceId: string; prune?: boolean; remote?: string },
-): Promise<{ summary: string }> {
+  args: { workspaceId: string; prune?: boolean; remote?: string; unshallow?: boolean },
+): Promise<{ summary: string; historyLimited?: true }> {
   return (await workspaceOp(
     bridge,
     "git.fetch",
@@ -1338,9 +1338,10 @@ export async function bridgeGitFetch(
       workspaceId: args.workspaceId,
       prune: args.prune,
       remote: args.remote,
+      ...(args.unshallow === undefined ? {} : { unshallow: args.unshallow }),
     },
-    NETWORK_GIT_TIMEOUT_MS,
-  )) as { summary: string };
+    args.unshallow ? 90_000 : NETWORK_GIT_TIMEOUT_MS,
+  )) as { summary: string; historyLimited?: true };
 }
 
 export async function bridgeGitStashSave(
