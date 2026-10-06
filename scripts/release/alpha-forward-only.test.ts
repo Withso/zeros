@@ -97,7 +97,7 @@ describe("automatic Alpha admitted freshness", () => {
     await expect(test.client.assertCurrent()).resolves.toBeUndefined();
     test.state.head = descendant;
     await expect(test.client.assertCurrent()).resolves.toBeUndefined();
-    expect(test.requests).toContain(`https://api.github.com/compare/${sourceSha}...${descendant}`);
+    expect(test.requests).toContain(`https://api.github.com/compare/${sourceSha}...${descendant}?per_page=1&page=2`);
     expect(test.command).toHaveBeenCalledOnce();
   });
 
@@ -184,7 +184,7 @@ describe("Stage 2 automatic Alpha admission", () => {
   it("keeps destination comparison errors red at initial admission", async () => {
     const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
     const original = test.fetcher.getMockImplementation()!;
-    test.fetcher.mockImplementation(async (input, init) => String(input).endsWith(`/compare/${ancestor}...${sourceSha}`)
+    test.fetcher.mockImplementation(async (input, init) => String(input).endsWith(`/compare/${ancestor}...${sourceSha}?per_page=1&page=2`)
       ? Response.json({}, { status: 403 }) : original(input, init));
     const error = await test.client.assertCurrent().catch(error => error);
     expect(error).toBeInstanceOf(PromotionError);
