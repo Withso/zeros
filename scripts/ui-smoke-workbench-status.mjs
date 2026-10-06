@@ -320,6 +320,19 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
   for (const kind of ["connect", "open"]) {
     await page.goto(`${harnessBase}/harness-workbench-status.html`);
     await page.waitForFunction(() => !!window.workbenchStatusFixture);
+    // A failed admission can coexist with a still-connected older peer.
+    await page.evaluate(
+      (kind) => window.workbenchStatusFixture.connectFailure(kind),
+      kind,
+    );
+    await expect(banner()).toContainText("Can't reach the workspace.");
+    await banner().getByRole("button").click();
+    await expect(banner()).toHaveCount(0);
+    expect(
+      await page.evaluate(
+        () => window.workbenchStatusFixture.bridge.reconnects,
+      ),
+    ).toBe(1);
     await page.evaluate((kind) => {
       const fixture = window.workbenchStatusFixture;
       fixture.connection("disconnected");

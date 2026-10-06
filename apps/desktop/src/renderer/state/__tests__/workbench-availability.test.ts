@@ -220,6 +220,9 @@ describe("workbench availability observers", () => {
       expect(workbenchAvailabilitySnapshot(other).rejected).not.toBe(true);
       const hide = registerWorkbenchFrameVisibility(`${folder}/src`);
       expect(fixture.toasts.size).toBe(0);
+      expect(workbenchAvailabilitySnapshot(`${folder}/src`).rejected).toBe(
+        true,
+      );
       expect(
         describeWorkspaceAvailability(
           workbenchAvailabilitySnapshot(folder),

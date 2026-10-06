@@ -30,7 +30,12 @@ interface AvailabilityEntry {
   value: WorkspaceAvailability;
   listeners: Set<() => void>;
   stop: () => void;
-  notice?: { headline: string; description: string; shown: boolean };
+  notice?: {
+    id: string;
+    headline: string;
+    description: string;
+    shown: boolean;
+  };
 }
 const entries = new Map<string, AvailabilityEntry>();
 const MAX_OBSERVED_WORKSPACES = 64;
@@ -52,7 +57,7 @@ function reconcileCloudNotice(folder: string, entry: AvailabilityEntry): void {
   const shown = !frameVisible(folder);
   if (notice.shown === shown) return;
   notice.shown = shown;
-  const id = `cloud-connect:${folder}`;
+  const id = notice.id;
   if (shown)
     toast.error(notice.headline, { id, description: notice.description });
   else toast.dismiss(id);
@@ -114,13 +119,16 @@ export function wireWorkbenchConnectionRejection(
   };
 }
 
-function clearConnectionNotice(folder: string, entry: AvailabilityEntry): void {
-  if (entry.notice) toast.dismiss(`cloud-connect:${folder}`);
+function clearConnectionNotice(entry: AvailabilityEntry): void {
+  if (entry.notice) toast.dismiss(entry.notice.id);
   entry.notice = undefined;
 }
 
 function entryFor(folder: string): AvailabilityEntry {
-  const retained = entries.get(folder);
+  // Availability belongs to the engine/VM, while data sources remain keyed by
+  // the exact folder/target. A nested visible frame must receive its VM's error.
+  const owner = visibilityKey(folder);
+  const retained = entries.get(owner);
   if (retained) return retained;
   const target = parseCloudWorkspaceKey(folder);
   const entry: AvailabilityEntry = {
@@ -128,7 +136,7 @@ function entryFor(folder: string): AvailabilityEntry {
     listeners: new Set(),
     stop: () => {},
   };
-  entries.set(folder, entry);
+  entries.set(owner, entry);
   let offStatus = () => {};
   let offRejected = () => {};
   const publish = (patch: Partial<WorkspaceAvailability>) => {
@@ -163,7 +171,7 @@ function entryFor(folder: string): AvailabilityEntry {
     const changed = () => {
       const connection =
         bridge instanceof WorkspaceRuntimeClient
-          ? bridge.statusForWorkspace(folder)
+          ? bridge.statusForWorkspace(target ? owner : folder)
           : (bridge?.status ?? "disconnected");
       const wasConnected = entry.value.connection === "connected";
       publish({
@@ -177,12 +185,12 @@ function entryFor(folder: string): AvailabilityEntry {
           ? { rejected: false, rejection: undefined }
           : {}),
       });
-      if (connection === "connected") clearConnectionNotice(folder, entry);
+      if (connection === "connected") clearConnectionNotice(entry);
     };
     changed();
     offStatus =
       bridge instanceof WorkspaceRuntimeClient && target
-        ? bridge.onWorkspaceStatusChange(folder, changed)
+        ? bridge.onWorkspaceStatusChange(owner, changed)
         : (bridge?.onStatusChange(changed) ?? (() => {}));
     // WorkspaceRuntimeClient routes cloud peers separately; its inherited
     // rejection subscription represents only the Local engine. Cloud admission
@@ -205,7 +213,7 @@ function entryFor(folder: string): AvailabilityEntry {
     offRejected();
     offBridge();
     offCatalog();
-    clearConnectionNotice(folder, entry);
+    clearConnectionNotice(entry);
   };
   // Passive subscriptions keep timestamps across hidden-tab activation. They
   // have no timers or I/O, and this observer set has a hard bound.
@@ -226,7 +234,10 @@ export function recordWorkbenchConnectionFailure(
   const entry = entryFor(folder);
   entry.value = { ...entry.value, rejected: true };
   for (const listener of entry.listeners) listener();
+  if (entry.notice?.id !== `cloud-connect:${folder}`)
+    clearConnectionNotice(entry);
   entry.notice = {
+    id: `cloud-connect:${folder}`,
     headline:
       kind === "connect"
         ? "Couldn't connect to this cloud workspace"
@@ -243,9 +254,9 @@ export function recordWorkbenchConnectionFailure(
 }
 
 export function clearWorkbenchConnectionFailure(folder: string): void {
-  const entry = entries.get(folder);
+  const entry = entries.get(visibilityKey(folder));
   if (!entry) return;
-  clearConnectionNotice(folder, entry);
+  clearConnectionNotice(entry);
   if (!entry.value.rejected || entry.value.rejection) return;
   entry.value = { ...entry.value, rejected: false };
   for (const listener of entry.listeners) listener();

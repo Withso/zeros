@@ -216,11 +216,19 @@ export function WorkbenchTabFrame({
       return;
     }
     void sources.retry(
-      availability.connection !== "connected"
+      availability.connection !== "connected" ||
+        availabilityStatus?.action === "Retry"
         ? () => reconnectWorkbenchWorkspace(folder)
         : undefined,
     );
-  }, [visible, availability.connection, folder, sources, status?.action]);
+  }, [
+    visible,
+    availability.connection,
+    availabilityStatus?.action,
+    folder,
+    sources,
+    status?.action,
+  ]);
   return (
     <StatusContext.Provider value={context}>
       <div
