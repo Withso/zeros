@@ -51,7 +51,8 @@
 //      another load.
 //  16. The app sidebar groups workspaces by repository by default, offers only
 //      Grouped/Ungrouped, persists per-repository collapse without hiding the
-//      selection, and routes the repository actions (+, settings, ⋯).
+//      selection, and routes the repository actions (+, settings, ⋯). Its Go
+//      back / Go forward retrace sidebar destinations, never Settings.
 //
 // Usage: pnpm test:ui-smoke [--shard=k/3]
 //        pnpm test:ui-smoke --list [--shard=k/3] --format=json

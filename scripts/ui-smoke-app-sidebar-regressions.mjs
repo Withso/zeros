@@ -13,6 +13,7 @@ async function resetHarness(page, harnessBase, query = "") {
 
 export async function checkSidebarNarrowHeader({ page, check, harnessBase }) {
   await resetHarness(page, harnessBase);
+  // Below the floor: the sidebar stops where its title band still fits.
   await page.evaluate(() => window.appSidebarSetWidth(200));
   const resources = page.getByRole("button", {
     name: "App resources",
@@ -24,13 +25,22 @@ export async function checkSidebarNarrowHeader({ page, check, harnessBase }) {
     page.getByRole("button", { name: /Archived workspaces/ }),
   ).toHaveCount(0);
   const sidebarBox = await page.locator("[data-app-sidebar]").boundingBox();
-  expect(sidebarBox.width).toBe(200);
-  const box = await resources.boundingBox();
-  expect(box.width).toBe(28);
-  expect(box.x).toBeGreaterThanOrEqual(sidebarBox.x);
-  expect(box.x + box.width).toBeLessThanOrEqual(
-    sidebarBox.x + sidebarBox.width,
-  );
+  expect(sidebarBox.width).toBe(220);
+  let previousEnd = sidebarBox.x;
+  for (const name of [
+    "Hide sidebar",
+    "App resources",
+    "Go back",
+    "Go forward",
+  ]) {
+    const box = await page
+      .getByRole("button", { name, exact: true })
+      .boundingBox();
+    expect(box.width).toBe(28);
+    expect(box.x).toBeGreaterThanOrEqual(previousEnd);
+    previousEnd = box.x + box.width;
+  }
+  expect(previousEnd).toBeLessThanOrEqual(sidebarBox.x + sidebarBox.width);
   await resources.click();
   const details = page.getByRole("dialog", { name: "App resources" });
   await expect(details).toBeVisible();
@@ -38,7 +48,96 @@ export async function checkSidebarNarrowHeader({ page, check, harnessBase }) {
   await expect(details).toContainText("CPU");
   await page.keyboard.press("Escape");
   check(
-    "Resource details stay available from an icon at 200px, with no Archive picker",
+    "Resources, Go back and Go forward fit after the toggle at the 220px floor, with no Archive picker",
+    true,
+  );
+}
+
+export async function checkSidebarHistory({ page, check, harnessBase }) {
+  await resetHarness(page, harnessBase);
+  const back = page.getByRole("button", { name: "Go back", exact: true });
+  const forward = page.getByRole("button", { name: "Go forward", exact: true });
+  const shown = async () => {
+    const state = await page.evaluate(() => window.appSidebarState());
+    if (state.page === "workspace") return `workspace:${state.folder}`;
+    if (state.page === "repo") return `repo:${state.repoId}`;
+    if (state.page === "create") return `create:${state.createProjectId}`;
+    return state.page;
+  };
+  const expectAvailable = async (button, available) => {
+    if (available) await expect(button).not.toHaveAttribute("aria-disabled");
+    else await expect(button).toHaveAttribute("aria-disabled", "true");
+  };
+  const step = async (button, destination) => {
+    await button.click();
+    await expect.poll(shown).toBe(destination);
+  };
+  const atlanta = "workspace:/fixture-workspaces/zeros/atlanta";
+
+  // A first load with no workspace selected has nothing to return to.
+  await expectAvailable(back, false);
+  await expectAvailable(forward, false);
+  await page.getByRole("button", { name: "Home", exact: true }).click();
+  await page.getByRole("button", { name: "Customize", exact: true }).click();
+  await expectAvailable(back, true);
+  await expectAvailable(forward, false);
+  await page
+    .locator('[data-workspace-id="ws-atlanta"]')
+    .getByRole("button", { name: /^Open workspace atlanta/ })
+    .click();
+  const zeros = page.locator('[data-sidebar-repository="project-zeros"]');
+  await zeros.hover();
+  await zeros
+    .getByRole("button", { name: "Zeros settings", exact: true })
+    .click();
+  await page
+    .locator("[data-app-sidebar]")
+    .getByRole("button", { name: "Create workspace", exact: true })
+    .click();
+  await expect.poll(shown).toBe("create:project-zeros");
+  // Settings replaces the sidebar and is never an entry; its Back opens Home.
+  await page.evaluate(() => window.appSidebarNavigate("settings"));
+  await expect(back).toHaveCount(0);
+  await page.evaluate(() => window.appSidebarNavigate("dashboard"));
+
+  for (const destination of [
+    "create:project-zeros",
+    "repo:project-zeros",
+    atlanta,
+    "customize",
+    "dashboard",
+  ]) {
+    await step(back, destination);
+  }
+  await expectAvailable(back, false);
+  // aria-disabled keeps the click on the button, where it does nothing.
+  await back.click({ force: true });
+  expect(await shown()).toBe("dashboard");
+  for (const destination of [
+    "customize",
+    atlanta,
+    "repo:project-zeros",
+    "create:project-zeros",
+    "dashboard",
+  ]) {
+    await step(forward, destination);
+  }
+  await expectAvailable(forward, false);
+
+  // Somewhere new from the middle drops the entries ahead.
+  await step(back, "create:project-zeros");
+  await page.getByRole("button", { name: "Customize", exact: true }).click();
+  await expectAvailable(forward, false);
+  await step(back, "create:project-zeros");
+  expect(
+    await page.evaluate(() =>
+      window.appSidebarRequests.filter(
+        ({ op }) => op === "workspace.create" || op === "chat.create",
+      ),
+    ),
+  ).toEqual([]);
+  check(
+    "Go back and Go forward retrace Home, Customize, workspaces, repository pages and Create, never Settings",
     true,
   );
 }
@@ -303,6 +402,7 @@ export async function checkSidebarReselection({ page, check, harnessBase }) {
 
 export const appSidebarRegressionChecks = [
   checkSidebarNarrowHeader,
+  checkSidebarHistory,
   checkSidebarUnopenedFolder,
   checkSidebarRetiredLocalMain,
   checkSidebarHiddenReads,
