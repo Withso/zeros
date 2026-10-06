@@ -438,11 +438,13 @@ export async function bridgeDesignHistory(
   workspaceId: string,
   frame: string | null,
   direction: "undo" | "redo",
+  expectedSourceVersions?: Record<string, string>,
 ): Promise<DesignApiMutationReplyWire> {
   return designApiMutationReply(
     await workspaceOp(bridge, `design.history.${direction}`, {
       workspaceId,
       ...(frame ? { frame } : {}),
+      ...(expectedSourceVersions ? { expectedSourceVersions } : {}),
     }),
     `design.history.${direction}`,
     true,

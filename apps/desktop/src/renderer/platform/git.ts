@@ -515,12 +515,14 @@ export async function designHistory(
   workspaceId: string,
   frame: string | null,
   direction: "undo" | "redo",
+  expectedSourceVersions?: Record<string, string>,
 ): Promise<DesignApiMutationReplyWire> {
   return bridgeDesignHistory(
     requireBridge(`${direction} a design edit`),
     workspaceId,
     frame,
     direction,
+    expectedSourceVersions,
   );
 }
 

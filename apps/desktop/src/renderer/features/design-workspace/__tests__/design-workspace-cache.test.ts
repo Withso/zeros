@@ -2211,6 +2211,19 @@ describe("design workspace cache", () => {
     ).toBe(false);
   });
 
+  it("sends every confirmed cloud frame generation for history independently of focus", async () => {
+    const workspaceId = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    const current = snapshot([{ file: "home.html" }, { file: "pricing.html" }]);
+    platformMocks.readSnapshot.mockResolvedValue(current);
+    await refreshDesignWorkspaceSnapshot(workspaceId);
+    platformMocks.history.mockResolvedValue({ result: null, snapshot: current });
+
+    await applyDesignHistoryCached(workspaceId, "pricing.html", "undo");
+
+    expect(platformMocks.history).toHaveBeenCalledWith(workspaceId, "pricing.html", "undo",
+      Object.fromEntries(current.frames.map(frame => [frame.file, frame.sourceVersion])));
+  });
+
   it("surfaces an exact refresh failure after hiding a mismatched boot preview", () => {
     const cached = snapshot();
     const error = new Error("restored checkout is unavailable");

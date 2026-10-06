@@ -49,6 +49,7 @@ import type { DesignTransaction } from "@zeros/design-core";
 import type { DesignRuntimeGenerationPatch } from "@zeros/protocol/design-runtime";
 import { KeyedAsyncCache } from "../../../shared/lib/keyed-async-cache";
 import { onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
+import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 import { classifyRpcError } from "../../../platform/bridge/failure";
 import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
 import { designStylePropertyAffectsLayout } from "../design-style-values";
@@ -1951,7 +1952,8 @@ export async function applyDesignHistoryCached(
         []
       ).map((candidate) => [candidate.file, candidate.sourceVersion]),
     );
-    const result = await designHistory(workspaceId, frame, direction);
+    const result = await designHistory(workspaceId, frame, direction,
+      isCloudWorkspace(workspaceId) ? Object.fromEntries(previousSourceVersions) : undefined);
     const historyFrame = result.result ? (result.historyFrame ?? frame) : null;
     const revisionKey = historyFrame
       ? frameMutationKey(workspaceId, historyFrame)

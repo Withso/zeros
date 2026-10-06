@@ -126,6 +126,7 @@ import {
   designSelectionStyles,
   designMatchedDeclarations,
   designMutationStyles,
+  designHistorySourceVersions,
 } from "./route-params";
 import {
   transferDesignHistoryBytes,
@@ -458,6 +459,8 @@ export async function handleDesignWorkspaceRoute(
         remote,
       );
       const direction = op === "design.history.undo" ? "undo" : "redo";
+      const expectedSources = options.actor && params.expectedSourceVersions !== undefined
+        ? designHistorySourceVersions(params.expectedSourceVersions) : undefined;
       const history = host.designHistoryState(workspace.path);
       const source = history?.[direction];
       const entry = source?.pop();
@@ -557,10 +560,20 @@ export async function handleDesignWorkspaceRoute(
         const documentId = designDocumentIdForFrame(entry.frame);
         let result;
         try {
+          let expectedRevision = options.actor && !expectedSources
+            ? reqStr(params, "expectedRevision") : undefined;
+          if (expectedSources) {
+            // Read the semantic revision BEFORE checking the rendered source.
+            // A write racing either read still fails the API's revision CAS.
+            expectedRevision = (await api.open(documentId)).revision;
+            const current = await readDesignFrameRenderIdentity(workspace.path, entry.frame);
+            if (expectedSources[entry.frame] !== current.sourceVersion)
+              throw new GitError({ code: "VALIDATION_FAILED", message: "Design source changed. Refresh before undoing or redoing." });
+          }
           result =
             direction === "undo"
-              ? await api.undo(documentId, options.actor, options.actor ? { expectedRevision: reqStr(params, "expectedRevision") } : {})
-              : await api.redo(documentId, options.actor, options.actor ? { expectedRevision: reqStr(params, "expectedRevision") } : {});
+              ? await api.undo(documentId, options.actor, { expectedRevision })
+              : await api.redo(documentId, options.actor, { expectedRevision });
           if (!result && options.actor) throw new GitError({ code: "VALIDATION_FAILED", message: "Another collaborator changed Design history. Refresh before undoing." });
         } catch (error) {
           if (error instanceof DesignPageTargetError)
