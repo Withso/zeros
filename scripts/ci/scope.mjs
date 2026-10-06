@@ -127,6 +127,7 @@ export function validatePolicy(policy) {
     "documentation",
     "lane_names",
     "path_rules",
+    "jobs",
     "checks",
   ]);
   policyAssert(
@@ -249,7 +250,22 @@ export function validatePolicy(policy) {
       /^[a-z][a-z\d]*(?:-[a-z\d]+)*$/.test(id),
       "check IDs must be lower-kebab-case.",
     );
-    fields(check, ["when", "execution_group", "commands"], ["lane"]);
+    fields(
+      check,
+      ["when", "execution_group", "commands"],
+      ["lane", "advisory", "runs_elsewhere"],
+    );
+    if (check.advisory !== undefined)
+      policyAssert(
+        typeof check.advisory === "boolean",
+        "advisory must be a boolean.",
+      );
+    if (check.runs_elsewhere !== undefined)
+      policyAssert(
+        typeof check.runs_elsewhere === "string" &&
+          check.runs_elsewhere.trim().length > 0,
+        "runs_elsewhere must name the check's execution owner.",
+      );
     fields(check.when, ["always", "full", "any_lanes"]);
     policyAssert(
       typeof check.when.always === "boolean" &&
@@ -290,6 +306,48 @@ export function validatePolicy(policy) {
     policy.checks["composer-full"].commands.includes("pnpm test:ui-smoke"),
     "composer-full must register its command.",
   );
+  policyAssert(
+    isRecord(policy.jobs) && Object.keys(policy.jobs).length > 0,
+    "jobs must be a nonempty object.",
+  );
+  for (const id of [
+    "quality",
+    "vitest",
+    "build",
+    "macos",
+    "control-plane-db",
+    "ui-smoke",
+    "control-plane-static",
+    "secret-scan",
+  ]) {
+    policyAssert(Object.hasOwn(policy.jobs, id), `missing required job ${id}.`);
+  }
+  const mappedChecks = new Set();
+  for (const [id, checks] of Object.entries(policy.jobs)) {
+    policyAssert(
+      /^[a-z][a-z\d]*(?:-[a-z\d]+)*$/.test(id),
+      "job IDs must be lower-kebab-case.",
+    );
+    strings(checks, `${id}.checks`);
+    for (const check of checks) {
+      policyAssert(
+        Object.hasOwn(policy.checks, check),
+        `${id} references unknown check ${check}.`,
+      );
+      mappedChecks.add(check);
+    }
+  }
+  policyAssert(
+    policy.jobs["ui-smoke"].length === 1 &&
+      policy.jobs["ui-smoke"][0] === "composer-full",
+    "ui-smoke must map only to composer-full; paths cannot select full composer smoke.",
+  );
+  for (const [id, check] of Object.entries(policy.checks)) {
+    policyAssert(
+      check.advisory === true || mappedChecks.has(id) || check.runs_elsewhere,
+      `${id} has no job or explicit execution owner.`,
+    );
+  }
   return policy;
 }
 
@@ -488,6 +546,22 @@ export function selectChecks(policy, decision) {
   return Object.keys(policy.checks)
     .filter((id) => checkSelected(policy.checks[id], decision))
     .sort();
+}
+
+/** Workload groups derive from the check registry, never a second lane policy. */
+export function selectJobs(policy, decision, mode = "pr") {
+  validatePolicy(policy);
+  if (!MODES.includes(mode))
+    throw new Error(`Unknown CI mode ${JSON.stringify(mode)}.`);
+  const selected = new Set(selectChecks(policy, decision));
+  return Object.fromEntries(
+    Object.keys(policy.jobs)
+      .sort()
+      .map((id) => [
+        id,
+        mode === "full" || policy.jobs[id].some((check) => selected.has(check)),
+      ]),
+  );
 }
 
 /** Pure selection: floors are a union; requests can only add lanes. */
@@ -741,6 +815,7 @@ export function createLedger({
       policy_digest: policyDigest(policy),
       full: decision.full,
       lanes: decision.lanes,
+      jobs: selectJobs(policy, decision, mode),
       requests: parseLabels(decision.requests),
       reasons: summarizedReasons(decision.reasons),
     }),
@@ -1007,6 +1082,9 @@ function stepSummary(ledger) {
   ];
   for (const [lane, run] of Object.entries(ledger.lanes))
     lines.push(`| ${lane} | ${run} |`);
+  lines.push("", "| Job | Selected |", "| --- | --- |");
+  for (const [id, run] of Object.entries(ledger.jobs))
+    lines.push(`| ${id} | ${run} |`);
   lines.push(
     "",
     "Reasons:",
@@ -1065,6 +1143,8 @@ export function runCli({
         ? formatLocalPlan(decision, comparison)
         : `ledger=${canonicalJson(ledger)}\n${Object.entries(ledger.lanes)
             .map(([lane, run]) => `${lane}=${run}\n`)
+            .join("")}${Object.entries(ledger.jobs)
+            .map(([id, run]) => `job-${id}=${run}\n`)
             .join("")}`,
     );
     return 0;

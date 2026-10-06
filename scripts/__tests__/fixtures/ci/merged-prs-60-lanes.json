@@ -21,15 +21,40 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "264": {
     "full": false,
-    "lanes": ["docs-only", "macos", "packaging", "runtime-bundle"]
+    "lanes": ["docs-only", "macos", "packaging", "runtime-bundle"],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
   },
   "265": {
     "full": false,
-    "lanes": ["docs-only", "macos", "packaging", "runtime-bundle"]
+    "lanes": ["docs-only", "macos", "packaging", "runtime-bundle"],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
   },
   "266": {
     "full": true,
@@ -53,6 +78,15 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "267": {
@@ -77,6 +111,15 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "268": {
@@ -101,11 +144,21 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "269": {
     "full": false,
-    "lanes": ["runtime-bundle", "smoke-harness"]
+    "lanes": ["runtime-bundle", "smoke-harness"],
+    "jobs": ["control-plane-static", "quality", "secret-scan", "vitest"]
   },
   "270": {
     "full": true,
@@ -129,6 +182,15 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "271": {
@@ -139,6 +201,14 @@
       "macos",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "272": {
@@ -151,6 +221,14 @@
       "macos",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "273": {
@@ -162,6 +240,14 @@
       "macos",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "274": {
@@ -177,6 +263,14 @@
       "protocol",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "275": {
@@ -191,6 +285,14 @@
       "macos",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "276": {
@@ -203,6 +305,14 @@
       "macos",
       "repository-contracts",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "277": {
@@ -214,11 +324,26 @@
       "macos",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "278": {
     "full": false,
-    "lanes": ["control-plane", "control-plane-db"]
+    "lanes": ["control-plane", "control-plane-db"],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "quality",
+      "secret-scan",
+      "vitest"
+    ]
   },
   "279": {
     "full": false,
@@ -229,6 +354,14 @@
       "macos",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "280": {
@@ -244,6 +377,15 @@
       "protocol",
       "repository-contracts",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "281": {
@@ -254,6 +396,15 @@
       "macos",
       "packaging",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "282": {
@@ -278,6 +429,15 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "283": {
@@ -302,6 +462,15 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "284": {
@@ -326,6 +495,15 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "285": {
@@ -350,6 +528,15 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "286": {
@@ -374,6 +561,15 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "287": {
@@ -384,6 +580,14 @@
       "macos",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "288": {
@@ -408,6 +612,15 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "289": {
@@ -432,6 +645,15 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "290": {
@@ -444,6 +666,14 @@
       "macos",
       "repository-contracts",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "291": {
@@ -455,6 +685,14 @@
       "macos",
       "repository-contracts",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "292": {
@@ -466,6 +704,14 @@
       "macos",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "293": {
@@ -481,6 +727,15 @@
       "protocol",
       "repository-contracts",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "294": {
@@ -493,6 +748,15 @@
       "desktop-engine",
       "macos",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "295": {
@@ -503,6 +767,14 @@
       "macos",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "296": {
@@ -527,11 +799,21 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "297": {
     "full": false,
-    "lanes": ["runtime-bundle", "smoke-harness"]
+    "lanes": ["runtime-bundle", "smoke-harness"],
+    "jobs": ["control-plane-static", "quality", "secret-scan", "vitest"]
   },
   "298": {
     "full": false,
@@ -542,6 +824,14 @@
       "macos",
       "repository-contracts",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "299": {
@@ -558,6 +848,15 @@
       "protocol",
       "repository-contracts",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "300": {
@@ -575,6 +874,15 @@
       "protocol",
       "repository-contracts",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "301": {
@@ -590,6 +898,15 @@
       "repository-contracts",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "302": {
@@ -614,6 +931,15 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "303": {
@@ -627,6 +953,15 @@
       "docs-only",
       "macos",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "304": {
@@ -640,6 +975,15 @@
       "macos",
       "repository-contracts",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "305": {
@@ -651,6 +995,14 @@
       "macos",
       "repository-contracts",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "306": {
@@ -663,6 +1015,14 @@
       "macos",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "307": {
@@ -674,6 +1034,14 @@
       "macos",
       "repository-contracts",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "308": {
@@ -688,6 +1056,15 @@
       "repository-contracts",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "309": {
@@ -703,6 +1080,15 @@
       "macos",
       "protocol",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "310": {
@@ -714,6 +1100,14 @@
       "macos",
       "repository-contracts",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "311": {
@@ -738,6 +1132,15 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "312": {
@@ -749,6 +1152,14 @@
       "macos",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "313": {
@@ -761,6 +1172,15 @@
       "macos",
       "repository-contracts",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "314": {
@@ -772,6 +1192,14 @@
       "docs-only",
       "macos",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "315": {
@@ -783,6 +1211,14 @@
       "docs-only",
       "macos",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "316": {
@@ -795,6 +1231,14 @@
       "macos",
       "repository-contracts",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "317": {
@@ -808,6 +1252,15 @@
       "macos",
       "repository-contracts",
       "runtime-bundle"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "318": {
@@ -832,6 +1285,15 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "319": {
@@ -847,6 +1309,14 @@
       "repository-contracts",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "320": {
@@ -863,11 +1333,21 @@
       "protocol",
       "runtime-bundle",
       "smoke-harness"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   },
   "321": {
     "full": false,
-    "lanes": ["runtime-bundle", "smoke-harness"]
+    "lanes": ["runtime-bundle", "smoke-harness"],
+    "jobs": ["control-plane-static", "quality", "secret-scan", "vitest"]
   },
   "322": {
     "full": true,
@@ -891,6 +1371,15 @@
       "runtime-bundle",
       "smoke-harness",
       "web"
+    ],
+    "jobs": [
+      "build",
+      "control-plane-db",
+      "control-plane-static",
+      "macos",
+      "quality",
+      "secret-scan",
+      "vitest"
     ]
   }
 }

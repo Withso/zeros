@@ -473,6 +473,42 @@
       "lanes": ["control-plane", "control-plane-db"]
     }
   ],
+  "jobs": {
+    "quality": [
+      "desktop-static",
+      "ui-source-guard",
+      "protocol-package-static",
+      "web-static-and-tests",
+      "marketing-static",
+      "release-contracts",
+      "changed-prettier-advisory"
+    ],
+    "vitest": [
+      "root-vitest",
+      "web-static-and-tests",
+      "codex-keeper-pin",
+      "preload",
+      "design-containment",
+      "catalog-and-provider-runtime",
+      "engine-migrations",
+      "backend-migration-guards",
+      "dependency-licenses-audit",
+      "release-and-security-static",
+      "adapter-fixtures",
+      "protocol-advisory",
+      "settings-schema-generation"
+    ],
+    "build": [
+      "renderer-build",
+      "engine-and-electron-build",
+      "web-and-marketing-build"
+    ],
+    "macos": ["source-sync-macos", "unsigned-packaging-proof"],
+    "control-plane-db": ["control-plane-database", "control-plane-reports"],
+    "ui-smoke": ["composer-full"],
+    "control-plane-static": ["control-plane-static"],
+    "secret-scan": ["commit-range-secrets"]
+  },
   "checks": {
     "tracked-secrets": {
       "when": {
@@ -481,7 +517,8 @@
         "any_lanes": []
       },
       "execution_group": "scope-core",
-      "commands": ["pnpm check:secrets"]
+      "commands": ["pnpm check:secrets"],
+      "runs_elsewhere": "Preflight test-shard; also bundled into selected CI Vitest shards. PR commit-range scanning remains mandatory in secret-scan."
     },
     "commit-range-secrets": {
       "when": {
@@ -499,7 +536,8 @@
         "any_lanes": []
       },
       "execution_group": "scope-core",
-      "commands": ["actionlint"]
+      "commands": ["actionlint"],
+      "runs_elsewhere": ".github/workflows/lint-ci.yml:actionlint"
     },
     "scope-policy-guard": {
       "when": {
@@ -508,7 +546,8 @@
         "any_lanes": []
       },
       "execution_group": "scope-core",
-      "commands": []
+      "commands": [],
+      "runs_elsewhere": ".github/workflows/ci.yml:scope and ci-gate"
     },
     "root-vitest": {
       "when": {
@@ -634,7 +673,7 @@
     },
     "control-plane-static": {
       "when": {
-        "always": false,
+        "always": true,
         "full": true,
         "any_lanes": ["control-plane", "control-plane-db"]
       },
@@ -817,7 +856,8 @@
         "any_lanes": ["protocol", "control-plane", "desktop-engine"]
       },
       "execution_group": "test",
-      "commands": ["pnpm check:protocol"]
+      "commands": ["pnpm check:protocol"],
+      "advisory": true
     },
     "settings-schema-generation": {
       "when": {
@@ -920,7 +960,8 @@
         "pnpm exec electron-builder --config electron-builder.yml --publish never --dir",
         "pnpm smoke:packaged-pty"
       ],
-      "lane": "macos"
+      "lane": "macos",
+      "runs_elsewhere": ".github/workflows/scheduled.yml:macos packaging proof; the macos job floor also selects source-sync verification."
     },
     "cloud-runner": {
       "when": {
@@ -942,7 +983,8 @@
         "bash scripts/ci/with-userns.sh pnpm check:zsr",
         "bash scripts/ci/with-userns.sh pnpm check:zsr-preview-browser",
         "pnpm --dir apps/control-plane typecheck"
-      ]
+      ],
+      "runs_elsewhere": ".github/workflows/cloud-runner-qualification.yml"
     },
     "linux-runtime-bundle": {
       "when": {
@@ -963,7 +1005,8 @@
       "commands": [
         "bash scripts/ci/with-userns.sh pnpm cloud:runtime-bundle:build --out-dir <temporary> --source-commit <head_sha>"
       ],
-      "lane": "runtime-bundle"
+      "lane": "runtime-bundle",
+      "runs_elsewhere": ".github/workflows/release-alpha.yml:runtime-build"
     },
     "composer-critical": {
       "when": {
@@ -980,7 +1023,8 @@
         ]
       },
       "execution_group": "browser",
-      "commands": []
+      "commands": [],
+      "advisory": true
     },
     "composer-full": {
       "when": {
@@ -1014,7 +1058,8 @@
         ]
       },
       "execution_group": "codeql",
-      "commands": []
+      "commands": [],
+      "runs_elsewhere": ".github/workflows/codeql.yml:codeql"
     },
     "changed-prettier-advisory": {
       "when": {
@@ -1041,7 +1086,8 @@
       "execution_group": "quality",
       "commands": [
         "pnpm exec prettier --check --ignore-unknown <validated changed files>"
-      ]
+      ],
+      "advisory": true
     }
   }
 }

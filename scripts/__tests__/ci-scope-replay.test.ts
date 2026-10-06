@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { decideScope, loadPolicy } from "../ci/scope.mjs";
+import { createLedger, decideScope, loadPolicy } from "../ci/scope.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const POLICY = loadPolicy(path.join(HERE, "../ci/scope-rules.json"));
@@ -52,6 +52,17 @@ describe("CI scope merged-PR replay", () => {
           full: decision.full,
           lanes: Object.keys(decision.lanes)
             .filter((lane) => decision.lanes[lane])
+            .sort(),
+          jobs: Object.entries(
+            createLedger({
+              policy: POLICY,
+              decision,
+              event: "pull_request",
+              mode: "pr",
+            }).jobs ?? {},
+          )
+            .filter(([, run]) => run)
+            .map(([id]) => id)
             .sort(),
         },
       ]),

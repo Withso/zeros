@@ -55,6 +55,33 @@ Browser-harness inputs are `scripts/ui-smoke-*`, `scripts/ui-smoke/**`, and
 `build:standalone`, and `check:deep-link-schemes`. The deployed Pages probe is
 excluded from this registry.
 
+The `jobs` map groups check IDs into the existing workflow workloads. A job is
+selected if any mapped check is selected; full mode selects every job. The map
+is validated before outputs are written: references must exist, and every
+non-advisory check must have a job or an explicit `runs_elsewhere` execution
+owner. Shared checks may belong to multiple jobs because their commands span
+the existing workload boundaries.
+
+| Job output                 | CI workload                                                                                | Mapped check IDs                                                                                                                                                                                                                                                                                               |
+| -------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `job-quality`              | `quality`                                                                                  | `desktop-static`, `ui-source-guard`, `protocol-package-static`, `web-static-and-tests`, `marketing-static`, `release-contracts`, `changed-prettier-advisory`                                                                                                                                                   |
+| `job-vitest`               | `test-shard`, with the required `test` aggregate                                           | `root-vitest`, `web-static-and-tests`, `codex-keeper-pin`, `preload`, `design-containment`, `catalog-and-provider-runtime`, `engine-migrations`, `backend-migration-guards`, `dependency-licenses-audit`, `release-and-security-static`, `adapter-fixtures`, `protocol-advisory`, `settings-schema-generation` |
+| `job-build`                | `build`                                                                                    | `renderer-build`, `engine-and-electron-build`, `web-and-marketing-build`                                                                                                                                                                                                                                       |
+| `job-macos`                | `source-sync-workload`, with the required `source-sync (macOS)` aggregate                  | `source-sync-macos`, `unsigned-packaging-proof`                                                                                                                                                                                                                                                                |
+| `job-control-plane-db`     | `control-plane-database`, with report validation in the required `control plane` aggregate | `control-plane-database`, `control-plane-reports`                                                                                                                                                                                                                                                              |
+| `job-ui-smoke`             | `ui-smoke (composer)`                                                                      | `composer-full`                                                                                                                                                                                                                                                                                                |
+| `job-control-plane-static` | `control-plane-static`                                                                     | `control-plane-static` (always selected)                                                                                                                                                                                                                                                                       |
+| `job-secret-scan`          | `secret scan (PR commit range)`                                                            | `commit-range-secrets` (always selected)                                                                                                                                                                                                                                                                       |
+
+`tracked-secrets` runs in full Preflight and is also bundled into selected CI
+Vitest shards; its independent selection does not force a Vitest workload on
+every documentation change. Commit-range scanning stays mandatory on every PR.
+Actionlint, CodeQL, cloud qualification, and Alpha runtime-bundle checks record
+their separate workflow owners. The unsigned packaging proof runs in Scheduled
+and contributes to the macOS workload floor. The reserved critical-composer
+entry has no executable suite yet and is advisory; it never substitutes for
+`composer-full`. These execution-owner annotations do not add workflow steps.
+
 ## Local preview and additive labels
 
 Run before the final push:
@@ -141,7 +168,9 @@ node scripts/ci/scope.mjs --mode full
 ```
 
 PR/full stdout uses GitHub output syntax: one `ledger=<canonical JSON>` line,
-followed by one `<lane>=true|false` line per lane. Reasons go to stderr and to
+followed by one `<lane>=true|false` line per path lane, then one
+`job-<id>=true|false` line per workload group. Workflow consumers use the job
+outputs directly rather than translating path lanes themselves. Reasons go to stderr and to
 `GITHUB_STEP_SUMMARY` when set. Full mode ignores diffs and selects every lane,
 including composer smoke.
 
@@ -151,12 +180,13 @@ The v1 ledger contains exactly:
 schema: "zeros.ci-selection/v1"
 event, mode, base_sha, source_sha, tested_sha, policy_digest, full
 lanes: { <registered lane>: <boolean>, ... }
+jobs: { <registered job>: <boolean>, ... }
 requests: [ <sorted additive labels>, ... ]
 reasons: [ <sorted reasons>, ... ]
 ```
 
 Unknown commit identities are `null`; known identities are full SHAs. Object
-keys are sorted recursively, requests are deduplicated, and lane values and
+keys are sorted recursively, requests are deduplicated, and lane/job values and
 `full` are real booleans. The tested identity is confirmed from checked-out
 `HEAD`, never inferred from event variables. Full mode preserves the declared
 event source (`PULL_REQUEST_HEAD_SHA` for PRs, `GITHUB_SHA` for other events),
@@ -168,7 +198,7 @@ and imported database input list. The ledger is at most 64 KiB; diagnostics reta
 up to 40 bounded reasons and an omitted-count reason when needed. Selection never
 depends on diagnostic truncation.
 
-The 60-PR replay fixture and per-PR JSON lane snapshot live under
+The 60-PR replay fixture and per-PR JSON lane/job snapshot live under
 `scripts/__tests__/fixtures/ci/`. Replay must keep at least half of the sample
 out of all-lanes fallback and select full composer smoke from paths for none.
 

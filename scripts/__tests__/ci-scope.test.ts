@@ -54,6 +54,153 @@ const allPrLanes = POLICY.lane_names
   .sort();
 const decide = (changes: ReturnType<typeof change>[], labels: string[] = []) =>
   decideScope({ policy: POLICY, changes, labels });
+const jobIds = [
+  "build",
+  "control-plane-db",
+  "control-plane-static",
+  "macos",
+  "quality",
+  "secret-scan",
+  "ui-smoke",
+  "vitest",
+];
+const jobs = (
+  changes: ReturnType<typeof change>[] | null,
+  labels: string[] = [],
+  mode = "pr",
+) =>
+  createLedger({
+    policy: POLICY,
+    decision: decideScope({ policy: POLICY, changes, labels, mode }),
+    event: "pull_request",
+    mode,
+  }).jobs;
+
+describe("CI scope job mapping", () => {
+  it("maps the current workload groups to the checks they execute", () => {
+    expect(Object.keys(POLICY.jobs ?? {}).sort()).toEqual(jobIds);
+    expect(POLICY.jobs?.quality).toEqual([
+      "desktop-static",
+      "ui-source-guard",
+      "protocol-package-static",
+      "web-static-and-tests",
+      "marketing-static",
+      "release-contracts",
+      "changed-prettier-advisory",
+    ]);
+    expect(POLICY.jobs?.vitest).toEqual([
+      "root-vitest",
+      "web-static-and-tests",
+      "codex-keeper-pin",
+      "preload",
+      "design-containment",
+      "catalog-and-provider-runtime",
+      "engine-migrations",
+      "backend-migration-guards",
+      "dependency-licenses-audit",
+      "release-and-security-static",
+      "adapter-fixtures",
+      "protocol-advisory",
+      "settings-schema-generation",
+    ]);
+    expect(POLICY.jobs?.build).toEqual([
+      "renderer-build",
+      "engine-and-electron-build",
+      "web-and-marketing-build",
+    ]);
+    expect(POLICY.jobs?.macos).toEqual([
+      "source-sync-macos",
+      "unsigned-packaging-proof",
+    ]);
+    expect(POLICY.jobs?.["control-plane-db"]).toEqual([
+      "control-plane-database",
+      "control-plane-reports",
+    ]);
+    expect(POLICY.jobs?.["ui-smoke"]).toEqual(["composer-full"]);
+    expect(POLICY.jobs?.["control-plane-static"]).toEqual([
+      "control-plane-static",
+    ]);
+    expect(POLICY.jobs?.["secret-scan"]).toEqual(["commit-range-secrets"]);
+  });
+
+  it("selects jobs from check predicates while keeping mandatory jobs on", () => {
+    expect(jobs([change("docs/local-development.md")])).toEqual({
+      build: false,
+      "control-plane-db": false,
+      "control-plane-static": true,
+      macos: false,
+      quality: false,
+      "secret-scan": true,
+      "ui-smoke": false,
+      vitest: false,
+    });
+    for (const changes of [
+      [change("apps/desktop/src/renderer/app-shell.tsx")],
+      [change("apps/control-plane/src/index.ts")],
+      [change("apps/web/functions/health.ts")],
+    ]) {
+      const decision = decide(changes);
+      const checks = selectChecks(POLICY, decision);
+      expect(jobs(changes)).toEqual(
+        Object.fromEntries(
+          Object.entries(POLICY.jobs ?? {}).map(([id, mapped]) => [
+            id,
+            (mapped as string[]).some((check) => checks.includes(check)),
+          ]),
+        ),
+      );
+    }
+  });
+
+  it("selects all jobs in full mode and keeps path fallback separate from composer", () => {
+    expect(jobs(null, [], "full")).toEqual(
+      Object.fromEntries(jobIds.map((id) => [id, true])),
+    );
+    for (const changes of [null, [], [change("package.json")]]) {
+      expect(jobs(changes)).toEqual(
+        Object.fromEntries(jobIds.map((id) => [id, id !== "ui-smoke"])),
+      );
+    }
+    expect(
+      jobs([change("docs/local-development.md")], ["ci:ui-smoke"]),
+    ).toHaveProperty("ui-smoke", true);
+  });
+
+  it("rejects invalid maps and unmapped required checks", () => {
+    for (const patch of [
+      { jobs: {} },
+      { jobs: { ...POLICY.jobs, quality: ["unknown-check"] } },
+      { jobs: { ...POLICY.jobs, quality: [] } },
+      { jobs: { ...POLICY.jobs, Bad_Job: ["root-vitest"] } },
+      { jobs: { ...POLICY.jobs, "ui-smoke": ["root-vitest"] } },
+      {
+        checks: {
+          ...POLICY.checks,
+          "unmapped-required": {
+            when: { always: true, full: true, any_lanes: [] },
+            execution_group: "test",
+            commands: ["pnpm check:preload"],
+          },
+        },
+      },
+    ]) {
+      expect(() => validatePolicy({ ...POLICY, ...patch })).toThrow(/policy/i);
+    }
+  });
+
+  it("accounts for every required check or explicitly records where it runs", () => {
+    const mapped = new Set(Object.values(POLICY.jobs ?? {}).flat());
+    for (const [id, check] of Object.entries(POLICY.checks)) {
+      if ((check as { advisory?: boolean }).advisory || mapped.has(id))
+        continue;
+      expect(check, id).toHaveProperty("runs_elsewhere");
+      expect(
+        (check as { runs_elsewhere: string }).runs_elsewhere,
+        id,
+      ).toBeTruthy();
+    }
+  });
+});
 
 describe("CI scope globs", () => {
   it.each([
@@ -366,6 +513,13 @@ describe("CI scope policy and ledger", () => {
       testedSha: SHA,
     });
     expect(ledger.schema).toBe("zeros.ci-selection/v1");
+    expect(Object.keys(ledger.jobs ?? {})).toEqual(jobIds);
+    expect(Object.values(ledger.jobs ?? {})).toHaveLength(jobIds.length);
+    expect(
+      Object.values(ledger.jobs ?? {}).every(
+        (value) => typeof value === "boolean",
+      ),
+    ).toBe(true);
     expect(Object.keys(ledger)).toEqual(Object.keys(ledger).sort());
     expect(Object.keys(ledger.lanes)).toEqual([...POLICY.lane_names].sort());
     expect(
@@ -695,9 +849,12 @@ describe("CI scope Git evidence and CLI", () => {
     expect(ledger.mode).toBe("pr");
     expect(ledger.event).toBe("pull_request");
     expect(ledgerLine!.slice(7)).toBe(canonicalJson(ledger));
-    expect(lines).toEqual(
-      Object.keys(ledger.lanes).map((lane) => `${lane}=${ledger.lanes[lane]}`),
-    );
+    expect(lines).toEqual([
+      ...Object.keys(ledger.lanes).map(
+        (lane) => `${lane}=${ledger.lanes[lane]}`,
+      ),
+      ...jobIds.map((id) => `job-${id}=${ledger.jobs?.[id]}`),
+    ]);
     for (const reason of ledger.reasons) {
       expect(result.stderr).toContain(reason);
       expect(readFileSync(summary, "utf8")).toContain(reason);
