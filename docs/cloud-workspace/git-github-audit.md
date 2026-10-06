@@ -33,8 +33,12 @@ admit only the current engine plus a live actor session with workspace **read**
 capability. The repository is resolved from the accepted computer source and
 its immutable repository ID and installation. No owner token, human GitHub
 connection, read grant row, or schema migration is involved. The installation
-credential is minted for one repository, used only on the backend, and revoked
-in `finally`. Reads cannot fall through to the mutation proxy.
+credential is minted for one repository and cached only in backend memory,
+keyed by installation ID and immutable repository ID. Up to 64 credentials are
+retained until five minutes before expiry; concurrent mints share one request.
+Eviction, expiry sweep and shutdown retire/revoke credentials after active
+readers drain. Shutdown aborts pending upstream reads. Reads cannot fall
+through to the mutation proxy.
 
 `github-read-policy.ts` pins two GraphQL queries (review threads and commit
 statistics) and explicitly admits repository metadata/branches, PRs/commits/
@@ -42,7 +46,9 @@ reviews/comments, PR issue comments/timeline, checks/annotations/statuses and
 comparisons. No arbitrary GraphQL, contents endpoint, caller origin, write,
 unknown query parameter, or pagination size is admitted. Responses are bounded
 to 8 MiB; upstream error text and headers never reach the worker. Repository
-identity is independently checked before every upstream read.
+identity is independently checked on first use and cached for 60 seconds
+per installation/repository ID and exact repository name; concurrent identity
+checks share one request. Identity cache size is bounded to 256 entries.
 
 The backend caches successful responses for 5 seconds, revalidates ETags for up
 to 5 minutes, coalesces identical reads, and rechecks authority even on cache

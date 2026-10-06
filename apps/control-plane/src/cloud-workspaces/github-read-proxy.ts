@@ -5,13 +5,10 @@ import { assertCloudActorSession, type CloudActorEngineScope } from "./actor-ses
 import { assertCurrentCloudEngineAuthority } from "./engine-authority.js";
 import { resolveComputerRepositoryGrant } from "./computer-workspace-source.js";
 import { authorizeGithubRead, type GithubReadRequest } from "./github-read-policy.js";
+import { GithubReadCredentials, type GithubReadCredentialBroker } from "./github-read-credentials.js";
 
 type Scope = CloudActorEngineScope & { actorSessionId: string };
 type Repository = { owner: string; repository: string; repositoryId: string; installationId: number };
-type Broker = {
-  mintWorkspaceRead(input: { installationId: number; repositoryId: number }): Promise<{ token: string; expiresAtMs: number }>;
-  revoke(token: string): Promise<void>;
-};
 type Result = { status: 200; contentType: string; body: string };
 type CacheEntry = { result: Result; etag: string | null; at: number; bytes: number };
 const MAX_BYTES = 8 * 1024 * 1024;
@@ -49,13 +46,31 @@ export class DatabaseCloudGithubReads {
   private readonly cache = new Map<string, CacheEntry>();
   private readonly pending = new Map<string, Promise<CacheEntry>>();
   private readonly budgets = new Map<string, { at: number; count: number }>();
+  private readonly identities = new Map<string, number>();
+  private readonly identityReads = new Map<string, Promise<void>>();
+  private readonly credentials: GithubReadCredentials;
+  private readonly abort = new AbortController();
+  private closed = false;
   private cacheBytes = 0;
   private readonly fetch: typeof fetch;
   private readonly now: () => number;
-  constructor(private readonly pool: pg.Pool, private readonly workosEnabled: boolean, private readonly broker: Broker,
+  constructor(private readonly pool: pg.Pool, private readonly workosEnabled: boolean, broker: GithubReadCredentialBroker,
     deps: { fetch?: typeof fetch; now?: () => number } = {}) {
     this.fetch = deps.fetch ?? globalThis.fetch;
     this.now = deps.now ?? Date.now;
+    this.credentials = new GithubReadCredentials(broker, { now: this.now });
+  }
+
+  async cleanup(): Promise<void> {
+    for (const [key, at] of this.identities) if (this.now() - at >= 60_000) this.identities.delete(key);
+    await this.credentials.cleanup();
+  }
+  async close(): Promise<void> {
+    this.closed = true;
+    this.abort.abort();
+    await this.credentials.close();
+    await Promise.allSettled([...this.pending.values()]);
+    this.cache.clear(); this.cacheBytes = 0; this.identities.clear(); this.budgets.clear();
   }
 
   async authorize(scope: Scope): Promise<Repository> {
@@ -95,6 +110,7 @@ export class DatabaseCloudGithubReads {
   }
 
   async read(scope: Scope, value: unknown): Promise<Result> {
+    if (this.closed) throw new GithubReadError();
     const repository = await this.authorize(scope);
     const request = authorizeGithubRead(repository, value);
     this.admit(scope.workspaceId);
@@ -114,7 +130,7 @@ export class DatabaseCloudGithubReads {
       finally { if (this.pending.get(key) === pending) this.pending.delete(key); }
     }
     // Revoke/stop/role changes that win during network I/O fence this response.
-    if (JSON.stringify(await this.authorize(scope)) !== JSON.stringify(repository)) throw new GithubReadError(403);
+    if (this.closed || JSON.stringify(await this.authorize(scope)) !== JSON.stringify(repository)) throw new GithubReadError(403);
     const current = this.cache.get(key);
     if (current !== entry && (!current || current.at <= entry.at)) {
       if (current && this.cache.delete(key)) this.cacheBytes -= current.bytes;
@@ -127,18 +143,33 @@ export class DatabaseCloudGithubReads {
     return entry.result;
   }
 
+  private async verifyIdentity(repository: Repository, headers: Record<string, string>, signal: AbortSignal): Promise<void> {
+    const key = JSON.stringify([repository.installationId, repository.repositoryId, repository.owner, repository.repository]);
+    const verifiedAt = this.identities.get(key);
+    if (verifiedAt !== undefined && this.now() - verifiedAt < 60_000) return;
+    let pending = this.identityReads.get(key);
+    if (!pending) {
+      pending = (async () => {
+        const identity = await this.fetch(`https://api.github.com/repos/${repository.owner}/${repository.repository}`, { headers, signal, redirect: "error" });
+        if (!identity.ok) { await identity.body?.cancel().catch(() => undefined); throw new GithubReadError(); }
+        const metadata = JSON.parse(await boundedBody(identity, 256 * 1024));
+        if (String(metadata.id) !== repository.repositoryId || metadata.disabled === true) throw new GithubReadError();
+        this.identities.delete(key); this.identities.set(key, this.now());
+        while (this.identities.size > 256) this.identities.delete(this.identities.keys().next().value!);
+      })();
+      this.identityReads.set(key, pending);
+    }
+    try { await pending; }
+    finally { if (this.identityReads.get(key) === pending) this.identityReads.delete(key); }
+  }
+
   private async load(repository: Repository, request: GithubReadRequest, cached?: CacheEntry): Promise<CacheEntry> {
-    const minted = await this.broker.mintWorkspaceRead({ installationId: repository.installationId, repositoryId: Number(repository.repositoryId) });
+    return this.credentials.use({ installationId: repository.installationId, repositoryId: Number(repository.repositoryId) }, async token => {
     try {
-      const headers: Record<string, string> = { accept: "application/vnd.github+json", authorization: `Bearer ${minted.token}`,
+      const headers: Record<string, string> = { accept: "application/vnd.github+json", authorization: `Bearer ${token}`,
         "user-agent": "zeros-control-plane", "x-github-api-version": "2026-03-10" };
-      const signal = AbortSignal.timeout(15_000);
-      // An installation token can also read public repositories. Verify the
-      // immutable identity so a rename/replacement cannot widen its scope.
-      const identity = await this.fetch(`https://api.github.com/repos/${repository.owner}/${repository.repository}`, { headers, signal, redirect: "error" });
-      if (!identity.ok) { await identity.body?.cancel().catch(() => undefined); throw new GithubReadError(); }
-      const metadata = JSON.parse(await boundedBody(identity, 256 * 1024));
-      if (String(metadata.id) !== repository.repositoryId || metadata.disabled === true) throw new GithubReadError();
+      const signal = AbortSignal.any([AbortSignal.timeout(15_000), this.abort.signal]);
+      await this.verifyIdentity(repository, headers, signal);
       if (request.format === "diff") headers.accept = "application/vnd.github.diff";
       if (cached?.etag) headers["if-none-match"] = cached.etag;
       if (request.body) headers["content-type"] = "application/json";
@@ -157,6 +188,6 @@ export class DatabaseCloudGithubReads {
       return { result: { status: 200, contentType: request.format === "diff" ? "text/plain" : "application/json", body },
         etag: response.headers.get("etag")?.slice(0, 256) ?? null, at: this.now(), bytes: Buffer.byteLength(body) };
     } catch (error) { throw error instanceof GithubReadError ? error : new GithubReadError(); }
-    finally { await this.broker.revoke(minted.token).catch(() => undefined); }
+    });
   }
 }

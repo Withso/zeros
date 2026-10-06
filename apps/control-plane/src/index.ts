@@ -660,11 +660,12 @@ let shuttingDown = false;
 const server = serve({ fetch: app.fetch, port: config.port, ...(config.host ? { hostname: config.host } : {}) }, (info) => {
   if (shuttingDown) return;
   if(migrationResult.status.state==="current"){
-    if (cloudGithubWriteGrants) {
+    if (cloudGithubWriteGrants || cloudGithubReads) {
       const sweep = () => {
         if (githubWriteCleanupRunning) return;
         githubWriteCleanupRunning = true;
-        githubWriteCleanupPending = cloudGithubWriteGrants.cleanup().catch(() => undefined).finally(() => { githubWriteCleanupRunning = false; });
+        githubWriteCleanupPending = Promise.all([cloudGithubWriteGrants?.cleanup(), cloudGithubReads?.cleanup()])
+          .then(() => undefined).catch(() => undefined).finally(() => { githubWriteCleanupRunning = false; });
       };
       sweep();
       githubWriteCleanup = setInterval(sweep, 30_000);
@@ -700,6 +701,7 @@ function shutdown(signal: string): void {
   cloudRuntimeServiceRelay?.close();
   console.log(`[control-plane] ${signal}; draining`);
   const backgroundStopped = Promise.allSettled([
+    cloudGithubReads?.close(),
     githubWriteCleanupPending,
     stopCloudSetupWorker(),
     stopCloudComputerBuildWorker(),
