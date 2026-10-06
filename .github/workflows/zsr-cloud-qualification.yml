@@ -1,4 +1,4 @@
-name: ZSR cloud qualification
+name: Cloud Runtime Qualification
 
 # Paid, credentialed, manual-only graduation of the exact Daytona image. This
 # is deliberately separate from fork/PR preflight. Configure required reviewers
@@ -59,7 +59,7 @@ concurrency:
 
 jobs:
   qualify:
-    name: Daytona image + live provider matrix
+    name: checks-cloud-image
     if: github.event.repository.fork == false
     runs-on: ubuntu-26.04
     timeout-minutes: 355

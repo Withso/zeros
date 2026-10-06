@@ -1,4 +1,4 @@
-name: Lint CI workflows
+name: Workflow Checks
 
 # actionlint over .github/workflows/*.yml — catches silently-broken CI config
 # (invalid ${{ }} expressions, shell-injection-prone run: interpolations, bad

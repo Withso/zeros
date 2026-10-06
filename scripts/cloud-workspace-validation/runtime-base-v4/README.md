@@ -483,7 +483,7 @@ Unexpected kit failures, including wrapped build/provider exceptions, print only
 class/code to stderr (for example `Error (ERR_MODULE_NOT_FOUND)`), with no message
 or stack; the final stdout diagnostic remains closed.
 
-For a base-only build (also the manual `Cloud runtime base` workflow), replace
+For a base-only build (also the manual `Cloud Runtime Base` workflow), replace
 `live-check` with `build`. This requires only Boat credentials and proves the
 clean cold boot. Its receipt explicitly reports `synthetic_runtime_pending`.
 The workflow is dispatch-only, Alpha-only, independent of runtime release jobs,
