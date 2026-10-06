@@ -1,0 +1,19 @@
+name: Concurrency Canary
+
+# Land and dispatch this canary before shipping Preflight queue changes.
+# See docs/ci-concurrency.md for the separate-commit rollout and acceptance gate.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  queue-canary:
+    name: queue-canary
+    runs-on: ubuntu-latest
+    concurrency:
+      group: concurrency-canary
+      queue: max
+    steps:
+      - name: Confirm job concurrency acceptance
+        run: printf 'GitHub accepted job-level concurrency.queue=max.\n'
