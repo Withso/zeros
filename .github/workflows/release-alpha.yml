@@ -101,7 +101,9 @@ jobs:
 
   runtime-build:
     name: Build Linux runtime bundle
-    needs: ci
+    # Read-only exact-source build: it starts with the run instead of waiting
+    # for the CI barrier. Publication still needs this job and hosted promotion,
+    # which itself needs the barrier.
     if: github.event.repository.fork == false
     runs-on: ubuntu-24.04
     timeout-minutes: 40

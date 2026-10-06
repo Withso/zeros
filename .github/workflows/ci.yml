@@ -1,74 +1,29 @@
-name: Preflight
+name: CI
 
-# The full exact-source check suite. It runs on every push to main and release
-# branches, and on merge-queue commits. Pull requests run the same jobs, under
-# the same required check names, in `ci.yml` ("CI"); the composer UI smoke runs
-# only here, after merge. Releases read this workflow by name and path
-# (scripts/release/ci.ts): Beta and Production require a successful Preflight
-# and CodeQL run on their exact release commit, and Alpha currently does too.
-# No job here needs a secret, and the top-level `permissions:` block below keeps
-# the token read-only. Parallel jobs keep failures attributable while putting
-# source-sync behavior on the app's actual platform:
+# Pull-request checks. Every job here reports the same required check name as
+# its Preflight twin, so the main ruleset is unchanged; Preflight (preflight.yml)
+# keeps running the full suite on every push to main, release branches and
+# merge-queue commits, and it remains the only workflow releases read as
+# exact-source evidence. Keep the shared jobs in step with preflight.yml until
+# the selective lanes replace this copy (scripts/__tests__/ci-workflow-parity
+# fails on drift).
 #
-#   quality — type safety (renderer + engine + Electron main + packages) and
-#             lint. CI adds an advisory Prettier pass over a PR's changed files.
-#   test    — the vitest suite (two native shards behind the `test` aggregate) +
-#             the repo's correctness guards (preload allowlist, model catalog,
-#             Cursor asar closure, migration forward-only, secret scan,
-#             settings-schema drift).
-#   build   — the app must actually BUILD: renderer, engine bundle, Electron main,
-#             and the bun-compiled engine sidecar binary that ships in the DMG.
-#   source-sync — required aggregate for the macOS source-sync workload, which
-#             also proves the shipping Apple Silicon kernel. Source-level
-#             boundary contracts run once in `test`. Keeping the established
-#             check name makes the existing ruleset enforce the workload job.
-#   secret-scan — gitleaks over every commit a change adds, not just its net
-#             diff (a PR's commit range in CI; the pushed commit here), so a
-#             credential added and then removed is still caught.
-#   control-plane — typecheck + audit for apps/control-plane (its own pnpm
-#             workspace and lockfile) on every change, plus its vitest suite
-#             sharded across Postgres service containers whenever one of that
-#             suite's inputs changed. One aggregate job owns the required check.
-#   ui-smoke — the Playwright-driven renderer smoke pass (real browser, real CSS).
-#             It runs here, after merge; pull requests skip it.
-#
-# Heavier/secret macOS work (full electron-builder pack, native ABI rebuild, live
-# model-catalog drift) remains in the scheduled workflow, not on the per-PR path.
-# The credentialed live-agent smoke (`pnpm agents:smoke`) is NOT wired into any
-# workflow yet — only the offline variant runs here. The pnpm + Node setup mirrors
-# release.yml so the two stay consistent (pnpm via packageManager, Node 22, pnpm
-# cache).
+# The one intentional difference: the composer UI smoke (~21 minutes, the last
+# required check on 43 of 50 recent pull requests) runs only after merge in
+# Preflight. Here its required context is a placeholder job skipped by its
+# condition, which GitHub reports as success.
 
 on:
-  # Required checks must also run for GitHub's synthetic merge-queue commit.
-  merge_group:
-  push:
-    branches: [main, "release/**"]
+  pull_request:
 
-# ── Least privilege ──────────────────────────────────────
-#
-# Merge-queue commits can contain a fork's changes, and `ci.yml` runs the same
-# jobs for every `pull_request`: both execute untrusted input — `pnpm install`
-# (arbitrary lifecycle scripts), a Playwright browser install and a Postgres
-# service on our runners. "These steps need no secrets" is NOT the same as
-# "the token can do nothing" — without this block every job
-# inherits the repository default, which is read/write on many repos. Nothing here
-# writes back: checkout and `git fetch` are the only token consumers, so read is
-# the entire requirement.
-#
-# The two companion settings live outside this file — Actions ▸ General ▸ "Require
-# approval for all external contributors", and Workflow permissions ▸ read-only
-# with "Allow GitHub Actions to create and approve pull requests" unchecked.
+# No job here needs a secret. Fork pull requests run arbitrary install scripts,
+# so the token stays read-only; checkout and `git fetch` are its only consumers.
 permissions:
   contents: read
 
-# Release branches cancel superseded pushes. Every push to main gets its own
-# group, so a newer merge never cancels or replaces an older SHA's run: each
-# merged commit keeps exact-source evidence for the Alpha barrier and the
-# post-merge record.
 concurrency:
-  group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('preflight-main-{0}', github.run_id) || format('preflight-{0}', github.ref) }}
-  cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   quality:
@@ -120,6 +75,52 @@ jobs:
         # RULES.md token guardrail (no raw hex/rgba/off-scale/z-index/Tailwind
         # color classes in src). The baseline is clean, so this is a merge gate.
         run: pnpm check:ui
+
+      - name: Prettier — changed files only (advisory)
+        # ADVISORY (continue-on-error) until a one-time `prettier --write .`
+        # baseline lands: the tree has a large legacy unformatted backlog and
+        # `prettier --check` is per-FILE, so editing a legacy-dirty file would
+        # otherwise fail the gate for unrelated reasons. This still surfaces "new
+        # unformatted code" as a signal; promote to blocking after the baseline.
+        # PR-only: on a push to main there's no meaningful diff base.
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed=$(git diff --name-only --diff-filter=ACMR "$BASE_SHA"...HEAD \
+            -- 'apps/desktop/src/' 'apps/desktop/electron/' 'packages/' 'scripts/' '*.json' '*.mjs' '*.mts' '*.ts' || true)
+          if [ -n "$changed" ]; then
+            echo "Changed files to format-check:"
+            printf '%s\n' "$changed"
+            # --ignore-unknown skips any extension Prettier can't parse (e.g. .jsonc).
+            printf '%s\n' "$changed" | xargs pnpm exec prettier --check --ignore-unknown
+          else
+            echo "No changed files to format-check."
+          fi
+
+      - name: Prettier — changed files only (advisory)
+        # ADVISORY (continue-on-error) until a one-time `prettier --write .`
+        # baseline lands: the tree has a large legacy unformatted backlog and
+        # `prettier --check` is per-FILE, so editing a legacy-dirty file would
+        # otherwise fail the gate for unrelated reasons. This still surfaces "new
+        # unformatted code" as a signal; promote to blocking after the baseline.
+        # PR-only: on a push to main there's no meaningful diff base.
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed=$(git diff --name-only --diff-filter=ACMR "$BASE_SHA"...HEAD \
+            -- 'apps/desktop/src/' 'apps/desktop/electron/' 'packages/' 'scripts/' '*.json' '*.mjs' '*.mts' '*.ts' || true)
+          if [ -n "$changed" ]; then
+            echo "Changed files to format-check:"
+            printf '%s\n' "$changed"
+            # --ignore-unknown skips any extension Prettier can't parse (e.g. .jsonc).
+            printf '%s\n' "$changed" | xargs pnpm exec prettier --check --ignore-unknown
+          else
+            echo "No changed files to format-check."
+          fi
 
   test-shard:
     name: tests-vitest (${{ matrix.part }}/2)
@@ -749,29 +750,13 @@ jobs:
 
   ui-smoke:
     name: ui-smoke (composer)
+    # Runs after merge in Preflight. Skipped on pull requests so the required
+    # context reports success without occupying a runner.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Setup pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: pnpm
-      - name: Install JS dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Install control-plane dependencies for title smoke
-        run: pnpm --dir apps/control-plane install --frozen-lockfile
-      - name: Install Playwright Chromium
-        run: pnpm exec playwright install --with-deps chromium
-      - name: Composer model-menu interaction contract
-        # Real-browser event-timing coverage the unit suite structurally cannot
-        # provide: a document-capture click listener can race Radix's open/focus
-        # sequence, making the model dropdown flash open and instantly close.
-        # Drives the actual ModelPill/AgentModelMenu tree headlessly.
-        run: pnpm test:ui-smoke
+      - name: Composer UI smoke runs after merge
+        run: echo "The composer UI smoke runs in Preflight on every push to main."
 
   secret-scan:
     name: secret scan (PR commit range)
