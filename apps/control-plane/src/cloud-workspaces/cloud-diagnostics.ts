@@ -51,6 +51,8 @@ export const cloudDiagnosticSchema = z.object({ phase: z.enum(diagnosticPhases),
   elapsedMs: z.number().int().min(0).max(86_400_000).optional(), fundedTtlMs: z.number().int().min(-86_400_000).max(86_400_000).optional(),
   providerTtlMs: z.number().int().min(-86_400_000).max(86_400_000).optional(), retryCount: z.number().int().min(0).max(10000).optional(),
   decision: z.enum(["checkpoint", "direct_stop", "retry", "stale", "reject_setup"]).optional(), claim: z.enum(["current", "stale"]).optional(),
+  // Additive JSON evidence preserves the released database reason enum.
+  stopReason: z.literal("provider_outage").optional(),
   setup: setupDiagnosticSchema.optional(),
 }).strict();
 export type CloudDiagnostic = z.infer<typeof cloudDiagnosticSchema>;
@@ -67,18 +69,20 @@ export function classifyCloudFailure(error: unknown, phase: CloudDiagnosticPhase
     ...(typeof status === "number" && Number.isInteger(status) && status >= 100 && status < 600 ? { httpClass: `${Math.floor(status / 100)}xx` as "1xx" | "2xx" | "3xx" | "4xx" | "5xx" } : {}),
   };
 }
-export function cloudStopReason(reason: string) {
+export function cloudStopReason(reason: string, stopReason?: unknown) {
+  if (reason === "provider_outage" || stopReason === "provider_outage") return { code: "provider_outage", message: "Workspace stopped because a provider outage exhausted its compute lease runway" };
   if (["budget_stop", "compute_credit_exhausted"].includes(reason)) return { code: "budget_stop", message: "Managed compute stopped at its funded limit" };
   if (["engine_expired", "engine_lease_expired", "engine_unavailable", "engine_heartbeat_expired"].includes(reason)) return { code: "engine_expired", message: "Workspace stopped because its engine lease expired" };
   if (["image_integrity_rejected", "setup_image_contract_invalid"].includes(reason)) return { code: "image_integrity_rejected", message: "Workspace image failed integrity verification" };
   return { code: "safety_failure", message: "Managed compute stopped after a safety check failed" };
 }
 
-/** Preserve the released two-key error shape and allowance code. Nothing from
- * the private cause is eligible for projection into a workspace response. */
-export function publicCloudIncident(incident: { id: string; reason: string }) {
+/** Preserve the released two-key error shape and allowance code. Only the
+ * closed stop class and incident reference may reach a workspace response. */
+export function publicCloudIncident(incident: { id: string; reason: string; stopReason?: unknown }) {
   if (!z.string().uuid().safeParse(incident.id).success ||
       !["budget_stop", "safety_failure", "engine_expired", "image_integrity_rejected"].includes(incident.reason)) return null;
-  return { code: incident.reason === "budget_stop" ? "cloud_compute_allowance_exhausted" : `cloud_workspace_${incident.reason}`,
-    message: `${cloudStopReason(incident.reason).message} (incident ${incident.id})` };
+  const reason = cloudStopReason(incident.reason, incident.stopReason);
+  return { code: reason.code === "budget_stop" ? "cloud_compute_allowance_exhausted" : `cloud_workspace_${reason.code}`,
+    message: `${reason.message} (incident ${incident.id})` };
 }

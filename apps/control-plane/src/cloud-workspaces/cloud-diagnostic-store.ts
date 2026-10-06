@@ -154,9 +154,10 @@ export async function tryRetainCloudDiagnosticTx(tx: Tx, scope: Scope, value: Cl
  * diagnostic lock cannot prevent finite-lease enforcement. */
 export async function findInitiatingCloudStopTx(tx: Tx, scope: {
   workspaceId: string; organizationId: string; generation: number; leaseId: string; workspaceStopping: boolean;
-}): Promise<{ id: string; code: string } | null> {
-  return tryCloudDiagnosticTx(tx, async () => (await tx.query<{id:string;code:string}>(`
-    SELECT incident.id,incident.terminal_cause->>'code' AS code
+}): Promise<{ id: string; code: string; stopReason?: "provider_outage" } | null> {
+  return tryCloudDiagnosticTx(tx, async () => {
+    const row = (await tx.query<{id:string;code:string;stop_reason:string|null}>(`
+    SELECT incident.id,incident.terminal_cause->>'code' AS code,incident.terminal_cause->>'stopReason' AS stop_reason
     FROM cloud_workspace_diagnostic_incidents incident
     JOIN cloud_workspaces workspace ON workspace.id=incident.workspace_id AND workspace.org_id=incident.org_id
     WHERE incident.workspace_id=$1 AND incident.org_id=$2 AND incident.generation=$3
@@ -165,7 +166,9 @@ export async function findInitiatingCloudStopTx(tx: Tx, scope: {
         OR incident.generation>workspace.diagnostic_recovery_generation)
       AND ($5 OR (incident.operation_kind='compute' AND incident.operation_id=$4))
     ORDER BY incident.stop_initiated_at,incident.id LIMIT 1`,
-  [scope.workspaceId,scope.organizationId,scope.generation,scope.leaseId,scope.workspaceStopping])).rows[0] ?? null);
+  [scope.workspaceId,scope.organizationId,scope.generation,scope.leaseId,scope.workspaceStopping])).rows[0];
+    return row ? { id: row.id, code: row.code, ...(row.stop_reason === "provider_outage" ? { stopReason: "provider_outage" as const } : {}) } : null;
+  });
 }
 
 async function tryCloudDiagnosticTx<T>(tx: Tx, operation: () => Promise<T>): Promise<T | null> {

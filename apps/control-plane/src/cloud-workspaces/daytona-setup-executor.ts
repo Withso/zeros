@@ -511,12 +511,25 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
   }
 
   private async retain(execution: CloudWorkspaceSetupExecution, error: unknown, phase: CloudDiagnosticPhase, sourceError?: unknown): Promise<void> {
-    if (!this.options.diagnosticPool) return;
     const setup = parseSetupDiagnostic((error as { diagnostic?: SetupDiagnostic } | null)?.diagnostic);
     const typed = classifyCloudFailure(sourceError ?? error, setup?.phase ?? phase);
     const code = diagnosticCode((error as {code?:unknown}|null)?.code);
     typed.code = code === "compute_reconciliation_failed" ? "setup_provider_failure" : code;
     if (error instanceof CloudWorkspaceSetupError) typed.retryable = error.retryable;
+    const source = sourceError && typeof sourceError === "object" ? sourceError as { code?: unknown } : {};
+    const transientProvider = typed.retryable && !setup && (
+      (sourceError instanceof CloudProviderError && sourceError.code.startsWith("provider_") && sourceError.code !== "provider_resource_lost") ||
+      typed.httpClass === "5xx" || typed.errorClass === "timeout" ||
+      ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ENETUNREACH", "EPIPE"].includes(String(source.code))
+    );
+    if (transientProvider && error instanceof CloudWorkspaceSetupError) {
+      // The worker owns retry exhaustion. Keep only the closed diagnostic on
+      // the typed failure until it actually rejects setup; successful retries
+      // should not leave a reject_setup incident in management history.
+      error.providerDiagnostic = typed;
+      return;
+    }
+    if (!this.options.diagnosticPool) return;
     try {
       const incidentId = await retainCloudDiagnostic(this.options.diagnosticPool, { ...execution, operationKind: "setup", operationId: execution.setupRunId },
         { ...typed, ...(setup ? { setup } : {}), retryCount: Math.min(10000,execution.attempt), decision: "reject_setup", claim: "current" });

@@ -332,7 +332,7 @@ type WorkspaceRow = CloudRuntimePinRow & {
   version: string | number;
   last_error_code: string | null;
   last_error_message: string | null;
-  diagnostic_incident: { id: string; reason: string } | null;
+  diagnostic_incident: { id: string; reason: string; stopReason?: unknown } | null;
   setup_failure: { code: string | null; hasLog: boolean } | null;
   last_observed_at: Date | string | null;
   created_at: Date | string;
@@ -439,7 +439,7 @@ const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
            'code',setup.error_code,'hasLog',btrim(setup.log_excerpt)<>'') ELSE NULL END
           FROM cloud_workspace_setup_runs setup WHERE setup.workspace_id=cw.id AND setup.org_id=cw.org_id
             AND setup.generation=cw.current_generation ORDER BY setup.attempt DESC LIMIT 1) AS setup_failure,
-         (SELECT jsonb_build_object('id',incident.id,'reason',incident.reason)
+         (SELECT jsonb_build_object('id',incident.id,'reason',incident.reason,'stopReason',incident.terminal_cause->>'stopReason')
           FROM cloud_workspace_diagnostic_incidents incident WHERE incident.workspace_id=cw.id AND incident.org_id=cw.org_id
             AND incident.generation=cw.current_generation AND incident.recovered_at IS NULL
             AND (cw.diagnostic_recovery_at IS NULL OR incident.last_at>cw.diagnostic_recovery_at

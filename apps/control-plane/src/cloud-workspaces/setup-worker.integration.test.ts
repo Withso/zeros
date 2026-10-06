@@ -33,7 +33,7 @@ import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-versi
 import { CloudWorkspaceLinuxSetupExecutor, type CloudWorkspaceSetupAdmissionBroker } from "./daytona-setup-executor.js";
 import { DatabaseCloudWorkspaceSetupAdmissionBroker } from "./setup-admission-broker.js";
 import { consumeCloudWorkspaceGrant } from "./grants.js";
-import type { CloudWorkspaceCommandRunner } from "./provider.js";
+import { CloudProviderError, type CloudWorkspaceCommandRunner } from "./provider.js";
 import { parseCloudWorkspaceSetupRequest, redactCloudWorkspaceSetupHookLog } from "../../../../scripts/cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
 
 const url = process.env.TEST_DATABASE_URL;
@@ -476,6 +476,53 @@ d("cloud workspace setup worker", () => {
     runtimeArtifacts: { presignCreatePut: vi.fn(), head: vi.fn(),
       presignGet: vi.fn(async () => ({ url: "https://artifacts.example.test/runtime?signature=private-runtime-delivery",
         expiresAt: new Date(Date.now() + 900_000).toISOString() })) },
+  });
+
+  it.each([
+    { source: "typed", outcome: "recover" },
+    { source: "typed", outcome: "exhaust" },
+    { source: "typed", outcome: "reject" },
+    { source: "http", outcome: "recover" },
+    { source: "http", outcome: "exhaust" },
+    { source: "timeout", outcome: "recover" },
+    { source: "reset", outcome: "exhaust" },
+  ] as const)("keeps transient v4 provider failures quiet until a terminal outcome: $source $outcome", async ({ source, outcome }) => {
+    const seeded = await seedSetup({ v4: true });
+    const broker = new DatabaseCloudWorkspaceSetupAdmissionBroker({ pool, endpoint: admissionEndpoint });
+    const transient = source === "typed"
+      ? new CloudProviderError("provider_request_failed", "private-provider-body", outcome !== "reject", { httpStatus: outcome === "reject" ? 401 : 503 })
+      : Object.assign(new Error("private-provider-body"), source === "http" ? { status: 503 } : source === "timeout" ? { name: "TimeoutError" } : { code: "ECONNRESET" });
+    const runner = { execute: vi.fn(async () => { throw transient; }) };
+    const linux = new CloudWorkspaceLinuxSetupExecutor(linuxSetupOptions(broker, runner));
+    const executor = new FakeExecutor([
+      (execution, signal) => linux.execute(execution, signal),
+      outcome === "recover" ? execution => registeredSuccessfulSetup(execution, "recovered") : (execution, signal) => linux.execute(execution, signal),
+    ]);
+    const instance = worker(executor, { maxClaims: 2 });
+    await instance.runOnce();
+    const incidents = () => pool.query("SELECT id,terminal_cause FROM cloud_workspace_diagnostic_incidents WHERE operation_id=$1", [seeded.setupRunId]);
+    if (outcome === "reject") {
+      expect((await incidents()).rows).toHaveLength(1);
+      expect((await pool.query("SELECT status FROM cloud_workspaces WHERE id=$1", [seeded.workspaceId])).rows[0].status).toBe("failed");
+      return;
+    }
+    expect((await incidents()).rows).toHaveLength(0);
+    expect((await pool.query("SELECT status,last_error_code FROM cloud_workspaces WHERE id=$1", [seeded.workspaceId])).rows[0])
+      .toEqual({ status: "setting_up", last_error_code: null });
+    await pool.query("UPDATE cloud_workspace_setup_runs SET next_attempt_at=clock_timestamp() WHERE id=$1", [seeded.setupRunId]);
+    await instance.runOnce();
+    if (outcome === "recover") {
+      expect((await incidents()).rows).toHaveLength(0);
+      expect((await pool.query("SELECT status,last_error_code FROM cloud_workspaces WHERE id=$1", [seeded.workspaceId])).rows[0])
+        .toEqual({ status: "ready", last_error_code: null });
+    } else {
+      expect((await incidents()).rows).toHaveLength(1);
+      expect((await incidents()).rows[0].terminal_cause).toMatchObject({
+        ...(source === "typed" || source === "http" ? { httpClass: "5xx" } : {}), retryable: true, decision: "reject_setup" });
+      expect((await pool.query("SELECT status,last_error_code FROM cloud_workspaces WHERE id=$1", [seeded.workspaceId])).rows[0])
+        .toEqual({ status: "failed", last_error_code: source === "typed" ? "setup_provider_request_failed" : "setup_provider_failure" });
+    }
+    expect(JSON.stringify((await incidents()).rows)).not.toContain("private-provider-body");
   });
 
   it.each([

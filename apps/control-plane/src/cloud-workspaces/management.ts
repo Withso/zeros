@@ -3434,8 +3434,8 @@ export class DatabaseCloudWorkspaceManagementService {
           )
         ).rows[0] ?? null;
 
-      const incidents = await tx.query<{ id:string; generation:number; reason:string; first_at:Date; last_at:Date; occurrence_count:string; recovered_at:Date|null; recovered_generation:number|null }>(
-        `SELECT id,generation,reason,first_at,last_at,occurrence_count,recovered_at,recovered_generation FROM cloud_workspace_diagnostic_incidents
+      const incidents = await tx.query<{ id:string; generation:number; reason:string; stop_reason:string|null; first_at:Date; last_at:Date; occurrence_count:string; recovered_at:Date|null; recovered_generation:number|null }>(
+        `SELECT id,generation,reason,terminal_cause->>'stopReason' AS stop_reason,first_at,last_at,occurrence_count,recovered_at,recovered_generation FROM cloud_workspace_diagnostic_incidents
          WHERE workspace_id=$1 AND org_id=$2 ORDER BY last_at DESC,id LIMIT 8`,[input.workspaceId,input.organizationId]);
       const effective = settings?.effective_document ?? {};
       const secretNames = Array.isArray(effective.secretRefs)
@@ -3458,8 +3458,8 @@ export class DatabaseCloudWorkspaceManagementService {
           status: workspace.status,
           desiredState: workspace.desiredState,
         },
-        incidents: incidents.rows.map(row=>({ id:row.id,generation:row.generation,reason:row.reason,
-          message: cloudStopReason(row.reason === "budget_stop" ? "compute_credit_exhausted" : row.reason === "engine_expired" ? "engine_unavailable" : row.reason === "image_integrity_rejected" ? "setup_image_contract_invalid" : "compute_reconciliation_failed").message,
+        incidents: incidents.rows.map(row=>({ id:row.id,generation:row.generation,reason:cloudStopReason(row.reason,row.stop_reason).code,
+          message: cloudStopReason(row.reason,row.stop_reason).message,
           firstAt:row.first_at.toISOString(),lastAt:row.last_at.toISOString(),
           count:Number(row.occurrence_count),recoveredAt:row.recovered_at?.toISOString()??null,recoveredGeneration:row.recovered_generation })),
         settings: settings
