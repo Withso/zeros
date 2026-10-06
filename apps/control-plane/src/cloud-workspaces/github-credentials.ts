@@ -122,6 +122,15 @@ export class GithubCloudWorkspaceCredentialBroker implements CloudWorkspaceRepos
     return this.mintScoped(input.installationId, { repository_ids: [input.repositoryId], permissions: { contents: "read" } });
   }
 
+  /** PR panel reads stay on the backend and bind the immutable computer repo. */
+  async mintWorkspaceRead(input: { installationId: number; repositoryId: number }): Promise<{ token: string; expiresAtMs: number }> {
+    if (![input.installationId, input.repositoryId].every(id => Number.isSafeInteger(id) && id > 0))
+      throw new Error("cloud workspace GitHub credential scope is invalid");
+    return this.mintScoped(input.installationId, { repository_ids: [input.repositoryId], permissions: {
+      contents: "read", pull_requests: "read", checks: "read", statuses: "read",
+    } });
+  }
+
   private async mintScoped(installationId: number, scope: Record<string, unknown>): Promise<{ token: string; expiresAtMs: number }> {
     const now = this.now();
     let response: Response;
