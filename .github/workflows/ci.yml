@@ -1130,11 +1130,15 @@ jobs:
           DATABASE_SHARDS: 8
         run: node scripts/ci/control-plane-results.mjs "$RUNNER_TEMP/control-plane-reports"
 
-  ui-smoke:
-    name: ui-smoke (composer)
+  ui-smoke-shard:
+    name: tests-ui-smoke (${{ matrix.shard }}/3)
     needs: scope
     if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-ui-smoke == 'true') }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - name: Verify scope result
         env:
@@ -1160,8 +1164,36 @@ jobs:
         run: pnpm --dir apps/control-plane install --frozen-lockfile
       - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium
-      - name: Run composer UI smoke suite
-        run: pnpm test:ui-smoke
+      - name: Run composer UI smoke shard
+        # Real-browser event-timing coverage the unit suite structurally cannot
+        # provide: a document-capture click listener can race Radix's open/focus
+        # sequence, making the model dropdown flash open and instantly close.
+        # Drives the actual ModelPill/AgentModelMenu tree headlessly.
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: pnpm test:ui-smoke --shard="${SHARD}/3"
+
+  ui-smoke:
+    name: ui-smoke (composer)
+    if: always()
+    needs: [scope, ui-smoke-shard]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify CI selection
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          LANE_SELECTED: ${{ needs.scope.outputs.job-ui-smoke }}
+          LANE_RESULT: ${{ needs.ui-smoke-shard.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SCOPE_RESULT" != "success" ]; then
+            echo "::error::The trusted scope decision was ${SCOPE_RESULT:-missing}."
+            exit 1
+          fi
+          case "${LANE_SELECTED}:${LANE_RESULT}" in
+            true:success|false:skipped|false:success) ;;
+            *) echo "::error::Invalid workload selection/result: ${LANE_SELECTED}:${LANE_RESULT}"; exit 1 ;;
+          esac
 
   secret-scan:
     name: secret scan (PR commit range)
@@ -1289,6 +1321,7 @@ jobs:
       - control-plane-database
       - control-plane
       - ui-smoke
+      - ui-smoke-shard
       - secret-scan
     runs-on: ubuntu-latest
     steps:
@@ -1387,7 +1420,8 @@ jobs:
             "control-plane-static": ledger.jobs["control-plane-static"],
             "control-plane-database": ledger.jobs["control-plane-db"],
             "control-plane": true,
-            "ui-smoke": ledger.jobs["ui-smoke"],
+            "ui-smoke": true,
+            "ui-smoke-shard": ledger.jobs["ui-smoke"],
             "secret-scan": ledger.jobs["secret-scan"],
           };
           const jobIds = Object.keys(selected);
@@ -1413,3 +1447,45 @@ jobs:
           if (problems.length) fail(`CI selection failed: ${problems.join("; ")}.`);
           console.log("Every selected job succeeded; all skips were proved unselected.");
           NODE
+
+  # Execute the complement of the trusted selection in this same run. Every
+  # PR still gets full coverage, including all database and browser shards.
+  # Required aggregates never depend on these additional workloads.
+  assurance:
+    name: Remaining full suite
+    needs: [scope, control-plane-scope, control-plane-static]
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/preflight.yml
+    with:
+      full_database: true
+      pr_selected_quality: ${{ needs.scope.result == 'success' && needs.scope.outputs.job-quality == 'true' }}
+      pr_selected_vitest: ${{ needs.scope.result == 'success' && needs.scope.outputs.job-vitest == 'true' }}
+      pr_selected_build: ${{ needs.scope.result == 'success' && needs.scope.outputs.job-build == 'true' }}
+      pr_selected_macos: ${{ needs.scope.result == 'success' && needs.scope.outputs.job-macos == 'true' }}
+      pr_selected_ui_smoke: ${{ needs.scope.result == 'success' && needs.scope.outputs.job-ui-smoke == 'true' }}
+      pr_selected_database: ${{ needs.scope.result == 'success' && needs.control-plane-scope.result == 'success' && needs.control-plane-scope.outputs.database == 'true' }}
+      pr_control_plane_static_result: ${{ needs.scope.result == 'success' && needs.control-plane-static.result || '' }}
+
+  extended:
+    name: Extended checks
+    uses: ./.github/workflows/scheduled.yml
+
+  full-assurance:
+    name: Full assurance
+    if: always()
+    needs: [ci-gate, assurance, extended]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce complete PR coverage
+        env:
+          SELECTED_RESULT: ${{ needs.ci-gate.result }}
+          REMAINING_RESULT: ${{ needs.assurance.result }}
+          EXTENDED_RESULT: ${{ needs.extended.result }}
+        run: |
+          set -euo pipefail
+          for result in "$SELECTED_RESULT" "$REMAINING_RESULT" "$EXTENDED_RESULT"; do
+            if [ "$result" != "success" ]; then
+              echo "::error::Full PR assurance is incomplete: $result"
+              exit 1
+            fi
+          done

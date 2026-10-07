@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createGitHubApi } from "../ci/recovery-api.mjs";
 import { RecoveryController } from "../ci/recovery-controller.mjs";
 
@@ -26,6 +26,66 @@ function compareFetch(requests: string[]) {
 }
 
 describe("recovery response bounds", () => {
+  it.each(["changed count", "short page", "duplicate", "invalid timestamp"])(
+    "refuses incomplete reservation history: %s",
+    async (fault) => {
+      let page = 0;
+      const readApi = {
+        get: async () => {
+          page++;
+          const artifacts = Array.from(
+            { length: fault === "short page" && page === 2 ? 99 : 100 },
+            (_, i) => ({
+              id: (page - 1) * 100 + i + 1,
+              name: "unrelated-report",
+              created_at: "2026-10-07T00:00:00Z",
+            }),
+          );
+          if (page === 2 && fault === "duplicate") artifacts[0].id = 1;
+          if (page === 2 && fault === "invalid timestamp")
+            artifacts[0].created_at = "invalid";
+          return {
+            total_count: fault === "changed count" && page === 2 ? 201 : 200,
+            artifacts,
+          };
+        },
+      };
+      const controller = new RecoveryController({
+        readApi,
+        now: new Date("2026-10-07T01:00:00Z"),
+      });
+      await expect(controller.reservations({})).rejects.toThrow(
+        "no writes are safe",
+      );
+    },
+  );
+
+  it("fails closed when complete reservation discovery exceeds the time budget", async () => {
+    const clock = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(0)
+      .mockReturnValue(120_000);
+    try {
+      const controller = new RecoveryController({
+        now: new Date("2026-10-07T01:00:00Z"),
+        readApi: {
+          get: async () => ({
+            total_count: 200,
+            artifacts: Array.from({ length: 100 }, (_, i) => ({
+              id: i + 1,
+              name: "unrelated",
+              created_at: "2026-10-07T00:00:00Z",
+            })),
+          }),
+        },
+      });
+      await expect(controller.reservations({})).rejects.toThrow("time budget");
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("reads ancestry from a compare page without file patches", async () => {
     const requests: string[] = [];
     const readApi = createGitHubApi({

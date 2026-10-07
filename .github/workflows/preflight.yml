@@ -2,9 +2,9 @@ name: Preflight
 
 # The full exact-source check suite. It runs independently for every main push,
 # on release-branch pushes, and on merge-queue commits. Pull
-# requests use selected required jobs in `ci.yml` ("CI") and this full graph
-# through `ci-full.yml` ("Full CI"), including composer smoke. Releases read this
-# workflow by name and path (scripts/release/ci.ts): Beta and Production
+# requests use selected required jobs in `ci.yml` ("CI") and call this graph
+# for the complementary workloads, including every unselected browser shard.
+# Releases read this workflow by name and path (scripts/release/ci.ts): Beta and Production
 # require a successful Preflight and CodeQL run on their exact release commit.
 # Automatic Alpha can opt in to the successful alpha-gate job alone while the
 # other jobs finish.
@@ -32,7 +32,7 @@ name: Preflight
 #             sharded across Postgres service containers whenever one of that
 #             suite's inputs changed. One aggregate job owns the required check.
 #   ui-smoke — the Playwright-driven renderer smoke pass (real browser, real CSS).
-#             Full CI also runs all browser shards on every pull request.
+#             CI runs all browser shards once on every pull request.
 #
 # Additional secret-free macOS work (full electron-builder pack, native ABI
 # rebuild) and runtime drift share the scheduled workflow, also called by Full CI.
@@ -48,6 +48,34 @@ on:
         description: Run every database shard for full pull-request assurance
         type: boolean
         default: false
+      pr_selected_quality:
+        description: PR workload owned by the caller; ignored outside pull_request
+        type: boolean
+        default: false
+      pr_selected_vitest:
+        description: PR workload owned by the caller; ignored outside pull_request
+        type: boolean
+        default: false
+      pr_selected_build:
+        description: PR workload owned by the caller; ignored outside pull_request
+        type: boolean
+        default: false
+      pr_selected_macos:
+        description: PR workload owned by the caller; ignored outside pull_request
+        type: boolean
+        default: false
+      pr_selected_database:
+        description: PR workload owned by the caller; ignored outside pull_request
+        type: boolean
+        default: false
+      pr_selected_ui_smoke:
+        description: PR workload owned by the caller; ignored outside pull_request
+        type: boolean
+        default: false
+      pr_control_plane_static_result:
+        description: Actual result of the caller's shared PR control-plane static job
+        type: string
+        default: ""
   # Required checks must also run for GitHub's synthetic merge-queue commit.
   merge_group:
   push:
@@ -81,6 +109,7 @@ concurrency:
 jobs:
   quality:
     name: quality
+    if: (github.event_name != 'pull_request' || !inputs.pr_selected_quality)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -131,6 +160,7 @@ jobs:
 
   test-shard:
     name: tests-vitest (${{ matrix.part }}/4)
+    if: (github.event_name != 'pull_request' || !inputs.pr_selected_vitest)
     runs-on: ubuntu-latest
     strategy:
       # Every part reports, so one failure never hides another.
@@ -395,13 +425,12 @@ jobs:
         if: matrix.part == 1
         run: pnpm schemas:build
 
-
   # The repository ruleset requires `test`. Keep that context as an explicit
   # aggregate of all four Vitest parts; `always()` turns a failed or cancelled
   # part into a red required check rather than a skipped one that can be missed.
   test:
     name: test
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || !inputs.pr_selected_vitest)
     needs:
       - test-shard
     runs-on: ubuntu-latest
@@ -418,6 +447,7 @@ jobs:
 
   build:
     name: build
+    if: (github.event_name != 'pull_request' || !inputs.pr_selected_build)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -472,6 +502,7 @@ jobs:
 
   source-sync-workload:
     name: source-sync workload (macOS)
+    if: (github.event_name != 'pull_request' || !inputs.pr_selected_macos)
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -600,7 +631,7 @@ jobs:
   # the `test` job already runs the sandbox suites.
   source-sync:
     name: source-sync (macOS)
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || !inputs.pr_selected_macos)
     needs:
       - source-sync-workload
     runs-on: ubuntu-latest
@@ -651,6 +682,7 @@ jobs:
 
   control-plane-static:
     name: control-plane typecheck + audit
+    if: github.event_name != 'pull_request' || inputs.pr_control_plane_static_result == ''
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -685,7 +717,7 @@ jobs:
   control-plane-database:
     name: control-plane database
     needs: control-plane-scope
-    if: needs.control-plane-scope.outputs.database == 'true'
+    if: needs.control-plane-scope.outputs.database == 'true' && (github.event_name != 'pull_request' || !inputs.pr_selected_database)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -760,7 +792,7 @@ jobs:
   # cover every test file once, with no failed or skipped DB-backed test.
   control-plane:
     name: control plane
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || !inputs.pr_selected_database)
     needs:
       - control-plane-scope
       - control-plane-static
@@ -786,7 +818,7 @@ jobs:
         env:
           SCOPE_RESULT: ${{ needs.control-plane-scope.result }}
           DATABASE_SCOPE: ${{ needs.control-plane-scope.outputs.database }}
-          STATIC_RESULT: ${{ needs.control-plane-static.result }}
+          STATIC_RESULT: ${{ github.event_name == 'pull_request' && inputs.pr_control_plane_static_result || needs.control-plane-static.result }}
           DATABASE_RESULT: ${{ needs.control-plane-database.result }}
           DATABASE_SHARDS: 8
         run: node scripts/ci/control-plane-results.mjs "$RUNNER_TEMP/control-plane-reports"
@@ -795,7 +827,7 @@ jobs:
   # attempt. The full Preflight run continues for release evidence and history.
   alpha-gate:
     name: alpha-gate
-    # Full CI's PR invocation supplies coverage, never Alpha admission.
+    # The complementary PR invocation supplies coverage, never Alpha admission.
     if: always() && github.event_name != 'pull_request'
     needs: [quality, test, build, control-plane, secret-scan]
     runs-on: ubuntu-latest
@@ -818,6 +850,7 @@ jobs:
 
   ui-smoke-shard:
     name: tests-ui-smoke (${{ matrix.shard }}/3)
+    if: (github.event_name != 'pull_request' || !inputs.pr_selected_ui_smoke)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -850,7 +883,7 @@ jobs:
 
   ui-smoke:
     name: ui-smoke (composer)
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || !inputs.pr_selected_ui_smoke)
     needs: [ui-smoke-shard]
     runs-on: ubuntu-latest
     permissions: {}
@@ -868,7 +901,7 @@ jobs:
   secret-scan:
     name: secret scan (PR commit range)
     # CI owns the required PR commit-range scanner. Avoid a second scanner in
-    # Full CI; direct push/merge-group Preflight keeps its existing scan.
+    # complementary PR coverage. Push/merge-group Preflight keeps its scan.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # ── Why the PR's COMMIT RANGE, not the tree and not all history ──

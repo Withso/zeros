@@ -1,7 +1,7 @@
 name: Scheduled Checks
 
-# Native ABI, unsigned packaging and runtime drift checks. Full CI also calls
-# these jobs for every PR and main/release push, independently of the fast
+# Native ABI, unsigned packaging and runtime drift checks. CI calls these jobs
+# for every PR; Full CI calls them for each main/release push, independently of the fast
 # required PR gate. Weekly and on-demand runs retain their existing entrypoints.
 # These mirror release packaging without Apple credentials or publication.
 # Runtime staleness is a report; broken pins still fail. Every job must remain

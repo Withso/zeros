@@ -62,10 +62,16 @@ const PRODUCERS: Record<string, (typeof JOBS)[number]> = {
   "control-plane-scope": "control-plane-static",
   "control-plane-static": "control-plane-static",
   "control-plane-database": "control-plane-db",
-  "ui-smoke": "ui-smoke",
+  "ui-smoke-shard": "ui-smoke",
   "secret-scan": "secret-scan",
 };
-const AGGREGATES = ["quality", "test", "source-sync", "control-plane"] as const;
+const AGGREGATES = [
+  "quality",
+  "test",
+  "source-sync",
+  "control-plane",
+  "ui-smoke",
+] as const;
 const RESULTS = ["success", "skipped", "failure", "cancelled", "neutral", ""];
 const temporaryDirectories: string[] = [];
 
@@ -222,7 +228,8 @@ describe("selective pull-request CI", () => {
     for (const job of Object.values(ci.jobs)) {
       if (job.permissions)
         expect(job.permissions).toEqual({ contents: "read" });
-      for (const step of job.steps) expect(step.run ?? "").not.toContain("${{");
+      for (const step of job.steps ?? [])
+        expect(step.run ?? "").not.toContain("${{");
     }
     expect(source).not.toContain("pull_request_target");
   });
@@ -656,12 +663,12 @@ describe("selective pull-request CI", () => {
   it("runs the real composer suite when explicitly selected", () => {
     expect(ci.jobs["ui-smoke"].name).toBe("ui-smoke (composer)");
     expect(
-      ci.jobs["ui-smoke"].steps.some(
-        (step) => step.run === "pnpm test:ui-smoke",
+      ci.jobs["ui-smoke-shard"].steps.some(
+        (step) => step.run === 'pnpm test:ui-smoke --shard="${SHARD}/3"',
       ),
     ).toBe(true);
     expect(
-      ci.jobs["ui-smoke"].steps.some((step) =>
+      ci.jobs["ui-smoke-shard"].steps.some((step) =>
         step.run?.includes("playwright install --with-deps chromium"),
       ),
     ).toBe(true);
@@ -674,7 +681,12 @@ describe("selective pull-request CI", () => {
     expect(gate.if).toBe("always()");
     expect(needsOf(gate).sort()).toEqual(
       Object.keys(ci.jobs)
-        .filter((id) => id !== "ci-gate")
+        .filter(
+          (id) =>
+            !["ci-gate", "assurance", "extended", "full-assurance"].includes(
+              id,
+            ),
+        )
         .sort(),
     );
   });
@@ -699,7 +711,12 @@ describe("the CI gate's executable ledger validation", () => {
     const jobs = ledger.jobs;
     const selected = Object.fromEntries(
       Object.keys(ci.jobs)
-        .filter((id) => id !== "ci-gate")
+        .filter(
+          (id) =>
+            !["ci-gate", "assurance", "extended", "full-assurance"].includes(
+              id,
+            ),
+        )
         .map((id) => [id, PRODUCERS[id] ? jobs[PRODUCERS[id]!] : true]),
     );
     const needs: Record<
@@ -770,7 +787,7 @@ describe("the CI gate's executable ledger validation", () => {
     "build",
     "source-sync-workload",
     "control-plane-database",
-    "ui-smoke",
+    "ui-smoke-shard",
   ])("checks the selection truth table for %s", (id) => {
     for (const selected of [true, false]) {
       for (const result of RESULTS) {
@@ -811,7 +828,7 @@ describe("the CI gate's executable ledger validation", () => {
       state.needs.scope!.outputs[`job-${id}`] = String(state.jobs[id]);
     }
     for (const id of Object.keys(state.needs))
-      state.needs[id]!.result = id === "ui-smoke" ? "skipped" : "success";
+      state.needs[id]!.result = id === "ui-smoke-shard" ? "skipped" : "success";
     state.needs["control-plane-scope"]!.outputs.database = "true";
     expect(verdict(state).status).toBe(0);
     state.jobs["ui-smoke"] = true;

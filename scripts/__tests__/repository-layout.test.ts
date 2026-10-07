@@ -89,7 +89,7 @@ describe("repository layout contracts", () => {
 
     expect(preflight).toContain("  source-sync-workload:");
     expect(preflight).toMatch(
-      /  source-sync:\n(?:.|\n)*?    name: source-sync \(macOS\)\n(?:.|\n)*?    if: always\(\)\n    needs:\n      - source-sync-workload\n    runs-on:/,
+      /  source-sync:\n(?:.|\n)*?    name: source-sync \(macOS\)\n(?:.|\n)*?    if: always\(\) && \(github.event_name != 'pull_request' \|\| !inputs.pr_selected_macos\)\n    needs:\n      - source-sync-workload\n    runs-on:/,
     );
     expect(preflight).toContain("SOURCE_SYNC_RESULT:");
     // Only shipped targets gate a pull request: the Mac app is Apple Silicon

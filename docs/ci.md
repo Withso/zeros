@@ -11,47 +11,49 @@ The ruleset still requires `quality`, `test`, `build`, `source-sync (macOS)`,
 is an additional aggregate for a future ruleset migration; it is not required
 by this change. Actionlint and CodeQL retain their separate workflows.
 
-## Independent full coverage
+## Full coverage without duplicate PR workloads
 
-`Full CI` (`.github/workflows/ci-full.yml`) runs alongside the required PR
-checks. It calls the existing Preflight workflow for every PR, including
-documentation-only changes, with all eight database shards enabled. This runs
-the complete Linux tests/build, macOS source-sync workload, three composer
-browser shards, dependency audits and source/security contracts even when the
-fast PR classifier does not select them. The shared workflow definitions keep
-commands and future coverage changes in one place.
+Every PR, including documentation-only changes, runs the complete verification
+inventory. `CI` executes the trusted path-selected workloads for the required
+contexts and calls Preflight for the remaining workloads in the **same run**.
+The complementary call receives explicit ownership booleans from the successful
+trusted scope decision. It runs all unselected workloads, including eight
+database shards and three browser shards. A failed scope authorizes no skips.
+These inputs are ignored on push and merge-group events, so canonical release
+Preflight always retains its complete exact-source graph.
 
-CI and Preflight split the root Vitest suite into four native shards and the
-control-plane database suite into eight isolated Postgres shards. Every shard
-reports even if another fails. Repository guards remain on Vitest part 1 and
-the explicit containment matrix on part 2; the existing required aggregates
-still enforce all selected shards and every database report.
+Both paths retain four Vitest shards, eight isolated Postgres shards and three
+composer browser shards, with fail-fast disabled. Repository guards remain on
+Vitest part 1 and containment on part 2. The selected and complementary paths
+partition workload execution; they do not reuse evidence from another SHA,
+event, run or PR. The shared control-plane static job's actual result is passed
+to the complementary database verifier, including failures. Whichever path
+owns database execution validates all eight reports and rejects skipped tests.
 
-The existing required CI job remains the single PR commit-range secret scanner.
-Full CI omits that duplicate scanner and the Alpha-only admission aggregate;
-neither omission drops a test or permits the assurance run to admit a release.
+The required PR commit-range secret scanner remains the single owner of that
+scan. The complementary call cannot admit Alpha. Every PR also retains native
+ABI, unsigned Electron packaging, packaged-engine/PTY smoke and runtime-drift
+checks through the Scheduled Checks callable. `Full CI` retains those extended
+jobs on every main/release push; its old duplicate PR trigger is removed.
+Weekly and manual Scheduled Checks remain available.
 
-Full CI also calls the existing native ABI, unsigned Electron packaging,
-packaged-engine/PTY smoke and runtime-drift checks on every PR and every push
-to main or a release branch. Their weekly and manual entrypoints remain
-available. Main and release pushes already run Preflight directly, so Full CI
-does not duplicate that full graph on pushes.
+`Remaining full suite / ...` and `Extended checks / ...` remain additional
+checks. A `Full assurance` aggregate requires the selected `zeros/ci-gate`,
+remaining suite and extended checks all to succeed. Missing, skipped, failed or
+cancelled graphs cannot report full assurance. Existing required contexts and
+`zeros/ci-gate` do not depend on the additional assurance jobs: the ruleset and
+merge policy are unchanged. All checks still run on every PR; none move to
+nightly-only coverage. Superseded PR runs retain per-PR cancellation.
 
-These additional checks have `Full suite / ...` and `Extended checks / ...`
-names. They are independent of the existing required contexts and
-`zeros/ci-gate`; merging does not wait for them. Failures remain visible in
-Actions and on the PR. CI Recovery continues to monitor full main Preflight;
-it does not automatically open incidents for the separate extended checks.
-Beta and Production still require successful exact-source Preflight and
-CodeQL evidence. A PR assurance run is not release evidence: its workflow
-path, event and tested merge commit differ from the authenticated push runs.
+CI Recovery continues to observe full main Preflight, not the additional
+extended checks. Beta and Production still require successful exact-source
+Preflight and CodeQL evidence. PR assurance is not release evidence: its event
+and tested merge commit differ from authenticated push runs.
 
-All reused verification jobs have read-only tokens, no inherited secrets and
-no protected environments. Fork PRs use `pull_request`, never
-`pull_request_target`. Credentialed live-provider qualification and deployment
-workflows retain their explicit operator triggers; they are not safe to run
-against arbitrary PR source. Runtime drift reports stale pins but fails broken
-ones, as before.
+All reused verification jobs retain read-only tokens, no inherited secrets and
+no protected environments. Fork PRs use `pull_request`. Credentialed provider
+qualification and deployment retain their existing operator triggers. Runtime
+drift reports stale pins and fails broken pins, as before.
 
 CodeQL runs its `security-and-quality` suite across all JS/TS sources on PRs,
 main and release pushes. This includes every query in `security-extended` and
@@ -216,8 +218,8 @@ LABELS_JSON='["ci:web","ci:macos"]' pnpm ci:plan
 
 `FORCE_FULL=true` or `1` selects every PR lane except `ui-smoke`; `false`, `0`, or an
 unset value leaves path selection in place. Only `ci:ui-smoke` and `ci:full` add
-full composer smoke in PR/local mode. A selected PR runs the complete serial
-composer suite with Preflight's browser setup. Full Preflight retains its three
+full composer smoke in PR/local mode. A selected PR runs all three composer shards with Preflight's browser setup and
+the unchanged required `ui-smoke (composer)` aggregate. Full Preflight retains its three
 balanced composer shards and required aggregate after merge on main/release
 pushes.
 

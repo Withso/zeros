@@ -110,6 +110,8 @@ export function recoveryFixture({
     divergent: new Set(),
     rerunError: false,
     failLabelDelete: false,
+    failClose: false,
+    afterLabelDelete: null,
     beforeGetRun: null,
   };
   function observer(id, attempt = 1, overrides = {}) {
@@ -205,8 +207,14 @@ export function recoveryFixture({
               : (state.jobs.get(match[1]) ?? []),
         });
       }
-      if (rel === "/actions/artifacts")
-        return cloneResponse({ artifacts: state.artifacts });
+      if (rel === "/actions/artifacts") {
+        const page = Number(parsed.searchParams.get("page") || 1);
+        const size = Number(parsed.searchParams.get("per_page") || 100);
+        return cloneResponse({
+          total_count: state.artifacts.length,
+          artifacts: state.artifacts.slice((page - 1) * size, page * size),
+        });
+      }
       if ((match = /^\/actions\/artifacts\/(\d+)$/.exec(rel))) {
         const artifact = state.artifacts.find((a) => String(a.id) === match[1]);
         return artifact ? cloneResponse(artifact) : response({}, 404);
@@ -358,12 +366,21 @@ export function recoveryFixture({
         return cloneResponse(comments.at(-1));
       }
     }
+    if (method === "PATCH" && /^\/pulls\/\d+$/.test(rel)) {
+      if (state.failClose) return response({}, 502);
+      const pr = state.pulls.find(
+        (p) => p.number === Number(rel.split("/")[2]),
+      );
+      pr.state = body.state;
+      return cloneResponse(pr);
+    }
     if (method === "DELETE" && /^\/issues\/\d+\/labels\/autofix$/.test(rel)) {
       if (state.failLabelDelete) return response({}, 502);
       const pr = state.pulls.find(
         (p) => p.number === Number(rel.split("/")[2]),
       );
       pr.labels = pr.labels.filter((label) => label.name !== "autofix");
+      if (state.afterLabelDelete) state.afterLabelDelete(pr);
       return cloneResponse(pr.labels);
     }
     return response({}, 404);
