@@ -21,13 +21,18 @@ const context = {
 const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
 let rows: CloudServiceAccessRow[] = [],
   nextId = 0;
-let releaseRead: (() => void) | undefined;
+// Every list call made while reads are held stays pending until release.
+let heldReads: Array<() => void> = [];
 let preferences = { forwardingEnabled: false, autoForwardEnabled: true };
 Object.assign(window, {
   cloudNativeFixture: {
     calls,
     holdRead: false,
-    releaseRead: () => releaseRead?.(),
+    releaseRead: () => {
+      const held = heldReads;
+      heldReads = [];
+      for (const release of held) release();
+    },
   },
 });
 let signedOut = false;
@@ -52,7 +57,7 @@ window.__ZEROS_NATIVE__ = {
           .cloudNativeFixture.holdRead
       )
         await new Promise<void>((resolve) => {
-          releaseRead = resolve;
+          heldReads.push(resolve);
         });
       return rows.map((row) => ({ ...row })) as T;
     }

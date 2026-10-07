@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 
@@ -28,10 +28,15 @@ export class CloudPortForwardingPreferences {
     this.maxEntries = options.maxEntries ?? MAX_ENTRIES;
     if (!Number.isSafeInteger(this.maxEntries) || this.maxEntries < 1 || this.maxEntries > MAX_ENTRIES) throw new Error("Invalid forwarding preference bound.");
     try {
-      const metadata = lstatSync(filePath);
-      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_BYTES || metadata.uid !== process.getuid?.()) return;
-      const document = z.object({ version: z.literal(1), entries: z.array(entrySchema).max(this.maxEntries) }).strict().parse(JSON.parse(readFileSync(filePath, "utf8")));
-      for (const entry of document.entries) this.entries.set(key(entry), entry);
+      // Validate and read the same no-follow descriptor, so the checked file
+      // cannot be swapped between the ownership check and the read.
+      const fd = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const metadata = fstatSync(fd);
+        if (!metadata.isFile() || metadata.size > MAX_BYTES || metadata.uid !== process.getuid?.()) return;
+        const document = z.object({ version: z.literal(1), entries: z.array(entrySchema).max(this.maxEntries) }).strict().parse(JSON.parse(readFileSync(fd, "utf8")));
+        for (const entry of document.entries) this.entries.set(key(entry), entry);
+      } finally { closeSync(fd); }
     } catch { /* Missing or invalid intent always defaults to forwarding off. */ }
   }
   private identity(owner: CloudPortForwardingOwner) {

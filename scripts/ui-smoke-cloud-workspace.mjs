@@ -77,6 +77,25 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
   await page.goto(`${harnessBase}/harness-cloud-native-access.html`);
   const access = page.getByRole("region", { name: "Open via SSH", exact: true });
   const ports = page.getByRole("region", { name: "Workspace ports", exact: true });
+  // A failed forwarded-row check prints the fixture's native call order and
+  // the rendered regions, so a CI-only failure is diagnosable from its log.
+  const trace = [];
+  page.on("console", message => { if (["error", "warning"].includes(message.type())) trace.push(`console.${message.type()}: ${message.text().slice(0, 300)}`); });
+  page.on("requestfailed", request => trace.push(`request failed: ${request.url().slice(0, 200)}`));
+  const expectForwardedPort = async () => {
+    try {
+      await expect(ports.getByText("localhost:5173", { exact: false })).toBeVisible();
+    } catch (error) {
+      const state = await page.evaluate(() => ({
+        visibility: document.visibilityState,
+        ports: document.querySelector('[aria-label="Workspace ports"]')?.textContent ?? null,
+        ssh: document.querySelector('[aria-label="Open via SSH"]')?.textContent ?? null,
+        calls: window.cloudNativeFixture.calls.map(call => call.command),
+      })).catch(failure => ({ unavailable: String(failure) }));
+      console.error(`cloud native access diagnostics: ${JSON.stringify({ state, trace: trace.slice(-40) })}`);
+      throw error;
+    }
+  };
   await expect(access.getByRole("button", { name: "Open via SSH in Terminal", exact: true })).toBeEnabled();
   expect(await page.evaluate(() => window.cloudNativeFixture.calls.every(call =>
     ["cloud_workspace_access_context", "cloud_workspace_access_list", "cloud_workspace_port_forwarding_get", "auth_get_access_token", "auth_get_session_user", "app_info"].includes(call.command)))).toBe(true);
@@ -97,7 +116,7 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
   await ports.getByLabel("Workspace port", { exact: true }).fill("4173");
   await ports.getByLabel("Mac port", { exact: true }).fill("5173");
   await ports.getByRole("button", { name: "Forward port", exact: true }).click();
-  await expect(ports.getByText("localhost:5173", { exact: false })).toBeVisible();
+  await expectForwardedPort();
   const mutation = await page.evaluate(() => window.cloudNativeFixture.calls.find(call => call.command === "cloud_workspace_tunnel_start"));
   expect(mutation.args).toMatchObject({ remotePort: 4173, localPort: 5173, keyVersion: 1 });
   expect(Object.keys(mutation.args).sort()).toEqual(["authorityId", "deviceId", "keyVersion", "localPort", "organizationId", "remotePort", "workspaceId"]);
@@ -109,7 +128,7 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
   await access.getByRole("button", { name: "SSH options", exact: true }).click();
   await expect(page.getByRole("menuitem", { name: "Close SSH connection", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(ports.getByText("localhost:5173", { exact: false })).toBeVisible();
+  await expectForwardedPort();
   await page.getByRole("button", { name: "Toggle visibility", exact: true }).click();
   await expect(access).toHaveCount(0);
   await page.evaluate(() => { window.cloudNativeFixture.holdRead = false; window.cloudNativeFixture.releaseRead(); });
@@ -125,7 +144,7 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
   await access.getByRole("button", { name: "SSH options", exact: true }).click();
   await expect(page.getByRole("menuitem", { name: "Close SSH connection", exact: true })).toHaveCount(0);
   await page.keyboard.press("Escape");
-  await expect(ports.getByText("localhost:5173", { exact: false })).toBeVisible();
+  await expectForwardedPort();
   await page.screenshot({ path: ".context/e1-native-access-ui.png" });
   await page.getByRole("button", { name: "Toggle edit access", exact: true }).click();
   await expect(access.getByRole("button", { name: "Open via SSH in Terminal", exact: true })).toBeDisabled();

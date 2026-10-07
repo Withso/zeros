@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -40,6 +40,12 @@ describe("main cloud forwarding preferences", () => {
     expect(store.read(otherAccount).forwardingEnabled).toBe(false);
     store.removeAccount(owner.accountId);
     expect(new CloudPortForwardingPreferences(filePath).read(otherWorkspace).forwardingEnabled).toBe(false);
+  });
+  it("never follows a preference path that was replaced by a symlink", async () => {
+    const filePath = await fixture(), elsewhere = `${filePath}.target`;
+    new CloudPortForwardingPreferences(elsewhere).set(owner, { forwardingEnabled: true });
+    await symlink(elsewhere, filePath);
+    expect(new CloudPortForwardingPreferences(filePath).read(owner).forwardingEnabled).toBe(false);
   });
   it("fails closed on corrupt or oversized persisted data and malformed preference updates", async () => {
     const filePath = await fixture();

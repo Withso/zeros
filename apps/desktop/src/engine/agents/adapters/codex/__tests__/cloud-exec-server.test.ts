@@ -62,7 +62,9 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
     const helper=path.join(root,"cloud-codex-executor.mjs");
     await copyFile(path.resolve("apps/desktop/src/engine/agents/containment/cloud-codex-executor.mjs"),helper);
     // Only the runtime's absolute deployment paths differ in this offline fixture.
-    await writeFile(path.join(root,"cloud-runtime-root.mjs"),`export const resolveCloudRuntimeChild=()=>(${JSON.stringify({...importedRuntime,workerRoot:process.cwd(),binRoot:path.dirname(process.execPath)})});export const assertCloudRuntimeChildPath=file=>{if(file!==${JSON.stringify(nativeBinary)})throw new Error('unadmitted fixture executable');};`);
+    // The module is static source; fixture values are data it reads at load.
+    await writeFile(path.join(root,"cloud-runtime-root.json"),JSON.stringify({runtime:{...importedRuntime,workerRoot:process.cwd(),binRoot:path.dirname(process.execPath)},nativeBinary}));
+    await writeFile(path.join(root,"cloud-runtime-root.mjs"),"import {readFileSync} from 'node:fs';const fixture=JSON.parse(readFileSync(new URL('./cloud-runtime-root.json',import.meta.url),'utf8'));export const resolveCloudRuntimeChild=()=>structuredClone(fixture.runtime);export const assertCloudRuntimeChildPath=file=>{if(file!==fixture.nativeBinary)throw new Error('unadmitted fixture executable');};");
     const values={ORG_VALUE:"synthetic-org-value",REPO_VALUE:"synthetic-repository-value",PERSONAL_VALUE:actor,ORG_SECRET:"synthetic-org-secret",EMPTY_VALUE:"",LANG:"C",
       OPENAI_API_KEY:"synthetic-provider-value",ANTHROPIC_API_KEY:"synthetic-provider-value",CURSOR_API_KEY:"synthetic-provider-value",CODEX_API_KEY:"synthetic-provider-value"};
     const abort=new AbortController(),domains=new Set<{stopAndProve():Promise<void>}>();let closing:Promise<void>|undefined;

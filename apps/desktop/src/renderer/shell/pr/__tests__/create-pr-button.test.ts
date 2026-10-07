@@ -31,7 +31,10 @@ vi.mock("../../../shared/ui/primitives/dropdown-menu", () => {
   const pass = ({ children }: { children: React.ReactNode }) => children;
   return { DropdownMenu: pass, DropdownMenuTrigger: pass, DropdownMenuContent: pass,
     DropdownMenuItem: ({ children, onSelect }: { children: React.ReactNode; onSelect: () => void }) => {
-      const label = renderToStaticMarkup(React.createElement(React.Fragment, null, children)).replace(/<[^>]*>/g, "").trim();
+      // Strip markup until stable, so a split tag cannot survive one pass.
+      let label = renderToStaticMarkup(React.createElement(React.Fragment, null, children)), previous;
+      do { previous = label; label = label.replace(/<[^>]*>/g, ""); } while (label !== previous);
+      label = label.trim();
       fixture.menu.set(label, onSelect);
       return children;
     } };
