@@ -20,11 +20,12 @@ The supported workspace artifact is the physical v4 tarball built by
 `runtime-bundle/build.cjs` through the reusable `cloud-runtime-bundle-build.yml`.
 The Alpha desktop release and the standalone `cloud-runtime-bundle.yml` use this
 build; runtime eligibility requires qualification against the protected Boat base and saved
-Computer source. The separate `cloud-runtime-publication.yml` still uses
-`publish-vm-image`/`buildEngineImage` and its flat `/opt/zeros-runtime` OCI recipe.
-The shared image kit retains separate Dev callers. Flat-image publication is an
-explicit follow-up, not qualified v4 workspace execution merely because a marker
-is changed. The opt-in v3 release-worker promotion lane now refuses before
+Computer source. The separate `cloud-runtime-publication.yml` flat
+`/opt/zeros-runtime` OCI publisher is retired: its recipe still installs the v3
+worker profile, so `publish-vm-image` and `publication-receipt` refuse before any
+build, registry or receipt work. The shared image kit retains separate Dev
+callers. A v4 flat image would need its own qualification; changing a marker
+cannot qualify it. The opt-in v3 release-worker promotion lane now refuses before
 allocation/build; it retains historical receipts and cleanup, while the disabled
 lane preserves ordinary release publication. See
 [qualification status](qualification-status.md) and

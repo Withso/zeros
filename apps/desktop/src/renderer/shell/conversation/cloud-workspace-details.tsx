@@ -44,6 +44,7 @@ import {
   parseCloudWorkspaceKey,
 } from "../../platform/bridge/cloud-workspace-key";
 import { getOrganizationStoreGeneration, useTeams } from "../../features/team/team-store";
+import { ControlPlaneError } from "../../features/team/control-plane";
 import { CloudWorkspaceSetupFailure } from "./cloud-workspace-setup-failure";
 import { renameCloudWorkspace, type CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 import { cloudWorkspaceExecutionRefusal } from "../../platform/cloud-workspace-execution";
@@ -219,17 +220,37 @@ function ResourceValue({ capacity, percent }: { capacity: string; percent?: numb
   </span>;
 }
 
+export type CloudWorkspaceRenameDraft = { name: string; version: number; rebase: boolean };
+
+/** A rename draft keeps the version it was opened against. Only a version
+ * conflict marks it for rebase onto the next refreshed document version, so a
+ * later concurrent change still surfaces as a conflict instead of an overwrite. */
+export function renameDraftAfterFailure(draft: CloudWorkspaceRenameDraft, error: unknown): CloudWorkspaceRenameDraft {
+  return error instanceof ControlPlaneError && error.status === 409 && error.code === "cloud_workspace_version_conflict"
+    ? { ...draft, rebase: true } : draft;
+}
+export function rebaseRenameDraft(draft: CloudWorkspaceRenameDraft, version: number): CloudWorkspaceRenameDraft {
+  return draft.rebase && version !== draft.version ? { ...draft, version, rebase: false } : draft;
+}
+
 function WorkspaceName({ workspace, onRename }: { workspace: CloudWorkspaceDocument; onRename?: (name: string, version: number) => Promise<void> }) {
-  const [draft, setDraft] = useState<{ name: string; version: number } | null>(null);
+  const [draft, setDraft] = useState<CloudWorkspaceRenameDraft | null>(null);
   const [busy, setBusy] = useState(false);
-  const pending = useRef(false), alive = useRef(true);
+  const pending = useRef(false), alive = useRef(true), latestVersion = useRef(workspace.version);
+  latestVersion.current = workspace.version;
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  useEffect(() => { setDraft(current => current && rebaseRenameDraft(current, workspace.version)); }, [workspace.version]);
   const save = () => {
     if (!draft || !onRename || pending.current || !workspace.capabilities.canManage || !draft.name.trim()) return;
     pending.current = true; setBusy(true);
     void onRename(draft.name.trim(), draft.version).then(() => {
       if (alive.current) { setDraft(null); toast.success("Workspace renamed"); }
-    }).catch(error => { if (alive.current) toast.error("Couldn't rename workspace", { description: error instanceof Error ? error.message : "Try again." }); })
+    }).catch(error => {
+      if (!alive.current) return;
+      // The refreshed version may already have arrived before this conflict.
+      setDraft(current => current && rebaseRenameDraft(renameDraftAfterFailure(current, error), latestVersion.current));
+      toast.error("Couldn't rename workspace", { description: error instanceof Error ? error.message : "Try again." });
+    })
       .finally(() => { pending.current = false; if (alive.current) setBusy(false); });
   };
   if (draft) return <form className="flex min-w-0 flex-1 items-center gap-1" onSubmit={event => { event.preventDefault(); save(); }}>
@@ -242,7 +263,7 @@ function WorkspaceName({ workspace, onRename }: { workspace: CloudWorkspaceDocum
     <Tooltip label={workspace.name}><h2 className="text-fg1 min-w-0 flex-1 truncate text-sm font-medium">{workspace.name}</h2></Tooltip>
     <Tooltip label={workspace.capabilities.canManage ? "Rename workspace" : "Workspace management access is required to rename"}>
       <span className="inline-flex"><Button variant="ghost" size="icon-compact" aria-label="Rename workspace" disabled={!workspace.capabilities.canManage || !onRename}
-        onClick={() => setDraft({ name: workspace.name, version: workspace.version })}><Pencil /></Button></span>
+        onClick={() => setDraft({ name: workspace.name, version: workspace.version, rebase: false })}><Pencil /></Button></span>
     </Tooltip>
   </>;
 }

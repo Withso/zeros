@@ -46,11 +46,13 @@ credentials. Personal stays Local; org-Local stays on the sidecar.
 5. Publish the desktop with the compatible protocol/capabilities and finish the
    signed Mac + authorized disposable Alpha acceptance matrix.
 
-The separate `cloud-runtime-publication.yml` flat OCI pipeline and the shared
-Dev image kit remain under an explicit publication follow-up. The static
-`/opt/zeros-runtime` image recipe is not the qualified v4 workspace-runtime
-bundle. Consumer/base-contract disposition and qualification must precede a
-cutover; changing a marker cannot qualify it.
+The separate `cloud-runtime-publication.yml` flat OCI pipeline is retired. Its
+static `/opt/zeros-runtime` recipe still installs the v3 worker profile, so the
+publisher and receipt steps refuse before any build, registry or receipt work.
+It is not the qualified v4 workspace-runtime bundle. The shared Dev image kit
+remains under an explicit publication follow-up. Consumer/base-contract
+disposition and qualification must precede any v4 flat-image cutover; changing a
+marker cannot qualify it.
 
 The opt-in v3 release-worker promotion lane is retired. With
 `ZEROS_WORKER_PROMOTION=enabled`, release refuses before allocation/build/credential preparation;
