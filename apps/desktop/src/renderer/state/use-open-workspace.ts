@@ -16,10 +16,10 @@ import { resolveWorkspacePresentationKind } from "./workspace-resolution";
 import { pendingWorkspaceMode } from "./pending-workspaces";
 import type { WorkspaceListFilter } from "./workspace-list-filter";
 import { workspaceIsReadOnly } from "./workspace-history";
-import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import { getActiveBridge } from "../platform/bridge/active-bridge";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
-import { useInternalFeatureActive } from "../features/settings/internal-features";
+import { hasCloudWorkspaceAccountAccess, useCloudWorkspaceAccountAccess } from "../features/team/cloud-workspace-account-access";
 import { requestCloudWorkspaceOpen } from "./cloud-workspace-open-intent";
 
 interface OpenWorkspaceOptions {
@@ -41,7 +41,7 @@ export function useOpenWorkspace(): (
 ) => void {
   const dispatch = useWorkspaceDispatch();
   const sessions = useAgentSessions();
-  const cloudComputerV2 = useInternalFeatureActive("cloudComputerV2");
+  const cloudComputerV2 = useCloudWorkspaceAccountAccess();
   return useCallback(
     (workspace: WorkspaceNavigationTarget, options?: OpenWorkspaceOptions) => {
       const historyOnly = workspaceIsReadOnly(workspace);
@@ -67,7 +67,7 @@ export function useOpenWorkspace(): (
           validationPending: workspace.validationPending,
           workspaceListFilter: options?.workspaceListFilter,
         });
-        if (cloudComputerV2) requestCloudWorkspaceOpen(workspace.path);
+        if (cloudComputerV2 && isCloudWorkspace(workspace.path) && hasCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(workspace.path)?.organizationId)) requestCloudWorkspaceOpen(workspace.path);
         return;
       }
       // Last-viewed chat there (validated), else the most-recent live one.
@@ -97,7 +97,8 @@ export function useOpenWorkspace(): (
         validationPending: workspace.validationPending,
         workspaceListFilter: options?.workspaceListFilter,
       });
-      if (cloudComputerV2 && !historyOnly) requestCloudWorkspaceOpen(workspace.path);
+      if (cloudComputerV2 && !historyOnly && isCloudWorkspace(workspace.path) &&
+          hasCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(workspace.path)?.organizationId)) requestCloudWorkspaceOpen(workspace.path);
       if (fallbackId) {
         return;
       }

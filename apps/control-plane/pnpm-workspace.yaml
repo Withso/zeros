@@ -4,12 +4,3 @@
 # is a fallback — approved so pnpm v10/v11 never hard-fails the install.
 onlyBuiltDependencies:
   - esbuild
-
-# Transitive security floors, as in the root workspace. Each stays within its
-# consumer's supported range; keep an override until the parent lock entry
-# naturally resolves to an equal or newer release.
-overrides:
-  # @daytona/api-client accepts ^1.6.1; 1.20.0 fixes GHSA-c29m-xwm3-cm6r,
-  # GHSA-mghh-pgcx-3jjj, GHSA-x97p-jq2g-jp4f, GHSA-3pq3-5fj3-cg6v and
-  # GHSA-542g-h47m-68v8.
-  axios: "1.20.0"

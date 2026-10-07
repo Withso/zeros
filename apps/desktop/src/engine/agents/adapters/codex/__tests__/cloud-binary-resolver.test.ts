@@ -3,10 +3,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { resolveCloudCodexBinaryFromImage } from "../binary-resolver";
+import { testCloudRuntime } from "../../../__tests__/helpers/test-cloud-runtime";
 import {resolveCloudRuntime,resolveCloudRuntimePackagePath} from "../../../containment/cloud-runtime-root.mjs";
 vi.mock("../../../containment/cloud-runtime-root.mjs",async original=>{
   const actual=await original<typeof import("../../../containment/cloud-runtime-root.mjs")>();
-  return {...actual,resolveCloudRuntime:vi.fn(actual.resolveCloudRuntime),resolveCloudRuntimePackagePath:vi.fn(actual.resolveCloudRuntimePackagePath)};
+  return {...actual,resolveCloudRuntime:vi.fn((await import("../../../__tests__/helpers/test-cloud-runtime")).testCloudRuntime),resolveCloudRuntimePackagePath:vi.fn(file=>file)};
 });
 const roots: string[] = [];
 afterEach(async () => {
@@ -53,6 +54,8 @@ async function image() {
   await writeFile(binary, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]), {
     mode: 0o555,
   });
+  vi.mocked(resolveCloudRuntime).mockReturnValue({ ...testCloudRuntime(), workerRoot: root });
+  vi.mocked(resolveCloudRuntimePackagePath).mockImplementation(file => file);
   return { root, wrapper, nativePackage, runtime, binary };
 }
 it.skipIf(process.platform !== "linux" || process.arch !== "x64")(
@@ -77,9 +80,7 @@ it.skipIf(process.platform !== "linux" || process.arch !== "x64")(
       path.join(f.nativePackage, "package.json"),
       JSON.stringify({ version: "0.153.0-linux-x64" }),
     );
-    await expect(resolveCloudCodexBinaryFromImage(f.root)).rejects.toThrow(
-      "pinned native",
-    );
+    await expect(resolveCloudCodexBinaryFromImage(f.root)).rejects.toThrow("pinned native");
   },
 );
 it.skipIf(process.platform !== "linux" || process.arch !== "x64")(
@@ -101,10 +102,9 @@ it.skipIf(process.platform !== "linux" || process.arch !== "x64")(
   async () => {
     const f = await image(),
       outside = await image();
+    vi.mocked(resolveCloudRuntime).mockReturnValue({ ...testCloudRuntime(), workerRoot: f.root });
     await rm(f.binary);
     await symlink(outside.binary, f.binary);
-    await expect(resolveCloudCodexBinaryFromImage(f.root)).rejects.toThrow(
-      "pinned native",
-    );
+    await expect(resolveCloudCodexBinaryFromImage(f.root)).rejects.toMatchObject({ code: "ELOOP" });
   },
 );

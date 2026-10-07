@@ -1,7 +1,10 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto";
 import { Hono } from "hono";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { ensureUser } from "../auth.js";
+import { DatabaseCloudWorkspaceActorSessionService } from "./actor-sessions.js";
+import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
 import { HttpError } from "../authz.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx } from "../db.js";
@@ -27,7 +30,7 @@ import { seedCanonicalCloudWorkspaceAuthority, seedReadyCloudWorkspace, type Rea
 const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image", sourceCommit: "b".repeat(40),
   architecture: "linux/amd64", cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480,
   settingsSecretEncryptionKeys: {}, currentSettingsSecretEncryptionKeyVersion: null,
-  runtime: { newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full" },
+  runtime: { qualificationMode: "full" },
 } as CloudWorkspaceBackendConfig;
 
 (process.env.TEST_DATABASE_URL ? describe : describe.skip)("v4 lifecycle pins and checkpoint replacements", () => {
@@ -170,8 +173,9 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
             (id,workspace_id,generation,org_id,account_user_id,setup_run_id,setup_execution_fence,registration_grant_id,
              protocol_version,state,bridge_token_hash,heartbeat_token_hash,registered_at,last_heartbeat_at,lease_expires_at,
              runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,
-             runtime_engine_protocol_version,runtime_installer_receipt_sha256,runtime_boot_id,runtime_supervisor_session_id)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'ready',$10,$11,now(),now(),now()+interval '2 minutes',$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+             runtime_engine_protocol_version,runtime_installer_receipt_sha256,runtime_boot_id,runtime_supervisor_session_id,
+             actor_protocol_version,agent_customization_version)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'ready',$10,$11,now(),now(),now()+interval '2 minutes',$12,$13,$14,$15,$16,$17,$18,$19,$20,2,3)`,
           [engineId,fixture.workspaceId,execution.generation,fixture.organizationId,fixture.userId,execution.setupRunId,
             execution.executionFence,grant.id,CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,randomBytes(32),createHash("sha256").update(heartbeatToken).digest(),
             ...cloudRuntimePinValues(execution.runtime),runtimeWitness.installerReceiptSha256,randomUUID(),randomUUID()]);
@@ -184,6 +188,27 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
           settings:{version:execution.settings.version,sha256:execution.settings.sha256},
           engine:{instanceId:engineId,protocolVersion:CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,health:"ready",durableRecordConnected:true}}};
       }} });
+  }
+
+  async function requestScope(engineScope: CloudCommandEngineScope): Promise<CloudCommandEngineScope> {
+    const identity = (await pool.query("SELECT provider_sub FROM user_identities WHERE user_id=$1 AND provider='workos'", [fixture.userId])).rows[0];
+    const user = await ensureUser(pool, { provider: "workos", providerSubject: identity.provider_sub,
+      email: "owner@example.test", displayName: "Owner", session: { id: `session_${randomUUID()}`, clientKind: "desktop",
+        authTime: Math.floor(Date.now()/1000), tokenExpiresAt: Math.floor(Date.now()/1000)+3600 } });
+    user.accountRevision = Number((await pool.query("SELECT auth_revision FROM users WHERE id=$1", [user.id])).rows[0].auth_revision);
+    await pool.query("INSERT INTO auth_sessions(provider_session_id,provider_sub,user_id,client_kind,last_token_expires_at) VALUES($1,$2,$3,'desktop',now()+interval '1 hour')",
+      [user.authentication.sessionId,user.identity.subject,user.id]);
+    const pair = generateKeyPairSync("ed25519"), publicKey = Buffer.from(pair.publicKey.export({ format: "jwk" }).x!, "base64url");
+    const device = (await pool.query("INSERT INTO devices(user_id,label,platform,public_key,key_fingerprint) VALUES($1,'Lifecycle test','macos',$2,$3) RETURNING id",
+      [user.id,publicKey,createHash("sha256").update(publicKey).digest()])).rows[0];
+    const fields = { deviceId: device.id, keyVersion: 1, timestampMs: Date.now(), nonce: randomBytes(24).toString("base64url") };
+    const actors = new DatabaseCloudWorkspaceActorSessionService({ pool, enginePort: 39393, bridgeUrl: "wss://api.example.test/v1/cloud-workspaces/bridge", workosEnabled: false });
+    const grant = await actors.issue({ workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
+      actorUserId: user.id, authenticatedUser: user, proof: { ...fields, signature: sign(null,
+        cloudWorkspaceDeviceProofMessage({ ...fields, accountUserId: user.id, action: "engine.connect",
+          payload: { organizationId: fixture.organizationId, workspaceId: fixture.workspaceId } }), pair.privateKey).toString("base64url") } });
+    const admitted = await actors.consume({ ...engineScope, token: grant.grantToken });
+    return { ...engineScope, actorSessionId: admitted.actorSessionId, deviceId: admitted.deviceId };
   }
 
   it("discovers a compatible runtime update without changing pins or creating lifecycle work", async () => {
@@ -350,6 +375,7 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     expect((await pin(2)).runtime).toEqual(next.pin);
     expect((await pool.query("SELECT state FROM cloud_workspace_generation_transitions WHERE workspace_id=$1",[fixture.workspaceId])).rows[0].state).toBe("succeeded");
     expect((await pool.query("SELECT 1 FROM audit_log WHERE action='cloud_workspace.generation_rollback_started' AND subject->>'workspaceId'=$1",[fixture.workspaceId])).rows).toEqual([]);
+    newScope = await requestScope(newScope!);
     const claimId=randomUUID(), claim=await service.claim(newScope!,"pending","after-ready",claimId);
     expect(claim?.commandId).toBe(commandIds[0]);
     expect(await service.claim(newScope!,"pending","after-ready",claimId)).toEqual(claim);
@@ -366,6 +392,7 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     await pool.query("UPDATE cloud_workspaces SET status='setting_up',authority_epoch=authority_epoch+1 WHERE id=$1",[fixture.workspaceId]);
     let ordinaryScope:CloudCommandEngineScope|undefined;
     await readyWorker(async engineScope=>{ordinaryScope=engineScope;}).runOnce();
+    ordinaryScope = await requestScope(ordinaryScope!);
     expect(await service.claim(ordinaryScope!,"paused","later-ordinary-engine")).toBeNull();
     expect((await service.snapshot(ordinaryScope!,"paused")).paused).toBe(true);
   });
@@ -534,7 +561,7 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     expect((await availability()).status).toBe(404);
   });
   it("keeps legacy workspaces readable without offering a v4 runtime upgrade", async () => {
-    fixture = await seedReadyCloudWorkspace(pool);
+    fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     const response = await availability();
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ currentRuntimeId: null, latestRuntimeId: null,
@@ -556,16 +583,10 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
 
   it.each(["wake", "retry", "recover", "automatic recovery", "upgrade"] as const)("retains the accepted computer source through %s after activation changes", async operation => {
     const accepted = await withSystemTx(pool, async tx => {
-      const installationId = randomUUID();
-      await tx.query(`INSERT INTO github_installations(id,github_installation_id,app_variant,org_id,account_login,account_type,target_type)
-        VALUES($1,987654,'github.com',$2,'withso','Organization','Organization')`, [installationId,fixture.organizationId]);
-      const input = { organizationId: fixture.organizationId, ownerUserId: fixture.userId, installationId,
-        runtimeId: (await loadGenerationSource(tx, scope())).runtime!.runtimeId };
-      const computer = await seedComputerTemplate(tx, input);
-      await tx.query(`INSERT INTO cloud_workspace_computer_sources(workspace_id,generation,org_id,build_id,template_id,config_id)
-        VALUES($1,1,$2,$3,$3,$4)`, [fixture.workspaceId,fixture.organizationId,computer.buildId,computer.configId]);
-      await seedComputerTemplate(tx, { ...input, version: 2 });
-      return { build_id: computer.buildId, template_id: computer.templateId, config_id: computer.configId };
+      const accepted = (await tx.query("SELECT build_id,template_id,config_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId])).rows[0];
+      await seedComputerTemplate(tx, { organizationId: fixture.organizationId, ownerUserId: fixture.userId,
+        installationId: randomUUID(), runtimeId: (await loadGenerationSource(tx, scope())).runtime.runtimeId, version: 2 });
+      return accepted;
     });
     const checkpointId = await finalCheckpoint();
     await advanceHead();
@@ -608,7 +629,7 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     await withSystemTx(pool, async tx => {
       const connection = (await tx.query("SELECT provider_connection_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId])).rows[0];
       await copyGenerationPins(tx, { ...scope(), sourceGeneration: 1, targetGeneration: 2, actorUserId: fixture.userId,
-        providerConnectionId: connection.provider_connection_id, legacyProfile: config, qualificationMode: "full" });
+        providerConnectionId: connection.provider_connection_id, qualificationMode: "full" });
     });
     expect(await pin(2)).toEqual(source);
   });
@@ -792,8 +813,9 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
             (id,workspace_id,generation,org_id,account_user_id,setup_run_id,setup_execution_fence,registration_grant_id,
              protocol_version,state,bridge_token_hash,heartbeat_token_hash,registered_at,last_heartbeat_at,lease_expires_at,
              runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,
-             runtime_engine_protocol_version,runtime_installer_receipt_sha256,runtime_boot_id,runtime_supervisor_session_id)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'ready',$10,$11,now(),now(),now()+interval '2 minutes',$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+             runtime_engine_protocol_version,runtime_installer_receipt_sha256,runtime_boot_id,runtime_supervisor_session_id,
+             actor_protocol_version,agent_customization_version)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'ready',$10,$11,now(),now(),now()+interval '2 minutes',$12,$13,$14,$15,$16,$17,$18,$19,$20,2,3)`,
           [engineId,fixture.workspaceId,execution.generation,fixture.organizationId,fixture.userId,execution.setupRunId,
             execution.executionFence,grant.id,CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,randomBytes(32),randomBytes(32),
             ...cloudRuntimePinValues(execution.runtime),runtimeWitness.installerReceiptSha256,randomUUID(),randomUUID()]);
@@ -903,18 +925,28 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: { code: "cloud_quota_exceeded" } });
   });
-  it("keeps v3 pins NULL and rejects the v4-only endpoint without migrating the generation", async () => {
-    fixture = await seedReadyCloudWorkspace(pool);
+  it.each(["stop", "archive", "delete"])("keeps historical %s cleanup available while refusing execution", async operation => {
+    fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
+    const wake = await route("/wake");
+    expect(wake.status).toBe(409);
+    expect(await wake.json()).toMatchObject({ error: { code: "cloud_workspace_v2_required" } });
+    const cleanup = operation === "delete" ? await route("", {}, config, "DELETE") : await route(`/${operation}`);
+    expect(cleanup.status, JSON.stringify(await cleanup.json())).toBe(202);
+    expect((await pool.query("SELECT generation,runtime_id FROM cloud_workspace_generations WHERE workspace_id=$1", [fixture.workspaceId])).rows)
+      .toEqual([{ generation: 1, runtime_id: null }]);
+  });
+  it("refuses an unpinned historical generation before runtime upgrade or generation copy", async () => {
+    fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     const response = await upgrade();
     expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ error: { code: "cloud_runtime_upgrade_not_supported" } });
-    const source = await pin();
-    await withSystemTx(pool, async tx => {
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_workspace_v2_required" } });
+    await expect(withSystemTx(pool, async tx => {
       const connection = (await tx.query("SELECT provider_connection_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId])).rows[0];
       await copyGenerationPins(tx, { ...scope(), sourceGeneration: 1, targetGeneration: 2, actorUserId: fixture.userId,
-        providerConnectionId: connection.provider_connection_id, legacyProfile: { ...source.profile, imageRef: "zeros-v2-test-legacy-upgrade" }, qualificationMode: "full" });
-    });
-    expect(await pin(2)).toEqual({ runtime: null, profile: { ...source.profile, imageRef: "zeros-v2-test-legacy-upgrade" } });
+        providerConnectionId: connection.provider_connection_id, qualificationMode: "full" });
+    })).rejects.toMatchObject({ code: "cloud_workspace_v2_required" });
+    expect((await pool.query("SELECT generation,runtime_id FROM cloud_workspace_generations WHERE workspace_id=$1", [fixture.workspaceId])).rows)
+      .toEqual([{ generation: 1, runtime_id: null }]);
   });
   it("copies a previously qualified v4 source pin during an explicit generation rollback", async () => {
     const source = await pin(); await finalCheckpoint(); await advanceHead();

@@ -18,17 +18,10 @@ function failed(tree: ReturnType<typeof fixture>, check: string, args?: string[]
 }
 
 describe("cloud worker attestation", () => {
-  it.each([1, 2, 3])("keeps the v%i report and launch proof byte-for-byte", version => {
-    const tree = fixture(version), result = tree.execute();
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toBe("");
-    expect(result.stdout).toMatchSnapshot();
-    expect(fs.readFileSync(tree.physical(proofPath), "utf8")).toMatchSnapshot();
-    expect(tree.execute("consume-cloud-admission.mjs")).toEqual({ stdout: "[cloud-admission] qualified runtime proof consumed\n", stderr: "", exitCode: 0 });
-  });
-  it.each([1, 2, 3])("keeps the v%i resolver's legacy ownership rejection", version => {
-    const tree = fixture(version); tree.owners.set(markerPath, 10001);
-    expect(() => tree.execute()).toThrow("Cloud runtime descriptor or installation is invalid");
+  it.each([1, 2, 3])("refuses worker-v%i before qualification or proof publication", version => {
+    const tree = fixture(version);
+    failed(tree, "host_marker");
+    expect(tree.calls).toHaveLength(0);
   });
   it("never falls back to legacy from a pinned v4 executable", () => {
     const tree = fixture(); tree.write(markerPath, { ...tree.marker, version: 3, profile: "zeros-cloud-worker-v3" });

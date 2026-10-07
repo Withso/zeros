@@ -126,7 +126,7 @@ export async function runCloudPreviewSmoke({ page, check, harnessBase }) {
   );
   await page.getByRole("button", { name: "Disable previews" }).click();
   await expect(page.locator("iframe")).toHaveCount(0);
-  check("disabling the internal gate removes the runtime surface", true);
+  check("signing out removes the Cloud preview surface", true);
 
   await page.reload();
   await page.getByRole("button", { name: "Toggle active" }).click();

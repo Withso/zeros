@@ -112,8 +112,9 @@ workspace needs it for rollback.
 
 Cloud Computer uses the same sanitation and worker-attestation scripts, extracted
 into `apps/control-plane/src/cloud-workspaces/computer-image-scripts.ts` so they
-ship in the control-plane deployment. The template files remain compatibility
-fixtures. No member, GitHub, engine-registration, setup, or agent credential is
+ship in the control-plane deployment. The image kit reads these script sources
+directly and writes the generated sanitation and attestation files for each build.
+No member, GitHub, engine-registration, setup, or agent credential is
 provided to the dedicated builder or its verification clone.
 
 Recipes run as uid 10004 in a disposable namespace with a read-only system and

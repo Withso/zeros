@@ -66,7 +66,8 @@ function hasCloudIdentityMap(version) {
   try {
     const uidVersion=cloudEngineIdMapVersion(readProc("/proc/self/uid_map",256));
     const gidVersion=cloudEngineIdMapVersion(readProc("/proc/self/gid_map",256));
-    return (uidVersion===2||uidVersion===3)&&uidVersion===gidVersion&&(version===undefined||uidVersion===cloudProfileIdentityMapVersion(version));
+    return uidVersion === 3 && uidVersion === gidVersion &&
+      uidVersion === cloudProfileIdentityMapVersion(version ?? 4);
   } catch {
     return false;
   }
@@ -134,7 +135,7 @@ export function isCloudDeploymentOwner(candidate, uid) {
 }
 
 export function cloudProfileIdentityMapVersion(version) {
-  return version === 4 || version === 3 ? 3 : version === 2 ? 2 : null;
+  return version === 4 ? 3 : null;
 }
 
 const MARKER = "/etc/zeros/cloud-worker.json";
@@ -214,9 +215,8 @@ function parseDocument(bytes) {
 }
 
 function runtimePaths(descriptor) {
-  const v4 = descriptor !== undefined;
-  const root = v4 ? descriptor.root : "/opt/zeros-runtime";
-  const workerRoot = v4 ? `${root}/worker` : "/opt/zeros";
+  const root = descriptor.root;
+  const workerRoot = `${root}/worker`;
   const libRoot = `${root}/lib/zeros`, binRoot = `${root}/bin`;
   const helperNames = {
     setup: "setup-cloud-workspace.mjs", attester: "attest-cloud-worker.mjs",
@@ -227,11 +227,11 @@ function runtimePaths(descriptor) {
     installGithubCredential: "install-cloud-github-credential.mjs", githubRefreshRequest: "cloud-github-refresh-request.mjs",
   };
   return Object.freeze({
-    ...descriptor, profile: v4 ? "v4" : "v3", root, workerRoot, libRoot, binRoot,
+    ...descriptor, profile: "v4", root, workerRoot, libRoot, binRoot,
     node: `${binRoot}/node`, startEngine: `${binRoot}/start-engine.sh`,
-    engineNamespace: `${v4 ? binRoot : root}/cloud-engine-namespace`,
-    processSupervisor: `${v4 ? binRoot : root}/cloud-process-supervisor`,
-    cgroupRoot: v4 ? descriptor.cgroupRoot : "/sys/fs/cgroup",
+    engineNamespace: `${binRoot}/cloud-engine-namespace`,
+    processSupervisor: `${binRoot}/cloud-process-supervisor`,
+    cgroupRoot: descriptor.cgroupRoot,
     helpers: Object.freeze(Object.fromEntries(Object.entries(helperNames).map(([key, name]) => [key, `${libRoot}/${name}`]))),
   });
 }
@@ -312,7 +312,7 @@ export function createCloudRuntimeResolver({
     // that escapes the installation and then comes back into the tree.
     let pending = file.slice(runtime.workerRoot.length).split("/").filter(Boolean);
     let current = runtime.workerRoot, links = 0;
-    const linkRoot = runtime.profile === "v4" ? runtime.root : runtime.workerRoot;
+    const linkRoot = runtime.root;
     assertPath(current, true);
     while (pending.length) {
       const component = pending.shift();
@@ -345,14 +345,11 @@ export function createCloudRuntimeResolver({
     let hasMarker = false;
     try { filesystem.lstatSync(MARKER); hasMarker = true; }
     catch (error) { if (error?.code !== "ENOENT") throw error; }
-    // A dangling link is a present, invalid marker, never a legacy fallback.
+    // A dangling link is a present, invalid marker, never an absent marker.
     const marker = hasMarker ? readDocument(MARKER, 4096) : undefined;
-    if (marker === undefined || [1, 2, 3].includes(marker?.version)) {
-      if (pinnedNode) throw invalidRuntime();
-      // Legacy runtime consumers historically use constants. Their existing
-      // marker and toolchain admission remains in cloud-worker-config/profile.
-      return resolved = runtimePaths();
-    }
+    // This resolver is cloud-only. Local engines select their Local backend
+    // through an absent loadCloudWorkerConfiguration marker and never call it.
+    if (marker === undefined) throw invalidRuntime();
     // The host/projection marker contract is intentionally checked separately
     // from the descriptor; matching kernel UID maps never select a profile.
     const projection = isEngine();
@@ -381,7 +378,6 @@ export function createCloudRuntimeResolver({
   function resolveChild() {
     if (childResolved) return childResolved;
     const node = executable();
-    if (node === "/opt/zeros-runtime/bin/node" || node === "/usr/local/bin/node") return childResolved = runtimePaths();
     const match = /^\/opt\/zeros-infra\/(r1-[a-f0-9]{64})\/bin\/node$/.exec(node);
     if (!match) throw invalidRuntime();
     const runtime = runtimePaths({ root: path.dirname(path.dirname(node)), runtimeId: match[1] });

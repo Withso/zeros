@@ -1,6 +1,7 @@
 import type pg from "pg";
 
 import { audit } from "../audit.js";
+import { HttpError } from "../authz.js";
 import { withSystemTx } from "../db.js";
 import {
   CloudWorkspaceGrantError,
@@ -11,11 +12,12 @@ import {
   CLOUD_WORKSPACE_RUNTIME_ADMISSION_TTL_SECONDS,
   type CloudWorkspaceSetupAdmission,
   type CloudWorkspaceSetupAdmissionBroker,
-} from "./daytona-setup-executor.js";
+} from "./linux-setup-executor.js";
 import {
   CloudWorkspaceSetupError,
   type CloudWorkspaceSetupExecution,
 } from "./setup-worker.js";
+import { CLOUD_WORKSPACE_V2_REQUIRED, requireSupportedCloudWorkspaceGeneration } from "./supported-generation.js";
 
 export type DatabaseCloudWorkspaceSetupAdmissionBrokerOptions = {
   pool: pg.Pool;
@@ -27,18 +29,17 @@ export type DatabaseCloudWorkspaceSetupAdmissionBrokerOptions = {
 export class DatabaseCloudWorkspaceSetupAdmissionBroker implements CloudWorkspaceSetupAdmissionBroker {
   private readonly pool: pg.Pool;
   private readonly endpoint: string;
-  private readonly ttlSeconds: number;
   private readonly workosEnabled: boolean;
 
   constructor(options: DatabaseCloudWorkspaceSetupAdmissionBrokerOptions) {
     this.pool = options.pool;
     this.endpoint = normalizeCloudWorkspaceGrantAudience(options.endpoint);
-    this.ttlSeconds = options.ttlSeconds ?? 120;
+    const ttlSeconds = options.ttlSeconds ?? 120;
     this.workosEnabled = options.workosEnabled === true;
     if (
-      !Number.isSafeInteger(this.ttlSeconds) ||
-      this.ttlSeconds < 15 ||
-      this.ttlSeconds > 900
+      !Number.isSafeInteger(ttlSeconds) ||
+      ttlSeconds < 15 ||
+      ttlSeconds > 900
     ) {
       throw new Error("setup admission ttlSeconds must be between 15 and 900");
     }
@@ -56,8 +57,11 @@ export class DatabaseCloudWorkspaceSetupAdmissionBroker implements CloudWorkspac
       );
     }
     try {
-      const grant = await withSystemTx(this.pool, (tx) =>
-        issueCloudWorkspaceGrant(tx, {
+      const grant = await withSystemTx(this.pool, async (tx) => {
+        await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [execution.organizationId]);
+        await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE", [execution.workspaceId, execution.organizationId]);
+        await requireSupportedCloudWorkspaceGeneration(tx, execution);
+        return issueCloudWorkspaceGrant(tx, {
           workspaceId: execution.workspaceId,
           generation: execution.generation,
           organizationId: execution.organizationId,
@@ -68,12 +72,13 @@ export class DatabaseCloudWorkspaceSetupAdmissionBroker implements CloudWorkspac
             executionFence: execution.executionFence,
           },
           audience: this.endpoint,
-          // V4 installs before its only redemption. Legacy retains its
-          // configured short TTL; both grants stay run/fence-bound and one-use.
-          ttlSeconds: execution.runtime ? CLOUD_WORKSPACE_RUNTIME_ADMISSION_TTL_SECONDS : this.ttlSeconds,
+          // Runtime installation precedes the only redemption; the grant stays
+          // run/fence-bound and one-use throughout that bounded v4 setup.
+          ttlSeconds: CLOUD_WORKSPACE_RUNTIME_ADMISSION_TTL_SECONDS,
           issuedBy: null,
           workosEnabled: this.workosEnabled,
-        }),
+        });
+      },
       );
       if (signal.aborted) {
         await this.revoke(
@@ -109,6 +114,8 @@ export class DatabaseCloudWorkspaceSetupAdmissionBroker implements CloudWorkspac
       };
     } catch (error) {
       if (error instanceof CloudWorkspaceSetupError) throw error;
+      if (error instanceof HttpError && error.code === CLOUD_WORKSPACE_V2_REQUIRED)
+        throw new CloudWorkspaceSetupError(error.code, error.message, false);
       if (error instanceof CloudWorkspaceGrantError) {
         throw new CloudWorkspaceSetupError(
           error.code === "grant_subject_not_authorized"

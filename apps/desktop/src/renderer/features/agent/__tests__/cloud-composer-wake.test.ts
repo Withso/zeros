@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Me } from "../../team/control-plane";
+import { cloudWorkspaceAccountAccess } from "../../team/cloud-workspace-account-access";
 import { isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId } from "../../../platform/bridge/cloud-workspace-key";
 import { isSubmittedComposerDocument } from "../composer-submission";
 import * as lifecycle from "../session-reload-lifecycle";
@@ -60,8 +62,17 @@ function harness(cloud = true, status = "stopped", resident = true) {
   let cancellation = 0, sequence = 0;
   const sending = new Set<string>();
   const workspace = { chats: [{ id: "chat", folder, agentId: "codex" }], pendingAutoSend: {} };
+  const account = { me: {
+    user: { id: "nonstaff-member", email: "fixture@example.test", displayName: null, staffRole: null },
+    organizations: [{ id: "11111111-1111-4111-8111-111111111111", slug: "fixture", name: "Fixture organization", logo: null,
+      isPersonal: false, role: "member", defaultTeamId: null, workspaceCapabilities: { local: false, cloud: true },
+      teamCapabilities: { multiple: false, canCreate: false } }],
+    teams: [],
+  } as Me | null };
+
   const provider: any = { ...lifecycle, ...retention, Error, BLANK: {}, useCallback: (fn: unknown) => fn, isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId,
-    cloudComputerV2: cloud, bridge: { status: "connected" }, getStore: () => store, useWorkspaceStore: { getState: () => workspace },
+    hasCloudWorkspaceAccountAccess: (organizationId: string) => cloudWorkspaceAccountAccess(account.me, organizationId),
+    cloudComputerV2: cloud && cloudWorkspaceAccountAccess(account.me), bridge: { status: "connected" }, getStore: () => store, useWorkspaceStore: { getState: () => workspace },
     cloudCatalogGeneration: () => 1, cloudWorkspaceDocument: () => doc, prepareForSend: prepare, cloudSendWaitRef: { current: wait },
     subscribeCloudWorkspaces: () => () => {}, cloudWorkspaceStopVersion: () => 0, isCloudWorkspaceLifecyclePending,
     cloudSendPreparationRef: { current: { cancel: vi.fn() } }, beginCloudSendWaitRef: { current: null }, hydrateCloudSendRef: { current: null },
@@ -107,7 +118,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
     clearComposer: clear, pendingSendScrollCountRef: { current: 0 }, sendInFlightRef: { current: false }, startCloudSubmitSpan: () => vi.fn(), toast: toasts,
   };
   vm.runInNewContext(composerCode, composer);
-  return { provider, composer, queue, store, prepare, delivered, clear, dispatch, cloudError, toasts, draft, failureNotice,
+  return { account, provider, composer, queue, store, prepare, delivered, clear, dispatch, cloudError, toasts, draft, failureNotice,
     send: () => composer.actions.handleSend(), ready: () => { doc.status = "ready"; wake.resolve(); initialize.resolve(); },
     type: (text: string) => { current = { ...draft, displayText: text, json: { text }, attachments: [], segments: [{ type: "text", text }] }; },
     finish: () => { sending.clear(); store.sessions.chat.status = "ready"; provider.actions.drainNextQueued("chat"); },
@@ -116,7 +127,16 @@ function harness(cloud = true, status = "stopped", resident = true) {
 }
 
 describe("cloud composer readiness queue", () => {
-  it("accepts a cloud send into an editable FIFO while its wake is still pending", async () => {
+  it.each(["signed-out", "no-entitlement"])("does not prepare or dispatch a cloud send for %s", async reason => {
+    const h = harness();
+    if (reason === "signed-out") h.account.me = null;
+    else h.account.me!.organizations![0].workspaceCapabilities.cloud = false;
+    await expect(h.provider.actions.sendPrompt("chat", "Blocked send")).rejects.toThrow("run access");
+    expect(h.queue.get("chat")).toBeUndefined();
+    expect(h.prepare).not.toHaveBeenCalled();
+    expect(h.delivered).not.toHaveBeenCalled();
+  });
+  it("accepts a nonstaff member cloud send without a rollout preference while wake is pending", async () => {
     const h = harness(); await h.send();
     expect(h.queue.get("chat")).toHaveLength(1); expect(h.clear).toHaveBeenCalledOnce();
     expect(h.provider.actions.getQueuedDraft("chat", h.queue.get("chat")![0].bubbleId).json).toBe(h.draft.json);

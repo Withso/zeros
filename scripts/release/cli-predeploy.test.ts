@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main } from "./cli";
 import { CHANNELS, type Channel } from "./contracts";
 import { workerEnvironment } from "./worker-test-fixtures";
+import { RELEASE_WORKER_IMAGES_RETIRED } from "../../apps/control-plane/src/cloud-workspaces/release-worker-retirement";
 
 const dependencies = vi.hoisted(() => ({ command: vi.fn(), providers: vi.fn(), github: vi.fn(), inputs: vi.fn(), checkout: vi.fn() }));
 vi.mock("./io", async original => {
@@ -87,11 +88,16 @@ describe("Alpha hosted preparation from the old deployment", () => {
     expect(JSON.parse(await readFile(".context/release/hosted-services.json", "utf8"))).toMatchObject({ status: "services-ready", backend: test.backend });
     expect(dependencies.inputs).not.toHaveBeenCalled();
   });
-  it.each(["unready", "unknown"])("preserves the existing tuple before a pending worker promotion with a 503 %s identity", async state => {
+  it.each(["unready", "unknown"])("refuses enabled worker preparation before reading a 503 %s identity", async state => {
     const test = fixture(); vi.stubEnv("WORKER_PROMOTION_REQUIRED", "true"); vi.stubEnv("ZEROS_WORKER_PROMOTION", "enabled");
-    test.respond({ ...test.old, cloud: { ...test.old.cloud, state } });
-    await main(); test.unmutated(); process.argv[2] = "--services"; await main();
-    expect(test.providers.waitIdentity).toHaveBeenCalledWith({ head: "0134_fixture.sql", sha256: digest }, oldWorker, false);
+    const fetcher = test.respond({ ...test.old, cloud: { ...test.old.cloud, state } });
+    for (const mode of ["--plan", "--services"]) {
+      process.argv[2] = mode; await expect(main()).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED); test.unmutated();
+    }
+    expect(fetcher).not.toHaveBeenCalled(); expect(dependencies.checkout).not.toHaveBeenCalled();
+    expect(dependencies.providers).not.toHaveBeenCalled(); expect(dependencies.github).not.toHaveBeenCalled();
+    expect(dependencies.inputs).not.toHaveBeenCalled(); expect(test.providers.waitIdentity).not.toHaveBeenCalled();
+    await expect(readFile(".context/release/hosted-services.json")).rejects.toMatchObject({ code: "ENOENT" });
   });
   it("supports the non-worker-changing execute path with an unready old Alpha", async () => {
     const test = fixture(); test.respond(); process.argv[2] = "--execute"; await main();
@@ -116,17 +122,29 @@ describe("Alpha hosted preparation from the old deployment", () => {
     const test = fixture(); vi.stubGlobal("fetch", vi.fn(async () => { throw new DOMException("private fixture diagnostic", name); }));
     await expect(main()).rejects.toThrow(); test.unmutated();
   });
-  it("requires the selected provider during pending worker preparation", async () => {
-    const test = fixture(); vi.stubEnv("WORKER_PROMOTION_REQUIRED", "true"); vi.stubEnv("CLOUD_WORKSPACE_PROVIDER", "daytona"); test.respond();
-    await expect(main()).rejects.toThrow("existing cloud provider"); test.unmutated();
+  it("requires the selected cloud provider with worker promotion disabled", async () => {
+    const test = fixture(); vi.stubEnv("CLOUD_WORKSPACE_PROVIDER", "unsupported"); test.respond();
+    await expect(main()).rejects.toThrow("explicit managed provider"); test.unmutated();
   });
-  it("retains qualification and committed input equality when a qualified worker is reused", async () => {
-    const test = fixture(); vi.stubEnv("ZEROS_WORKER_PROMOTION", "enabled"); test.respond({ ...test.old, workerQualified: true });
-    await main(); test.unmutated();
-    expect(dependencies.inputs).toHaveBeenCalledWith(oldWorker.sourceSha); expect(dependencies.inputs).toHaveBeenCalledWith(sourceSha);
-    dependencies.inputs.mockImplementation(async (sha: string) => sha === sourceSha ? "e".repeat(64) : digest);
-    await expect(main()).rejects.toThrow("Worker inputs changed"); test.unmutated();
-    test.respond(); await expect(main()).rejects.toThrow("qualification"); test.unmutated();
+  it("refuses enabled reuse before reading qualification or hashing committed inputs", async () => {
+    const test = fixture(); vi.stubEnv("ZEROS_WORKER_PROMOTION", "enabled");
+    dependencies.inputs.mockImplementation(async () => { throw new Error("Retired worker input scan must not run"); });
+    for (const workerQualified of [true, false]) {
+      const fetcher = test.respond({ ...test.old, workerQualified });
+      await expect(main()).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED); test.unmutated();
+      expect(fetcher).not.toHaveBeenCalled();
+    }
+    expect(dependencies.inputs).not.toHaveBeenCalled(); expect(dependencies.checkout).not.toHaveBeenCalled();
+    expect(dependencies.providers).not.toHaveBeenCalled(); expect(dependencies.github).not.toHaveBeenCalled();
+  });
+  it("prepares disabled-lane services without qualification or committed worker input scans", async () => {
+    const test = fixture(); test.respond({ ...test.old, workerQualified: false });
+    dependencies.inputs.mockImplementation(async () => { throw new Error("Disabled publication must not scan worker inputs"); });
+    await main(); test.unmutated(); process.argv[2] = "--services"; await main();
+    expect(test.providers.waitIdentity).toHaveBeenCalledWith({ head: "0134_fixture.sql", sha256: digest }, undefined, true);
+    expect(dependencies.inputs).not.toHaveBeenCalled();
+    expect(JSON.parse(await readFile(".context/release/hosted-services.json", "utf8"))).toMatchObject({
+      status: "services-ready", sourceSha, backend: { worker: oldWorker, workerQualified: false } });
   });
   it("requires new-candidate readiness before Pages even after accepting old 503 metadata", async () => {
     const test = fixture(); test.respond(); test.providers.waitIdentity.mockResolvedValue({ ...test.old, sourceSha });

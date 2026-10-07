@@ -1,6 +1,8 @@
+import { RELEASE_WORKER_IMAGES_RETIRED } from "./cloud-workspaces/release-worker-retirement.js";
 import { describe, expect, it, vi } from "vitest";
 import type pg from "pg";
-import { DevAgentRequestSchema, assertDevAgentEnvironment, devAgentModel, inspectDevAgents } from "./dev-agent-qualification.js";
+import { DevAgentRequestSchema, assertDevAgentEnvironment, devAgentModel, inspectDevAgents, start } from "./dev-agent-qualification.js";
+import { NATIVE_AGENT_CANARY_RETIREMENT } from "../../../scripts/dev-environment/native-agent-retirement.mjs";
 import { DatabaseCloudAgentCredentialService } from "./cloud-workspaces/agent-credentials.js";
 import { startNativeDevCanary } from "./cloud-workspaces/dev-native-canary.js";
 
@@ -10,6 +12,13 @@ const request = { owner: "a".repeat(24), generation: "11111111-1111-4111-8111-11
 const env = { ZEROS_DEV_ENVIRONMENT: "hosted", ZEROS_DEV_OWNER: request.owner, ZEROS_DEV_GENERATION: request.generation,
   BOAT_SNAPSHOT_ID: request.image.snapshotId, BOAT_IMAGE_BUILD_SHA256: request.image.buildSha256, ZEROS_CLOUD_SOURCE_COMMIT: request.image.sourceCommit };
 describe("Dev native agent operator boundaries", () => {
+  it("refuses the SSH operator before input, environment, database, renewal or provider access", async () => {
+    const read = vi.fn(() => { throw new Error("Retired operator must not read authority"); });
+    const forbidden = new Proxy({}, { get: read });
+    expect(NATIVE_AGENT_CANARY_RETIREMENT).toEqual({ status: 409, code: "release_worker_images_retired", message: RELEASE_WORKER_IMAGES_RETIRED });
+    await expect(start(forbidden, forbidden)).rejects.toMatchObject(NATIVE_AGENT_CANARY_RETIREMENT);
+    expect(read).not.toHaveBeenCalled();
+  });
   it("rejects release backends, other generations and stale deployed images", () => {
     expect(() => assertDevAgentEnvironment(request, env)).not.toThrow();
     for (const field of Object.keys(env)) expect(() => assertDevAgentEnvironment(request, { ...env, [field]: "other" })).toThrow();
@@ -56,19 +65,12 @@ describe("Dev native agent operator boundaries", () => {
       expect(imageQuery).toContain("q.runtime_contract_sha256=image.image_contract");
     } finally { accounts.mockRestore(); }
   });
-  it("stages access only through a private file and returns no credential or native output", async () => {
-    const secret = "synthetic-provider-token-for-test";
-    const command = vi.fn(async () => "started");
-    const upload = vi.fn(async () => {});
+  it("refuses the retired native canary before staging access or runner commands", async () => {
+    const command = vi.fn(async () => "started"), upload = vi.fn(async () => {});
     const target = { id: "bx_test123", attempt: "22222222-2222-4222-8222-222222222222", ...request.image };
-    await startNativeDevCanary({ command, upload }, target, { version: 1, expiresAtMs: Date.now() + 600_000,
-      buildSha256: target.buildSha256, sourceCommit: target.sourceCommit, model: "claude-haiku-4-5",
-      material: { kind: "claude-setup-token", accessToken: secret } });
-    expect(upload).toHaveBeenCalledOnce();
-    expect(JSON.stringify(command.mock.calls)).not.toContain(secret);
-    expect(command.mock.calls.map(call => String(call[0])).join("\n")).toContain("O_NOFOLLOW");
-    expect(command.mock.calls.map(call => String(call[0])).join("\n")).toContain(target.buildSha256);
-    expect(command.mock.calls.map(call => String(call[0])).join("\n")).toContain("item.get('version')==3");
+    await expect(startNativeDevCanary({ command, upload }, target, { version: 1, model: "claude-haiku-4-5" }))
+      .rejects.toMatchObject({ status: 409, code: "release_worker_images_retired", message: RELEASE_WORKER_IMAGES_RETIRED });
+    expect(upload).not.toHaveBeenCalled(); expect(command).not.toHaveBeenCalled();
   });
 });
 

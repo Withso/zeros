@@ -15,6 +15,15 @@ function memory() {
 }
 
 describe("hosted Dev registry", () => {
+  it("authenticates receipts without a retired provider key and retains historical fields", () => {
+    const state = newHostedGeneration(identity);
+    delete state.keys.provider;
+    expect(openReceipt(sealReceipt(state, key), key, identity.owner)).toEqual(state);
+
+    state.keys.provider = "ef".repeat(32);
+    expect(openReceipt(sealReceipt(state, key), key, identity.owner)).toEqual(state);
+  });
+
   it("encrypts credentials and authenticates both the ciphertext and owner", () => {
     const state = newHostedGeneration(identity);
     const sealed = sealReceipt(state, key);

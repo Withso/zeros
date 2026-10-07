@@ -5,6 +5,10 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+vi.mock("../cloud-workspace-validation/sandbox/cloud-runtime-root.mjs", async original => ({
+  ...await original<typeof import("../cloud-workspace-validation/sandbox/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime: (await import("../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime")).testCloudRuntime,
+}));
 import { CloudWorkspaceDurabilityRuntime } from "../../apps/desktop/src/engine/cloud-durability-runtime";
 import { prepareRepositoryAndSettings, restoreCloudWorkspaceCheckpoint } from "../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
 import runtimeLayout from "../cloud-workspace-validation/sandbox/runtime-layout.json" with { type: "json" };
@@ -42,9 +46,11 @@ describe.runIf(process.platform === "linux" && process.getuid?.() === 0 && proce
     git(repository, ["remote", "add", "origin", "https://github.com/example/recovery.git"]);
     await fs.writeFile(path.join(repository, "file.txt"), "base\n"); git(repository, ["add", "."]); git(repository, ["commit", "-qm", "base"]);
     const base = git(repository, ["rev-parse", "HEAD"]); execFileSync("chown", ["-R", "10001:10001", repository]);
-    // This is the root-owned seed backup installed by the atomic clone path.
-    await fs.mkdir("/srv/zeros/.zeros-image-seed");
-    const profile = { version: 1, setupDirectory: "/srv/zeros/setup", managedSettingsDirectory: "/srv/zeros/managed" };
+    // V4's private seed stays on the same files bind as the saved checkout.
+    const staging = path.join(runtimeLayout.engineFilesRoot, ".zeros-setup");
+    await fs.mkdir(staging, { mode: 0o710 }); await fs.chown(staging, 0, 10001);
+    await fs.mkdir(path.join(staging, "seed"));
+    const profile = { version: 4, setupDirectory: "/srv/zeros/setup", managedSettingsDirectory: "/srv/zeros/managed", engineUid: 10003, engineGid: 10003 };
     const material = { execution: { workspaceId: randomUUID(), organizationId: randomUUID(), generation: 1, setupRunId: randomUUID(), executionFence: 1 },
       repository: { cloneUrl: "https://github.com/example/recovery.git", revision: base }, settings: { version: 1, snapshotSha256: "a".repeat(64), document: { values: {} }, setupCommands: [], setupEnvironment: [] } };
     const stringify = async () => "[env]\nQUALIFICATION = \"true\"\n";
@@ -101,17 +107,17 @@ describe.runIf(process.platform === "linux" && process.getuid?.() === 0 && proce
     } finally {vi.mocked(runScopedCloudSetup).mockReset();}
   });
 
-  it("preserves legacy scoped setup errors and environment delivery", async () => {
+  it.each([1, 2, 3])("refuses retired setup profile %s before executing a hook", async version => {
     const commit = git(runtimeLayout.repository, ["rev-parse", "HEAD"], true);
     const material = { execution: { workspaceId: randomUUID(), organizationId: randomUUID(), generation: 1, setupRunId: randomUUID(), executionFence: 1 },
       repository: { cloneUrl: "https://github.com/example/recovery.git", revision: commit },
       settings: { version: 1, snapshotSha256: "c".repeat(64), document: { values: {} },
         setupCommands: [{ command: "true", timeoutSeconds: 5 }], setupEnvironment: [{ name: "LANG", value: "en_US.UTF-8" }] } };
-    vi.mocked(runScopedCloudSetup).mockRejectedValueOnce(new Error("legacy scoped setup failure"));
+    vi.mocked(runScopedCloudSetup).mockClear();
     try {
-      await expect(prepareRepositoryAndSettings(material, { version: 2, setupDirectory: "/srv/zeros/setup-v2", managedSettingsDirectory: "/srv/zeros/managed-v2" }, async () => ""))
-        .rejects.toThrow("legacy scoped setup failure");
-      expect(runScopedCloudSetup).toHaveBeenCalledWith(expect.objectContaining({ environment: { LANG: "en_US.UTF-8" } }));
+      await expect(prepareRepositoryAndSettings(material, { version, setupDirectory: "/srv/zeros/setup-retired", managedSettingsDirectory: "/srv/zeros/managed-retired" }, async () => ""))
+        .rejects.toMatchObject({ code: "cloud_workspace_v2_required" });
+      expect(runScopedCloudSetup).not.toHaveBeenCalled();
     } finally { vi.mocked(runScopedCloudSetup).mockReset(); }
   });
 
@@ -235,10 +241,10 @@ describe.runIf(process.platform === "linux" && process.getuid?.() === 0 && proce
     await expect(fs.stat("/srv/zeros/home/agent/.codex/auth.json")).rejects.toMatchObject({ code: "ENOENT" });
     git(upstream, ["update-ref", "-d", "refs/heads/main"]);
     git(upstream, ["reflog", "expire", "--expire=now", "--all"]); git(upstream, ["gc", "-q", "--prune=now"]);
-    for (const directory of [runtimeLayout.repository, runtimeLayout.seedBackup, "/srv/zeros/setup", "/srv/zeros/managed"]) {
+    for (const directory of [runtimeLayout.repository, path.join(runtimeLayout.engineFilesRoot, ".zeros-setup", "seed"), "/srv/zeros/setup", "/srv/zeros/managed"]) {
       await fs.rm(directory, { recursive: true, force: true });
     }
-    const profile = { version: 1, setupDirectory: "/srv/zeros/setup", managedSettingsDirectory: "/srv/zeros/managed", engineUid: 0, engineGid: 0 };
+    const profile = { version: 4, setupDirectory: "/srv/zeros/setup", managedSettingsDirectory: "/srv/zeros/managed", engineUid: 10003, engineGid: 10003 };
     const material = {
       execution: { workspaceId: authority.workspaceId, organizationId: authority.organizationId, generation: 2, setupRunId: randomUUID(), executionFence: 2 },
       repository: { cloneUrl: `${recovery.endpoint.replace("http:", "https:")}/unavailable.git`, revision: base, credential: { token: "test-only-git-token" } },

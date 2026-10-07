@@ -7,7 +7,14 @@ import {
   cloudEngineWorkspacePaths,
 } from "../cloud-workspace-validation/sandbox/cloud-engine-view.mjs";
 
+import { testCloudRuntime } from "../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime";
+const runtime = testCloudRuntime();
+const view = "/run/zeros/view/runtime-11111111-1111-4111-8111-111111111111";
+
 describe("fixed cloud engine mount and environment contract", () => {
+  it.each([2,3])("refuses retired profile %i even with a supplied legacy runtime", version => {
+    expect(() => cloudEngineViewArguments("serve",version,{...runtime,profile:"v3"},view)).toThrow(/profile version/);
+  });
   it("shares only one validated resident service directory and exposes future immutable runtimes only to the resident", () => {
     const tree = cloudRuntimeFixture();
     try {
@@ -22,7 +29,7 @@ describe("fixed cloud engine mount and environment contract", () => {
       expect(engine.join("\n")).not.toContain("--ro-bind\n/opt/zeros-infra\n/opt/zeros-infra");
       for (const invalid of ["../engine", "", "/run/zeros"]) expect(() =>
         cloudEngineViewArguments("serve", 4, runtime, view, undefined, invalid)).toThrow();
-      expect(() => cloudEngineViewArguments("serve", 3, undefined, undefined, undefined, hostId)).toThrow();
+      expect(() => cloudEngineViewArguments("serve", 3, runtime, view, undefined, hostId)).toThrow();
     } finally { tree.dispose(); }
   });
   it("admits the fixed resident entry only in v4 without giving it registration credentials", () => {
@@ -33,7 +40,7 @@ describe("fixed cloud engine mount and environment contract", () => {
       expect(cloudEngineViewArguments("resident", 4, runtime, view).slice(-3)).toEqual([
         "--runtime-id", runtime.runtimeId, "--resident",
       ]);
-      expect(() => cloudEngineViewArguments("resident", 3)).toThrow();
+      expect(() => cloudEngineViewArguments("resident", 3, runtime, view)).toThrow();
       const environment = cloudEngineViewEnvironment({ ZEROS_CLOUD_TOKEN: "synthetic",
         ZEROS_CLOUD_RUNTIME_B64: "synthetic", ZEROS_RESIDENT_PTY_B64: "synthetic" }, "resident", runtime);
       expect(environment).not.toHaveProperty("ZEROS_CLOUD_TOKEN");
@@ -61,28 +68,27 @@ describe("fixed cloud engine mount and environment contract", () => {
         expect(() => cloudEngineViewArguments("serve", 4, runtime, view, invalid)).toThrow();
         expect(() => cloudEngineWorkspacePaths(invalid)).toThrow();
       }
-      expect(() => cloudEngineViewArguments("serve", 3, undefined, undefined, primary)).toThrow();
+      expect(() => cloudEngineViewArguments("serve", 3, runtime, view, primary)).toThrow();
       expect(binds.some(([source]) => source === "/home/user" || source === "/srv/zeros/setup" || source === "/run/zeros")).toBe(false);
     } finally { tree.dispose(); }
   });
-  it("admits only the fixed native qualification entry in the v3 engine view", () => {
-    expect(cloudEngineViewArguments("qualify-agent", 3).slice(-2)).toEqual(["--v3", "--qualify-agent"]);
-    expect(cloudEngineViewArguments("qualify-agent", 3)).toContain("/opt/zeros");
-    expect(() => cloudEngineViewArguments("qualify-agent", 2)).toThrow();
-    expect(cloudEngineViewEnvironment({ ZEROS_CLOUD_TOKEN: "private" }, "qualify-agent")).not.toHaveProperty("ZEROS_CLOUD_TOKEN");
+  it("refuses the retired paid image qualification mode", () => {
+    expect(() => cloudEngineViewArguments("qualify-agent", 4, runtime, view)).toThrow(/operation/);
+    expect(() => cloudEngineViewEnvironment({}, "qualify-agent", runtime)).toThrow(/operation/);
   });
+
   it("keeps private attachment staging on the repository mount without exposing host authority", () => {
-    const args = cloudEngineViewArguments("serve", 3);
+    const args = cloudEngineViewArguments("serve", 4, runtime, view);
     const binds = args.flatMap((arg, index) => arg === "--bind" ? [[args[index + 1], args[index + 2]]] : []);
     expect(binds).toContainEqual(["/srv/zeros/files", "/srv/zeros"]);
     expect(binds.some(([, target]) => target === "/srv/zeros/workspace" || target === "/srv/zeros/attachment-staging")).toBe(false);
     expect(binds.some(([source]) => source === "/srv/zeros")).toBe(false);
-    expect(cloudEngineViewEnvironment({ ZEROS_ATTACHMENT_TEMP_DIR: "/untrusted" })).toHaveProperty(
+    expect(cloudEngineViewEnvironment({ ZEROS_ATTACHMENT_TEMP_DIR: "/untrusted" },"serve",runtime)).toHaveProperty(
       "ZEROS_ATTACHMENT_TEMP_DIR", "/srv/zeros/attachment-staging",
     );
   });
   it("projects only engine runtime authority and readonly control mounts", () => {
-    const args = cloudEngineViewArguments();
+    const args = cloudEngineViewArguments("serve", 4, runtime, view);
     const mounts: Array<[string, string, string]> = [];
     for (let index = 0; index < args.length; index++) {
       if (["--bind", "--ro-bind"].includes(args[index]))
@@ -98,7 +104,8 @@ describe("fixed cloud engine mount and environment contract", () => {
       "/sys/fs/cgroup",
       "/sys/fs/cgroup",
     ]);
-    expect(mounts).toContainEqual(["--ro-bind", "/opt/zeros", "/opt/zeros"]);
+    expect(mounts).toContainEqual(["--ro-bind", runtime.root, runtime.root]);
+    expect(mounts).toContainEqual(["--ro-bind", `${view}/facade`, "/opt/zeros"]);
     expect(mounts).toContainEqual([
       "--ro-bind",
       "/etc/containers/policy.json",
@@ -118,22 +125,18 @@ describe("fixed cloud engine mount and environment contract", () => {
     // The native entry blocks before bwrap forks; bwrap's own late barrier
     // cannot guarantee cgroup inheritance for descendants already created.
     expect(args).not.toContain("--block-fd");
-    expect(args.slice(-2)).toEqual([
-      "--",
-      "/opt/zeros-runtime/cloud-engine-namespace",
-    ]);
-    expect(cloudEngineViewArguments("qualify").at(-1)).toBe("--qualify");
-    expect(cloudEngineViewArguments("qualify",3).slice(-2)).toEqual(["--v3","--qualify"]);
-    expect(cloudEngineViewArguments("serve",3).at(-1)).toBe("--v3");
+    expect(args.slice(-4)).toEqual(["--", runtime.engineNamespace, "--runtime-id", runtime.runtimeId]);
+    expect(cloudEngineViewArguments("qualify", 4, runtime, view).at(-1)).toBe("--qualify");
+    expect(cloudEngineViewArguments("qualify",4,runtime,view).slice(-3)).toEqual(["--runtime-id",runtime.runtimeId,"--qualify"]);
     expect(args.filter((_, index) => args[index - 1] === "--cap-add")).toEqual([
       "CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP", "CAP_KILL", "CAP_SYS_ADMIN",
       "CAP_SYS_CHROOT", "CAP_DAC_OVERRIDE", "CAP_CHOWN", "CAP_FOWNER", "CAP_SETFCAP",
     ]);
-    expect(()=>cloudEngineViewArguments("serve",4)).toThrow(/version/);
-    expect(() => cloudEngineViewArguments("shell")).toThrow(/operation/);
+    expect(()=>cloudEngineViewArguments("serve",4,{...runtime,profile:"v3"},view)).toThrow(/version/);
+    expect(() => cloudEngineViewArguments("shell",4,runtime,view)).toThrow(/operation/);
   });
   it("does not mask procfs entries needed for private container PID namespaces", () => {
-    const args = cloudEngineViewArguments();
+    const args = cloudEngineViewArguments("serve", 4, runtime, view);
     for (let index = 0; index < args.length; index++) {
       if (["--bind", "--ro-bind"].includes(args[index]))
         expect(args[index + 2].startsWith("/proc/")).toBe(false);
@@ -148,11 +151,11 @@ describe("fixed cloud engine mount and environment contract", () => {
       NODE_OPTIONS: "--require=/tmp/untrusted",
       LD_PRELOAD: "/tmp/loader",
       BOAT_API_KEY: "test-provider",
-      DAYTONA_API_KEY: "test-provider",
+      PROVIDER_API_KEY: "test-provider",
       OPENAI_API_KEY: "test-unrelated-model-key",
       HOME: "/root",
     };
-    const environment = cloudEngineViewEnvironment(source);
+    const environment = cloudEngineViewEnvironment(source,"serve",runtime);
     expect(environment).toMatchObject({
       ZEROS_CLOUD_TOKEN: source.ZEROS_CLOUD_TOKEN,
       ZEROS_REQUIRE_EXACT_MODEL: "1",
@@ -163,14 +166,14 @@ describe("fixed cloud engine mount and environment contract", () => {
       "NODE_OPTIONS",
       "LD_PRELOAD",
       "BOAT_API_KEY",
-      "DAYTONA_API_KEY",
+      "PROVIDER_API_KEY",
       "OPENAI_API_KEY",
     ])
       expect(environment).not.toHaveProperty(name);
-    expect(cloudEngineViewArguments().join("\n")).not.toContain(
+    expect(cloudEngineViewArguments("serve", 4, runtime, view).join("\n")).not.toContain(
       source.ZEROS_CLOUD_TOKEN,
     );
-    const qualification = cloudEngineViewEnvironment(source, "qualify");
+    const qualification = cloudEngineViewEnvironment(source, "qualify",runtime);
     expect(qualification).not.toHaveProperty("ZEROS_CLOUD_TOKEN");
     expect(qualification).not.toHaveProperty("ZEROS_CLOUD_RUNTIME_B64");
   });

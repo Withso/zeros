@@ -92,6 +92,7 @@ function projectForPending(
 ): Project | null {
   return (
     projects.find((candidate) => candidate.repoRoot === pending.repoRoot) ??
+    (pending.placement === "cloud" ? projects.find(candidate => candidate.repoSlug === pending.repoSlug) : null) ??
     findProjectForFolder(pending.repoRoot, projects)
   );
 }
@@ -130,9 +131,19 @@ export function buildSidebarWorkspaceEntries(args: {
 }): SidebarWorkspaceEntry[] {
   const { filter, projects } = args;
   const pendingByProject = new Map<string, PendingWorkspaceCreate[]>();
+  const unregisteredCloudCreates: SidebarWorkspaceItem[] = [];
   for (const pending of args.pending) {
     const project = projectForPending(pending, projects);
-    if (!project) continue;
+    if (!project) {
+      // A first cloud create has no confirmed repository yet. Its display
+      // identity stays in a non-navigable row, never in the project registry.
+      if (pending.placement === "cloud" && pending.organizationId && pending.repository) {
+        unregisteredCloudCreates.push(pendingItem({ id: `pending-repository:${pending.token}`,
+          name: pending.repository.name, repoRoot: pending.repoRoot, repoSlug: pending.repoSlug,
+          originUrl: pending.repository.originUrl, isGitRepository: true, addedAt: pending.startedAt }, pending));
+      }
+      continue;
+    }
     const rows = pendingByProject.get(project.id);
     if (rows) rows.push(pending);
     else pendingByProject.set(project.id, [pending]);
@@ -156,7 +167,9 @@ export function buildSidebarWorkspaceEntries(args: {
       const project = findProjectForFolder(workspace.repoRoot, projects);
       if (project) workspaces.push(workspaceItem(project, workspace));
     }
-    const items = [...pending, ...workspaces];
+    const items = [...unregisteredCloudCreates, ...pending]
+      .sort((a, b) => (b.kind === "pending" ? b.pending.startedAt : 0) - (a.kind === "pending" ? a.pending.startedAt : 0))
+      .concat(workspaces);
     const representedProjects = new Set(items.map((item) => item.project.id));
     const entries: SidebarWorkspaceEntry[] = items.map((item) => ({
       kind: "row" as const,
@@ -179,7 +192,7 @@ export function buildSidebarWorkspaceEntries(args: {
       group.project ? [[group.project.id, group.workspaces] as const] : [],
     ),
   );
-  return projects.flatMap((project): SidebarWorkspaceEntry[] => {
+  const entries = projects.flatMap((project): SidebarWorkspaceEntry[] => {
     const items = [
       ...(pendingByProject.get(project.id) ?? []).map((pending) =>
         pendingItem(project, pending),
@@ -207,6 +220,7 @@ export function buildSidebarWorkspaceEntries(args: {
       },
     ];
   });
+  return [...unregisteredCloudCreates.map(item => ({ kind: "row" as const, key: item.key, item })), ...entries];
 }
 
 /** Every workspace/create row, in painted order, regardless of collapse.

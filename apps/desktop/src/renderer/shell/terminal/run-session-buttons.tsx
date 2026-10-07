@@ -3,8 +3,8 @@ import { Button, Tooltip } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import { WORKBENCH_TITLE_ACTION_CLS } from "../workbench/tab-chrome";
 import { workspacePreviewAvailable, warmCloudPreviewContext } from "../../platform/cloud-workspace-access";
-import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
-import { useInternalFeatureActive } from "../../features/settings/internal-features";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { useCloudWorkspaceAccountAccess } from "../../features/team/cloud-workspace-account-access";
 import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
 
@@ -25,7 +25,7 @@ export function RunSessionButtons({
   onOpenPreview(): void;
   onStop(): void;
 }) {
-  const cloudPreviews = useInternalFeatureActive("cloudComputerV2");
+  const cloudPreviews = useCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(folderKey)?.organizationId);
   const canEdit = useCloudWorkspaceCanEdit(folderKey);
   const previewAvailable = workspacePreviewAvailable(folderKey ?? "") && (!isCloudWorkspace(folderKey) || (cloudPreviews && canEdit));
   const warmPreview = () => {

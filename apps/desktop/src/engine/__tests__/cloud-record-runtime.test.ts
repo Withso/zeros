@@ -18,6 +18,7 @@ import { deleteTurnsForChat, deleteTurnsFrom } from "../db/turns";
 import { clearChatMessages, windowChatMessages, listChatMessagesSince, upsertChatMessage } from "../db/messages";
 import { getTurn, startTurn } from "../db/turns";
 import { getWorkspaceById, insertWorkspace, updateWorkspace } from "../git/state";
+import { testCloudRuntime } from "../agents/__tests__/helpers/test-cloud-runtime";
 
 const NOW = Date.parse("2026-09-04T12:00:00.000Z");
 const authority = {
@@ -1075,7 +1076,12 @@ describe("cloud durable record runtime", () => {
     });
     const registration: CloudRuntimeRegistration = new CloudRuntimeRegistration(
       config,
-      { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
+      { agentRuntime: {
+          profile: "zeros-cloud-worker-v4", runtimeId: testCloudRuntime().runtimeId,
+          manifestSha256: testCloudRuntime().manifestSha256, baseCompatibilityId: testCloudRuntime().baseCompatibilityId,
+          installerReceiptSha256: testCloudRuntime().installerReceiptSha256, bootId: testCloudRuntime().bootId,
+          supervisorSessionId: testCloudRuntime().supervisorSessionId,
+        },
         fetch,
         now: () => NOW,
         onAuthorityLost: vi.fn(),

@@ -21,8 +21,8 @@ import {
 
 const SSH_CREDENTIAL = `ssh_${"a".repeat(40)}`;
 const EXPIRES_AT = new Date(Date.now() + 30 * 60_000).toISOString();
-const DAYTONA_HOST_KEY =
-  "ssh.app.daytona.io ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE3m8wAQ4nU6ax0dPX7dIYJ8Z6JXjT6Jf2sA3x0Xc4Uk";
+const FIXTURE_HOST_KEY =
+  "ssh.fixture.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE3m8wAQ4nU6ax0dPX7dIYJ8Z6JXjT6Jf2sA3x0Xc4Uk";
 const roots: string[] = [];
 
 type FakeChild = EventEmitter & {
@@ -71,11 +71,17 @@ afterEach(async () => {
 });
 
 describe("CloudWorkspaceSshRuntime", () => {
+  it("uses the Boat runtime tunnel without a provider gateway or global host-key pins", async () => {
+    const { runtimeRoot, knownHostsPath } = await fixture();
+    const runtime = new CloudWorkspaceSshRuntime({ runtimeRoot, knownHostsPath });
+    await expect(runtime.launchTerminal({ sshUsername: SSH_CREDENTIAL, sshHost: "ssh.fixture.test", expiresAt: EXPIRES_AT })).rejects.toThrow();
+  });
   it("fails closed when neither verified pins nor an explicit development TOFU policy exists", async () => {
     const { runtimeRoot, knownHostsPath } = await fixture();
     expect(
       () =>
         new CloudWorkspaceSshRuntime({
+          allowedSshHosts: ["ssh.fixture.test"],
           runtimeRoot,
           knownHostsPath,
         }),
@@ -89,8 +95,8 @@ describe("CloudWorkspaceSshRuntime", () => {
         new CloudWorkspaceSshRuntime({
           runtimeRoot,
           knownHostsPath,
-          allowedSshHosts: ["ssh.app.daytona.io", "ssh.backup.example"],
-          knownHostEntries: [DAYTONA_HOST_KEY],
+          allowedSshHosts: ["ssh.fixture.test", "ssh.backup.example"],
+          knownHostEntries: [FIXTURE_HOST_KEY],
         }),
     ).toThrow(/host-key policy/i);
   });
@@ -107,16 +113,17 @@ describe("CloudWorkspaceSshRuntime", () => {
       return terminalChild;
     }) as unknown as SpawnCloudProcess;
     const runtime = new CloudWorkspaceSshRuntime({
+          allowedSshHosts: ["ssh.fixture.test"],
       runtimeRoot,
       knownHostsPath,
-      knownHostEntries: [DAYTONA_HOST_KEY],
+      knownHostEntries: [FIXTURE_HOST_KEY],
       spawn: spawnProcess,
       openBinary: "/usr/bin/open",
     });
 
     await runtime.launchTerminal({
       sshUsername: SSH_CREDENTIAL,
-      sshHost: "ssh.app.daytona.io",
+      sshHost: "ssh.fixture.test",
       expiresAt: EXPIRES_AT,
     });
 
@@ -128,7 +135,7 @@ describe("CloudWorkspaceSshRuntime", () => {
     expect(config).toContain("StrictHostKeyChecking yes");
     expect(config).not.toContain("accept-new");
     expect(await readFile(knownHostsPath, "utf8")).toBe(
-      `${DAYTONA_HOST_KEY}\n`,
+      `${FIXTURE_HOST_KEY}\n`,
     );
   });
 
@@ -149,6 +156,7 @@ describe("CloudWorkspaceSshRuntime", () => {
       return terminalChild;
     }) as unknown as SpawnCloudProcess;
     const runtime = new CloudWorkspaceSshRuntime({
+          allowedSshHosts: ["ssh.fixture.test"],
       runtimeRoot,
       knownHostsPath,
       spawn: spawnProcess,
@@ -158,7 +166,7 @@ describe("CloudWorkspaceSshRuntime", () => {
 
     await runtime.launchTerminal({
       sshUsername: SSH_CREDENTIAL,
-      sshHost: "ssh.app.daytona.io",
+      sshHost: "ssh.fixture.test",
       expiresAt: EXPIRES_AT,
     });
 
@@ -177,6 +185,7 @@ describe("CloudWorkspaceSshRuntime", () => {
       return terminalChild;
     }) as unknown as SpawnCloudProcess;
     const runtime = new CloudWorkspaceSshRuntime({
+          allowedSshHosts: ["ssh.fixture.test"],
       runtimeRoot,
       knownHostsPath,
       spawn: spawnProcess,
@@ -186,7 +195,7 @@ describe("CloudWorkspaceSshRuntime", () => {
 
     await runtime.launchTerminal({
       sshUsername: SSH_CREDENTIAL,
-      sshHost: "ssh.app.daytona.io",
+      sshHost: "ssh.fixture.test",
       expiresAt: EXPIRES_AT,
     });
 
@@ -203,7 +212,7 @@ describe("CloudWorkspaceSshRuntime", () => {
     expect(configPath).toBeTruthy();
     const config = await readFile(configPath!, "utf8");
     expect(config).toContain(`User ${SSH_CREDENTIAL}`);
-    expect(config).toContain("HostName ssh.app.daytona.io");
+    expect(config).toContain("HostName ssh.fixture.test");
     expect((await stat(configPath!)).mode & 0o777).toBe(0o600);
   });
 
@@ -216,6 +225,7 @@ describe("CloudWorkspaceSshRuntime", () => {
     }) as unknown as SpawnCloudProcess;
     const checkTunnel = vi.fn(async () => true);
     const runtime = new CloudWorkspaceSshRuntime({
+          allowedSshHosts: ["ssh.fixture.test"],
       runtimeRoot,
       knownHostsPath,
       spawn: spawnProcess,
@@ -229,7 +239,7 @@ describe("CloudWorkspaceSshRuntime", () => {
       remoteHost: "127.0.0.1",
       remotePort: 4173,
       sshUsername: SSH_CREDENTIAL,
-      sshHost: "ssh.app.daytona.io",
+      sshHost: "ssh.fixture.test",
       expiresAt: EXPIRES_AT,
     });
 
@@ -256,6 +266,7 @@ describe("CloudWorkspaceSshRuntime", () => {
         return tunnelChild;
       }) as unknown as SpawnCloudProcess;
       const runtime = new CloudWorkspaceSshRuntime({
+          allowedSshHosts: ["ssh.fixture.test"],
         runtimeRoot,
         knownHostsPath,
         spawn: spawnProcess,
@@ -277,7 +288,7 @@ describe("CloudWorkspaceSshRuntime", () => {
         remoteHost: "127.0.0.1",
         remotePort: 4173,
         sshUsername: SSH_CREDENTIAL,
-        sshHost: "ssh.app.daytona.io",
+        sshHost: "ssh.fixture.test",
         expiresAt: new Date(Date.now() + 1_000).toISOString(),
       });
       await vi.advanceTimersByTimeAsync(1_000);
@@ -302,6 +313,7 @@ describe("CloudWorkspaceSshRuntime", () => {
       return proxyChild;
     }) as unknown as SpawnCloudProcess;
     const runtime = new CloudWorkspaceSshRuntime({
+          allowedSshHosts: ["ssh.fixture.test"],
       runtimeRoot,
       knownHostsPath,
       spawn: spawnProcess,
@@ -313,7 +325,7 @@ describe("CloudWorkspaceSshRuntime", () => {
       remoteHost: "127.0.0.1",
       remotePort: 47891,
       sshUsername: SSH_CREDENTIAL,
-      sshHost: "ssh.app.daytona.io",
+      sshHost: "ssh.fixture.test",
       expiresAt: EXPIRES_AT,
     });
     expect(handle.localPort).toBeGreaterThanOrEqual(1_024);
@@ -348,6 +360,7 @@ describe("CloudWorkspaceSshRuntime", () => {
       return ideChild;
     }) as unknown as SpawnCloudProcess;
     const runtime = new CloudWorkspaceSshRuntime({
+          allowedSshHosts: ["ssh.fixture.test"],
       runtimeRoot,
       knownHostsPath,
       spawn: spawnProcess,
@@ -360,7 +373,7 @@ describe("CloudWorkspaceSshRuntime", () => {
     await runtime.launchIde({
       appId: "cursor",
       sshUsername: SSH_CREDENTIAL,
-      sshHost: "ssh.app.daytona.io",
+      sshHost: "ssh.fixture.test",
       expiresAt: EXPIRES_AT,
     });
 
@@ -400,6 +413,7 @@ describe("CloudWorkspaceSshRuntime", () => {
       return ideChild;
     }) as unknown as SpawnCloudProcess;
     const runtime = new CloudWorkspaceSshRuntime({
+          allowedSshHosts: ["ssh.fixture.test"],
       runtimeRoot,
       knownHostsPath,
       spawn: spawnProcess,
@@ -412,7 +426,7 @@ describe("CloudWorkspaceSshRuntime", () => {
     await runtime.launchIde({
       appId: "cursor",
       sshUsername: SSH_CREDENTIAL,
-      sshHost: "ssh.app.daytona.io",
+      sshHost: "ssh.fixture.test",
       expiresAt: EXPIRES_AT,
     });
     const args = vi.mocked(spawnProcess).mock.calls[0]![1];
@@ -430,6 +444,7 @@ describe("CloudWorkspaceSshRuntime", () => {
     const { runtimeRoot, knownHostsPath } = await fixture();
     const spawnProcess = vi.fn() as unknown as SpawnCloudProcess;
     const runtime = new CloudWorkspaceSshRuntime({
+          allowedSshHosts: ["ssh.fixture.test"],
       runtimeRoot,
       knownHostsPath,
       spawn: spawnProcess,
@@ -441,7 +456,7 @@ describe("CloudWorkspaceSshRuntime", () => {
     await expect(
       runtime.launchTerminal({
         sshUsername: SSH_CREDENTIAL,
-        sshHost: "ssh.app.daytona.io",
+        sshHost: "ssh.fixture.test",
         expiresAt: EXPIRES_AT,
       }),
     ).rejects.toThrow(/authority.*ended/i);
@@ -454,6 +469,7 @@ describe("CloudWorkspaceSshRuntime", () => {
       throw new Error("native spawn refused");
     }) as unknown as SpawnCloudProcess;
     const runtime = new CloudWorkspaceSshRuntime({
+          allowedSshHosts: ["ssh.fixture.test"],
       runtimeRoot,
       knownHostsPath,
       spawn: spawnProcess,
@@ -466,7 +482,7 @@ describe("CloudWorkspaceSshRuntime", () => {
     await expect(
       runtime.launchTerminal({
         sshUsername: SSH_CREDENTIAL,
-        sshHost: "ssh.app.daytona.io",
+        sshHost: "ssh.fixture.test",
         expiresAt: EXPIRES_AT,
       }),
     ).rejects.toThrow(/spawn refused/i);
@@ -477,7 +493,7 @@ describe("CloudWorkspaceSshRuntime", () => {
       runtime.launchIde({
         appId: "cursor",
         sshUsername: SSH_CREDENTIAL,
-        sshHost: "ssh.app.daytona.io",
+        sshHost: "ssh.fixture.test",
         expiresAt: EXPIRES_AT,
       }),
     ).rejects.toThrow(/spawn refused/i);
@@ -490,7 +506,7 @@ describe("CloudWorkspaceSshRuntime", () => {
         remoteHost: "127.0.0.1",
         remotePort: 4173,
         sshUsername: SSH_CREDENTIAL,
-        sshHost: "ssh.app.daytona.io",
+        sshHost: "ssh.fixture.test",
         expiresAt: EXPIRES_AT,
       }),
     ).rejects.toThrow(/spawn refused/i);
@@ -509,6 +525,7 @@ describe("CloudWorkspaceSshRuntime", () => {
       return rejectedChild;
     }) as unknown as SpawnCloudProcess;
     const runtime = new CloudWorkspaceSshRuntime({
+          allowedSshHosts: ["ssh.fixture.test"],
       runtimeRoot,
       knownHostsPath,
       spawn: spawnProcess,
@@ -518,7 +535,7 @@ describe("CloudWorkspaceSshRuntime", () => {
     await expect(
       runtime.launchTerminal({
         sshUsername: SSH_CREDENTIAL,
-        sshHost: "ssh.app.daytona.io",
+        sshHost: "ssh.fixture.test",
         expiresAt: EXPIRES_AT,
       }),
     ).rejects.toThrow(/launch.*failed/i);
@@ -529,6 +546,7 @@ describe("CloudWorkspaceSshRuntime", () => {
     const { runtimeRoot, knownHostsPath } = await fixture();
     const spawnProcess = vi.fn() as unknown as SpawnCloudProcess;
     const runtime = new CloudWorkspaceSshRuntime({
+          allowedSshHosts: ["ssh.fixture.test"],
       runtimeRoot,
       knownHostsPath,
       spawn: spawnProcess,
@@ -542,7 +560,7 @@ describe("CloudWorkspaceSshRuntime", () => {
         remoteHost: "127.0.0.1",
         remotePort: 22,
         sshUsername: SSH_CREDENTIAL,
-        sshHost: "ssh.app.daytona.io",
+        sshHost: "ssh.fixture.test",
         expiresAt: EXPIRES_AT,
       }),
     ).rejects.toThrow(/invalid/i);
@@ -554,7 +572,7 @@ describe("CloudWorkspaceSshRuntime", () => {
         remoteHost: "127.0.0.1",
         remotePort: 4173,
         sshUsername: SSH_CREDENTIAL,
-        sshHost: "ssh.app.daytona.io\nProxyCommand evil",
+        sshHost: "ssh.fixture.test\nProxyCommand evil",
         expiresAt: EXPIRES_AT,
       }),
     ).rejects.toThrow(/invalid/i);

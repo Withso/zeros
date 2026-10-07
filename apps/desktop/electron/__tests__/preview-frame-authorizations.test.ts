@@ -154,9 +154,7 @@ describe("PreviewFrameAuthorizations", () => {
     expect(
       grants.bindPendingFrame(frameName, `${origin}/app`, 101, now + 1),
     ).toBe(true);
-    expect(grants.requestHeaders(`${origin}/asset.js`, [101], now + 2)).toEqual(
-      { "X-Daytona-Skip-Preview-Warning": "true" },
-    );
+    expect(grants.requestHeaders(`${origin}/asset.js`, [101], now + 2)).toBeNull();
     // A later frame that reuses the logical name cannot steal the bound grant.
     expect(
       grants.bindPendingFrame(frameName, `${origin}/app`, 202, now + 2),
@@ -200,7 +198,6 @@ describe("PreviewFrameAuthorizations", () => {
     grants.revoke(frameName, oldCapability);
 
     expect(grants.requestHeaders(`${origin}/app.js`, [101], now + 2)).toEqual({
-      "X-Daytona-Skip-Preview-Warning": "true",
       "x-zeros-preview-capability": newCapability,
     });
   });
@@ -255,7 +252,6 @@ describe("PreviewFrameAuthorizations", () => {
         now + 1,
       ),
     ).toEqual({
-      "X-Daytona-Skip-Preview-Warning": "true",
       "x-zeros-preview-capability": capability,
     });
     expect(

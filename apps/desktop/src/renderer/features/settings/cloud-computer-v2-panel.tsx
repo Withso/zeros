@@ -17,7 +17,6 @@ import {
 } from "../team/team-store";
 import { ControlPlaneError } from "../team/control-plane";
 import { SettingsSection, SettingsList, SettingsRow } from "./settings-ui";
-import { useInternalFeatureActive } from "./internal-features";
 import { CloudRepositoryPicker } from "./cloud-repository-picker";
 import {
   activateCloudComputerV2,
@@ -81,10 +80,9 @@ export function CloudComputerV2Panel({
 }: {
   surfaceActive?: boolean;
 }) {
-  const authorized = useInternalFeatureActive("cloudComputerV2");
   const organization = useActiveOrganization();
   const { me } = useTeams();
-  if (!authorized || !organization || organization.isPersonal || !me)
+  if (!organization || organization.isPersonal || !me)
     return null;
   const key = cloudComputerV2Key(me.user.id, organization.id);
   return (

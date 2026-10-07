@@ -37,7 +37,8 @@ import type { CloudRuntimeServiceTransport, CloudServiceConnection, CloudService
 const SSH_CREDENTIAL_PATTERN = /^[A-Za-z0-9._~-]{16,4096}$/;
 const HOST_PATTERN =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/;
-const DEFAULT_SSH_HOSTS = ["ssh.app.daytona.io"] as const;
+// Boat service SSH runs over an authorized local runtime tunnel.
+const DEFAULT_SSH_HOSTS: readonly string[] = [];
 const MAX_SSH_STDERR_BYTES = 64 * 1024;
 const TUNNEL_CHECK_TIMEOUT_MS = 10_000;
 const NATIVE_LAUNCH_ACCEPTANCE_TIMEOUT_MS = 3_000;
@@ -391,7 +392,6 @@ export class CloudWorkspaceSshRuntime {
     this.resolveIdeBinary = input.resolveIdeBinary ?? defaultResolveIdeBinary;
     const hosts = input.allowedSshHosts ?? DEFAULT_SSH_HOSTS;
     if (
-      hosts.length < 1 ||
       hosts.some(
         (host) =>
           host !== host.toLowerCase() ||
@@ -417,7 +417,7 @@ export class CloudWorkspaceSshRuntime {
       (parsedEntries.length > 0 &&
         [...this.allowedSshHosts].some((host) => !pinnedHosts.has(host))) ||
       (parsedEntries.length > 0 && this.trustOnFirstUse) ||
-      (parsedEntries.length === 0 && !this.trustOnFirstUse)
+      (hosts.length > 0 && parsedEntries.length === 0 && !this.trustOnFirstUse)
     ) {
       throw new Error("Cloud workspace SSH host-key policy is invalid");
     }

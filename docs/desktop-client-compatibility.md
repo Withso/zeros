@@ -143,8 +143,8 @@ Independent tunnels remain intact:
   device- and port-scoped `kind: tunnel` grant. The broker binds only
   `127.0.0.1`, and the SSH runtime uses pinned gateway access with OpenSSH `-L`
   to the remote loopback port. Neither issuance nor forwarding requires a
-  preview base domain or suffix. Daytona's SSH host/pin release checks remain
-  mandatory; managed Boat builds do not require Daytona SSH pins.
+  preview base domain or suffix. Managed Boat uses the authenticated runtime
+  tunnel; optional explicit gateway configurations still require valid host pins.
 - Cloud engine/runtime access uses its separate admission and control-plane
   WebSocket/SSH transport, not the preview origin. Disabling preview URLs does
   not disable agents or runtime terminals. This does not claim a new Boat

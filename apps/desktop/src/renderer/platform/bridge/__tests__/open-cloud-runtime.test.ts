@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ enabled: true, epoch: 1, doc: { status: "ready", deletedAt: null, generation: { number: 1 }, capabilities: { canWrite: true } }, wake: vi.fn(), refresh: vi.fn(), admission: vi.fn(), close: vi.fn(async () => true), connect: vi.fn(async () => {}), dispose: vi.fn(), list: vi.fn(), listeners: new Set<() => void>() }));
-vi.mock("../../../features/settings/internal-features", () => ({ isInternalFeatureActive: () => mocks.enabled }));
+const mocks = vi.hoisted(() => ({ enabled: true, epoch: 1, doc: { status: "ready", deletedAt: null, generation: { number: 1 }, capabilities: { canWrite: true } }, wake: vi.fn(), refresh: vi.fn(), admission: vi.fn(), close: vi.fn(async () => true), connect: vi.fn(async () => {}), dispose: vi.fn(), list: vi.fn(), listeners: new Set<() => void>(), status: "connected", statuses: new Set<(status: string) => void>(), publish: vi.fn(async () => {}), refreshAdmission: vi.fn(), clientOptions: {} as { refreshCloudConnectionTarget?: (target: unknown) => Promise<unknown> } }));
+vi.mock("../../../features/team/cloud-workspace-account-access", () => ({ hasCloudWorkspaceAccountAccess: () => mocks.enabled }));
 vi.mock("../../../state/cloud-workspace-catalog", () => ({
   cloudCatalogGeneration: () => mocks.epoch, cloudWorkspaceDocument: () => mocks.doc, cloudWorkspaceStopVersion: () => 0,
   refreshCloudWorkspace: mocks.refresh, acceptCloudEngineWorkspace: vi.fn(),
@@ -9,18 +9,18 @@ vi.mock("../../../state/cloud-workspace-catalog", () => ({
   isCloudWorkspaceLifecyclePending: (doc: { status: string }) => ["stopping", "waking", "provisioning", "setting_up"].includes(doc.status),
   subscribeCloudWorkspaces: (fn: () => void) => { mocks.listeners.add(fn); return () => mocks.listeners.delete(fn); },
 }));
-vi.mock("../../cloud-workspace-access", () => ({ openCloudWorkspaceRuntime: mocks.admission, closeCloudWorkspaceRuntime: mocks.close, refreshCloudWorkspaceRuntime: vi.fn() }));
+vi.mock("../../cloud-workspace-access", () => ({ openCloudWorkspaceRuntime: mocks.admission, closeCloudWorkspaceRuntime: mocks.close, refreshCloudWorkspaceRuntime: mocks.refreshAdmission, publishCloudWorkspacePortForwardingRuntime: mocks.publish }));
 vi.mock("../workspace-bridge", () => ({ bridgeWorkspaceList: mocks.list }));
-vi.mock("../ws-client", () => ({ RuntimeClient: class { connect = mocks.connect; dispose = mocks.dispose; on = () => () => {}; onStatusChange = () => () => {}; } }));
-vi.mock("../cloud-agent-connection", () => ({ CloudAgentConnection: class { dispose() {} } }));
+vi.mock("../ws-client", () => ({ RuntimeClient: class { constructor(_descriptor: unknown, options: typeof mocks.clientOptions) { mocks.clientOptions = options; } get status() { return mocks.status; } connect = mocks.connect; dispose = mocks.dispose; on = () => () => {}; onStatusChange(fn: (status: string) => void) { mocks.statuses.add(fn); return () => mocks.statuses.delete(fn); } } }));
+vi.mock("../cloud-agent-connection", () => ({ CloudAgentConnection: class { dispose() {} async refreshAttachments() {} } }));
 vi.mock("../cloud-event-reader", () => ({ CloudEventReader: class { dispose() {} on() { return () => {}; } } }));
 vi.mock("../cloud-github-native", () => ({ installCloudGithubNative: vi.fn(() => () => {}) }));
 import { openCloudRuntime } from "../open-cloud-runtime";
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
-const descriptor = { ...target, runtimeId: "fixture-runtime", generation: 1 };
+const descriptor = { ...target, kind: "cloud", runtimeId: "fixture-runtime", generation: 1, authorityEpoch: 4, engineInstanceId: "33333333-3333-4333-8333-333333333333", connectionSequence: 1 };
 function deferred<T>() { let resolve!: (v: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
 beforeEach(() => {
-  vi.clearAllMocks(); mocks.listeners.clear(); mocks.epoch = 1; mocks.enabled = true;
+  vi.clearAllMocks(); mocks.listeners.clear(); mocks.statuses.clear(); mocks.status = "connected"; mocks.epoch = 1; mocks.enabled = true;
   mocks.doc = { status: "ready", deletedAt: null, generation: { number: 1 }, capabilities: { canWrite: true } };
   mocks.refresh.mockImplementation(async () => mocks.doc);
   mocks.wake.mockImplementation(async () => { mocks.doc = { ...mocks.doc, status: "ready" }; return mocks.doc; });
@@ -30,6 +30,30 @@ beforeEach(() => {
 });
 afterEach(() => { mocks.listeners.clear(); });
 describe("cloud runtime admission fencing", () => {
+  it("publishes forwarding connection only after confirming the physical root and withdraws it on release", async () => {
+    const root = deferred<Array<{ id: string; path: string }>>(); mocks.list.mockReturnValue(root.promise);
+    const opening = openCloudRuntime(target);
+    await vi.waitFor(() => expect(mocks.list).toHaveBeenCalledOnce());
+    expect(mocks.publish).not.toHaveBeenCalled();
+    root.resolve([{ id: "local-main", path: "/workspace/repo" }]);
+    const peer = await opening;
+    expect(mocks.publish).toHaveBeenCalledExactlyOnceWith(descriptor, true);
+    peer.release();
+    expect(mocks.publish).toHaveBeenLastCalledWith(descriptor, false);
+    expect(mocks.statuses.size).toBe(0);
+  });
+  it("publishes disconnect and reconnect with the latest admitted connection sequence", async () => {
+    const peer = await openCloudRuntime(target);
+    for (const listener of mocks.statuses) listener("disconnected");
+    expect(mocks.publish).toHaveBeenLastCalledWith(descriptor, false);
+    const replacement = { ...descriptor, connectionSequence: 2 };
+    mocks.refreshAdmission.mockResolvedValue(replacement);
+    await mocks.clientOptions.refreshCloudConnectionTarget!(descriptor);
+    for (const listener of mocks.statuses) listener("connected");
+    expect(mocks.publish).toHaveBeenLastCalledWith(replacement, true);
+    peer.release();
+    expect(mocks.publish).toHaveBeenLastCalledWith(replacement, false);
+  });
   it("marks interaction wakes on the existing lifecycle path for both new and connected admissions", async () => {
     const passive = await openCloudRuntime(target, { reason: "interaction" });
     expect(mocks.wake).not.toHaveBeenCalled(); passive.release();

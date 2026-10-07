@@ -535,16 +535,6 @@ export async function prepareDesignWatchIsolation(
   );
 }
 
-export async function prepareNodeDesignWatchGuard(
-  toolsRoot: string,
-  protectedRoots: readonly string[],
-): Promise<string | null> {
-  return (
-    (await prepareDesignWatchIsolation(toolsRoot, protectedRoots, []))
-      ?.nodeGuardPath ?? null
-  );
-}
-
 /** Prepare content-addressed watcher artifacts for human terminals. Terminals
  * remain outside agent execution boundaries and keep their normal write
  * authority. Content addressing makes preparation one-time per exact
@@ -572,17 +562,6 @@ export async function prepareReusableDesignWatchIsolation(
   const toolsRoot = path.join(guardsRoot, fingerprint);
   await mkdir(toolsRoot, { recursive: true, mode: 0o700 });
   return writeDesignWatchIsolationArtifacts(toolsRoot, sources, true);
-}
-
-/** Compatibility helper for focused callers that need only the Node preload. */
-export async function prepareReusableNodeDesignWatchGuard(
-  guardsRoot: string,
-  protectedRoots: readonly string[],
-): Promise<string | null> {
-  return (
-    (await prepareReusableDesignWatchIsolation(guardsRoot, protectedRoots, []))
-      ?.nodeGuardPath ?? null
-  );
 }
 
 export function nodeOptionsWithDesignWatchGuard(

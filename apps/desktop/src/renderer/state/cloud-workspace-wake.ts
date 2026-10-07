@@ -1,4 +1,4 @@
-import { isInternalFeatureActive } from "../features/settings/internal-features";
+import { hasCloudWorkspaceAccountAccess } from "../features/team/cloud-workspace-account-access";
 import type { CloudWorkspaceTarget } from "../platform/bridge/cloud-workspace-key";
 import type { CloudWorkspaceDocument } from "../platform/cloud-workspaces";
 import {
@@ -41,7 +41,7 @@ export async function wakeCloudWorkspace(
     const current = cloudWorkspaceDocument(target);
     if (!current || !canReadCloudWorkspace(current) || current.generation.number < generation && !isCloudWorkspaceLifecyclePending(current))
       throw new Error("Cloud workspace generation or access changed while waking");
-    if (!isInternalFeatureActive("cloudComputerV2") || !current.capabilities.canWrite)
+    if (!hasCloudWorkspaceAccountAccess(target.organizationId) || !current.capabilities.canWrite)
       throw new Error("Cloud workspace run access is required to wake it");
     if (cloudWorkspaceStopVersion(target) !== stopVersion)
       throw new CloudWorkspaceWakeEndedError("Cloud workspace was stopped. Open it again to retry.");
@@ -54,8 +54,12 @@ export async function wakeCloudWorkspace(
     generation = current.generation.number;
     return current;
   };
+  let onProgress: ((current: CloudWorkspaceDocument) => void) | undefined;
   const off = subscribeCloudWorkspaces(() => {
-    try { assertCurrent(); } catch { cancel(); }
+    try {
+      const current = assertCurrent();
+      onProgress?.(current);
+    } catch { cancel(); }
   });
   const wait = <T>(promise: Promise<T>): Promise<T> => new Promise((resolve, reject) => {
     const abort = () => {
@@ -67,6 +71,19 @@ export async function wakeCloudWorkspace(
     promise.then(resolve, reject).finally(() => controller.signal.removeEventListener("abort", abort));
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const waitForProgress = async (previous: CloudWorkspaceDocument) => {
+    const progress = new Promise<void>((resolve, reject) => {
+      onProgress = current => { if (current !== previous) resolve(); };
+      // Catalog/runtime publications settle immediately, including while a
+      // detail refresh is hung. Poll only when no exact-workspace event arrives.
+      timer = setTimeout(() => {
+        timer = undefined;
+        void refreshCloudWorkspace(target).then(() => resolve(), reject);
+      }, 2_000);
+    });
+    try { await wait(progress); }
+    finally { onProgress = undefined; clearTimeout(timer); }
+  };
   // Compute drain/create/setup are server-owned progress, not agent admission
   // time. Keep waiting without a short client deadline; bound even hung IPC
   // with one elapsed (clock-skew-independent) fifteen-minute safety cap.
@@ -93,10 +110,7 @@ export async function wakeCloudWorkspace(
       if (!["stopping", "waking", "provisioning", "setting_up"].includes(current.status) ||
           (current.status === "stopping" && !mayWake && !replacement))
         throw new CloudWorkspaceWakeEndedError(current.error?.message ?? `Cloud workspace is ${current.status}. Open it again to retry.`);
-      await wait(new Promise<void>(resolve => { timer = setTimeout(resolve, 1_000); }));
-      current = assertCurrent();
-      if (["ready", "busy"].includes(current.status)) continue;
-      await wait(refreshCloudWorkspace(target));
+      await waitForProgress(current);
       current = assertCurrent();
     }
     return current;

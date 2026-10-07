@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Tx } from "../db.js";
-import { ensureCloudComputerIdentity } from "./computer.js";
+import { ensureCloudComputerIdentity } from "./computer-identity.js";
 import { runtimeBase } from "./runtime-test-fixtures.js";
 
 export const computerTestWallet = "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41";

@@ -4,7 +4,7 @@ import { DatabaseReleaseCanaryService, releaseCanaryRequest } from "../../apps/c
 import { BoatAccountAdmission, releaseWorkerOwner } from "../../apps/control-plane/src/cloud-workspaces/boat-account-admission";
 import { createReleaseCanaryAdmissionRoutes } from "../../apps/control-plane/src/cloud-workspaces/release-canary-routes";
 import { WorkerBuilderProvenanceSchema } from "./worker-builder-retirement";
-import { buildBoatImage } from "./worker-adapters";
+import { RELEASE_WORKER_IMAGES_RETIRED } from "../../apps/control-plane/src/cloud-workspaces/release-worker-retirement";
 import { workerSnapshotName } from "./worker-admission";
 import { workerConnections } from "./worker-test-fixtures";
 import { workerEnvironment } from "./worker-test-fixtures";
@@ -102,18 +102,8 @@ function fixture() {
   return { state, parent, row, job, ledger, store, admission, request, subject, audits, query, config, service, operation, provider, fetcher, profile };
 }
 
-async function producedCandidate(test: ReturnType<typeof fixture>) {
-  return buildBoatImage({ sourceSha: test.request.sourceSha, directory: "/tmp/zeros-release-candidate-fixture",
-    baseSnapshot: test.profile.boat.baseSnapshot, maxUsedHours: 1 }, {
-    nameSnapshot: async () => test.parent.snapshotId, pause: async () => {}, kit: async args => {
-      if (args[1] === "status" && args[0] !== "attestation") return { state: "ready", wallet: "billing-org" };
-      if (args[0] === "attestation") return { finished: true, qualified: true, matchesCommit: true,
-        sourceCommit: test.request.sourceSha, measuredStorageMiB: 4096, buildSha256: test.request.target.buildSha256 };
-      if (args[2]?.endsWith("build-hash.sh")) return JSON.stringify({ commit: test.request.sourceSha });
-      if (args[2]?.endsWith("build-status.sh")) return JSON.stringify({ result: { passed: true } });
-      return {};
-    },
-  });
+async function recordedCandidate(test: ReturnType<typeof fixture>) {
+  return structuredClone(test.parent.candidate);
 }
 
 function storagePending(test: ReturnType<typeof fixture>, stage = "waiting_for_uploads") {
@@ -301,10 +291,10 @@ describe("marked release canary policy admission", () => {
 });
 
 describe("truthful release-only native retirement reconciliation", () => {
-  it.each(["maintained build producer", "original v1 serialization"] as const)("reconciles the %s candidate without changing original proof bytes", async format => {
-    const test = fixture(), image = await producedCandidate(test);
+  it.each(["recorded modern serialization", "original v1 serialization"] as const)("reconciles the %s candidate without changing original proof bytes", async format => {
+    const test = fixture(), image = await recordedCandidate(test);
     const legacyBytes = `{"snapshotId":"${image.snapshotId}","sourceCommit":"${image.sourceCommit}","buildSha256":"${image.buildSha256}","storageMiB":4096,"architecture":"linux/amd64"}`;
-    test.parent.candidate = format === "maintained build producer" ? image : JSON.parse(legacyBytes);
+    test.parent.candidate = format === "recorded modern serialization" ? image : JSON.parse(legacyBytes);
     const candidateBytes = JSON.stringify(test.parent.candidate), originalAudit = structuredClone(test.audits[0]);
     const intentBytes = JSON.stringify(test.row.builderIntent), certificateBytes = JSON.stringify(test.parent.builder.cleanup.provenance);
     expect(test.parent.candidate).toEqual(test.parent.builder.cleanup.provenance.candidate);
@@ -425,7 +415,7 @@ describe("truthful release-only native retirement reconciliation", () => {
     await test.service.retire(retirementInput(), `Bearer ${token}`);
     expect(test.audits).toHaveLength(2);
     const deps = { phase: "retired", transition: vi.fn(), read: vi.fn(), renew: vi.fn(), assertFresh: vi.fn(), start: vi.fn(), observeStarted: vi.fn() };
-    await expect(runReleaseCanaryAdmission(test.request, deps as any)).rejects.toThrow("reconciliation");
+    await expect(runReleaseCanaryAdmission(test.request, deps as any)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
     expect(deps.read).not.toHaveBeenCalled(); expect(deps.renew).not.toHaveBeenCalled(); expect(deps.start).not.toHaveBeenCalled();
     expect(deps.observeStarted).not.toHaveBeenCalled(); expect(deps.transition).not.toHaveBeenCalled();
   });
@@ -443,7 +433,7 @@ describe("truthful release-only native retirement reconciliation", () => {
   });
   it("recovers the cancelled historical run through real native cleanup, admission CAS and audited replay after a lost response", async () => {
     const test = fixture();
-    test.parent.candidate = await producedCandidate(test);
+    test.parent.candidate = await recordedCandidate(test);
     delete test.row.builder.physicalCleanup; test.row.builder.deleted = true;
     test.parent.builder.retiredAt = new Date(Date.now() - 40_000).toISOString();
     const namedHold = { kind: "builder", owner: test.state.owner, generation: test.state.generation, computeId: `snapshot:${test.parent.snapshotId}`,

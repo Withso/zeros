@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CloudCommandRuntime } from "../cloud-command-runtime";
 import { CloudCommandRuntimeError } from "../cloud-command-client";
 import type { CloudCommandEngineRequest, CloudCommandClaim, CloudCommandSnapshot, CloudCommandResult } from "@zeros/protocol/cloud-commands";
+import { CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
 function fixture(headless?:{prepare(claim:CloudCommandClaim):Promise<void>;retire(claim:CloudCommandClaim):Promise<void>}) {
@@ -30,6 +31,44 @@ function fixture(headless?:{prepare(claim:CloudCommandClaim):Promise<void>;retir
   return { claim, snapshot, completion, dependencies, runtime, send, stop, read };
 }
 describe("engine-owned cloud command dispatch", () => {
+  it("recovers an interrupted receipt once on reconnect without dispatching its prompt", async () => {
+    const f = fixture(), interrupted = vi.fn();
+    const receipt = { commandId: f.claim.commandId, position: 1, state: "uncertain" as const, payload: f.claim.payload,
+      executionId: "previous-engine", generation: 1, resultCode: "engine_interrupted", createdAt: new Date(0).toISOString(), updatedAt: new Date(1).toISOString() };
+    Object.assign(f.dependencies, { interrupted });
+    f.dependencies.request.mockImplementation(async input => input.kind === "claim" ? null : { ...f.snapshot(), receipts: [receipt] });
+    try {
+      await f.read(); await f.read();
+      await new Promise(resolve => setImmediate(resolve));
+      expect(interrupted).toHaveBeenCalledExactlyOnceWith("chat", receipt);
+      expect(f.dependencies.dispatch).not.toHaveBeenCalled();
+      expect(f.dependencies.request.mock.calls.some(([input]) => input.kind === "settle")).toBe(false);
+    } finally { f.runtime.close(); }
+  });
+  it("retires a provider and closes admission when its durable failure cannot be saved", async () => {
+    const prepare = vi.fn(async (claim: CloudCommandClaim) => { f.dependencies.execution.mockReturnValue(claim.executionId); });
+    const retire = vi.fn(async () => {}), f = fixture({ prepare, retire });
+    Object.assign(f.dependencies, { failed: vi.fn(() => { throw new Error("message persistence failed"); }) });
+    f.dependencies.dispatch.mockRejectedValueOnce(new CloudCommandFailureError({ stage: "provider_prompt", category: "protocol_error" }));
+    try {
+      await f.send(); await vi.waitFor(() => expect(retire).toHaveBeenCalledOnce());
+      expect(f.dependencies.request.mock.calls.some(([input]) => input.kind === "settle")).toBe(false);
+      await expect(f.send()).rejects.toThrow("engine_authority_rejected");
+      expect(f.dependencies.dispatch).toHaveBeenCalledOnce();
+    } finally { f.runtime.close(); }
+  });
+  it.each(["validation", "admission", "containment", "provider_start", "provider_prompt"] as const)("retains the safe %s cause in a claim receipt without redispatch", async stage => {
+    const f = fixture();
+    f.dependencies.dispatch.mockRejectedValueOnce(new CloudCommandFailureError({ stage, category: "rejected" }));
+    try {
+      await f.send();
+      await vi.waitFor(() => expect(f.dependencies.request.mock.calls.some(([input]) => input.kind === "settle")).toBe(true));
+      const settled = f.dependencies.request.mock.calls.find(([input]) => input.kind === "settle")![0];
+      expect(settled).toMatchObject({ result: { commandId: f.claim.commandId, claimId: f.claim.claimId,
+        state: "failed", resultCode: `cloud_${stage}_rejected` } });
+      expect(f.dependencies.dispatch).toHaveBeenCalledOnce();
+    } finally { f.runtime.close(); }
+  });
   it("waits for an accepted queue mutation's reply before reporting drained", async () => {
     const f = fixture(), reply = deferred<unknown>();
     f.dependencies.request.mockImplementation(() => reply.promise);

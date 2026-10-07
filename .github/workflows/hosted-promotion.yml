@@ -60,6 +60,11 @@ jobs:
       CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER }}
       ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED }}
     steps:
+      - name: Refuse retired v3 worker promotion
+        if: env.ZEROS_WORKER_PROMOTION == 'enabled'
+        run: |
+          echo '::error::v3 release worker images are retired; v4 runtime bundles are the supported artifact'
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}

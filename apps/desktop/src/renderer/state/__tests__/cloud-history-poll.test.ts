@@ -5,7 +5,7 @@ const harness = vi.hoisted(() => ({
   folder:
     "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222",
 }));
-vi.mock("../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => false }));
+vi.mock("../../features/team/cloud-workspace-account-access", () => ({ useCloudWorkspaceAccountAccess: () => false, hasCloudWorkspaceAccountAccess: () => false }));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
   useEffect: (fn: () => void | (() => void)) => harness.effects.push(fn),
@@ -111,7 +111,7 @@ it.each(["initial failure", "new revision"])(
     acceptCloudWorkspaceDocument(doc);
     CloudWorkspaceLifecycle();
     // Run the real active-workspace effect; invoke the same catalog poll as the timer.
-    const off = harness.effects[2]();
+    const off = harness.effects.find(effect => effect.toString().includes("warmCloudWorkspaceDestination"))!();
     try {
       await flush();
       expect(history).toHaveBeenCalledTimes(1);
@@ -155,7 +155,7 @@ it("successful polls revalidate only the visible owner and notify only a new con
   const changes = vi.fn();
   const offChanges = bridge.on("DB_CHANGED", changes);
   CloudWorkspaceLifecycle();
-  const off = harness.effects[2]();
+  const off = harness.effects.find(effect => effect.toString().includes("warmCloudWorkspaceDestination"))!();
   try {
     await flush();
     expect(history).toHaveBeenCalledTimes(1);
@@ -224,7 +224,7 @@ it("resume retries failed stopped history, while a failed catalog poll and hidde
   setActiveBridge(bridge);
   acceptCloudWorkspaceDocument(doc);
   CloudWorkspaceLifecycle();
-  const off = harness.effects[2]();
+  const off = harness.effects.find(effect => effect.toString().includes("warmCloudWorkspaceDestination"))!();
   const visibility = vi
     .mocked(document.addEventListener)
     .mock.calls.find(([type]) => type === "visibilitychange")![1] as () => void;

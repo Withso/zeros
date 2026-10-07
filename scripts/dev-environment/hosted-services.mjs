@@ -1,3 +1,4 @@
+import { refuseRetiredDevNativeCanary } from "./native-agent-retirement.mjs";
 import { startHosted } from "./hosted-lifecycle.mjs";
 import { persistentConnectionLifecycle } from "./hosted-connections.mjs";
 import { readPrivateJson } from "./state.mjs";
@@ -22,9 +23,9 @@ import { endpoints, workosClient } from "./workos.mjs";
 import { packDevOperator, unpackDevOperator } from "./operator-artifact.mjs";
 import { assertCurrentFixtureFunding, bindFixture, verifyFixtureMembership } from "./hosted-fixtures.mjs";
 import { bindHostedProfile } from "./hosted-state.mjs";
-import { advanceHostedAgents, retireUnfinishedHostedAgents } from "./hosted-agents.mjs";
+import { retireUnfinishedHostedAgents } from "./hosted-agents.mjs";
 import { hostedAgentCanary, hostedAgentRequest } from "./hosted-agent-canary.mjs";
-import { startHostedAgentOverSsh, retireHostedAgentSsh } from "./hosted-agent-ssh.mjs";
+import { retireHostedAgentSsh } from "./hosted-agent-ssh.mjs";
 import { inventoryHostedProviders } from "./hosted-inventory.mjs";
 import { reserveHostedAdmission, releaseHostedAdmission } from "./hosted-admission.mjs";
 
@@ -219,36 +220,12 @@ export function hostedServices(root, directory, profile, progress = () => {}, { 
       try { return await seed(lease, cleanupBuild); }
       finally { await deletePlanetScaleMigrationRole(lease, profile.planetscale, ps); }
     },
-    async agents(lease, options) {
+    async agents(lease) {
+      if (lease.state.status === "ready" && profile.fixture) refuseRetiredDevNativeCanary();
       if(lease.state.status==='ready' && profile.connections?.enabled && lease.state.connectionRegistration &&
         Date.parse(lease.state.connectionRegistration.expiresAt)<=Date.now()+6*3600000)
         await startHosted(lease,{owner:lease.state.owner,identity:lease.state.identity},profile,this);
-      if (lease.state.status !== "ready" || !profile.fixture) return { state: profile.connections?.enabled ? "ready" : "inactive" };
-      bindHostedProfile(lease.state, profile); bindFixture(lease.state, profile.fixture);
-      await retireHostedAgentSsh(lease, profile);
-      await operatorBuild(lease);
-      const canary = hostedAgentCanary(lease, profile, undefined, {
-        reserve: job => {
-          if (!registry) throw new Error("Dev canary allocation requires the account admission registry");
-          return reserveHostedAdmission(registry, lease.state, profile, { kind: "builder", computeId: `canary:${job.id}` });
-        },
-        release: () => registry ? releaseHostedAdmission(registry, lease, profile) : undefined,
-      });
-      return advanceHostedAgents(lease, profile, {
-        ...canary,
-        inspect: () => database(lease, "agents-inspect", cleanupBuild),
-        seed: () => this.seed(lease),
-        start: (job, image) => startHostedAgentOverSsh(lease, profile, generationDirectory(lease), {
-          ...hostedAgentRequest(lease.state, profile, image), target: canary.target(job), startedAt: job.startedAt,
-          credentialId: job.connection.credentialId, credentialRevision: job.connection.credentialRevision,
-          connectionRevision: job.connection.connectionRevision, model: job.connection.model,
-        }),
-        enable: async job => {
-          await ensurePlanetScaleRoles(lease, profile.planetscale, ps);
-          try { await database(lease, "agents-enable", cleanupBuild, undefined, job); }
-          finally { await deletePlanetScaleMigrationRole(lease, profile.planetscale, ps); }
-        },
-      }, options);
+      return { state: profile.connections?.enabled ? "ready" : "inactive" };
     },
     retireDatabaseCredentials: lease => retirePlanetScaleRuntimeRoles(lease, profile.planetscale, ps),
     retireAgentAccess: lease => retireHostedAgentSsh(lease, profile),

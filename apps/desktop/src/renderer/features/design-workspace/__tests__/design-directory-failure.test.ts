@@ -22,4 +22,29 @@ describe("Design lifecycle action feedback", () => {
     expect(error).toHaveBeenCalledExactlyOnceWith(`Couldn't ${action} the Design directory. Try again.`);
     expect(warn).toHaveBeenCalledExactlyOnceWith("[Design] Cloud directory action failed", { action, reason: "git_command_failed" });
   });
+
+  it.each([
+    ["rev_parse", "dubious_ownership"],
+    ["check_ignore", "permission_denied"],
+    ["policy_config", "invalid_configuration"],
+  ])("reports the safe %s operation and failure category", (operation, category) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    reportDesignDirectoryFailure("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "create",
+      Object.assign(new Error(`Managed Git ${operation} failed (${category}).`), { code: "GIT_COMMAND_FAILED" }));
+    expect(warn).toHaveBeenCalledExactlyOnceWith("[Design] Cloud directory action failed", {
+      action: "create", reason: `git_${operation}_${category}`,
+    });
+    expect(error).toHaveBeenCalledExactlyOnceWith("Couldn't create the Design directory. Try again.");
+  });
+
+  it.each([
+    "Managed Git /private/checkout failed (permission_denied).",
+    "Managed Git check_ignore failed (/private/checkout).",
+    "Managed Git check_ignore failed (permission_denied). /private/checkout",
+  ])("rejects unrecognized diagnostic text without logging it", message => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    reportDesignDirectoryFailure("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "create", new Error(message));
+    expect(warn).toHaveBeenCalledExactlyOnceWith("[Design] Cloud directory action failed", { action: "create", reason: "operation_rejected" });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("/private/");
+  });
 });

@@ -70,11 +70,12 @@ describe("cloud setup runtime redemption witness", () => {
     expect(fetchMock.mock.calls[0][1]!.headers).toHaveProperty("X-Zeros-Resume-Existing", "1");
   });
 
-  it.each([1, 2, 3])("preserves the v%i request without a runtime witness", async (version) => {
+  it.each([1, 2, 3])("refuses worker v%i before material redemption", async (version) => {
     tree.write("/etc/zeros/cloud-worker.json", { ...tree.marker, version, profile: `zeros-cloud-worker-v${version}` });
     tree.write("/run/zeros/active-runtime.json", "invalid", 0o600);
-    expect(await redemptionBody()).toEqual(legacyBody);
-    expect(fetchMock.mock.calls[0][1]!.headers).not.toHaveProperty("X-Zeros-Resume-Existing");
+    await expect(import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs")
+      .then(({ redeemMaterials }) => redeemMaterials(request))).rejects.toThrow(/runtime descriptor/);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it.each([

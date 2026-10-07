@@ -5,7 +5,7 @@
 #
 # Baked into the zeros-engine-v1 image; invoked by provision.ts as a managed
 # session process (so an engine crash ≠ container death). Binds CloudTransport
-# on 0.0.0.0:$ZEROS_CLOUD_PORT — the port the Daytona preview URL maps to.
+# on 0.0.0.0:$ZEROS_CLOUD_PORT — the runtime listener reached by the control-plane relay.
 #
 # Env (injected at sandbox create / by provision.ts):
 #   ZEROS_CLOUD_PORT    required — the 0.0.0.0 bridge port (CloudTransport)
@@ -49,14 +49,12 @@ fi
 # Bootstrap only from this installed physical script. The shared resolver is
 # the sole descriptor reader; neither argv nor environment can select a root.
 CLOUD_START_SCRIPT=$(readlink -f -- "${BASH_SOURCE[0]}")
-if [[ "$CLOUD_START_SCRIPT" != /opt/zeros-runtime/bin/start-engine.sh &&
-      ! "$CLOUD_START_SCRIPT" =~ ^/opt/zeros-infra/r1-[a-f0-9]{64}/bin/start-engine\.sh$ ]]; then
+if [[ ! "$CLOUD_START_SCRIPT" =~ ^/opt/zeros-infra/r1-[a-f0-9]{64}/bin/start-engine\.sh$ ]]; then
   echo "[start-engine] FATAL: unsafe installed launcher" >&2
   exit 1
 fi
 CLOUD_BOOT_ROOT="${CLOUD_START_SCRIPT%/bin/start-engine.sh}"
 CLOUD_BOOT_NODE="$CLOUD_BOOT_ROOT/bin/node"
-if [[ "$CLOUD_BOOT_ROOT" == /opt/zeros-runtime && ! -x "$CLOUD_BOOT_NODE" ]]; then CLOUD_BOOT_NODE=/usr/local/bin/node; fi
 cloud_root_file() {
   local candidate="$1" ancestor="$1"
   [[ -f "$candidate" && ! -L "$candidate" && "$(stat -c '%h' -- "$candidate")" == 1 && "$(readlink -f -- "$candidate")" == "$candidate" ]] || return 1
@@ -77,12 +75,12 @@ import {pathToFileURL} from "node:url";
 const installed=process.argv[2], lib=path.join(path.dirname(path.dirname(installed)),"lib/zeros");
 const {resolveCloudRuntime}=await import(pathToFileURL(`${lib}/cloud-runtime-root.mjs`));
 const runtime=resolveCloudRuntime();
-if(runtime.startEngine!==installed || runtime.profile==="v4" && runtime.node!==process.execPath)
+if(runtime.startEngine!==installed || runtime.profile!=="v4" || runtime.node!==process.execPath)
   throw new Error("Cloud launch runtime changed");
 const {readCloudHostRuntimeProfile}=await import(pathToFileURL(runtime.helpers.profile));
 const profile=readCloudHostRuntimeProfile();
 process.stdout.write([runtime.workerRoot,runtime.libRoot,runtime.binRoot,
-  profile.version===1?process.execPath:runtime.node,String(profile.version)].join("\n"));
+  runtime.node,String(profile.version)].join("\n"));
 ZEROS_RUNTIME_SELECTION
 )
 mapfile -t CLOUD_PATHS <<< "$CLOUD_SELECTION"
@@ -117,20 +115,16 @@ export ZEROS_ZSR_BWRAP_PATH="/usr/bin/bwrap"
 export ZEROS_ZSR_SETPRIV_PATH="/usr/bin/setpriv"
 
 
-case "$PROFILE_VERSION" in
-  1) RUNTIME_DIRECTORY="/run/zeros"; ENGINE_UID="0"; SETTINGS_DIRECTORY="/srv/zeros/state/user-settings" ;;
-  2) RUNTIME_DIRECTORY="/run/zeros/engine"; ENGINE_UID="10003"; SETTINGS_DIRECTORY="/srv/zeros/managed-settings"; REPO_DIR="/srv/zeros/workspace" ;;
-  # This shell still runs on the host. The v3 engine view subsequently maps
-  # the physical checkout to /srv/zeros/workspace inside its namespace.
-  3|4) RUNTIME_DIRECTORY="/run/zeros/engine"; ENGINE_UID="10003"; SETTINGS_DIRECTORY="/srv/zeros/managed-settings"; REPO_DIR="/srv/zeros/files/workspace" ;;
-  *) echo "[start-engine] FATAL: unsupported runtime profile" >&2; exit 1 ;;
-esac
-
-TEMPLATE_WORKSPACE=0
-if [[ "$PROFILE_VERSION" == "4" ]]; then
-  REPO_DIR=$("$RUNTIME" "$RUNTIME_LIB/cloud-computer-checkout.mjs" --host-repository) || exit 1
-  if [[ "$REPO_DIR" != "/srv/zeros/files/workspace" ]]; then TEMPLATE_WORKSPACE=1; fi
+if [[ "$PROFILE_VERSION" != "4" ]]; then
+  echo "[start-engine] FATAL: unsupported runtime profile" >&2
+  exit 1
 fi
+RUNTIME_DIRECTORY="/run/zeros/engine"
+ENGINE_UID="10003"
+SETTINGS_DIRECTORY="/srv/zeros/managed-settings"
+TEMPLATE_WORKSPACE=0
+REPO_DIR=$("$RUNTIME" "$RUNTIME_LIB/cloud-computer-checkout.mjs" --host-repository) || exit 1
+if [[ "$REPO_DIR" != "/srv/zeros/files/workspace" ]]; then TEMPLATE_WORKSPACE=1; fi
 
 SETUP_BOOT="${ZEROS_CLOUD_SETUP_BOOT:-}"
 if [[ -n "$SETUP_BOOT" && "$SETUP_BOOT" != "1" ]]; then
@@ -235,7 +229,4 @@ echo "[start-engine] backend=cloud-worker token_gate=on worker=$WORKER_UID:$WORK
 # ZEROS_CLOUD_PORT is set — CloudTransport on 0.0.0.0:$ZEROS_CLOUD_PORT. Keep
 # Node as the direct supervised process. A tee sibling would retain the one-use
 # registration material in its inherited environment for the engine lifetime.
-if [[ "$PROFILE_VERSION" == "2" || "$PROFILE_VERSION" == "3" || "$PROFILE_VERSION" == "4" ]]; then
-  exec "$RUNTIME" "$RUNTIME_LIB/cloud-engine-launcher.mjs" >>"$LOG" 2>&1
-fi
-exec "$RUNTIME" "$ENGINE_DIR/dist-engine/cli.js" serve --root "$REPO_DIR" >>"$LOG" 2>&1
+exec "$RUNTIME" "$RUNTIME_LIB/cloud-engine-launcher.mjs" >>"$LOG" 2>&1

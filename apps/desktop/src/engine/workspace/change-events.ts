@@ -224,6 +224,10 @@ export function dbChangedIncludesOriginator(op: string, cloudWorker = false): bo
     op === "project.upsert" ||
     op === "project.bulkUpsert" ||
     op === "chats.setComposerMode" ||
+    // Initialization primes the Design receipt, but the caller's retained
+    // Files/Changes caches still describe the checkout before those files
+    // existed. Refresh them through the same exact-workspace event as peers.
+    op === "design.initialize" ||
     // The Design surface does not own a Git-status cache to update
     // optimistically. Echo its index checkpoint so a retained Code/Changes
     // surface immediately re-reads staged state.

@@ -1,239 +1,385 @@
-# Live updates for running cloud workspaces
+# Cloud runtime updates, staging and handoff
 
-Approved decision, 2026-10-06. Internal Alpha only. Extends
-[HU's transition design](runtime-hot-update.md); does not enable live updates or
-claim measured process survival. Repository baseline: `41e84ffe`.
+Status: runtime selection/pins, installer/controller adapters, retained-allocation
+transfer, staging, quiet observation and resident handoff boundaries are
+implemented. **Automatic live activation and present-client process survival are
+not release-qualified.** The concrete Alpha acceptance adapter remains deferred.
+Repository code and synthetic/real-Linux tests do not establish a live ≤2-second
+gap. [Runtime bundles](runtime-bundles.md) owns artifact/registry/installation;
+this guide owns update states and their one transition journal.
 
-## Decision
+## Update modes and authority
 
-**Stage on qualification; activate at a safe point without stopping user
-processes.** Keep one resident workload host outside the replaceable engine's
-process group, cgroup and PID/mount namespace lifetime. It owns terminal masters,
-terminal state and user jobs. Replace the engine, retain the VM and workload
-host, and reuse HU's generation transfer, enrollment, rollback and crash journal.
-Do not implement a second transition owner.
-
-“Immediate” means eligible running workspaces start staging without waiting for
-sleep or user inactivity, and activate after current engine-owned work drains.
-An in-flight agent turn finishes on its existing runtime; subsequent prompts
-wait in the durable queue. We cannot promise an immediate code change inside an
-arbitrarily long turn while also promising never to interrupt it. Stage age,
-drain time and handoff gap must be measured separately.
-
-Target **≤2 seconds** from last authenticated source response to first
-authenticated target response with ordered replay, with no update banner on
-successful handoffs. This is an acceptance target, not a measured capability.
-The current attester and enrollment path cannot yet justify it. Longer failures
-use existing 10-second pending / 45-second error presentation; do not conceal
-outages or remove those thresholds.
-
-## Research: what is established
-
-VERIFIED means directly read documentation, source or local artifacts; it does
-not mean a vendor's live update was exercised. INFERENCE is an architectural
-conclusion. UNCONFIRMED means the inspected evidence does not establish it.
-No provider operation or process restart was performed.
-
-### Conductor
-
-- **VERIFIED, local artifacts:** this sandbox has two versioned
-  `/conductor-infra/<sha>` trees. `/conductor/{bin,worker,manifest.json}` point to
-  the same tree. Its manifest identifies runner version 22, built
-  `2026-10-06T03:20:53.208Z`. Read-only symlink/manifest inspection establishes
-  installation layout, not when or why selection changed.
-- **VERIFIED, shipped code/binary:** the host binary contains PTY IPC, TCP tunnel
-  and frontend-supervision symbols, including a restart-on-frontend-exit path.
-  The worker emits `sandboxRestart` for recovered sessions at startup
-  (`/conductor/worker/index.js:253409`). Its idle monitor defaults to five minutes
-  and requests sleep at 4h55m; the server may defer that request
-  (`index.js:248070`). These are configurable defaults, not a verified enforced
-  lifetime in this VM. No process arguments or environments were inspected.
-- **VERIFIED, public contract:** a rebuilt Cloud Computer changes the environment
-  of new workspaces; existing workspaces retain their environment.
-  [Cloud documentation](https://www.conductor.build/docs/cloud).
-  The October 2 changelog describes update-restart confirmation when a run
-  script or unsent prompt exists; it does not identify a live cloud worker swap.
-  [Changelog](https://www.conductor.build/changelog).
-- **INFERENCE:** separating PTYs/tunnels from the frontend permits frontend
-  replacement without making that frontend the shell's lifetime owner.
-  Versioned payloads permit staged selection. Neither proves agent-turn survival.
-- **UNCONFIRMED:** automatic qualification push into busy VMs, host-binary live
-  replacement, preserved provider sessions during replacement, or a bounded
-  reconnect gap. The prior research reports named in the task were not present
-  in this checkout; their supplied summary agrees with these limited findings.
-  No restart experiment was attempted on the workspace running this agent.
-
-### Other systems and applicable patterns
-
-| System | Verified behavior and limit of the evidence | Implication for Zeros |
-| --- | --- | --- |
-| VS Code Server | The client installs/updates its server on connection. Server installation paths include quality and commit. [FAQ](https://code.visualstudio.com/docs/remote/faq#_can-i-install-vs-code-server-manually), [upstream paths](https://github.com/microsoft/vscode/blob/main/cli/src/tunnels/paths.rs). This is not proof of cross-version live PTY migration. | Immutable side-by-side payloads solve installation, not process ownership. |
-| GitHub Codespaces | Configuration changes use container rebuild; `/workspaces` survives. [Rebuild contract](https://docs.github.com/en/codespaces/developing-in-a-codespace/rebuilding-the-container-in-a-codespace). No busy-agent hot replacement guarantee is established there. | File persistence is insufficient evidence of shell survival. |
-| Gitpod Classic | Stopping backs up `/workspace`; restarting restores it into a new container. IDE choice applies on workspace start. [Lifecycle](https://www.gitpod.io/docs/classic/user/configure/workspaces/workspace-lifecycle), [IDE example](https://www.gitpod.io/docs/classic/user/references/ides-and-editors/rider). | This is a restart model; do not present it as live replacement. |
-| Coder | Workspace update stops a running workspace and starts it with the updated template; optional automatic update applies at start. [Workspace management](https://coder.com/docs/user-guides/workspace-management). Transparent in-place **agent self-update** preserving all sessions is unconfirmed by the inspected sources. | Do not assume self-update implies session preservation. |
-| Daytona | Named sessions support asynchronous long-running commands and explicit cleanup. [Process execution](https://www.daytona.io/docs/en/process-code-execution/). Survival across daemon replacement is unconfirmed. | Stable command/session ownership is useful, but requires a separate restart test. |
-| E2B | `envd` is a versioned in-sandbox daemon. The SDK selects behavior/fallbacks by daemon version, including file upload and watcher support. [Daemon contract](https://github.com/e2b-dev/infra/blob/main/packages/envd/README.md), [SDK](https://github.com/e2b-dev/E2B/blob/main/packages/js-sdk/src/sandbox/filesystem/index.ts). Live daemon replacement is unconfirmed. | Negotiate capabilities against the runtime actually serving the request. |
-| Modal | Memory snapshots clone filesystem and process state into another sandbox; documented restrictions include active exec and exec-launched background processes. [Snapshots](https://modal.com/docs/guide/sandbox-snapshots). | Snapshot recovery neither replaces old code in memory nor proves unrestricted live migration. |
-| Fly Machines | A successful update of a running Machine reboots it. [Machines API](https://fly.io/docs/machines/api/machines-resource/#update-a-machine). | VM update is outside our uninterrupted-work contract. |
-| Replit | Its engineering recap reports substantially fewer container restarts and less loss of program state. It does not specify a live runtime handoff contract. [2023 recap](https://replit.com/blog/replit-recap-2023). | Reduced restart frequency is not a zero-interruption update guarantee. |
-
-Unix descriptor handoff (`SCM_RIGHTS`) or inherited descriptors can preserve
-kernel endpoints, but application buffers, TLS/SSH state and ownership still
-need a protocol. [systemd's FD store](https://systemd.io/FILE_DESCRIPTOR_STORE/)
-retains descriptors across service restarts; it does not serialize a Node heap
-or automatically preserve children killed with their service. [Envoy hot
-restart](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/operations/hot_restart)
-shares listening sockets but drains existing connections in the old process;
-it does not transfer them. [nginx binary upgrade](https://nginx.org/en/docs/control.html#upgrade)
-runs old and new masters/workers concurrently before retiring old workers.
-**Inference:** a resident workload host is simpler than FD transplantation for
-Zeros; no external source code is imported by this design.
-
-## Handoff and preservation contract
-
-1. **Offer and stage.** Qualification completion *and* release confirmation
-   schedule bounded work through the existing worker notification mechanism.
-   Reconcile missed notifications from durable eligibility; never depend on a
-   push being delivered. Select by exact organization, workspace, source
-   generation, base/controller compatibility and delegated credential kinds.
-   Stage through HU's verified installer beside the active tree. Keep source
-   authority, pointers and processes unchanged. Limit download concurrency,
-   disk use and staging retries; superseded offers cannot activate.
-2. **Drain and reserve.** Close new claims at the shared transition lock, allow
-   dispatched work to finish, and queue subsequent prompts with their existing
-   identities/paused states. Establish a synchronous engine admission fence for
-   mutations/process starts, then recheck after every await. Unknown activity is
-   busy. Ordinary terminal I/O need not wait once it has resident ownership;
-   never treat an engine-owned PTY as resident based only on a PID.
-3. **Prepare while source serves.** Verify target bytes and compatibility. An
-   isolated candidate preflight must not take the source lifetime lock, publish
-   the active descriptor, consume source proofs, open writable SQLite or acquire
-   provider authority. This requires a separately qualified attestation change.
-4. **Handoff.** Finish Git/Design mutations and durable writes, close the source
-   SQLite connection, fence the source engine, retain resident workloads, and
-   invoke HU's selection/enrollment protocol. Exactly one engine may write
-   state or admit work. The resident host attaches only the freshly enrolled
-   exact engine under a monotonic fence; old sockets and stale capabilities
-   cannot write, resize, kill, attach, or acquire credentials.
-5. **Prove and resume.** Publish a fresh boot/session/descriptor-bound proof and
-   fresh engine UUID, transfer authority using HU, check authenticated readiness
-   and record synchronization, reconnect every device and replay in order.
-   Revalidate queued work's actor, role, model and delegation before claim.
-6. **Recover.** A target that fails health is fenced before a fresh enrollment
-   of the saved verified source. Reverse HU's transfer if necessary. Do not
-   replay dispatched/uncertain external effects or restore the checkout from a
-   checkpoint. The resident host continues existing authorized user jobs.
-   Unknown authority closes admission; a network partition has no finite
-   availability guarantee.
-
-| Surface | Required behavior |
+| Mode | Current boundary |
 | --- | --- |
-| Terminal / Run / user dev server | Resident host owns PTY masters, bounded screen/scrollback, ordered output, exit status, cwd/session registry and descendants. New engine attaches using stable session IDs and a snapshot cursor. Input acknowledgements prevent replaying keystrokes. Explicit close and actual workspace stop still retire descendants. Engine disconnect alone does not. |
-| Agent turns / MCP / provider subprocesses | First release drains turns, pending tools, approvals/questions, background leases and provider processes; do not kill or adopt an active SDK connection. Product MCP gateways restart between turns with fresh grants. A later resident execution host could preserve active turns, but opaque SDK state and lease renewal make that a separate design, not this slice. |
-| SSH / SFTP / tunnels | Current native service grants bind generation, engine and authority epoch; engine retirement invalidates them. Leave active sessions as blockers until a resident transport plus allocation-scoped, independently renewable authority is designed and reviewed. Never merely stop checking grants. [Current contract](client-runtime-contract.md#native-human-ssh-sftp-and-port-streams). |
-| Previews / watchers / language services | A resident dev server keeps its PID and listener. Existing engine-owned relay connections still require draining or resident relay ownership. Recreate restartable file/Git watchers and reconcile authoritative snapshots so edits during the gap are discovered. Active preview streams block until continuity is qualified. |
-| Git / Design | Finish non-idempotent mutations, merge/rebase operations and Design checked transactions before handoff. Keep checkout/index/refs/Design IDs, source and open operation state on disk. Do not rerun setup, alter a user's working tree or mistake file survival for completed transaction survival. |
-| SQLite / native histories | Flush/close the old writer before the new writer opens. Qualify forward **and rollback** readability of schema and provider histories for the exact runtime pair; only additive compatible changes during the rollback window. No concurrent writers or automatic destructive migration. |
-| Credentials / containment | Resident host gets only bounded operation material, never provider administration credentials. Preserve separate workload containment and revoke operation grants normally. Update proofs attest resident controller/workload-host identity separately from engine identity; new engine bytes cannot stand in for old host bytes. Never change protected base bytes under the same compatibility ID. |
-| Multiple devices | One workspace transition and queue; preserve stable `cloud://` identity, input ownership and output cursors. Discard late source events by engine/epoch. Exact-key snapshots remain visible; switching owner/placement cannot retarget a pending attachment or update. |
+| Same-pin resume | Validated preparation reuse may skip clone/hooks/preflight; full final attestation and fresh launch/registration remain. No runtime selection change. See [wake performance](wake-performance.md). |
+| Stopped next-wake / explicit upgrade | Existing generation replacement selects a qualified newer runtime for the saved base/source, restores a fresh checkpoint and rolls back on candidate failure. It does not preserve processes. See [runtime lifecycle acceptance](runtime-lifecycle-acceptance.md). |
+| Stage while running | Download/verify beside the active tree, preserving source engine/pointers/processes. Stage receipt grants no activation/enrollment authority. |
+| Quiet retained-allocation update | New immutable generation on the same allocation through the existing transfer lock/journal. Requires exact pair/controller qualification and current safe-point authority. No production activation worker is enabled. |
+| Resident handoff | Separately attested workload host can retain PTYs/user jobs while the engine is replaced. Uses the same transfer/enrollment/recovery journal plus consumption records. Live continuity remains gated. |
 
-### Existing running workspaces
+A new desktop/control-plane deployment does not modify an existing pinned VM.
+Selection rechecks current source/base/runtime/credential qualifications and
+revocation, not merely release order. Keep historical generations and immutable
+pins; never edit protected base bytes while retaining its compatibility ID.
+Legacy executable profiles 1–3/actor protocol 1 are intentionally retired. N/N−1 release
+skew covers supported saved-v2/v4/actor2 cohorts; it cannot resurrect those paths
+or revoked runtime authority. See [runtime skew](runtime-skew-gate.md).
 
-The current [PTY host](../../apps/desktop/src/engine/pty/pty-host.cjs#L294)
-kills shells on stdin close; [engine stop](../../apps/desktop/src/engine/zeros-engine.ts#L3188)
-kills terminals and clears their registry; the
-[supervisor](../../scripts/cloud-workspace-validation/sandbox/cloud-worker-supervisor.mjs#L355)
-retires engine/setup scopes. Removing those kills alone leaves namespace,
-credential and orphan-cleanup failures. Existing PTY masters/state cannot be
-retroactively transferred by installing new engine code.
+## Preservation and readiness
 
-Therefore legacy busy workspaces keep working on their old runtime until a
-non-destructive migration point. HU's initial quiet host migration remains
-necessary. Freshly resident-owned terminals can survive later engine updates.
-Do not advertise immediate uninterrupted activation for legacy PTYs, active
-provider turns or SSH until their respective ownership migrations are qualified.
-The skew contract below is required while any such workspace remains pinned.
+Files, working tree/index/refs, Design, engine SQLite and native histories remain
+on disk during retained-allocation updates. Their survival is different from
+process/connection survival: ordinary retirement kills engine/setup descendants;
+PTYs, jobs, SSH/preview and provider SDK state need separately qualified lifetime
+owners. Checkpoints are disaster-recovery data, not process snapshots. Never
+call final quiescing checkpoint to forcibly manufacture a quiet source.
 
-## Version-skew release gate
+Before switching, finish non-idempotent Git/Design mutations and durable writes,
+close the old SQLite writer, and synchronously fence new mutations/process starts.
+Exactly one engine may write/admit work. Recheck activity/authority after every
+await. Unknown process/state evidence is busy. Candidate preflight cannot take
+the source lifetime lock, overwrite its descriptor/proof, open writable SQLite
+or obtain provider authority; current final attestation remains in the fenced gap.
 
-**N is the proposed qualified runtime; N−1 is the previous qualified runtime for
-the same base/credential profile, not the preceding Git commit or protocol
-integer.** Current control plane and desktop must preserve all previously
-supported core operations with both. New features require an advertised
-runtime capability or a tested fallback; lack of support must be rejected before
-durable dispatch, never converted into `command_dispatch_rejected` mid-turn.
-The reported old-runtime agent refusal was subsequently identified by the
-orchestrator as deliberate control-plane admission policy: customization on a
-non-MCP-qualified runtime returns `cloud_runtime_upgrade_required`, which the
-old engine collapses to `command_dispatch_rejected`. Together with the failed
-wake upgrade, that explains the incident; it is not evidence of schema skew.
-The skew gate remains a preventive release requirement.
+A target and rollback each need a fresh engine UUID, supervisor session,
+namespace/cgroup/boot/receipt witness, single-use proof and registration grants,
+current qualification, initial durable sync and challenged authenticated health.
+A stage receipt or reused prior readiness cannot substitute. Forward and rollback
+SQLite/provider-history readability require exact source/target compatibility
+qualification; no destructive migration, setup rerun or Git rewrite is implicit.
 
-Handshake range equality alone is insufficient: the existing
-[protocol check](../../scripts/check-protocol-version.mjs#L2) is advisory.
+Retained-allocation registration atomically transfers current binding/logical
+allocation owner/generation authority while preserving original funding,
+reservation, meter, billing epoch and provider labels. Old in-flight stop/delete/
+compute claims block activation; source cleanup may never delete the transferred
+VM. Disk selection and PostgreSQL cannot commit atomically, so admissions close
+across the journaled gap. Unknown authority retains data and closes admission;
+a partition has no finite availability guarantee.
 
-N−1 is a minimum. Do not drop a still-running older qualified cohort just
-because another runtime was published. Retire support only after allocation
-inventory confirms no running cohort needs it (and queued/stopped admission has
-a qualified migration path). Revocation remains authoritative, with an explicit
-error when no safe runtime exists; compatibility cannot resurrect revoked code.
+Undispatched queue entries keep command/user-message/operation identity, order
+and saved pause state and revalidate actors/models/delegations on the selected
+healthy engine. Dispatched/uncertain effects are never replayed. Delivery/claim
+idempotency is not exactly-once arbitrary external side effects.
 
-CI must use immutable manifest/source/digest-pinned released fixtures or bundles,
-not two copies of current schemas. Exercise current desktop ↔ N−1 engine ↔
-current control plane and previous desktop ↔ N engine ↔ current control plane:
-handshake/capabilities, ordinary prompt + Stop/approval + queued claim/settle,
-terminal attach/input/snapshot, Files/Git/Design creation, record/event replay,
-service admission and registration/credential renewal. Include strict old
-parsers, optional/missing fields and capability-gated new commands. An intentional
-negative fixture must make the gate fail. Store no live credentials in fixtures.
+## Staging while work continues
 
-Wire this as a **required** compatibility/release-qualification gate before
-desktop/control-plane publication; neither successful N qualification nor an
-advisory protocol bump may bypass it. Roll-forward and rollback data-format
-tests are separate. Local tests with frozen schemas can be a first slice but
-must not be represented as full released-binary qualification. Resolve runtime
-provenance through `cloud_runtime_bundles.source_commit`; a runtime ID suffix is
-not a source commit. The orchestrator has supplied the old runtime's provenance;
-the skew-gate owner must bind its fixtures to the verified manifest/artifact and
-the preceding desktop build.
+The Alpha control plane can stage a newer qualified runtime on a running
+organization workspace without retiring its engine. `CLOUD_RUNTIME_STAGING_ENABLED`
+defaults to `false`. It requires the hosted Boat backend and runtime artifact
+store. It never enables activation, changes runtime pointers, obtains enrollment
+grants or restarts a workspace. Keep it disabled until the staged installer and
+transition path are qualified together.
 
-## Ownership and PR slices
+Qualification success, confirmed Alpha release publication and runtime revocation
+send an empty PostgreSQL notification in their existing transaction. Notifications
+carry no authority, identity or artifact capability. The existing dedicated
+worker listener wakes staging after commit and reconnect. A 15-second poll and
+startup scan recover lost hints, including qualifications written out of band.
 
-| Slice | Owner / boundary | Evidence before enabling |
+Discovery includes `ready` and `busy` workspaces belonging to staff, with a live
+engine and hosted Boat binding. It uses the existing selector for the exact base,
+protocol, qualification mode and delegated credential kinds. It does not inspect
+client presence, PTYs, idle time or agent turns. Local-owner and organization-owned
+local workspaces do not use this control-plane worker. Owner/placement switching
+does not change its exact organization/workspace/generation/engine scope.
+
+The worker calls the transfer service’s `offer`, `claim`, `renew`, `reconcile`, `staged`, `release`
+and `cancelStaging` APIs. The transfer service owns the common lock and transition journal. No new
+migration or supervisor queue is introduced. The operation UUID is derived from
+the source identity, discovered target and previous expired cancellation, so duplicate pushes and worker restarts
+join the same offer. The service reselects and fences authoritative eligibility when offering.
+
+Each replica runs at most two downloads (the constructor caps this at four),
+reads pages of 16, and keeps at most 512 retry records. A transition gets three
+attempts per worker process with backoff. The transfer service’s durable 15-minute deadline bounds
+retries across crashes; exhaustion cancels that offer without changing the source.
+After the cancelled offer's original deadline, polling may create a fresh offer
+with a new durable idempotency key. A long-running turn therefore cannot strand
+an update permanently. A newly selected target need not wait for an older target's
+retry window. Duplicate scans inside each window join the same offer.
+The verified installer enforces archive/expanded-size and disk checks. Staging
+does not add runtime cache garbage collection.
+
+The worker signs a short-lived artifact capability in memory, then rechecks the
+source identity, live lease, qualification and latest eligible target. It invokes
+the existing pinned installer over private SSH stdin with `operation: stage`;
+every activation callback is denied. The installer verifies bytes beside the
+active tree and preserves source processes and selection. A final eligibility
+read precedes `staged`. Claim renewal and eligibility monitoring run every 25
+seconds; lease loss, shutdown or a changed source discard the result. A cancelled
+download can finish verified cache bytes on the VM, but has no activation authority.
+Diagnostics use closed labels and contain no provider output or signed URLs.
+
+Superseded and revoked offers are cancelled under the transfer service’s fenced API. A valid staged
+offer is released immediately for a future qualified activation caller. That caller must still
+recheck current eligibility, latest-target supersession and its quiet/safe-point
+policy at activation, then obtain fresh proofs and enrollment. A stage receipt is
+neither an attestation nor permission to activate.
+
+Local tests cover busy-source staging, real transition receipts, transactional
+notifications, duplicate/lost hints, source and tenant mismatches, revocation,
+supersession, worker lease loss, retries and shutdown. No live provider operation
+or latency claim is made by these tests. The Alpha acceptance runner separately
+verifies actual pointer/process preservation and the subsequent handoff.
+
+## Retained-allocation transfer
+
+`DatabaseCloudRuntimeTransitionService` in
+`apps/control-plane/src/cloud-workspaces/runtime-transfer.ts` implements the
+retained-allocation executor. It has no automatic scheduler or activation
+policy installed. The resident workload host owns process lifetime and the attach fence; the
+transfer service owns the database transition,
+registration, health verification and crash deadlines. The activation caller must supply a policy appropriate to the qualified VM controller. Presence,
+PTY survival and safe points are policy inputs, not hard-coded transfer rules.
+There is no measured reconnect-gap claim for this executor.
+
+The executor reuses the existing lifecycle service’s candidate selection and organization/workspace lock,
+and the existing single-active-generation-transition journal. Its
+`execution_mode='retain_allocation'` never owns provider lifecycle intents.
+Staging creates an immutable candidate generation while the source runs.
+Activation requires current runtime/base/credential qualification plus a
+separate operator-published source/target/controller compatibility record.
+Those records start disabled; runtime qualification alone cannot authorize a
+reversible database/history downgrade. Activation also rejects pending
+provider operations, compute claims and insufficient funded rollback runway.
+The trusted policy's decision is followed by another wall-clock authority
+check before the source is fenced.
+
+The controller integration contract is:
+
+| Call | Required evidence and result |
+| --- | --- |
+| `offer` | Current source engine and generation, operation UUID, engine/bootstrap mode. Returns the single transition or joins the existing lifecycle service’s existing one. |
+| `claim` / `renew` | Worker lease lasts 90 seconds. Reclaim changes the worker fence; the VM execution fence remains fixed. Renewal cannot extend phase deadlines. |
+| `release(claim): Promise<boolean>` | Relinquish an exact live worker claim immediately, retaining phase and execution fence. The next claimant receives a new worker fence. A stale, expired, already released or terminal claim returns false. |
+| `cancelStaging(claim): Promise<boolean>` | Cancel only offered/staged work before any activation, under the common transition lock. Requires the current live claim; an exact retry of its completed cancellation returns true even after lease expiry. Other fences and post-activation cancellations return false. Source authority, allocation and pin remain unchanged. |
+| `staged` | Called only after the authenticated, pinned installer conversation returns its exact staged receipt. Staging expires after 15 minutes. |
+| `activate` | Verified controller descriptor and injected `CloudRuntimeActivationPolicy`. True is the source-admission fence; target registration is bounded to 240 seconds. |
+| `enroll` | Fresh verified active/controller identities and the complete normalized v4 attester report from the pinned root channel. Rejects a reused supervisor session, wrong boot/base/pin or incomplete containment evidence. Returns a fresh engine UUID and short-lived, one-use capabilities in memory only. |
+| transition registration | `POST /internal/v1/cloud-workspaces/runtime/register`, strict existing registration body, bearer capability. `setupRunId` carries the enrollment UUID and `executionFence` its sequence **only on this endpoint**. It cannot redeem setup, repository or settings grants. Registration moves the binding, logical allocation owner, current generation and ready engine atomically. |
+| `verifyHealth` | A fresh challenge sent over the authenticated root controller channel; the reply must bind the execution fence, active descriptor, engine UUID, protocol, ready health and durable-record connection. Ordinary engine HTTP input is never a health proof. A successful probe records evidence but keeps admissions closed. |
+| `finish` | Exact final `RuntimeUpdateResult` receipt from that controller's durable journal, matching the registered engine and fresh health evidence. Only this step publishes ready status and ordinary admissions. |
+| `beginRollback` / `reconcile` | Revoke target authority before VM rollback. Allocate a fresh source engine/enrollment rather than reviving an old UUID. A lost registration reply can be resolved by fresh health plus the final journal receipt. Activation and rollback each have a fixed 240-second bound. Unknown or expired rollback stays `recovery_required`, with the allocation preserved and admissions closed. |
+
+The pinned controller must expose fresh challenge-bound health and authenticated journal inspection
+for recovery after a worker dies. Wire these calls through the existing pinned
+installer conversation; do not expose `enroll`, `verifyHealth` or `finish` as
+ordinary client/engine routes. A reclaimed worker never reuses a plaintext
+registration or readiness capability from storage. The generation and engine
+keys are checked again under the common lifecycle lock at every publication.
+Only durable-record synchronization and heartbeat are available to a newly
+registered engine before the final receipt. Repository credential refresh,
+commands, tools, and client admission remain closed.
+
+`cloud_workspace_allocation_owners` records the VM's original provider identity
+and its current generation. `cloud_workspace_allocation_transfers` audits each
+ownership change. The existing allocation lease, reservations, funding window,
+meters and billing epoch retain their original identity, including on subsequent
+updates of the same VM. Loss settlement uses the original provider journal plus
+the audited current binding; legacy allocations keep their existing checks. Provider receipts and
+labels also retain their original generation. The provider adapter projects
+only that exact allocation onto its current owner and rejects stale destructive
+calls. A provider operation is journaled before I/O; an unknown outcome blocks
+activation even after the caller's lease expires. Clearing an unknown provider
+outcome requires independent provider completion evidence; a timeout or a
+single observation is insufficient. Automatic repair of such provider outcomes
+is deliberately not inferred by runtime crash reconciliation.
+
+`readCloudRuntimeResumeProofEpoch` now covers both ordinary setup and retained
+engine enrollment. A database-assigned order detects later incomplete launches,
+including copied legacy INSERT shapes. Cancellation after activation cannot
+resurrect an earlier cached epoch. A successful rollback has its own engine UUID.
+
+Migration 0136 is an expand migration with nine explicit, statement-scoped
+exceptions: three validated CHECK widenings, three nullable enrollment columns,
+two conditional legacy triggers, and the compute-authority function. The
+exception linter accepts only the annotated exact statements in this file; the
+function's entire body is pinned for review. Both legacy trigger functions are
+unchanged. New enrollment rows have a scoped FK, an immutable enrollment ID and
+a separate INSERT/UPDATE guard for pin, witness, sequence and capability state.
+The new CHECKs are added NOT VALID and validated before the old restrictions
+are removed, within the existing five-second lock timeout. Application RLS
+permits qualification row locking but forbids qualification publication. New
+workspace-owned records follow the existing workspace-erasure cascade. The
+migration is compatible with old-code writes, but activation of the new row
+shapes requires all control-plane replicas to run the transfer-aware code.
+Keep operator transfer qualifications disabled throughout a rolling deployment.
+
+Local and organization-owned local workspaces have no control-plane transition
+rows and keep their existing behavior. Cloud transitions remain scoped by both
+organization and workspace. This slice changes no renderer selection or local
+engine path. Automatic activation and the concrete Alpha acceptance adapter remain gated;
+current staging, resident wiring and queue handoff do not qualify a live swap.
+
+
+## Quiet observation and activation policy
+
+`apps/desktop/src/engine/cloud-runtime-quiet-state.ts` exports
+`CloudRuntimeQuietState`, `CloudRuntimeQuietStateOptions`,
+`CloudRuntimeQuietScope` and `CloudRuntimeQuietSnapshot`.
+`snapshot(challenge: string): Promise<CloudRuntimeQuietSnapshot | null>` is
+read-only: it does not drain work, reserve a safe point, change admission or
+stop a process. The resident handoff can consume the same typed snapshot.
+
+Each version-1 snapshot binds a fresh UUID challenge to organization, workspace,
+generation and engine instance. It contains the monotonic activity revision,
+quiet duration, durable-record synchronization state, idle-stop workload guard,
+live PTY guard, process-scan result and presence state. The reader samples guards
+before and after process inspection; changed activity marks the snapshot
+unstable, a changed identity rejects it, and unavailable process evidence is
+unknown. `CloudIdleStopScheduler.readActivity()` does not renew activity or
+consume an idle-stop attempt. Idle-stop still includes presence in its busy
+check; the update snapshot reports presence separately for policy selection.
+
+The hook is exposed at `GET /internal/runtime-quiet` on the engine's existing
+internal-readiness boundary: loopback peer and Host, exact readiness capability,
+no query string, and `x-zeros-quiet-challenge`. It rechecks engine readiness after
+the asynchronous read. Missing hooks, old engines, invalid challenges and
+unavailable readiness never imply quiet. Responses contain only the closed
+snapshot schema; errors return the existing fixed unavailable/not-found body.
+There is no client RPC for this observation. Local and organization-owned local
+engines never perform the inspection.
+
+`CloudUserPresence.snapshot(attached)` requires a fresh admitted report for each
+attached cloud client. An explicit negative report proves absence for its
+90-second lease; a missing, expired, replaced or revoked client report is
+unknown. Any present device blocks the default policy. No attached clients means
+absent. The renderer's existing presence rule is a visible window with input in
+the last 15 minutes, on a device that is neither locked nor suspended.
+The current interaction client sends a negative report on withdrawal, without periodic negative
+renewal (`CloudWorkspaceInteraction.refresh`). After 90 seconds an attached
+inactive client therefore becomes unknown and this policy defers until a new
+report or disconnect. Keeping absence continuously provable requires an interaction-client
+renewal change; this slice does not infer absence from an expired lease.
+
+The control-plane module
+`apps/control-plane/src/cloud-workspaces/runtime-quiet-trigger.ts` exports:
+
+- `CloudRuntimeQuietReader`: an injected, authenticated pinned-controller reader
+  accepting the exact source scope, a fresh challenge and an abort signal.
+- `readFreshCloudRuntimeQuietSnapshot`: validates the closed schema, exact scope
+  and challenge, and a two-second monotonic bound. It aborts hung reads and
+  suppresses raw reader errors. The adapter must additionally bound response
+  bytes and authenticate the pinned source; the challenge is not authentication.
+- `cloudRuntimeQuietAbsentPolicy`: the default policy, requiring 60 quiet
+  seconds, stable activity, ready record synchronization, absent presence and
+  all workload/PTY/process guards clear. Unknown evidence defers activation.
+- `DatabaseCloudRuntimeQuietTrigger.consider(input)`: an optional quiet offer
+  entry point that reuses the existing server workload query and the transfer service's
+  selection and single-transition lock. It cannot activate a runtime.
+- `DatabaseCloudRuntimeQuietTrigger.prepareActivation(claim)`: returns a
+  `CloudRuntimeActivationPolicy` for a staged, live worker claim. Its `authorize`
+  callback runs under the transfer service's existing lock, requires the exact
+  claim, obtains a new snapshot with the same activity revision, and checks
+  server work before and after that read. A refusal leaves the transition staged
+  and the source usable; it changes no command or queue pause state.
+
+Background background staging continues to call `offer` independently of quietness;
+this module adds no scheduler, poll interval or startup wiring. The resident host owns the
+resident-host safe-point/attach fence and must combine it with the final
+observation policy before activating. A read-only snapshot cannot close the
+last race between an observation and new VM work. The policy is injectable so
+qualified live handoff can change the presence/PTY gates without duplicating
+selection, enrollment or transition ownership. No gate is relaxed automatically:
+that still requires the appropriate runtime/controller qualification and
+measured reconnect gap (at most 2 seconds for the live-handoff path). Until then
+the default remains absent clients and 60 quiet seconds. Bootstrap qualification
+and measurement remain separate.
+
+The hook and policy are implemented, with resident fencing described below.
+They do not enable production activation or establish a measured gap or
+exactly-once external tool effects. A qualified controller and actual live
+acceptance remain required.
+
+## Resident handoff and consumption journal
+
+The control-plane adapter implements the resident VM integration contract. Resident activation is an explicit engine-mode
+request with `handoff: {challenge, organizationId, workspaceId, generation,
+engineInstanceId, hostId, fence, expiresAtMs}`. It cannot use the bootstrap path
+or fall back to ordinary `prepare`. The fixed adapter validates the complete
+source, controller, target and resident trees independently. Its cgroup census
+permits only the exact root-attested resident workload alongside the host;
+every engine/setup scope must be empty after retirement.
+
+Migration **0137** is additive expand; 0136 is unchanged and there are no new
+expand exceptions. `cloud_workspace_runtime_handoffs` records these separate
+commits under the existing per-workspace transition and worker fences:
+
+| Journal phase | Durable meaning | Recovery action |
 | --- | --- | --- |
-| LU-0: this decision | LU; separate doc, no edits to HU's design | Sources and exact limitations above. |
-| LU-1: skew gate | Separate agent assigned by the orchestrator; frozen contracts, compatibility harness and required CI integration | Deliberately incompatible request fails; both placements and released N/N−1 matrix pass. Baseline artifact/provenance must be agreed first. CI changes require owner merge. |
-| LU-2: resident workload host | LU; new host/engine adapter, terminal registry/mirror ownership and packaging | Real shell plus detached dev server keep PID/state/output across old-engine exit, target attach and rollback; stale engine/refused auth, bounded buffers, explicit close, stop and host-crash tests. |
-| LU-3: safe-point handoff | LU engine admission/drain and agreed resident supervisor extensions; HU final control-plane decision and enrollment | No admitted mutation/claim crosses fence; source/candidate race, pending approval, drain failure, SQLite close/reopen and rollback tests. |
-| LU-4: qualification-driven staging | LU trigger/staging integration; HU transition APIs; PERF notification worker | Busy workspace stages without pointer/process change; duplicate/lost push, supersession, revocation and source-generation races. |
-| LU-5: Alpha acceptance | LU workload-survival and latency assertions compose with HU's runner | Two clients, active PTY/server, queued sends, failed target health, fresh proof/UUID, same allocation/boot, cleanup and measured ≤2s successful gap. |
-| HU existing slices | HU owns 0135, retained allocation/compute fencing, transition enrollment, journal reconciliation, quiet fallback and IW2 queue integration | LU consumes these; does not edit their files/protocol without agreement through the orchestrator. |
+| `consumption_authorized` | Root supplied the scoped, fenced resident receipt; current candidate and independent resident qualification passed. Source record/heartbeat authority remains live, but new command claims are blocked. | Inspect the exact root receipt; no staging cancellation or ordinary prepare. |
+| `consumed` | Root's resident-aware prepare consumed the sealed source, detached its resident authority and proved engine/setup retirement. | A live claim can finish server retirement; `reconcile` does so within the bound. |
+| `source_retired` | Server source authority is revoked and the existing transfer phase is `activated`. | Existing fresh enrollment, registration, challenged health and rollback paths apply. |
+| `cancelled` | Root confirmed cancellation on the same live, still-attached source before consumption. | Cancel this offer, retain the source pin/epoch and queue pause state, permit a later offer. |
+| `uncertain` | The consumption deadline expired without a conclusive root receipt. | Retire server authority, preserve the VM and require recovery verification. Never infer that its writer can resume. |
 
-**Required coordination before LU-2/3 integration:** agree a separate resident
-workload scope and credential/revocation boundary with HU; whether the unchanged
-v4-5 base can attest that scope; the supervisor's handoff/attach fence; and the
-isolated preflight/final-proof split. If a protected base change is necessary,
-use a new base compatibility ID. Any database addition needs a number assigned
-by the orchestrator. SSH/active-preview continuity needs a separately agreed
-service-authority change. HU's 60-second/no-present-client gate is retained for
-its quiet path; LU only replaces it on individually qualified resident paths.
+Authorization expires at the earlier of the resident receipt expiry and 90 seconds.
+The original stage deadline and worker claim also apply. The VM retries a lost
+prepare reply only with the identical handoff and resident fields, so the
+supervisor can replay its unspent one-use session. Neither this session nor
+enrollment credentials enter the database journal or diagnostics. A root
+process crash with an unfinished local journal blocks an ordinary activation
+retry; uncertain disk/controller state requires inspection, not an inferred
+rollback. Automatic target-health rollback still runs within the existing
+bounded conversation when source retirement is confirmed.
 
-The Alpha runner must read `.env.agent`, use deployed supported endpoints and a
-staff-only older-runtime create pin, and refuse before creating anything if
-capabilities are absent. Create only `zeros-v2-test-lu-*` resources, journal
-idempotency/resource IDs before mutation, use synthetic terminal/HTTP sequence
-markers, and report closed checks/timings. Test duplicate input and sends,
-rollback, two-device replay and unaffected user files. Delete in `finally`,
-recover lost create replies by idempotency, and verify all generations' pending
-deletion inventory is empty. Never print tokens, signed URLs, process arguments,
-environments or raw provider errors. No live run was performed here.
+The duplex protocol adds `authorize_consumption`, `consumed` and
+`cancel_consumption`. `createResidentRuntimeUpdateHandlers` in
+`apps/control-plane/src/cloud-workspaces/runtime-resident-update.ts` binds them
+to `DatabaseCloudRuntimeTransitionService.authorizeResidentConsumption`,
+`recordResidentConsumption`, `retireResidentSource` and
+`cancelResidentConsumption`. Consumption is committed before retirement in
+separate transactions. Missing resident handlers fail closed. The caller owns
+worker-lease renewal, an injected activation policy, construction of bounded
+enrollment material, a fresh pinned-root health probe and `finish` after the
+runner's final receipt. There is no new public/client mutation endpoint.
 
-## LU-3 VM integration contract
+`cloud_runtime_resident_transfer_qualifications` is an operator-published,
+revocable record for the exact source engine / target engine / controller /
+resident runtime / base / mode combination, with an evidence digest. Ordinary
+runtime-transfer qualification alone is insufficient. An older resident host
+can remain only when that exact combination qualifies its independent
+`zeros.resident-pty/v1` protocol; the current engine protocol does not attest the
+host. No broad version-range or N-1 exemption is inferred. Source/target runtime
+and credential-kind qualification remain mandatory at their existing joins.
 
-The VM implementation extends HU's shared `cloud-runtime-quiet-state.ts` and
+Every resident enrollment records its own detached witness. Target and rollback
+start with new engine UUIDs and a higher resident fence. Registration still
+uses the immutable generation pin and existing transfer service; authenticated,
+challenged health additionally verifies that exact resident host, generation,
+engine and attachment fence. Rollback never recycles a prior resume-proof epoch.
+
+A start rejected before attachment can reuse the original detached fence only
+when a fresh root status proves the unchanged detached resident and an exact
+prepare replay proves the original session is still unspent. The control plane
+also requires that candidate registration has not consumed its enrollment.
+A failed or lost start retains the planned target authority: rollback must
+prove and detach that exact attachment, or remain `recovery_required`. A
+rejected response alone never proves that attachment or session state survived.
+
+Queue recovery shares the lifecycle queue rule: undispatched commands retain their pause state
+only for the exact successfully enrolled target/rollback engine. Their durable
+command/claim identities remain unchanged; interrupted dispatched commands stay
+uncertain, and ordinary replacement engines still pause the queue. Actor and
+device authorization are checked again before dispatch. Source claims remain
+blocked between authorized consumption and confirmed cancellation/retirement.
+The client's existing FIFO/reconnect code remains responsible for retrying a
+send that has not yet reached the durable queue with the same command identity.
+
+This path changes only organization-owned cloud execution. Local and
+organization-owned local workspaces do not call these control-plane adapters;
+owner/placement switching retains exact organization/workspace/engine scope.
+It does not enable a production activation worker, advertise resident support,
+relax presence/PTY eligibility, or claim a measured reconnect gap. Those gates
+still require qualification and the disposable acceptance run with actual
+workload-survival assertions.
+## VM safe point and resident attachment
+
+The VM implementation extends shared `cloud-runtime-quiet-state.ts` and
 existing supervisor `prepare` / one-use session / `select-runtime` / `start`
 path. It does not enable a control-plane activation policy or change the quiet
-path's conservative eligibility rules. LU-4 staging is already merged.
+path's conservative eligibility rules. Staging is independently gated.
 
 - Root sends `runtime-handoff`, action `prepare` or `cancel`, with `handoff`:
   `{challenge, organizationId, workspaceId, generation, engineInstanceId,
@@ -262,14 +408,11 @@ path's conservative eligibility rules. LU-4 staging is already merged.
   engine runtime are distinct proof inputs; selected engine bytes do not attest
   the still-running host. Protected v4-5 base assets are unchanged.
 
-**HU wiring required before activation:** the current update adapter's ordinary
-`prepare` kills the resident scope, and its populated-cgroup check rejects the
-preserved workload. Add the resident mode explicitly. Agree transaction/journal
-ordering before using it: current `authorize()` retires source server authority;
-the VM must consume the source receipt while that authority is still live.
-Recovery must distinguish unconsumed cancellation from consumed retirement and
-must never fall back to destructive ordinary `prepare` after an ambiguous reply.
-Keep latest-candidate/revocation/claim checks under HU's existing ownership lock.
+The resident adapter uses the consumption journal above, preserving source
+server authority until root consumes its handoff. Missing handlers or ambiguous
+receipts fail closed; there is no fallback to destructive ordinary `prepare`.
+Ordinary engine-only preparation retires its own scopes and cannot be used to
+claim resident process survival.
 
 First qualification must include this resident host and adapter together; no
 resident capability is advertised by this slice. The private snapshot request
@@ -286,11 +429,11 @@ gap. Active SSH/preview streams and engine-owned Setup/Run/provider processes
 still delay activation. Device-to-engine terminal input has no durable client
 acknowledgement today; host-side input deduplication alone does not establish
 lossless typing during a client reconnect. Keep present-client activation gated
-until LU-5 verifies that path and the agreed client retry contract.
+until live acceptance verifies that path and the agreed client retry contract.
 
-## LU-5 acceptance harness (adapter pending)
+## Gated live acceptance harness
 
-This is a gated harness, not runnable live Alpha acceptance. HU and LU agreed
+This is a gated harness, not runnable live Alpha acceptance. The harness exposes
 [`AlphaLiveUpdateAdapter`](../../scripts/cloud-workspace-validation/live-update-acceptance/contract.ts),
 but the concrete adapter/controller is deferred to a separate reviewed slice.
 Missing implementation or unqualified capabilities refuse before creation.
@@ -331,8 +474,8 @@ Enablement prerequisites remain explicit:
   resident enrollment. Ordinary setup/bootstrap does not enroll a host today.
 - Trusted root quiet/readiness observations and a handoff-aware final policy.
   The ordinary quiet predicate regards a fenced engine as busy. `runtime-observe`
-  is a separate proposed supervisor operation, absent from the reviewed LU-3
-  head; it cannot be treated as available here.
+  is a separate proposed supervisor operation; the current supervisor does not
+  expose it.
 - Real device-to-engine acknowledged input/retry, independently authenticated
   reconnect/replay observations from two devices, an ordinary provider turn
   held at a test tool gate, and candidate-scoped root health-failure injection.
@@ -377,24 +520,27 @@ fixed result codes, measured gaps and cleanup state. The adapter must retain
 additional provider resource IDs in a credential-free inventory for the
 orchestrator's live report; no raw provider errors or workload output is logged.
 
-## Local workspace impact
+## Local, devices and qualification
 
-Local-owner and organization-owned local workspaces retain their existing
-engine/PTY-host lifecycle, filesystem identity and offline behavior. Select the
-new host only at the cloud-worker boundary. Shared adapters require a regression
-proving local stdio spawn and explicit teardown remain unchanged. Local-owner
-cloud placement remains invalid. macOS lifecycle checks remain owner-run.
+Personal Local and organization Local retain their engine/PTY/filesystem/offline
+lifecycle. Cloud updates select only exact organization/workspace/generation/
+engine authority; owner switches and late source frames cannot retarget another
+workspace. All devices observe one transition and queue with bounded replay.
 
-## Cloud workspace impact and owner experience
+Required acceptance includes busy/drain/final-switch races, expired/revoked
+claims/pins/delegations, stage failure, lost registration/health/prepare replies,
+rollback and unknown recovery, compute/source-delete races, queue pause state,
+dirty Code/Design/Git/index/chats, exact source/target/controller/resident proof,
+real PTY/dev-server PID/output/input continuity and all-generation cleanup.
+Measure stage age, drain interval and handoff gap separately. The live target is
+≤2 seconds last authenticated source→first authenticated/replayed target;
+bootstrap/quiet paths have their own measured bounds. Existing pending/error
+presentation remains truthful when a gap exceeds its thresholds.
 
-Organization cloud workspaces stage a qualified update while the owner keeps
-typing. A drained agent switches runtime before the next queued turn; resident
-shells and dev servers continue. The qualified short gap reconnects without a
-banner, preserves terminal output and conversation ordering, and converges on
-all devices. Existing unsupported activity delays activation without killing
-work. Qualification/staging failure leaves the source usable; target failure
-uses HU rollback. Until those gates pass, this is a proposed experience, not a
-claim that today's old workspace has received the fix.
-
-Owner/placement switches retain independent exact-key connections and update
-state; no cloud host/capability may attach to a local or foreign workspace.
+Current active provider turns, MCP/approval/background leases, engine-owned
+Setup/Run processes, SSH/native service and preview streams still block relevant
+activation. Client terminal input has no durable acknowledged retry contract;
+host deduplication alone cannot establish lossless typing through reconnect.
+Keep present-client activation disabled until that client path and exact
+controller/workload survival pass live acceptance. Publish sanitized evidence
+outside public docs. See [qualification status](qualification-status.md).

@@ -7,6 +7,7 @@ import { authorizeCloudWorkspaceActor, authorizeRecordedCloudWorkspaceActor, typ
 import { assertCurrentCloudEngineAuthority } from "./engine-authority.js";
 import { consumeCloudWorkspaceDeviceProof, type CloudWorkspaceDeviceProof } from "./replicas.js";
 import type { CloudEngineRelayGrant } from "./engine-client-admission.js";
+import { requireSupportedCloudWorkspaceGeneration } from "./supported-generation.js";
 
 export const CLOUD_ACTOR_ADMISSION_PATH = "/internal/v2/cloud-workspaces/engine/client-admission";
 export const CLOUD_ACTOR_ADMISSION_AUDIENCE = "zeros-cloud-workspace-engine-client-admission-v2";
@@ -14,6 +15,7 @@ export const CLOUD_ACTOR_TOKEN_PATTERN = /^zwa_[A-Za-z0-9_-]{43}$/;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const hash = (token:string) => createHash("sha256").update(token).digest();
 function rejected():never { throw new HttpError(401,"cloud_actor_admission_rejected","Workspace actor admission was rejected"); }
+function clientUpdateRequired():never { throw new HttpError(409,"cloud_workspace_client_update_required","Update Zeros to connect to cloud workspaces."); }
 
 export type CloudRecordedActor = {
   actorUserId:string;deviceId:string;deviceKeyVersion:number;fingerprint:string;sourceSessionId:string;
@@ -66,25 +68,19 @@ export async function assertCloudActorSession(
       AND session.last_renewed_at>clock_timestamp()-interval '30 seconds'`,
   [actorSessionId,scope.workspaceId,scope.organizationId,scope.generation,scope.engineInstanceId])).rows[0];
   if (!row) rejected();
+  await requireSupportedCloudWorkspaceGeneration(tx,scope);
   const actor = recordedActor(row);
   // The same statement confirms the session is still current after authorization.
   const authority = await recordedActorAuthority(tx,{...scope,actorUserId:actor.actorUserId,actor,capability},true);
   return {...actor,role:authority.role,sessionId:row.id};
 }
 
-/** Compatibility is limited to an untouched, owner-only v1 runtime. A missing
- * actor is never interpreted as the sponsor after collaboration is enabled. */
+/** Every request carries its device's actor session, including owner-only workspaces. */
 export async function assertCloudRequestActor(
   tx:Tx,scope:CloudActorEngineScope,capability:CloudWorkspaceCapability,
 ) {
   if (scope.actorSessionId!==undefined) return assertCloudActorSession(tx,scope,scope.actorSessionId,capability);
-  const legacy=await tx.query(`SELECT 1 FROM cloud_workspaces workspace
-    JOIN cloud_workspace_engine_instances engine ON engine.workspace_id=workspace.id AND engine.org_id=workspace.org_id
-    WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.single_member_mode=true
-      AND workspace.sharing_mode='private' AND engine.id=$3 AND engine.generation=$4 AND engine.actor_protocol_version=1`,
-  [scope.workspaceId,scope.organizationId,scope.engineInstanceId,scope.generation]);
-  if (legacy.rowCount!==1) rejected();
-  return null;
+  clientUpdateRequired();
 }
 
 export class DatabaseCloudWorkspaceActorSessionService {
@@ -105,7 +101,7 @@ export class DatabaseCloudWorkspaceActorSessionService {
     if (![input.workspaceId,input.organizationId,input.actorUserId].every(value=>uuid.test(value))) rejected();
     return withSystemTx(this.options.pool,async tx=>{
       await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE",[input.organizationId]);
-      await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE",[input.workspaceId,input.organizationId]);
+      const workspace=(await tx.query<{current_generation:number}>("SELECT current_generation FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE",[input.workspaceId,input.organizationId])).rows[0];
       const user=input.authenticatedUser;
       if(!user||user.id!==input.actorUserId||user.identity.provider!=="workos"||!user.authentication.sessionId)rejected();
       const source=(await tx.query<{created_at:string}>(`SELECT source.created_at::text FROM auth_sessions source
@@ -116,20 +112,23 @@ export class DatabaseCloudWorkspaceActorSessionService {
       [user.authentication.sessionId,user.id,user.identity.subject,user.accountRevision,user.authentication.tokenExpiresAt])).rows[0];
       if(!source)rejected();
       const actor = await authorizeCloudWorkspaceActor(tx,{...input,capability:"read"});
-      const device = await consumeCloudWorkspaceDeviceProof(tx,{accountUserId:input.actorUserId,action:"engine.connect",
-        payload:{organizationId:input.organizationId,workspaceId:input.workspaceId},proof:input.proof});
-      const engines = await tx.query<{id:string;generation:number;authority_epoch:string}>(`SELECT engine.id,engine.generation,workspace.authority_epoch
+      if(!workspace)rejected();
+      await requireSupportedCloudWorkspaceGeneration(tx,{...input,generation:workspace.current_generation});
+      const engines = await tx.query<{id:string;generation:number;authority_epoch:string;actor_protocol_version:number}>(`SELECT engine.id,engine.generation,workspace.authority_epoch,engine.actor_protocol_version
         FROM cloud_workspace_engine_instances engine
         JOIN cloud_workspaces workspace ON workspace.id=engine.workspace_id AND workspace.org_id=engine.org_id
           AND workspace.current_generation=engine.generation AND workspace.owner_user_id=engine.account_user_id
         WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.deleted_at IS NULL AND workspace.desired_state='running'
           AND workspace.status IN ('ready','busy') AND engine.state='ready' AND engine.revoked_at IS NULL
-          AND engine.lease_expires_at>clock_timestamp() AND engine.actor_protocol_version=2
+          AND engine.lease_expires_at>clock_timestamp()
           AND cloud_workspace_generation_policy_current(workspace.id,engine.generation,workspace.org_id)
           AND cloud_workspace_runtime_authority_live(workspace.id,engine.generation,workspace.owner_user_id,$3)
         LIMIT 2`,[input.workspaceId,input.organizationId,this.options.workosEnabled]);
       if (engines.rows.length!==1) throw new HttpError(409,"cloud_actor_runtime_unavailable","An actor-aware cloud runtime is required");
       const engine = engines.rows[0]!;
+      if(engine.actor_protocol_version!==2)clientUpdateRequired();
+      const device = await consumeCloudWorkspaceDeviceProof(tx,{accountUserId:input.actorUserId,action:"engine.connect",
+        payload:{organizationId:input.organizationId,workspaceId:input.workspaceId},proof:input.proof});
       const active = (await tx.query<{count:string}>(`SELECT count(*) FROM cloud_workspace_actor_sessions
         WHERE workspace_id=$1 AND revoked_at IS NULL AND session_expires_at>clock_timestamp()
           AND ((consumed_at IS NULL AND admission_expires_at>clock_timestamp()) OR last_renewed_at>clock_timestamp()-interval '30 seconds')`,[input.workspaceId])).rows[0]!;
@@ -157,6 +156,7 @@ export class DatabaseCloudWorkspaceActorSessionService {
       // queueing engine work. NO KEY UPDATE stays compatible with the KEY SHARE
       // an approval recheck takes on the same session.
       const engine = await assertCurrentCloudEngineAuthority(tx,{...input,workosEnabled:this.options.workosEnabled,lock:"share"});
+      await requireSupportedCloudWorkspaceGeneration(tx,input);
       const row = (await tx.query<Session>(`SELECT session.* FROM cloud_workspace_actor_sessions session
         JOIN cloud_workspace_engine_instances engine ON engine.id=session.engine_instance_id AND engine.actor_protocol_version=2
         WHERE session.token_hash=$1 AND session.workspace_id=$2 AND session.org_id=$3 AND session.generation=$4
@@ -202,7 +202,9 @@ export class DatabaseCloudWorkspaceActorSessionService {
       [hash(token),options.connected===true,this.options.workosEnabled])).rows[0];
       if (!row || !row.provider_resource_id) return null;
       let role:CloudWorkspaceActorRole;
-      try { ({role}=await assertRecordedCloudActor(tx,{workspaceId:row.workspace_id,organizationId:row.org_id,
+      try {
+        await requireSupportedCloudWorkspaceGeneration(tx,{workspaceId:row.workspace_id,organizationId:row.org_id,generation:row.generation});
+        ({role}=await assertRecordedCloudActor(tx,{workspaceId:row.workspace_id,organizationId:row.org_id,
         actorUserId:row.actor_user_id,actor:recordedActor(row),capability:"read"})); }
       catch (error) { if (error instanceof HttpError) return null; throw error; }
       return {workspaceId:row.workspace_id,organizationId:row.org_id,generation:row.generation,

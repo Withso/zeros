@@ -46,7 +46,7 @@ export class CloudCoordinatorBoundary implements PreparedBoundary {
   }
   static async prepare(lease:CloudAgentLease,workload:PreparedBoundary,conversationId:string,settings?:Record<string,string>):Promise<CloudCoordinatorBoundary>{
     const configuration=loadCloudWorkerConfiguration();
-    if(configuration?.version!==3&&configuration?.version!==4)throw new Error("Private cloud agents require the qualified cloud runtime");
+    if(configuration?.version!==4)throw new Error("Private cloud agents require the qualified cloud runtime");
     lease.assertLive();await workload.attestation;lease.assertLive();
     await mkdir(ROOT,{recursive:true,mode:0o700});
     const root=await lstat(ROOT);

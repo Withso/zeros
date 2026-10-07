@@ -1,6 +1,6 @@
 import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
-import { lockCloudComputerOrganization } from "./computer.js";
+import { lockCloudComputerOrganization } from "./computer-identity.js";
 import type { CloudComputerV2Repository } from "./computer-v2-contract.js";
 
 export type TemplateAllocation = {

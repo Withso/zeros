@@ -74,7 +74,7 @@ describe("cloud generation resource admission", () => {
       false,
     );
     expect(
-      cloudImageReferenceMatchesBuild("existing-daytona-snapshot", digest),
+      cloudImageReferenceMatchesBuild("opaque-image-fixture", digest),
     ).toBe(true);
   });
   it("accounts for kernel/filesystem overhead and the bounded VM-service reserve", () => {

@@ -34,7 +34,8 @@ export async function authenticatedAlphaParent(env: NodeJS.ProcessEnv, read: Rea
 }
 
 function producerJob(kind: Kind, jobs: any[], env: NodeJS.ProcessEnv) {
-  const matches = jobs.filter(job => job?.name === producers[kind].name);
+  const matches = jobs.filter(job => job?.name === producers[kind].name ||
+    kind === "runtime" && job?.name === "Build Linux runtime bundle / Build Linux runtime bundle");
   requireCheck(matches.length === 1, "Alpha build producer evidence is missing or ambiguous");
   const job = matches[0], attempt = Number(env.GITHUB_RUN_ATTEMPT);
   requireCheck(integer.safeParse(job.id).success && job.run_id === Number(env.GITHUB_RUN_ID) && job.head_sha === env.GITHUB_SHA &&

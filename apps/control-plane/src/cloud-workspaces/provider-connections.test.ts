@@ -1,107 +1,8 @@
-import { randomBytes } from "node:crypto";
-
 import { describe, expect, it, vi } from "vitest";
 
 import {
   loadGenerationCloudProviderConnection,
-  openCloudProviderCredential,
-  sealCloudProviderCredential,
 } from "./provider-connections.js";
-
-describe("cloud provider credential envelope", () => {
-  const binding = {
-    connectionId: "11111111-1111-4111-8111-111111111111",
-    organizationId: "22222222-2222-4222-8222-222222222222",
-    version: 1,
-    provider: "daytona" as const,
-    endpoint: "https://app.daytona.io/api",
-  };
-
-  it("round-trips without embedding plaintext and verifies the envelope hash", () => {
-    const key = randomBytes(32).toString("base64url");
-    const credential = "daytona_test_credential_0123456789";
-    const sealed = sealCloudProviderCredential(credential, binding, key);
-
-    expect(sealed.ciphertext.toString("utf8")).not.toContain(credential);
-    expect(sealed.credentialSha256).toHaveLength(32);
-    expect(
-      openCloudProviderCredential({ keyVersion: 1, ...sealed }, binding, key),
-    ).toBe(credential);
-  });
-
-  it("fails closed when a credential is replayed under another tenant", () => {
-    const key = randomBytes(32).toString("base64url");
-    const sealed = sealCloudProviderCredential(
-      "daytona_test_credential_0123456789",
-      binding,
-      key,
-    );
-
-    expect(() =>
-      openCloudProviderCredential(
-        { keyVersion: 1, ...sealed },
-        {
-          ...binding,
-          organizationId: "33333333-3333-4333-8333-333333333333",
-        },
-        key,
-      ),
-    ).toThrow("invalid");
-  });
-
-  it("rejects endpoints with credential-bearing URL components", () => {
-    const key = randomBytes(32).toString("base64url");
-    expect(() =>
-      sealCloudProviderCredential(
-        "daytona_test_credential_0123456789",
-        { ...binding, endpoint: "https://token@app.daytona.io/api" },
-        key,
-      ),
-    ).toThrow("invalid");
-  });
-
-  it.each(["", "unsupported", "DAYTONA", "daytona\0boat"])(
-    "rejects an unknown runtime provider binding: %j",
-    (provider) => {
-      const key = randomBytes(32).toString("base64url");
-      expect(() =>
-        sealCloudProviderCredential(
-          "provider_test_credential_0123456789",
-          { ...binding, provider: provider as never },
-          key,
-        ),
-      ).toThrow("invalid");
-    },
-  );
-
-  it("binds Boat credentials to the provider as well as tenant and version", () => {
-    const key = randomBytes(32).toString("base64url");
-    const boatBinding = {
-      ...binding,
-      provider: "boat" as const,
-      endpoint: "https://boat.dev/api/v1",
-    };
-    const sealed = sealCloudProviderCredential(
-      "provider_test_credential_0123456789",
-      boatBinding,
-      key,
-    );
-    expect(
-      openCloudProviderCredential(
-        { keyVersion: 1, ...sealed },
-        boatBinding,
-        key,
-      ),
-    ).toBe("provider_test_credential_0123456789");
-    expect(() =>
-      openCloudProviderCredential(
-        { keyVersion: 1, ...sealed },
-        { ...boatBinding, provider: "daytona" },
-        key,
-      ),
-    ).toThrow("invalid");
-  });
-});
 
 describe("generation provider connection lookup", () => {
   it("loads the immutable generation version instead of the rotated current version", async () => {
@@ -110,9 +11,9 @@ describe("generation provider connection lookup", () => {
         {
           id: "11111111-1111-4111-8111-111111111111",
           org_id: "22222222-2222-4222-8222-222222222222",
-          provider: "daytona",
+          provider: "boat",
           credential_source: "hosted",
-          endpoint: "hosted://daytona-v1",
+          endpoint: "hosted://boat-v1",
           region: null,
           current_version: 1,
         },
@@ -127,7 +28,7 @@ describe("generation provider connection lookup", () => {
       }),
     ).resolves.toMatchObject({
       credentialVersion: 1,
-      endpoint: "hosted://daytona-v1",
+      endpoint: "hosted://boat-v1",
     });
     expect(query.mock.calls[0]?.[0]).toContain(
       "version.version = generation.provider_connection_version",

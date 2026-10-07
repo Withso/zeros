@@ -18,7 +18,10 @@ const serviceContextSchema = z.object({ authorityId: z.string().uuid(), deviceId
 const serviceRowsSchema = z.array(z.object({
   accessId: z.string().uuid(), kind: z.enum(["ssh", "tunnel"]), generation: z.number().int().positive(), expiresAt: z.string().datetime(),
   localPort: z.number().int().min(1024).max(65535).nullable(), remotePort: z.number().int().min(1024).max(65535).nullable(), closing: z.boolean(),
+  ownership: z.literal("auto").optional(),
 }).strict()).max(64);
+const forwardingStateSchema = z.object({ forwardingEnabled: z.boolean(), autoForwardEnabled: z.boolean() }).strict();
+export type CloudWorkspacePortForwardingState = z.infer<typeof forwardingStateSchema>;
 export type CloudServiceContext = z.infer<typeof serviceContextSchema>;
 export type CloudServiceAccessRow = z.infer<typeof serviceRowsSchema>[number];
 export const cloudServiceContextKey = () => String(getOrganizationStoreGeneration());
@@ -106,10 +109,19 @@ export function openCloudWorkspaceTerminal(
 }
 
 export function openCloudWorkspaceIde(
-  target: CloudWorkspaceAccessTarget,
+  target: CloudWorkspaceAccessTarget & Partial<CloudServiceContext>,
   appId: "cursor" | "vscode",
 ): Promise<CloudWorkspaceAccessReceipt> {
   return nativeInvoke("cloud_workspace_ssh_ide", { ...target, appId });
+}
+
+/** Installed editors are not proof of native Remote-SSH support. The current
+ * worker SSH service denies forwarding channels, so Terminal is the qualified
+ * default until the editor's complete native connection is supported. */
+export function readCloudWorkspaceSshEditors(
+  _target: CloudWorkspaceAccessTarget & CloudServiceContext,
+): Promise<ReadonlyArray<"cursor" | "vscode">> {
+  return Promise.resolve([]);
 }
 
 export function startCloudWorkspaceTunnel(
@@ -129,6 +141,43 @@ export function startCloudWorkspaceTunnel(
 
 export function revokeCloudWorkspaceAccess(accessId: string): Promise<boolean> {
   return nativeInvoke("cloud_workspace_access_revoke", { accessId });
+}
+
+export async function readCloudWorkspacePortForwarding(
+  target: CloudWorkspaceAccessTarget & CloudServiceContext,
+): Promise<CloudWorkspacePortForwardingState> {
+  const epoch = getOrganizationStoreGeneration();
+  const state = forwardingStateSchema.parse(await nativeInvoke("cloud_workspace_port_forwarding_get", target));
+  if (epoch !== getOrganizationStoreGeneration()) throw new Error("The cloud access account changed.");
+  return state;
+}
+
+export async function setCloudWorkspacePortForwarding(
+  target: CloudWorkspaceAccessTarget & CloudServiceContext & Partial<CloudWorkspacePortForwardingState>,
+): Promise<CloudWorkspacePortForwardingState> {
+  const epoch = getOrganizationStoreGeneration();
+  const state = forwardingStateSchema.parse(await nativeInvoke("cloud_workspace_port_forwarding_set", target));
+  if (epoch !== getOrganizationStoreGeneration()) throw new Error("The cloud access account changed.");
+  invalidateCloudServiceAccess(target);
+  return state;
+}
+
+/** Connection lifecycle only. Select safe identity fields; the admission's
+ * URL and bearer must never be included in this renderer-to-main publication. */
+export function publishCloudWorkspacePortForwardingRuntime(
+  target: CloudRuntimeConnectionTarget,
+  connected: boolean,
+): Promise<void> {
+  return nativeInvoke("cloud_workspace_port_forwarding_runtime", {
+    organizationId: target.organizationId, workspaceId: target.workspaceId, runtimeId: target.runtimeId,
+    generation: target.generation, authorityEpoch: target.authorityEpoch,
+    engineInstanceId: target.engineInstanceId, connectionSequence: target.connectionSequence, connected,
+  });
+}
+
+/** Called after confirmed workspace removal, without opening a connection. */
+export function forgetCloudWorkspacePortForwarding(target: CloudWorkspaceAccessTarget): Promise<void> {
+  return nativeInvoke("cloud_workspace_port_forwarding_forget", target);
 }
 
 export function openCloudWorkspaceRuntime(

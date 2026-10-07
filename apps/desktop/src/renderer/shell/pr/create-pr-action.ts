@@ -1,5 +1,5 @@
-// Direct PR creation publishes existing branch commits. Staging and committing
-// remain explicit Git actions with their own review and scope.
+// Direct PR creation commits pending Code + Design, then publishes the branch.
+import { buildAutoCommitMessage, describeAutoCommitBlock, summarizePendingWork, type AutoCommitBlocker, type NetTrackedChange, type WorktreeFacts } from "./pr-auto-commit";
 
 /** Structural mirror of the engine's GithubRepoAccess. `unknown` means the
  *  probe could not complete and is NEVER a refusal. */
@@ -50,11 +50,13 @@ interface CreatePullRequestInput {
 
 export interface CreatePullRequestOutcome<TResult> {
   result: TResult;
-  /** Compatibility result: PR creation never creates a commit. */
-  committed: null;
+  committed: { sha: string; branch: string } | null;
 }
 
 interface CreatePullRequestDependencies<TResult> {
+  status(workspaceId: string): Promise<WorktreeFacts>;
+  diff(args: { workspaceId: string; mode: "worktree-vs-head"; rawPatch: false; summaryLimit: 0 }): Promise<{ files?: readonly NetTrackedChange[]; hunks?: readonly unknown[] }>;
+  commit(args: { workspaceId: string; message: string; files: string[] }): Promise<{ sha: string; branch: string }>;
   log(args: {
     workspaceId: string;
     limit: number;
@@ -67,6 +69,21 @@ interface CreatePullRequestDependencies<TResult> {
     draft: boolean;
   }): Promise<TResult>;
   access?(): Promise<GithubAccessProbe>;
+}
+
+export class AutoCommitBlockedError extends Error {
+  constructor(readonly blocker: AutoCommitBlocker) {
+    const copy = describeAutoCommitBlock(blocker);
+    super(`${copy.title}. ${copy.description}`);
+    this.name = "AutoCommitBlockedError";
+  }
+}
+
+export class AutoCommitError extends Error {
+  constructor(readonly failure: unknown) {
+    super("Couldn't commit your changes.");
+    this.name = "AutoCommitError";
+  }
 }
 
 function subject(message: string): string {
@@ -109,19 +126,37 @@ export async function createPullRequestForWorkspace<TResult>(
   deps: CreatePullRequestDependencies<TResult>,
   input: CreatePullRequestInput,
 ): Promise<CreatePullRequestOutcome<TResult>> {
+  // Keep this invocation on its original owner even if the visible selection
+  // changes while Git/GitHub requests are in flight.
+  const { workspaceId, branch, baseBranch, draft: requestedDraft } = input;
   const access = deps.access ? await deps.access().catch(() => null) : null;
   if (isPrAccessBlocked(access)) throw new GithubAccessError(access);
+  const status = await deps.status(workspaceId);
+  let pending = summarizePendingWork(status);
+  if (pending.blocker) throw new AutoCommitBlockedError(pending.blocker);
+  let committed: CreatePullRequestOutcome<TResult>["committed"] = null;
+  if (pending.paths.length > 0) {
+    const comparison = await deps.diff({ workspaceId, mode: "worktree-vs-head", rawPatch: false, summaryLimit: 0 });
+    if (!comparison.files && comparison.hunks?.length) throw new Error("Git didn't return a complete file list. Refresh the workspace and try again.");
+    pending = summarizePendingWork(status, comparison.files ?? []);
+    if (pending.paths.length > 0) {
+      const message = buildAutoCommitMessage(pending.paths);
+      try {
+        committed = await deps.commit({ workspaceId, files: pending.paths, message: `${message.subject}\n\n${message.body}` });
+      } catch (failure) { throw new AutoCommitError(failure); }
+    }
+  }
   const commits = await deps.log({
-    workspaceId: input.workspaceId,
+    workspaceId,
     limit: 50,
-    ...(input.baseBranch ? { base: input.baseBranch } : {}),
+    ...(baseBranch ? { base: baseBranch } : {}),
   });
   if (commits.length === 0) throw new Error("This branch has no commits beyond its base. Review and commit the changes you want to publish first.");
-  const draft = buildPullRequestDraft(commits, input.branch);
+  const draft = buildPullRequestDraft(commits, branch);
   const result = await deps.create({
-    workspaceId: input.workspaceId,
+    workspaceId,
     ...draft,
-    draft: input.draft,
+    draft: requestedDraft,
   });
-  return { result, committed: null };
+  return { result, committed };
 }

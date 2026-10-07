@@ -95,10 +95,11 @@ The first supported release should provide:
 8. an optional per-user/per-device receive-only local replica; and
 9. quotas, audit records, and owner-visible cost/lifecycle information.
 
-The earlier Phase 0–5 foundation has expanded to the eight backend steps in the
-[implementation roadmap](implementation-roadmap.md). Desktop cloud UI, native
-mobile/Windows clients, active ownership transfer, automatic bidirectional file
-sync and collaborative text editing are separate delivery work. Ordered durable
+The current implementation and release gates are in
+[qualification status](qualification-status.md). Desktop create/catalog/details,
+sharing and native access surfaces are implemented; native mobile/Windows clients,
+active ownership transfer, bidirectional file sync and collaborative text editing
+remain separate future scope. Ordered durable
 streams and device-scoped authority are shared backend contracts. Their presence
 does not qualify an unbuilt client or promise zero network/cold-start latency.
 Release claims require the protected provider and deployment qualification gates.

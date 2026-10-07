@@ -51,8 +51,7 @@ function proxyHeaders(source: IncomingMessage["headers"]): OutgoingHttpHeaders {
   for (const [name, value] of Object.entries(source)) {
     if (
       blocked.has(name) ||
-      name.startsWith("x-zeros-") ||
-      name.startsWith("x-daytona-")
+      name.startsWith("x-zeros-")
     )
       continue;
     result[name] = value;

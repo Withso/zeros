@@ -23,7 +23,7 @@ function config() {
     provider: "boat", apiKey: "zeros-v2-test-boat-key",
     boat: { accountScope: "zeros-v2-test-template-account", billingOrg: BUILDER_WALLET, ttlSeconds: null },
     computerMaxConcurrentBuilds: 3,
-    runtime: { qualificationMode: "smoke", qualificationEnabled: false, newWorkspaceProfile: "legacy", staffOnly: true },
+    runtime: { qualificationMode: "smoke", qualificationEnabled: false },
   } } as Config;
 }
 
@@ -41,7 +41,7 @@ describe("computer template worker factory", () => {
   it.each(["no cloud", "non-Boat", "no Boat settings", "no artifacts"])("disables builds with %s", missing => {
     const value = config();
     if (missing === "no cloud") value.cloudWorkspaces = null;
-    if (missing === "non-Boat") value.cloudWorkspaces!.provider = "daytona";
+    if (missing === "non-Boat") value.cloudWorkspaces!.provider = "unsupported" as never;
     if (missing === "no Boat settings") delete value.cloudWorkspaces!.boat;
     expect(createComputerTemplateWorker(value, pool, missing === "no artifacts" ? null : artifacts, github)).toBeNull();
     expect(ComputerTemplateWorker).not.toHaveBeenCalled();

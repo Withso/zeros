@@ -3,7 +3,6 @@ import type { CloudComputerV2BuildSummary } from "@zeros/protocol/cloud-computer
 import { Button } from "../../shared/ui";
 import { getOrganizationStoreGeneration } from "../team/team-store";
 import { ControlPlaneError } from "../team/control-plane";
-import { useInternalFeatureActive } from "./internal-features";
 import {
   configureCloudComputerV2AdminWorkspace,
   refreshCloudComputerV2,
@@ -26,14 +25,13 @@ export function CloudComputerV2AdminAction({
   active: boolean;
   disabled: boolean;
 }) {
-  const authorized = useInternalFeatureActive("cloudComputerV2");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pending = useRef(false);
   const operation = useRef<{ version: number; id: string } | null>(null);
   const ready =
     activeBuild?.state === "succeeded" && activeBuild.templateState === "ready";
-  const enabled = authorized && active && canManage && ready;
+  const enabled = active && canManage && ready;
   const version = activeBuild?.version;
   const available = useRef({ enabled, version });
   available.current = { enabled, version };
@@ -91,7 +89,6 @@ export function CloudComputerV2AdminAction({
   const warm = () => {
     if (enabled && !disabled) warmCloudComputerV2AdminWorkspace(scopeKey);
   };
-  if (!authorized) return null;
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-2">

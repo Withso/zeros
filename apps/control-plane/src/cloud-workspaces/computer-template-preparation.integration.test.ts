@@ -45,7 +45,7 @@ database("computer template claim preparation with the real B7 journal", () => {
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
     await seedComputerTemplateRuntime(pool);
-    fixture = await seedReadyCloudWorkspace(pool);
+    fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     service = new DatabaseCloudComputerV2Service(pool, {
       settingsSecretKeyV1: randomBytes(32).toString("base64url"),
     } as CloudWorkspaceBackendConfig, { maxConcurrentBuilds: 1 });

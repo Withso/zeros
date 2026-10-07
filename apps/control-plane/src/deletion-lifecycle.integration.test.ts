@@ -12,7 +12,7 @@ import {
 import { HttpError } from "./authz.js";
 import { withSystemTx } from "./db.js";
 import type { CloudWorkspaceBackendConfig } from "./config.js";
-import { DatabaseCloudComputerService } from "./cloud-workspaces/computer.js";
+import { ensureCloudComputerIdentity } from "./cloud-workspaces/computer-identity.js";
 import { DatabaseCloudComputerV2Service } from "./cloud-workspaces/computer-v2.js";
 import { seedComputerTemplateRuntime, templateRuntime } from "./cloud-workspaces/computer-template-test-fixtures.js";
 import {
@@ -160,7 +160,7 @@ d("account, organization, and operator deletion lifecycle", () => {
         `INSERT INTO provider_connections (
            org_id, owner_kind, owner_user_id, provider, display_name,
            credential_source, current_version, state
-         ) VALUES ($1, 'user', $2, 'daytona', 'Legacy Daytona',
+         ) VALUES ($1, 'user', $2, 'boat', 'Legacy Boat',
                    'hosted', 1, 'active')
          RETURNING id`,
         [organizationId, ownerUserId],
@@ -169,7 +169,7 @@ d("account, organization, and operator deletion lifecycle", () => {
         `INSERT INTO provider_connection_versions (
            connection_id, org_id, version, credential_source,
            endpoint, created_by
-         ) VALUES ($1, $2, 1, 'hosted', 'hosted://daytona', $3)`,
+         ) VALUES ($1, $2, 1, 'hosted', 'hosted://boat', $3)`,
         [connection.rows[0]!.id, organizationId, ownerUserId],
       );
       await client.query("COMMIT");
@@ -238,6 +238,7 @@ d("account, organization, and operator deletion lifecycle", () => {
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: url, max: 3 });
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     await seedComputerTemplateRuntime(pool);
     actor = await signup("Bootstrap");
 
@@ -988,7 +989,7 @@ d("account, organization, and operator deletion lifecycle", () => {
            architecture, cpu_millicores, memory_mib, storage_mib,
            source_commit, provider_connection_id,
            provider_connection_version, created_by
-         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+         ) VALUES ($1, 1, $2, 'boat', 'snap-pinned', 'linux/amd64',
                    2000, 4096, 20480, $3, $4, 1, $5)`,
         [
           workspaceId,
@@ -1291,7 +1292,7 @@ d("account, organization, and operator deletion lifecycle", () => {
            architecture, cpu_millicores, memory_mib, storage_mib,
            source_commit, provider_connection_id,
            provider_connection_version, created_by
-         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+         ) VALUES ($1, 1, $2, 'boat', 'snap-pinned', 'linux/amd64',
                    2000, 4096, 20480, $3, $4, 1, $5)`,
         [
           workspaceId,
@@ -1427,16 +1428,7 @@ d("account, organization, and operator deletion lifecycle", () => {
         timeoutSeconds: 900,
       };
       if (kind === "legacy") {
-        await new DatabaseCloudComputerService(pool, config).save(
-          organizationId,
-          owner.id,
-          {
-            expectedRevision: 0,
-            operationId: randomUUID(),
-            document,
-            sources: [],
-          },
-        );
+        await withSystemTx(pool, tx => ensureCloudComputerIdentity(tx, organizationId, owner.id));
       } else {
         await new DatabaseCloudComputerV2Service(pool, config).saveDraft(
           organizationId,
@@ -1847,7 +1839,7 @@ d("account, organization, and operator deletion lifecycle", () => {
          architecture, cpu_millicores, memory_mib, storage_mib,
          source_commit, provider_connection_id, provider_connection_version,
          created_by
-       ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+       ) VALUES ($1, 1, $2, 'boat', 'snap-pinned', 'linux/amd64',
                  2000, 4096, 20480, $3, $4, 1, $5)`,
         [
           workspaceId,
@@ -1863,7 +1855,7 @@ d("account, organization, and operator deletion lifecycle", () => {
          actor_user_id, billing_owner_user_id, billing_epoch, provider,
          meter, quantity, source_idempotency_key, occurred_at, metadata,
          provider_connection_id, provider_connection_version, request_sha256
-       ) VALUES ($1, $2, 1, 1, $3, $3, 1, 'daytona',
+       ) VALUES ($1, $2, 1, 1, $3, $3, 1, 'boat',
                  'cpu_millisecond', 1, $4, now(), '{"tenant":"Purge Company"}',
                  $5, 1, $6)`,
         [

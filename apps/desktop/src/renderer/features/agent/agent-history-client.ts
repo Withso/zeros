@@ -28,6 +28,9 @@ import {
   readAgentAttachmentFile,
 } from "./attachment-file-reader";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
+import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
+import { parseCloudScopedId, cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { readCloudTranscriptWithCachedPaint } from "../../platform/cloud-transcript-cache";
 import { runtimeExecutionKey } from "../../platform/bridge/ws-client";
 import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-id-resolver";
 import {
@@ -125,12 +128,15 @@ export async function windowMessages(
   chatId: string,
   limit: number,
   before?: number,
+  onCached?: (messages: AgentMessage[]) => void,
 ): Promise<AgentMessage[]> {
-  const rows = await bridgeMessageWindow(
-    requireBridge("load the chat transcript"),
-    chatId,
-    limit,
-    before,
+  const bridge = requireBridge("load the chat transcript");
+  const target = parseCloudScopedId(chatId);
+  const canPaintCached = !!target && before === undefined && !!onCached &&
+    !(bridge instanceof WorkspaceRuntimeClient && (bridge.hasCloudMessageSnapshot(chatId, limit) || bridge.statusForWorkspace(cloudWorkspaceKey(target)) === "connected"));
+  const rows = await readCloudTranscriptWithCachedPaint(chatId,
+    () => bridgeMessageWindow(bridge, chatId, limit, before),
+    canPaintCached ? window => onCached!(window.messages.map(fromPersistedMessage).filter((message): message is AgentMessage => message !== null)) : undefined,
   );
   return rows
     .map(fromPersistedMessage)

@@ -49,6 +49,7 @@ import {
 import { useSessionsStore } from "../../features/agent/sessions-store";
 import { useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { AgentChat } from "../../features/agent/agent-chat";
+import { CloudTranscriptCacheNotice } from "./cloud-transcript-cache-notice";
 import { agentFamily, envForChat } from "../../features/agent/model-catalog";
 import { agentAppliesConfigLive } from "../../features/agent/live-config-support";
 import { useDefaultAgent } from "../../features/settings/default-agent";
@@ -806,6 +807,7 @@ function ChatBody({
 
   return (
     <>
+      <CloudTranscriptCacheNotice chatId={chatId} cached={session.transcriptState === "loading" && session.status !== "streaming" && session.messages.some(message => message.kind !== "text" || !message.queued)} />
       {readOnly && historyError && (
         <p className="text-red-fg px-7 py-2 text-xs" role="alert">
           {historyError}

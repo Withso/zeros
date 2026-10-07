@@ -91,7 +91,7 @@ function configure(staffRole: StaffRole | null = "developer", parent = false) {
 afterEach(() => {
   vi.restoreAllMocks();
 });
-describe("Cloud Computer v2 staff route boundary", () => {
+describe("Cloud Computer v2 organization route boundary", () => {
   it("keeps the legacy strict response byte-identical unless active repositories are explicitly requested", async () => {
     const { request, service } = configure();
     const legacy = {
@@ -117,20 +117,7 @@ describe("Cloud Computer v2 staff route boundary", () => {
     expect(optedIn.status).toBe(200);
     expect(shippedStrictSchema.extend({ activeRepositories: z.array(CloudComputerV2ActiveRepositorySchema) }).parse(await optedIn.json())).toEqual({ ...legacy, activeRepositories: [] });
   });
-  it.each([null, "support_admin"] as const)(
-    "denies every endpoint to %s before service access",
-    async (role) => {
-      const { service, request } = configure(role);
-      for (const [method, suffix, body] of paths) {
-        const response = await request(method, suffix, body);
-        expect(response.status).toBe(404);
-        expect(response.headers.get("cache-control")).toBe("no-store");
-      }
-      for (const method of Object.values(service))
-        expect(method).not.toHaveBeenCalled();
-    },
-  );
-  it.each(["developer", "platform_owner"] as const)(
+  it.each([null, "support_admin", "developer", "platform_owner"] as const)(
     "uses the authenticated %s actor for every route",
     async (role) => {
       const { service, request, user } = configure(role);

@@ -1,18 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { z } from "zod";
-import {
-  HttpError,
-  requireOrganizationCreationCapability,
-  type StaffRole,
-} from "../authz.js";
+import { HttpError } from "../authz.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx, type Tx } from "../db.js";
 import {
   ensureCloudComputerIdentity,
   lockCloudComputerOrganization,
   requireCloudComputerAuthority,
-} from "./computer.js";
+} from "./computer-identity.js";
+import { retireLegacyComputerBuilds } from "./computer-retirement.js";
 import { assertCloudGithubSource } from "./github-user-access.js";
 import {
   cloudWorkspaceSecretValueVerifier,
@@ -245,13 +242,13 @@ async function authority(
   lockRows = true,
 ) {
   const account = (
-    await tx.query<{ staff_role: StaffRole | null }>(
-      `SELECT staff_role FROM users
+    await tx.query(
+      `SELECT id FROM users
     WHERE id=$1 AND deleted_at IS NULL AND auth_status='active'${lockRows ? " FOR SHARE" : ""}`,
       [user],
     )
   ).rows[0];
-  requireOrganizationCreationCapability(account?.staff_role ?? null);
+  if (!account) throw new HttpError(404, "not_found", "Cloud Computer not found");
   return requireCloudComputerAuthority(tx, org, user, admin, lockRows);
 }
 async function headRow(tx: Tx, org: string, forUpdate = false) {
@@ -476,21 +473,9 @@ export class DatabaseCloudComputerV2Service {
     );
   }
   private async enable(tx: Tx, org: string, user: string): Promise<Head> {
+    await retireLegacyComputerBuilds(tx, org);
     const current = await headRow(tx, org, true);
     if (current) return current;
-    const legacy = (
-      await tx.query<{ id: string }>(
-        "SELECT id FROM cloud_computer_builds WHERE org_id=$1 AND state='building' LIMIT 1",
-        [org],
-      )
-    ).rows[0];
-    if (legacy)
-      throw new HttpError(
-        409,
-        "cloud_computer_build_active",
-        "Finish or cancel the legacy build before enabling v2.",
-        { currentBuildId: legacy.id },
-      );
     await ensureCloudComputerIdentity(tx, org, user);
     return (
       await tx.query<Head>(

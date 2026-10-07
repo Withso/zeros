@@ -84,6 +84,13 @@ const commandTable: Record<string, CommandHandler> = {
   cloud_workspace_access_revoke: notImpl("cloud_workspace_access_revoke", 3),
   cloud_workspace_access_context: notImpl("cloud_workspace_access_context", 3),
   cloud_workspace_access_list: notImpl("cloud_workspace_access_list", 3),
+  cloud_workspace_port_forwarding_get: notImpl("cloud_workspace_port_forwarding_get", 3),
+  cloud_workspace_port_forwarding_set: notImpl("cloud_workspace_port_forwarding_set", 3),
+  cloud_workspace_port_forwarding_runtime: notImpl("cloud_workspace_port_forwarding_runtime", 3),
+  cloud_workspace_port_forwarding_forget: notImpl("cloud_workspace_port_forwarding_forget", 3),
+  cloud_transcript_cache_read: notImpl("cloud_transcript_cache_read", 3),
+  cloud_transcript_cache_write: notImpl("cloud_transcript_cache_write", 3),
+  cloud_transcript_cache_prune: notImpl("cloud_transcript_cache_prune", 3),
   cloud_workspace_runtime_open: notImpl("cloud_workspace_runtime_open", 3),
   cloud_workspace_capability: notImpl("cloud_workspace_capability", 3),
   cloud_workspace_runtime_refresh: notImpl(

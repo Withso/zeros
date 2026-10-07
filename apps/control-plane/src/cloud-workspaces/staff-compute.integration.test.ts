@@ -19,7 +19,7 @@ import { seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const policy = {
-  provider: "daytona", policyId: "staff-compute-test-v1", secondsPerDollar: 100_000,
+  provider: "boat", policyId: "staff-compute-test-v1", secondsPerDollar: 100_000,
   minimumTtlSeconds: 600, maximumTtlSeconds: 900, requestMarginSeconds: 60,
 };
 const standardAmount = computeMicroUsd(PRO_STANDARD_SECONDS, policy.secondsPerDollar);
@@ -59,7 +59,7 @@ suite("uncapped staff machine-hour funding", () => {
   async function configure(target: ReadyCloudWorkspaceFixture) {
     await admin.query("UPDATE organization_entitlements SET plan='pro',seat_limit=NULL WHERE org_id=$1", [target.organizationId]);
     await admin.query("UPDATE workspace_billing_epochs SET entitlement_scope='account',entitlement_plan='pro' WHERE workspace_id=$1", [target.workspaceId]);
-    await admin.query("UPDATE managed_compute_provider_requirements SET require_credit=true WHERE provider='daytona'");
+    await admin.query("UPDATE managed_compute_provider_requirements SET require_credit=true WHERE provider='boat'");
     await admin.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id=NULL WHERE workspace_id=$1", [target.workspaceId]);
     await admin.query(`INSERT INTO cloud_workspace_quotas(org_id,max_workspaces,max_running_workspaces,max_cpu_millicores,max_memory_mib,max_storage_mib)
       VALUES($1,2,2,8000,16384,40960) ON CONFLICT(org_id) DO NOTHING`, [target.organizationId]);
@@ -106,7 +106,7 @@ suite("uncapped staff machine-hour funding", () => {
     const resource = (ttl = 900) => ({ workspaceId: target.workspaceId, generation: 1, resourceId: `sandbox-${target.workspaceId}`,
       state: "running" as const, target: null, metadata: { computeLeaseExpiresAt: new Date(Date.now() + ttl * 1000).toISOString() } });
     const provider = {
-      name: "daytona", create: vi.fn(async () => resource()), start: vi.fn(async () => resource()),
+      name: "boat", create: vi.fn(async () => resource()), start: vi.fn(async () => resource()),
       computeWeight: vi.fn(() => ({ numerator: 1, denominator: 1 })),
       createWithComputeLease: vi.fn(async (_input: ManagedComputeStart, ttl: number) => resource(ttl)),
       startWithComputeLease: vi.fn(async (_resource: string, ttl: number) => resource(ttl)),
@@ -135,11 +135,11 @@ suite("uncapped staff machine-hour funding", () => {
       authentication: { sessionId: null, clientKind: "legacy", authTime: null, tokenExpiresAt: null },
     };
     const config: CloudWorkspaceBackendConfig = {
-      provider: "daytona", computePolicy: policy, apiKey: "placeholder", apiUrl: "https://api.example.test", target: "test",
+      provider: "boat", computePolicy: policy, apiKey: "placeholder", apiUrl: "https://api.example.test", target: "test",
       snapshotId: "staff-test-image", imageRef: "staff-test-image", architecture: "linux/amd64",
       cpuMillicores: 4000, memoryMiB: 8192, storageMiB: 20480, sourceCommit: null,
       operationTimeoutSeconds: 30, autoArchiveMinutes: 10080, reconcileIntervalMs: 1000,
-      providerCredentialKeys: {}, settingsSecretEncryptionKeys: {}, currentSettingsSecretEncryptionKeyVersion: null,
+      settingsSecretEncryptionKeys: {}, currentSettingsSecretEncryptionKeyVersion: null,
       settingsSecretKeyV1: null, access: { allowedSshHosts: [], allowedPreviewHostSuffixes: [], previewBaseDomain: null },
       durability: null, outbox: null, setupExecution: null,
     };

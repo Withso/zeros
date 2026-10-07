@@ -25,8 +25,8 @@ suite("retirement progress health",()=>{
   it("retains capacity and receipt progress independently of retries and logical deletion",async()=>{
     const resource=(await pool.query("SELECT provider_resource_id FROM cloud_workspace_provider_bindings WHERE workspace_id=$1",[f.workspaceId])).rows[0].provider_resource_id;
     await pool.query(`INSERT INTO cloud_workspace_provider_operations(provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,resource_id,deletion_requested_at,deletion_operation_id)
-      VALUES('daytona','synthetic',$1,1,$2,'synthetic',repeat('a',64),$3,now()-interval '2 hours','receipt')`,[f.workspaceId,f.organizationId,resource]);
-    const store=new DatabaseCloudProviderOperationStore(pool,"daytona","synthetic");
+      VALUES('boat','synthetic',$1,1,$2,'synthetic',repeat('a',64),$3,now()-interval '2 hours','receipt')`,[f.workspaceId,f.organizationId,resource]);
+    const store=new DatabaseCloudProviderOperationStore(pool,"boat","synthetic");
     await store.recordDeletionProgress(resource,"receipt","processing");
     const progress=async()=>(await pool.query("SELECT deletion_progress_at FROM cloud_workspace_provider_operations WHERE workspace_id=$1",[f.workspaceId])).rows[0].deletion_progress_at;
     const first=await progress();

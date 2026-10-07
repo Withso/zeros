@@ -11,10 +11,14 @@ vi.mock('node:fs', async (actual) => {
 vi.mock('node:child_process', async (actual) => ({ ...await actual<typeof import('node:child_process')>(), spawn: boundary.spawn }));
 vi.mock('../../agents/containment/cloud-deployment-authority.mjs', () => ({ isCloudDeploymentOwner: boundary.owner }));
 import { CloudRuntimeHumanServices } from '../cloud-human-services';
-const worker: CloudWorkerConfiguration = { version: 2, backend: 'cloud-worker', profile: 'zeros-cloud-worker-v2', uid: 10001, gid: 10001,
-  toolchain: { node: '/opt/zeros-runtime/bin/node', setpriv: '/usr/bin/setpriv', supervisor: '/opt/zeros/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs', bwrap: '/usr/bin/bwrap' } };
+import {testCloudRuntime,testCloudWorker} from "../../agents/__tests__/helpers/test-cloud-runtime";
+vi.mock("../../agents/containment/cloud-runtime-root.mjs",async original=>({
+  ...await original<typeof import("../../agents/containment/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime:(await import("../../agents/__tests__/helpers/test-cloud-runtime")).testCloudRuntime,
+}));
+const worker:CloudWorkerConfiguration=testCloudWorker();
 const grant = { version: 1 as const, audience: 'zeros-cloud-runtime-access-admission-v1' as const, admitted: true as const, grantId: 'grant', accountUserId: 'owner', authorityEpoch: 1, expiresAtMs: Date.now() + 5000, kind: 'ssh' as const, remotePort: null };
-const script = '/opt/zeros/apps/desktop/src/engine/transport/cloud-ssh-session.mjs';
+const script = `${testCloudRuntime().workerRoot}/apps/desktop/src/engine/transport/cloud-ssh-session.mjs`;
 beforeEach(() => {
   vi.clearAllMocks(); boundary.owner.mockReturnValue(true);
   boundary.stat.mockReturnValue({ uid: 65534, mode: 0o444, isFile: () => true, isSymbolicLink: () => false });

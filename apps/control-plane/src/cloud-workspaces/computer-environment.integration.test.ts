@@ -196,7 +196,7 @@ d("generation-pinned computer environment", () => {
       environment: [{ op: "remove", name: "SETTING" }],
     });
     expect((await environment()).values).toEqual({ SETTING: "active-value" });
-    const legacy = await withSystemTx(pool, (tx) =>
+    await expect(withSystemTx(pool, (tx) =>
       resolveDatabaseCloudWorkspaceSettings(tx, {
         ...fixture,
         generation: 2,
@@ -204,8 +204,7 @@ d("generation-pinned computer environment", () => {
         isPersonal: false,
         setupSecretKeyV1: key,
       }),
-    );
-    expect(legacy.setupSecrets).toEqual([]);
+    )).rejects.toMatchObject({ code: "cloud_workspace_v2_required" });
   });
 
   it.each(["revoked", "retired", "wrong-purpose", "missing"])(

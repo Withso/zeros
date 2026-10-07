@@ -7,6 +7,28 @@ const admission={executionId:randomUUID(),delegationId:randomUUID(),provider:"cu
 const grant={leaseId:randomUUID(),authorityId:"a".repeat(64),expiresAt:new Date(Date.now()+45_000).toISOString(),credentialVersion:1,credentialKind:"cursor-api-key",
   provider:"cursor",model:"grok-4.6",material:{kind:"cursor-api-key",apiKey:"synthetic-private-cursor-token"}};
 describe("private agent execution client",()=>{
+  it.each(["private provider diagnostic", JSON.stringify({ error: "unknown_private_refusal" }),
+    JSON.stringify({ error: "cloud_agent_credential_expired", details: "private" })])("classifies an untyped HTTP409 without borrowing its diagnostic body", async body => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(body, { status: 409 }));
+    await expect(requestCloudAgentExecution(authority, { kind: "admit", admission }, new AbortController().signal, fetcher))
+      .rejects.toMatchObject({ code: "cloud_admission_authority_http_4xx", message: "Cloud agent execution authority is unavailable" });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it.each([
+    [401, "authority_http_4xx"], [404, "authority_http_4xx"], [503, "authority_http_5xx"], [200, "authority_response_invalid"],
+  ])("retains a safe admission category for HTTP %s without exposing the body", async (status, category) => {
+    const fetcher = vi.fn().mockResolvedValue(new Response("private provider diagnostic", { status: status as number }));
+    await expect(requestCloudAgentExecution(authority, { kind: "admit", admission }, new AbortController().signal, fetcher))
+      .rejects.toMatchObject({ code: `cloud_admission_${category}`, message: "Cloud agent execution authority is unavailable" });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it.each(["TimeoutError", "TypeError"])("retains a safe %s transport cause without retrying admission", async name => {
+    const error = new Error("private transport diagnostic"); error.name = name;
+    const fetcher = vi.fn().mockRejectedValue(error);
+    await expect(requestCloudAgentExecution(authority, { kind: "admit", admission }, new AbortController().signal, fetcher))
+      .rejects.toMatchObject({ code: `cloud_admission_${name === "TimeoutError" ? "authority_timeout" : "authority_transport"}` });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
   it.each(["cloud_agent_model_not_authorized", "cloud_agent_credential_required", "cloud_agent_credential_expired", "cloud_agent_credential_revoked", "cloud_agent_credential_refresh_required"])("preserves the closed %s admission cause without retrying", async code => {
     const fetcher = vi.fn().mockResolvedValue(Response.json({ error: code }, { status: 409 }));
     await expect(requestCloudAgentExecution(authority, { kind: "admit", admission }, new AbortController().signal, fetcher)).rejects.toThrow(code);

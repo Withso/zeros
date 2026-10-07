@@ -12,6 +12,7 @@ import { ConversationPaneLayout } from "./pane-layout";
 import { TerminalDeck } from "./terminal-deck";
 import { ChatDeck } from "./chat-deck";
 import { ConversationHeader } from "./conversation-header";
+import { ConversationWorkspaceHeader } from "./workspace-header";
 import {
   CONVERSATION_MIN_PX,
   CONVERSATION_RATIO_VAR,
@@ -47,13 +48,8 @@ import {
 // 2026-06-16: dropped `border-r border-border1`. 2026-07-11 flush redesign:
 // the conversation/workbench seam line came back, but workbench owns it now (`border-l` on
 // WORKBENCH_PANE_CLS) — conversation pane stays borderless so the seam is a single 1px line.
-// No top gutter (2026-07-12, restated 2026-09-01): the column's first row IS
-// its chrome band — it starts at the window's top edge beside the app sidebar,
-// like workbench's first row. That row
-// used to be the workspace/mode header; since its removal the chat strip is the
-// band, and it carries the column-level mode toggle and the collapsed-workbench
-// expand control as fixed slots. It shares Workbench's h-10 header height so the
-// expand control does not shift when the panel opens or collapses.
+// The column starts with one workspace header beside the sidebar and workbench.
+// Pane-owned chat strips follow it inside the split tree.
 const CONVERSATION_BASE_CLS = "flex flex-col bg-bg1 overflow-hidden relative";
 // Width policy (2026-07-17 — proportional columns):
 //   - Conversation pane's share of the two-column row is a RATIO, not a pixel
@@ -129,7 +125,7 @@ const BODY_BASE_CLS =
  *  chat-root classes moved into conversation/pane-layout.tsx.) */
 const BODY_STACK_CLS = "relative size-full min-h-0";
 /** The pane tree fills the stack; terminal layers portal into panes. */
-const PANE_TREE_ROOT_CLS = "absolute inset-0 flex min-h-0 min-w-0";
+const PANE_TREE_ROOT_CLS = "absolute inset-0 flex min-h-0 min-w-0 flex-col";
 
 /** 2026-07-17 proportional columns: persist conversation pane's SHARE of the
  *  two-column row (0..1) instead of a pixel width, so both columns
@@ -405,13 +401,6 @@ export function ConversationPane({
       }}
       aria-label={readOnly ? "Workspace history" : "Agent Workspace"}
     >
-      {/* 2026-09-01: the column's own h-10 workspace row is GONE. It carried
-          only the branch name (the app sidebar already shows it) plus the
-          mode toggle, so the whole band was a 40px tax on the transcript. The
-          toggle and the collapsed-workbench expand control now ride the chat
-          strip below as fixed, non-scrolling slots — the strip is the column's
-          first row, and ConversationPaneLayout hands each control to the pane
-          that owns its corner (see conversation/pane-layout.tsx). */}
       {/* The per-workspace bar (project › workspace breadcrumb +
           "Open in" dropdown) is HIDDEN — the app sidebar already
           shows the repository and workspace, so a second one was pure noise. It
@@ -419,7 +408,7 @@ export function ConversationPane({
           the ⌘O (open in default app) and ⌘C (copy path) window-level
           shortcuts it registers keep working. Window dragging is
           unaffected (the app sidebar's title band and Workbench's header
-          own the drag regions). The chat strip's trailing slot now owns the workbench
+          own the drag regions). The workspace header owns the workbench
           expand button while the panel is collapsed. Remove the `hidden`
           wrapper to bring this legacy row back. */}
       {!readOnly && (
@@ -440,23 +429,12 @@ export function ConversationPane({
               workbenchCollapsed={workbenchCollapsed}
               onRevealWorkbench={revealWorkbench}
             >
-              <ConversationPaneLayout
+              <ConversationWorkspaceHeader
                 workspace={workspace}
                 readOnly={readOnly}
-                emptyContent={emptyHistory}
-                onMinimumSizeChange={setPaneMinimumSize}
-                // The collapsed sidebar's window controls are 116px wide; the
-                // leading slot's own 8px gutter plus this spacer clears them.
-                stripLeading={
-                  windowControlsInset ? (
-                    <span
-                      className="block h-full w-[108px] shrink-0"
-                      aria-hidden="true"
-                      data-window-controls-reserve=""
-                    />
-                  ) : null
-                }
-                stripTrailing={
+                windowControlsInset={windowControlsInset}
+                onRevealWorkbench={revealWorkbench}
+                trailing={
                   !readOnly && (
                     <>
                       <ConversationSummaryTrigger />
@@ -469,6 +447,12 @@ export function ConversationPane({
                     </>
                   )
                 }
+              />
+              <ConversationPaneLayout
+                workspace={workspace}
+                readOnly={readOnly}
+                emptyContent={emptyHistory}
+                onMinimumSizeChange={setPaneMinimumSize}
                 bodyAside={!readOnly && <ConversationSummaryIsland />}
               />
             </ConversationSummaryProvider>

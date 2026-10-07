@@ -201,7 +201,7 @@ async function main() {
       networkReads,
       hostedCloud: false,
       limitation:
-        "Production capture worker on a Linux VM fixture; deployed Daytona admission/bridge qualification is separate.",
+        "Production capture worker on a Linux VM fixture; deployed Boat admission/bridge qualification is separate.",
     });
     console.log("Qualification report:", reportFile);
   } finally {

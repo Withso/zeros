@@ -3,7 +3,11 @@ import {createHash} from "node:crypto";
 import {LspError} from "./lsp-rpc";
 import type {LspDocument} from "./cloud-language-service";
 
-export const CLOUD_LANGUAGE_FILE_HELPER=`${resolveCloudRuntime().workerRoot}/apps/desktop/src/engine/agents/containment/cloud-file-tool.mjs`;
+/** Resolve only when an admitted cloud language operation needs the helper.
+ * Local imports have no cloud deployment marker or runtime authority. */
+export function cloudLanguageFileHelper(): string {
+  return `${resolveCloudRuntime().workerRoot}/apps/desktop/src/engine/agents/containment/cloud-file-tool.mjs`;
+}
 /** The helper opens each component through pinned directory descriptors with
  * O_NOFOLLOW inside the same workload boundary as the language server. */
 export function parseLanguageDocument(output:string):LspDocument{

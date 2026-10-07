@@ -28,7 +28,7 @@ const grant = {
 };
 const endpoint = {
   url: "https://approved-provider.example/",
-  headerName: "x-daytona-preview-token" as const,
+  headerName: "x-provider-preview" as const,
   headerValue: "outer-provider-secret",
 };
 const servers: Server[] = [];
@@ -91,7 +91,7 @@ async function fixture(
     sockets.add(ws);
     engines.push(ws);
     expect(request.headers["x-zeros-cloud-token"]).toBe(token);
-    expect(request.headers["x-daytona-preview-token"]).toBe(
+    expect(request.headers["x-provider-preview"]).toBe(
       "outer-provider-secret",
     );
     if (mode === "echo")
@@ -303,7 +303,7 @@ describe("portable cloud runtime relay", () => {
       ...grant,
       endpoint: {
         url: "https://approved-provider.example/",
-        headerName: "x-daytona-preview-token" as const,
+        headerName: "x-provider-preview" as const,
         headerValue: "outer-provider-secret",
       },
     }));
@@ -316,7 +316,7 @@ describe("portable cloud runtime relay", () => {
       workspaceId: "other-workspace",
       endpoint: {
         url: "https://approved-provider.example/",
-        headerName: "x-daytona-preview-token",
+        headerName: "x-provider-preview",
         headerValue: "outer-provider-secret",
       },
     });

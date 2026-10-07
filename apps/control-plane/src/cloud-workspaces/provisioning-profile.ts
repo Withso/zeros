@@ -31,7 +31,7 @@ export function cloudWorkspaceProvisioningProfile(
   if (
     !candidate ||
     candidate.provider !== provider ||
-    (candidate.sandboxClass!==undefined&&(provider!=="daytona"||!["container","linux-vm"].includes(candidate.sandboxClass))) ||
+    candidate.sandboxClass!==undefined ||
     typeof candidate.imageRef !== "string" ||
     candidate.imageRef.length === 0 ||
     candidate.imageRef.length > 1024 ||

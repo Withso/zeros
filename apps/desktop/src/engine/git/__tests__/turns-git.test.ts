@@ -4,12 +4,13 @@
 // non-overlapping edit (3-way merge), and CONFLICT rather than clobber on an
 // overlapping edit.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import * as ownership from "../../files/cloud-workspace-ownership";
 
 import {
   snapshotWorkingTree,
@@ -68,6 +69,7 @@ describe("turns-git", () => {
     await initRepo(root);
   });
   afterEach(async () => {
+    vi.restoreAllMocks();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -573,10 +575,12 @@ PATCH"`;
     // A concurrent chat then changes L1 (different line) on disk:
     await writeFile(path.join(root, "a.txt"), "Y\nL2\nX\n");
 
+    const publish = vi.spyOn(ownership, "publishCloudWorkspacePath");
     const res = await applyTurnReset(root, "c", ["a.txt"], pre, post);
     expect(res.conflicts).toHaveLength(0);
     // This chat's L3 change reverted (X→L3); the concurrent L1 change (Y) kept.
     expect(await read(root, "a.txt")).toBe("Y\nL2\nL3\n");
+    expect(publish).toHaveBeenCalledWith(path.join(root, "a.txt"), expect.any(Number));
   });
 
   it("reset (concurrent, overlapping): conflicts instead of clobbering", async () => {

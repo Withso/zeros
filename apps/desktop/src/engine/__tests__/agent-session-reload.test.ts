@@ -29,6 +29,7 @@ import { upsertChatMessagesBulk, windowChatMessages } from "../db/messages";
 import { listTurnsForChat } from "../db/turns";
 import { AgentFailureError } from "../agents/types";
 import type { CloudWorkerConfiguration } from "../agents/containment/cloud-worker-config";
+import { testCloudWorker } from "../agents/__tests__/helpers/test-cloud-runtime";
 import type { CloudCommandClaim } from "@zeros/protocol/cloud-commands";
 import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
 
@@ -181,8 +182,7 @@ describe("agent session continuity across a local renderer reload", () => {
 
   it.each([false,true])("a second cloud device does not supersede command admission (provisional route: %s)",async provisional=>{
     const engine=new ZerosEngine({root:process.cwd(),port:29880}),state=internals(engine);
-    state.cloudWorker={version:1,backend:"cloud-worker",profile:"zeros-cloud-worker-v1",uid:10001,gid:10001,
-      toolchain:{node:"/usr/bin/node",supervisor:"/opt/zeros/zsr-supervisor.mjs",bwrap:"/usr/bin/bwrap",setpriv:"/usr/bin/setpriv"}};
+    state.cloudWorker=testCloudWorker();
     const peer=testClient("second-device","cloud"),client:TransportClient={...peer.client,authorized:()=>true,
       cloudActor:{sessionId:randomUUID(),deviceId:randomUUID(),role:"developer",fingerprint:"a".repeat(64)}};
     state.router.register(client);vi.spyOn(state.workspace,"resolveCwd").mockReturnValue(process.cwd());vi.spyOn(state.pty,"isWithinAllowed").mockReturnValue(true);
@@ -1207,19 +1207,7 @@ describe("agent session continuity across a local renderer reload", () => {
   it("keeps an attested cloud agent alive across a transient WSS disconnect", () => {
     const engine = new ZerosEngine({ root: process.cwd(), port: 29_882 });
     const state = internals(engine);
-    state.cloudWorker = {
-      version: 1,
-      backend: "cloud-worker",
-      profile: "zeros-cloud-worker-v1",
-      uid: process.getuid?.() || 10_001,
-      gid: process.getgid?.() || 10_001,
-      toolchain: {
-        node: "/usr/bin/node",
-        supervisor: "/opt/zeros/zsr-supervisor.mjs",
-        bwrap: "/usr/bin/bwrap",
-        setpriv: "/usr/bin/setpriv",
-      },
-    };
+    state.cloudWorker = testCloudWorker();
     const { client } = testClient("cloud-renderer-reload", "cloud");
     state.router.register(client);
     state.router.setOwner("session-1", client.id);

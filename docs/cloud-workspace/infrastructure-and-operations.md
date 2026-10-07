@@ -1,5 +1,14 @@
 # Cloud workspace infrastructure and operations
 
+Current compute is Boat-only with saved v2 Computer sources, qualified v4
+runtime/base pins and actor protocol 2. [Runtime bundles](runtime-bundles.md)
+owns the physical artifact/installation; [runtime updates](live-runtime-updates.md)
+owns transfer/staging. Flat OCI publication and the shared Dev image kit remain
+separate follow-ups. The opt-in v3 release-worker promotion lane is
+[retired](release-worker-qualification.md), with historical receipts/cleanup
+retained. This guide owns lifecycle, operations and controlled migration/restore
+procedures.
+
 ## Build and image contract
 
 The remote image must be reproducible from reviewed source and a pinned runtime
@@ -29,9 +38,9 @@ wire values become compatibility contracts when introduced.
 - Setup execution uses a bounded renewable lease and an incrementing fence.
   Sandbox commands run after the claim transaction commits; every heartbeat and
   result locks/rechecks workspace, generation, lifecycle, and provider binding.
-- Daytona commands resolve the exact bound resource id, reject unbounded
+- Boat commands resolve the exact bound resource id, reject unbounded
   execution, and carry a positive provider-side timeout. Local cancellation may
-  stop waiting before the SDK call returns, so the remote timeout plus the
+  stop waiting before the provider call returns, so the remote timeout plus the
   durable execution fence are both mandatory.
 - The setup executor invokes one fixed image-owned helper. Its one-use admission
   is bound to the setup run and fence, and must be retired before success can be
@@ -148,26 +157,20 @@ physical-deletion receipt.
 
 ## Recovery drills and measured limits
 
-Batch 7 measured the isolated Alpha qualification deployment on September
-23–24, 2026: one Railway control-plane replica, a single-node PlanetScale PS-5
-cluster, private R2 object storage and managed Boat sandboxes, driven from
-clients in another US region. These are single-region engineering baselines,
-not public reliability or latency promises.
+Keep dated deployment/load/restore observations in private operational evidence.
+Historical single-region tests do not qualify this changed runtime or provide
+public RPO/RTO, HA/capacity or latency promises. Record the exact topology,
+artifact/source/pins, backup point, object inventory, faults, elapsed times and
+cleanup with each new drill.
 
-| Area | Measured | Limit or rule |
-| --- | --- | --- |
-| Database and object restore | A point-in-time PlanetScale branch at an exact timestamp was ready in 102 s, and a control-plane service on it passed health 17 s later. Verifying 144 unchanged tables and decrypting all 4,363 live objects took another 254 s: 6 min 41 s in total. | RPO is the chosen restore point: every row committed before it was present and none after. Point-in-time restore reaches back about 48 hours. Expect about 7 minutes of operator work before a traffic cutover. |
-| Objects referenced after restore | Every object the restored rows referenced was present. | Live objects outlive their last reference by `CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS` (48 hours). Key rotation deletes superseded ciphertext at once, so restore to a point after a rotation finished. |
-| Provider-host loss | The engine's authority lapsed 90 s after its last heartbeat. The workspace became `failed` (`provider_not_found`) 5 min 20 s after the sandbox was destroyed, when the provider first returned not found for it. After `cloud-provider-loss:manage` recorded the loss, the compute lease settled 5 s later at its last meter. Recovery from the last checkpoint reached `ready` 73 s after the request: the file written before that checkpoint came back, and the one written after it did not. | Work since the last durable checkpoint is lost. Engines checkpoint every 5 minutes, and stop or archive takes a final checkpoint. An operator must attest the loss with `cloud-provider-loss:manage` before recovery. |
-| Engine process loss | Compute stopped 106 s after the engine was killed mid-command: its 90 s lease plus reconciliation. The interrupted command's receipt became `uncertain`, it was never re-dispatched, and the conversation paused. Wake reached `ready` in 68 s. | The owner decides whether to repeat an uncertain command. |
-| Control-plane outage | A normal deploy during a turn kept the engine and the turn running; device bridges reconnected. During a 12-minute crash, engines lost authority when their leases expired (81 s). On recovery the engine was revoked and the workspace stopped within 10 s. The sandbox kept billing throughout. | Recover a crashed deployment with a redeploy: restarting a deployment whose restart policy is `NEVER` left it crashed. The uptime probe checks every 10 minutes. |
-| Approvals | From a second device seeing a permission prompt to its durable approval receipt, with Claude Haiku 4.5: about 6.2 s before the September 23 round-trip changes, 4.8–5.5 s after them, and 3.6–3.9 s once each recorded-actor check became one statement. The approval's receipt transaction fell from 2.2–2.7 s to 1.5–1.7 s: 86 statements became 59. | Each engine request is one transaction of sequential statements. Each statement costs about 25 ms between the control plane and the database, and the receipt transaction also waits on the agent-execution checks running beside it. |
-| Event streams | Over 30 minutes, two workspaces with three devices each answered 408 of 408 pings with no reconnects. Fan-out lag was 3 ms at p95 and 89 ms at most. Replay after a 20 s disconnect was contiguous and complete: 86 and 63 frames in one page, in about 1.1 s. | — |
-| API | 11,292 requests in 25 minutes at four-way concurrency: p50 about 440 ms, p95 1.2 s, p99 2 s. | Each user gets 240 `/v1` requests per minute; the API returns 429 beyond that. Engine lifecycle routes use a separate per-address bucket. |
-| Database connections | PS-5 allows 25 connections. Peak use was 19 backends, 7 of them the application. | Keep every replica's pool plus operator sessions under the cluster limit. |
-| Control-plane resources | CPU peaked at 0.15 vCPU and memory at 475 MB. | — |
-| Object-key rotation | 4,366 objects (75 MB) moved to a new key with no failures in 3 h 7 min: about 1.9 s per object, one at a time, in batches of up to 100 with a minute between batches. Afterwards every object was read back with only the new key in 3.5 minutes. | About 23 objects per minute per worker, so a large store takes days. Keep the old key in the keyring until rotation finishes. |
-| Lifecycle races | Two deletes and an archive sent at once produced one outcome: the newest intent ran and the others were superseded. A wake over the running quota returned 409 `cloud_quota_exceeded`. | — |
+| Boundary | Required evidence and current rule |
+| --- | --- |
+| Database + objects | Restore the chosen committed point and verify every referenced encrypted object/key version, policies/roles/sequences/ledger and before/after probe rows. Database backups alone are insufficient. |
+| Retention/key rotation | Keep live-object restore-window coverage and required old key versions; do not infer a historical backup can read ciphertext retired by rotation. Qualify the exact restored inventory. |
+| Provider/engine loss | Lost engine authority fences commands; interrupted native outcomes remain uncertain/paused. Reconcile provider loss and meter through the audited loss procedure; restore only the last durable checkpoint. |
+| CP outage/reconnect | Engines obey finite lease authority; restored outbox/provider outcomes and revocations reconcile before reopening. Never replay native effects or revive a revoked generation from stale backup. |
+| Multi-device/load | Measure fan-out/catch-up, connection/byte budgets, queue and SQL latency under the actual deployment. Bound all replica pools/rollout overlap/operator headroom to the target's real limits. |
+| Rotation/delete/lifecycle races | Verify ciphertext readback, permanent deletion fences, newest-intent publication, positive compute release and separate snapshot/object erasure. A404 or accepted DELETE alone is insufficient. |
 
 ### Disaster recovery drill
 
@@ -564,21 +567,26 @@ keys or generated connection state.
 
 ## Current desktop access boundary
 
-Electron main owns cloud access issuance, provider credentials, native SSH
-configuration, Terminal/IDE launch, preview-header admission, and tunnel process
-lifetime. The renderer receives only bounded receipts, bearer-free navigation
-URLs, and exact loopback mappings. App exit or account replacement clears local
-preview authority and stops tunnels immediately; remote revocation is attempted
-while a valid account session remains, with provider TTL and durable lifecycle
-revocation as backstops.
+Electron main owns runtime-service capability issuance/transport, device proof,
+private SSH configuration, Terminal/forwarding, exact-frame preview admission
+and local process lifetime. Boat provisioning authority stays in the control
+plane. Renderer receives bounded bearer-free receipts/URLs and actual loopback
+mappings. Account/device/engine/generation retirement fences late grants and
+attempts exact remote revocation while backend expiry bounds offline cleanup.
 
-The service boundary is unit-tested on Linux, but Terminal/IDE launch, pinned
-OpenSSH host-key behavior, tunnel teardown, app signing/notarization, and
-provider token revocation still require the protected macOS/live-Daytona
-qualification. Production builds fail closed without a verified key for every
-allowed gateway; TOFU exists only as an explicit development escape hatch. The
-desktop catalog/details UI and automatic collision-free local-port selection
-are later product wiring, not evidence supplied by this boundary.
+Catalog/details, collision-aware forwarding preferences and receive-only sync
+controls are implemented. Passive reads/automatic forwarding never wake or admit
+an engine. Native editor launch stays hidden pending multi-connection SSH
+qualification. Main validates the native service introduction and OpenSSH pin;
+legacy gateway/TOFU configuration is a separately validated compatibility/development
+contract, not a native-service authentication shortcut. See
+[native access acceptance](native-access-acceptance.md) and
+[native preview acceptance](native-preview-acceptance.md).
+
+Linux unit/real-OpenSSH tests do not qualify signed/notarized macOS Terminal,
+SFTP, clipboard/config/socket cleanup, frame-isolated HMR, forwarding collisions
+or live role/device/Stop/replacement revocation. Complete that exact native
+matrix on an adopted qualified v4 pin before release claims.
 
 ## Deployment ownership
 

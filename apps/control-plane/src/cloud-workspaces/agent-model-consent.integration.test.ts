@@ -36,20 +36,20 @@ d("explicit provider-wide self consent", () => {
     expect(grant).toMatchObject({ allModels: true });
     expect(grant.models).toContain("grok-4.7");
     const turn = admission(request.id, "grok-4.7");
-    const lease = await executions.admit(f.scope, turn);
+    const lease = await executions.admit(f.scope, turn, false, undefined, undefined, undefined, 1);
     expect(lease.model).toBe("grok-4.7");
     await expect(executions.validate(f.scope, lease.leaseId, true)).resolves.toHaveProperty("leaseId", lease.leaseId);
     await expect(executions.authorizeAction(f.scope, turn.executionId, f.initiating.actorSessionId)).resolves.toMatchObject({ authorized: true });
     for (const model of ["gpt-6.1-sol", "unknown-future-model"])
-      await expect(executions.admit(f.scope, admission(request.id, model))).rejects.toMatchObject({ code: "cloud_agent_model_not_authorized" });
+      await expect(executions.admit(f.scope, admission(request.id, model), false, undefined, undefined, undefined, 1)).rejects.toMatchObject({ code: "cloud_agent_model_not_authorized" });
   });
   it("preserves existing and explicitly restricted lists without widening them", async () => {
     for (const flag of [undefined, false]) {
       const request = delegate(flag); await credentials.delegate(f.owner.id, request);
       expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations.find(row => row.id === request.id))
         .toMatchObject({ allModels: false, models: ["grok-4.6"] });
-      await expect(executions.admit(f.scope, admission(request.id, "grok-4.7"))).rejects.toMatchObject({ code: "cloud_agent_model_not_authorized" });
-      expect((await executions.admit(f.scope, admission(request.id, "grok-4.6"))).model).toBe("grok-4.6");
+      await expect(executions.admit(f.scope, admission(request.id, "grok-4.7"), false, undefined, undefined, undefined, 1)).rejects.toMatchObject({ code: "cloud_agent_model_not_authorized" });
+      expect((await executions.admit(f.scope, admission(request.id, "grok-4.6"), false, undefined, undefined, undefined, 1)).model).toBe("grok-4.6");
     }
   });
   it("rejects provider-wide grants to another member while preserving their explicit model consent", async () => {
@@ -100,7 +100,7 @@ d("explicit provider-wide self consent", () => {
     if (cause === "expired") await pool.query("UPDATE cloud_agent_credential_delegations SET expires_at=now() WHERE id=$1", [grant.id]);
     if (cause === "material") await pool.query("UPDATE cloud_agent_credential_versions SET material_expires_at=now() WHERE credential_id=$1", [grant.credentialId]);
     await expect(executions.admit(f.scope, { ...admission(grant.id, model), executionId,
-      source: { kind: "command", commandId, claimId: claim.claimId } })).rejects.toMatchObject({ status: 409, code });
+      source: { kind: "command", commandId, claimId: claim.claimId } }, false, undefined, undefined, undefined, 1)).rejects.toMatchObject({ status: 409, code });
     const settlement = { commandId, claimId: claim.claimId, state: "failed" as const, resultCode: "command_dispatch_rejected" };
     await commands.settle(f.scope, settlement);
     expect((await pool.query("SELECT state,result_code FROM cloud_workspace_commands WHERE id=$1", [commandId])).rows[0])

@@ -99,12 +99,17 @@ function launch(action: string, mode = "remote") {
   `);
   write("hosted-local.mjs", "export const cleanupHostedLocalState = () => true;");
   write("hosted-profile.mjs", `
-    export const loadHostedProfile = () => ({ registry: {} });
+    import { event } from './fixture.mjs';
+    export const loadHostedProfile = () => { event('profile-read'); return { registry: {} }; };
     export const hostedDesktopEnvironment = () => ({});
     export const hostedPublicProfile = () => ({ apiOrigin: 'https://api.example.test' });
   `);
   write("hosted-services.mjs", "export const hostedServices = () => ({ removeLocalSources() {}, close() {} });");
-  write("hosted-agent-monitor.mjs", "export const monitorHostedAgents = async () => {};");
+  write("hosted-agent-monitor.mjs", `
+    import { mode } from './fixture.mjs';
+    import { refuseRetiredDevNativeCanary } from './native-agent-retirement.mjs';
+    export const monitorHostedAgents = async () => { if (mode === 'retired-monitor') refuseRetiredDevNativeCanary(); };
+  `);
   write("hosted-reconcile.mjs", "export const reconcileHosted = async () => ({ complete: true });");
   write("hosted-doctor.mjs", "export const hostedDiagnostic = () => ({}); export const inspectHostedLive = async () => ({});");
   write("processes.mjs", `
@@ -113,14 +118,29 @@ function launch(action: string, mode = "remote") {
     export const withDevPortRetry = async operation => operation(0);
   `);
   write("platform.mjs", "Object.defineProperty(process, 'platform', { value: 'darwin' });");
+  fs.copyFileSync(path.join(repository, "scripts/dev-environment/native-agent-retirement.mjs"), path.join(directory, "native-agent-retirement.mjs"));
   fs.copyFileSync(path.join(repository, "scripts/dev-environment/hosted-launcher.mjs"), path.join(directory, "hosted-launcher.mjs"));
   const result = spawnSync(process.execPath, ["--import", path.join(directory, "platform.mjs"), path.join(directory, "hosted-launcher.mjs"), action, "--once"],
     { cwd: root, encoding: "utf8", timeout: 5000 });
-  const events = fs.readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line));
+  const events = fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
   return { ...result, events };
 }
 
 describe("hosted Dev launcher restart", () => {
+  it("refuses explicit agents intent before reading a profile, registry or lease", () => {
+    const result = launch("agents");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("v3 release worker images are retired; v4 runtime bundles are the supported artifact");
+    expect(result.events).toEqual([]);
+  });
+  it.each(["start", "backend"])("preserves %s when its optional native monitor reports retirement", action => {
+    const result = launch(action, "retired-monitor");
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("release_worker_images_retired");
+    expect(result.stdout).toContain("v3 release worker images are retired; v4 runtime bundles are the supported artifact");
+    expect(result.events.filter(event => event.name === "start")).toHaveLength(1);
+    expect(result.events.find(event => event.name === "closed")).toMatchObject({ sameGeneration: true, database: "existing-dev-branch", leaseToken: null });
+  });
   it.each(["start", "backend"])("%s waits for an interrupted launch's lease without replacing its generation", action => {
     const result = launch(action);
     expect(result.status, result.stderr).toBe(0);

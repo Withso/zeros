@@ -41,21 +41,30 @@ export interface PendingWork {
   blocker: AutoCommitBlocker | null;
 }
 
-/** Matches the engine's own internal-path filter, so this module's file list
- *  agrees with the counts the button decided to act on. */
-function isInternal(path: string): boolean {
-  return path === ".zeros" || path.startsWith(".zeros/");
+export interface NetTrackedChange {
+  path: string;
+  oldPath?: string;
 }
 
-export function summarizePendingWork(facts: WorktreeFacts): PendingWork {
+/** Direct PRs include Code and Design. Context notes/attachments stay outside
+ * this generated commit, as in the primary agent's PR instructions. */
+function isInternal(path: string): boolean {
+  return [".zeros", ".context", ".context-graph"].some(root => path === root || path.startsWith(root + "/"));
+}
+
+export function summarizePendingWork(facts: WorktreeFacts, netTrackedChanges?: readonly NetTrackedChange[]): PendingWork {
   const paths = new Set<string>();
-  for (const change of [...facts.staged, ...facts.unstaged]) {
+  // HEAD-vs-worktree metadata removes cancelled staged/unstaged changes (AD,
+  // or an edit reverted on disk). Porcelain alone cannot establish that set.
+  const tracked: readonly NetTrackedChange[] = netTrackedChanges ?? [...facts.staged, ...facts.unstaged];
+  for (const change of tracked) {
     if (!isInternal(change.path)) paths.add(change.path);
+    if (change.oldPath && !isInternal(change.oldPath)) paths.add(change.oldPath);
   }
   for (const path of facts.untracked) {
     if (!isInternal(path)) paths.add(path);
   }
-  const conflicted = facts.conflicted.filter((c) => !isInternal(c.path));
+  const conflicted = facts.conflicted;
   // Conflicts first: they name the actual file work, while the operation only
   // names the command that produced it. A conflicted path staged as-is commits
   // the `<<<<<<<` markers — git can't tell a resolved file from an unresolved

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -23,7 +24,7 @@ describe("cloud runtime publication authority", () => {
     expect(source).toContain("packages: write");
     expect(source).toContain("secrets.GITHUB_TOKEN");
     expect(source).not.toMatch(
-      /secrets\.(?!GITHUB_TOKEN)[A-Z_]+|bake-snapshot|provision\.ts|DAYTONA_API_KEY|BOAT_API_KEY/,
+      /secrets\.(?!GITHUB_TOKEN)[A-Z_]+|bake-snapshot|provision\.ts|BOAT_API_KEY/,
     );
     expect(source).toContain("--password-stdin");
     expect(source).toContain("if: always()");
@@ -39,15 +40,16 @@ describe("cloud runtime publication authority", () => {
     );
     expect(source).toContain('"oci://$PUBLISHED_IMAGE"');
     expect(source).toContain("/publication.json");
-    const publisher = readFileSync(
-      new URL(
-        "../cloud-workspace-validation/publish-vm-image.ts",
-        import.meta.url,
-      ),
-      "utf8",
-    );
-    expect(publisher).toContain("org.opencontainers.image.source=");
-    expect(publisher).toContain("org.opencontainers.image.revision=");
+  });
+  it("refuses the retired flat OCI image before any build, registry or receipt work", () => {
+    for (const script of ["publish-vm-image.ts", "publication-receipt.ts"]) {
+      const result = spawnSync(process.execPath, ["--import", "tsx", `scripts/cloud-workspace-validation/${script}`], {
+        cwd: new URL("../..", import.meta.url), encoding: "utf8", timeout: 30_000,
+        env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Flat OCI runtime images are retired; publish the v4 runtime bundle with cloud-runtime-bundle.yml.");
+    }
   });
   it("bounds the isolated builder before registry authentication", () => {
     expect(source).toContain("--driver docker-container");

@@ -2,11 +2,8 @@ import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ensureUser } from "../auth.js";
-import { withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { seedReadyCloudWorkspace, ensureCloudPilotUser } from "./test-fixtures.js";
-import { seedComputerTemplate } from "./computer-workspace-test-fixtures.js";
-import { seedRuntimeBase, seedRuntimeBundle } from "./runtime-test-fixtures.js";
 import { DatabaseCloudWorkspaceCollaborationService } from "./actors.js";
 import { DatabaseCloudWorkspaceActorSessionService } from "./actor-sessions.js";
 import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
@@ -25,7 +22,11 @@ suite("computer repository GitHub reads", () => {
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
     vi.clearAllMocks();
-    await resetMigratedTestDatabase(pool); fixture = await seedReadyCloudWorkspace(pool);
+    await resetMigratedTestDatabase(pool);
+    // Author the exact repository/source/pin together, with one registry seed.
+    const installationId = randomUUID();
+    fixture = await seedReadyCloudWorkspace(pool, { computerSource: { installationId,
+      repositories: [{ id: "456", owner: "withso", name: "zeros", sha: "1".repeat(40) }] } });
     await new DatabaseCloudWorkspaceCollaborationService(pool).setSharing({ workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
       actorUserId: fixture.userId, sharingMode: "organization", expectedRevision: 1 });
     const user = await ensureUser(pool, { provider: "workos", providerSubject: `workos|${fixture.userId}`, email: `durable-${fixture.userId}@example.test`, displayName: "Owner",
@@ -40,20 +41,13 @@ suite("computer repository GitHub reads", () => {
     const proof = { ...fields, signature: sign(null, cloudWorkspaceDeviceProofMessage({ ...fields, accountUserId: user.id, action: "engine.connect",
       payload: { organizationId: fixture.organizationId, workspaceId: fixture.workspaceId } }), pair.privateKey).toString("base64url") };
     const sessions = new DatabaseCloudWorkspaceActorSessionService({ pool, enginePort: 39393, bridgeUrl: "wss://api.example.test/v1/cloud-workspaces/bridge", workosEnabled: false });
-    const issued = await sessions.issue({ ...engine(), actorUserId: user.id, authenticatedUser: user, proof });
-    actorSessionId = (await sessions.consume({ ...engine(), token: issued.grantToken })).actorSessionId;
     await pool.query("UPDATE repositories SET forge_repository_id='456',identity_state='verified' WHERE id=(SELECT repository_id FROM cloud_workspaces WHERE id=$1)", [fixture.workspaceId]);
     await pool.query("INSERT INTO github_authorizations(owner_user_id,app_variant,github_login) VALUES($1,'github.com','test-member') ON CONFLICT(owner_user_id,app_variant) DO NOTHING", [fixture.userId]);
-    const installation = (await pool.query(`INSERT INTO github_installations(github_installation_id,app_variant,owner_user_id,account_login,account_type,target_type)
-      SELECT 123,'github.com',$1,repository_owner,'Organization','Organization' FROM cloud_workspaces WHERE id=$2 RETURNING id`, [fixture.userId, fixture.workspaceId])).rows[0];
-    await withSystemTx(pool, async tx => {
-      await seedRuntimeBase(tx);
-      await seedRuntimeBundle(tx);
-      const computer = await seedComputerTemplate(tx, { organizationId: fixture.organizationId, ownerUserId: fixture.userId, installationId: installation.id,
-        repositories: [{ id: "456", owner: "withso", name: "zeros", sha: "1".repeat(40) }] });
-      await tx.query(`INSERT INTO cloud_workspace_computer_sources(workspace_id,generation,org_id,build_id,template_id,config_id)
-        VALUES($1,1,$2,$3,$3,$4)`, [fixture.workspaceId, fixture.organizationId, computer.buildId, computer.configId]);
-    });
+    await pool.query(`INSERT INTO github_installations(id,github_installation_id,app_variant,owner_user_id,account_login,account_type,target_type)
+      SELECT $3,123,'github.com',$1,repository_owner,'Organization','Organization' FROM cloud_workspaces WHERE id=$2`,
+    [fixture.userId, fixture.workspaceId, installationId]);
+    const issued = await sessions.issue({ ...engine(), actorUserId: user.id, authenticatedUser: user, proof });
+    actorSessionId = (await sessions.consume({ ...engine(), token: issued.grantToken })).actorSessionId;
     service = new DatabaseCloudGithubReads(pool, false, broker, { fetch: upstream });
   });
   it("uses the bound computer installation with no human connection or read grant rows", async () => {

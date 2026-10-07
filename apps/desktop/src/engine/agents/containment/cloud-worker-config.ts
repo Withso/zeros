@@ -23,9 +23,9 @@ export const CLOUD_WORKER_CONFIG_PATH = "/etc/zeros/cloud-worker.json";
 const MAX_CONFIG_BYTES = 4 * 1024;
 
 export interface CloudWorkerConfiguration extends CloudWorkerRuntimeConfiguration {
-  readonly version: 1 | 2 | 3 | 4;
+  readonly version: 4;
   readonly backend: "cloud-worker";
-  readonly profile: "zeros-cloud-worker-v1" | "zeros-cloud-worker-v2" | "zeros-cloud-worker-v3" | "zeros-cloud-worker-v4";
+  readonly profile: "zeros-cloud-worker-v4";
   readonly toolchain: CloudWorkerToolchain;
 }
 
@@ -76,17 +76,11 @@ export function parseCloudWorkerConfiguration(
     "version",
   ];
   const toolchain = parseToolchain(value.toolchain);
-  const legacy =
-    value.version === 1 && value.profile === "zeros-cloud-worker-v1";
-  const isolated =
-    (value.version === 2 && value.profile === "zeros-cloud-worker-v2") ||
-    (value.version === 3 && value.profile === "zeros-cloud-worker-v3") ||
-    (value.version === 4 && value.profile === "zeros-cloud-worker-v4");
   if (
     Object.keys(value).sort().join("\0") !== expectedKeys.join("\0") ||
-    (!legacy && !isolated) ||
+    (value.version !== 4 || value.profile !== "zeros-cloud-worker-v4") ||
     value.backend !== "cloud-worker" ||
-    (isolated && (value.uid !== 10001 || value.gid !== 10001)) ||
+    (value.uid !== 10001 || value.gid !== 10001) ||
     !Number.isInteger(value.uid) ||
     Number(value.uid) <= 0 ||
     Number(value.uid) > 2_147_483_647 ||
@@ -98,9 +92,9 @@ export function parseCloudWorkerConfiguration(
     throw new Error("cloud-worker configuration has an unsupported contract");
   }
   return {
-    version: value.version as 1|2|3|4,
+    version: 4,
     backend: "cloud-worker",
-    profile: value.profile as CloudWorkerConfiguration["profile"],
+    profile: "zeros-cloud-worker-v4",
     uid: Number(value.uid),
     gid: Number(value.gid),
     toolchain,
@@ -182,7 +176,7 @@ export function loadCloudWorkerConfiguration(
     configuration = parseCloudWorkerConfiguration(
       readFileSync(descriptor, "utf8"),
     );
-    if (configuration.version===1?hasCloudEngineUserNamespace():!hasCloudEngineUserNamespace(configuration.version)) {
+    if (!hasCloudEngineUserNamespace(4)) {
       throw new Error(
         "cloud-worker profile does not match its engine namespace",
       );
@@ -193,14 +187,12 @@ export function loadCloudWorkerConfiguration(
   for (const candidate of Object.values(configuration.toolchain)) {
     assertRootControlledPath(candidate);
   }
-  if (configuration.version === 4) {
-    validateCloudRuntimeMarker(configuration, true);
-    const runtime = resolveCloudRuntime();
-    if (runtime.profile !== "v4" || configuration.toolchain.node !== runtime.node ||
+  validateCloudRuntimeMarker(configuration, true);
+  const runtime = resolveCloudRuntime();
+  if (runtime.profile !== "v4" || configuration.toolchain.node !== runtime.node ||
       configuration.toolchain.supervisor !== `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs` ||
       configuration.toolchain.bwrap !== "/usr/bin/bwrap" || configuration.toolchain.setpriv !== "/usr/bin/setpriv")
-      throw new Error("cloud-worker toolchain does not match the active runtime");
-  }
+    throw new Error("cloud-worker toolchain does not match the active runtime");
   for (const candidate of [
     configuration.toolchain.node,
     configuration.toolchain.bwrap,

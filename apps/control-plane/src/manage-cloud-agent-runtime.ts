@@ -59,7 +59,7 @@ export const CloudAgentRuntimeEvidenceSchema = z
     qualificationProfile: z.enum(["smoke", "full"]).optional(),
     releaseCanaryBindings: ReleaseCanaryBindingsSchema.optional(),
     channel: z.enum(["development", "alpha", "beta", "production"]),
-    provider: z.enum(["boat", "daytona"]),
+    provider: z.literal("boat"),
     runtimeClass: z.literal("linux-vm"),
     imageRef: z.string().min(1).max(512),
     profile: z.literal("zeros-cloud-worker-v3"),
@@ -111,15 +111,7 @@ export const CloudAgentRuntimeEvidenceSchema = z
         message: "Codex subscription renewal must qualify independently",
       });
     // Boat images bind immutable image identity and the expected baked metadata.
-    // Daytona snapshots are opaque IDs; reject mutable aliases and image tags.
-    const immutable =
-      value.provider === "boat"
-        ? /^boat:[a-z0-9][a-z0-9-]{0,62}@sha256:[a-f0-9]{64}$/.test(
-            value.imageRef,
-          )
-        : /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(
-            value.imageRef,
-          );
+    const immutable = /^boat:[a-z0-9][a-z0-9-]{0,62}@sha256:[a-f0-9]{64}$/.test(value.imageRef);
     if (!immutable)
       context.addIssue({
         code: "custom",

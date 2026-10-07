@@ -164,19 +164,19 @@ describe("cloud request account boundaries", () => {
     await expect(cloudAccountRequest("/v1/test", z.object({ ok: z.boolean() }))).rejects.toThrow(/account changed/i);
   });
 
-  it("does not retry workspace creation under a replacement account after a source probe", async () => {
+  it("does not use desktop personal source proofs for v2 template creation", async () => {
     state.session.mockResolvedValue(session);
     const fetch = vi.fn(async () => Response.json({ error: {
       code: "github_cloud_source_authorization_required", message: "Refresh source access",
     } }, { status: 409 }));
     vi.stubGlobal("fetch", fetch);
-    state.source.mockImplementation(async () => { state.generation++; });
     await expect(createCloudWorkspaceDocument({
       organizationId: "11111111-1111-4111-8111-111111111111",
       idempotencyKey: "workspace-intent",
       repository: { forge: "github.com", owner: "example", name: "repository", revision: "main",
         githubInstallationId: "22222222-2222-4222-8222-222222222222" },
-    })).rejects.toThrow(/account changed/i);
+    })).rejects.toMatchObject({ code: "github_cloud_source_authorization_required" });
     expect(fetch).toHaveBeenCalledTimes(1);
+    expect(state.source).not.toHaveBeenCalled();
   });
 });

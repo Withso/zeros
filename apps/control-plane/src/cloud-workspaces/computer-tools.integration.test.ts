@@ -41,7 +41,7 @@ database("admin workspace computer tools", () => {
     return (await response.json()).result;
   }
   const config = () => ok({ name: "GetComputerConfiguration", arguments: { computerId: f.fixture.organizationId } });
-  const create = (expectedRevision = 1, previousBuildId: string | null = null): CloudComputerToolRequest => ({ name: "CreateComputerConfiguration",
+  const create = (expectedRevision = f.initialRevision, previousBuildId: string | null = null): CloudComputerToolRequest => ({ name: "CreateComputerConfiguration",
     arguments: { installScript: "echo updated", timeoutSeconds: 180, expectedRevision, previousBuildId } });
   const list = { name: "ListComputers", arguments: {} } as const;
 
@@ -53,9 +53,9 @@ database("admin workspace computer tools", () => {
     expect((await ok(list)).computers).toEqual([expect.objectContaining({ computerId: f.fixture.organizationId,
       capabilities: { computerToolsVersion: 1, configure: true, updateRepositorySetupScript: true } })]);
     const accepted = await ok(create());
-    expect(accepted).toMatchObject({ revision: 2, version: 1 });
+    expect(accepted).toMatchObject({ revision: f.initialRevision + 1, version: f.nextBuildVersion });
     const after = await config();
-    expect(after).toMatchObject({ installScript: "echo updated", timeoutSeconds: 180, revision: 2, latestBuildId: accepted.buildId });
+    expect(after).toMatchObject({ installScript: "echo updated", timeoutSeconds: 180, revision: f.initialRevision + 1, latestBuildId: accepted.buildId });
     const refs = await pool.query(`SELECT binding_id,binding_version FROM cloud_computer_environment_refs WHERE config_id=ANY($1::uuid[]) ORDER BY config_id`, [[before.configId, after.configId]]);
     expect(refs.rows).toHaveLength(2); expect(refs.rows[0]).toEqual(refs.rows[1]);
     expect(after.repositories).toEqual(before.repositories);
@@ -65,32 +65,32 @@ database("admin workspace computer tools", () => {
     expect(setup.mock.calls[0]![0]).toEqual({ orgId: f.fixture.organizationId, repositoryId: f.fixture.repositoryId, expectedSettingsVersion: 0,
       script: "echo setup", timeoutSeconds: 30, actorUserId: f.fixture.userId, operationId: computerToolOperationId(f.initiating.leaseId, "native-setup") });
     const final = await config();
-    expect(final.revision).toBe(2);
+    expect(final.revision).toBe(f.initialRevision + 1);
     expect(final.repositories[0]).toMatchObject({ settingsVersion: 1, setupCommands: [{ command: "echo setup", timeoutSeconds: 30 }] });
-    expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(1);
+    expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(f.initialBuildCount + 1);
     await f.computer.claimNextBuild(1);
     await f.computer.appendBuildLog(accepted.buildId, 1, { stage: "install", stream: "stdout",
       text: "synthetic-org-environment-value synthetic-private-provider-key https://provider.example.test/private-access" });
     const status = await ok({ name: "GetComputerBuildStatus", arguments: { buildId: accepted.buildId } });
-    expect(status).toMatchObject({ buildId: accepted.buildId, version: 1, state: "running", activated: false, cursor: 1,
+    expect(status).toMatchObject({ buildId: accepted.buildId, version: f.nextBuildVersion, state: "running", activated: false, cursor: 1,
       lines: [{ text: "[cloud workspace setup output withheld]" }] });
     const output = JSON.stringify([before, after, final, accepted, status]);
     for (const privateValue of ["synthetic-org-environment-value", "synthetic-private-provider-key", "zeros-v2-test-private-provider-id", "private-access", "installationId", "bindingId"])
       expect(output.includes(privateValue)).toBe(false);
   });
   it("returns 409 when the revision changed without a new build", async () => {
-    await f.computer.saveDraft(f.fixture.organizationId, f.fixture.userId, { ...f.draft, installScript: "admin changed", expectedRevision: 1 });
+    await f.computer.saveDraft(f.fixture.organizationId, f.fixture.userId, { ...f.draft, installScript: "admin changed", expectedRevision: f.initialRevision });
     const response = await call(create());
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ result: { conflict: true, revision: 2, latestBuildId: null } });
-    expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(0);
+    expect(await response.json()).toEqual({ result: { conflict: true, revision: f.initialRevision + 1, latestBuildId: null } });
+    expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(f.initialBuildCount);
     expect((await config()).installScript).toBe("admin changed");
   });
   it("requires the previous build as well as revision and explicitly supersedes a pending build", async () => {
     const first = await ok(create());
     expect((await call(create(first.revision, null))).status).toBe(409);
     const second = await ok(create(first.revision, first.buildId));
-    expect(second).toMatchObject({ revision: 3, version: 2 });
+    expect(second).toMatchObject({ revision: f.initialRevision + 2, version: f.nextBuildVersion + 1 });
     expect((await ok({ name: "GetComputerBuildStatus", arguments: { buildId: first.buildId } })).state).toBe("superseded");
     await service.release(f.scope, f.initiating.leaseId);
     expect((await f.computer.getBuild(f.fixture.organizationId, f.fixture.userId, second.buildId)).state).toBe("queued");
@@ -115,8 +115,8 @@ database("admin workspace computer tools", () => {
       expect(await conflict.json()).toEqual({ result: { conflict: true, version: 1 } });
     }
     expect((await call({ ...tool, arguments: { ...tool.arguments, repositoryId: randomUUID() } })).status).toBe(403);
-    expect((await config()).revision).toBe(1);
-    expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(0);
+    expect((await config()).revision).toBe(f.initialRevision);
+    expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(f.initialBuildCount);
     expect((await pool.query("SELECT version FROM repository_settings_versions")).rows).toEqual([{ version: "1" }]);
   });
   it("writes setup through C4 with preserved settings, its audit/outbox, and no replay", async () => {
@@ -143,8 +143,8 @@ database("admin workspace computer tools", () => {
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toEqual({ result: { conflict: true, version: 2 } });
     expect((await pool.query("SELECT version FROM repository_settings_versions ORDER BY version")).rows).toEqual([{ version: "1" }, { version: "2" }]);
-    expect((await config()).revision).toBe(1);
-    expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(0);
+    expect((await config()).revision).toBe(f.initialRevision);
+    expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(f.initialBuildCount);
   });
   it("accepts an active-only repository after the draft removes it, and still rejects an unrelated repository", async () => {
     const accepted = await ok(create());
@@ -210,7 +210,7 @@ database("admin workspace computer tools", () => {
     const { heartbeatToken, ...scope } = f.scope;
     const response = await createCloudAgentExecutionRoutes(service).request(CLOUD_AGENT_EXECUTION_PATH, { method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${heartbeatToken}` },
-      body: JSON.stringify({ ...scope, request: { kind: "admit", computerToolsVersion: 1, admission: {
+      body: JSON.stringify({ ...scope, request: { kind: "admit", computerToolsVersion: 1, environmentVersion: 1, admission: {
         executionId: randomUUID(), delegationId: f.initiating.delegationId, provider: "cursor", model: "grok-4.6",
         source: { kind: "session", actorSessionId: f.initiating.actorSessionId },
       } } }) });
@@ -222,7 +222,7 @@ database("admin workspace computer tools", () => {
     await pool.query("UPDATE cloud_runtime_base_contracts SET revoked_at=now() WHERE base_compatibility_id=$1", [f.compatibilityId]);
     expect((await call(create(), { leaseId: result.leaseId })).status).toBe(403);
     await expect(service.validate(f.scope, result.leaseId, true)).rejects.toMatchObject({ status: 403 });
-    expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(0);
+    expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(f.initialBuildCount);
   });
   it("does not grant a capability to an ordinary workspace", async () => {
     await initialize(false);
@@ -268,7 +268,7 @@ database("admin workspace computer tools", () => {
     if (reason === "mcp") await pool.query("UPDATE cloud_runtime_qualifications SET enabled=false,mcp_qualified=false,revoked_at=now() WHERE runtime_id=$1", [f.runtimeId]);
     expect([401,403]).toContain((await call(list)).status);
     expect([401,403]).toContain((await call(create())).status);
-    expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(0);
+    expect((await pool.query("SELECT id FROM cloud_computer_v2_builds")).rowCount).toBe(f.initialBuildCount);
   });
   it.each(["org", "generation", "engine", "heartbeat", "lease", "computer", "build"])("rejects a wrong %s without exposing diagnostics", async key => {
     const response = await call(key === "computer" ? { name: "GetComputerConfiguration", arguments: { computerId: randomUUID() } } :

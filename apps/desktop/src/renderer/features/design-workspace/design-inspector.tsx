@@ -43,14 +43,14 @@ import { exportDesignPng } from "../../platform/design";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { openDesignFramePreview } from "../../platform/bridge/design-context-bridge";
 import { shellOpenUrl } from "../../platform/app";
-import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
 import { cloudWorkspaceCanEdit, useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 import { useWorkspaceStore, workbenchScopeForFolder } from "../../state/workspace-store";
 import { defaultScopeFor } from "../../shell/workbench/tab-model";
 import { planBrowserOpen } from "../../shell/workbench/use-open-browser";
 import { getOrganizationStoreGeneration } from "../team/team-store";
-import { isInternalFeatureActive, useInternalFeatureActive } from "../settings/internal-features";
+import { hasCloudWorkspaceAccountAccess, useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import { cn } from "../../shared/ui/cn";
 import {
   Button,
@@ -938,7 +938,7 @@ export function DesignInspector(props: DesignInspectorProps) {
 }
 
 function CloudDesignInspector(props: DesignInspectorProps) {
-  const enabled = useInternalFeatureActive("cloudComputerV2");
+  const enabled = useCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(props.workspaceId)?.organizationId);
   const canEdit = useCloudWorkspaceCanEdit(props.workspaceId ?? undefined);
   return <DesignInspectorContent {...props} previewAccess={{
     enabled,
@@ -1002,7 +1002,7 @@ function DesignInspectorContent({
           result.reference.frame !== frame.file || (frame.frameId && result.reference.frameId !== frame.frameId)) return;
       if (cloudPreview) {
         if (getOrganizationStoreGeneration() !== previewAccount || !cloudWorkspaceCanEdit(workspaceId) ||
-            !isInternalFeatureActive("cloudComputerV2") || !workspacePreviewAvailable(workspaceId)) return;
+            !hasCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(workspaceId)?.organizationId) || !workspacePreviewAvailable(workspaceId)) return;
         const url = new URL(result.previewUrl);
         if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password || Number(url.port) < 1024)
           throw new Error("Invalid cloud Design preview destination.");

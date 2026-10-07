@@ -1,9 +1,11 @@
 # Pro cloud backend
 
-This is the backend contract for individual Pro launch. Migrations
-`0101`–`0104` are applied on Alpha and its cloud workers are enabled. Desktop UI
-is separate work. Business pricing, seats and collaboration policy remain deferred.
-See [qualification status](qualification-status.md) for deployed evidence.
+This is the current individual sponsorship and collaboration contract.
+Migrations0101–0104 and subsequent source/runtime/authority migrations implement
+it; a migration number is not a current channel deployment claim. Desktop
+create/catalog/details/sharing surfaces are implemented. Business pricing/seats
+remain separate historical contracts and deferred launch policy. See
+[qualification status](qualification-status.md) for release gates.
 
 ## Authorization and sharing
 
@@ -189,9 +191,10 @@ The old public `/access/ssh` and `/access/tunnels` creation routes now return
 `409 cloud_workspace_runtime_connection_required`; they cannot return supplier
 hosts or credentials. Clients use the existing actor-aware `/runtime/services`
 relay. Existing grant revocation and local tunnel activation remain available.
-Desktop wiring for this public contract migration is a separate phase. Alpha
-execution is enabled for qualification; desktop cloud surfaces must adopt and
-qualify the new client path before exposing it. Beta and Production remain off.
+Electron's `cloud-runtime-service-client.ts` and the renderer's exact-workspace
+access controls use that relay path. Signed Mac Terminal/SSH/tunnel acceptance
+remains a release gate; repository wiring does not establish a deployed flag
+value or customer rollout approval. See [native access](native-access-acceptance.md).
 
 ## Safety defaults and rollout
 

@@ -30,7 +30,7 @@ suite("recovery migration with populated FORCE RLS tables", () => {
       await client.query("ROLLBACK");
       client.release();
     }
-    fixture = await seedReadyCloudWorkspace(pool);
+    fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
   });
 
   async function finalCheckpoint(): Promise<string> {

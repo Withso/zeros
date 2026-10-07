@@ -30,7 +30,7 @@ describe.runIf(!!process.env.TEST_DATABASE_URL)('customization authorization and
       // Reconstruct only the additive 0115 boundary inside a rolled-back
       // transaction; execute the exact migration artifact, not a mock DDL.
       await client.query('DROP TABLE cloud_customization_execution_snapshots,cloud_customization; ALTER TABLE cloud_agent_execution_leases DROP COLUMN customization_digest; ALTER TABLE cloud_agent_runtime_qualifications DROP COLUMN mcp_qualified');
-      const legacyInsert=`INSERT INTO cloud_agent_runtime_qualifications(provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled) VALUES('daytona',$1,$2,'cursor-api-key','zeros-cloud-worker-v3',true)`;
+      const legacyInsert=`INSERT INTO cloud_agent_runtime_qualifications(provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled) VALUES('boat',$1,$2,'cursor-api-key','zeros-cloud-worker-v3',true)`;
       await client.query(legacyInsert,['v7-before','a'.repeat(64)]);
       await client.query(await readFile(new URL('../../migrations/0115_cloud_customization.sql', import.meta.url),'utf8'));
       await client.query(legacyInsert,['v7-after','a'.repeat(64)]);

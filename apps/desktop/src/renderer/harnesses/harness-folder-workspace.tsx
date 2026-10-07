@@ -219,6 +219,9 @@ setActiveBridge({
         branches: ["main", connected ? "feature/remote" : "feature/local"].map((name) => ({ name, lastCommitDate: 1 })),
       };
     }
+    if (message.op === "gh.branchList") {
+      result = ["main", "feature/remote"].map(name => ({ name, isDefault: name === "main" }));
+    }
     if (message.op === "gh.prList") {
       await sourcePrGate;
       result = [{ number: 42, title: "Improve the project picker", headBranch: "feature/remote", url: "https://github.com/example/project/pull/42" }];

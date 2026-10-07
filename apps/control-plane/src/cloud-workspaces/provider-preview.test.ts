@@ -15,7 +15,7 @@ describe("provider-neutral private preview transport", () => {
     expect(() =>
       assertProviderPreviewEndpoint({
         ...endpoint,
-        headerName: "x-daytona-preview-token",
+        headerName: "x-zeros-runtime-preview",
       }),
     ).not.toThrow();
   });

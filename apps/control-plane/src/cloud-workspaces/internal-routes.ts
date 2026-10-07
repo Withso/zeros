@@ -398,6 +398,7 @@ function errorStatus(
 ): 401 | 409 | 422 | 503 {
   switch (error.code) {
     case "setup_authority_changed":
+    case "cloud_workspace_v2_required":
     case "computer_environment_revoked":
       return 409;
     case "setup_settings_invalid":

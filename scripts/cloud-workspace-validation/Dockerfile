@@ -2,10 +2,9 @@
 # zeros-engine-v1 — cloud-workspace validation Dockerfile
 # ──────────────────────────────────────────────────────────
 #
-# image.ts is the CANONICAL build spec (the bake script consumes it via the
-# Daytona SDK's declarative Image builder). This Dockerfile is the portable
-# equivalent — for `Image.fromDockerfile()`, a local `docker build` sanity check,
-# or porting the validation harness to another sandbox provider.
+# image.ts emits the canonical Dockerfile and portable build context for OCI
+# publication. This checked-in Dockerfile documents the equivalent runtime
+# recipe and supports a local docker build sanity check.
 #
 # Build args mirror config.ts. The native bindings compile against THIS image's
 # Node ABI — there is no Electron in a cloud sandbox, so the electron-rebuild ABI

@@ -32,9 +32,8 @@ function optionsKey(user: string, organization: string, repository: { owner: str
     ...(computer ? [computer.repositoryId, computer.installationId] : [])]);
 }
 function readOptions(value: string) {
-  const [, org, owner, repo, repositoryId] = JSON.parse(value) as [string, string, string, string, string?];
-  return repositoryId ? getCloudWorkspaceCreateOptions(org, owner, repo, { cloudComputerV2: true })
-    : getCloudWorkspaceCreateOptions(org, owner, repo);
+  const [, org, owner, repo] = JSON.parse(value) as [string, string, string, string, string?];
+  return getCloudWorkspaceCreateOptions(org, owner, repo);
 }
 
 // Both create surfaces consume the same confirmed source metadata. Clicks

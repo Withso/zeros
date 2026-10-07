@@ -14,18 +14,16 @@ export function cloudEngineWorkspacePaths(primaryRepository) {
  * engine request. The host launcher verifies their physical ownership first.
  * Private broker authority, provider login homes and the host shadow/SSH files
  * have no mount in this view. */
-export function cloudEngineViewArguments(operation = "serve",version=2,runtime=resolveCloudRuntime(),viewDirectory,primaryRepository,residentHostId) {
-  if (!["serve", "qualify", "qualify-agent", "resident"].includes(operation))
+export function cloudEngineViewArguments(operation = "serve",version=4,runtime=resolveCloudRuntime(),viewDirectory,primaryRepository,residentHostId) {
+  if (!["serve", "qualify", "resident"].includes(operation))
     throw new Error("Invalid cloud engine launch operation");
-  if(![2,3,4].includes(version)||(version===4)!==(runtime.profile==="v4"))throw new Error("Invalid cloud engine profile version");
-  if(operation==="qualify-agent"&&version<3)throw new Error("Native agent qualification requires v3 or v4");
-  if(operation==="resident"&&version!==4)throw new Error("Resident workloads require v4");
-  if (residentHostId !== undefined && (version !== 4 || !["serve", "resident"].includes(operation) ||
+  if(version!==4 || runtime.profile!=="v4")throw new Error("Invalid cloud engine profile version");
+  if (residentHostId !== undefined && (!["serve", "resident"].includes(operation) ||
     !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(residentHostId)))
     throw new Error("Invalid resident service projection");
-  if(version===4&&(!/^\/run\/zeros\/view\/runtime-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(viewDirectory??"")))
+  if((!/^\/run\/zeros\/view\/runtime-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(viewDirectory??"")))
     throw new Error("Invalid cloud engine runtime projection");
-  if (primaryRepository !== undefined && (version !== 4 || !isCloudComputerRepositoryDirectory(primaryRepository)))
+  if (primaryRepository !== undefined && !isCloudComputerRepositoryDirectory(primaryRepository))
     throw new Error("Invalid cloud engine repository projection");
   const args = [
     "--die-with-parent",
@@ -69,7 +67,7 @@ export function cloudEngineViewArguments(operation = "serve",version=2,runtime=r
     "--ro-bind",
     "/sys/fs/cgroup",
     "/sys/fs/cgroup",
-    ...(version === 4 ? [
+    ...[
       // The resident remains pinned, but future shells need the selected
       // immutable runtime's binaries. No mutable facade/host authority is
       // exposed by this root-owned, read-only installation parent.
@@ -77,11 +75,7 @@ export function cloudEngineViewArguments(operation = "serve",version=2,runtime=r
       "--ro-bind", `${viewDirectory}/facade`, "/opt/zeros",
       "--symlink", "/opt/zeros", "/zeros",
       "--ro-bind", `${viewDirectory}/etc`, "/etc/zeros",
-    ] : [
-      "--ro-bind", runtime.workerRoot, runtime.workerRoot,
-      "--ro-bind", runtime.root, runtime.root,
-      "--ro-bind", "/etc/zeros", "/etc/zeros",
-    ]),
+    ],
     "--ro-bind",
     "/etc/containers/policy.json",
     "/etc/containers/policy.json",
@@ -97,8 +91,8 @@ export function cloudEngineViewArguments(operation = "serve",version=2,runtime=r
     "/srv/zeros",
     // v4 setup must stage within the files bind to avoid EXDEV and retain
     // Boat persistence. Its private seed/home are never engine-visible.
-    ...(version === 4 ? ["--tmpfs", "/srv/zeros/.zeros-setup", "--chmod", "0000", "/srv/zeros/.zeros-setup",
-      "--remount-ro", "/srv/zeros/.zeros-setup"] : []),
+    ...["--tmpfs", "/srv/zeros/.zeros-setup", "--chmod", "0000", "/srv/zeros/.zeros-setup",
+      "--remount-ro", "/srv/zeros/.zeros-setup"],
     // The source is the admitted host clone. No mount is installed beneath
     // the host's files bind; this alias belongs only to this engine namespace.
     ...(primaryRepository ? ["--bind", primaryRepository, "/srv/zeros/workspace"] : []),
@@ -114,7 +108,7 @@ export function cloudEngineViewArguments(operation = "serve",version=2,runtime=r
     "--bind",
     "/run/zeros/engine",
     "/run/zeros",
-    ...(version === 4 ? ["--ro-bind", `${viewDirectory}/active-runtime.json`, "/run/zeros/active-runtime.json"] : []),
+    "--ro-bind", `${viewDirectory}/active-runtime.json`, "/run/zeros/active-runtime.json",
     "--ro-bind",
     "/run/zeros/view/settings",
     "/srv/zeros/managed-settings",
@@ -153,7 +147,7 @@ export function cloudEngineViewArguments(operation = "serve",version=2,runtime=r
     args.push("--cap-add", capability);
   for (const directory of [
     "/opt",
-    ...(version === 4 ? ["/opt/zeros-infra"] : []),
+    "/opt/zeros-infra",
     "/srv",
     "/srv/zeros",
     "/srv/zeros/home",
@@ -172,14 +166,12 @@ export function cloudEngineViewArguments(operation = "serve",version=2,runtime=r
     "--remount-ro",
     "/",
     "--chdir",
-    operation === "qualify-agent" ? runtime.workerRoot : "/srv/zeros/workspace",
+    "/srv/zeros/workspace",
     "--",
     runtime.engineNamespace,
   );
-  if(version===3)args.push("--v3");
-  if(version===4)args.push("--runtime-id",runtime.runtimeId);
+  args.push("--runtime-id",runtime.runtimeId);
   if (operation === "qualify") args.push("--qualify");
-  if (operation === "qualify-agent") args.push("--qualify-agent");
   if (operation === "resident") args.push("--resident");
   return args;
 }
@@ -188,8 +180,7 @@ export function cloudEngineViewArguments(operation = "serve",version=2,runtime=r
  * listings. Every authority-bearing variable is selected explicitly from the
  * existing supervisor contract; ambient provider/loader variables are absent. */
 export function cloudEngineViewEnvironment(source, operation = "serve", runtime=resolveCloudRuntime()) {
-  if (!["serve", "qualify", "qualify-agent", "resident"].includes(operation) ||
-    operation === "resident" && runtime.profile !== "v4")
+  if (!["serve", "qualify", "resident"].includes(operation) || runtime.profile !== "v4")
     throw new Error("Invalid cloud engine launch operation");
   const environment = {
     PATH: `${runtime.binRoot}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,

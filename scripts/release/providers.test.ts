@@ -1,3 +1,4 @@
+import { RELEASE_WORKER_IMAGES_RETIRED } from "../../apps/control-plane/src/cloud-workspaces/release-worker-retirement";
 import { describe, expect, it } from "vitest";
 import { promotionConfig } from "./contracts";
 import { createProviders, publicPagesEnvironment, assertNotOlderBranch } from "./providers";
@@ -141,8 +142,8 @@ describe("release provider adapters", () => {
     let reads = 0;
     const strict = createProviders({ ...config, cloudRequired: true, requireQualifiedWorker: true, provider: "boat" }, {},
       { fetch: async () => { reads++; return Response.json(ready); }, pause: async () => {} });
-    await expect(strict.waitIdentity(manifest)).rejects.toThrow("timed out");
-    expect(reads).toBeGreaterThan(1);
+    await expect(strict.waitIdentity(manifest)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
+    expect(reads).toBe(0);
   });
   it.each(["unready", "unknown"])("refuses a newly deployed Alpha 503 with cloud %s even when worker promotion is off", async state => {
     const manifest = { head: "0134_fixture.sql", sha256: "e".repeat(64) };

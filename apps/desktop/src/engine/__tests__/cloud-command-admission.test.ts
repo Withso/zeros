@@ -4,6 +4,7 @@ import path from "node:path";
 import {randomUUID} from "node:crypto";
 import {afterEach,beforeEach,describe,expect,it,vi} from "vitest";
 import type {CloudCommandClaim,CloudCommandEngineRequest} from "@zeros/protocol/cloud-commands";
+import { CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
 import type {AgentNewSessionMessage,AgentLoadSessionMessage} from "@zeros/protocol/messages";
 import {ZerosEngine} from "../zeros-engine";
 import {CloudGoalRecorder} from "../cloud-goal-recorder";
@@ -11,6 +12,7 @@ import {CloudCommandRuntime} from "../cloud-command-runtime";
 import type {TransportClient} from "../transport/types";
 import {closeZerosDb,setZerosDbPathForTesting} from "../db";
 import {deleteChat,getChat,upsertChat,setChatComposerMode} from "../db/chats";
+import { windowChatMessages } from "../db/messages";
 import type {CloudAgentSelection} from "../agents/cloud-provider-execution";
 import {AgentGateway} from "../agents/gateway";
 import type {AgentAdapter} from "../agents/types";
@@ -28,6 +30,7 @@ const methods=ZerosEngine.prototype as unknown as {
   agentSpawnOpts(this:unknown,message:Start,client:TransportClient,stage:string):Promise<Spawn>;
   validateCloudCommand(this:unknown,id:string,payload?:unknown):void;
   handleCloudEventOperation(this:unknown,params:Record<string,unknown>):Promise<unknown>;
+  publishCloudCommandFailure(this:unknown,claim:Pick<CloudCommandClaim,"commandId"|"conversationId"|"payload"> & {executionId:string|null},code:string):void;
 };
 let root:string;
 beforeEach(async()=>{root=await mkdtemp(path.join(os.tmpdir(),"zeros-command-admit-"));setZerosDbPathForTesting(path.join(root,"state.db"));await mkdir(path.join(root,"workspace"));});
@@ -67,6 +70,70 @@ function failingRetirement(engine:ReturnType<typeof fixture>["engine"],execution
   return proof;
 }
 describe("cloud engine credential admission",()=>{
+  it("keeps a typed startup refusal instead of replacing it with generic admission failure", async () => {
+    const { claim, engine } = fixture();
+    const failure = new CloudCommandFailureError({ stage: "containment", category: "canary_failed" });
+    engine.handleAgentMessage.mockImplementationOnce(async (_message, client) => {
+      client.send({ type: "AGENT_ERROR", code: failure.code, message: failure.failure.message, failure: failure.failure } as never);
+    });
+    await expect(methods.prepareCloudCommand.call(engine, claim)).rejects.toMatchObject({ code: failure.code });
+  });
+  it("retains the provider failure kind in the receipt", async () => {
+    const { claim, engine } = fixture(); await methods.prepareCloudCommand.call(engine, claim);
+    engine.handleAgentMessage.mockImplementationOnce(async (_message, client) => {
+      client.send({ type: "AGENT_PROMPT_FAILED", error: "Provider verification required",
+        failure: { kind: "verification-required", stage: "prompt", message: "Verify the provider account" } } as never);
+    });
+    expect(await methods.dispatchCloudCommand.call(engine, claim)).toMatchObject({ state: "failed", resultCode: "cloud_provider_prompt_verification_required" });
+  });
+  it("saves and broadcasts a turn-owned startup error before a device can hydrate", () => {
+    const { claim, engine } = fixture();
+    methods.publishCloudCommandFailure.call(engine, claim, "cloud_admission_authority_http_4xx");
+    const messages = windowChatMessages(claim.conversationId, 100).map(row => JSON.parse(row.payload));
+    expect(messages).toMatchObject([
+      { id: claim.payload.userMessageId, role: "user", text: "test", recoveryFailure: { kind: "protocol-error" } },
+      { kind: "error_notice", recoverable: false, turnFailure: { turnId: claim.payload.userMessageId, kind: "protocol-error" } },
+    ]);
+    expect(engine.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: "AGENT_PROMPT_FAILED", requestId: claim.commandId,
+      error: "cloud_admission_authority_http_4xx", failure: { kind: "protocol-error", message: expect.any(String), agentId: "cursor", stage: "initialize" } }));
+  });
+  it("retains the same terminal error through repeated recovery and a database reopen", () => {
+    const { claim, engine } = fixture(), now = vi.spyOn(Date, "now");
+    try {
+      now.mockReturnValue(10);
+      methods.publishCloudCommandFailure.call(engine, claim, "command_dispatch_rejected");
+      const saved = windowChatMessages(claim.conversationId, 100);
+      closeZerosDb();
+      now.mockReturnValue(20);
+      methods.publishCloudCommandFailure.call(engine, claim, "command_dispatch_rejected");
+      expect(windowChatMessages(claim.conversationId, 100)).toEqual(saved);
+      expect(saved.map(row => JSON.parse(row.payload))).toMatchObject([
+        { id: claim.payload.userMessageId, recoveryFailure: { message: expect.stringContaining("Review the conversation") } },
+        { turnFailure: { turnId: claim.payload.userMessageId }, message: expect.stringContaining("Review the conversation") },
+      ]);
+    } finally { now.mockRestore(); }
+  });
+  it("hydrates an uncertain old-engine receipt into durable VM history without invoking a provider", async () => {
+    const { claim, engine } = fixture(), dispatch = vi.fn();
+    const receipt = { commandId: claim.commandId, position: 1, state: "uncertain" as const, payload: claim.payload,
+      executionId: claim.executionId, generation: 1, resultCode: "engine_interrupted", createdAt: new Date(0).toISOString(), updatedAt: new Date(1).toISOString() };
+    const runtime = new CloudCommandRuntime({
+      request: async input => input.kind === "claim" ? null : { version: 1, conversationId: claim.conversationId,
+        revision: 1, paused: false, pending: [], receipts: [receipt] },
+      validate: () => {}, execution: () => null, dispatch, cancel: async () => {}, changed: () => {},
+      interrupted: (conversationId, row) => { if (row.payload) methods.publishCloudCommandFailure.call(engine,
+        { conversationId, commandId: row.commandId, executionId: row.executionId, payload: row.payload }, "engine_interrupted"); },
+    });
+    try {
+      await runtime.handle({ kind: "snapshot", conversationId: claim.conversationId });
+      closeZerosDb();
+      expect(windowChatMessages(claim.conversationId, 100).map(row => JSON.parse(row.payload))).toMatchObject([
+        { id: claim.payload.userMessageId, recoveryFailure: { kind: "protocol-error", message: expect.stringContaining("Review the conversation") } },
+        { code: "engine_interrupted", turnFailure: { turnId: claim.payload.userMessageId } },
+      ]);
+      expect(dispatch).not.toHaveBeenCalled(); expect(engine.handleAgentMessage).not.toHaveBeenCalled();
+    } finally { runtime.close(); }
+  });
   it("preserves another actor's retained execution when a claim fails validation before admission",async()=>{
     const {claim,engine}=fixture(),incoming={...claim,actor:{...claim.actor!,userId:randomUUID()}};
     engine.conversationExecution.set("conversation",claim.executionId);engine.sessionAgent.set(claim.executionId,"cursor");

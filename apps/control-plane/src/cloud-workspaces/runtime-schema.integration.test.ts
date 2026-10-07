@@ -106,7 +106,9 @@ database("v4 runtime registry and immutable schema", () => {
   });
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
-    fixture = await seedReadyCloudWorkspace(pool);
+    // Generation 1 stays historical so the NULL-to-v4 immutability case remains real.
+    // This suite inserts its full manifest-backed registry and generation 2 below.
+    fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     providerConnectionId = randomUUID();
     const { files: _files, ...header } = manifest;
     registryRows = {

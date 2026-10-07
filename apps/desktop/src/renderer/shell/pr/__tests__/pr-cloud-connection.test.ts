@@ -12,7 +12,7 @@ const fixture = vi.hoisted(() => ({
   sendPrompt: vi.fn(async () => {}),
   error: vi.fn(),
 }));
-vi.mock("../../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => fixture.cloudComputerV2 }));
+vi.mock("../../../features/team/cloud-workspace-account-access", () => ({ useCloudWorkspaceAccountAccess: () => fixture.cloudComputerV2 }));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
   useCallback: (callback: unknown) => callback,

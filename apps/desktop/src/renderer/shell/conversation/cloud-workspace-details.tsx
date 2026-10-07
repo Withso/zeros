@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Activity,
   Clock,
@@ -7,10 +7,21 @@ import {
   FolderGit2,
   HardDrive,
   MemoryStick,
+  ArrowUpRight,
+  Ellipsis,
+  Pencil,
+  Check,
+  X,
   Wrench,
 } from "lucide-react";
-import { Button } from "../../shared/ui";
-import { Tooltip } from "../../shared/ui/primitives";
+import { Button, Input, Tooltip } from "../../shared/ui/primitives";
+import { Avatar, AvatarFallback, AvatarImage } from "../../shared/ui/primitives/avatar";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "../../shared/ui/primitives/dropdown-menu";
+import { shellOpenUrl } from "../../platform/app";
+import { describeWorkspaceRuntimeStatus } from "../workbench/tab-status-model";
+import { formatCompactAge } from "../../features/agent/format-age";
+import { CloudWorkspaceStatusRow } from "./cloud-workspace-restart-controls";
+import { useCloudWorkspaceSurfaceActive } from "./use-cloud-workspace-surface";
 import {
   Popover,
   PopoverContent,
@@ -18,30 +29,34 @@ import {
 } from "../../shared/ui/primitives/popover";
 import {
   cloudWorkspaceDetails,
+  canReadCloudWorkspace,
+  acceptCloudWorkspaceDocument,
+  cloudWorkspaceDocument,
   cloudCatalogGeneration,
   manageCloudWorkspace,
   manageCloudWorkspaceRecovery,
   refreshCloudWorkspace,
 } from "../../state/cloud-workspace-catalog";
 import { useCachedRead } from "../../state/use-cached-read";
+import { useCloudWorkspaceResourceUsage } from "../../state/use-cloud-workspace-resource-usage";
 import {
   cloudWorkspaceKey,
   parseCloudWorkspaceKey,
 } from "../../platform/bridge/cloud-workspace-key";
 import { getOrganizationStoreGeneration, useTeams } from "../../features/team/team-store";
+import { ControlPlaneError } from "../../features/team/control-plane";
 import { CloudWorkspaceSetupFailure } from "./cloud-workspace-setup-failure";
-import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
+import { renameCloudWorkspace, type CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
+import { cloudWorkspaceExecutionRefusal } from "../../platform/cloud-workspace-execution";
 import { toast } from "../../shared/ui/primitives/elements";
 import { Checkbox } from "../../shared/ui/primitives/checkbox";
-import { useInternalFeatureActive } from "../../features/settings/internal-features";
+import { hasCloudWorkspaceAccountAccess, useCloudWorkspaceAccountAccess } from "../../features/team/cloud-workspace-account-access";
 import { warmCloudServiceAccess } from "../../platform/cloud-workspace-access";
 import { CloudWorkspaceAccessControls } from "./cloud-workspace-access-controls";
 import { useNativeRuntime } from "../../platform/runtime";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import { warmCloudWorkspaceReplicas } from "../../state/cloud-replica-cache";
 import { CloudWorkspaceSyncControls } from "./cloud-workspace-sync-controls";
-import { cloudWorkspaceCollaborationKey, cloudWorkspaceCollaborationOwner, warmCloudWorkspaceCollaboration } from "../../state/cloud-workspace-collaboration-cache";
-import { CloudWorkspaceSharingControls } from "./cloud-workspace-sharing-controls";
 import { CloudWorkspaceRuntimeControls } from "./cloud-workspace-runtime-controls";
 import { subscribeCloudRuntimeUpgradeDetails, warmCloudRuntimeUpgrade } from "../../state/cloud-runtime-upgrade";
 
@@ -49,35 +64,55 @@ export function cloudStatusLabel(status: string): string {
   return (
     (
       {
-        ready: "Running",
-        busy: "Running",
-        creating: "Creating",
-        provisioning: "Setting up",
-        starting: "Starting",
-        stopping: "Stopping",
-        stopped: "Stopped",
-        archived: "Archived",
-        error: "Needs attention",
-        failed: "Setup failed",
         restoring: "Restoring workspace from saved checkpoint",
         waiting_for_capacity: "Recovery is waiting for capacity",
         waiting_for_funding: "Recovery is waiting for compute funding",
         recovery_needed: "Recovery needs attention",
       } as Record<string, string>
-    )[status] ?? status.replaceAll("_", " ")
+    )[status] ?? describeWorkspaceRuntimeStatus({ cloud: true, state: status, connection: "connected", since: 0 }, Date.now())
   );
+}
+
+/** The view accepts the same nested observations as the usage facade. Native
+ * paths and grants never enter this presentation contract. */
+export interface CloudWorkspaceUsage {
+  organizationId: string;
+  workspaceId: string;
+  generation: number;
+  cpu: { cores: number | null; usedPercent: number | null };
+  memory: { totalBytes: number | null; usedPercent: number | null };
+  disk: { totalBytes: number | null; usedPercent: number | null };
 }
 
 export function CloudWorkspaceDetailsContent({
   workspace,
   creator,
+  resourceUsage,
+  status,
+  more,
+  onRename,
+  now = Date.now(),
 }: {
   workspace: CloudWorkspaceDocument;
   creator: string;
+  resourceUsage?: CloudWorkspaceUsage | null;
+  status?: ReactNode;
+  more?: ReactNode;
+  onRename?: (name: string, version: number) => Promise<void>;
+  now?: number;
 }) {
   const resources = workspace.generation.resources;
   const recoveryState = workspace.recovery?.state;
-  const setup = workspace.setupFailure ? "Setup failed" : recoveryState ? cloudStatusLabel(recoveryState) : ["ready", "busy", "stopped", "archived"].includes(
+  const refusal = cloudWorkspaceExecutionRefusal(workspace);
+  const usage = ["ready", "busy"].includes(workspace.status) && !recoveryState && !refusal &&
+    resourceUsage?.organizationId === workspace.organizationId && resourceUsage.workspaceId === workspace.id &&
+    resourceUsage.generation === workspace.generation.number ? resourceUsage : null;
+  const repositoryName = `${workspace.repository.owner}/${workspace.repository.name}`;
+  const createdAge = formatCompactAge(Date.parse(workspace.createdAt), now);
+  const repositoryUrl = ["github", "github.com"].includes(workspace.repository.forge) &&
+    /^[\w.-]+$/.test(workspace.repository.owner) && /^[\w.-]+$/.test(workspace.repository.name)
+    ? `https://github.com/${encodeURIComponent(workspace.repository.owner)}/${encodeURIComponent(workspace.repository.name)}` : null;
+  const setup = refusal ? "Unavailable" : workspace.setupFailure ? "Setup failed" : recoveryState ? cloudStatusLabel(recoveryState) : ["ready", "busy", "stopped", "archived"].includes(
     workspace.status,
   )
     ? "Setup succeeded"
@@ -88,56 +123,70 @@ export function CloudWorkspaceDetailsContent({
     {
       Icon: FolderGit2,
       label: "Repository",
-      value: `${workspace.repository.owner}/${workspace.repository.name}`,
+      value: <span className="inline-flex min-w-0 items-center justify-end gap-1">
+        <Avatar className="size-4 shrink-0">
+          {repositoryUrl && <AvatarImage src={`https://github.com/${encodeURIComponent(workspace.repository.owner)}.png?size=32`} alt="" />}
+          <AvatarFallback className="text-xxs">{workspace.repository.owner.slice(0, 1).toUpperCase()}</AvatarFallback>
+        </Avatar>
+        <Tooltip label={repositoryName}><span className="min-w-0 truncate">{repositoryName}</span></Tooltip>
+        {repositoryUrl && <Tooltip label="Open repository"><Button variant="ghost" size="icon-compact" aria-label="Open repository"
+          onClick={() => { void shellOpenUrl(repositoryUrl).catch(() => toast.error("Couldn't open repository")); }}><ArrowUpRight /></Button></Tooltip>}
+      </span>,
     },
     {
       Icon: Clock,
       label: "Created",
-      value: `${creator} · ${new Date(workspace.createdAt).toLocaleDateString()}`,
+      value: <Tooltip label={new Date(workspace.createdAt).toLocaleString()}>
+        <span className="min-w-0 truncate">{creator} · {createdAge === "now" ? "Just now" : `${createdAge} ago`}</span>
+      </Tooltip>,
     },
     { Icon: Wrench, label: "Setup", value: setup },
     { Icon: Cloud, label: "Environment", value: "Zeros Cloud" },
     {
       Icon: Activity,
       label: "Status",
-      value: cloudStatusLabel(recoveryState ?? workspace.status),
+      value: status ?? <span role="status" className="inline-flex items-center gap-1.5">
+        {!refusal && cloudStatusLabel(recoveryState ?? workspace.status) === "Running" && <span className="bg-green-primary size-1.5 rounded-full" aria-hidden="true" />}
+        {cloudStatusLabel(refusal ? "failed" : recoveryState ?? workspace.status)}
+      </span>,
     },
     {
       Icon: Cpu,
       label: "CPU",
-      value: `${resources.cpuMillicores / 1000} cores`,
+      value: <ResourceValue capacity={`${usage?.cpu.cores ?? resources.cpuMillicores / 1000} cores`} percent={usage?.cpu.usedPercent} />,
     },
     {
       Icon: MemoryStick,
       label: "Memory",
-      value: `${Number((resources.memoryMiB / 1024).toFixed(2))} GiB`,
+      value: <ResourceValue capacity={formatGigabytes(usage?.memory.totalBytes ?? resources.memoryMiB * 1024 * 1024)} percent={usage?.memory.usedPercent} />,
     },
     {
       Icon: HardDrive,
       label: "Disk",
-      value: `${Number((resources.storageMiB / 1024).toFixed(2))} GiB`,
+      value: <ResourceValue capacity={formatGigabytes(usage?.disk.totalBytes ?? resources.storageMiB * 1024 * 1024)} percent={usage?.disk.usedPercent} />,
     },
   ];
   return (
     <>
-      <h2 className="text-fg1 mb-3 truncate text-sm font-medium">
-        {workspace.name}
-      </h2>
-      <dl className="space-y-3">
+      <div className="mb-3 flex min-w-0 items-center gap-1">
+        <WorkspaceName key={`${workspace.organizationId}:${workspace.id}`} workspace={workspace} onRename={onRename} />
+        {more ?? <Button variant="ghost" size="icon-compact" disabled aria-label="More workspace actions"><Ellipsis /></Button>}
+      </div>
+      <dl className="space-y-2">
         {rows.map(({ Icon, label, value }, index) => (
           <div
             key={label}
             className={
               index === 3
-                ? "border-border1 flex items-start gap-3 border-t pt-3"
-                : "flex items-start gap-3"
+                ? "border-border1 flex min-w-0 items-center gap-2 border-t pt-3"
+                : "flex min-w-0 items-center gap-2"
             }
           >
             <dt className="text-fg2 flex shrink-0 items-center gap-2 text-xs">
               <Icon size={14} strokeWidth={1.5} />
               {label}
             </dt>
-            <dd className="text-fg1 ml-auto min-w-0 text-right text-xs break-words">
+            <dd className="text-fg1 ml-auto min-w-0 text-right text-xs">
               {value}
             </dd>
           </div>
@@ -146,10 +195,11 @@ export function CloudWorkspaceDetailsContent({
       {recoveryState && workspace.recovery?.checkpointAt && (
         <p className="text-fg3 mt-3 text-xs">Saved checkpoint · {new Date(workspace.recovery.checkpointAt).toLocaleString()}</p>
       )}
-      {workspace.setupFailure && (
+      {refusal && <p className="text-fg2 mt-3 text-xs" role="alert">{refusal.message}</p>}
+      {!refusal && workspace.setupFailure && (
         <div className="mt-3"><CloudWorkspaceSetupFailure failure={workspace.setupFailure} /></div>
       )}
-      {workspace.error && !recoveryState && !workspace.setupFailure && (
+      {!refusal && workspace.error && !recoveryState && !workspace.setupFailure && (
         <p className="text-red-primary mt-3 text-xs" role="alert">
           {workspace.error.message}
         </p>
@@ -158,19 +208,91 @@ export function CloudWorkspaceDetailsContent({
   );
 }
 
+function formatGigabytes(bytes: number): string {
+  return `${Number((bytes / 1_000_000_000).toFixed(1))} GB`;
+}
+
+function ResourceValue({ capacity, percent }: { capacity: string; percent?: number | null }) {
+  const available = percent !== null && percent !== undefined && Number.isFinite(percent) && percent >= 0 && percent <= 100;
+  return <span className="inline-flex items-center gap-1">
+    <span className="text-muted-fg">{capacity}</span><span className="text-muted-fg" aria-hidden="true">·</span>
+    <span>{available ? `${Number(percent.toFixed(1))}% used` : <Tooltip label="Live usage unavailable"><span aria-label="Live usage unavailable">—</span></Tooltip>}</span>
+  </span>;
+}
+
+export type CloudWorkspaceRenameDraft = { name: string; version: number; rebase: boolean };
+
+/** A rename draft keeps the version it was opened against. Only a version
+ * conflict marks it for rebase onto the next refreshed document version, so a
+ * later concurrent change still surfaces as a conflict instead of an overwrite. */
+export function renameDraftAfterFailure(draft: CloudWorkspaceRenameDraft, error: unknown): CloudWorkspaceRenameDraft {
+  return error instanceof ControlPlaneError && error.status === 409 && error.code === "cloud_workspace_version_conflict"
+    ? { ...draft, rebase: true } : draft;
+}
+export function rebaseRenameDraft(draft: CloudWorkspaceRenameDraft, version: number): CloudWorkspaceRenameDraft {
+  return draft.rebase && version !== draft.version ? { ...draft, version, rebase: false } : draft;
+}
+
+function WorkspaceName({ workspace, onRename }: { workspace: CloudWorkspaceDocument; onRename?: (name: string, version: number) => Promise<void> }) {
+  const [draft, setDraft] = useState<CloudWorkspaceRenameDraft | null>(null);
+  const [busy, setBusy] = useState(false);
+  const pending = useRef(false), alive = useRef(true), latestVersion = useRef(workspace.version);
+  latestVersion.current = workspace.version;
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  useEffect(() => { setDraft(current => current && rebaseRenameDraft(current, workspace.version)); }, [workspace.version]);
+  const save = () => {
+    if (!draft || !onRename || pending.current || !workspace.capabilities.canManage || !draft.name.trim()) return;
+    pending.current = true; setBusy(true);
+    void onRename(draft.name.trim(), draft.version).then(() => {
+      if (alive.current) { setDraft(null); toast.success("Workspace renamed"); }
+    }).catch(error => {
+      if (!alive.current) return;
+      // The refreshed version may already have arrived before this conflict.
+      setDraft(current => current && rebaseRenameDraft(renameDraftAfterFailure(current, error), latestVersion.current));
+      toast.error("Couldn't rename workspace", { description: error instanceof Error ? error.message : "Try again." });
+    })
+      .finally(() => { pending.current = false; if (alive.current) setBusy(false); });
+  };
+  if (draft) return <form className="flex min-w-0 flex-1 items-center gap-1" onSubmit={event => { event.preventDefault(); save(); }}>
+    <Input aria-label="Workspace name" maxLength={120} value={draft.name} disabled={busy} autoFocus
+      onChange={event => setDraft({ ...draft, name: event.target.value })} onKeyDown={event => { if (event.key === "Escape" && !busy) { event.preventDefault(); setDraft(null); } }} />
+    <Button type="submit" variant="ghost" size="icon-compact" aria-label="Save workspace name" disabled={busy || !draft.name.trim()}><Check /></Button>
+    <Button type="button" variant="ghost" size="icon-compact" aria-label="Cancel rename" disabled={busy} onClick={() => setDraft(null)}><X /></Button>
+  </form>;
+  return <>
+    <Tooltip label={workspace.name}><h2 className="text-fg1 min-w-0 flex-1 truncate text-sm font-medium">{workspace.name}</h2></Tooltip>
+    <Tooltip label={workspace.capabilities.canManage ? "Rename workspace" : "Workspace management access is required to rename"}>
+      <span className="inline-flex"><Button variant="ghost" size="icon-compact" aria-label="Rename workspace" disabled={!workspace.capabilities.canManage || !onRename}
+        onClick={() => setDraft({ name: workspace.name, version: workspace.version, rebase: false })}><Pencil /></Button></span>
+    </Tooltip>
+  </>;
+}
+
+function WorkspaceMore({ workspace, active, focusRequest }: { workspace: CloudWorkspaceDocument; active: boolean; focusRequest: number }) {
+  const [open, setOpen] = useState(false);
+  useEffect(() => { if (focusRequest && active) setOpen(true); }, [focusRequest, active]);
+  return <DropdownMenu open={open && active} onOpenChange={setOpen}>
+    <Tooltip label="More workspace actions"><DropdownMenuTrigger asChild>
+      <Button variant="ghost" size="icon-compact" aria-label="More workspace actions"><Ellipsis /></Button>
+    </DropdownMenuTrigger></Tooltip>
+    <DropdownMenuContent align="end" className="w-64 p-3">
+      <CloudWorkspaceRuntimeControls workspace={workspace} active={open && active} focusRequest={focusRequest} />
+    </DropdownMenuContent>
+  </DropdownMenu>;
+}
+
 export function CloudWorkspaceDetails({ folder }: { folder: string }) {
-  const nativeAccessEnabled = useInternalFeatureActive("cloudComputerV2");
   const target = parseCloudWorkspaceKey(folder);
+  const nativeAccessEnabled = useCloudWorkspaceAccountAccess(target?.organizationId);
   const key = target ? cloudWorkspaceKey(target) : null;
   const [open, setOpen] = useState(false);
   const [runtimeFocusRequest, setRuntimeFocusRequest] = useState(0);
   const [starting, setStarting] = useState(false);
   const [acknowledgedCheckpoint, setAcknowledgedCheckpoint] = useState<string | null>(null);
   const { me } = useTeams();
-  const syncEnabled = useInternalFeatureActive("cloudComputerV2");
+  const syncEnabled = nativeAccessEnabled;
   const native = useNativeRuntime().ready;
-  const surfaceActive = useWorkspaceStore(state => state.activePage === "workspace");
-  const sharingActive = useInternalFeatureActive("cloudComputerV2");
+  const surfaceActive = useCloudWorkspaceSurfaceActive(useWorkspaceStore(state => state.activePage === "workspace"));
   const account = getOrganizationStoreGeneration(), catalog = cloudCatalogGeneration();
   useEffect(() => subscribeCloudRuntimeUpgradeDetails(intent => {
     if (!nativeAccessEnabled || !surfaceActive || intent.account !== account || intent.catalog !== catalog ||
@@ -179,41 +301,52 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
     setOpen(true);
   }), [nativeAccessEnabled, surfaceActive, account, catalog, key]);
   const mounted = useRef(false);
-  const warmSurface = useRef({ key, active: sharingActive && surfaceActive });
-  warmSurface.current = { key, active: sharingActive && surfaceActive };
+  const warmSurface = useRef({ key, active: surfaceActive, account, catalog });
+  warmSurface.current = { key, active: surfaceActive, account, catalog };
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => { if (!surfaceActive) { setOpen(false); setRuntimeFocusRequest(0); } }, [surfaceActive]);
   const details = useCachedRead(
     cloudWorkspaceDetails,
     key,
     (value) => refreshCloudWorkspace(parseCloudWorkspaceKey(value)!),
-    { enabled: open && surfaceActive, maxAgeMs: 10_000 },
+    { enabled: open && surfaceActive && nativeAccessEnabled, maxAgeMs: 10_000 },
   );
-  if (!key) return null;
+  const resourceUsage = useCloudWorkspaceResourceUsage(key, { active: surfaceActive, open, featureActive: nativeAccessEnabled });
+  if (!key || !nativeAccessEnabled) return null;
   const warm = () => {
     if (!surfaceActive) return;
     const confirmed = cloudWorkspaceDetails.peekSnapshot(key).data;
-    if (nativeAccessEnabled && confirmed?.capabilities.canManage) warmCloudRuntimeUpgrade(target!, confirmed.generation.number);
-    if (nativeAccessEnabled && target) void warmCloudServiceAccess(target).catch(() => {});
-    const owner = sharingActive ? cloudWorkspaceCollaborationOwner(target!) : null;
-    const ownerKey = owner ? cloudWorkspaceCollaborationKey(owner) : null;
-    if (sharingActive) warmCloudWorkspaceCollaboration(target!);
+    if (nativeAccessEnabled && confirmed?.capabilities.canManage && !cloudWorkspaceExecutionRefusal(confirmed)) warmCloudRuntimeUpgrade(target!, confirmed.generation.number);
+    if (nativeAccessEnabled && target && canReadCloudWorkspace(confirmed)) void warmCloudServiceAccess(target).catch(() => {});
     void cloudWorkspaceDetails
       .load(key, () => refreshCloudWorkspace(parseCloudWorkspaceKey(key)!), {
         maxAgeMs: 10_000,
       })
       .then(workspace => {
-        if (mounted.current && warmSurface.current.active && warmSurface.current.key === key && ownerKey) {
-          if (workspace.capabilities.canManage) warmCloudRuntimeUpgrade(target!, workspace.generation.number);
-          const currentOwner = cloudWorkspaceCollaborationOwner(target!);
-          if (currentOwner && cloudWorkspaceCollaborationKey(currentOwner) === ownerKey)
-            warmCloudWorkspaceCollaboration(target!);
+        if (!mounted.current || !warmSurface.current.active || warmSurface.current.key !== key ||
+          warmSurface.current.account !== account || warmSurface.current.catalog !== catalog) return;
+        if (nativeAccessEnabled) {
+          if (workspace.capabilities.canManage && !cloudWorkspaceExecutionRefusal(workspace)) warmCloudRuntimeUpgrade(target!, workspace.generation.number);
         }
         if (syncEnabled && native && surfaceActive && me?.user.id && workspace.capabilities.canEdit === true) {
           return warmCloudWorkspaceReplicas(me.user.id, parseCloudWorkspaceKey(key)!);
         }
       })
       .catch(() => {});
+  };
+  const rename = async (name: string, version: number) => {
+    const current = () => mounted.current && warmSurface.current.active && warmSurface.current.key === key &&
+      hasCloudWorkspaceAccountAccess(target!.organizationId) &&
+      account === getOrganizationStoreGeneration() && catalog === cloudCatalogGeneration();
+    if (!current() || !details.data?.capabilities.canManage) throw new Error("Workspace management access is required to rename.");
+    try {
+      const workspace = await renameCloudWorkspace(target!, { name, version }, crypto.randomUUID());
+      if (!current() || !cloudWorkspaceDocument(target!)) throw new Error("The cloud workspace changed.");
+      acceptCloudWorkspaceDocument(workspace);
+    } finally {
+      // Success and version conflicts both converge on the exact catalog read.
+      if (current()) void refreshCloudWorkspace(target!).catch(() => {});
+    }
   };
   return (
     <Popover open={open && surfaceActive} onOpenChange={next => { setRuntimeFocusRequest(0); setOpen(next); }}>
@@ -243,10 +376,14 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
           <CloudWorkspaceDetailsContent
             workspace={details.data}
             creator={
-              me?.user.id === details.data.createdBy
+              details.data.createdByDisplayName ?? (me?.user.id === details.data.createdBy
                 ? (me.user.displayName ?? "You")
-                : "Workspace member"
+                : "Workspace member")
             }
+            resourceUsage={resourceUsage.data}
+            onRename={rename}
+            status={nativeAccessEnabled ? <CloudWorkspaceStatusRow folder={key} active={open && surfaceActive} inline /> : undefined}
+            more={nativeAccessEnabled && details.data.capabilities.canManage && !cloudWorkspaceExecutionRefusal(details.data) ? <WorkspaceMore workspace={details.data} active={open && surfaceActive} focusRequest={runtimeFocusRequest} /> : undefined}
           />
         ) : (
           <p className="text-fg2 text-xs">
@@ -258,9 +395,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
             Couldn’t refresh. Showing the last confirmed details.
           </p>
         )}
-        {details.data && nativeAccessEnabled && <CloudWorkspaceRuntimeControls key={`${getOrganizationStoreGeneration()}:${key}`} workspace={details.data} active={open && surfaceActive} focusRequest={runtimeFocusRequest} />}
-        {details.data && sharingActive && <CloudWorkspaceSharingControls workspace={details.data} active={open && surfaceActive} />}
-        {details.data?.recovery?.checkpointId && details.data.recovery.state !== "restoring" &&
+        {details.data?.recovery?.checkpointId && !cloudWorkspaceExecutionRefusal(details.data) && details.data.recovery.state !== "restoring" &&
           (details.data.recovery.state || details.data.status === "failed") &&
           ["failed", "stopped", "archived"].includes(details.data.status) && (
             <div className="mt-3">
@@ -285,7 +420,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
               </Button>
             </div>
           )}
-        {details.data && !details.data.recovery?.state &&
+        {details.data && !cloudWorkspaceExecutionRefusal(details.data) && !details.data.recovery?.state &&
           ["stopped", "archived"].includes(details.data.status) && (
             <div className="mt-3">
               <Button
@@ -312,7 +447,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
               )}
             </div>
           )}
-        {details.data && <CloudWorkspaceAccessControls workspace={details.data} active={open} />}
+        {details.data && !cloudWorkspaceExecutionRefusal(details.data) && <CloudWorkspaceAccessControls workspace={details.data} active={open && surfaceActive} mode="ssh" />}
         {details.data && <CloudWorkspaceSyncControls key={`${me?.user.id}:${key}`} workspace={details.data} active={open && surfaceActive} />}
       </PopoverContent>
     </Popover>

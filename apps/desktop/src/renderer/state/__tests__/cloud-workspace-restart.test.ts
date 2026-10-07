@@ -2,8 +2,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 import { cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 
-const api = vi.hoisted(() => ({ enabled: true, read: vi.fn(), lifecycle: vi.fn(), connect: vi.fn(), failure: vi.fn(), clear: vi.fn() }));
+const api = vi.hoisted(() => ({ enabled: true, signedIn: true, entitled: true, read: vi.fn(), lifecycle: vi.fn(), connect: vi.fn(), failure: vi.fn(), clear: vi.fn() }));
 vi.mock("../../features/settings/internal-features", () => ({ isInternalFeatureActive: () => api.enabled }));
+vi.mock("../../features/team/team-store", async original => ({
+  ...await original<typeof import("../../features/team/team-store")>(),
+  getTeamStoreState: () => ({ me: api.signedIn ? {
+    user: { id: "nonstaff-member", staffRole: null },
+    organizations: [{ id: "11111111-1111-4111-8111-111111111111", isPersonal: false, workspaceCapabilities: { cloud: api.entitled } }],
+    teams: [],
+  } : null }),
+  useTeams: () => ({ me: api.signedIn ? {
+    user: { id: "nonstaff-member", staffRole: null },
+    organizations: [{ id: "11111111-1111-4111-8111-111111111111", isPersonal: false, workspaceCapabilities: { cloud: api.entitled } }],
+    teams: [],
+  } : null }),
+}));
 vi.mock("../../platform/cloud-workspaces", async original => ({
   ...await original<typeof import("../../platform/cloud-workspaces")>(),
   getCloudWorkspaceDocument: api.read,
@@ -31,7 +44,7 @@ function doc(version: number, status = "ready"): CloudWorkspaceDocument {
   };
 }
 beforeEach(() => {
-  vi.useFakeTimers(); vi.resetAllMocks(); api.enabled = true;
+  vi.useFakeTimers(); vi.resetAllMocks(); api.enabled = true; api.signedIn = true; api.entitled = true;
   clearCloudWorkspaceCatalog(); acceptCloudWorkspaceDocument(doc(1));
   api.lifecycle.mockImplementation(async (_target, operation) => doc(operation === "stop" ? 2 : 4, operation === "stop" ? "stopping" : "waking"));
   api.read.mockResolvedValueOnce(doc(3, "stopped")).mockResolvedValue(doc(5, "ready"));
@@ -40,6 +53,13 @@ beforeEach(() => {
 afterEach(() => { clearCloudWorkspaceCatalog(); vi.useRealTimers(); });
 
 describe("manual cloud workspace Restart", () => {
+  it("restarts for a nonstaff member without enabling the retired preference", async () => {
+    api.enabled = false;
+    const pending = restartCloudWorkspace(target);
+    await Promise.all([expect(pending).resolves.toBeUndefined(), vi.advanceTimersByTimeAsync(3_000)]);
+    expect(api.lifecycle.mock.calls.map(call => call[1])).toEqual(["stop", "wake"]);
+    expect(api.connect).toHaveBeenCalledExactlyOnceWith(folder);
+  });
   it("connects the current generation when its accepted wake automatically upgrades the runtime", async () => {
     api.read.mockReset().mockResolvedValueOnce(doc(3, "stopped"))
       .mockResolvedValueOnce({ ...doc(5, "provisioning"), generation: { ...doc(5).generation, number: 8 } })
@@ -47,10 +67,53 @@ describe("manual cloud workspace Restart", () => {
     api.connect.mockImplementation(async () => { expect(cloudWorkspaceDocument(target)?.generation.number).toBe(8); });
     const task = restartCloudWorkspace(target);
     const ready = expect(task).resolves.toBeUndefined();
-    await vi.advanceTimersByTimeAsync(3_000); await ready;
+    // Stop is observed at 1 s, then each wake fallback is 2 s. The first
+    // observes the upgraded generation; readiness is a separate publication.
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(cloudWorkspaceDocument(target)?.status).toBe("provisioning");
+    expect(api.connect).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2_000); await ready;
     expect(api.lifecycle.mock.calls.map(call => call[1])).toEqual(["stop", "wake"]);
     expect(api.connect).toHaveBeenCalledExactlyOnceWith(folder);
     expect(api.failure).not.toHaveBeenCalled();
+  });
+
+  it("retains upgraded readiness published before the wake reply, without a wake fallback poll", async () => {
+    let finishWake!: (value: CloudWorkspaceDocument) => void;
+    api.lifecycle.mockImplementation(async (_target, operation) => operation === "stop" ? doc(2, "stopping")
+      : new Promise(resolve => { finishWake = resolve; }));
+    const task = restartCloudWorkspace(target);
+    const completed = expect(task).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(api.lifecycle.mock.calls.map(call => call[1])).toEqual(["stop", "wake"]);
+    acceptCloudWorkspaceDocument({ ...doc(5, "provisioning"), generation: { ...doc(5).generation, number: 8 } });
+    acceptCloudWorkspaceDocument({ ...doc(6, "ready"), generation: { ...doc(6).generation, number: 8 } });
+    expect(api.connect).not.toHaveBeenCalled();
+    // The late receipt describes the source; its older version must not erase
+    // the ready replacement or require an event that already arrived.
+    finishWake(doc(4, "waking"));
+    await vi.advanceTimersByTimeAsync(0); await completed;
+    expect(cloudWorkspaceDocument(target)?.generation.number).toBe(8);
+    expect(api.connect).toHaveBeenCalledExactlyOnceWith(folder);
+    expect(api.read).toHaveBeenCalledOnce(); // Stop observation only.
+    expect(api.failure).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("connects on upgraded readiness while the wake fallback refresh is hung", async () => {
+    api.read.mockReset().mockResolvedValueOnce(doc(3, "stopped")).mockReturnValue(new Promise(() => {}));
+    const task = restartCloudWorkspace(target);
+    const completed = expect(task).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(api.read).toHaveBeenCalledTimes(2);
+    expect(api.connect).not.toHaveBeenCalled();
+    acceptCloudWorkspaceDocument({ ...doc(6, "ready"), generation: { ...doc(6).generation, number: 8 } });
+    await vi.advanceTimersByTimeAsync(0); await completed;
+    expect(api.connect).toHaveBeenCalledExactlyOnceWith(folder);
+    expect(cloudWorkspaceDocument(target)?.generation.number).toBe(8);
+    expect(api.lifecycle.mock.calls.map(call => call[1])).toEqual(["stop", "wake"]);
+    expect(api.failure).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
   it("waits for the final Stop checkpoint, wakes with a fresh operation, then connects the same workspace", async () => {
     const phases: (string | null)[] = [cloudWorkspaceRestartPhase(folder)];
@@ -61,7 +124,9 @@ describe("manual cloud workspace Restart", () => {
     const stopRevision = cloudWorkspaceStopVersion(target);
     expect(stopRevision).toBeGreaterThan(0);
     expect(api.connect).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(2_000); await task;
+    await vi.advanceTimersByTimeAsync(2_000);
+    acceptCloudWorkspaceDocument(doc(5, "ready"));
+    await vi.advanceTimersByTimeAsync(0); await task;
     expect(phases).toEqual([null, "stopping", "stopped", "waking", "connecting", null]);
     expect(api.lifecycle.mock.calls.map(call => call[1])).toEqual(["stop", "wake"]);
     expect(api.lifecycle.mock.calls[0][2]).not.toBe(api.lifecycle.mock.calls[1][2]);
@@ -98,7 +163,9 @@ describe("manual cloud workspace Restart", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(api.lifecycle).toHaveBeenCalledOnce();
     finish(doc(2, "stopping")); await stop;
-    await vi.advanceTimersByTimeAsync(2_000); await first;
+    await vi.advanceTimersByTimeAsync(2_000);
+    acceptCloudWorkspaceDocument(doc(5, "ready"));
+    await vi.advanceTimersByTimeAsync(0); await first;
     expect(api.lifecycle.mock.calls.map(call => call[1])).toEqual(["stop", "wake"]);
     expect(api.connect).toHaveBeenCalledOnce();
   });
@@ -108,24 +175,34 @@ describe("manual cloud workspace Restart", () => {
     api.read.mockReset().mockResolvedValue(doc(5, "ready"));
     const wake = wakeCloudWorkspace(target, doc(1, "stopped"));
     const restart = restartCloudWorkspace(folder);
-    await vi.advanceTimersByTimeAsync(1_000); await Promise.all([wake, restart]);
+    await vi.advanceTimersByTimeAsync(25);
+    acceptCloudWorkspaceDocument(doc(5, "ready"));
+    await vi.advanceTimersByTimeAsync(0); await Promise.all([wake, restart]);
     expect(api.lifecycle).toHaveBeenCalledExactlyOnceWith(target, "wake", expect.any(String));
     expect(api.connect).toHaveBeenCalledOnce();
+    expect(api.read).not.toHaveBeenCalled();
   });
 
   it.each(["stopping", "stopped", "waking"])("joins server %s state without repeating its lifecycle mutation", async status => {
     acceptCloudWorkspaceDocument(doc(1, status));
     if (status !== "stopping") api.read.mockReset().mockResolvedValue(doc(5, "ready"));
     const task = restartCloudWorkspace(folder);
-    await vi.advanceTimersByTimeAsync(2_000); await task;
+    await vi.advanceTimersByTimeAsync(0);
+    if (status === "stopping") {
+      expect(api.lifecycle).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    acceptCloudWorkspaceDocument(doc(5, "ready"));
+    await vi.advanceTimersByTimeAsync(0); await task;
     expect(api.lifecycle.mock.calls.map(call => call[1])).toEqual(status === "waking" ? [] : ["wake"]);
     expect(api.connect).toHaveBeenCalledOnce();
   });
 
-  it.each(["no canWrite", "archived", "archiving", "deleting", "deleted", "Local Personal", "Local organization", "flag off"])("does not mutate or connect for %s", async reason => {
+  it.each(["no canWrite", "archived", "archiving", "deleting", "deleted", "Local Personal", "Local organization", "signed-out", "no-entitlement"])("does not mutate or connect for %s", async reason => {
     const current = doc(2, ["archived", "archiving", "deleting", "deleted"].includes(reason) ? reason : "ready");
     if (reason === "no canWrite") current.capabilities.canWrite = false;
-    if (reason === "flag off") api.enabled = false;
+    if (reason === "signed-out") api.signedIn = false;
+    if (reason === "no-entitlement") api.entitled = false;
     acceptCloudWorkspaceDocument(current);
     const path = reason.startsWith("Local") ? "/fixture/local" : folder;
     await expect(restartCloudWorkspace(path)).rejects.toThrow();
@@ -133,7 +210,7 @@ describe("manual cloud workspace Restart", () => {
     expect(api.read).not.toHaveBeenCalled();
     expect(api.connect).not.toHaveBeenCalled();
     expect(api.failure).not.toHaveBeenCalled();
-    if (reason !== "no canWrite" && reason !== "flag off") expect(cloudWorkspaceRestartVisible(path, current)).toBe(false);
+    if (reason !== "no canWrite" && !["signed-out", "no-entitlement"].includes(reason)) expect(cloudWorkspaceRestartVisible(path, current)).toBe(false);
   });
 
   it.each(["account", "generation", "archived", "canWrite"])("never wakes after %s changes while Stop is pending", async reason => {

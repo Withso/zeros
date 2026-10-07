@@ -5,8 +5,13 @@ control-plane entrypoint starts template builds when Boat and runtime artifacts
 are configured. Tests cover factory startup and shutdown, C1 and the
 B7 database journal, the actual adapter/helper transport, and fake provider and
 GitHub boundaries.
-This document describes the internal Alpha path; the legacy image worker is
-unchanged. No live qualification is claimed by these tests.
+This is the supported Alpha build path for active organization owners/admins;
+engineering staff membership and the desktop internal flag are not required.
+The legacy image producer/service is removed. Historical cancellation and
+receipt-verified deletion run in the cleanup-only retirement worker, independent
+of setup-worker startup; enrollment can proceed while cleanup is pending.
+Historical tables, identities and referenced snapshots remain. No live
+qualification is claimed by these tests.
 
 ## Worker and durable authority
 

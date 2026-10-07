@@ -1,4 +1,6 @@
 import type {CloudAgentExecutionAdmission,CloudAgentExecutionRequest} from "@zeros/protocol/cloud-agent-execution";
+import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
+import { cloudCommandFailureCode, decodeCloudCommandFailure, CloudCommandFailureError, type CloudCommandFailureCause } from "@zeros/protocol/cloud-commands";
 import type {CloudAgentToolBridge} from "@zeros/protocol/cloud-agent-tools";
 import {CLOUD_NATIVE_EXECUTION_PROFILE,cloudNativeProviderRestrictions,cloudBrowserUnavailable} from "@zeros/protocol/containment";
 import {CloudAgentLease,type CloudAgentLeaseSupervisor} from "./cloud-agent-lease";
@@ -55,13 +57,16 @@ export function createCloudAgentExecutionFactory(options:{
   return {async prepare({admission,conversationId,workload,cwd,signal,productTools,providerSettings,customization}){
     let lease:CloudAgentLease|undefined;
     let redactor:CloudCustomizationRedactor|undefined;
+    let stage: CloudCommandFailureCause["stage"] = "validation";
     try{
       signal.throwIfAborted();
-      const customizationVersion=resolveCloudRuntime().profile==="v4"?3 as const:2 as const;
-      const requested=customization?{...admission,customization:{version:customizationVersion,repositoryServers:await readCloudRepositoryMcp(cwd)}}:admission;
+      if(resolveCloudRuntime().profile!=="v4")throw new Error("Cloud agents require a qualified v4 worker");
+      const requested=customization?{...admission,customization:{version:3 as const,repositoryServers:await readCloudRepositoryMcp(cwd)}}:admission;
+      stage = "admission";
       lease=await CloudAgentLease.admit(requested,options.request,signal,options.supervisor);
       redactor=new CloudCustomizationRedactor([...Object.values(lease.environment?.values??{}),...(lease.customization?.servers??[]).flatMap(({server})=>
         Object.values(server.transport==="stdio"?server.env??{}:server.headers??{}))]);
+      stage = "containment";
       lease.attach(workload);
       const tools=new CloudWorkloadTools(lease,workload,cwd);
       const coordinator=await CloudNativeBoundary.prepare(lease,workload,conversationId,providerSettings);
@@ -71,7 +76,6 @@ export function createCloudAgentExecutionFactory(options:{
       if(productServers.some(server=>server.transport==="stdio"))throw new Error("Cloud product tools require a scoped remote transport");
       if(productServers.some(server=>server.name===CLOUD_COMPUTER_TOOLS_SERVER))throw new Error("Cloud Computer tools require private execution admission");
       if(lease.computerToolsVersion===1){
-        if(resolveCloudRuntime().profile!=="v4")throw new Error("Update the cloud runtime to configure this computer.");
         const ownedLease=lease;
         const computer=await lease.launch(()=>CloudComputerMcpServer.start(ownedLease));
         productServers.push(computer.registration);
@@ -79,9 +83,7 @@ export function createCloudAgentExecutionFactory(options:{
       const userServers=lease.customization?.servers.map(({server})=>admission.provider==="codex"?cloudCodexMcpServer(server):server)??[];
       if(userServers.some(server=>productServers.some(product=>product.name===server.name)))throw new Error("Cloud MCP server name conflicts with a product tool");
       const owned=lease;
-      // B1 extends the shared diagnostic union; keep this runtime-only change
-      // independent of the parallel protocol PR while preserving the wire value.
-      const runtimeProfile=`zeros-cloud-worker-${resolveCloudRuntime().profile}` as ReturnType<typeof cloudBrowserUnavailable>["runtimeProfile"];
+      const runtimeProfile="zeros-cloud-worker-v4" as const;
       // Gateway retirement closes both domains through the lease. This facade
       // is deliberately not attached back to the lease (which would deadlock).
       const boundary:PreparedBoundary={
@@ -111,7 +113,11 @@ export function createCloudAgentExecutionFactory(options:{
     }catch(error){
       const redacted=redactor?.error(error)??error;
       if(lease)await lease.close();else await workload.stopAndProve();
-      throw redacted;
+      const innerCode = redacted && typeof redacted === "object" && "code" in redacted ? redacted.code : undefined;
+      if (isCloudAgentAdmissionCode(innerCode)) throw redacted;
+      const code = cloudCommandFailureCode(redacted, stage);
+      if (redacted instanceof Error) throw Object.assign(redacted, { code });
+      throw new CloudCommandFailureError(decodeCloudCommandFailure(code)!);
     }
   }};
 }

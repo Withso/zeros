@@ -1,3 +1,4 @@
+import { refuseRetiredWorkerPromotion } from "./worker-retirement";
 import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -13,6 +14,7 @@ import { alphaFrontierIdentity } from "./alpha-frontier";
 import type { z } from "zod";
 
 export async function main() {
+  if (process.env.ZEROS_WORKER_PROMOTION === "enabled") refuseRetiredWorkerPromotion();
   const mode = process.argv[2];
   requireCheck(["--plan", "--execute", "--services", "--finalize"].includes(mode), "Usage: cli.ts --plan|--execute|--services|--finalize");
   const config = promotionConfig(process.env, { migrations: mode !== "--finalize" });

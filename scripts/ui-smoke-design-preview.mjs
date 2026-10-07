@@ -48,7 +48,6 @@ export async function runDesignPreviewSmoke({ page, check }) {
       dispatch(action);
     } });
     const { acceptOrganizationSnapshot, clearTeamStore } = await import("/apps/desktop/src/renderer/features/team/team-store.ts");
-    const { setInternalFeatureEnabled } = await import("/apps/desktop/src/renderer/features/settings/internal-features.ts");
     const { acceptCloudWorkspaceDocument } = await import("/apps/desktop/src/renderer/state/cloud-workspace-catalog.ts");
     const organizationId = "11111111-1111-4111-8111-111111111111", id = "22222222-2222-4222-8222-222222222222";
     const cloudKey = `cloud://${organizationId}/${id}`;
@@ -72,9 +71,8 @@ export async function runDesignPreviewSmoke({ page, check }) {
       cloud: () => {
         const organization = { id: organizationId, slug: "fixture", name: "Example", logo: null, isPersonal: false, role: "admin", defaultTeamId: organizationId,
           workspaceCapabilities: { local: false, cloud: true }, teamCapabilities: { multiple: false, canCreate: false } };
-        acceptOrganizationSnapshot({ user: { id: organizationId, email: "fixture@example.test", displayName: "Fixture", staffRole: "developer" },
+        acceptOrganizationSnapshot({ user: { id: organizationId, email: "fixture@example.test", displayName: "Fixture", staffRole: null },
           teams: [organization], organizations: [organization] });
-        setInternalFeatureEnabled("cloudComputerV2", true);
         role(true); workspaceId = folder = cloudKey; directory("directory-a"); render();
       },
       pending: () => !!settle,

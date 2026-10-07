@@ -117,8 +117,9 @@ empty tables.
 
 ## Explicit open and message wake (Cloud v2 Alpha)
 
-With the staff-only `cloudComputerV2` toggle active, an explicit workspace open
-or message submission prepares the exact workspace before session admission.
+With current account/organization cloud access, an explicit workspace open or
+message submission prepares the exact workspace before session admission. The
+retired staff rollout toggle does not authorize this path.
 Selection restoration, history/catalog reads, hover/focus prefetch, app resume
 and retained hidden views do not request wake. Existing history and drafts stay
 available while the workspace starts. Concurrent open/send preparation shares

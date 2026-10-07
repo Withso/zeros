@@ -7,7 +7,7 @@ on:
         options: [alpha, beta, production]
         required: true
       execute:
-        description: Execute only after the release canary transport is rehearsed
+        description: Retired v3 producer; execution refuses before allocation. Use runtime bundles.
         type: boolean
         default: false
       reconcile_storage:
@@ -139,6 +139,11 @@ jobs:
       RUNTIME_QUALIFICATION_CREDENTIAL_KINDS: ${{ vars.RUNTIME_QUALIFICATION_CREDENTIAL_KINDS }}
       WORKER_CANARY_ORGANIZATION_ID: ${{ vars.WORKER_CANARY_ORGANIZATION_ID }}
     steps:
+      - name: Refuse retired v3 worker promotion
+        if: inputs.reconcile_storage != true && (inputs.execute == true || env.ZEROS_WORKER_PROMOTION == 'enabled')
+        run: |
+          echo '::error::v3 release worker images are retired; v4 runtime bundles are the supported artifact'
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha || github.sha }}

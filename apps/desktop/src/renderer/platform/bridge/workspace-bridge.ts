@@ -19,6 +19,9 @@ import type {
 // ──────────────────────────────────────────────────────────
 
 import type { RuntimeClient } from "./ws-client";
+import type { CloudResourceUsageConnection } from "./workspace-runtime-client";
+import type { CloudWorkspaceTarget } from "./cloud-workspace-key";
+import { WorkspaceResourceUsageSchema, type WorkspaceResourceUsage } from "@zeros/protocol/workspace-resource-usage";
 import { WorkspaceRuntimeClient, type ChatSnapshotRefresh } from "./workspace-runtime-client";
 import type { BridgeMessage } from "./messages";
 import type {
@@ -164,6 +167,23 @@ export async function workspaceOp(
   }
   if (tracked) trackGitOp({ op: tracked, outcome: "ok" });
   return resp.result;
+}
+
+export async function bridgeWorkspaceResourceUsage(
+  bridge: WorkspaceRuntimeClient,
+  target: CloudWorkspaceTarget,
+  connection: CloudResourceUsageConnection,
+): Promise<WorkspaceResourceUsage | null> {
+  const response = await bridge.requestCloudResourceUsage(target, connection) as WorkspaceResponseLike | WorkspaceErrorLike | null;
+  if (response === null) return null;
+  if (response.type === "WORKSPACE_ERROR") throw new WorkspaceOpError(response);
+  if (response.type !== "WORKSPACE_RESPONSE" || response.op !== "workspace.resourceUsage")
+    throw new Error("Cloud returned an invalid resource usage response");
+  const sample = WorkspaceResourceUsageSchema.parse(response.result);
+  if (sample.organizationId !== target.organizationId || sample.workspaceId !== target.workspaceId ||
+      sample.generation !== connection.generation || sample.engineInstanceId !== connection.engineInstanceId)
+    throw new Error("Cloud resource usage changed runtime identity");
+  return sample;
 }
 
 // ── Turns (v13: footer / per-turn changes / reset) ──────────

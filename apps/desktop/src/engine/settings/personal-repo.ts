@@ -16,6 +16,7 @@ import {
 import path from "node:path";
 import os from "node:os";
 import { gitProcessOptions } from "../git/git-execution-identity";
+import { gitProbeFailure } from "../git/git-exec";
 import { isTransientWorktreeRegistryRead } from "../git/worktree-registry";
 import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import {
@@ -44,13 +45,28 @@ const WORKSPACE_FILE = ".zeros/settings.toml";
 type PersonalSettingsPath = typeof LOCAL_FILE | typeof WORKSPACE_FILE;
 
 function git(root: string, args: string[]): string {
-  return execFileSync("git", ["-c", "core.fsmonitor=false", ...args], {
-    cwd: root,
-    encoding: "utf8",
-    ...gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }),
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: 5_000,
-  }).trim();
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return execFileSync("git", ["-c", "core.fsmonitor=false", ...args], {
+        cwd: root,
+        encoding: "utf8",
+        ...gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }),
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 5_000,
+      }).trim();
+    } catch (error) {
+      const failure = error as { status?: number; stderr?: unknown };
+      const operation = args[0] === "worktree" ? "worktree_list"
+        : args[0] === "ls-files" ? "ls_files"
+        : args[0] === "check-ignore" ? "check_ignore" : "rev_parse";
+      // Retry the raw observation before discarding its private stderr. No
+      // mutation is repeated, and the public error never retains those bytes.
+      if (operation === "worktree_list" && attempt < 2 && isTransientWorktreeRegistryRead(String(failure.stderr ?? ""))) continue;
+      if (operation === "check_ignore" && failure.status === 1)
+        throw Object.assign(new Error("Git ignore check found no match."), { status: 1 });
+      throw gitProbeFailure(operation, error);
+    }
+  }
 }
 
 /** `git worktree list` opens every registered worktree's admin entry, so it can
@@ -58,19 +74,7 @@ function git(root: string, args: string[]): string {
  * safe to repeat at once (starting Git again outlasts the window); any other
  * failure, or a third one, reaches the caller unchanged. */
 function listWorktreesPorcelain(root: string): string {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return git(root, ["worktree", "list", "--porcelain", "-z"]);
-    } catch (error) {
-      const stderr = (error as { stderr?: unknown }).stderr;
-      if (
-        attempt >= 2 ||
-        !isTransientWorktreeRegistryRead(typeof stderr === "string" ? stderr : "")
-      ) {
-        throw error;
-      }
-    }
-  }
+  return git(root, ["worktree", "list", "--porcelain", "-z"]);
 }
 
 /** Git owns the checkout identity, including linked worktrees and submodules.
@@ -268,8 +272,9 @@ export function ensureLocalSettingsIgnored(
     try {
       git(root, ["check-ignore", "--quiet", "--", relative]);
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      if ((error as { status?: number }).status === 1) return false;
+      throw error;
     }
   };
   // Keep an explicit local rule even when another ignore source already

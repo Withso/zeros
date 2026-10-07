@@ -234,14 +234,15 @@ export async function authorizeReadyCloudWorkspaceAccess(tx:Tx,input:{
   const selected=await tx.query<AuthorizedWorkspace>(`SELECT cw.team_id,cw.owner_user_id,cw.single_member_mode,
       cw.current_generation AS generation,cw.authority_epoch,cw.status,cw.desired_state,
       binding.provider_resource_id,binding.updated_at AS provider_binding_updated_at,
-      NOT (generation.provider='daytona' AND connection.provider='daytona'
-        AND generation.runtime_id IS NULL AND generation.runtime_profile IS NULL) AS native_preview
+      true AS native_preview
     FROM cloud_workspaces cw JOIN cloud_workspace_provider_bindings binding
       ON binding.workspace_id=cw.id AND binding.org_id=cw.org_id AND binding.generation=cw.current_generation
     JOIN cloud_workspace_generations generation
       ON generation.workspace_id=cw.id AND generation.org_id=cw.org_id AND generation.generation=cw.current_generation
     JOIN provider_connections connection ON connection.id=generation.provider_connection_id AND connection.org_id=cw.org_id
     WHERE cw.id=$1 AND cw.org_id=$2 AND cw.deleted_at IS NULL
+      AND generation.provider='boat' AND generation.sandbox_class IS NULL
+      AND connection.provider='boat' AND connection.credential_source='hosted'
       AND binding.provider_resource_id IS NOT NULL AND binding.observed_state='running'
       AND (NOT $5::boolean OR (cw.single_member_mode AND cw.owner_user_id=$3))
       AND (cw.single_member_mode OR EXISTS(SELECT 1 FROM cloud_workspace_engine_instances engine
@@ -384,7 +385,7 @@ function safeProviderAccessId(value: string): string {
 }
 
 /**
- * Daytona revokes SSH credentials for the whole sandbox, not one bearer. The
+ * Provider-wide revocation closes SSH credentials for the whole sandbox, not one bearer. The
  * pending row that scheduled revocation prevents new issuance, while this
  * workspace-first fence also catches issuance whose provider request was
  * already in flight. It must commit before the remote revoke starts so a token
@@ -758,7 +759,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
             [grantId],
           );
         } else {
-          // A timeout or malformed response can occur after Daytona minted an
+          // A timeout or malformed response can occur after the provider minted an
           // SSH bearer. No raw token may be available to revoke exactly, so
           // durably schedule provider-wide revocation instead of publishing a
           // terminal local failure that could leave remote access live.
@@ -1164,7 +1165,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
           reason: "provider_wide_account_revoked",
         });
         // The submitted bearer proved possession against our verifier. Do not
-        // forward it to Daytona's exact-revoke query parameter: revoke every
+        // forward it in a provider URL: revoke every
         // sandbox SSH token and reflect that broader provider fact below.
         const provider = await this.providerFor({
           workspaceId: selected.workspace_id,
@@ -1257,12 +1258,10 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
           AND pb.provider_resource_id = access.provider_resource_id
          WHERE access.preview_proxy_label = $1 AND access.kind = 'preview'
            AND access.state = 'active' AND access.expires_at > now()
-           AND ((access.preview_device_id IS NULL AND access.preview_target IS NULL
-             AND generation.provider='daytona' AND provider_connection.provider='daytona'
-             AND generation.runtime_id IS NULL AND generation.runtime_profile IS NULL) OR EXISTS (
+           AND EXISTS (
              SELECT 1 FROM devices device WHERE device.id=access.preview_device_id AND device.user_id=access.account_user_id
                AND device.key_version=access.preview_device_key_version AND device.trust_state='trusted' AND device.revoked_at IS NULL
-           ))
+           )
            AND cw.deleted_at IS NULL AND cw.desired_state = 'running'
            AND access.actor_fingerprint=cloud_workspace_actor_fingerprint(cw.id,access.account_user_id)
            AND cloud_workspace_actor_role(cw.id,access.account_user_id) IN ('developer','manager','owner')
@@ -1566,7 +1565,6 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     }
     headers.set("x-forwarded-host", publicHost);
     headers.set("x-forwarded-proto", "https");
-    headers.set("x-daytona-skip-last-activity-update", "true");
     return headers;
   }
 
@@ -1623,7 +1621,6 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     ]);
     for (const [name, value] of upstream.headers) {
       if (blocked.has(name.toLowerCase())) continue;
-      if (name.toLowerCase().startsWith("x-daytona-")) continue;
       headers.append(name, value);
     }
     const location = upstream.headers.get("location");
@@ -1919,7 +1916,7 @@ export class CloudWorkspaceAccessRevocationWorker {
           [claim.id],
         );
       } else {
-        // Daytona's credential-free revocation invalidates every SSH token for
+        // Provider-wide revocation invalidates every SSH token for
         // the sandbox. Reflect that provider fact for all matching grants.
         await tx.query(
           `UPDATE cloud_workspace_client_access_grants

@@ -34,7 +34,7 @@ let languages: CloudRuntimeLanguageServices | undefined;
 
 async function main() {
   const worker = loadCloudWorkerConfiguration();
-  assert(worker?.version === 3 || worker?.version === 4);
+  assert(worker?.version === 4);
   assert(worker);
   const runtime=readCloudAgentRuntimeAttestation(worker);
   assert.equal(runtime.profile,worker.profile);

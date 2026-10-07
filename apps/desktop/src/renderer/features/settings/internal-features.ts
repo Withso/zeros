@@ -92,11 +92,12 @@ export function useIsInternalUser(): boolean {
 /** The set of internal feature flags.
  *  - `copyLogs` — ⇧⌘L copies the scrubbed recent-log tail (the exact
  *    bytes a feedback submission shares) to the clipboard. */
-export type InternalFeature = "copyLogs" | "releaseCanaries" | "cloudComputerV2";
+export type InternalFeature = "copyLogs" | "releaseCanaries";
 
 const STORAGE_KEY = "zeros.internalFeatures";
 
-type PersistedShape = Partial<Record<InternalFeature, boolean>>;
+// Read the retired key for serialized compatibility; it grants no access.
+type PersistedShape = Partial<Record<InternalFeature | "cloudComputerV2", boolean>>;
 
 function readPersisted(): PersistedShape {
   try {
@@ -142,7 +143,8 @@ function getSnapshot(): PersistedShape {
  *  panel's switches); runtime behavior must use `isInternalFeatureActive`
  *  so the allowlist is enforced. */
 export function isInternalFeatureEnabled(feature: InternalFeature): boolean {
-  return current[feature] === true || feature === "releaseCanaries" && current[feature] === undefined;
+  return feature === "copyLogs" && current[feature] === true ||
+    feature === "releaseCanaries" && (current[feature] === true || current[feature] === undefined);
 }
 
 /** Flip a flag and notify every subscriber. Always swaps the snapshot
@@ -182,7 +184,8 @@ export function useInternalFeature(
   feature: InternalFeature,
 ): [boolean, (on: boolean) => void] {
   const persisted = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  const on = persisted[feature] === true || feature === "releaseCanaries" && persisted[feature] === undefined;
+  const on = feature === "copyLogs" && persisted[feature] === true ||
+    feature === "releaseCanaries" && (persisted[feature] === true || persisted[feature] === undefined);
   const set = useCallback(
     (next: boolean) => setInternalFeatureEnabled(feature, next),
     [feature],

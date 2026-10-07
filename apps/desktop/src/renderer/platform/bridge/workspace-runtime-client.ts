@@ -1,4 +1,5 @@
 import type { BridgeMessage } from "./messages";
+import { WORKSPACE_RESOURCE_USAGE_CAPABILITY } from "@zeros/protocol/workspace-resource-usage";
 import { isCloudGithubWriteOperation } from "@zeros/protocol/github-auth";
 import { RuntimeClient, type ConnectionStatus } from "./ws-client";
 import type { CloudAgentConnection, CloudConversationAttachment } from "./cloud-agent-connection";
@@ -7,6 +8,7 @@ import {
   cloudWorkspaceKey,
   isCloudRepositorySlug,
   parseCloudWorkspaceKey,
+  parseCloudScopedId,
   type CloudWorkspaceTarget,
 } from "./cloud-workspace-key";
 import {
@@ -39,6 +41,12 @@ export interface CloudPeer {
    * False means the drain retired this connection and a fresh one is needed. */
   prepareForRun?: (signal: AbortSignal, reason?: "interaction") => Promise<boolean>;
 }
+export interface CloudResourceUsageConnection extends CloudWorkspaceTarget {
+  generation: number;
+  engineInstanceId: string;
+  authorityEpoch: number;
+  admissionId: string;
+}
 export interface WorkspaceRuntimeOptions {
   open: (target: CloudWorkspaceTarget, options?: { signal: AbortSignal; wake?: boolean; reason?: "interaction" }) => Promise<CloudPeer>;
   /** Account/catalog epoch and generation; never a credential or admission. */
@@ -53,6 +61,8 @@ export interface WorkspaceRuntimeOptions {
   manage?: (target: CloudWorkspaceTarget, op: string, params?: WireRecord) => Promise<WireRecord>;
   /** Authorized database reads that do not require a worker connection. */
   readHistory?: (target: CloudWorkspaceTarget, op: string, params: WireRecord) => Promise<WireRecord>;
+  /** Desktop durable cache: checkpoint passive projections at turn/departure boundaries. */
+  checkpointHistory?: boolean;
   prepareGithubWrite?: (target: CloudWorkspaceTarget, op: string, params: WireRecord) => Promise<string>;
 }
 interface WakeOwner { account: string; generation: number; stopVersion: number; lifecyclePending?: boolean; retargetVersion?: number }
@@ -113,6 +123,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   });
   private readonly historyWorkspaces = new Map<string, CloudWorkspaceTarget>();
   private readonly historyWarmups = new Map<string, Promise<WireRecord>>();
+  private readonly projectionCheckpoints = new Map<string, { until: number; pending: boolean }>();
   private localEpoch = 0;
   private readonly localLists = new Map<string, LocalListEntry>();
   private readonly cloudRepositorySlugs = new Set<string>();
@@ -484,12 +495,49 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       return result;
     }, { maxAgeMs: (this.historyIntents.get(cacheKey) ?? -1) >= performance.now() ? 15_000 : 1000 });
     assertAccess();
+    // A cold projection may finish after a user attaches the newer runtime.
+    // Reuse that peer; never open/wake one to reconcile a passive history read.
+    const currentPeer = this.peers.get(key);
+    if (!peer && (op === "messages.window" || op === "messages.windowOlder") && currentPeer &&
+        currentPeer.identity === identity && !currentPeer.retired && currentPeer.client.status === "connected")
+      return this.readHistory(target, op, params);
     if (op === "chats.list") {
       this.historyWorkspaces.delete(key);
       this.historyWorkspaces.set(key, target);
       while (this.historyWorkspaces.size > 32) this.historyWorkspaces.delete(this.historyWorkspaces.keys().next().value!);
     }
     return snapshot;
+  }
+
+  /** Passive CP checkpoint; call only for a terminal turn or chat departure.
+   * It never connects, wakes, or delays the authoritative native response. */
+  checkpointCloudTranscript(chatId: string): void {
+    if (!this.routing.checkpointHistory || !this.routing.readHistory || this.closed) return;
+    let target: ReturnType<typeof parseCloudScopedId>;
+    try { target = parseCloudScopedId(chatId); } catch { return; }
+    if (!target || this.routing.canAccess && !this.routing.canAccess(target)) return;
+    const epoch = this.accountEpoch, identity = this.identity(target);
+    const params = { chatId, limit: 200 };
+    const key = `${this.historyKey(target, "messages.window", params)}\0projection-checkpoint`;
+    const attemptKey = JSON.stringify([epoch, cloudWorkspaceKey(target), target.id]);
+    const now = performance.now();
+    // Attempt timestamps are separate from payload retention/invalidation:
+    // DB_CHANGED, generation changes, failures and eviction cannot reset it.
+    for (const [oldKey, attempt] of this.projectionCheckpoints)
+      if (!attempt.pending && attempt.until <= now) this.projectionCheckpoints.delete(oldKey);
+    if (this.projectionCheckpoints.has(attemptKey) || this.projectionCheckpoints.size >= 64) return;
+    const attempt = { until: now + 30_000, pending: true };
+    this.projectionCheckpoints.set(attemptKey, attempt);
+    const assertAccess = () => {
+      if (this.closed || epoch !== this.accountEpoch || identity !== this.identity(target) ||
+          this.routing.canAccess && !this.routing.canAccess(target)) throw new Error("Cloud history access changed");
+    };
+    void this.history.load(key, async () => {
+      assertAccess();
+      const result = await this.routing.readHistory!(target, "messages.window", params);
+      assertAccess();
+      return result;
+    }, { force: true }).catch(() => {}).finally(() => { attempt.pending = false; });
   }
 
   private invalidateHistory(target: CloudWorkspaceTarget): void {
@@ -503,6 +551,15 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       this.peers.get(cloudWorkspaceKey(target))?.hasChatSnapshot === true);
   }
 
+  hasCloudMessageSnapshot(chatId: string, limit: number): boolean {
+    const target = parseCloudScopedId(chatId);
+    if (!target || this.closed || this.routing.canAccess && !this.routing.canAccess(target)) return false;
+    const entry = this.peers.get(cloudWorkspaceKey(target));
+    const peer = entry && entry.identity === this.identity(target) && !entry.retired && entry.client.status === "connected" ? entry : null;
+    const key = this.historyKey(target, "messages.window", { chatId, limit }) + (peer ? `\0runtime:${peer.runtimeId}` : "");
+    return this.history.peekSnapshot(key).data !== undefined;
+  }
+
   statusForWorkspace(folder?: string | null): ConnectionStatus {
     const target = parseCloudWorkspaceKey(folder);
     if (!target) return this.status;
@@ -510,6 +567,42 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     if (this.opening.has(key)) return "connecting";
     const entry = this.peers.get(key);
     return entry && !entry.retired ? entry.client.status : "disconnected";
+  }
+
+  /** Safe metadata from an already admitted peer. Does not connect or adopt. */
+  cloudResourceUsageConnection(folder: string): CloudResourceUsageConnection | null {
+    const target = parseCloudWorkspaceKey(folder);
+    if (!target) return null;
+    const entry = this.peers.get(cloudWorkspaceKey(target));
+    if (!entry || entry.retired || entry.epoch !== this.accountEpoch || !entry.runtimeId ||
+        entry.identity !== this.identity(target) || this.routing.canAccess?.(target) === false) return null;
+    const identity = entry.client.executionIdentity;
+    if (identity?.kind !== "cloud" || identity.organizationId !== target.organizationId ||
+        identity.workspaceId !== target.workspaceId || entry.generation !== identity.generation) return null;
+    return { organizationId: target.organizationId, workspaceId: target.workspaceId,
+      generation: identity.generation, engineInstanceId: identity.engineInstanceId,
+      authorityEpoch: identity.authorityEpoch, admissionId: entry.runtimeId };
+  }
+
+  async requestCloudResourceUsage(target: CloudWorkspaceTarget, expected: CloudResourceUsageConnection): Promise<BridgeMessage | null> {
+    const key = cloudWorkspaceKey(target);
+    const entry = this.peers.get(key);
+    const assertConnected = () => {
+      if (!entry || entry.client.status !== "connected") throw new Error("Cloud workspace is disconnected");
+      this.assertCurrent(entry);
+      const current = this.cloudResourceUsageConnection(key);
+      if (!current || (["organizationId", "workspaceId", "generation", "engineInstanceId", "authorityEpoch", "admissionId"] as const)
+        .some(field => current[field] !== expected[field]))
+        throw new Error("Cloud resource usage admission changed");
+    };
+    assertConnected();
+    if (!entry!.client.supportsEngineCapability(WORKSPACE_RESOURCE_USAGE_CAPABILITY)) return null;
+    const response = await entry!.client.requestConnected(cloudOutgoing(entry!.scope, {
+      type: "WORKSPACE_REQUEST", op: "workspace.resourceUsage",
+      params: { workspaceId: key, generation: expected.generation, engineInstanceId: expected.engineInstanceId },
+    }) as Message, 5000);
+    assertConnected();
+    return cloudIncoming(entry!.scope, response as unknown as WireRecord) as unknown as BridgeMessage;
   }
 
   /** Renderer-only shell continuity. Admission IDs change on reconnect; only
@@ -803,11 +896,14 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     if (entry.epoch !== this.accountEpoch)
       throw new Error("Cloud account changed before the response arrived");
     this.assertCurrent(entry);
-    return cloudIncoming(
+    const incoming = cloudIncoming(
       entry.scope,
       entry.agents?.incoming(response as unknown as WireRecord) ??
         (response as unknown as WireRecord),
-    ) as unknown as BridgeMessage;
+    );
+    if (["AGENT_PROMPT_COMPLETE", "AGENT_PROMPT_FAILED"].includes(String(incoming.type)) && typeof incoming.chatId === "string")
+      this.checkpointCloudTranscript(incoming.chatId);
+    return incoming as unknown as BridgeMessage;
   }
 
   override async request<T extends BridgeMessage = BridgeMessage>(
@@ -876,6 +972,16 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       } as unknown as T;
     }
     const target = cloudRequestTarget(wire);
+    if (wire.type === "WORKSPACE_REQUEST" && wire.op === "workspace.resourceUsage") {
+      if (!target) throw new Error("Resource usage requires a cloud workspace");
+      const expected = this.cloudResourceUsageConnection(cloudWorkspaceKey(target));
+      if (!expected) throw new Error("Cloud workspace is disconnected");
+      if (params.generation !== expected.generation || params.engineInstanceId !== expected.engineInstanceId)
+        throw new Error("Cloud resource usage generation changed");
+      return (await this.requestCloudResourceUsage(target, expected) ?? {
+        type: "WORKSPACE_RESPONSE", op: wire.op, result: null,
+      }) as T;
+    }
     if (
       target &&
       wire.type === "WORKSPACE_REQUEST" &&
@@ -970,6 +1076,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     this.opening.clear();
     this.historyWarmups.clear();
     this.historyIntents.clear();
+    this.projectionCheckpoints.clear();
     for (const key of this.history.keys()) this.history.forget(key);
     this.historyWorkspaces.clear();
   }

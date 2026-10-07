@@ -46,7 +46,6 @@ import {
 import {
   validCloudResourceContract,
   cloudResourcesMeetContract,
-  cloudImageReferenceMatchesBuild,
 } from "./cloud-resource-admission.mjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { TextDecoder } from "node:util";
@@ -561,7 +560,7 @@ export function parseCloudWorkspaceSetupMaterials(
     (raw.computer !== undefined && raw.version !== 2))
     throw new Error("cloud workspace setup materials are invalid");
   if (raw.computer !== undefined) parseCloudComputerSetup(raw.computer, raw.repository);
-  if (raw.resume !== undefined && (raw.version !== 2 || RUNTIME.profile !== "v4" || !validResumePlan(raw.resume)))
+  if (raw.resume !== undefined && (raw.version !== 2 || !validResumePlan(raw.resume)))
     throw new Error("cloud workspace setup materials are invalid");
 
   const document = parseSetupDocument(
@@ -1345,7 +1344,7 @@ export async function redeemMaterials(request) {
         Authorization: `Bearer ${request.admission.token}`,
         "Content-Type": "application/json",
         "X-Zeros-Setup-Timings": "1",
-        ...(RUNTIME.profile === "v4" ? { "X-Zeros-Resume-Existing": "1" } : {}),
+        "X-Zeros-Resume-Existing": "1",
       },
       body: JSON.stringify({
         materialVersion: 2,
@@ -1355,8 +1354,7 @@ export async function redeemMaterials(request) {
         setupRunId: request.execution.setupRunId,
         executionFence: request.execution.executionFence,
         expected: request.expected,
-        ...(RUNTIME.profile === "v4" ? {
-          checkoutSourceVersion: 1,
+        checkoutSourceVersion: 1,
           runtime: {
             runtimeId: RUNTIME.runtimeId,
             manifestSha256: RUNTIME.manifestSha256,
@@ -1365,7 +1363,6 @@ export async function redeemMaterials(request) {
             bootId: RUNTIME.bootId,
             supervisorSessionId: RUNTIME.supervisorSessionId,
           },
-        } : {}),
       }),
     });
   } catch {
@@ -1378,7 +1375,7 @@ export async function redeemMaterials(request) {
       let code;
       try { code = (await boundedResponseJson(response, 1024))?.error?.code; }
       catch { /* Provider text is never a setup diagnostic. */ }
-      if (code === "computer_environment_revoked") throw failure(code);
+      if (code === "computer_environment_revoked" || code === "cloud_workspace_v2_required") throw failure(code);
       throw failure("request_invalid");
     }
     await response.body?.cancel().catch(() => undefined);
@@ -1995,8 +1992,7 @@ async function cloneRepository(material,profile) {
 }
 
 function clonePaths(profile) {
-  if (profile.version !== 4)
-    return { stagingParent: runtimeLayout.root, seededRepositoryBackup: SEEDED_REPOSITORY_BACKUP };
+  if (profile.version !== 4) throw failure("cloud_workspace_v2_required");
   // Both staging and the seed must share the checkout's bind mount. Root
   // controls this parent's entries; the agent group can only traverse it to
   // the per-operation 0700 repository/home. The engine view masks the parent.
@@ -2023,6 +2019,7 @@ async function stringifyManagedSettings(values) {
 }
 
 export async function prepareRepositoryAndSettings(material, profile, stringify = stringifyManagedSettings) {
+  if (profile.version !== 4) throw failure("cloud_workspace_v2_required");
   const repositoryDirectory = hostRepository(material);
   const journalFile = path.join(profile.setupDirectory, "repository.json");
   const managedSettings = path.join(
@@ -2072,7 +2069,7 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
   ) {
     throw failure("repository_revision_invalid");
   }
-  if (profile.version === 4 && journal.commandState && journal.setupRunId === material.execution.setupRunId) {
+  if (journal.commandState && journal.setupRunId === material.execution.setupRunId) {
     const error = failure("setup_hook_retry_required");
     error.hookLog = { version: 1, text: "The previous setup hook did not complete. Retry setup explicitly.\n", truncated: false };
     throw error;
@@ -2084,47 +2081,18 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
   ) {
     const command = material.settings.setupCommands[index];
     const commandEnvironment = Object.fromEntries(
-      material.settings.setupEnvironment.filter(entry => profile.version !== 4 || !["LANG", "LOGNAME", "USER", "SHELL", "TMPDIR"].includes(entry.name)).map((entry) => [
+      material.settings.setupEnvironment.filter(entry => !["LANG", "LOGNAME", "USER", "SHELL", "TMPDIR"].includes(entry.name)).map((entry) => [
         entry.name,
         entry.value,
       ]),
     );
-    if (profile.version === 4) saveJournal(journalFile, identity, material, index, "running");
+    saveJournal(journalFile, identity, material, index, "running");
     let result;
-    try { result =
-      profile.version >= 2
-        ? await runScopedCloudSetup({
-            version: 1,
-            command: command.command,
-            timeoutMs: command.timeoutSeconds * 1000,
-            environment: commandEnvironment,
-          })
-        : await runProcess(
-            "/usr/bin/setpriv",
-            [
-              ...CLOUD_WORKSPACE_UNPRIVILEGED_SET_PRIV_ARGS,
-              "/bin/bash",
-              "--noprofile",
-              "--norc",
-              "-lc",
-              command.command,
-            ],
-            {
-              cwd: repositoryDirectory,
-              timeoutMs: command.timeoutSeconds * 1_000,
-              env: {
-                ...commandEnvironment,
-                HOME: runtimeLayout.agentHome,
-                LANG: "C.UTF-8",
-                LOGNAME: "zeros-agent",
-                PATH: `${RUNTIME.binRoot}:/usr/bin:/bin`,
-                SHELL: "/bin/bash",
-                USER: "zeros-agent",
-              },
-            },
-          );
-    } catch (error) {
-      if (profile.version !== 4) throw error;
+    try { result = await runScopedCloudSetup({
+      version: 1, command: command.command, timeoutMs: command.timeoutSeconds * 1000,
+      environment: commandEnvironment,
+    });
+    } catch {
       result = { code: null, signal: null, timedOut: false, overflow: false, stdout: "", stderr: "Setup hook could not complete.\n" };
     }
     for (const name of Object.keys(commandEnvironment)) {
@@ -2137,7 +2105,7 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
       result.signal
     ) {
       const error = failure("setup_command_failed");
-      if (profile.version === 4) {
+      {
         error.hookLog = redactCloudWorkspaceSetupHookLog(`${result.stdout}${result.stderr}`, [
           ...material.settings.setupEnvironment.map(entry => entry.value), material.repository.credential?.token,
         ], result.overflow);
@@ -2398,45 +2366,15 @@ export function cloudWorkspaceImageAdmissionChecks(
   result,
   report,
 ) {
-  if (profile.version === 4) {
-    return {
-      execution: result.code === 0 && !result.timedOut && !result.overflow,
-      report: isRecord(report) && report.version === 1,
-      profile: profile.profile === "zeros-cloud-worker-v4" && report?.profile === profile.profile,
-      qualified: report?.qualified === true,
-      // Keep the setup diagnostic's metadata gate. For v4 it checks RUNTIME,
-      // the validated descriptor pinned before redemption and sent as its
-      // witness to the control plane, never an attester-supplied identity.
-      metadata: RUNTIME.profile === "v4" && isRecord(report?.runtime) &&
-        exactKeys(report.runtime, CLOUD_V4_IDENTITY_FIELDS) &&
-        CLOUD_V4_IDENTITY_FIELDS.every(key => report.runtime[key] === RUNTIME[key]),
-      helpers:
-        report?.helpers?.deploymentTrusted?.setupHelper === true &&
-        report?.helpers?.deploymentTrusted?.workerSupervisor === true,
-      resources:
-        report?.resources?.finite === true &&
-        cloudResourcesMeetContract(material.image.resources, report.resources),
-      runtime: report?.qualification?.secure === true,
-    };
-  }
   return {
     execution: result.code === 0 && !result.timedOut && !result.overflow,
     report: isRecord(report) && report.version === 1,
-    profile: report?.profile === profile.profile,
+    profile: profile.version === 4 && profile.profile === "zeros-cloud-worker-v4" && report?.profile === profile.profile,
     qualified: report?.qualified === true,
-    source:
-      report?.metadata?.build?.source?.commit === material.image.sourceCommit,
-    build: cloudImageReferenceMatchesBuild(
-      material.image.ref,
-      report?.metadata?.buildSha256,
-    ),
-    helpers:
-      report?.helpers?.deploymentTrusted?.setupHelper === true &&
-      report?.helpers?.deploymentTrusted?.workerSupervisor === true,
-    resources:
-      report?.resources?.finite === true &&
-      (profile.version < 2 ||
-        cloudResourcesMeetContract(material.image.resources, report.resources)),
+    metadata: isRecord(report?.runtime) && exactKeys(report.runtime, CLOUD_V4_IDENTITY_FIELDS) &&
+      CLOUD_V4_IDENTITY_FIELDS.every(key => report.runtime[key] === RUNTIME[key]),
+    helpers: report?.helpers?.deploymentTrusted?.setupHelper === true && report?.helpers?.deploymentTrusted?.workerSupervisor === true,
+    resources: report?.resources?.finite === true && cloudResourcesMeetContract(material.image.resources, report.resources),
     runtime: report?.qualification?.secure === true,
   };
 }
@@ -2537,32 +2475,8 @@ export function cloudWorkspaceImageAdmissionDiagnostic(report) {
   };
 }
 
-/** Diagnostic evidence only. This never changes the admission predicate. */
-export function cloudWorkspaceImageIdentityDiagnostic(build, observed) {
-  return {
-    metadata: build?.version === 2,
-    source: Boolean(observed?.source && build?.source?.commit === observed.source.commit && build?.source?.contractSha256 === observed.source.contractSha256),
-    engine: Boolean(observed?.artifacts && ["dist-engine/cli.js", "dist-engine/design-capture-worker.js", "binaries/zsr-supervisor.mjs"]
-      .every(file => typeof build?.artifacts?.[file] === "string" && build.artifacts[file] === observed.artifacts[file])),
-    ...(build?.baseOrigin?.kind === "native-linux" ? {
-      osRelease: Boolean(observed?.inventory && build.baseOrigin.osReleaseSha256 === observed.inventory.osReleaseSha256),
-      packageInventory: Boolean(observed?.inventory && build.baseOrigin.packageInventorySha256 === observed.inventory.packageInventorySha256),
-      node: Boolean(observed?.inventory && build.baseOrigin.nodeSha256 === observed.inventory.nodeSha256),
-    } : {}),
-  };
-}
-
-export function cloudWorkspaceImageDigests(build, observed) {
-  const result = {};
-  for (const [key, field] of [["osRelease", "osReleaseSha256"], ["packageInventory", "packageInventorySha256"], ["node", "nodeSha256"]]) {
-    const expected = build?.baseOrigin?.[field], actual = observed?.inventory?.[field];
-    if (typeof expected === "string" && SHA256_PATTERN.test(expected) && typeof actual === "string" && SHA256_PATTERN.test(actual))
-      result[key] = { expected, observed: actual };
-  }
-  return result;
-}
-
 export async function attestImage(material, profile, recordChecks, recordTimings = () => {}) {
+  if (profile.version !== 4) throw failure("cloud_workspace_v2_required");
   if (
     material.repository.credential.expiresAtMs - Date.now() < 5 * 60_000 ||
     material.engine.registration.expiresAtMs - Date.now() < 5 * 60_000
@@ -2570,29 +2484,18 @@ export async function attestImage(material, profile, recordChecks, recordTimings
     throw failure("engine_readiness_failed");
   }
   const result = await runProcess(
-    profile.version >= 2
-      ? RUNTIME.node
-      : "/usr/local/bin/node",
+    RUNTIME.node,
     [ATTESTER],
     {
       timeoutMs: 4 * 60_000,
     },
   );
-  let report;
-  if (profile.version === 4) {
-    try {
-      const diagnostic = JSON.parse(result.stdout.trimEnd().split("\n").at(-1));
-      const timings = parseSetupTimings(diagnostic?.timings);
-      if (timings) recordTimings(timings);
-    } catch { /* Telemetry cannot supply an admission or leak raw output. */ }
-    report = readCloudWorkspaceV4Attestation(result);
-  } else {
-    try {
-      report = JSON.parse(result.stdout);
-    } catch {
-      report = null;
-    }
-  }
+  try {
+    const diagnostic = JSON.parse(result.stdout.trimEnd().split("\n").at(-1));
+    const timings = parseSetupTimings(diagnostic?.timings);
+    if (timings) recordTimings(timings);
+  } catch { /* Telemetry cannot supply admission or leak raw output. */ }
+  const report = readCloudWorkspaceV4Attestation(result);
   const checks = cloudWorkspaceImageAdmissionChecks(
     material,
     profile,
@@ -2601,15 +2504,6 @@ export async function attestImage(material, profile, recordChecks, recordTimings
   );
   recordChecks(checks, cloudWorkspaceImageAdmissionDiagnostic(report));
   if (!Object.values(checks).every((value) => value === true)) {
-    if (profile.version === 4) throw failure("image_contract_invalid");
-    const observed = {};
-    try {
-      const inventory = await import("./image-build-contract.mjs");
-      try { observed.inventory = inventory.readCloudImageNativeInventory(); } catch { /* Unknown remains failed. */ }
-      try { observed.source = inventory.cloudImageSourceIdentity(RUNTIME.workerRoot); } catch { /* No raw error retained. */ }
-      try { observed.artifacts = inventory.cloudImageArtifactHashes(RUNTIME.workerRoot); } catch { /* Fixed artifacts only. */ }
-    } catch { /* Broken images may lack the diagnostic helper too. */ }
-    recordChecks({ ...checks, ...cloudWorkspaceImageIdentityDiagnostic(report?.metadata?.build, observed) }, undefined, cloudWorkspaceImageDigests(report?.metadata?.build, observed));
     throw failure("image_contract_invalid");
   }
 }
@@ -2645,7 +2539,7 @@ async function waitForReadiness(material) {
   const endpoint = `http://127.0.0.1:${material.engine.port}/internal/readiness`;
   while (Date.now() < deadline) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3_000);
+    const timer = setTimeout(() => controller.abort(), Math.min(3_000, deadline - Date.now()));
     timer.unref?.();
     try {
       const response = await fetch(endpoint, {
@@ -2677,8 +2571,10 @@ async function waitForReadiness(material) {
     } finally {
       clearTimeout(timer);
     }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
     await new Promise((resolve) => {
-      setTimeout(resolve, 500);
+      setTimeout(resolve, Math.min(125, remaining));
     });
   }
   throw failure("engine_readiness_failed");
@@ -2870,7 +2766,7 @@ async function executeSetup(encoded) {
       ...(diagnostic.digests ? { digests: diagnostic.digests } : {}),
       files: {
         node: existsSync(RUNTIME.node),
-        supervisor: existsSync(RUNTIME.profile === "v4" ? RUNTIME.helpers.supervisor : RUNTIME.helpers.ensureSupervisor),
+        supervisor: existsSync(RUNTIME.helpers.supervisor),
         setup: existsSync(RUNTIME.helpers.setup),
         engine: existsSync(path.join(RUNTIME.workerRoot, "dist-engine/cli.js")),
       },

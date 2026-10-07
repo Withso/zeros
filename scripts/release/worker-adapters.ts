@@ -1,68 +1,24 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
-import fs from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
-import { main as imageKit, KitError, TEMPLATES, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
-import { imageContractSha256 } from "../cloud-workspace-validation/config";
+import { createHash, randomUUID } from "node:crypto";
+import type { main as imageKit } from "../cloud-workspace-validation/boat-image/boat-image";
 import { devBoatClient } from "../dev-environment/hosted-image.mjs";
-import { dispatchDevCreate, acknowledgeDevCreate, DevProviderError } from "../dev-environment/provider-http.mjs";
+import { dispatchDevCreate } from "../dev-environment/provider-http.mjs";
 import { manageCloudAgentRuntime, nativeCapabilitiesFromChecks } from "../../apps/control-plane/src/manage-cloud-agent-runtime";
 import { planetScaleClient, roleConnectionString } from "../../apps/control-plane/src/manage-release-migration";
 import { createMigrationPool } from "../../apps/control-plane/src/db";
-import { DIGEST, SHA, PromotionError, requireCheck, type PromotionConfig } from "./contracts";
-import { poll } from "./io";
+import { DIGEST, PromotionError, requireCheck, type PromotionConfig } from "./contracts";
+import { refuseRetiredWorkerPromotion } from "./worker-retirement";
 import type { WorkerCandidate, WorkerDependencies } from "./worker";
-import { WorkerBuilderCreationBodySchema, releaseBuilderCreationScope, retireReleaseBuilder, retireFailedReleaseBuilder } from "./worker-builder-retirement";
+import { retireReleaseBuilder, retireFailedReleaseBuilder } from "./worker-builder-retirement";
 
-/** Image-kit sequence also used by hosted-image.mjs, with committed source and
- * channel names, without creating Dev identities or changing build metadata. */
-export async function buildBoatImage(input: { sourceSha: string; directory: string; baseSnapshot: string; maxUsedHours: number; state?: any }, deps: {
+/** Retained as an explicit refusal for old release tooling; the shared Dev
+ * image kit is a separate consumer. No release source export or allocation is
+ * permitted, including when resuming an earlier producer. */
+export async function buildBoatImage(_input: { sourceSha: string; directory: string; baseSnapshot: string; maxUsedHours: number; state?: any }, _deps: {
   kit(args: string[]): Promise<any>; nameSnapshot(): Promise<string>; pause?: (ms: number) => Promise<void>; exists?: (file: string) => boolean; save?: () => Promise<void>;
 }): Promise<WorkerCandidate> {
-  requireCheck(SHA.test(input.sourceSha) && Number.isFinite(input.maxUsedHours) && input.maxUsedHours > 0, "Invalid worker build identity or budget");
-  const call = deps.kit, dir = path.join(input.directory, input.sourceSha.slice(0,12));
-  const state = input.state ?? {}, exists = deps.exists ?? (() => false);
-  requireCheck(!exists(path.join(dir, "source.json")) || state.installStarted || exists(path.join(dir, "source.tar.gz")),
-    "Worker recovery archive is missing; reconcile the original build before another allocation or upload");
-  if (!exists(path.join(dir, "source.json"))) await call(["export"]);
-  if (!exists(path.join(input.directory, "builder.json"))) await call(["builder", "create", "--from", input.baseSnapshot, "--max-used-hours", String(input.maxUsedHours)]);
-  await poll(async () => {
-    const status = await call(["builder", "status"]);
-    requireCheck(status.wallet === "billing-org", "Worker builder billing identity is unconfirmed");
-    return ["ready", "running", "idle"].includes(status.state);
-  }, { sleep: deps.pause, attempts: 30, timeoutMs: 5 * 60_000 });
-  if (!exists(path.join(dir, "generation.json"))) {
-    const previous = JSON.parse(await call(["builder", "run", path.join(TEMPLATES, "build-hash.sh")]));
-    requireCheck(SHA.test(previous.commit ?? ""), "Worker base source is unconfirmed");
-    await call(["generate", "--previous", previous.commit]);
-  }
-  const snapshotId = await deps.nameSnapshot();
-  if (!state.installStarted) {
-    await call(["builder", "run", path.join(dir, "builder-preflight.sh")]);
-    await call(["builder", "upload"]);
-    state.installStarted = true; await deps.save?.();
-    await call(["builder", "run", path.join(dir, "install.sh"), "120"]);
-  }
-  await poll(async () => {
-    const result = JSON.parse(await call(["builder", "run", path.join(dir, "build-status.sh")]));
-    requireCheck(!result.result || result.result.passed === true, "Native worker build failed");
-    return result.result?.passed === true;
-  }, { sleep: deps.pause, attempts: 150 });
-  if (!state.attestationStarted) { state.attestationStarted = true; await deps.save?.(); await call(["attestation", "start"]); }
-  const attestation = await poll(async () => {
-    const result = await call(["attestation", "status"]);
-    if (!result.finished) return false;
-    requireCheck(result.qualified === true && result.matchesCommit === true && result.sourceCommit === input.sourceSha && DIGEST.test(result.buildSha256 ?? "") &&
-      Number.isSafeInteger(result.measuredStorageMiB) && result.measuredStorageMiB > 0, "Worker attestation failed");
-    return result;
-  }, { sleep: deps.pause, attempts: 120 });
-  if (!exists(path.join(dir, "sanitize.sh"))) await call(["generate-post"]);
-  // snapshot save itself performs fresh sanitation and rejects private state.
-  if (!exists(path.join(dir, "snapshot-ledger.json"))) await call(["snapshot", "save"]);
-  await poll(async () => (await call(["snapshot", "status"])).state === "ready", { sleep: deps.pause, attempts: 60 });
-  return { snapshotId, sourceCommit: input.sourceSha, buildSha256: attestation.buildSha256, storageMiB: attestation.measuredStorageMiB, architecture: "linux/amd64" };
+  refuseRetiredWorkerPromotion();
 }
-export async function boatImageAdapter(config: PromotionConfig, env: NodeJS.ProcessEnv, directory: string, context: {
+export async function boatImageAdapter(config: PromotionConfig, env: NodeJS.ProcessEnv, _directory: string, context: {
   lease: any; record: any; profile: any; maxUsedHours: number; snapshotName: string; reserve(): Promise<unknown>; release(): Promise<unknown>;
   request?: any; kit?: typeof imageKit; readAdmission?: () => Promise<any>;
 }) {
@@ -70,128 +26,11 @@ export async function boatImageAdapter(config: PromotionConfig, env: NodeJS.Proc
   const budget = Number(env.BOAT_BUILDER_BUDGET_HOURS);
   requireCheck(Number.isFinite(budget) && budget > 0 && budget <= 2, "Boat builder budget must be positive and at most two hours");
   requireCheck(context && context.record.sourceCommit === config.sourceSha && context.record.snapshotId === context.snapshotName, "Worker build requires a bound shared-account admission receipt");
-  await mkdir(directory, { recursive: true, mode: 0o700 });
   const request = context.request ?? devBoatClient({ apiKey: env.BOAT_API_KEY }, context.lease.signal);
   const { lease, record } = context;
-  const attestationCommand = /^commands\/\d{1,16}-attest-status\.sh\.json$/;
-  const allowed = /^(?:builder(?:-intent)?\.json|[a-f0-9]{12}\/\w[\w-]*\.(?:json|sh)|commands\/\d{1,16}-attest-status\.sh\.json)$/;
-  for (const [file, text] of Object.entries(record.kitFiles ?? {})) {
-    requireCheck(allowed.test(file) && typeof text === "string" && text.length <= 512 * 1024, "Invalid worker recovery receipt");
-    const target = path.join(directory, file); await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
-    // "wx" keeps a file the interrupted build already wrote, without a separate
-    // existence check that could race with it.
-    await writeFile(target, text, { mode: 0o600, flag: "wx" }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "EEXIST") throw error;
-    });
-  }
-  const persist = async () => {
-    const files: Record<string, string> = {};
-    const entries = fs.readdirSync(directory, { recursive: true });
-    // Keep one private status response, including the failure that precedes
-    // native-attestation.json. Polling must not grow the encrypted journal.
-    const latestAttestation = entries.filter((file): file is string => typeof file === "string" && attestationCommand.test(file))
-      .sort((left, right) => Number(right.slice(9).split("-")[0]) - Number(left.slice(9).split("-")[0]))[0];
-    for (const file of entries) {
-      if (typeof file !== "string" || !allowed.test(file)) continue;
-      if (attestationCommand.test(file) && file !== latestAttestation) continue;
-      // Check and read one descriptor, opened without following a symlink, so
-      // the file cannot be swapped between the check and the read.
-      let descriptor = -1;
-      try { descriptor = fs.openSync(path.join(directory, file), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); } catch {}
-      requireCheck(descriptor >= 0, "Invalid worker kit recovery file");
-      try {
-        const stat = fs.fstatSync(descriptor);
-        requireCheck(stat.isFile() && stat.size <= 512 * 1024, "Invalid worker kit recovery file");
-        const text = fs.readFileSync(descriptor, "utf8");
-        files[file] = attestationCommand.test(file) && Buffer.byteLength(text) > 64 * 1024
-          ? JSON.stringify({ truncated: true, bytes: Buffer.byteLength(text), sha256: createHash("sha256").update(text).digest("hex"),
-            head: text.slice(0, 8192), tail: text.slice(-8192) }) : text;
-      } finally {
-        fs.closeSync(descriptor);
-      }
-    }
-    requireCheck(JSON.stringify(files).length <= 1024 * 1024, "Worker kit recovery receipt exceeds its bound");
-    record.kitFiles = files; await lease.save();
-  };
-  const meter = await request("GET", `/limits?org=${encodeURIComponent(env.BOAT_BILLING_ORG)}`);
-  requireCheck(meter.status === 200 && Number.isFinite(meter.body?.creditUsedSeconds), "Boat meter is unavailable");
-  record.maxUsedHours ??= Math.min(context.maxUsedHours, meter.body.creditUsedSeconds / 3600 + budget); await lease.save();
-  const maxUsedHours = record.maxUsedHours;
-  const deps: KitDeps = { boat: async (method, route, options = {}) => {
-    await persist(); await lease.fence();
-    const previous = Boolean(record.builderIntent);
-    const key = method === "POST" && route === "/sandboxes" ? "builderCreate" : method === "POST" && route === "/named-snapshots" ? "snapshotCreate" : null;
-    if (key === "builderCreate") {
-      if (!record.builderIntent) {
-        const body = WorkerBuilderCreationBodySchema.safeParse(options.body);
-        requireCheck(context.profile.boat?.accountScope === env.BOAT_ACCOUNT_SCOPE && context.profile.boat.billingOrg === env.BOAT_BILLING_ORG &&
-          context.profile.boat.baseSnapshot === env.BOAT_BASE_SNAPSHOT && body.success && body.data.from === env.BOAT_BASE_SNAPSHOT,
-          "Worker builder original account/base/environment intent is invalid");
-        const scope = await releaseBuilderCreationScope(config, { lease, record, profile: context.profile, request, readAdmission: context.readAdmission });
-        record.builderIntent = { body: options.body, key: options.headers?.["idempotency-key"], at: Date.now(), scope };
-      }
-      await lease.save();
-    }
-    if (key === "snapshotCreate") { record.snapshotRequested = true; await lease.save(); }
-    const dispatch = async () => {
-      const response = await request(method, route, options);
-      if (key && response.status >= 300) throw new DevProviderError("Boat Dev", response.status, response.requestId);
-      if (key === "builderCreate") {
-        requireCheck(/^bx_[a-z0-9]+$/.test(response.body?.sandbox?.id ?? ""), "Worker builder allocation is unconfirmed");
-        record.builder = { id: response.body.sandbox.id }; await lease.save();
-      }
-      const sandbox = response.body?.sandbox;
-      if (response.status >= 200 && response.status < 300 && sandbox && record.builder && sandbox.id === record.builder.id &&
-          sandbox.team?.id === env.BOAT_BILLING_ORG && record.builderIntent?.scope && !record.builder.billingOrgConfirmed) {
-        record.builder.billingOrgConfirmed = true; record.builder.billingObservedAt = new Date().toISOString();
-        record.builder.accountBinding = record.builderIntent.scope.accountBinding; await lease.save();
-      }
-      return response;
-    };
-    if (!key) return dispatch();
-    const intent = record.builderIntent;
-    const idempotentReplay = key === "builderCreate" && previous && intent.key === options.headers?.["idempotency-key"] &&
-      JSON.stringify(intent.body) === JSON.stringify(options.body) && Date.now() - intent.at < 23 * 3600_000;
-    return dispatchDevCreate(lease, record, "Boat Dev", dispatch, { key, idempotentReplay });
-  }, billingOrg: env.BOAT_BILLING_ORG, repoRoot: process.cwd(), stateDir: directory,
-    imageContract: imageContractSha256, now: Date.now, randomUUID, randomHex: () => randomBytes(16).toString("hex") };
-  const call = async (args: string[]) => {
-    const measured = await request("GET", `/limits?org=${encodeURIComponent(env.BOAT_BILLING_ORG!)}`);
-    requireCheck(measured.status === 200 && Number.isFinite(measured.body?.creditUsedSeconds) && measured.body.creditUsedSeconds / 3600 < maxUsedHours, "Worker builder account-wide budget is unavailable or exhausted");
-    if (record.builder && !record.builder.deleted && Date.now() - (record.lastRenewedAt ?? record.builderIntent?.at ?? Date.now()) > 45 * 60_000) {
-      record.lastRenewedAt = Date.now(); await lease.save();
-      await (context.kit ?? imageKit)(["builder", "renew", "--max-used-hours", String(maxUsedHours)], deps);
-    }
-    try { return await (context.kit ?? imageKit)(args, deps); }
-    catch (error) {
-      if (args[0] === "attestation" && error instanceof KitError) throw new PromotionError("Worker image attestation failed; private command receipt retained");
-      throw error;
-    }
-    finally { await persist(); }
-  };
-  const verify = async () => {
-    const response = await request("GET", `/named-snapshots/${record.snapshotId}`), snapshot = response.body?.snapshot;
-    requireCheck(response.status === 200 && snapshot?.name === record.snapshotId && snapshot.status === "ready" && snapshot.sourceSandboxId === record.builder?.id,
-      "Worker snapshot identity is unconfirmed; reconcile before another capture");
-    await acknowledgeDevCreate(lease, record, "snapshotCreate");
-  };
   return {
-    async build() {
-      if (record.candidate) { await verify(); return record.candidate as WorkerCandidate; }
-      await context.reserve();
-      const image = await buildBoatImage({ sourceSha: config.sourceSha, directory, baseSnapshot: env.BOAT_BASE_SNAPSHOT!, maxUsedHours, state: record }, {
-      kit: call, exists: fs.existsSync, save: () => lease.save(),
-      nameSnapshot: async () => {
-        const file = path.join(directory, config.sourceSha.slice(0,12), "generation.json");
-        const generation = JSON.parse(await readFile(file, "utf8"));
-        generation.snapshotName = context.snapshotName;
-        requireCheck(generation.snapshotName.length <= 63, "Worker snapshot name exceeds provider bound");
-        await writeFile(file, JSON.stringify(generation), { mode: 0o600 });
-        await persist(); return generation.snapshotName;
-      },
-      });
-      await verify(); record.candidate = image; record.buildSha256 = image.buildSha256; record.qualified = true; await lease.save();
-      return image;
+    async build(): Promise<WorkerCandidate> {
+      refuseRetiredWorkerPromotion();
     },
     async cleanup() {
       if (!record.builder && record.builderIntent && !["planned", "rejected"].includes(record.builderCreate?.phase)) {

@@ -4,6 +4,7 @@ import type pg from "pg";
 import { parseSetupTimings, type SetupTimings } from "./setup-timings.js";
 
 import { audit } from "../audit.js";
+import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { CloudWorkerScheduler } from "./worker-scheduler.js";
 import { parseCloudWorkspaceSetupHookLog, type CloudWorkspaceSetupHookLog } from "./setup-log.js";
@@ -14,6 +15,7 @@ import { cloudDiagnosticSchema, type CloudDiagnostic } from "./cloud-diagnostics
 import { tryRetainCloudDiagnosticTx } from "./cloud-diagnostic-store.js";
 import type { CloudRuntimeWitnessRow } from "./runtime-contract.js";
 import { cloudRuntimeQualificationMode } from "./runtime-config.js";
+import { CLOUD_WORKSPACE_V2_REQUIRED, requireSupportedCloudWorkspaceGeneration } from "./supported-generation.js";
 import { advanceCloudAutomaticRecovery, classifyCloudRestoreEvidence, enqueueCloudAutomaticRecovery, recordCloudRestoreEvidence } from "./automatic-recovery.js";
 import {
   completeCloudWorkspaceGenerationTransition,
@@ -231,6 +233,7 @@ export function cloudWorkspaceSetupReadinessMatches(
 }
 
 function safeFailure(error: unknown): SafeSetupFailure {
+  if (error instanceof HttpError && error.code === CLOUD_WORKSPACE_V2_REQUIRED) return { code: error.code, retryable: false };
   if (error instanceof CloudRuntimeError) return { code: error.code, retryable: false };
   if (error instanceof CloudWorkspaceSetupError) {
     const providerDiagnostic = cloudDiagnosticSchema.safeParse(error.providerDiagnostic);
@@ -351,7 +354,7 @@ export class CloudWorkspaceSetupWorker {
     }
     this.scheduler = new CloudWorkerScheduler(this.intervalMs, () => this.tick(), () => {
       this.logger.error("[cloud-workspace] setup tick failed; will retry");
-    });
+    }, () => this.readNextDelayMs());
   }
 
   start(): () => Promise<void> {
@@ -378,6 +381,33 @@ export class CloudWorkspaceSetupWorker {
     } finally {
       this.ticking = false;
     }
+  }
+
+  private async readNextDelayMs(): Promise<number | null> {
+    return withSystemTx(this.pool, async tx => {
+      const started = Date.now();
+      const result = await tx.query<{ delay_ms: string | null }>(
+        `SELECT extract(epoch FROM (min(CASE WHEN sr.state = 'queued'
+             THEN sr.next_attempt_at ELSE sr.lease_expires_at END) - now())) * 1000 AS delay_ms
+         FROM cloud_workspace_setup_runs sr
+         JOIN cloud_workspaces cw ON cw.id = sr.workspace_id AND cw.org_id = sr.org_id
+           AND cw.current_generation = sr.generation
+         JOIN organizations organization ON organization.id = cw.org_id AND organization.deleted_at IS NULL
+         JOIN teams team ON team.id = cw.team_id AND team.org_id = cw.org_id AND team.deleted_at IS NULL
+         JOIN organization_members om ON om.org_id = cw.org_id AND om.user_id = cw.owner_user_id
+         JOIN team_members tm ON tm.team_id = cw.team_id AND tm.org_id = cw.org_id AND tm.user_id = cw.owner_user_id
+         JOIN users account ON account.id = cw.owner_user_id AND account.deleted_at IS NULL AND account.auth_status = 'active'
+         JOIN cloud_workspace_provider_bindings pb ON pb.workspace_id = cw.id AND pb.generation = cw.current_generation
+         WHERE sr.state IN ('queued', 'running')
+           AND cw.desired_state = 'running' AND cw.status = 'setting_up' AND cw.deleted_at IS NULL
+           AND pb.observed_state = 'running' AND pb.provider_resource_id IS NOT NULL
+           AND cloud_workspace_generation_policy_current(cw.id, cw.current_generation, cw.org_id)
+           AND cloud_workspace_runtime_authority_live(cw.id, cw.current_generation, cw.owner_user_id, $1)`,
+        [this.workosEnabled],
+      );
+      const delay = result.rows[0]?.delay_ms;
+      return delay == null ? null : Number(delay) - (Date.now() - started);
+    }, { consistentRead: true });
   }
 
   private async claim(): Promise<ClaimDecision> {
@@ -744,6 +774,7 @@ export class CloudWorkspaceSetupWorker {
     timings?: SetupTimings,
   ): Promise<boolean> {
     return withSystemTx(this.pool, async (tx) => {
+      await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [setup.organizationId]);
       const workspace = await tx.query<{
         current_generation: number;
         desired_state: string;
@@ -846,6 +877,7 @@ export class CloudWorkspaceSetupWorker {
                AND ei.account_user_id = $5 AND ei.setup_run_id = $6
                AND ei.setup_execution_fence = $7
                AND ei.protocol_version = $8 AND ei.state = 'ready'
+               AND ei.actor_protocol_version = 2
                AND ei.revoked_at IS NULL AND ei.lease_expires_at > now()
                AND ei.registration_grant_id = $9
              FOR UPDATE OF ei`,
@@ -891,6 +923,7 @@ export class CloudWorkspaceSetupWorker {
 
       // Revocation after execution is a terminal runtime refusal too. Keep its
       // actionable error instead of cancelling an otherwise current setup.
+      await requireSupportedCloudWorkspaceGeneration(tx, setup);
       if (registeredPin) await requirePinnedCloudRuntime(tx, registeredPin, cloudRuntimeQualificationMode());
       await revokeSetupExecutionGrants(tx, setup);
       await retireCloudWorkspaceEngineInstances(tx, {
@@ -973,7 +1006,7 @@ export class CloudWorkspaceSetupWorker {
     setup: ClaimedSetup,
     failure: SafeSetupFailure,
   ): Promise<boolean> {
-    const message = failure.code === "cloud_runtime_revoked" || failure.code === "cloud_runtime_unavailable"
+    const message = failure.code === CLOUD_WORKSPACE_V2_REQUIRED || failure.code === "cloud_runtime_revoked" || failure.code === "cloud_runtime_unavailable"
       ? publicCloudError(failure.code).message : "Cloud workspace setup did not complete";
     return withSystemTx(this.pool, async (tx) => {
       await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [setup.organizationId]);
@@ -1219,7 +1252,12 @@ export class CloudWorkspaceSetupWorker {
     // Admission expiry and the execution fence make a late ignored command
     // unable to publish readiness after this bounded side wins the race.
     const execution = Promise.resolve().then(async () => {
-      if (setup.runtime) await withSystemTx(this.pool, tx => requirePinnedCloudRuntime(tx, setup.runtime!, cloudRuntimeQualificationMode()));
+      await withSystemTx(this.pool, async tx => {
+        await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [setup.organizationId]);
+        await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE", [setup.workspaceId, setup.organizationId]);
+        const supported = await requireSupportedCloudWorkspaceGeneration(tx, setup);
+        await requirePinnedCloudRuntime(tx, supported.runtimePin, cloudRuntimeQualificationMode());
+      });
       return this.executor.execute(setup, controller.signal);
     });
     try {
@@ -1266,7 +1304,7 @@ export class CloudWorkspaceSetupWorker {
     try {
       await this.recordSuccess(setup, result.readiness, this.executionLog(result), parseSetupTimings(result.timings));
     } catch (error) {
-      if (!(error instanceof CloudRuntimeError)) throw error;
+      if (!(error instanceof CloudRuntimeError) && !(error instanceof HttpError && error.code === CLOUD_WORKSPACE_V2_REQUIRED)) throw error;
       await this.recordFailure(setup, safeFailure(error));
     }
   }

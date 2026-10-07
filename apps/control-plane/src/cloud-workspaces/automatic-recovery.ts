@@ -6,14 +6,13 @@ import type { CloudWorkspaceBackendConfig, CloudWorkspaceProvisioningProfile } f
 import { authorizeCloudWorkspaceOperation } from "./authorization.js";
 import { authorizeCloudWorkspaceActor } from "./actors.js";
 import { refreshCloudWorkspaceBillingEpoch } from "./paid-authority.js";
-import { cloudWorkspaceProvisioningProfile } from "./provisioning-profile.js";
-import { resolveComputerImage } from "./computer-image.js";
 import { loadGenerationCloudProviderConnection } from "./provider-connections.js";
 import { persistCloudWorkspaceSetupSecrets, persistDatabaseCloudWorkspaceSettings, resolveDatabaseCloudWorkspaceSettings } from "./settings.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
 import type { CloudWorkspaceSetupExecution } from "./setup-worker.js";
 import { parseSetupDiagnostic } from "./cloud-diagnostics.js";
 import { advanceCloudWorkspaceGenerationTransitionAfterDrain, cancelCloudWorkspaceGenerationTransition, rollbackCloudWorkspaceGenerationTransition } from "./generation-transitions.js";
+import { requireSupportedCloudWorkspaceGeneration } from "./supported-generation.js";
 import { copyGenerationPins, requireGenerationRuntime } from "./generation-pins.js";
 import { cloudRuntimeQualificationMode } from "./runtime-config.js";
 
@@ -195,6 +194,7 @@ export async function requireCloudRecoveryAdmission(tx: Tx, input: RecoveryScope
   if (!workspace || workspace.current_generation!==input.sourceGeneration) throw new HttpError(409,"cloud_generation_changed","Cloud workspace generation changed before recovery");
   await authorizeCloudWorkspaceActor(tx,{...input,capability:"manage"});
   if (input.actorUserId!==workspace.owner_user_id) throw new HttpError(403,"cloud_workspace_owner_required","Only the workspace owner can recover this workspace");
+  await requireSupportedCloudWorkspaceGeneration(tx,{...input,generation:input.sourceGeneration});
   const authorization = await authorizeCloudWorkspaceOperation(tx,{...input,teamId:workspace.team_id,billingOwnerUserId:workspace.owner_user_id,requireWorkspaceOwner:true});
   await refreshCloudWorkspaceBillingEpoch(tx,{...input,authorization});
   const expired = (await tx.query(`SELECT 1 FROM cloud_workspace_engine_instances WHERE workspace_id=$1 AND generation=$2 AND lease_expires_at<=now()
@@ -228,11 +228,9 @@ export async function createCloudRecoveryTransition(tx: Tx, input: RecoveryScope
   if(!source)throw new HttpError(404,"cloud_generation_not_qualified","Source generation is unavailable");
   const qualificationMode=input.config.runtime?.qualificationMode??cloudRuntimeQualificationMode();
   const pins=await requireGenerationRuntime(tx,{...input,generation:input.sourceGeneration},qualificationMode);
-  const baseProfile=pins.runtime?pins.profile:cloudWorkspaceProvisioningProfile(input.config,source.provider);
+  const profile=pins.profile;
   const connection=await loadGenerationCloudProviderConnection(tx,{...input,generation:input.sourceGeneration});
-  if(!connection||connection.provider!==baseProfile.provider)throw new HttpError(409,"cloud_provider_connection_unavailable","The cloud provider connection is unavailable");
-  const profile=!pins.runtime&&connection.credentialSource==='hosted'&&!authorization.isPersonal
-    ? await resolveComputerImage(tx,input.organizationId,baseProfile) : baseProfile;
+  if(!connection||connection.provider!==profile.provider)throw new HttpError(409,"cloud_provider_connection_unavailable","The cloud provider connection is unavailable");
   if(!profile.sourceCommit)throw new HttpError(409,"recovery_image_unavailable","A qualified recovery image is unavailable");
   const quota=await loadQuota(tx,input.organizationId),usage=await loadUsage(tx,input.organizationId);
   if(workspace.desired_state!=="running"&&Number(usage.running)+1>quota.max_running_workspaces)
@@ -242,7 +240,7 @@ export async function createCloudRecoveryTransition(tx: Tx, input: RecoveryScope
   const generation=(await tx.query<{generation:number}>("SELECT coalesce(max(generation),0)::integer+1 AS generation FROM cloud_workspace_generations WHERE workspace_id=$1",[input.workspaceId])).rows[0]!.generation;
   const transitionId=randomUUID(),intentId=input.drainIntentId??randomUUID();
   await copyGenerationPins(tx,{...input,targetGeneration:generation,providerConnectionId:connection.id,
-    legacyProfile:profile,qualificationMode,recoveryCheckpointId:point.id});
+    qualificationMode,recoveryCheckpointId:point.id});
   const resolved=await resolveDatabaseCloudWorkspaceSettings(tx,{organizationId:input.organizationId,repositoryId:workspace.repository_id,workspaceId:input.workspaceId,generation,actorUserId:input.actorUserId,
     isPersonal:authorization.isPersonal,secretEncryptionKeys:input.config.settingsSecretEncryptionKeys,currentSecretEncryptionKeyVersion:input.config.currentSettingsSecretEncryptionKeyVersion});
   const settings=await persistDatabaseCloudWorkspaceSettings(tx,{...input,generation,settings:resolved});
@@ -450,10 +448,11 @@ export async function advanceCloudAutomaticRecovery(pool: pg.Pool, config: Cloud
       const capacity=['cloud_replacement_headroom_exceeded','cloud_quota_not_configured','cloud_quota_exceeded'].includes(error.code);
       const funding=/^cloud_(?:compute|account_entitlement)/.test(error.code);
       const state=capacity?'waiting_for_capacity':funding?'waiting_for_funding':'recovery_needed';
-      const code=capacity?'recovery_waiting_for_capacity':funding?'recovery_waiting_for_funding':error.code==='cloud_runtime_revoked'?error.code:'recovery_needed';
+      const terminal=['cloud_runtime_revoked','cloud_workspace_v2_required'].includes(error.code);
+      const code=capacity?'recovery_waiting_for_capacity':funding?'recovery_waiting_for_funding':terminal?error.code:'recovery_needed';
       await tx.query("UPDATE cloud_workspace_restore_incidents SET state=$2,reason=$3,next_attempt_at=now()+interval '30 seconds',updated_at=now() WHERE id=$1",[job.id,state,error.code]);
       await tx.query("UPDATE cloud_workspaces SET last_error_code=$2,last_error_message=$3,version=version+1,updated_at=now() WHERE id=$1",[scope.workspace_id,code,
-        capacity?'Recovery is waiting for capacity':funding?'Recovery is waiting for compute funding':error.code==='cloud_runtime_revoked'?error.message:'Recovery needs attention. The source is preserved.']);
+        capacity?'Recovery is waiting for capacity':funding?'Recovery is waiting for compute funding':terminal?error.message:'Recovery needs attention. The source is preserved.']);
     }
     return true;
   });

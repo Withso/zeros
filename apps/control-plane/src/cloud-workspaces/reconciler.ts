@@ -3,6 +3,8 @@ import { stopUnavailableCloudEngine } from "./engine-health.js";
 import type pg from "pg";
 
 import { audit } from "../audit.js";
+import { HttpError } from "../authz.js";
+import { CLOUD_WORKSPACE_V2_REQUIRED, requireSupportedCloudWorkspaceGeneration } from "./supported-generation.js";
 import { withSystemTx } from "../db.js";
 import { deferCloudRecoveryResourceBlock } from "./automatic-recovery.js";
 import { requireGenerationRuntime } from "./generation-pins.js";
@@ -229,6 +231,7 @@ function safeFailure(error: unknown): {
   retryable: boolean;
   retryAfterMs?: number | undefined;
 } {
+  if (error instanceof HttpError && error.code === CLOUD_WORKSPACE_V2_REQUIRED) return { code: error.code, message: error.message, retryable: false };
   if (error instanceof CloudRuntimeError) return { code: error.code, message: error.message, retryable: false };
   if (error instanceof CloudProviderError) {
     return {
@@ -315,7 +318,7 @@ export class CloudWorkspaceReconciler {
     this.logger = options.logger ?? console;
     this.scheduler = new CloudWorkerScheduler(this.intervalMs, periodic => this.tick(periodic), () => {
       this.logger.error("[cloud-workspace] reconcile tick failed; will retry");
-    });
+    }, () => this.readNextDelayMs());
   }
 
   start(): () => Promise<void> {
@@ -360,6 +363,42 @@ export class CloudWorkspaceReconciler {
     } finally {
       this.ticking = false;
     }
+  }
+
+  private async readNextDelayMs(): Promise<number | null> {
+    return withSystemTx(this.pool, async tx => {
+      const started = Date.now();
+      const result = await tx.query<{ delay_ms: string | null }>(
+        `SELECT extract(epoch FROM (min(greatest(
+           i.next_attempt_at,
+           CASE WHEN i.state = 'dispatching' THEN i.lease_expires_at ELSE i.next_attempt_at END,
+           (SELECT max(active.lease_expires_at) FROM cloud_workspace_lifecycle_intents active
+            WHERE active.workspace_id = i.workspace_id AND active.id <> i.id
+              AND active.state = 'dispatching')
+         )) - now())) * 1000 AS delay_ms
+         FROM cloud_workspace_lifecycle_intents i
+         JOIN cloud_workspaces cw ON cw.id = i.workspace_id
+         JOIN cloud_workspace_generations g
+           ON g.workspace_id = i.workspace_id AND g.generation = i.generation AND g.org_id = i.org_id
+         JOIN cloud_workspace_provider_bindings pb
+           ON pb.workspace_id = g.workspace_id AND pb.generation = g.generation
+         LEFT JOIN workspace_checkpoint_requests checkpoint_request ON checkpoint_request.lifecycle_intent_id = i.id
+         WHERE i.state IN ('queued', 'observing', 'dispatching')
+           AND (i.state <> 'dispatching' OR i.lease_expires_at IS NOT NULL)
+           AND (i.resume_after_intent_id IS NULL OR EXISTS (
+             SELECT 1 FROM cloud_workspace_lifecycle_intents prerequisite
+             WHERE prerequisite.id = i.resume_after_intent_id AND prerequisite.state = 'succeeded'
+           ))
+           AND (checkpoint_request.id IS NULL OR checkpoint_request.state = 'succeeded')
+           AND (i.operation <> 'create' OR NOT EXISTS (
+             SELECT 1 FROM workspace_fork_intents fork
+             WHERE fork.target_cloud_workspace_id = i.workspace_id AND fork.org_id = i.org_id
+               AND fork.operation = 'local_to_cloud' AND fork.state <> 'succeeded'
+           ))`,
+      );
+      const delay = result.rows[0]?.delay_ms;
+      return delay == null ? null : Number(delay) - (Date.now() - started);
+    }, { consistentRead: true });
   }
 
   private async claimIntent(): Promise<ClaimedIntent | null> {
@@ -514,6 +553,15 @@ export class CloudWorkspaceReconciler {
       !intent.generationTransitionId && ["create", "wake"].includes(intent.operation);
     let provider: CloudWorkspaceProvider;
     try {
+      if (intent.operation === "create" || intent.operation === "wake") {
+        await withSystemTx(this.pool, async tx => {
+          await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [intent.orgId]);
+          await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE", [intent.workspaceId, intent.orgId]);
+          await requireSupportedCloudWorkspaceGeneration(tx, {
+            workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
+          });
+        });
+      }
       if (!mayUpgradeOnWake && (intent.operation === "create" || intent.operation === "wake")) {
         await withSystemTx(this.pool, tx => requireGenerationRuntime(tx, {
           workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
@@ -653,6 +701,16 @@ export class CloudWorkspaceReconciler {
     switch (intent.operation) {
       case "create":
       case "wake": {
+        await withSystemTx(this.pool, async tx => {
+          await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [intent.orgId]);
+          await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE", [intent.workspaceId, intent.orgId]);
+          await requireSupportedCloudWorkspaceGeneration(tx, {
+            workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
+          });
+          await requireGenerationRuntime(tx, {
+            workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
+          }, this.runtimeUpgradeConfig?.runtime?.qualificationMode);
+        });
         if (!current && intent.providerResourceId) {
           // An admitted generation already had an allocation. Reusing its
           // identity would hide allocation loss and native-history recovery

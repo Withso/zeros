@@ -16,6 +16,7 @@ d("explicit personal agent credential authority",()=>{
   beforeAll(()=>{pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:5});});
   afterAll(async()=>{await pool.end();});
   beforeEach(async()=>{await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     fixture=await seedReadyCloudWorkspace(pool);service=new DatabaseCloudAgentCredentialService(pool,{keys:{1:key},currentKeyVersion:1});});
   const input=()=>({ownerUserId:fixture.userId,credentialId:randomUUID(),operationId:randomUUID(),expectedRevision:0,displayName:"My Cursor",
     material:{kind:"cursor-api-key" as const,apiKey:secret}});
@@ -90,7 +91,7 @@ d("explicit personal agent credential authority",()=>{
   it("requires explicit trust in BYO compute and invalidates consent when that authority changes",async()=>{
     const request=input();await service.put(request);
     const connection=(await pool.query(`SELECT provider_connection_id AS id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1`,[fixture.workspaceId])).rows[0].id;
-    await pool.query(`UPDATE provider_connection_versions SET credential_source='delegated',endpoint='https://app.daytona.io/api',
+    await pool.query(`UPDATE provider_connection_versions SET credential_source='delegated',endpoint='https://api.fixture.test',
       key_version=1,nonce=$2,ciphertext=$3,auth_tag=$4,credential_sha256=$5 WHERE connection_id=$1`,[connection,randomBytes(12),randomBytes(32),randomBytes(16),randomBytes(32)]);
     await pool.query("UPDATE provider_connections SET credential_source='delegated' WHERE id=$1",[connection]);
     const grant=delegation(request.credentialId);

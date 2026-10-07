@@ -1,5 +1,5 @@
-// Shared PR controls for every workspace. PR creation uses existing commits;
-// local staging and commits remain explicit review actions.
+// Shared PR controls for every workspace. Direct creation commits pending
+// Code + Design and publishes the branch; the primary action asks the agent.
 
 import { useCallback, useRef } from "react";
 import {
@@ -25,10 +25,13 @@ import {
   ghPrCreate,
   ghRepoAccess,
   gitChangeCounts,
+  gitCommit,
+  gitDiff,
   gitLog,
   gitRepoBranchCatalog,
   gitStatus,
   isGitErrorShape,
+  isWorkspaceOpStillRunning,
   type GithubRepoAccess,
   type StatusResult,
   type Workspace,
@@ -45,9 +48,13 @@ import {
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import {
   createPullRequestForWorkspace,
+  AutoCommitBlockedError,
+  AutoCommitError,
   GithubAccessError,
   isPrAccessBlocked,
 } from "./create-pr-action";
+import { describeAutoCommitBlock, describeAutoCommitFailure } from "./pr-auto-commit";
+import { triggerGitRefresh } from "../use-git-refresh-key";
 import {
   describePrAccessBlock,
   describePrCreateFailure,
@@ -247,19 +254,25 @@ export function CreatePrButton({
     async (draft: boolean) => {
       const owner = claim();
       if (!owner) return;
-      // Started here, not inside the orchestrator, so it overlaps the local
-      // change-count read and the push instead of queueing in front of them —
-      // the happy path pays nothing for it. Never rejects (ghRepoAccess
-      // resolves "unknown" on any failure), so leaving it unawaited on the
-      // success path cannot raise an unhandled rejection.
+      // A definite refusal stops before committing. Unknown probes proceed
+      // to the existing authoritative brokered operation.
       const accessProbe = ghRepoAccess(workspace.id);
+      let committed = false;
       try {
         await createPullRequestForWorkspace(
           {
+            status: (id) => gitStatus(id),
+            diff: (args) => gitDiff(args),
+            commit: async (args) => {
+              const result = await gitCommit(args);
+              committed = true;
+              triggerGitRefresh(workspace.path);
+              notifyWorkspacesChanged(workspace.repoSlug);
+              return result;
+            },
             log: (args) => gitLog(args),
             create: (args) => ghPrCreate(args),
             access: () => accessProbe,
-
           },
           {
             workspaceId: workspace.id,
@@ -272,6 +285,17 @@ export function CreatePrButton({
         // Refresh it instead of showing a redundant success toast.
         notifyWorkspacesChanged(workspace.repoSlug);
       } catch (err) {
+        if (err instanceof AutoCommitBlockedError) {
+          showBlockToast({ ...describeAutoCommitBlock(err.blocker), openSettings: false });
+          return;
+        }
+        if (err instanceof AutoCommitError) {
+          showBlockToast({ ...describeAutoCommitFailure({
+            stillRunning: isWorkspaceOpStillRunning(err.failure),
+            ...(isGitErrorShape(err.failure) ? { remediation: err.failure.remediation } : {}),
+          }), openSettings: false });
+          return;
+        }
         if (err instanceof GithubAccessError) {
           showBlockToast(describePrAccessBlock(err.access));
           return;
@@ -287,7 +311,11 @@ export function CreatePrButton({
         const facts = isGitErrorShape(err)
           ? err
           : { message: err instanceof Error ? err.message : String(err) };
-        showBlockToast(describePrCreateFailure(facts, access));
+        const copy = describePrCreateFailure(facts, access);
+        showBlockToast(committed ? {
+          ...copy,
+          description: `${copy.description} Your changes were committed; retry will reuse that commit.`,
+        } : copy);
       } finally {
         releasePrCreateAction(owner);
       }
@@ -296,6 +324,7 @@ export function CreatePrButton({
       claim,
       showBlockToast,
       workspace.id,
+      workspace.path,
       workspace.branch,
       workspace.baseBranch,
       workspace.repoSlug,

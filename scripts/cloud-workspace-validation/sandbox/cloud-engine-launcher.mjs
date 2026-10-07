@@ -54,10 +54,11 @@ function rootPath(file, directory = false) {
 export function assertCloudEngineFilesProjection(runtime, {
   root = runtimeLayout.engineFilesRoot, rootPath: verifyRoot = rootPath,
 } = {}) {
+  if (runtime.profile !== "v4") throw new Error("Isolated cloud engine profile required");
   verifyRoot(root, true);
   const names = readdirSync(root);
   const allowed = ["workspace", "attachment-staging", "state", "home", "managed-settings",
-    ...(runtime.profile === "v4" ? ["repos", ".zeros-setup"] : [])];
+    "repos", ".zeros-setup"];
   if (names.some(name => !allowed.includes(name)))
     throw new Error("Unexpected cloud engine file projection");
   if (names.includes("repos")) {
@@ -182,6 +183,7 @@ export function prepareCloudEngineAppArmor({
   execute = spawnSync,
   runtime = resolveCloudRuntime(),
 } = {}) {
+  if (runtime.profile !== "v4") throw new Error("Isolated cloud engine profile required");
   let restriction;
   try {
     restriction = read(
@@ -210,7 +212,7 @@ export function prepareCloudEngineAppArmor({
     return;
   }
   const parser = "/usr/sbin/apparmor_parser";
-  const profile = runtime.profile === "v4" ? "/etc/apparmor.d/zeros-cloud-engine" : `${runtime.libRoot}/zeros-cloud-engine.apparmor`;
+  const profile = "/etc/apparmor.d/zeros-cloud-engine";
   verify(parser);
   verify(profile);
   const result = execute(parser, ["--replace", "--skip-cache", profile], {
@@ -256,10 +258,10 @@ function verifyComputerRepositoryProjection(directory) {
 
 export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source = process.env, operation = "serve") {
   const profile = readCloudHostRuntimeProfile();
-  if (![2,3,4].includes(profile.version) || (profile.version === 4) !== (runtime.profile === "v4"))
+  if (profile.version !== 4 || runtime.profile !== "v4")
     throw new Error("Isolated cloud engine profile required");
   let engineIdentity;
-  if (runtime.profile === "v4" && ["serve", "resident"].includes(operation)) {
+  if (["serve", "resident"].includes(operation)) {
     try {
       const encoded = source.ZEROS_CLOUD_RUNTIME_B64;
       if (typeof encoded !== "string" || encoded.length > 65536) throw new Error();
@@ -268,8 +270,8 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
   }
   const computer = readCloudComputerWorkspaceAdmission(runtime, { engineIdentity });
   let residentHostId;
-  if (runtime.profile === "v4" && operation === "resident") residentHostId = source.ZEROS_RESIDENT_HOST_ID;
-  else if (runtime.profile === "v4" && operation === "serve" && source.ZEROS_RESIDENT_PTY_B64 !== undefined) {
+  if (operation === "resident") residentHostId = source.ZEROS_RESIDENT_HOST_ID;
+  else if (operation === "serve" && source.ZEROS_RESIDENT_PTY_B64 !== undefined) {
     try {
       if (source.ZEROS_RESIDENT_PTY_B64.length > 4096) throw new Error();
       residentHostId = JSON.parse(Buffer.from(source.ZEROS_RESIDENT_PTY_B64, "base64url").toString("utf8")).hostId;
@@ -303,10 +305,9 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
   privateDirectory("/srv/zeros/state", 10003, 10003, 0o700);
   rootPath(runtimeLayout.engineFilesRoot, true);
   privateDirectory(runtimeLayout.attachmentTemporaryRoot, 10003, 10003, 0o700);
-  if (profile.version === 4)
-    privateDirectory(path.join(runtimeLayout.engineFilesRoot, ".zeros-setup"), 0, 10001, 0o710);
+  privateDirectory(path.join(runtimeLayout.engineFilesRoot, ".zeros-setup"), 0, 10001, 0o710);
   assertCloudEngineFilesProjection(runtime);
-  if (profile.version === 4 && readdirSync(runtimeLayout.engineFilesRoot).includes("repos"))
+  if (readdirSync(runtimeLayout.engineFilesRoot).includes("repos"))
     verifyComputerRepositoryProjection(path.join(runtimeLayout.engineFilesRoot, "repos"));
   for (const name of ["home", "state", "managed-settings", "home/agent", "home/capture"]) {
     const directory = path.join(runtimeLayout.engineFilesRoot, name);
@@ -348,7 +349,6 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
   } finally {
     managed.fill(0);
   }
-  if (runtime.profile !== "v4") return {...profile, runtime};
   const viewDirectory = `/run/zeros/view/runtime-${randomUUID()}`;
   privateDirectory(viewDirectory, 0, 0, 0o700);
   try {
@@ -392,15 +392,16 @@ export async function launchCloudEngine({
   spawnProcess = spawn,
   signals = process,
 } = {}) {
+  if (runtime.profile !== "v4") throw new Error("Isolated cloud engine profile required");
   const profile=prepare(runtime, source, operation);
   runtime = profile?.runtime ?? runtime;
   let args, environment;
   try {
-    args = cloudEngineViewArguments(operation,profile?.version??2,runtime,profile?.viewDirectory,profile?.primaryRepository,profile?.residentHostId);
+    args = cloudEngineViewArguments(operation,profile?.version,runtime,profile?.viewDirectory,profile?.primaryRepository,profile?.residentHostId);
     environment = cloudEngineViewEnvironment(source, operation,runtime);
     if (!scope) {
       let instanceId;
-      if (runtime.profile === "v4") {
+      {
         if (operation === "resident") instanceId = source.ZEROS_RESIDENT_HOST_ID;
         else if (operation === "serve") {
           try { instanceId = JSON.parse(Buffer.from(source.ZEROS_CLOUD_RUNTIME_B64 ?? "", "base64url").toString("utf8"))?.engine?.instanceId; }
@@ -516,8 +517,6 @@ if (
       ? "serve"
       : args.length === 1 && args[0] === "--qualify"
         ? "qualify"
-        : args.length === 1 && args[0] === "--qualify-agent"
-          ? "qualify-agent"
         : args.length === 1 && args[0] === "--resident"
           ? "resident"
         : null;

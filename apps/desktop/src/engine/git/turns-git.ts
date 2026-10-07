@@ -29,7 +29,8 @@
 // live turn is never disturbed.
 // ──────────────────────────────────────────────────────────
 
-import { promises as fs } from "node:fs";
+import { constants, promises as fs } from "node:fs";
+import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import { createGitTemporaryDirectory, writeGitTemporaryFile } from "./git-temporary";
 import * as os from "node:os";
 import * as nodePath from "node:path";
@@ -1042,7 +1043,15 @@ async function resetPath(
   if (conflict) {
     return { path, result: "conflict", reason: "overlapping concurrent edit" };
   }
-  await fs.writeFile(nodePath.resolve(cwd, path), merged);
+  const target = nodePath.resolve(cwd, path);
+  const handle = await fs.open(target, constants.O_RDWR | constants.O_NOFOLLOW);
+  try {
+    // Publish/check the pinned inode before mutating it. Unlike a path-based
+    // write this cannot recreate a worker-owned file as an engine-owned one.
+    publishCloudWorkspacePath(target, handle.fd);
+    await handle.truncate(0);
+    await handle.writeFile(merged);
+  } finally { await handle.close(); }
   return { path, result: "merged" };
 }
 

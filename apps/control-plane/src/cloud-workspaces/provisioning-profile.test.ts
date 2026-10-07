@@ -8,21 +8,9 @@ import {
   configuredCloudWorkspaceProviders,
 } from "./provisioning-profile.js";
 
-const daytona: CloudWorkspaceProvisioningProfile = {
-  provider: "daytona",
-  imageRef: "qualified-snapshot",
-  architecture: "linux/amd64",
-  cpuMillicores: 2000,
-  memoryMiB: 4096,
-  storageMiB: 20480,
-  sourceCommit: "a".repeat(40),
-};
 const boat: CloudWorkspaceProvisioningProfile = {
-  ...daytona,
-  provider: "boat",
-  imageRef: "qualified-template",
-  cpuMillicores: 4000,
-  memoryMiB: 8192,
+  provider: "boat", imageRef: "qualified-template", architecture: "linux/amd64",
+  cpuMillicores: 4000, memoryMiB: 8192, storageMiB: 20480, sourceCommit: "a".repeat(40),
 };
 const config = (profiles?: CloudWorkspaceBackendConfig["providerProfiles"]) =>
   ({
@@ -32,23 +20,12 @@ const config = (profiles?: CloudWorkspaceBackendConfig["providerProfiles"]) =>
   }) as CloudWorkspaceBackendConfig;
 
 describe("cloud provisioning profiles", () => {
-  it("preserves a qualified Daytona VM class without changing legacy profiles",()=>{
-    const vm={...daytona,sandboxClass:"linux-vm" as const};
-    expect(cloudWorkspaceProvisioningProfile(config({daytona:vm}),"daytona")).toEqual(vm);
-  });
-  it("selects the customer's provider independently of the managed default without copying credentials", () => {
-    const configured = config({ daytona });
-    expect(configuredCloudWorkspaceProviders(configured)).toEqual([
-      "daytona",
-      "boat",
-    ]);
-    expect(cloudWorkspaceProvisioningProfile(configured, "daytona")).toEqual(
-      daytona,
-    );
-    expect(cloudWorkspaceProvisioningProfile(configured, "boat")).toEqual(boat);
+  it("returns only the qualified Boat profile without copying credentials", () => {
+    expect(configuredCloudWorkspaceProviders(config())).toEqual(["boat"]);
+    expect(cloudWorkspaceProvisioningProfile(config(), "boat")).toEqual(boat);
   });
 
-  it.each(["daytona", "unknown", "__proto__", null])(
+  it.each(["retired-provider", "unknown", "__proto__", null])(
     "does not fall back for an unconfigured provider (%s)",
     (name) => {
       expect(() => cloudWorkspaceProvisioningProfile(config(), name)).toThrow(
@@ -58,7 +35,7 @@ describe("cloud provisioning profiles", () => {
   );
 
   it.each([
-    { provider: "boat" },
+    { provider: "unknown" },
     { architecture: "windows/amd64" },
     { cpuMillicores: 0 },
     { memoryMiB: 0.5 },
@@ -68,10 +45,10 @@ describe("cloud provisioning profiles", () => {
     { imageRef: "" },
   ])("rejects an invalid qualified target %j", (invalid) => {
     const configured = config({
-      daytona: { ...daytona, ...invalid } as CloudWorkspaceProvisioningProfile,
+      boat: { ...boat, ...invalid } as CloudWorkspaceProvisioningProfile,
     });
     expect(() =>
-      cloudWorkspaceProvisioningProfile(configured, "daytona"),
+      cloudWorkspaceProvisioningProfile(configured, "boat"),
     ).toThrow("no valid provisioning profile");
   });
 });

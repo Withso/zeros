@@ -1,5 +1,5 @@
 import {describe,expect,it} from "vitest";
-import {assertSnapshotPlacement,parseDaytonaSandboxClass,vmSnapshotParameters} from "../cloud-workspace-validation/lib/snapshot-placement";
+import {assertRegistryImageDigest} from "../cloud-workspace-validation/lib/registry-image";
 import {chmod,mkdtemp,mkdir,writeFile,readFile,rm,symlink} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,10 +8,7 @@ import {buildEngineImage} from "../cloud-workspace-validation/image";
 import {fileURLToPath} from "node:url";
 
 const registryImage=`registry.example.test/zeros/runtime@sha256:${"a".repeat(64)}`;
-const resources={cpu:2,memory:4,disk:20};
-const expected={sandboxClass:"linux-vm" as const,region:"eu",resources};
-const attestation={version:2 as const,...expected,registryImage};
-describe("Daytona VM snapshot identity",()=>{
+describe("portable VM image identity",()=>{
   it("binds the rendered base image, source bytes, destination and executable mode",async()=>{
     const root=await mkdtemp(path.join(os.tmpdir(),"zeros-vm-recipe-"));
     try{
@@ -24,7 +21,7 @@ describe("Daytona VM snapshot identity",()=>{
       await chmod(source,0o600);await writeFile(source,"echo changed\n");expect(await vmImageRecipeSha256(image,root)).not.toBe(original);
     }finally{await rm(root,{recursive:true,force:true});}
   });
-  it("exports every runtime source from the actual pinned SDK image builder",async()=>{
+  it("exports every runtime source from the portable image recipe",async()=>{
     const root=await mkdtemp(path.join(os.tmpdir(),"zeros-vm-real-image-"));
     try{
       const image=buildEngineImage();const output=path.join(root,"context");
@@ -60,19 +57,11 @@ describe("Daytona VM snapshot identity",()=>{
       await symlink(file,path.join(root,"link"));await expect(readVmImageReceipt(path.join(root,"link"),expected)).rejects.toThrow(/regular file/);
     }finally{await rm(root,{recursive:true,force:true});}
   });
-  it("uses the published image path with explicit class and region",()=>{
-    expect(vmSnapshotParameters({name:"candidate",registryImage,region:"eu",resources})).toEqual({name:"candidate",image:registryImage,regionId:"eu",resources,sandboxClass:"linux-vm"});
-    expect(()=>assertSnapshotPlacement(attestation,expected)).not.toThrow();
+  it.each([{}, "node:24", "registry.example.test/zeros/runtime:latest", "https://registry.example.test/zeros/runtime@sha256:" + "a".repeat(64)])("rejects unpinned registry build inputs", value => {
+    expect(() => assertRegistryImageDigest(value)).toThrow(/immutable registry/);
   });
-  it.each([{},"node:24","registry.example.test/zeros/runtime:latest","https://registry.example.test/zeros/runtime@sha256:"+"a".repeat(64)])("rejects declarative or unpinned build inputs",registryImage=>{
-    expect(()=>vmSnapshotParameters({name:"candidate",registryImage,region:"eu",resources})).toThrow(/immutable registry/);
-  });
-  it.each([{version:1 as const},{...attestation,sandboxClass:"container" as const},{...attestation,region:"us"},{...attestation,resources:{...resources,disk:8}}])("does not let a different snapshot placement qualify a VM",value=>{
-    expect(()=>assertSnapshotPlacement(value,expected)).toThrow();
-  });
-  it("keeps legacy container attestations readable without treating them as VM evidence",()=>{
-    expect(()=>assertSnapshotPlacement({version:1},{...expected,sandboxClass:"container"})).not.toThrow();
-    expect(parseDaytonaSandboxClass(undefined)).toBe("container");
-    expect(()=>parseDaytonaSandboxClass("windows")).toThrow();
+  it("accepts only a bounded immutable registry digest", () => {
+    expect(() => assertRegistryImageDigest(registryImage)).not.toThrow();
+    expect(() => assertRegistryImageDigest(registryImage.replace("/zeros/", "/../"))).toThrow();
   });
 });

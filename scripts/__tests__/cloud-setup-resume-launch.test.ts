@@ -1,4 +1,8 @@
 import { expect, it, vi } from "vitest";
+vi.mock("../cloud-workspace-validation/sandbox/cloud-runtime-root.mjs", async original => ({
+  ...await original<typeof import("../cloud-workspace-validation/sandbox/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime: (await import("../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime")).testCloudRuntime,
+}));
 import { prepareAndLaunchCloudWorkspace } from "../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
 
 const material = { execution: { workspaceId: "workspace", organizationId: "org", generation: 1, setupRunId: "run", executionFence: 1 },

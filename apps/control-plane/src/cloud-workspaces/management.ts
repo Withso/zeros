@@ -12,16 +12,12 @@ import {
   requireOrganizationRole,
 } from "../authz.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
+import { isSupportedCloudWorkspaceProviderBinding } from "./provider.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { authorizeCloudWorkspaceActor, authorizeCloudWorkspaceCleanup } from "./actors.js";
 import { lockCloudWorkspaceScope, authorizeCloudWorkspaceOperation } from "./authorization.js";
 import { enqueueWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import { cancelCloudWorkspaceGenerationTransition } from "./generation-transitions.js";
-import { sealCloudProviderCredential } from "./provider-connections.js";
-import {
-  CloudProviderQualificationError,
-  DaytonaProviderConnectionQualifier,
-} from "./provider-qualification.js";
 import {
   cloudWorkspaceSecretValueVerifier,
   filterCloudWorkspaceSettingsByAllowedPaths,
@@ -61,66 +57,6 @@ function iso(value: Date | string | null): string | null {
   const parsed = value instanceof Date ? value : new Date(value);
   if (!Number.isFinite(parsed.getTime())) throw new Error("invalid timestamp");
   return parsed.toISOString();
-}
-
-function credentialKey(config: CloudWorkspaceBackendConfig): {
-  version: number;
-  key: string;
-} {
-  const versions = Object.keys(config.providerCredentialKeys)
-    .map(Number)
-    .filter((value) => Number.isSafeInteger(value) && value > 0)
-    .sort((left, right) => right - left);
-  const version = versions[0];
-  const key =
-    version === undefined ? undefined : config.providerCredentialKeys[version];
-  if (!version || !key) {
-    throw new HttpError(
-      503,
-      "cloud_provider_credential_storage_not_configured",
-      "Delegated cloud provider credentials are not configured",
-    );
-  }
-  return { version, key };
-}
-
-/** New connections use the separately configured Daytona endpoint. Rotation
- * uses the accepted version's endpoint and target: a credential change must
- * never migrate the connection or send the new key to another provider. */
-function daytonaConnectionTarget(
-  value: { apiUrl: unknown; target: unknown } | null,
-): { apiUrl: string; target: string } {
-  const unavailable = () =>
-    new HttpError(
-      503,
-      "cloud_provider_not_configured",
-      "The customer Daytona endpoint and target are not configured",
-    );
-  if (
-    !value ||
-    typeof value.apiUrl !== "string" ||
-    value.apiUrl.length > 2_048 ||
-    /[\x00-\x20\x7f]/.test(value.apiUrl) ||
-    typeof value.target !== "string" ||
-    !/^[A-Za-z0-9._-]{1,64}$/.test(value.target)
-  )
-    throw unavailable();
-  let url: URL;
-  try {
-    url = new URL(value.apiUrl);
-  } catch {
-    throw unavailable();
-  }
-  if (
-    url.protocol !== "https:" ||
-    !url.hostname ||
-    url.username ||
-    url.password ||
-    url.search ||
-    url.hash
-  )
-    throw unavailable();
-  return { apiUrl: value.apiUrl, target: value.target };
 }
 
 function currentSecretKey(config: CloudWorkspaceBackendConfig): {
@@ -492,13 +428,8 @@ export class DatabaseCloudWorkspaceManagementService {
     private readonly config: CloudWorkspaceBackendConfig,
     private readonly options: {
       workosEnabled: boolean;
-      qualifier?: DaytonaProviderConnectionQualifier;
     },
   ) {}
-
-  private qualifier(): DaytonaProviderConnectionQualifier {
-    return this.options.qualifier ?? new DaytonaProviderConnectionQualifier();
-  }
 
   async repositorySettings(input: {
     organizationId: string;
@@ -2300,7 +2231,7 @@ export class DatabaseCloudWorkspaceManagementService {
         id: string;
         owner_kind: "user" | "organization";
         owner_user_id: string | null;
-        provider: "daytona";
+        provider: "boat";
         display_name: string;
         credential_source: "hosted" | "delegated";
         current_version: string | number;
@@ -2315,7 +2246,7 @@ export class DatabaseCloudWorkspaceManagementService {
                 credential_source, current_version, state, capabilities,
                 region, created_at, updated_at, revoked_at
          FROM provider_connections
-         WHERE org_id = $1
+         WHERE org_id = $1 AND provider = 'boat' AND credential_source = 'hosted'
            AND (
              (owner_kind = 'organization' AND owner_user_id IS NULL)
              OR (owner_kind = 'user' AND owner_user_id = $2)
@@ -2335,7 +2266,8 @@ export class DatabaseCloudWorkspaceManagementService {
     id: string;
     owner_kind: "user" | "organization";
     owner_user_id: string | null;
-    provider: "daytona";
+    provider: string;
+    sandbox_class?: unknown;
     display_name: string;
     credential_source: "hosted" | "delegated";
     current_version: string | number;
@@ -2346,14 +2278,16 @@ export class DatabaseCloudWorkspaceManagementService {
     updated_at?: Date | string;
     revoked_at?: Date | string | null;
   }): Record<string, unknown> {
-    const capabilities = row.capabilities ?? {};
+    const supported = isSupportedCloudWorkspaceProviderBinding({ provider: row.provider, credentialSource: row.credential_source, sandboxClass: row.sandbox_class });
+    const capabilities = supported ? row.capabilities ?? {} : {};
     return {
       id: row.id,
       ownerKind: row.owner_kind,
       displayName: row.credential_source==="hosted"?"Zeros Cloud":"Custom compute",
       credentialSource: row.credential_source,
       version: safeVersion(row.current_version, "provider connection"),
-      state: row.state,
+      state: supported ? row.state : "invalid",
+      ...(supported ? {} : { unavailableCode: "cloud_provider_unsupported" }),
       capabilities: {
         qualified: capabilities.qualified === true,
         qualificationVersion:
@@ -2379,613 +2313,18 @@ export class DatabaseCloudWorkspaceManagementService {
     };
   }
 
-  private async providerOwner(
-    tx: Tx,
-    input: {
-      organizationId: string;
-      actorUserId: string;
-      ownerKind: "user" | "organization";
-      paid: boolean;
-    },
-  ): Promise<{
-    ownerKind: "user" | "organization";
-    ownerUserId: string | null;
-  }> {
-    const authority = await organizationAuthority(tx, {
-      ...input,
-      workosEnabled: this.options.workosEnabled,
-      paid: input.paid,
-    });
-    if (authority.isPersonal && input.ownerKind !== "user") {
-      throw new HttpError(
-        422,
-        "cloud_provider_owner_invalid",
-        "Personal cloud provider connections must be account-owned",
-      );
-    }
-    return {
-      ownerKind: input.ownerKind,
-      ownerUserId: input.ownerKind === "user" ? input.actorUserId : null,
-    };
-  }
-
-  async createProviderConnection(input: {
-    id: string;
-    organizationId: string;
-    actorUserId: string;
-    ownerKind: "user" | "organization";
-    displayName: string;
-    apiKey: string;
+  async createProviderConnection(_input: {
+    id: string; organizationId: string; actorUserId: string;
+    ownerKind: "user" | "organization"; displayName: string; apiKey: string;
   }): Promise<{ connection: unknown; replayed: boolean }> {
-    const digest = createHash("sha256").update(input.apiKey, "utf8").digest();
-    const storedKey = credentialKey(this.config);
-    const preflight = await withSystemTx(this.pool, async (tx) => {
-      const owner = await this.providerOwner(tx, { ...input, paid: true });
-      const existing = (
-        await tx.query<{
-          id: string;
-          org_id: string;
-          owner_kind: "user" | "organization";
-          owner_user_id: string | null;
-          provider: "daytona";
-          display_name: string;
-          credential_source: "hosted" | "delegated";
-          current_version: string | number;
-          state: "active" | "revoked" | "invalid";
-          capabilities: Record<string, unknown>;
-          region: string | null;
-          credential_sha256: Buffer | null;
-        }>(
-          `SELECT connection.id, connection.org_id, connection.owner_kind,
-                  connection.owner_user_id, connection.provider,
-                  connection.display_name, connection.credential_source,
-                  connection.current_version, connection.state,
-                  connection.capabilities, connection.region,
-                  version.credential_sha256
-           FROM provider_connections connection
-           JOIN provider_connection_versions version
-             ON version.connection_id = connection.id
-            AND version.org_id = connection.org_id
-            AND version.version = connection.current_version
-           WHERE connection.id = $1`,
-          [input.id],
-        )
-      ).rows[0];
-      if (!existing) return { owner, existing: null };
-      const exact =
-        existing.org_id === input.organizationId &&
-        existing.owner_kind === owner.ownerKind &&
-        existing.owner_user_id === owner.ownerUserId &&
-        existing.provider === "daytona" &&
-        existing.display_name === input.displayName &&
-        existing.credential_source === "delegated" &&
-        existing.state === "active" &&
-        existing.credential_sha256 !== null &&
-        same(existing.credential_sha256, digest);
-      if (!exact) {
-        throw new HttpError(
-          409,
-          "cloud_provider_identity_conflict",
-          "Provider connection identity is already in use",
-        );
-      }
-      return { owner, existing };
-    });
-    if (preflight.existing) {
-      return {
-        connection: this.providerConnectionDocument(preflight.existing),
-        replayed: true,
-      };
-    }
-    const target = daytonaConnectionTarget(
-      this.config.daytonaConnection ??
-        (this.config.provider === "daytona" ? this.config : null),
-    );
-    let qualification;
-    try {
-      qualification = await this.qualifier().qualify({
-        apiKey: input.apiKey,
-        apiUrl: target.apiUrl,
-        target: target.target,
-      });
-    } catch (error) {
-      if (error instanceof CloudProviderQualificationError) {
-        throw new HttpError(422, error.code, error.message);
-      }
-      throw error;
-    }
-    const capabilities = {
-      ...qualification.capabilities,
-      credentialExpiresAt: qualification.credentialExpiresAt,
-    };
-    return withSystemTx(this.pool, async (tx) => {
-      const owner = await this.providerOwner(tx, { ...input, paid: true });
-      // Qualification is deliberately outside a database transaction. A
-      // deterministic per-id lock makes two qualified retries converge on one
-      // encrypted row instead of turning the second valid request into a
-      // uniqueness failure.
-      await tx.query(
-        `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`,
-        [input.id],
-      );
-      const collision = (
-        await tx.query<{
-          id: string;
-          org_id: string;
-          owner_kind: "user" | "organization";
-          owner_user_id: string | null;
-          provider: "daytona";
-          display_name: string;
-          credential_source: "hosted" | "delegated";
-          current_version: string | number;
-          state: "active" | "revoked" | "invalid";
-          capabilities: Record<string, unknown>;
-          region: string | null;
-          credential_sha256: Buffer | null;
-        }>(
-          `SELECT connection.id, connection.org_id, connection.owner_kind,
-                  connection.owner_user_id, connection.provider,
-                  connection.display_name, connection.credential_source,
-                  connection.current_version, connection.state,
-                  connection.capabilities, connection.region,
-                  version.credential_sha256
-           FROM provider_connections connection
-           JOIN provider_connection_versions version
-             ON version.connection_id = connection.id
-            AND version.org_id = connection.org_id
-            AND version.version = connection.current_version
-           WHERE connection.id = $1
-           FOR UPDATE OF connection`,
-          [input.id],
-        )
-      ).rows[0];
-      if (collision) {
-        const exact =
-          collision.org_id === input.organizationId &&
-          collision.owner_kind === owner.ownerKind &&
-          collision.owner_user_id === owner.ownerUserId &&
-          collision.provider === "daytona" &&
-          collision.display_name === input.displayName &&
-          collision.credential_source === "delegated" &&
-          collision.state === "active" &&
-          collision.credential_sha256 !== null &&
-          same(collision.credential_sha256, digest);
-        if (exact) {
-          return {
-            connection: this.providerConnectionDocument(collision),
-            replayed: true,
-          };
-        }
-        throw new HttpError(
-          409,
-          "cloud_provider_identity_conflict",
-          "Provider connection identity is already in use",
-        );
-      }
-      const sealed = sealCloudProviderCredential(
-        input.apiKey,
-        {
-          connectionId: input.id,
-          organizationId: input.organizationId,
-          version: 1,
-          provider: "daytona",
-          endpoint: target.apiUrl,
-        },
-        storedKey.key,
-      );
-      await tx.query(
-        `INSERT INTO provider_connections (
-           id, org_id, owner_kind, owner_user_id, provider, display_name,
-           credential_source, current_version, state, capabilities, region
-         ) VALUES ($1, $2, $3, $4, 'daytona', $5, 'delegated', 1,
-                   'active', $6::jsonb, $7)`,
-        [
-          input.id,
-          input.organizationId,
-          owner.ownerKind,
-          owner.ownerUserId,
-          input.displayName,
-          JSON.stringify(capabilities),
-          target.target,
-        ],
-      );
-      await tx.query(
-        `INSERT INTO provider_connection_versions (
-           connection_id, org_id, version, credential_source, endpoint,
-           key_version, nonce, ciphertext, auth_tag, credential_sha256,
-           capabilities, credential_expires_at, created_by
-         ) VALUES (
-           $1, $2, 1, 'delegated', $3, $4, $5, $6, $7, $8,
-           $9::jsonb, $10, $11
-         )`,
-        [
-          input.id,
-          input.organizationId,
-          target.apiUrl,
-          storedKey.version,
-          sealed.nonce,
-          sealed.ciphertext,
-          sealed.authTag,
-          sealed.credentialSha256,
-          JSON.stringify(capabilities),
-          qualification.credentialExpiresAt,
-          input.actorUserId,
-        ],
-      );
-      await audit(
-        tx,
-        input.organizationId,
-        input.actorUserId,
-        "cloud_workspace.provider_connection_created",
-        {
-          providerConnectionId: input.id,
-          ownerKind: owner.ownerKind,
-          provider: "daytona",
-          version: 1,
-          credentialExpiresAt: qualification.credentialExpiresAt,
-        },
-      );
-      await outbox(tx, {
-        organizationId: input.organizationId,
-        eventType: "cloud_provider.connection_created",
-        aggregateKey: `provider-connection:${input.id}`,
-        revision: 1,
-        idempotencyKey: `provider-connection:${input.id}:1`,
-        payload: {
-          providerConnectionId: input.id,
-          ownerKind: owner.ownerKind,
-          provider: "daytona",
-          version: 1,
-        },
-      });
-      return {
-        connection: this.providerConnectionDocument({
-          id: input.id,
-          owner_kind: owner.ownerKind,
-          owner_user_id: owner.ownerUserId,
-          provider: "daytona",
-          display_name: input.displayName,
-          credential_source: "delegated",
-          current_version: 1,
-          state: "active",
-          capabilities,
-          region: target.target,
-        }),
-        replayed: false,
-      };
-    });
+    throw new HttpError(503, "cloud_provider_not_configured", "Customer compute connections are unavailable");
   }
 
-  async rotateProviderConnection(input: {
-    id: string;
-    organizationId: string;
-    actorUserId: string;
-    expectedVersion: number;
-    apiKey: string;
-  }): Promise<{
-    connection: unknown;
-    replayed: boolean;
-    generationsUsingPreviousVersion: number;
-  }> {
-    const digest = createHash("sha256").update(input.apiKey, "utf8").digest();
-    const storedKey = credentialKey(this.config);
-    const preflight = await withSystemTx(this.pool, async (tx) => {
-      await organizationAuthority(tx, {
-        ...input,
-        workosEnabled: this.options.workosEnabled,
-        paid: true,
-      });
-      const row = (
-        await tx.query<{
-          owner_kind: "user" | "organization";
-          owner_user_id: string | null;
-          display_name: string;
-          credential_source: "hosted" | "delegated";
-          current_version: string | number;
-          state: "active" | "revoked" | "invalid";
-          capabilities: Record<string, unknown>;
-          region: string | null;
-          credential_sha256: Buffer | null;
-          endpoint: string;
-        }>(
-          `SELECT connection.owner_kind, connection.owner_user_id,
-                  connection.display_name, connection.credential_source,
-                  connection.current_version, connection.state,
-                  connection.capabilities, connection.region,
-                  version.credential_sha256, version.endpoint
-           FROM provider_connections connection
-           JOIN provider_connection_versions version
-             ON version.connection_id = connection.id
-            AND version.org_id = connection.org_id
-            AND version.version = connection.current_version
-           WHERE connection.id = $1 AND connection.org_id = $2
-             AND connection.provider = 'daytona'
-             AND (
-               (connection.owner_kind = 'organization'
-                 AND connection.owner_user_id IS NULL)
-               OR (connection.owner_kind = 'user'
-                 AND connection.owner_user_id = $3)
-             )`,
-          [input.id, input.organizationId, input.actorUserId],
-        )
-      ).rows[0];
-      if (!row)
-        throw new HttpError(404, "not_found", "Provider connection not found");
-      if (row.credential_source !== "delegated") {
-        throw new HttpError(
-          409,
-          "cloud_provider_managed",
-          "Hosted provider credentials are operator-managed",
-        );
-      }
-      if (row.state !== "active") {
-        throw new HttpError(
-          409,
-          "cloud_provider_revoked",
-          "Provider connection is not active",
-        );
-      }
-      const version = safeVersion(row.current_version, "provider connection");
-      const uses = Number(
-        (
-          await tx.query<{ count: string | number }>(
-            `SELECT count(*) AS count FROM cloud_workspace_generations
-             WHERE provider_connection_id = $1
-               AND provider_connection_version = $2
-               AND retired_at IS NULL`,
-            [input.id, version],
-          )
-        ).rows[0]?.count ?? 0,
-      );
-      if (row.credential_sha256 && same(row.credential_sha256, digest)) {
-        return { row, version, uses, replayed: true as const };
-      }
-      if (version !== input.expectedVersion) {
-        throw new HttpError(
-          409,
-          "cloud_provider_version_conflict",
-          "Provider connection changed; reload before rotating",
-          { currentVersion: version },
-        );
-      }
-      return { row, version, uses, replayed: false as const };
-    });
-    if (preflight.replayed) {
-      return {
-        connection: this.providerConnectionDocument({
-          id: input.id,
-          owner_kind: preflight.row.owner_kind,
-          owner_user_id: preflight.row.owner_user_id,
-          provider: "daytona",
-          display_name: preflight.row.display_name,
-          credential_source: "delegated",
-          current_version: preflight.version,
-          state: "active",
-          capabilities: preflight.row.capabilities,
-          region: preflight.row.region,
-        }),
-        replayed: true,
-        generationsUsingPreviousVersion: preflight.uses,
-      };
-    }
-    const target = daytonaConnectionTarget({
-      apiUrl: preflight.row.endpoint,
-      target: preflight.row.capabilities.daytonaTarget ?? preflight.row.region,
-    });
-    let qualification;
-    try {
-      qualification = await this.qualifier().qualify({
-        apiKey: input.apiKey,
-        apiUrl: target.apiUrl,
-        target: target.target,
-      });
-    } catch (error) {
-      if (error instanceof CloudProviderQualificationError) {
-        throw new HttpError(422, error.code, error.message);
-      }
-      throw error;
-    }
-    return withSystemTx(this.pool, async (tx) => {
-      await organizationAuthority(tx, {
-        ...input,
-        workosEnabled: this.options.workosEnabled,
-        paid: true,
-      });
-      const row = (
-        await tx.query<{
-          owner_kind: "user" | "organization";
-          owner_user_id: string | null;
-          display_name: string;
-          current_version: string | number;
-          state: "active" | "revoked" | "invalid";
-          capabilities: Record<string, unknown>;
-          region: string | null;
-        }>(
-          `SELECT owner_kind, owner_user_id, display_name, current_version,
-                  state, capabilities, region
-           FROM provider_connections
-           WHERE id = $1 AND org_id = $2 AND credential_source = 'delegated'
-             AND provider = 'daytona'
-             AND (
-               (owner_kind = 'organization' AND owner_user_id IS NULL)
-               OR (owner_kind = 'user' AND owner_user_id = $3)
-             )
-           FOR UPDATE`,
-          [input.id, input.organizationId, input.actorUserId],
-        )
-      ).rows[0];
-      if (!row)
-        throw new HttpError(404, "not_found", "Provider connection not found");
-      if (row.state !== "active") {
-        throw new HttpError(
-          409,
-          "cloud_provider_revoked",
-          "Provider connection is not active",
-        );
-      }
-      const currentVersion = safeVersion(
-        row.current_version,
-        "provider connection",
-      );
-      if (currentVersion !== input.expectedVersion) {
-        const currentHash = (
-          await tx.query<{ credential_sha256: Buffer | null }>(
-            `SELECT credential_sha256 FROM provider_connection_versions
-             WHERE connection_id = $1 AND org_id = $2 AND version = $3`,
-            [input.id, input.organizationId, currentVersion],
-          )
-        ).rows[0]?.credential_sha256;
-        if (currentHash && same(currentHash, digest)) {
-          const uses = Number(
-            (
-              await tx.query<{ count: string | number }>(
-                `SELECT count(*) AS count FROM cloud_workspace_generations
-                 WHERE provider_connection_id = $1
-                   AND provider_connection_version = $2
-                   AND retired_at IS NULL`,
-                [input.id, input.expectedVersion],
-              )
-            ).rows[0]?.count ?? 0,
-          );
-          return {
-            connection: this.providerConnectionDocument({
-              id: input.id,
-              owner_kind: row.owner_kind,
-              owner_user_id: row.owner_user_id,
-              provider: "daytona",
-              display_name: row.display_name,
-              credential_source: "delegated",
-              current_version: currentVersion,
-              state: "active",
-              capabilities: row.capabilities,
-              region: row.region,
-            }),
-            replayed: true,
-            generationsUsingPreviousVersion: uses,
-          };
-        }
-        throw new HttpError(
-          409,
-          "cloud_provider_version_conflict",
-          "Provider connection changed; reload before rotating",
-          { currentVersion },
-        );
-      }
-      const version = currentVersion + 1;
-      const sealed = sealCloudProviderCredential(
-        input.apiKey,
-        {
-          connectionId: input.id,
-          organizationId: input.organizationId,
-          version,
-          provider: "daytona",
-          endpoint: target.apiUrl,
-        },
-        storedKey.key,
-      );
-      const capabilities = {
-        ...qualification.capabilities,
-        credentialExpiresAt: qualification.credentialExpiresAt,
-      };
-      await tx.query(
-        `INSERT INTO provider_connection_versions (
-           connection_id, org_id, version, credential_source, endpoint,
-           key_version, nonce, ciphertext, auth_tag, credential_sha256,
-           capabilities, credential_expires_at, created_by
-         ) VALUES (
-           $1, $2, $3, 'delegated', $4, $5, $6, $7, $8, $9,
-           $10::jsonb, $11, $12
-         )`,
-        [
-          input.id,
-          input.organizationId,
-          version,
-          target.apiUrl,
-          storedKey.version,
-          sealed.nonce,
-          sealed.ciphertext,
-          sealed.authTag,
-          sealed.credentialSha256,
-          JSON.stringify(capabilities),
-          qualification.credentialExpiresAt,
-          input.actorUserId,
-        ],
-      );
-      await tx.query(
-        `UPDATE provider_connections
-         SET current_version = $3, capabilities = $4::jsonb,
-             region = $5, updated_at = now()
-         WHERE id = $1 AND org_id = $2`,
-        [
-          input.id,
-          input.organizationId,
-          version,
-          JSON.stringify(capabilities),
-          target.target,
-        ],
-      );
-      const uses = Number(
-        (
-          await tx.query<{ count: string | number }>(
-            `SELECT count(*) AS count FROM cloud_workspace_generations
-             WHERE provider_connection_id = $1
-               AND provider_connection_version = $2
-               AND retired_at IS NULL`,
-            [input.id, currentVersion],
-          )
-        ).rows[0]?.count ?? 0,
-      );
-      if (uses === 0) {
-        await tx.query(
-          `UPDATE provider_connection_versions
-           SET retired_at = coalesce(retired_at, now())
-           WHERE connection_id = $1 AND version = $2`,
-          [input.id, currentVersion],
-        );
-      }
-      await audit(
-        tx,
-        input.organizationId,
-        input.actorUserId,
-        "cloud_workspace.provider_connection_rotated",
-        {
-          providerConnectionId: input.id,
-          previousVersion: currentVersion,
-          version,
-          generationsUsingPreviousVersion: uses,
-          credentialExpiresAt: qualification.credentialExpiresAt,
-        },
-      );
-      await outbox(tx, {
-        organizationId: input.organizationId,
-        eventType: "cloud_provider.connection_rotated",
-        aggregateKey: `provider-connection:${input.id}`,
-        revision: version,
-        idempotencyKey: `provider-connection:${input.id}:${version}`,
-        payload: {
-          providerConnectionId: input.id,
-          previousVersion: currentVersion,
-          version,
-          generationsUsingPreviousVersion: uses,
-        },
-      });
-      return {
-        connection: this.providerConnectionDocument({
-          id: input.id,
-          owner_kind: row.owner_kind,
-          owner_user_id: row.owner_user_id,
-          provider: "daytona",
-          display_name: row.display_name,
-          credential_source: "delegated",
-          current_version: version,
-          state: "active",
-          capabilities,
-          region: target.target,
-        }),
-        replayed: false,
-        generationsUsingPreviousVersion: uses,
-      };
-    });
+  async rotateProviderConnection(_input: {
+    id: string; organizationId: string; actorUserId: string;
+    expectedVersion: number; apiKey: string;
+  }): Promise<{ connection: unknown; replayed: boolean }> {
+    throw new HttpError(503, "cloud_provider_not_configured", "Customer compute connections are unavailable");
   }
 
   async revokeProviderConnection(input: {
@@ -3149,7 +2488,8 @@ export class DatabaseCloudWorkspaceManagementService {
             id: string;
             owner_kind: "user" | "organization";
             owner_user_id: string | null;
-            provider: "daytona";
+            provider: string;
+            sandbox_class: string | null;
             display_name: string;
             credential_source: "hosted" | "delegated";
             current_version: string | number;
@@ -3163,7 +2503,7 @@ export class DatabaseCloudWorkspaceManagementService {
                   connection.display_name, connection.credential_source,
                   connection.current_version, connection.state,
                   connection.capabilities, connection.region,
-                  generation.provider_connection_version AS generation_version
+                  generation.provider_connection_version AS generation_version, generation.sandbox_class
            FROM cloud_workspace_generations generation
            JOIN provider_connections connection
              ON connection.id = generation.provider_connection_id

@@ -2840,7 +2840,7 @@ with sandboxing enabled and the pinned browser. Eight checks passed: exact PNG
 dimensions, denied network, no surviving worker/browser, single admission,
 cancellation cleanup, recovery, and headless proposal/result evidence with
 verified source hashes. The complete fixture took approximately 2.34 seconds.
-This is **not a deployed Daytona qualification**. Hosted authentication,
+Deployed cloud qualification remains pending for this path. Hosted authentication,
 worker-owned admission, disconnect/reconnect and retention through the real
 cloud lifecycle remain release gates; no deployment was performed by this fixture.
 

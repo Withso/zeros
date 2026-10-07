@@ -1,222 +1,104 @@
-# Cloud backend qualification status
+# Cloud workspace qualification status
 
-Reviewed September 26, 2026. This matrix distinguishes implemented behavior,
-live evidence and release qualification. Alpha cloud execution, setup and
-background workers are enabled. Beta and Production cloud execution remains
-disabled. Desktop cloud creation UI is outside this backend change.
+This page separates current repository behavior from release evidence. Alpha
+cloud operation predates the overhaul; historical qualification of an older
+image/deployment does not qualify the changed source, runtime or desktop.
+Account-specific deployment receipts and test-run diaries stay in private
+operational records, not this guide.
 
-Alpha admits individual Pro sponsors in collaborative Organizations; only
-standing Zeros staff roles `platform_owner` and `developer` may create those
-Organizations. Customer subscription/payment integration is deferred.
-Organization membership, tenant isolation, monthly allowances, quotas and
-finite compute leases still apply. Beta and Production retain the earlier
-staff-only policy with cloud execution off. Provider runtime admission remains
-a separate qualification boundary.
+## Current implementation
 
-Alpha now runs the [Pro backend](pro-backend.md) policy and
-migrations `0101`–`0104`: individual sponsorship, complimentary staff Pro,
-monthly allowances, ten assigned writers and unlimited Read-only Pro guests.
-Both existing staff accounts have complimentary Pro and one automatically
-issued allowance each. Desktop qualification remains separate work.
+| Area | Implemented contract | Qualification still required |
+| --- | --- | --- |
+| Execution floor | Boat-only; immutable saved v2 Computer source, complete qualified v4 pin, actor2. Retired rows retain metadata/history/cleanup and refuse new execution. | Exact released worker/base pair, intentional old-profile/actor-v1 refusals and supported-cohort skew. |
+| Computer/create | Current organization members see v2 settings; admins manage builds/repository setup. Source/CAS/role/funding checks precede allocation. Renderer pending creation binds the confirmed UUID atomically. | Signed Mac create/failure/account-switch flows and exact template qualification. |
+| Commands/native agents | One durable queue; stable IDs, guarded claims, truthful failed/uncertain outcomes, receipt-to-history catch-up. Native CLIs and per-actor credential/delegation authority. | Actual Claude/Codex turns, Stop/approval, lost events/reconnect and deployed admission. Synthetic startup handshakes are insufficient. |
+| Git/Files/Design | Checked engine publication and required startup ownership recovery; finite Git diagnostics; direct PR commits net pending Code+Design. | Worker read/diff/commit, Design creation/Files refresh/capture, named targets, real GitHub installation/courier and conflicts on the adopted pin. |
+| Lifecycle/recovery | Fenced setup/engine registration; periodic maintenance plus notifications/retry deadlines; checkpoints, stopped wake and generation recovery. | Fresh-allocation restore, rollback, unknown provider outcomes, authority loss, physical deletion and object cleanup. |
+| Desktop/native access | Exact runtime routing, status/details/resources/ports, receive-only sync, main-owned Terminal/forwarding and revocation. Native editor launch remains hidden. | Signed macOS SSH/host trust/PTY/SFTP/tunnels/preview, frame isolation, focus and account/device/generation retirement. |
+| Presentation cache | Bounded durable sanitized confirmed transcript windows, revision/tail cursor and provisional Cached paint; no send/completion authority. | Packaged Mac restart, disk/IPC timing, deletion/role/account retirement and streaming races. Forward incremental feed remains separate. |
+| Runtime updates | Immutable bundles/pins; same-base wake/explicit upgrade; transfer/staging/resident handoff machinery, one journal. Staging cannot activate. | Exact controller/source/target/resident pair, rollback formats, workload survival, concrete acceptance adapter and measured handoff gap before automatic/present-client activation. |
+| Spend/operations | Individual sponsorship, quotas, credit reservations, finite compute leases, cumulative meters and bounded checkpoint/Stop; encrypted durable objects. | Current deployment budgets, observability, provider loss/settlement, backup/PITR/object-key/deletion and regional recovery drills. |
 
-Alpha, Beta and Production now use PlanetScale Postgres; the control-plane
-application remains on Railway. All three cutovers passed source fencing, data
-comparison, forward migrations, runtime-role and public API checks. Normal app
-access is restored. Batch 4 covers deployed
-account connection, collaboration and image publication. Batch 6 requalified
-managed Boat through the isolated deployment's public API, and Batch 7
-exercised recovery, fault injection, sustained load and operations there.
-Daytona worker isolation is still unqualified. See
-[database qualification](database-qualification.md).
+Source/test anchors are in [engineering reference](engineering-reference.md).
+Basic v4 credential runtime qualification and MCP qualification are distinct;
+MCP/native Computer operations require their additional current evidence.
+WorkOS membership alone does not grant paid authority or another person's agent
+credentials. Personal stays Local; org-Local stays on the sidecar.
 
-## Release state
+## Rollout order
 
-Batch 8 closed the staff backend milestone on September 24, 2026.
+1. Back up/drain as required and apply forward migrations, including
+   `0138_cloud_workspace_usage_and_ui.sql`, through the protected migration path.
+   Keep application/migration roles separate. See
+   [database qualification](database-qualification.md) and
+   [operations](infrastructure-and-operations.md).
+2. Deploy the control plane with the source/v4/actor2 floor and new readers before
+   the desktop/worker consumers. Unsupported execution is intentionally refused;
+   historical metadata/management/cleanup must remain available.
+3. Build, qualify and publish the exact v4 runtime and compatible base through
+   the supported bundle consumers (`release-alpha.yml`, `alpha-publication.yml`).
+   Source fixes on the server/Mac do not replace a VM's accepted runtime.
+4. Adopt a qualified same-base runtime through the existing stopped next-wake or
+   explicit fenced upgrade. Retain source/template/settings, Git/index/edits,
+   Design and durable chats. Never patch base bytes under an old compatibility ID
+   or rewrite historical pins. Ordinary resume of an unchanged pin is not adoption.
+5. Publish the desktop with the compatible protocol/capabilities and finish the
+   signed Mac + authorized disposable Alpha acceptance matrix.
 
-| Channel    | Backend                                                              | Migration ledger | Cloud execution                                    |
-| ---------- | -------------------------------------------------------------------- | ---------------- | -------------------------------------------------- |
-| Alpha      | Pro backend `bf45aad6` from `main`, explicitly deployed September 26 | through `0104`   | on; physical provider deletion remains unconfirmed |
-| Beta       | September 25 release (`release/0.1.19`)                              | through `0100`   | off                                                |
-| Production | September 25 release (`release/0.1.19`)                              | through `0100`   | off                                                |
+The separate `cloud-runtime-publication.yml` flat OCI pipeline is retired. Its
+static `/opt/zeros-runtime` recipe still installs the v3 worker profile, so the
+publisher and receipt steps refuse before any build, registry or receipt work.
+It is not the qualified v4 workspace-runtime bundle. The shared Dev image kit
+remains under an explicit publication follow-up. Consumer/base-contract
+disposition and qualification must precede any v4 flat-image cutover; changing a
+marker cannot qualify it.
 
-- Managed Boat Linux VMs are the default provider. Daytona remains a separate
-  adapter, used only when explicitly selected: its worker isolation is
-  unqualified, and it is kept for a future Windows sandbox.
-- Beta and Production moved to the current backend in `release/0.1.19`
-  (`c3653385`) on September 25: `release-migration:manage` applied
-  `0094`–`0100` after an on-demand backup of each database, then the API, web
-  and desktop builds were promoted as described in
-  [deployment environments](../deployment-environments.md). Beta deploys from
-  the release branch again; Production deploys stay manual.
-- The isolated qualification deployment used for Batches 4–8 is retired. Its
-  evidence is summarized here and in
-  [infrastructure and operations](infrastructure-and-operations.md#recovery-drills-and-measured-limits).
-- Alpha has a dedicated non-admin runtime key, distinct from the agent key,
-  the pinned `zeros-qualification-aa11196c97a6` image, measured 70,225 MiB
-  storage, and a 900-second finite compute lease. Its `zeros-cloud-workspaces-alpha`
-  R2 bucket has a separate credential and object/secret keyrings. Encrypted
-  upload, readback, decryption and deletion fencing passed against that bucket.
-  The runtime key is action-scoped; its provider resource/environment scope is
-  wildcard, so provider-enforced isolation from future environments is not claimed.
-- The controlled Alpha rollout used a successful on-demand backup, drained
-  the old deployment, applied `0101`–`0104` with checksum verification, removed
-  the temporary migration role, and deployed the merged backend. Hosted boot
-  migrations remain off. `/healthz` reports execution, setup, background workers
-  and durability healthy. The Alpha desktop release workflow failed its shipping
-  kernel ZSR qualification; the API was deployed explicitly. PR #211's merge
-  checks all passed; no new signed desktop release is claimed.
-- A disposable ordinary Pro account passed real WorkOS authentication,
-  percentage-only usage reads, Personal cloud denial, and denial of both
-  Organization creation routes. Its temporary staff role was removed before
-  testing Pro admission. Automatic issuance produced exactly one allowance.
-  At the verified provider rate of 100,000 standard seconds per dollar, the
-  monthly 500-hour allowance represents $18 of compute, excluding other costs.
-- After installing the `zeros-alpha` GitHub App with access to the test
-  repository, the ordinary Pro sponsor passed authenticated create, idempotent
-  create replay, engine readiness, checkpointed stop, wake and second engine
-  readiness. The collaborator response counted the owner as one of ten writer
-  slots. Workspace responses remained provider-neutral throughout.
-- Stop captured 4,721 encrypted file objects in approximately 266 seconds;
-  the next final checkpoint completed in approximately 20 seconds. Both
-  compute reservations settled against the same sponsor with zero remaining
-  reservations or platform exposure: 405 billed standard-machine seconds,
-  or $0.00405 against a $0.10 compute qualification budget. Object storage costs
-  are separate. No paid model turn or signed desktop behavior was tested.
-- Delete was accepted after the second durable checkpoint and stopped compute.
-  The exact Boat deletion operation reports `blocked`, with no completion
-  timestamp. This reproduces the previously open provider-deletion boundary on
-  Alpha: full physical deletion is not qualified. Keep the journal, encrypted
-  objects and fixture Organization until the receipt completes; an absent
-  sandbox or a successful delete request is not completion evidence. UI wiring
-  can proceed against Alpha, but launch qualification must retain this open item.
+The opt-in v3 release-worker promotion lane is retired. With
+`ZEROS_WORKER_PROMOTION=enabled`, release refuses before allocation/build/credential preparation;
+the disabled lane preserves normal release publication. Historical receipts and
+builder/storage cleanup remain available. **Re-qualify a v4 release-worker lane
+if needed** is separate future work; it cannot weaken the workspace v4 floor.
+See [release worker qualification](release-worker-qualification.md).
 
-## Current eight-step execution
+`CLOUD_WORKSPACES_ENABLED`, background/setup gates, baked desktop capability and
+native feature gates remain separate. Current code defaults do not establish a
+deployed flag value or customer release approval. Preparation reuse defaults
+true only on Alpha, is explicitly disableable, remains staff/negotiation/pin gated
+and always needs fresh final attestation/launch/registration. See
+[wake performance](wake-performance.md).
 
-| Step                         | Repository implementation and evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Open exit condition                                                                                                                                                   |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. Contracts                 | Portable client/runtime, provider, command, checkpoint and security contracts; Organization ownership and Personal-local enforcement                                                                                                                                                                                                                                                                                                                                                                                                                                             | Keep advertised capabilities within this matrix                                                                                                                       |
-| 2. Provider registry         | Managed Boat and versioned customer Daytona connections; immutable generation routing, independent profiles, key rotation and revocation regressions; isolated deployed Daytona onboarding, distinct valid-key rotation, replay, rejected rotation and revocation                                                                                                                                                                                                                                                                                                                | Qualification with an enabled compute profile                                                                                                                         |
-| 3. Secure Linux / Boat       | Pinned native image, unprivileged engine/worker separation, setup, admission, heartbeat, lifecycle and finite provider lease; live authorized Boat create/readiness                                                                                                                                                                                                                                                                                                                                                                                                              | Exact production deployment, remaining provider deletion proof and host-security release review                                                                       |
-| 4. Shared headless workspace | File/Git/process/PTY, shared Code/Design conversation, API authoring and capture, native agent continuation, private previews and scoped human services exercised on Boat                                                                                                                                                                                                                                                                                                                                                                                                        | Production agent-account connection/authentication flow, Codex on the current image and declared tooling gaps below                                                   |
-| 5. Devices and commands      | Durable queues, approval/Stop receipts, independent device grants, bounded replay; live concurrent and suspended clients on Boat; a 30-minute two-workspace, six-device soak with complete replay after a disconnect                                                                                                                                                                                                                                                                                                                                                             | Multi-region and fleet-scale load, and later native client release tests                                                                                              |
-| 6. Durability                | Dirty Git/index/unpublished HEAD, attachments, native histories and Design restored into a fresh Boat generation; public recovery from a stopped workspace, rollback and upgrade on the current image; active-turn loss leaves an uncertain command and paused queue; a workspace whose provider host was destroyed recovered from its last durable checkpoint after an operator loss attestation; a point-in-time database restore with every referenced object verified and measured RPO/RTO                                                                                   | Cross-region recovery, and recovery after losing the object store itself                                                                                              |
-| 7. Daytona BYO               | Provider and onboarding code plus database regressions; live allocation/cleanup probes; off by default, selected only explicitly                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Deferred. Linux-VM snapshot/region/quota preflight implemented; the tested host fails user-namespace creation as the actual worker identity. Full parity remains open |
-| 8. Spend and operations      | Credit grants, reservations, cumulative meter, live Boat rejected-create closure and settlement, ledger-to-provider meter reconciliation, finite renewal, budget drain/Stop, settlement, engine-loss Stop, leased cross-provider drift, cleanup, staff admission regressions, deployed WorkOS identity, Alpha/Beta/Production PlanetScale cutovers, isolated restore/HA/PITR evidence and encrypted R2 upload/readback/decryption evidence; operator-attested loss settlement, emailed health alerts, an external uptime probe, a measured load baseline and object-key rotation | Production deployment and provider deletion completion; customer billing deferred                                                                                     |
+## Release acceptance
 
-The eight steps are not all complete. Local tests and a successful Boat runtime
-do not clear Daytona or production operations gates.
+- Run the repository verification matrix and applicable selected CI lanes.
+  Required checks include adjacent runtime/CP tests, forward migration checks,
+  protocol/preload/hardening, UI/build/smoke, secrets/licenses and Actions for
+  changed workflows. CI-definition changes require owner merge.
+- Qualify the actual worker UID, namespaces/cgroups, protected installer/tree,
+  runtime/base manifests, native tools and all required credential kinds. Root-
+  only probes or historical v3 qualification cannot qualify v4 admission.
+- Run the supported N/N−1 released-binary matrix within the saved-v2/v4/actor2
+  floor. Intentional retired-profile refusals are a separate negative contract.
+  No skew test may restore unsupported execution or revoked qualifications.
+- Exercise ordinary public actor admission, not provider-admin execution, for
+  agents, Git/Files/Design, durable queue/receipts/replay, SSH/preview/tunnels,
+  stop/wake/archive, recovery and cleanup. Use explicitly authorized disposable
+  fixtures, bounded budgets and verified all-generation cleanup.
+- Verify live revocation during issuance/I/O, multiple devices and owner switches;
+  preserve undispatched/paused queue state and never replay uncertain native
+  effects. Retired generations need metadata/history/export/delete acceptance.
+- Qualify backup/PITR with referenced object integrity, key rotation, forced RLS,
+  source fencing and target comparison. Approve RPO/RTO, capacity, incident,
+  privacy/licensing and regional/object-store-loss policy separately.
+- Run `pnpm smoke:engine` and native access/preview acceptance on macOS. Linux
+  renderer, CLI and synthetic tests do not establish native disk/IPC/paint,
+  signed-client behavior or deployed provider correctness.
 
-## Supported native tools and evidence
-
-| Capability                                                                                      | Backend                                                                                                             | Live qualification                                                                                                                                                 |
-| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Files, search, Git, process execution and PTY                                                   | Existing Zeros engine over authenticated portable bridge                                                            | Boat                                                                                                                                                               |
-| Code and Design with one agent conversation                                                     | Mode revisions, cloud API authoring, directory lifecycle, capture and durable recovery                              | Boat                                                                                                                                                               |
-| Claude, Cursor and Codex native sessions                                                        | Existing provider adapters; explicit model credentials remain tenant scoped                                         | Boat with test-authorized credentials: Claude and Cursor on the current image, Codex on the previous image only; production account connection remains open        |
-| SSH / SFTP / TCP forwarding                                                                     | Zeros runtime SSH inside the admitted engine namespace; independent device/service grants and descendant retirement | Boat, including PTY dimensions, stderr/exit, file/tunnel roundtrips and revocation                                                                                 |
-| HTTP and HMR previews                                                                           | Private scoped relay with current authority checks                                                                  | Boat                                                                                                                                                               |
-| Ordered live streams, replay and Stop/approval receipts                                         | Shared schemas, durable receipts, bounded buffers, per-device authority                                             | Boat headless clients, including late and suspended receivers                                                                                                      |
-| Receive-only replicas and immutable copy/fork                                                   | Backend services and regression coverage                                                                            | Signed desktop lifecycle qualification remains open                                                                                                                |
-| TypeScript, JavaScript and Python language services                                             | Typed disk-backed symbols/completions, actor and execution isolation, bounded RPC and retirement                    | Real native and root namespace canaries plus actual Boat v3 engine image attestation; Daytona remains open                                                         |
-| Personal Codex subscription renewal                                                             | Encrypted native cache, durable single-use refresh attempts, access-only leases, per-owner consent                  | Real pinned native cache renewal and paid native turn/resume on qualified Boat images; exact deployed account-connection and delegation qualification remains open |
-| Windows/macOS compute, public ports, UDP and simultaneous text editing with conflict resolution | Outside the current Linux pilot                                                                                     | No claim                                                                                                                                                           |
-
-## Evidence limits
-
-- Batch 7 destroyed a running Boat sandbox at the provider. The control plane
-  marked the workspace failed once the provider reported it gone, and never
-  treated the 404 as deletion or as a final meter. After an operator loss
-  attestation, compute settled at the last meter and the owner recovered the
-  last durable checkpoint into a new generation: a file written before that
-  checkpoint came back and a file written after it did not.
-- Batch 7 also killed the engine mid-command, replaced and crashed the control
-  plane, restored the database to an exact point in time with every referenced
-  object decrypted, rotated the object-encryption key across every object and
-  ran a 30-minute multi-device soak. The killed command's receipt became
-  uncertain and was never re-dispatched. Everything ran in one region against
-  the isolated deployment; measured limits are in
-  [infrastructure and operations](infrastructure-and-operations.md#recovery-drills-and-measured-limits).
-- Concurrent headless clients exercise the platform-independent protocol. They
-  do not qualify native iOS, iPadOS, Windows or signed macOS applications.
-- Earlier engine qualification used fixture identity issuance. Subsequent
-  isolated Railway tests exercised normal WorkOS authentication, delivered
-  invitations, workspace-scoped guest acceptance, concurrent devices and guest
-  revocation through the public API. The current isolated API also passes Claude
-  and Cursor credential connection, delegation, rotation and revocation; Codex
-  account metadata and duplicate refresh-seed rejection; and independent staff
-  and Pro withdrawal checks. A disposable private repository passed scoped
-  GitHub App token issue, a real Git fetch, token revocation and anonymous denial.
-  Batch 6 later cloned that repository on the provider host and ran Claude and
-  Cursor turns on the current image; no interactive native sign-in ceremony is
-  claimed. A membership created directly at the identity provider is projected
-  but never materialized as a Zeros grant.
-- Deployed Daytona connection checks verified the supplied key without allocating
-  compute. Personal onboarding and guest provider administration were denied;
-  a stored valid key could not create a workspace while its compute profile was
-  absent. Invalid rotation preserved the existing version, and revoked connection
-  reuse was denied. Live rotation between two distinct valid keys verified both
-  encrypted versions, retirement of the unused prior version, idempotent replay,
-  stale-version rejection and revocation without allocating a generation.
-- Revoking an owned WorkOS test session closed both of its open event streams
-  and denied API access while another user's session remained valid. Revocation
-  took about 60 seconds through the isolated deployment's event-polling fallback.
-  This proves session isolation, not instant revocation or native-device behavior.
-- Isolated PlanetScale restores preserve source rows, enforce NOINHERIT runtime roles and pass same-region HA failover and point-in-time recovery. Separate encrypted R2 evidence verifies upload, readback, integrity and decryption. All three main cutovers preserve their original datasets and pass authenticated owner/tenant-isolation and concurrent event-stream checks; cloud execution remained disabled during those cutovers. Encrypted backup recovery has separate evidence. Batch 7 added a same-region restore drill of the database with its objects; regional recovery remains open.
-- Disposable PostgreSQL 15 and 18 final-copy rehearsals cover writer draining,
-  connection fencing, dropped-column and enum restore compatibility, sequence
-  ownership, role drift, cancellation and uncertain fence acknowledgements.
-  A real R2 round trip verifies encrypted evidence by downloading and decrypting
-  it. Any future cutover requires a fresh fenced copy and target comparison;
-  source and target collation-library versions must be explicitly qualified.
-- Batch 6 rebuilt and attested the Boat image from merged main and exercised it
-  through the isolated deployment's public API, billed to an explicit
-  organization wallet. A stopped workspace recovered into a fresh generation.
-  Rollback to the previous image and upgrade back restored repository and
-  Design content. Two-device PTY/Git, Design authoring and capture, Claude
-  durable turns with cross-device approvals, Cursor durable turns, a
-  Code-to-Design-to-Code conversation, mid-turn Stop with explicit queue resume, stop/wake/archive and
-  a rejected agent startup without engine loss passed. The run also verified
-  the Cursor product-tool and workload file-ownership fixes. Codex was not
-  requalified on this image because its account usage limit was exhausted.
-  Ledger usage matched Boat's organization meter exactly. Daytona allocation
-  probes reached the host, but unprivileged worker namespace creation failed;
-  a privileged-root success does not clear that boundary. Native image tests
-  do not substitute for public admission or qualify later runtime changes. The
-  protected registry publication workflow records source provenance separately
-  from provider qualification.
-- The rejected-create audit found that unbound journals could indefinitely
-  retain cleanup and compute reservations. Migration 0093 adds per-dispatch
-  rejection evidence and permanent unallocated closure; historical requests
-  with incomplete evidence remain unresolved. Live qualification under an
-  owner-set Boat member cap first found a refusal diagnostic the adapter did not
-  recognize, which left every attempt unknown. On the fixed deployment every
-  dispatch was a qualified refusal. Stop closed the generation, the reservation
-  settled without a debit, wake required recreation and deletion needed no
-  provider receipt. Closure cannot be used to infer old resources were erased.
-- Full-suite verification exposed two concurrent filesystem cleanup races:
-  an upload inode can lose its last link during inspection, and another
-  deleter can publish a permanent fence before unlink. Bounded reinspection
-  preserves the existing file checks and deletion fence. Deterministic
-  regressions cover both races, unsafe replacements and persistent ambiguity;
-  the repair still requires deployed qualification.
-- Provider DELETE acceptance and a subsequent 404 are not data-erasure evidence.
-  Storage and cleanup records remain until a matching terminal receipt exists.
-  Batch 6's sandbox deletion receipts were still provider-blocked at review
-  time, so those workspaces keep their storage reservation and `deleting` state.
-
-## Requalification
-
-Run the repository verification matrix and adjacent regression suites. Database
-suites must use an isolated test database and run serially. Build and attest the
-exact source/image, then exercise the headless matrix through normal public
-admission rather than provider administrator access. Reserve provider budget
-and cleanup headroom before allocation. Use provider administration only for
-explicit fault injection and independent observation. Keep raw secrets and
-operational evidence outside the repository.
-
-For Daytona, qualify the required namespaces/cgroups as the actual worker UID
-before running paid agents. A privileged-root probe alone is insufficient.
-Use a compatible host configuration; do not disable worker isolation to make a
-provider test pass. See the [roadmap](implementation-roadmap.md),
-[provider contract](provider-contract.md), [compute credit contract](compute-credits.md)
-and [runtime threat model](root-coordinator-threat-model.md).
+No new live latency distribution or ≤2-second stopped wake/usable create result
+is established by this overhaul's repository tests. The historical five setup
+runs and unmatched probe limits remain in [wake performance](wake-performance.md).
+Warm capacity, qualification reuse, VM durable delivery, outbound/multiplexed
+transport, forward transcript feeds and Mac acknowledged send-outbox work remain
+explicit [follow-ups](warm-pool.md). Seamless live handoff, mobile clients,
+active ownership transfer, CRDT/bidirectional replicas, registered primary hosts
+and customer-managed Railway template publication remain gated future scope.

@@ -1,0 +1,54 @@
+name: Build cloud runtime bundle
+
+on:
+  workflow_call:
+    inputs:
+      artifact_name:
+        type: string
+        default: zeros-alpha-runtime-build
+    outputs:
+      artifact_id:
+        description: Immutable artifact ID for this run's exact-source bundle
+        value: ${{ jobs.build.outputs.artifact_id }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Linux runtime bundle
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - uses: ./.github/actions/contained-execution-runtime
+      - name: Build and verify the exact-source runtime
+        run: bash scripts/ci/with-userns.sh pnpm cloud:runtime-bundle:build --out-dir "$RUNNER_TEMP/cloud-runtime-bundle" --source-commit "$GITHUB_SHA"
+      - name: Save runtime bundle outputs
+        id: artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact_name }}-${{ github.sha }}
+          overwrite: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 5
+          path: |
+            ${{ runner.temp }}/cloud-runtime-bundle/*.tar.gz
+            ${{ runner.temp }}/cloud-runtime-bundle/descriptor.json
+            ${{ runner.temp }}/cloud-runtime-bundle/manifest.json
+            ${{ runner.temp }}/cloud-runtime-bundle/build-receipt.json

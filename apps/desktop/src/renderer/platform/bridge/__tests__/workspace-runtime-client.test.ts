@@ -460,6 +460,8 @@ describe("workspace runtime routing", () => {
         const result = message.op === "chats.list" ? { chats: [], chatDeletions: [] }
           : message.op === "cloudCommands.conversation" || message.op === "cloudCommands.createConversation"
             ? { conversationId: chat, agentId: "codex", modeRevision: 0 }
+            : message.op === "cloudEvents.request"
+              ? { snapshot: { conversationId: chat, executionId: "replacement-execution", activeTurn: null } }
             : request?.kind === "snapshot"
               ? { version: 1, conversationId: chat, revision: 0, paused: false, pending: [], receipts: [] }
               : request?.kind === "read"

@@ -18,8 +18,8 @@ No provider API, deployment or release workflow was run for E2 implementation.
    it must not silently upgrade to E2.
 3. In the orchestrator's workspace run `pnpm agent:check` read-only using its
    gitignored `.env.agent`. Do not transfer credentials into another workspace
-   or print their values. Use the signed Mac Alpha app, engineering staff and
-   `cloudComputerV2`. Run `pnpm smoke:engine` on that Mac separately.
+   or print their values. Use the signed Mac Alpha app with current account/org
+   admission; server native-preview issuance still requires engineering staff. Run `pnpm smoke:engine` on that Mac separately.
 4. Use two Mac devices with distinct staff owner/developer accounts. Also have
    prompter/viewer accounts to check denied editing authority. Create ordinary
    disposable workspaces through C5, named `zeros-v2-test-native-previews-a`
@@ -92,8 +92,8 @@ be 5173; the trusted engine owns its real mapped listener.
    independently issued grant must keep working. Revoke or rotate the first
    device through the existing device-management flow: its former grants must
    fail on public ingress and runtime renewal even if its app stays open.
-5. Disable `cloudComputerV2`, sign out, and remove editing access in separate
-   runs. New admissions must be refused and active authority retired/denied.
+5. Withdraw account/organization cloud access, sign out, and remove editing
+   access in separate runs. New admissions must be refused and active authority retired/denied.
    Prompter/viewer accounts must not gain edit authority through a copied URL,
    forged target or direct native request. Re-enable/re-enroll only through
    normal staff/account/device flows; prior grants must not regain authority.

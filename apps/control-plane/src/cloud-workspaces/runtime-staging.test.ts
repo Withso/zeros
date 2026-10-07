@@ -9,7 +9,7 @@ describe("runtime staging rollout boundary", () => {
     const supported = { deploymentChannel: "alpha", enabled: true, provider: "boat", hosted: true, artifacts: true };
     expect(cloudRuntimeStagingEnabled(supported)).toBe(true);
     for (const unsupported of [{ deploymentChannel: "beta" }, { deploymentChannel: "production" }, { enabled: false },
-      { provider: "daytona" }, { hosted: false }, { artifacts: false }])
+      { provider: "unsupported" }, { hosted: false }, { artifacts: false }])
       expect(cloudRuntimeStagingEnabled({ ...supported, ...unsupported })).toBe(false);
   });
 });

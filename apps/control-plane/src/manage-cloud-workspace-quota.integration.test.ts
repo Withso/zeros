@@ -21,6 +21,7 @@ d("owner-managed cloud-workspace quotas", () => {
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: url, max: 3 });
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
   });
 
   afterAll(async () => {
@@ -395,7 +396,7 @@ d("owner-managed cloud-workspace quotas", () => {
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider, observed_state
-         ) VALUES ($1, 2, $2, 'daytona', 'absent')`,
+         ) VALUES ($1, 2, $2, 'boat', 'absent')`,
         [used.workspaceId, used.organizationId],
       );
       await tx.query(
@@ -512,7 +513,7 @@ d("owner-managed cloud-workspace quotas", () => {
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider,
            provider_resource_id, observed_state, last_observed_at
-         ) VALUES ($1, 2, $2, 'daytona', $3, 'running', now())`,
+         ) VALUES ($1, 2, $2, 'boat', $3, 'running', now())`,
         [
           used.workspaceId,
           used.organizationId,

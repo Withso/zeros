@@ -1,5 +1,4 @@
 import { CloudAgentAdmissionError } from "./bridge/cloud-agent-errors";
-import { authorizeCloudGithubSource } from "./cloud-github";
 import { z } from "zod";
 import { CloudComputerAdminWorkspaceSchema } from "@zeros/protocol/cloud-computer-v2";
 import { CloudNativeCapabilitiesSchema } from "@zeros/protocol/cloud-agent-execution";
@@ -12,6 +11,10 @@ import {
   ControlPlaneError,
 } from "../features/team/control-plane";
 import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
+import { getActiveBridge } from "./bridge/active-bridge";
+import { WorkspaceRuntimeClient, type CloudResourceUsageConnection } from "./bridge/workspace-runtime-client";
+import { bridgeWorkspaceResourceUsage } from "./bridge/workspace-bridge";
+import { forgetCloudWorkspacePortForwarding } from "./cloud-workspace-access";
 
 export const CloudWorkspaceActorRoleSchema = z.enum(["viewer", "prompter", "developer", "manager", "owner"]);
 export type CloudWorkspaceActorRole = z.infer<typeof CloudWorkspaceActorRoleSchema>;
@@ -22,6 +25,7 @@ export const CloudWorkspaceDocumentSchema = z.object({
   teamId: z.string().uuid(),
   name: z.string().min(1).max(120),
   createdBy: z.string().uuid(),
+  createdByDisplayName: z.string().min(1).max(120).nullable().optional(),
   ownerUserId: z.string().uuid().optional(),
   adminWorkspace: CloudComputerAdminWorkspaceSchema.optional(),
   actorRole: CloudWorkspaceActorRoleSchema.nullable().optional(),
@@ -155,6 +159,55 @@ export async function cloudAccountRequest<T>(
 
 const request = cloudAccountRequest;
 
+export const CloudWorkspaceRenameInputSchema = z.object({
+  // Reject controls before whitespace normalization.
+  // eslint-disable-next-line no-control-regex
+  name: z.string().refine(value => !/[\u0000-\u001f\u007f]/.test(value), "Name contains unsupported characters")
+    .transform(value => value.trim()).pipe(z.string().min(1).max(120)),
+  version: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+}).strict();
+
+export const CloudWorkspaceDetectedPortsSchema = z.object({
+  version: z.literal(1), organizationId: z.string().uuid(), workspaceId: z.string().uuid(),
+  generation: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), status: z.string().min(1).max(64),
+  observedAt: z.string().datetime().nullable(),
+  ports: z.array(z.object({
+    port: z.number().int().min(1024).max(65535), protocol: z.literal("tcp"),
+    processLabel: z.string().max(120).nullable(), health: z.enum(["observed", "healthy", "unhealthy", "closed"]),
+    observedAt: z.string().datetime(), closedAt: z.string().datetime().nullable(),
+  }).strict()).max(128).nullable(),
+}).strict().refine(value => (value.ports === null) === (value.observedAt === null), "Port observation state needs its timestamp");
+export type CloudWorkspaceDetectedPorts = z.infer<typeof CloudWorkspaceDetectedPortsSchema>;
+
+export async function getCloudWorkspaceDetectedPorts(target: CloudWorkspaceTarget, generation: number): Promise<CloudWorkspaceDetectedPorts> {
+  const number = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).parse(generation);
+  const result = await request(`${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}/detected-ports?generation=${number}`,
+    CloudWorkspaceDetectedPortsSchema);
+  if (result.organizationId !== target.organizationId || result.workspaceId !== target.workspaceId || result.generation !== number)
+    throw new Error("Cloud port observations changed identity");
+  return result;
+}
+
+export async function renameCloudWorkspace(
+  target: CloudWorkspaceTarget,
+  input: z.infer<typeof CloudWorkspaceRenameInputSchema>,
+  idempotencyKey: string,
+): Promise<CloudWorkspaceDocument> {
+  const body = CloudWorkspaceRenameInputSchema.parse(input);
+  const key = z.string().min(8).max(128).regex(/^[A-Za-z0-9._:-]+$/).parse(idempotencyKey);
+  const { workspace } = await request(`${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}`,
+    z.object({ workspace: CloudWorkspaceDocumentSchema }), { body, idempotencyKey: key, method: "PATCH" });
+  if (workspace.organizationId !== target.organizationId || workspace.id !== target.workspaceId)
+    throw new Error("Cloud workspace rename changed identity");
+  return workspace;
+}
+
+export async function getCloudWorkspaceResourceUsage(target: CloudWorkspaceTarget, connection: CloudResourceUsageConnection) {
+  const bridge = getActiveBridge();
+  if (!(bridge instanceof WorkspaceRuntimeClient)) throw new Error("Cloud workspace is disconnected");
+  return bridgeWorkspaceResourceUsage(bridge, target, connection);
+}
+
 function runtimeUpgradePath(target: CloudWorkspaceTarget): string {
   return `${organizationPath(target.organizationId)}/${z.string().uuid().parse(target.workspaceId)}/runtime-upgrade`;
 }
@@ -283,6 +336,11 @@ export async function changeCloudWorkspaceLifecycle(
     workspace.organizationId !== target.organizationId
   )
     throw new Error("Cloud lifecycle response changed identity");
+  if (operation === "delete") {
+    // A successful server deletion remains successful if native cleanup is
+    // already retired; runtime authority independently fences new tunnels.
+    await forgetCloudWorkspacePortForwarding(target).catch(() => undefined);
+  }
   return workspace;
 }
 
@@ -308,11 +366,9 @@ export async function getCloudWorkspaceCreateOptions(
   organizationId: string,
   owner: string,
   repository?: string,
-  source?: { cloudComputerV2: true },
 ): Promise<CloudWorkspaceCreateOptions> {
-  if (repository && !source?.cloudComputerV2) await authorizeCloudGithubSource(organizationId, owner, repository);
   return request(
-    `${organizationPath(organizationId)}/create-options?owner=${encodeURIComponent(owner)}${repository ? `&repository=${encodeURIComponent(repository)}` : ""}${source?.cloudComputerV2 ? "&cloudComputerV2=true" : ""}`,
+    `${organizationPath(organizationId)}/create-options?owner=${encodeURIComponent(owner)}${repository ? `&repository=${encodeURIComponent(repository)}` : ""}&cloudComputerV2=true`,
     OptionsSchema,
   );
 }
@@ -345,16 +401,7 @@ export async function createCloudWorkspaceDocument(input: {
       { body, idempotencyKey },
     );
   };
-  let result;
-  try { result = await create(); }
-  catch (error) {
-    // Preserve idempotent replay even after a source proof expires. Only a new
-    // create needing fresh user permissions takes the native verification path.
-    if (!(error instanceof ControlPlaneError) || error.code !== "github_cloud_source_authorization_required") throw error;
-    assertAccount();
-    await authorizeCloudGithubSource(organizationId, body.repository.owner, body.repository.name, body.repository.githubInstallationId);
-    result = await create();
-  }
+  const result = await create();
   assertAccount();
   if (result.workspace.organizationId !== organizationId)
     throw new Error("Cloud creation returned a different organization");

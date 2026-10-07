@@ -1,9 +1,10 @@
 # Cloud client and runtime contract
 
-This contract governs the backend expansion after the original cloud foundation.
-Implementation and live qualification are tracked separately in the roadmap.
-Native mobile remains deferred. The desktop Create page and workspace catalog
-now route cloud workspaces through the same conversation and workbench surfaces.
+This contract describes current desktop/control-plane/engine routing, delivery,
+replay and native access. Execution requires Boat, a saved v2 Computer source,
+a qualified v4 pin and actor protocol 2. Native mobile remains deferred;
+[qualification status](qualification-status.md) separates implementation from
+live/platform release evidence. Cloud uses the same conversation/workbench UI.
 
 ## Identity and placement
 
@@ -15,9 +16,10 @@ now route cloud workspaces through the same conversation and workbench surfaces.
   cleanup, but never introduces a second writer.
 - A workspace, conversation, execution, device, connection and provider resource
   have separate identities. Opening another device subscribes to existing work.
-- Multiple devices of the authorized owner do not imply Organization multiplayer.
-- The managed provider default applies only when no provider connection is
-  selected. An explicit customer connection determines its provider independently.
+- Multiple devices retain independent actor/device grants; organization members
+  and exact-workspace guests use the same current sharing/role authorization.
+- Managed Boat is the only execution provider. Historical customer/provider
+  connection records stay readable but cannot select an alternate execution path.
 - Generations retain their exact provider connection and credential version.
   Changing a default never migrates an existing workspace or redirects cleanup.
 
@@ -55,10 +57,12 @@ pending provider storage cleanup does not keep them navigable.
 The fixed cloud details button and details popover identify the execution host.
 Chat/tool transcripts, Files, Changes, Review and PR controls keep
 their existing renderers and receive the selected workspace's backend data.
-The popover displays configured capacities; no utilization or cost is inferred.
+The context popover shows configured capacities and current authenticated
+CPU/memory/disk utilization when a connected exact-engine sample exists. Missing
+samples stay unavailable. Hidden surfaces stop sampling; capacity is not cost.
 
-Staff cloud workspaces expose manual Restart in the Setup status row and workspace
-context menu. It joins the existing Stop (final checkpoint), waits for stopped,
+Effectively gated cloud workspaces expose Status/Restart in the workspace
+context details and Restart in the context menu. Setup retains logs and commands. It joins the existing Stop (final checkpoint), waits for stopped,
 then issues a fresh explicit wake before normal admission. Wake retains the
 server's automatic runtime-upgrade policy. Renderer-observed work requires
 confirmation; Local, archived and deleting workspaces expose no Restart. The
@@ -148,6 +152,49 @@ Archive, wake and delete use control-plane lifecycle operations. The existing
 deployment, entitlement and provider qualification gates remain authoritative;
 desktop wiring is not evidence of live macOS/provider qualification.
 
+### Durable initial transcript window cache
+
+Electron main stores a sanitized server-confirmed latest window outside engine
+SQLite/Chromium session data. Identity is account + organization UUID + workspace
+UUID + bare chat ID; the hashed on-disk key does not substitute for authorization.
+Bounds are 512 windows/64 MiB including index metadata, 200 rows/512 KiB per window;
+renderer memory retains 64 windows/24 MiB and 128 owner tokens. LRU/corruption/
+missing-file/symlink checks fail closed. Atomic per-file/index writes form a
+recoverable presentation cache, not a cross-file database transaction.
+
+Each window keeps the confirmed CP revision and tail msgId. The passive history
+API has no record epoch or forward after-revision/feed-offset endpoint, so
+`recordEpoch:null` explicitly means unknown; it is never an engine generation or
+admission. Revalidation reads a bounded tail and existing older windows. Runtime
+live replay remains incremental and authoritative; a future durable forward feed
+is separate [follow-up work](warm-pool.md).
+
+Main derives current account from its auth session, installs retirement listeners
+before cleanup and issues an opaque in-memory epoch. Sign-out/session/account
+replacement rotates that epoch before I/O; failed purge blocks reads/writes until
+full cleanup succeeds, including A→B→A. Renderer additionally requires confirmed
+catalog read authority for the exact cloud owner. Denial, tombstones and full-
+catalog reconciliation prune memory/disk, including unvisited windows after restart.
+Local IDs bypass cache IPC/revision filtering. Optional cache initialization cannot
+abort Personal Local or organization Local command registration.
+
+The initial latest-window hydrate can publish provisional **Cached** rows before
+a deferred authoritative read, while retaining loading and queued/streaming data.
+Current slot/account/owner guards reject late cache replies. Confirmed/native
+windows supersede it; a delayed CP read after native attachment is reread from
+that existing peer without admission/wake. The request promise still resolves
+an authoritative read. Cached paint never fulfills send completion, receipt
+catch-up or fresh runtime authority.
+
+Only terminal turn completion/failure or chat departure requests a passive latest-
+window checkpoint. It coalesces pending work and permits at most one attempt per
+semantic account/workspace/chat key every 30 seconds, across failure, invalidation,
+payload eviction and generation changes. There is no timer or per-window request;
+completion never awaits it. A lagging CP projection may leave an older confirmed
+head until subsequent authorized revalidation. See
+`apps/desktop/electron/cloud-transcript-cache-store.ts`, renderer
+`state/cloud-transcript-cache.ts` and `platform/bridge/cloud-transcript-checkpoints.ts`.
+
 ### Cloud workspace idle and wake
 
 A workspace stays active while any admitted device is using it or any workload
@@ -161,6 +208,11 @@ closed and never reads process arguments or environments. The quiet interval
 starts after these guards clear and lasts ten minutes before checkpoint + stop.
 Existing control-plane workload/authority guards still apply, including the
 bounded lifetime of outstanding human-service grants.
+Automatic forwarding listeners alone do not count as workload. The control
+plane excludes only tunnel grants with the reserved signed idempotency key
+`desktop:auto-tunnel:<lowercase UUID v4>`; SSH, manual tunnels and malformed
+keys remain blockers. Actual forwarding traffic still holds the workspace
+active through the engine's existing ten-minute traffic observation.
 
 User presence requires a selected cloud workspace, a signed-in/admitted client,
 a visible, available app window, and keyboard/pointer/scroll input in the last
@@ -329,7 +381,7 @@ registration. Missing cloud tool admission never enables native fallback.
 
 ### Implemented command transport
 
-Protocol 19 advertises `cloud.commands.v1` on `ENGINE_READY` only when the
+The shared engine protocol advertises `cloud.commands.v1` on `ENGINE_READY` only when the
 engine is registered with the control plane. The authenticated workspace bridge
 exposes these operations (the desktop creation UI is separate):
 
@@ -400,6 +452,13 @@ unconfirmed revision ranges and external revisions require reconciliation.
 This avoids downloading the same ten-entity pages after every short turn while
 preserving authority checks, remote deletions and the terminal durability gate.
 
+A dispatch/admission failure must carry a closed cause into the actual command
+receipt and UI. Ambiguous dispatch, unavailable/revoked runtime or missing
+terminal proof stays failed/uncertain with partial history retained; it never
+creates an empty successful assistant turn or completed telemetry. Receipt-only
+success triggers bounded authoritative history/event catch-up even when a
+matching live terminal frame is lost. Initial Cached rows cannot satisfy it.
+
 ### Durable approvals and steering
 
 `cloud.actions.v1` adds `cloudActions.request` with `submit` and exact operation
@@ -457,8 +516,8 @@ current trusted key. Device rotation/revocation, actor changes, expired grants,
 engine authority loss and generation retirement deny requests and renewals.
 The authoritative generation's provider and accepted runtime pin determine
 whether a scalar preview requires native device admission, even when the caller
-omits `native` and `target`. Only a verified legacy Daytona generation without
-a v4 pin retains the proof-free scalar exception. Existing unbound native
+omits `native` and `target`. All supported Boat generations require trusted
+device admission. Existing unbound native
 grants fail at ingress and runtime admission and must be issued again.
 
 The optional `AGENT_BOUNDARY_PORT_OPENED.nativeTarget` carries the same opaque
@@ -492,7 +551,9 @@ Header injection covers HTTPS and WSS. Secure WebSocket origins normalize to
 their equivalent HTTPS origin while preserving the exact host, port and frame
 ancestry; sibling frames never inherit HMR authority.
 
-Native preview surfaces use `useInternalFeatureActive("cloudComputerV2")`.
+Native preview surfaces use current account/organization admission via
+`useCloudWorkspaceAccountAccess`. Server native-preview issuance retains its
+independent engineering-staff and current edit/device authority checks.
 Browser, Run and agent admission also require the exact workspace's confirmed
 `capabilities.canEdit === true`. They subscribe to that cached authority;
 missing or denied capabilities retire the grant and cancel admission retries.
@@ -567,8 +628,12 @@ in-flight batch and exact-batch retry after lost acknowledgements. A command's
 terminal receipt also waits for event flush. Direct live frames are provisional
 until flush; a snapshot/replay response covers committed data. Control-plane
 retention is bounded to 10,000 events and 16 MiB of encoded frames per workspace.
-The engine's pending journal is bounded to 8,192 events / 8 MiB. Exhausting that
+The live engine's in-memory pending journal is bounded to 8,192 events / 8 MiB. Exhausting that
 pending bound fences execution instead of silently losing mandatory events.
+The CP event journal is durable; pending VM batches currently retry only within
+the live process. Persist-before-send VM outbox/inbox, a resident outbound uplink,
+one multiplexed device/backend channel and Mac send acknowledgements remain
+[separate follow-ups](warm-pool.md). They must reuse the existing command queue.
 
 Frames above 256 KiB remain available live and in normalized state. Their journal
 entry marks `requiresSnapshot`, and replay returns `event_snapshot_required`.
@@ -690,7 +755,7 @@ digest differs from ordinary deletion, and unknown request fields are rejected.
 
 ## Acceptance gates
 
-Both managed and customer-provider paths must pass:
+Supported Boat execution must pass:
 
 1. unauthorized create/subscription rejection before external side effects;
 2. one shared Code/Design conversation without a desktop process;
@@ -761,8 +826,9 @@ legacy SSH grants do not authorize these native workload services.
 Electron main implements native service admission and transport in
 `cloud-runtime-service-client.ts` and `cloud-runtime-service-transport.ts`.
 The existing SSH copy, Terminal and tunnel IPC names now use these native
-services. Provider SSH remains a distinct compatibility path for legacy engine
-dispatch; a refused native service never falls back to provider administration.
+services. Provider SSH remains a distinct protected bootstrap/qualification boundary;
+retired desktop engine dispatch is refused. A native-service refusal never falls
+back to provider administration or Local execution.
 The main process signs the exact device proof, validates the returned workspace,
 device, service, port and expiry, and accepts only the exact control-plane WSS
 service URL. Account replacement and local device-key rotation fence pending
@@ -796,8 +862,8 @@ An independent read-only check renews listener authority at most every five
 seconds, including while idle. Revocation or failure to revalidate within the
 existing ten-second bound closes the listener and retires its broker row;
 ordinary application EOF leaves it available. Older control planes without the
-authority-check route fail closed. No wake,
-retry, persisted config or account change silently reissues service authority.
+authority-check route fail closed. Manual access is never silently reissued by
+wake, retry, persisted config or account change.
 
 Closing an SSH connection or explicitly closing a forwarding listener stops
 local access and deletes only its exact grant, using the issuing account.
@@ -805,22 +871,40 @@ Sibling grants (including other devices) are unaffected. Failed retirement in
 the current session remains visible as **Retry close**, including admission
 whose local bind failed. Account retirement attempts cleanup with the original
 account token; if offline cleanup cannot complete, backend expiry still bounds
-the abandoned grant. Unused copied commands and idle forwarding listeners hold
+the abandoned grant. Unused copied commands and manual forwarding listeners hold
 their fifteen-minute grant until closed or expired and can therefore delay idle
 sleep. The user must close them when finished.
 
+Automatic forwarding requires explicit **Forward to localhost** intent (off by
+default) and **Auto-forwarding** (on by default). Main persists only these two
+booleans under a bounded account/device/organization/workspace key; workspace
+removal and sign-out prune them. Renderer connection-status publications carry
+safe runtime identity only, which main matches to its exact admission before
+polling current-generation detected ports. Neither passive reads nor automatic
+forwarding admit an engine, connect a peer or wake compute. Unknown observations
+retain confirmed forwards; confirmed disappearance retires only automatic
+grants. Forwarding chooses the requested local port or the next available port
+within 31 ports and reports the actual bound destination. A stopped automatic
+port stays suppressed until detection disappears or the user re-arms forwarding.
+Disconnect, account/device/runtime replacement, revocation and app exit cancel
+pending work and close automatic listeners; manual sibling grants retain their
+own existing lifecycle. Native authority checks continue independently.
+Normal automatic grant expiry can renew under the current connected runtime
+and explicit forwarding preference. An unexpected grant closure before expiry
+withdraws automatic work until the user re-arms it.
+
 The workspace details controls require
-`useInternalFeatureActive("cloudComputerV2")`, a running workspace, the native
+`useCloudWorkspaceAccountAccess(organizationId)`, a running workspace, the native
 desktop bridge, and `capabilities.canEdit === true`. `canEdit` is optional for
 mixed-version documents and fails closed when absent. Read-only
 `cloud_workspace_access_context` / `cloud_workspace_access_list` return safe
 metadata only. Their bounded renderer caches include account epoch, broker
 authority, device/key version, organization and workspace. Pointer/focus intent
 warms metadata without issuing grants; same-key refresh retains confirmed rows;
-hidden surfaces do not poll. Staff actions return the captured authority context
+hidden surfaces do not poll. Actions return the captured authority context
 to main so a stale click cannot issue into a replacement account or device.
 
 Local tests cover real OpenSSH exec/SFTP, key mismatch, framing, authority races,
-cleanup and the staff UI. They do not qualify a signed Mac build against a v4
+cleanup and current account/capability UI. They do not qualify a signed Mac build against a v4
 template workspace. Run the [Mac Alpha acceptance procedure](native-access-acceptance.md)
 after the template, wake and persistence prerequisites have been qualified.

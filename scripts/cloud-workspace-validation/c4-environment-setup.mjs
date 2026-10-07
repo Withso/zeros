@@ -144,20 +144,13 @@ export async function runC4SetupProbe(config, requestFetch = fetch) {
     const computer = await request(computerPath, config.adminToken);
     required(computer.status === 200 && version(computer.document.revision));
     report.phase = "authority";
-    for (const [label, token] of [
-      ["member403", config.memberToken],
-      ["nonstaff403", config.nonstaffToken],
+    for (const [label, token, expectedStatus] of [
+      ["member403", config.memberToken, 403],
+      ["nonstaffAdmin409", config.nonstaffToken, 409],
     ]) {
-      required(
-        (
-          await request(
-            setupPath,
-            token,
-            "PUT",
-            input(Number.MAX_SAFE_INTEGER, ""),
-          )
-        ).status === 403,
-      );
+      const refusal = await request(setupPath, token, "PUT", input(Number.MAX_SAFE_INTEGER, ""));
+      required(refusal.status === expectedStatus &&
+        (expectedStatus !== 409 || refusal.document?.error?.code === "cloud_settings_version_conflict"));
       report.checks.push(label);
     }
     report.phase = "setup-write";

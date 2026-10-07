@@ -469,6 +469,7 @@ describe("cloud workspace internal setup routes", () => {
 
   it.each([
     ["computer_environment_revoked", 409, false],
+    ["cloud_workspace_v2_required", 409, false],
     ["computer_environment_busy", 503, true],
   ] as const)("returns the closed %s setup code", async (code, status, retryable) => {
     const { app } = harness({ redeem: vi.fn(async () => { throw new CloudWorkspaceSetupMaterialError(code, "private environment value", retryable); }) });

@@ -8,7 +8,6 @@ import { createRoot } from "react-dom/client";
 import { DesignSection } from "../features/repositories/design-section";
 import { DesignDirectoryMenu } from "../features/design-workspace/design-directory-menu";
 import { acceptOrganizationSnapshot } from "../features/team/team-store";
-import { setInternalFeatureEnabled } from "../features/settings/internal-features";
 import { cloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import {
   acceptCloudWorkspaceDocument,
@@ -51,12 +50,11 @@ acceptOrganizationSnapshot({
     id: organizationId,
     email: "fixture@example.test",
     displayName: "Fixture",
-    staffRole: "developer",
+    staffRole: null,
   },
   teams: [organization],
   organizations: [organization],
 });
-setInternalFeatureEnabled("cloudComputerV2", true);
 let version = 0;
 function role(actorRole: CloudWorkspaceActorRole) {
   for (const id of ids)

@@ -8,6 +8,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { consumeCloudWorkspaceGrant } from "./grants.js";
 import { DatabaseCloudWorkspaceSetupAdmissionBroker } from "./setup-admission-broker.js";
 import {
+  seedSupportedCloudWorkspaceGeneration,
   seedCanonicalCloudWorkspaceAuthority,
   seedCanonicalCloudWorkspacePrerequisites,
   seedCanonicalWorkspaceSettingsVersion,
@@ -31,6 +32,7 @@ d("cloud workspace setup admission broker", () => {
 
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     const userId = randomUUID();
     await pool.query(`INSERT INTO users(id,email,display_name,staff_role)
       VALUES ($1,$2,'Setup Admission Owner','developer')`, [userId, `setup-admission-${userId}@example.test`]);
@@ -87,21 +89,9 @@ d("cloud workspace setup admission broker", () => {
         organizationId,
         ownerUserId: userId,
       });
-      await tx.query(
-        `INSERT INTO cloud_workspace_generations (
-           workspace_id, generation, org_id, provider, image_ref,
-           architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by, provider_connection_id
-         ) VALUES ($1, 1, $2, 'daytona', 'snapshot-pinned-id',
-                   'linux/amd64', 2000, 4096, 20480, $3, $4, $5)`,
-        [
-          workspaceId,
-          organizationId,
-          "a".repeat(40),
-          userId,
-          canonical.providerConnectionId,
-        ],
-      );
+      const supported = await seedSupportedCloudWorkspaceGeneration(tx, {
+        workspaceId, organizationId, ownerUserId: userId, providerConnectionId: canonical.providerConnectionId,
+      });
       const settingsDocument = { schemaVersion: 1, values: {} };
       const settings = JSON.stringify(settingsDocument);
       const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(tx, {
@@ -132,6 +122,7 @@ d("cloud workspace setup admission broker", () => {
         [workspaceId, organizationId],
       );
       return {
+        runtime: supported.pin,
         setupRunId: run.rows[0]!.id,
         workspaceId,
         organizationId,
@@ -139,10 +130,10 @@ d("cloud workspace setup admission broker", () => {
         generation: 1,
         attempt: 1,
         executionFence: 4,
-        provider: { name: "daytona", resourceId: `sandbox-${workspaceId}` },
+        provider: { name: "boat", resourceId: `sandbox-${workspaceId}` },
         image: {
-          ref: "snapshot-pinned-id",
-          sourceCommit: "a".repeat(40),
+          ref: `boat-template:${supported.source.sourceSandboxId}`,
+          sourceCommit: "d".repeat(40),
         },
         repository: {
           forge: "github.com",
@@ -160,6 +151,16 @@ d("cloud workspace setup admission broker", () => {
         },
       };
     });
+  });
+
+  it("refuses unsupported setup before issuing its one-use grant", async () => {
+    await pool.query(`UPDATE cloud_computer_templates SET state='quarantined'
+      WHERE build_id IN (SELECT template_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1)`, [setup.workspaceId]);
+    const broker = new DatabaseCloudWorkspaceSetupAdmissionBroker({ pool,
+      endpoint: "https://control.example.test/v1/internal/cloud-workspaces/setup" });
+    await expect(broker.issue(setup, new AbortController().signal).then(() => undefined))
+      .rejects.toMatchObject({ code: "cloud_workspace_v2_required", retryable: false });
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_endpoint_grants WHERE workspace_id=$1", [setup.workspaceId])).rows[0].n).toBe(0);
   });
 
   it("stores only a digest and consumes exactly the matching run and fence", async () => {

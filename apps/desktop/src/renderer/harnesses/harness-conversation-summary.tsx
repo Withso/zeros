@@ -29,6 +29,7 @@ import {
   ConversationSummaryTrigger,
   ConversationSummaryIsland,
 } from "../shell/conversation/conversation-summary";
+import { WorkspaceHeader } from "../shell/conversation/workspace-header";
 
 const repoA = "/summary-fixture/a";
 const repoB = "/summary-fixture/b";
@@ -295,6 +296,7 @@ function Harness() {
   const [collapsed, setCollapsed] = useState(true);
   const [narrow, setNarrow] = useState(false);
   const workbench = useWorkspaceStore(selectWorkbench);
+  const folder = useWorkspaceStore(state => state.newAgentFolder);
   const reveal = useCallback(() => setCollapsed(false), []);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   // Exercise the production composer's focus policy around a new chat overlay.
@@ -351,8 +353,7 @@ function Harness() {
             workbenchCollapsed={collapsed}
             onRevealWorkbench={reveal}
           >
-            <div className="flex h-10 shrink-0 items-center gap-2 px-3">
-              <span className="text-fg2 flex-1 text-xs">Untitled chat</span>
+            <WorkspaceHeader folder={folder} name={folder === folderB ? "Summary B" : "Summary A"} branch trailing={<>
               <ConversationSummaryTrigger />
               {collapsed && (
                 <Button
@@ -364,7 +365,7 @@ function Harness() {
                   ↔
                 </Button>
               )}
-            </div>
+            </>} />
             <div className="flex min-h-0 min-w-0 flex-1">
               <div
                 className="flex min-w-0 flex-1 flex-col justify-between p-4"

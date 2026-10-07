@@ -435,12 +435,13 @@ export function DashboardPage() {
                     <PendingDashboardCard
                       key={pending.token}
                       label={
-                        pending.branch
+                        pending.label ?? (pending.branch
                           ? branchDisplayName(pending.branch)
-                          : "New workspace"
+                          : "New workspace")
                       }
                       repoName={
                         projectBySlug.get(pending.repoSlug)?.name ??
+                        pending.repository?.name ??
                         pending.repoSlug
                       }
                       project={projectBySlug.get(pending.repoSlug) ?? null}

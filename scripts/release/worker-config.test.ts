@@ -12,6 +12,12 @@ describe("protected worker execution policy", () => {
       expect(() => workerExecutionConfig({ ...workerEnvironment(), ...patch })).toThrow();
     }
   });
+  it("allows explicit guarded cleanup with promotion off without relaxing protected authority", () => {
+    const env = { ...workerEnvironment(), ZEROS_WORKER_PROMOTION: "disabled" };
+    expect(workerExecutionConfig(env, { cleanupOnly: true }).config.requireQualifiedWorker).toBe(false);
+    for (const patch of [{ GITHUB_EVENT_NAME: "pull_request" }, { GITHUB_HEAD_REF: "fork" }, { WORKER_CANARY_ADMISSION_TOKEN: "" }])
+      expect(() => workerExecutionConfig({ ...env, ...patch }, { cleanupOnly: true })).toThrow();
+  });
   it("rejects unqualified API-key modes and unbounded account spending", () => {
     for (const patch of [{ RUNTIME_QUALIFICATION_CREDENTIAL_KINDS: "claude-api-key,codex-api-key,cursor-api-key" },
       { RUNTIME_QUALIFICATION_CREDENTIAL_KINDS: "claude-setup-token,codex-chatgpt,cursor-api-key,claude-api-key,codex-api-key" },

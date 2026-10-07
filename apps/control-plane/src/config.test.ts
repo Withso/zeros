@@ -59,11 +59,19 @@ describe("temporary Alpha deletion readiness exception", () => {
 });
 
 describe("same-generation resume configuration", () => {
-  it("defaults off and enables only explicitly on Alpha", () => {
+  it("defaults on only for Alpha and preserves an explicit opt-out", () => {
     expect(loadConfig(baseEnv()).cloudWorkspaceResumeExistingEnabled).toBe(false);
+    for (const channel of ["alpha", "Alpha", " ALPHA "]) {
+      expect(loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: channel }).cloudWorkspaceResumeExistingEnabled).toBe(true);
+      expect(loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
+        CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "false" }).cloudWorkspaceResumeExistingEnabled).toBe(false);
+    }
+  });
+  it("defaults off elsewhere and rejects an explicit non-Alpha enable", () => {
     expect(loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: "alpha",
       CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "true" }).cloudWorkspaceResumeExistingEnabled).toBe(true);
-    for (const channel of ["development", "beta", "production"]) {
+    for (const channel of ["development", "beta", "production", "preview", ""]) {
+      expect(loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: channel }).cloudWorkspaceResumeExistingEnabled).toBe(false);
       expect(() => loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
         CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "true" })).toThrow(/resume.*Alpha/i);
     }
@@ -82,7 +90,12 @@ describe("runtime publication configuration", () => {
     const config = loadConfig(baseEnv());
     expect(config.cloudRuntimePublication).toEqual({ enabled: false, audience: "zeros-control-plane-development",
       repository: "Withso/zeros", environment: "alpha", s3: null });
-    expect(config.cloudWorkspaceNewRuntimeProfile).toBe("legacy");
+    expect(config.cloudWorkspaceNewRuntimeProfile).toBe("v4");
+  });
+
+  it("refuses the retired new-workspace runtime rollout", () => {
+    expect(() => loadConfig({ ...baseEnv(), CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE: "legacy" }))
+      .toThrow(/CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE/);
   });
 
   it("reuses CP-held S3 credentials independently of workspace provisioning", () => {
@@ -124,24 +137,44 @@ describe("runtime publication configuration", () => {
     expect(message.includes("http:")).toBe(false);
   });
 
-  it("admits publication only on the Alpha channel", () => {
-    for (const channel of ["development", "beta", "production"]) {
-      expect(() => loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel })).toThrow(/runtime publication.*Alpha/);
-    }
+  it.each(["alpha", "beta", "production"])("admits publication with the matching default OIDC environment on %s", channel => {
+    const config = loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel });
+    expect(config.cloudRuntimePublication).toMatchObject({
+      enabled: true, audience: `zeros-control-plane-${channel}`, environment: channel,
+    });
+    expect(loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
+      CLOUD_RUNTIME_OIDC_ENVIRONMENT: channel }).cloudRuntimePublication?.environment).toBe(channel);
+  });
+
+  it.each(["development", "staging", "unknown"])("refuses enabled publication outside a release channel: %s", channel => {
+    expect(() => loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel })).toThrow(/runtime publication.*channel/i);
+  });
+
+  it.each(["alpha", "beta", "production"])("refuses an explicit OIDC environment for another deployment channel: %s", channel => {
+    expect(() => loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
+      CLOUD_RUNTIME_OIDC_ENVIRONMENT: channel === "alpha" ? "beta" : "alpha" }))
+      .toThrow(/runtime publication.*CLOUD_RUNTIME_OIDC_ENVIRONMENT/);
+  });
+
+  it.each(["beta", "production"])("keeps the legacy null-environment opt-out confined to Alpha: %s", channel => {
+    expect(() => loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
+      CLOUD_RUNTIME_OIDC_ENVIRONMENT: "" })).toThrow(/runtime publication.*CLOUD_RUNTIME_OIDC_ENVIRONMENT/);
   });
 });
 
 describe("v4 runtime admission configuration", () => {
-  it("defaults new workspaces to legacy and qualifications to full, with the staff gate enabled", () => {
+  it("defaults qualifications to full without a staff or runtime rollout switch", () => {
     expect(loadConfig(cloudSetupEnv()).cloudWorkspaces?.runtime).toEqual({
-      newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full", qualificationEnabled: false, stagingEnabled: false,
+      qualificationMode: "full", qualificationEnabled: false, stagingEnabled: false,
     });
   });
   it("accepts only the explicit runtime switches", () => {
     expect(loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE: "v4",
       CLOUD_RUNTIME_V4_STAFF_ONLY: "false", CLOUD_RUNTIME_QUALIFICATION_MODE: "smoke", CLOUD_RUNTIME_QUALIFICATION_ENABLED: "true" }).cloudWorkspaces?.runtime)
-      .toEqual({ newWorkspaceProfile: "v4", staffOnly: false, qualificationMode: "smoke", qualificationEnabled: true, stagingEnabled: false });
-    for (const name of ["CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE", "CLOUD_RUNTIME_V4_STAFF_ONLY", "CLOUD_RUNTIME_QUALIFICATION_MODE", "CLOUD_RUNTIME_QUALIFICATION_ENABLED"]) {
+      .toEqual({ qualificationMode: "smoke", qualificationEnabled: true, stagingEnabled: false });
+    expect(loadConfig({ ...cloudSetupEnv(), CLOUD_RUNTIME_V4_STAFF_ONLY: "true" }).cloudWorkspaces?.runtime)
+      .toEqual(loadConfig(cloudSetupEnv()).cloudWorkspaces?.runtime);
+    for (const name of ["CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE", "CLOUD_RUNTIME_QUALIFICATION_MODE", "CLOUD_RUNTIME_QUALIFICATION_ENABLED"]) {
       expect(() => loadConfig({ ...cloudSetupEnv(), [name]: "invalid" })).toThrow(name);
     }
   });
@@ -304,9 +337,16 @@ function cloudEnv(): NodeJS.ProcessEnv {
     ...validEnv(),
     GITHUB_APP_PRIVATE_KEY: privateKey,
     CLOUD_WORKSPACES_ENABLED: "true",
-    CLOUD_WORKSPACE_PROVIDER: "daytona",
-    DAYTONA_API_KEY: "daytona-api-key-for-control-plane-tests",
-    DAYTONA_SNAPSHOT_ID: "snap_immutable_123",
+    CLOUD_WORKSPACE_PROVIDER: "boat",
+    BOAT_API_KEY: "boat-api-key-for-control-plane-tests",
+    BOAT_ACCOUNT_SCOPE: "qualification-account",
+    BOAT_BILLING_ORG: "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41",
+    BOAT_SNAPSHOT_ID: "zeros-qualified-immutable-v1",
+    BOAT_IMAGE_BUILD_SHA256: "c".repeat(64),
+    BOAT_TTL_SECONDS: "3600",
+    BOAT_COMPUTE_POLICY_ID: "boat-price-v1",
+    BOAT_SECONDS_PER_DOLLAR: "100000",
+    CLOUD_WORKSPACE_STORAGE_MIB: "40960",
     ZEROS_CLOUD_SOURCE_COMMIT: "a".repeat(40),
   };
 }
@@ -317,7 +357,6 @@ function cloudSetupEnv(): NodeJS.ProcessEnv {
     ...cloudEnv(),
     CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
     CLOUD_WORKSPACE_CONTROL_PLANE_URL: "https://api.example.test",
-    DAYTONA_TOOLBOX_ORIGINS: "https://proxy.example.test",
     CLOUD_WORKSPACE_SECRET_KEY_V1: setupKey,
     CLOUD_WORKSPACE_OBJECT_KEY_V1: setupKey,
     CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: "/var/lib/zeros/workspace-objects",
@@ -764,8 +803,6 @@ describe("cloud workspace backend configuration", () => {
     return {
       ...cloudEnv(),
       CLOUD_WORKSPACE_PROVIDER: "boat",
-      DAYTONA_API_KEY: undefined,
-      DAYTONA_SNAPSHOT_ID: undefined,
       BOAT_API_KEY: "boat-api-key-for-control-plane-tests",
       BOAT_ACCOUNT_SCOPE: "qualification-account",
       BOAT_BILLING_ORG: "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41",
@@ -778,16 +815,23 @@ describe("cloud workspace backend configuration", () => {
     };
   }
 
-  it("defaults the managed provider to Boat and never implies Daytona", () => {
+  it("defaults the managed provider to Boat", () => {
     const cloud = loadConfig({ ...boatEnv(), CLOUD_WORKSPACE_PROVIDER: undefined }).cloudWorkspaces!;
     expect(cloud).toMatchObject({ provider: "boat", cpuMillicores: 4000, memoryMiB: 8192 });
     expect(cloud.providerProfiles).toBeUndefined();
-    expect(cloud.daytonaConnection).toBeUndefined();
-    // A Daytona credential alone neither selects Daytona nor satisfies Boat.
-    expect(() => loadConfig({ ...cloudEnv(), CLOUD_WORKSPACE_PROVIDER: undefined })).toThrow(/BOAT_API_KEY/);
+    expect(() => loadConfig({ ...cloudEnv(), BOAT_API_KEY: undefined, CLOUD_WORKSPACE_PROVIDER: undefined })).toThrow(/BOAT_API_KEY/);
   });
 
-  it("configures managed Boat without a managed Daytona credential", () => {
+  it("ignores a retired delegated credential key when loading Boat configuration", () => {
+    const cloud = loadConfig({
+      ...boatEnv(),
+      CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1: "retired-input-is-not-a-key",
+    }).cloudWorkspaces!;
+    expect(cloud.provider).toBe("boat");
+    expect(cloud).not.toHaveProperty("providerCredentialKeys");
+  });
+
+  it("configures the managed Boat provider", () => {
     const cloud = loadConfig(boatEnv()).cloudWorkspaces!;
     expect(cloud).toMatchObject({
       provider: "boat",
@@ -806,7 +850,6 @@ describe("cloud workspace backend configuration", () => {
       computePolicy: {provider:"boat",policyId:"boat-price-v1",secondsPerDollar:100000,minimumTtlSeconds:600,maximumTtlSeconds:3600,requestMarginSeconds:185},
     });
     expect(cloud.providerProfiles).toBeUndefined();
-    expect(cloud.daytonaConnection).toBeUndefined();
   });
 
   it("requires explicit Boat account, snapshot, TTL and measured capacity", () => {
@@ -848,93 +891,10 @@ describe("cloud workspace backend configuration", () => {
       );
   });
 
-  it("gives Daytona BYO an independent complete image profile beside managed Boat", () => {
-    const env = {
-      ...boatEnv(),
-      DAYTONA_BYO_ENABLED: "true",
-      DAYTONA_BYO_SNAPSHOT_ID: "daytona-qualified-image",
-      DAYTONA_BYO_SOURCE_COMMIT: "b".repeat(40),
-      DAYTONA_BYO_CPU_MILLICORES: "2000",
-      DAYTONA_BYO_MEMORY_MIB: "4096",
-      DAYTONA_BYO_STORAGE_MIB: "10240",
-      DAYTONA_TARGET: "us",
-    };
-    const cloud = loadConfig(env).cloudWorkspaces!;
-    expect(cloud.provider).toBe("boat");
-    expect(cloud.daytonaConnection).toEqual({
-      apiUrl: "https://app.daytona.io/api",
-      target: "us",
-    });
-    expect(cloud.providerProfiles?.daytona).toEqual({
-      provider: "daytona",
-      imageRef: "daytona-qualified-image",
-      sourceCommit: "b".repeat(40),
-      architecture: "linux/amd64",
-      cpuMillicores: 2000,
-      memoryMiB: 4096,
-      storageMiB: 10240,
-    });
-    for (const name of [
-      "DAYTONA_BYO_SNAPSHOT_ID",
-      "DAYTONA_BYO_SOURCE_COMMIT",
-      "DAYTONA_BYO_CPU_MILLICORES",
-      "DAYTONA_BYO_MEMORY_MIB",
-      "DAYTONA_BYO_STORAGE_MIB",
-    ]) {
-      expect(() => loadConfig({ ...env, [name]: undefined })).toThrow(
-        new RegExp(name),
-      );
-    }
-    expect(() => loadConfig({ ...env, DAYTONA_BYO_ENABLED: "yes" })).toThrow(
-      /DAYTONA_BYO_ENABLED/,
-    );
-  });
-
-  it("allows Daytona credential onboarding without enabling its compute profile", () => {
-    const cloud = loadConfig({
-      ...boatEnv(),
-      DAYTONA_CONNECTIONS_ENABLED: "true",
-      DAYTONA_TARGET: "us",
-      CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: "false",
-    }).cloudWorkspaces!;
-    expect(cloud.daytonaConnection).toEqual({
-      apiUrl: "https://app.daytona.io/api",
-      target: "us",
-    });
-    expect(cloud.providerProfiles).toBeUndefined();
-    expect(cloud.provider).toBe("boat");
-    expect(configuredCloudWorkspaceProviders(cloud)).toEqual(["boat"]);
-    expect(() => cloudWorkspaceProvisioningProfile(cloud, "daytona"))
-      .toThrow("no valid provisioning profile");
-    expect(cloud.backgroundWorkersEnabled).toBe(false);
-    expect(cloud.setupExecution).toBeNull();
-    expect(loadConfig({ ...boatEnv(), DAYTONA_CONNECTIONS_ENABLED: "false" })
-      .cloudWorkspaces?.daytonaConnection).toBeUndefined();
-    expect(() => loadConfig({ ...boatEnv(), DAYTONA_CONNECTIONS_ENABLED: "yes" }))
-      .toThrow(/DAYTONA_CONNECTIONS_ENABLED/);
-  });
-
-  it("runs Boat setup without requiring Daytona toolbox access", () => {
-    const cloud = loadConfig({
-      ...cloudSetupEnv(),
-      ...boatEnv(),
-      DAYTONA_TOOLBOX_ORIGINS: undefined,
-    }).cloudWorkspaces!;
-    expect(cloud.setupExecution?.allowedToolboxOrigins).toEqual([]);
-    expect(() =>
-      loadConfig({
-        ...cloudSetupEnv(),
-        DAYTONA_TOOLBOX_ORIGINS: undefined,
-      }),
-    ).toThrow(/DAYTONA_TOOLBOX_ORIGINS/);
-  });
-
   it("stays disabled unless the paid-resource gate is explicit", () => {
     expect(
       loadConfig({
         ...validEnv(),
-        DAYTONA_API_KEY: "daytona-api-key-for-control-plane-tests",
-        DAYTONA_SNAPSHOT_ID: "snap_immutable_123",
       }).cloudWorkspaces,
     ).toBeNull();
   });
@@ -951,47 +911,6 @@ describe("cloud workspace backend configuration", () => {
     for (const value of ["0", "33", "1.5", "unbounded"]) {
       expect(() => loadConfig({ ...cloudEnv(), CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS: value })).toThrow(/CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS/);
     }
-  });
-
-  it("loads one pinned Daytona provider contract behind the gate", () => {
-    expect(loadConfig(cloudEnv()).cloudWorkspaces).toEqual({
-      runtime: { newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full", qualificationEnabled: false, stagingEnabled: false },
-      provider: "daytona",
-      apiKey: "daytona-api-key-for-control-plane-tests",
-      apiUrl: "https://app.daytona.io/api",
-      target: "eu",
-      snapshotId: "snap_immutable_123",
-      imageRef: "snap_immutable_123",
-      architecture: "linux/amd64",
-      cpuMillicores: 2_000,
-      memoryMiB: 4_096,
-      storageMiB: 20_480,
-      sourceCommit: "a".repeat(40),
-      operationTimeoutSeconds: 180,
-      autoArchiveMinutes: 10_080,
-      reconcileIntervalMs: 5_000,
-      backgroundWorkersEnabled: true,
-      computerMaxConcurrentBuilds: 2,
-      access: {
-        allowedSshHosts: ["ssh.app.daytona.io"],
-        allowedPreviewHostSuffixes: ["proxy.daytona.work"],
-        previewBaseDomain: null,
-      },
-      providerCredentialKeys: {},
-      settingsSecretEncryptionKeys: {},
-      currentSettingsSecretEncryptionKeyVersion: null,
-      settingsSecretKeyV1: null,
-      durability: null,
-      bridge: {
-        maxConnections: 64,
-        maxConnectionsPerWorkspace: 10,
-        maxReadOnlyConnectionsPerWorkspace: 10,
-        outboundBudgetBytes: 128 * 1024 * 1024,
-        inboundBudgetBytes: 256 * 1024 * 1024,
-      },
-      outbox: null,
-      setupExecution: null,
-    });
   });
 
   it("sizes the portable runtime relay only from validated bridge variables", () => {
@@ -1068,33 +987,8 @@ describe("cloud workspace backend configuration", () => {
     }
   });
 
-  it("pins provider access hosts and an isolated wildcard preview domain", () => {
-    expect(
-      loadConfig({
-        ...cloudEnv(),
-        DAYTONA_SSH_HOSTS:
-          "ssh.provider.example,ssh-secondary.provider.example",
-        DAYTONA_PREVIEW_HOST_SUFFIXES:
-          "preview.provider.example,preview-alt.provider.example",
-        CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN: "cloud-preview.example.test",
-      }).cloudWorkspaces?.access,
-    ).toEqual({
-      allowedSshHosts: [
-        "ssh.provider.example",
-        "ssh-secondary.provider.example",
-      ],
-      allowedPreviewHostSuffixes: [
-        "preview.provider.example",
-        "preview-alt.provider.example",
-      ],
-      previewBaseDomain: "cloud-preview.example.test",
-    });
-  });
-
   it("rejects wildcard, URL, and IP-shaped provider access hosts", () => {
     for (const override of [
-      { DAYTONA_SSH_HOSTS: "*.example.test" },
-      { DAYTONA_PREVIEW_HOST_SUFFIXES: "https://preview.example.test" },
       { CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN: "127.0.0.1" },
     ]) {
       expect(() => loadConfig({ ...cloudEnv(), ...override })).toThrow(
@@ -1108,8 +1002,6 @@ describe("cloud workspace backend configuration", () => {
     expect(
       loadConfig({
         ...cloudSetupEnv(),
-        DAYTONA_TOOLBOX_ORIGINS:
-          "https://proxy-a.example.test,https://proxy-b.example.test",
         CLOUD_WORKSPACE_SECRET_KEY_V1: setupKey,
         CLOUD_WORKSPACE_OBJECT_KEY_V1: setupKey,
       }).cloudWorkspaces,
@@ -1126,10 +1018,6 @@ describe("cloud workspace backend configuration", () => {
       },
       setupExecution: {
         controlPlaneOrigin: "https://api.example.test",
-        allowedToolboxOrigins: [
-          "https://proxy-a.example.test",
-          "https://proxy-b.example.test",
-        ],
         setupSecretEncryptionKeys: { 1: setupKey },
         currentSetupSecretEncryptionKeyVersion: 1,
         setupSecretKeyV1: setupKey,
@@ -1310,12 +1198,7 @@ describe("cloud workspace backend configuration", () => {
         CLOUD_WORKSPACE_CONTROL_PLANE_URL: undefined,
       }),
     ).toThrow(/CLOUD_WORKSPACE_CONTROL_PLANE_URL/);
-    expect(() =>
-      loadConfig({
-        ...cloudSetupEnv(),
-        DAYTONA_TOOLBOX_ORIGINS: "https://proxy.example.test/path",
-      }),
-    ).toThrow(/DAYTONA_TOOLBOX_ORIGINS/);
+
     expect(() =>
       loadConfig({
         ...cloudSetupEnv(),
@@ -1351,13 +1234,13 @@ describe("cloud workspace backend configuration", () => {
     ).toThrow(/valid RSA private key/);
   });
 
-  it("rejects credential-bearing provider URLs and ambiguous gate values", () => {
+  it("rejects unsupported providers and ambiguous gate values", () => {
     expect(() =>
       loadConfig({
         ...cloudEnv(),
-        DAYTONA_API_URL: "https://user:secret@app.daytona.io/api",
+        CLOUD_WORKSPACE_PROVIDER: "retired-provider",
       }),
-    ).toThrow(/DAYTONA_API_URL/);
+    ).toThrow(/CLOUD_WORKSPACE_PROVIDER/);
     expect(() =>
       loadConfig({ ...validEnv(), CLOUD_WORKSPACES_ENABLED: "yes" }),
     ).toThrow(/must be true or false/);

@@ -291,4 +291,4 @@ Bare-base clone/staging/image-seed failures are bypassed for a computer workspac
 (`setup-cloud-workspace.mjs:2122`). Platform/root entry rejection and unexpected
 top-level failures also use `image_contract_invalid` at 2860/2872/2891. The control
 plane maps that closed code to `setup_image_contract_invalid` in
-`daytona-setup-executor.ts:120`.
+`linux-setup-executor.ts`.

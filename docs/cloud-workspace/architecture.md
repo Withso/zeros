@@ -3,158 +3,147 @@
 ## System boundaries
 
 ```text
-Mac desktop
-  renderer + Design canvas + local engine + replica/forward broker
-       │                         │
-       │ authenticated control  └── receive-only files / localhost tunnels
-       ▼
-apps/control-plane ───── stable identity, policy, authorization, audit
-       │                         │
-       │ lifecycle/grants        └── durable record + encrypted object store
-       ▼
-Remote execution environment
-  repository + Zeros engine + agents + PTY + Design API
-       │ versioned bridge / SSH / authenticated preview
-       └────────────────────────► authorized active clients
-
-Configured Git remote remains the committed code/review boundary.
+Desktop: exact cloud:// selection, retained views, bounded transcript cache
+  | account HTTP: history, commands, lifecycle, admissions
+  v
+Control plane: organization/actor/device authority
+  immutable Computer source + runtime generation pins; allocation journal
+  one durable command queue + receipts; ordered events + normalized history
+  | current: authenticated bridge relay + engine outbound HTTP
+  v
+Boat VM: protected bootstrap -> pinned engine + existing SQLite
+  contained worker: repository, native provider CLIs, scoped Git operations
+  checked engine-write publication; separately admitted PTY/preview/capture
 ```
 
-The design separates four concerns:
+The control plane authorizes work and persists its delivery/result evidence. The
+engine sequences live workspace operations. Provider resources are replaceable
+execution capacity; they do not replace the stable workspace ID, durable record
+or configured Git remote. The renderer presents these authorities through one
+workspace runtime router; status UI does not become another lifecycle controller.
 
-1. **Client plane:** desktop and its device-private replica/forward broker first,
-   then web control surfaces. Native mobile is deferred.
-2. **Control plane:** identity, organization and child-team authorization, workspace registry,
-   lifecycle intents, idempotency, audit, quotas, and provider orchestration.
-3. **Execution plane:** one isolated environment containing the repository,
-   engine, agent processes, and terminals.
-4. **Data plane:** the durable workspace record, encrypted checkpoints/blobs,
-   per-replica cursors, artifacts/backups, and the user's Git remote.
-
-The engine is the live ordering authority while a workspace is running.
-`CloudRuntimeBridgeRelay` carries authenticated engine frames for portable
-clients without taking execution ownership. It bounds connections, queued
-bytes and admission work, and revalidates actor/device/generation authority.
-Provider administrative credentials remain behind this relay boundary.
+Cloud execution admits only generations with a valid saved v2 Cloud Computer
+source and a complete v4 worker pin, using actor protocol 2. Unsupported saved
+generations return `cloud_workspace_v2_required` before execution admission;
+setup and automatic recovery treat that refusal as terminal. Catalog metadata,
+authorized history, sharing and explicit resource deletion remain available.
+Existing sources and pins are retained without selecting today's template or
+converting historical workspaces. See [Computer Environment](computer-environment.md).
+Local and organization-owned local workspaces retain their normal local paths.
 
 ## Identity and placement boundary
 
-The stable workspace identity is not the provider resource and is not inferred
-from a local worktree path. Device SQLite owns local-workspace UUIDs and paths;
-the control plane owns cloud-workspace UUIDs, tenant/team/repository, creator,
-billing owner, assignee, visibility, authority epoch, and generation history.
-A local↔cloud copy creates a different destination UUID and records immutable
-fork provenance. It never reuses the source identity or changes its authority.
-Provider bindings describe only a disposable cloud resource.
-Per-user/per-device replica bindings describe optional local mirrors and never
-store the absolute device path in the cloud.
+Cloud keys encode organization and workspace UUIDs. Device SQLite owns Local
+paths and released Local identity aliases; the control plane owns cloud rows,
+generations, actor/device grants, billing epochs and immutable source/runtime
+pins. Never infer placement from organization membership, a provider resource ID
+or a VM path. Personal Local and organization Local run the same local engine
+operations without cloud admission, history or cloud-only credentials.
 
-Released human-readable and path-derived local IDs remain compatibility
-aliases. They must not be silently reinterpreted as cloud identities.
+A Local↔cloud copy creates a fresh destination UUID and immutable provenance.
+The source remains authoritative for itself. Receive-only replicas belong to one
+user/device/workspace; paths remain device-local, and replica edits never upload
+or change cloud authority. See [data and sync](data-and-sync.md).
+
+## Create and wake
+
+1. Desktop publishes an account/org/idempotency-scoped pending create immediately.
+   A confirmed server UUID replaces that placeholder atomically. A rejected or
+   late reply can remove only its own pending row.
+2. The control plane validates current membership, roles, funding and the exact
+   ready v2 Computer source. It records immutable generation inputs, runtime
+   pin and allocation/setup intent before provider I/O.
+3. Boat fork/resume runs the fixed image-owned setup path. Setup claims, retries
+   and readiness remain fenced by workspace, generation, lease and execution
+   fence. A retry deadline wakes the existing worker scheduler; periodic
+   maintenance remains independent.
+4. Required ownership recovery, runtime verification, lifecycle handlers, fresh
+   engine registration and initial durable sync complete before readiness.
+   Optional Design capture starts afterward and cannot delay readiness.
+5. Desktop consumes the exact ready catalog event and obtains current runtime
+   admission. A two-second fallback covers missed events. Account, generation
+   and Stop/restart-operation guards reject stale readiness.
+
+Ordinary wake retains the accepted runtime pin. Qualified same-base updates use
+the existing fenced runtime transition, not today's template as an implicit
+replacement. Preparation reuse can avoid repeated clone/configure/hooks only
+under its validated identity; launch authority, attestation and registration
+remain fresh. See [wake performance](wake-performance.md),
+[template forks](template-forks.md) and [runtime updates](live-runtime-updates.md).
+
+## Commands and durable history
+
+Desktop sends a stable command identity to the control plane's existing durable
+queue. The engine receives admitted work and reports ordered event batches;
+receipts describe accepted/running/terminal/uncertain outcomes. A succeeded
+receipt still requires transcript catch-up before presentation settles. An
+ambiguous dispatch or missing terminal event cannot fabricate success or justify
+automatically replaying a native turn. Delivery ACKs alone cannot establish
+exactly-once external tool effects.
+
+Authorized history can be read without a running VM. Desktop's bounded durable
+cache stores a sanitized confirmed latest window/revision and tail message ID;
+it is presentation state, not command or execution authority. Native streaming
+and confirmed history supersede provisional Cached rows. The current history
+API supports bounded tail/older windows; a forward feed-offset API remains a
+follow-up. See [client/runtime contract](client-runtime-contract.md).
+
+## Connections and native services
+
+`CloudRuntimeBridgeRelay` currently carries authenticated frames through the
+provider-mediated engine connection for each desktop attachment. It bounds
+connections, bytes and admissions and rechecks actor/device/generation authority.
+The engine also sends outbound registration, heartbeats and durable HTTP
+requests. This is the current topology; a resident VM outbound stream and one
+multiplexed client↔backend channel remain separate proposed changes.
+
+The exact-execution connection registry can retain a cloud peer beside the Local
+sidecar used by a Local terminal or replica. Passive stopped-workspace reads do
+not wake or admit an engine. Hidden surfaces are inert and bounded; live usage
+sampling requires the current connected cloud execution.
+
+Electron main owns SSH/Terminal, localhost forwarding, preview headers, device
+keys and revocation. Renderer IPC returns bearer-free receipts/URLs. Previews are
+scoped to the exact authorized Browser frame; tunnels bind loopback. Native
+editor launch remains hidden pending multi-connection SSH qualification. See
+[native access](native-access-acceptance.md) and
+[native preview](native-preview-acceptance.md).
 
 ## Repository ownership
 
-| Responsibility                                                            | Owner                                                                                             |
-| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Remote engine transport and desktop connection state                      | `apps/desktop/src/engine/transport/` and desktop-owned client modules                             |
-| SSH launch, preview admission, and localhost forward broker               | `apps/desktop/electron/cloud-workspace-access-*`; never renderer-owned process or credential code |
-| Local forks and receive-only replicas                                     | Desktop engine/Electron boundaries; never renderer-only code                                      |
-| Shared bridge schemas, protocol version, crypto primitives, and redaction | `packages/protocol/`                                                                              |
-| Workspace APIs, authorization, registry, audit, quotas, and orchestration | `apps/control-plane/`                                                                             |
-| Browser management and authentication handoff                             | `apps/web/`                                                                                       |
-| Non-production provider experiments                                       | `scripts/cloud-workspace-validation/`                                                             |
-| A future independently deployed execution coordinator                     | A new `apps/<name>/` only when it has a real build/deploy boundary                                |
-| Native mobile control clients                                             | Deferred; add `apps/ios/` or `apps/android/` only with real source                                |
+| Responsibility | Source boundary |
+| --- | --- |
+| Lifecycle, policy, durable queue/history, provider operations | `apps/control-plane/src/cloud-workspaces/` |
+| Shared wire schemas, crypto and redaction | `packages/protocol/` |
+| Live workspace, native agents, Files/Git/Design and publication | `apps/desktop/src/engine/` |
+| Exact workspace routing and retained views | `apps/desktop/src/renderer/platform/bridge/`, `apps/desktop/src/renderer/state/` |
+| Native access, transcript cache and replica processes | `apps/desktop/electron/` |
+| Protected runtime builds and qualification | `scripts/cloud-workspace-validation/`, release workflows |
+| Browser authentication and management seams | `apps/web/` |
 
-Do not put provider credentials, provisioning code, or tenant authorization in
-renderer/shared code. Do not extract a generic cloud package until at least two
-deployables consume the same stable contract.
+Keep provider credentials and provisioning outside renderer/shared code. Add a
+new package or app only when it has a real stable multi-consumer or independent
+build/deployment boundary. See [engineering reference](engineering-reference.md).
 
-## Connection sequence
+## Failure and rollout boundaries
 
-1. A client authenticates and requests a workspace by stable workspace ID.
-2. The control plane authorizes the actor and returns the current lifecycle
-   record. Creation and wake requests carry idempotency keys.
-3. The control plane provisions or wakes the execution environment and starts
-   the engine with a short-lived, workspace-bound connection grant.
-4. The client connects through the provider/network boundary and performs the
-   normal Zeros protocol handshake.
-5. The engine verifies protocol compatibility and account/workspace binding
-   before accepting privileged messages.
-6. Reconnect resumes from acknowledged revisions rather than replaying an
-   unbounded transcript or assuming the client is current.
+Intent is durable before dispatch; provider timeouts retain unknown outcomes for
+reconciliation. Results recheck authority, desired state and the exact generation
+before publication. Expiry/revocation retires runtime, device and service grants.
+Storage erasure requires matching terminal evidence; DELETE acceptance and a 404
+do not prove physical deletion. Local selection and other exact workspace views
+retain their own confirmed state throughout these failures.
 
-The desktop connection registry is keyed by engine/execution identity. A
-cloud-authoritative workspace may need the cloud bridge for chat/Git/Design and
-a local-engine bridge for a Local terminal or replica broker at the same time.
-Compatibility helpers may expose an active selection, but do not own connection
-identity or collapse independently keyed runtimes.
+Release order is forward migration → control plane → qualified runtime/base
+publication → compatible explicit/next-wake pin adoption → desktop. This overhaul
+has repository evidence, not new live Alpha or signed macOS qualification. Flat
+OCI publication and the shared Dev image kit remain separate from the qualified
+v4 workspace artifact. The opt-in v3 release-worker promotion lane is retired;
+default-disabled releases, historical receipts and cleanup remain available. See
+[qualification status](qualification-status.md).
 
-The pre-production control plane has lifecycle records, fenced setup admission,
-an internal workspace/generation-bound engine lease, and a short-lived desktop
-runtime admission. The renderer connection registry is keyed by exact runtime
-identity and refreshes generation-bound connections without exposing provider
-credentials. Desktop discovery and selection use the authorized cloud catalog,
-while a workspace-keyed runtime router feeds the existing local/cloud UI tree.
-See [desktop routing](client-runtime-contract.md#desktop-routing-and-presentation)
-for identity, caching, durable command and reconnect behavior.
-
-The separate Phase-2 access broker is implemented in Electron main without
-pretending that bridge routing is complete. It obtains a current account token
-from the main-owned auth session, calls the control plane over a bounded HTTPS
-client, validates the exact workspace/kind/port/expiry contract, and keeps
-provider access material out of renderer state. Terminal/tunnel credentials
-live only in main memory or owner-private SSH files. External IDEs receive a
-fixed SSH alias and an isolated user-data directory whose Remote-SSH settings
-point at the private per-launch config, so the provider username does not enter
-child argv or recent-workspace state. IPC returns grant identifiers, expiries,
-loopback mappings, and bearer-free preview URLs. Preview capabilities are
-injected only for requests whose Chromium frame ancestry contains the exact
-authorized Browser iframe. SSH tunnel processes and configuration remain
-desktop-owned and are stopped on revocation, sign-out, or app exit. A provider-
-wide SSH revocation invalidates only sibling local leases for the same workspace
-generation.
-
-The desktop product flow now includes creation, discovery and workspace details.
-Automated port selection and signed macOS/provider E2E remain separate release
-requirements; the new UI does not expose SSH or resource billing controls.
-
-## Provider boundary
-
-Provider operations must be expressed through an internal interface covering
-image/version selection, create, inspect, start, stop, delete, endpoint grants,
-logs, and usage. Persist both the stable Zeros workspace ID and the current
-provider connection/resource ID. A provider connection belongs to a user or
-Organization and references encrypted credentials; a workspace never points at
-one deployment-wide API key implicitly. Provider-specific state must never leak
-into public API identity or serialized client preferences.
-
-## Fork and replica sequence
-
-A local-to-cloud fork records the destination identity and expected source
-snapshot before upload, reserves bounded encrypted objects before publication,
-stages an integrity-checked file/chat projection, then creates the destination
-checkpoint. A cloud-to-local fork pins a durable checkpoint and exposes it
-through a short-lived device-bound export grant. Either direction is resumable
-and idempotent. The source workspace is never stopped, re-owned, deleted, or
-given the destination ID.
-
-A local replica is different: the control plane authorizes a specific
-user/device, and the desktop broker bootstraps from an exact manifest before
-consuming ordered file events. Replica paths stay device-local. Pausing one
-binding cannot mutate workspace authority or another member's binding. The full
-contract is in [data, copies, and local sync](data-and-sync.md).
-
-## Failure model
-
-- Every lifecycle mutation is idempotent and reconciled from observed provider
-  state.
-- The control plane records intent before dispatch and records the observed
-  result afterward.
-- A timeout means the result is unknown, not necessarily failed. Reconciliation
-  must inspect before retrying creation or deletion.
-- Clients retain the last confirmed exact-workspace snapshot during
-  revalidation and label stale data.
-- Deletion is complete only after execution resources, connection grants,
-  provider credentials, and retention-scoped data are handled according to the
-  product contract.
+The [follow-up design](warm-pool.md) owns accounted warm capacity, a persisted
+VM event outbox/inbox, resident outbound transport, a multiplexed backend device
+stream, incremental durable transcript feeds and a Mac composer outbox with
+explicit acknowledgements. Each must preserve the existing queue, identity,
+uncertain-outcome, funding and revocation contracts.

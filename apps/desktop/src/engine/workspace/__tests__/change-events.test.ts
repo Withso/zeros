@@ -186,6 +186,19 @@ describe("dbChangedKinds", () => {
 });
 
 describe("dbChangedIncludesOriginator", () => {
+  it.each([false, true])(
+    "refreshes the Design initialization caller's Files and Changes (cloud=%s)",
+    (cloudWorker) => {
+      expect(dbChangedKinds("design.initialize", undefined, cloudWorker)).toEqual([
+        "workspaces",
+      ]);
+      expect(dbChangedIncludesOriginator("design.initialize", cloudWorker)).toBe(
+        true,
+      );
+      expect(LONG_LIFECYCLE_OPS.has("design.initialize")).toBe(false);
+    },
+  );
+
   it.each(["settings.write", "settings.writeRaw", "settings.migrateLegacy"])(
     "echoes %s back to the client that wrote it",
     (op) => {

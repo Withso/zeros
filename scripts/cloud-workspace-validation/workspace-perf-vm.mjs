@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { BoatApiClient } from "../../apps/control-plane/src/cloud-workspaces/boat-client.ts";
 import { ClosedDiagnosticSchema, RuntimeBaseStatusSchema, RuntimeDescriptorSchema, RuntimeInstallInputSchema } from "../../apps/control-plane/src/cloud-workspaces/runtime-contract.ts";
 import { executeBoatPinnedSsh } from "../../apps/control-plane/src/cloud-workspaces/boat-pinned-ssh.ts";
-import { CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "../../apps/control-plane/src/cloud-workspaces/daytona-setup-executor.ts";
+import { CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "../../apps/control-plane/src/cloud-workspaces/linux-setup-executor.ts";
 import { createRuntimeArtifactStore, runtimeArtifactObjectKey } from "../../apps/control-plane/src/cloud-workspaces/runtime-artifact-store.ts";
 import { templateSetupReproConfig, privateFile, newTemplateSetupJournal, readTemplateSetupSource,
   runTemplateSetupRepro, runTemplateSetupProbe, cleanupTemplateSetupFork, templateSetupErrorDiagnostic } from "./template-setup-repro.mjs";

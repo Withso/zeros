@@ -267,7 +267,7 @@ only on images with recorded runtime qualifications for that channel.
 
 Engine protocol/port/heartbeat, setup deadlines and operation/archive/reconcile
 limits retain existing validated values or the boot loader's defaults. Managed
-Boat does not need the optional Daytona/BYO provider-credential key. Railway
+Boat keeps provider credentials in coordinator configuration. Railway
 injects `RAILWAY_GIT_COMMIT_SHA` at deployment; provisioning must not invent it.
 
 Every new keyring is a JSON object such as `{"1":"<canonical base64url for 32
@@ -532,8 +532,8 @@ variables:
 | `AUTH_AUDIENCE`                              | unused                    | matching channel API origin                                                     |
 | `ZEROS_CLOUD_WORKSPACES_ENABLED`             | `false`                   | `false` until that channel's desktop cloud client is release-approved           |
 | `VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES` | unset: Cloud previews hidden | optional; when supplied, 1-8 unique exact lowercase DNS suffixes |
-| `CLOUD_WORKSPACE_PROVIDER`                  | unused while cloud is off | `boat` or `daytona`; omission preserves the legacy Daytona policy |
-| `VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64`   | unused while cloud is off | Daytona: canonical base64url OpenSSH pins covering `ssh.app.daytona.io`; optional for managed Boat |
+| `CLOUD_WORKSPACE_PROVIDER`                  | unused while cloud is off | `boat`; omission selects Boat and other values are rejected |
+| `VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64`   | unused while cloud is off | optional canonical base64url OpenSSH pins for explicitly configured gateways; Boat uses the runtime tunnel |
 
 The authentication entries are public verification values baked only into
 Electron main. Never add a WorkOS API key—generic, web, desktop, or channel-
@@ -551,8 +551,8 @@ backend admission. The first cloud release leaves public cloud-preview suffixes
 unset: Cloud Preview URL controls are hidden, while preview-independent
 forward-to-localhost tunnels remain available. The release-environment check
 allows cloud-enabled builds without preview suffixes and validates their format
-whenever supplied. Daytona still requires its complete SSH host-key policy.
-Managed Boat uses the backend terminal tunnel, so it needs no Daytona pin; a
+whenever supplied. Managed Boat uses the backend terminal tunnel, so it
+requires no provider gateway pin; a
 supplied pin document is still validated. Flags-off builds remain valid without
 either value.
 
@@ -567,8 +567,9 @@ checks** retains its separate configured platform-owner and current-revision
 consent requirements.
 
 Set GitHub Environment deployment-branch protection too: `alpha` permits only
-`main`; `beta` permits only `release/*`; `production` permits only `release/*`.
-The stable workflow itself rejects `main` and requires an exact
+`main`; `beta` and `production` permit `release/*`, with `main` also allowed
+when standalone runtime publication from main is needed (see below).
+The stable desktop workflow itself rejects `main` and requires an exact
 `release/X.Y.Z` ref, so a manual dispatch cannot bypass the promotion ladder.
 
 Production takes **one human approval per run**. The `production-approval`
@@ -597,6 +598,49 @@ Apply the settings in this order, so no window runs without a gate:
    `production`. Older release branches still run their earlier workflows,
    which lack the approval job; their Production jobs refuse a SHA that the
    latest Beta did not publish.
+
+### Standalone runtime-bundle publication
+
+[cloud-runtime-bundle.yml](../.github/workflows/cloud-runtime-bundle.yml)
+builds and publishes the supported runtime independently of a desktop release.
+Choose `alpha`, `beta`, or `production`; its `publish` job uses that GitHub
+environment and a separate lock for each channel. Configure these Actions
+**variables** in each environment:
+
+| Environment | `CLOUD_WORKSPACE_CONTROL_PLANE_URL` | `CLOUD_RUNTIME_OIDC_AUDIENCE` |
+| --- | --- | --- |
+| `alpha` | `https://api-alpha.zeros.build` | `zeros-control-plane-alpha` |
+| `beta` | `https://api-beta.zeros.build` | `zeros-control-plane-beta` |
+| `production` | `https://api.zeros.build` | `zeros-control-plane-production` |
+
+These publication variables are required; there is no Production fallback.
+The existing Alpha desktop publication retains `VITE_CONTROL_PLANE_URL` and
+its existing Alpha audience default. A custom audience must match
+`CLOUD_RUNTIME_OIDC_AUDIENCE` on that channel's control plane.
+
+On Railway, enable `CLOUD_RUNTIME_PUBLICATION_ENABLED=true` only for the
+intended channel and retain its own CP-held `CLOUD_WORKSPACE_S3_*` artifact
+configuration. `CLOUD_RUNTIME_OIDC_ENVIRONMENT` defaults to that CP's channel;
+if explicitly set it must match. Leave it nonempty for standalone publication.
+The explicit empty compatibility value is confined to the legacy Alpha push
+and cannot authorize this dispatch. Artifact credentials stay on the control
+plane; the publisher uses GitHub OIDC and bounded upload capabilities.
+
+Alpha dispatch is allowed only on `main`. Beta and Production allow `main` or
+`release/*`; their GitHub environment branch policies must also allow `main`
+if publication from that ref is desired. The desktop Beta/Production workflows
+retain their own frozen `release/X.Y.Z` guards. The standalone publisher honors
+protections on `alpha`, `beta`, or `production` itself; the desktop release's
+separate `production-approval` job does not govern this workflow. Configured
+reviewer requirements on the selected environment still apply. Environment
+settings are owner-operated; this source change does not alter them.
+
+The same latest exact-SHA Preflight/CodeQL and current-branch evidence is
+verified before upload, including for Alpha dispatch. Publication changes the
+registry only. Qualification, staging, runtime selection and qualified
+upgrade/wake admission remain the existing paths; publication alone neither
+installs a runtime nor changes a running workspace's saved pin. See
+[Standalone publication](cloud-workspace/runtime-bundles.md#standalone-publication).
 
 ### macOS signing keychain
 
@@ -1416,7 +1460,7 @@ Configure these GitHub **environment** variables independently in `alpha`,
 | `AUTH_ISSUER`, `AUTH_JWKS_URL`                                       | channel's qualified public WorkOS issuer and signing-key URL; HTTPS only                             |
 | `AUTH_WEB_CLIENT_ID`, `AUTH_DESKTOP_CLIENT_ID`                       | distinct channel client IDs; public verification metadata, never client secrets                      |
 | `ZEROS_CLOUD_WORKSPACES_ENABLED`                                     | exact desktop capability decision; `true` only after qualification                                   |
-| `CLOUD_WORKSPACE_PROVIDER`                                           | `boat` for managed Boat; `daytona` retains the legacy SSH requirement                                |
+| `CLOUD_WORKSPACE_PROVIDER`                                           | `boat` for managed Boat; other values are rejected                                |
 | Existing desktop auth/origin/preview values                          | the exact channel values in the earlier tables                                                       |
 
 The event supplies `RELEASE_SHA`, `RELEASE_BRANCH` and channel;
@@ -1496,19 +1540,29 @@ Owner setup, once per channel before **enabling** the controller:
 
 ## Worker lane and first rollout of this branch
 
-`cloud-worker-promotion.yml` supports dispatch and `workflow_call`, shares the
-hosted mutation lock, and uses `ZEROS_WORKER_PROMOTION=enabled` as its separate
-switch. With the switch off, hosted promotion and publication do not require a
-qualified worker even for a cloud-enabled desktop; the API keeps its current
-worker tuple and the hosted services gate is unchanged. Plans remain mutation-free and never issue success receipts. Execution
-requires a clean exact-event-SHA checkout, successful exact-SHA Preflight and
-CodeQL, the new exact-SHA API/current schema and trusted pre-worker services
-receipt (API, Pages and WorkOS). The supported broker uses only explicitly
-designated credentials in the channel's encrypted store, never Dev authority
-or static provider credentials from CI. **Keep the switch disabled until the
-owner consent/configuration ceremony and protected rehearsal pass.**
+The opt-in v3 worker-promotion lane is retired. Setting
+`ZEROS_WORKER_PROMOTION=enabled` refuses before build/allocation, provider reads,
+credential preparation or release handoff. Default-disabled hosted promotion
+and publication keep their existing source, schema, receipt and exact worker
+checks. Explicit guarded storage reconciliation and historical receipts remain
+available; the supported artifact is the v4 runtime bundle.
 
-Implemented, fake-tested worker primitives in `scripts/release/` include:
+The separate shared Dev native agent canary is also retired: `pnpm dev:agents`,
+the native/hosted canary producer and SSH/backend start entry points return
+`release_worker_images_retired` (409), with
+`v3 release worker images are retired; v4 runtime bundles are the supported artifact`.
+Refusal happens before budget/admission/lease/dispatch writes, builder allocation,
+credential or connection renewal, SSH registration, commands or private uploads.
+Already-started polling and exact original-intent cleanup/reconcile remain;
+normal app/backend launch reports the optional native refusal while continuing,
+and no-fixture connection authority maintenance is unchanged. Follow-up:
+**re-qualify Dev native agent canary on v4**. See the
+[Dev runtime qualification note](development-environments.md#runtime-qualification).
+
+The following describes historical worker producer/receipt contracts. It does
+not authorize new v3 release or Dev native qualification.
+
+Historical worker primitives in `scripts/release/` included:
 
 - Exact committed input-tree hashing using the existing worker input policy.
 - Existing Boat image kit export/build/attestation, fresh sanitation at snapshot
@@ -1541,8 +1595,8 @@ run's receipt can authorize hosted finalization.
 
 Default **SMOKE** uses two messages per agent; **FULL** is selected for native
 adapter/containment/contract inputs or explicit request. Anthropic/OpenAI
-API-key modes stay unoffered on an image until separately qualified. Dev rate
-limits defer retry with bounded backoff without consuming the three attempts;
+API-key modes stayed unoffered on an image until separately qualified. Historical Dev rate
+limits deferred retry with bounded backoff without consuming the three attempts;
 release returns **“canary account rate-limited”** without automatic retry or
 approval. Alpha, Beta, Production, Dev and custom images share Boat's current
 subscription quota. Zeros imposes no numerical snapshot limit, per-channel

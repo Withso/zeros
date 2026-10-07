@@ -10,8 +10,8 @@ import type { Action } from "@/renderer/state/workspace-store";
 import { workbenchScopeForFolder } from "@/renderer/state/workspace-store";
 import { isLoopbackUrl } from "./tabs/localhost-url";
 import { workspacePreviewAvailable } from "../../platform/cloud-workspace-access";
-import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
-import { useInternalFeatureActive } from "../../features/settings/internal-features";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { hasCloudWorkspaceAccountAccess, useCloudWorkspaceAccountAccess } from "../../features/team/cloud-workspace-account-access";
 import type { BrowserPreviewSource } from "./tab-model";
 import type { ExecutionBoundaryPortsSnapshot } from "@zeros/protocol/containment";
 import { cloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
@@ -82,13 +82,13 @@ export function useOpenBrowserInWorkbench(
 
 /** A retained chat must never open its preview in a different workspace. */
 export function useOpenChatPreviewInWorkbench(): (cwd: string | undefined, url: string, agent?: { chatId: string; executionId?: string; ports?: ExecutionBoundaryPortsSnapshot }) => boolean {
-  const cloudPreviews = useInternalFeatureActive("cloudComputerV2");
+  const cloudPreviews = useCloudWorkspaceAccountAccess();
   return useCallback((cwd, url, agent) => {
     if (!cwd || !isLoopbackUrl(url)) return false;
     const cloud = isCloudWorkspace(cwd);
     // Consume cloud-local URLs even when unavailable; the OS must never open
     // them against a coincidental listener on this Mac.
-    if (!workspacePreviewAvailable(cwd) || (cloud && (!cloudPreviews || !cloudWorkspaceCanEdit(cwd)))) return cloud;
+    if (!workspacePreviewAvailable(cwd) || (cloud && (!cloudPreviews || !hasCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(cwd)?.organizationId) || !cloudWorkspaceCanEdit(cwd)))) return cloud;
     let previewSource: BrowserPreviewSource | undefined;
     if (cloud) {
       const parsed = new URL(url);

@@ -13,49 +13,23 @@ import {
 import path from "node:path";
 import { validateCloudRuntimeMarker, resolveCloudRuntime } from "./cloud-runtime-root.mjs";
 
-/** A VM broker need not inherit a provider container's seccomp filter. Version
- * 2 must prove the actual isolated engine's filter and no-new-privileges bit;
- * host-only evidence cannot satisfy this boundary. Legacy admission is kept. */
-export function cloudRuntimeProcessSecurityQualified(
-  version,
-  hostSeccomp,
-  identity,
-) {
-  return (version === 2 || version === 3 || version === 4)
-    ? identity?.secure === true &&
-        identity.noNewPrivs === 1 &&
-        identity.seccompMode === 2
-    : version === 1 && hostSeccomp === "2";
+/** Host seccomp is not evidence of the isolated engine's admission. Worker v4
+ * must prove its own filter and no-new-privileges bit. */
+export function cloudRuntimeProcessSecurityQualified(version, _hostSeccomp, identity) {
+  return version === 4 && identity?.secure === true &&
+    identity.noNewPrivs === 1 && identity.seccompMode === 2;
 }
 
 export function cloudHostRuntimeProfile(marker) {
-  if (marker?.version === 4) validateCloudRuntimeMarker(marker);
-  if (
-    !marker ||
-    typeof marker !== "object" ||
-    Array.isArray(marker) ||
-    marker.backend !== "cloud-worker" ||
-    marker.uid !== 10001 ||
-    marker.gid !== 10001 ||
-    !(
-      (marker.version === 1 && marker.profile === "zeros-cloud-worker-v1") ||
-      (marker.version === 2 && marker.profile === "zeros-cloud-worker-v2") ||
-      (marker.version === 3 && marker.profile === "zeros-cloud-worker-v3") ||
-      (marker.version === 4 && marker.profile === "zeros-cloud-worker-v4")
-    )
-  )
-    throw new Error("Unsupported cloud host runtime profile");
-  const isolated = marker.version >= 2;
+  validateCloudRuntimeMarker(marker);
   return Object.freeze({
-    version: marker.version,
-    profile: marker.profile,
-    engineUid: isolated ? 10003 : 0,
-    engineGid: isolated ? 10003 : 0,
-    runtimeDirectory: isolated ? "/run/zeros/engine" : "/run/zeros",
-    setupDirectory: isolated ? "/srv/zeros/setup" : "/srv/zeros/state/setup",
-    managedSettingsDirectory: isolated
-      ? "/srv/zeros/managed-settings"
-      : "/srv/zeros/state/user-settings",
+    version: 4,
+    profile: "zeros-cloud-worker-v4",
+    engineUid: 10003,
+    engineGid: 10003,
+    runtimeDirectory: "/run/zeros/engine",
+    setupDirectory: "/srv/zeros/setup",
+    managedSettingsDirectory: "/srv/zeros/managed-settings",
   });
 }
 
@@ -155,8 +129,9 @@ export function readCloudHostRuntimeProfile(
     const bytes = readSync(descriptor, buffer, 0, buffer.length, 0);
     if (bytes !== metadata.size) throw new Error("Cloud host profile changed");
     const marker = JSON.parse(buffer.toString("utf8", 0, bytes));
-    if (marker.version === 4) resolveCloudRuntime();
-    return cloudHostRuntimeProfile(marker);
+    const profile = cloudHostRuntimeProfile(marker);
+    resolveCloudRuntime();
+    return profile;
   } finally {
     closeSync(descriptor);
   }

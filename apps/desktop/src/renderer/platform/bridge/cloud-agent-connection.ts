@@ -8,6 +8,7 @@ import {
   type CloudNativeOperation,
   CloudNativeOperationSchema,
   CloudNativeResultSchema,
+  cloudCommandFailureFromCode,
 } from "@zeros/protocol/cloud-commands";
 import type { RuntimeClient } from "./ws-client";
 import type { BackgroundTasksUpdate } from "@zeros/protocol/agent-events";
@@ -686,7 +687,8 @@ export class CloudAgentConnection {
     ).join("");
     const commandId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
     this.commandOwners.set(commandId, owner.id);
-    let observing = true;
+    // Mutated by the finally below while observeReceipt may still be awaiting.
+    const observation = { live: true };
     let terminal: WireRecord | undefined;
     let wakeReceiptWait: (() => void) | undefined;
     const completed = new Promise<WireRecord>(resolve => {
@@ -724,7 +726,7 @@ export class CloudAgentConnection {
                 const current = CloudCommandSnapshotSchema.parse(await this.op("cloudCommands.request", {
                   request: { kind: "snapshot", conversationId: owner.id },
                 }));
-                if (!observing) return terminal!;
+                if (!observation.live) return terminal!;
                 // Resume may race the stopped turn's durable retirement. A
                 // changed pause/queue intent must still reject this stale send.
                 if (signal?.aborted || !onlyCommandRetirements(queue, current)) throw error;
@@ -732,7 +734,7 @@ export class CloudAgentConnection {
               }
             }
           }
-          if (!observing) return terminal!;
+          if (!observation.live) return terminal!;
           const enqueue = () => this.op("cloudCommands.request", {
             request: {
               kind: "mutate",
@@ -774,7 +776,7 @@ export class CloudAgentConnection {
               const current = CloudCommandSnapshotSchema.parse(await this.op("cloudCommands.request", {
                 request: { kind: "snapshot", conversationId: owner.id },
               }));
-              if (!observing) return terminal!;
+              if (!observation.live) return terminal!;
               if ([...current.pending, ...current.receipts].some(row => row.commandId === commandId)) break;
               // A concurrent Stop or unchanged revision is a real conflict,
               // not permission to resume or rewrite someone else's command.
@@ -786,7 +788,7 @@ export class CloudAgentConnection {
         // Receipts recover completion after reconnect or lost terminal frames.
         // The server still serializes subsequent execution behind retirement.
         for (;;) {
-          if (!observing) return terminal!;
+          if (!observation.live) return terminal!;
           if (signal?.aborted || this.closed)
             throw new Error(
               "Cloud prompt observation ended; reconnect to view its result",
@@ -799,10 +801,10 @@ export class CloudAgentConnection {
               }),
             );
           } catch (error) {
-            if (!observing) return terminal!;
+            if (!observation.live) return terminal!;
             if (this.client.status === "connected") throw error;
           }
-          if (!observing) return terminal!;
+          if (!observation.live) return terminal!;
           if (entry && (entry.commandId !== commandId || entry.conversationId !== owner.id))
             throw new Error("Cloud command receipt does not match this conversation");
           if (entry?.executionId) {
@@ -810,6 +812,20 @@ export class CloudAgentConnection {
             if (result) result.execution = entry.executionId;
             owner.execution = entry.executionId;
             this.executionOwners.set(entry.executionId, owner.id);
+          }
+          if (entry?.state === "succeeded") {
+            // Receipt persistence proves dispatch completion, not consumption
+            // of the ordered transcript. Install its existing snapshot floor
+            // before the renderer reads history, so delayed chunks cannot be
+            // appended a second time to that normalized tail.
+            const state = await this.restoreNativeState(owner);
+            if (!observation.live) { state.restoration?.finish(); return terminal!; }
+            try {
+              this.attachSnapshot(state);
+              const changed = { type: "DB_CHANGED", kinds: ["messages"], chatIds: [owner.id] };
+              for (const listener of this.listeners.get("DB_CHANGED") ?? []) listener(changed as unknown as BridgeMessage);
+              this.publishControls(state);
+            } catch (error) { state.restoration?.finish(); throw error; }
           }
           if (entry && ["succeeded", "cancelled"].includes(entry.state))
             return {
@@ -827,11 +843,15 @@ export class CloudAgentConnection {
               sessionId: routeId(owner.id),
               executionId: routeId(owner.id),
               error:
-                isCloudAgentAdmissionCode(entry.resultCode)
+                isCloudAgentAdmissionCode(entry.resultCode) || cloudCommandFailureFromCode(entry.resultCode)
                   ? entry.resultCode
                   : entry.state === "uncertain"
                   ? "The cloud command outcome is unknown. Review the transcript before retrying."
                   : "command_dispatch_rejected",
+              ...(entry.state === "failed" && cloudCommandFailureFromCode(entry.resultCode, owner.agentId)
+                ? { failure: cloudCommandFailureFromCode(entry.resultCode, owner.agentId) } : {}),
+              requestId: commandId,
+              chatId: owner.id,
             };
           await new Promise<void>(resolve => {
             const timer = setTimeout(() => { wakeReceiptWait = undefined; resolve(); }, 1000);
@@ -851,6 +871,9 @@ export class CloudAgentConnection {
           if (receipt.commandId === commandId && receipt.conversationId === owner.id &&
               isCloudAgentAdmissionCode(receipt.resultCode))
             result = { ...result, error: receipt.resultCode };
+          else if (receipt.commandId === commandId && receipt.conversationId === owner.id && !result.failure &&
+              cloudCommandFailureFromCode(receipt.resultCode, owner.agentId))
+            result = { ...result, error: receipt.resultCode, failure: cloudCommandFailureFromCode(receipt.resultCode, owner.agentId) };
         } catch { /* An unavailable receipt cannot prove a pre-provider denial. */ }
       }
       // A terminal receipt also ends the execution's interactive controls when
@@ -858,7 +881,7 @@ export class CloudAgentConnection {
       owner.promptActive = false;
       return result;
     } finally {
-      observing = false;
+      observation.live = false;
       wakeReceiptWait?.();
       this.promptResults.delete(commandId);
       this.commandOwners.delete(commandId);

@@ -74,8 +74,8 @@ import { CloudComputerSourcePicker, computerSourceReadKey, warmComputerSources }
 import type { DispatcherBase } from "./dispatcher-source";
 import { CloudComputerV2CreateNotice } from "../../features/settings/cloud-computer-v2-create-gate";
 import { registerCloudDesignCreation } from "../../state/cloud-creation-mode";
-import { createCloudWorkspaceDocument } from "../../platform/cloud-workspaces";
-import { cloudProjectForFolder, acceptCloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
+import { createCloudWorkspaceWithPending } from "../../state/cloud-workspace-create";
+import { cloudProjectForFolder } from "../../state/cloud-workspace-catalog";
 import { cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { spawnPreparedDefaultChat } from "../../state/spawn-default-chat";
 import { prepareProjectFolder } from "../project-folder-setup";
@@ -272,9 +272,8 @@ export function DispatcherPage({
     setComputerCreateNotice(null);
     setBusy(true);
     try {
-      const document = await createCloudWorkspaceDocument({ ...request, idempotencyKey });
+      const document = await createCloudWorkspaceWithPending({ ...request, idempotencyKey }, createMode);
       if (creationGeneration !== getOrganizationStoreGeneration()) return;
-      acceptCloudWorkspaceDocument(document);
       const folder = cloudWorkspaceKey({ organizationId: document.organizationId, workspaceId: document.id });
       markWorkspaceSettling(folder);
       if (createMode === "design") registerCloudDesignCreation(folder);

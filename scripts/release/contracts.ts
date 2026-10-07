@@ -43,7 +43,7 @@ export function promotionConfig(env: NodeJS.ProcessEnv, options: { migrations?: 
   requireCheck(env.AUTH_PROVIDER === "workos", "Hosted promotion requires the WorkOS Pages facade");
   requireCheck([undefined, "", "false", "true"].includes(env.ZEROS_CLOUD_WORKSPACES_ENABLED), "Invalid desktop cloud capability");
   const cloudRequired = env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true";
-  requireCheck(!cloudRequired || ["boat", "daytona"].includes(env.CLOUD_WORKSPACE_PROVIDER ?? ""), "Cloud releases require an explicit managed provider");
+  requireCheck(!cloudRequired || env.CLOUD_WORKSPACE_PROVIDER === "boat", "Cloud releases require an explicit managed provider");
   requireCheck(/^\d+$/.test(env.GITHUB_RUN_ID ?? "") && /^\d+$/.test(env.GITHUB_RUN_ATTEMPT ?? ""), "Run identity is required");
   // With worker promotion off, a cloud-enabled desktop ships on the API's
   // current worker state (possibly none or unqualified); hosted services still gate it.
@@ -64,9 +64,9 @@ export const MigrationReceipt = z.object({
   controlledApprovals: z.array(migrationName), pendingMigrations: z.array(migrationName), applied: z.array(migrationName),
   ledger: z.enum(["pending", "recorded", "verified"]), role: z.object({ deleted: z.literal(true) }),
 });
-export const WorkerIdentity = z.object({ provider: z.enum(["boat", "daytona"]), imageRef: z.string(),
+export const WorkerIdentity = z.object({ provider: z.literal("boat"), imageRef: z.string(),
   sourceSha: z.string().regex(SHA), architecture: z.enum(["linux/amd64", "linux/arm64"]), storageMiB: z.number().int().positive() })
-  .refine(value => value.provider === "boat" ? /^boat:[a-z0-9][a-z0-9-]{0,62}@sha256:[a-f0-9]{64}$/.test(value.imageRef) : UUID.test(value.imageRef));
+  .refine(value => /^boat:[a-z0-9][a-z0-9-]{0,62}@sha256:[a-f0-9]{64}$/.test(value.imageRef));
 // The frontier reader relaxes readiness before deployment; every publication
 // consumer uses the refined ReleaseIdentity below.
 export const ReleaseIdentityBase = z.object({ version: z.literal(1), ready: z.literal(true), sourceSha: z.string().regex(SHA),

@@ -81,6 +81,11 @@ export class DatabaseCloudRuntimeAccessAdmissionService {
            JOIN cloud_workspace_provider_bindings binding
              ON binding.workspace_id = access.workspace_id AND binding.org_id = access.org_id AND binding.generation = access.generation
              AND binding.provider_resource_id = access.provider_resource_id AND binding.observed_state = 'running'
+           JOIN cloud_workspace_generations generation ON generation.workspace_id=access.workspace_id
+             AND generation.org_id=access.org_id AND generation.generation=access.generation
+             AND generation.provider='boat' AND generation.sandbox_class IS NULL
+           JOIN provider_connections connection ON connection.id=generation.provider_connection_id
+             AND connection.org_id=access.org_id AND connection.provider='boat' AND connection.credential_source='hosted'
            WHERE access.workspace_id = $1 AND access.org_id = $2 AND access.generation = $3
              AND access.token_hash = $4 AND access.engine_instance_id = $5
              AND access.authority_epoch = $6 AND access.revoked_at IS NULL AND access.expires_at > now()`,
@@ -98,16 +103,15 @@ export class DatabaseCloudRuntimeAccessAdmissionService {
            AND generation.generation = access.generation AND generation.retired_at IS NULL
           JOIN provider_connections connection
             ON connection.id = generation.provider_connection_id AND connection.org_id = access.org_id
-           AND connection.state = 'active'
+           AND connection.state = 'active' AND connection.provider='boat' AND connection.credential_source='hosted'
+           AND generation.provider='boat' AND generation.sandbox_class IS NULL
           WHERE access.workspace_id = $1 AND access.org_id = $2 AND access.generation = $3
             AND access.token_hash = $4
             AND access.state = 'active' AND access.expires_at > now()
-            AND ((access.preview_device_id IS NULL AND access.preview_target IS NULL
-              AND generation.provider='daytona' AND connection.provider='daytona'
-              AND generation.runtime_id IS NULL AND generation.runtime_profile IS NULL) OR EXISTS (
+            AND EXISTS (
               SELECT 1 FROM devices device WHERE device.id=access.preview_device_id AND device.user_id=access.account_user_id
                 AND device.key_version=access.preview_device_key_version AND device.trust_state='trusted' AND device.revoked_at IS NULL
-            ))
+            )
             AND (access.kind <> 'tunnel' OR EXISTS (
               SELECT 1 FROM port_forward_sessions session JOIN devices device
                 ON device.id = session.device_id AND device.user_id = session.user_id

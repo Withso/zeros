@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import pg from "pg";
 import { resetMigratedTestDatabase } from "../test-database.js";
@@ -32,13 +32,19 @@ d("runtime access admission", () => {
       workosEnabled: false,
     });
     grantId = randomUUID();
+    const previewDeviceId = randomUUID();
+    await pool.query(
+      "INSERT INTO devices(id,user_id,label,platform,public_key,key_fingerprint) VALUES($1,$2,'Preview device','macos',$3,$4)",
+      [previewDeviceId, fixture.userId, randomBytes(32), randomBytes(32)],
+    );
     await pool.query(
       `INSERT INTO cloud_workspace_client_access_grants (
       id, workspace_id, org_id, generation, account_user_id, kind, remote_port,
       provider_resource_id, token_hash, state, expires_at, idempotency_key,
-      request_sha256, preview_proxy_label, issued_at, requested_expires_at
+      request_sha256, preview_proxy_label, issued_at, requested_expires_at,
+      preview_device_id, preview_device_key_version
     ) VALUES ($1,$2,$3,1,$4,'preview',3000,$5,$6,'active',now()+interval '1 minute',
-      $1::uuid::text, $7, $8, now(), now()+interval '1 minute')`,
+      $1::uuid::text, $7, $8, now(), now()+interval '1 minute', $9, 1)`,
       [
         grantId,
         fixture.workspaceId,
@@ -48,6 +54,7 @@ d("runtime access admission", () => {
         createHash("sha256").update(token).digest(),
         Buffer.alloc(32, 1),
         "b".repeat(32),
+        previewDeviceId,
       ],
     );
     await withSystemTx(pool,tx=>tx.query("UPDATE cloud_workspace_client_access_grants SET actor_fingerprint=cloud_workspace_actor_fingerprint(workspace_id,account_user_id) WHERE id=$1",[grantId]));
@@ -145,7 +152,8 @@ d("runtime access admission", () => {
     const legacyToken = `zsh_${"T".repeat(43)}`;
     await pool.query(
       `UPDATE cloud_workspace_client_access_grants SET kind = 'ssh', remote_port = NULL,
-       preview_proxy_label = NULL, token_hash = $2 WHERE id = $1`,
+       preview_proxy_label = NULL, preview_device_id = NULL, preview_device_key_version = NULL,
+       token_hash = $2 WHERE id = $1`,
       [grantId, createHash("sha256").update(legacyToken).digest()],
     );
     await expect(service.admit({ ...input(), token: legacyToken })).rejects.toMatchObject({ code: "runtime_access_rejected" });

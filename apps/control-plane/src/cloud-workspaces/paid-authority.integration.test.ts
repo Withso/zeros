@@ -27,6 +27,7 @@ d("cloud workspace paid-authority reconciliation", () => {
 
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
   });
 
   it("rolls a valid entitlement revision into a new immutable billing epoch", async () => {
@@ -184,7 +185,7 @@ d("cloud workspace paid-authority reconciliation", () => {
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider
-         ) VALUES ($1, 2, $2, 'daytona')`,
+         ) VALUES ($1, 2, $2, 'boat')`,
         [fixture.workspaceId, fixture.organizationId],
       );
       await tx.query(
@@ -266,7 +267,7 @@ d("cloud workspace paid-authority reconciliation", () => {
            id, org_id, owner_kind, provider, display_name,
            credential_source, current_version, state, capabilities, region
          ) VALUES (
-           $1, $2, 'organization', 'daytona', 'Expiring Daytona',
+           $1, $2, 'organization', 'boat', 'Expiring Boat',
            'delegated', 1, 'active', $3::jsonb, 'eu'
          )`,
         [
@@ -281,7 +282,7 @@ d("cloud workspace paid-authority reconciliation", () => {
            key_version, nonce, ciphertext, auth_tag, credential_sha256,
            capabilities, credential_expires_at, created_by
          ) VALUES (
-           $1, $2, 1, 'delegated', 'https://api.daytona.test',
+           $1, $2, 1, 'delegated', 'https://api.fixture.test',
            1, $3, $4, $5, $6, $7::jsonb, now() + interval '4 minutes', $8
          )`,
         [
@@ -297,7 +298,7 @@ d("cloud workspace paid-authority reconciliation", () => {
             ssh: true,
             preview: true,
             commandExecution: true,
-            daytonaTarget: "eu",
+            providerTarget: "eu",
           }),
           fixture.userId,
         ],

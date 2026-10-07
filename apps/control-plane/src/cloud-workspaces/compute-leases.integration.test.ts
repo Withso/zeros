@@ -47,7 +47,7 @@ suite("managed compute lifecycle admission", () => {
     coordinator: CloudWorkspaceComputeLeaseCoordinator;
   let input: ManagedComputeStart, provider: ReturnType<typeof makeProvider>;
   const policy = {
-    provider: "daytona",
+    provider: "boat",
     policyId: "qualification-price-v1",
     secondsPerDollar: 100000,
     minimumTtlSeconds: 600,
@@ -66,7 +66,7 @@ suite("managed compute lifecycle admission", () => {
   });
   function makeProvider() {
     return {
-      name: "daytona",
+      name: "boat",
       create: vi.fn(async () => resource()),
       start: vi.fn(async () => resource()),
       computeWeight: vi.fn(() => ({ numerator: 1, denominator: 1 })),
@@ -116,7 +116,7 @@ suite("managed compute lifecycle admission", () => {
     await resetMigratedTestDatabase(pool);
     f = await seedReadyCloudWorkspace(pool);
     await pool.query(
-      "UPDATE managed_compute_provider_requirements SET require_credit=true WHERE provider='daytona'",
+      "UPDATE managed_compute_provider_requirements SET require_credit=true WHERE provider='boat'",
     );
     await pool.query(
       "UPDATE cloud_workspace_provider_bindings SET provider_resource_id=NULL WHERE workspace_id=$1",
@@ -771,7 +771,7 @@ suite("managed compute lifecycle admission", () => {
   it("finalizes an attested lost allocation at its last provider meter", async () => {
     await ready();
     await age();
-    const journal = new DatabaseCloudProviderOperationStore(pool, "daytona", "credit-journal-test");
+    const journal = new DatabaseCloudProviderOperationStore(pool, "boat", "credit-journal-test");
     await journal.prepareCreate({ ...input, requestSha256: "a".repeat(64) });
     await journal.bindResource(input, resource().resourceId);
     await coordinator.runOnce();
@@ -786,7 +786,7 @@ suite("managed compute lifecycle admission", () => {
     // A missing allocation alone is not a final meter.
     expect((await lease()).rows[0]).toEqual({ state: "draining", last_error_code: "compute_final_meter_unavailable" });
     expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
-    await seedProviderLossAttestation(pool, { provider: "daytona", accountScope: "credit-journal-test", workspaceId: f.workspaceId,
+    await seedProviderLossAttestation(pool, { provider: "boat", accountScope: "credit-journal-test", workspaceId: f.workspaceId,
       resourceId: resource().resourceId, attestedBy: f.userId });
     await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
     await coordinator.runOnce();
@@ -799,10 +799,10 @@ suite("managed compute lifecycle admission", () => {
   });
   it("does not finalize an allocation from a loss recorded for a different resource", async () => {
     await ready();
-    const other = new DatabaseCloudProviderOperationStore(pool, "daytona", "credit-journal-test");
+    const other = new DatabaseCloudProviderOperationStore(pool, "boat", "credit-journal-test");
     await other.prepareCreate({ ...input, requestSha256: "a".repeat(64) });
     await other.bindResource(input, "sandbox-some-other-allocation");
-    await seedProviderLossAttestation(pool, { provider: "daytona", accountScope: "credit-journal-test", workspaceId: f.workspaceId,
+    await seedProviderLossAttestation(pool, { provider: "boat", accountScope: "credit-journal-test", workspaceId: f.workspaceId,
       resourceId: "sandbox-some-other-allocation", attestedBy: f.userId });
     await pool.query("UPDATE managed_compute_allocation_leases SET provider_resource_id=$2 WHERE id=$1", [input.intentId, resource().resourceId]);
     provider.inspect.mockResolvedValue(null as unknown as CloudProviderResource);
@@ -814,7 +814,7 @@ suite("managed compute lifecycle admission", () => {
   });
   it("settles an attested lost allocation that its lease never recorded", async () => {
     await ready();
-    const journal = new DatabaseCloudProviderOperationStore(pool, "daytona", "credit-journal-test");
+    const journal = new DatabaseCloudProviderOperationStore(pool, "boat", "credit-journal-test");
     await journal.prepareCreate({ ...input, requestSha256: "a".repeat(64) });
     await journal.bindResource(input, resource().resourceId);
     // The allocation was bound before its draining lease recorded it, then lost.
@@ -825,7 +825,7 @@ suite("managed compute lifecycle admission", () => {
     const lease = () => pool.query("SELECT state,last_error_code FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId]);
     await coordinator.runOnce();
     expect((await lease()).rows[0]).toMatchObject({ last_error_code: "compute_final_meter_unavailable" });
-    await seedProviderLossAttestation(pool, { provider: "daytona", accountScope: "credit-journal-test", workspaceId: f.workspaceId,
+    await seedProviderLossAttestation(pool, { provider: "boat", accountScope: "credit-journal-test", workspaceId: f.workspaceId,
       resourceId: resource().resourceId, attestedBy: f.userId });
     await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
     await coordinator.runOnce();
@@ -1151,7 +1151,7 @@ suite("managed compute lifecycle admission", () => {
 
   it.each([false,true])("settles a rejected create only with a complete dispatch journal (earlier unknown=%s)",async earlierUnknown=>{
     await grant();
-    const journal=new DatabaseCloudProviderOperationStore(pool,"daytona","credit-journal-test");
+    const journal=new DatabaseCloudProviderOperationStore(pool,"boat","credit-journal-test");
     provider.find.mockResolvedValue([]);
     provider.verifyAbsence.mockImplementation(identity=>journal.closeUnallocatedCreate(identity));
     provider.createWithComputeLease.mockImplementationOnce(async()=>{
@@ -1313,7 +1313,7 @@ suite("managed compute lifecycle admission", () => {
   });
   it("keeps customer-delegated compute out of managed reservations", async () => {
     await pool.query(
-      `UPDATE provider_connection_versions SET credential_source='delegated',endpoint='https://app.daytona.io/api',
+      `UPDATE provider_connection_versions SET credential_source='delegated',endpoint='https://api.fixture.test',
       key_version=1,nonce=$2,ciphertext=$3,auth_tag=$4,credential_sha256=$5 WHERE org_id=$1`,
       [
         f.organizationId,

@@ -6,7 +6,7 @@ import {ensureUser} from "../auth.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { ensureCloudPilotUser,seedReadyCloudWorkspace,seedReadyProCloudWorkspace } from "./test-fixtures.js";
 import { DatabaseCloudWorkspaceCollaborationService } from "./actors.js";
-import { assertCloudActorSession,assertRecordedCloudActor,DatabaseCloudWorkspaceActorSessionService } from "./actor-sessions.js";
+import { assertCloudActorSession,assertCloudRequestActor,assertRecordedCloudActor,DatabaseCloudWorkspaceActorSessionService } from "./actor-sessions.js";
 import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
 import { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { DatabaseCloudWorkspaceActionService } from "./action-receipts.js";
@@ -28,6 +28,7 @@ d.each(["legacy","pro"] as const)("actor-aware cloud runtime admission (%s)",fun
   afterAll(async()=>{await pool.end();});
   beforeEach(async()=>{
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     fixture=await (funding==="pro"?seedReadyProCloudWorkspace:seedReadyCloudWorkspace)(pool);
     guest=await (funding==="pro"?ensureUser:ensureCloudPilotUser)(pool,{provider:"workos",providerSubject:`user_${randomUUID()}`,email:`guest-${randomUUID()}@example.test`,displayName:"Guest",
       session:{id:`session_${randomUUID()}`,clientKind:"desktop",authTime:Math.floor(Date.now()/1000),tokenExpiresAt:Math.floor(Date.now()/1000)+3600}});
@@ -152,8 +153,8 @@ d.each(["legacy","pro"] as const)("actor-aware cloud runtime admission (%s)",fun
 
   it("requires a live actor for shared commands and decisions, including read-only guests",async()=>{
     const commands=new DatabaseCloudWorkspaceCommandService({pool}),actions=new DatabaseCloudWorkspaceActionService({pool});
-    await expect(commands.mutate(engine(),queued())).rejects.toMatchObject({status:401});
-    await expect(actions.request(engine(),decision())).rejects.toMatchObject({status:401});
+    await expect(commands.mutate(engine(),queued())).rejects.toMatchObject({status:409,code:"cloud_workspace_client_update_required"});
+    await expect(actions.request(engine(),decision())).rejects.toMatchObject({status:409,code:"cloud_workspace_client_update_required"});
     await pool.query("UPDATE cloud_workspace_guest_grants SET role='viewer',revision=revision+1 WHERE user_id=$1",[guest.id]);
     const viewer=await actorConnection();
     await expect(commands.snapshot(viewer,"shared-chat")).resolves.toMatchObject({pending:[]});
@@ -184,12 +185,13 @@ d.each(["legacy","pro"] as const)("actor-aware cloud runtime admission (%s)",fun
     const encryption={keys:{1:randomBytes(32).toString("base64url")},currentKeyVersion:1};
     const credentials=new DatabaseCloudAgentCredentialService(pool,encryption),executions=new DatabaseCloudAgentExecutionService(pool,encryption,false);
     const credentialId=randomUUID(),delegationId=randomUUID();
-    await pool.query("UPDATE cloud_workspace_engine_instances SET agent_runtime_profile='zeros-cloud-worker-v3',agent_runtime_contract_sha256=$2 WHERE id=$1",[fixture.engineInstanceId,"a".repeat(64)]);
-    await pool.query(`INSERT INTO cloud_agent_runtime_qualifications(provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled)
-      VALUES('daytona','snapshot-pinned',$1,'claude-api-key','zeros-cloud-worker-v3',true)`,["a".repeat(64)]);
+    await pool.query(`INSERT INTO cloud_runtime_qualifications
+      (runtime_id,base_compatibility_id,credential_kind,profile,enabled,mcp_qualified,evidence,qualified_at)
+      SELECT runtime_id,base_compatibility_id,'claude-api-key',profile,enabled,mcp_qualified,evidence,qualified_at
+      FROM cloud_runtime_qualifications WHERE credential_kind='claude-setup-token'`);
     await credentials.put({ownerUserId:guest.id,credentialId,operationId:randomUUID(),expectedRevision:0,displayName:"Guest-owned credential",material:{kind:"claude-api-key",apiKey:"synthetic-guest-claude-key"}});
     await credentials.delegate(guest.id,{id:delegationId,credentialId,expectedRevision:1,workspaceId:fixture.workspaceId,granteeUserId:guest.id,models:["haiku"],expiresAt:new Date(Date.now()+3600_000).toISOString()});
-    await executions.admit(engine(),{executionId:action.action.executionId,delegationId,provider:"claude",model:"haiku",source:{kind:"session",actorSessionId:a.actorSessionId}});
+    await executions.admit(engine(),{executionId:action.action.executionId,delegationId,provider:"claude",model:"haiku",source:{kind:"session",actorSessionId:a.actorSessionId}},false,undefined,undefined,undefined,1);
     await commands.mutate(a,input);await actions.request(a,action);
     await expect(commands.mutate(a,input)).resolves.toMatchObject({replayed:true});
     await expect(actions.request(a,action)).resolves.toMatchObject({replayed:true});
@@ -224,8 +226,30 @@ d.each(["legacy","pro"] as const)("actor-aware cloud runtime admission (%s)",fun
     const signer=await device();const proof=signer.proof();proof.signature=Buffer.alloc(64).toString("base64url");
     await expect(service.issue({...subject(),proof})).rejects.toBeDefined();
     await pool.query("UPDATE cloud_workspace_engine_instances SET actor_protocol_version=1 WHERE id=$1",[fixture.engineInstanceId]);
-    await expect(service.issue({...subject(),proof:signer.proof()})).rejects.toMatchObject({code:"cloud_actor_runtime_unavailable"});
+    await expect(service.issue({...subject(),proof:signer.proof()})).rejects.toMatchObject({code:"cloud_workspace_client_update_required"});
+    expect((await pool.query("SELECT count(*)::int AS n FROM device_request_nonces")).rows[0].n).toBe(0);
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_actor_sessions")).rows[0].n).toBe(0);
+  });
+  it("refuses a retired saved Computer source before consuming device proof",async()=>{
+    const signer=await device();
+    await pool.query(`UPDATE cloud_computer_templates SET state='quarantined'
+      WHERE build_id IN (SELECT template_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1)`,[fixture.workspaceId]);
+    await expect(service.issue({...subject(),proof:signer.proof()})).rejects.toMatchObject({status:409,code:"cloud_workspace_v2_required"});
+    expect((await pool.query("SELECT count(*)::int AS n FROM device_request_nonces")).rows[0].n).toBe(0);
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_actor_sessions")).rows[0].n).toBe(0);
+  });
+  it("fences renewal and relays when the saved Computer source becomes unsupported",async()=>{
+    const signer=await device(),grant=await service.issue({...subject(),proof:signer.proof()});
+    await service.consume({...engine(),token:grant.grantToken});
+    await pool.query(`UPDATE cloud_computer_templates SET state='quarantined'
+      WHERE build_id IN (SELECT template_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1)`,[fixture.workspaceId]);
+    await expect(service.consume({...engine(),token:grant.grantToken,renew:true})).rejects.toMatchObject({status:409,code:"cloud_workspace_v2_required"});
+    expect(await service.authorizeRelay(grant.grantToken,{connected:true})).toBeNull();
+  });
+  it("requires actor admission even for a private single-member legacy engine",async()=>{
+    await pool.query("UPDATE cloud_workspaces SET sharing_mode='private',single_member_mode=true WHERE id=$1",[fixture.workspaceId]);
+    await pool.query("UPDATE cloud_workspace_engine_instances SET actor_protocol_version=1 WHERE id=$1",[fixture.engineInstanceId]);
+    await expect(withSystemTx(pool,tx=>assertCloudRequestActor(tx,engine(),"read"))).rejects.toMatchObject({status:409,code:"cloud_workspace_client_update_required"});
   });
   it("keeps durable actor intent valid after socket expiry, but denies it after guest revocation",async()=>{
     const signer=await device();const grant=await service.issue({...subject(),proof:signer.proof()});

@@ -12,27 +12,15 @@ const credential = z.object({
   connectionMethod: z.enum(["api", "account"]).optional(),
 });
 export type CloudProviderCredential = z.infer<typeof credential>;
-const access = z.object({
-  compute: z.object({
-    fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-    trust: z.enum(["zeros-managed", "compute-administrator"]),
-  }),
-  delegations: z.array(
-    z.object({
-      id: z.string().uuid(),
-      kind: z.string(),
-      ownerUserId: z.string().uuid(),
-      models: z.array(z.string()),
-      allModels: z.boolean().optional(),
-      expiresAt: z.string(),
-    }),
-  ),
-});
+type CloudProviderAccess = {
+  compute: { fingerprint: string; trust: "zeros-managed" | "compute-administrator" };
+  delegations: { id: string; kind: string; ownerUserId: string; models: string[]; allModels?: boolean; expiresAt: string }[];
+};
 export const cloudProviderCredentialsCache = new KeyedAsyncCache<
   CloudProviderCredential[]
 >(16);
 export const cloudProviderAccessCache = new KeyedAsyncCache<
-  z.infer<typeof access>
+  CloudProviderAccess
 >(32);
 const organizationConnections = z.object({
   credentials: z.array(credential).max(100),
@@ -61,19 +49,6 @@ export function clearCloudProviderConnections(): void {
   for (const key of cloudOrganizationConnectionsCache.keys())
     cloudOrganizationConnectionsCache.forget(key);
 }
-export const readCloudProviderCredentials = async () =>
-  (
-    await cloudAccountRequest(
-      "/v1/cloud-agent-credentials",
-      z.object({ credentials: z.array(credential).max(100) }),
-    )
-  ).credentials;
-export const readCloudProviderAccess = (workspaceId: string) =>
-  cloudAccountRequest(
-    `/v1/cloud-workspaces/${z.string().uuid().parse(workspaceId)}/agent-credentials`,
-    access,
-  );
-
 export function saveCloudProviderCredential(input: {
   id: string;
   operationId: string;
@@ -154,7 +129,7 @@ export function authorizeCloudProvider(input: {
   models: string[];
   allModels?: boolean;
   expiresAt: string;
-  computeConsent: z.infer<typeof access>["compute"];
+  computeConsent: CloudProviderAccess["compute"];
 }) {
   return cloudAccountRequest(
     "/v1/cloud-agent-credentials/delegations",

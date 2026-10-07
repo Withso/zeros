@@ -1,3 +1,4 @@
+import { RELEASE_WORKER_IMAGES_RETIRED } from "./release-worker-retirement.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -81,16 +82,16 @@ suite("immutable native retirement audit settlement", () => {
   };
   it("settles the real credential fence with an append-only pending audit, then observes actual physical completion", async () => {
     pending(); const next = fresh();
-    await expect(service.admit(next, `Bearer ${token}`)).rejects.toThrow("credential requires reconciliation");
+    await expect(service.admit(next, `Bearer ${token}`)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
     expect(await service.retire(input(), `Bearer ${token}`)).toEqual({ retired: true, storagePending: true });
     const rows = (await audit()).rows, pendingAudit = structuredClone(rows[1]);
     expect(rows).toHaveLength(2); expect(rows[0]).toEqual(originalAudit);
     expect(rows[1]).toMatchObject({ action: "cloud.release_canary.storage_retired", subject: { sourceSha: request.sourceSha,
       retirement: { version: 2, operation: { status: "blocked" }, storage: { status: "pending", physicalBytes: "unmeasured" } } } });
-    await expect(originalService.admit(request, `Bearer ${token}`)).rejects.toThrow("credential preparation requires reconciliation");
+    await expect(originalService.admit(request, `Bearer ${token}`)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
     expect(admission.assertCanary).not.toHaveBeenCalled();
-    await expect(service.admit(next, `Bearer ${token}`)).rejects.toThrow("Fresh fixture allocation barrier");
-    expect(admission.assertCanary).toHaveBeenCalledOnce();
+    await expect(service.admit(next, `Bearer ${token}`)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
+    expect(admission.assertCanary).not.toHaveBeenCalled();
     operation.status = "processing"; operation.stage = "removing"; operation.expectedBy = null;
     expect(await service.retire(input(), `Bearer ${token}`)).toEqual({ retired: true, storagePending: true });
     expect((await audit()).rows).toEqual(rows);
@@ -107,7 +108,7 @@ suite("immutable native retirement audit settlement", () => {
   it("retains pending-storage cleanup authority after revocation without granting new execution consent", async () => {
     pending(); await credentials.revoke(request.ownerUserId, request.credentialId);
     expect(await service.retire(input(), `Bearer ${token}`)).toEqual({ retired: true, storagePending: true });
-    await expect(service.admit(fresh(), `Bearer ${token}`)).rejects.toThrow("designated");
+    await expect(service.admit(fresh(), `Bearer ${token}`)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
     expect(admission.assertCanary).not.toHaveBeenCalled(); expect((await audit()).rows).toHaveLength(2);
   });
   it.each(["available sandbox", "foreign operation", "unknown progress"])("does not append logical retirement for %s", async reason => {
@@ -118,27 +119,27 @@ suite("immutable native retirement audit settlement", () => {
     await expect(service.retire(input(), `Bearer ${token}`)).rejects.toThrow("retirement");
     expect((await audit()).rows).toEqual([originalAudit]);
   });
-  it("settles the real preparing/dispatched SQL fence append-only before allowing a separately fresh admission", async () => {
+  it("settles the real preparing/dispatched SQL fence append-only while fresh admission stays retired", async () => {
     const next = fresh();
-    await expect(service.admit(next, `Bearer ${token}`)).rejects.toThrow("credential requires reconciliation");
+    await expect(service.admit(next, `Bearer ${token}`)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
     expect(await service.retire(input(), `Bearer ${token}`)).toEqual({ retired: true });
     const rows = (await audit()).rows;
     expect(rows).toHaveLength(2); expect(rows[0]).toEqual(originalAudit); expect(rows[1].action).toBe("cloud.release_canary.retired");
     expect(rows[1].subject.sourceSha).toBe(request.sourceSha); expect(rows[1].subject.retirement.operation.status).toBe("completed");
-    await expect(service.admit(next, `Bearer ${token}`)).rejects.toThrow("Fresh fixture allocation barrier");
-    expect(admission.assertCanary).toHaveBeenCalledOnce(); expect(admission.assertCanary.mock.calls[0][0].sourceSha).toBe(configuration.sourceSha);
+    await expect(service.admit(next, `Bearer ${token}`)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
+    expect(admission.assertCanary).not.toHaveBeenCalled();
     expect(await service.retire(input(), `Bearer ${token}`)).toEqual({ retired: true });
     expect((await audit()).rows).toHaveLength(2);
   });
   it("permits truthful cleanup after revocation without decrypting material or granting new consent", async () => {
     await credentials.revoke(request.ownerUserId, request.credentialId);
     expect(await service.retire(input(), `Bearer ${token}`)).toEqual({ retired: true });
-    await expect(service.admit(fresh(), `Bearer ${token}`)).rejects.toThrow("designated");
+    await expect(service.admit(fresh(), `Bearer ${token}`)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
     expect(admission.assertCanary).not.toHaveBeenCalled(); expect((await audit()).rows).toHaveLength(2);
   });
   it("rejects a terminal operation even under the old exact-source API before renewal or dispatch", async () => {
     await service.retire(input(), `Bearer ${token}`);
-    await expect(originalService.admit(request, `Bearer ${token}`)).rejects.toThrow("credential preparation requires reconciliation");
+    await expect(originalService.admit(request, `Bearer ${token}`)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
     expect(admission.assertCanary).not.toHaveBeenCalled(); expect((await audit()).rows).toHaveLength(2);
   });
   it("does not settle pending storage or bypass the current staff owner boundary", async () => {

@@ -56,3 +56,27 @@ int main(int argc,char **argv) { if(argc!=2)return 2; select_runtime(argv[1]); p
     expect(spawnSync(binary,[value],{timeout:3000}).status).toBe(125);
   });
 });
+
+describe.skipIf(process.platform !== "linux")("retired namespace entrypoints", () => {
+  let directory: string, binary: string;
+  beforeAll(() => {
+    directory = mkdtempSync(path.join(tmpdir(), "zeros-retired-namespace-"));
+    binary = path.join(directory, "namespace");
+    const source = path.join(directory, "probe.c");
+    writeFileSync(source, `#define setgroups refuse_legacy_identity_map
+#define getuid namespace_uid
+#define geteuid namespace_euid
+#define getgid namespace_gid
+#include ${JSON.stringify(path.resolve("scripts/cloud-workspace-validation/sandbox/cloud-engine-namespace.c"))}
+uid_t namespace_uid(void) { return 0; }
+uid_t namespace_euid(void) { return 0; }
+gid_t namespace_gid(void) { return 0; }
+int refuse_legacy_identity_map(size_t count, const gid_t *groups) { (void)count; (void)groups; _exit(99); }
+`);
+    execFileSync("cc", ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", source, "-o", binary], { timeout: 15000, stdio: "pipe" });
+  });
+  afterAll(() => { if (directory) rmSync(directory, { recursive: true, force: true }); });
+  it.each([[], ["--v3"], ["--qualify"], ["--v3", "--qualify-agent"]].map(args => ({ args })))("rejects retired args $args before changing identity maps", ({ args }) => {
+    expect(spawnSync(binary, args, { timeout: 3000 }).status).toBe(125);
+  });
+});

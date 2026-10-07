@@ -27,7 +27,7 @@ const pin = {
   runtime_id: runtimeId, runtime_manifest_sha256: manifestSha, runtime_base_image_id: baseId,
   runtime_base_compatibility_id: compatibilityId, runtime_profile: "zeros-cloud-worker-v4", runtime_engine_protocol_version: 20,
 };
-const jsonColumns = new Set(["contract", "manifest_header", "evidence", "effective_document", "provenance", "source_versions"]);
+const jsonColumns = new Set(["contract", "manifest_header", "evidence", "effective_document", "provenance", "source_versions", "repository_manifest"]);
 async function insert(tx: Tx, table: string, row: Record<string, unknown>) {
   // All identifiers are fixture constants; data remains parameterized.
   const keys = Object.keys(row);
@@ -46,6 +46,8 @@ export async function seedComputerToolsFixture(pool: pg.Pool, marked = true, qua
   const encryption = { keys: { 1: randomBytes(32).toString("base64url") }, currentKeyVersion: 1 };
   const providerId = randomUUID(), setupId = randomUUID(), grantId = randomUUID(), settingsId = randomUUID();
   const engineInstanceId = randomUUID(), heartbeatToken = `zwh_${randomBytes(32).toString("base64url")}`;
+  const sourceBuildId = randomUUID(), sourceConfigId = randomUUID();
+  const sourceSandboxId = "zeros-v2-test-tools-template", sourceImageRef = `boat-template:${sourceSandboxId}`;
   const scope = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, engineInstanceId, heartbeatToken, generation: 2 };
   const { files: _files, ...header } = manifest;
   await withSystemTx(pool, async tx => {
@@ -62,11 +64,26 @@ export async function seedComputerToolsFixture(pool: pg.Pool, marked = true, qua
       display_name: "Computer tools fixture", credential_source: "hosted", current_version: 1, state: "active" });
     await insert(tx, "provider_connection_versions", { connection_id: providerId, org_id: fixture.organizationId, version: 1,
       credential_source: "hosted", endpoint: "hosted://boat", created_by: fixture.userId });
+    const head = (await tx.query<{ revision: string; next_version: string }>(
+      "SELECT revision,next_version FROM cloud_computer_v2_heads WHERE org_id=$1 FOR UPDATE", [fixture.organizationId])).rows[0]!;
+    const sourceVersion = Number(head.next_version);
+    await insert(tx, "cloud_computer_v2_configs", { id: sourceConfigId, org_id: fixture.organizationId,
+      install_script: "", timeout_seconds: 900, metadata_digest: randomBytes(32), created_by: fixture.userId });
+    await insert(tx, "cloud_computer_v2_builds", { id: sourceBuildId, org_id: fixture.organizationId, version: sourceVersion,
+      config_id: sourceConfigId, accepted_revision: Number(head.revision), requested_by: fixture.userId, operation_id: randomUUID(),
+      state: "succeeded", stage: "done", base_image_id: baseId, runtime_id: runtimeId, repository_manifest: [], completed_at: new Date() });
+    await insert(tx, "cloud_computer_templates", { build_id: sourceBuildId, org_id: fixture.organizationId, state: "ready",
+      provider_resource_id: sourceSandboxId, account_scope: "zeros-v2-test-account", billing_org: "zeros-v2-test-wallet",
+      protected_contract_digest: randomBytes(32), stopped_at: new Date() });
+    await tx.query("UPDATE cloud_computer_v2_heads SET next_version=$2 WHERE org_id=$1", [fixture.organizationId, sourceVersion + 1]);
     await insert(tx, "cloud_workspace_generations", { workspace_id: fixture.workspaceId, generation: 2, org_id: fixture.organizationId,
-      provider: "boat", image_ref: baseId, architecture: "linux/amd64", cpu_millicores: 2000, memory_mib: 4096, storage_mib: 20480,
+      provider: "boat", image_ref: sourceImageRef, architecture: "linux/amd64", cpu_millicores: 2000, memory_mib: 4096, storage_mib: 20480,
       source_commit: "c".repeat(40), created_by: fixture.userId, provider_connection_id: providerId, ...pin });
+    await insert(tx, "cloud_workspace_computer_sources", { workspace_id: fixture.workspaceId, generation: 2, org_id: fixture.organizationId,
+      build_id: sourceBuildId, template_id: sourceBuildId, config_id: sourceConfigId });
     await insert(tx, "workspace_settings_versions", { id: settingsId, workspace_id: fixture.workspaceId, generation: 2, org_id: fixture.organizationId,
-      effective_document: { schemaVersion: 1, values: {} }, provenance: {}, source_versions: { fixture: 1 }, created_by: fixture.userId });
+      effective_document: { schemaVersion: 1, values: {} }, provenance: {},
+      source_versions: { fixture: 1, computerEnvironment: { configId: sourceConfigId, bindings: [] } }, created_by: fixture.userId });
     await tx.query(`INSERT INTO cloud_workspace_setup_specs(workspace_id,generation,org_id,repository_forge,repository_owner,repository_name,
       repository_revision,settings_snapshot,settings_snapshot_sha256,workspace_settings_version_id)
       SELECT workspace_id,2,org_id,repository_forge,repository_owner,repository_name,repository_revision,settings_snapshot,settings_snapshot_sha256,$2
@@ -93,6 +110,7 @@ export async function seedComputerToolsFixture(pool: pg.Pool, marked = true, qua
 
   // Fund the synthetic Boat allocation through the real ledger/coordinator.
   // Runtime authority must retain its normal compute checks in this fixture.
+  await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=true WHERE provider='boat'");
   const intentId = randomUUID();
   await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256)
     VALUES($1,$2,2,$3,$4,'create',$5,$6)`, [intentId, fixture.workspaceId, fixture.organizationId, fixture.userId, randomUUID(), randomBytes(32)]);
@@ -112,7 +130,7 @@ export async function seedComputerToolsFixture(pool: pg.Pool, marked = true, qua
   await new CloudWorkspaceComputeLeaseCoordinator({ pool, workosEnabled: false,
     policy: { provider: "boat", policyId: "zeros-v2-test-price", secondsPerDollar: 100_000, minimumTtlSeconds: 600,
       maximumTtlSeconds: 900, requestMarginSeconds: 60 } }).allocate({ workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
-    generation: 2, intentId, idempotencyKey: intentId, imageRef: baseId, architecture: "linux/amd64",
+    generation: 2, intentId, idempotencyKey: intentId, imageRef: sourceImageRef, architecture: "linux/amd64",
     cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 }, provider, null);
 
   const installationId = randomUUID();
@@ -127,8 +145,11 @@ export async function seedComputerToolsFixture(pool: pg.Pool, marked = true, qua
   });
   const draft = { installScript: "echo initial", timeoutSeconds: 120,
     repositories: [{ id: "123", owner: "withso", name: "zeros", installationId, requestedRef: null }] };
-  await computer.saveDraft(fixture.organizationId, fixture.userId, { ...draft, expectedRevision: 0,
+  const head = (await pool.query<{ revision: string; next_version: string }>(
+    "SELECT revision,next_version FROM cloud_computer_v2_heads WHERE org_id=$1", [fixture.organizationId])).rows[0]!;
+  const saved = await computer.saveDraft(fixture.organizationId, fixture.userId, { ...draft, expectedRevision: Number(head.revision),
     environment: [{ op: "set", name: "APPLICATION_SECRET", value: "synthetic-org-environment-value" }] });
+  const initialBuildCount = (await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM cloud_computer_v2_builds")).rows[0]!.count;
 
   async function actor(userId = fixture.userId) {
     const user = await ensureUser(pool, { provider: "workos", providerSubject: `workos|${userId}`, email: `durable-${userId}@example.test`, displayName: "Fixture",
@@ -164,5 +185,6 @@ export async function seedComputerToolsFixture(pool: pg.Pool, marked = true, qua
     return { leaseId, actorSessionId, credentialId, delegationId, executionId };
   }
   const owner = await actor(), initiating = await lease(owner);
-  return { fixture, scope, computer, config, encryption, actor, lease, owner, initiating, draft, runtimeId, compatibilityId };
+  return { fixture, scope, computer, config, encryption, actor, lease, owner, initiating, draft, runtimeId, compatibilityId,
+    initialRevision: saved.revision, nextBuildVersion: Number(head.next_version), initialBuildCount };
 }

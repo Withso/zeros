@@ -13,6 +13,7 @@ import {
 import type { AuthedUser } from "../auth.js";
 import { HttpError } from "../authz.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
+import { ensureCloudComputerIdentity } from "./computer-identity.js";
 import { withSystemTx, withUserTx } from "../db.js";
 import { createRoutes } from "../routes.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
@@ -24,7 +25,7 @@ import {
 import { DatabaseCloudWorkspaceManagementService } from "./management.js";
 import { DatabaseCloudComputerV2Service } from "./computer-v2.js";
 import { seedComputerTemplateRuntime, templateRuntime } from "./computer-template-test-fixtures.js";
-import { requireCloudComputerAuthority } from "./computer.js";
+import { requireCloudComputerAuthority } from "./computer-identity.js";
 import { createCloudComputerV2Routes } from "./computer-v2-routes.js";
 import type {
   CloudComputerV2DraftInput,
@@ -67,7 +68,7 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
     await seedComputerTemplateRuntime(pool);
-    fixture = await seedReadyCloudWorkspace(pool);
+    fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     config = {
       settingsSecretKeyV1: randomBytes(32).toString("base64url"),
     } as CloudWorkspaceBackendConfig;
@@ -123,7 +124,7 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
     return result.build;
   }
   async function admin() {
-    const other = await seedReadyCloudWorkspace(pool);
+    const other = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     await pool.query(
       "INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')",
       [fixture.organizationId, other.userId],
@@ -538,19 +539,16 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
       isDefault: true,
       document: { secretRefs: [{ id: bindingId, name: "SETTING" }] },
     });
-    const resolve = () =>
-      withSystemTx(pool, async (tx) => {
-        const settings = await resolveDatabaseCloudWorkspaceSettings(tx, {
-          organizationId: fixture.organizationId,
-          repositoryId: fixture.repositoryId,
-          workspaceId: fixture.workspaceId,
-          generation: 1,
-          actorUserId: fixture.userId,
-          isPersonal: false,
-          setupSecretKeyV1: config.settingsSecretKeyV1,
-        });
-        return settings.sourceVersions.secretBindings;
-      });
+    // Historical metadata remains manageable without admitting its runtime.
+    const resolve = async () => {
+      const { bindings } = await management.listSecretBindings({ organizationId: fixture.organizationId, actorUserId: fixture.userId });
+      const binding = bindings.find((row: any) => row.id === bindingId) as { id: string; version: number };
+      return { SETTING: { id: binding.id, version: binding.version } };
+    };
+    await expect(withSystemTx(pool, tx => resolveDatabaseCloudWorkspaceSettings(tx, {
+      organizationId: fixture.organizationId, repositoryId: fixture.repositoryId, workspaceId: fixture.workspaceId,
+      generation: 1, actorUserId: fixture.userId, isPersonal: false, setupSecretKeyV1: config.settingsSecretKeyV1,
+    }))).rejects.toMatchObject({ code: "cloud_workspace_v2_required" });
     const published = { SETTING: { id: bindingId, version: 1 } };
     expect(await resolve()).toEqual(published);
     await save(0, {
@@ -1098,7 +1096,7 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
     await expect(read({ cursor: "invalid" })).rejects.toMatchObject({
       code: "invalid_cursor",
     });
-    const other = await seedReadyCloudWorkspace(pool);
+    const other = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     await expect(
       service.read(other.organizationId, other.userId, {
         cursor: first.history.nextCursor!,
@@ -1178,9 +1176,9 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
       ),
     ).not.toContain("workerFence");
   });
-  it("authorizes staff and organization roles independently for all services and reads", async () => {
+  it("authorizes active accounts and organization roles for all services and reads", async () => {
     const request = await build();
-    const other = await seedReadyCloudWorkspace(pool);
+    const other = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     await expect(
       service.getBuild(fixture.organizationId, other.userId, request.build.id),
     ).rejects.toMatchObject({ status: 404 });
@@ -1213,19 +1211,18 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
     ])
       await expect(mutation()).rejects.toMatchObject({ status: 403 });
     for (const role of [null, "support_admin"]) {
-      await pool.query("UPDATE users SET staff_role=$2 WHERE id=$1", [
-        fixture.userId,
-        role,
-      ]);
-      await expect(read()).rejects.toMatchObject({ status: 404 });
-      await expect(
-        service.getBuild(
-          fixture.organizationId,
-          fixture.userId,
-          request.build.id,
-        ),
-      ).rejects.toMatchObject({ status: 404 });
+      await pool.query("UPDATE users SET staff_role=$2 WHERE id=$1", [fixture.userId, role]);
+      expect(await read()).toMatchObject({ canManage: false });
+      expect(await service.getBuild(fixture.organizationId, fixture.userId, request.build.id)).toMatchObject({ id: request.build.id });
     }
+    await pool.query("UPDATE users SET auth_status='suspended' WHERE id=$1", [fixture.userId]);
+    await expect(read()).rejects.toMatchObject({ status: 404 });
+  });
+  it.each([null, "support_admin"])("allows a nonstaff org admin (%s) to configure and request a v2 build", async role => {
+    await pool.query("UPDATE users SET staff_role=$2 WHERE id=$1", [fixture.userId, role]);
+    expect(await read()).toMatchObject({ canManage: true });
+    expect(await save()).toMatchObject({ revision: 1 });
+    expect(await build(1)).toMatchObject({ build: { state: "queued" } });
   });
   it("denies an admin demoted before the membership row is locked", async () => {
     const other = await admin();
@@ -1263,7 +1260,7 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
         tx.query("UPDATE cloud_computer_v2_configs SET install_script='other'"),
       ),
     ).rejects.toMatchObject({ code: "23514" });
-    const other = await seedReadyCloudWorkspace(pool);
+    const other = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     await service.saveDraft(other.organizationId, other.userId, {
       expectedRevision: 0,
       ...draft,
@@ -1347,8 +1344,8 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
   });
   it("enforces a database-wide worker cap and settles failures without activation", async () => {
     await build();
-    const other = await seedReadyCloudWorkspace(pool),
-      third = await seedReadyCloudWorkspace(pool);
+    const other = await seedReadyCloudWorkspace(pool, { runtimeV4: false }),
+      third = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     await service.build(other.organizationId, other.userId, {
       expectedRevision: 0,
       operationId: randomUUID(),
@@ -1369,26 +1366,17 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
     expect(await service.claimNextBuild(3)).not.toBeNull();
     expect((await read()).state).toBe("failed");
   });
-  it("enrollment cannot race or coexist with an active legacy build", async () => {
-    const { DatabaseCloudComputerService } = await import("./computer.js");
-    const legacy = new DatabaseCloudComputerService(pool, config);
-    await legacy.save(fixture.organizationId, fixture.userId, {
-      expectedRevision: 0,
-      operationId: randomUUID(),
-      document: draft,
-      sources: [],
-    });
-    await pool.query(
-      `INSERT INTO cloud_computer_builds(id,org_id,profile_id,version,requested_by,repository_owner,repository_name)
+  it("enrollment cancels historical builds under the org lock and proceeds", async () => {
+    await withSystemTx(pool, tx => ensureCloudComputerIdentity(tx, fixture.organizationId, fixture.userId));
+    const id = randomUUID();
+    await pool.query(`INSERT INTO cloud_computer_builds(id,org_id,profile_id,version,requested_by,repository_owner,repository_name)
       SELECT $1,org_id,profile_id,1,$2,'','' FROM cloud_computers WHERE org_id=$3`,
-      [randomUUID(), fixture.userId, fixture.organizationId],
-    );
-    await expect(save()).rejects.toMatchObject({
-      code: "cloud_computer_build_active",
-    });
-    expect(
-      (await pool.query("SELECT 1 FROM cloud_computer_v2_heads")).rowCount,
-    ).toBe(0);
+      [id, fixture.userId, fixture.organizationId]);
+    await save();
+    expect((await pool.query("SELECT state,cleanup_state,error_code FROM cloud_computer_builds WHERE id=$1", [id])).rows[0])
+      .toEqual({ state: "cancelled", cleanup_state: "requested", error_code: "cloud_workspace_v2_required" });
+    expect((await pool.query("SELECT 1 FROM cloud_computer_v2_heads WHERE org_id=$1", [fixture.organizationId])).rowCount).toBe(1);
+    expect((await build(1)).build.state).toBe("queued");
   });
   it("fences direct legacy build inserts after enrollment", async () => {
     await save();

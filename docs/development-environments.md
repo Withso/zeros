@@ -17,18 +17,19 @@ another Railway environment or PlanetScale branch.
 For account-free native UI/local feature testing, use
 [`pnpm electron:local`](local-development.md). It is a separate macOS launcher
 with isolated checkout profiles and no hosted provisioning. The Dev commands
-below retain the complete hosted app and their existing behavior.
+below retain hosted app setup. The v3 native agent canary is retired; its
+explicit command refuses before preparing provider or account authority.
 
 | Command | Behavior |
 | --- | --- |
 | `bash scripts/setup-zeros-dev.sh --profile /path/to/zeros-dev-env.json` | Install tools/dependencies on a Mac and securely import the portable profile |
 | `pnpm dev:setup --check` | Check installed tools and profile format without provisioning or changing files |
-| `pnpm dev:agents` | Check connected Dev agents and finish pending exact-image qualification |
-| `pnpm dev:agents --retry` | Explicitly retry a failed native qualification, bounded to three attempts per connection/image |
+| `pnpm dev:agents` | Refuse retired native qualification before profile, lease, allocation or credential preparation |
+| `pnpm dev:agents --retry` | Return the same retirement refusal; no new native attempt or credential dispatch |
 | `pnpm electron:dev` | Reconcile hosted services, then build and watch the isolated macOS desktop |
 | `pnpm electron:run` | Same provisioning, then run the desktop without source watchers |
-| `pnpm dev:backend` | Reconcile/deploy the current source from macOS or Linux; monitor agent setup when a fixture is configured |
-| `pnpm dev:backend --once` | Deploy and perform one qualification pass, then exit |
+| `pnpm dev:backend` | Reconcile/deploy the current source from macOS or Linux; report retirement of a configured native monitor |
+| `pnpm dev:backend --once` | Deploy once and report any retired native-canary intent, then exit |
 | `pnpm dev:doctor` | Read the encrypted environment receipt without provisioning |
 | `pnpm dev:doctor --all --live` | Inventory current and archived owners; read live health, image, role and service evidence without mutations |
 | `pnpm dev:adopt --owner OWNER --generation UUID` | Authenticate an existing receipt and explicitly bind this checkout without renaming live resource keys |
@@ -415,9 +416,11 @@ receipt; it never issues it twice. Monthly receipts retain their normal renewal
 behavior until the disposable environment is archived.
 
 The base example provisions infrastructure only. Add and verify the optional
-member/Organization fixture above to enable automatic native qualification.
-Native Linux Run is long-running when it monitors a fixture; `--once` provides an
-explicit one-pass command. No fixture means no automatic agent tests.
+member/Organization fixture above to prepare the verified test organization.
+Its v3 native-canary intent now refuses before allocation, lease writes, credential
+renewal or transport. App/backend launch reports that refusal while continuing
+its other operations. No-fixture connection authority maintenance remains
+available. Follow-up: **re-qualify Dev native agent canary on v4**.
 
 The selected fixture is bound to its generation and must be refreshed after
 seven days through Archive/Run. Changing its identity or funding model also
@@ -732,30 +735,38 @@ stops/deletes at the threshold, with a provider TTL as fallback. Other concurren
 builds share that meter, and API outages can delay enforcement; it is not a hard
 invoice cap. Archive removes all owned resources that the APIs permit immediately.
 
-Worker image attestation establishes the machine boundary and build provenance.
-It does not enable provider credentials. Agent execution also requires an audited
-runtime qualification for the exact immutable image, recipe and authentication
-kind in that Dev database. After normal sign-in, the Dev launcher seeds the
-explicitly configured fixture and monitors its selected organization connections.
-Each new image/credential kind runs the baked native turn/resume, permission,
-file/shell, isolation and stop/revocation tests on a disposable clone. Codex account
-connections also prove native backend renewal and adoption of refreshed access
-material. Expired or near-expiry Codex access is renewed durably before the first
-canary turn, followed by a separate forced-renewal proof; refresh tokens stay in
-the backend. Only successful exact-image evidence is applied through the existing
-migration-owner audited operator. Runtime application credentials cannot write
-approvals. Release channels continue to use the
+The shared Dev v3 native agent canary is retired because its baked
+`--qualify-agent` runner is no longer supported. Its direct allocation/readiness/
+start entry points, hosted coordinator, SSH operator and explicit `pnpm dev:agents`
+command return `release_worker_images_retired` (409) with the fixed message:
+`v3 release worker images are retired; v4 runtime bundles are the supported artifact`.
+Refusal precedes provider budget reads, builder allocation, admission reservations,
+lease/dispatch writes, credential or connection renewal, SSH registration,
+commands and private uploads. Optional monitoring reports retirement without
+stopping app/backend launch; no-fixture connection maintenance remains available.
+
+Already-started native attempts can still be polled without redispatching
+credentials, including historical hosted SSH jobs saved as `starting` or
+`running` for that exact image without the native transport's dispatch marker.
+Archive/reconcile retain the exact recorded owner, original create
+body and idempotency key, deletion operation, physical or pending-storage proof,
+SSH key cleanup and immutable receipt/evidence readers. An unknown or expired
+create cannot be replaced with a new intent. Historical v3 evidence does not
+authorize a fresh canary or approval.
+
+Worker image attestation establishes machine provenance; it does not enable
+provider credentials. Supported product cloud execution still requires the v2
+Computer source, qualified v4 worker and actor protocol2. The shared Dev image
+kit and independent flat OCI publication are separate follow-ups; they are not
+qualified v4 runtimes by changing a marker. **Re-qualify Dev native agent canary
+on v4** before restoring native qualification. Release channels use the
 [runtime qualification procedure](cloud-workspace/agent-authentication-and-language-tools.md#runtime-qualification-and-activation).
 
 No agent credentials are copied from another database or stored in the portable
-profile. Normal WorkOS sign-in and GitHub/agent account consent are required after
-a fresh launch. The configured member's selected, consented model is used for
-small paid tests (preferring a smaller model when included in that consent).
-Tests run serially with a finite VM TTL, bounded output and a compute-meter
-budget. These checks are not a hard invoice cap. Failure is retained without
-automatically running another paid attempt; `pnpm dev:agents --retry` allows at
-most three attempts for the same connection/image. Reconnecting an account or
-changing the image creates a new qualification identity.
+profile. Normal WorkOS sign-in and GitHub/agent account consent remain required.
+Historical native evidence keeps its exact image, model, kind, isolation, MCP,
+stop/revocation and independent Codex renewal checks; these readers remain
+available for audit and cleanup.
 
 Connection reuse across disposable Dev databases is implemented as optional
 **connect-once** mode; see [Persistent Dev connections](dev-connections.md). It
@@ -765,22 +776,17 @@ Restored references still require normal sign-in, current consent/repository
 access and exact-image agent qualification. Never copy refresh-token caches
 between generations or into Alpha/Beta/Production.
 
-The launcher uses a pinned Railway CLI (5.47.1), installed by Dev setup or lazily
-when first needed, to invoke the SSH-only backend operator. Temporary SSH keys
-are recorded in the encrypted ownership receipt before registration and removed
-after dispatch; Run/Archive can reconcile an interrupted removal from another
-machine. Registration uses Railway's structured key API with complete paginated
-inventory; it does not add keys to the developer's SSH agent or `~/.ssh`. A
-confirmed failure before dispatch retires its unused canary immediately, while
-an uncertain dispatch remains subject to polling and the overall deadline.
-Provider credentials move directly from the backend to a private file
-on the disposable worker. Native refresh caches never leave the backend.
-`pnpm dev:doctor` reports recorded test phases and pending storage receipts.
-Native tests run between short registry leases, so Archive can stop the backend
-and retire their recorded VMs without waiting for a paid turn to finish.
+The pinned Railway CLI (5.47.1) and existing SSH-key cleanup remain available.
+Recorded temporary SSH keys stay in the encrypted ownership receipt until exact
+provider removal is confirmed; Archive/reconcile can finish an interrupted
+removal from another machine. New native SSH dispatch refuses before key
+registration, local transport files or backend credential preparation.
+`pnpm dev:doctor` still reports recorded native test phases and pending storage
+receipts. Archive can retire recorded canary VMs without waiting for a paid turn.
 
 This setup tests the same application, hosting providers, migrations, privilege
-boundaries and native worker qualification path as releases. It does not prove
+boundaries as releases. Native Dev qualification remains retired until its
+v4 follow-up is qualified. It does not prove
 production scaling, replica behavior, failover or upgrades from existing customer
 data. Query correctness, indexes and migrations can be exercised against real
 PlanetScale PostgreSQL, but performance conclusions require representative data,

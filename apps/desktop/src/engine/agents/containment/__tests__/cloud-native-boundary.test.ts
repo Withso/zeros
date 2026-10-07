@@ -8,6 +8,10 @@ import { CLOUD_COORDINATOR_HOME } from "../cloud-coordinator-view.mjs";
 import { CLOUD_NATIVE_HOME } from "../cloud-native-view.mjs";
 import type { BoundarySpawnRequest, PreparedBoundary } from "../types";
 
+vi.mock("../cloud-runtime-root.mjs",async original=>({
+  ...await original<typeof import("../cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime:(await import("../../__tests__/helpers/test-cloud-runtime")).testCloudRuntime,
+}));
 const mocked = vi.hoisted(() => ({ rm: vi.fn(async () => {}) }));
 const gitAuthor = { name: "Test Member", email: "1234+test-member@users.noreply.github.com" };
 vi.mock("node:fs/promises", async original => ({ ...await original<typeof import("node:fs/promises")>(), rm: mocked.rm }));

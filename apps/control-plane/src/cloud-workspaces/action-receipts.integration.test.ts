@@ -3,8 +3,9 @@ import pg from "pg";
 import { beforeAll, afterAll, beforeEach, describe, it, expect } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { withSystemTx, withUserTx } from "../db.js";
-import { seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
+import { seedReadyCloudWorkspace, withCloudFixturePurgeTx, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
 import type { CloudCommandEngineScope } from "./commands.js";
+import { seedRecordedCloudWorkspaceActor } from "./recorded-actor-test-fixture.js";
 import { DatabaseCloudWorkspaceActionService } from "./action-receipts.js";
 import {withAuthorityDeadlineBarrier} from "./authority-deadline-test-utils.js";
 
@@ -15,8 +16,7 @@ suite("durable cloud decision and steering receipts", () => {
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool); fixture = await seedReadyCloudWorkspace(pool);
-    scope = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
-      engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken };
+    scope = await seedRecordedCloudWorkspaceActor(pool, fixture, { executionId: "execution" });
     service = new DatabaseCloudWorkspaceActionService({ pool });
   });
   const input = () => ({ kind: "begin", admissible: true, action: { operationId: randomUUID(), conversationId: "chat",
@@ -74,7 +74,10 @@ suite("durable cloud decision and steering receipts", () => {
     const receipt = await service.request(scope, input());
     await expect(service.request({ ...scope, generation: 2 }, { kind: "read", operationId: receipt.operationId })).rejects.toThrow("authority");
     expect((await withUserTx(pool, fixture.userId, tx => tx.query("SELECT * FROM cloud_workspace_action_receipts"))).rows).toEqual([]);
-    await withSystemTx(pool, tx => tx.query("DELETE FROM cloud_workspaces WHERE id=$1", [scope.workspaceId]));
+    await withCloudFixturePurgeTx(pool, { organizationId: fixture.organizationId, userId: fixture.userId }, async tx => {
+      await tx.query("DELETE FROM cloud_workspace_computer_sources WHERE workspace_id=$1", [scope.workspaceId]);
+      await tx.query("DELETE FROM cloud_workspaces WHERE id=$1", [scope.workspaceId]);
+    });
     expect((await withSystemTx(pool, tx => tx.query("SELECT * FROM cloud_workspace_action_receipts"))).rows).toEqual([]);
   });
   it("rejects oversized or hostile payloads before retaining any intent", async () => {

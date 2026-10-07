@@ -11,6 +11,7 @@ import { ghCloud } from "./cloud-github";
 // ──────────────────────────────────────────────────────────
 
 import { setCommand } from "../router";
+import { cloudTranscriptCacheRead, cloudTranscriptCacheWrite, cloudTranscriptCachePrune, installCloudTranscriptCacheLifecycle } from "./cloud-transcript-cache";
 import { cursorSubscription } from "./cursor-subscription";
 import { providerSubscription } from "./provider-subscription";
 import { cloudProviderAuth } from "./cloud-provider-auth";
@@ -110,6 +111,10 @@ import {
   cloudWorkspaceAccessContext,
   cloudWorkspaceAccessList,
   cloudWorkspaceAccessRevoke,
+  cloudWorkspacePortForwardingGet,
+  cloudWorkspacePortForwardingSet,
+  cloudWorkspacePortForwardingRuntime,
+  cloudWorkspacePortForwardingForget,
   cloudWorkspaceRuntimeClose,
   cloudWorkspaceRuntimeOpen,
   cloudWorkspaceCapability,
@@ -121,6 +126,10 @@ import {
 } from "./cloud-workspace-access";
 export function registerAllCommands(): void {
   registerAttachmentSourceIpc();
+  installCloudTranscriptCacheLifecycle();
+  setCommand("cloud_transcript_cache_read", cloudTranscriptCacheRead);
+  setCommand("cloud_transcript_cache_write", cloudTranscriptCacheWrite);
+  setCommand("cloud_transcript_cache_prune", cloudTranscriptCachePrune);
   // App info (runtime mode / version / platform) — consumed by the
   // renderer analytics layer to route events to the right PostHog
   // project (Zeros Dev vs Zeros). Metadata only.
@@ -175,6 +184,10 @@ export function registerAllCommands(): void {
   setCommand("cloud_workspace_access_revoke", cloudWorkspaceAccessRevoke);
   setCommand("cloud_workspace_access_context", cloudWorkspaceAccessContext);
   setCommand("cloud_workspace_access_list", cloudWorkspaceAccessList);
+  setCommand("cloud_workspace_port_forwarding_get", cloudWorkspacePortForwardingGet);
+  setCommand("cloud_workspace_port_forwarding_set", cloudWorkspacePortForwardingSet);
+  setCommand("cloud_workspace_port_forwarding_runtime", cloudWorkspacePortForwardingRuntime);
+  setCommand("cloud_workspace_port_forwarding_forget", cloudWorkspacePortForwardingForget);
   setCommand("cloud_workspace_runtime_open", cloudWorkspaceRuntimeOpen);
   setCommand("cloud_workspace_capability", cloudWorkspaceCapability);
   setCommand("cloud_workspace_runtime_refresh", cloudWorkspaceRuntimeRefresh);

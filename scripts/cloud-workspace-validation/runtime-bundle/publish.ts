@@ -267,8 +267,9 @@ export async function publishRuntimeBundle(options: {
     );
     check(origin.pathname === "/" && !origin.search, "input_schema");
     const oidcRequest = githubActionsOidcRequest(env);
-    const releaseOrder = positiveInteger(env.GITHUB_RUN_NUMBER);
+    positiveInteger(env.GITHUB_RUN_NUMBER);
     const githubRunId = positiveInteger(env.GITHUB_RUN_ID);
+    const releaseOrder = githubRunId;
     const githubRunAttempt = positiveInteger(
       env.GITHUB_RUN_ATTEMPT,
       2_147_483_647,

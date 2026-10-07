@@ -669,12 +669,13 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
         branch={item.pending.branch ?? undefined}
         kind={item.pending.kind}
         project={item.project}
+        projectInteractive={item.pending.placement !== "cloud"}
         mixedRepositories={!groupedList}
         grouped={grouped}
         label={
-          item.pending.branch
+          item.pending.label ?? (item.pending.branch
             ? branchDisplayName(item.pending.branch)
-            : "New workspace"
+            : "New workspace")
         }
         active={active}
         rowRef={(node) => registerRow(selectionKey, node)}

@@ -8,6 +8,11 @@ import {afterEach,describe,expect,it,vi} from "vitest";
 import type {CloudAgentLease} from "../cloud-agent-lease";
 import {CloudWorkloadTools} from "../cloud-workload-tools";
 import type {BoundaryProcess,BoundarySpawnRequest,PreparedBoundary} from "../containment/types";
+import { testCloudRuntime } from "./helpers/test-cloud-runtime";
+vi.mock("../containment/cloud-runtime-root.mjs", async original => ({
+  ...await original<typeof import("../containment/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime: (await import("./helpers/test-cloud-runtime")).testCloudRuntime,
+}));
 const roots:string[]=[],hosts:CloudWorkloadTools[]=[];
 async function fixture(gitAuthor?:{name:string;email:string},values?:Record<string,string>){
   const root=await mkdtemp(path.join(os.tmpdir(),"zeros-cloud-tools-"));roots.push(root);
@@ -20,7 +25,7 @@ async function fixture(gitAuthor?:{name:string;email:string},values?:Record<stri
     close:async()=>{controller.abort();for(const domain of domains)await domain.stopAndProve();},
   } as unknown as CloudAgentLease;
   const launched=vi.fn(async(request:BoundarySpawnRequest):Promise<BoundaryProcess>=>{
-    const command=request.command==="/opt/zeros-runtime/bin/node"?process.execPath:request.command;
+    const command=request.command===testCloudRuntime().node?process.execPath:request.command;
     const args=request.args.map(arg=>arg.endsWith("/cloud-file-tool.mjs")?path.resolve("apps/desktop/src/engine/agents/containment/cloud-file-tool.mjs"):arg);
     const child=spawn(command,args,{cwd:root,env:{...request.env},stdio:"pipe",detached:true});
     const exit=new Promise<{code:number|null;signal:string|null}>(resolve=>child.once("exit",(code,signal)=>resolve({code,signal})));

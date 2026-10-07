@@ -1,296 +1,193 @@
-# Cloud wake and create performance (Alpha)
+# Cloud wake and create performance
 
-Owner targets: wake a stopped workspace to usable in **1–2 seconds**, and
-create a workspace from an existing Cloud Computer template in **3–4 seconds**.
-“Usable” requires authenticated actor admission, the bridge connection, the
-CONNECTED-first handshake and a successful correlated `workspace.list` probe.
-A provider `ready` state, engine health response, or WebSocket upgrade alone
-does not establish usability. Desktop paint is a separate, additional endpoint.
+The engineering budgets are **1–2 seconds** for true stopped wake to usable and
+**3–4 seconds** for create from an existing Computer template to usable.
+Usable requires actor admission, bridge connection, CONNECTED-first handshake
+and a successful correlated `workspace.list` probe. Provider-ready, a process
+health response or a provisional create row does not establish it. Transcript
+paint/first text and still-running reattach are separate endpoints.
 
-## Evidence and current limits
+## Historical baseline and evidence limits
 
-Audit date: 2026-10-06. Code baseline: `0600b6f5` (main before PERF's worker
-notification change). PERF has no `.env.agent`; the orchestrator supplied a
-closed read-only Alpha timeline for workspace
-`c5f68576-41cb-4d1a-af6f-60b07f42e5fe`. Five completed setups took 116.422,
-128.850, 133.063, 130.325 and 130.399 seconds (median 130.325 s); a sixth was
-cancelled after 112.935 s. Setup repeats on wake. Queue-to-start was only
-0.372–1.202 s. This makes **avoiding repeated full setup the primary lever**;
-notifications alone cannot meet the goal. No matched after-run or complete
-client-to-paint measurement is available. Provider claims and configured timers
-remain separate from those historical measurements.
+The owner-supplied Alpha timeline recorded five completed setup intervals:
+116.422 / 128.850 / 133.063 / 130.325 / 130.399 seconds, median 130.325 seconds.
+A cancelled 112.935-second execution is excluded. Queue-to-first-claim was
+0.372–1.202 seconds; engine-row creation→registration was approximately 17–23
+seconds; five actor-create→consume samples ranged 2.718–3.447 seconds,
+median 2.999 seconds. The Stop example queued for 6.166 seconds.
 
-The repeatable [measurement runbook](../../scripts/cloud-workspace-validation/workspace-perf.md)
-provides a read-only historical timeline, a disposable real workspace
-create/stop/wake/attach cycle, and a separate isolated VM fork/resume probe.
-Run the same harness against the baseline and changed Alpha deployment; the
-`before`/`after` argument labels a result and does not deploy anything.
+Setup `started_at` survives reclaim, so these intervals include retries and
+backoff. Five default claims can contribute 5 + 10 + 20 + 40 = 75 seconds of backoff;
+historical claim counts are unavailable. Engine rows exist before spawn, so
+row→registration is not Node initialization or registration HTTP latency.
+Actor intervals include client/bridge work and do not measure paint. The
+historical setup record proves repeated setup intervals, not loss of persistence
+or 130 seconds of guest attestation. Existing journals preserve completed hooks.
 
-| Stage | Evidence in today's code | Available timing / limitation |
-| --- | --- | --- |
-| Client wake status | `apps/desktop/src/renderer/state/cloud-workspace-wake.ts:74` polls at 1,000 ms | Configured polling interval; real desktop visibility not measured |
-| Lifecycle handoff | `apps/control-plane/src/config.ts:447` defaults to 5,000 ms; `reconciler.ts:326` serially drains maintenance and lifecycle batches | An idle polling worker can add up to one interval, plus work already running. Historical `created_at → dispatched_at` measures first dispatch, including all queue delays |
-| Paid authority / compute leases | `reconciler.ts:330` and `compute-leases.ts` run maintenance and fenced allocation | No separate persisted duration. Serial maintenance can delay the lifecycle batch; a notification-only pass avoids extra maintenance |
-| Provider create/fork/resume/inspect | `boat-client.ts`, `boat-provider.ts`, `compute-leases.ts` | Isolated VM script records API round-trip aggregates. DB create-attempt `dispatched_at` is not an API completion timestamp |
-| Provider restore / base readiness | `boat-setup-runner.ts` checks the v4 base before installing setup | VM script separately observes provider readiness and a valid root bootstrap status. These include polling and command overhead, not hypervisor boot time |
-| Setup handoff | `config.ts:535` defaults to 1,000 ms; `setup-worker.ts` requires due work and a running binding | `setup.created_at → started_at` includes prerequisite waits and first claim. Not a pure worker timer measurement |
-| Tree and containment verification | `scripts/cloud-workspace-validation/sandbox/attest-cloud-worker.mjs:970` performs `verify_tree`, `qualify_engine`, `run_setup`, `publish_proof` in order | Existing isolated probe reports each duration and failure code; production setup timings are not persisted per attester stage |
-| Checkout / settings / start | `sandbox/setup-cloud-workspace.mjs:2685` redeems materials, verifies, prepares repository, verifies again, starts the engine | Isolated probe has later-stage timings, but uses diagnostic material and is not a production authorization or checkout benchmark |
-| Node / SQLite / containment | `apps/desktop/src/engine/zeros-engine.ts` initializes engine services before readiness | No independent persisted timings. Do not subtract overlapping spans to invent these costs |
-| Engine registration / heartbeat | `zeros-engine.ts:3099` awaits initial durable registration; `cloud-runtime-registration.ts` schedules subsequent heartbeats | Engine row creation to registration is available, but starts before process startup. `last_heartbeat_at` is not the first heartbeat |
-| Engine readiness observation | `sandbox/setup-cloud-workspace.mjs:2605` sleeps 500 ms between probes | Up to one probe interval plus request overhead; the 90-second deadline is not a measured duration |
-| Actor admission / bridge / handshake | `apps/desktop/src/renderer/platform/bridge/ws-client.ts` implements #330's CONNECTED-first probe | Real workspace script records admission HTTP, bridge upgrade and correlated probe separately; DB actor creation to consumption is also available |
-| Renderer warmups / visible transcript | `renderer/state/cloud-workspace-latency.ts:18` records `intent_history_visible`, `click_transcript_paint`, `submit_first_text` | Chat/history spans end after two animation frames when visible/hydrated. They are not complete workspace create/wake spans; verify on the Mac |
+No matched after-run, full intent→paint trace or successful live performance
+qualification of this overhaul is available. The VM inspected during the
+read-only audit was archived before per-stage probes could run and remained
+asleep. Configured timers and fake-clock regressions establish code behavior,
+not latency percentiles.
 
-Paths abbreviated after their first full prefix refer to the same subsystem.
-Lifecycle dispatch-to-completion spans include retries, backoff and later
-observations. Setup and registration intervals overlap: do not add these rows.
-Historical queries return at most 32 records per table and never read credential
-columns, command output, setup logs or repository contents.
+The [measurement runbook](../../scripts/cloud-workspace-validation/workspace-perf.md)
+separates read-only timeline, authorized disposable workspace cycle and isolated
+VM probe. Labeling a result before/after does not deploy code. Record runtime/
+base/template, deployment/client versions, region, claim count, failures and
+cleanup evidence. Compare matched configurations and retain failed/time-out
+samples. Overlapping spans must not be summed; one run cannot establish p95.
 
 ### Baseline / after ledger
 
-| Endpoint | Before | After notification change | Interpretation |
+Keep historical intervals separate from the effects of current code. The entries
+below are the comparison ledger, not evidence that a new runtime is deployed.
+
+| Endpoint | Historical evidence | Current repository change | Matched after evidence |
 | --- | --- | --- | --- |
-| Real create → CONNECTED probe | Not measured | Not measured | Target 3–4 s; includes operator ownership read, explicitly timed |
-| Real wake → CONNECTED probe | Not measured | Not measured | Target 1–2 s; renderer paint still additional |
-| Lifecycle queue → first dispatch | Stop example: 6.166 s; no-op wakes excluded | Not measured | Notification change addresses initial and committed prerequisite handoffs |
-| Setup queue → first claim | 0.372–1.202 s | Not measured | Orchestrator-supplied historical Alpha timeline |
-| Setup execution | Completed: 116.422–133.063 s, median 130.325 s (n=5); cancelled: 112.935 s | Not measured | Dominant observed cost; not a complete wake endpoint |
-| Engine row creation → registration | Approximately 17–23 s | Not measured | Includes prelaunch/startup; not pure registration HTTP time |
-| Actor creation → consumption | 2.718–3.447 s, median 2.999 s (five examples) | Not measured | Includes client scheduling/bridge; not complete CONNECTED probe or paint |
-| Boat fork API / provider ready | Fork 0.184–0.186 s in runs 1–2; provider-ready observations 2.860–5.017 s across three failed samples | Not measured | Samples failed later; not successful workspace creates |
-| Base ready / boot unit / hydration | Latest run: 36.723 s from cycle start / 5.662 s / about 4 s | Not measured | Only boot and hydration are same-VM intervals; pre-unit delay needs the new clock bracket |
-| Attester / containment / checkout / engine sub-stages | Not measured | Not measured | Successful production stage spans are not persisted; failure observations are available |
-| Polling scheduler regression | Next periodic tick | Immediate scheduled pass | Deterministic fake-clock regression, **not live latency** |
+| Completed setup interval | Five samples; median 130.325 seconds, including possible retries/backoff. | Validated preparation reuse; every launch still needs fresh final attestation and registration. | Not collected. |
+| Queue to first setup claim | 0.372–1.202 seconds. | Commit hints and nearest eligible retry/lease deadlines, with fallback scanning. | Not collected. |
+| Engine row to registration | Approximately 17–23 seconds; not a process-start or HTTP-only interval. | Required startup recovery remains; optional Design capture leaves the readiness path. | Not collected. |
+| Actor create to consume | Five samples, 2.718–3.447 seconds; median 2.999 seconds. | Exact actor/engine admission still applies. | No matched attach/consume trace. |
+| Fresh create to usable | No complete intent-to-usable trace. | Pending create row paints immediately; confirmed readiness still requires all usable checks. | Not collected. |
+| True stopped wake to usable | No complete stopped-wake trace. | Preparation reuse and ready-event settlement with a 2-second fallback. | Not collected. |
+| Transcript paint and first text | No signed Mac comparison trace. | Bounded durable provisional transcript cache and separate renderer spans. | Not collected. |
 
-Record run IDs, resource IDs, exact runtime/base/template build, control-plane
-commit, client version and region, elapsed totals, failures and cleanup status
-with each result. Compare matched configurations. Start with one before/after
-run; repeated samples require a deliberate resource budget. Never report a p95
-from a single run or quietly discard a failure/timeout.
+## Current critical path
 
-The source inspector confirmed that the initial `bx_dxzfh3p6` run used the
-wrong template. This generation pins `bx_v255c32q` (build prefix `1a776d6d`);
-every other source/snapshot precondition passed. The original run allocated
-nothing (`childId: null`, `cleanup: not_created`).
+| Stage | Current code | What remains to measure |
+| --- | --- | --- |
+| Desktop create/wake | Renderer `state/cloud-workspace-create.ts` publishes a scoped pending row; `cloud-workspace-wake.ts` settles exact catalog events with a 2-second fallback. | Receipt, confirmed UUID, navigation and visible paint separately. |
+| CP queue/claim | `worker-scheduler.ts`, `reconciler.ts`, `setup-worker.ts` consume commit hints and nearest eligible retry/lease deadlines, retaining periodic fallback. | In-flight work, lock/prerequisite and first/reclaimed claim delays. |
+| Funding/allocation | `compute-leases.ts`, `boat-provider.ts`, `boat-setup-runner.ts` bind finite funded authority and inspect/resume/fork the exact allocation. | API request, provider-running observation, restoration and protected-base readiness. |
+| Preparation | `sandbox/setup-cloud-workspace.mjs`, `setup-resume.ts` choose validated reuse or full preparation. | Hydration, installer/tree verification, preflight, checkout/settings/hooks. |
+| Fresh launch | `sandbox/attest-cloud-worker.mjs` and protected supervisor verify current tree/containment, mint/consume proof and start an exact engine. | Final attester stages, supervisor/namespace/cgroup and process spawn. |
+| Required engine state | `zeros-engine.ts` completes startup ownership recovery, lifecycle handlers, registration and initial durable sync before ready; optional cloud Design capture starts afterward. | Process entry, SQLite/schema, ownership recovery, registration HTTP and durable sync separately. |
+| Ready observation | Setup helper retries at 125 ms within the existing 90-second budget, including remaining-budget request cancellation. | Probe/request overhead; exact instance/protocol/health/durable proof still required. |
+| Client attach | Actor admission and `ws-client.ts` CONNECTED-first correlated probe. | Admission, scheduling, relay/provider hops, consume and initial replay. |
+| Transcript paint | Renderer latency spans and bounded durable initial-window cache. | Signed Mac disk/IPC/frame timing, confirmed replacement and first agent text. |
 
-The corrected before run allocated disposable child `bx_d54mkt7t`. Source
-inspection took 305 ms and the fork request 184 ms; provider ready was observed
-at 4,481 ms from cycle start. These intervals overlap; do not add the fork
-request duration to that total. Bootstrap never passed
-within ten minutes: 1,052 inspections (103 s summed, max 1.4 s, one failed) and
-1,038 commands (235 s summed, max 12.4 s, four failed). These are serial API
-aggregates, not hydration or setup stage durations. No attester stages ran.
-Compute cleanup was verified; storage remained `waiting_for_uploads`, so
-snapshot erasure is not established. The orchestrator supplied no run UUID.
+Abbreviations in the table: renderer=`apps/desktop/src/renderer/`,
+CP=`apps/control-plane/src/cloud-workspaces/`, sandbox=
+`scripts/cloud-workspace-validation/sandbox/`. A large checkout's required
+ownership repair is part of readiness and cannot be deferred as optional work.
 
-The old probe discarded every rejection reason. Successful API calls do not
-prove that the command succeeded. Its 250 ms fixed retry generated excessive
-probes, but does not explain why bootstrap never passed. Source tracing shows
-`bootstrap.py:base` gates on hydration and protected-base checks; `status`
-requires active host/persistence, and template sanitation stops the host before
-snapshot. Host state, command exit and hydration cannot be recovered from the
-reported aggregates. The updated probe preserves bounded closed rejection
-counts and a whitelisted bootstrap diagnostic, and backs off 250 ms to 5 s.
-It keeps the same base identity/readiness checks and never restarts a host.
-Later pinned-template runs below distinguish the actual gates.
+## Preparation reuse and fresh authority
 
-The second corrected run (probe commit `13cbf4ae`) created `bx_ddxjxhab`.
-Provider ready was observed at 5,017 ms and base ready at 43,555 ms; the
-38,538 ms difference includes command duration and up to 5 s polling delay,
-not just VM execution. Observations: four provider-pending, three request
-failures, one stopped host, then ready. Five bootstrap commands took 18,467 ms
-summed (three failed, maximum 5,265 ms). This sample does not reproduce the
-first run's persistent bootstrap timeout. The following probe command failed
-in 257 ms with `probe_invalid`; its old wrapper discarded command exit and
-closed subprocess error details. No attester-stage result was returned.
-Compute cleanup was verified, with storage still `waiting_for_uploads`.
+`CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED` defaults true only when
+`RAILWAY_ENVIRONMENT_NAME` resolves to Alpha. Explicit false disables it;
+enabling it elsewhere is rejected. Materials still require a live staff account,
+Boat, qualified v4 pin and negotiated `X-Zeros-Resume-Existing: 1`. Old material
+negotiation uses full preparation. Code default is not proof of a deployed value.
 
-The next diagnostic revision separates probe command failure/timeout/overflow
-and preserves only whitelisted subprocess identities. It also takes one
-read-only unit/hydration snapshot after base-ready observation (or at bootstrap
-timeout). Unit monotonic start/exit timestamps and filtered hydration wait/ready
-events can isolate the boot oneshot's interval. The Type=simple host's active
-state is not completion of dispatch verification or attestation. Missing events
-stay missing; no raw journal text or argv leaves the VM. This extra snapshot
-occurs after the recorded base-ready endpoint and adds overhead before setup.
+The preparation key binds organization/workspace/generation/account, provider/
+allocation, runtime/manifest/base/profile/protocol, image/resources, settings/
+repository/spec and saved Computer config/build/environment. Ephemeral launch
+witnesses and replaced compute-lease IDs are excluded. Under the lifecycle/setup
+locks, `readCloudRuntimeResumeProofEpoch` selects the last completed exact
+engine enrollment; incomplete or uncertain enrollment invalidates reuse. Check
+identity/authority again after external credential minting.
 
-The third run (probe commit `14216cf0`) created `bx_m5cdnkr6`. Provider
-ready was observed at 2,860 ms and base ready at 36,723 ms. The boot unit's
-monotonic start/exit interval was **5.662079 s**; its hydration wait was about
-**4 s**. The host unit started 9.895 ms after the boot unit exited. These
-are in-VM intervals, not provider API time. The VM observation occurred
-9.202827 s after the boot unit started, but the old probe did not bracket that
-observation in its operator clock; an exact restore-to-unit offset cannot be
-recovered. Inference: most of the base-ready interval precedes the boot unit,
-rather than being time spent in hydration or that unit's startup work.
+A protected, bounded mode-0600 completion record, completed repository journal,
+unchanged managed-settings bytes and physical checkout identity must agree.
+A hit skips repository preparation/hooks and duplicate preflight. It preserves
+owner commits, HEAD/index/dirty Code, Design, engine SQLite and conversation
+state. Missing/corrupt/unsafe/mismatched evidence selects full preparation
+without deleting user data or resetting history.
 
-This run's probe failed with exit 1, `FileNotFoundError` at `execute_node`,
-and `activeDescriptorPresent: false`. The wrapper accepted
-`waiting_for_runtime` as base ready and immediately invoked
-`/opt/zeros/current/bin/node`. That is a **measurement prerequisite bug**:
-base readiness explicitly permits an absent runtime. Production setup instead
-runs the protected base installer first. The revised probe uses that same
-verified installer with `purpose: qualification`, the exact selected immutable
-runtime and a short-lived read-only artifact capability sent over pinned SSH
-stdin. It then requires the selected runtime and an idle host before launching
-Node. It does not install a system Node, bypass a tree check or modify the
-source/template. Installer preparation has its own measured interval, and runs
-on the disposable child for both create and resume. A successful follow-up is
-still required; these failures establish no attester or usable-workspace result.
+Every launch still verifies template/runtime and the **full final attestation**,
+including restored-tree integrity and functional containment qualification.
+It obtains fresh host/supervisor session, namespace/cgroup identity, engine UUID,
+one-use launch/registration capabilities, proof consumption, registration and
+initial durable sync. Old grants/proofs/tokens are never reused. Runtime changes
+remain the existing generation-transition owner's decision; ordinary wake
+cannot silently select today's template or change immutable pins.
 
-The revised bootstrap snapshot includes an operator request start/end bracket.
-Subtracting the VM observation-to-first-unit interval from that bracket produces
-lower/upper unit-start bounds in the operator cycle clock, plus bounds relative
-to the first provider-running **observation**. It never subtracts independent
-clock epochs or labels that provider observation as the actual restore start.
-Compute cleanup for run three was verified; storage remained
-`waiting_for_uploads`. All three disposable child IDs and their pending storage
-receipts must stay in the orchestrator's cleanup ledger.
+A matching digest string, metadata timestamp or provider ID does not authenticate
+restored bytes. Future qualification caching needs exact signed/root-controlled
+artifact/base/profile evidence, revocation/expiry and tested invalidation.
+Preparation reuse is already implemented; qualification reuse remains a
+[follow-up](warm-pool.md), not permission to skip launch confinement.
 
-The [resume proposal](resume-performance-design.md) prioritizes preparation reuse,
-fresh launch authority, integrity-bound qualification reuse, engine startup,
-registration/attachment measurement, and closed persisted stage spans for RU/HU
-coordination. It does not remove any verification in the current implementation.
+## Desktop and scheduler behavior
 
-## Boat capabilities relevant to the budget
+Pending create identity binds account/catalog epoch, organization and idempotency.
+The server receipt binds the final key before confirmed catalog publication.
+Failure/late receipts affect only their own placeholder. No provisional row
+admits an engine/prompt; account retirement invalidates even an empty catalog.
+Local create remains on its original path.
 
-The public [snapshot documentation](https://docs.boat.dev/snapshots) describes
-filesystem snapshots, not process or memory capture. Resume reconstructs the
-same sandbox on fresh hardware; fork creates an independent sandbox. The
-provider describes restoration in a few seconds, not a 1–2-second guarantee.
-Enabled services restart, but restore is not a fresh kernel boot; the v4 base
-must respect the overlay/start ordering already established by the Alpha audit.
+Wake/restart can settle from current ready catalog events even during a hung
+refresh. Account, target generation, operation version and Stop guards remain
+unconditional. Restart fixtures cover source-generation replies arriving after
+ready target publication; widening timeouts is not the production behavior.
 
-Files hydrate on demand while background downloads continue. Boat's documented
-startup playbook (`.ascii/playbook.json`) prioritizes previously opened paths,
-up to 5,000. Training requires startup immediately after restoring a snapshot,
-then saving after hydration completes. This suggests a controlled experiment
-using the actual bootstrap/attester/engine read order, preserving all checks.
-See [warming instructions](https://docs.boat.dev/snapshots#warming-for-faster-first-boots).
+Workers read durable eligible retry/lease deadlines after each pass and debounce
+already-due/locked work by 100 ms. Independent periodic maintenance remains at
+its configured cadence; notification passes do not repeat maintenance. Original
+claim locks, due dates, fences and prerequisites decide execution. No hint or a
+failed deadline read falls back to scanning. Serial in-flight work is not
+preempted; a newly committed deadline without a hint may await the fallback.
 
-The [platform guide](https://docs.boat.dev/platform-guide) recommends prepared
-template forks and a restarted service/daemon. Zeros already forks Cloud
-Computer templates. No public memory-suspend or managed warm-pool API was
-identified in the reviewed snapshot, lifecycle and platform guides; that is a
-research limitation, not proof that Boat cannot offer one privately. Ask Boat
-for measured p50/p95 fork/resume and placement guarantees before budgeting them.
+## Closed setup clocks
 
-The [FAQ](https://docs.boat.dev/faq) places compute in Germany, Finland and France
-and estimates US round trips at 100–200 ms. Those are vendor estimates, not
-Alpha measurements. No placement selector was identified in the reviewed
-lifecycle docs. Serial control-plane/provider/VM requests may consume much of
-the wake budget; measure where Alpha actually runs before changing placement.
+Migration 0135 adds nullable `stage_timings` on setup runs. The negotiated version 1
+document is capped at 8 KiB, five unique clocks and 32 spans. Sources are
+`control_plane`, `boat_transport`, `setup`, `attester_preflight` and
+`attester_launch`; stages/outcomes are closed enums. Each clock has UUID/UTC
+anchor and monotonic offsets bounded to one hour. No raw stdout, paths, provider
+messages, repository names or credentials belong in it.
 
-[Webhooks](https://docs.boat.dev/webhooks) include ready, archived, error and
-hydrated events. Hydrated can arrive substantially later than ready. Delivery
-can be repeated or reordered; authentication and current binding checks are
-required before treating an event as an observation hint. Provider inspection
-and existing state fences remain authoritative. This could remove future
-provider polling delay but is a separate integration, with no webhook created
-by PERF.
+Publish through existing fenced result/progress transport, not one HTTP request
+per stage. Current execution fence prevents stale overwrite. Missing/bad timing
+cannot make verification pass or block safety Stop. Failed/cancelled spans remain
+explicit. Final successful clocks are available in current code; the historical
+runs lack them. They do not independently isolate Node/SQLite/registration HTTP.
+Never subtract timestamps from independent machine clock epochs.
 
-The [API guide](https://docs.boat.dev/api-v1) documents 24-hour, account-scoped
-idempotency for create/fork. This matters for both measurement cleanup and any
-future pool allocator: a lost response must not allocate a second VM. The
-[long-running task guide](https://docs.boat.dev/long-running-tasks) provides
-`ttlSeconds` at fork/resume. The isolated probe uses 30 minutes and one child.
-Deletion can release compute before storage uploads finish; retain the receipt
-and report the distinction rather than retrying fresh allocations.
+## Unmatched VM probes
 
-## Safe implementation sequence
+Earlier disposable cold-fork probes observed provider running in 2.860–5.017
+seconds and protected base readiness in 36.723–43.555 seconds. All failed later,
+so none proves usable create or true stopped-wake performance. One VM's boot
+oneshot took 5.662079 seconds, including about 4 seconds of hydration; host start
+followed 9.895 ms later. Those are same-VM intervals. A missing operator bracket
+prevents an exact restore→unit offset; preceding delay is still unproven.
 
-1. **Committed-work notifications (PR #356).** Payload-free PostgreSQL triggers
-   wake lifecycle/setup workers through one dedicated session per replica.
-   Hints coalesce and survive an active tick; due-date polling stays enabled.
-   Existing claims, locks, lease fences, authorization and operation decisions
-   decide what runs. Notification passes do not repeat periodic maintenance.
-   Security cost: unchanged. Operational cost: one connection per replica and
-   small transaction notification overhead. This removes avoidable handoff
-   waiting, not provider/verification time. Migration 0134 is assigned by the
-   orchestrator; reserved predecessors must land before the sequence check is
-   green.
-2. **Prioritize the resume proposal using the live baseline.** Full setup takes
-   about two minutes on every observed wake. Preserve existing checkout and
-   preparation on eligible same-generation resumes, with fresh authority and
-   integrity checks; coordinate the hook with RU/HU. Persist closed stage spans
-   to identify the expensive substeps before changing their guarantees. A
-   future `next_attempt_at` becoming due
-   emits no PostgreSQL notification: provider observations and error backoff
-   can still wait for polling. A bounded due-time scheduler or verified Boat
-   webhook hint is a next scheduling candidate; preserve retry deadlines and
-   RU/HU's decision semantics.
-3. **Train template hydration on a disposable copy.** If verification reads
-   dominate, train the supported startup playbook with real startup, wait for
-   full hydration, then compare new forks. Do not mutate the owner's template
-   or skip hash reads. Shipping a different base/template remains a separate
-   orchestrator-controlled change.
-4. **Consider a bounded pool only if measured provider restore dominates.**
-   Proposed Alpha-only default is disabled, at most one unassigned VM per
-   approved template and a global hard cap. A design must pin runtime, base,
-   template and organization, atomically claim once, admit no user secrets
-   before assignment, obtain fresh workspace/engine proofs after assignment,
-   count idle compute against an explicit shared staff budget, expire and
-   delete unused VMs, and drain on template/runtime change. Warm cost is
-   `pool size × live hourly rate × hours`, even with zero workspace demand.
-   No pool/migration/provider allocation is added by this change. A pool cannot
-   reuse a stopped user's mutable filesystem as a generic fork.
-5. **Optimize verified startup only with the responsible owners.** Immutable
-   image identity may support reusing measured artifact information in a
-   root-controlled cache; a matching digest string alone is insufficient.
-   v4 proofs bind current boot, supervisor session, tree, mount/containment and
-   launch identity. Fresh runtime checks and proof consumption remain required
-   across restore. User-writable cache state, old launch proofs, or old actor
-   tokens must never replace them. Parallelize only independent preparation,
-   then keep a verification barrier before material release and engine start.
-   HU owns in-place update and RU owns runtime selection on wake.
-6. **Client intent work belongs with IW2.** Early account/device and status
-   preparation may overlap wake. Actor admission still needs the exact current
-   generation and ready engine; passive hover/read must not become an implicit
-   compute authorization. Retain #330's CONNECTED-first replay order and exact
-   owner/workspace/generation keys.
+An early probe discarded rejection reasons and produced excessive retries.
+A later probe incorrectly treated base-ready as installed-runtime-ready, then
+failed because the pinned Node path did not exist. The revised runner invokes
+the same protected installer on the disposable child before Node, records that
+interval separately and retains allowlisted diagnostics. No successful follow-up
+or attester timing was supplied. Compute cleanup was observed; storage upload/
+erasure receipts remained pending and must remain in the private cleanup ledger.
 
-Neither target is established by the current evidence. The before baseline
-establishes a dominant setup cost; after measurements remain necessary. True stopped-to-usable
-in 1–2 seconds may require a different provider capability or a deliberate
-keep-running policy; keeping a VM warm has a cost and does not count as a
-measured stopped-VM wake. Escalate that tradeoff with numbers, not an altered
-definition of “ready.”
+Current probe attribution brackets allowlisted systemd observations with
+operator request start/end, then translates same-VM monotonic differences to
+intervals. `firstUnitStartFromCycleMs` is the earliest observed allowlisted unit,
+not provider boot time. Provider-running is an observation, not hypervisor start.
+Critical-chain/blame retain systemd semantics; early negative intervals are not
+clamped into fresh restore work. Missing evidence stays missing. Raw journals,
+argv/environments and unknown unit details do not leave the VM.
 
-## Local workspace impact
+## Follow-up order and acceptance
 
-Personal Local and organization-owned local workspaces do not use these
-cloud workers or Alpha measurement scripts. No local engine, permissions,
-filesystem, owner selection or renderer behavior changes.
+1. Collect stopped-wake/fresh-create traces on the exact adopted runtime, with
+   separate first/reclaimed claims, closed stages and Mac paint/first text.
+2. Optimize the measured dominant stage. Keep hydration/persistent-bind and
+   restored-tree barriers. Hydration training requires a separately authorized
+   disposable template copy and a newly qualified template/base.
+3. If restore dominates cold create, evaluate the bounded accounted
+   [warm pool](warm-pool.md). An unassigned prebooted slot cannot represent a
+   stopped user's mutable filesystem. Still-running retention has an explicit
+   compute cost and is a reattach metric, not stopped wake.
+4. Measure registration/attach/relay round trips before replacing transport.
+   VM outbox, multiplexed device stream, Mac send ACKs and incremental durable
+   feed are separate reliability/latency slices in that same follow-up guide.
 
-## Cloud workspace impact
-
-Notifications carry no workspace identity or authority. Cloud execution keeps
-organization/workspace/generation claim fences and all attestation/admission
-checks. Measurement mutations use a designated staff test principal and a
-new `zeros-v2-test-perf-*` workspace/VM only. Historical reads may inspect an
-explicitly selected Alpha workspace; they never mutate it. Owner switching,
-concurrent clients and agent continuity still need the Mac verification in
-the runbook.
-
-### Restore-to-unit attribution
-
-The disposable VM runner reads `systemd-analyze critical-chain zeros-boot.service`
-and `systemd-analyze blame`, then `systemctl show` for the allowlisted dependency
-units. Only closed unit names, numeric activation/duration values, state enums and
-counts of omitted unknown units leave the guest. No raw unit descriptions, journal
-messages, paths or command text enter the journal. Each read is bounded; unavailable
-analysis stays missing rather than becoming zero.
-
-`bootstrapAnchor.unitStartsFromCycleMs` translates each observed process start
-into an interval in the operator's create/wake clock using the request's start/end
-bracket and a same-VM monotonic delta. `firstUnitStartFromCycleMs` refers to the
-earliest **observed allowlisted** process start, which can precede zeros-boot.
-The separate offset after `providerReadyObservedMs` is relative to when the runner
-first observed provider running, not an undocumented provider boot timestamp.
-Critical-chain `@` values and blame durations retain systemd's own semantics and
-are not subtracted from the operator clock. Early units may precede overlay
-restoration; negative intervals are not clamped or counted as fresh restore work.
-This brackets the pre-zeros interval without pretending it is all hydration or
-all provider time. The orchestrator must collect a new sample to attribute it.
+Regression/qualification must preserve dirty Code/Design/chats, owner commits,
+failed-hook retry and all identity/mount/settings invalidations; obtain fresh
+proofs on hits, fallbacks, target and rollback; fence concurrent wakes and Stop;
+and retain Personal Local, org-Local, denied roles, second device and A→B→A.
+Linux fake clocks/storage fixtures prove behavior, not a live latency budget or
+signed Mac continuity. No pool is enabled and neither usable endpoint is met
+by the current evidence.

@@ -3,7 +3,7 @@ const harness = vi.hoisted(() => ({
   effects: [] as Array<() => void | (() => void)>,
   list: vi.fn(),
 }));
-vi.mock("../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => false }));
+vi.mock("../../features/team/cloud-workspace-account-access", () => ({ useCloudWorkspaceAccountAccess: () => false, hasCloudWorkspaceAccountAccess: () => false }));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
   useEffect: (effect: () => void | (() => void)) =>
@@ -134,7 +134,7 @@ it("catalog removal prunes unmounted live/archive collections and preserves Loca
   );
   harness.effects.length = 0;
   CloudWorkspaceLifecycle();
-  const off = harness.effects[0](); // Real catalog -> consumer publication path.
+  const off = harness.effects.find(effect => effect.toString().includes("clearCloudWorkspaceCatalog"))!(); // Real catalog -> consumer publication path.
   try {
     request.mockClear();
     harness.list.mockResolvedValue([]);

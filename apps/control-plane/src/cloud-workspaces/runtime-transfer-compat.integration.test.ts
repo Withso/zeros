@@ -4,7 +4,7 @@ import { afterAll,beforeAll,beforeEach,describe,expect,it } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { withSystemTx } from "../db.js";
 import { seedReadyCloudWorkspace,type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
-import { copyGenerationPins,loadGenerationSource } from "./generation-pins.js";
+import { copyGenerationPins } from "./generation-pins.js";
 
 (process.env.TEST_DATABASE_URL?describe:describe.skip)("runtime transfer schema preserves old shapes",()=>{
   let pool:pg.Pool,fixture:ReadyCloudWorkspaceFixture;
@@ -25,10 +25,9 @@ import { copyGenerationPins,loadGenerationSource } from "./generation-pins.js";
   ])("retains the original executor rule from $old",async test=>{
     const scope={workspaceId:fixture.workspaceId,organizationId:fixture.organizationId,generation:1};
     await withSystemTx(pool,async tx=>{
-      const saved=await loadGenerationSource(tx,scope);
       const connection=(await tx.query<{provider_connection_id:string}>("SELECT provider_connection_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1",[fixture.workspaceId])).rows[0]!;
       await copyGenerationPins(tx,{...scope,sourceGeneration:1,targetGeneration:2,actorUserId:fixture.userId,
-        providerConnectionId:connection.provider_connection_id,legacyProfile:saved.profile,qualificationMode:"full"});
+        providerConnectionId:connection.provider_connection_id,qualificationMode:"full"});
     });
     const drain=randomUUID(),provision=randomUUID();
     for(const [id,generation,operation] of [[drain,1,'stop'],[provision,2,'create']] as const)

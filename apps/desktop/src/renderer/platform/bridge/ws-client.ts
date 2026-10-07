@@ -649,6 +649,26 @@ export class RuntimeClient {
     return runtimeExecutionIdentity(this.connectionTarget);
   }
 
+  private engineCapabilities = new Set<string>();
+  supportsEngineCapability(capability: string): boolean {
+    return this._status === "connected" && this.isOpen() && this.engineCapabilities.has(capability);
+  }
+
+  /** Passive observations never enter the reconnect queue or start admission.
+   * Check and send in the same synchronous turn at the socket owner. */
+  requestConnected<T extends BridgeMessage = BridgeMessage>(
+    msg: Partial<BridgeMessage> & { type: string },
+    timeoutOrOptions: number | RequestOptions = 5000,
+  ): Promise<T> {
+    const opts = normalizeRequestOptions(timeoutOrOptions);
+    if (this._disposed || this._status !== "connected" || !this.isOpen())
+      return Promise.reject(new Error("Cloud workspace is disconnected"));
+    if (this.connectionTarget.kind === "cloud" &&
+        (this.pendingRequests.size >= CLOUD_RPC_IN_FLIGHT || this.queuedRequests.length))
+      return Promise.reject(new Error("Cloud workspace transport is busy"));
+    return this.sendRequest<T>(msg, opts.timeoutMs, opts.signal);
+  }
+
   /** Whether the engine is connected and ready */
   private _engineConnected = false;
   private handshakeReady = false;
@@ -1227,6 +1247,11 @@ export class RuntimeClient {
    *  passes a parsed object; the relay channel delivers an already-decrypted
    *  app message object. */
   private handleIncoming(msg: BridgeMessage): void {
+    if (msg.type === "ENGINE_READY") {
+      const capabilities = (msg as unknown as { capabilities?: unknown }).capabilities;
+      this.engineCapabilities = new Set(Array.isArray(capabilities) && capabilities.length <= 64
+        ? capabilities.filter((value): value is string => typeof value === "string" && value.length <= 128) : []);
+    }
     // ENGINE_READY confirms the engine is fully initialized.
     if (msg.type === "ENGINE_READY" && (this.connectionTarget.kind === "local" || this.handshakeReady)) {
       this._engineConnected = true;
@@ -1404,6 +1429,7 @@ export class RuntimeClient {
 
   private setStatus(status: ConnectionStatus) {
     this._status = status;
+    if (status === "disconnected") this.engineCapabilities.clear();
     for (const cb of this.statusListeners) cb(status);
   }
 

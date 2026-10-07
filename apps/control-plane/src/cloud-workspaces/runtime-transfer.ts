@@ -720,7 +720,7 @@ export class DatabaseCloudRuntimeTransitionService {
         "SELECT coalesce(max(generation),0)+1 AS generation FROM cloud_workspace_generations WHERE workspace_id=$1", [input.workspaceId])).rows[0]!.generation;
       const copy = { workspaceId:input.workspaceId,organizationId:input.organizationId,sourceGeneration:input.generation,
         targetGeneration:candidateGeneration,actorUserId:source.owner_user_id };
-      await copyGenerationPins(tx,{ ...copy,providerConnectionId:source.provider_connection_id,providerConnectionVersion:source.provider_connection_version,legacyProfile:saved.profile,
+      await copyGenerationPins(tx,{ ...copy,providerConnectionId:source.provider_connection_id,providerConnectionVersion:source.provider_connection_version,
         qualificationMode:this.options.qualificationMode,runtimeUpgrade:selected.pin });
       const settings = await cloneDatabaseCloudWorkspaceSettingsForRollback(tx,{ ...copy,
         secretEncryptionKeys:this.options.secretEncryptionKeys ?? {},

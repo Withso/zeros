@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useInternalFeatureActive } from "../settings/internal-features";
+import { useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { cloudWorkspaceDetails, refreshCloudWorkspace } from "../../state/cloud-workspace-catalog";
 import { cloudRuntimeUpgradeAvailability, cloudRuntimeUpgradeAvailabilityKey, loadCloudRuntimeUpgradeAvailability } from "../../state/cloud-runtime-upgrade";
@@ -13,8 +13,8 @@ export function cloudRuntimeUpgradeComposerContext(folder: string, active: boole
 /** The discovery workstream can supply its stable reason without sharing its
  * transport. Qualified newer runtimes supply the fallback independently. */
 export function useCloudRuntimeUpgradeLink(folder: string | undefined, active: boolean, runtimeUpgradeRequiredForAgents = false) {
-  const internal = useInternalFeatureActive("cloudComputerV2");
   const target = parseCloudWorkspaceKey(folder);
+  const internal = useCloudWorkspaceAccountAccess(target?.organizationId);
   const enabled = internal && active && target !== null;
   const details = useCachedRead(cloudWorkspaceDetails, enabled ? cloudWorkspaceKey(target!) : null,
     key => refreshCloudWorkspace(parseCloudWorkspaceKey(key)!), { enabled, maxAgeMs: 10_000 });

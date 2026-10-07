@@ -60,8 +60,20 @@ describe("cloud synchronous Git probes", () => {
     boundary.configuration.mockImplementation(() => { throw new Error("invalid deployment marker"); });
     const { assertDesignFilesNotIgnored } = await import("../../design/gitignore");
     const { ensureLocalSettingsIgnored } = await import("../../settings/personal-repo");
-    expect(() => assertDesignFilesNotIgnored(root, ["Design/design.toml"])).toThrow("invalid deployment marker");
-    expect(() => ensureLocalSettingsIgnored(root)).toThrow("invalid deployment marker");
+    expect(() => assertDesignFilesNotIgnored(root, ["Design/design.toml"])).toThrow(expect.objectContaining({
+      name: "GitError",
+      code: "GIT_COMMAND_FAILED",
+      message: "Managed Git check_ignore failed (command_failed).",
+      context: { operation: "check_ignore", reason: "command_failed" },
+      cause: undefined,
+    }));
+    expect(() => ensureLocalSettingsIgnored(root)).toThrow(expect.objectContaining({
+      name: "GitError",
+      code: "GIT_COMMAND_FAILED",
+      message: "Managed Git rev_parse failed (command_failed).",
+      context: { operation: "rev_parse", reason: "command_failed" },
+      cause: undefined,
+    }));
     expect(boundary.calls).not.toHaveBeenCalled();
   });
 });

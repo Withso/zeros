@@ -28,6 +28,7 @@ import { constants as fsConstants, type Dirent } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { currentCloudFilePolicy } from "./cloud-file-policy";
+import { publishCloudWorkspacePath } from "./cloud-workspace-ownership";
 import { createAttachmentTemporaryDirectory } from "./attachment-temporary-directory";
 import { cloudWorkspacePublicationPath } from "../agents/containment/cloud-workspace-paths";
 import { cleanupLegacyAttachmentStaging } from "./attachment-legacy-staging";
@@ -200,6 +201,7 @@ async function scaffoldContextGraph(
     }
     if (policy) created = policy.createDirectory(path.relative(workspaceRoot, dir));
     else created = (await fs.mkdir(dir, { recursive: true })) !== undefined;
+    publishCloudWorkspacePath(dir);
     if (!(await isConfined(dir, workspaceRoot))) {
       return { ok: false, created, error: "graph escapes workspace" };
     }
@@ -564,8 +566,6 @@ async function atomicWriteAttachment(
       await handle.writeFile(chunk);
       offset += chunk.length;
     }
-    await handle.close();
-    handle = null;
     if (!Buffer.isBuffer(contents)) await contents.verify?.();
     try {
       await fs.rename(temporaryPath, publicationPath);
@@ -585,6 +585,7 @@ async function atomicWriteAttachment(
       await fs.rm(publicationPath, { recursive: true, force: true });
       await fs.rename(temporaryPath, publicationPath);
     }
+    publishCloudWorkspacePath(publicationPath, handle.fd);
   } finally {
     await handle?.close().catch(() => {});
     await temporary.dispose().catch(() => {});
@@ -677,6 +678,7 @@ async function stageAttachmentContents(
       return { ok: false, error: "path escapes workspace" };
     }
     await fs.mkdir(dir, { recursive: true });
+    publishCloudWorkspacePath(dir);
     if (!(await isConfined(dir, workspaceRoot))) {
       return { ok: false, error: "path escapes workspace" };
     }

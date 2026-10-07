@@ -2,7 +2,7 @@ import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ensureUser } from "../auth.js";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import { DatabaseCloudWorkspaceCollaborationService } from "./actors.js";
 import { DatabaseCloudWorkspaceActorSessionService } from "./actor-sessions.js";
@@ -25,8 +25,7 @@ suite("cloud GitHub single-operation writes", () => {
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
     vi.clearAllMocks();
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-    await runMigrations(pool); fixture = await seedReadyCloudWorkspace(pool);
+    await resetMigratedTestDatabase(pool); fixture = await seedReadyCloudWorkspace(pool);
     await new DatabaseCloudWorkspaceCollaborationService(pool).setSharing({ workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
       actorUserId: fixture.userId, sharingMode: "organization", expectedRevision: 1 });
     const user = await ensureUser(pool, { provider: "workos", providerSubject: `workos|${fixture.userId}`, email: `durable-${fixture.userId}@example.test`, displayName: "Owner",

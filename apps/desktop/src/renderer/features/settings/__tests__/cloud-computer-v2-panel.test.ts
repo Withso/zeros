@@ -4,7 +4,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudComputerV2State } from "@zeros/protocol/cloud-computer-v2";
 import {
   computerBuild,
-  computerBuildId,
   computerOrg,
   computerState,
   computerUser,
@@ -58,16 +57,6 @@ vi.mock("../../../state/use-cached-read", () => ({
     state.reads.push({ key, enabled: options.enabled });
     let data: unknown;
     if (cache === cloudComputerV2Cache) data = state.snapshot;
-    else if (cache === cloudComputerCache)
-      data = {
-        revision: 0,
-        document: { repositories: [], installScript: "", timeoutSeconds: 30 },
-        history: [],
-        resources: { cpuMillicores: 4000, memoryMiB: 8192, storageMiB: 20480 },
-        canManage: true,
-        configured: true,
-        draftVersion: 0,
-      };
     else if (cache === cloudComputerV2BuildCache)
       data = state.snapshot?.latestBuild;
     else if (cache === cloudComputerV2LogsCache)
@@ -81,14 +70,12 @@ vi.mock("../../../state/use-cached-read", () => ({
     };
   },
 }));
-import { cloudComputerCache } from "../cloud-computer-client";
 import {
   cloudComputerV2Cache,
   cloudComputerV2BuildCache,
   cloudComputerV2LogsCache,
 } from "../cloud-computer-v2-client";
 import { CloudComputerV2Panel } from "../cloud-computer-v2-panel";
-import { CloudComputerPanel } from "../cloud-computer-panel";
 
 const render = (active = true) =>
   renderToStaticMarkup(
@@ -296,30 +283,20 @@ describe("Cloud Computer v2 settings states", () => {
     expect(state.reads.every((row) => !row.enabled)).toBe(true);
   });
 
-  it("requires the effective staff gate and a collaborative org before mounting any v2 read", () => {
+  it("uses v2 for nonstaff organization members even with the retired rollout flag off", () => {
     for (const role of [null, "support_admin"]) {
       state.role = role;
+      state.feature = false;
       state.reads = [];
-      expect(render()).toBe("");
-      expect(state.reads).toEqual([]);
+      expect(render()).toContain("Build computer");
+      expect(state.reads.some((row) => row.enabled)).toBe(true);
     }
-    state.role = "developer";
-    state.feature = false;
-    expect(render()).toBe("");
-    state.feature = true;
-    state.personal = true;
-    expect(render()).toBe("");
   });
 
-  it("preserves the legacy panel when the internal feature is off", () => {
-    state.feature = false;
-    const html = renderToStaticMarkup(createElement(CloudComputerPanel));
-    expect(html).toContain("System and runtime files are read-only");
-    expect(html).toContain("Each member must have their own GitHub access");
-    expect(html).not.toContain("Configure with an agent");
-    expect(
-      state.reads.filter((row) => row.enabled).map((row) => row.key),
-    ).toEqual([JSON.stringify([computerUser, computerOrg])]);
-    expect(html).not.toContain(computerBuildId);
+  it("does not mount Cloud Computer reads for Local ownership", () => {
+    state.personal = true;
+    expect(render()).toBe("");
+    expect(state.reads).toEqual([]);
   });
+
 });

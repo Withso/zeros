@@ -2,36 +2,71 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
+import type { Me, OrganizationSummary } from "../../features/team/control-plane";
 import type { WorkspaceAvailability } from "../workbench/tab-status-model";
 import type { AgentSessionState } from "../../features/agent/use-agent-session";
-const state = vi.hoisted(() => ({ enabled: true, workspace: undefined as CloudWorkspaceDocument | undefined,
+const state = vi.hoisted(() => ({ userId: "nonstaff-member" as string | null, cloudEntitled: true, availabilityReads: [] as boolean[], workspace: undefined as CloudWorkspaceDocument | undefined,
   availability: { cloud: true, state: "ready", connection: "connected", since: 0 } as WorkspaceAvailability }));
-vi.mock("../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => state.enabled, isInternalFeatureActive: () => state.enabled }));
+function accountSnapshot(): Me | null {
+  if (!state.userId) return null;
+  const organizations = [
+    { id: "11111111-1111-4111-8111-111111111111", isPersonal: false, role: "member",
+      workspaceCapabilities: { local: true, cloud: state.cloudEntitled } },
+    { id: "99999999-9999-4999-8999-999999999999", isPersonal: false, role: "member",
+      workspaceCapabilities: { local: true, cloud: true } },
+  ] as OrganizationSummary[];
+  return {
+    user: { id: state.userId, email: "fixture@example.test", displayName: null, staffRole: null },
+    organizations, teams: organizations,
+  };
+}
+vi.mock("../../features/team/team-store", () => ({
+  getOrganizationStoreGeneration: () => 0,
+  getTeamStoreState: () => ({ me: accountSnapshot() }), useTeams: () => ({ me: accountSnapshot() }),
+}));
 vi.mock("../../state/cloud-workspace-catalog", () => ({
   cloudCatalogGeneration: () => 0, subscribeCloudWorkspaces: () => () => {},
   cloudWorkspaceDocument: () => state.workspace,
   canReadCloudWorkspace: (doc: CloudWorkspaceDocument | undefined) => !!doc && doc.deletedAt === null && !["deleting", "deleted"].includes(doc.status),
 }));
-vi.mock("../../state/workbench-availability", () => ({ useWorkbenchAvailability: () => ({ availability: state.availability }) }));
+vi.mock("../../state/workbench-availability", () => ({ useWorkbenchAvailability: (_folder: string, active: boolean) => {
+  state.availabilityReads.push(active);
+  return { availability: state.availability };
+} }));
 import { CloudWorkspaceStatusRow } from "../conversation/cloud-workspace-restart-controls";
 import { cloudWorkspaceHasRunningWork } from "../conversation/cloud-workspace-running-work";
 import { TooltipProvider } from "../../shared/ui/primitives";
 
 const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 beforeEach(() => {
-  state.enabled = true;
+  state.userId = "nonstaff-member";
+  state.cloudEntitled = true;
+  state.availabilityReads = [];
   state.workspace = { id: "22222222-2222-4222-8222-222222222222", organizationId: "11111111-1111-4111-8111-111111111111", placement: "cloud",
     status: "ready", deletedAt: null, capabilities: { canWrite: true }, generation: { number: 1 } } as CloudWorkspaceDocument;
   state.availability = { cloud: true, state: "ready", connection: "connected", since: Date.now() };
 });
-function render(path = folder) { return renderToStaticMarkup(createElement(TooltipProvider, { children: createElement(CloudWorkspaceStatusRow, { folder: path, active: true }) })); }
+function render(path = folder, active = true) { return renderToStaticMarkup(createElement(TooltipProvider, { children: createElement(CloudWorkspaceStatusRow, { folder: path, active }) })); }
 describe("cloud Restart status controls", () => {
   it.each(["/local/personal", "/local/organization"])("does not add controls or status to %s", path => {
     expect(render(path)).toBe("");
   });
-  it.each(["archived", "archiving", "deleting", "deleted"])("hides the controls for %s", status => {
+  it.each(["deleting", "deleted"])("hides the controls for %s", status => {
     state.workspace!.status = status;
     expect(render()).toBe("");
+  });
+  it("keeps archived availability visible without offering Restart", () => {
+    state.workspace!.status = "archived";
+    state.availability.state = "archived";
+    const html = render();
+    expect(html).toContain("Archived");
+    expect(html).not.toContain('aria-label="Restart workspace"');
+  });
+  it("keeps retired workspace status readable without offering Restart", () => {
+    state.workspace!.capabilities.startUnavailableReason = "cloud_workspace_v2_required";
+    const html = render();
+    expect(html).toContain('aria-label="Cloud workspace status"');
+    expect(html).not.toContain('aria-label="Restart workspace"');
   });
   it("keeps permission-denied Restart visible and disabled with an explanatory tooltip", () => {
     state.workspace!.capabilities.canWrite = false;
@@ -39,11 +74,20 @@ describe("cloud Restart status controls", () => {
     expect(html).toContain('aria-label="Restart workspace" disabled=""');
     expect(html).toContain("Running");
   });
-  it("requires the staff feature gate and the exact cloud owner", () => {
-    state.enabled = false;
+  it("requires current account access and the exact cloud owner", () => {
+    state.cloudEntitled = false;
     expect(render()).toBe("");
-    state.enabled = true;
+    state.cloudEntitled = true;
     expect(render(folder.replace("22222222", "33333333"))).toBe("");
+  });
+  it("keeps status and availability reads inert after sign-out with a retained writable document", () => {
+    state.userId = null;
+    expect(render()).toBe("");
+    expect(state.availabilityReads).toEqual([false]);
+  });
+  it("retains the confirmed status while a hidden surface stops availability work", () => {
+    expect(render(folder, false)).toContain("Running");
+    expect(state.availabilityReads).toEqual([false]);
   });
   it.each([["ready", "Running"], ["busy", "Running"], ["waking", "Starting"], ["setting_up", "Starting"],
     ["stopped", "Sleeping"], ["stopping", "Stopping"], ["failed", "Needs attention"]])("renders %s through shared availability", (status, label) => {

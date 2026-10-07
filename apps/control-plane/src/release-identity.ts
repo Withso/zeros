@@ -9,6 +9,7 @@ import { isNewerExpandMigration } from "./migration-phase.js";
 import type { CloudWorkspaceReleaseHealthReader } from "./cloud-workspaces/health.js";
 import { activeAlphaDeletionReadinessException } from "./cloud-workspaces/alpha-deletion-readiness.js";
 import { readRuntimeReleaseIdentity } from "./cloud-workspaces/runtime-publication-routes.js";
+import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./cloud-workspaces/engine-protocol-version.js";
 
 type LedgerRow = { name: string; checksum: string | null; phase?: string | null };
 type Dependencies = {
@@ -22,15 +23,18 @@ type Dependencies = {
 };
 const sha = (value: string | undefined | null) => /^[a-f0-9]{40}$/.test(value ?? "") ? value! : null;
 const digest = (text: string | Buffer) => createHash("sha256").update(text).digest("hex");
-export function qualifiedWorkerMatrix(rows: Array<{ credential_kind: string; runtime_contract_sha256: string; profile: string; enabled: boolean; mcp_qualified: boolean }>) {
+export function qualifiedWorkerMatrix(rows: Array<{ credential_kind: string; runtime_id?: string; base_compatibility_id?: string; profile: string; enabled: boolean; mcp_qualified: boolean }>) {
   if (rows.length > 100) return false;
-  const required = ["claude-setup-token", "codex-chatgpt", "cursor-api-key"], contracts = new Map<string, Set<string>>();
+  const required = ["claude-setup-token", "codex-chatgpt", "cursor-api-key"], runtimes = new Map<string, Set<string>>();
   for (const row of rows) {
-    if (!row.enabled || !row.mcp_qualified || row.profile !== "zeros-cloud-worker-v3" || !/^[a-f0-9]{64}$/.test(row.runtime_contract_sha256) || !required.includes(row.credential_kind)) continue;
-    const kinds = contracts.get(row.runtime_contract_sha256) ?? new Set<string>();
-    kinds.add(row.credential_kind); contracts.set(row.runtime_contract_sha256, kinds);
+    if (!row.enabled || !row.mcp_qualified || row.profile !== "zeros-cloud-worker-v4" ||
+        !/^r1-[a-f0-9]{64}$/.test(row.runtime_id ?? "") || !/^bc1-[a-f0-9]{64}$/.test(row.base_compatibility_id ?? "") ||
+        !required.includes(row.credential_kind)) continue;
+    const identity = `${row.runtime_id}/${row.base_compatibility_id}`;
+    const kinds = runtimes.get(identity) ?? new Set<string>();
+    kinds.add(row.credential_kind); runtimes.set(identity, kinds);
   }
-  return [...contracts.values()].some(kinds => required.every(kind => kinds.has(kind)));
+  return [...runtimes.values()].some(kinds => required.every(kind => kinds.has(kind)));
 }
 
 async function packagedManifest(): Promise<LedgerRow[]> {
@@ -98,9 +102,7 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
     const selected = configured ? { provider: configured.provider, imageRef: configured.imageRef, sourceSha: configured.sourceCommit,
       architecture: configured.architecture, storageMiB: configured.storageMiB } : config.selectedCloudWorker;
     const imageRef = selected?.imageRef;
-    const validImage = selected?.provider === "boat"
-      ? /^boat:[a-z0-9][a-z0-9-]{0,62}@sha256:[a-f0-9]{64}$/.test(imageRef ?? "")
-      : selected?.provider === "daytona" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(imageRef ?? "");
+    const validImage = selected?.provider === "boat" && /^boat:[a-z0-9][a-z0-9-]{0,62}@sha256:[a-f0-9]{64}$/.test(imageRef ?? "");
     const worker = selected && typeof imageRef === "string" && validImage && sha(selected.sourceSha) &&
       ["linux/amd64", "linux/arm64"].includes(selected.architecture) && Number.isSafeInteger(selected.storageMiB) && selected.storageMiB > 0 ? {
       provider: selected.provider, imageRef, sourceSha: sha(selected.sourceSha),
@@ -115,10 +117,20 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
         // admission still enforces its exact contract and MCP qualification.
         workerQualified = deps.readWorkerQualified ? await deps.readWorkerQualified(worker.provider, worker.imageRef) :
           await withSystemTx(pool, async tx => qualifiedWorkerMatrix((await tx.query<Parameters<typeof qualifiedWorkerMatrix>[0][number]>(
-            `SELECT credential_kind,runtime_contract_sha256,profile,enabled,mcp_qualified FROM cloud_agent_runtime_qualifications
-             WHERE provider=$1 AND image_ref=$2 AND enabled
-               AND profile='zeros-cloud-worker-v3' AND mcp_qualified LIMIT 101`,
-            [worker.provider, worker.imageRef],
+            `SELECT qualification.credential_kind,qualification.runtime_id,qualification.base_compatibility_id,
+                    qualification.profile,qualification.enabled,qualification.mcp_qualified
+             FROM cloud_runtime_qualifications qualification
+             JOIN cloud_runtime_bundles bundle ON bundle.runtime_id=qualification.runtime_id AND bundle.revoked_at IS NULL
+               AND bundle.engine_protocol_version=$3
+             JOIN cloud_runtime_base_images base USING(base_compatibility_id)
+             JOIN cloud_runtime_base_contracts contract USING(base_compatibility_id)
+             WHERE base.provider=$1 AND base.image_ref=$2 AND base.revoked_at IS NULL AND contract.revoked_at IS NULL
+               AND qualification.profile='zeros-cloud-worker-v4' AND qualification.enabled AND qualification.mcp_qualified
+               AND qualification.revoked_at IS NULL AND qualification.evidence->>'mode'='full'
+               AND EXISTS (SELECT 1 FROM cloud_runtime_channel_releases release WHERE release.runtime_id=bundle.runtime_id
+                 AND release.channel='alpha' AND release.confirmed_at IS NOT NULL AND release.revoked_at IS NULL)
+             LIMIT 101`,
+            [worker.provider, worker.imageRef, CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION],
           )).rows), { consistentRead: true });
       } catch { /* Missing/unreadable approval must not authorize publication. */ }
     }
@@ -126,7 +138,7 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
     if (config.cloudRuntimePublication && !maintenance && migrations.state === "current") {
       try {
         runtimeV4 = await (deps.readRuntimeIdentity ? deps.readRuntimeIdentity() :
-          readRuntimeReleaseIdentity(pool, config.cloudWorkspaceNewRuntimeProfile ?? "legacy"));
+          readRuntimeReleaseIdentity(pool, config.cloudWorkspaceNewRuntimeProfile ?? "v4"));
       } catch { /* Registry visibility never changes v1 readiness or leaks diagnostics. */ }
     }
     return { version: 1 as const, ready: !!sourceSha && !maintenance && migrations.state === "current" && cloud.ready && (!configured || !!worker),

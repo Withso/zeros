@@ -19,7 +19,8 @@ vi.mock("../cloud-mcp",async original=>{
 });
 vi.mock("../containment/cloud-runtime-root.mjs",async original=>{
   const actual=await original<typeof import("../containment/cloud-runtime-root.mjs")>();
-  return {...actual,resolveCloudRuntime:vi.fn(actual.resolveCloudRuntime)};
+  const {testCloudRuntime}=await import("./helpers/test-cloud-runtime");
+  return {...actual,resolveCloudRuntime:vi.fn(testCloudRuntime)};
 });
 afterEach(()=>vi.resetAllMocks());
 function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="cursor-api-key", computerToolsVersion?:1,environment?:CloudComputerExecutionEnvironment){
@@ -39,9 +40,18 @@ function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="c
   const factory=createCloudAgentExecutionFactory({request,supervisor:{onRetirementFailure:vi.fn()}});
   const input={admission:{executionId:randomUUID(),delegationId:randomUUID(),provider,model:"grok-4.6",
     source:{kind:"session" as const,actorSessionId:randomUUID()}},conversationId:randomUUID(),workload,cwd:"/srv/zeros/workspace",signal:controller.signal};
-  return {factory,input,workload,coordinator,controller};
+  return {factory,input,workload,coordinator,controller,request};
 }
 describe("admitted native cloud diagnostic",()=>{
+  it.each(["validation", "admission", "containment"] as const)("keeps a safe %s preparation cause after cleanup", async stage => {
+    const { factory, input, request, workload } = fixture();
+    if (stage === "validation") vi.mocked(resolveCloudRuntime).mockReturnValue({ ...resolveCloudRuntime(), profile: "v3" } as unknown as ReturnType<typeof resolveCloudRuntime>);
+    else if (stage === "admission") request.mockRejectedValueOnce(new Error("private admission diagnostic"));
+    else vi.mocked(CloudNativeBoundary.prepare).mockRejectedValueOnce(new Error("private containment diagnostic"));
+    await expect(factory.prepare(input)).rejects.toMatchObject({ code: `cloud_${stage}_rejected` });
+    expect(workload.stopAndProve).toHaveBeenCalled();
+    if (stage === "validation") expect(request).not.toHaveBeenCalled();
+  });
   it("starts a v4 basic turn when optional customization is unqualified and reports the restriction", async () => {
     vi.mocked(resolveCloudRuntime).mockReturnValue({ ...resolveCloudRuntime(), profile: "v4" } as ReturnType<typeof resolveCloudRuntime>);
     vi.mocked(readCloudRepositoryMcp).mockResolvedValueOnce([]);
@@ -86,9 +96,11 @@ describe("admitted native cloud diagnostic",()=>{
       name:"cloud-computer",transport:"http",url:"http://127.0.0.1:1234/mcp",
     }]}})).rejects.toThrow("private execution admission");
   });
-  it("requires v4 even if an older local runtime receives the capability",async()=>{
-    const {factory,input,workload}=fixture("cursor","cursor-api-key",1);
-    await expect(factory.prepare(input)).rejects.toThrow("Update the cloud runtime");
+  it.each(["v1","v2","v3"])("refuses %s before requesting agent credentials",async profile=>{
+    vi.mocked(resolveCloudRuntime).mockReturnValue({...resolveCloudRuntime(),profile} as ReturnType<typeof resolveCloudRuntime>);
+    const {factory,input,workload,request}=fixture();
+    await expect(factory.prepare(input)).rejects.toThrow("qualified v4");
+    expect(request).not.toHaveBeenCalled();
     expect(workload.stopAndProve).toHaveBeenCalled();
   });
   it("retires the computer endpoint through gateway Stop even if native cancellation hangs",async()=>{
@@ -143,7 +155,7 @@ describe("admitted native cloud diagnostic",()=>{
     const result=await factory.prepare(input);
     try {
       expect(result.boundary.status).toHaveProperty("browser",{
-        version:1,provider,runtimeProfile:"zeros-cloud-worker-v3",credentialKind:kind,state:"unavailable",reason,
+        version:1,provider,runtimeProfile:"zeros-cloud-worker-v4",credentialKind:kind,state:"unavailable",reason,
       });
       expect(result.boundary.status.state).toBe("ready");
     } finally { await result.boundary.stopAndProve(); }
@@ -152,7 +164,7 @@ describe("admitted native cloud diagnostic",()=>{
     const {factory,input,workload}=fixture();
     const result=await factory.prepare({...input,...(design?{productTools:{env:{},servers:[{name:"design-draft",transport:"http" as const,url:"http://127.0.0.1:1234/mcp"}]}}:{})});
     try{
-      expect(result.boundary.status.cloudExecution).toEqual({version:1,profile:"zeros-cloud-native-v1",runtimeProfile:"zeros-cloud-worker-v3",provider:"cursor",designApi:design?"admitted":"unavailable"});
+      expect(result.boundary.status.cloudExecution).toEqual({version:1,profile:"zeros-cloud-native-v1",runtimeProfile:"zeros-cloud-worker-v4",provider:"cursor",designApi:design?"admitted":"unavailable"});
       expect(cloudProviderExecution(result.boundary)).not.toBeNull();
       expect(cloudProviderExecution(workload)).toBeNull();
       expect(workload.status).not.toHaveProperty("cloudExecution");

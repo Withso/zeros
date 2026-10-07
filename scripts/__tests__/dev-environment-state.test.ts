@@ -18,6 +18,20 @@ function fixture() {
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
 describe("persistent development workspace ownership", () => {
+  it("opens receipts without a retired provider key and preserves historical receipt fields", () => {
+    const f = fixture(), workspace = ensureWorkspace(f);
+    const receipt = readPrivateJson(workspace.file);
+    delete receipt.keys.provider;
+    writePrivateJson(workspace.file, receipt);
+    expect(ensureWorkspace(f).state.instanceId).toBe(workspace.state.instanceId);
+
+    receipt.keys.provider = "ab".repeat(32);
+    writePrivateJson(workspace.file, receipt);
+    const historical = ensureWorkspace(f).state;
+    expect(historical.instanceId).toBe(workspace.state.instanceId);
+    expect(historical.keys.provider).toBe(receipt.keys.provider);
+  });
+
   it("reuses data across restarts and aliases but isolates independent checkouts", () => {
     const f = fixture();
     const a = ensureWorkspace(f);

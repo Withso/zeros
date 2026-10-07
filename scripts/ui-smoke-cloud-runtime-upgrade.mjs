@@ -40,10 +40,12 @@ export async function runCloudRuntimeUpgradeSmoke({ page, check, harnessBase }) 
   await page.keyboard.press("Escape");
   await detailsButton.click();
   const details = page.getByRole("dialog", { name: "Cloud workspace details", exact: true });
-  const runtime = details.getByRole("region", { name: "Workspace runtime", exact: true });
-  await expect(runtime).toContainText("Runtime · r1-aaaaaaaa");
+  const more = details.getByRole("button", { name: "More workspace actions", exact: true });
+  await expect(details).not.toContainText("r1-aaaaaaaa");
+  await more.click();
+  const runtime = page.getByRole("region", { name: "Runtime updates", exact: true });
+  await expect(runtime).toContainText("Runtime updates");
   await expect(runtime).toContainText("Updates automatically the next time this workspace wakes");
-  await expect(details.getByRole("button", { name: "Manage sharing", exact: true })).toBeFocused();
   await expect(details.getByRole("button", { name: /Update runtime/ })).toHaveCount(0);
   const idleDocumentReads = documentReads, idleAvailabilityReads = availabilityReads;
   await page.clock.fastForward(5_001);
@@ -62,7 +64,7 @@ export async function runCloudRuntimeUpgradeSmoke({ page, check, harnessBase }) 
     fixture.publish({ status: "setting_up", generation: { ...fixture.document.generation, number: 2 } });
   });
   await page.clock.fastForward(2_001);
-  await expect(runtime).toContainText("Runtime · r1-bbbbbbbb");
+  await expect(runtime).not.toContainText("r1-bbbbbbbb");
   await expect(runtime).toContainText("Starting the cloud workspace…");
   transition.state = "succeeded";
   await page.evaluate(() => window.cloudRuntimeFixture.publish({ status: "ready" }));
@@ -72,6 +74,20 @@ export async function runCloudRuntimeUpgradeSmoke({ page, check, harnessBase }) 
   await runtime.scrollIntoViewIfNeeded();
   await page.screenshot({ path: ".context/cloud-runtime-auto-updated.png" });
   await page.keyboard.press("Escape");
+  await expect(runtime).toHaveCount(0);
+  await expect(more).toBeFocused();
+  // Let the nested menu release its dismissal layer before closing details.
+  await page.clock.runFor(200);
+  await expect(page.getByRole("menu", { includeHidden: true })).toHaveCount(0);
+  // Keyboard focus can show the trigger's hint. Dismiss that layer first,
+  // then require Escape to close the containing details popover.
+  const moreHint = page.getByRole("tooltip").filter({ hasText: "More workspace actions" });
+  if (await moreHint.count()) {
+    await page.keyboard.press("Escape");
+    await expect(moreHint).toHaveCount(0);
+    await page.clock.runFor(200);
+  }
+  await page.keyboard.press("Escape");
   await expect(details).toHaveCount(0);
   const closedReads = availabilityReads;
   await page.clock.fastForward(10_001);
@@ -79,8 +95,10 @@ export async function runCloudRuntimeUpgradeSmoke({ page, check, harnessBase }) 
   await page.clock.fastForward(30_001);
   await expect.poll(() => availabilityReads).toBeGreaterThan(closedReads);
   await detailsButton.click();
+  await more.click();
   await expect(runtime).toBeVisible();
-  await page.getByRole("button", { name: "Hide workspace", exact: true }).click();
+  // Simulate an external page change while the nested modal menu is open.
+  await page.getByRole("button", { name: "Hide workspace", exact: true, includeHidden: true }).dispatchEvent("click");
   await expect(details).toHaveCount(0);
   const hiddenReads = availabilityReads;
   await page.clock.fastForward(40_001);
@@ -89,12 +107,18 @@ export async function runCloudRuntimeUpgradeSmoke({ page, check, harnessBase }) 
   await page.evaluate(() => window.cloudRuntimeFixture.setStaff(null));
   await detailsButton.click();
   await expect(details).toBeVisible();
-  await expect(runtime).toHaveCount(0);
+  await more.click();
+  await expect(runtime).toBeVisible();
   const nonStaffReads = availabilityReads;
+  await page.clock.fastForward(5_001);
+  await expect.poll(() => availabilityReads).toBeGreaterThan(nonStaffReads);
+  await page.getByRole("button", { name: "Sign out fixture", exact: true, includeHidden: true }).dispatchEvent("click");
+  await expect(details).toHaveCount(0);
+  await expect(runtime).toHaveCount(0);
+  const signedOutReads = availabilityReads;
   await page.clock.fastForward(40_001);
-  expect(availabilityReads).toBe(nonStaffReads);
-  await page.keyboard.press("Escape");
-  await page.evaluate(() => window.cloudRuntimeFixture.setStaff("developer"));
+  expect(availabilityReads).toBe(signedOutReads);
+  await page.getByRole("button", { name: "Owner fixture", exact: true }).click();
   await page.getByRole("button", { name: "Local fixture", exact: true }).click();
   await expect(detailsButton).toHaveCount(0);
   await page.getByRole("button", { name: /^Model:/ }).click();
@@ -113,7 +137,7 @@ export async function runCloudRuntimeUpgradeSmoke({ page, check, harnessBase }) 
   await expect(page.getByRole("button", { name: /Update runtime/ })).toHaveCount(0);
   await page.keyboard.press("Escape");
   expect(mutations).toHaveLength(0);
-  check("Staff runtime details and composer explain automatic updates, follow wake/readiness, and stay inert while hidden or unauthorized", true);
+  check("Nonstaff runtime details and composer explain automatic updates, follow wake/readiness, and stay inert while hidden or unauthorized", true);
   check("The agents-required discovery flag supplies one next-wake notice in the model menu", true);
   check("Local chat tabs and model menu retain their behavior, with no runtime discovery or mutation HTTP", true);
 }

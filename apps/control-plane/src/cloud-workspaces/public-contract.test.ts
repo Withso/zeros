@@ -4,7 +4,7 @@ import { isCustomerCloudPath, publicCloudError } from "./public-contract.js";
 describe("customer cloud response boundary", () => {
   it.each([
     "boat_credit_limit",
-    "daytona_unavailable",
+    "provider_unavailable",
     "provider_budget_exhausted",
     "snapshot_missing",
     "https://boat.dev/private?token=hidden",

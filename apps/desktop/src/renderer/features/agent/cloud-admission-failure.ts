@@ -1,8 +1,9 @@
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { modelsForAgent } from "./model-catalog";
+import { CLOUD_WORKSPACE_V2_REQUIRED_MESSAGE } from "../../platform/cloud-workspace-execution";
 
 export type CloudAdmissionFailure = {
-  kind: "runtime-upgrade-required" | "model-not-authorized" | "credential-required" | "waiting" | "unavailable";
+  kind: "runtime-upgrade-required" | "retired-runtime" | "model-not-authorized" | "credential-required" | "waiting" | "unavailable";
   message: string;
   action: "none" | "choose-model" | "reconnect" | "retry";
 };
@@ -30,6 +31,8 @@ export function classifyCloudAdmissionFailure(input: {
   const code = cloudAdmissionFailureCode(input.error);
   const provider = input.agentId === "codex" ? "Codex" : input.agentId === "claude" ? "Claude Code" : input.agentId === "cursor" ? "Cursor" : "your agent";
   switch (code) {
+    case "cloud_workspace_v2_required":
+      return { kind: "retired-runtime", message: CLOUD_WORKSPACE_V2_REQUIRED_MESSAGE, action: "none" };
     case "cloud_runtime_upgrade_required":
       return { kind: "runtime-upgrade-required", message: "This workspace gets the new cloud runtime the next time it wakes", action: "none" };
     case "cloud_agent_model_not_authorized": {

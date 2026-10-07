@@ -3,6 +3,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { fstatSync, statSync } from "node:fs";
+import * as ownership from "../cloud-workspace-ownership";
 
 import {
   contextGraphArchivePaths,
@@ -37,6 +39,25 @@ const status = () =>
   });
 
 describe(".context directory compatibility", () => {
+  it("publishes migrated source after retiring its hardlink and preserves private migration records", async () => {
+    await put(".context-graph/shared/notes.md", "shared source");
+    await put(".context-graph/.gitignore", "/local/\n");
+    const published: string[] = [];
+    const original = ownership.publishCloudWorkspacePath;
+    vi.spyOn(ownership, "publishCloudWorkspacePath").mockImplementation((target, fd) => {
+      const stat = fd === undefined ? statSync(target) : fstatSync(fd);
+      if (stat.isFile()) expect(stat.nlink).toBe(1);
+      published.push(target);
+      original(target, fd);
+    });
+    expect(await ensureContextGraph(root)).toMatchObject({ ok: true });
+    expect(published).toContain(path.join(root, ".context/shared"));
+    expect(published).toContain(path.join(root, ".context/shared/notes.md"));
+    expect(published).toContain(path.join(root, ".context/.gitignore"));
+    expect(published.some(target => target.includes(".zeros-context-migration"))).toBe(false);
+    expect(await read(".context/shared/notes.md")).toBe("shared source");
+  });
+
   it("keeps the content probe read-only for a symlinked context root", async () => {
     const elsewhere = await put("other/local/notes.md", "outside context");
     await fs.symlink(

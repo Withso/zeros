@@ -2,7 +2,7 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type pg from "pg";
 import { z } from "zod";
-import { canCreateOrganization, HttpError, requireOrganizationCreationCapability } from "../authz.js";
+import { HttpError } from "../authz.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { rateLimit } from "../ratelimit.js";
 import { DatabaseCloudComputerV2Service } from "./computer-v2.js";
@@ -42,12 +42,6 @@ export function createCloudComputerV2Routes(
   const root = "/v1/organizations/:organization/cloud-computer/v2";
   app.use(root + "*", async (c, next) => {
     c.header("Cache-Control", "no-store");
-    await next();
-  });
-  app.use(root + "*", async (c, next) => {
-    if (c.req.method === "PUT" && /\/repositories\/[^/]+\/setup$/.test(c.req.path) && !canCreateOrganization(c.get("user").staffRole))
-      throw new HttpError(403, "forbidden", "Engineering staff access is required.");
-    requireOrganizationCreationCapability(c.get("user").staffRole);
     await next();
   });
   app.use(

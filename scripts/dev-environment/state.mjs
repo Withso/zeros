@@ -162,7 +162,7 @@ function validateState(state, identity) {
   if (!UUID.test(state.instanceId ?? "") || !["active", "archiving", "archived"].includes(state.status) ||
       state.database?.name !== `zeros_dev_${identity.owner}` || state.database.major !== 18 ||
       ![state.database.adminPassword, state.database.migrationPassword, state.database.runtimePassword,
-        state.keys?.cookie, state.keys?.settings, state.keys?.objects, state.keys?.provider, state.keys?.agent].every(v => HEX_SECRET.test(v ?? "")) ||
+        state.keys?.cookie, state.keys?.settings, state.keys?.objects, state.keys?.agent].every(v => HEX_SECRET.test(v ?? "")) ||
       !/^[A-Za-z0-9+/]{43}=$/.test(state.tunnel?.secret ?? "") ||
       state.tunnel.name !== `zeros-dev-${state.owner}-${state.instanceId.slice(0, 8)}`) {
     throw new Error("Invalid development state; existing data was preserved");
@@ -182,7 +182,7 @@ export function ensureWorkspace({ repositoryRoot, homeDir = os.homedir(), env = 
       version: 1, ...identity, instanceId, status: "active", createdAt: new Date().toISOString(),
       database: { name: `zeros_dev_${identity.owner}`, major: 18,
         adminPassword: secret(), migrationPassword: secret(), runtimePassword: secret() },
-      keys: { cookie: secret(), settings: secret(), objects: secret(), provider: secret(), agent: secret() },
+      keys: { cookie: secret(), settings: secret(), objects: secret(), agent: secret() },
       tunnel: { name: `zeros-dev-${identity.owner}-${instanceId.slice(0, 8)}`,
         secret: randomBytes(32).toString("base64"), id: null, dns: [] },
     }, { create: true });

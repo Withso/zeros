@@ -1,7 +1,9 @@
 # Enterprise and self-hosting
 
-Enterprise support should extend the same workspace protocol and data model,
-not fork the product into a separate implementation.
+Current execution is managed Boat with saved v2 source/v4 pins/actor2. Customer
+compute, registered primary hosts and a published customer-managed deployment
+remain proposed. Preserve the same workspace protocol/data model and configuration
+seams; historical provider references do not enable alternate execution.
 
 ## Control-plane and data-plane separation
 

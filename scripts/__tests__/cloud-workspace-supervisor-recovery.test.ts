@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ensureCloudWorkerSupervisor } from "../cloud-workspace-validation/sandbox/ensure-cloud-worker-supervisor.mjs";
 import {createCloudRuntimeResolver} from "../../apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
 import {cloudRuntimeFixture} from "../../apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-fixture";
+import { testCloudRuntime } from "../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime";
 import {
   CloudWorkerSupervisor,
   parseCloudWorkerSupervisorRequest,
@@ -128,7 +129,7 @@ describe("cloud runtime activation", () => {
       await expect(f.supervisor.apply({ operation: "select-runtime", session: prepared.session,
         active: f.active })).rejects.toThrow("verification failed");
       expect(f.supervisor.launcher).toBe(f.runtime.startEngine);
-      const legacy = new CloudWorkerSupervisor();
+      const legacy = new CloudWorkerSupervisor({ runtime: { ...testCloudRuntime(), profile: "v3" } });
       expect(await legacy.apply({ operation: "update-status" })).toMatchObject({ outcome: "rejected" });
     } finally { f.tree.dispose(); }
   });
@@ -144,35 +145,48 @@ describe("cloud broker resume and ownership", () => {
       expect(launch).not.toHaveBeenCalled();expect(probe).not.toHaveBeenCalled();
     } finally {tree.dispose();}
   });
-  it("leaves a healthy broker and its admitted work running", async () => {
+  it("refuses ad hoc recovery without probing or disturbing a healthy v4 broker", async () => {
+    const runtime = testCloudRuntime();
     const launch = vi.fn();
-    await ensureCloudWorkerSupervisor({ probe: async () => true, launch });
+    const probe = vi.fn(async () => true);
+    await expect(ensureCloudWorkerSupervisor({ runtime, probe, launch })).rejects.toThrow(/systemd/);
     expect(launch).not.toHaveBeenCalled();
+    expect(probe).not.toHaveBeenCalled();
   });
-  it("starts only one candidate and waits for positive readiness after cold resume", async () => {
+  it("leaves cold v4 supervisor recovery to systemd before launching a candidate", async () => {
+    const runtime = testCloudRuntime();
     const launch = vi.fn();
     const probe = vi
       .fn()
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(false)
       .mockResolvedValue(true);
-    await ensureCloudWorkerSupervisor({ probe, launch, wait: async () => {} });
-    expect(launch).toHaveBeenCalledOnce();
-    expect(probe).toHaveBeenCalledTimes(3);
+    const wait = vi.fn(async () => {});
+    await expect(ensureCloudWorkerSupervisor({ runtime, probe, launch, wait })).rejects.toThrow(/systemd/);
+    expect(launch).not.toHaveBeenCalled();
+    expect(probe).not.toHaveBeenCalled();
+    expect(wait).not.toHaveBeenCalled();
   });
-  it("bounds an uncertain startup without launching repeated candidates", async () => {
+  it("refuses uncertain v4 startup without launching or polling repeated candidates", async () => {
+    const runtime = testCloudRuntime();
     const launch = vi.fn();
+    const probe = vi.fn(async () => false);
+    const wait = vi.fn(async () => {});
     await expect(
       ensureCloudWorkerSupervisor({
-        probe: async () => false,
+        runtime,
+        probe,
         launch,
-        wait: async () => {},
+        wait,
       }),
-    ).rejects.toThrow(/unconfirmed/);
-    expect(launch).toHaveBeenCalledOnce();
+    ).rejects.toThrow(/systemd/);
+    expect(launch).not.toHaveBeenCalled();
+    expect(probe).not.toHaveBeenCalled();
+    expect(wait).not.toHaveBeenCalled();
   });
   it("answers a read-only readiness probe without retiring the current engine", async () => {
-    const supervisor = new CloudWorkerSupervisor();
+    const retire = vi.fn(async () => {});
+    const supervisor = new CloudWorkerSupervisor({ runtime: testCloudRuntime(), engineScope: { retire } });
     supervisor.session = "retained-session";
     expect(
       parseCloudWorkerSupervisorRequest({
@@ -189,6 +203,7 @@ describe("cloud broker resume and ownership", () => {
       supervisor.apply({ operation: "status" }),
     ).resolves.toMatchObject({ outcome: "ready" });
     expect(supervisor.session).toBe("retained-session");
+    expect(retire).not.toHaveBeenCalled();
   });
 
   const rootAvailable =
@@ -207,14 +222,15 @@ describe("cloud broker resume and ownership", () => {
       import {CloudWorkerSupervisor} from ${JSON.stringify(module)};
       const directory=mkdtempSync('/tmp/zeros-broker-lock-');
       const socketPath=directory+'/broker.sock';
-      const first=new CloudWorkerSupervisor({socketPath});
-      const second=new CloudWorkerSupervisor({socketPath});
+      const runtime=${JSON.stringify(testCloudRuntime())};
+      const first=new CloudWorkerSupervisor({socketPath,runtime});
+      const second=new CloudWorkerSupervisor({socketPath,runtime});
       try {
         await first.start(); const inode=lstatSync(socketPath).ino;
         let rejected=false; try {await second.start();} catch {rejected=true;}
         if (!rejected || lstatSync(socketPath).ino!==inode) throw new Error('live broker endpoint replaced');
         await first.stop();
-        const recovered=new CloudWorkerSupervisor({socketPath});
+        const recovered=new CloudWorkerSupervisor({socketPath,runtime});
         await recovered.start(); await recovered.stop();
       } finally { await first.stop(); await second.stop(); rmSync(directory,{recursive:true,force:true}); }
     `;

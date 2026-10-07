@@ -110,7 +110,7 @@ export function hostedBackendEnvironment(state, profile, source, worker) {
     BOAT_TTL_SECONDS: "900", BOAT_COMPUTE_POLICY_ID: "hosted-dev", BOAT_SECONDS_PER_DOLLAR: String(profile.boat.secondsPerDollar),
     ZEROS_CLOUD_IMAGE_ARCHITECTURE: "linux/amd64", CLOUD_WORKSPACE_CPU_MILLICORES: "4000", CLOUD_WORKSPACE_MEMORY_MIB: "8192",
     CLOUD_WORKSPACE_STORAGE_MIB: String(worker.storageMiB),
-    CLOUD_WORKSPACE_SECRET_KEY_V1: key("settings"), CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1: key("provider"), CLOUD_WORKSPACE_OBJECT_KEY_V1: key("objects"),
+    CLOUD_WORKSPACE_SECRET_KEY_V1: key("settings"), CLOUD_WORKSPACE_OBJECT_KEY_V1: key("objects"),
     // This generation's separate agent key was reserved in the original Dev
     // receipt. Keep refresh-family fingerprints stable across redeploys and
     // independent of credential encryption key rotation.

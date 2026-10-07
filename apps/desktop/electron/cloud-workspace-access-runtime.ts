@@ -1,7 +1,9 @@
 import { app, clipboard } from "electron";
 import path from "node:path";
 
-import { CloudWorkspaceAccessBroker } from "./cloud-workspace-access-broker";
+import { CloudWorkspaceAccessBroker, type CloudServiceContext } from "./cloud-workspace-access-broker";
+import { CloudWorkspacePortForwarding } from "./cloud-workspace-port-forwarding";
+import { CloudPortForwardingPreferences, type CloudPortForwardingState } from "./cloud-workspace-port-forwarding-store";
 import { cloudWorkspaceDesktopCapabilityEnabled } from "../src/engine/cloud-workspace-capability";
 import { CloudWorkspaceAccessClient } from "./cloud-workspace-access-client";
 import { CloudWorkspaceNativeSshRuntime, CloudWorkspaceSshRuntime } from "./cloud-workspace-ssh-runtime";
@@ -23,6 +25,26 @@ declare const __ZEROS_CLOUD_PREVIEW_HOST_SUFFIXES_BAKED__: string | undefined;
 declare const __ZEROS_CLOUD_SSH_KNOWN_HOSTS_B64_BAKED__: string | undefined;
 
 let broker: CloudWorkspaceAccessBroker | null = null;
+let forwarding: { broker: CloudWorkspaceAccessBroker; coordinator: CloudWorkspacePortForwarding } | null = null;
+let forwardingPreferences: CloudPortForwardingPreferences | null = null;
+function readForwardingSession() {
+  const user = getSessionUserForMain();
+  return user ? { accountId: JSON.stringify([user.provider, user.accountId ?? user.sub]),
+    sessionKey: JSON.stringify([user.provider, user.accountId ?? user.sub, user.sessionId ?? null]) } : null;
+}
+let forwardingSession: ReturnType<typeof readForwardingSession> = null;
+// Auth storage uses Electron's application paths. Capture the boot identity
+// after readiness, without adding native reads to import-only Local paths.
+void app?.whenReady?.().then(() => { forwardingSession ??= readForwardingSession(); });
+
+function getForwardingPreferences(): CloudPortForwardingPreferences {
+  return forwardingPreferences ??= new CloudPortForwardingPreferences(path.join(app.getPath("userData"), "cloud-port-forwarding.json"));
+}
+
+async function retireForwarding(pruneAccount: boolean): Promise<void> {
+  const previous = forwarding; forwarding = null;
+  await previous?.coordinator.dispose({ pruneAccount });
+}
 
 function controlPlaneBaseUrl(): string {
   const baked =
@@ -108,6 +130,7 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
     throw new Error("Cloud workspaces are not enabled in this desktop build");
   }
   if (broker?.hasCurrentSession()) return broker;
+  void retireForwarding(true).catch(() => undefined);
   broker = null;
   const hosts = allowedSshHosts();
 
@@ -129,7 +152,7 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
   });
     return ssh;
   };
-  broker = new CloudWorkspaceAccessBroker({
+  const current = new CloudWorkspaceAccessBroker({
     nativeServices: {
       api: new CloudRuntimeServiceClient({ baseUrl: controlPlaneBaseUrl(), fetch: controlPlaneFetch,
         sign: signCloudRuntimeServiceForMain, allowInsecureLoopback: IS_DEV }),
@@ -154,7 +177,10 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
       if (!user) return null;
       return JSON.stringify([user.provider, user.accountId ?? user.sub, user.sessionId ?? null]);
     },
-    onRuntimeRetired: (runtimeIds) => emitEvent("cloud-workspace-access-retired", { runtimeIds }),
+    onRuntimeRetired: (runtimeIds) => {
+      if (forwarding?.broker === current) for (const id of runtimeIds) forwarding.coordinator.retireRuntime(id);
+      emitEvent("cloud-workspace-access-retired", { runtimeIds });
+    },
     getDeviceId: async () => (await ensureCloudAccessDeviceForMain()).deviceId,
     writeClipboard: (value) => clipboard.writeText(value),
     launchTerminal: (input) => getSsh().launchTerminal(input),
@@ -163,14 +189,57 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
     startDynamicTunnel: (input) => getSsh().startDynamicTunnel(input),
     disposeLocalAccess: async () => { await Promise.all([ssh?.dispose(), nativeSsh.dispose(), serviceTransport.dispose()]); },
   });
+  broker = current;
   return broker;
+}
+
+export function getCloudWorkspacePortForwarding(): CloudWorkspacePortForwarding {
+  const current = getCloudWorkspaceAccessBroker();
+  if (forwarding?.broker === current) return forwarding.coordinator;
+  const user = getSessionUserForMain();
+  if (!user) throw new Error("Sign in before changing cloud forwarding.");
+  const accountId = JSON.stringify([user.provider, user.accountId ?? user.sub]);
+  const client = new CloudWorkspaceAccessClient({ baseUrl: controlPlaneBaseUrl(), fetch: controlPlaneFetch, allowInsecureLoopback: IS_DEV });
+  const coordinator = new CloudWorkspacePortForwarding({ broker: current, preferences: getForwardingPreferences(), accountId,
+    readPorts: async (runtime, signal) => {
+      current.assertRuntime(runtime);
+      const token = await getValidAccessTokenForMain();
+      current.assertRuntime(runtime);
+      if (!token || signal.aborted) throw new Error("Cloud forwarding authority has ended.");
+      const result = await client.readDetectedPorts(token, runtime, signal);
+      current.assertRuntime(runtime);
+      return result;
+    },
+  });
+  forwarding = { broker: current, coordinator };
+  return coordinator;
+}
+
+export async function setCloudWorkspacePortForwardingPreferences(
+  input: { organizationId: string; workspaceId: string } & CloudServiceContext, change: Partial<CloudPortForwardingState>,
+): Promise<Readonly<CloudPortForwardingState>> {
+  const current = getCloudWorkspaceAccessBroker();
+  current.listServices(input);
+  if (!input.deviceId) {
+    // A switch mutation is explicit user intent; passive preference/context
+    // reads never enroll a device or obtain a token.
+    await ensureCloudAccessDeviceForMain();
+    if (!current.hasCurrentSession()) throw new Error("Cloud forwarding account has changed.");
+  }
+  return getCloudWorkspacePortForwarding().setPreferences({ ...input, ...current.serviceContext() }, change);
+}
+
+export function revokeCloudWorkspaceNativeAccess(accessId: string): Promise<boolean> {
+  const current = getCloudWorkspaceAccessBroker();
+  return forwarding?.broker === current ? forwarding.coordinator.revoke(accessId) : current.revoke(accessId);
 }
 
 export async function disposeCloudWorkspaceAccessBroker(): Promise<void> {
   previewFrameAuthorizations.clear();
   const current = broker;
+  const forwardingCleanup = retireForwarding(false);
   broker = null;
-  await current?.dispose();
+  await Promise.all([forwardingCleanup, current?.dispose()]);
 }
 
 export function revokeCloudWorkspacePreviewFrame(
@@ -184,10 +253,17 @@ export function revokeCloudWorkspacePreviewFrame(
 // its grants long enough to attempt remote revocation; provider TTL and
 // lifecycle revocation remain the durable backstop when the network is down.
 export function reconcileCloudWorkspaceAccessSession(): void {
+  const previousSession = forwardingSession;
+  forwardingSession = readForwardingSession();
   if (broker && !broker.hasCurrentSession()) {
+    void retireForwarding(true).catch(() => undefined);
     previewFrameAuthorizations.clear();
     broker = null;
   }
+  // Persisted intent can exist from an earlier app launch even when this
+  // launch never constructed a broker/coordinator. Sign-out still prunes it.
+  if (previousSession && previousSession.sessionKey !== forwardingSession?.sessionKey)
+    getForwardingPreferences().removeAccount(previousSession.accountId);
 }
 onMainAuthSessionChanged(reconcileCloudWorkspaceAccessSession);
 

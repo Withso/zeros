@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign, type KeyObject } from "node:crypto";
 import {
   afterAll,
   beforeAll,
@@ -14,6 +14,7 @@ import type { AuthedUser } from "../auth.js";
 import { ensureCloudPilotUser as ensureUser } from "./test-fixtures.js";
 import { withSystemTx, withUserTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
+import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
 import type {
   CloudProviderPreviewEndpoint,
   CloudProviderSshAccess,
@@ -48,8 +49,8 @@ function fakeAccessProvider() {
         return {
           providerAccessId: randomUUID(),
           credential,
-          host: "ssh.app.daytona.io",
-          command: `ssh ${credential}@ssh.app.daytona.io`,
+          host: "ssh.fixture.test",
+          command: `ssh ${credential}@ssh.fixture.test`,
           expiresAt: new Date(Date.now() + expiresInMinutes * 60_000),
         };
       },
@@ -60,8 +61,8 @@ function fakeAccessProvider() {
         resourceId: string,
         port: number,
       ): Promise<CloudProviderPreviewEndpoint> => ({
-        url: `https://${port}-${resourceId}.proxy.daytona.work/`,
-        headerName: "x-daytona-preview-token",
+        url: `https://${port}-${resourceId}.preview.fixture.test/`,
+        headerName: "x-fixture-preview-token",
         headerValue: "preview-token-abcdefghijklmnopqrstuvwxyz",
       }),
     ),
@@ -125,8 +126,8 @@ describe("cloud preview endpoint cache", () => {
       async (resourceId, port) => {
         await gate;
         return {
-          url: `https://${port}-${resourceId}.proxy.daytona.work/`,
-          headerName: "x-daytona-preview-token",
+          url: `https://${port}-${resourceId}.preview.fixture.test/`,
+          headerName: "x-fixture-preview-token",
           headerValue: "preview-token-abcdefghijklmnopqrstuvwxyz",
         };
       },
@@ -182,6 +183,17 @@ d("cloud workspace client access", () => {
   let providerResourceId: string;
   let providerConnectionId: string;
   let deviceId: string;
+  let devicePrivateKey: KeyObject;
+
+  async function issue(service: DatabaseCloudWorkspaceAccessService, input: Parameters<DatabaseCloudWorkspaceAccessService["issue"]>[0]) {
+    if (input.kind !== "preview") return service.issue(input);
+    const fields = { deviceId, keyVersion: 1, timestampMs: Date.now(), nonce: randomBytes(24).toString("base64url") };
+    const payload = { organizationId: input.organizationId, workspaceId: input.workspaceId, port: input.remotePort,
+      target: input.previewTarget ?? null, expiresInMinutes: input.expiresInMinutes ?? 15, idempotencyKey: input.idempotencyKey };
+    return service.issue({ ...input, proof: { ...fields, signature: sign(null, cloudWorkspaceDeviceProofMessage({
+      ...fields, accountUserId: input.accountUserId, action: "preview.issue", payload,
+    }), devicePrivateKey).toString("base64url") } });
+  }
 
   beforeAll(() => {
     pool = new pg.Pool({ connectionString: url, max: 4 });
@@ -193,6 +205,7 @@ d("cloud workspace client access", () => {
 
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     actor = await ensureUser(pool, {
       provider: "auth0",
       providerSubject: randomUUID(),
@@ -277,7 +290,7 @@ d("cloud workspace client access", () => {
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib, created_by,
            provider_connection_id
-         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+         ) VALUES ($1, 1, $2, 'boat', 'snap-pinned', 'linux/amd64',
                    2000, 4096, 20480, $3, $4)`,
         [childWorkspaceId, organizationId, actor.id, childProviderConnectionId],
       );
@@ -293,10 +306,12 @@ d("cloud workspace client access", () => {
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider, provider_resource_id,
            observed_state, last_observed_at
-         ) VALUES ($1, 1, $2, 'daytona', $3, 'running', now())`,
+         ) VALUES ($1, 1, $2, 'boat', $3, 'running', now())`,
         [childWorkspaceId, organizationId, resourceId],
       );
-      const publicKey = randomBytes(32);
+      const pair = generateKeyPairSync("ed25519");
+      devicePrivateKey = pair.privateKey;
+      const publicKey = Buffer.from(pair.publicKey.export({ format: "jwk" }).x!, "base64url");
       const device = await tx.query<{ id: string }>(
         `INSERT INTO devices (
            user_id, label, platform, public_key, key_fingerprint
@@ -332,7 +347,7 @@ d("cloud workspace client access", () => {
       runtimeEnginePort: 39_393,
     });
     const key = randomUUID();
-    const issued = await service.issue({
+    const issued = await issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -345,8 +360,8 @@ d("cloud workspace client access", () => {
       grant: { kind: "ssh", generation: 1 },
       ssh: {
         username: sshCredential,
-        host: "ssh.app.daytona.io",
-        command: `ssh ${sshCredential}@ssh.app.daytona.io`,
+        host: "ssh.fixture.test",
+        command: `ssh ${sshCredential}@ssh.fixture.test`,
       },
     });
     const stored = await withSystemTx(pool, (tx) =>
@@ -367,7 +382,7 @@ d("cloud workspace client access", () => {
     expect(JSON.stringify(stored.rows[0])).not.toContain(sshCredential);
 
     await expect(
-      service.issue({
+      issue(service, {
         organizationId: orgId,
         workspaceId,
         accountUserId: actor.id,
@@ -383,8 +398,8 @@ d("cloud workspace client access", () => {
     vi.mocked(provider.createSshAccess).mockResolvedValueOnce({
       providerAccessId: "invalid provider id",
       credential: "ssh-token-abcdefghijklmnopqrstuvwxyz",
-      host: "ssh.app.daytona.io",
-      command: "ssh ssh-token-abcdefghijklmnopqrstuvwxyz@ssh.app.daytona.io",
+      host: "ssh.fixture.test",
+      command: "ssh ssh-token-abcdefghijklmnopqrstuvwxyz@ssh.fixture.test",
       expiresAt: new Date(Date.now() + 15 * 60_000),
     });
     const service = new DatabaseCloudWorkspaceAccessService({
@@ -394,7 +409,7 @@ d("cloud workspace client access", () => {
     });
 
     await expect(
-      service.issue({
+      issue(service, {
         organizationId: orgId,
         workspaceId,
         accountUserId: actor.id,
@@ -427,7 +442,7 @@ d("cloud workspace client access", () => {
     });
 
     await expect(
-      service.issue({
+      issue(service, {
         organizationId: orgId,
         workspaceId,
         accountUserId: actor.id,
@@ -470,7 +485,7 @@ d("cloud workspace client access", () => {
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib, created_by,
            provider_connection_id
-         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+         ) VALUES ($1, 1, $2, 'boat', 'snap-pinned', 'linux/amd64',
                    2000, 4096, 20480, $3, $4)`,
         [id, orgId, actor.id, providerConnectionId],
       );
@@ -485,7 +500,7 @@ d("cloud workspace client access", () => {
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider, provider_resource_id,
            observed_state, last_observed_at
-         ) VALUES ($1, 1, $2, 'daytona', $3, 'running', now())`,
+         ) VALUES ($1, 1, $2, 'boat', $3, 'running', now())`,
         [id, orgId, `sandbox-${id}`],
       );
       return id;
@@ -527,7 +542,7 @@ d("cloud workspace client access", () => {
     });
     const idempotencyKey = randomUUID();
     const request = (targetWorkspaceId: string) =>
-      service.issue({
+      issue(service, {
         organizationId: orgId,
         workspaceId: targetWorkspaceId,
         accountUserId: actor.id,
@@ -559,7 +574,7 @@ d("cloud workspace client access", () => {
       previewBaseDomain: "cloud-preview.example.test",
       runtimeEnginePort: 39_393,
     });
-    const issued = await service.issue({
+    const issued = await issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -574,7 +589,7 @@ d("cloud workspace client access", () => {
       grant: { kind: "tunnel", remotePort: 4_173 },
       tunnel: {
         sshUsername: sshCredential,
-        sshHost: "ssh.app.daytona.io",
+        sshHost: "ssh.fixture.test",
         remoteHost: "127.0.0.1",
         remotePort: 4_173,
         session: { deviceId, state: "starting" },
@@ -625,7 +640,7 @@ d("cloud workspace client access", () => {
     ).rejects.toMatchObject({ code: "cloud_access_not_active" });
 
     await expect(
-      service.issue({
+      issue(service, {
         organizationId: orgId,
         workspaceId,
         accountUserId: actor.id,
@@ -638,7 +653,7 @@ d("cloud workspace client access", () => {
     ).rejects.toMatchObject({ code: "cloud_access_port_forbidden" });
 
     await expect(
-      service.issue({
+      issue(service, {
         organizationId: orgId,
         workspaceId,
         accountUserId: actor.id,
@@ -663,7 +678,7 @@ d("cloud workspace client access", () => {
       provider,
       previewBaseDomain: "cloud-preview.example.test",
     });
-    const issued = await service.issue({
+    const issued = await issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -712,7 +727,7 @@ d("cloud workspace client access", () => {
       provider,
       previewBaseDomain: "cloud-preview.example.test",
     });
-    const issued = await service.issue({
+    const issued = await issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -772,7 +787,7 @@ d("cloud workspace client access", () => {
 
     vi.mocked(provider.getPreviewEndpoint).mockClear();
     await expect(
-      service.issue({
+      issue(service, {
         organizationId: orgId,
         workspaceId,
         accountUserId: actor.id,
@@ -785,7 +800,7 @@ d("cloud workspace client access", () => {
     expect(provider.getPreviewEndpoint).not.toHaveBeenCalled();
   });
 
-  it.each(["x-daytona-preview-token", "x-zeros-runtime-preview"] as const)(
+  it.each(["x-fixture-preview-token", "x-zeros-runtime-preview"] as const)(
     "proxies private preview HTTP with %s while retaining provider tokens server-side",
     async (headerName) => {
       const { provider } = fakeAccessProvider();
@@ -815,7 +830,7 @@ d("cloud workspace client access", () => {
         previewBaseDomain: "cloud-preview.example.test",
         fetcher: upstream,
       });
-      const issued = await service.issue({
+      const issued = await issue(service, {
         organizationId: orgId,
         workspaceId,
         accountUserId: actor.id,
@@ -876,7 +891,7 @@ d("cloud workspace client access", () => {
       // One qualification lookup during issuance plus one shared proxy refresh.
       expect(provider.getPreviewEndpoint).toHaveBeenCalledTimes(2);
       expect(upstream).toHaveBeenCalledWith(
-        `https://3000-${providerResourceId}.proxy.daytona.work/nested?q=1`,
+        `https://3000-${providerResourceId}.preview.fixture.test/nested?q=1`,
         expect.objectContaining({ redirect: "manual" }),
       );
       const stored = await withSystemTx(pool, (tx) =>
@@ -922,7 +937,7 @@ d("cloud workspace client access", () => {
       previewBaseDomain: "cloud-preview.example.test",
       fetcher: upstream,
     });
-    const issued = await service.issue({
+    const issued = await issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -971,7 +986,7 @@ d("cloud workspace client access", () => {
       previewBaseDomain: "cloud-preview.example.test",
       fetcher: upstream,
     });
-    const issued = await service.issue({
+    const issued = await issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -1008,7 +1023,7 @@ d("cloud workspace client access", () => {
   it("authorizes preview WebSocket destinations and rechecks live authority before renewal", async () => {
     const { provider } = fakeAccessProvider();
     const service = new DatabaseCloudWorkspaceAccessService({ pool, provider, previewBaseDomain: "cloud-preview.example.test" });
-    const issued = await service.issue({ organizationId: orgId, workspaceId, accountUserId: actor.id,
+    const issued = await issue(service, { organizationId: orgId, workspaceId, accountUserId: actor.id,
       kind: "preview", remotePort: 3000, expiresInMinutes: 15, idempotencyKey: randomUUID() });
     const request = new Request(`${issued.preview!.origin}/hmr?q=1`, { headers: {
       "x-zeros-preview-capability": issued.preview!.capability,
@@ -1030,7 +1045,7 @@ d("cloud workspace client access", () => {
   it("does not admit a preview socket revoked during its provider lookup", async () => {
     const { provider } = fakeAccessProvider();
     const service = new DatabaseCloudWorkspaceAccessService({ pool, provider, previewBaseDomain: "cloud-preview.example.test" });
-    const issued = await service.issue({ organizationId: orgId, workspaceId, accountUserId: actor.id,
+    const issued = await issue(service, { organizationId: orgId, workspaceId, accountUserId: actor.id,
       kind: "preview", remotePort: 3000, expiresInMinutes: 15, idempotencyKey: randomUUID() });
     let finish!: (endpoint: CloudProviderPreviewEndpoint) => void;
     vi.mocked(provider.getPreviewEndpoint).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
@@ -1038,20 +1053,20 @@ d("cloud workspace client access", () => {
     const resolving = service.resolvePreviewWebSocket(request);
     await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
     await withSystemTx(pool, tx => tx.query(`UPDATE cloud_workspace_client_access_grants SET state='revoked', revoked_at=now() WHERE id=$1`, [issued.grant.id]));
-    finish({ url: "https://3000-workspace.proxy.daytona.work/", headerName: "x-daytona-preview-token", headerValue: "preview-token-fixture" });
+    finish({ url: "https://3000-workspace.preview.fixture.test/", headerName: "x-fixture-preview-token", headerValue: "preview-token-fixture" });
     await expect(resolving).resolves.toBeNull();
   });
 
   it("does not dispatch a preview POST revoked during provider lookup", async () => {
     const {provider}=fakeAccessProvider(),upstream=vi.fn(async()=>new Response("must-not-run"));
     const service=new DatabaseCloudWorkspaceAccessService({pool,provider,previewBaseDomain:"cloud-preview.example.test",fetcher:upstream});
-    const issued=await service.issue({organizationId:orgId,workspaceId,accountUserId:actor.id,kind:"preview",remotePort:3000,expiresInMinutes:15,idempotencyKey:randomUUID()});
+    const issued=await issue(service, {organizationId:orgId,workspaceId,accountUserId:actor.id,kind:"preview",remotePort:3000,expiresInMinutes:15,idempotencyKey:randomUUID()});
     let finish!:(endpoint:CloudProviderPreviewEndpoint)=>void;
     vi.mocked(provider.getPreviewEndpoint).mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
     const pending=service.handlePreviewRequest(new Request(`${issued.preview!.origin}/mutate`,{method:"POST",body:"side-effect",headers:{"x-zeros-preview-capability":issued.preview!.capability}}));
     await vi.waitFor(()=>expect(finish).toBeTypeOf("function"));
     await withSystemTx(pool,tx=>tx.query(`UPDATE cloud_workspace_client_access_grants SET state='revoked',revoked_at=now() WHERE id=$1`,[issued.grant.id]));
-    finish({url:"https://3000-workspace.proxy.daytona.work/",headerName:"x-daytona-preview-token",headerValue:"preview-token-fixture"});
+    finish({url:"https://3000-workspace.preview.fixture.test/",headerName:"x-fixture-preview-token",headerValue:"preview-token-fixture"});
     expect((await pending)?.status).toBe(401);expect(upstream).not.toHaveBeenCalled();
   });
 
@@ -1062,7 +1077,7 @@ d("cloud workspace client access", () => {
       return new Response(new ReadableStream<Uint8Array>({start(controller){controller.enqueue(new TextEncoder().encode("first"));},cancel}));
     });
     const service=new DatabaseCloudWorkspaceAccessService({pool,provider,previewBaseDomain:"cloud-preview.example.test",fetcher:upstream});
-    const issued=await service.issue({organizationId:orgId,workspaceId,accountUserId:actor.id,kind:"preview",remotePort:3000,expiresInMinutes:15,idempotencyKey:randomUUID()});
+    const issued=await issue(service, {organizationId:orgId,workspaceId,accountUserId:actor.id,kind:"preview",remotePort:3000,expiresInMinutes:15,idempotencyKey:randomUUID()});
     const response=await service.handlePreviewRequest(new Request(`${issued.preview!.origin}/stream`,{headers:{"x-zeros-preview-capability":issued.preview!.capability}}));
     const reader=response!.body!.getReader();expect(new TextDecoder().decode((await reader.read()).value)).toBe("first");
     await withSystemTx(pool,tx=>tx.query(`UPDATE cloud_workspace_client_access_grants SET state='revoked',revoked_at=now() WHERE id=$1`,[issued.grant.id]));
@@ -1085,7 +1100,7 @@ d("cloud workspace client access", () => {
       previewBaseDomain: "cloud-preview.example.test",
       fetcher: upstream,
     });
-    const issued = await service.issue({
+    const issued = await issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -1119,7 +1134,7 @@ d("cloud workspace client access", () => {
       previewBaseDomain: "cloud-preview.example.test",
       fetcher: upstream,
     });
-    const issued = await service.issue({
+    const issued = await issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -1152,7 +1167,7 @@ d("cloud workspace client access", () => {
       provider,
       previewBaseDomain: "cloud-preview.example.test",
     });
-    const first = await service.issue({
+    const first = await issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -1160,7 +1175,7 @@ d("cloud workspace client access", () => {
       expiresInMinutes: 15,
       idempotencyKey: randomUUID(),
     });
-    const peer = await service.issue({
+    const peer = await issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -1199,7 +1214,7 @@ d("cloud workspace client access", () => {
     expect(stoppedTunnel.rows[0]).toMatchObject({ state: "stopped" });
     expect(stoppedTunnel.rows[0]!.stopped_at).not.toBeNull();
 
-    const second = await service.issue({
+    const second = await issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -1247,7 +1262,7 @@ d("cloud workspace client access", () => {
       provider,
       previewBaseDomain: "cloud-preview.example.test",
     });
-    const active = await service.issue({
+    const active = await issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -1267,13 +1282,13 @@ d("cloud workspace client access", () => {
         return {
           providerAccessId: randomUUID(),
           credential,
-          host: "ssh.app.daytona.io",
-          command: `ssh ${credential}@ssh.app.daytona.io`,
+          host: "ssh.fixture.test",
+          command: `ssh ${credential}@ssh.fixture.test`,
           expiresAt: new Date(Date.now() + expiresInMinutes * 60_000),
         };
       },
     );
-    const issuing = service.issue({
+    const issuing = issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -1337,8 +1352,8 @@ d("cloud workspace client access", () => {
         return {
           providerAccessId: randomUUID(),
           credential,
-          host: "ssh.app.daytona.io",
-          command: `ssh ${credential}@ssh.app.daytona.io`,
+          host: "ssh.fixture.test",
+          command: `ssh ${credential}@ssh.fixture.test`,
           expiresAt: new Date(Date.now() + expiresInMinutes * 60_000),
         };
       },
@@ -1386,7 +1401,7 @@ d("cloud workspace client access", () => {
       provider,
       previewBaseDomain: "cloud-preview.example.test",
     });
-    const issuing = service.issue({
+    const issuing = issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -1436,8 +1451,8 @@ d("cloud workspace client access", () => {
         return {
           providerAccessId: randomUUID(),
           credential,
-          host: "ssh.app.daytona.io",
-          command: `ssh ${credential}@ssh.app.daytona.io`,
+          host: "ssh.fixture.test",
+          command: `ssh ${credential}@ssh.fixture.test`,
           expiresAt: new Date(Date.now() + expiresInMinutes * 60_000),
         };
       },
@@ -1448,7 +1463,7 @@ d("cloud workspace client access", () => {
       previewBaseDomain: "cloud-preview.example.test",
     });
 
-    const issuing = service.issue({
+    const issuing = issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -1503,7 +1518,7 @@ d("cloud workspace client access", () => {
       provider,
       previewBaseDomain: "cloud-preview.example.test",
     });
-    const issued = await service.issue({
+    const issued = await issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -1546,7 +1561,7 @@ d("cloud workspace client access", () => {
         provider,
         previewBaseDomain: "cloud-preview.example.test",
       });
-      const issued = await service.issue({
+      const issued = await issue(service, {
         organizationId: orgId,
         workspaceId,
         accountUserId: actor.id,
@@ -1618,7 +1633,7 @@ d("cloud workspace client access", () => {
       provider,
       previewBaseDomain: "cloud-preview.example.test",
     });
-    const issued = await service.issue({
+    const issued = await issue(service, {
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
@@ -1757,7 +1772,7 @@ d("cloud workspace client access", () => {
     });
 
     await expect(
-      service.issue({
+      issue(service, {
         organizationId: orgId,
         workspaceId,
         accountUserId: actor.id,
@@ -1817,7 +1832,7 @@ d("cloud workspace client access", () => {
     });
 
     await expect(
-      service.issue({
+      issue(service, {
         organizationId: orgId,
         workspaceId,
         accountUserId: actor.id,
@@ -1837,7 +1852,7 @@ d("cloud workspace client access", () => {
     });
     const grants = await Promise.all(
       [3_000, 3_001, 3_002].map((remotePort) =>
-        service.issue({
+        issue(service, {
           organizationId: orgId,
           workspaceId,
           accountUserId: actor.id,

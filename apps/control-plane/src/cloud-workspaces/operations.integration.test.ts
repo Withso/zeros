@@ -10,6 +10,7 @@ import {
 } from "./object-store.js";
 import { CloudWorkspaceOperationsWorker } from "./operations.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
+import { seedRecordedCloudWorkspaceActor } from "./recorded-actor-test-fixture.js";
 import { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { DatabaseCloudWorkspaceActionService } from "./action-receipts.js";
 import { DatabaseCloudWorkspaceEventService } from "./event-streams.js";
@@ -50,8 +51,7 @@ d("cloud workspace production operations", () => {
       const fixture = await seedReadyCloudWorkspace(pool);
       const other = await seedReadyCloudWorkspace(pool);
       for (const f of [fixture, other]) {
-        const scope = { workspaceId: f.workspaceId, organizationId: f.organizationId,
-          generation: 1, engineInstanceId: f.engineInstanceId, heartbeatToken: f.heartbeatToken };
+        const scope = await seedRecordedCloudWorkspaceActor(pool, f, kind === "actions" ? { executionId: "execution" } : {});
         if (kind === "commands") {
           const commands = new DatabaseCloudWorkspaceCommandService({ pool });
           await commands.mutate(scope, { conversationId: "delete-fixture", operationId: randomUUID(), expectedRevision: 0,

@@ -12,6 +12,17 @@ import { cloudRuntimeHandoffBlocksClaims, isAutomaticRetainedRuntimeEngine } fro
 const identity = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/);
 const revision = z.number().int().safe().nonnegative();
 const uuid = z.string().uuid();
+// Mirrored reserved receipt vocabulary. Production CP never imports protocol;
+// command-failure.test.ts keeps this closed set in parity with the engine.
+export const CLOUD_COMMAND_FAILURE_STAGES = ["validation", "admission", "containment", "provider_start", "provider_prompt"] as const;
+export const CLOUD_COMMAND_FAILURE_CATEGORIES = [
+  "rejected", "authority_unavailable", "authority_timeout", "authority_transport", "authority_http_4xx", "authority_http_5xx",
+  "authority_response_invalid", "canary_failed", "attestation_failed", "timeout", "auth_required", "verification_required",
+  "cloud_credential_error", "subprocess_exited", "protocol_error", "transport_closed", "lifecycle_superseded", "rate_limited",
+  "design_protection_failed", "session_expired",
+] as const;
+const cloudFailureCodes = new Set(CLOUD_COMMAND_FAILURE_STAGES.flatMap(stage =>
+  CLOUD_COMMAND_FAILURE_CATEGORIES.map(category => `cloud_${stage}_${category}`)));
 export const CloudGoalUpdateSchema = z.object({
   objective: z.string().trim().min(1).max(32_768).optional(),
   status: z.enum(["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"]).optional(),
@@ -77,7 +88,8 @@ export const CloudCommandMutationSchema = z.object({
 });
 export const CloudCommandSettleSchema = z.object({
   commandId: uuid, claimId: uuid, state: z.enum(["succeeded", "failed", "cancelled"]),
-  resultCode: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).nullable(),
+  resultCode: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).refine(code =>
+    !CLOUD_COMMAND_FAILURE_STAGES.some(stage => code.startsWith(`cloud_${stage}_`)) || cloudFailureCodes.has(code)).nullable(),
   result: CloudNativeResultSchema.optional(),
 }).strict();
 const CloudGoalConfirmationSchema=z.object({kind:z.literal("confirm-goal"),commandId:uuid,claimId:uuid,

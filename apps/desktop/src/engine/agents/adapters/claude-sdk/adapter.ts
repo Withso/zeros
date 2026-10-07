@@ -175,15 +175,9 @@ let loggedCliSource: ClaudeCliSourceKind | null = null;
  * overrides and the writable workspace's package graph. */
 export function resolveCloudClaudeCli(): {path:string;source:"bundled"} {
   const runtime=resolveCloudRuntime();
-  if(runtime.profile==="v3") {
-    const cli=resolveClaudeCli();
-    if(cli.source!=="bundled"||!cli.path?.startsWith(`${runtime.workerRoot}/`))
-      throw new Error("Cloud Claude requires the immutable bundled runtime");
-    return {path:cli.path,source:"bundled"};
-  }
-  const guard=(file:string)=>runtime.profile==="v4"?resolveCloudRuntimePackagePath(file):file;
+  const guard=resolveCloudRuntimePackagePath;
   const anchor=path.join(runtime.workerRoot,"package.json");
-  if(runtime.profile==="v4")guard(path.join(runtime.workerRoot,"node_modules/@anthropic-ai/claude-agent-sdk/package.json"));
+  guard(path.join(runtime.workerRoot,"node_modules/@anthropic-ai/claude-agent-sdk/package.json"));
   const sdk=guard(createRequire(guard(anchor)).resolve("@anthropic-ai/claude-agent-sdk"));
   const fromSdk=createRequire(sdk);
   for(const pkg of claudePlatformPackages()) {

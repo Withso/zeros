@@ -56,7 +56,6 @@ jobs:
             echo "ZEROS_CLOUD_VM_REGISTRY_TAG=$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
             echo "ZEROS_REPO_URL=https://github.com/$REPOSITORY.git"
             echo "ZEROS_REPO_COMMIT=$GITHUB_SHA"
-            echo "DAYTONA_SANDBOX_CLASS=linux-vm"
             echo "BUILDX_BUILDER=zeros-runtime-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           } >> "$GITHUB_ENV"
       - name: Configure bounded publication builder

@@ -90,7 +90,6 @@ import {
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { useTerminalBusy } from "../terminal/terminal-activity";
 import { ChatHistoryMenu } from "./chat-history-menu";
-import { CloudWorkspaceDetails } from "./cloud-workspace-details";
 import { CloudTerminalIndicator } from "../terminal/cloud-terminal-indicator";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { NewChatMenu } from "./new-chat-menu";
@@ -515,7 +514,6 @@ export function ChatTabs({
 
   return (
     <div className={CHAT_STRIP_SHELL_CLS}>
-      {isCloudWorkspace(workspaceFolder) && <div className="flex h-full shrink-0 items-center pl-2" data-cloud-workspace-button=""><CloudWorkspaceDetails key={workspaceFolder} folder={workspaceFolder} /></div>}
       {/* Fixed leading slot — outside the scrolling lane, so the mode toggle
           holds the strip's left edge no matter how far the tabs scroll. */}
       {leading ? (

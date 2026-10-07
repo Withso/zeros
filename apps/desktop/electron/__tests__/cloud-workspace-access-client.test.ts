@@ -12,7 +12,6 @@ const NOW = 1_800_000_000_000;
 const SSH_CREDENTIAL = `ssh_${"a".repeat(40)}`;
 const PREVIEW_CAPABILITY = `zwp_${"b".repeat(43)}`;
 const ENGINE_INSTANCE_ID = "44444444-4444-4444-8444-444444444444";
-const ENGINE_GRANT = `zws_${"c".repeat(43)}`;
 const DEVICE_ID = "55555555-5555-4555-8555-555555555555";
 const TUNNEL_SESSION_ID = "66666666-6666-4666-8666-666666666666";
 
@@ -35,6 +34,20 @@ function grant(kind: "ssh" | "tunnel" | "preview", remotePort: number | null) {
 }
 
 describe("CloudWorkspaceAccessClient", () => {
+  const detectedPorts = { version: 1, organizationId: ORGANIZATION_ID, workspaceId: WORKSPACE_ID, generation: 7,
+    status: "ready", observedAt: new Date(NOW).toISOString(), ports: [] };
+  it("reads exact-generation port observations without issuing an admission and preserves unknown versus empty", async () => {
+    const fetchImpl = vi.fn(async () => json(detectedPorts));
+    const client = new CloudWorkspaceAccessClient({ baseUrl: "https://api.zeros.test", fetch: fetchImpl });
+    await expect(client.readDetectedPorts("account-access-token", { organizationId: ORGANIZATION_ID, workspaceId: WORKSPACE_ID, generation: 7 })).resolves.toEqual(detectedPorts);
+    expect(fetchImpl).toHaveBeenCalledWith(`https://api.zeros.test/v1/organizations/${ORGANIZATION_ID}/cloud-workspaces/${WORKSPACE_ID}/detected-ports?generation=7`, expect.objectContaining({ method: "GET", redirect: "error", credentials: "omit" }));
+    fetchImpl.mockResolvedValueOnce(json({ ...detectedPorts, observedAt: null, ports: null }));
+    await expect(client.readDetectedPorts("account-access-token", { organizationId: ORGANIZATION_ID, workspaceId: WORKSPACE_ID, generation: 7 })).resolves.toMatchObject({ ports: null });
+  });
+  it.each([{ generation: 8 }, { workspaceId: GRANT_ID }, { organizationId: GRANT_ID }, { capability: "unexpected" }, { ports: [{ port: 22 }] }])("rejects foreign, malformed, or credential-bearing port reads", async change => {
+    const client = new CloudWorkspaceAccessClient({ baseUrl: "https://api.zeros.test", fetch: vi.fn(async () => json({ ...detectedPorts, ...change })) });
+    await expect(client.readDetectedPorts("account-access-token", { organizationId: ORGANIZATION_ID, workspaceId: WORKSPACE_ID, generation: 7 })).rejects.toMatchObject({ code: "bad_response" });
+  });
   it("requests actor v2 with an exact device proof and accepts only its control-plane bridge",async()=>{
     const proof={deviceId:DEVICE_ID,keyVersion:1,timestampMs:NOW,nonce:"n".repeat(32),signature:"s".repeat(86)};
     const signEngineAdmission=vi.fn(async()=>proof);
@@ -52,6 +65,20 @@ describe("CloudWorkspaceAccessClient", () => {
       await expect(client.issueEngineAdmission("account-access-token",{organizationId:ORGANIZATION_ID,workspaceId:WORKSPACE_ID})).rejects.toMatchObject({code:"bad_response"});
     }
   });
+  it.each([
+    ["cloud_workspace_v2_required", "This workspace uses a retired cloud runtime — create a new workspace."],
+    ["cloud_workspace_client_update_required", "Update Zeros to connect to cloud workspaces."],
+  ])("preserves the closed actor refusal %s without reflecting private server details", async (code, message) => {
+    const proof = { deviceId: DEVICE_ID, keyVersion: 1, timestampMs: NOW, nonce: "n".repeat(32), signature: "s".repeat(86) };
+    const client = new CloudWorkspaceAccessClient({ baseUrl: "https://api.zeros.test", now: () => NOW,
+      signEngineAdmission: async () => proof,
+      fetch: vi.fn(async () => json({ error: { code, message: "must-not-surface", privateDetails: "must-not-surface" } }, 409)),
+    });
+    const error = await client.issueEngineAdmission("account-access-token", { organizationId: ORGANIZATION_ID, workspaceId: WORKSPACE_ID }).catch(value => value);
+    expect(error).toBeInstanceOf(CloudWorkspaceAccessClientError);
+    expect(error).toMatchObject({ status: 409, code, message });
+    expect(JSON.stringify(error)).not.toContain("must-not-surface");
+  });
 
   it("issues SSH access with main-owned auth and validates the exact hosted endpoint", async () => {
     const fetchImpl = vi.fn(async () =>
@@ -60,14 +87,14 @@ describe("CloudWorkspaceAccessClient", () => {
           grant: grant("ssh", null),
           ssh: {
             username: SSH_CREDENTIAL,
-            host: "ssh.app.daytona.io",
-            command: `ssh ${SSH_CREDENTIAL}@ssh.app.daytona.io`,
+            host: "ssh.fixture.test",
+            command: `ssh ${SSH_CREDENTIAL}@ssh.fixture.test`,
           },
         },
         201,
       ),
     );
-    const client = new CloudWorkspaceAccessClient({
+    const client = new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"],
       baseUrl: "https://api.zeros.test/",
       fetch: fetchImpl as typeof fetch,
       now: () => NOW,
@@ -82,7 +109,7 @@ describe("CloudWorkspaceAccessClient", () => {
       }),
     ).resolves.toMatchObject({
       grant: { kind: "ssh", workspaceId: WORKSPACE_ID, remotePort: null },
-      ssh: { username: SSH_CREDENTIAL, host: "ssh.app.daytona.io" },
+      ssh: { username: SSH_CREDENTIAL, host: "ssh.fixture.test" },
     });
     expect(fetchImpl).toHaveBeenCalledWith(
       `https://api.zeros.test/v1/organizations/${ORGANIZATION_ID}/cloud-workspaces/${WORKSPACE_ID}/access/ssh`,
@@ -116,7 +143,7 @@ describe("CloudWorkspaceAccessClient", () => {
         ),
       )
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
-    const client = new CloudWorkspaceAccessClient({
+    const client = new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"],
       baseUrl: "https://api.zeros.test",
       fetch: fetchImpl as typeof fetch,
       now: () => NOW,
@@ -148,15 +175,15 @@ describe("CloudWorkspaceAccessClient", () => {
             },
             ssh: {
               username: SSH_CREDENTIAL,
-              host: "ssh.app.daytona.io",
-              command: `ssh ${SSH_CREDENTIAL}@ssh.app.daytona.io`,
+              host: "ssh.fixture.test",
+              command: `ssh ${SSH_CREDENTIAL}@ssh.fixture.test`,
             },
           },
           201,
         ),
       )
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
-    const client = new CloudWorkspaceAccessClient({
+    const client = new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"],
       baseUrl: "https://api.zeros.test",
       fetch: fetchImpl as typeof fetch,
       now: () => NOW,
@@ -183,7 +210,7 @@ describe("CloudWorkspaceAccessClient", () => {
           grant: grant("tunnel", 4173),
           tunnel: {
             sshUsername: SSH_CREDENTIAL,
-            sshHost: "ssh.app.daytona.io",
+            sshHost: "ssh.fixture.test",
             remoteHost: "127.0.0.1",
             remotePort: 4173,
             session: {
@@ -196,7 +223,7 @@ describe("CloudWorkspaceAccessClient", () => {
         201,
       ),
     );
-    const client = new CloudWorkspaceAccessClient({
+    const client = new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"],
       baseUrl: "https://api.zeros.test",
       fetch: fetchImpl as typeof fetch,
       now: () => NOW,
@@ -239,7 +266,7 @@ describe("CloudWorkspaceAccessClient", () => {
         observedLocalPort: 54173,
       }),
     );
-    const client = new CloudWorkspaceAccessClient({
+    const client = new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"],
       baseUrl: "https://api.zeros.test",
       fetch: fetchImpl as typeof fetch,
       now: () => NOW,
@@ -260,87 +287,8 @@ describe("CloudWorkspaceAccessClient", () => {
     );
   });
 
-  it("accepts only an exact generation-bound engine admission", async () => {
-    const fetchImpl = vi.fn(async () =>
-      json(
-        {
-          version: 1,
-          audience: "zeros-cloud-workspace-engine-client-admission-v1",
-          workspaceId: WORKSPACE_ID,
-          organizationId: ORGANIZATION_ID,
-          generation: 7,
-          authorityEpoch: 11,
-          engineInstanceId: ENGINE_INSTANCE_ID,
-          remotePort: 47891,
-          grantToken: ENGINE_GRANT,
-          expiresAt: new Date(NOW + 120_000).toISOString(),
-        },
-        201,
-      ),
-    );
-    const client = new CloudWorkspaceAccessClient({
-      baseUrl: "https://api.zeros.test",
-      fetch: fetchImpl as typeof fetch,
-      now: () => NOW,
-    });
-
-    await expect(
-      client.issueLegacyEngineAdmission("account-access-token", {
-        organizationId: ORGANIZATION_ID,
-        workspaceId: WORKSPACE_ID,
-      }),
-    ).resolves.toMatchObject({
-      generation: 7,
-      authorityEpoch: 11,
-      engineInstanceId: ENGINE_INSTANCE_ID,
-      grantToken: ENGINE_GRANT,
-    });
-    expect(fetchImpl).toHaveBeenCalledWith(
-      `https://api.zeros.test/v1/organizations/${ORGANIZATION_ID}/cloud-workspaces/${WORKSPACE_ID}/runtime/admission`,
-      expect.objectContaining({
-        method: "POST",
-        body: "{}",
-        headers: expect.objectContaining({
-          authorization: "Bearer account-access-token",
-        }),
-      }),
-    );
-  });
-
-  it("fails closed on an ambiguous engine-admission response", async () => {
-    const client = new CloudWorkspaceAccessClient({
-      baseUrl: "https://api.zeros.test",
-      fetch: vi.fn(async () =>
-        json(
-          {
-            version: 1,
-            audience: "zeros-cloud-workspace-engine-client-admission-v1",
-            workspaceId: WORKSPACE_ID,
-            organizationId: ORGANIZATION_ID,
-            generation: 7,
-            authorityEpoch: 11,
-            engineInstanceId: ENGINE_INSTANCE_ID,
-            remotePort: 47891,
-            grantToken: ENGINE_GRANT,
-            expiresAt: new Date(NOW + 120_000).toISOString(),
-            providerCredential: "must-not-be-accepted",
-          },
-          201,
-        ),
-      ) as typeof fetch,
-      now: () => NOW,
-    });
-
-    await expect(
-      client.issueLegacyEngineAdmission("account-access-token", {
-        organizationId: ORGANIZATION_ID,
-        workspaceId: WORKSPACE_ID,
-      }),
-    ).rejects.toMatchObject({ code: "bad_response" });
-  });
-
   it("issues an isolated preview capability with an exact HTTPS origin", async () => {
-    const client = new CloudWorkspaceAccessClient({
+    const client = new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"],
       baseUrl: "https://api.zeros.test",
       fetch: vi.fn(async () =>
         json(
@@ -383,13 +331,13 @@ describe("CloudWorkspaceAccessClient", () => {
       logicalUrl: "http://localhost:4173/", origin: "https://0123456789abcdef0123456789abcdef.preview.zeros.test",
       capability: PREVIEW_CAPABILITY, headerName: "x-zeros-preview-capability", target: { ...target, portId: "B".repeat(32) },
     } }, 201));
-    const client = new CloudWorkspaceAccessClient({ baseUrl: "https://api.zeros.test", fetch: fetcher as typeof fetch, now: () => NOW, allowedPreviewHostSuffixes: ["preview.zeros.test"] });
+    const client = new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"], baseUrl: "https://api.zeros.test", fetch: fetcher as typeof fetch, now: () => NOW, allowedPreviewHostSuffixes: ["preview.zeros.test"] });
     await expect(client.issuePreview("account-access-token", { organizationId: ORGANIZATION_ID, workspaceId: WORKSPACE_ID, port: 4173, target, expiresInMinutes: 30, idempotencyKey: "desktop:preview:opaque" })).rejects.toMatchObject({ code: "bad_response" });
     expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toMatchObject({ target });
   });
 
   it("rejects an array-encoded preview capability instead of returning it as a string", async () => {
-    const client = new CloudWorkspaceAccessClient({
+    const client = new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"],
       baseUrl: "https://api.zeros.test",
       fetch: vi.fn(async () =>
         json(
@@ -439,7 +387,7 @@ describe("CloudWorkspaceAccessClient", () => {
         ),
       )
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
-    const client = new CloudWorkspaceAccessClient({
+    const client = new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"],
       baseUrl: "https://api.zeros.test",
       fetch: fetchImpl as typeof fetch,
       now: () => NOW,
@@ -460,7 +408,7 @@ describe("CloudWorkspaceAccessClient", () => {
 
   it("revokes by sending both account auth and the exact access verifier", async () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }));
-    const client = new CloudWorkspaceAccessClient({
+    const client = new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"],
       baseUrl: "https://api.zeros.test",
       fetch: fetchImpl as typeof fetch,
       now: () => NOW,
@@ -486,7 +434,7 @@ describe("CloudWorkspaceAccessClient", () => {
   });
 
   it("maps bounded control-plane errors without reflecting provider secrets", async () => {
-    const client = new CloudWorkspaceAccessClient({
+    const client = new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"],
       baseUrl: "https://api.zeros.test",
       fetch: vi.fn(async () =>
         json(
@@ -524,7 +472,7 @@ describe("CloudWorkspaceAccessClient", () => {
   });
 
   it("does not reflect an unknown server error code or message", async () => {
-    const client = new CloudWorkspaceAccessClient({
+    const client = new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"],
       baseUrl: "https://api.zeros.test",
       fetch: vi.fn(async () =>
         json(
@@ -562,17 +510,17 @@ describe("CloudWorkspaceAccessClient", () => {
   it("requires a bare HTTPS control-plane origin, with loopback only by explicit opt-in", () => {
     expect(
       () =>
-        new CloudWorkspaceAccessClient({ baseUrl: "http://api.zeros.test" }),
+        new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"], baseUrl: "http://api.zeros.test" }),
     ).toThrow(/HTTPS/);
     expect(
       () =>
-        new CloudWorkspaceAccessClient({
+        new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"],
           baseUrl: "https://api.zeros.test/prefix",
         }),
     ).toThrow(/origin/);
     expect(
       () =>
-        new CloudWorkspaceAccessClient({
+        new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"],
           baseUrl: "http://127.0.0.1:8788",
           allowInsecureLoopback: true,
         }),
@@ -581,7 +529,7 @@ describe("CloudWorkspaceAccessClient", () => {
 
   it("does not issue preview access without an exact configured DNS boundary", async () => {
     const fetchImpl = vi.fn();
-    const client = new CloudWorkspaceAccessClient({
+    const client = new CloudWorkspaceAccessClient({ allowedSshHosts: ["ssh.fixture.test"],
       baseUrl: "https://api.zeros.test",
       fetch: fetchImpl as typeof fetch,
       now: () => NOW,

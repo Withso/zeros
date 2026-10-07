@@ -1,16 +1,12 @@
 # Hosted Postgres qualification
 
-Status, September 24, 2026: Alpha, Beta and Production use PlanetScale Postgres.
-Each cutover preserved its own source data, applied forward migrations, verified
-runtime roles and API behavior, and retained the old writer fence. Normal app
-access is restored. A same-region point-in-time restore drill of the isolated
-deployment verified its rows and every referenced object; it does not complete
-regional disaster recovery or sustained production-load qualification. Alpha
-applied `0094`–`0100` on September 24 after an on-demand backup; Beta and
-Production stay at `0093` until their next release. The control-plane
-application stays on Railway. Existing SQL, workspace identities,
-RLS, migrations and portable client contracts remain authoritative. The compute
-providers remain independent of database hosting.
+The control-plane application runs on Railway with hosted PlanetScale Postgres.
+Database hosting is independent of Boat compute. This guide owns connection,
+role, migration, writer-fence and recovery acceptance; it does not record a
+current per-channel migration ledger or deployment claim. Existing SQL,
+workspace identity, forced RLS and forward migrations remain authoritative.
+Same-region restore evidence cannot establish regional/object-store recovery
+or sustained production capacity. See [qualification status](qualification-status.md).
 
 ## Environment boundaries
 
@@ -92,7 +88,7 @@ driver pool eviction alone does not establish safe listener rotation.
 [Role management](https://planetscale.com/docs/postgres/connecting/roles),
 [connection resilience](https://planetscale.com/docs/postgres/connection-resilience)
 
-Start PS-5 qualification with one API replica, six request connections and one
+Start isolated qualification with one API replica, six request connections and one
 dedicated listener. Rolling overlap would consume fourteen direct connections,
 before an explicit migrator and operator headroom. Compare the complete budget
 with the target's usable slots and measured load. The minimum is three request
@@ -112,8 +108,7 @@ not performance sizing recommendations.
    private-repository access and revocation through the public API. Measure
    connection waits, transaction latency, event replay and worker progress.
 4. Run the Boat headless lifecycle, agents, Code/Design, simultaneous-device,
-   spend and recovery matrix against the target database. Daytona must separately
-   pass its worker-host compatibility gate before its complete runtime matrix.
+   spend and recovery matrix against the target database.
 5. Rehearse HA switchover, restart, expired credentials, sustained load and restored
    database promotion on the production-equivalent disposable cluster. Verify
    no duplicate allocation, prompt, grant, settlement or external side effect.
@@ -172,8 +167,8 @@ new writes exist, recovery needs a verified reverse data path or a forward fix;
 switching back to stale data can lose confirmed state. Retire source resources
 only after the agreed restore and observation criteria pass.
 
-These checks extend steps 1, 5, 6 and 8 of the cloud roadmap. They do not close
-the remaining agent-account, LSP, provider-cleanup or Daytona-host requirements.
+These checks qualify the database boundary only; native agents, tooling and
+provider cleanup retain their independent acceptance gates.
 Customer billing remains outside the current internal pilot.
 
 ## Stable migration owner and operator plans
@@ -207,7 +202,7 @@ Run `node dist/migrate.js --plan` from the exact reviewed artifact to obtain
 Review that list with the drain/backup plan, then supply its exact filenames in
 `CONTROL_PLANE_MIGRATION_APPROVALS` to the one-shot migrator. Strict execution
 preflights all pending controlled approvals before committing any application
-migration prefix. A fresh reset requires all eight current marked files;
+migration prefix. A fresh reset requires every controlled filename returned by that exact plan;
 already applied files need no additional approval.
 
 The later boundaries require draining old lifecycle/allocator workers and
@@ -219,15 +214,9 @@ workers together or reinterpret historical payers, reservations or receipts.
 
 ## History index rollout (0109)
 
-Migration `0109_cloud_history_reads.sql` is already applied in Dev. Its bytes
-and checksum must remain unchanged. A read-only Alpha measurement supplied by
-the rollout orchestrator at **2026-09-29 12:05 UTC** found
-`workspace_record_entities`: **0 rows, 16 KiB**; `cloud_agent_credentials`:
-**0 rows**; `cloud_agent_credential_delegations`: **0 rows**; and
-`cloud_workspaces`: **1 row**. Beta and Production have cloud execution off.
-This is a dated size measurement, not a populated-table timing or load test.
-At that measured size the ordinary index build is not a practical rollout
-blocker; recheck the size before deployment and accept that small write pause.
+Applied `0109_cloud_history_reads.sql` bytes/checksum remain unchanged. Recheck
+actual table size, writer load and permitted interruption before any deployment;
+a dated empty-table measurement cannot qualify a populated-table lock or timing.
 
 Ordinary `CREATE INDEX` holds a write-conflicting lock until the enclosing
 migration transaction commits. For a populated deployment, drain durable-record
@@ -243,8 +232,8 @@ This change adds no nontransactional migration execution mode.
 `cloud_workspace_provider_operations`, before creating its foreign key or
 altering either table. This parent-first order avoids a lock-upgrade deadlock
 with a released backend's wake transaction (workspace lock, journal read,
-workspace update). Even one workspace can encounter that interleaving; the
-small 0109 index measurement does not qualify it away.
+workspace update). Even one workspace can encounter that interleaving; a
+small table-size measurement does not qualify it away.
 
 Lock acquisition has a two-second `lock_timeout`. If an existing transaction
 does not finish in that window, PostgreSQL returns `55P03`; the whole migration

@@ -51,7 +51,7 @@ export function localEnvironment({
   // credentials/HOME remain ordinary provider credentials, separate from Zeros.
   for (const key of Object.keys(env)) {
     if (
-      /^(?:ZEROS_|AUTH_|AUTH0_|WORKOS_|CLOUD_|CONTROL_PLANE_|DAYTONA_|RAILWAY_|PLANETSCALE_|CLOUDFLARE_|CF_|R2_)/.test(
+      /^(?:ZEROS_|AUTH_|AUTH0_|WORKOS_|CLOUD_|CONTROL_PLANE_|RAILWAY_|PLANETSCALE_|CLOUDFLARE_|CF_|R2_)/.test(
         key,
       )
     )

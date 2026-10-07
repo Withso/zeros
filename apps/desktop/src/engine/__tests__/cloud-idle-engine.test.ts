@@ -74,6 +74,13 @@ describe("idle checkpoint execution", () => {
     });
     const request = vi.fn(async (message: WireRecord): Promise<WireRecord> => {
       const input = (message.params as WireRecord).request as WireRecord | undefined;
+      if (message.op === "cloudEvents.request") {
+        expect(input).toEqual({ kind: "snapshot", conversationId });
+        return { type: "WORKSPACE_RESPONSE", result: {
+          cursor: { streamId: "33333333-3333-4333-8333-333333333333", sequence: 0 },
+          snapshot: { conversationId, executionId: "execution", activeTurn: null, messages: [] },
+        } };
+      }
       if (input?.kind === "mutate") {
         writes.push(input.mutation as WireRecord);
         let response!: WireRecord;

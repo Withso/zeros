@@ -18,13 +18,11 @@ import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { DatabaseCloudWorkspaceManagementService } from "./management.js";
-import { selectCloudProviderConnectionForNewGeneration } from "./provider-connections.js";
-import { DaytonaProviderConnectionQualifier } from "./provider-qualification.js";
 import {
   persistDatabaseCloudWorkspaceSettings,
   resolveDatabaseCloudWorkspaceSettings,
 } from "./settings.js";
-import { seedCanonicalWorkspaceSettingsVersion,seedHostedCloudWorkspaceProviderConnection,seedReadyCloudWorkspace } from "./test-fixtures.js";
+import { seedCanonicalWorkspaceSettingsVersion,seedReadyCloudWorkspace,seedSupportedCloudWorkspaceGeneration } from "./test-fixtures.js";
 import {DatabaseCloudWorkspaceCollaborationService} from "./actors.js";
 import {CloudWorkspaceCheckpointRequestWorker,enqueueWorkspaceCheckpointRequest} from "./checkpoint-requests.js";
 import {assertDatabaseLockOrder} from "./lock-order-test-utils.js";
@@ -34,10 +32,9 @@ const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
 
 const settingsKey = randomBytes(32).toString("base64url");
-const providerKey = randomBytes(32).toString("base64url");
 const config: CloudWorkspaceBackendConfig = {
-  provider: "daytona",
-  apiKey: "hosted-daytona-key-for-management-tests",
+  provider: "boat",
+  apiKey: "hosted-boat-key-for-management-tests",
   apiUrl: "https://api.example.test",
   target: "eu",
   snapshotId: "snap-pinned",
@@ -50,13 +47,12 @@ const config: CloudWorkspaceBackendConfig = {
   operationTimeoutSeconds: 30,
   autoArchiveMinutes: 10_080,
   reconcileIntervalMs: 1_000,
-  providerCredentialKeys: { 1: providerKey },
   settingsSecretEncryptionKeys: { 1: settingsKey },
   currentSettingsSecretEncryptionKeyVersion: 1,
   settingsSecretKeyV1: settingsKey,
   access: {
-    allowedSshHosts: ["ssh.app.daytona.io"],
-    allowedPreviewHostSuffixes: ["proxy.daytona.work"],
+    allowedSshHosts: ["ssh.fixture.test"],
+    allowedPreviewHostSuffixes: ["preview.fixture.test"],
     previewBaseDomain: "cloud-preview.example.test",
   },
   durability: null,
@@ -71,10 +67,7 @@ d("cloud workspace Phase 5 management", () => {
   let repositoryId: string;
   let workspaceId: string;
   let management: DatabaseCloudWorkspaceManagementService;
-  const currentApiKey = vi.fn(async () => ({
-    permissions: ["write:sandboxes", "delete:sandboxes"],
-    expiresAt: new Date(Date.now() + 24 * 60 * 60_000),
-  }));
+
 
   beforeAll(() => {
     pool = new pg.Pool({ connectionString: url, max: 4 });
@@ -85,8 +78,8 @@ d("cloud workspace Phase 5 management", () => {
   });
 
   beforeEach(async () => {
-    currentApiKey.mockClear();
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     actor = await ensureUser(pool, {
       provider: "auth0",
       providerSubject: randomUUID(),
@@ -144,13 +137,6 @@ d("cloud workspace Phase 5 management", () => {
         [organizationId, randomUUID(), actor.id],
       );
       const childRepositoryId = repository.rows[0]!.id;
-      const connectionId = await seedHostedCloudWorkspaceProviderConnection(
-        tx,
-        {
-          organizationId,
-          createdBy: actor.id,
-        },
-      );
       const workspace = await tx.query<{ id: string }>(
         `INSERT INTO cloud_workspaces (
            org_id, team_id, created_by, display_name, repository_forge,
@@ -179,20 +165,14 @@ d("cloud workspace Phase 5 management", () => {
          ) VALUES ($1, 1, $2, $3, 'organization', 'business', 1, $3)`,
         [childWorkspaceId, organizationId, actor.id],
       );
-      await tx.query(
-        `INSERT INTO cloud_workspace_generations (
-           workspace_id, generation, org_id, provider, image_ref,
-           architecture, cpu_millicores, memory_mib, storage_mib, created_by,
-           provider_connection_id
-         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
-                   2000, 4096, 20480, $3, $4)`,
-        [childWorkspaceId, organizationId, actor.id, connectionId],
-      );
+      await seedSupportedCloudWorkspaceGeneration(tx, {
+        workspaceId: childWorkspaceId, organizationId, ownerUserId: actor.id,
+      });
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider, provider_resource_id,
            observed_state, last_observed_at
-         ) VALUES ($1, 1, $2, 'daytona', $3, 'running', now())`,
+         ) VALUES ($1, 1, $2, 'boat', $3, 'running', now())`,
         [childWorkspaceId, organizationId, `sandbox-${childWorkspaceId}`],
       );
       return {
@@ -206,9 +186,6 @@ d("cloud workspace Phase 5 management", () => {
     workspaceId = seeded.childWorkspaceId;
     management = new DatabaseCloudWorkspaceManagementService(pool, config, {
       workosEnabled: false,
-      qualifier: new DaytonaProviderConnectionQualifier({
-        clientFactory: () => ({ currentApiKey }),
-      }),
     });
   });
 
@@ -353,7 +330,7 @@ d("cloud workspace Phase 5 management", () => {
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider,
            provider_resource_id, observed_state, last_observed_at
-         ) VALUES ($1, 2, $2, 'daytona', $3, 'running', now())`,
+         ) VALUES ($1, 2, $2, 'boat', $3, 'running', now())`,
         [workspaceId, orgId, `sandbox-${workspaceId}-2`],
       );
       await tx.query(
@@ -535,6 +512,7 @@ d("cloud workspace Phase 5 management", () => {
     expect(inherited.resolved.snapshot).toEqual({
       schemaVersion: 1,
       values: { SAFE_THEME: "dark", nested: { allowed: true } },
+      setupCommands: [],
     });
     expect(JSON.stringify(inherited)).not.toContain("must-not-cross");
     expect(inherited.sourceVersions).toMatchObject({
@@ -676,16 +654,12 @@ d("cloud workspace Phase 5 management", () => {
       value: "secret-value-that-must-never-be-returned",
     });
     expect(JSON.stringify(created)).not.toContain("secret-value");
-    await management.createEnvironmentProfile({
-      id: randomUUID(),
-      organizationId: orgId,
-      actorUserId: actor.id,
-      name: "Cloud runtime",
-      placement: "cloud",
-      isDefault: true,
-      document: {
-        secretRefs: [{ id: bindingId, name: "DEPLOY_TOKEN" }],
-      },
+    await withCloudFixtureOwnerTx(pool, async tx => {
+      // The immutable fixture config must explicitly pin the used binding.
+      // Production never adds a reference to an already accepted config.
+      await tx.query("SET LOCAL session_replication_role=replica");
+      await tx.query(`INSERT INTO cloud_computer_environment_refs(config_id,org_id,name,binding_id,binding_version)
+        SELECT config_id,org_id,'DEPLOY_TOKEN',$2,1 FROM cloud_workspace_computer_sources WHERE workspace_id=$1`, [workspaceId,bindingId]);
     });
     const accessId = randomUUID();
     const endpointId = randomUUID();
@@ -873,306 +847,17 @@ d("cloud workspace Phase 5 management", () => {
     });
   });
 
-  it("converges concurrent delegated-provider creation retries on one encrypted identity", async () => {
-    const id = randomUUID();
-    const apiKey = "daytona-concurrent-key-abcdefghijklmnopqrstuvwxyz";
-    const input = {
-      id,
-      organizationId: orgId,
-      actorUserId: actor.id,
-      ownerKind: "organization" as const,
-      displayName: "Concurrent Daytona",
-      apiKey,
-    };
-    const results = await Promise.all([
-      management.createProviderConnection(input),
-      management.createProviderConnection(input),
-    ]);
-    expect(results.map((result) => result.replayed).sort()).toEqual([
-      false,
-      true,
-    ]);
-    expect(JSON.stringify(results)).not.toContain(apiKey);
-    const stored = await withSystemTx(pool, (tx) =>
-      tx.query<{ count: string }>(
-        `SELECT count(*) AS count
-         FROM provider_connection_versions
-         WHERE connection_id = $1`,
-        [id],
-      ),
-    );
-    expect(Number(stored.rows[0]!.count)).toBe(1);
+  it("rejects customer provider creation and rotation with a controlled compatibility error", async () => {
+    await expect(management.createProviderConnection({
+      id: randomUUID(), organizationId: orgId, actorUserId: actor.id,
+      ownerKind: "organization", displayName: "Customer compute", apiKey: "fixture-provider-key",
+    })).rejects.toMatchObject({ status: 503, code: "cloud_provider_not_configured" });
+    await expect(management.rotateProviderConnection({
+      id: randomUUID(), organizationId: orgId, actorUserId: actor.id,
+      expectedVersion: 1, apiKey: "fixture-provider-key",
+    })).rejects.toMatchObject({ status: 503, code: "cloud_provider_not_configured" });
+    const connections = await management.listProviderConnections({ organizationId: orgId, actorUserId: actor.id });
+    expect(connections).toMatchObject({ connections: [expect.objectContaining({ credentialSource: "hosted", state: "active" })] });
   });
 
-  it("qualifies customer Daytona against its own endpoint while Boat is managed", async () => {
-    const clientFactory = vi.fn(() => ({ currentApiKey }));
-    const separate = new DatabaseCloudWorkspaceManagementService(
-      pool,
-      {
-        ...config,
-        provider: "boat",
-        apiUrl: "https://boat.dev/api/v1",
-        target: "managed-linux",
-        daytonaConnection: { apiUrl: config.apiUrl, target: config.target },
-      },
-      {
-        workosEnabled: false,
-        qualifier: new DaytonaProviderConnectionQualifier({ clientFactory }),
-      },
-    );
-    const id = randomUUID();
-    await separate.createProviderConnection({
-      id,
-      organizationId: orgId,
-      actorUserId: actor.id,
-      ownerKind: "organization",
-      displayName: "Customer Daytona",
-      apiKey: "daytona-separate-customer-key-abcdefghijklmnopqrstuvwxyz",
-    });
-    expect(clientFactory).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({
-        apiUrl: config.apiUrl,
-      }),
-    );
-    const stored = await withSystemTx(pool, (tx) =>
-      tx.query(
-        `SELECT version.endpoint, connection.region, version.capabilities
-       FROM provider_connection_versions version
-       JOIN provider_connections connection ON connection.id = version.connection_id
-       WHERE connection.id = $1`,
-        [id],
-      ),
-    );
-    expect(stored.rows).toEqual([
-      expect.objectContaining({
-        endpoint: config.apiUrl,
-        region: config.target,
-        capabilities: expect.objectContaining({ daytonaTarget: config.target }),
-      }),
-    ]);
-  });
-
-  it("rejects an unconfigured customer provider before exposing a key to the managed API", async () => {
-    const clientFactory = vi.fn(() => ({ currentApiKey }));
-    const separate = new DatabaseCloudWorkspaceManagementService(
-      pool,
-      { ...config, provider: "boat", apiUrl: "https://boat.dev/api/v1" },
-      {
-        workosEnabled: false,
-        qualifier: new DaytonaProviderConnectionQualifier({ clientFactory }),
-      },
-    );
-    await expect(
-      separate.createProviderConnection({
-        id: randomUUID(),
-        organizationId: orgId,
-        actorUserId: actor.id,
-        ownerKind: "organization",
-        displayName: "Customer Daytona",
-        apiKey: "daytona-separate-customer-key-abcdefghijklmnopqrstuvwxyz",
-      }),
-    ).rejects.toMatchObject({ code: "cloud_provider_not_configured" });
-    expect(clientFactory).not.toHaveBeenCalled();
-  });
-
-  it.each(["daytona", "boat"] as const)(
-    "keeps the accepted Daytona endpoint and target when rotating after a %s default change",
-    async (provider) => {
-      const id = randomUUID();
-      await management.createProviderConnection({
-        id,
-        organizationId: orgId,
-        actorUserId: actor.id,
-        ownerKind: "organization",
-        displayName: "Original Daytona",
-        apiKey: "daytona-original-before-change-abcdefghijklmnopqrstuvwxyz",
-      });
-      const clientFactory = vi.fn(() => ({ currentApiKey }));
-      const changed = new DatabaseCloudWorkspaceManagementService(
-        pool,
-        {
-          ...config,
-          provider,
-          apiUrl: "https://changed.example.test/api",
-          target: "us",
-        },
-        {
-          workosEnabled: false,
-          qualifier: new DaytonaProviderConnectionQualifier({ clientFactory }),
-        },
-      );
-      const result = await changed.rotateProviderConnection({
-        id,
-        organizationId: orgId,
-        actorUserId: actor.id,
-        expectedVersion: 1,
-        apiKey: "daytona-rotated-after-change-abcdefghijklmnopqrstuvwxyz",
-      });
-      expect(result.connection).not.toHaveProperty("region");
-      expect(clientFactory).toHaveBeenCalledExactlyOnceWith(
-        expect.objectContaining({
-          apiUrl: config.apiUrl,
-        }),
-      );
-      const versions = await withSystemTx(pool, (tx) =>
-        tx.query(
-          `SELECT endpoint, capabilities ->> 'daytonaTarget' AS target
-         FROM provider_connection_versions WHERE connection_id = $1 ORDER BY version`,
-          [id],
-        ),
-      );
-      expect(versions.rows).toEqual([
-        { endpoint: config.apiUrl, target: config.target },
-        { endpoint: config.apiUrl, target: config.target },
-      ]);
-    },
-  );
-
-  it("returns the committed provider qualification when concurrent rotations converge", async () => {
-    const id = randomUUID();
-    await management.createProviderConnection({
-      id,
-      organizationId: orgId,
-      actorUserId: actor.id,
-      ownerKind: "organization",
-      displayName: "Concurrent Rotation Daytona",
-      apiKey: "daytona-initial-concurrent-rotation-abcdefghijklmnopqrstuvwxyz",
-    });
-
-    let qualificationCalls = 0;
-    let releaseQualifications!: () => void;
-    const bothQualified = new Promise<void>((resolve) => {
-      releaseQualifications = resolve;
-    });
-    const concurrentApiKey = vi.fn(async () => {
-      qualificationCalls += 1;
-      const call = qualificationCalls;
-      if (qualificationCalls === 2) releaseQualifications();
-      await bothQualified;
-      return {
-        permissions: ["write:sandboxes", "delete:sandboxes"],
-        expiresAt: new Date(Date.now() + call * 24 * 60 * 60_000),
-      };
-    });
-    const concurrentManagement = new DatabaseCloudWorkspaceManagementService(
-      pool,
-      config,
-      {
-        workosEnabled: false,
-        qualifier: new DaytonaProviderConnectionQualifier({
-          clientFactory: () => ({ currentApiKey: concurrentApiKey }),
-        }),
-      },
-    );
-    const input = {
-      id,
-      organizationId: orgId,
-      actorUserId: actor.id,
-      expectedVersion: 1,
-      apiKey: "daytona-concurrent-rotation-key-abcdefghijklmnopqrstuvwxyz",
-    };
-    const results = await Promise.all([
-      concurrentManagement.rotateProviderConnection(input),
-      concurrentManagement.rotateProviderConnection(input),
-    ]);
-    expect(results.map((result) => result.replayed).sort()).toEqual([
-      false,
-      true,
-    ]);
-
-    const stored = await withSystemTx(pool, (tx) =>
-      tx.query<{ expires_at: string | null }>(
-        `SELECT capabilities ->> 'credentialExpiresAt' AS expires_at
-         FROM provider_connections WHERE id = $1`,
-        [id],
-      ),
-    );
-    for (const result of results) {
-      const connection = result.connection as {
-        capabilities: { credentialExpiresAt: string | null };
-      };
-      expect(connection.capabilities.credentialExpiresAt).toBe(
-        stored.rows[0]!.expires_at,
-      );
-    }
-  });
-
-  it("qualifies, encrypts, rotates, selects, and safely revokes delegated provider accounts", async () => {
-    const id = randomUUID();
-    const firstKey = "daytona-delegated-key-abcdefghijklmnopqrstuvwxyz";
-    const created = await management.createProviderConnection({
-      id,
-      organizationId: orgId,
-      actorUserId: actor.id,
-      ownerKind: "organization",
-      displayName: "Team Daytona",
-      apiKey: firstKey,
-    });
-    expect(created).toMatchObject({
-      connection: {
-        id,
-        credentialSource: "delegated",
-        version: 1,
-        state: "active",
-      },
-      replayed: false,
-    });
-    expect(JSON.stringify(created)).not.toContain(firstKey);
-    const stored = await withSystemTx(pool, (tx) =>
-      tx.query(
-        `SELECT encode(version.credential_sha256, 'hex') AS sha256,
-                position($2::text in version.ciphertext::text) > 0 AS leaked
-         FROM provider_connection_versions version
-         WHERE version.connection_id = $1 AND version.version = 1`,
-        [id, firstKey],
-      ),
-    );
-    expect(stored.rows[0]).toEqual({
-      sha256: createHash("sha256").update(firstKey).digest("hex"),
-      leaked: false,
-    });
-    const selected = await withSystemTx(pool, (tx) =>
-      selectCloudProviderConnectionForNewGeneration(tx, {
-        connectionId: id,
-        organizationId: orgId,
-        ownerUserId: actor.id,
-        isPersonal: false,
-        providers: ["daytona"],
-      }),
-    );
-    expect(selected).toMatchObject({ id, credentialVersion: 1 });
-
-    const secondKey =
-      "daytona-delegated-key-rotated-abcdefghijklmnopqrstuvwxyz";
-    await expect(
-      management.rotateProviderConnection({
-        id,
-        organizationId: orgId,
-        actorUserId: actor.id,
-        expectedVersion: 1,
-        apiKey: secondKey,
-      }),
-    ).resolves.toMatchObject({ connection: { version: 2 }, replayed: false });
-    const revoked = await management.revokeProviderConnection({
-      id,
-      organizationId: orgId,
-      actorUserId: actor.id,
-      expectedVersion: 2,
-    });
-    expect(revoked).toMatchObject({
-      connection: { state: "revoked", version: 2 },
-    });
-    await expect(
-      withSystemTx(pool, (tx) =>
-        selectCloudProviderConnectionForNewGeneration(tx, {
-          connectionId: id,
-          organizationId: orgId,
-          ownerUserId: actor.id,
-          isPersonal: false,
-          providers: ["daytona"],
-        }),
-      ),
-    ).resolves.toBeNull();
-    expect(currentApiKey).toHaveBeenCalledTimes(2);
-  });
 });

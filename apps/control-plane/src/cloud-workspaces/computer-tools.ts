@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { HttpError } from "../authz.js";
 import type { Tx } from "../db.js";
-import { lockCloudComputerOrganization } from "./computer.js";
+import { lockCloudComputerOrganization } from "./computer-identity.js";
 import type { DatabaseCloudComputerV2Service } from "./computer-v2.js";
 import {
   CLOUD_COMPUTER_TOOL_MAX_RESPONSE_BYTES,

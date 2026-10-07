@@ -27,6 +27,7 @@ import path from "node:path";
 
 import {
   classifyGitTransportError,
+  gitTransportRemediation,
   isGitLockContention,
   runFile,
   runGit,
@@ -39,6 +40,21 @@ import {
 } from "../credential-broker";
 
 const execFileAsync = promisify(execFile);
+
+describe("redacted Git permission remediation", () => {
+  it.each([
+    "error: open('/private/fixture/path'): Permission denied",
+    "fatal: Unable to create '/private/fixture/index.lock': Operation not permitted",
+    "error: insufficient permission for adding an object to repository database",
+  ])("describes filesystem access failures without exposing their stderr", (stderr) => {
+    expect(gitTransportRemediation("GIT_COMMAND_FAILED", stderr)).toBe("Workspace file permissions need repair.");
+  });
+  it("keeps authentication and unrelated failures distinct", () => {
+    expect(gitTransportRemediation("NOT_AUTHENTICATED", "Permission denied (publickey).")).toMatch(/GitHub refused/);
+    expect(gitTransportRemediation("GIT_COMMAND_FAILED", "Permission denied (publickey).")).toBeUndefined();
+    expect(gitTransportRemediation("GIT_COMMAND_FAILED", "fatal: invalid ref")).toBeUndefined();
+  });
+});
 
 async function serveGitHttpBackend(opts: {
   req: IncomingMessage;
@@ -255,6 +271,19 @@ describe("classifyGitTransportError", () => {
 });
 
 describe("runFile — Bun native subprocess boundary", () => {
+  it("carries fixed permission remediation through the renderer's existing Git error contract", async () => {
+    const spawn = vi.fn((command: string[]) => {
+      const failed = command.includes("--no-pager");
+      return { stdout: new Response("").body,
+        stderr: new Response(failed ? "error: open('/private/fixture/source'): Permission denied" : "").body,
+        exited: Promise.resolve(failed ? 128 : 0), signalCode: null, killed: false, kill: vi.fn() };
+    });
+    vi.stubGlobal("Bun", { spawn });
+    await expect(runGit("/fixture/git-permission", ["diff", "HEAD"])).rejects.toMatchObject({
+      code: "GIT_COMMAND_FAILED", message: "git diff HEAD failed", remediation: "Workspace file permissions need repair.",
+    });
+  });
+
   it("terminates the opted-in cloud fetch process group, then bounds cleanup", async () => {
     vi.useFakeTimers();
     let finish!: (code: number) => void;

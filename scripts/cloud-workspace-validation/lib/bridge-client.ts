@@ -39,8 +39,6 @@ interface PendingRequest {
 export interface BridgeClientOpts {
   /** Clean ws(s)://…/ws URL built by config.bridgeWsUrl. */
   url: string;
-  /** Daytona preview-proxy token → `x-daytona-preview-token`. */
-  previewToken?: string;
   /** Zeros bridge bearer token → the browser-compatible, non-negotiated
    * `zeros-cloud-token.<base64url>` WebSocket protocol carrier. */
   cloudToken?: string;
@@ -101,18 +99,13 @@ export class BridgeClient {
     return new Promise((resolve, reject) => {
       this.readyResolve = resolve;
       this.readyReject = reject;
-      const headers: Record<string, string> = {};
-      if (this.opts.previewToken) {
-        headers["x-daytona-preview-token"] = this.opts.previewToken;
-      }
       const protocols = this.opts.cloudToken
         ? [
             "zeros-v1",
             `zeros-cloud-token.${Buffer.from(this.opts.cloudToken, "utf8").toString("base64url")}`,
           ]
         : undefined;
-      const clientOptions =
-        Object.keys(headers).length > 0 ? { headers } : undefined;
+      const clientOptions = undefined;
       const ws = protocols
         ? new WebSocket(this.opts.url, protocols, clientOptions)
         : new WebSocket(this.opts.url, clientOptions);

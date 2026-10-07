@@ -93,7 +93,7 @@ database("Cloud Computer template worker", () => {
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
     await seedComputerTemplateRuntime(pool);
-    fixture = await seedReadyCloudWorkspace(pool);
+    fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     service = new DatabaseCloudComputerV2Service(
       pool,
       {
@@ -622,7 +622,7 @@ database("Cloud Computer template worker", () => {
         )
       ).rows[0].cleanup_confirmed_at,
     ).toBeNull();
-    const other = await seedReadyCloudWorkspace(pool);
+    const other = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     await service.build(other.organizationId, other.userId, {
       expectedRevision: 0,
       operationId: randomUUID(),
@@ -630,7 +630,7 @@ database("Cloud Computer template worker", () => {
     expect((await service.claimNextBuild(11))?.organizationId).toBe(
       other.organizationId,
     );
-    const third = await seedReadyCloudWorkspace(pool);
+    const third = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     await service.build(third.organizationId, third.userId, {
       expectedRevision: 0,
       operationId: randomUUID(),

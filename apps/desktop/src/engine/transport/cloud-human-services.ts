@@ -44,14 +44,21 @@ export function parseCloudSshIntro(source: string): Extract<CloudRuntimeServiceS
 export class CloudRuntimeHumanServices {
   private paused = false;
   private readonly workers = new Set<{ close(): void; retired: Promise<void> }>();
-  private readonly tunnels = new Map<Socket, { bytes: number; at: number }>();
+  private readonly tunnels = new Map<Socket, { bytes: number }>();
+  private lastTunnelTrafficAt: number | null = null;
   hasActiveWork(): boolean {
     const now = this.now();
     for (const [stream, traffic] of this.tunnels) {
-      const bytes = stream.bytesRead + stream.bytesWritten;
-      if (bytes !== traffic.bytes) { traffic.bytes = bytes; traffic.at = now; }
+      this.recordTunnelTraffic(stream, traffic, now);
     }
-    return this.workers.size > 0 || [...this.tunnels.values()].some(traffic => now - traffic.at < 10 * 60_000);
+    return this.workers.size > 0 || (this.lastTunnelTrafficAt !== null && now - this.lastTunnelTrafficAt < 10 * 60_000);
+  }
+  private recordTunnelTraffic(stream: Socket, traffic: { bytes: number }, now: number): void {
+    const bytes = stream.bytesRead + stream.bytesWritten;
+    if (bytes > traffic.bytes) {
+      traffic.bytes = bytes;
+      this.lastTunnelTrafficAt = now;
+    }
   }
   constructor(private readonly worker: CloudWorkerConfiguration, private readonly forbiddenPorts: () => readonly number[],
     private readonly now: () => number = () => performance.now()) {}
@@ -81,8 +88,14 @@ export class CloudRuntimeHumanServices {
     const stream = connect({ host: '127.0.0.1', port: grant.remotePort! });
     // Traffic, rather than an unused listener or authority heartbeat, is work.
     // Socket byte counters observe both directions without consuming data.
-    this.tunnels.set(stream, { bytes: 0, at: this.now() });
-    stream.once('close', () => this.tunnels.delete(stream));
+    const traffic = { bytes: 0 };
+    this.tunnels.set(stream, traffic);
+    stream.once('close', () => {
+      // A short request can finish entirely between idle observations. Retain
+      // only its activity time, including bytes not observed before close.
+      this.recordTunnelTraffic(stream, traffic, this.now());
+      this.tunnels.delete(stream);
+    });
     stream.on('error', () => {});
     try {
       await new Promise<void>((resolve, reject) => {

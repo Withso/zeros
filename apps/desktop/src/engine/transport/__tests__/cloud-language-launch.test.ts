@@ -1,9 +1,13 @@
-import {describe,it,expect} from "vitest";
+import {describe,it,expect,vi} from "vitest";
 import {cloudLanguageLaunch} from "../cloud-language-services";
 import type {CloudWorkerConfiguration} from "../../agents/containment/cloud-worker-config";
-const worker:CloudWorkerConfiguration={version:2,backend:"cloud-worker",profile:"zeros-cloud-worker-v2",uid:10001,gid:10001,
-  toolchain:{node:"/opt/zeros-runtime/bin/node",bwrap:"/usr/bin/bwrap",setpriv:"/usr/bin/setpriv",supervisor:"/opt/zeros/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs"}};
-const args=["--max-old-space-size=256","/opt/zeros/node_modules/pyright/langserver.index.js","--stdio"];
+import {testCloudRuntime,testCloudWorker} from "../../agents/__tests__/helpers/test-cloud-runtime";
+vi.mock("../../agents/containment/cloud-runtime-root.mjs",async original=>({
+  ...await original<typeof import("../../agents/containment/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime:(await import("../../agents/__tests__/helpers/test-cloud-runtime")).testCloudRuntime,
+}));
+const worker:CloudWorkerConfiguration=testCloudWorker();
+const args=["--max-old-space-size=256",`${testCloudRuntime().workerRoot}/node_modules/pyright/langserver.index.js`,"--stdio"];
 describe("human language server launch boundary",()=>{
   it("pins a read-only filesystem, private PID/network namespace, cleared groups and workload identity",()=>{
     const launched=cloudLanguageLaunch(worker,worker.toolchain.node,args);

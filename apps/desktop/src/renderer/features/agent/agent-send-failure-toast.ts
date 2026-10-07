@@ -2,7 +2,7 @@ import { toast } from "../../shared/ui/primitives/elements/toast";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { cloudCatalogGeneration, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
 import { cloudWorkspaceRestartVisible, restartCloudWorkspace } from "../../state/cloud-workspace-restart";
-import { isInternalFeatureActive } from "../settings/internal-features";
+import { hasCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode } from "./cloud-admission-failure";
 import { openCloudAdmissionSettings } from "./cloud-admission-status";
 import { modelsForAgent } from "./model-catalog";
@@ -17,6 +17,7 @@ export type AgentSendFailureReason =
   | "workspace_archived"
   | "workspace_unavailable"
   | "runtime_upgrade_required"
+  | "retired_runtime"
   | "model_not_enabled"
   | "credential_missing"
   | "credential_expired_or_revoked"
@@ -54,6 +55,7 @@ function sendFailureReason(input: AgentSendFailureInput): AgentSendFailureReason
   switch (failure?.kind) {
     case "waiting": return input.reason ?? null;
     case "runtime-upgrade-required": return "runtime_upgrade_required";
+    case "retired-runtime": return "retired_runtime";
     case "model-not-authorized": return "model_not_enabled";
     case "credential-required":
       switch (cloudAdmissionFailureCode(input.error)) {
@@ -72,7 +74,7 @@ function runtimeRestartAction(input: AgentSendFailureInput) {
   if (!target) return undefined;
   const canRestart = () => {
     const workspace = cloudWorkspaceDocument(target);
-    return isInternalFeatureActive("cloudComputerV2") && workspace?.capabilities.canWrite &&
+    return hasCloudWorkspaceAccountAccess(target.organizationId) && workspace?.capabilities.canWrite &&
       cloudWorkspaceRestartVisible(input.folder!, workspace);
   };
   if (!canRestart()) return undefined;
@@ -121,6 +123,10 @@ export function notifyAgentSendFailure(input: AgentSendFailureInput): boolean {
       message = "This workspace is on an older runtime";
       action = runtimeRestartAction(input);
       description = action ? "Restart this workspace to update its cloud runtime." : CLOUD_RUNTIME_UPGRADE_TOOLTIP;
+      break;
+    case "retired_runtime":
+      message = "This workspace uses a retired cloud runtime";
+      description = "Create a new workspace to send messages.";
       break;
     case "model_not_enabled": {
       const model = input.agentId && input.model ? modelsForAgent(input.agentId, null).find(row => row.value === input.model)?.label : null;

@@ -9,6 +9,7 @@ import {
 } from "./bridge/cloud-workspace-key";
 import type { WireRecord } from "./bridge/cloud-runtime-wire";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
+import { captureCloudTranscriptConfirmation, forgetCloudTranscriptChat } from "./cloud-transcript-cache";
 
 const baseSchema = {
   workspaceId: z.string().uuid(),
@@ -183,6 +184,7 @@ export async function readCloudWorkspaceHistory(
         // Messages can change without a chat title changing. Preserve the
         // database revision so quiet metadata polls remain distinguishable
         // from a real history update, including while the worker is stopped.
+        for (const chatId of chatDeletions) forgetCloudTranscriptChat(chatId);
         return { chats, chatDeletions, revision };
       } catch (error) {
         assertAccount();
@@ -213,11 +215,19 @@ export async function readCloudWorkspaceHistory(
       "before",
       String(z.number().int().safe().nonnegative().parse(params.before)),
     );
+  const confirm = op === "messages.window" && params.before === undefined
+    ? captureCloudTranscriptConfirmation(cloudScopedId(target, chat.id)) : null;
   const page = await cloudAccountRequest(
     `${root}/messages/${encodeURIComponent(chat.id)}?${query}`,
     messagesSchema,
   );
   assertAccount();
   assertScope(target, page);
+  if (op === "messages.window" && params.before === undefined) {
+    confirm?.({
+      recordEpoch: null, revision: page.revision, cursor: page.messages.at(-1)?.msgId ?? null, messages: page.messages,
+    });
+    return { messages: page.messages, revision: page.revision };
+  }
   return { messages: page.messages };
 }

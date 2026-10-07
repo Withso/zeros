@@ -233,6 +233,11 @@ function controlPlane() {
 async function commandRoundtrip(client, engine, negativeFixture, stop = true) {
   const cp = controlPlane(),
     completion = deferred();
+  const journal = new engine.CloudEventRuntime(streamId, {
+    request: (request) => engine.eventTransport.requestCloudEvent(authority, request, abort.signal, cp.fetch),
+    onFailure: () => {},
+  });
+  journal.start();
   let dispatched = 0,
     cancelled = 0;
   const runtime = new engine.CloudCommandRuntime({
@@ -280,6 +285,16 @@ async function commandRoundtrip(client, engine, negativeFixture, stop = true) {
           permissionModeVersion: 1,
           nativeCommandsVersion: 1,
         };
+      } else if (op === "cloudEvents.request") {
+        // The receiving cohort supplies both the strict client parser and the
+        // actual native journal snapshot implementation. Do not let a new
+        // renderer operation pass against an older runtime via an echo fake.
+        const request = engine.events.CloudEventClientRequestSchema.parse(params.request);
+        if (request.kind === "snapshot") {
+          assert.equal(request.conversationId, conversationId);
+          result = await journal.snapshot(() => ({ conversationId,
+            executionId: "execution-contract-fixture", activeTurn: null, messages: [] }));
+        } else result = await journal.replay(request.cursor);
       } else {
         assert.equal(op, "cloudCommands.request");
         const request = clone(params.request);
@@ -376,6 +391,7 @@ async function commandRoundtrip(client, engine, negativeFixture, stop = true) {
       resultCode: "stopped_before_dispatch",
     });
     runtime.close();
+    journal.close();
     connection.dispose();
     await sending?.catch(() => {});
   }

@@ -1,3 +1,4 @@
+import { refuseRetiredWorkerPromotion } from "./worker-retirement";
 import { appendFile } from "node:fs/promises";
 import { CHANNELS, PromotionError, releaseSource, requireCheck } from "./contracts";
 import { disabledGuard, publicIdentity } from "./guard";
@@ -6,6 +7,7 @@ import { command, jsonClient } from "./io";
 import { assertBuildCapability, publicationGate } from "./publication";
 
 async function main() {
+  if (process.env.ZEROS_WORKER_PROMOTION === "enabled") refuseRetiredWorkerPromotion();
   const source = releaseSource(process.env);
   requireCheck((await command("git", ["rev-parse", "HEAD"])).trim() === source.sourceSha, "Publication checkout differs from the event SHA");
   const github = githubClient(source, process.env);
@@ -14,7 +16,7 @@ async function main() {
   // Packaging changes package.json. Read manifests from Git objects, and
   // refresh rolling refs at publication rather than trusting checkout time.
   await command("git", ["fetch", "--force", "--prune", "--prune-tags", "--tags", "origin"]);
-  const cloudRequired = process.env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true", provider = process.env.CLOUD_WORKSPACE_PROVIDER || "daytona";
+  const cloudRequired = process.env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true", provider = process.env.CLOUD_WORKSPACE_PROVIDER || "boat";
   assertBuildCapability(process.env.BUILD_CLOUD_ENABLED, cloudRequired);
   if (process.env.ZEROS_HOSTED_PROMOTION !== "enabled") {
     const result = await disabledGuard([], { ...source, cloudEnabled: cloudRequired, provider });

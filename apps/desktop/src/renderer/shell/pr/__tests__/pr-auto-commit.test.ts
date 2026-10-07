@@ -16,6 +16,13 @@ const EMPTY = {
 } as const;
 
 describe("summarizePendingWork", () => {
+  it("uses net tracked changes, includes rename deletions, and excludes context/private paths", () => {
+    expect(summarizePendingWork({
+      ...EMPTY, staged: [{ path: "AD.ts" }], unstaged: [{ path: "AD.ts" }],
+      untracked: ["new.ts", ".context/notes.md", ".context-graph/shared/notes.md", ".zeros/private"],
+    }, [{ path: "renamed.ts", oldPath: "old.ts" }, { path: ".context/other.md" }]).paths).toEqual(["new.ts", "old.ts", "renamed.ts"]);
+  });
+
   it("unions staged, unstaged and untracked paths without duplicates", () => {
     const pending = summarizePendingWork({
       ...EMPTY,
