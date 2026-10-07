@@ -1045,6 +1045,10 @@ export class RecoveryController {
         if (
           fresh.state !== "open" ||
           fresh.head.sha !== pr.head.sha ||
+          fresh.head.ref !== row.incident.branch ||
+          fresh.base?.ref !== "main" ||
+          !sameRepo(fresh.base.repo) ||
+          !sameRepo(fresh.head.repo) ||
           fresh.body !== pr.body ||
           !(await this.untouched(fresh, parseContractBody(pr.body), bot, true))
         )

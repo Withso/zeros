@@ -576,7 +576,7 @@ describe("CI recovery reconciliation", () => {
     expect(fixture.state.refs.size).toBe(1);
   });
 
-  it.each(["assignee", "commit", "ready", "body", "main"])(
+  it.each(["assignee", "commit", "ready", "body", "base", "main"])(
     "preserves an incident when %s changes immediately before closing",
     async (change) => {
       const fixture = recoveryFixture({ run: sourceRun({ run_attempt: 2 }) });
@@ -592,6 +592,7 @@ describe("CI recovery reconciliation", () => {
         if (change === "commit") pr.commits++;
         if (change === "ready") pr.draft = false;
         if (change === "body") pr.body += "\nHuman repair notes";
+        if (change === "base") pr.base.ref = "release/1.0.0";
         if (change === "main") fixture.state.main = "c".repeat(40);
       };
       expect(await applyNext(fixture, "resolve")).toMatchObject({
