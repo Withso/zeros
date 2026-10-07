@@ -548,15 +548,82 @@ describe("recoverable per-directory Design pages migration", () => {
     );
   });
 
-  it("retains small hash-only journals and recovers every durable write/delete boundary", () => {
+  const payloadFiles = [
+    "0-after.txt",
+    "1-before.txt",
+    "1-after.txt",
+    "2-after.txt",
+    "3-before.txt",
+    "4-after.txt",
+    "5-before.txt",
+    "6-before.txt",
+    "6-after.txt",
+    "7-before.txt",
+    "7-after.txt",
+    "8-before.txt",
+    "8-after.txt",
+    "9-after.txt",
+    "10-before.txt",
+    "10-after.txt",
+    "11-after.txt",
+    "12-before.txt",
+    "13-before.txt",
+  ];
+  // Give each durable boundary its own test budget. The discovery assertion
+  // below fails if the migration adds a boundary without a recovery case.
+  const crashPoints = [
+    "payload-directory",
+    ...payloadFiles.map((file) => "payload:" + file),
+    "atomic-phase:prepared",
+    "phase:prepared",
+    "directory:meta",
+    "directory:page-1",
+    ...[
+      ".gitignore",
+      "components/card.html",
+      "page-1/details.html",
+      "page-1/home.html",
+      "notes.html",
+      "shared.css",
+      "styles/local.css",
+    ].flatMap((file) => ["atomic-source:" + file, "source:" + file]),
+    "atomic-phase:sources",
+    "phase:sources",
+    ...["meta/canvas.json", "rules.md", "meta/design.toml"].flatMap((file) => [
+      "atomic-metadata:" + file,
+      "metadata:" + file,
+    ]),
+    "atomic-phase:metadata",
+    "phase:metadata",
+    ...["details.html", "home.html", "canvas.json", "design.toml"].map(
+      (file) => "delete:" + file,
+    ),
+    "atomic-phase:deleted",
+    "phase:deleted",
+    "atomic-cache-generation",
+    "cache-generation",
+    ...["invalidated", "complete"].flatMap((phase) => [
+      "atomic-phase:" + phase,
+      "phase:" + phase,
+    ]),
+    ...[...payloadFiles].sort().map((file) => "cleanup:" + file),
+    "cleanup:directory",
+    "journal-removed",
+  ];
+
+  it("covers every discovered durable write/delete boundary with a recovery case", () => {
     const steps: string[] = [];
     migrateDesignDirectoryPages(root, directory, {
       afterStep: (step) => steps.push(step),
     });
     expect(steps.length).toBeGreaterThan(15);
     expect(new Set(steps).size).toBe(steps.length);
-    for (const crashPoint of steps) {
-      reset();
+    expect(steps).toEqual(crashPoints);
+  });
+
+  it.each(crashPoints)(
+    "retains small hash-only journals and recovers at %s",
+    (crashPoint) => {
       expect(
         () =>
           migrateDesignDirectoryPages(root, directory, {
@@ -584,8 +651,8 @@ describe("recoverable per-directory Design pages migration", () => {
       migrateDesignDirectoryPages(root, directory);
       assertMigrated();
       expect(existsSync(journal), crashPoint).toBe(false);
-    }
-  });
+    },
+  );
 
   it("detects edits to already-written destinations before deleting predecessors", () => {
     expect(() =>
