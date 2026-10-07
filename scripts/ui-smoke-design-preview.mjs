@@ -127,6 +127,15 @@ export async function runDesignPreviewSmoke({ page, check }) {
   await expect.poll(() => page.evaluate(() => window.__designPreviewRace.opened.length)).toBe(2);
   check("unmount cancels a pending preview and remount can open a new one", true);
 
+  await request();
+  await page.evaluate(async () => {
+    window.__designPreviewRace.visible(false);
+    await window.__designPreviewRace.resolve();
+  });
+  expect(await page.evaluate(() => window.__designPreviewRace.opened.length)).toBe(2);
+  await page.evaluate(() => window.__designPreviewRace.visible(true));
+  check("hiding Local retires a preview reply delivered in the same browser task", true);
+
   await page.evaluate(() => window.__designPreviewRace.cloud());
   await expect(open).toBeVisible();
   await request();
@@ -155,8 +164,10 @@ export async function runDesignPreviewSmoke({ page, check }) {
   expect(await page.evaluate(() => window.__designPreviewRace.browserIntents.length)).toBe(2);
   await page.evaluate(() => window.__designPreviewRace.role(true));
   await request();
-  await page.evaluate(() => window.__designPreviewRace.visible(false));
-  await page.evaluate(() => window.__designPreviewRace.resolve());
+  await page.evaluate(async () => {
+    window.__designPreviewRace.visible(false);
+    await window.__designPreviewRace.resolve();
+  });
   expect(await page.evaluate(() => window.__designPreviewRace.opened.length)).toBe(2);
   expect(await page.evaluate(() => window.__designPreviewRace.browserIntents.length)).toBe(2);
   check("cloud permission loss and hiding retire pending preview intents", true);

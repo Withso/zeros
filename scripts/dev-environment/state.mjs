@@ -206,12 +206,27 @@ export function acquireWorkspaceLock(workspace, name = "run.lock") {
   const file = path.join(workspace.directory, name);
   const token = randomUUID();
   const record = { pid: process.pid, token, owner: workspace.state.owner };
+  const missingLock = error => error?.code === "ENOENT" && error.path === file;
+  const readLock = () => {
+    try { return readPrivateJson(file); }
+    catch (error) { if (!missingLock(error)) throw error; }
+  };
+  const retireLock = expected => {
+    try {
+      const current = readLock();
+      if (current !== undefined && current.token === expected) fs.unlinkSync(file);
+    }
+    catch (error) { if (!missingLock(error)) throw error; }
+  };
   for (let attempt = 0; attempt < 3; attempt++) {
-    writePrivateJson(file, record, { create: true });
-    const current = readPrivateJson(file);
-    if (current.token === token) return () => {
-      if (fs.existsSync(file) && readPrivateJson(file).token === token) fs.unlinkSync(file);
-    };
+    // A live owner can release between validation/publication and our read.
+    // Retry only a vanished lock; private-directory and malformed-state errors
+    // still fail without replacing the existing state.
+    try { writePrivateJson(file, record, { create: true }); }
+    catch (error) { if (missingLock(error)) continue; throw error; }
+    const current = readLock();
+    if (current === undefined) continue;
+    if (current.token === token) return () => retireLock(token);
     if (!Number.isInteger(current.pid) || current.pid < 1 || current.owner !== workspace.state.owner) {
       throw new Error("Invalid development process lock; existing state was preserved");
     }
@@ -226,7 +241,7 @@ export function acquireWorkspaceLock(workspace, name = "run.lock") {
         try { fd = fs.openSync(recovery, "wx", 0o600); }
         catch { throw new Error("Development lock recovery is already in progress; retry after it completes"); }
         try {
-          if (fs.existsSync(file) && readPrivateJson(file).token === current.token) fs.unlinkSync(file);
+          retireLock(current.token);
         } finally { fs.closeSync(fd); fs.unlinkSync(recovery); }
         continue;
       }

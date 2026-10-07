@@ -109,6 +109,13 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
   const menuRestart = page.getByRole("menuitem", { name: "Restart workspace", exact: true });
   const workspaceMenu = page.getByRole("menu").first();
   const closeWorkspaceMenu = async () => {
+    // A disabled item can appear before the menu's opening focus settles.
+    // Wait for the actual menu lifecycle before sending its dismissal key.
+    await expect(workspaceMenu).toBeVisible();
+    await expect(workspaceMenu).toBeFocused();
+    await workspaceMenu.evaluate(node => Promise.all(
+      node.getAnimations().map(animation => animation.finished),
+    ));
     await page.keyboard.press("Escape");
     await expect(page.getByRole("menu")).toHaveCount(0);
   };

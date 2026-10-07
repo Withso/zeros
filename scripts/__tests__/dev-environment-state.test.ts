@@ -70,6 +70,57 @@ describe("persistent development workspace ownership", () => {
     acquireWorkspaceLock(state)();
   });
 
+  it.each(["run.lock", "mutation.lock"])("retries %s when its owner releases it during acquisition", name => {
+    const workspace = ensureWorkspace(fixture());
+    const lock = path.join(workspace.directory, name);
+    const release = acquireWorkspaceLock(workspace, name);
+    const link = fs.linkSync;
+    let released = false;
+    vi.spyOn(fs, "linkSync").mockImplementation((source, destination) => {
+      try { return link(source, destination); }
+      catch (error) {
+        if (String(destination) === lock && !released) {
+          released = true;
+          release();
+        }
+        throw error;
+      }
+    });
+    const successor = acquireWorkspaceLock(workspace, name);
+    expect(released).toBe(true);
+    expect(() => acquireWorkspaceLock(workspace, name)).toThrow(/already running/i);
+    release();
+    expect(fs.existsSync(lock)).toBe(true);
+    successor();
+    expect(fs.existsSync(lock)).toBe(false);
+  });
+
+  it("retries a dependency lock released before its private-file validation", () => {
+    const workspace = ensureWorkspace(fixture());
+    const lock = path.join(workspace.directory, "mutation.lock");
+    const release = acquireWorkspaceLock(workspace, "mutation.lock");
+    const lstat = fs.lstatSync;
+    let released = false;
+    vi.spyOn(fs, "lstatSync").mockImplementation((file, options) => {
+      if (String(file) === lock && !released) {
+        released = true;
+        release();
+      }
+      return lstat(file, options);
+    });
+    const successor = acquireWorkspaceLock(workspace, "mutation.lock");
+    expect(released).toBe(true);
+    successor();
+  });
+
+  it.each([false, 0, ""])("preserves malformed lock records instead of retrying them (%j)", record => {
+    const workspace = ensureWorkspace(fixture());
+    const lock = path.join(workspace.directory, "mutation.lock");
+    writePrivateJson(lock, record);
+    expect(() => acquireWorkspaceLock(workspace, "mutation.lock")).toThrow("Invalid development process lock; existing state was preserved");
+    expect(readPrivateJson(lock)).toBe(record);
+  });
+
   it("does not grant two launchers ownership when both recover the same dead process", () => {
     const w = ensureWorkspace(fixture());
     const lock = path.join(w.directory, "run.lock");

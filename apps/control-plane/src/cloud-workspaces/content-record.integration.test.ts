@@ -442,7 +442,7 @@ d("cloud workspace content durability", () => {
     ).resolves.toMatchObject({ rows: [{ count: 0 }] });
   });
 
-  it("serializes cumulative organization admission without double-charging retries", async () => {
+  it.each([false, true])("serializes cumulative organization admission without double-charging retries (reversed upload order: %s)", async reverseUploadOrder => {
     await pool.query(
       `UPDATE cloud_workspace_object_storage_limits
        SET max_organization_bytes = 9, max_workspace_bytes = 9,
@@ -451,10 +451,11 @@ d("cloud workspace content durability", () => {
       [fixture.organizationId, fixture.userId],
     );
 
-    const results = await Promise.allSettled([
-      blobs.put({ ...engineAuthority(), bytes: Buffer.from("first!", "utf8") }),
-      blobs.put({ ...engineAuthority(), bytes: Buffer.from("second", "utf8") }),
-    ]);
+    const payloads = [Buffer.from("first!", "utf8"), Buffer.from("second", "utf8")];
+    if (reverseUploadOrder) payloads.reverse();
+    const results = await Promise.allSettled(
+      payloads.map(bytes => blobs.put({ ...engineAuthority(), bytes })),
+    );
     expect(
       results.filter((result) => result.status === "fulfilled"),
     ).toHaveLength(1);
@@ -471,10 +472,7 @@ d("cloud workspace content durability", () => {
         Awaited<ReturnType<typeof blobs.put>>
       > => result.status === "fulfilled",
     )!.value;
-    const admittedBytes =
-      Buffer.from("first!", "utf8").length === admitted.sizeBytes
-        ? Buffer.from("first!", "utf8")
-        : Buffer.from("second", "utf8");
+    const admittedBytes = payloads[results.findIndex(result => result.status === "fulfilled")]!;
     await expect(
       blobs.put({ ...engineAuthority(), bytes: admittedBytes }),
     ).resolves.toMatchObject({ id: admitted.id, reused: true });
