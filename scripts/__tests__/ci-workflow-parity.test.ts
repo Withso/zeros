@@ -156,6 +156,7 @@ describe("CI and Preflight job parity", () => {
         "Setup pnpm",
         "Setup Node",
         "Install JS dependencies",
+        "Rebuild and verify native PTY binding",
         "Install control-plane contract dependencies",
         "Install contained-execution runtime",
         "Install Playwright Chromium headless shell",

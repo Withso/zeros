@@ -369,6 +369,13 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Rebuild and verify native PTY binding
+        # A restored pnpm store can skip node-pty's build without a usable
+        # Linux binding. Terminal and SSH integration tests need that binding.
+        run: |
+          pnpm rebuild node-pty
+          node -e "require('node-pty')"
+
       - name: Install control-plane contract dependencies
         # The engine checkpoint contract exercises the real HTTP validators
         # across both independent package graphs.
