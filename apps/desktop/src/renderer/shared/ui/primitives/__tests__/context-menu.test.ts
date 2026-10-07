@@ -15,11 +15,11 @@ vi.mock("@radix-ui/react-menu", async () => {
   const React = await import("react");
   const passthrough = React.forwardRef<
     HTMLDivElement,
-    Record<string, unknown> & { children?: ReactNode }
+    { children?: ReactNode }
   >(({ children }, ref) => React.createElement("div", { ref }, children));
   const Content = React.forwardRef<
     HTMLDivElement,
-    Record<string, unknown> & { children?: ReactNode }
+    { children?: ReactNode }
   >((props, ref) => {
     captured.contentProps = props;
     return React.createElement("div", { ref }, props.children);
