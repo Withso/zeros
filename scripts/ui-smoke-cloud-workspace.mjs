@@ -87,7 +87,9 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
       visibility: document.visibilityState,
       ports: document.querySelector('[aria-label="Workspace ports"]')?.textContent ?? null,
       portsHidden: !!document.querySelector('[aria-label="Workspace ports"]')?.closest('[aria-hidden="true"], [inert]'),
-      menus: [...document.querySelectorAll('[role="menu"]')].map(menu => ({ state: menu.getAttribute("data-state"), animation: getComputedStyle(menu).animationName })),
+      menus: [...document.querySelectorAll('[role="menu"]')].map(menu => ({ state: menu.getAttribute("data-state"), animation: getComputedStyle(menu).animationName,
+        pointerEvents: menu.style.pointerEvents })),
+      bodyPointerEvents: document.body.style.pointerEvents,
       animations: document.getAnimations().map(animation => ({ name: animation.animationName ?? animation.id, state: animation.playState, time: animation.currentTime })),
       timeline: document.timeline.currentTime,
       escapes: window.smokeEscapeEvents ?? null,
@@ -100,7 +102,16 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
     console.error(`cloud native access diagnostics (${reason}): ${JSON.stringify({ state, trace: trace.slice(-40) })}`);
   };
   // A modal menu hides the rest of the page until its exit animation ends.
+  // Radix sets the open menu's inline pointer-events only in the render after
+  // it registers as the top dismissable layer, the same state its Escape
+  // handler reads. Wait for that before pressing Escape.
   const closeMenu = async () => {
+    try {
+      await expect.poll(() => page.evaluate(() => document.querySelector('[role="menu"]')?.style.pointerEvents ?? null), { timeout: 15_000 }).toBe("auto");
+    } catch (error) {
+      await diagnose("menu never became the top layer");
+      throw error;
+    }
     await page.evaluate(() => {
       window.smokeEscapeEvents = [];
       if (window.smokeEscapeHooks) return;
