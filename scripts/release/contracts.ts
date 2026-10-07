@@ -67,14 +67,33 @@ export const MigrationReceipt = z.object({
 export const WorkerIdentity = z.object({ provider: z.enum(["boat", "daytona"]), imageRef: z.string(),
   sourceSha: z.string().regex(SHA), architecture: z.enum(["linux/amd64", "linux/arm64"]), storageMiB: z.number().int().positive() })
   .refine(value => value.provider === "boat" ? /^boat:[a-z0-9][a-z0-9-]{0,62}@sha256:[a-f0-9]{64}$/.test(value.imageRef) : UUID.test(value.imageRef));
-export const ReleaseIdentity = z.object({ version: z.literal(1), ready: z.literal(true), sourceSha: z.string().regex(SHA),
+// The frontier reader relaxes readiness before deployment; every publication
+// consumer uses the refined ReleaseIdentity below.
+export const ReleaseIdentityBase = z.object({ version: z.literal(1), ready: z.literal(true), sourceSha: z.string().regex(SHA),
   channel: z.enum(["alpha", "beta", "production"]), maintenance: z.literal(false),
   migrations: z.object({ state: z.literal("current"), head: migrationName, expectedHead: migrationName, manifestSha256: z.string().regex(DIGEST) }),
-  cloud: z.object({ enabled: z.boolean(), ready: z.literal(true), state: z.enum(["healthy", "disabled"]) }), worker: WorkerIdentity.nullable(),
+  cloud: z.object({ enabled: z.boolean(), ready: z.literal(true), state: z.enum(["healthy", "disabled"]),
+    operationalState: z.enum(["healthy", "degraded"]).optional() }), worker: WorkerIdentity.nullable(),
   // Additive signal: old hosted/Beta receipts remain readable, but cannot
   // authorize publication of cloud capability without current qualification.
   workerQualified: z.boolean().optional(),
+  alphaReadinessException: z.object({ kind: z.literal("retired-boat-deletions"), expiresAt: z.string().datetime() }).strict().optional(),
 });
+export function checkAlphaReadinessException(value: {
+  channel: string;
+  cloud: { enabled: boolean; ready: boolean; state: string; operationalState?: string };
+  alphaReadinessException?: { kind: "retired-boat-deletions"; expiresAt: string };
+}, context: z.RefinementCtx) {
+  const exception = value.alphaReadinessException;
+  const now = Date.now();
+  if (exception ? value.channel !== "alpha" || !value.cloud.enabled || !value.cloud.ready || value.cloud.state !== "healthy" ||
+    value.cloud.operationalState !== "degraded" || Date.parse(exception.expiresAt) <= now ||
+    Date.parse(exception.expiresAt) > now + 72 * 60 * 60_000
+    : value.cloud.operationalState === "degraded") {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Temporary deletion readiness requires a current Alpha exception" });
+  }
+}
+export const ReleaseIdentity = ReleaseIdentityBase.superRefine(checkAlphaReadinessException);
 export const WorkOSVerification = z.object({ kind: z.literal("workos-handshake-v1"), surfaces: z.array(z.enum(["app", "ops"])), verifiedAt: z.string().datetime() });
 export const HostedReceipt = z.object({ version: z.literal(1), status: z.literal("success"), channel: z.enum(["alpha", "beta", "production"]),
   sourceSha: z.string().regex(SHA), branch: z.string(), repository: z.string(), runId: z.string().regex(/^\d+$/), runAttempt: z.string().regex(/^\d+$/),

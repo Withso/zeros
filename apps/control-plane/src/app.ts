@@ -25,6 +25,7 @@ import { isIP } from "node:net";
 import type pg from "pg";
 
 import type { Config } from "./config.js";
+import type { CloudWorkspaceReleaseHealthReader } from "./cloud-workspaces/health.js";
 import { createReleaseIdentityRoutes } from "./release-identity.js";
 import { ClientCompatibility, createClientCompatibilityMiddleware } from "./client-compatibility.js";
 import { createAuthMiddleware } from "./auth.js";
@@ -101,7 +102,7 @@ export type CreateAppDependencies = {
   cloudWorkspaceForkService?: DatabaseCloudWorkspaceForkService;
   cloudWorkspaceReplicaService?: DatabaseCloudWorkspaceReplicaService;
   cloudWorkspaceEngineClientAdmissionService?: DatabaseCloudWorkspaceEngineClientAdmissionService;
-  cloudWorkspaceHealthService?: { read(): Promise<CloudWorkspaceHealth> };
+  cloudWorkspaceHealthService?: CloudWorkspaceReleaseHealthReader;
   securityEventBroker?: PostgresSecurityEventBroker;
   workosProvider?: RailwayWorkOSProvider;
   migrationStatus?: MigrationStatus;
