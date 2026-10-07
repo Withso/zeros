@@ -170,6 +170,16 @@ async function main() {
   const ConversationPane = workbenchHarness ? (await import("../shell/conversation/conversation-pane")).ConversationPane : null;
   const { ActionsCtx } = await import("../features/agent/sessions-context");
   const { createRoot } = await import("react-dom/client");
+  const { flushSync } = await import("react-dom");
+  // Preview races must use this harness's exact runtime even when Chromium's
+  // bounded resource-timing buffer no longer contains its dependency URLs.
+  (window as Window & {
+    __zerosDesignHarnessRuntime?: {
+      React: typeof React;
+      createRoot: typeof createRoot;
+      flushSync: typeof flushSync;
+    };
+  }).__zerosDesignHarnessRuntime = { React, createRoot, flushSync };
   const { TooltipProvider } = await import("../shared/ui/primitives/tooltip");
   const { Toaster } = await import("../shared/ui/primitives/elements/toast");
   const { DesignWorkspaceColumn } =
