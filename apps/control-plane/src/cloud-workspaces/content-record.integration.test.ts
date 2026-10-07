@@ -442,7 +442,11 @@ d("cloud workspace content durability", () => {
     ).resolves.toMatchObject({ rows: [{ count: 0 }] });
   });
 
-  it("serializes cumulative organization admission without double-charging retries", async () => {
+  it.each([
+    ["racing uploads", null],
+    ["first upload already admitted", 0],
+    ["second upload already admitted", 1],
+  ] as const)("serializes cumulative organization admission without double-charging retries (%s)", async (_case, admittedIndex) => {
     await pool.query(
       `UPDATE cloud_workspace_object_storage_limits
        SET max_organization_bytes = 9, max_workspace_bytes = 9,
@@ -451,10 +455,15 @@ d("cloud workspace content durability", () => {
       [fixture.organizationId, fixture.userId],
     );
 
-    const results = await Promise.allSettled([
-      blobs.put({ ...engineAuthority(), bytes: Buffer.from("first!", "utf8") }),
-      blobs.put({ ...engineAuthority(), bytes: Buffer.from("second", "utf8") }),
-    ]);
+    const entries = [Buffer.from("first!", "utf8"), Buffer.from("second", "utf8")];
+    // Keep the original race, and force either winner in separate cases so
+    // equal-length payloads cannot hide a retry of the rejected upload.
+    if (admittedIndex !== null) {
+      await blobs.put({ ...engineAuthority(), bytes: entries[admittedIndex] });
+    }
+    const results = await Promise.allSettled(
+      entries.map(bytes => blobs.put({ ...engineAuthority(), bytes })),
+    );
     expect(
       results.filter((result) => result.status === "fulfilled"),
     ).toHaveLength(1);
@@ -464,17 +473,12 @@ d("cloud workspace content durability", () => {
       { reason: { code: "organization_object_storage_limit_exceeded" } },
     ]);
 
-    const admitted = results.find(
-      (
-        result,
-      ): result is PromiseFulfilledResult<
-        Awaited<ReturnType<typeof blobs.put>>
-      > => result.status === "fulfilled",
-    )!.value;
-    const admittedBytes =
-      Buffer.from("first!", "utf8").length === admitted.sizeBytes
-        ? Buffer.from("first!", "utf8")
-        : Buffer.from("second", "utf8");
+    const winnerIndex = results.findIndex(result => result.status === "fulfilled");
+    if (admittedIndex !== null) expect(winnerIndex).toBe(admittedIndex);
+    const admitted = (results[winnerIndex] as PromiseFulfilledResult<
+      Awaited<ReturnType<typeof blobs.put>>
+    >).value;
+    const admittedBytes = entries[winnerIndex];
     await expect(
       blobs.put({ ...engineAuthority(), bytes: admittedBytes }),
     ).resolves.toMatchObject({ id: admitted.id, reused: true });
