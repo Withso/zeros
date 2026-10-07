@@ -113,6 +113,9 @@ describe("CI recovery API trust boundaries", () => {
     ).toBe(true);
     for (const [method, endpoint, body] of [
       ["PATCH", "/git/refs/heads/main", { sha: MAIN_SHA }],
+      ["PATCH", "/pulls/1", { state: "open" }],
+      ["PATCH", "/pulls/1", { state: "closed", base: "other" }],
+      ["PATCH", "/issues/1", { state: "closed" }],
       ["DELETE", "/git/refs/heads/ci-fix/" + "a".repeat(64), undefined],
       ["POST", "/releases", {}],
       ["POST", "/pulls/1/merge", {}],
@@ -321,7 +324,7 @@ describe("CI recovery reconciliation", () => {
     ).not.toContain("autofix");
     await sourceDecision(fixture);
     expect(fixture.state.comments.get(200)).toHaveLength(1);
-    expect(fixture.state.pulls[0].state).toBe("open");
+    expect(fixture.state.pulls[0].state).toBe("closed");
     expect(fixture.state.refs.size).toBe(1);
   });
 
@@ -528,6 +531,79 @@ describe("CI recovery reconciliation", () => {
     ).toHaveLength(0);
     expect(fixture.state.writes).toEqual([]);
   });
+
+  it("finds authenticated retry receipts beyond 2,000 unrelated artifacts", async () => {
+    const fixture = recoveryFixture();
+    const row = await sourceDecision(fixture);
+    const controller = fixture.controller("retry");
+    const reservation = await controller.prepare({
+      intent: "retry",
+      signature: row.signature,
+      runId: row.run_id,
+      attempt: row.attempt,
+    });
+    fixture.save(reservation);
+    fixture.state.artifacts.unshift(
+      ...Array.from({ length: 2100 }, (_, i) => ({
+        id: 2000 + i,
+        name: "database-report-" + i,
+        created_at: NOW,
+      })),
+    );
+    expect((await sourceDecision(fixture)).reason).toBe(
+      "retry-outcome-unknown",
+    );
+    expect(fixture.state.writes).toEqual([]);
+  });
+
+  it("resumes closing a resolved untouched draft after a failed close", async () => {
+    const fixture = recoveryFixture({ run: sourceRun({ run_attempt: 2 }) });
+    await applyNext(fixture, "upsert");
+    fixture.nextController();
+    fixture.state.runs.set(
+      "200",
+      sourceRun({ id: 200, head_sha: MAIN_SHA, conclusion: "success" }),
+    );
+    fixture.state.jobs.set("200", greenJobs);
+    fixture.state.failClose = true;
+    await expect(applyNext(fixture, "resolve")).rejects.toThrow("returned 502");
+    fixture.state.failClose = false;
+    fixture.nextController();
+    expect((await sourceDecision(fixture)).action).toBe("resolve");
+    await applyNext(fixture, "resolve");
+    expect(fixture.state.comments.get(200)).toHaveLength(1);
+    expect(fixture.state.pulls[0].state).toBe("closed");
+    expect(fixture.state.refs.size).toBe(1);
+  });
+
+  it.each(["assignee", "commit", "ready", "body", "base", "main"])(
+    "preserves an incident when %s changes immediately before closing",
+    async (change) => {
+      const fixture = recoveryFixture({ run: sourceRun({ run_attempt: 2 }) });
+      await applyNext(fixture, "upsert");
+      fixture.nextController();
+      fixture.state.runs.set(
+        "200",
+        sourceRun({ id: 200, head_sha: MAIN_SHA, conclusion: "success" }),
+      );
+      fixture.state.jobs.set("200", greenJobs);
+      fixture.state.afterLabelDelete = (pr) => {
+        if (change === "assignee") pr.assignees.push({ login: "repair-owner" });
+        if (change === "commit") pr.commits++;
+        if (change === "ready") pr.draft = false;
+        if (change === "body") pr.body += "\nHuman repair notes";
+        if (change === "base") pr.base.ref = "release/1.0.0";
+        if (change === "main") fixture.state.main = "c".repeat(40);
+      };
+      expect(await applyNext(fixture, "resolve")).toMatchObject({
+        applied: false,
+      });
+      expect(fixture.state.pulls[0].state).toBe("open");
+      expect(
+        fixture.state.writes.some((write) => write.method === "PATCH"),
+      ).toBe(false);
+    },
+  );
 
   it("finishes an interrupted resolution label update without duplicating its comment", async () => {
     const fixture = recoveryFixture({ run: sourceRun({ run_attempt: 2 }) });

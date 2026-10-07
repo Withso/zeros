@@ -266,13 +266,47 @@ export class RecoveryController {
   async reservations(metadata, ignoreId = null) {
     const since = this.now.getTime() - 7 * 86400_000;
     const receipts = [];
-    for (let page = 1; page <= 20; page++) {
+    const seen = new Set();
+    // The seven-day window, response-size bound and elapsed budget bound work,
+    // not unrelated artifact volume. Keep old-controller rerun receipts visible.
+    const deadline = Date.now() + 120_000;
+    let total;
+    for (let page = 1; ; page++) {
+      if (Date.now() >= deadline)
+        throw new Error(
+          "Recovery reservation discovery exceeded its time budget; no writes are safe",
+        );
       const result = await this.read.get(
         REPO_API + "/actions/artifacts?per_page=100&page=" + page,
       );
-      if (!Array.isArray(result.artifacts))
-        throw new Error("Invalid recovery artifact collection");
+      if (
+        !Array.isArray(result.artifacts) ||
+        result.artifacts.length > 100 ||
+        !Number.isSafeInteger(result.total_count) ||
+        result.total_count < 0 ||
+        (total !== undefined && total !== result.total_count)
+      )
+        throw new Error(
+          "Recovery artifact collection changed or is invalid; no writes are safe",
+        );
+      total = result.total_count;
+      if (
+        result.artifacts.length !==
+        Math.min(100, Math.max(0, total - (page - 1) * 100))
+      )
+        throw new Error(
+          "Incomplete recovery artifact page; no writes are safe",
+        );
       for (const artifact of result.artifacts) {
+        if (
+          !ID.test(String(artifact.id)) ||
+          !Number.isFinite(Date.parse(artifact.created_at)) ||
+          seen.has(String(artifact.id))
+        )
+          throw new Error(
+            "Invalid or repeated recovery artifact; no writes are safe",
+          );
+        seen.add(String(artifact.id));
         if (
           Date.parse(artifact.created_at) < since ||
           String(artifact.id) === String(ignoreId)
@@ -282,15 +316,16 @@ export class RecoveryController {
         const receipt = await this.verifyReceipt(artifact, metadata);
         if (receipt) receipts.push(receipt);
       }
+      if (Date.now() >= deadline)
+        throw new Error(
+          "Recovery reservation discovery exceeded its time budget; no writes are safe",
+        );
       if (
-        result.artifacts.length < 100 ||
-        Date.parse(result.artifacts.at(-1).created_at) < since
+        page * 100 >= total ||
+        Date.parse(result.artifacts.at(-1)?.created_at) < since
       )
         return receipts;
     }
-    throw new Error(
-      "Recovery reservation history exceeds its bound; no writes are safe",
-    );
   }
 
   async authenticateContract(contract, metadata) {
@@ -381,13 +416,13 @@ export class RecoveryController {
     return bot && String(bot.id) === String(pr.user.id) ? bot : null;
   }
 
-  async untouched(pr, initial, bot) {
+  async untouched(pr, initial, bot, resolved = false) {
     if (
       !bot ||
       !pr.draft ||
       pr.commits !== 1 ||
       pr.assignees?.length ||
-      !pr.labels?.some((label) => label.name === "autofix")
+      (!resolved && !pr.labels?.some((label) => label.name === "autofix"))
     )
       return false;
     const commit = await this.read.get(REPO_API + "/commits/" + pr.head.sha);
@@ -501,7 +536,12 @@ export class RecoveryController {
             latest = next;
         }
         record.contract = latest;
-        record.untouched = await this.untouched(pr, initial, bot);
+        record.untouched = await this.untouched(
+          pr,
+          initial,
+          bot,
+          latest.state === "resolved",
+        );
       } catch {
         // Malformed/tampered contracts, missing receipts and human edits all
         // retain the PR/ref and require owner attention.
@@ -961,7 +1001,9 @@ export class RecoveryController {
         pr.head.sha !== row.incident.head ||
         pr.assignees?.length ||
         !pr.draft ||
-        !pr.labels?.some((label) => label.name === "autofix")
+        pr.body !== row.incident.pr.body ||
+        (row.incident.contract.state !== "resolved" &&
+          !pr.labels?.some((label) => label.name === "autofix"))
       )
         return { applied: false, reason: "new-human-claim" };
       if (expected === "resolve") {
@@ -985,17 +1027,49 @@ export class RecoveryController {
         await this.write.post(REPO_API + "/issues/" + pr.number + "/comments", {
           body:
             (expected === "resolve"
-              ? "CI recovery resolved this untouched incident. The owner may close this draft."
+              ? "CI recovery resolved this untouched incident and will close the draft after revalidation."
               : "CI recovery recorded another occurrence.") +
             "\n\n" +
             renderJsonBlock(contract),
         });
       }
-      if (expected === "resolve")
-        await this.write.delete(
-          REPO_API + "/issues/" + pr.number + "/labels/autofix",
+      if (expected === "resolve") {
+        if (pr.labels?.some((label) => label.name === "autofix"))
+          await this.write.delete(
+            REPO_API + "/issues/" + pr.number + "/labels/autofix",
+          );
+        // Closing is a separate write. Recheck claims, scaffold and live green
+        // authority after the comment/label operations, including on retries.
+        const fresh = await this.read.get(REPO_API + "/pulls/" + pr.number);
+        const bot = await this.appAuthor(fresh);
+        if (
+          fresh.state !== "open" ||
+          fresh.head.sha !== pr.head.sha ||
+          fresh.head.ref !== row.incident.branch ||
+          fresh.base?.ref !== "main" ||
+          !sameRepo(fresh.base.repo) ||
+          !sameRepo(fresh.head.repo) ||
+          fresh.body !== pr.body ||
+          !(await this.untouched(fresh, parseContractBody(pr.body), bot, true))
+        )
+          return { applied: false, reason: "new-human-claim" };
+        const main = await this.read.get(REPO_API + "/git/ref/heads/main");
+        const green = await this.read.get(
+          REPO_API + "/actions/runs/" + contract.resolved_by.run_id,
         );
-      else
+        if (
+          main.object.sha !== contract.resolved_by.sha ||
+          !isSourceRun(green, metadata.workflow) ||
+          green.head_sha !== main.object.sha ||
+          green.run_attempt !== contract.resolved_by.attempt ||
+          green.status !== "completed" ||
+          green.conclusion !== "success"
+        )
+          return { applied: false, reason: "new-main-evidence" };
+        await this.write.patch(REPO_API + "/pulls/" + pr.number, {
+          state: "closed",
+        });
+      } else
         await this.write.post(REPO_API + "/issues/" + pr.number + "/labels", {
           labels: ["ci-failure", "autofix", ...contract.required_ci_additions],
         });

@@ -129,8 +129,8 @@ workflow's existing lane-selection behavior.
 
 There are at most **10 open App incident PRs** and **3 new signatures per UTC
 day**. Updates do not consume creation slots. Saved creation reservations count
-even if the writer later fails; resolution leaves the PR open, so the owner must
-close resolved leftovers to recover an open-PR slot. A signature's exact head
+even if the writer later fails; verified resolution closes an untouched draft to recover its open-PR slot.
+Claimed, edited or ready-for-review repairs remain under their owner's control. A signature's exact head
 branch and verified App author establish dedupe, together with authenticated
 contract, marker and single scaffold commit. Existing, closed, resolved or
 human-owned refs are preserved; v1 does not create additional repair generations.
@@ -183,13 +183,24 @@ green at the **current main head**, complete evidence for the incident's failed
 lanes, and ancestry proof for its first/latest failure and any newer occurrence.
 Old green completions, incomplete database coverage and unknown ancestry cannot
 resolve it. Only untouched, unclaimed drafts transition to `resolved`. The
-controller appends one resolution snapshot, removes `autofix`, and leaves the
-PR and branch intact. An interrupted label removal resumes without a second
-resolution comment. An agent can continue an already claimed repair.
+controller appends one resolution snapshot, removes `autofix`, and closes the
+untouched draft after rechecking App ownership, the original scaffold, claims,
+body/head identity and current main's green evidence. It leaves the branch
+intact. Interrupted label removal or closure resumes without a duplicate
+resolution comment. Already resolved legacy drafts are eligible for the same
+verified closure. Assigned, edited and non-draft repairs are preserved. GitHub
+has no atomic compare-and-close API; claim the repair before working on it.
+The writer allows only a `state: closed` PR patch, never reopening, merging,
+retargeting or deleting a branch. An agent can continue an already claimed repair.
 
 The main pilot reads seven days of source runs and reservations, plus source
 runs referenced by open incidents and completion callbacks, with bounded API
-pagination, 32 occurrences and 32 authenticated snapshot comments. Bound
+responses, 32 occurrences and 32 authenticated snapshot comments. Reservation
+discovery pages the full repository artifact window within a two-minute budget,
+rather than truncating at 2,000 artifacts. Keeping this index also finds fresh
+receipts from older controller reruns. Unrelated artifacts need no authority
+lookups. Changed counts, duplicate IDs, invalid pages and budget exhaustion stop
+writes; discovery never treats truncated history as permission to retry. Bound
 overflow or unreadable authority stops automation for owner review. API traffic
 grows with unresolved history; monitor rate-limit failures before broadening the
 pilot. Controller writes are cooperative with agents: assignment before work

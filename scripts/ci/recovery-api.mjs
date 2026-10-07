@@ -33,6 +33,12 @@ export function allowWrite(kind, method, endpoint, body) {
     return (
       /^\/issues\/[1-9]\d*\/labels\/autofix$/.test(path) && body === undefined
     );
+  if (method === "PATCH")
+    return (
+      /^\/pulls\/[1-9]\d*$/.test(path) &&
+      exactKeys(body, ["state"]) &&
+      body.state === "closed"
+    );
   if (method !== "POST") return false;
   if (path === "/git/blobs") {
     if (
@@ -186,6 +192,7 @@ export function createGitHubApi({
   return {
     get: (endpoint, options) => request("GET", endpoint, undefined, options),
     post: (endpoint, body) => request("POST", endpoint, body),
+    patch: (endpoint, body) => request("PATCH", endpoint, body),
     delete: (endpoint) => request("DELETE", endpoint),
   };
 }

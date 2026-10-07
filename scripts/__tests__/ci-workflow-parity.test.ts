@@ -62,9 +62,16 @@ const workflow = (file: string) =>
     readFileSync(path.join(ROOT, ".github/workflows", file), "utf8"),
   ) as Workflow;
 
-const PR_ONLY_JOBS = new Set(["scope", "quality", "ci-gate"]);
+const PR_ONLY_JOBS = new Set([
+  "scope",
+  "quality",
+  "ci-gate",
+  "assurance",
+  "extended",
+  "full-assurance",
+]);
 // The Alpha gate and composer browser shards run only in full Preflight.
-const PREFLIGHT_ONLY_JOBS = new Set(["alpha-gate", "ui-smoke-shard"]);
+const PREFLIGHT_ONLY_JOBS = new Set(["alpha-gate"]);
 const PR_ONLY_STEPS = new Set([
   "Prettier — changed files only (advisory)",
   "Reject unresolved CI incident markers",
@@ -101,7 +108,12 @@ const comparable = (job: Job) => ({
       if: condition,
       env: Object.fromEntries(
         Object.entries(env ?? {}).filter(
-          ([key]) => key !== SELECTION_INPUTS[name ?? ""],
+          ([key]) =>
+            key !== SELECTION_INPUTS[name ?? ""] &&
+            !(
+              name === "Enforce control-plane results" &&
+              key === "STATIC_RESULT"
+            ),
         ),
       ),
     })),
@@ -194,7 +206,7 @@ describe("CI and Preflight job parity", () => {
         ).toHaveLength(1);
       }
       expect(jobs.test!.name).toBe("test");
-      expect(jobs.test!.if).toBe("always()");
+      expect(jobs.test!.if).toContain("always()");
       expect(
         (jobs.test!.needs as string[]).filter((id) => id !== "scope"),
       ).toEqual(["test-shard"]);
@@ -244,7 +256,7 @@ describe("CI and Preflight job parity", () => {
       expect(artifacts.at(-1)).toBe("control-plane-database-report-8");
       const aggregate = jobs["control-plane"]!;
       expect(aggregate.name).toBe("control plane");
-      expect(aggregate.if).toBe("always()");
+      expect(aggregate.if).toContain("always()");
       const download = aggregate.steps!.find(
         (step) => step.name === "Download database shard reports",
       )!;
@@ -299,37 +311,16 @@ describe("CI and Preflight job parity", () => {
     }
   });
 
-  it("reuses Preflight's browser setup for the full selected PR composer suite", () => {
-    expect(ci.jobs["ui-smoke"].name).toBe("ui-smoke (composer)");
-    const candidate = comparable(ci.jobs["ui-smoke"]).steps;
-    const full = comparable(preflight.jobs["ui-smoke-shard"]).steps;
-    expect(candidate.slice(0, -1)).toEqual(full.slice(0, -1));
-    expect(candidate.at(-1)).toEqual({
-      name: "Run composer UI smoke suite",
-      run: "pnpm test:ui-smoke",
-      uses: undefined,
-      if: undefined,
-      env: {},
-    });
-  });
-
-  it("runs all browser shards only in post-merge Preflight", () => {
-    expect(ci.jobs).not.toHaveProperty("ui-smoke-shard");
-    expect(preflight.jobs["ui-smoke-shard"]?.name).toBe(
-      "tests-ui-smoke (${{ matrix.shard }}/3)",
+  it("reuses all three Preflight browser shards in selected PR CI", () => {
+    expect(comparable(ci.jobs["ui-smoke-shard"])).toEqual(
+      comparable(preflight.jobs["ui-smoke-shard"]),
     );
-    expect(preflight.jobs["ui-smoke-shard"]?.strategy).toEqual({
+    expect(ci.jobs["ui-smoke"].name).toBe("ui-smoke (composer)");
+    expect(ci.jobs["ui-smoke"].needs).toEqual(["scope", "ui-smoke-shard"]);
+    expect(preflight.jobs["ui-smoke-shard"].strategy).toEqual({
       "fail-fast": false,
       matrix: { shard: [1, 2, 3] },
     });
-    expect(preflight.jobs["ui-smoke-shard"]?.steps?.at(-1)).toMatchObject({
-      name: "Run composer UI smoke shard",
-      env: { SHARD: "${{ matrix.shard }}" },
-      run: 'pnpm test:ui-smoke --shard="${SHARD}/3"',
-    });
-    expect(preflight.jobs["ui-smoke"].name).toBe("ui-smoke (composer)");
-    expect(preflight.jobs["ui-smoke"].if).toBe("always()");
-    expect(preflight.jobs["ui-smoke"].needs).toEqual(["ui-smoke-shard"]);
   });
 
   it.each(["success", "failure", "cancelled", "skipped"])(

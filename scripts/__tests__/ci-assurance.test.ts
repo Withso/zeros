@@ -51,31 +51,19 @@ function expression(value: string, github: Record<string, any>, inputs = {}) {
 }
 
 describe("independent full CI assurance", () => {
-  it("runs the existing full suite on every PR without becoming a fast-gate dependency", () => {
-    const assurance = read("ci-full.yml");
-    expect(assurance.on).toHaveProperty("pull_request");
-    expect(assurance.on).not.toHaveProperty("pull_request_target");
-    expect(assurance.on.pull_request?.paths).toBeUndefined();
-    expect(assurance.jobs.preflight).toMatchObject({
-      name: "Full suite",
-      if: "github.event_name == 'pull_request'",
+  it("runs full PR coverage through one selected/complementary graph", () => {
+    const ci = read("ci.yml");
+    expect(ci.on).toHaveProperty("pull_request");
+    expect(ci.on).not.toHaveProperty("pull_request_target");
+    expect(ci.on.pull_request?.paths).toBeUndefined();
+    expect(ci.jobs.assurance).toMatchObject({
+      name: "Remaining full suite",
       uses: "./.github/workflows/preflight.yml",
       with: { full_database: true },
     });
-    expect(assurance.jobs.preflight.needs).toBeUndefined();
-    expect(read("preflight.yml").on.workflow_call.inputs.full_database).toEqual(
-      {
-        description: "Run every database shard for full pull-request assurance",
-        type: "boolean",
-        default: false,
-      },
-    );
-    for (const job of Object.values(read("ci.yml").jobs)) {
-      expect(job.uses ?? "").not.toContain("ci-full");
-      expect(JSON.stringify(job.needs ?? [])).not.toMatch(
-        /assurance|preflight|extended/,
-      );
-    }
+    expect(ci.jobs["ci-gate"].needs).not.toContain("assurance");
+    expect(ci.jobs["ci-gate"].needs).not.toContain("extended");
+    expect(read("ci-full.yml").on).not.toHaveProperty("pull_request");
   });
 
   it("forces all database shards even for a documentation-only assurance run", () => {
@@ -111,7 +99,12 @@ describe("independent full CI assurance", () => {
   });
 
   it("never grants fork PR assurance deployment authority or inherited secrets", () => {
-    for (const name of ["ci-full.yml", "preflight.yml", "scheduled.yml"]) {
+    for (const name of [
+      "ci.yml",
+      "ci-full.yml",
+      "preflight.yml",
+      "scheduled.yml",
+    ]) {
       const workflow = read(name);
       expect(workflow.permissions).toEqual({ contents: "read" });
       expect(workflow.on.workflow_call?.secrets).toBeUndefined();
@@ -170,20 +163,10 @@ describe("independent full CI assurance", () => {
     }
   });
 
-  it("cancels only obsolete assurance for the same PR and never coalesces pushes", () => {
+  it("never coalesces extended push assurance", () => {
     const concurrency = read("ci-full.yml").concurrency!;
-    const pr = (number: number, run_id: number) => ({
-      event_name: "pull_request",
-      event: { pull_request: { number } },
-      run_id,
-    });
     const group = (github: Record<string, any>) =>
       expression(concurrency.group, github);
-    expect(group(pr(1, 10))).toBe(group(pr(1, 11)));
-    expect(group(pr(1, 10))).not.toBe(group(pr(2, 10)));
-    expect(
-      expression(String(concurrency["cancel-in-progress"]), pr(1, 10)),
-    ).toBe(true);
     for (const ref of ["refs/heads/main", "refs/heads/release/1.0.0"]) {
       const push = { event_name: "push", event: {}, ref, run_id: 20 };
       expect(group(push)).not.toBe(group({ ...push, run_id: 21 }));

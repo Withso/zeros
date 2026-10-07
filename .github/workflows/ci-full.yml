@@ -1,13 +1,9 @@
 name: Full CI
 
-# Independent assurance keeps every existing workload running while CI's
-# path-selected required contexts remain the fast merge gate. Reusing the
-# workflows gives these checks distinct "Full suite / ..." and "Extended
-# checks / ..." names; they cannot satisfy an existing required CI context.
-# Main/release pushes already run Preflight directly, so only the additional
-# native ABI, unsigned packaging and runtime drift jobs are repeated there.
+# PR CI owns both selected and complementary verification in one run. Pushes
+# retain the additional native ABI, unsigned packaging and runtime drift jobs;
+# main/release Preflight still executes its full independent exact-SHA graph.
 on:
-  pull_request:
   push:
     branches: [main, "release/**"]
 
@@ -21,13 +17,6 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  preflight:
-    name: Full suite
-    if: github.event_name == 'pull_request'
-    uses: ./.github/workflows/preflight.yml
-    with:
-      full_database: true
-
   extended:
     name: Extended checks
     uses: ./.github/workflows/scheduled.yml

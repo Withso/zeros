@@ -30,9 +30,10 @@ scheduling, so jobs can still queue when the shared pool is occupied.
 ## Consequences
 
 - **Coverage.** Every main push has its own exact-SHA Preflight evidence with
-  the full workload profile and safety checks. CI and Preflight use four
+  the full workload profile and safety checks. PR CI shares selected/complementary executions in one run. CI and Preflight use four
   native Vitest shards and eight database shards, with no matrix parallelism
-  cap and no fail-fast cancellation. CI Recovery continues to link the commit
+  cap and no fail-fast cancellation. PR browser smoke uses the same three shards
+  as Preflight, with all scenarios retained. CI Recovery continues to link the commit
   range since the last green main run;
   a failure can still involve an earlier merge in that range.
 - **Alpha.** With `ZEROS_ALPHA_CI_FAST_PATH=enabled`, automatic Alpha needs its
