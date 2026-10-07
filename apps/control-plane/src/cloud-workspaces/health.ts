@@ -1,11 +1,8 @@
 import type pg from "pg";
 
-import { withSystemTx } from "../db.js";
-
-/** Provider-reported deletion stages that legitimately hold a receipt for
- * hours (Boat finishing snapshot uploads or serving newer restores). They are
- * progress, not a stall, until the 24-hour retirement limit. */
-const PROVIDER_DELETION_WAITING_STAGES = ["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"];
+import { withSystemTx, type Tx } from "../db.js";
+import { canDeferRetiredBoatDeletions, PROVIDER_DELETION_WAITING_STAGES,
+  stalledDeletionIntentPredicate, stalledProviderDeletionPredicate } from "./alpha-deletion-readiness.js";
 
 export type CloudWorkspaceHealth = {
   enabled: true;
@@ -15,6 +12,11 @@ export type CloudWorkspaceHealth = {
   outboxDelivery: "enabled" | "retained";
   operationalState: "healthy" | "degraded";
   reasons: string[];
+};
+
+export type CloudWorkspaceReleaseHealthReader = {
+  read(): Promise<CloudWorkspaceHealth>;
+  readForRelease?(sandboxIds: readonly string[]): Promise<{ health: CloudWorkspaceHealth; stalledDeletionsDeferred: boolean }>;
 };
 
 type HealthSignals = {
@@ -51,7 +53,21 @@ export class DatabaseCloudWorkspaceHealthService {
   ) {}
 
   async read(): Promise<CloudWorkspaceHealth> {
-    const signals = await withSystemTx(this.pool, async (tx) =>
+    return withSystemTx(this.pool, tx => this.readHealth(tx));
+  }
+
+  async readForRelease(sandboxIds: readonly string[]): Promise<{ health: CloudWorkspaceHealth; stalledDeletionsDeferred: boolean }> {
+    return withSystemTx(this.pool, async tx => {
+      const health = await this.readHealth(tx);
+      const stalledDeletionsDeferred = health.operationalState === "degraded" &&
+        health.reasons.length === 1 && health.reasons[0] === "deletion_intent_stalled" &&
+        await canDeferRetiredBoatDeletions(tx, sandboxIds);
+      return { health, stalledDeletionsDeferred };
+    }, { consistentRead: true });
+  }
+
+  private async readHealth(tx: Tx): Promise<CloudWorkspaceHealth> {
+    const signals =
       (
         await tx.query<HealthSignals>(
           `SELECT
@@ -92,14 +108,9 @@ export class DatabaseCloudWorkspaceHealthService {
              EXISTS (SELECT 1 FROM cloud_workspace_lifecycle_intents intent
                LEFT JOIN cloud_workspace_provider_bindings binding ON binding.workspace_id=intent.workspace_id AND binding.generation=intent.generation AND binding.org_id=intent.org_id
                LEFT JOIN cloud_workspace_provider_operations operation ON operation.workspace_id=intent.workspace_id AND operation.generation=intent.generation AND operation.org_id=intent.org_id
-               WHERE intent.operation='delete' AND intent.state IN ('queued','dispatching','observing','failed')
-                 AND binding.deletion_verified_at IS NULL AND operation.deleted_at IS NULL
-                 AND (intent.state='failed' OR least(intent.created_at,operation.deletion_requested_at)<now()-interval '24 hours'
-                   OR (coalesce(operation.deletion_progress_at,operation.deletion_requested_at,intent.created_at)<now()-interval '1 hour'
-                     AND NOT coalesce(operation.deletion_stage,'') = ANY($4::text[]))))
-               OR EXISTS (SELECT 1 FROM cloud_workspace_provider_operations WHERE deletion_requested_at IS NOT NULL AND deleted_at IS NULL
-                 AND (deletion_requested_at<now()-interval '24 hours' OR (coalesce(deletion_progress_at,deletion_requested_at)<now()-interval '1 hour'
-                   AND NOT coalesce(deletion_stage,'') = ANY($4::text[])))) AS deletion_intent_stalled,
+               WHERE ${stalledDeletionIntentPredicate("$4")})
+               OR EXISTS (SELECT 1 FROM cloud_workspace_provider_operations operation
+                 WHERE ${stalledProviderDeletionPredicate("$4")}) AS deletion_intent_stalled,
              EXISTS (SELECT 1 FROM workspace_checkpoint_requests WHERE idle_engine_instance_id IS NOT NULL
                AND state IN ('queued','delivered') AND created_at<now()-interval '5 minutes') AS idle_stop_blocked,
              CASE WHEN $2::boolean THEN EXISTS (
@@ -156,8 +167,7 @@ export class DatabaseCloudWorkspaceHealthService {
             PROVIDER_DELETION_WAITING_STAGES,
           ],
         )
-      ).rows[0]!,
-    );
+      ).rows[0]!;
     const reasons = (Object.entries(signals) as Array<
       [keyof HealthSignals, boolean]
     >)

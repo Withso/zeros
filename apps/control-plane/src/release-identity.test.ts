@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type pg from "pg";
 import type { Config } from "./config.js";
 import { createReleaseIdentityRoutes, qualifiedWorkerMatrix } from "./release-identity.js";
+import type { CloudWorkspaceHealth } from "./cloud-workspaces/health.js";
 
 const sha = "a".repeat(40);
 const manifest = [{ name: "0001_initial.sql", checksum: `sha256:${"b".repeat(64)}` }];
@@ -238,4 +239,132 @@ describe("public release readiness", () => {
       expect(JSON.stringify(body)).not.toContain("private-owner-row");
     }
   });
+});
+
+describe("Alpha readiness with explicitly deferred retired deletions", () => {
+  const exception = { startsAt: "2026-10-07T00:00:00.000Z", expiresAt: "2026-10-10T00:00:00.000Z", sandboxIds: ["bx_fixture1"] };
+  const health = { enabled: true as const, backgroundWorkers: "enabled" as const, setupExecution: "enabled" as const,
+    durability: "enabled" as const, outboxDelivery: "retained" as const, operationalState: "degraded" as const,
+    reasons: ["deletion_intent_stalled"] };
+  function deferred(overrides: Partial<Config> = {}, measured: CloudWorkspaceHealth = health, eligible = true, qualified = true) {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-07T12:00:00.000Z"));
+    const read = vi.fn(async () => measured);
+    const readForRelease = vi.fn(async () => ({ health: measured, stalledDeletionsDeferred: eligible }));
+    const readWorkerQualified = vi.fn(async () => qualified);
+    const app = createReleaseIdentityRoutes({ ...config, cloudWorkspaces: {
+      provider: "boat", imageRef: `boat:zeros-fixture@sha256:${"c".repeat(64)}`, sourceCommit: sha,
+      architecture: "linux/amd64", storageMiB: 4096,
+    } as NonNullable<Config["cloudWorkspaces"]>, alphaDeletionReadinessException: exception, ...overrides }, {} as pg.Pool, {
+      sourceSha: sha, readManifest: async () => manifest, readLedger: async () => manifest,
+      readWorkerQualified, cloudWorkspaceHealthService: { read, readForRelease },
+    });
+    return { app, read, readForRelease, readWorkerQualified };
+  }
+  afterEach(() => vi.useRealTimers());
+
+  it("admits the scoped exception while retaining degraded operational health and real qualification", async () => {
+    const test = deferred();
+    const response = await test.app.request("/v1/release-identity");
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({ ready: true, workerQualified: true,
+      cloud: { enabled: true, ready: true, state: "healthy", operationalState: "degraded" },
+      alphaReadinessException: { kind: "retired-boat-deletions", expiresAt: exception.expiresAt } });
+    expect(test.readForRelease).toHaveBeenCalledWith(exception.sandboxIds);
+    expect(test.read).not.toHaveBeenCalled();
+    expect(test.readWorkerQualified).toHaveBeenCalledOnce();
+    expect(JSON.stringify(body)).not.toContain("bx_fixture1");
+  });
+
+  it.each(["beta", "production", "development"] as const)("never applies on %s", async deploymentChannel => {
+    const test = deferred({ deploymentChannel });
+    expect((await test.app.request("/v1/release-identity")).status).toBe(503);
+    expect(test.readForRelease).not.toHaveBeenCalled();
+  });
+
+  it("keeps Local and organization local workspaces outside cloud readiness", async () => {
+    const test = deferred({ cloudWorkspaces: null });
+    const response = await test.app.request("/v1/release-identity");
+    expect(response.status).toBe(200);
+    expect(await response.json()).not.toHaveProperty("alphaReadinessException");
+    expect(test.readForRelease).not.toHaveBeenCalled();
+    expect(test.read).not.toHaveBeenCalled();
+  });
+
+  it("requires an exact eligible retirement inventory", async () => {
+    const test = deferred({}, health, false);
+    expect((await test.app.request("/v1/release-identity")).status).toBe(503);
+    expect(test.readWorkerQualified).not.toHaveBeenCalled();
+  });
+
+  it.each(["engine_lease_expired", "durability_stalled", "access_revocation_stalled", "deletion_jobs_failed", "deletion_provider_stalled"])(
+    "retains the %s blocker", async reason => {
+      const test = deferred({}, { ...health, reasons: [...health.reasons, reason] });
+      expect((await test.app.request("/v1/release-identity")).status).toBe(503);
+    },
+  );
+
+  it("expires even when the last ready response is still inside its five-second cache", async () => {
+    const test = deferred();
+    vi.setSystemTime(new Date(Date.parse(exception.expiresAt) - 1));
+    expect((await test.app.request("/v1/release-identity")).status).toBe(200);
+    vi.setSystemTime(new Date(exception.expiresAt));
+    const response = await test.app.request("/v1/release-identity");
+    expect(response.status).toBe(503);
+    expect(await response.json()).not.toHaveProperty("alphaReadinessException");
+    expect(test.read).toHaveBeenCalledOnce();
+  });
+
+  it("cannot outlive its deadline while the retirement inventory is being read", async () => {
+    const test = deferred();
+    test.readForRelease.mockImplementationOnce(async () => {
+      vi.setSystemTime(new Date(exception.expiresAt));
+      return { health, stalledDeletionsDeferred: true };
+    });
+    const response = await test.app.request("/v1/release-identity");
+    expect(response.status).toBe(503);
+    expect(await response.json()).not.toHaveProperty("alphaReadinessException");
+  });
+
+  it("cannot outlive its deadline while real worker qualification is being read", async () => {
+    const test = deferred();
+    test.readWorkerQualified.mockImplementationOnce(async () => {
+      vi.setSystemTime(new Date(exception.expiresAt));
+      return true;
+    });
+    const response = await test.app.request("/v1/release-identity");
+    expect(response.status).toBe(503);
+    expect(await response.json()).not.toHaveProperty("alphaReadinessException");
+  });
+
+  it("does not activate before its start time or without its configuration", async () => {
+    const pending = deferred();
+    vi.setSystemTime(new Date(Date.parse(exception.startsAt) - 1));
+    expect((await pending.app.request("/v1/release-identity")).status).toBe(503);
+    expect(pending.readForRelease).not.toHaveBeenCalled();
+    const disabled = deferred({ alphaDeletionReadinessException: null });
+    expect((await disabled.app.request("/v1/release-identity")).status).toBe(503);
+  });
+
+  it("never manufactures worker qualification", async () => {
+    const test = deferred({}, health, true, false);
+    const body = await (await test.app.request("/v1/release-identity")).json();
+    expect(body.workerQualified).toBe(false);
+    expect(test.readWorkerQualified).toHaveBeenCalledOnce();
+  });
+
+  it("retains maintenance and paused-worker blockers", async () => {
+    const maintenance = deferred({ databaseMaintenanceMode: true });
+    expect((await maintenance.app.request("/v1/release-identity")).status).toBe(503);
+    expect(maintenance.readForRelease).not.toHaveBeenCalled();
+    const paused = deferred({}, { ...health, backgroundWorkers: "paused" });
+    expect((await paused.app.request("/v1/release-identity")).status).toBe(503);
+  });
+
+  it.each([{ setupExecution: "paused" as const }, { durability: "disabled" as const }])(
+    "retains disabled setup and durability blockers: %j", async posture => {
+      expect((await deferred({}, { ...health, ...posture }).app.request("/v1/release-identity")).status).toBe(503);
+    },
+  );
 });

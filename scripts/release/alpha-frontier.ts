@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CHANNELS, PromotionError, ReleaseIdentity, SHA, requireCheck } from "./contracts";
+import { CHANNELS, PromotionError, ReleaseIdentity, ReleaseIdentityBase, SHA, checkAlphaReadinessException, requireCheck } from "./contracts";
 import { buildReleaseLedger, previousReleaseLedger, ReleaseLedger } from "./release-ledger";
 
 type Read = (route: string) => Promise<any>;
@@ -77,10 +77,10 @@ function requireDestination(condition: unknown, reason: string): asserts conditi
 
 // Admission and pre-deploy Alpha preparation need the deployed source even when cloud readiness is false.
 // Retain the shared identity constraints, relaxing only readiness fields.
-const AlphaFrontierIdentity = ReleaseIdentity.extend({ ready: z.boolean(),
-  cloud: ReleaseIdentity.shape.cloud.extend({ ready: z.boolean(),
+const AlphaFrontierIdentity = ReleaseIdentityBase.extend({ ready: z.boolean(),
+  cloud: ReleaseIdentityBase.shape.cloud.extend({ ready: z.boolean(),
     state: z.enum(["healthy", "disabled", "unready", "unknown"]) }),
-});
+}).superRefine(checkAlphaReadinessException);
 
 export async function alphaFrontierIdentity(fetcher: typeof fetch = fetch) {
   const controller = new AbortController();

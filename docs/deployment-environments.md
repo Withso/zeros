@@ -1154,6 +1154,50 @@ entire live tuple after checking the committed input tree; final readiness
 requires that exact tuple. Missing, false or revoked approval blocks publication.
 The public boolean does not replace per-credential native launch qualification.
 
+### Temporary Alpha exception for retired Boat deletion receipts
+
+An operator may configure the private control-plane variable
+`ALPHA_DELETION_READINESS_EXCEPTION_JSON` to keep Alpha publication available
+while a specific retired Boat allocation awaits provider deletion completion.
+It is disabled when unset and ignored outside Alpha. The JSON contains
+`startsAt` and `expiresAt` as UTC ISO timestamps, and `sandboxIds` as an array
+of 1–7 unique `bx_*` sandbox IDs. The interval must be positive and at most
+72 hours. Keep the actual target list in Alpha's private service configuration;
+never copy it into source, PRs or workflow output. Invalid Alpha configuration
+fails boot with a fixed message that does not disclose the JSON or IDs.
+
+This changes only release readiness. In one read-only, repeatable-read system
+transaction, the API requires `deletion_intent_stalled` to be the sole health
+reason and checks **every** stalled intent and provider journal against the
+exact allowlist. Each must have a Boat deletion receipt, an observing delete
+intent with a pending/blocked provider cause, a retired non-current generation,
+and a matching archived Boat binding without deletion proof. A missing or
+mismatched record, failed/queued intent, current generation, additional stalled
+resource, or another health reason keeps publication blocked. Normal provider
+waiting stages retain their existing one-hour/24-hour health rules; they do not
+expand the allowlist. Workers, setup execution and durability must remain enabled.
+
+While the exception is actually used, `/v1/release-identity` retains
+`cloud.ready=true` and the v1 `cloud.state="healthy"` **release-readiness**
+posture, and explicitly adds `cloud.operationalState="degraded"` plus
+`alphaReadinessException={"kind":"retired-boat-deletions","expiresAt":"…"}`.
+No resource IDs are public. `/healthz`, health alerts, deletion workers, pending
+storage accounting and physical-deletion verification remain unchanged. The
+API still measures real worker qualification; signing, source/schema checks,
+migration approvals and other release gates are unchanged. Local workspaces,
+organization local workspaces and owner/placement switching do not use this
+server-only policy.
+
+The deadline is checked after health reads and before each response, and limits
+the normal five-second readiness cache. Release receipts preserve the exception
+metadata and reject expired exceptions or their use on Beta/Production. Remove
+the variable and deploy the same reviewed source to disable it early; otherwise
+readiness automatically closes at expiry. If an expired exception was saved in
+an earlier receipt, rerun hosted promotion to obtain current evidence rather
+than replaying that receipt. Provider completion and normal deletion
+verification remain the permanent resolution; this exception does not certify
+erasure or settle provider capacity.
+
 Hosted control planes keep `DATABASE_MIGRATIONS_ON_BOOT=false`. The migration
 subprocess requires `NODE_ENV=production`, rejects pending controlled
 boundaries (use the reviewed drain ceremony separately), verifies checksums,

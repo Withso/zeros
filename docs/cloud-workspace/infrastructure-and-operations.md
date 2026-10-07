@@ -140,6 +140,12 @@ target-bound approval, and change nothing until rerun unchanged with
 | `compute_platform_exposure` | Provider overrun was recorded as platform exposure in the last 24 hours. | Reconcile the provider meter against the ledger and review the affected credit period. |
 | `health_query_failed` | The aggregate health query itself failed. | Check database connectivity, pool saturation and whether a migration is pending. |
 
+Alpha can use the bounded, private [retired Boat deletion readiness exception](../deployment-environments.md#temporary-alpha-exception-for-retired-boat-deletion-receipts)
+while the provider resolves named retired allocations. It changes publication
+admission only: this health reason, operator alerts, reserved storage and
+deletion verification remain active. A sandbox lookup returning 404 is not a
+physical-deletion receipt.
+
 ## Recovery drills and measured limits
 
 Batch 7 measured the isolated Alpha qualification deployment on September

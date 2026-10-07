@@ -21,6 +21,43 @@ function baseEnv(): NodeJS.ProcessEnv {
   };
 }
 
+describe("temporary Alpha deletion readiness exception", () => {
+  const exception = {
+    startsAt: "2026-10-07T00:00:00.000Z",
+    expiresAt: "2026-10-10T00:00:00.000Z",
+    sandboxIds: ["bx_fixture1", "bx_fixture2"],
+  };
+  const configured = (value: unknown) => ({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: "alpha",
+    ALPHA_DELETION_READINESS_EXCEPTION_JSON: JSON.stringify(value) });
+
+  it("defaults off and accepts an explicit bounded Alpha policy", () => {
+    expect(loadConfig(baseEnv()).alphaDeletionReadinessException).toBeNull();
+    expect(loadConfig(configured(exception)).alphaDeletionReadinessException).toEqual(exception);
+  });
+
+  it.each(["development", "beta", "production"])("keeps %s outside the exception", channel => {
+    expect(loadConfig({ ...configured(exception), RAILWAY_ENVIRONMENT_NAME: channel })
+      .alphaDeletionReadinessException).toBeNull();
+  });
+
+  it.each([
+    { ...exception, sandboxIds: [] },
+    { ...exception, sandboxIds: ["bx_fixture1", "bx_fixture1"] },
+    { ...exception, sandboxIds: Array.from({ length: 8 }, (_, index) => `bx_fixture${index}`) },
+    { ...exception, sandboxIds: ["private-sentinel"] },
+    { ...exception, expiresAt: exception.startsAt },
+    { ...exception, expiresAt: "2026-10-10T00:00:00.001Z" },
+    { ...exception, startsAt: "2026-10-07T00:00:00+01:00" },
+    { ...exception, extra: "private-sentinel" },
+  ])("rejects malformed or unbounded policy without exposing its contents", value => {
+    let message = "";
+    try { loadConfig(configured(value)); } catch (error) { message = (error as Error).message; }
+    expect(message).toContain("Alpha deletion readiness exception");
+    expect(message).not.toContain("private-sentinel");
+    expect(message).not.toContain("bx_");
+  });
+});
+
 describe("same-generation resume configuration", () => {
   it("defaults off and enables only explicitly on Alpha", () => {
     expect(loadConfig(baseEnv()).cloudWorkspaceResumeExistingEnabled).toBe(false);

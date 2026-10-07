@@ -28,6 +28,7 @@ import { loadCloudRuntimeConfig, type CloudRuntimeConfig } from "./cloud-workspa
 import { BOAT_BILLING_ORG_PATTERN } from "./cloud-workspaces/boat-client.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS } from "./request-timing.js";
 import { validateReleaseLedgerUrl } from "./client-compatibility.js";
+import { loadAlphaDeletionReadinessException, type AlphaDeletionReadinessException } from "./cloud-workspaces/alpha-deletion-readiness.js";
 import {
   DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
   MAX_ENGINE_HEARTBEAT_INTERVAL_MS,
@@ -335,6 +336,8 @@ export type Config = {
   development?: DevelopmentIdentity;
   isProduction: boolean;
   deploymentChannel: "development" | "alpha" | "beta" | "production";
+  /** Private, expiring exception for at most seven retired Boat generations. */
+  alphaDeletionReadinessException?: AlphaDeletionReadinessException | null;
   desktopReleaseLedgerUrl?: string | null;
   /** Null when no GitHub App is registered for this environment. */
   github: GithubBackendConfig | null;
@@ -1814,6 +1817,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     isProduction: e.NODE_ENV === "production",
     desktopReleaseLedgerUrl: validateReleaseLedgerUrl(e.DESKTOP_RELEASE_LEDGER_URL),
     deploymentChannel,
+    alphaDeletionReadinessException: loadAlphaDeletionReadinessException(env, deploymentChannel),
     github,
     feedback: loadFeedbackConfig(env, diagnostics),
     chatTitleApiKey: e.CHAT_TITLE_OPENAI_API_KEY || null,
