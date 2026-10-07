@@ -288,6 +288,95 @@ acknowledgement today; host-side input deduplication alone does not establish
 lossless typing during a client reconnect. Keep present-client activation gated
 until LU-5 verifies that path and the agreed client retry contract.
 
+## LU-5 acceptance harness (adapter pending)
+
+This is a gated harness, not runnable live Alpha acceptance. HU and LU agreed
+[`AlphaLiveUpdateAdapter`](../../scripts/cloud-workspace-validation/live-update-acceptance/contract.ts),
+but the concrete adapter/controller is deferred to a separate reviewed slice.
+Missing implementation or unqualified capabilities refuse before creation.
+Production and present-client activation remain disabled.
+
+Future command, **after the prerequisites below are implemented and qualified**:
+
+```sh
+pnpm exec tsx scripts/cloud-workspace-validation/live-update-acceptance/cli.mts \
+  --adapter scripts/cloud-workspace-validation/runtime-hot-update-alpha/adapter.ts \
+  --config .context/zeros-v2-test-live-update.json
+```
+
+The agreed adapter path is not shipped yet. It must export
+`createAlphaLiveUpdateAdapter({credentials, configPath, signal})`. The CLI resolves
+an explicit config file and passes only allowlisted `.env.agent` entries in a
+private map, including `ZEROS_HU_ALPHA_ACCESS_TOKEN` and
+`ZEROS_HU_ALPHA_DATABASE_URL`; there is no ambient environment fallback. The
+adapter's import, factory, identity and preflight are read-only and silent.
+
+The adapter must validate a strict noncredential config: `version:1`,
+`channel:"alpha"`, organization/test-user/template-build UUIDs
+(`organizationId`, `testUserId`, `templateBuildId`), `sourceRuntimeId`,
+`targetRuntimeId`, `baseCompatibilityId`, a `repository` object with
+`forge:"github.com"`, `owner`, `name`, `revision`, `githubInstallationId` (UUID)
+and `expectedSha` (reviewed 40-hex source commit), and an `agent` object with
+`agentId:"claude"|"codex"|"cursor"`, `modelId` and `credentialId` (UUID).
+No endpoint override, existing-workspace ID or credential value belongs in this
+file. Config content validation belongs to the reviewed adapter, not this CLI.
+
+Enablement prerequisites remain explicit:
+
+- A concrete Alpha adapter/controller using actual lifecycle APIs, a dedicated
+  staff test account/template and the existing Alpha provider credentials.
+  Alpha origins must be fixed; no unsupported hosted endpoints are assumed.
+- Source A and newer B qualified as the exact resident/rollback pair, including
+  compatible SQLite, fresh server-verified proof inputs and qualified first
+  resident enrollment. Ordinary setup/bootstrap does not enroll a host today.
+- Trusted root quiet/readiness observations and a handoff-aware final policy.
+  The ordinary quiet predicate regards a fenced engine as busy. `runtime-observe`
+  is a separate proposed supervisor operation, absent from the reviewed LU-3
+  head; it cannot be treated as available here.
+- Real device-to-engine acknowledged input/retry, independently authenticated
+  reconnect/replay observations from two devices, an ordinary provider turn
+  held at a test tool gate, and candidate-scoped root health-failure injection.
+  Host-side input deduplication alone is insufficient; report
+  `inputAcknowledgements:false` until the client path exists.
+- Idempotent provisioning and verified all-generation cleanup inventory. The
+  orchestrator holds credentials and performs live runs; none were run here.
+
+The runner stages B during a held ordinary turn, queues a duplicate prompt,
+drains that turn, then injects failed B health and requires **A → B → fresh A**.
+The first queued prompt must complete once on fresh A. It starts a second held
+turn, stages the same newer B, queues a separate prompt and requires a healthy
+**A → B** retry; that prompt completes once on B. It never requests B → A as a
+new target selection. Prior input and completed prompts stay exactly once.
+
+Both transitions preserve terminal/server PIDs, boot/allocation/controller/host
+identity and sentinel digest; require fresh engine/proof/authority/fence; and
+converge on both devices. The runner measures last source to first replacement
+response and rejects a gap over two seconds. Synthetic tests verify assertions,
+not live timing or continuity. Keep activation gated until real evidence passes.
+
+The adapter exposes independent `identity`, qualified `preflight`, idempotent
+`provision`, two-device `connect`, `stage`, `handoff` and `cleanup`. Devices expose
+workload start, `holdTurn`, authenticated observation, acknowledged input,
+durable enqueue, turn release and close. Observations must use actual engine
+round trips and verified enrollment, never locally invented IDs or cached UI.
+
+Before provisioning, fsync a private operation journal in `.context/`, including
+the preflight organization and all input/prompt/transition/retry-turn identities.
+Only `zeros-v2-test-lu` (default) or `zeros-v2-test-hu` is allowed by
+`--name-prefix`. Lost create replies reuse the same identity. Cleanup uses
+independent staff/org identity and remains available after pair revocation; it
+must match the journaled organization, reconcile ambiguous operations and prove
+all generations/resources/pending deletion inventory empty. A DELETE reply is
+insufficient. Older journals with a workspace can recover its organization;
+older ambiguous journals without either organization source fail closed.
+
+Resume interrupted cleanup with the same future command plus
+`--cleanup .context/zeros-v2-test-lu-<operation-id>.json`. Do not discard a
+`cleanup_required` journal. Closed reports contain only operation/workspace IDs,
+fixed result codes, measured gaps and cleanup state. The adapter must retain
+additional provider resource IDs in a credential-free inventory for the
+orchestrator's live report; no raw provider errors or workload output is logged.
+
 ## Local workspace impact
 
 Local-owner and organization-owned local workspaces retain their existing
