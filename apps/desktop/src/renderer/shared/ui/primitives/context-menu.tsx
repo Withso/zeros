@@ -275,43 +275,83 @@ ContextMenuSubContent.displayName = ContextMenuPrimitive.SubContent.displayName;
 const ContextMenuContent = React.forwardRef<
   React.ComponentRef<typeof ContextMenuPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.Content>
->(({ className, onCloseAutoFocus, onInteractOutside, ...props }, ref) => {
-  const context = React.useContext(MenuAnchorContext);
-  const interactedOutside = React.useRef(false);
-  return (
-    <ContextMenuPrimitive.Portal>
-      <ContextMenuPrimitive.Content
-        ref={ref}
-        side="right"
-        align="start"
-        sideOffset={2}
-        collisionPadding={8}
-        updatePositionStrategy="always"
-        // Drop the spurious focus ring Radix leaves on the trigger after a
-        // pointer-driven close (see overlay-focus.ts); still forward the handler.
-        onCloseAutoFocus={(event) => {
-          suppressPointerRefocus(event);
-          onCloseAutoFocus?.(event);
-          if (interactedOutside.current) event.preventDefault();
-          interactedOutside.current = false;
-        }}
-        onInteractOutside={(event) => {
-          onInteractOutside?.(event);
-          if (!event.defaultPrevented && !context?.modal)
-            interactedOutside.current = true;
-        }}
-        className={cn(
-          MENU_SURFACE_RADIUS,
-          "border-border2 bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-dropdown max-h-(--radix-popper-available-height) max-w-(--radix-popper-available-width) min-w-[min(9rem,var(--radix-popper-available-width))] overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
-          MENU_SURFACE_INSET,
-          className,
-        )}
-        {...props}
-        style={{ ...props.style, ...CONTEXT_MENU_VARIABLES }}
-      />
-    </ContextMenuPrimitive.Portal>
-  );
-});
+>(
+  (
+    {
+      className,
+      onCloseAutoFocus,
+      onInteractOutside,
+      onEscapeKeyDown,
+      onKeyDown,
+      ...props
+    },
+    ref,
+  ) => {
+    const context = React.useContext(MenuAnchorContext);
+    const interactedOutside = React.useRef(false);
+    const escapeEvents = React.useRef<WeakSet<Event>>(new WeakSet());
+    return (
+      <ContextMenuPrimitive.Portal>
+        <ContextMenuPrimitive.Content
+          ref={ref}
+          side="right"
+          align="start"
+          sideOffset={2}
+          collisionPadding={8}
+          updatePositionStrategy="always"
+          // Drop the spurious focus ring Radix leaves on the trigger after a
+          // pointer-driven close (see overlay-focus.ts); still forward the handler.
+          onCloseAutoFocus={(event) => {
+            suppressPointerRefocus(event);
+            onCloseAutoFocus?.(event);
+            if (interactedOutside.current) event.preventDefault();
+            interactedOutside.current = false;
+          }}
+          onInteractOutside={(event) => {
+            onInteractOutside?.(event);
+            if (!event.defaultPrevented && !context?.modal)
+              interactedOutside.current = true;
+          }}
+          onEscapeKeyDown={(event) => {
+            if (escapeEvents.current.has(event)) return;
+            escapeEvents.current.add(event);
+            onEscapeKeyDown?.(event);
+          }}
+          onKeyDown={(event) => {
+            onKeyDown?.(event);
+            if (
+              event.defaultPrevented ||
+              event.key !== "Escape" ||
+              // React events from separately portaled overlays also bubble here.
+              !event.currentTarget.contains(event.target as Node)
+            )
+              return;
+            const nativeEvent = event.nativeEvent;
+            if (
+              nativeEvent.defaultPrevented ||
+              escapeEvents.current.has(nativeEvent)
+            )
+              return;
+            // First-focus Escape can precede Radix's document listener.
+            escapeEvents.current.add(nativeEvent);
+            onEscapeKeyDown?.(nativeEvent);
+            if (event.defaultPrevented || nativeEvent.defaultPrevented) return;
+            event.preventDefault();
+            context?.setOpen(false);
+          }}
+          className={cn(
+            MENU_SURFACE_RADIUS,
+            "border-border2 bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-dropdown max-h-(--radix-popper-available-height) max-w-(--radix-popper-available-width) min-w-[min(9rem,var(--radix-popper-available-width))] overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)]",
+            MENU_SURFACE_INSET,
+            className,
+          )}
+          {...props}
+          style={{ ...props.style, ...CONTEXT_MENU_VARIABLES }}
+        />
+      </ContextMenuPrimitive.Portal>
+    );
+  },
+);
 ContextMenuContent.displayName = ContextMenuPrimitive.Content.displayName;
 
 const ContextMenuItem = React.forwardRef<

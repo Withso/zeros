@@ -14,7 +14,11 @@ export async function runMentionsSmoke({ page, check }) {
   // Confirm that precondition so leftover text from the previous query fails
   // here, by name, rather than later as a missing picker row.
   const typeQuery = async (query) => {
-    await input.fill("");
+    // Keep ProseMirror's selection in sync: fill's DOM-only range can be
+    // collapsed by a pending editor focus before its separate Delete command.
+    await input.press("ControlOrMeta+A");
+    await input.press("Backspace");
+    await expect(input).toHaveText("");
     await input.pressSequentially(`@${query}`);
     await expect(input).toHaveText(`@${query}`);
   };
