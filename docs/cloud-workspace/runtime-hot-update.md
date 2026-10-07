@@ -674,6 +674,14 @@ uses the immutable generation pin and existing transfer service; authenticated,
 challenged health additionally verifies that exact resident host, generation,
 engine and attachment fence. Rollback never recycles a prior resume-proof epoch.
 
+A start rejected before attachment can reuse the original detached fence only
+when a fresh root status proves the unchanged detached resident and an exact
+prepare replay proves the original session is still unspent. The control plane
+also requires that candidate registration has not consumed its enrollment.
+A failed or lost start retains the planned target authority: rollback must
+prove and detach that exact attachment, or remain `recovery_required`. A
+rejected response alone never proves that attachment or session state survived.
+
 Queue recovery shares RU's rule: undispatched commands retain their pause state
 only for the exact successfully enrolled target/rollback engine. Their durable
 command/claim identities remain unchanged; interrupted dispatched commands stay

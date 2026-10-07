@@ -422,6 +422,7 @@ class SystemRuntime:
         self.resident = None
         self.source_retired = False
         self.resident_enrollment = None
+        self.resident_prepare_fields = None
         self.enrolled_engine_instances = set()
 
     def authorize(self, request):
@@ -569,6 +570,7 @@ class SystemRuntime:
             require(same_resident(original, detached) and detached["engineId"] is None and detached["fence"] == expected_fence)
             self.b.text_match(reply.get("session"), r"zsp_[A-Za-z0-9_-]{43}", "input_schema")
             self.session, self.resident, self.resident_enrollment = reply["session"], detached, None
+            self.resident_prepare_fields = fields
             self.check_retired_scope()
             if not self.source_retired:
                 require(self.pipe.exchange(self.request, "consumed", resident=detached)["allow"])
@@ -672,8 +674,15 @@ class SystemRuntime:
             require(fence < 2**53)
             self.resident_enrollment = {"engineId": engine_id, "generation": self.request["scope"]["sourceGeneration" if rollback else "candidateGeneration"], "fence": fence}
             resident_fields = {"resident": {"hostId": self.resident["hostId"], "fence": fence}}
-        started = self.supervisor("start", session=self.session, environment=reply["environment"], **resident_fields)
-        self.session = None
+        prepared_session = self.session
+        try:
+            started = self.supervisor("start", session=prepared_session, environment=reply["environment"], **resident_fields)
+        finally:
+            # A failed or lost start can already have attached the target. Keep
+            # its planned authority for exact retirement; never guess detached.
+            self.session = None
+        if started.get("outcome") == "rejected" and self.resident:
+            self.confirm_rejected_resident_start(prepared_session)
         require(started.get("outcome") == "started")
         phase = "rollback_health" if rollback else "health"
         remaining = deadline - time.monotonic()
@@ -686,6 +695,27 @@ class SystemRuntime:
             require(same_resident(attached, self.resident) and all(attached[key] == value for key, value in self.resident_enrollment.items()))
             resident_fields = {"resident": attached}
         return self.pipe.exchange(self.request, phase, active=active, timeout=remaining, **resident_fields)["allow"]
+
+    def confirm_rejected_resident_start(self, prepared_session):
+        # Rejection alone is insufficient. The same root must prove both the
+        # exact unchanged detached host and the original unspent prepare. This
+        # also distinguishes validation rejection from a failed/ambiguous start
+        # that consumed its session or attached the candidate before replying.
+        if prepared_session is None or self.resident_prepare_fields is None:
+            return
+        try:
+            status = self.supervisor("resident-status")
+            require(status.get("outcome") == "ready")
+            detached = resident_document(self.b, status.get("resident"))
+            require(detached == self.resident and detached["engineId"] is None)
+            replay = self.supervisor("prepare", **self.resident_prepare_fields)
+            require(replay.get("outcome") == "prepared" and replay.get("session") == prepared_session)
+            require(resident_document(self.b, replay.get("resident")) == detached)
+            self.check_retired_scope()
+        except Exception:
+            return
+        self.session = prepared_session
+        self.resident_enrollment = None
 
 
 def main():

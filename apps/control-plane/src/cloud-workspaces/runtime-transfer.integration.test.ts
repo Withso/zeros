@@ -277,6 +277,29 @@ import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
       expect(rollback.engineInstanceId).not.toBe(enrollment.engineInstanceId);
       expect(rollback.engineInstanceId).not.toBe(fixture.engineInstanceId);
     });
+    it.each([false, true])("permits the original detached rollback fence only before candidate registration (registered=%s)", async registered => {
+      const f = await prepared();
+      await service.authorizeResidentConsumption(f.claim, f);
+      const detached = { ...f.resident, fence: 2, engineId: null, generation: null };
+      await service.recordResidentConsumption(f.claim, { handoff: f.handoff, resident: detached });
+      await service.retireResidentSource(f.claim);
+      const active = targetActive();
+      const target = (await service.enroll(f.claim, { active, controller: f.controller, report: report(active),
+        rollback: false, resident: detached }))!;
+      if (registered) await service.register({ ...f.claim, generation: 2, setupRunId: target.id, executionFence: target.executionFence,
+        engineInstanceId: target.engineInstanceId, token: target.token, protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+        actorProtocolVersion: 2, agentRuntime: { ...report(active).runtime as object, profile: "zeros-cloud-worker-v4" } });
+      await service.beginRollback(f.claim);
+      const restored = { ...sourceActive(), supervisorSessionId: randomUUID() };
+      const rollback = await service.enroll(f.claim, { active: restored, controller: f.controller, report: report(restored),
+        rollback: true, resident: detached });
+      if (registered) expect(rollback).toBeNull();
+      else {
+        expect(rollback?.resident).toEqual({ hostId: f.resident.hostId, fence: 3 });
+        expect(rollback?.engineInstanceId).not.toBe(target.engineInstanceId);
+        expect(rollback?.engineInstanceId).not.toBe(fixture.engineInstanceId);
+      }
+    });
     it.each([false, true])("preserves queued pause=%s across a verified swap and claims each command once", async paused => {
       const f = await prepared(), commands = new DatabaseCloudWorkspaceCommandService({ pool });
       const source = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,

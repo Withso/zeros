@@ -473,6 +473,82 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(runtime.resident, {**detached, "fence": 4})
         self.assertEqual(pipe.exchange.call_count, 2)
 
+    def resident_start_fixture(self, outcome, *, changed_session=False):
+        runtime, request, pipe, _, detached, _ = self.resident_fixture()
+        self.assertTrue(runtime.authorize(request))
+        runtime.retire()
+        target_id = "abababab-abab-4bab-8bab-abababababab"
+        execution = {key: request["scope"][key] for key in ("workspaceId", "organizationId")}
+        environment = {"runtimeB64": fixture.encoded({"version": 1, "audience": "zeros-cloud-engine-runtime-v1",
+            "execution": {**execution, "generation": 2}, "engine": {"instanceId": target_id}}).decode()}
+        pipe.exchange.return_value = {"allow": True, "environment": environment}
+        operations, prepares = [], []
+        attached = {**detached, "engineId": target_id, "generation": 2, "fence": 3}
+        original_session = runtime.session
+        def supervisor(operation, **fields):
+            operations.append(operation)
+            if operation == "start":
+                if outcome == "timeout":
+                    raise TimeoutError()
+                return {"outcome": "failed" if outcome.startswith("failed") else "rejected"}
+            if operation == "resident-status":
+                return {"outcome": "ready", "resident": attached if outcome == "failed_attached" else detached}
+            self.assertEqual(operation, "prepare")
+            prepares.append(fields)
+            if outcome == "failed_attached":
+                self.assertEqual(fields, {"resident": {key: attached[key] for key in ("hostId", "engineId", "fence")}})
+                return {"outcome": "prepared", "session": original_session, "resident": {**detached, "fence": 4}}
+            self.assertEqual(fields, {"resident": {"hostId": request["handoff"]["hostId"],
+                "engineId": request["handoff"]["engineInstanceId"], "fence": 1}, "handoff": request["handoff"]})
+            return {"outcome": "prepared", "session": "zsp_" + "c" * 43 if changed_session else original_session,
+                    "resident": detached}
+        runtime.supervisor = supervisor
+        read_fd, write_fd = os.pipe()
+        report = {"profile": "zeros-cloud-worker-v4", "qualified": True, "runtime": self.source}
+        diagnostic = {"schema": "zeros.diagnostic/v1", "component": "attester", "ok": True,
+                      "stage": "done", "exitCode": 0, "failedChecks": []}
+        os.write(write_fd, b.packed(report) + b"\n" + b.packed(diagnostic) + b"\n")
+        os.close(write_fd)
+        child = mock.Mock(stdout=os.fdopen(read_fd, "rb"))
+        child.wait.return_value = 0
+        with mock.patch.object(update.subprocess, "Popen", return_value=child):
+            with self.assertRaises(Exception):
+                runtime.launch_and_health(self.source, False, update.time.monotonic() + 10)
+        return runtime, detached, operations, prepares
+
+    def test_proven_pre_attachment_rejection_reuses_only_the_original_unspent_prepare(self):
+        runtime, detached, operations, prepares = self.resident_start_fixture("rejected")
+        runtime.retire()
+        self.assertIsNone(runtime.resident_enrollment)
+        self.assertEqual(runtime.resident, detached)
+        self.assertIsNotNone(runtime.session)
+        self.assertEqual(operations[:3], ["start", "resident-status", "prepare"])
+        self.assertEqual(len(prepares), 2)
+        self.assertEqual(prepares[0], prepares[1])
+
+    def test_unchanged_detached_host_without_the_original_session_cannot_roll_back(self):
+        runtime, _, _, _ = self.resident_start_fixture("rejected", changed_session=True)
+        with self.assertRaises(Exception):
+            runtime.retire()
+        self.assertIsNotNone(runtime.resident_enrollment)
+        self.assertIsNone(runtime.session)
+
+    def test_failed_or_lost_start_never_infers_an_unattached_target(self):
+        for outcome in ("failed_detached", "timeout"):
+            with self.subTest(outcome=outcome):
+                runtime, _, _, prepares = self.resident_start_fixture(outcome)
+                with self.assertRaises(Exception):
+                    runtime.retire()
+                self.assertIsNotNone(runtime.resident_enrollment)
+                self.assertEqual(prepares, [])
+
+    def test_failed_start_after_attachment_retires_only_the_exact_target(self):
+        runtime, detached, _, prepares = self.resident_start_fixture("failed_attached")
+        runtime.retire()
+        self.assertIsNone(runtime.resident_enrollment)
+        self.assertEqual(runtime.resident, {**detached, "fence": 4})
+        self.assertEqual(len(prepares), 1)
+
     def test_expiration_during_final_decision_cannot_retire(self):
         self.stage()
         self.runtime.on_authorize = lambda: setattr(self.app, "now", lambda: fixture.NOW + fixture.datetime.timedelta(minutes=20))
