@@ -1,5 +1,46 @@
 import type { Tx } from "../db.js";
 
+// A lifecycle cancellation can close the outer generation transition without
+// proving whether root consumed the old writer. That unresolved journal still
+// invalidates cached proof even when the outer transition says cancelled.
+const settledResidentHandoff = `NOT EXISTS(SELECT 1 FROM cloud_workspace_runtime_handoffs handoff
+  JOIN cloud_workspace_generation_transitions transition ON transition.id=handoff.transition_id
+  WHERE handoff.workspace_id=$1 AND handoff.org_id=$2 AND $3 IN (transition.source_generation,transition.candidate_generation)
+    AND handoff.phase NOT IN ('cancelled','source_retired'))`;
+
+/** Only the exact successfully enrolled engine of a retained transition may
+ * inherit undispatched queue intent. Failed/ordinary replacement engines do
+ * not acquire this exception. Dispatched commands remain uncertain. */
+export async function isAutomaticRetainedRuntimeEngine(tx: Tx, input: {
+  workspaceId: string; organizationId: string; generation: number; engineInstanceId: string;
+}): Promise<boolean> {
+  return !!(await tx.query(`SELECT 1 FROM cloud_workspace_runtime_enrollments enrollment
+    JOIN cloud_workspace_runtime_transitions runtime ON runtime.transition_id=enrollment.transition_id
+    JOIN cloud_workspace_generation_transitions transition ON transition.id=runtime.transition_id
+    JOIN cloud_workspace_engine_instances engine ON engine.id=enrollment.engine_instance_id
+    WHERE enrollment.workspace_id=$1 AND enrollment.org_id=$2 AND enrollment.generation=$3 AND enrollment.engine_instance_id=$4
+      AND enrollment.sequence=runtime.enrollment_sequence AND enrollment.consumed_at IS NOT NULL AND enrollment.revoked_at IS NULL
+      AND runtime.phase IN ('healthy','rolled_back') AND transition.execution_mode='retain_allocation'
+      AND transition.state IN ('succeeded','rolled_back') AND engine.state='ready'
+      AND NOT EXISTS(SELECT 1 FROM cloud_workspace_engine_instances newer
+        WHERE newer.workspace_id=$1 AND newer.org_id=$2 AND newer.generation=$3 AND newer.enrollment_order>engine.enrollment_order)`,
+  [input.workspaceId,input.organizationId,input.generation,input.engineInstanceId])).rowCount;
+}
+
+/** The source keeps record/heartbeat authority until root consumes its sealed
+ * writer. New queue claims are blocked during that interval under the same
+ * workspace lock as the journal commit; enqueue/Stop receipts remain durable. */
+export async function cloudRuntimeHandoffBlocksClaims(tx: Tx, input: {
+  workspaceId: string; organizationId: string; generation: number; engineInstanceId: string;
+}): Promise<boolean> {
+  return !!(await tx.query(`SELECT 1 FROM cloud_workspace_runtime_handoffs handoff
+    JOIN cloud_workspace_runtime_transitions runtime ON runtime.transition_id=handoff.transition_id
+    JOIN cloud_workspace_generation_transitions transition ON transition.id=runtime.transition_id
+    WHERE handoff.workspace_id=$1 AND handoff.org_id=$2 AND transition.source_generation=$3
+      AND runtime.source_engine_instance_id=$4 AND handoff.phase<>'cancelled'`,
+  [input.workspaceId,input.organizationId,input.generation,input.engineInstanceId])).rowCount;
+}
+
 /** Cache invalidation only, never admission or qualification. The caller holds
  * the workspace lifecycle lock and checks the full runtime key, current
  * qualification, fresh launch proofs and restored-tree integrity separately.
@@ -27,6 +68,7 @@ export async function readCloudRuntimeResumeProofEpoch(tx: Tx, input: {
       AND attestation.engine_instance_id=engine.id
     WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.current_generation=$3
       AND workspace.deleted_at IS NULL AND workspace.desired_state<>'deleted'
+      AND ${settledResidentHandoff}
       AND NOT EXISTS(SELECT 1 FROM cloud_workspace_engine_instances newer
         WHERE newer.workspace_id=engine.workspace_id AND newer.org_id=engine.org_id AND newer.generation=engine.generation
           AND newer.runtime_transition_enrollment_id IS NOT NULL AND newer.enrollment_order>engine.enrollment_order)
@@ -75,6 +117,7 @@ export async function readCloudRuntimeResumeProofEpoch(tx: Tx, input: {
     JOIN cloud_workspace_runtime_transitions runtime ON runtime.transition_id=enrollment.transition_id
     WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.current_generation=$3
       AND workspace.deleted_at IS NULL AND workspace.desired_state<>'deleted'
+      AND ${settledResidentHandoff}
       AND engine.state IN ('ready','revoked') AND engine.registered_at IS NOT NULL
       AND NOT EXISTS(SELECT 1 FROM cloud_workspace_runtime_transitions later
         JOIN cloud_workspace_generation_transitions transition ON transition.id=later.transition_id

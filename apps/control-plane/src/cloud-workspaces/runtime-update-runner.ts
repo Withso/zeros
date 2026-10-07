@@ -4,6 +4,8 @@ import { z } from "zod";
 import { executeBoatPinnedSsh, type BoatPinnedSshOptions } from "./boat-pinned-ssh.js";
 import { CloudActiveRuntimeSchema, CloudRuntimeWitnessSchema, RuntimeDescriptorSchema,
   RuntimeInstallInputSchema, type CloudActiveRuntime } from "./runtime-contract.js";
+import { CloudResidentWitnessSchema, CloudRuntimeHandoffRequestSchema, CloudRuntimeHandoffReceiptSchema,
+  detachedResident, sameHandoff, sameResidentHost, type CloudResidentWitness, type CloudRuntimeHandoffReceipt } from "./runtime-handoff-contract.js";
 
 const schema = "zeros.runtime-update/v1";
 const MAX_FRAME = 128 * 1024;
@@ -16,12 +18,14 @@ const inputFields = { ...scope, expiresAt: z.string().datetime({ offset: true })
   mode: z.enum(["bootstrap", "engine"]) };
 const Input = z.discriminatedUnion("operation", [
   z.object({ ...inputFields, operation: z.literal("stage"), install: z.string().max(64 * 1024) }).strict(),
-  z.object({ ...inputFields, operation: z.literal("activate"), target: RuntimeDescriptorSchema }).strict(),
+  z.object({ ...inputFields, operation: z.literal("activate"), target: RuntimeDescriptorSchema,
+    handoff: CloudRuntimeHandoffRequestSchema.optional() }).strict(),
 ]);
 export type RuntimeUpdateInput = z.infer<typeof Input>;
 const Frame = z.object({ ...scope,
-  phase: z.enum(["authorize", "enroll", "health", "authorize_rollback", "rollback_enroll", "rollback_health"]),
+  phase: z.enum(["authorize", "authorize_consumption", "cancel_consumption", "consumed", "enroll", "health", "authorize_rollback", "rollback_enroll", "rollback_health"]),
   active: CloudActiveRuntimeSchema.optional(), controller: CloudActiveRuntimeSchema.optional(),
+  resident: CloudResidentWitnessSchema.optional(), handoff: CloudRuntimeHandoffReceiptSchema.optional(),
   report: z.record(z.unknown()).optional(),
 }).strict();
 const Result = z.object({ ...scope, operation: z.enum(["stage", "activate"]),
@@ -29,12 +33,20 @@ const Result = z.object({ ...scope, operation: z.enum(["stage", "activate"]),
   active: CloudActiveRuntimeSchema.optional(),
 }).strict();
 export type RuntimeUpdateResult = z.infer<typeof Result>;
-type Context = { input: RuntimeUpdateInput; controller: CloudActiveRuntime | null };
+type Context = { input: RuntimeUpdateInput; controller: CloudActiveRuntime | null; resident?: CloudResidentWitness };
 type Enrollment = Context & { active: CloudActiveRuntime; report: Record<string, unknown>; rollback: boolean };
 export type RuntimeUpdateHandlers = {
   /** Owns the workspace transition lock, current-mode qualifications, complete
    * quiet reservation and presence gate. True is the activation linearization. */
   authorize(context: Context): Promise<boolean>;
+  /** Journal authorization only; source authority MUST remain live. Missing
+   * resident handlers deny activation even when legacy authorization allows. */
+  authorizeConsumption?(context: Context & { resident: CloudResidentWitness; receipt: CloudRuntimeHandoffReceipt }): Promise<boolean>;
+  /** Commit the consumed witness, then retire source authority in a separate
+   * transaction. An ambiguous result closes admission and requires recovery. */
+  consumed?(context: Context & { resident: CloudResidentWitness }): Promise<boolean>;
+  /** Only an accepted root cancellation plus the original attached witness. */
+  cancelConsumption?(context: Context & { resident: CloudResidentWitness }): Promise<boolean>;
   /** Fences candidate admission and resolves an ambiguous health response. */
   authorizeRollback(context: Context): Promise<boolean>;
   /** A fresh one-use grant; no repository setup or credential redemption. */
@@ -90,15 +102,22 @@ export function createRuntimeUpdateConversation(raw: RuntimeUpdateInput, handler
     const install = RuntimeInstallInputSchema.safeParse(document);
     requireValid(install.success && install.data.purpose !== "workspace-setup" &&
       install.data.runtime.runtimeId !== input.source.runtimeId);
-  } else requireValid(input.target.runtimeId !== input.source.runtimeId);
+  } else {
+    requireValid(input.target.runtimeId !== input.source.runtimeId);
+    if (input.handoff) requireValid(input.mode === "engine" && input.handoff.workspaceId === input.scope.workspaceId &&
+      input.handoff.organizationId === input.scope.organizationId && input.handoff.generation === input.scope.sourceGeneration &&
+      input.handoff.engineInstanceId === input.scope.sourceEngineInstanceId && input.handoff.expiresAtMs > now() &&
+      input.handoff.expiresAtMs <= Date.parse(input.expiresAt));
+  }
   const scopeValue = { schema, transitionId: input.transitionId, fence: input.fence, scope: input.scope };
   let state = input.operation === "stage" ? "staging" : "offered";
   let controller: CloudActiveRuntime | null = null;
+  let resident: CloudResidentWitness | undefined;
   let enrolled: CloudActiveRuntime | null = null;
   let enrollmentAllowed = false;
   let result: RuntimeUpdateResult | undefined;
   let processing = false;
-  const context = () => ({ input, controller });
+  const context = () => ({ input, controller, ...(resident ? { resident } : {}) });
   const sameScope = (value: z.infer<typeof Frame> | RuntimeUpdateResult) =>
     value.transitionId === input.transitionId && value.fence === input.fence &&
     Object.entries(input.scope).every(([key, expected]) => value.scope[key as keyof typeof input.scope] === expected);
@@ -122,7 +141,7 @@ export function createRuntimeUpdateConversation(raw: RuntimeUpdateInput, handler
           requireValid(sameScope(v) && v.operation === input.operation);
           const expected = { staged: "staging", deferred: "deferred", healthy: "healthy", rolled_back: "rolled_back" };
           requireValid(v.outcome === "recovery_required"
-            ? ["activated", "enrolling", "health_failed", "healthy", "rollback", "rollback_enrolling", "rolled_back", "recovery_required"].includes(state)
+            ? ["consumption_authorized", "activated", "enrolling", "health_failed", "healthy", "rollback", "rollback_enrolling", "rolled_back", "recovery_required"].includes(state)
             : state === expected[v.outcome]);
           if (v.outcome === "healthy" || v.outcome === "rolled_back")
             requireValid(v.active && enrolled && equal(v.active, enrolled));
@@ -136,18 +155,44 @@ export function createRuntimeUpdateConversation(raw: RuntimeUpdateInput, handler
         const { phase } = frame;
         let allow = false;
         let environment: Record<string, unknown> | null = null;
-        if (phase === "authorize") {
+        requireValid(phase === "authorize_consumption" || !frame.handoff);
+        requireValid(input.handoff || !frame.resident);
+        if (phase === "authorize" || phase === "authorize_consumption") {
           requireValid(state === "offered" && !frame.active && !frame.report);
+          requireValid((phase === "authorize_consumption") === !!input.handoff);
           fresh();
           if (input.mode === "engine") {
             requireValid(frame.controller && sameAllocation(frame.controller));
             controller = frame.controller;
           } else requireValid(!frame.controller);
-          allow = await decide(() => handlers.authorize(context()));
-          state = allow ? "activated" : "deferred";
+          if (input.handoff) {
+            requireValid(frame.handoff && sameHandoff(input.handoff, frame.handoff) && input.handoff.expiresAtMs > now() &&
+              frame.resident && frame.resident.hostId === input.handoff.hostId && frame.resident.fence === input.handoff.fence &&
+              frame.resident.engineId === input.scope.sourceEngineInstanceId && frame.resident.generation === input.scope.sourceGeneration &&
+              frame.resident.workspaceId === input.scope.workspaceId && frame.resident.organizationId === input.scope.organizationId &&
+              frame.resident.bootId === input.source.bootId);
+            resident = frame.resident;
+            allow = await decide(() => handlers.authorizeConsumption?.({ ...context(), resident: frame.resident!, receipt: frame.handoff! }) ?? Promise.resolve(false));
+            state = allow ? "consumption_authorized" : "deferred";
+          } else {
+            allow = await decide(() => handlers.authorize(context()));
+            state = allow ? "activated" : "deferred";
+          }
+        } else if (phase === "cancel_consumption") {
+          requireValid(input.handoff && state === "consumption_authorized" && resident && frame.resident &&
+            Object.entries(resident).every(([key, value]) => frame.resident![key as keyof CloudResidentWitness] === value) &&
+            !frame.active && !frame.controller && !frame.report);
+          allow = await decide(() => handlers.cancelConsumption?.({ ...context(), resident: frame.resident! }) ?? Promise.resolve(false));
+          state = allow ? "deferred" : "recovery_required";
+        } else if (phase === "consumed") {
+          requireValid(input.handoff && state === "consumption_authorized" && resident && frame.resident &&
+            detachedResident(resident, frame.resident) && !frame.active && !frame.controller && !frame.report);
+          resident = frame.resident;
+          allow = await decide(() => handlers.consumed?.({ ...context(), resident: frame.resident! }) ?? Promise.resolve(false));
+          state = allow ? "activated" : "recovery_required";
         } else if (phase === "authorize_rollback") {
           requireValid(["activated", "enrolling", "health_failed", "healthy"].includes(state) &&
-            !frame.active && !frame.report && !frame.controller);
+            !frame.active && !frame.report && !frame.controller && !frame.resident);
           allow = await decide(() => handlers.authorizeRollback(context()));
           state = allow ? "rollback" : "recovery_required";
           enrolled = null;
@@ -162,6 +207,11 @@ export function createRuntimeUpdateConversation(raw: RuntimeUpdateInput, handler
           if (rollback) requireValid(active.installerReceiptSha256 === input.source.installerReceiptSha256);
           if (input.mode === "bootstrap") { requireValid(equal(frame.controller, active)); controller = active; }
           else requireValid(controller && equal(frame.controller, controller));
+          if (input.handoff) {
+            requireValid(resident && frame.resident && sameResidentHost(resident, frame.resident) && frame.resident.engineId === null &&
+              frame.resident.fence >= resident.fence);
+            resident = frame.resident;
+          }
           const report = frame.report;
           const witness = CloudRuntimeWitnessSchema.safeParse(report.runtime);
           requireValid(report.version === 1 && report.profile === "zeros-cloud-worker-v4" && report.qualified === true &&
@@ -176,7 +226,10 @@ export function createRuntimeUpdateConversation(raw: RuntimeUpdateInput, handler
           const rollback = phase === "rollback_health";
           requireValid(state === (rollback ? "rollback_enrolling" : "enrolling") && enrollmentAllowed && frame.active && enrolled &&
             equal(frame.active, enrolled) && !frame.controller && !frame.report);
-          allow = await decide(() => handlers.health({ ...context(), active: frame.active!, rollback }));
+          if (input.handoff) requireValid(resident && frame.resident && sameResidentHost(resident, frame.resident) &&
+            frame.resident.fence === resident.fence + 1 && frame.resident.engineId !== null && frame.resident.engineId !== input.scope.sourceEngineInstanceId &&
+            frame.resident.generation === (rollback ? input.scope.sourceGeneration : input.scope.candidateGeneration));
+          allow = await decide(() => handlers.health({ ...context(), ...(frame.resident ? { resident: frame.resident } : {}), active: frame.active!, rollback }));
           state = rollback ? allow ? "rolled_back" : "recovery_required" : allow ? "healthy" : "health_failed";
         }
         const response = JSON.stringify({ ...scopeValue, phase, allow, ...(environment ? { environment } : {}) });

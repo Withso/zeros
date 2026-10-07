@@ -33,6 +33,72 @@ function fixture() {
   return { handlers, dialog: createRuntimeUpdateConversation(request, handlers, () => now) };
 }
 
+const handoff = { challenge: "abababab-abab-4bab-8bab-abababababab", workspaceId: request.scope.workspaceId,
+  organizationId: request.scope.organizationId, generation: 1, engineInstanceId: request.scope.sourceEngineInstanceId,
+  hostId: "ffffffff-ffff-4fff-8fff-ffffffffffff", fence: 1, expiresAtMs: now + 60_000 };
+const resident = { hostId: handoff.hostId, workspaceId: handoff.workspaceId, organizationId: handoff.organizationId,
+  protocol: "zeros.resident-pty/v1" as const, runtimeId: source.runtimeId, manifestSha256: source.manifestSha256,
+  bootId: source.bootId, supervisorSessionId: source.supervisorSessionId,
+  scope: `${source.cgroupRoot}/engine-workload-${handoff.hostId}`, fence: 1, engineId: handoff.engineInstanceId, generation: 1 };
+const receipt = { ...handoff, version: 1, phase: "fenced", activityRevision: 7 };
+const detached = { ...resident, fence: 2, engineId: null, generation: null };
+
+describe("resident update conversation", () => {
+  function residentFixture() {
+    const handlers = { ...fixture().handlers, authorizeConsumption: vi.fn(async () => true), consumed: vi.fn(async () => true),
+      cancelConsumption: vi.fn(async () => true) };
+    return { handlers, dialog: createRuntimeUpdateConversation({ ...request, handoff }, handlers, () => now) };
+  }
+  it("requires durable consumption authorization and confirmed consumption before enrollment", async () => {
+    const { handlers, dialog } = residentFixture();
+    await dialog.onFrame(frame("authorize_consumption", { controller: source, resident, handoff: receipt }));
+    expect(handlers.authorizeConsumption).toHaveBeenCalledOnce();
+    expect(handlers.authorize).not.toHaveBeenCalled();
+    await expect(dialog.onFrame(frame("enroll", { active, controller: source, report, resident: detached }))).rejects.toThrow();
+    await dialog.onFrame(frame("consumed", { resident: detached }));
+    expect(handlers.consumed).toHaveBeenCalledOnce();
+    await dialog.onFrame(frame("enroll", { active, controller: source, report, resident: detached }));
+    expect(handlers.enroll).toHaveBeenCalledOnce();
+  });
+  it("rejects ordinary authorization, forged receipts and wrong detached hosts", async () => {
+    for (const fields of [{ phase: "authorize", controller: source },
+      { phase: "authorize_consumption", controller: source, resident, handoff: { ...receipt, phase: "draining" } },
+      { phase: "authorize_consumption", controller: source, resident, handoff: { ...receipt, challenge: handoff.hostId } }]) {
+      const { handlers, dialog } = residentFixture();
+      await expect(dialog.onFrame(JSON.stringify({ ...scope, ...fields }))).rejects.toThrow();
+      expect(handlers.authorizeConsumption).not.toHaveBeenCalled();
+      expect(handlers.authorize).not.toHaveBeenCalled();
+    }
+    const { handlers, dialog } = residentFixture();
+    await dialog.onFrame(frame("authorize_consumption", { controller: source, resident, handoff: receipt }));
+    await expect(dialog.onFrame(frame("consumed", { resident: { ...detached, fence: 1 } }))).rejects.toThrow();
+    expect(handlers.consumed).not.toHaveBeenCalled();
+  });
+  it("fails closed on an ambiguous consumption response without enabling ordinary rollback", async () => {
+    const { handlers, dialog } = residentFixture();
+    handlers.consumed.mockRejectedValueOnce(new Error("private diagnostic"));
+    await dialog.onFrame(frame("authorize_consumption", { controller: source, resident, handoff: receipt }));
+    expect(JSON.parse((await dialog.onFrame(frame("consumed", { resident: detached })))!)).toMatchObject({ allow: false });
+    await expect(dialog.onFrame(frame("authorize_rollback"))).rejects.toThrow();
+    await dialog.onFrame(JSON.stringify({ ...scope, operation: "activate", outcome: "recovery_required" }));
+    expect(dialog.result().outcome).toBe("recovery_required");
+  });
+  it("accepts cancellation only before consumption and only for the original attached source", async () => {
+    const { handlers, dialog } = residentFixture();
+    await dialog.onFrame(frame("authorize_consumption", { controller: source, resident, handoff: receipt }));
+    await expect(dialog.onFrame(frame("cancel_consumption", { resident: detached }))).rejects.toThrow();
+    expect(handlers.cancelConsumption).not.toHaveBeenCalled();
+    await dialog.onFrame(frame("cancel_consumption", { resident }));
+    expect(handlers.cancelConsumption).toHaveBeenCalledOnce();
+    await dialog.onFrame(JSON.stringify({ ...scope, operation: "activate", outcome: "deferred" }));
+    expect(dialog.result().outcome).toBe("deferred");
+    const second = residentFixture();
+    await second.dialog.onFrame(frame("authorize_consumption", { controller: source, resident, handoff: receipt }));
+    await second.dialog.onFrame(frame("consumed", { resident: detached }));
+    await expect(second.dialog.onFrame(frame("cancel_consumption", { resident }))).rejects.toThrow();
+  });
+});
+
 describe("runtime update root channel", () => {
   it("authorizes only after the VM's verified ready frame and never places grants in the command", async () => {
     const { dialog, handlers } = fixture();

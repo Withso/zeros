@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it,vi } from "vitest";
 import { withSystemTx } from "../db.js";
@@ -19,6 +19,10 @@ import type { CloudActiveRuntime } from "./runtime-contract.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { DatabaseCloudRuntimeQuietTrigger } from "./runtime-quiet-trigger.js";
 import type { CloudRuntimeQuietSnapshot } from "./runtime-quiet-contract.js";
+import { DatabaseCloudWorkspaceCommandService } from "./commands.js";
+import { ensureUser } from "../auth.js";
+import { DatabaseCloudWorkspaceActorSessionService } from "./actor-sessions.js";
+import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
 
 (process.env.TEST_DATABASE_URL ? describe : describe.skip)("retained cloud runtime transitions", () => {
   let pool: pg.Pool;
@@ -91,6 +95,253 @@ import type { CloudRuntimeQuietSnapshot } from "./runtime-quiet-contract.js";
     expect(await service.activate(claim,{controller:sourceActive(),policy:{id:"zeros_test_live_handoff",async authorize() {return true;} }})).toBe(true);
     return claim;
   }
+
+  describe("resident handoff journal", () => {
+    async function prepared() {
+      const claim = await claimed(); await qualifyTransfer(); await service.staged(claim);
+      const handoff = { challenge: randomUUID(), organizationId: fixture.organizationId, workspaceId: fixture.workspaceId,
+        generation: 1, engineInstanceId: fixture.engineInstanceId, hostId: randomUUID(), fence: 1, expiresAtMs: Date.now() + 60_000 };
+      const resident = { hostId: handoff.hostId, organizationId: fixture.organizationId, workspaceId: fixture.workspaceId,
+        protocol: "zeros.resident-pty/v1" as const, runtimeId: runtimeWitness.runtimeId, manifestSha256: runtimeWitness.manifestSha256,
+        bootId: runtimeWitness.bootId, supervisorSessionId: runtimeWitness.supervisorSessionId,
+        scope: `${sourceActive().cgroupRoot}/engine-workload-${handoff.hostId}`, fence: 1, engineId: fixture.engineInstanceId, generation: 1 };
+      await pool.query(`INSERT INTO cloud_runtime_resident_transfer_qualifications
+        (source_runtime_id,target_runtime_id,controller_runtime_id,base_compatibility_id,mode,qualification_mode,
+          resident_runtime_id,enabled,evidence_sha256) VALUES($1,$2,$1,$3,'engine','full',$1,true,$4)`,
+      [runtimeWitness.runtimeId, targetActive().runtimeId, runtimeWitness.baseCompatibilityId, Buffer.alloc(32)]);
+      return { claim, handoff, resident, controller: sourceActive(),
+        receipt: { ...handoff, version: 1 as const, phase: "fenced" as const, activityRevision: 3 },
+        policy: { id: "zeros_test_resident", async authorize() { return true; } } };
+    }
+    const sourceState = async () => (await pool.query("SELECT state FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0].state;
+    const journal = async (id: string) => (await pool.query("SELECT phase FROM cloud_workspace_runtime_handoffs WHERE transition_id=$1", [id])).rows[0]?.phase;
+    async function queueActor() {
+      const user = await ensureUser(pool, { provider: "workos", providerSubject: `workos|${fixture.userId}`,
+        email: `durable-${fixture.userId}@example.test`, displayName: "Queue owner",
+        session: { id: `session_${randomUUID()}`, clientKind: "desktop", authTime: Math.floor(Date.now()/1000), tokenExpiresAt: Math.floor(Date.now()/1000)+3600 } });
+      expect(user.id).toBe(fixture.userId);
+      user.accountRevision = Number((await pool.query("SELECT auth_revision FROM users WHERE id=$1", [user.id])).rows[0].auth_revision);
+      await pool.query(`INSERT INTO auth_sessions(provider_session_id,provider_sub,user_id,client_kind,last_token_expires_at)
+        VALUES($1,$2,$3,'desktop',now()+interval '1 hour')`, [user.authentication.sessionId,user.identity.subject,user.id]);
+      await pool.query("UPDATE cloud_workspace_engine_instances SET actor_protocol_version=2 WHERE id=$1", [fixture.engineInstanceId]);
+      const pair = generateKeyPairSync("ed25519"), publicKey = Buffer.from(pair.publicKey.export({ format: "jwk" }).x!, "base64url");
+      const device = (await pool.query<{ id: string }>(`INSERT INTO devices(user_id,label,platform,public_key,key_fingerprint)
+        VALUES($1,'Queue device','macos',$2,$3) RETURNING id`, [user.id,publicKey,createHash("sha256").update(publicKey).digest()])).rows[0]!;
+      const fields = { deviceId: device.id, keyVersion: 1, timestampMs: Date.now(), nonce: randomBytes(24).toString("base64url") };
+      const actors = new DatabaseCloudWorkspaceActorSessionService({ pool, enginePort: 39393, bridgeUrl: "wss://control.example/bridge", workosEnabled: false });
+      const grant = await actors.issue({ workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
+        actorUserId: user.id, authenticatedUser: user, proof: { ...fields, signature: sign(null, cloudWorkspaceDeviceProofMessage({ ...fields,
+          accountUserId: user.id, action: "engine.connect", payload: { organizationId: fixture.organizationId, workspaceId: fixture.workspaceId } }), pair.privateKey).toString("base64url") } });
+      const scope = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
+        engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken };
+      const admitted = await actors.consume({ ...scope, token: grant.grantToken });
+      return { ...scope, actorSessionId: admitted.actorSessionId, deviceId: device.id };
+    }
+    it("records consumption authorization and consumption separately before retiring source authority", async () => {
+      const f = await prepared();
+      expect(await service.authorizeResidentConsumption(f.claim, f)).toBe(true);
+      expect(await sourceState()).toBe("ready");
+      expect(await journal(f.claim.transitionId)).toBe("consumption_authorized");
+      expect(await service.retireResidentSource(f.claim)).toBe(false);
+      const detached = { ...f.resident, fence: 2, engineId: null, generation: null };
+      expect(await service.recordResidentConsumption(f.claim, { handoff: f.handoff, resident: detached })).toBe(true);
+      expect(await journal(f.claim.transitionId)).toBe("consumed");
+      expect(await sourceState()).toBe("ready");
+      expect(await service.retireResidentSource(f.claim)).toBe(true);
+      expect(await journal(f.claim.transitionId)).toBe("source_retired");
+      expect(await sourceState()).toBe("revoked");
+      expect(await service.retireResidentSource(f.claim)).toBe(true);
+    });
+    it("never cancels an ambiguous authorized consumption or takes the ordinary activation path", async () => {
+      const f = await prepared();
+      expect(await service.authorizeResidentConsumption(f.claim, f)).toBe(true);
+      expect(await service.cancelStaging(f.claim)).toBe(false);
+      expect(await service.activate(f.claim, f)).toBe(false);
+      expect(await service.reconcile(f.claim)).toBe("inspect");
+      await pool.query("UPDATE cloud_workspace_runtime_handoffs SET deadline_at=clock_timestamp()-interval '1 second' WHERE transition_id=$1", [f.claim.transitionId]);
+      expect(await service.reconcile(f.claim)).toBe("recovery_required");
+      expect(await journal(f.claim.transitionId)).toBe("uncertain");
+      expect(await sourceState()).toBe("revoked");
+    });
+    it("releases a consumption intent only after root proves cancellation under the same live source", async () => {
+      const f = await prepared();
+      await service.authorizeResidentConsumption(f.claim, f);
+      expect(await service.cancelResidentConsumption(f.claim, { handoff: f.handoff, resident: { ...f.resident, fence: 2 } })).toBe(false);
+      expect(await service.cancelResidentConsumption(f.claim, f)).toBe(true);
+      expect(await journal(f.claim.transitionId)).toBe("cancelled");
+      expect(await sourceState()).toBe("ready");
+      expect(await withSystemTx(pool, tx => readCloudRuntimeResumeProofEpoch(tx, { ...f.claim, generation: 1 }))).toBe(fixture.engineInstanceId);
+      expect(await service.recordResidentConsumption(f.claim, { handoff: f.handoff,
+        resident: { ...f.resident, engineId: null, generation: null, fence: 2 } })).toBe(false);
+      const commands = new DatabaseCloudWorkspaceCommandService({ pool }), commandId = randomUUID();
+      const scope = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
+        engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken };
+      await commands.mutate(scope, { conversationId: "after-cancel", operationId: randomUUID(), expectedRevision: 0,
+        action: { kind: "enqueue", commandId, payload: { agentId: "claude", userMessageId: randomUUID(),
+          prompt: [{ type: "text", text: "fixture prompt" }], modeRevision: 0 } } });
+      expect((await commands.claim(scope, "after-cancel", "resumed-source"))?.commandId).toBe(commandId);
+    });
+    it("keeps the resume proof epoch invalid when a lifecycle stop cancels an unresolved consumption", async () => {
+      const f = await prepared();
+      await service.authorizeResidentConsumption(f.claim, f);
+      await withSystemTx(pool, tx => cancelCloudWorkspaceGenerationTransition(tx, { ...f.claim, reason: "workspace_stop_requested" }));
+      expect(await journal(f.claim.transitionId)).toBe("consumption_authorized");
+      expect(await withSystemTx(pool, tx => readCloudRuntimeResumeProofEpoch(tx, { ...f.claim, generation: 1 }))).toBeNull();
+    });
+    it.each(["foreign", "unfenced", "expired", "unqualified"] as const)("rejects %s handoff evidence without retiring source", async kind => {
+      const f = await prepared();
+      if (kind === "foreign") f.resident.workspaceId = randomUUID();
+      if (kind === "unfenced") Object.assign(f.receipt, { phase: "draining" });
+      if (kind === "expired") f.handoff.expiresAtMs = f.receipt.expiresAtMs = Date.now() - 1;
+      if (kind === "unqualified") await pool.query("UPDATE cloud_runtime_resident_transfer_qualifications SET enabled=false");
+      expect(await service.authorizeResidentConsumption(f.claim, f)).toBe(false);
+      expect(await journal(f.claim.transitionId)).toBeUndefined();
+      expect(await sourceState()).toBe("ready");
+    });
+    it("requires explicit qualification of a distinct older resident runtime", async () => {
+      const f = await prepared();
+      const older = await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "3", releaseOrder: 3,
+        engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION - 1, confirmed: false }));
+      f.resident.runtimeId = older.pin.runtimeId; f.resident.manifestSha256 = older.pin.manifestSha256;
+      expect(await service.authorizeResidentConsumption(f.claim, f)).toBe(false);
+      await pool.query(`INSERT INTO cloud_runtime_resident_transfer_qualifications
+        (source_runtime_id,target_runtime_id,controller_runtime_id,base_compatibility_id,mode,qualification_mode,
+          resident_runtime_id,enabled,evidence_sha256) VALUES($1,$2,$1,$3,'engine','full',$4,true,$5)`,
+      [runtimeWitness.runtimeId,targetActive().runtimeId,runtimeWitness.baseCompatibilityId,older.pin.runtimeId,Buffer.alloc(32)]);
+      expect(await service.authorizeResidentConsumption(f.claim, f)).toBe(true);
+    });
+    it("rejects a superseded candidate without consuming the source", async () => {
+      const f = await prepared();
+      await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "3", releaseOrder: 3 }));
+      expect(await service.authorizeResidentConsumption(f.claim, f)).toBe(false);
+      expect(await sourceState()).toBe("ready");
+      expect(await journal(f.claim.transitionId)).toBeUndefined();
+    });
+    it("does not let persisted identity or phase edits erase a consumption fence", async () => {
+      const f = await prepared();
+      await service.authorizeResidentConsumption(f.claim, f);
+      await expect(pool.query(`UPDATE cloud_workspace_runtime_handoffs SET request='{}' WHERE transition_id=$1`, [f.claim.transitionId])).rejects.toMatchObject({ code: "23514" });
+      await expect(pool.query(`UPDATE cloud_workspace_runtime_handoffs SET phase='source_retired',source_retired_at=clock_timestamp()
+        WHERE transition_id=$1`, [f.claim.transitionId])).rejects.toMatchObject({ code: "23514" });
+      await expect(pool.query(`UPDATE cloud_workspace_runtime_handoffs SET deadline_at=deadline_at+interval '1 second'
+        WHERE transition_id=$1`, [f.claim.transitionId])).rejects.toMatchObject({ code: "23514" });
+      await service.recordResidentConsumption(f.claim, { handoff: f.handoff, resident: { ...f.resident, engineId: null, generation: null, fence: 2 } });
+      await expect(pool.query(`UPDATE cloud_workspace_runtime_handoffs SET phase='consumption_authorized',consumed_at=NULL,consumed_resident=NULL
+        WHERE transition_id=$1`, [f.claim.transitionId])).rejects.toMatchObject({ code: "23514" });
+      expect(await service.reconcile(f.claim)).toBe("inspect");
+      expect(await journal(f.claim.transitionId)).toBe("source_retired");
+      expect(await sourceState()).toBe("revoked");
+    });
+    it("rejects a forged detached witness and lets a fresh worker finish confirmed consumption", async () => {
+      const f = await prepared();
+      expect(await service.authorizeResidentConsumption(f.claim, f)).toBe(true);
+      const detached = { ...f.resident, fence: 2, engineId: null, generation: null };
+      for (const change of [{ hostId: randomUUID() }, { fence: 1 }, { engineId: fixture.engineInstanceId }, { runtimeId: targetActive().runtimeId }])
+        expect(await service.recordResidentConsumption(f.claim, { handoff: f.handoff, resident: { ...detached, ...change } })).toBe(false);
+      expect(await service.recordResidentConsumption(f.claim, { handoff: f.handoff, resident: detached })).toBe(true);
+      expect(await service.recordResidentConsumption(f.claim, { handoff: f.handoff, resident: detached })).toBe(true);
+      await service.release(f.claim);
+      const next = await service.claim(f.claim, "zeros-v2-test-hu-recovery");
+      expect(await service.retireResidentSource(f.claim)).toBe(false);
+      expect(await service.reconcile(next!)).toBe("inspect");
+      expect(await service.retireResidentSource(next!)).toBe(true);
+      expect(await sourceState()).toBe("revoked");
+    });
+    it("binds target and rollback health to the resident host and a fresh attachment fence", async () => {
+      const f = await prepared();
+      expect(await service.authorizeResidentConsumption(f.claim, f)).toBe(true);
+      const detached = { ...f.resident, fence: 2, engineId: null, generation: null };
+      await service.recordResidentConsumption(f.claim, { handoff: f.handoff, resident: detached });
+      await service.retireResidentSource(f.claim);
+      const active = targetActive(), evidence = { active, controller: f.controller, report: report(active), rollback: false };
+      expect(await service.enroll(f.claim, evidence)).toBeNull();
+      expect(await service.enroll(f.claim, { ...evidence, resident: { ...detached, fence: 4 } })).toBeNull();
+      const enrollment = (await service.enroll(f.claim, { ...evidence, resident: detached }))!;
+      expect(enrollment.resident).toEqual({ hostId: f.resident.hostId, fence: 3 });
+      await expect(pool.query("UPDATE cloud_workspace_runtime_enrollments SET resident_witness=NULL WHERE id=$1", [enrollment.id])).rejects.toMatchObject({ code: "23514" });
+      await service.register({ ...f.claim, generation: 2, setupRunId: enrollment.id, executionFence: enrollment.executionFence,
+        engineInstanceId: enrollment.engineInstanceId, token: enrollment.token, protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+        actorProtocolVersion: 2, agentRuntime: { ...report(active).runtime as object, profile: "zeros-cloud-worker-v4" } });
+      const probe = (challenge: string) => ({ challenge, executionFence: f.claim.executionFence, active,
+        engineInstanceId: enrollment.engineInstanceId, protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+        health: "ready" as const, durableRecordConnected: true as const });
+      expect(await service.verifyHealth(f.claim, async challenge => probe(challenge))).toBe(false);
+      const attached = { ...detached, engineId: enrollment.engineInstanceId, generation: 2, fence: 3 };
+      expect(await service.verifyHealth(f.claim, async challenge => ({ ...probe(challenge), resident: { ...attached, fence: 2 } }))).toBe(false);
+      expect(await service.verifyHealth(f.claim, async challenge => ({ ...probe(challenge), resident: attached }))).toBe(true);
+      await service.beginRollback(f.claim);
+      const restored = { ...sourceActive(), supervisorSessionId: randomUUID() };
+      const rollback = (await service.enroll(f.claim, { active: restored, controller: f.controller, report: report(restored),
+        rollback: true, resident: { ...detached, fence: 4 } }))!;
+      expect(rollback.resident).toEqual({ hostId: f.resident.hostId, fence: 5 });
+      expect(rollback.engineInstanceId).not.toBe(enrollment.engineInstanceId);
+      expect(rollback.engineInstanceId).not.toBe(fixture.engineInstanceId);
+    });
+    it.each([false, true])("permits the original detached rollback fence only before candidate registration (registered=%s)", async registered => {
+      const f = await prepared();
+      await service.authorizeResidentConsumption(f.claim, f);
+      const detached = { ...f.resident, fence: 2, engineId: null, generation: null };
+      await service.recordResidentConsumption(f.claim, { handoff: f.handoff, resident: detached });
+      await service.retireResidentSource(f.claim);
+      const active = targetActive();
+      const target = (await service.enroll(f.claim, { active, controller: f.controller, report: report(active),
+        rollback: false, resident: detached }))!;
+      if (registered) await service.register({ ...f.claim, generation: 2, setupRunId: target.id, executionFence: target.executionFence,
+        engineInstanceId: target.engineInstanceId, token: target.token, protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+        actorProtocolVersion: 2, agentRuntime: { ...report(active).runtime as object, profile: "zeros-cloud-worker-v4" } });
+      await service.beginRollback(f.claim);
+      const restored = { ...sourceActive(), supervisorSessionId: randomUUID() };
+      const rollback = await service.enroll(f.claim, { active: restored, controller: f.controller, report: report(restored),
+        rollback: true, resident: detached });
+      if (registered) expect(rollback).toBeNull();
+      else {
+        expect(rollback?.resident).toEqual({ hostId: f.resident.hostId, fence: 3 });
+        expect(rollback?.engineInstanceId).not.toBe(target.engineInstanceId);
+        expect(rollback?.engineInstanceId).not.toBe(fixture.engineInstanceId);
+      }
+    });
+    it.each([false, true])("preserves queued pause=%s across a verified swap and claims each command once", async paused => {
+      const f = await prepared(), commands = new DatabaseCloudWorkspaceCommandService({ pool });
+      const source = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
+        engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken };
+      const input = { conversationId: "resident-queue", operationId: randomUUID(), expectedRevision: 0,
+        action: { kind: "enqueue" as const, commandId: randomUUID(), payload: { agentId: "claude" as const,
+          userMessageId: randomUUID(), prompt: [{ type: "text" as const, text: "fixture prompt" }], modeRevision: 0 } } };
+      const actor = await queueActor();
+      await commands.mutate(actor, input);
+      if (paused) await commands.stop(actor, input.conversationId, randomUUID());
+      expect(await service.authorizeResidentConsumption(f.claim, f)).toBe(true);
+      expect(await commands.claim(source, input.conversationId, "during-handoff")).toBeNull();
+      const detached = { ...f.resident, fence: 2, engineId: null, generation: null };
+      await service.recordResidentConsumption(f.claim, { handoff: f.handoff, resident: detached });
+      await service.retireResidentSource(f.claim);
+      const active = targetActive();
+      const enrollment = (await service.enroll(f.claim, { active, controller: f.controller, report: report(active), rollback: false, resident: detached }))!;
+      const registration = await service.register({ ...f.claim, generation: 2, setupRunId: enrollment.id, executionFence: enrollment.executionFence,
+        engineInstanceId: enrollment.engineInstanceId, token: enrollment.token, protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+        actorProtocolVersion: 2, agentRuntime: { ...report(active).runtime as object, profile: "zeros-cloud-worker-v4" } });
+      const target = { ...source, generation: 2, engineInstanceId: enrollment.engineInstanceId, heartbeatToken: registration.heartbeat.token };
+      await expect(commands.claim(target, input.conversationId, "before-health")).rejects.toThrow();
+      expect(await service.verifyHealth(f.claim, async challenge => ({ challenge, executionFence: f.claim.executionFence, active,
+        engineInstanceId: enrollment.engineInstanceId, protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, health: "ready", durableRecordConnected: true,
+        resident: { ...detached, fence: 3, engineId: enrollment.engineInstanceId, generation: 2 } }))).toBe(true);
+      expect(await service.finish(f.claim, receipt(f.claim, active))).toBe(true);
+      if (paused) expect(await commands.claim(target, input.conversationId, "still-paused")).toBeNull();
+      else {
+        const claimId = randomUUID();
+        const dispatch = await commands.claim(target, input.conversationId, "after-health", claimId);
+        expect(dispatch?.commandId).toBe(input.action.commandId);
+        expect(dispatch?.dispatchAllowed).not.toBe(false);
+        expect(await commands.claim(target, input.conversationId, "after-health", claimId)).toEqual(dispatch);
+        expect(await commands.claim(target, input.conversationId, "another-execution")).toBeNull();
+        await commands.settle(target, { commandId: input.action.commandId, claimId, state: "succeeded", resultCode: null });
+        expect(await commands.claim(target, input.conversationId, "after-health", claimId)).toBeNull();
+      }
+      expect((await pool.query("SELECT paused FROM cloud_workspace_conversation_controls WHERE workspace_id=$1 AND conversation_id=$2",
+        [fixture.workspaceId,input.conversationId])).rows[0].paused).toBe(paused);
+      await expect(commands.claim(source, input.conversationId, "stale-source")).rejects.toThrow();
+    });
+  });
 
   describe("running quiet trigger", () => {
     const scope = () => ({ workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,

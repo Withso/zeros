@@ -300,6 +300,255 @@ class UpdateTests(unittest.TestCase):
         self.assertTrue(runtime.authorize(request))
         pipe.exchange.assert_called_once_with(request, "authorize", controller=self.source)
 
+    def resident_fixture(self):
+        scope = self.request["scope"]
+        handoff = {"challenge": "abababab-abab-4bab-8bab-abababababab", "workspaceId": scope["workspaceId"],
+                   "organizationId": scope["organizationId"], "generation": scope["sourceGeneration"],
+                   "engineInstanceId": scope["sourceEngineInstanceId"], "hostId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+                   "fence": 1, "expiresAtMs": int(self.app.now().timestamp() * 1000) + 60_000}
+        resident = {"hostId": handoff["hostId"], "organizationId": scope["organizationId"], "workspaceId": scope["workspaceId"],
+                    "protocol": "zeros.resident-pty/v1", **{key: self.source[key] for key in
+                    ("runtimeId", "manifestSha256", "bootId", "supervisorSessionId")},
+                    "scope": b.CGROUP + "/engine-workload-" + handoff["hostId"], "fence": 1,
+                    "engineId": scope["sourceEngineInstanceId"], "generation": 1}
+        request = {**self.request, "mode": "engine", "handoff": handoff}
+        pipe = mock.Mock()
+        pipe.exchange.return_value = {"allow": True}
+        runtime = update.SystemRuntime(b, self.app, pipe, request)
+        runtime.check_source_scope = lambda: None
+        runtime.check_retired_scope = lambda: None
+        receipt = {**handoff, "version": 1, "phase": "fenced", "activityRevision": 7}
+        detached = {**resident, "fence": 2, "engineId": None, "generation": None}
+        def supervisor(operation, **fields):
+            if operation == "update-status":
+                return {"outcome": "ready", "controller": self.source, "selected": self.source}
+            if operation == "resident-status":
+                return {"outcome": "ready", "resident": resident}
+            if operation == "runtime-handoff":
+                return {"outcome": "fenced", "handoff": receipt}
+            if operation == "prepare":
+                self.assertEqual(fields, {"resident": {"hostId": handoff["hostId"], "engineId": handoff["engineInstanceId"], "fence": 1},
+                                          "handoff": handoff})
+                return {"outcome": "prepared", "session": "zsp_" + "a" * 43, "resident": detached}
+            self.fail("Unexpected supervisor operation")
+        runtime.supervisor = mock.Mock(side_effect=supervisor)
+        return runtime, request, pipe, resident, detached, receipt
+
+    def test_resident_consumption_precedes_source_authority_retirement(self):
+        runtime, request, pipe, resident, detached, receipt = self.resident_fixture()
+        self.assertTrue(runtime.authorize(request))
+        pipe.exchange.assert_called_once_with(request, "authorize_consumption", controller=self.source, resident=resident, handoff=receipt)
+        self.assertNotIn(mock.call("prepare"), runtime.supervisor.call_args_list)
+        runtime.retire()
+        self.assertEqual(runtime.resident, detached)
+        self.assertEqual(pipe.exchange.call_args_list[-1], mock.call(request, "consumed", resident=detached))
+
+    def test_resident_lost_prepare_reply_retries_only_the_identical_handoff(self):
+        runtime, request, pipe, _, detached, _ = self.resident_fixture()
+        self.assertTrue(runtime.authorize(request))
+        original = runtime.supervisor.side_effect
+        attempts = []
+        def fail_once(operation, **fields):
+            if operation == "prepare":
+                attempts.append(fields)
+                if len(attempts) == 1:
+                    raise TimeoutError()
+            return original(operation, **fields)
+        runtime.supervisor.side_effect = fail_once
+        runtime.retire()
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0], attempts[1])
+        self.assertEqual(runtime.resident, detached)
+        self.assertEqual(pipe.exchange.call_args_list[-1], mock.call(request, "consumed", resident=detached))
+
+    def test_resident_ambiguous_consumption_never_falls_back_to_ordinary_prepare(self):
+        runtime, request, pipe, _, _, _ = self.resident_fixture()
+        self.assertTrue(runtime.authorize(request))
+        runtime.supervisor.reset_mock(side_effect=True)
+        runtime.supervisor.side_effect = TimeoutError()
+        with self.assertRaises(update.UpdateFailure):
+            runtime.retire()
+        self.assertTrue(runtime.supervisor.call_args_list)
+        self.assertTrue(all(call.kwargs.get("handoff") == request["handoff"] for call in runtime.supervisor.call_args_list))
+        self.assertEqual(pipe.exchange.call_count, 1)
+
+    def test_resident_scope_preserves_only_the_exact_attested_workload(self):
+        runtime, _, _, resident, _, _ = self.resident_fixture()
+        root = fixture.cgroup_fixture(self.case.root)
+        workload = root / ("engine-workload-" + resident["hostId"])
+        workload.mkdir()
+        (workload / "cgroup.events").write_text("populated 1\nfrozen 0\n")
+        runtime.resident = resident
+        runtime.check_scope(retired=False)
+        runtime.check_scope(retired=True)
+        engine = root / ("engine-" + self.request["scope"]["sourceEngineInstanceId"])
+        engine.mkdir()
+        (engine / "cgroup.events").write_text("populated 1\nfrozen 0\n")
+        runtime.check_scope(retired=False)
+        with self.assertRaises(update.UpdateFailure):
+            runtime.check_scope(retired=True)
+        (engine / "cgroup.events").write_text("populated 0\nfrozen 0\n")
+        (workload / "unexpected").mkdir()
+        with self.assertRaises(update.UpdateFailure):
+            runtime.check_scope(retired=True)
+
+    def test_resident_scope_rejects_a_populated_foreign_workload(self):
+        runtime, _, _, resident, _, _ = self.resident_fixture()
+        root = fixture.cgroup_fixture(self.case.root)
+        foreign = root / "engine-workload-11111111-1111-4111-8111-111111111111"
+        foreign.mkdir()
+        (foreign / "cgroup.events").write_text("populated 1\nfrozen 0\n")
+        runtime.resident = resident
+        for retired in (False, True):
+            with self.subTest(retired=retired), self.assertRaises(update.UpdateFailure):
+                runtime.check_scope(retired=retired)
+
+    def test_resident_document_rejects_foreign_wrong_prefix_and_nested_scopes(self):
+        _, _, _, resident, _, _ = self.resident_fixture()
+        for scope in (b.CGROUP + "/engine-workload-11111111-1111-4111-8111-111111111111",
+                      b.CGROUP + "/workload-" + resident["hostId"], resident["scope"] + "/nested"):
+            with self.subTest(scope=scope), self.assertRaises(update.UpdateFailure):
+                update.resident_document(b, {**resident, "scope": scope})
+
+    def test_resident_foreign_witness_and_unfenced_receipt_cannot_authorize_consumption(self):
+        for change in ("resident", "receipt"):
+            runtime, request, pipe, resident, _, receipt = self.resident_fixture()
+            if change == "resident":
+                resident["workspaceId"] = resident["hostId"]
+            else:
+                receipt["challenge"] = receipt["hostId"]
+            with self.assertRaises(update.UpdateFailure):
+                runtime.authorize(request)
+            pipe.exchange.assert_not_called()
+            self.assertFalse(any(call.args[0] == "prepare" for call in runtime.supervisor.call_args_list))
+
+    def test_resident_consumption_denial_keeps_the_pointer_and_never_stops_the_host(self):
+        self.stage()
+        runtime, request, pipe, _, _, _ = self.resident_fixture()
+        request = {key: value for key, value in request.items() if key != "install"}
+        request.update(operation="activate", target=self.install["runtime"])
+        runtime.request = request
+        pipe.exchange.side_effect = lambda _request, phase, **_fields: {"allow": phase != "consumed"}
+        adapter = update.RuntimeInstaller(b, self.app, runtime)
+        self.assertEqual(adapter.run(request)["outcome"], "recovery_required")
+        self.assertEqual(self.snapshot(), self.before)
+        self.assertEqual(self.case.host.calls, [])
+        self.assertEqual([call.args[1] for call in pipe.exchange.call_args_list], ["authorize_consumption", "consumed"])
+        journal = json.loads(self.app.read(update.JOURNAL, 16384, 0o600))
+        self.assertEqual(journal["phase"], "recovery_required")
+        self.assertEqual(journal["handoff"], request["handoff"])
+        self.assertNotIn("session", journal)
+
+    def test_resident_busy_recheck_requires_confirmed_cancellation_before_deferring(self):
+        runtime, request, pipe, resident, _, _ = self.resident_fixture()
+        self.assertTrue(runtime.authorize(request))
+        original = runtime.supervisor.side_effect
+        def supervisor(operation, **fields):
+            if operation == "prepare":
+                return {"outcome": "rejected"}
+            if operation == "runtime-handoff" and fields.get("action") == "cancel":
+                return {"outcome": "cancelled"}
+            return original(operation, **fields)
+        runtime.supervisor.side_effect = supervisor
+        with self.assertRaises(update.Deferred):
+            runtime.retire()
+        self.assertEqual(pipe.exchange.call_args_list[-1], mock.call(request, "cancel_consumption", resident=resident))
+        self.assertIsNone(runtime.session)
+
+    def test_resident_rollback_detaches_only_the_enrolled_target_and_keeps_its_host(self):
+        runtime, request, pipe, _, detached, _ = self.resident_fixture()
+        self.assertTrue(runtime.authorize(request))
+        runtime.retire()
+        target = {**detached, "fence": 3, "engineId": "abababab-abab-4bab-8bab-abababababab", "generation": 2}
+        runtime.resident_enrollment = {key: target[key] for key in ("engineId", "generation", "fence")}
+        def supervisor(operation, **fields):
+            if operation == "resident-status":
+                return {"outcome": "ready", "resident": target}
+            self.assertEqual(operation, "prepare")
+            self.assertEqual(fields, {"resident": {key: target[key] for key in ("hostId", "engineId", "fence")}})
+            return {"outcome": "prepared", "session": "zsp_" + "b" * 43,
+                    "resident": {**detached, "fence": 4}}
+        runtime.supervisor = supervisor
+        runtime.retire()
+        self.assertEqual(runtime.resident, {**detached, "fence": 4})
+        self.assertEqual(pipe.exchange.call_count, 2)
+
+    def resident_start_fixture(self, outcome, *, changed_session=False):
+        runtime, request, pipe, _, detached, _ = self.resident_fixture()
+        self.assertTrue(runtime.authorize(request))
+        runtime.retire()
+        target_id = "abababab-abab-4bab-8bab-abababababab"
+        execution = {key: request["scope"][key] for key in ("workspaceId", "organizationId")}
+        environment = {"runtimeB64": fixture.encoded({"version": 1, "audience": "zeros-cloud-engine-runtime-v1",
+            "execution": {**execution, "generation": 2}, "engine": {"instanceId": target_id}}).decode()}
+        pipe.exchange.return_value = {"allow": True, "environment": environment}
+        operations, prepares = [], []
+        attached = {**detached, "engineId": target_id, "generation": 2, "fence": 3}
+        original_session = runtime.session
+        def supervisor(operation, **fields):
+            operations.append(operation)
+            if operation == "start":
+                if outcome == "timeout":
+                    raise TimeoutError()
+                return {"outcome": "failed" if outcome.startswith("failed") else "rejected"}
+            if operation == "resident-status":
+                return {"outcome": "ready", "resident": attached if outcome == "failed_attached" else detached}
+            self.assertEqual(operation, "prepare")
+            prepares.append(fields)
+            if outcome == "failed_attached":
+                self.assertEqual(fields, {"resident": {key: attached[key] for key in ("hostId", "engineId", "fence")}})
+                return {"outcome": "prepared", "session": original_session, "resident": {**detached, "fence": 4}}
+            self.assertEqual(fields, {"resident": {"hostId": request["handoff"]["hostId"],
+                "engineId": request["handoff"]["engineInstanceId"], "fence": 1}, "handoff": request["handoff"]})
+            return {"outcome": "prepared", "session": "zsp_" + "c" * 43 if changed_session else original_session,
+                    "resident": detached}
+        runtime.supervisor = supervisor
+        read_fd, write_fd = os.pipe()
+        report = {"profile": "zeros-cloud-worker-v4", "qualified": True, "runtime": self.source}
+        diagnostic = {"schema": "zeros.diagnostic/v1", "component": "attester", "ok": True,
+                      "stage": "done", "exitCode": 0, "failedChecks": []}
+        os.write(write_fd, b.packed(report) + b"\n" + b.packed(diagnostic) + b"\n")
+        os.close(write_fd)
+        child = mock.Mock(stdout=os.fdopen(read_fd, "rb"))
+        child.wait.return_value = 0
+        with mock.patch.object(update.subprocess, "Popen", return_value=child):
+            with self.assertRaises(Exception):
+                runtime.launch_and_health(self.source, False, update.time.monotonic() + 10)
+        return runtime, detached, operations, prepares
+
+    def test_proven_pre_attachment_rejection_reuses_only_the_original_unspent_prepare(self):
+        runtime, detached, operations, prepares = self.resident_start_fixture("rejected")
+        runtime.retire()
+        self.assertIsNone(runtime.resident_enrollment)
+        self.assertEqual(runtime.resident, detached)
+        self.assertIsNotNone(runtime.session)
+        self.assertEqual(operations[:3], ["start", "resident-status", "prepare"])
+        self.assertEqual(len(prepares), 2)
+        self.assertEqual(prepares[0], prepares[1])
+
+    def test_unchanged_detached_host_without_the_original_session_cannot_roll_back(self):
+        runtime, _, _, _ = self.resident_start_fixture("rejected", changed_session=True)
+        with self.assertRaises(Exception):
+            runtime.retire()
+        self.assertIsNotNone(runtime.resident_enrollment)
+        self.assertIsNone(runtime.session)
+
+    def test_failed_or_lost_start_never_infers_an_unattached_target(self):
+        for outcome in ("failed_detached", "timeout"):
+            with self.subTest(outcome=outcome):
+                runtime, _, _, prepares = self.resident_start_fixture(outcome)
+                with self.assertRaises(Exception):
+                    runtime.retire()
+                self.assertIsNotNone(runtime.resident_enrollment)
+                self.assertEqual(prepares, [])
+
+    def test_failed_start_after_attachment_retires_only_the_exact_target(self):
+        runtime, detached, _, prepares = self.resident_start_fixture("failed_attached")
+        runtime.retire()
+        self.assertIsNone(runtime.resident_enrollment)
+        self.assertEqual(runtime.resident, {**detached, "fence": 4})
+        self.assertEqual(len(prepares), 1)
+
     def test_expiration_during_final_decision_cannot_retire(self):
         self.stage()
         self.runtime.on_authorize = lambda: setattr(self.app, "now", lambda: fixture.NOW + fixture.datetime.timedelta(minutes=20))

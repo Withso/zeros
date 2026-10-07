@@ -12,7 +12,6 @@ import fcntl
 import importlib.util
 import json
 import os
-from pathlib import Path
 import selectors
 import signal
 import socket
@@ -30,6 +29,9 @@ ACTIVATION_SECONDS = 240
 ROLLBACK_SECONDS = 240
 ACTIVE_KEYS = ("schema", "runtimeId", "manifestSha256", "root", "baseCompatibilityId",
                "installerReceiptSha256", "bootId", "supervisorSessionId", "cgroupRoot")
+HANDOFF_KEYS = ("challenge", "organizationId", "workspaceId", "generation", "engineInstanceId", "hostId", "fence", "expiresAtMs")
+RESIDENT_KEYS = ("hostId", "organizationId", "workspaceId", "protocol", "runtimeId", "manifestSha256",
+                 "bootId", "supervisorSessionId", "scope", "fence", "engineId", "generation")
 
 
 class UpdateFailure(Exception):
@@ -42,6 +44,10 @@ class Staged(Exception):
 
 
 class Deferred(Exception):
+    pass
+
+
+class ConsumptionUncertain(UpdateFailure):
     pass
 
 
@@ -71,6 +77,38 @@ def validate_scope(b, value):
     for key in ("sourceGeneration", "candidateGeneration"):
         b.integer(value[key], 1, 2**31 - 1, "input_schema")
     require(value["candidateGeneration"] > value["sourceGeneration"])
+
+
+def validate_handoff(b, value, request, now):
+    b.shape(value, HANDOFF_KEYS)
+    for key in ("challenge", "organizationId", "workspaceId", "engineInstanceId", "hostId"):
+        b.text_match(value[key], b.UUID, "input_schema")
+    for key in ("generation", "fence", "expiresAtMs"):
+        b.integer(value[key], 1, 2**53 - 1, "input_schema")
+    scope = request["scope"]
+    require(all(value[key] == scope[key] for key in ("organizationId", "workspaceId")))
+    require(value["generation"] == scope["sourceGeneration"] and value["engineInstanceId"] == scope["sourceEngineInstanceId"])
+    require(now.timestamp() * 1000 < value["expiresAtMs"] <= b.timestamp(request["expiresAt"], "input_schema").timestamp() * 1000)
+
+
+def resident_document(b, value):
+    b.shape(value, RESIDENT_KEYS)
+    for key in ("hostId", "organizationId", "workspaceId", "bootId", "supervisorSessionId"):
+        b.text_match(value[key], b.UUID, "input_schema")
+    b.text_match(value["runtimeId"], b.RID, "input_schema")
+    require(value["manifestSha256"] == value["runtimeId"][3:] and value["protocol"] == "zeros.resident-pty/v1")
+    require(value["scope"] == b.CGROUP + "/engine-workload-" + value["hostId"])
+    b.integer(value["fence"], 1, 2**53 - 2, "input_schema")
+    if value["engineId"] is None:
+        require(value["generation"] is None)
+    else:
+        b.text_match(value["engineId"], b.UUID, "input_schema")
+        b.integer(value["generation"], 1, 2**31 - 1, "input_schema")
+    return value
+
+
+def same_resident(left, right):
+    return all(left[key] == right[key] for key in RESIDENT_KEYS if key not in ("engineId", "generation", "fence"))
 
 
 def validate_enrollment_environment(b, environment, request, rollback, prior_engine_instances=()):
@@ -131,6 +169,9 @@ class RuntimeInstaller:
         # artifact URLs, environments, stdout, or a free-form exception.
         value = {key: request[key] for key in ("transitionId", "fence", "scope", "source", "mode")}
         value.update(schema=SCHEMA, phase=phase, target=request["target"])
+        if "handoff" in request:
+            value["handoff"] = request["handoff"]
+            value["resident"] = self.runtime.resident
         self.app.atomic(JOURNAL, self.b.packed(value))
 
     def check_journal(self):
@@ -138,7 +179,7 @@ class RuntimeInstaller:
             value = self.b.strict_json(self.app.read(JOURNAL, 16384, 0o600), "input_schema")
         except FileNotFoundError:
             return
-        require(value.get("schema") == SCHEMA and value.get("phase") in ("healthy", "rolled_back"))
+        require(value.get("schema") == SCHEMA and value.get("phase") in ("healthy", "rolled_back", "cancelled"))
 
     @contextlib.contextmanager
     def setup_lock(self):
@@ -167,7 +208,7 @@ class RuntimeInstaller:
     def run(self, request):
         b, app = self.b, self.app
         b.shape(request, ("schema", "operation", "transitionId", "fence", "scope", "expiresAt", "source", "mode"),
-                ("install", "target"))
+                ("install", "target", "handoff"))
         require(request["schema"] == SCHEMA and request["operation"] in ("stage", "activate"))
         require(request["mode"] in ("bootstrap", "engine"))
         for key in ("transitionId", "fence"):
@@ -176,6 +217,9 @@ class RuntimeInstaller:
         active_document(b, request["source"])
         app.base()
         self.check_expiry(request)
+        if "handoff" in request:
+            require(request["operation"] == "activate" and request["mode"] == "engine")
+            validate_handoff(b, request["handoff"], request, app.now())
         with self.setup_lock(), app.lock("runtime-update.lock"):
             self.check_journal()
             if request["operation"] == "stage":
@@ -244,13 +288,15 @@ class RuntimeInstaller:
                 # source or expired permit must still fail before retirement.
                 owner.check_source(request)
                 deadline = time.monotonic() + ACTIVATION_SECONDS
-                owner.journal(request, "activating")
+                owner.journal(request, "consumption_authorized" if "handoff" in request else "activating")
                 started = True
                 owner.arm_deadline(ACTIVATION_SECONDS)
                 if request["mode"] == "bootstrap":
                     original_host.stop()
                 else:
                     owner.runtime.retire()
+                    if "handoff" in request:
+                        owner.journal(request, "source_retired")
 
         try:
             app.host = GuardedHost()
@@ -269,7 +315,12 @@ class RuntimeInstaller:
             self.journal(request, "healthy")
             return self.response(request, "healthy", active)
         except Deferred:
+            if "handoff" in request:
+                self.journal(request, "cancelled")
             return self.response(request, "deferred")
+        except ConsumptionUncertain:
+            self.journal(request, "recovery_required")
+            return self.response(request, "recovery_required")
         except Exception:
             if not started:
                 raise
@@ -342,7 +393,7 @@ class Pipe:
         sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
         sys.stdout.flush()
 
-    def exchange(self, request, phase, active=None, report=None, controller=None, timeout=15):
+    def exchange(self, request, phase, active=None, report=None, controller=None, timeout=15, resident=None, handoff=None):
         value = {"schema": SCHEMA, "phase": phase, "transitionId": request["transitionId"],
                  "fence": request["fence"], "scope": request["scope"]}
         if active is not None:
@@ -351,6 +402,10 @@ class Pipe:
             value["report"] = report
         if controller is not None:
             value["controller"] = controller
+        if resident is not None:
+            value["resident"] = resident
+        if handoff is not None:
+            value["handoff"] = handoff
         self.write(value)
         reply = self.read(timeout)
         self.b.shape(reply, ("schema", "phase", "transitionId", "fence", "scope", "allow"), ("environment",))
@@ -364,9 +419,24 @@ class SystemRuntime:
         self.b, self.app, self.pipe, self.request = b, app, pipe, request
         self.session = None
         self.controller = None
+        self.resident = None
+        self.source_retired = False
+        self.resident_enrollment = None
+        self.resident_prepare_fields = None
         self.enrolled_engine_instances = set()
 
     def authorize(self, request):
+        if "handoff" in request:
+            validate_handoff(self.b, request["handoff"], request, self.app.now())
+            status = self.supervisor("resident-status")
+            require(status.get("outcome") == "ready")
+            self.resident = resident_document(self.b, status.get("resident"))
+            handoff = request["handoff"]
+            require(all(self.resident[key] == handoff[key] for key in ("hostId", "organizationId", "workspaceId", "generation", "fence")))
+            require(self.resident["engineId"] == handoff["engineInstanceId"] and self.resident["bootId"] == request["source"]["bootId"])
+            # Resident bytes may belong to an earlier engine selection. Verify
+            # their own complete tree; the new engine manifest is not evidence.
+            self.app.verify_runtime(self.resident["runtimeId"], full=True)
         self.check_source_scope()
         status = self.supervisor("update-status")
         if request["mode"] == "bootstrap":
@@ -379,23 +449,49 @@ class SystemRuntime:
                         ("baseCompatibilityId", "bootId", "cgroupRoot")))
             _, receipt = self.app.verify_runtime(self.controller["runtimeId"], full=True)
             require(self.b.sha(receipt) == self.controller["installerReceiptSha256"])
-        allowed = self.pipe.exchange(request, "authorize", controller=self.controller)["allow"]
+        if "handoff" in request:
+            handoff = request["handoff"]
+            result = self.supervisor("runtime-handoff", action="prepare", handoff=handoff)
+            if result.get("outcome") == "draining":
+                require(self.supervisor("runtime-handoff", action="cancel", handoff=handoff).get("outcome") == "cancelled")
+                return False
+            require(result.get("outcome") == "fenced")
+            receipt = result.get("handoff")
+            self.b.shape(receipt, (*HANDOFF_KEYS, "version", "phase", "activityRevision"))
+            require(all(receipt[key] == handoff[key] for key in HANDOFF_KEYS) and receipt["version"] == 1 and receipt["phase"] == "fenced")
+            self.b.integer(receipt["activityRevision"], 0, 2**53 - 1, "input_schema")
+            self.check_source_scope()
+            allowed = self.pipe.exchange(request, "authorize_consumption", controller=self.controller,
+                                         resident=self.resident, handoff=receipt)["allow"]
+            if not allowed:
+                require(self.supervisor("runtime-handoff", action="cancel", handoff=handoff).get("outcome") == "cancelled")
+        else:
+            allowed = self.pipe.exchange(request, "authorize", controller=self.controller)["allow"]
         if allowed:
             self.check_source_scope()
         return allowed
 
     def check_source_scope(self):
+        self.check_scope(retired=False)
+
+    def check_retired_scope(self):
+        self.check_scope(retired=True)
+
+    def check_scope(self, retired):
         root = self.app.path(self.b.CGROUP)
         allowed = "engine-" + self.request["scope"]["sourceEngineInstanceId"]
+        # The resident uses the base-compatible engine-* namespace. Only its
+        # exact verified leaf may stay populated when ordinary engines retire.
+        retained = "engine-workload-" + self.resident["hostId"] if self.resident else None
         with self.app.directory(self.b.CGROUP):
             require(not (root / "cgroup.procs").read_text().strip())
             leaves = [entry for entry in root.iterdir() if entry.is_dir()]
             require(len(leaves) <= 1024 and any(entry.name == "host" for entry in leaves))
             for entry in leaves:
                 with self.app.directory(self.b.CGROUP + "/" + entry.name):
-                    require(entry.name in ("host", "setup") or self.b.re.fullmatch(r"engine-[A-Za-z0-9_-]{1,128}", entry.name))
+                    require(entry.name in ("host", "setup", retained) or self.b.re.fullmatch(r"engine-[A-Za-z0-9_-]{1,128}", entry.name))
                     require(not any(child.is_dir() for child in entry.iterdir()))
-                    if entry.name not in ("host", allowed):
+                    if entry.name not in ("host", retained) and (retired or entry.name != allowed):
                         require(not populated(entry))
 
     def authorize_rollback(self, request):
@@ -425,21 +521,64 @@ class SystemRuntime:
         raise UpdateFailure()
 
     def retire(self):
+        if self.resident:
+            return self.retire_resident()
         reply = self.supervisor("prepare")
         require(reply.get("outcome") == "prepared")
         self.b.text_match(reply.get("session"), r"zsp_[A-Za-z0-9_-]{43}", "input_schema")
         self.session = reply["session"]
         # The supervisor must retire all delegated engine/setup leaves, not
         # merely its tracked child. Independently confirm retirement.
-        root = Path(self.b.CGROUP)
-        for directory, children, _ in os.walk(root):
-            for child in children:
-                require(Path(directory) == root and (child in ("host", "setup") or
-                        self.b.re.fullmatch(r"engine-[A-Za-z0-9_-]{1,128}", child)))
-            if Path(directory) != root / "host":
-                if Path(directory) != root:
-                    require(not populated(Path(directory)))
-        require(not (root / "cgroup.procs").read_text().strip())
+        self.check_retired_scope()
+
+    def retire_resident(self):
+        original = self.resident
+        if self.resident_enrollment is not None:
+            # Rollback was authorized separately by the server. Only the exact
+            # freshly enrolled target can be detached; never guess a fence.
+            status = self.supervisor("resident-status")
+            require(status.get("outcome") == "ready")
+            original = resident_document(self.b, status.get("resident"))
+            require(same_resident(original, self.resident) and all(original[key] == value for key, value in self.resident_enrollment.items()))
+            fields = {"resident": {"hostId": original["hostId"], "engineId": original["engineId"], "fence": original["fence"]}}
+        else:
+            handoff = self.request["handoff"]
+            fields = {"resident": {"hostId": handoff["hostId"], "engineId": handoff["engineInstanceId"], "fence": handoff["fence"]}, "handoff": handoff}
+        try:
+            # Only an exact retry can replay the root supervisor's unspent
+            # session. A lost response never authorizes ordinary prepare.
+            for attempt in range(2):
+                try:
+                    reply = self.supervisor("prepare", **fields)
+                    break
+                except (ConnectionError, TimeoutError):
+                    if attempt:
+                        raise
+            if reply.get("outcome") == "rejected" and not self.source_retired:
+                require(self.supervisor("runtime-handoff", action="cancel", handoff=self.request["handoff"]).get("outcome") == "cancelled")
+                status = self.supervisor("resident-status")
+                require(status.get("outcome") == "ready")
+                attached = resident_document(self.b, status.get("resident"))
+                require(attached == original)
+                require(self.pipe.exchange(self.request, "cancel_consumption", resident=attached)["allow"])
+                raise Deferred()
+            require(reply.get("outcome") == "prepared")
+            detached = resident_document(self.b, reply.get("resident"))
+            # The first receipt can be replayed after selection but before any
+            # start consumes the session; it repeats the same detached fence.
+            expected_fence = original["fence"] + (1 if original["engineId"] is not None else 0)
+            require(same_resident(original, detached) and detached["engineId"] is None and detached["fence"] == expected_fence)
+            self.b.text_match(reply.get("session"), r"zsp_[A-Za-z0-9_-]{43}", "input_schema")
+            self.session, self.resident, self.resident_enrollment = reply["session"], detached, None
+            self.resident_prepare_fields = fields
+            self.check_retired_scope()
+            if not self.source_retired:
+                require(self.pipe.exchange(self.request, "consumed", resident=detached)["allow"])
+                self.source_retired = True
+        except Deferred:
+            raise
+        except Exception:
+            raise ConsumptionUncertain() from None
 
     def selected(self, active):
         if self.request["mode"] == "bootstrap":
@@ -523,18 +662,60 @@ class SystemRuntime:
         remaining = deadline - time.monotonic()
         require(remaining > 0)
         reply = self.pipe.exchange(self.request, phase, active=active, report=report,
-                                   controller=self.controller, timeout=min(15, remaining))
+                                   controller=self.controller, timeout=min(15, remaining),
+                                   **({"resident": self.resident} if self.resident else {}))
         require(reply["allow"] and type(reply.get("environment")) is dict)
         engine_id = validate_enrollment_environment(self.b, reply["environment"], self.request, rollback,
                                                     self.enrolled_engine_instances)
         self.enrolled_engine_instances.add(engine_id)
-        started = self.supervisor("start", session=self.session, environment=reply["environment"])
-        self.session = None
+        resident_fields = {}
+        if self.resident:
+            fence = self.resident["fence"] + 1
+            require(fence < 2**53)
+            self.resident_enrollment = {"engineId": engine_id, "generation": self.request["scope"]["sourceGeneration" if rollback else "candidateGeneration"], "fence": fence}
+            resident_fields = {"resident": {"hostId": self.resident["hostId"], "fence": fence}}
+        prepared_session = self.session
+        try:
+            started = self.supervisor("start", session=prepared_session, environment=reply["environment"], **resident_fields)
+        finally:
+            # A failed or lost start can already have attached the target. Keep
+            # its planned authority for exact retirement; never guess detached.
+            self.session = None
+        if started.get("outcome") == "rejected" and self.resident:
+            self.confirm_rejected_resident_start(prepared_session)
         require(started.get("outcome") == "started")
         phase = "rollback_health" if rollback else "health"
         remaining = deadline - time.monotonic()
         require(remaining > 0)
-        return self.pipe.exchange(self.request, phase, active=active, timeout=remaining)["allow"]
+        resident_fields = {}
+        if self.resident:
+            status = self.supervisor("resident-status")
+            require(status.get("outcome") == "ready")
+            attached = resident_document(self.b, status.get("resident"))
+            require(same_resident(attached, self.resident) and all(attached[key] == value for key, value in self.resident_enrollment.items()))
+            resident_fields = {"resident": attached}
+        return self.pipe.exchange(self.request, phase, active=active, timeout=remaining, **resident_fields)["allow"]
+
+    def confirm_rejected_resident_start(self, prepared_session):
+        # Rejection alone is insufficient. The same root must prove both the
+        # exact unchanged detached host and the original unspent prepare. This
+        # also distinguishes validation rejection from a failed/ambiguous start
+        # that consumed its session or attached the candidate before replying.
+        if prepared_session is None or self.resident_prepare_fields is None:
+            return
+        try:
+            status = self.supervisor("resident-status")
+            require(status.get("outcome") == "ready")
+            detached = resident_document(self.b, status.get("resident"))
+            require(detached == self.resident and detached["engineId"] is None)
+            replay = self.supervisor("prepare", **self.resident_prepare_fields)
+            require(replay.get("outcome") == "prepared" and replay.get("session") == prepared_session)
+            require(resident_document(self.b, replay.get("resident")) == detached)
+            self.check_retired_scope()
+        except Exception:
+            return
+        self.session = prepared_session
+        self.resident_enrollment = None
 
 
 def main():
