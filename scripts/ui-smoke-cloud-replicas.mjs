@@ -22,11 +22,17 @@ export async function runCloudReplicaSmoke({ page, check, harnessBase }) {
   await expect(sync).toContainText("In sync");
 
   await page.keyboard.press("Escape");
+  await page.mouse.move(0, 0, { steps: 5 });
   await page.getByRole("button", { name: "Second workspace", exact: true }).click();
   await trigger.click();
   await expect(sync).toContainText("Off");
   await expect(sync).not.toContainText("/Users/fixture/zeros-v2-test-sync");
   await page.keyboard.press("Escape");
+  await trigger.hover();
+  await expect(page.getByRole("tooltip")).toBeVisible();
+  // Move off the details trigger so its tooltip cannot cover the workspace button.
+  await page.mouse.move(0, 0, { steps: 5 });
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
   await page.getByRole("button", { name: "First workspace", exact: true }).click();
   await trigger.click();
   await expect(sync).toContainText("In sync");

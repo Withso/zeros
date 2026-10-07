@@ -178,16 +178,32 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
     ),
   );
   // The parent participates in the same transaction when pinning flow children.
-  // Wait for confirmed inspector readback before a direct fixture resize.
-  await waitFor(
-    async () =>
-      (
-        await layout
-          .getByRole("combobox", { name: "Horizontal constraint" })
-          .textContent()
-      ).trim() === "Right",
+  // The inspector's Right value is optimistic. Wait for the authored pin and
+  // its runtime generation before resizing a parent the save still owns.
+  const pinCommitted = await waitFor(
+    () =>
+      page.evaluate(async () => {
+        const { designFrame } =
+          await import("/apps/desktop/src/renderer/platform/git.ts");
+        const { designFrameRuntime } =
+          await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
+        const frame = await designFrame("ws_design_harness", "home.html");
+        const node = new DOMParser()
+          .parseFromString(frame.source, "text/html")
+          .querySelector('[data-oid="home-heading"]');
+        return (
+          node?.style.right === "229px" &&
+          node.style.left === "auto" &&
+          designFrameRuntime("ws_design_harness", "home.html")
+            ?.sourceVersion === frame.sourceVersion
+        );
+      }),
     "layout-pin-committed",
   );
+  if (!pinCommitted)
+    throw new Error(
+      "The pin transaction did not settle before the parent resize.",
+    );
   await heading.evaluate((element) => {
     element.parentElement.style.width = "600px";
   });
