@@ -51,7 +51,7 @@ const descriptor = RuntimeDescriptorSchema.parse({
 const publicationBody = {
   descriptor,
   manifestHeader,
-  releaseOrder: 42,
+  releaseOrder: 1234,
   githubRunId: 1234,
   githubRunAttempt: 1,
 };
@@ -295,6 +295,35 @@ describe("runtime publication HTTP boundaries", () => {
       }
     }
     expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it("returns a closed refusal for an unregistered legacy run-number request", async () => {
+    const { app, pool, artifacts } = harness();
+    const client = {
+      query: vi.fn(async (_sql: string) => ({ rows: [], rowCount: 0 })),
+      release: vi.fn(),
+    };
+    vi.mocked(pool.connect).mockResolvedValue(client as never);
+    for (const path of [
+      RUNTIME_PUBLICATION_PATH,
+      `${RUNTIME_PUBLICATION_PATH}/complete`,
+    ]) {
+      const response = await post(app, path, {
+        ...publicationBody,
+        releaseOrder: provenance.runNumber,
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: { code: "runtime_identity_conflict" },
+      });
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+    }
+    expect(artifacts.head).not.toHaveBeenCalled();
+    expect(artifacts.presignCreatePut).not.toHaveBeenCalled();
+    expect(client.query.mock.calls.some(([sql]) =>
+      /\b(?:INSERT|UPDATE)\b/.test(String(sql)),
+    )).toBe(false);
+    expect(client.release).toHaveBeenCalledTimes(2);
   });
 
   it("bounds JSON before buffering and returns only a closed error", async () => {

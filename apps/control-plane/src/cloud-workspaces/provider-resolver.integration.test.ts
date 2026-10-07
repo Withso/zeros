@@ -1,436 +1,88 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 
 import pg from "pg";
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
-import type { DaytonaWorkspaceProviderConfig } from "./daytona-provider.js";
-import { sealCloudProviderCredential } from "./provider-connections.js";
-import {
-  DatabaseDaytonaProviderResolver,
-  DatabaseCloudWorkspaceProviderResolver,
-} from "./provider-resolver.js";
+import { DatabaseCloudWorkspaceProviderResolver } from "./provider-resolver.js";
 import { CloudWorkspaceProviderRegistry } from "./provider-registry.js";
-import type {
-  CloudWorkspaceAccessProvider,
-  CloudWorkspaceProvider,
-} from "./provider.js";
-import {
-  seedReadyCloudWorkspace,
-  type ReadyCloudWorkspaceFixture,
-} from "./test-fixtures.js";
+import type { CloudWorkspaceAccessProvider, CloudWorkspaceProvider } from "./provider.js";
+import { seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const d = databaseUrl ? describe : describe.skip;
 
 function provider(): CloudWorkspaceProvider & CloudWorkspaceAccessProvider {
   return {
-    name: "daytona",
-    find: vi.fn(async () => []),
-    create: vi.fn(),
-    inspect: vi.fn(),
-    start: vi.fn(),
-    stop: vi.fn(),
-    archive: vi.fn(),
-    delete: vi.fn(),
-    listManaged: vi.fn(async function* () {}),
-    createSshAccess: vi.fn(),
-    revokeSshAccess: vi.fn(),
-    getPreviewEndpoint: vi.fn(),
+    name: "boat", find: vi.fn(async () => []), create: vi.fn(), inspect: vi.fn(),
+    start: vi.fn(), stop: vi.fn(), archive: vi.fn(), delete: vi.fn(),
+    listManaged: vi.fn(async function* () {}), createSshAccess: vi.fn(),
+    revokeSshAccess: vi.fn(), getPreviewEndpoint: vi.fn(),
   };
 }
-
-const hostedConfig: DaytonaWorkspaceProviderConfig = {
-  apiKey: "hosted-daytona-key-0123456789",
-  apiUrl: "https://app.daytona.io/api",
-  target: "eu",
-  snapshotId: "snapshot-pinned",
-  architecture: "linux/amd64",
-  cpuMillicores: 2_000,
-  memoryMiB: 4_096,
-  storageMiB: 20_480,
-  operationTimeoutSeconds: 180,
-  autoStopMinutes: 0,
-  autoArchiveMinutes: 10_080,
-  autoDeleteMinutes: -1,
-};
 
 d("generation-bound cloud provider resolution", () => {
   let pool: pg.Pool;
   let fixture: ReadyCloudWorkspaceFixture;
-
-  beforeAll(() => {
-    pool = new pg.Pool({ connectionString: databaseUrl, max: 5 });
-  });
-
-  afterAll(async () => {
-    await pool.end();
-  });
-
+  beforeAll(() => { pool = new pg.Pool({ connectionString: databaseUrl, max: 5 }); });
+  afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
   });
+  const input = () => ({ workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
+    generation: 1, purpose: "lifecycle" as const });
+  const resolver = (hosted = provider()) => new DatabaseCloudWorkspaceProviderResolver({
+    pool, workosEnabled: false,
+    registry: new CloudWorkspaceProviderRegistry([{ name: "boat", hosted: { provider: hosted } }]),
+  });
 
-  it("returns the deployment provider only for the exact hosted generation binding", async () => {
+  it("resolves only the exact hosted generation and rejects another tenant or generation", async () => {
+    const resolved = resolver();
+    await expect(resolved.resolve(input())).resolves.toMatchObject({
+      provider: { name: "boat" }, connectionVersion: 1, credentialSource: "hosted",
+    });
+    await expect(resolved.resolve({ ...input(), generation: 2 })).rejects.toMatchObject({ code: "provider_connection_unavailable" });
+    const scopes = await resolved.cleanupScopes();
+    expect(scopes.unavailable).toBe(0);
+    expect(scopes.scopes).toMatchObject([{ provider: { name: "boat" }, credentialSource: "hosted", organizationId: null }]);
+  });
+
+  it("constructs the provider with the accepted generation profile after deployment defaults change", async () => {
+    const currentDefault = provider(), accepted = provider();
+    const factory = vi.fn(() => ({ provider: accepted }));
+    const resolved = new DatabaseCloudWorkspaceProviderResolver({ pool, workosEnabled: false,
+      registry: new CloudWorkspaceProviderRegistry([{ name: "boat", hosted: { provider: currentDefault }, hostedForGeneration: factory }]),
+    });
+    await expect(resolved.resolve(input())).resolves.toMatchObject({ provider: { name: "boat" }, credentialSource: "hosted" });
+    expect(factory).toHaveBeenCalledExactlyOnceWith({ imageRef: `boat-template:zeros-v2-test-template-${fixture.workspaceId}-1`, architecture: "linux/amd64",
+      cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 });
+    expect(currentDefault.create).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the generation's account has no registered provider", async () => {
+    const resolved = new DatabaseCloudWorkspaceProviderResolver({ pool, workosEnabled: false,
+      registry: new CloudWorkspaceProviderRegistry([]) });
+    await expect(resolved.resolve(input())).rejects.toMatchObject({ code: "provider_connection_unavailable" });
+  });
+
+  it("rejects persisted customer credentials and counts their bound cleanup scope without using managed credentials", async () => {
     const hosted = provider();
-    const resolver = new DatabaseDaytonaProviderResolver({
-      pool,
-      hostedProvider: hosted,
-      hostedConfig,
-      workosEnabled: false,
-    });
-    await expect(
-      resolver.resolve({
-        workspaceId: fixture.workspaceId,
-        organizationId: fixture.organizationId,
-        generation: 1,
-        purpose: "lifecycle",
-      }),
-    ).resolves.toMatchObject({
-      provider: hosted,
-      connectionVersion: 1,
-      credentialSource: "hosted",
-    });
+    const connection = (await pool.query("SELECT provider_connection_id AS id FROM cloud_workspace_generations WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].id;
+    await pool.query(`UPDATE provider_connection_versions SET credential_source='delegated',endpoint='https://api.fixture.test',
+      key_version=1,nonce=$2,ciphertext=$3,auth_tag=$4,credential_sha256=$5 WHERE connection_id=$1`,
+      [connection, randomBytes(12), randomBytes(32), randomBytes(16), randomBytes(32)]);
+    await pool.query("UPDATE provider_connections SET credential_source='delegated' WHERE id=$1", [connection]);
+    const resolved = resolver(hosted);
+    await expect(resolved.resolve(input())).rejects.toMatchObject({ code: "provider_unsupported" });
+    expect(await resolved.cleanupScopes()).toMatchObject({ unavailable: 1,
+      scopes: [{ credentialSource: "hosted", organizationId: null }] });
+    expect(hosted.create).not.toHaveBeenCalled();
+    expect(hosted.delete).not.toHaveBeenCalled();
   });
 
-  it("retains an existing Daytona generation while Boat is also registered", async () => {
-    const daytona = provider();
-    const boat = { ...provider(), name: "boat" };
-    const resolver = new DatabaseCloudWorkspaceProviderResolver({
-      pool,
-      workosEnabled: false,
-      registry: new CloudWorkspaceProviderRegistry([
-        { name: "boat", hosted: { provider: boat } },
-        { name: "daytona", hosted: { provider: daytona } },
-      ]),
-    });
-    const resolved = await resolver.resolve({
-      workspaceId: fixture.workspaceId,
-      organizationId: fixture.organizationId,
-      generation: 1,
-      purpose: "lifecycle",
-    });
-    expect(resolved.provider).toBe(daytona);
-    expect(boat.create).not.toHaveBeenCalled();
-    expect(
-      (await resolver.cleanupScopes()).scopes.map((scope) => scope.provider),
-    ).toEqual([boat, daytona]);
-  });
-
-  it("constructs a hosted provider from an accepted generation after the deployment image changes", async () => {
-    const currentDefault = provider();
-    const originalImage = provider();
-    const factory = vi.fn(() => originalImage);
-    const resolver = new DatabaseDaytonaProviderResolver({
-      pool,
-      hostedProvider: currentDefault,
-      hostedConfig: {
-        ...hostedConfig,
-        snapshotId: "new-deployment-image",
-        cpuMillicores: 4000,
-      },
-      providerFactory: factory,
-      workosEnabled: false,
-    });
-    const resolved = await resolver.resolve({
-      workspaceId: fixture.workspaceId,
-      organizationId: fixture.organizationId,
-      generation: 1,
-      purpose: "lifecycle",
-    });
-    expect(resolved.provider).toBe(originalImage);
-    expect(factory).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({
-        snapshotId: "snapshot-pinned",
-        cpuMillicores: 2000,
-        apiKey: hostedConfig.apiKey,
-        apiUrl: hostedConfig.apiUrl,
-      }),
-    );
-  });
-
-  it("does not redirect an unavailable historical provider to managed Boat", async () => {
-    const boat = { ...provider(), name: "boat" };
-    const resolver = new DatabaseCloudWorkspaceProviderResolver({
-      pool,
-      workosEnabled: false,
-      registry: new CloudWorkspaceProviderRegistry([
-        { name: "boat", hosted: { provider: boat } },
-      ]),
-    });
-    await expect(
-      resolver.resolve({
-        workspaceId: fixture.workspaceId,
-        organizationId: fixture.organizationId,
-        generation: 1,
-        purpose: "cleanup",
-      }),
-    ).rejects.toMatchObject({ code: "provider_connection_unavailable" });
-    expect(boat.delete).not.toHaveBeenCalled();
-  });
-
-  it("opens a qualified delegated credential just in time and rejects it after revocation", async () => {
-    const encryptionKey = randomBytes(32).toString("base64url");
-    const connectionId = randomUUID();
-    const endpoint = "https://delegated.daytona.example/api";
-    const credential = "delegated-daytona-key-0123456789"; // gitleaks:allow — deterministic test fixture
-    const sealed = sealCloudProviderCredential(
-      credential,
-      {
-        connectionId,
-        organizationId: fixture.organizationId,
-        version: 1,
-        provider: "daytona",
-        endpoint,
-      },
-      encryptionKey,
-    );
-    await withSystemTx(pool, async (tx) => {
-      await tx.query(
-        `INSERT INTO provider_connections (
-           id, org_id, owner_kind, owner_user_id, provider, display_name,
-           credential_source, current_version, state, capabilities, region
-         ) VALUES (
-           $1, $2, 'user', $3, 'daytona', 'My Daytona', 'delegated', 1,
-           'active', $4::jsonb, 'eu'
-         )`,
-        [
-          connectionId,
-          fixture.organizationId,
-          fixture.userId,
-          JSON.stringify({
-            qualified: true,
-            lifecycle: true,
-            ssh: true,
-            preview: true,
-            daytonaTarget: "eu",
-          }),
-        ],
-      );
-      await tx.query(
-        `INSERT INTO provider_connection_versions (
-           connection_id, org_id, version, credential_source, endpoint,
-           key_version, nonce, ciphertext, auth_tag, credential_sha256,
-           capabilities, created_by
-         ) VALUES (
-           $1, $2, 1, 'delegated', $3, 1, $4, $5, $6, $7, $8::jsonb, $9
-         )`,
-        [
-          connectionId,
-          fixture.organizationId,
-          endpoint,
-          sealed.nonce,
-          sealed.ciphertext,
-          sealed.authTag,
-          sealed.credentialSha256,
-          JSON.stringify({
-            qualified: true,
-            lifecycle: true,
-            ssh: true,
-            preview: true,
-            commandExecution: true,
-            daytonaTarget: "eu",
-          }),
-          fixture.userId,
-        ],
-      );
-      await tx.query(
-        `UPDATE cloud_workspace_generations
-         SET provider_connection_id = $3
-         WHERE workspace_id = $1 AND generation = 1 AND org_id = $2`,
-        [fixture.workspaceId, fixture.organizationId, connectionId],
-      );
-    });
-
-    const delegated = provider();
-    let createdConfig: DaytonaWorkspaceProviderConfig | null = null;
-    const resolver = new DatabaseDaytonaProviderResolver({
-      pool,
-      hostedProvider: provider(),
-      hostedConfig,
-      credentialKeys: { 1: encryptionKey },
-      workosEnabled: false,
-      providerFactory: (config) => {
-        createdConfig = config;
-        return delegated;
-      },
-    });
-    await expect(
-      resolver.resolve({
-        workspaceId: fixture.workspaceId,
-        organizationId: fixture.organizationId,
-        generation: 1,
-        purpose: "ssh",
-      }),
-    ).resolves.toMatchObject({
-      provider: delegated,
-      connectionId,
-      connectionVersion: 1,
-      credentialSource: "delegated",
-    });
-    expect(createdConfig).toMatchObject({
-      apiKey: credential,
-      apiUrl: endpoint,
-      target: "eu",
-      snapshotId: "snapshot-pinned",
-    });
-
-    await withSystemTx(pool, (tx) =>
-      tx.query(
-        `UPDATE provider_connections
-         SET state = 'revoked', revoked_at = now() WHERE id = $1`,
-        [connectionId],
-      ),
-    );
-    await expect(
-      resolver.resolve({
-        workspaceId: fixture.workspaceId,
-        organizationId: fixture.organizationId,
-        generation: 1,
-        purpose: "ssh",
-      }),
-    ).rejects.toMatchObject({ code: "provider_authority_revoked" });
-    await expect(
-      resolver.resolve({
-        workspaceId: fixture.workspaceId,
-        organizationId: fixture.organizationId,
-        generation: 1,
-        purpose: "cleanup",
-      }),
-    ).resolves.toMatchObject({ provider: delegated });
-  });
-
-  it("keeps an execution on its immutable credential version after the connection rotates", async () => {
-    const encryptionKey = randomBytes(32).toString("base64url");
-    const connectionId = randomUUID();
-    const endpointV1 = "https://v1.daytona.example/api";
-    const endpointV2 = "https://v2.daytona.example/api";
-    const credentialV1 = "delegated-daytona-key-v1-0123456789"; // gitleaks:allow — deterministic test fixture
-    const credentialV2 = "delegated-daytona-key-v2-0123456789"; // gitleaks:allow — deterministic test fixture
-    const sealedV1 = sealCloudProviderCredential(
-      credentialV1,
-      {
-        connectionId,
-        organizationId: fixture.organizationId,
-        version: 1,
-        provider: "daytona",
-        endpoint: endpointV1,
-      },
-      encryptionKey,
-    );
-    const sealedV2 = sealCloudProviderCredential(
-      credentialV2,
-      {
-        connectionId,
-        organizationId: fixture.organizationId,
-        version: 2,
-        provider: "daytona",
-        endpoint: endpointV2,
-      },
-      encryptionKey,
-    );
-    await withSystemTx(pool, async (tx) => {
-      await tx.query(
-        `INSERT INTO provider_connections (
-           id, org_id, owner_kind, owner_user_id, provider, display_name,
-           credential_source, current_version, state, capabilities, region
-         ) VALUES (
-           $1, $2, 'user', $3, 'daytona', 'Rotated Daytona', 'delegated', 1,
-           'active', $4::jsonb, 'eu'
-         )`,
-        [
-          connectionId,
-          fixture.organizationId,
-          fixture.userId,
-          JSON.stringify({ qualified: true, lifecycle: true }),
-        ],
-      );
-      for (const [version, endpoint, sealed] of [
-        [1, endpointV1, sealedV1],
-        [2, endpointV2, sealedV2],
-      ] as const) {
-        await tx.query(
-          `INSERT INTO provider_connection_versions (
-             connection_id, org_id, version, credential_source, endpoint,
-             key_version, nonce, ciphertext, auth_tag, credential_sha256,
-             capabilities, credential_expires_at, created_by
-           ) VALUES (
-             $1, $2, $3, 'delegated', $4, 1, $5, $6, $7, $8,
-             $9::jsonb, $10, $11
-           )`,
-          [
-            connectionId,
-            fixture.organizationId,
-            version,
-            endpoint,
-            sealed.nonce,
-            sealed.ciphertext,
-            sealed.authTag,
-            sealed.credentialSha256,
-            JSON.stringify({
-              qualified: true,
-              lifecycle: true,
-              ssh: true,
-              preview: true,
-              commandExecution: true,
-              daytonaTarget: version === 1 ? "v1-target" : "v2-target",
-            }),
-            new Date(Date.now() + version * 86_400_000),
-            fixture.userId,
-          ],
-        );
-      }
-      await tx.query(
-        `UPDATE cloud_workspace_generations
-         SET provider_connection_id = $3, provider_connection_version = 1
-         WHERE workspace_id = $1 AND generation = 1 AND org_id = $2`,
-        [fixture.workspaceId, fixture.organizationId, connectionId],
-      );
-      await tx.query(
-        `UPDATE provider_connections SET current_version = 2 WHERE id = $1`,
-        [connectionId],
-      );
-    });
-
-    const seen: DaytonaWorkspaceProviderConfig[] = [];
-    const resolver = new DatabaseDaytonaProviderResolver({
-      pool,
-      hostedProvider: provider(),
-      hostedConfig,
-      credentialKeys: { 1: encryptionKey },
-      workosEnabled: false,
-      providerFactory: (config) => {
-        seen.push(config);
-        return provider();
-      },
-    });
-    await expect(
-      resolver.resolve({
-        workspaceId: fixture.workspaceId,
-        organizationId: fixture.organizationId,
-        generation: 1,
-        purpose: "lifecycle",
-      }),
-    ).resolves.toMatchObject({
-      connectionId,
-      connectionVersion: 1,
-      credentialSource: "delegated",
-    });
-    expect(seen).toHaveLength(1);
-    expect(seen[0]).toMatchObject({
-      apiKey: credentialV1,
-      apiUrl: endpointV1,
-      target: "v1-target",
-    });
+  it("rejects an invalid hosted endpoint before provider calls", async () => {
+    await pool.query("UPDATE provider_connection_versions SET endpoint='hosted://unconfigured'");
+    await expect(resolver().resolve(input())).rejects.toMatchObject({ code: "provider_connection_invalid" });
   });
 });

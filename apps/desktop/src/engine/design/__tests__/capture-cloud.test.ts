@@ -7,7 +7,7 @@ import { createCloudDesignCaptureHost } from "../capture-cloud";
 import { resolveCloudRuntime } from "../../agents/containment/cloud-runtime-root.mjs";
 vi.mock("../../agents/containment/cloud-runtime-root.mjs",async original=>{
   const actual=await original<typeof import("../../agents/containment/cloud-runtime-root.mjs")>();
-  return {...actual,resolveCloudRuntime:vi.fn(actual.resolveCloudRuntime)};
+  return {...actual,resolveCloudRuntime:vi.fn((await import("../../agents/__tests__/helpers/test-cloud-runtime")).testCloudRuntime)};
 });
 const input = {
   version: 1 as const,

@@ -37,6 +37,8 @@ vi.mock("node:fs", () => ({
   writeSync: vi.fn((_fd: number, value: string) => Buffer.byteLength(value)),
 }));
 import { CloudEngineCgroup } from "../cloud-workspace-validation/sandbox/cloud-engine-cgroup.mjs";
+import { testCloudRuntime } from "../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime";
+const scope = () => new CloudEngineCgroup({ runtime: testCloudRuntime(), instanceId: "32345678-1234-4234-8234-123456789abc" });
 
 describe("cgroup descriptor failure cleanup", () => {
   beforeEach(() => {
@@ -49,23 +51,23 @@ describe("cgroup descriptor failure cleanup", () => {
   it("retires a delegated root-owned cgroup below kernel-owned sysfs ancestors", async () => {
     calls.overflowAncestor = true;
     const uid = vi.spyOn(process, "getuid").mockReturnValue(0);
-    try { await expect(new CloudEngineCgroup().retire()).resolves.toBeUndefined(); }
+    try { await expect(scope().retire()).resolves.toBeUndefined(); }
     finally { uid.mockRestore(); }
   });
   it("does not trust an overflow-owned ancestor on an ordinary filesystem", async () => {
     calls.overflowAncestor = true; calls.forgedAncestor = true;
     const uid = vi.spyOn(process, "getuid").mockReturnValue(0);
-    try { await expect(new CloudEngineCgroup().retire()).rejects.toThrow(/ancestry/); }
+    try { await expect(scope().retire()).rejects.toThrow(/ancestry/); }
     finally { uid.mockRestore(); }
   });
   it("closes a descriptor when inode inspection fails", () => {
     calls.statFailure = true;
-    expect(() => new CloudEngineCgroup().attach(123)).toThrow(/stat failed/);
+    expect(() => scope().attach(123)).toThrow(/stat failed/);
     expect(calls.close).toHaveBeenCalledWith(31);
   });
   it("closes a descriptor when filesystem inspection fails", () => {
     calls.filesystemFailure = true;
-    expect(() => new CloudEngineCgroup().attach(123)).toThrow(
+    expect(() => scope().attach(123)).toThrow(
       /filesystem inspection failed/,
     );
     expect(calls.close).toHaveBeenCalledWith(31);

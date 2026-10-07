@@ -14,6 +14,11 @@ import {
   type KitDeps,
 } from "../cloud-workspace-validation/boat-image/boat-image";
 import { DevProviderError, dispatchDevCreate } from "../dev-environment/provider-http.mjs";
+import {
+  releaseImageSanitation,
+  releaseImageAttestation,
+  releaseImageAttestationStatus,
+} from "../../apps/control-plane/src/cloud-workspaces/computer-image-scripts";
 
 const sha256 = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const NOW = Date.parse("2026-09-25T10:00:00Z");
@@ -145,9 +150,16 @@ describe("Boat image kit", () => {
     expect(sha256(script.replace(migration, "").replace(resolver, "").replace(timings, "").replace(checkout, ""))).toBe("97e5b3b21438e85e53a22e2aec2d38436751c4efcb22aafa1f67ede3e336ddd9");
   });
 
-  it("keeps templates free of build identities and private paths", () => {
-    for (const name of fs.readdirSync(TEMPLATES).filter(name => fs.statSync(path.join(TEMPLATES, name)).isFile())) {
-      const text = fs.readFileSync(path.join(TEMPLATES, name), "utf8");
+  it("keeps templates and shared image scripts free of build identities and private paths", () => {
+    const scripts: [string, string][] = fs.readdirSync(TEMPLATES)
+      .filter(name => fs.statSync(path.join(TEMPLATES, name)).isFile())
+      .map(name => [name, fs.readFileSync(path.join(TEMPLATES, name), "utf8")]);
+    scripts.push(
+      ["sanitize.sh", releaseImageSanitation],
+      ["attest.sh", releaseImageAttestation],
+      ["attest-status.sh", releaseImageAttestationStatus],
+    );
+    for (const [name, text] of scripts) {
       expect(text, name).not.toMatch(/[a-f0-9]{32}/);
       expect(text, name).not.toMatch(/\b(bx|team)_[a-z0-9]/);
       expect(text, name).not.toMatch(/vercel-sandbox|\.context\/|\/Users\//);
@@ -189,6 +201,10 @@ describe("Boat image kit", () => {
     expect(script).toContain(`https://github.com/withso/zeros ${commit} /opt/zeros ${CONTRACT}`);
     const runner = JSON.parse(install.split("\n").find((line) => line.startsWith("runner="))!.slice("runner=".length));
     expect(runner).toBe(fs.readFileSync(path.join(TEMPLATES, "owned-runner.py"), "utf8"));
+    const attestation = fs.readFileSync(path.join(dir, "attest.sh"), "utf8");
+    expect(attestation).toContain(`['source']['commit']=='${commit}'`);
+    expect(attestation).toContain(`image-attestation-${HEX}`);
+    expect(fs.readFileSync(path.join(dir, "attest-status.sh"), "utf8")).toContain(`image-attestation-${HEX}`);
     for (const name of fs.readdirSync(dir).filter((file) => file.endsWith(".sh"))) {
       const text = fs.readFileSync(path.join(dir, name), "utf8");
       expect(text, name).not.toMatch(/\{\{[A-Z0-9_]+\}\}/);
@@ -319,7 +335,7 @@ describe("Boat image kit", () => {
 
   it("refuses to run an unfilled template on the builder", async () => {
     const { deps, fake } = await prepared();
-    await expect(main(["builder", "run", path.join(TEMPLATES, "sanitize.sh")], deps)).rejects.toThrow("unfilled template");
+    await expect(main(["builder", "run", path.join(TEMPLATES, "install.sh")], deps)).rejects.toThrow("unfilled template");
     expect(fake.calls.some((call) => call.path.endsWith("/commands"))).toBe(false);
   });
 

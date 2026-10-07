@@ -6,7 +6,7 @@ const state = vi.hoisted(() => ({
   workspacesChanged: vi.fn(),
   projectsChanged: vi.fn(),
 }));
-vi.mock("../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => false }));
+vi.mock("../../features/team/cloud-workspace-account-access", () => ({ useCloudWorkspaceAccountAccess: () => false, hasCloudWorkspaceAccountAccess: () => false }));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
   useEffect: (fn: () => void | (() => void)) => state.effects.push(fn),
@@ -106,7 +106,7 @@ it("a cloud catalog change does not invalidate every Local repository", () => {
     removeEventListener: vi.fn(),
   });
   CloudWorkspaceLifecycle();
-  const cleanup = state.effects[0]();
+  const cleanup = state.effects.find(effect => effect.toString().includes("clearCloudWorkspaceCatalog"))!();
   if (cleanup) cleanups.push(cleanup);
   acceptCloudWorkspaceDocument(doc);
   expect(

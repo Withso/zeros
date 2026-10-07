@@ -13,6 +13,7 @@ import {
   RUNTIME_OIDC_ISSUER,
   RUNTIME_OIDC_JWKS_URL,
   RuntimeOidcError,
+  type RuntimeOidcConfig,
 } from "./runtime-oidc.js";
 
 const config = {
@@ -64,8 +65,8 @@ function token(changes: JWTPayload = {}, pair = first, kid = "first") {
     .sign(pair.privateKey);
 }
 
-function verifier() {
-  return createRuntimeOidcVerifier(config, {
+function verifier(settings: RuntimeOidcConfig = config) {
+  return createRuntimeOidcVerifier(settings, {
     keySet: createLocalJWKSet({ keys: [firstJwk] }),
   });
 }
@@ -99,6 +100,79 @@ describe("runtime publication OIDC", () => {
       verifier()(await token(), "base_registration"),
     ).rejects.toBeInstanceOf(RuntimeOidcError);
   });
+
+  it.each([
+    ["alpha", "refs/heads/main"],
+    ["beta", "refs/heads/main"],
+    ["beta", "refs/heads/release/1.2.3"],
+    ["production", "refs/heads/main"],
+    ["production", "refs/heads/release/1.2.3"],
+  ] as const)(
+    "accepts standalone publication for %s from %s",
+    async (environment, ref) => {
+      const audience = `zeros-control-plane-${environment}`;
+      const workflow_ref = `${config.repository}/.github/workflows/cloud-runtime-bundle.yml@${ref}`;
+      expect(
+        await verifier({ ...config, environment, audience })(
+          await token({ environment, aud: audience, ref, workflow_ref, event_name: "workflow_dispatch" }),
+          "publication",
+        ),
+      ).toEqual({ runId: 1234, runNumber: 42, runAttempt: 2, sha, workflowRef: workflow_ref });
+    },
+  );
+
+  it.each(["alpha", "beta", "production"] as const)(
+    "rejects standalone publication with wrong workflow/event/ref/environment/repository on %s",
+    async environment => {
+      const audience = `zeros-control-plane-${environment}`;
+      const ref = "refs/heads/main";
+      const standalone = {
+        environment, aud: audience, ref, event_name: "workflow_dispatch",
+        workflow_ref: `${config.repository}/.github/workflows/cloud-runtime-bundle.yml@${ref}`,
+      };
+      const releaseRef = "refs/heads/release/1.2.3";
+      const invalid: JWTPayload[] = [
+        { aud: "zeros-control-plane-other" },
+        { repository: "fork/zeros" },
+        { workflow_ref: `fork/zeros/.github/workflows/cloud-runtime-bundle.yml@${ref}` },
+        { workflow_ref: `${config.repository}/.github/workflows/cloud-runtime-base.yml@${ref}` },
+        { workflow_ref: `${config.repository}/.github/workflows/cloud-runtime-bundle-build.yml@${ref}` },
+        { workflow_ref: `${config.repository}/.github/workflows/other.yml@${ref}` },
+        { event_name: "push" },
+        { event_name: "pull_request" },
+        { event_name: "pull_request_target" },
+        { environment: undefined },
+        { environment: environment === "alpha" ? "beta" : "alpha" },
+        { ref: "refs/heads/feature" },
+        { ref: "refs/tags/v1.2.3", workflow_ref: `${config.repository}/.github/workflows/cloud-runtime-bundle.yml@refs/tags/v1.2.3` },
+        { ref: "refs/pull/1/merge" },
+        { ref: "refs/heads/release/", workflow_ref: `${config.repository}/.github/workflows/cloud-runtime-bundle.yml@refs/heads/release/` },
+        { workflow_ref: `${config.repository}/.github/workflows/cloud-runtime-bundle.yml@${releaseRef}` },
+        { ref: releaseRef },
+      ];
+      if (environment === "alpha") invalid.push({
+        ref: releaseRef,
+        workflow_ref: `${config.repository}/.github/workflows/cloud-runtime-bundle.yml@${releaseRef}`,
+      });
+      for (const changed of invalid) {
+        await expect(
+          verifier({ ...config, environment, audience })(await token({ ...standalone, ...changed }), "publication"),
+        ).rejects.toThrow(/^Runtime publication authentication rejected$/);
+      }
+    },
+  );
+
+  it.each(["beta", "production"] as const)(
+    "does not grant the Alpha release or base workflow authority on %s",
+    async environment => {
+      await expect(verifier({ ...config, environment })(await token({ environment }), "publication"))
+        .rejects.toBeInstanceOf(RuntimeOidcError);
+      const base = await token({ environment, event_name: "workflow_dispatch",
+        workflow_ref: `${config.repository}/.github/workflows/cloud-runtime-base.yml@refs/heads/main` });
+      await expect(verifier({ ...config, environment })(base, "base_registration"))
+        .rejects.toBeInstanceOf(RuntimeOidcError);
+    },
+  );
 
   it.each(["publication", "base_registration"] as const)(
     "bounds future iat to sixty seconds of skew for %s",
@@ -164,6 +238,18 @@ describe("runtime publication OIDC", () => {
     expect(
       await verify(await token({ environment: undefined }), "publication"),
     ).toMatchObject({ runNumber: 42 });
+  });
+
+  it("does not grant standalone or base authority through the legacy null-environment opt-out", async () => {
+    const verify = verifier({ ...config, environment: null });
+    for (const environment of ["alpha", undefined]) {
+      const standalone = await token({ environment, event_name: "workflow_dispatch",
+        workflow_ref: `${config.repository}/.github/workflows/cloud-runtime-bundle.yml@refs/heads/main` });
+      await expect(verify(standalone, "publication")).rejects.toBeInstanceOf(RuntimeOidcError);
+      const base = await token({ environment, event_name: "workflow_dispatch",
+        workflow_ref: `${config.repository}/.github/workflows/cloud-runtime-base.yml@refs/heads/main` });
+      await expect(verify(base, "base_registration")).rejects.toBeInstanceOf(RuntimeOidcError);
+    }
   });
 
   it("verifies signatures rather than trusting decoded claims", async () => {

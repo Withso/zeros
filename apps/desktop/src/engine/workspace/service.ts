@@ -1,4 +1,7 @@
 import { designDirectoryEntry } from "../design/metadata";
+import { z } from "zod";
+import { WorkspaceResourceUsageIdentitySchema, type WorkspaceResourceUsageIdentity } from "@zeros/protocol/workspace-resource-usage";
+import { WorkspaceResourceUsageSampler } from "./resource-usage";
 import { isCodeReviewOperation } from "@zeros/protocol/code-review";
 import { handleCodeReviewRoute } from "../code-review/routes";
 import { CodeReviewError } from "../code-review/errors";
@@ -1134,6 +1137,7 @@ const REMOTE_READABLE = new Set<string>([
   "codeReview.list",
   // Workspaces + projects (repository navigation / workspace picker)
   "workspace.list",
+  "workspace.resourceUsage",
   "project.list",
   // Chats sidebar + handoff picker
   "chats.list",
@@ -1328,6 +1332,7 @@ interface DesignTerritoryTransitionTarget {
 }
 
 export class WorkspaceService {
+  private readonly resourceUsageSampler = new WorkspaceResourceUsageSampler();
   private readonly designRouteHost: DesignWorkspaceRouteHost = {
     resolveDesignWorkspace: (workspaceId, remote) =>
       this.resolveDesignWorkspace(workspaceId, remote),
@@ -1360,7 +1365,10 @@ export class WorkspaceService {
 
   constructor(
     private readonly root: string,
-    private readonly options: { primaryDesignWorkspace?: boolean } = {},
+    private readonly options: {
+      primaryDesignWorkspace?: boolean;
+      cloudResourceUsageIdentity?: () => WorkspaceResourceUsageIdentity | null;
+    } = {},
   ) {
     // v11: hand the chats DB layer an authoritative folder→workspaceId resolver
     // so every chat upsert caches its owning workspace (db/chats.ts stays free of
@@ -2462,6 +2470,23 @@ export class WorkspaceService {
     } = {},
   ): Promise<unknown> {
     const remote = opts.remote === true;
+    if (op === "workspace.resourceUsage") {
+      const request = z.object({ workspaceId: z.literal(LOCAL_MAIN_WORKSPACE_ID),
+        generation: z.number().int().positive(), engineInstanceId: z.string().uuid() }).strict().safeParse(params);
+      const identity = WorkspaceResourceUsageIdentitySchema.safeParse(this.options.cloudResourceUsageIdentity?.());
+      const assertAdmitted = () => {
+        const current = WorkspaceResourceUsageIdentitySchema.safeParse(this.options.cloudResourceUsageIdentity?.());
+        if (!remote || !opts.cloudWorker || !this.options.primaryDesignWorkspace || !opts.cloudActorIdentity ||
+            !opts.cloudFileActor?.authorized() || !request.success || !identity.success ||
+            request.data.generation !== identity.data.generation || request.data.engineInstanceId !== identity.data.engineInstanceId ||
+            !current.success || JSON.stringify(current.data) !== JSON.stringify(identity.data))
+          throw new GitError({ code: "REMOTE_RESTRICTED", message: "Resource usage requires the admitted cloud workspace." });
+      };
+      assertAdmitted();
+      const sample = await this.resourceUsageSampler.sample(identity.data!, this.root);
+      assertAdmitted();
+      return sample;
+    }
     // Qualified VM authority is server-owned, independent of the paired-host
     // relay flag. Never infer it from a path, client params, or remote alone.
     const cloudFileOperation = ["design.asset.upload", "file.tree", "file.ignored", "file.read", "file.write",

@@ -5,6 +5,7 @@ import type { Channel } from "./contracts";
 import { workerOwner } from "./worker-admission";
 import { workerExecutionConfig } from "./worker-config";
 import { executeWorkerPromotion, reconcileWorkerNativeStorage } from "./worker-run";
+import { RELEASE_WORKER_IMAGES_RETIRED } from "../../apps/control-plane/src/cloud-workspaces/release-worker-retirement";
 import { workerConnections, workerEnvironment } from "./worker-test-fixtures";
 
 const dependencies = vi.hoisted(() => ({ registry: vi.fn(), requiredChecks: vi.fn(), current: vi.fn() }));
@@ -33,6 +34,8 @@ function fixture(channel: Channel = "production", existing = true) {
   state.releaseRuns = [];
   let durable: any = existing ? state : undefined, revision = existing ? "1" : undefined;
   const key = `release-workers/v1/${channel}.json`;
+  const accountBinding = createHash("sha256").update(JSON.stringify([profile.boat.accountScope, profile.boat.billingOrg,
+    profile.railway.projectId, profile.planetscale.organization, profile.planetscale.database, profile.cloudflare.accountId])).digest("hex");
   const registry = {
     readDocument: vi.fn(async (requestedKey: string, requestedOwner: string, project: (value: any) => any) => {
       expect(requestedKey).toBe(key); expect(requestedOwner).toBe(owner);
@@ -42,7 +45,7 @@ function fixture(channel: Channel = "production", existing = true) {
       expect(requestedKey).toBe(key); expect(etag).toBe(revision);
       durable = structuredClone(next); revision = String(Number(revision ?? "0") + 1); return revision;
     }),
-    readAdmission: vi.fn(async () => ({ state: { version: 1, owner: "account-admission", account: "d".repeat(64), reservations: [] }, etag: "1" })),
+    readAdmission: vi.fn(async () => ({ state: { version: 1, owner: "account-admission", account: accountBinding, reservations: [] }, etag: "1" })),
     writeAdmission: vi.fn(async () => { throw new Error("Unexpected admission mutation in synthetic preflight test"); }),
     close: vi.fn(),
   };
@@ -69,94 +72,12 @@ function fixture(channel: Channel = "production", existing = true) {
     execute: () => executeWorkerPromotion(env, "f".repeat(64), "full") };
 }
 
-describe("worker runner first-generation recovery ordering", () => {
-  it.each(["alpha", "beta", "production"] as const)("reaches the real broker preflight from a canonical fresh %s receipt", async channel => {
+describe("retired worker runner", () => {
+  it.each(["alpha", "beta", "production"] as const)("refuses new %s execution before opening a registry, CI or provider", async channel => {
     const test = fixture(channel);
-    expect(test.state.resources).toEqual({}); expect(test.state.releaseRuns).toEqual([]);
-    await expect(test.execute()).rejects.toThrow("Release canary designation missing for claude-setup-token");
-    expect(test.preflight).toHaveBeenCalledOnce();
-    expect(dependencies.requiredChecks).toHaveBeenCalledTimes(2); expect(dependencies.current).toHaveBeenCalledTimes(2);
-    expect(test.saved().resources.images).toEqual([]); expect(test.saved().releaseRuns).toEqual([]);
-    expect(test.saved().owner).toBe(test.state.owner); expect(test.saved().generation).toBe(test.state.generation);
-    expect(test.saved()).not.toHaveProperty("lease"); expect(test.registry.close).toHaveBeenCalledOnce();
-    expect(test.registry.writeAdmission).not.toHaveBeenCalled(); expect(test.fetcher).toHaveBeenCalledTimes(3);
-  });
-  it("also initializes the generation created by the real lease when no registry document exists", async () => {
-    const test = fixture("production", false);
-    await expect(test.execute()).rejects.toThrow("Release canary designation missing for claude-setup-token");
-    expect(test.preflight).toHaveBeenCalledOnce();
-    expect(test.saved().resources.images).toEqual([]); expect(test.saved().releaseRuns).toEqual([]);
-    expect(test.saved().owner).toBe(test.state.owner); expect(test.saved().identity).toBe(test.state.identity);
-    expect(test.saved()).not.toHaveProperty("lease"); expect(test.registry.writeAdmission).not.toHaveBeenCalled();
-  });
-  it.each([
-    ["null images", (state: any) => { state.resources.images = null; }],
-    ["object images", (state: any) => { state.resources.images = {}; }],
-    ["string images", (state: any) => { state.resources.images = "invalid"; }],
-    ["null release history", (state: any) => { state.releaseRuns = null; state.resources.images = []; }],
-    ["object release history", (state: any) => { state.releaseRuns = {}; }],
-    ["array resource container", (state: any) => { state.resources = []; }],
-    ["ready receipt missing images", (state: any) => { state.status = "ready"; }],
-    ["populated resource container without images", (state: any) => { state.resources.railway = { id: "synthetic-service" }; }],
-    ["missing release history with retained images", (state: any) => { delete state.releaseRuns; state.resources.images = [{ snapshotId: "synthetic-old-image" }]; }],
-  ] as const)("does not repair %s or reach preflight", async (_label, change) => {
-    const test = fixture(); change(test.state);
-    const resources = structuredClone(test.state.resources), history = structuredClone(test.state.releaseRuns);
-    await expect(test.execute()).rejects.toThrow();
-    expect(test.preflight).not.toHaveBeenCalled(); expect(test.registry.writeAdmission).not.toHaveBeenCalled();
-    expect(test.saved().resources).toEqual(resources); expect(test.saved().releaseRuns).toEqual(history);
-  });
-  it("does not invent an image inventory for a populated historical run even when it has no canaries", async () => {
-    const test = fixture(); test.state.releaseRuns.push(test.run);
-    await expect(test.execute()).rejects.toThrow("historical ownership is unconfirmed");
-    expect(test.preflight).not.toHaveBeenCalled(); expect(test.saved().resources).toEqual({});
-    expect(test.saved().releaseRuns).toEqual([test.run]); expect(test.registry.writeAdmission).not.toHaveBeenCalled();
-  });
-  it("keeps a historical starting job with a missing allocation row fenced", async () => {
-    const test = fixture(); test.state.resources.images = [];
-    test.run.canaries.push({ ...workerConnections()[0], id: "88888888-8888-4888-8888-888888888888", startedAt: Date.now(),
-      phase: "starting", qualificationProfile: "full", image: { snapshotId: "synthetic-image", sourceCommit: test.run.sourceSha, buildSha256: "b".repeat(64) } });
-    test.state.releaseRuns.push(test.run);
-    await expect(test.execute()).rejects.toThrow("historical allocation journal is missing or ambiguous");
-    expect(test.preflight).not.toHaveBeenCalled(); expect(test.saved().resources.images).toEqual([]);
-    expect(test.saved().releaseRuns).toEqual([test.run]); expect(test.registry.writeAdmission).not.toHaveBeenCalled();
-  });
-  it("preserves an existing image array and valid empty-canary historical run", async () => {
-    const test = fixture(), record = { purpose: "release-worker", releaseRunId: test.run.runId, sourceCommit: test.run.sourceSha, snapshotId: "synthetic-old-image" };
-    test.state.resources.images = [record]; test.state.releaseRuns.push(test.run);
-    await expect(test.execute()).rejects.toThrow("Release canary designation missing for claude-setup-token");
-    expect(test.preflight).toHaveBeenCalledOnce(); expect(test.saved().resources.images).toEqual([record]);
-    expect(test.saved().releaseRuns).toEqual([test.run]); expect(test.registry.writeAdmission).not.toHaveBeenCalled();
-  });
-  it.each(["image builder", "native canary"])("defers prior Alpha %s recovery without observing or clearing its retained state", async kind => {
-    const test = fixture("alpha"), id = "88888888-8888-4888-8888-888888888888";
-    const builder = { id: "bx_previous", deleteRequested: true, deleted: false,
-      deletionOperationId: `bdop_${"c".repeat(32)}`, retiredAt: new Date(Date.now() - 10_000).toISOString() };
-    const record = kind === "image builder"
-      ? { purpose: "release-worker", releaseRunId: test.run.runId, sourceCommit: test.run.sourceSha, snapshotId: "synthetic-old-image", builder }
-      : { purpose: "native-agent-qualification", agentQualificationId: id, sourceCommit: test.run.sourceSha, sourceImage: "synthetic-old-image", nativeDispatchStarted: true, builder };
-    if (kind === "native canary") test.run.canaries.push({ ...workerConnections()[0], id, startedAt: Date.now() - 20_000,
-      phase: "starting", qualificationProfile: "full", image: { snapshotId: "synthetic-old-image", sourceCommit: test.run.sourceSha, buildSha256: "b".repeat(64) } });
-    test.state.resources.images = [record]; test.state.releaseRuns.push(test.run);
-    const retained = structuredClone({ images: test.state.resources.images, runs: test.state.releaseRuns });
-    await expect(test.execute()).rejects.toThrow("Release canary designation missing for claude-setup-token");
-    expect(test.preflight).toHaveBeenCalledOnce(); expect(test.fetcher).toHaveBeenCalledTimes(3);
-    expect(test.saved().resources.images).toEqual(retained.images); expect(test.saved().releaseRuns).toEqual(retained.runs);
-    expect(test.saved()).not.toHaveProperty("lease"); expect(test.registry.writeAdmission).not.toHaveBeenCalled();
-  });
-  it.each(["beta", "production"] as const)("keeps %s historical recovery before fresh preflight", async channel => {
-    const test = fixture(channel);
-    test.state.resources.images = [{ purpose: "release-worker", releaseRunId: test.run.runId, sourceCommit: test.run.sourceSha,
-      snapshotId: "synthetic-old-image", builder: { id: "bx_previous", retiredAt: new Date(Date.now() - 10_000).toISOString() } }];
-    test.state.releaseRuns.push(test.run);
-    await expect(test.execute()).rejects.toThrow("Worker builder retained storage is unconfirmed");
-    expect(test.preflight).not.toHaveBeenCalled(); expect(test.registry.writeAdmission).not.toHaveBeenCalled();
-  });
-  it("refuses a different authenticated owner before any recovery or broker preflight", async () => {
-    const test = fixture(); test.state.owner = workerOwner("beta");
-    await expect(test.execute()).rejects.toThrow("ownership receipt");
-    expect(test.preflight).not.toHaveBeenCalled(); expect(test.registry.writeDocument).not.toHaveBeenCalled();
-    expect(test.registry.writeAdmission).not.toHaveBeenCalled();
+    await expect(test.execute()).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
+    expect(dependencies.registry).not.toHaveBeenCalled(); expect(dependencies.requiredChecks).not.toHaveBeenCalled();
+    expect(test.fetcher).not.toHaveBeenCalled(); expect(test.saved()).toEqual(test.state);
   });
 });
 
@@ -170,6 +91,7 @@ describe("reconciliation-only worker runner", () => {
   });
   it("observes existing empty history under its real lease without preflight, admission changes or qualification", async () => {
     const test = fixture("alpha"); test.state.resources.images = [];
+    test.env.ZEROS_WORKER_PROMOTION = "disabled";
     await expect(reconcileWorkerNativeStorage(test.env)).resolves.toBe(0);
     expect(dependencies.requiredChecks).toHaveBeenCalledTimes(2); expect(dependencies.current).toHaveBeenCalledTimes(2);
     expect(test.preflight).not.toHaveBeenCalled(); expect(test.registry.writeAdmission).not.toHaveBeenCalled();

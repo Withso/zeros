@@ -3,12 +3,12 @@ import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution
 import type { AgentSendFailureInput } from "../agent-send-failure-toast";
 
 const mocks = vi.hoisted(() => ({ error: vi.fn(), settings: vi.fn(), restart: vi.fn(),
-  workspace: vi.fn(), account: vi.fn(), restartVisible: vi.fn(), internalFeature: vi.fn() }));
+  workspace: vi.fn(), account: vi.fn(), restartVisible: vi.fn(), accountAccess: vi.fn() }));
 vi.mock("../../../shared/ui/primitives/elements/toast", () => ({ toast: { error: mocks.error } }));
 vi.mock("../cloud-admission-status", () => ({ openCloudAdmissionSettings: mocks.settings }));
 vi.mock("../../../state/cloud-workspace-catalog", () => ({ cloudWorkspaceDocument: mocks.workspace, cloudCatalogGeneration: mocks.account }));
 vi.mock("../../../state/cloud-workspace-restart", () => ({ restartCloudWorkspace: mocks.restart, cloudWorkspaceRestartVisible: mocks.restartVisible }));
-vi.mock("../../settings/internal-features", () => ({ isInternalFeatureActive: mocks.internalFeature }));
+vi.mock("../../team/cloud-workspace-account-access", () => ({ hasCloudWorkspaceAccountAccess: mocks.accountAccess }));
 
 const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 let notify: typeof import("../agent-send-failure-toast").notifyAgentSendFailure;
@@ -22,13 +22,14 @@ beforeEach(async () => {
   mocks.workspace.mockReturnValue(undefined);
   mocks.account.mockReturnValue(1);
   mocks.restartVisible.mockReturnValue(true);
-  mocks.internalFeature.mockReturnValue(true);
+  mocks.accountAccess.mockReturnValue(true);
   mocks.restart.mockResolvedValue(undefined);
   notify = (await import("../agent-send-failure-toast")).notifyAgentSendFailure;
 });
 
 describe("agent send failure toasts", () => {
   it.each([
+    ["cloud_workspace_v2_required", "This workspace uses a retired cloud runtime", undefined],
     ["cloud_runtime_upgrade_required", "This workspace is on an older runtime", undefined],
     ["cloud_agent_model_not_authorized", "GPT-6.1 Sol isn't enabled for this workspace", "Agent settings"],
     ["cloud_agent_credential_required", "Connect Codex to send messages", "Reconnect"],
@@ -111,6 +112,7 @@ describe("agent send failure toasts", () => {
   });
 
   it.each([
+    ["retired_runtime", "This workspace uses a retired cloud runtime", undefined],
     ["queued_timeout", "Message wasn't sent in time", "Retry"],
     ["workspace_stopped", "Cloud workspace stopped", "Retry"],
     ["workspace_archived", "Cloud workspace is archived", undefined],
@@ -177,7 +179,7 @@ describe("agent send failure toasts", () => {
   it.each(["no-write", "no-document", "archived", "feature-off", "personal-local", "organization-local"])("offers no runtime restart for %s even with a caller hook", state => {
     mocks.workspace.mockReturnValue(state === "no-document" ? undefined : { capabilities: { canWrite: state !== "no-write" } });
     mocks.restartVisible.mockReturnValue(state !== "archived");
-    mocks.internalFeature.mockReturnValue(state !== "feature-off");
+    mocks.accountAccess.mockReturnValue(state !== "feature-off");
     const restart = vi.fn();
     notify(input("cloud_runtime_upgrade_required", {
       folder: state.endsWith("local") ? `/${state}` : folder, onRestartWorkspace: restart,

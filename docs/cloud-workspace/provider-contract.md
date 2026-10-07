@@ -1,9 +1,9 @@
 # Cloud compute provider contract
 
-Provider selection, credentials and allocation identity are separate from the
-managed deployment default. The registry resolves the exact provider recorded
-on a generation. A missing registration or unavailable customer credential fails
-closed; it never borrows another provider's managed account.
+Boat is the only supported execution provider. The registry resolves the exact
+accepted generation/account/allocation; deployment defaults never redirect it.
+Unsupported persisted providers/customer connections remain metadata only and
+fail before provider I/O. A historical row never borrows managed Boat authority.
 
 These are internal execution and operator contracts. The
 [Pro public response boundary](pro-backend.md#customer-response-boundary)
@@ -13,10 +13,11 @@ persisted provider identities and native credentials remain internal.
 
 ## Immutable generations
 
-Explicit customer connections choose their own provider and provisioning
-profile. Profiles contain the qualified image, architecture, CPU, memory,
-storage and source revision. The legacy flat configuration remains the profile
-for the managed default. Additional profiles are independent configuration.
+Supported generations require the saved v2 Computer source and complete qualified
+v4 runtime/base pin, plus the accepted architecture/CPU/memory/storage and source
+revision. Historical flat configuration and provider references remain serialized
+data, not a creation/profile selector. Current organization-role, funding and
+actor2 admission remain independent checks.
 
 Create and generation-replacement retries calculate their request digest from
 the accepted generation's profile. Changing deployment defaults cannot change
@@ -27,18 +28,10 @@ historical generation's profile and existing authorization checks.
 
 Hosted factories also receive the accepted generation's image and resources;
 the deployment's current image is not a substitute for a queued create target.
-Delegated resolution retains the exact encrypted credential version, endpoint,
-Organization and owner binding. Credential envelope bytes and associated data
-remain compatible with existing Daytona records.
-
-Daytona can be registered for customer accounts without a hosted Daytona account.
-Only execution limits and Daytona access-host policy are shared by its factories;
-the customer credential, endpoint, target and generation profile are explicit
-inputs. Customer onboarding uses its own endpoint configuration. The legacy flat
-endpoint is a default only while the managed provider is Daytona. Rotating a key
-preserves the accepted connection's endpoint and target, including after a
-deployment default changes. Moving a connection to another endpoint requires a
-separate connection rather than a key rotation.
+Applied schemas and historical seed rows remain unchanged. Unsupported
+persisted providers or customer credentials are unavailable for allocation,
+setup and access; list/overview reads remain readable and lifecycle requests
+return a typed unsupported error before provider I/O.
 
 ## Allocation and deletion evidence
 
@@ -144,7 +137,7 @@ this scheduling state without changing existing provider identities.
 The Linux setup executor uses a fixed image-owned helper, one-use admission,
 execution fence and pinned image/source contract. Provider runners transport
 that request without interpolating credentials into shell commands. The
-original Daytona exports remain compatibility aliases for the shared executor.
+shared implementation is `linux-setup-executor.ts`.
 
 Lifecycle allocation does not establish engine readiness or qualify optional
 agent, capture, SSH or preview capabilities. Access revocation must complete
@@ -156,18 +149,17 @@ attempts to overwrite client-capability or forwarding headers before caching.
 
 ## Current integration boundary
 
-Production composition accepts managed Boat or managed Daytona. Boat uses the
+Production composition accepts managed Boat. Boat uses the
 durable operation journal, restricted one-use bootstrap runner, and authenticated
 Zeros runtime listener. It exposes no provider administrator login to clients.
 Human SSH is the Zeros runtime service and must be qualified on the exact image.
-Boat has live scoped SSH, PTY, SFTP, forwarding and retirement evidence. Daytona
-must pass the same tests on a compatible host. Provider configuration and local
+Boat has live scoped SSH, PTY, SFTP, forwarding and retirement evidence.
+Provider configuration and local
 tests do not enable the production qualification gates.
 
 Managed Boat Linux VMs are the default provider: an unset
-`CLOUD_WORKSPACE_PROVIDER` means `boat`, and Daytona must be selected
-explicitly with `CLOUD_WORKSPACE_PROVIDER=daytona`. Customer Daytona
-connections stay off unless `DAYTONA_BYO_ENABLED=true`. Managed Boat requires
+`CLOUD_WORKSPACE_PROVIDER` means `boat`; any other value is rejected.
+Customer compute connections are unavailable. Managed Boat requires
 `BOAT_API_KEY`, a stable `BOAT_ACCOUNT_SCOPE`, `BOAT_BILLING_ORG`,
 `BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`, and `CLOUD_WORKSPACE_STORAGE_MIB`
 from the measured image. The
@@ -202,35 +194,11 @@ allocation billed elsewhere is not resumed; recover its workspace into a fresh
 generation. The wallet is billing scope, not the journal's account identity, so
 changing it does not change `BOAT_ACCOUNT_SCOPE`.
 
-Daytona BYO beside Boat requires `DAYTONA_BYO_ENABLED=true` and independent
-`DAYTONA_BYO_SNAPSHOT_ID`, `DAYTONA_BYO_SOURCE_COMMIT`,
-`DAYTONA_BYO_CPU_MILLICORES`, `DAYTONA_BYO_MEMORY_MIB`, and
-`DAYTONA_BYO_STORAGE_MIB`. Its architecture defaults to `linux/amd64` and can be
-set with `DAYTONA_BYO_ARCHITECTURE`. `DAYTONA_API_URL`, `DAYTONA_TARGET`, and
-the existing access/toolbox allowlists apply to that connection. No managed
-Daytona API key is required or used for BYO. The runtime registry refuses missing
-historic managed accounts; a default-provider migration must drain or retain
-the former provider deployment before removing its credentials.
-
-`DAYTONA_CONNECTIONS_ENABLED=true` permits credential onboarding independently
-of the compute profile. It uses `DAYTONA_API_URL`, `DAYTONA_TARGET` and the
-provider credential encryption key for bounded, read-only key verification and
-encrypted storage. It does not register a Daytona provisioning profile or enable
-allocation. This supports staff API qualification while host isolation remains
-unqualified. Enabling a complete BYO compute profile also enables onboarding;
-both controls default off beside managed Boat.
-
 Boat allocation accepts only the storage size declared by its qualified image
 profile. The provider API has no disk-resize parameter; accepting another size
 would misrepresent the reservation. Configuration alone does not prove capacity:
 the image qualification and runtime readiness checks must measure available
 storage before the profile is enabled.
-
-Daytona snapshot creation inherits CPU, memory, and disk from that snapshot.
-The adapter must not send resource overrides alongside a snapshot. It verifies
-the returned resources against the immutable generation reservation, including
-when recovering a timed-out allocation. Each offered size therefore needs a
-matching qualified snapshot; changing configuration cannot resize an image.
 
 Current helpers request version-2 setup materials, which carry the generation's
 architecture, CPU, memory, and storage. They compare host and ancestor-cgroup
@@ -253,5 +221,5 @@ and lost deletion receipts that cannot be recovered remain blocked for operator
 reconciliation. Never remove their journal records to unblock billing or purge.
 
 See the [client/runtime contract](client-runtime-contract.md) for multi-device
-and recovery requirements and the [runtime security gate](root-coordinator-threat-model.md)
+and recovery requirements and the [runtime security gate](security.md#protected-bootstrap-and-v4-engine-boundary)
 for the current production restriction.

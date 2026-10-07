@@ -5,9 +5,10 @@
 
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
-import { mkdtempSync } from "node:fs";
+import { fstatSync, mkdtempSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import * as ownership from "../cloud-workspace-ownership";
 
 import {
   CONTEXT_GRAPH_DIR,
@@ -26,6 +27,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await fs.rm(root, { recursive: true, force: true });
 });
 
@@ -324,6 +326,27 @@ describe("contextGraphArchivePaths", () => {
 });
 
 describe("stageContextGraphAttachment", () => {
+  it("publishes the admitted parent and renamed attachment by its still-open descriptor", async () => {
+    const published: string[] = [];
+    const original = ownership.publishCloudWorkspacePath;
+    vi.spyOn(ownership, "publishCloudWorkspacePath").mockImplementation((target, fd) => {
+      if (fd !== undefined) {
+        const pinned = fstatSync(fd), current = statSync(target);
+        expect(pinned.nlink).toBe(1);
+        expect([pinned.dev, pinned.ino]).toEqual([current.dev, current.ino]);
+        expect(target).toBe(graph("attachments", "att-1", "notes.txt"));
+      }
+      published.push(target);
+      original(target, fd);
+    });
+    expect(await stageContextGraphAttachment(root, {
+      attachmentId: "att-1", base64: Buffer.from("hello").toString("base64"), filename: "notes.txt",
+    })).toMatchObject({ ok: true });
+    expect(published).toContain(graph("attachments", "att-1"));
+    expect(published).toContain(graph("attachments", "att-1", "notes.txt"));
+    expect(published.every(target => target.startsWith(graph() + path.sep))).toBe(true);
+  });
+
   it("scaffolds on demand and writes to .context/attachments/<id>/", async () => {
     const res = await stageContextGraphAttachment(root, {
       attachmentId: "att-1",

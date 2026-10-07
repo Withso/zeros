@@ -4,7 +4,8 @@ This document defines the product and engineering contract for creating a
 Zeros workspace locally or in cloud, making integrity-checked copies between
 those placements, and keeping private device replicas. The append-only cloud
 migration ladder and desktop engine services implement the foundation. Alpha
-staff can control receive-only Mac replicas from cloud workspace details.
+members with current account/organization cloud access and edit authority can
+control receive-only Mac replicas from cloud workspace details.
 Protected signed-client qualification remains separate release work.
 
 ## The three independent dimensions
@@ -64,7 +65,7 @@ repository has no usable default. The workspace UI then shows a placement badge
 status. Do not use a single ambiguous `Local` status for both.
 
 Copy and replica actions use verbs that state their consequence. Workspace
-fork/copy UI remains deferred; Alpha's internal sync controls expose the replica
+fork/copy UI remains deferred; the authorized sync controls expose the replica
 actions below:
 
 - **Create cloud copy** forks a new cloud workspace and retains the local
@@ -89,7 +90,9 @@ is issued. Workspace deletion, device revocation, or explicit replica
 removal/tombstoning makes the original replica identity terminal; the member
 may remove the retained local copy or create a separately authorized new fork.
 
-SSH access is also outside the current UI phase. A local copy has an independent
+Native SSH/Terminal and forwarding use the separately authorized runtime-service
+path; signed Mac acceptance is still required. See
+[native access](native-access-acceptance.md). A local copy has an independent
 identity; it does not make a Mac authoritative for the cloud source.
 
 ## Ownership and collaboration rules
@@ -199,7 +202,7 @@ value into an Organization document.
 - User-delegated MCP identity is resolved per actor when the MCP protocol
   supports it. Workspace service credentials are resolved from an approved
   Organization or billing-owner binding and are never revealed to members.
-- Ownership transfer is deferred to Phase 6A. Its persisted model already
+- Active ownership transfer remains deferred. Its persisted model already
   identifies owner-scoped bindings; the accepted workflow must invalidate and
   replace them before a new cloud generation can become ready.
 
@@ -338,8 +341,8 @@ copying remains a separate operation with a fresh destination identity.
 
 ### Alpha Mac controls
 
-Cloud workspace details contains **Sync files to this Mac**, gated by
-`useInternalFeatureActive("cloudComputerV2")`. Controls require the native Mac
+Cloud workspace details contains **Sync files to this Mac**, gated by the current account/organization admission helper
+`useCloudWorkspaceAccountAccess(organizationId)`. Controls require the native Mac
 host and an explicit `capabilities.canEdit === true`; an absent capability
 fails closed. E5 owns that server-derived capability. A new replica also
 requires a running workspace. Opening details or refreshing metadata never
@@ -526,7 +529,7 @@ The main implemented relations are below. Exact SQL names in migrations
 | `repository_device_paths`                                         | Device-local stable repository ID to canonical path mapping; SQLite only                                                                                                     |
 | `repository_settings_versions`                                    | Immutable schema-versioned Shared/Local/Cloud non-secret documents with creator and provenance                                                                               |
 | `environment_profiles` / `environment_profile_versions`           | Named Personal or Organization placement profiles and immutable build inputs                                                                                                 |
-| `provider_connections`                                            | User/Organization-owned encrypted Daytona or future provider binding; no raw credential in workspace rows                                                                    |
+| `provider_connections`                                            | Organization-hosted Boat binding; historical customer bindings fail closed; no raw credential in workspace rows                                                                    |
 | `secret_bindings`                                                 | Opaque secret-store references scoped by tenant, owner, purpose, placement, and rotation version                                                                             |
 | `cloud_workspaces`                                                | Cloud UUID, non-Personal Organization/team/repository, creator, owner, assignee, visibility, single-member flag, authority/billing epochs, lifecycle, and optimistic version |
 | `cloud_workspace_members`                                         | Explicit workspace role/following/presence eligibility; membership is always bounded by Organization/Team membership                                                         |
@@ -550,7 +553,7 @@ The main implemented relations are below. Exact SQL names in migrations
 | `workspace_fork_import_entries` / `workspace_fork_import_records` | Bounded immutable staging for file overlays and optional portable chat records; blob reservations use `workspace_blob_references`                                            |
 | `workspace_ports`                                                 | Engine-observed sandbox listeners and health, never an unauthenticated public endpoint                                                                                       |
 | `port_forward_sessions`                                           | Actor/device/remote/local mapping, bind address, grant, expiry, and observed status                                                                                          |
-| `cloud_workspace_ownership_transfers`                             | Deferred Phase 6A offer/accept/cancel state; old/new owner and optimistic workspace version                                                                                  |
+| `cloud_workspace_ownership_transfers`                             | Deferred ownership offer/accept/cancel state; old/new owner and optimistic workspace version                                                                                  |
 | `usage_events`                                                    | Immutable provider/agent usage with actor, billing-owner snapshot, billing epoch, source idempotency key, quantity, and timestamps                                           |
 | `outbox_events`                                                   | Transactional publication of lifecycle, sync, audit, usage, and notification events                                                                                          |
 
@@ -678,7 +681,7 @@ flow, and it never uploads local source changes.
   outranks late events; the original server replica binding is terminal and
   cannot resume or become authoritative. Any retained on-disk bytes are only a
   `Detached` local copy, not a live replica.
-- Ownership transfers across provider accounts are Phase 6A work: checkpoint
+- Ownership transfers across provider accounts remain deferred: checkpoint
   and reprovision; changing an owner column alone is forbidden.
 - A fork request times out: replay the same idempotency key and source snapshot.
   Never reuse the source UUID, delete the source, or create another destination
@@ -688,7 +691,7 @@ flow, and it never uploads local source changes.
 
 ## Acceptance matrix
 
-Before Phase 5 can be called seamless for a single member, automated and
+Before single-member continuity can be released, automated and
 end-to-end tests cover:
 
 - Personal local and Organization local/cloud creation with exact settings
@@ -714,7 +717,7 @@ end-to-end tests cover:
 - backup/restore into a fresh provider environment without relying on the old
   sandbox or a Mac replica.
 
-Before Phase 6A multiplayer can ship, extend the same matrix to two or more
+Before multiplayer release, extend the same matrix to two or more
 members and prove independent device paths/cursors, role and membership
 revocation, owner transfer, billing-epoch cutover, and the absence of
 cross-member replica side effects.
@@ -750,7 +753,7 @@ Execute and record each result:
 
 | Step | Action | Required observation |
 | --- | --- | --- |
-| Gate and authority | Open workspace details on each Mac, then with the internal toggle disabled and with a prompter/viewer role. | The surface is absent without the staff gate. Edit controls are unavailable for `canEdit: false` or an older document without `canEdit`; the other details still work. |
+| Gate and authority | Open workspace details on each Mac, then sign out or withdraw current account/organization cloud access; also test a prompter/viewer role. | The surface is absent without current cloud access. Edit controls are unavailable for `canEdit: false` or an older document without `canEdit`; authorized read-only details still work. |
 | Initial download | In the Cloud terminal, create a primary `zeros-v2-test-e3-source.txt` marker. On each Mac choose its own empty folder. Record the independent replica IDs and initial/final cursors using private Local engine diagnostics. | Checkpoint download and ordered catch-up reach **In sync** with identical allowed content and different device/path bindings. An existing nonempty folder is rejected without overwriting its files. |
 | Exclusions | Create harmless markers at `node_modules/zeros-v2-test-e3.txt`, `.env.zeros-v2-test-e3`, and `.zeros/zeros-v2-test-e3.txt` in the primary cloud root. Inspect both downloaded folders and the existing cloud `.git` boundary. | `.git`, dependency directories, secret-like files, and private Zeros state are absent on both Macs. Allowed source changes still arrive. Additional replica exclusions are visible when configured. |
 | Cloud edits | Update the source marker twice, add another allowed marker, and delete that marker through the Cloud terminal. | Both replicas converge to the final cloud bytes and deletion in event order. Cloud remains authoritative. |

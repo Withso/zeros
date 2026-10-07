@@ -51,7 +51,7 @@ it.each(['end_turn','cancelled','failure'])('public prompt completion retains as
  })});
  try{
   let failure:any=null;await gateway.prompt('codex','s',[{type:'text',text:'Hello'}]).catch(e=>{failure=e;});
-  if(ending==='failure')expect(failure?.message).toBe('safe failure');else expect(failure).toBeNull();
+  if(ending==='failure')expect(failure).toMatchObject({code:'cloud_provider_prompt_rejected',failure:{kind:'protocol-error',stage:'prompt',message:expect.stringContaining('Review the conversation')}});else expect(failure).toBeNull();
   const text=events.onSessionUpdate.mock.calls.map(([,n])=>n.update.content.text).join('');
   expect(text).toBe('Complete ordinary answer. [redacted]! Last [redacted]');
   expect(events.onSessionUpdate.mock.calls.every(([,n])=>n.sessionId==='s'&&n.update.messageId==='m')).toBe(true);
@@ -64,7 +64,7 @@ it('public gateway rejects with a scrubbed truncated provider diagnostic',async(
  const gateway=new AgentGateway({projectRoot:'/tmp',events,cloudAgentExecutionFactory:{prepare:vi.fn()}}),g=gateway as any;
  state.execution={lease:{signal:new AbortController().signal,admission:{provider:'codex'},validate:vi.fn(async()=>{})},redactor:new CloudCustomizationRedactor([secret])};g.executionBoundaries.set('s',{});
  g.adapterForSession=()=>({agentId:'codex',prompt:vi.fn(async()=>{throw new Error('MCP exited: '+prefix);})});
- try{const error=await gateway.prompt('codex','s',[{type:'text',text:'Hello'}]).catch(e=>e);expect(error.message).toContain('MCP exited:');expect(error.message).not.toContain(prefix);}finally{state.execution=null;g.executionBoundaries.clear();}
+ try{const error=await gateway.prompt('codex','s',[{type:'text',text:'Hello'}]).catch(e=>e);expect(error).toMatchObject({code:'cloud_provider_prompt_rejected',failure:{kind:'protocol-error',stage:'prompt',message:expect.stringContaining('Review the conversation')}});expect([error.message,error.stack,JSON.stringify(error.failure)].join('\n')).not.toContain(prefix);}finally{state.execution=null;g.executionBoundaries.clear();}
 });
 
 it('public gateway retries interrupted owner changes without resuming the prior owner binding',async()=>{

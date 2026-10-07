@@ -1,16 +1,20 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useInternalFeatureActive } from "../../features/settings/internal-features";
+import { useCloudWorkspaceAccountAccess } from "../../features/team/cloud-workspace-account-access";
 import { getOrganizationStoreGeneration, useTeams } from "../../features/team/team-store";
 import { useNativeRuntime } from "../../platform/runtime";
 import { onActiveBridgeConnected } from "../../platform/bridge/active-bridge";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
+import { cloudWorkspaceExecutionRefusal } from "../../platform/cloud-workspace-execution";
 import { changeCloudReplica, createCloudReplica, pickCloudReplicaFolder, type CloudReplica, type CloudReplicaScope } from "../../platform/cloud-replicas";
 import {
   CLOUD_REPLICA_FRESHNESS_MS, cloudReplicaCache, cloudReplicaIdentityCache, cloudReplicaIdentityKey,
   cloudReplicaScopeKey, readCloudReplicaIdentityKey, readCloudReplicaScopeKey, warmCloudWorkspaceReplicas,
 } from "../../state/cloud-replica-cache";
 import { useCachedRead } from "../../state/use-cached-read";
-import { Button } from "../../shared/ui";
+import { Ellipsis, FolderSync } from "lucide-react";
+import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, Switch } from "../../shared/ui/primitives";
+import { OpenInPathButton } from "./conversation-header";
+import { useCloudWorkspaceSurfaceActive } from "./use-cloud-workspace-surface";
 
 function statusLabel(replica: CloudReplica | null): string {
   if (!replica) return "Off";
@@ -18,13 +22,15 @@ function statusLabel(replica: CloudReplica | null): string {
     in_sync: "In sync", diverged: "Local changes", paused: "Paused", detached: "Detached", failed: "Needs attention", removed: "Off" }[replica.observedState];
 }
 
-export function CloudWorkspaceSyncControls({ workspace, active }: { workspace: CloudWorkspaceDocument; active: boolean }) {
-  const internal = useInternalFeatureActive("cloudComputerV2");
+export function CloudWorkspaceSyncControls({ workspace, active: requestedActive }: { workspace: CloudWorkspaceDocument; active: boolean }) {
+  const active = useCloudWorkspaceSurfaceActive(requestedActive);
+  const internal = useCloudWorkspaceAccountAccess(workspace.organizationId);
   const native = useNativeRuntime().ready;
   const { me } = useTeams();
   const accountUserId = me?.user.id;
   const canEdit = workspace.capabilities.canEdit === true && !workspace.deletedAt && !["deleting", "deleted"].includes(workspace.status);
-  const authorized = internal && native && canEdit && !!accountUserId;
+  const cloud = workspace.placement === "cloud";
+  const authorized = cloud && internal && native && canEdit && !!accountUserId;
   const accountEpoch = getOrganizationStoreGeneration();
   const accountKey = authorized ? cloudReplicaIdentityKey(accountUserId!) : null;
   const identity = useCachedRead(cloudReplicaIdentityCache, accountKey, readCloudReplicaIdentityKey,
@@ -35,6 +41,7 @@ export function CloudWorkspaceSyncControls({ workspace, active }: { workspace: C
   const snapshot = useCachedRead(cloudReplicaCache, key, readCloudReplicaScopeKey,
     { enabled: active, maxAgeMs: CLOUD_REPLICA_FRESHNESS_MS });
   const replica = snapshot.data?.replica ?? null;
+  const executionUnavailable = !!cloudWorkspaceExecutionRefusal(workspace);
   const divergences = snapshot.data?.divergences ?? [];
   const detached = replica?.observedState === "detached";
   const context = useRef({ key, active, authorized, replicaId: replica?.replicaId });
@@ -79,12 +86,13 @@ export function CloudWorkspaceSyncControls({ workspace, active }: { workspace: C
     return () => { off(); clearInterval(timer); document.removeEventListener("visibilitychange", warm); window.removeEventListener("focus", warm); };
   }, [active, authorized, accountKey, accountUserId, workspace.organizationId, workspace.id]);
 
-  if (!internal || !active) return null;
+  if (!cloud || !internal || !active) return null;
   const currentBusy = busy?.key === key;
   const disabled = currentBusy || !!identity.error || !!snapshot.error;
   const isCurrent = (ownerKey: string, replicaId?: string) => context.current.active && context.current.authorized &&
     context.current.key === ownerKey && (replicaId === undefined || context.current.replicaId === replicaId);
   const mutate = async (operation: "create" | "pause" | "resume" | "remove" | "replace") => {
+    if (executionUnavailable && ["create", "resume", "replace"].includes(operation)) return;
     if (!scope || !key || !isCurrent(key) || pending.current?.key === key || disabled || (detached && operation !== "remove")) return;
     const ownerKey = key, currentReplicaId = replica?.replicaId;
     if (operation !== "create" && !currentReplicaId) return;
@@ -117,27 +125,37 @@ export function CloudWorkspaceSyncControls({ workspace, active }: { workspace: C
       setBusy(value => value?.id === job.id ? null : value);
     }
   };
-  const refresh = () => {
-    if (accountKey) cloudReplicaIdentityCache.invalidate(accountKey);
-    if (key) cloudReplicaCache.invalidate(key);
-  };
   const confirm = confirmation?.key === key && confirmation.replicaId === replica?.replicaId &&
-    (confirmation.action !== "replace" || !detached) ? confirmation : null;
-  const extraExclusions = replica?.ignorePolicy && typeof replica.ignorePolicy === "object" && "excludePrefixes" in replica.ignorePolicy &&
-    Array.isArray(replica.ignorePolicy.excludePrefixes) ? replica.ignorePolicy.excludePrefixes.filter((value): value is string => typeof value === "string") : [];
+    (confirmation.action !== "replace" || !detached && !executionUnavailable) ? confirmation : null;
+  const synced = replica?.desiredState === "active" && !detached;
+  const canChoose = ["ready", "busy"].includes(workspace.status) && !executionUnavailable;
   return (
-    <section className="border-border1 mt-4 space-y-2 border-t pt-3" aria-label="Sync files to this Mac">
-      <h3 className="text-fg1 text-xs font-medium">Sync files to this Mac</h3>
-      <p className="text-fg2 text-xs">Receive-only downloads of the primary repository. Local edits stay on this Mac and are never uploaded.</p>
-      <p className="text-fg3 text-xs">Excluded: .git, node_modules, .env files, credential files and private Zeros state.</p>
-      {extraExclusions.length > 0 && <p className="text-fg3 text-xs break-words">Additional exclusions: {extraExclusions.join(", ")}</p>}
+    <section className="border-border1 mt-3 space-y-2 border-t pt-3" aria-label="Sync to a local directory">
+      <div className="flex items-center gap-2">
+        <FolderSync className="text-fg2 size-3.5 shrink-0" />
+        <h3 className="text-fg1 flex-1 text-xs font-medium">Sync to a local directory</h3>
+        <Switch aria-label="Sync to a local directory" checked={!!synced}
+          disabled={!authorized || disabled || !snapshot.data || detached || (!replica && !canChoose) || (executionUnavailable && !synced)}
+          onCheckedChange={enabled => { void mutate(replica ? enabled ? "resume" : "pause" : "create"); }} />
+      </div>
       {!native ? <p className="text-fg2 text-xs">Sync is available in the Mac app.</p> : !canEdit ?
         <p className="text-fg2 text-xs">Sync controls require workspace edit access.</p> : !accountUserId ?
           <p className="text-fg2 text-xs">Sign in to use sync on this Mac.</p> : (
             <>
-              {snapshot.data ? <p className="text-fg1 text-xs" role="status">{statusLabel(replica)}{currentBusy ? " · Updating…" : ""}</p> :
+              {snapshot.data ? <div className="flex items-center gap-1.5">
+                {replica && <span className={replica.observedState === "in_sync" ? "bg-green-primary size-1.5 rounded-full" : "bg-fg3 size-1.5 rounded-full"} aria-hidden="true" />}
+                <p className="text-fg1 flex-1 text-xs" role="status">{statusLabel(replica)}{currentBusy ? " · Updating…" : ""}</p>
+                {replica && <DropdownMenu><DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="icon-compact" aria-label="Sync actions" disabled={currentBusy}><Ellipsis /></Button>
+                </DropdownMenuTrigger><DropdownMenuContent align="end">
+                  {!detached && <DropdownMenuItem disabled={disabled || (executionUnavailable && (replica.desiredState === "paused" || replica.observedState === "failed"))} onSelect={() => { void mutate(replica.desiredState === "paused" || replica.observedState === "failed" ? "resume" : "pause"); }}>
+                    {replica.desiredState === "paused" ? "Resume" : replica.observedState === "failed" ? "Retry sync" : "Pause"}
+                  </DropdownMenuItem>}
+                  <DropdownMenuItem disabled={disabled} onSelect={() => setConfirmation({ key: key!, replicaId: replica.replicaId, action: "remove" })}>Remove sync…</DropdownMenuItem>
+                </DropdownMenuContent></DropdownMenu>}
+              </div> :
                 <p className="text-fg2 text-xs" role="status">{identity.error || snapshot.error ? "Sync status unavailable." : "Loading sync status…"}</p>}
-              {replica && <p className="text-fg2 text-xs break-words">{replica.rootPath}</p>}
+              {replica && <OpenInPathButton path={replica.rootPath} />}
               {detached && <p className="text-fg2 text-xs">This Mac no longer has sync access. Your downloaded files are kept.</p>}
               {replica?.observedState === "failed" && <p className="text-fg2 text-xs">Sync needs attention. Your downloaded files are kept; retry when the connection is available.</p>}
               {(identity.error || snapshot.error) && <p className="text-fg3 text-xs" role="status">Couldn’t refresh. Showing the last confirmed sync state when available.</p>}
@@ -149,20 +167,10 @@ export function CloudWorkspaceSyncControls({ workspace, active }: { workspace: C
                     {divergences.slice(0, 25).map(change => <li key={change.path}>{change.path}</li>)}
                   </ul>
                   {divergences.length > 25 && <p className="text-fg3 text-xs">{divergences.length - 25} more changed files.</p>}
-                  <Button size="sm" variant="secondary" disabled={disabled || detached} onClick={() => setConfirmation({ key: key!, replicaId: replica!.replicaId, action: "replace" })}>Use cloud version…</Button>
+                  <Button size="sm" variant="secondary" disabled={disabled || detached || executionUnavailable} onClick={() => setConfirmation({ key: key!, replicaId: replica!.replicaId, action: "replace" })}>Use cloud version…</Button>
                 </div>
               )}
-              {snapshot.data && !replica && (["ready", "busy"].includes(workspace.status) ?
-                <Button size="sm" variant="secondary" disabled={disabled} onClick={() => void mutate("create")}>Choose folder…</Button> :
-                <p className="text-fg2 text-xs">Start the workspace before choosing an empty folder.</p>)}
-              {replica && (
-                <div className="flex flex-wrap gap-2">
-                  {!detached && <Button size="sm" variant="secondary" disabled={disabled} onClick={() => void mutate(replica.desiredState === "paused" || replica.observedState === "failed" ? "resume" : "pause")}>
-                    {replica.desiredState === "paused" ? "Resume" : replica.observedState === "failed" ? "Retry sync" : "Pause"}
-                  </Button>}
-                  <Button size="sm" variant="secondary" disabled={disabled} onClick={() => setConfirmation({ key: key!, replicaId: replica.replicaId, action: "remove" })}>Remove…</Button>
-                </div>
-              )}
+              {snapshot.data && !replica && !canChoose && !executionUnavailable && <p className="text-fg2 text-xs">Start the workspace before choosing an empty folder.</p>}
               {confirm && <div className="space-y-2">
                 <p className="text-fg2 text-xs break-words">{confirm.action === "remove"
                   ? "Stop sync on this Mac? Downloaded files stay in this folder. Other replicas keep syncing."
@@ -172,7 +180,6 @@ export function CloudWorkspaceSyncControls({ workspace, active }: { workspace: C
                   <Button size="sm" variant="secondary" disabled={disabled} onClick={() => void mutate(confirm.action === "remove" ? "remove" : "replace")}>{confirm.action === "remove" ? "Remove sync" : "Save local changes and receive cloud"}</Button>
                 </div>
               </div>}
-              <Button size="sm" variant="ghost" disabled={currentBusy} onClick={refresh}>Refresh sync status</Button>
             </>
           )}
     </section>

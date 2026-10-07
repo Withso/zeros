@@ -35,6 +35,24 @@ function fixture() {
 }
 
 describe("hosted Dev boundaries", () => {
+  it("refuses native agent intent before renewal/operator/SSH while preserving no-fixture connection maintenance", async () => {
+    const f = fixture(), fetcher = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected provider transport"));
+    const services = hostedServices(temporary(), temporary(), f.profile);
+    f.state.status = "ready"; f.profile.fixture = {};
+    f.profile.connections = { enabled: true };
+    f.state.connectionRegistration = { expiresAt: new Date(Date.now() + 1000).toISOString() };
+    const before = structuredClone(f.state);
+    try {
+      await expect(services.agents(f.lease)).rejects.toMatchObject({ status: 409, code: "release_worker_images_retired" });
+      expect(fetcher).not.toHaveBeenCalled(); expect(f.lease.save).not.toHaveBeenCalled();
+      expect(f.lease.fence).not.toHaveBeenCalled(); expect(f.state).toEqual(before);
+      delete f.profile.fixture; delete f.state.connectionRegistration;
+      expect(await services.agents(f.lease)).toEqual({ state: "ready" });
+      f.state.status = "archiving";
+      await expect(services.seed(f.lease)).rejects.toThrow("Launch the Dev environment");
+      expect(fetcher).not.toHaveBeenCalled(); expect(f.lease.save).not.toHaveBeenCalled();
+    } finally { services.close(); fetcher.mockRestore(); }
+  });
   it("seeds capacity from the matching worker build instead of the first historical image", () => {
     const previous = { inputsSha256: "a".repeat(64), qualified: true, storageMiB: 2048 };
     const current = { inputsSha256: "b".repeat(64), qualified: true, storageMiB: 4096 };

@@ -16,12 +16,10 @@ import { clearCloudAgentRegistry } from "../features/agent/workspace-agent-regis
 import { controlPlane } from "../features/team/control-plane";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
 import type { RuntimeClient } from "../platform/bridge/ws-client";
-import { CloudComputerPanel } from "../features/settings/cloud-computer-panel";
+import { CloudComputerV2Panel } from "../features/settings/cloud-computer-v2-panel";
 import { CloudGithubSection } from "../features/settings/cloud-github-section";
 import { clearCloudGithub } from "../platform/cloud-github";
-import { clearCloudComputers } from "../features/settings/cloud-computer-client";
 import { clearCloudComputersV2 } from "../features/settings/cloud-computer-v2-client";
-import { setInternalFeatureEnabled } from "../features/settings/internal-features";
 import { OpenGithubProjectDialog } from "../shell/dialogs/open-github-project";
 import { acceptCloudWorkspaceDocument } from "../state/cloud-workspace-catalog";
 import { notifyProjectsChanged } from "../state/use-projects";
@@ -50,7 +48,6 @@ let user = userA;
 const harnessQuery = new URLSearchParams(location.search);
 const computerV2Mode = harnessQuery.has("computer-v2");
 let platformOwner = computerV2Mode;
-setInternalFeatureEnabled("cloudComputerV2", computerV2Mode);
 const DispatcherPage = computerV2Mode ? (await import("../shell/dispatcher/dispatcher-modal")).DispatcherPage : null;
 const agents = [{ id: "claude", name: "Claude Code", version: "fixture", description: "", distribution: {}, installed: true, authenticated: true }];
 if (computerV2Mode) await loadAgents(async () => agents);
@@ -60,7 +57,6 @@ function installAccount(next: string) {
   clearCloudProviderConnections();
   clearCloudAgentRegistry();
   clearCloudGithub();
-  clearCloudComputers();
   clearCloudComputersV2();
   const organization = {
     id: organizationId,
@@ -286,8 +282,6 @@ function Harness() {
       <main className="bg-bg1 text-fg1 min-h-screen p-8">
         <div className="mb-6 flex gap-2">
           {computerV2Mode && <>
-            <Button onClick={() => setInternalFeatureEnabled("cloudComputerV2", true)}>Enable computer v2</Button>
-            <Button onClick={() => setInternalFeatureEnabled("cloudComputerV2", false)}>Disable computer v2</Button>
             <Button onClick={() => setGithubOpen(true)}>Open GitHub create</Button>
             <Button onClick={() => setSection("create")}>Create section</Button>
             <Button onClick={() => setOrganizationRole("admin")}>
@@ -352,7 +346,7 @@ function Harness() {
         )}
         {section === "providers" && <ProvidersPanel surfaceActive={active} />}
         {section === "computer" && (
-          <CloudComputerPanel surfaceActive={active && !workspaceOpen} />
+          <CloudComputerV2Panel surfaceActive={active && !workspaceOpen} />
         )}
         {section === "github" && organization && me && (
           <CloudGithubSection

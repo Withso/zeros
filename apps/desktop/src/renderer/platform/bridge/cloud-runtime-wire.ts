@@ -258,6 +258,14 @@ export function cloudIncoming(
     out.workspaceIds = [cloudWorkspaceKey(scope)];
     out.cloudWorkspace = cloudWorkspaceKey(scope);
   }
+  if (message.op === "workspace.resourceUsage" && message.type === "WORKSPACE_RESPONSE" && message.result) {
+    const sample = record(message.result);
+    if (sample.organizationId !== scope.organizationId || sample.workspaceId !== scope.workspaceId)
+      throw new Error("Resource usage does not match the admitted cloud workspace");
+    // This operation already carries the CP UUID, not a VM-native workspace
+    // row/path. Preserve its exact typed identity instead of generic remapping.
+    return { ...out, result: sample };
+  }
   if (message.result && typeof message.result === "object") {
     const result = mapFields(scope, record(message.result), "in");
     if (typeof message.op === "string" &&

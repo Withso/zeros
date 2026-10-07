@@ -60,7 +60,7 @@ import { LocalTransport } from "./transport/local";
 import { CloudTransport, parseCloudTransportPort } from "./transport/cloud";
 import { CloudRuntimeHumanServices } from "./transport/cloud-human-services";
 import { CloudRuntimeLanguageServices } from "./transport/cloud-language-services";
-import { CloudComputerTerminalEnvironmentSchema } from "@zeros/protocol/cloud-agent-execution";
+import { CloudComputerTerminalEnvironmentSchema, isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
 import { cloudComputerProcessEnvironment } from "./agents/cloud-computer-environment";
 import { CloudCustomizationRedactor } from "./agents/cloud-customization-redaction";
 import { readObservedCloudWorkspacePorts } from "./cloud-observed-ports";
@@ -75,6 +75,7 @@ import {
 } from "./runtime";
 import { shouldLogAgentDispatch } from "./agent-dispatch-logging";
 import { engineRuntimeDir, zerosDataDir } from "./db/paths";
+import { recoverCloudWorkspaceOwnership } from "./files/cloud-workspace-ownership";
 import { openZerosDb, resumeZerosDbAfterRuntimeHandoff, sealZerosDbForRuntimeHandoff } from "./db";
 import {
   buildAccountAuthFromEnv,
@@ -155,6 +156,8 @@ import { CloudEventRuntimeError } from "./cloud-event-client";
 import { CloudEventClientRequestSchema } from "@zeros/protocol/cloud-events";
 import { cloudPermissionMode, legacyCloudCommandResponse, type CloudCommandClaim, type CloudCommandResult, type CloudQueuedPrompt } from "@zeros/protocol/cloud-commands";
 import { CloudConversationCreateSchema, CloudConversationReadSchema, CloudConversationModeSchema } from "@zeros/protocol/cloud-commands";
+import { cloudCommandFailureCode, decodeCloudCommandFailure, cloudCommandFailureFromCode, CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
+import { CloudAgentAdmissionError } from "./cloud-agent-execution-client";
 import { listKnownRepoRoots } from "./db/projects";
 import { resolveRunActions } from "./settings/repo-scripts";
 import {
@@ -1319,6 +1322,13 @@ export class ZerosEngine {
     this.cache = new EngineCache(this.root);
     this.workspace = new WorkspaceService(this.root, {
       primaryDesignWorkspace: Boolean(cloudWorker),
+      cloudResourceUsageIdentity: () => this.cloudWorker && this.cloudRuntimeConfig &&
+        this.cloudRuntimeRegistration?.readiness() && !this.cloudRuntimeAuthorityStopping ? {
+          organizationId: this.cloudRuntimeConfig.execution.organizationId,
+          workspaceId: this.cloudRuntimeConfig.execution.workspaceId,
+          generation: this.cloudRuntimeConfig.execution.generation,
+          engineInstanceId: this.cloudRuntimeConfig.engine.instanceId,
+        } : null,
     });
     const cloudWorkspacePipelines = createCloudWorkspaceDesktopPipelines({
       cloudWorker: Boolean(cloudWorker),
@@ -1991,6 +2001,11 @@ export class ZerosEngine {
       releaseRetainedExecution:executionId=>this.agents.releaseCloudBackgroundReservation(executionId),
       prepare:claim=>this.prepareCloudCommand(claim),
       retire:(claim,result)=>this.retireCloudCommand(claim,result.state==="succeeded"),
+      failed:(claim,code,error)=>this.publishCloudCommandFailure(claim,code,error),
+      interrupted:(conversationId,receipt)=>{
+        if(receipt.payload)this.publishCloudCommandFailure({conversationId,commandId:receipt.commandId,
+          executionId:receipt.executionId,payload:receipt.payload},"engine_interrupted");
+      },
       cancel: conversationId=>this.cancelCloudCommandConversation(conversationId),
       changed: (conversationId) => this.broadcast(createMessage({
         type: "DB_CHANGED", source: "engine", kinds: ["chats"], chatIds: [conversationId],
@@ -2689,6 +2704,7 @@ export class ZerosEngine {
    * Start the engine. Builds indexes, starts server, starts watcher.
    */
   private designCaptureService: DesignCaptureService | undefined;
+  private cloudCaptureStartup: object | undefined;
   async start(): Promise<void> {
     if (this.running) return;
 
@@ -2729,6 +2745,16 @@ export class ZerosEngine {
     const swept = await sweepDeadSessions();
     if (swept > 0) {
       console.log(`[Zeros] swept ${swept} crashed session dir(s)`);
+    }
+
+    if (this.cloudWorker?.version === 4) {
+      const recovered = await recoverCloudWorkspaceOwnership(this.cloudWorker, {
+        privateRoots: [zerosDataDir(), engineRuntimeDir(this.root)],
+        ownerRoots: this.workspace.codeReviewOwnerRoots(),
+      });
+      console.log(
+        `[Zeros] checkout ownership recovery: visited=${recovered.visited} published=${recovered.published} skipped=${recovered.skipped} failed=${recovered.failed} bounded=${Number(recovered.bounded)}`,
+      );
     }
 
     // Publish launch authority only after stale write capabilities are gone.
@@ -2798,17 +2824,6 @@ export class ZerosEngine {
     // disconnect re-connect on the next refresh/restart.
     this.setupHostControlChannel();
     this.setupParentDeathWatchdog();
-
-    // Only the attested cloud execution posture may admit the immutable
-    // renderer worker. A transport environment variable is not authority.
-    if (this.cloudWorker) {
-      try {
-        this.designCaptureService = await startCloudDesignCapture();
-        if (this.designCaptureService) setDesignCaptureConfig(this.designCaptureService);
-      } catch {
-        console.warn("[Design] Cloud capture unavailable; source tools remain available.");
-      }
-    }
 
     // 1a. One-time fold-in of the legacy ~/.zeros/state.db (workspaces + meta +
     // detach_state) into the unified zeros.db. Runs before seedFromDisk
@@ -3189,12 +3204,34 @@ export class ZerosEngine {
     console.log(
       `[Zeros] Engine ready on port ${this.actualPort} (${elapsed}ms)`,
     );
+    // Capture is optional: source tools remain usable without its renderer.
+    // Start only after handlers and initial durable registration are ready;
+    // the capture host still validates the immutable, attested cloud image.
+    if (this.cloudWorker) {
+      const startup = {};
+      this.cloudCaptureStartup = startup;
+      const active = () => this.running && this.cloudCaptureStartup === startup &&
+        !this.cloudRuntimeAuthorityStopping && !this.cloudRuntimeHandoffFenced;
+      setImmediate(() => {
+        if (!active()) return;
+        void startCloudDesignCapture().then(async service => {
+          if (!service) return;
+          if (!active()) { await service.stop(); return; }
+          this.designCaptureService = service;
+          setDesignCaptureConfig(service);
+        }).catch(() => {
+          console.warn("[Design] Cloud capture unavailable; source tools remain available.");
+        });
+      }).unref();
+    }
   }
 
   /**
    * Stop the engine gracefully.
    */
   async stop(): Promise<void> {
+    // A late optional startup must not restore capture after stop/replacement.
+    this.cloudCaptureStartup = undefined;
     this.activityHeartbeat?.stop();
     const idleStopped = this.cloudIdleStop.close();
     const checkpointStopped = this.cloudCheckpointScheduler?.close();
@@ -3755,8 +3792,18 @@ export class ZerosEngine {
     if(!claim.actor||claim.dispatchAllowed!==true||!claim.payload.agentCredentialGrantId||!claim.payload.model)
       return Promise.reject(new CloudCommandRuntimeError("cloud_actor_authority_rejected"));
     if(this.cloudCommandSessions.has(claim.commandId))return Promise.reject(new Error("Cloud command is already admitted"));
+    let admissionError: Error | undefined;
     const receiver:TransportClient={id:`cloud-command:${claim.commandId}`,kind:"cloud",close:()=>{},
-      cloudCommandActor:claim.actor,accountUserId:claim.actor.userId,send:message=>this.broadcast(message)};
+      cloudCommandActor:claim.actor,accountUserId:claim.actor.userId,send:message=>{
+        if(message.type === "AGENT_ERROR") {
+          const code = isCloudAgentAdmissionCode(message.code) || decodeCloudCommandFailure(message.code) ? message.code
+            : cloudCommandFailureCode(message, "provider_start");
+          admissionError = isCloudAgentAdmissionCode(code) ? new CloudAgentAdmissionError(code)
+            : message.failure ? Object.assign(new AgentFailureError(message.failure), { code })
+            : new CloudCommandFailureError(decodeCloudCommandFailure(code)!);
+        }
+        this.broadcast(message);
+      }};
     const record={claim,receiver,controller:new AbortController(),preparation:Promise.resolve(),ownsExecution:false};
     this.cloudCommandSessions.set(claim.commandId,record);this.cloudCommandAdmissions.set(receiver,claim);
     record.preparation=Promise.resolve().then(async()=>{
@@ -3811,6 +3858,7 @@ export class ZerosEngine {
           ?createMessage({...common,type:"AGENT_LOAD_SESSION",providerBinding:binding})
           :createMessage({...common,type:"AGENT_NEW_SESSION"});
         await this.handleAgentMessage({...admission,id:claim.commandId},receiver,0,true);
+        if(admissionError)throw admissionError;
         if(record.controller.signal.aborted||this.conversationExecution.get(chat.id)!==claim.executionId||this.sessionAgent.get(claim.executionId)!==chat.agentId)
           throw new Error("Cloud command admission failed");
       }finally{record.controller.signal.removeEventListener("abort",invalidate);}
@@ -3911,6 +3959,44 @@ export class ZerosEngine {
     return [...this.cloudCommandSessions.values()].find(record=>record.claim.executionId===executionId&&record.claim.payload.agentId==="codex")?.claim;
   }
 
+  private publishCloudCommandFailure(claim: Pick<CloudCommandClaim, "commandId" | "conversationId" | "payload"> & { executionId: string | null }, code: string, error?: unknown): void {
+    const chat = getChat(claim.conversationId);
+    if (!chat || chat.agentId !== claim.payload.agentId || claim.payload.operation) return;
+    const native = error instanceof AgentFailureError ? error.failure : null;
+    const failure = native ? { ...native, message: redactLogSecrets(native.message).slice(0, 8000) }
+      : cloudCommandFailureFromCode(code, claim.payload.agentId) ?? { kind: "protocol-error" as const, stage: "initialize" as const,
+        agentId: claim.payload.agentId, message: "The cloud agent request could not be completed. Review the conversation before trying again." };
+    const noticeId = `cloud-command-failure-${claim.commandId}`;
+    const exact = openZerosDb().prepare("SELECT payload FROM chat_messages WHERE chat_id = ? AND msg_id IN (?, ?) LIMIT 2")
+      .all(chat.id, claim.payload.userMessageId, noticeId) as { payload: string }[];
+    const previous = windowChatMessages(chat.id, 100).flatMap(row => {
+      try { return [JSON.parse(row.payload) as AgentMessage]; } catch { return []; }
+    });
+    const keyed = exact.flatMap(row => { try { return [JSON.parse(row.payload) as AgentMessage]; } catch { return []; } });
+    const retained = keyed.find((row): row is AgentTextMessage => row.id === claim.payload.userMessageId && row.kind === "text" && row.role === "user");
+    if (retained?.recoveryFailure && keyed.some(row => row.id === noticeId && row.kind === "error_notice")) return;
+    const bubble = claim.payload.bubble as AgentPromptBubble | undefined;
+    const prompt: AgentTextMessage = { ...(retained ?? { id: claim.payload.userMessageId, kind: "text", role: "user",
+      text: bubble?.displayText ?? claim.payload.prompt.map(block => block.type === "text" ? block.text : "").join(""),
+      createdAt: Date.now(), ...(bubble?.attachments ? { attachments: bubble.attachments } : {}),
+      ...(bubble?.retryText != null ? { retryText: bubble.retryText } : {}),
+      ...(bubble?.segments ? { segments: bubble.segments } : {}), ...(bubble?.autoAction ? { autoAction: bubble.autoAction } : {}) }),
+      queued: false, queuedPresentation: undefined, queuedEditable: undefined,
+      recoveryFailure: { kind: isCloudAgentAdmissionCode(code) ? "cloud-admission" : failure.kind,
+        message: isCloudAgentAdmissionCode(code) ? code : failure.message } };
+    const notice: AgentMessage = { id: noticeId, kind: "error_notice", severity: "error",
+      recoverable: false, message: failure.message, code, createdAt: Date.now(),
+      turnFailure: { turnId: prompt.id, kind: failure.kind } };
+    // Preserve a richer native terminal notice already persisted for this turn.
+    const rows = previous.some(row => row.kind === "error_notice" && row.turnFailure?.turnId === prompt.id && !row.recoverable)
+      ? [prompt] : [prompt, notice];
+    upsertChatMessagesBulk(chat.id, rows.map(row => ({ msgId: row.id, kind: row.kind, payload: JSON.stringify(row), createdAt: row.createdAt })));
+    if (claim.executionId) this.broadcast(createMessage({ type: "AGENT_PROMPT_FAILED", source: "engine", requestId: claim.commandId,
+      agentId: claim.payload.agentId, sessionId: claim.executionId, executionId: claim.executionId,
+      error: code, failure }));
+    this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["messages", "chats"], chatIds: [chat.id] }));
+  }
+
   private async dispatchCloudCommand(claim: CloudCommandClaim): Promise<Pick<CloudCommandResult, "state" | "resultCode" | "result">> {
     let result: Pick<CloudCommandResult, "state" | "resultCode" | "result"> = { state: "failed", resultCode: "command_dispatch_rejected" };
     // This receiver has no transport lifetime. Streaming still uses the shared
@@ -3936,7 +4022,8 @@ export class ZerosEngine {
         if (message.type === "AGENT_PROMPT_COMPLETE") result = message.stopReason === "cancelled"
           ? { state: "cancelled", resultCode: "stopped_by_user" } : { state: "succeeded", resultCode: null };
         else if (message.type === "AGENT_PROMPT_FAILED" || message.type === "AGENT_ERROR")
-          result = { state: "failed", resultCode: "agent_prompt_failed" };
+          result = { state: "failed", resultCode: message.type === "AGENT_ERROR" && isCloudAgentAdmissionCode(message.code)
+            ? message.code : cloudCommandFailureCode(message.type === "AGENT_ERROR" ? message : { ...message, code: message.error }, "provider_prompt") };
         this.broadcast(message);
       },
     };
@@ -6386,7 +6473,8 @@ export class ZerosEngine {
               this.activePromptContexts.get(msg.sessionId) === activePrompt
             ) {
               const failure =
-                err instanceof AgentFailureError ? err.failure : undefined;
+                err instanceof AgentFailureError ? err.failure : fromCloudCommand
+                  ? cloudCommandFailureFromCode(cloudCommandFailureCode(err, "provider_prompt"), msg.agentId) ?? undefined : undefined;
               const notification: SessionNotification = {
                 sessionId: msg.sessionId,
                 update: {
@@ -6442,7 +6530,8 @@ export class ZerosEngine {
             // into the hard-error toast. Matches the AGENT_ERROR
             // envelope behaviour for non-prompt handlers below.
             const failure =
-              err instanceof AgentFailureError ? err.failure : undefined;
+              err instanceof AgentFailureError ? err.failure : fromCloudCommand
+                ? cloudCommandFailureFromCode(cloudCommandFailureCode(err, "provider_prompt"), msg.agentId) ?? undefined : undefined;
             client.send(
               createMessage({
                 type: "AGENT_PROMPT_FAILED",
@@ -6451,7 +6540,7 @@ export class ZerosEngine {
                 agentId: msg.agentId,
                 executionId: msg.sessionId,
                 sessionId: msg.sessionId,
-                error: err instanceof Error ? err.message : String(err),
+                error: fromCloudCommand ? cloudCommandFailureCode(err, "provider_prompt") : err instanceof Error ? err.message : String(err),
                 failure,
               }),
             );
@@ -7944,18 +8033,21 @@ export class ZerosEngine {
       // failure.kind. The AgentFailureError class is the native
       // gateway's structured error boundary.
       const message = err instanceof Error ? err.message : String(err);
+      const observedCode = err && typeof err === "object" && "code" in err ? err.code : undefined;
+      const cloudCode = fromCloudCommand ? isCloudAgentAdmissionCode(observedCode) ? observedCode
+        : cloudCommandFailureCode(err, msg.type === "AGENT_PROMPT" ? "provider_prompt" : "provider_start") : undefined;
       const failure =
-        err instanceof AgentFailureError ? err.failure : undefined;
+        err instanceof AgentFailureError ? err.failure : cloudCode ? cloudCommandFailureFromCode(cloudCode, agentId) ?? undefined : undefined;
       client.send(
         createMessage({
           type: "AGENT_ERROR",
           source: "engine",
           requestId: msg.id,
           agentId,
-          code: failure?.kind
+          code: cloudCode ?? (failure?.kind
             ? `AGENT_${failure.kind.toUpperCase().replace(/-/g, "_")}`
-            : "AGENT_DISPATCH_FAILED",
-          message,
+            : "AGENT_DISPATCH_FAILED"),
+          message: cloudCode ? failure?.message ?? cloudCode : message,
           failure,
         }),
       );
@@ -10778,7 +10870,7 @@ export class ZerosEngine {
         port: this.actualPort,
         protocolVersion: PROTOCOL_VERSION,
         minProtocolVersion: MIN_SUPPORTED_PROTOCOL,
-        ...(this.cloudCommands ? { capabilities: ["cloud.commands.v1", ...(this.cloudEvents ? ["cloud.events.v1"] : []), ...(this.cloudActions ? ["cloud.actions.v1"] : []), ...(this.cloud?.supportsNativeServices ? ["cloud.services.v1"] : [])] } : {}),
+        ...(this.cloudCommands ? { capabilities: ["cloud.commands.v1", ...(this.cloudWorker && this.cloudRuntimeConfig ? ["workspace.resourceUsage.v1"] : []), ...(this.cloudEvents ? ["cloud.events.v1"] : []), ...(this.cloudActions ? ["cloud.actions.v1"] : []), ...(this.cloud?.supportsNativeServices ? ["cloud.services.v1"] : [])] } : {}),
       }),
     );
   }

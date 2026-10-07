@@ -1,4 +1,4 @@
-import { CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "./daytona-setup-executor.js";
+import { CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "./linux-setup-executor.js";
 import { ClosedDiagnosticSchema } from "./runtime-contract.js";
 import type { z } from "zod";
 

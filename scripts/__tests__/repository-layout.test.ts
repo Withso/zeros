@@ -653,7 +653,6 @@ describe("repository layout contracts", () => {
       "scripts/cloud-workspace-validation/lib/bridge-client.ts",
     );
     const image = read("scripts/cloud-workspace-validation/image.ts");
-    const lifecycle = read("scripts/cloud-workspace-validation/lifecycle.ts");
     const dockerfile = read("scripts/cloud-workspace-validation/Dockerfile");
     const launcher = read(
       "scripts/cloud-workspace-validation/sandbox/start-engine.sh",
@@ -664,19 +663,17 @@ describe("repository layout contracts", () => {
     const admission = read(
       "scripts/cloud-workspace-validation/sandbox/consume-cloud-admission.mjs",
     );
-    const runtime = read("scripts/cloud-workspace-validation/runtime.ts");
 
-    expect(config).toContain("mode: 0o700");
-    expect(config).toContain("mode: 0o600");
-    expect(config).toContain("fs.renameSync(temporary, stateFile)");
-    expect(config).toContain('u.searchParams.delete("token")');
+    const vmImage = read("scripts/cloud-workspace-validation/lib/vm-image.ts");
+    expect(vmImage).toContain("mode:0o700");
+    expect(vmImage).toContain("mode:0o600");
+    expect(vmImage).toContain("constants.O_NOFOLLOW");
     expect(client).toContain('"zeros-v1"');
     expect(client).toContain("zeros-cloud-token.${Buffer.from");
     expect(client).toContain('source: "browser" as const');
     expect(client).not.toContain('source: "client"');
     expect(client).toContain('from "../../../packages/protocol/src/version"');
     expect(client).not.toMatch(/const PROTOCOL_VERSION\s*=\s*\d/);
-    expect(lifecycle).toContain("clearState()");
     expect(dockerfile).toContain("&& pnpm rebuild better-sqlite3");
     expect(dockerfile).not.toContain("pnpm rebuild better-sqlite3 || true");
     expect(dockerfile).toContain(
@@ -705,14 +702,14 @@ describe("repository layout contracts", () => {
     expect(dockerfile).not.toMatch(/mutagen/i);
     expect(image).not.toMatch(/mutagen/i);
     expect(attester).toContain("cloud-worker-admission.json");
-    expect(attester).toContain("rootControlledTree(ENGINE)");
+    expect(attester).toContain("verifyCloudV4Installation()");
+    expect(attester).toContain("validateCloudRuntimeMarker(marker)");
+    expect(attester).toContain("resolver.resolve()");
+    expect(attester).toContain("verifyV4Tree(runtime.root)");
     expect(admission).toContain("renameSync(PROOF, consumed)");
     expect(admission).toContain("containerInitStartTicks");
     expect(launcher).toContain("consume-cloud-admission.mjs");
-    expect(runtime).toContain("attestCloudWorker(");
-    expect(runtime).toContain("relaunchQualifiedCloudEngine");
-    expect(lifecycle).toContain("relaunchQualifiedCloudEngine");
-    expect(launcher).toContain(
+    expect(launcher).not.toContain(
       '"$RUNTIME" "$ENGINE_DIR/dist-engine/cli.js" serve --root "$REPO_DIR"',
     );
     expect(launcher).toContain('"$RUNTIME" "$RUNTIME_LIB/cloud-engine-launcher.mjs"');
@@ -789,12 +786,9 @@ describe("repository layout contracts", () => {
       "database-qualification.md",
       "engineering-reference.md",
       "enterprise-and-self-hosting.md",
-      "git-github-audit.md",
-      "implementation-roadmap.md",
       "infrastructure-and-operations.md",
       "lifecycle-diagnostics.md",
       "live-runtime-updates.md",
-      "local-workspace-impact-audit.md",
       "mcp-and-skills.md",
       "native-access-acceptance.md",
       "native-preview-acceptance.md",
@@ -806,25 +800,36 @@ describe("repository layout contracts", () => {
       "qualification-status.md",
       "relay-capacity.md",
       "release-worker-qualification.md",
-      "resume-performance-design.md",
-      "root-coordinator-threat-model.md",
       "runtime-bundles.md",
-      "runtime-hot-update.md",
       "runtime-lifecycle-acceptance.md",
       "runtime-skew-gate.md",
-      "runtime-staging.md",
       "security.md",
       "template-forks.md",
       "wake-performance.md",
+      "warm-pool.md",
     ];
 
     expect(readdirSync(cloudDocs).sort()).toEqual(expected);
-    expect(read(`${cloudDocs}/README.md`)).toContain(
-      "Cloud workspaces are **pre-production**",
+    const cloudIndex = read(`${cloudDocs}/README.md`);
+    for (const contract of [
+      "**Boat**",
+      "**v2 Cloud Computer",
+      "**v4 worker runtime pin**",
+      "**actor protocol 2**",
+    ])
+      expect(cloudIndex).toContain(contract);
+    expect(read(`${cloudDocs}/qualification-status.md`)).toContain(
+      "0138_cloud_workspace_usage_and_ui.sql",
     );
-    expect(read(`${cloudDocs}/implementation-roadmap.md`)).toContain(
-      "scripts/cloud-workspace-validation/",
-    );
+    const followUps = read(`${cloudDocs}/warm-pool.md`);
+    for (const boundary of [
+      "VM durable outbox/inbox",
+      "Resident outbound VM transport",
+      "One multiplexed client↔backend channel",
+      "Incremental durable transcript feed",
+      "Mac send outbox with acks",
+    ])
+      expect(followUps).toContain(boundary);
     expect(read(`${cloudDocs}/engineering-reference.md`)).toContain(
       "apps/desktop/src/engine/transport/cloud.ts",
     );

@@ -13,7 +13,7 @@ import {
 } from "../../platform/bridge/cloud-workspace-key";
 import { nativeInvoke } from "../../platform/runtime";
 import { getOrganizationStoreGeneration } from "../team/team-store";
-import { useInternalFeatureActive } from "../settings/internal-features";
+import { useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import { useWorkbenchStatusSource } from "../../shell/workbench/tab-status";
 import { useAgentSessions } from "../agent/sessions-hooks";
 import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
@@ -41,7 +41,7 @@ export function useCloudPreviewAdmission(options: {
   agentPreview: boolean;
   navigate(input: PreviewNavigationInput): void | Promise<void>;
 }) {
-  const enabled = useInternalFeatureActive("cloudComputerV2");
+  const enabled = useCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(options.scope)?.organizationId);
   const canEdit = useCloudWorkspaceCanEdit(options.scope);
   const sessions = useAgentSessions();
   const accountGeneration = getOrganizationStoreGeneration();

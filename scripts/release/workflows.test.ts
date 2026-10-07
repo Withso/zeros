@@ -67,10 +67,20 @@ describe("release dependency and authority contracts", () => {
     for (const name of ["release-beta", "release"]) expect(workflow(name)).not.toContain("release-slot");
   });
   it("builds the exact Alpha runtime without waiting for CI and publishes it after hosted promotion", () => {
-    const text = workflow("release-alpha"), build = job(text, "runtime-build"), publish = job(workflow("alpha-publication"), "runtime-publish");
+    const text = workflow("release-alpha"), caller = job(text, "runtime-build"), build = job(workflow("cloud-runtime-bundle-build"), "build"), publish = job(workflow("alpha-publication"), "runtime-publish");
     // The read-only build starts with the run; only publication waits for the
     // CI barrier, through hosted promotion.
-    expect(build).not.toMatch(/^ {4}needs:/m);
+    expect(caller).not.toMatch(/^ {4}needs:/m);
+    expect(caller).toContain("uses: ./.github/workflows/cloud-runtime-bundle-build.yml");
+    expect(caller).toContain("name: Build Linux runtime bundle");
+    const reusable = load(workflow("cloud-runtime-bundle-build")) as any;
+    expect(Object.keys(reusable.on)).toEqual(["workflow_call"]);
+    expect(reusable.on.workflow_call.inputs.artifact_name.default).toBe("zeros-alpha-runtime-build");
+    expect(reusable.on.workflow_call.outputs.artifact_id.value).toBe("${{ jobs.build.outputs.artifact_id }}");
+    expect(reusable.jobs.build.outputs.artifact_id).toBe("${{ steps.artifact.outputs.artifact-id }}");
+    expect(build).toContain("name: Build Linux runtime bundle");
+    expect(build).toContain("uses: ./.github/actions/contained-execution-runtime");
+    expect(build).toContain("name: ${{ inputs.artifact_name }}-${{ github.sha }}");
     expect(build).toContain("runs-on: ubuntu-24.04");
     expect(build).toContain("timeout-minutes: 40");
     expect(build).toContain("pnpm cloud:runtime-bundle:build");
@@ -93,8 +103,45 @@ describe("release dependency and authority contracts", () => {
       expect(runtimeJob).toContain("ref: ${{ github.sha }}");
       expect(runtimeJob).toContain("persist-credentials: false");
       expect(runtimeJob).toContain("pnpm install --frozen-lockfile --ignore-scripts");
-      expect(runtimeJob).not.toMatch(/secrets\.|secrets:|BOAT_|DAYTONA_|CLOUD_WORKSPACE_S3_|qualify|qualification|hosted-mutation|contents: write/);
+      expect(runtimeJob).not.toMatch(/secrets\.|secrets:|BOAT_|CLOUD_WORKSPACE_S3_|qualify|qualification|hosted-mutation|contents: write/);
     }
+  });
+  it("publishes standalone bundles only from the channel ref matrix with protected environment OIDC", () => {
+    const text = workflow("cloud-runtime-bundle"), parsed = load(text) as any;
+    expect(Object.keys(parsed.on)).toEqual(["workflow_dispatch"]);
+    expect(parsed.on.workflow_dispatch.inputs.channel).toMatchObject({
+      type: "choice", options: ["alpha", "beta", "production"], default: "alpha", required: true,
+    });
+    expect(parsed.permissions).toEqual({ contents: "read" });
+    expect(parsed.concurrency).toEqual({ group: "cloud-runtime-bundle-${{ inputs.channel }}", "cancel-in-progress": false });
+    const { build, publish } = parsed.jobs;
+    const allowed = "github.event.repository.fork == false && (github.ref == 'refs/heads/main' || (inputs.channel != 'alpha' && startsWith(github.ref, 'refs/heads/release/')))";
+    expect(build.if).toBe(allowed);
+    expect(publish.if).toBe(allowed);
+    expect(build.uses).toBe("./.github/workflows/cloud-runtime-bundle-build.yml");
+    expect(build.with.artifact_name).toBe("zeros-${{ inputs.channel }}-runtime-build");
+    expect(build.permissions).toEqual({ contents: "read" });
+    expect(build.secrets).toBeUndefined();
+    expect(publish.needs).toBe("build");
+    expect(publish.environment).toBe("${{ inputs.channel }}");
+    expect(publish.permissions).toEqual({ contents: "read", actions: "read", "id-token": "write" });
+    const download = publish.steps.find((step: any) => step.uses?.startsWith("actions/download-artifact@"));
+    expect(download.with).toMatchObject({ "artifact-ids": "${{ needs.build.outputs.artifact_id }}",
+      "run-id": "${{ github.run_id }}", "github-token": "${{ github.token }}", "merge-multiple": true });
+    const checkout = publish.steps.find((step: any) => step.uses?.startsWith("actions/checkout@"));
+    expect(checkout.with).toMatchObject({ ref: "${{ github.sha }}", "persist-credentials": false });
+    const mutation = publish.steps.find((step: any) => step.run?.includes("runtime-bundle/publish.ts"));
+    expect(mutation.env).toMatchObject({ CLOUD_WORKSPACE_CONTROL_PLANE_URL: "${{ vars.CLOUD_WORKSPACE_CONTROL_PLANE_URL }}",
+      CLOUD_RUNTIME_OIDC_AUDIENCE: "${{ vars.CLOUD_RUNTIME_OIDC_AUDIENCE }}" });
+    expect(publish.env).toMatchObject({ RELEASE_CHANNEL: "${{ inputs.channel }}", RELEASE_SHA: "${{ github.sha }}",
+      RELEASE_BRANCH: "${{ github.ref_name }}", GH_TOKEN: "${{ github.token }}" });
+    expect(mutation.run).toContain("set -euo pipefail");
+    expect(mutation.run).toContain("scripts/release/runtime-bundle-ci.ts --verify");
+    expect(mutation.run.indexOf("runtime-bundle-ci.ts --verify")).toBeLessThan(mutation.run.indexOf("runtime-bundle/publish.ts"));
+    expect(text).not.toMatch(/secrets\.|secrets:|BOAT_|CLOUD_WORKSPACE_S3_|contents: write/);
+    expect(publish.steps.map((step: any) => step.run ?? "").join("\n")).not.toMatch(/qualify|qualification|runtime-upgrade|staging/);
+    expect(job(workflow("cloud-runtime-bundle-build"), "build")).not.toContain("id-token:");
+    for (const action of text.matchAll(/uses: ([^\s]+)@([^\s]+)/g)) expect(action[2]).toMatch(/^[a-f0-9]{40}$/);
   });
   it("grants Alpha OIDC only to runtime publication and keeps its feed independent of runtime jobs", () => {
     const text = workflow("alpha-publication"), parent = workflow("release-alpha"), publish = job(text, "runtime-publish"), feed = job(text, "publish");

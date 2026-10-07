@@ -387,7 +387,7 @@ d("migration ladder", () => {
   it("backfills Pro benefits and missing caps without selecting inherited writers or converting Business history",async()=>{
     const index=LADDER.indexOf("0101_cloud_workspace_pro_entitlements.sql");
     await applyThrough(index);
-    const pro=await seedReadyCloudWorkspace(pool),business=await seedReadyCloudWorkspace(pool,{ownerUserId:pro.userId});
+    const pro=await seedReadyCloudWorkspace(pool,{runtimeV4:false}),business=await seedReadyCloudWorkspace(pool,{ownerUserId:pro.userId,runtimeV4:false});
     await pool.query("UPDATE workspace_billing_epochs SET entitlement_scope='account',entitlement_plan='pro' WHERE workspace_id=$1",[pro.workspaceId]);
     await pool.query("UPDATE cloud_workspaces SET single_member_mode=false,sharing_mode='organization' WHERE id IN ($1,$2)",[pro.workspaceId,business.workspaceId]);
     await pool.query("DELETE FROM cloud_workspace_quotas WHERE org_id=$1",[pro.organizationId]);
@@ -535,7 +535,7 @@ d("migration ladder", () => {
   it("restores deletion verification that a later absent stop result cleared", async () => {
     const repairIndex = LADDER.indexOf("0100_cloud_deletion_verification_repair.sql");
     await applyThrough(repairIndex);
-    const fixture = await seedReadyCloudWorkspace(pool);
+    const fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     for (const generation of [2, 3, 4]) {
       await pool.query(`INSERT INTO cloud_workspace_generations(workspace_id,generation,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,
           provider_connection_id,provider_connection_version,retired_at)

@@ -1,3 +1,4 @@
+import { RELEASE_WORKER_IMAGES_RETIRED } from "../../apps/control-plane/src/cloud-workspaces/release-worker-retirement";
 import { describe, expect, it } from "vitest";
 import { finalizePromotion, promote, promoteServices, type FinalizationDependencies, type PromotionDependencies } from "./promotion";
 import { promotionConfig, ReleaseIdentity, type PromotionConfig } from "./contracts";
@@ -88,7 +89,7 @@ describe("ordered hosted promotion", () => {
   });
 });
 
-async function finalizationHarness(workerPromoted = true) {
+async function finalizationHarness(workerPromoted = false) {
   const { config, deps, calls } = harness();
   const services = await promoteServices(config, deps);
   calls.length = 0;
@@ -97,11 +98,11 @@ async function finalizationHarness(workerPromoted = true) {
   return { config, services, final, calls };
 }
 describe("services and qualified worker finalization", () => {
-  it("withholds success until the worker handoff and exact-source API redeploy complete", async () => {
+  it("finalizes the exact services handoff without a retired worker redeploy", async () => {
     const { config, services, final, calls } = await finalizationHarness();
     expect(services.status).toBe("services-ready");
     expect(await finalizePromotion(config, services, final)).toMatchObject({ status: "success", sourceSha: sha });
-    expect(calls).toEqual(["current", "inspect", "verify:app", "verify:ops", "worker", "current", "deploy", "success", "identity"]);
+    expect(calls).toEqual(["current", "inspect", "verify:app", "verify:ops", "worker", "identity"]);
   });
   it("reuses an authenticated earlier services attempt without redeploying an unchanged worker", async () => {
     const { config, services, final, calls } = await finalizationHarness(false);
@@ -117,7 +118,7 @@ describe("services and qualified worker finalization", () => {
         change === "manifest" ? { migrations: { ...identity.migrations, manifestSha256: "e".repeat(64) } } :
         change === "head" ? { migrations: { ...identity.migrations, head: "0122_other.sql", expectedHead: "0122_other.sql" } } :
         change === "maintenance" ? { maintenance: true } : { cloud: { enabled: true, ready: true, state: "healthy" },
-          worker: { ...worker, ...(change === "provider" ? { provider: "daytona" } : {}) }, workerQualified: change !== "qualification" }) });
+          worker: { ...worker, ...(change === "provider" ? { provider: "unsupported" } : {}) }, workerQualified: change !== "qualification" }) });
     const strict = ["qualification", "provider"].includes(change);
     await expect(finalizePromotion({ ...config, cloudRequired: strict, requireQualifiedWorker: strict, provider: "boat" }, services, final)).rejects.toThrow();
   });
@@ -128,7 +129,7 @@ describe("services and qualified worker finalization", () => {
     expect(calls).not.toContain("deploy");
     expect(calls).not.toContain("identity");
   });
-  it.each(["assertCurrent", "inspect", "verifyPages", "deploy", "waitDeployment"] as const)("withholds success on final %s failure without exposing private details", async step => {
+  it.each(["assertCurrent", "inspect", "verifyPages"] as const)("withholds success on final %s failure without exposing private details", async step => {
     const { config, services, final } = await finalizationHarness();
     final[step] = async () => { throw new Error("private-provider-detail"); };
     await expect(finalizePromotion(config, services, final)).rejects.not.toThrow("private-provider-detail");
@@ -136,7 +137,7 @@ describe("services and qualified worker finalization", () => {
   it("records the desktop cloud decision and refuses to finalize under another", async () => {
     const { config, services, final, calls } = await finalizationHarness(false);
     expect(services.cloudRequired).toBe(false);
-    await expect(finalizePromotion({ ...config, cloudRequired: true, requireQualifiedWorker: true, provider: "boat" }, services, final)).rejects.toThrow("desktop cloud capability");
+    await expect(finalizePromotion({ ...config, cloudRequired: true, requireQualifiedWorker: false, provider: "boat" }, services, final)).rejects.toThrow("desktop cloud capability");
     await expect(finalizePromotion(config, { ...services, cloudRequired: undefined }, final)).rejects.toThrow("desktop cloud capability");
     expect(calls).toEqual([]);
   });
@@ -153,7 +154,13 @@ describe("services and qualified worker finalization", () => {
     // With worker promotion on, the same API cannot authorize a cloud-enabled desktop.
     const strict = promotionConfig({ ...env, ZEROS_CLOUD_WORKSPACES_ENABLED: "true", CLOUD_WORKSPACE_PROVIDER: "boat", ZEROS_WORKER_PROMOTION: "enabled" });
     expect(strict.requireQualifiedWorker).toBe(true);
-    await expect(finalizePromotion(strict, services, final)).rejects.toThrow("qualification");
+    await expect(finalizePromotion(strict, services, final)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
+  });
+  it("refuses enabled services and worker handoffs before any provider action", async () => {
+    const { config, services, final, calls } = await finalizationHarness(false);
+    await expect(finalizePromotion(config, services, { ...final, workerPromoted: true })).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
+    await expect(promoteServices({ ...config, requireQualifiedWorker: true }, final)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
+    expect(calls).toEqual([]);
   });
   it("pins the API's worker tuple through finalization when no worker was promoted", async () => {
     const { config, services, final } = await finalizationHarness(false);

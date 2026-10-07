@@ -3,8 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const state = vi.hoisted(() => ({ internal: true, manager: true, available: true, reads: vi.fn() }));
-vi.mock("../../settings/internal-features", () => ({ useInternalFeatureActive: () => state.internal }));
+const state = vi.hoisted(() => ({ accountAccess: true, manager: true, available: true, reads: vi.fn() }));
+vi.mock("../../team/cloud-workspace-account-access", () => ({ useCloudWorkspaceAccountAccess: () => state.accountAccess }));
 vi.mock("../../../state/cloud-workspace-catalog", () => ({ cloudWorkspaceDetails: "workspace", refreshCloudWorkspace: vi.fn() }));
 vi.mock("../../../state/cloud-runtime-upgrade", () => ({ cloudRuntimeUpgradeAvailability: "runtime", cloudRuntimeUpgradeAvailabilityKey: () => "runtime-key",
   loadCloudRuntimeUpgradeAvailability: vi.fn(), requestCloudRuntimeUpgradeDetails: vi.fn() }));
@@ -19,7 +19,7 @@ function Surface({ active = true, required = false, cwd = folder }) {
   return useCloudRuntimeUpgradeLink(cwd, active, required);
 }
 function render(props = {}) { return renderToStaticMarkup(createElement(Surface, props)); }
-beforeEach(() => { state.internal = true; state.manager = true; state.available = true; state.reads.mockClear(); });
+beforeEach(() => { state.accountAccess = true; state.manager = true; state.available = true; state.reads.mockClear(); });
 describe("composer runtime update entry", () => {
   it("leaves local composers' props and visibility behavior unchanged, including retained inactive chats", () => {
     for (const active of [true, false]) {
@@ -43,8 +43,8 @@ describe("composer runtime update entry", () => {
     state.available = true;
     expect(render()).toContain("Updates automatically the next time this workspace wakes");
   });
-  it.each(["hidden", "nonstaff", "nonmanager", "local"])("keeps %s composer surfaces inert", reason => {
-    if (reason === "nonstaff") state.internal = false;
+  it.each(["hidden", "signed-out", "nonmanager", "local"])("keeps %s composer surfaces inert", reason => {
+    if (reason === "signed-out") state.accountAccess = false;
     if (reason === "nonmanager") state.manager = false;
     expect(render({ active: reason !== "hidden", cwd: reason === "local" ? "/local/workspace" : folder, required: true })).toBe("");
     expect(state.reads.mock.calls.some(call => call[0] === "runtime" && call[2].enabled)).toBe(false);

@@ -1,10 +1,8 @@
 # Managed compute credit contract
 
-Managed Boat allocations require prepaid, finite compute leases. Customer
-Daytona connections are charged by Daytona and never consume Zeros managed
-credits. The existing hosted Daytona path remains an explicit compatibility
-policy; qualifying it for managed credit billing requires its own reliable
-usage meter and finite stop adapter. A new hosted provider fails closed.
+Managed Boat allocations require prepaid, finite compute leases. Unsupported
+persisted providers fail closed; their historical schema records and seed rows
+do not authorize allocation or bypass Boat credit admission.
 
 The [Pro backend](pro-backend.md) automatically issues one monthly allowance
 per eligible user: 500 standard-machine hours, recorded as a server-defined
@@ -101,7 +99,7 @@ the new reconciler before resuming. Do not run an older allocator alongside the
 new spending boundary. A rollback must leave Boat allocations stopped and
 cloud execution disabled; do not disable the credit gate to revive them.
 Existing provider credentials and immutable image references stay unchanged.
-The managed Boat and independent Daytona BYO deployment variables are listed in
+The managed Boat deployment variables are listed in
 the control plane's [environment example](../../apps/control-plane/.env.example).
 
 ## Grant operations

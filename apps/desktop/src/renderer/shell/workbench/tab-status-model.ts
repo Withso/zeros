@@ -7,6 +7,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
+import { CLOUD_WORKSPACE_V2_REQUIRED, CLOUD_WORKSPACE_V2_REQUIRED_MESSAGE } from "../../platform/cloud-workspace-execution";
 import type { WorkbenchTab, WorkbenchTabType } from "./tab-model";
 import {
   describeConnectionRejection,
@@ -150,6 +151,8 @@ export function describeWorkspaceAvailability(
   now: number,
 ): WorkbenchStatus | null {
   const workspace = input.cloud ? "cloud workspace" : "Zeros engine";
+  if (input.cloud && input.stopError?.code === CLOUD_WORKSPACE_V2_REQUIRED)
+    return { tone: "error", message: CLOUD_WORKSPACE_V2_REQUIRED_MESSAGE };
   if (input.cloud && input.restarting)
     return { tone: "pending", message: "Restarting the cloud workspace…" };
   if (input.cloud && input.restartFailed)

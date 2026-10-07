@@ -2,7 +2,7 @@ import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ImagePlus } from "lucide-react";
 import { Input, toast } from "../../shared/ui/primitives";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
-import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import type {
   CloudDesignAssetUploadInput,
   DesignCanvasFrameWire,
@@ -11,7 +11,7 @@ import {
   cloudWorkspaceCanEdit,
   useCloudWorkspaceCanEdit,
 } from "../../state/use-cloud-workspace-can-edit";
-import { useInternalFeatureActive } from "../settings/internal-features";
+import { useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import { DesignToolbarButton } from "./design-inspector-kit";
 import { uploadDesignAssetCached } from "./state/design-workspace-cache";
 import { useDesignWorkspaceUiStore } from "./state/design-workspace-ui";
@@ -35,7 +35,7 @@ export function CloudDesignImageUpload({
   frame: DesignCanvasFrameWire | null;
   active: boolean;
 }) {
-  const enabled = useInternalFeatureActive("cloudComputerV2");
+  const enabled = useCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(workspaceId)?.organizationId);
   const canEdit = useCloudWorkspaceCanEdit(workspaceId ?? undefined);
   const [busy, setBusy] = useState(false);
   const running = useRef(false);

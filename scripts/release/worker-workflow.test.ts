@@ -3,6 +3,20 @@ import { describe, expect, it } from "vitest";
 
 const workflow = () => readFileSync(".github/workflows/cloud-worker-promotion.yml", "utf8");
 describe("protected worker workflow handoff", () => {
+  it("refuses retired execution before setup while keeping cleanup and the disabled release path available", () => {
+    const text = workflow();
+    const refusal = "Refuse retired v3 worker promotion";
+    const message = "v3 release worker images are retired; v4 runtime bundles are the supported artifact";
+    expect(text).toContain("if: inputs.reconcile_storage != true && (inputs.execute == true || env.ZEROS_WORKER_PROMOTION == 'enabled')");
+    expect(text).toContain(message);
+    expect(text.indexOf(refusal)).toBeLessThan(text.indexOf("actions/checkout", text.indexOf("  worker:")));
+    for (const name of ["hosted-promotion", "alpha-publication"]) {
+      const caller = readFileSync(`.github/workflows/${name}.yml`, "utf8");
+      expect(caller).toContain(`name: ${refusal}`);
+      expect(caller).toContain("if: env.ZEROS_WORKER_PROMOTION == 'enabled'");
+      expect(caller).toContain(message);
+    }
+  });
   it("keeps storage-only reconciliation default-off and behind the same source, channel and Production gates", () => {
     const text = workflow();
     expect(text.split("workflow_call:")[0]).toMatch(/reconcile_storage:[\s\S]*?type: boolean\s+default: false/);

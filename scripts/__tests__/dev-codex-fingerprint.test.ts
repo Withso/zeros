@@ -16,7 +16,8 @@ describe("hosted Dev Codex account import", () => {
     const first = hostedBackendEnvironment(state, profile, source, worker);
     const keys = loadCodexFingerprintKeys(first);
     expect(keys).toEqual({ currentKeyVersion: 1, keys: { 1: Buffer.from(state.keys.agent, "hex").toString("base64url") } });
-    expect(keys!.keys[1]).not.toBe(first.CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1);
+    expect(keys!.keys[1]).not.toBe(first.CLOUD_WORKSPACE_SECRET_KEY_V1);
+    expect(keys!.keys[1]).not.toBe(first.CLOUD_WORKSPACE_OBJECT_KEY_V1);
     const restarted = hostedBackendEnvironment(structuredClone(state), profile, source, worker);
     expect(loadCodexFingerprintKeys(restarted)).toEqual(keys);
     const publicValues = JSON.stringify([hostedPublicProfile(state, profile), hostedWebEnvironment(state, profile)]);

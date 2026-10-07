@@ -253,7 +253,8 @@ function validatePublication(
   const body = input(RuntimePublicationInputSchema, value);
   const { descriptor: runtime, manifestHeader: header } = body;
   if (
-    body.releaseOrder !== provenance.runNumber ||
+    (body.releaseOrder !== provenance.runId &&
+      body.releaseOrder !== provenance.runNumber) ||
     body.githubRunId !== provenance.runId ||
     body.githubRunAttempt !== provenance.runAttempt ||
     runtime.sourceCommit !== provenance.sha ||
@@ -265,7 +266,6 @@ function validatePublication(
     identityConflict();
   return {
     ...body,
-    releaseOrder: provenance.runNumber,
     githubRunId: provenance.runId,
     githubRunAttempt: provenance.runAttempt,
   };
@@ -412,25 +412,39 @@ async function checkBundle(
   return row ?? null;
 }
 
-async function checkRelease(tx: Tx, body: PublicationInput): Promise<void> {
+type PublicationChannel = "alpha" | "beta" | "production";
+
+async function checkRelease(
+  tx: Tx,
+  body: PublicationInput,
+  channel: PublicationChannel,
+): Promise<ReleaseRow | null> {
   const rows = (
     await tx.query<ReleaseRow>(
       `SELECT channel,release_order,runtime_id,github_release_run_id,github_release_run_attempt,confirmed_at,revoked_at
-    FROM cloud_runtime_channel_releases WHERE channel='alpha' AND (release_order=$1 OR github_release_run_id=$2)`,
-      [body.releaseOrder, body.githubRunId],
+    FROM cloud_runtime_channel_releases WHERE channel=$3 AND (release_order=$1 OR github_release_run_id=$2)`,
+      [body.githubRunId, body.githubRunId, channel],
     )
   ).rows;
+  const sameRun = rows.filter(
+    (row) => Number(row.github_release_run_id) === body.githubRunId,
+  );
+  // Historical run-number orders are immutable. Both old and updated
+  // publishers may retry the same registered run, but cannot create a legacy
+  // order or move an existing run to another runtime/channel.
+  if (sameRun.length > 1) identityConflict();
+  const row = sameRun[0];
   if (
-    rows.some(
-      (row) =>
-        row.revoked_at ||
-        Number(row.release_order) !== body.releaseOrder ||
-        row.runtime_id !== body.descriptor.runtimeId ||
-        Number(row.github_release_run_id) !== body.githubRunId ||
-        row.github_release_run_attempt > body.githubRunAttempt,
-    )
+    row &&
+    (row.revoked_at ||
+      row.runtime_id !== body.descriptor.runtimeId ||
+      row.github_release_run_attempt > body.githubRunAttempt)
   )
     identityConflict();
+  if (row) return row;
+  if (rows.length || body.releaseOrder !== body.githubRunId)
+    identityConflict();
+  return null;
 }
 
 /** B7 replaces this hook with durable smoke scheduling. Registration is
@@ -448,6 +462,7 @@ export class DatabaseRuntimePublicationService {
     private readonly enqueueSmoke: (
       runtimeId: string,
     ) => Promise<unknown> = enqueueRuntimeSmokeQualification,
+    private readonly channel: PublicationChannel = "alpha",
   ) {}
 
   private async objectState(
@@ -470,7 +485,7 @@ export class DatabaseRuntimePublicationService {
       this.pool,
       async (tx) => {
         await checkBundle(tx, body);
-        await checkRelease(tx, body);
+        await checkRelease(tx, body, this.channel);
       },
       { consistentRead: true },
     );
@@ -506,6 +521,15 @@ export class DatabaseRuntimePublicationService {
 
   async complete(value: unknown, provenance: RuntimePublicationProvenance) {
     const body = validatePublication(value, provenance);
+    if (body.releaseOrder !== body.githubRunId) {
+      // Refuse unregistered legacy requests before artifact I/O. Recheck in
+      // the write transaction so revocation cannot be bypassed by this read.
+      await withSystemTx(
+        this.pool,
+        (tx) => checkRelease(tx, body, this.channel),
+        { consistentRead: true },
+      );
+    }
     const runtime = body.descriptor;
     const objectKey = runtimeArtifactObjectKey(
       runtime.runtimeId,
@@ -546,21 +570,26 @@ export class DatabaseRuntimePublicationService {
         ],
       );
       if (!(await checkBundle(tx, body, true))) identityConflict();
-      await tx.query(
-        `INSERT INTO cloud_runtime_channel_releases(channel,release_order,runtime_id,github_release_run_id,github_release_run_attempt,confirmed_at)
-        VALUES('alpha',$1,$2,$3,$4,now()) ON CONFLICT DO NOTHING`,
-        [
-          body.releaseOrder,
-          runtime.runtimeId,
-          body.githubRunId,
-          body.githubRunAttempt,
-        ],
-      );
-      await checkRelease(tx, body);
+      let release = await checkRelease(tx, body, this.channel);
+      if (!release) {
+        await tx.query(
+          `INSERT INTO cloud_runtime_channel_releases(channel,release_order,runtime_id,github_release_run_id,github_release_run_attempt,confirmed_at)
+          VALUES($5,$1,$2,$3,$4,now()) ON CONFLICT DO NOTHING`,
+          [
+            body.githubRunId,
+            runtime.runtimeId,
+            body.githubRunId,
+            body.githubRunAttempt,
+            this.channel,
+          ],
+        );
+        release = await checkRelease(tx, body, this.channel);
+      }
+      if (!release) identityConflict();
       await tx.query(
         `UPDATE cloud_runtime_channel_releases SET confirmed_at=now()
-        WHERE channel='alpha' AND release_order=$1 AND confirmed_at IS NULL AND revoked_at IS NULL`,
-        [body.releaseOrder],
+        WHERE channel=$2 AND release_order=$1 AND confirmed_at IS NULL AND revoked_at IS NULL`,
+        [release.release_order, this.channel],
       );
       await notifyRuntimeStaging(tx);
     });
@@ -665,14 +694,16 @@ export function createRuntimePublicationRoutes(
 ): Hono {
   const routes = new Hono();
   const publication = config.cloudRuntimePublication;
-  const enabled =
-    publication?.enabled === true && config.deploymentChannel === "alpha";
+  const channel = config.deploymentChannel === "alpha" || config.deploymentChannel === "beta" || config.deploymentChannel === "production"
+    ? config.deploymentChannel : null;
+  const enabled = publication?.enabled === true && channel !== null;
   const artifacts = enabled ? (dependencies.artifacts ?? null) : null;
-  const service = artifacts
+  const service = artifacts && channel
     ? new DatabaseRuntimePublicationService(
         pool,
         artifacts,
         dependencies.enqueueSmoke,
+        channel,
       )
     : null;
   const verify = enabled
@@ -686,7 +717,8 @@ export function createRuntimePublicationRoutes(
     routes.use(path, async (c, next) => {
       c.header("Cache-Control", "no-store");
       c.header("Pragma", "no-cache");
-      if (!enabled) return c.json({ error: { code: "not_found" } }, 404);
+      if (!enabled || path === RUNTIME_BASE_REGISTRATION_PATH && channel !== "alpha")
+        return c.json({ error: { code: "not_found" } }, 404);
       await next();
     });
     routes.use(
@@ -782,7 +814,7 @@ export async function readRuntimeStatus(
     async (tx) => {
       const bases = (
         await tx.query<BaseRow>(`SELECT ${baseColumns} FROM cloud_runtime_base_images base
-      JOIN cloud_runtime_base_contracts contract USING(base_compatibility_id) ORDER BY base.approved_at DESC,base.base_image_id LIMIT 100`)
+      JOIN cloud_runtime_base_contracts contract USING(base_compatibility_id) WHERE base.provider='boat' ORDER BY base.approved_at DESC,base.base_image_id LIMIT 100`)
       ).rows;
       const runtimes = (
         await tx.query<BundleRow>(
@@ -830,7 +862,7 @@ export async function readRuntimeStatus(
           createdAt: row.created_at, startedAt: row.started_at, deadlineAt: row.deadline_at,
           finishedAt: row.finished_at, cleanupConfirmedAt: row.cleanup_confirmed_at,
         })),
-        bases: bases.map(publicBase),
+        bases: bases.filter(row => row.provider === "boat").map(publicBase),
         runtimes: runtimes.map((row) => ({
           ...descriptor(row),
           nodeVersion: row.node_version,
@@ -871,7 +903,7 @@ export async function readRuntimeStatus(
  * source SHAs, and counts. It never controls the v1 readiness predicate. */
 export async function readRuntimeReleaseIdentity(
   pool: pg.Pool,
-  newWorkspaceProfile: "legacy" | "v4",
+  newWorkspaceProfile: "v4",
 ) {
   return withSystemTx(
     pool,
@@ -879,8 +911,8 @@ export async function readRuntimeReleaseIdentity(
       const base = (
         await tx.query<BaseRow>(`SELECT ${baseColumns} FROM cloud_runtime_base_images base
       JOIN cloud_runtime_base_contracts contract USING(base_compatibility_id)
-      WHERE base.revoked_at IS NULL AND contract.revoked_at IS NULL ORDER BY base.approved_at DESC,base.base_image_id LIMIT 1`)
-      ).rows[0];
+      WHERE base.provider='boat' AND base.revoked_at IS NULL AND contract.revoked_at IS NULL ORDER BY base.approved_at DESC,base.base_image_id LIMIT 1`)
+      ).rows.find(row => row.provider === "boat");
       const runtime = (
         await tx.query<BundleRow>(
           `SELECT ${bundleColumns} FROM cloud_runtime_bundles ORDER BY registered_at DESC,runtime_id LIMIT 1`,

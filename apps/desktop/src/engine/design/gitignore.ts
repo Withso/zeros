@@ -1,8 +1,8 @@
-import { execFileSync } from "node:child_process";
 import { closeSync, constants, existsSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { gitExecutionIdentity, gitProcessOptions } from "../git/git-execution-identity";
+import { gitExecutionIdentity } from "../git/git-execution-identity";
+import { runGitProbeSync } from "../git/git-exec";
 import { readDesignStorageFile } from "./metadata-storage";
 
 const START = "# Zeros Design metadata (managed by Zeros)";
@@ -118,9 +118,7 @@ export function assertDesignFilesNotIgnored(
           writeFileSync(path.join(temporary, file), source);
         }
       }
-      const gitDir = execFileSync("git", ["rev-parse", "--absolute-git-dir"], {
-        cwd: workspace, encoding: "utf8", timeout: 10_000, ...gitProcessOptions(),
-      }).trim();
+      const gitDir = runGitProbeSync(workspace, "rev_parse", ["rev-parse", "--absolute-git-dir"]).trim();
       if (identity) grantIgnoreTree(temporary, identity);
       checkIgnored(temporary, files, ["--git-dir=" + gitDir, "--work-tree=" + temporary]);
       return;
@@ -150,25 +148,10 @@ export function assertDesignFilesNotIgnored(
 }
 
 function checkIgnored(workspace: string, files: string[], prefix: string[] = []): void {
-  let ignored: string;
-  try {
-    ignored = execFileSync(
-      "git",
-      [...prefix, "-c", "core.fsmonitor=false", "check-ignore", "--no-index", "-z", "--stdin"],
-      {
-        cwd: workspace,
-        input: files.join("\0") + "\0",
-        encoding: "utf8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: 10_000,
-        maxBuffer: 1024 * 1024,
-        ...gitProcessOptions(),
-      },
-    );
-  } catch (error) {
-    if ((error as { status?: number }).status !== 1) throw error;
-    ignored = "";
-  }
+  const ignored = runGitProbeSync(workspace, "check_ignore",
+    [...prefix, "check-ignore", "--no-index", "-z", "--stdin"],
+    { input: files.join("\0") + "\0", expectedExitCodes: [1] },
+  );
   if (ignored)
     throw new Error(
       `Design metadata is still ignored by a conflicting .gitignore: ${ignored.split("\0").filter(Boolean).join(", ")}. Remove the conflicting parent or nested rule before editing Design.`,

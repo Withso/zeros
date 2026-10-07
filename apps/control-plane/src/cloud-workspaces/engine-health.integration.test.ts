@@ -35,6 +35,7 @@ suite("cloud engine liveness and compute convergence", () => {
   });
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     f = await seedReadyCloudWorkspace(pool);
   });
   it("retains a distinct expired-engine reason and incident reference", async () => {
@@ -55,7 +56,7 @@ suite("cloud engine liveness and compute convergence", () => {
       metadata: {},
     });
     const provider = {
-      name: "daytona",
+      name: "boat",
       inspect: vi.fn(async () => resource()),
       find: vi.fn(async () => [resource()]),
       stop: vi.fn(async () => {

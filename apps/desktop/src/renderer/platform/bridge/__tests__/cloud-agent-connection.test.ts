@@ -98,6 +98,63 @@ function fixture(receiptIdentity: Record<string, unknown> = {}) {
 afterEach(() => vi.restoreAllMocks());
 
 describe("cloud snapshot and replay installation", () => {
+  it("holds a succeeded receipt for snapshot recovery and drops buffered transcript duplicates", async () => {
+    const f = fixture(), original = f.request.getMockImplementation()!;
+    const streamId = "33333333-3333-4333-8333-333333333333";
+    const handlers = new Map<string, (frame: BridgeMessage) => void>();
+    let finish!: (value: unknown) => void;
+    const request = vi.fn(async (message: WireRecord) => {
+      if (message.op === "cloudEvents.request") {
+        if ((message.params as any).request.kind === "replay") return { type: "WORKSPACE_RESPONSE", result: {
+          streamId, firstRetained: 1, head: 10, cursor: 10, events: [],
+        } };
+        return new Promise(resolve => { finish = resolve; });
+      }
+      return original(message);
+    });
+    const client = { request, status: "connected", on: (type: string, listener: (frame: BridgeMessage) => void) => {
+      handlers.set(type, listener); return () => handlers.delete(type);
+    }, onStatusChange: () => () => {} } as unknown as RuntimeClient;
+    const reader = new CloudEventReader(client), connection = new CloudAgentConnection(client, "local-main", f.authorize, reader);
+    const updates = vi.fn(), changed = vi.fn();
+    reader.on("AGENT_SESSION_UPDATE", updates); connection.on("DB_CHANGED", changed);
+    const chunk = (sequence: number) => ({ type: "AGENT_SESSION_UPDATE", id: `event-${sequence}`, source: "engine", timestamp: 1,
+      chatId: chat, sessionId: "execution", executionId: "execution", agentId: "codex", cloudStream: { streamId, sequence },
+      notification: { sessionId: "execution", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Saved answer" } } } }) as BridgeMessage;
+    try {
+      await connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "test-model" } });
+      handlers.get("AGENT_SESSION_UPDATE")!(chunk(1)); updates.mockClear();
+      const flight = connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "receipt-race", prompt: [] });
+      let completed = false; void flight.then(() => { completed = true; });
+      await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+      expect(completed).toBe(false);
+      handlers.get("AGENT_SESSION_UPDATE")!(chunk(2));
+      finish({ type: "WORKSPACE_RESPONSE", result: { cursor: { streamId, sequence: 10 },
+        snapshot: { conversationId: chat, executionId: "execution", activeTurn: null, messages: [] } } });
+      await expect(flight).resolves.toMatchObject({ type: "AGENT_PROMPT_COMPLETE" });
+      expect(changed).toHaveBeenCalledWith(expect.objectContaining({ kinds: ["messages"], chatIds: [chat] }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(updates).not.toHaveBeenCalled();
+      expect(request.mock.calls.filter(([message]) => message.op === "cloudCommands.request" && (message.params as any).request.kind === "mutate")).toHaveLength(1);
+    } finally { reader.dispose(); connection.dispose(); f.connection.dispose(); }
+  });
+  it.each(["cloud_provider_start_verification_required", "cloud_provider_prompt_cloud_credential_error"])("restores structured %s from a receipt after terminal-event loss", async code => {
+    const f = fixture(); f.setState("failed");
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async message => {
+      const response = await original(message);
+      if (message.op === "cloudCommands.request" && (message.params as any).request.kind === "read")
+        (response.result as WireRecord).resultCode = code;
+      return response;
+    });
+    try {
+      await f.connection.request({ type: "AGENT_NEW_SESSION", agentId: "claude", chatId: chat, env: { ANTHROPIC_MODEL: "test-model" } });
+      await expect(f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "receipt-cause", prompt: [] }))
+        .resolves.toMatchObject({ type: "AGENT_PROMPT_FAILED", error: code,
+          failure: { kind: code.includes("verification_required") ? "verification-required" : "cloud-credentials-unavailable" } });
+      expect(f.request.mock.calls.filter(([message]) => message.op === "cloudCommands.request" && (message.params as any).request.kind === "mutate")).toHaveLength(1);
+    } finally { f.connection.dispose(); }
+  });
   it.each([false, true])("does not resurrect a completed turn or settled permission from delayed state (retired=%s)", async retired => {
     const f = fixture(), original = f.request.getMockImplementation()!;
     const streamId = "33333333-3333-4333-8333-333333333333";

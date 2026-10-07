@@ -72,8 +72,7 @@ describe("iframe request header admission", () => {
               cancel: false,
               requestHeaders: {
                 Upgrade: "websocket",
-                "X-Daytona-Skip-Preview-Warning": "true",
-                "x-zeros-preview-capability": capability,
+                          "x-zeros-preview-capability": capability,
               },
             }
           : { cancel: false },

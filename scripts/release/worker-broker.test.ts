@@ -1,3 +1,4 @@
+import { RELEASE_WORKER_IMAGES_RETIRED } from "../../apps/control-plane/src/cloud-workspaces/release-worker-retirement";
 import { describe, expect, it, vi } from "vitest";
 import { releaseCanaryRequest, runReleaseCanaryAdmission, releaseCanaryDesignation } from "../../apps/control-plane/src/cloud-workspaces/release-canaries";
 import { BoatAccountAdmission, releaseWorkerOwner } from "../../apps/control-plane/src/cloud-workspaces/boat-account-admission";
@@ -47,27 +48,9 @@ describe("owner-designated release-only canary admission", () => {
     }
     expect(() => releaseCanaryDesignation(selected, { ...credential, owner_user_id: credentialId }, designation)).toThrow("designated");
   });
-  it("uses published server-native rotation, uploads access only and returns no provider credentials", async () => {
-    const calls: string[] = []; let version = 1;
-    const read = vi.fn(async () => ({ credential: { current_version: version }, material: { kind: "codex-chatgpt", accountId: "synthetic-account",
-      accessToken: `synthetic-access-${version}`, expiresAt: Math.floor(Date.now() / 1000) + 3600 } }));
-    const deps = { phase: "reserved", transition: vi.fn(async (phase: string) => { calls.push(phase); }), read,
-      renew: vi.fn(async () => { version++; calls.push("native-rotation-published"); }), assertFresh: vi.fn(async () => { calls.push("fresh-disposable"); }),
-      start: vi.fn(async (input: any, renewal: any) => { calls.push("private-upload"); expect(input.material).not.toHaveProperty("refreshToken");
-        expect(input.renewedCodex.accessToken).not.toBe(input.material.accessToken); expect(renewal.cachePublished).toBe(true); }),
-      observeStarted: vi.fn(async () => true) };
-    const result = await runReleaseCanaryAdmission(releaseCanaryRequest(request(), scope), deps as any);
-    expect(calls).toEqual(["preparing", "fresh-disposable", "native-rotation-published", "dispatched", "fresh-disposable", "private-upload", "started"]);
-    expect(JSON.stringify(result)).not.toContain("synthetic-access"); expect(result).toEqual({ started: true });
-    expect(deps.renew).toHaveBeenCalledOnce();
-  });
-  it("reconciles lost native dispatch and never reuses an uncertain renewal or reads arbitrary credentials", async () => {
-    const deps = { phase: "dispatched", transition: vi.fn(), read: vi.fn(), renew: vi.fn(), start: vi.fn(), assertFresh: vi.fn(), observeStarted: vi.fn(async () => true) };
-    expect(await runReleaseCanaryAdmission(releaseCanaryRequest(request(), scope), deps as any)).toEqual({ started: true });
-    expect(deps.read).not.toHaveBeenCalled(); expect(deps.renew).not.toHaveBeenCalled(); expect(deps.start).not.toHaveBeenCalled();
-    deps.observeStarted.mockResolvedValue(false);
-    await expect(runReleaseCanaryAdmission(releaseCanaryRequest(request(), scope), deps as any)).rejects.toThrow("reconcil");
-    await expect(runReleaseCanaryAdmission(releaseCanaryRequest(request(), scope), { ...deps, phase: "preparing" } as any)).rejects.toThrow("reconcil");
-    expect(deps.renew).not.toHaveBeenCalled();
+  it.each(["reserved", "preparing", "dispatched", "started", "retired"])("refuses new admission and replay before access preparation (%s)", async phase => {
+    const deps = { phase, transition: vi.fn(), read: vi.fn(), renew: vi.fn(), start: vi.fn(), assertFresh: vi.fn(), observeStarted: vi.fn() };
+    await expect(runReleaseCanaryAdmission(releaseCanaryRequest(request(), scope), deps as any)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
+    for (const value of Object.values(deps)) if (typeof value === "function") expect(value).not.toHaveBeenCalled();
   });
 });

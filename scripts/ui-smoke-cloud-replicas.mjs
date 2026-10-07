@@ -4,21 +4,21 @@ export async function runCloudReplicaSmoke({ page, check, harnessBase }) {
   await page.clock.install();
   await page.goto(`${harnessBase}/harness-cloud-replicas.html`);
   const trigger = page.getByRole("button", { name: "Cloud workspace details", exact: true });
-  const sync = page.getByRole("region", { name: "Sync files to this Mac" });
+  const sync = page.getByRole("region", { name: "Sync to a local directory" });
   const calls = () => page.evaluate(() => window.cloudReplicaHarness.calls);
   await trigger.hover();
   await expect.poll(async () => (await calls()).filter(call => call.op === "cloudReplica.list").length).toBe(1);
   await trigger.click();
-  await expect(sync).toContainText("never uploaded");
+  await expect(sync.getByRole("switch", { name: "Sync to a local directory", exact: true })).not.toBeChecked();
   expect((await calls()).filter(call => call.op === "cloudReplica.list")).toHaveLength(1);
-  await sync.getByRole("button", { name: "Choose folder…", exact: true }).click();
+  await sync.getByRole("switch", { name: "Sync to a local directory", exact: true }).click();
   await expect(sync).toContainText("In sync");
   const create = (await calls()).find(call => call.op === "cloudReplica.create");
   expect(create.params.workspaceId).toBe("22222222-2222-4222-8222-222222222222");
   expect(create.params.deviceId).toBe("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
-  await sync.getByRole("button", { name: "Pause", exact: true }).click();
-  await expect(sync.getByRole("button", { name: "Resume", exact: true })).toBeVisible();
-  await sync.getByRole("button", { name: "Resume", exact: true }).click();
+  await sync.getByRole("switch", { name: "Sync to a local directory", exact: true }).click();
+  await expect(sync.getByRole("switch", { name: "Sync to a local directory", exact: true })).not.toBeChecked();
+  await sync.getByRole("switch", { name: "Sync to a local directory", exact: true }).click();
   await expect(sync).toContainText("In sync");
 
   await page.keyboard.press("Escape");
@@ -47,7 +47,7 @@ export async function runCloudReplicaSmoke({ page, check, harnessBase }) {
     window.cloudReplicaHarness.folder("/Users/fixture/zeros-v2-test-second-device");
   });
   await expect(sync).toContainText("Off");
-  await sync.getByRole("button", { name: "Choose folder…", exact: true }).click();
+  await sync.getByRole("switch", { name: "Sync to a local directory", exact: true }).click();
   await expect(sync).toContainText("/Users/fixture/zeros-v2-test-second-device");
   expect((await calls()).filter(call => call.op === "cloudReplica.create").at(-1).params.deviceId).toBe("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
   await page.evaluate(() => {
@@ -85,28 +85,29 @@ export async function runCloudReplicaSmoke({ page, check, harnessBase }) {
   await trigger.click();
   await expect(sync).toContainText("In sync");
 
-  await sync.getByRole("button", { name: "Remove…", exact: true }).click();
+  await sync.getByRole("button", { name: "Sync actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Remove sync…", exact: true }).click();
   await expect(sync).toContainText("Other replicas keep syncing");
   expect((await calls()).filter(call => call.op === "cloudReplica.remove")).toHaveLength(0);
   await sync.getByRole("button", { name: "Remove sync", exact: true }).click();
-  await expect(sync.getByRole("button", { name: "Choose folder…", exact: true })).toBeVisible();
+  await expect(sync.getByRole("switch", { name: "Sync to a local directory", exact: true })).toBeVisible();
   await page.evaluate(() => window.cloudReplicaHarness.device("cccccccc-cccc-4ccc-8ccc-cccccccccccc"));
   await expect(sync).toContainText("In sync");
   await expect(sync).toContainText("/Users/fixture/zeros-v2-test-second-device");
   await page.evaluate(() => window.cloudReplicaHarness.device("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"));
-  await expect(sync.getByRole("button", { name: "Choose folder…", exact: true })).toBeVisible();
+  await expect(sync.getByRole("switch", { name: "Sync to a local directory", exact: true })).toBeVisible();
   await page.evaluate(() => window.cloudReplicaHarness.holdFolder());
-  await sync.getByRole("button", { name: "Choose folder…", exact: true }).click();
+  await sync.getByRole("switch", { name: "Sync to a local directory", exact: true }).click();
   const beforeClosedPicker = (await calls()).filter(call => call.op === "cloudReplica.create").length;
   await page.keyboard.press("Escape");
   await page.evaluate(() => window.cloudReplicaHarness.finishFolder("/Users/fixture/zeros-v2-test-closed"));
   await page.clock.fastForward(100);
   expect((await calls()).filter(call => call.op === "cloudReplica.create")).toHaveLength(beforeClosedPicker);
   await trigger.click();
-  await expect(sync.getByRole("button", { name: "Choose folder…", exact: true })).toBeVisible();
+  await expect(sync.getByRole("switch", { name: "Sync to a local directory", exact: true })).toBeVisible();
   for (const lifecycle of ["activity", "authorization"]) {
     await page.evaluate(() => window.cloudReplicaHarness.holdFolder());
-    await sync.getByRole("button", { name: "Choose folder…", exact: true }).click();
+    await sync.getByRole("switch", { name: "Sync to a local directory", exact: true }).click();
     const beforeCancelledPicker = (await calls()).filter(call => call.op === "cloudReplica.create").length;
     if (lifecycle === "activity") {
       await page.evaluate(() => window.cloudReplicaHarness.hide());
@@ -118,18 +119,18 @@ export async function runCloudReplicaSmoke({ page, check, harnessBase }) {
       await expect(sync).toContainText("edit access");
       await page.evaluate(() => window.cloudReplicaHarness.canEdit(true));
     }
-    await expect(sync.getByRole("button", { name: "Choose folder…", exact: true })).toBeVisible();
+    await expect(sync.getByRole("switch", { name: "Sync to a local directory", exact: true })).toBeVisible();
     await page.evaluate(lifecycle => window.cloudReplicaHarness.finishFolder(`/Users/fixture/zeros-v2-test-cancelled-${lifecycle}`), lifecycle);
     await page.clock.fastForward(100);
     expect((await calls()).filter(call => call.op === "cloudReplica.create")).toHaveLength(beforeCancelledPicker);
-    await expect(sync.getByRole("button", { name: "Choose folder…", exact: true })).toBeEnabled();
+    await expect(sync.getByRole("switch", { name: "Sync to a local directory", exact: true })).toBeEnabled();
   }
   await page.evaluate(() => window.cloudReplicaHarness.canEdit(undefined));
   await expect(sync).toContainText("edit access");
-  await expect(sync.getByRole("button", { name: "Choose folder…", exact: true })).toHaveCount(0);
+  await expect(sync.getByRole("switch", { name: "Sync to a local directory", exact: true })).toBeDisabled();
   await page.evaluate(() => window.cloudReplicaHarness.canEdit(true));
-  await expect(sync.getByRole("button", { name: "Choose folder…", exact: true })).toBeVisible();
-  await sync.getByRole("button", { name: "Choose folder…", exact: true }).click();
+  await expect(sync.getByRole("switch", { name: "Sync to a local directory", exact: true })).toBeVisible();
+  await sync.getByRole("switch", { name: "Sync to a local directory", exact: true }).click();
   await expect(sync).toContainText("In sync");
   await page.evaluate(() => window.cloudReplicaHarness.diverge());
   await sync.getByRole("button", { name: "Use cloud version…", exact: true }).click();
@@ -140,6 +141,8 @@ export async function runCloudReplicaSmoke({ page, check, harnessBase }) {
   await expect(sync.getByRole("button", { name: "Resume", exact: true })).toHaveCount(0);
   await expect(sync.getByRole("button", { name: "Save local changes and receive cloud", exact: true })).toHaveCount(0);
   await page.evaluate(() => window.cloudReplicaHarness.staff(false));
+  await expect(sync).toBeVisible();
+  await page.evaluate(() => window.cloudReplicaHarness.signOut());
   await expect(sync).toHaveCount(0);
   check("Mac replica controls isolate accounts/devices/workspaces, fence hidden reads/pickers and revocation, retain offline snapshots and confirm replacement/removal", true);
 }

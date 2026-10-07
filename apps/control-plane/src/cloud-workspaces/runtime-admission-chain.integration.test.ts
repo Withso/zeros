@@ -15,10 +15,6 @@ import { ensureUser } from "../auth.js";
 import { HttpError } from "../authz.js";
 import type { CloudWorkspaceBackendConfig, GithubBackendConfig } from "../config.js";
 import { createGithubRoutes } from "../github.js";
-import {
-  manageCloudAgentRuntime,
-  type CloudAgentRuntimeChange,
-} from "../manage-cloud-agent-runtime.js";
 import { createCloudWorkspaceRoutes } from "./routes.js";
 import { createCloudWorkspaceInternalRoutes } from "./internal-routes.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
@@ -36,17 +32,18 @@ import type {
   CloudWorkspaceProvider,
 } from "./provider.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
+import { runtimeBase, runtimeWitness, seedRuntimeBase, seedRuntimeBundle } from "./runtime-test-fixtures.js";
+import { computerTestAccount, computerTestWallet, seedComputerTemplate } from "./computer-workspace-test-fixtures.js";
 import { CloudRuntimeRegistration } from "../../../desktop/src/engine/cloud-runtime-registration.js";
 import { CloudWorkspaceAccessClient } from "../../../desktop/electron/cloud-workspace-access-client.js";
 
 const url = process.env.TEST_DATABASE_URL,
   d = url ? describe : describe.skip;
-const IMAGE = "11111111-1111-4111-8111-111111111111",
-  ORIGIN = "https://control.example.test",
-  CONTRACT = "b".repeat(64);
+const IMAGE = runtimeBase.imageRef,
+  ORIGIN = "https://control.example.test";
 const cloudConfig: CloudWorkspaceBackendConfig = {
-  provider: "daytona",
-  apiKey: "daytona-api-key-for-integration-tests",
+  provider: "boat",
+  apiKey: "boat-api-key-for-integration-tests",
   apiUrl: "https://api.example.test",
   target: "eu",
   snapshotId: IMAGE,
@@ -59,18 +56,19 @@ const cloudConfig: CloudWorkspaceBackendConfig = {
   operationTimeoutSeconds: 30,
   autoArchiveMinutes: 10_080,
   reconcileIntervalMs: 1_000,
-  providerCredentialKeys: {},
   settingsSecretEncryptionKeys: {},
   currentSettingsSecretEncryptionKeyVersion: null,
   settingsSecretKeyV1: null,
   access: {
-    allowedSshHosts: ["ssh.app.daytona.io"],
-    allowedPreviewHostSuffixes: ["proxy.daytona.work"],
+    allowedSshHosts: ["ssh.fixture.test"],
+    allowedPreviewHostSuffixes: ["preview.fixture.test"],
     previewBaseDomain: "cloud-preview.example.test",
   },
   durability: null,
   outbox: null,
   setupExecution: null,
+  runtime: { qualificationMode: "full" },
+  boat: { accountScope: computerTestAccount, billingOrg: computerTestWallet, ttlSeconds: 1800 },
 };
 const githubConfig: GithubBackendConfig = {
   appId: 654321,
@@ -100,6 +98,7 @@ d("normal shared cloud runtime admission chain", () => {
   });
   it("creates, reconciles, registers the real client and admits two devices and an exact delegated execution without SQL runtime patches", async () => {
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     const owner = await ensureUser(pool, {
       provider: "workos",
       providerSubject: `user_${randomUUID()}`,
@@ -124,7 +123,6 @@ d("normal shared cloud runtime admission chain", () => {
       "INSERT INTO auth_sessions(provider_session_id,provider_sub,user_id,client_kind,last_token_expires_at) VALUES($1,$2,$3,'desktop',now()+interval '1 hour')",
       [owner.authentication.sessionId, owner.identity.subject, owner.id],
     );
-    let orgId: string, installationId: string;
     const seeded = await withSystemTx(pool, async (tx) => {
       const organization = await tx.query<{ id: string }>(
         `INSERT INTO organizations (
@@ -188,8 +186,8 @@ d("normal shared cloud runtime admission chain", () => {
         installationId: installation.rows[0]!.id,
       };
     });
-    orgId = seeded.organizationId;
-    installationId = seeded.installationId;
+    const orgId = seeded.organizationId,
+      installationId = seeded.installationId;
 
     await withCloudFixtureOwnerTx(pool, async (tx) => {
       await tx.query(
@@ -233,6 +231,10 @@ d("normal shared cloud runtime admission chain", () => {
       enginePort: 39393,
       setupSecretKeyV1: randomBytes(32).toString("base64url"),
       github: {
+        mintContentsRead: async () => ({
+          token: "ghs_synthetic_repository_credential",
+          expiresAtMs: Date.now() + 3600000,
+        }),
         mint: async () => ({
           token: "ghs_synthetic_repository_credential",
           expiresAtMs: Date.now() + 3600000,
@@ -294,6 +296,8 @@ d("normal shared cloud runtime admission chain", () => {
             webUrl: "https://github.com/withso/zeros",
             defaultBranch: "main",
             visibility: "private",
+            resolvedRevision: "c".repeat(40),
+            checkoutSource: { kind: "default", revision: "c".repeat(40), headBranch: "main", targetBranch: "main", pullRequest: null },
           }),
         },
       }),
@@ -321,6 +325,15 @@ d("normal shared cloud runtime admission chain", () => {
         owner: "withso", repository: "zeros" }),
     });
     expect(source.status, JSON.stringify(await source.json())).toBe(200);
+    // Published template/release fixtures precede create. The actual create,
+    // setup redemption and registration establish immutable runtime rows.
+    const computer = await withSystemTx(pool, async tx => {
+      await seedRuntimeBase(tx);
+      const publishedRuntime = await seedRuntimeBundle(tx);
+      const template = await seedComputerTemplate(tx, { organizationId: orgId, ownerUserId: owner.id, installationId,
+        repositories: [{ id: "123456789", owner: "withso", name: "zeros", sha: "c".repeat(40) }] });
+      return { pin: publishedRuntime.pin, template };
+    });
     const response = await app.request(
       `/v1/organizations/${orgId}/cloud-workspaces`,
       {
@@ -344,6 +357,8 @@ d("normal shared cloud runtime admission chain", () => {
     const created = await response.json();
     expect(response.status, JSON.stringify(created)).toBe(202);
     const workspaceId = created.workspace.id;
+    expect((await pool.query("SELECT generation,build_id,template_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1",
+      [workspaceId])).rows).toEqual([{ generation: 1, build_id: computer.template.buildId, template_id: computer.template.templateId }]);
     expect(
       (
         await pool.query(
@@ -365,7 +380,7 @@ d("normal shared cloud runtime admission chain", () => {
     });
     const resources = new Map<string, CloudProviderResource>();
     const provider: CloudWorkspaceProvider = {
-      name: "daytona",
+      name: "boat",
       find: async (identity) =>
         [...resources.values()].filter(
           (row) =>
@@ -413,6 +428,7 @@ d("normal shared cloud runtime admission chain", () => {
       ttlSeconds: 120,
       workosEnabled: true,
     });
+    let setupFailure: { name: string; message: string } | undefined;
     const setup = new CloudWorkspaceSetupWorker({
       pool,
       intervalMs: 1000,
@@ -421,111 +437,126 @@ d("normal shared cloud runtime admission chain", () => {
       logger: { info() {}, warn() {}, error() {} },
       executor: {
         execute: async (execution, signal) => {
-          const grant = await broker.issue(execution, signal);
-          const redeemed = await materials.redeem({
-            token: grant.token,
-            ...(Object.fromEntries(
-              [
-                "workspaceId",
-                "organizationId",
-                "generation",
-                "setupRunId",
-                "executionFence",
-              ].map((key) => [key, execution[key as keyof typeof execution]]),
-            ) as Pick<
-              typeof execution,
-              | "workspaceId"
-              | "organizationId"
-              | "generation"
-              | "setupRunId"
-              | "executionFence"
-            >),
-            materialVersion: 2,
-            expected: {
-              imageRef: execution.image.ref,
-              imageSourceCommit: execution.image.sourceCommit!,
-              repositoryRevision: execution.repository.revision,
-              settingsVersion: execution.settings.version,
-              settingsSha256: execution.settings.sha256,
-            },
-          });
-          runtime = new CloudRuntimeRegistration(
-            {
-              version: 1,
-              audience: "zeros-cloud-engine-runtime-v1",
-              execution: redeemed.execution,
-              engine: {
-                instanceId: redeemed.engine.instanceId,
-                protocolVersion: redeemed.engine.protocolVersion,
-                readinessProbeToken: redeemed.engine.readinessProbeToken,
+          try {
+            const grant = await broker.issue(execution, signal);
+            const redeemed = await materials.redeem({
+              token: grant.token,
+              ...(Object.fromEntries(
+                [
+                  "workspaceId",
+                  "organizationId",
+                  "generation",
+                  "setupRunId",
+                  "executionFence",
+                ].map((key) => [key, execution[key as keyof typeof execution]]),
+              ) as Pick<
+                typeof execution,
+                | "workspaceId"
+                | "organizationId"
+                | "generation"
+                | "setupRunId"
+                | "executionFence"
+              >),
+              materialVersion: 2,
+              runtime: runtimeWitness,
+              checkoutSourceVersion: 1,
+              expected: {
+                imageRef: execution.image.ref,
+                imageSourceCommit: execution.image.sourceCommit!,
+                repositoryRevision: execution.repository.revision,
+                settingsVersion: execution.settings.version,
+                settingsSha256: execution.settings.sha256,
               },
-              registration: redeemed.engine.registration,
-            },
-            {
-              agentRuntime: {
-                profile: "zeros-cloud-worker-v3",
-                contractSha256: CONTRACT,
+            });
+            runtime = new CloudRuntimeRegistration(
+              {
+                version: 1,
+                audience: "zeros-cloud-engine-runtime-v1",
+                execution: redeemed.execution,
+                engine: {
+                  instanceId: redeemed.engine.instanceId,
+                  protocolVersion: redeemed.engine.protocolVersion,
+                  readinessProbeToken: redeemed.engine.readinessProbeToken,
+                },
+                registration: redeemed.engine.registration,
               },
-              fetch: fetcher,
-              onAuthorityLost: () => {},
-              onDurableRecordSync: async (authority) => {
-                await records.headForEngine({
-                  ...authority,
-                  afterEntityKind: null,
-                  afterEntityId: null,
-                });
+              {
+                agentRuntime: {
+                  profile: "zeros-cloud-worker-v4",
+                  ...runtimeWitness,
+                },
+                fetch: fetcher,
+                onAuthorityLost: () => {},
+                onDurableRecordSync: async (authority) => {
+                  await records.headForEngine({
+                    ...authority,
+                    afterEntityKind: null,
+                    afterEntityId: null,
+                  });
+                },
               },
-            },
-          );
-          await runtime.start();
-          return {
-            logExcerpt: "",
-            readiness: {
-              version: 1,
-              ...redeemed.execution,
-              image: {
-                ref: execution.image.ref,
-                sourceCommit: execution.image.sourceCommit!,
+            );
+            await runtime.start();
+            return {
+              logExcerpt: "",
+              readiness: {
+                version: 1,
+                ...redeemed.execution,
+                image: {
+                  ref: execution.image.ref,
+                  sourceCommit: execution.image.sourceCommit!,
+                },
+                repository: {
+                  revision: execution.repository.revision,
+                  commit: "c".repeat(40),
+                },
+                settings: {
+                  version: execution.settings.version,
+                  sha256: execution.settings.sha256,
+                },
+                engine: {
+                  instanceId: redeemed.engine.instanceId,
+                  protocolVersion: redeemed.engine.protocolVersion,
+                  health: "ready",
+                  durableRecordConnected: true,
+                },
               },
-              repository: {
-                revision: execution.repository.revision,
-                commit: "c".repeat(40),
-              },
-              settings: {
-                version: execution.settings.version,
-                sha256: execution.settings.sha256,
-              },
-              engine: {
-                instanceId: redeemed.engine.instanceId,
-                protocolVersion: redeemed.engine.protocolVersion,
-                health: "ready",
-                durableRecordConnected: true,
-              },
-            },
-          };
+            };
+          } catch (error) {
+            setupFailure = error instanceof Error
+              ? { name: error.name, message: error.message.slice(0,160) }
+              : { name: typeof error, message: "Setup fixture failed" };
+            throw error;
+          }
         },
       },
     });
     expect(await setup.runOnce()).toBe(true);
+    expect(setupFailure).toBeUndefined();
+    expect(
+      (
+        await pool.query("SELECT status,last_error_code,last_error_message FROM cloud_workspaces WHERE id=$1", [
+          workspaceId,
+        ])
+      ).rows[0],
+    ).toMatchObject({status:"ready",last_error_code:null,last_error_message:null});
     expect(runtime?.readiness()?.health).toBe("ready");
     expect(
       (
-        await pool.query("SELECT status FROM cloud_workspaces WHERE id=$1", [
-          workspaceId,
-        ])
-      ).rows[0].status,
-    ).toBe("ready");
-    expect(
-      (
         await pool.query(
-          "SELECT actor_protocol_version,agent_runtime_profile,agent_runtime_contract_sha256 FROM cloud_workspace_engine_instances WHERE workspace_id=$1",
+          "SELECT actor_protocol_version,agent_runtime_profile,agent_runtime_contract_sha256,runtime_profile,runtime_id,runtime_manifest_sha256,runtime_base_compatibility_id,runtime_installer_receipt_sha256 FROM cloud_workspace_engine_instances WHERE workspace_id=$1",
           [workspaceId],
         )
       ).rows[0],
     ).toMatchObject({
       actor_protocol_version: 2,
-      agent_runtime_profile: "zeros-cloud-worker-v3",
-      agent_runtime_contract_sha256: CONTRACT,
+      agent_runtime_profile: null,
+      agent_runtime_contract_sha256: null,
+      runtime_profile: "zeros-cloud-worker-v4",
+      runtime_id: computer.pin.runtimeId,
+      runtime_manifest_sha256: computer.pin.manifestSha256,
+      runtime_base_compatibility_id: computer.pin.baseCompatibilityId,
+      runtime_installer_receipt_sha256: runtimeWitness.installerReceiptSha256,
     });
     async function device() {
       const pair = generateKeyPairSync("ed25519"),
@@ -622,6 +653,7 @@ d("normal shared cloud runtime admission chain", () => {
     expect(await runtime!.commandRequest({ kind: "claim", conversationId: "normal-runtime-chain", executionId, claimId })).toMatchObject({ commandId, claimId, executionId, dispatchAllowed: true });
     const admission = {
       kind: "admit" as const,
+      environmentVersion: 1 as const,
       admission: {
         executionId,
         delegationId,
@@ -634,49 +666,7 @@ d("normal shared cloud runtime admission chain", () => {
         },
       },
     };
-    await expect(
-      runtime!.agentExecutionRequest(admission, new AbortController().signal),
-    ).rejects.toThrow();
-    const evidence: CloudAgentRuntimeChange = {
-      operationId: randomUUID(),
-      actorUserId: owner.id,
-      enabled: true,
-      reason: "Synthetic integration fixture, not live provider qualification",
-      evidence: {
-        version: 1,
-        channel: "development",
-        provider: "daytona",
-        runtimeClass: "linux-vm",
-        imageRef: IMAGE,
-        profile: "zeros-cloud-worker-v3",
-        runtimeContractSha256: CONTRACT,
-        sourceCommit: "a".repeat(40),
-        evidenceSha256: "e".repeat(64),
-        qualifiedAt: new Date().toISOString(),
-        credentials: [
-          {
-            kind: "cursor-api-key",
-            renewal: false,
-            checks: {
-              privateCredentialIsolation: true,
-              workloadCredentialDenial: true,
-              actorAdmission: true,
-              stopAndRevocation: true,
-              nativeTurn: true,
-              nativeResume: true,
-              authentication: true,
-            },
-          },
-        ],
-      },
-    };
-    const options = { databaseUrl: url!, channel: "development" },
-      plan = await manageCloudAgentRuntime(pool, evidence, options);
-    await manageCloudAgentRuntime(pool, evidence, {
-      ...options,
-      execute: true,
-      approval: plan.planSha256,
-    });
+    await expect(runtime!.agentExecutionRequest({kind:"admit",admission:admission.admission},new AbortController().signal)).rejects.toThrow();
     for (const changed of [
       { executionId: randomUUID() }, { delegationId: randomUUID() },
       { model: "unqualified-model" }, { provider: "claude" as const },
@@ -690,6 +680,15 @@ d("normal shared cloud runtime admission chain", () => {
       new AbortController().signal,
     )) as { leaseId: string };
     expect(lease.leaseId).toBeTypeOf("string");
+    // V4 qualification revocation is one-way. Revoke the exact credential
+    // evidence after proving admission, and reject both replay and its lease.
+    await withSystemTx(pool, async tx => {
+      expect((await tx.query(`UPDATE cloud_runtime_qualifications SET enabled=false,mcp_qualified=false,revoked_at=now()
+        WHERE runtime_id=$1 AND base_compatibility_id=$2 AND credential_kind='cursor-api-key' AND profile='zeros-cloud-worker-v4'`,
+        [computer.pin.runtimeId, computer.pin.baseCompatibilityId])).rowCount).toBe(1);
+    });
+    await expect(runtime!.agentExecutionRequest(admission, new AbortController().signal)).rejects.toThrow();
+    await expect(runtime!.agentExecutionRequest({kind:"validate",leaseId:lease.leaseId},new AbortController().signal)).rejects.toThrow();
     await desktop.revokeEngineAdmission("synthetic-account-token", {
       ...target,
       grantToken: grant.grantToken,

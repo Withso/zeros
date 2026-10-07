@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createBrowserTab } from "../tab-model";
-vi.mock("../../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => true }));
+vi.mock("../../../features/team/cloud-workspace-account-access", () => ({ useCloudWorkspaceAccountAccess: () => true, hasCloudWorkspaceAccountAccess: () => true }));
 
 vi.mock("../../../features/agent/sessions-hooks", async (importOriginal) => ({
   ...(await importOriginal<

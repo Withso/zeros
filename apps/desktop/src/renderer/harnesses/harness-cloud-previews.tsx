@@ -1,4 +1,4 @@
-// Real Browser and staff gate. Native admission is synthetic; this harness
+// Real Browser and account admission. Native admission is synthetic; this harness
 // verifies renderer lifecycle, while Electron/runtime suites own authority.
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
@@ -17,7 +17,6 @@ import {
   acceptOrganizationSnapshot,
   clearTeamStore,
 } from "../features/team/team-store";
-import { setInternalFeatureEnabled } from "../features/settings/internal-features";
 import { cloudScopedId } from "../platform/bridge/cloud-workspace-key";
 import { useWorkspaceStore } from "../state/workspace-store";
 import { cloudWorkspaceDetails } from "../state/cloud-workspace-catalog";
@@ -146,12 +145,11 @@ acceptOrganizationSnapshot({
     id: organizationId,
     email: "fixture@example.test",
     displayName: "Fixture",
-    staffRole: "developer",
+    staffRole: null,
   },
   organizations: [],
   teams: [],
 });
-setInternalFeatureEnabled("cloudComputerV2", true);
 const tab = createBrowserTab({
   url:
     new URLSearchParams(location.search).has("empty") ||
@@ -245,7 +243,7 @@ function Harness() {
                 id: secondWorkspace,
                 email: "second@example.test",
                 displayName: "Second",
-                staffRole: "developer",
+                staffRole: null,
               },
               organizations: [],
               teams: [],
@@ -255,7 +253,7 @@ function Harness() {
           Switch account
         </Button>
         <Button
-          onClick={() => setInternalFeatureEnabled("cloudComputerV2", false)}
+          onClick={() => clearTeamStore()}
         >
           Disable previews
         </Button>

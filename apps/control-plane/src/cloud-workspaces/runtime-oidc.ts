@@ -7,7 +7,7 @@ export type RuntimeOidcPurpose = "publication" | "base_registration";
 export type RuntimeOidcConfig = {
   audience: string;
   repository: string;
-  environment: "alpha" | null;
+  environment: "alpha" | "beta" | "production" | null;
 };
 export type RuntimePublicationProvenance = {
   runId: number;
@@ -20,14 +20,6 @@ export type RuntimeOidcVerifier = (
   token: string,
   purpose: RuntimeOidcPurpose,
 ) => Promise<RuntimePublicationProvenance>;
-
-const workflows = {
-  publication: { file: "release-alpha.yml", events: ["push"] },
-  base_registration: {
-    file: "cloud-runtime-base.yml",
-    events: ["workflow_dispatch"],
-  },
-} as const;
 
 export class RuntimeOidcError extends Error {
   constructor() {
@@ -87,17 +79,32 @@ export function createRuntimeOidcVerifier(
           "sha",
         ],
       });
-      const workflow = workflows[purpose];
-      const workflowRef = `${config.repository}/.github/workflows/${workflow.file}@refs/heads/main`;
+      const main = payload.ref === "refs/heads/main";
+      // Only the original Alpha push retains the explicit null-environment
+      // compatibility opt-out. Dispatch publication always names its channel.
+      const alphaPush = purpose === "publication" && main &&
+        payload.event_name === "push" &&
+        (config.environment === "alpha" || config.environment === null);
+      const baseRegistration = purpose === "base_registration" && main &&
+        payload.event_name === "workflow_dispatch" && config.environment === "alpha";
+      const releaseBranch = typeof payload.ref === "string" &&
+        payload.ref.startsWith("refs/heads/release/") &&
+        payload.ref.length > "refs/heads/release/".length &&
+        !/\s/.test(payload.ref);
+      const standalone = purpose === "publication" &&
+        payload.event_name === "workflow_dispatch" && config.environment !== null &&
+        (main || config.environment !== "alpha" && releaseBranch);
+      const file = alphaPush ? "release-alpha.yml" :
+        baseRegistration ? "cloud-runtime-base.yml" :
+        standalone ? "cloud-runtime-bundle.yml" : null;
+      if (!file) throw new RuntimeOidcError();
+      const workflowRef = `${config.repository}/.github/workflows/${file}@${payload.ref}`;
       if (
         typeof payload.iat !== "number" ||
         payload.iat > Math.floor(Date.now() / 1000) + 60 ||
         typeof payload.repository !== "string" ||
         payload.repository.toLowerCase() !== config.repository.toLowerCase() ||
         payload.workflow_ref !== workflowRef ||
-        payload.ref !== "refs/heads/main" ||
-        typeof payload.event_name !== "string" ||
-        !(workflow.events as readonly string[]).includes(payload.event_name) ||
         (config.environment !== null &&
           payload.environment !== config.environment) ||
         typeof payload.sha !== "string" ||

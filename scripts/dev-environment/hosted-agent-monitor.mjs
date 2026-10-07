@@ -1,3 +1,4 @@
+import { refuseRetiredDevNativeCanary } from "./native-agent-retirement.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 import { withHostedLease } from "./hosted-state.mjs";
 
@@ -12,10 +13,11 @@ const description = result => ({
   inactive: "Dev agent checks stopped because this environment is no longer active.",
 })[result.state];
 
-/** Polls metadata while waiting for normal sign-in/account connections. Native
- * execution is detached on its recorded VM; each poll releases the R2 lease. */
+/** Connection authority maintenance without a native fixture remains available.
+ * Native qualification intent refuses before acquiring a registry lease. */
 export async function monitorHostedAgents({ registry, identity, generation, profile, services, signal, mutation = operation => operation(), watch = true, retry = false, progress = () => {} }) {
-  if (!profile.fixture && !profile.connections?.enabled) return;
+  if (profile.fixture) refuseRetiredDevNativeCanary();
+  if (!profile.connections?.enabled) return;
   let last, retryOnce = retry;
   while (!signal?.aborted) {
     let result;

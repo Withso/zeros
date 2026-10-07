@@ -283,7 +283,7 @@ describe("Alpha runtime bundle publication", () => {
     expect(body).toEqual({
       descriptor,
       manifestHeader,
-      releaseOrder: 17,
+      releaseOrder: 123,
       githubRunId: 123,
       githubRunAttempt: 2,
     });

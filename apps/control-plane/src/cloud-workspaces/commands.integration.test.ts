@@ -3,7 +3,8 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { withSystemTx, withUserTx } from "../db.js";
-import { seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
+import { seedReadyCloudWorkspace, withCloudFixturePurgeTx, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
+import { seedRecordedCloudWorkspaceActor } from "./recorded-actor-test-fixture.js";
 import { DatabaseCloudWorkspaceCommandService, type CloudCommandEngineScope, type CloudCommandMutation } from "./commands.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -14,8 +15,7 @@ d("durable cloud commands", () => {
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool);
-    scope = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
-      engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken };
+    scope = await seedRecordedCloudWorkspaceActor(pool, fixture);
     service = new DatabaseCloudWorkspaceCommandService({ pool });
   });
   const payload = () => ({ agentId: "claude", userMessageId: randomUUID(), prompt: [{ type: "text", text: "fixture prompt" }], modeRevision: 0 });
@@ -138,7 +138,10 @@ d("durable cloud commands", () => {
     await service.mutate(scope, enqueue());
     const claim = (await service.claim(scope, "conversation", "execution"))!;
     await service.settle(scope, { commandId: claim.commandId, claimId: claim.claimId, state: "succeeded", resultCode: null });
-    await withSystemTx(pool, tx => tx.query(`DELETE FROM cloud_workspaces WHERE id=$1`, [scope.workspaceId]));
+    await withCloudFixturePurgeTx(pool, { organizationId: fixture.organizationId, userId: fixture.userId }, async tx => {
+      await tx.query("DELETE FROM cloud_workspace_computer_sources WHERE workspace_id=$1", [scope.workspaceId]);
+      await tx.query("DELETE FROM cloud_workspaces WHERE id=$1", [scope.workspaceId]);
+    });
     expect((await withSystemTx(pool, tx => tx.query(`SELECT * FROM cloud_workspace_commands WHERE workspace_id=$1`, [scope.workspaceId]))).rows).toEqual([]);
   });
 

@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { RELEASE_WORKER_IMAGES_RETIRED } from "../../apps/control-plane/src/cloud-workspaces/release-worker-retirement";
 import { assertBuildCapability, publicationGate } from "./publication";
 import { reusableWorker } from "./worker-reuse";
 import { channelBaseline, migrationManifest } from "./source";
 
 const sha = "a".repeat(40), later = "b".repeat(40), digest = "c".repeat(64);
-const candidate = { channel: "alpha" as const, sourceSha: sha, branch: "main", repository: "example/zeros", runId: "1", cloudRequired: true, requireQualifiedWorker: true, provider: "boat" };
+const candidate = { channel: "alpha" as const, sourceSha: sha, branch: "main", repository: "example/zeros", runId: "1", cloudRequired: true, requireQualifiedWorker: false, provider: "boat" };
 const worker = { provider: "boat", imageRef: `boat:zeros-alpha-fixture@sha256:${digest}`, sourceSha: sha, architecture: "linux/amd64", storageMiB: 4096 };
 const backend = { version: 1, ready: true, sourceSha: sha, channel: "alpha", maintenance: false,
   migrations: { state: "current", head: "0112_test.sql", expectedHead: "0112_test.sql", manifestSha256: digest },
@@ -24,8 +25,8 @@ describe("V6 publication-time proof", () => {
     await expect(publicationGate(candidate, { ...deps(), identity: async () => ({ ...backend, sourceSha: later }) })).rejects.toThrow();
     await expect(publicationGate(candidate, { ...deps(), page: async surface => ({ version: 1, commitSha: later, surface }) })).rejects.toThrow();
   });
-  it("refuses revoked approval, a different complete worker tuple, and another run's receipt", async () => {
-    for (const patch of [{ workerQualified: false }, { workerQualified: undefined }, { worker: { ...worker, storageMiB: 8192 } }])
+  it("refuses a different complete worker tuple and another run's receipt while promotion is off", async () => {
+    for (const patch of [{ worker: { ...worker, storageMiB: 8192 } }])
       await expect(publicationGate(candidate, { ...deps(), identity: async () => ({ ...backend, ...patch }) })).rejects.toThrow();
     await expect(publicationGate(candidate, { ...deps(), receipt: async () => ({ ...receipt, runId: "2" }) })).rejects.toThrow();
   });
@@ -60,15 +61,15 @@ describe("V6 publication-time proof", () => {
       await expect(publicationGate(advisory, { ...deps(), receipt: async () => receipted, identity: async () => ({ ...current, sourceSha: later }) })).rejects.toThrow();
       await expect(publicationGate(advisory, { ...deps(), receipt: async () => receipted, identity: async () => current,
         page: async surface => ({ version: 1, commitSha: later, surface }) })).rejects.toThrow();
-      await expect(publicationGate(candidate, { ...deps(), receipt: async () => receipted, identity: async () => current })).rejects.toThrow("cloud qualification");
+      await expect(publicationGate({ ...candidate, requireQualifiedWorker: true }, { ...deps(), receipt: async () => receipted, identity: async () => current })).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
       expect(await reusableWorker(advisory, current, async () => digest)).toBeUndefined();
-      await expect(reusableWorker(candidate, current, async () => digest)).rejects.toThrow();
+      await expect(reusableWorker({ ...candidate, requireQualifiedWorker: true }, current, async () => digest)).rejects.toThrow();
     }
   });
   it("enabled reuse requires affirmative current qualification", async () => {
     for (const workerQualified of [false, undefined])
-      await expect(reusableWorker(candidate, { ...backend, workerQualified }, async () => digest)).rejects.toThrow();
-    expect(await reusableWorker(candidate, backend, async () => digest)).toEqual(worker);
+      await expect(reusableWorker({ ...candidate, requireQualifiedWorker: true }, { ...backend, workerQualified }, async () => digest)).rejects.toThrow();
+    expect(await reusableWorker({ ...candidate, requireQualifiedWorker: true }, backend, async () => digest)).toEqual(worker);
   });
 });
 

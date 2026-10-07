@@ -1,7 +1,6 @@
 import { useEffect, useMemo } from "react";
 import { useCachedRead } from "../../state/use-cached-read";
 import { Button } from "../../shared/ui";
-import { useInternalFeatureActive } from "./internal-features";
 import {
   cloudComputerV2BuildCache,
   cloudComputerV2LogsCache,
@@ -39,17 +38,16 @@ export function CloudComputerV2Log({
   version: number;
   active: boolean;
 }) {
-  const authorized = useInternalFeatureActive("cloudComputerV2");
-  const enabled = useCloudComputerV2Visible(authorized && active);
+  const enabled = useCloudComputerV2Visible(active);
   const build = useCachedRead(
     cloudComputerV2BuildCache,
-    authorized ? buildKey : null,
+    buildKey,
     readCloudComputerV2Build,
     { enabled, maxAgeMs: 1000 },
   );
   const log = useCachedRead(
     cloudComputerV2LogsCache,
-    authorized ? buildKey : null,
+    buildKey,
     readAndMergeCloudComputerV2Logs,
     { enabled, maxAgeMs: 1000 },
   );
@@ -79,7 +77,6 @@ export function CloudComputerV2Log({
     () => log.data?.entries.map((entry) => entry.text).join("") ?? "",
     [log.data?.entries],
   );
-  if (!authorized) return null;
   return (
     <div
       className="flex flex-col gap-2"

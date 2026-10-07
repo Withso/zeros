@@ -2,6 +2,7 @@ import type { ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmod, chown, lstat, mkdir, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import type { CloudAgentAccessMaterial } from "@zeros/protocol/cloud-agent-execution";
+import { CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
 import type { CloudAgentLease } from "../cloud-agent-lease";
 import { attestCloudCoordinator } from "./cloud-coordinator-attestation";
 import { cloudCoordinatorEnvironment, CLOUD_COORDINATOR_HOME } from "./cloud-coordinator-view.mjs";
@@ -102,9 +103,12 @@ export class CloudNativeBoundary implements PreparedBoundary {
   static async prepare(lease: CloudAgentLease, workload: PreparedBoundary, conversationId: string,
     settings?: Record<string, string>): Promise<CloudNativeBoundary> {
     const configuration = loadCloudWorkerConfiguration();
-    if ((configuration?.version !== 3 && configuration?.version !== 4) || workload.status.backend !== "cloud-worker")
+    if ((configuration?.version !== 4) || workload.status.backend !== "cloud-worker")
       throw new Error("Native cloud agents require a qualified cloud worker");
-    lease.assertLive(); await workload.attestation; lease.assertLive();
+    lease.assertLive();
+    try { await workload.attestation; }
+    catch { throw new CloudCommandFailureError({ stage: "containment", category: "attestation_failed" }); }
+    lease.assertLive();
     await mkdir(ROOT, { recursive: true, mode: 0o700 });
     const root = await lstat(ROOT);
     if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== 0 || (root.mode & 0o077) !== 0 || await realpath(ROOT) !== ROOT)
@@ -153,7 +157,8 @@ export class CloudNativeBoundary implements PreparedBoundary {
       const canary = await lease.launch(() => workload.spawn(owned.request({ command: configuration.toolchain.node,
         args: ["-e", CANARY, parentNamespace, authorityCanary], cwd: "/srv/zeros/workspace", env: {}, stdio: "pipe" }, true)));
       canary.stderr?.resume();
-      await attestCloudCoordinator(lease, canary, "zeros-native-provider-v1");
+      try { await attestCloudCoordinator(lease, canary, "zeros-native-provider-v1"); }
+      catch { throw new CloudCommandFailureError({ stage: "containment", category: "canary_failed" }); }
       await lease.validate(); lease.assertLive();
       return boundary;
     } catch (error) {

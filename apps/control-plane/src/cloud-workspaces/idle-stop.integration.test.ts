@@ -12,9 +12,10 @@ import { previousBackendWake } from "./lifecycle-compatibility-fixtures.js";
 import { previousBackendReconciler } from "./previous-reconciler-fixture.js";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { runMigrations } from "../migrate.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
 import { withSystemTx } from "../db.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
+import { seedRecordedCloudWorkspaceActor } from "./recorded-actor-test-fixture.js";
 import { DatabaseCloudIdleStop } from "./idle-stop.js";
 import { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { completeWorkspaceCheckpointRequest, deliverWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
@@ -22,13 +23,14 @@ import { completeWorkspaceCheckpointRequest, deliverWorkspaceCheckpointRequest }
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("verified inactivity shutdown", () => {
   let pool: pg.Pool, fixture: Awaited<ReturnType<typeof seedReadyCloudWorkspace>>, service: DatabaseCloudIdleStop;
-  const scope = () => ({ workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1, engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken });
+  let actor: Awaited<ReturnType<typeof seedRecordedCloudWorkspaceActor>>;
+  const scope = () => actor;
   const request = () => service.request(scope(), randomUUID());
   const oldEngine = () => pool.query("UPDATE cloud_workspace_engine_instances SET created_at=now()-interval '11 minutes' WHERE id=$1", [fixture.engineInstanceId]);
   const lifecycle = (operation: string, key = randomUUID()) => {
     const app = new Hono();
     app.use("*", async (c, next) => { c.set("user", { id: fixture.userId }); await next(); });
-    const config = { provider: "daytona", imageRef: "fixture-image", architecture: "linux/amd64", cpuMillicores: 2000,
+    const config = { provider: "boat", imageRef: "fixture-image", architecture: "linux/amd64", cpuMillicores: 2000,
       memoryMiB: 4096, storageMiB: 20480, sourceCommit: "b".repeat(40), settingsSecretEncryptionKeys: {},
       currentSettingsSecretEncryptionKeyVersion: null } as CloudWorkspaceBackendConfig;
     app.route("/", createCloudWorkspaceRoutes(pool, config, { workosEnabled: false }));
@@ -63,8 +65,9 @@ suite("verified inactivity shutdown", () => {
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 5 }); });
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public"); await runMigrations(pool);
+    await resetMigratedTestDatabase(pool);
     fixture = await seedReadyCloudWorkspace(pool); service = new DatabaseCloudIdleStop(pool, false);
+    actor = await seedRecordedCloudWorkspaceActor(pool, fixture);
     await pool.query(`INSERT INTO cloud_workspace_quotas(org_id,max_workspaces,max_running_workspaces,max_cpu_millicores,max_memory_mib,max_storage_mib)
       VALUES($1,10,10,100000,100000,1000000) ON CONFLICT(org_id) DO NOTHING`,[fixture.organizationId]);
   });
@@ -161,7 +164,7 @@ suite("verified inactivity shutdown", () => {
     const release = new Promise<void>(resolve => { finish = resolve; });
     let starts = 0;
     let resource: CloudProviderResource = { workspaceId: fixture.workspaceId, generation: 1, resourceId: `sandbox-${fixture.workspaceId}`, state: "running", target: null, metadata: {} };
-    const provider: CloudWorkspaceProvider = { name: "daytona", async find() { return [resource]; }, async inspect() { return resource; },
+    const provider: CloudWorkspaceProvider = { name: "boat", async find() { return [resource]; }, async inspect() { return resource; },
       async create() { throw new Error("same-generation wake"); }, async start() { starts++; resource = { ...resource, state: "running" }; return resource; },
       async stop() { entered(); await release; resource = { ...resource, state: "stopped" }; return resource; },
       async archive() { return resource; }, async delete() {}, async *listManaged() {} };
@@ -183,7 +186,7 @@ suite("verified inactivity shutdown", () => {
     const { commit } = await finalCheckpoint(); await commit();
     expect((await lifecycle("wake")).status).toBe(202);
     const resource: CloudProviderResource = { workspaceId: fixture.workspaceId, generation: 1, resourceId: `sandbox-${fixture.workspaceId}`, state: "running", target: null, metadata: {} };
-    const provider: CloudWorkspaceProvider = { name: "daytona", async find() { return [resource]; }, async inspect() { return resource; },
+    const provider: CloudWorkspaceProvider = { name: "boat", async find() { return [resource]; }, async inspect() { return resource; },
       async create() { throw new Error("unused"); }, async start() { throw new Error("must finish stop first"); },
       async stop() { throw new CloudProviderError("provider_request_invalid", "fixture", false); },
       async archive() { return resource; }, async delete() {}, async *listManaged() {} };
@@ -200,7 +203,7 @@ suite("verified inactivity shutdown", () => {
     const wakeId = await withSystemTx(pool, tx => previousBackendWake(tx, fixture));
     let stops = 0;
     const resource: CloudProviderResource = { workspaceId: fixture.workspaceId, generation: 1, resourceId: `sandbox-${fixture.workspaceId}`, state: "running", target: null, metadata: {} };
-    const provider: CloudWorkspaceProvider = { name: "daytona", async find() { return [resource]; }, async inspect() { return resource; },
+    const provider: CloudWorkspaceProvider = { name: "boat", async find() { return [resource]; }, async inspect() { return resource; },
       async create() { throw new Error("unused"); }, async start() { throw new Error("must finish stop first"); },
       async stop() { stops++; throw new CloudProviderError("provider_resource_failed", "Stop failed", retryable, { retryAfterMs: 60_000 }); },
       async archive() { return resource; }, async delete() {}, async *listManaged() {} };
@@ -233,7 +236,7 @@ suite("verified inactivity shutdown", () => {
     await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now()+interval '30 seconds' WHERE id=$1", [stopId]);
     let stops = 0;
     let resource: CloudProviderResource = { workspaceId: fixture.workspaceId, generation: 1, resourceId: `sandbox-${fixture.workspaceId}`, state: "running", target: null, metadata: {} };
-    const provider: CloudWorkspaceProvider = { name: "daytona", async find() { return [resource]; }, async inspect() { return resource; },
+    const provider: CloudWorkspaceProvider = { name: "boat", async find() { return [resource]; }, async inspect() { return resource; },
       async create() { throw new Error("unused"); }, async start() { resource = { ...resource, state: "running" }; return resource; },
       async stop() { stops++; resource = { ...resource, state: "stopped" }; return resource; }, async archive() { return resource; }, async delete() {}, async *listManaged() {} };
     const reconciler = new CloudWorkspaceReconciler({ pool, provider, intervalMs: 1000 });

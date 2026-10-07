@@ -103,130 +103,66 @@ d("cloud engine device admission", () => {
       renew,
     });
 
-  it("requires a trusted signed device for portable admission", async () => {
-    const before = (
-      await pool.query(
-        "SELECT count(*)::int AS count FROM cloud_workspace_endpoint_grants WHERE purpose = 'engine-connect'",
-      )
-    ).rows[0].count;
-    await expect(service.issue(subject())).rejects.toMatchObject({
-      code: "engine_client_admission_invalid",
-    });
+  const retired = { code: "cloud_workspace_client_update_required", message: "Update Zeros to connect to cloud workspaces." };
+  const historicalToken = `zws_${"a".repeat(43)}`;
+
+  it("refuses retired portable admission before minting authority", async () => {
+    const before = (await pool.query(
+      "SELECT count(*)::int AS count FROM cloud_workspace_endpoint_grants WHERE purpose='engine-connect'",
+    )).rows[0].count;
+    await expect(service.issue(subject())).rejects.toMatchObject(retired);
     const signer = await device();
+    const invalid = signer.proof();
+    invalid.signature = Buffer.alloc(64).toString("base64url");
+    await expect(service.issue({ ...subject(), proof: invalid })).rejects.toMatchObject(retired);
+    await expect(service.issue({ ...subject(), proof: signer.proof() })).rejects.toMatchObject(retired);
+    expect((await pool.query(
+      "SELECT count(*)::int AS count FROM cloud_workspace_endpoint_grants WHERE purpose='engine-connect'",
+    )).rows[0].count).toBe(before);
+  });
+
+  it("refuses retired signed requests regardless of workspace binding or replay", async () => {
+    const signer = await device();
+    await expect(service.issue({ ...subject(), proof: signer.proof({
+      organizationId: fixture.organizationId, workspaceId: fixture.engineInstanceId,
+    }) })).rejects.toMatchObject(retired);
     const proof = signer.proof();
-    proof.signature = Buffer.alloc(64).toString("base64url");
-    await expect(service.issue({ ...subject(), proof })).rejects.toMatchObject({
-      code: "engine_client_admission_rejected",
-    });
-    expect(
-      (
-        await pool.query(
-          "SELECT count(*)::int AS count FROM cloud_workspace_endpoint_grants WHERE purpose = 'engine-connect'",
-        )
-      ).rows[0].count,
-    ).toBe(before);
+    await expect(service.issue({ ...subject(), proof })).rejects.toMatchObject(retired);
+    await expect(service.issue({ ...subject(), proof })).rejects.toMatchObject(retired);
   });
 
-  it("binds device signatures to this workspace and rejects replay", async () => {
+  it("does not admit either retired device or authorize its historical relay token", async () => {
+    const a = await device(), b = await device("windows");
+    await expect(service.issue({ ...subject(), proof: a.proof() })).rejects.toMatchObject(retired);
+    await expect(service.issue({ ...subject(), proof: b.proof() })).rejects.toMatchObject(retired);
+    await expect(redeem(historicalToken)).rejects.toMatchObject(retired);
+    await expect(redeem(historicalToken, true)).rejects.toMatchObject(retired);
+    await pool.query("UPDATE devices SET trust_state='revoked',revoked_at=now() WHERE id=$1", [a.deviceId]);
+    await expect(redeem(historicalToken, true)).rejects.toMatchObject(retired);
+    await expect(service.authorizeRelay(historicalToken, { connected: true })).resolves.toBeNull();
+  });
+
+  it("refuses retired renewal before and after device key rotation", async () => {
     const signer = await device();
-    await expect(
-      service.issue({
-        ...subject(),
-        proof: signer.proof({
-          organizationId: fixture.organizationId,
-          workspaceId: fixture.engineInstanceId,
-        }),
-      }),
-    ).rejects.toMatchObject({ code: "engine_client_admission_rejected" });
-    const proof = signer.proof();
-    await service.issue({ ...subject(), proof });
-    await expect(service.issue({ ...subject(), proof })).rejects.toMatchObject({
-      code: "engine_client_admission_rejected",
-    });
+    await expect(redeem(historicalToken, true)).rejects.toMatchObject(retired);
+    await pool.query("UPDATE devices SET key_version=key_version+1 WHERE id=$1", [signer.deviceId]);
+    await expect(redeem(historicalToken, true)).rejects.toMatchObject(retired);
+    await expect(service.authorizeRelay(historicalToken, { connected: true })).resolves.toBeNull();
   });
 
-  it("keeps two devices' pending connections independent and revokes only the removed device", async () => {
-    const a = await device();
-    const b = await device("windows");
-    const first = await service.issue({ ...subject(), proof: a.proof() });
-    const second = await service.issue({ ...subject(), proof: b.proof() });
-    await expect(redeem(first.grantToken)).resolves.toMatchObject({
-      admitted: true,
-    });
-    await expect(redeem(second.grantToken)).resolves.toMatchObject({
-      admitted: true,
-    });
-    await expect(redeem(first.grantToken, true)).resolves.toMatchObject({
-      admitted: true,
-    });
-    await pool.query(
-      "UPDATE devices SET trust_state = 'revoked', revoked_at = now() WHERE id = $1",
-      [a.deviceId],
-    );
-    await expect(redeem(first.grantToken, true)).rejects.toMatchObject({
-      code: "engine_client_admission_rejected",
-    });
-    await expect(
-      service.authorizeRelay(first.grantToken, { connected: true }),
-    ).resolves.toBeNull();
-    await expect(redeem(second.grantToken, true)).resolves.toMatchObject({
-      admitted: true,
-    });
-    await expect(
-      service.authorizeRelay(second.grantToken, { connected: true }),
-    ).resolves.not.toBeNull();
-  });
-
-  it("renewal cannot redeem an unused grant or survive device key rotation", async () => {
+  it("keeps retired renewal closed for a pending device", async () => {
     const signer = await device();
-    const grant = await service.issue({ ...subject(), proof: signer.proof() });
-    await expect(redeem(grant.grantToken, true)).rejects.toMatchObject({
-      code: "engine_client_admission_rejected",
-    });
-    await redeem(grant.grantToken);
-    await pool.query(
-      "UPDATE devices SET key_version = key_version + 1 WHERE id = $1",
-      [signer.deviceId],
-    );
-    await expect(redeem(grant.grantToken, true)).rejects.toMatchObject({
-      code: "engine_client_admission_rejected",
-    });
-    await expect(
-      service.authorizeRelay(grant.grantToken, { connected: true }),
-    ).resolves.toBeNull();
-  });
-
-  it("renews a consumed grant after admission expiry but never for a pending device", async () => {
-    const signer = await device();
-    const grant = await service.issue({ ...subject(), proof: signer.proof() });
-    await redeem(grant.grantToken);
-    await pool.query(
-      "UPDATE cloud_workspace_endpoint_grants SET expires_at = now() - interval '1 second', created_at = now() - interval '2 minutes' WHERE token_hash = $1",
-      [createHash("sha256").update(grant.grantToken).digest()],
-    );
-    await expect(redeem(grant.grantToken, true)).resolves.toMatchObject({
-      admitted: true,
-    });
-    await pool.query(
-      "UPDATE devices SET trust_state = 'pending' WHERE id = $1",
-      [signer.deviceId],
-    );
-    await expect(redeem(grant.grantToken, true)).rejects.toMatchObject({
-      code: "engine_client_admission_rejected",
-    });
+    await expect(redeem(historicalToken, true)).rejects.toMatchObject(retired);
+    await pool.query("UPDATE devices SET trust_state='pending' WHERE id=$1", [signer.deviceId]);
+    await expect(service.issue({ ...subject(), proof: signer.proof() })).rejects.toMatchObject(retired);
+    await expect(redeem(historicalToken, true)).rejects.toMatchObject(retired);
   });
 
   it.each(["ios", "ipados", "android", "web"])(
-    "admits the same authenticated protocol for %s devices",
-    async (platform) => {
+    "requires an actor-2 client for %s devices", async platform => {
       const signer = await device(platform);
-      const grant = await service.issue({
-        ...subject(),
-        proof: signer.proof(),
-      });
-      await expect(redeem(grant.grantToken)).resolves.toMatchObject({
-        admitted: true,
-      });
+      await expect(service.issue({ ...subject(), proof: signer.proof() })).rejects.toMatchObject(retired);
+      await expect(redeem(historicalToken)).rejects.toMatchObject(retired);
     },
   );
 });

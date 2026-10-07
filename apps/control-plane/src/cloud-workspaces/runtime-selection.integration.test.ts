@@ -94,18 +94,31 @@ const url = process.env.TEST_DATABASE_URL;
   // rows. Composite input rows let negative tests exercise impossible/stale
   // engine pins without weakening the generation/engine database triggers.
   const credentialQualified = async (options: { mode?: "full" | "smoke"; mcp?: boolean; kind?: string;
-    compat?: string; engineRuntimeId?: string } = {}) => withSystemTx(pool, async tx => {
+    compat?: string; engineRuntimeId?: string; retired?: boolean } = {}) => withSystemTx(pool, async tx => {
     const generation = { provider: "boat", image_ref: runtimeBase.imageRef, runtime_id: `r1-${"a".repeat(64)}`,
       runtime_manifest_sha256: "a".repeat(64), runtime_base_image_id: runtimeBase.id,
       runtime_base_compatibility_id: options.compat ?? runtimeBase.compatibilityId,
       runtime_profile: "zeros-cloud-worker-v4", runtime_engine_protocol_version: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION };
-    const engine = { ...generation, runtime_id: options.engineRuntimeId ?? generation.runtime_id };
+    const pin = options.retired ? { runtime_id: null, runtime_manifest_sha256: null,
+      runtime_base_image_id: null, runtime_base_compatibility_id: null, runtime_profile: null,
+      runtime_engine_protocol_version: null } : {};
+    Object.assign(generation, pin);
+    const engine = { ...generation, runtime_id: options.engineRuntimeId ?? generation.runtime_id,
+      agent_runtime_profile: "zeros-cloud-worker-v3", agent_runtime_contract_sha256: "a".repeat(64) };
     return (await tx.query(`SELECT count(*)::int AS count
       FROM jsonb_populate_record(NULL::cloud_workspace_generations, $1::jsonb) generation
       CROSS JOIN jsonb_populate_record(NULL::cloud_workspace_engine_instances, $2::jsonb) engine
       CROSS JOIN (SELECT $3::text AS kind) credential
       ${runtimeCredentialQualificationJoin("$4", "$5::boolean")}`,
     [JSON.stringify(generation), JSON.stringify(engine), options.kind ?? "codex-chatgpt", options.mode ?? "full", options.mcp ?? false])).rows[0].count;
+  });
+  it("never admits a retired generation through its historical v3 credential qualification", async () => {
+    await pool.query(`INSERT INTO cloud_agent_runtime_qualifications
+      (provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled,mcp_qualified)
+      VALUES ('boat',$1,$2,'codex-chatgpt','zeros-cloud-worker-v3',true,true)`,
+      [runtimeBase.imageRef, "a".repeat(64)]);
+    expect(await credentialQualified({ retired: true })).toBe(0);
+    expect(await credentialQualified({ retired: true, mcp: true })).toBe(0);
   });
   it("uses exact per-kind runtime qualifications and independently gates MCP in both credential paths", async () => {
     await withSystemTx(pool, tx => seedRuntimeBundle(tx, { mcpQualified: false }));

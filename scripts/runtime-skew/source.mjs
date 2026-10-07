@@ -18,6 +18,7 @@ export { CloudAgentConnection } from "./apps/desktop/src/renderer/platform/bridg
 export * as pty from "./apps/desktop/src/renderer/platform/bridge/pty-bridge";
 export * as wire from "./apps/desktop/src/renderer/platform/bridge/cloud-runtime-wire";
 export { CloudCommandRuntime } from "./apps/desktop/src/engine/cloud-command-runtime";
+export { CloudEventRuntime } from "./apps/desktop/src/engine/cloud-event-runtime";
 export { CloudActionRuntime } from "./apps/desktop/src/engine/cloud-action-runtime";
 export * as commandTransport from "./apps/desktop/src/engine/cloud-command-client";
 export * as eventTransport from "./apps/desktop/src/engine/cloud-event-client";

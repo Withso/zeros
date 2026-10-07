@@ -3,6 +3,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../migrate.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
+import { seedRecordedCloudWorkspaceActor } from "./recorded-actor-test-fixture.js";
 import { DatabaseCloudIdleStop } from "./idle-stop.js";
 import { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { DatabaseCloudAgentCredentialService } from "./agent-credentials.js";
@@ -10,13 +11,15 @@ import { DatabaseCloudAgentCredentialService } from "./agent-credentials.js";
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("control plane liveness and released writers", () => {
   let pool: pg.Pool, f: Awaited<ReturnType<typeof seedReadyCloudWorkspace>>;
+  let actor: Awaited<ReturnType<typeof seedRecordedCloudWorkspaceActor>>;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 5 }); });
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
     await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public"); await runMigrations(pool);
     f = await seedReadyCloudWorkspace(pool);
+    actor = await seedRecordedCloudWorkspaceActor(pool, f);
   });
-  const scope = () => ({ workspaceId: f.workspaceId, organizationId: f.organizationId, generation: 1, engineInstanceId: f.engineInstanceId, heartbeatToken: f.heartbeatToken });
+  const scope = () => actor;
   it("lets a durable paused queue sleep and serializes Resume against idle capture", async () => {
     const commands = new DatabaseCloudWorkspaceCommandService({ pool });
     const idle = new DatabaseCloudIdleStop(pool, false);

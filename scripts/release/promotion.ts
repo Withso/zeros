@@ -1,3 +1,4 @@
+import { refuseRetiredWorkerPromotion } from "./worker-retirement";
 import { HostedReceipt, HostedServicesReceipt, MigrationReceipt, PromotionError, ReleaseIdentity, requireCheck, type PromotionConfig, type Surface } from "./contracts";
 
 export type PromotionDependencies = {
@@ -16,6 +17,7 @@ export type PromotionDependencies = {
 /** No rollback after schema advancement. Every ambiguous mutation stops this
  * chain; a human reconciles provider state before retrying a failed run. */
 export async function promoteServices(config: PromotionConfig, deps: PromotionDependencies) {
+  if (config.requireQualifiedWorker) refuseRetiredWorkerPromotion();
   let stage = "Beta receipt";
   try {
     if (config.channel === "production") await deps.betaReceipt();
@@ -69,6 +71,7 @@ export type FinalizationDependencies = Pick<PromotionDependencies, "assertCurren
 };
 
 export async function finalizePromotion(config: PromotionConfig, value: unknown, deps: FinalizationDependencies) {
+  if (config.requireQualifiedWorker || deps.workerPromoted) refuseRetiredWorkerPromotion();
   let stage = "services receipt";
   try {
     const services = HostedServicesReceipt.parse(value);
@@ -87,22 +90,14 @@ export async function finalizePromotion(config: PromotionConfig, value: unknown,
     for (const surface of config.surfaces) await deps.verifyPages(surface);
     stage = "qualified worker handoff";
     await deps.checkWorker();
-    let railwayDeploymentId = services.railwayDeploymentId;
-    if (deps.workerPromoted) {
-      stage = "worker tuple API redeploy";
-      await deps.assertCurrent();
-      railwayDeploymentId = await deps.deploy(); await deps.waitDeployment(railwayDeploymentId);
-    }
+    const railwayDeploymentId = services.railwayDeploymentId;
     stage = "final API readiness";
     const backend = ReleaseIdentity.parse(await deps.waitIdentity());
     requireCheck(backend.channel === config.channel && backend.sourceSha === config.sourceSha &&
       backend.migrations.head === services.backend.migrations.head && backend.migrations.expectedHead === services.backend.migrations.expectedHead &&
       backend.migrations.manifestSha256 === services.backend.migrations.manifestSha256, "Final API source or migration manifest changed after services promotion");
-    requireCheck(!config.requireQualifiedWorker || backend.cloud.enabled && backend.workerQualified === true && backend.worker?.provider === config.provider,
-      "Final API worker is unavailable or lacks current channel qualification");
-    // Without a worker promotion, the API must keep the tuple it served at the
-    // services handoff; a change since then belongs to the worker lane.
-    requireCheck(deps.workerPromoted || backend.cloud.enabled === services.backend.cloud.enabled &&
+    // The API must keep the exact worker tuple served at the services handoff.
+    requireCheck(backend.cloud.enabled === services.backend.cloud.enabled &&
       JSON.stringify(backend.worker) === JSON.stringify(services.backend.worker), "The API's worker tuple changed after services promotion");
     return HostedReceipt.parse({ ...services, status: "success", runAttempt: config.runAttempt, backend, railwayDeploymentId, completedAt: new Date().toISOString() });
   } catch (error) {

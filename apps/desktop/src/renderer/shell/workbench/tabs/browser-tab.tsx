@@ -26,8 +26,8 @@ import React, {
   useState,
 } from "react";
 import { workspacePreviewAvailable } from "../../../platform/cloud-workspace-access";
-import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
-import { useInternalFeatureActive } from "../../../features/settings/internal-features";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
+import { useCloudWorkspaceAccountAccess } from "../../../features/team/cloud-workspace-account-access";
 import { useCloudPreviewAdmission } from "../../../features/browser/use-cloud-preview-admission";
 import {
   ChevronLeft,
@@ -135,7 +135,6 @@ interface BrowserTabProps {
 }
 
 export function BrowserTab(props: BrowserTabProps) {
-  const cloudPreviews = useInternalFeatureActive("cloudComputerV2");
   const previewFolder = useWorkspaceStore((state) =>
     props.tab.previewSource
       ? state.chats.find((chat) => chat.id === props.tab.previewSource?.chatId)
@@ -143,6 +142,7 @@ export function BrowserTab(props: BrowserTabProps) {
       : undefined,
   );
   const folder = props.scope ?? previewFolder ?? "";
+  const cloudPreviews = useCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(folder)?.organizationId);
   if (!props.tab.browserConversationId && (props.tab.previewSource || isLoopbackUrl(normalizeBrowserUrl(props.tab.url ?? "") ?? "")) && isCloudWorkspace(folder) && !cloudPreviews) return null;
   if (
     !props.tab.browserConversationId &&

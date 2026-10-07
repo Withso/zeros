@@ -100,6 +100,7 @@ d("cloud workspace content durability", () => {
 
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     fixture = await seedReadyCloudWorkspace(pool);
     objectStore = new InspectableObjectStore();
     blobs = new DatabaseCloudWorkspaceBlobService({
@@ -376,9 +377,9 @@ d("cloud workspace content durability", () => {
       // A periodic snapshot does not close this engine's write authority.
       await expect(blobs.authorizeUpload(fixture.heartbeatToken)).resolves.toBeUndefined();
     }
-    const config: CloudWorkspaceBackendConfig = { provider: "daytona", apiKey: "fixture", apiUrl: "https://api.example.test", target: "eu", snapshotId: "recovery-image", imageRef: "recovery-image",
+    const config: CloudWorkspaceBackendConfig = { provider: "boat", apiKey: "fixture", apiUrl: "https://api.example.test", target: "eu", snapshotId: "recovery-image", imageRef: "recovery-image",
       architecture: "linux/amd64", cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480, sourceCommit: "b".repeat(40), operationTimeoutSeconds: 30,
-      autoArchiveMinutes: 10080, reconcileIntervalMs: 1000, providerCredentialKeys: {}, settingsSecretEncryptionKeys: {}, currentSettingsSecretEncryptionKeyVersion: null,
+      autoArchiveMinutes: 10080, reconcileIntervalMs: 1000, settingsSecretEncryptionKeys: {}, currentSettingsSecretEncryptionKeyVersion: null,
       settingsSecretKeyV1: null, access: { allowedSshHosts: [], allowedPreviewHostSuffixes: [], previewBaseDomain: "preview.example.test" }, durability: null, outbox: null, setupExecution: null };
     const app = new Hono();
     app.use("*", async (c, next) => { c.set("user", { id: fixture.userId } as AuthedUser); await next(); });
@@ -415,7 +416,7 @@ d("cloud workspace content durability", () => {
     expect((await pool.query("SELECT state FROM cloud_workspace_engine_instances WHERE id=$1", [fixture.engineInstanceId])).rows[0]?.state).not.toBe("ready");
     let stops = 0, creates = 0;
     let observed: CloudProviderResource | null = { workspaceId: fixture.workspaceId, generation: 1, resourceId: `sandbox-${fixture.workspaceId}`, state: "running", target: "eu", metadata: {} };
-    const provider: CloudWorkspaceProvider = { name: "daytona", async inspect(id) { return observed?.resourceId === id ? observed : null; }, async find() { return []; },
+    const provider: CloudWorkspaceProvider = { name: "boat", async inspect(id) { return observed?.resourceId === id ? observed : null; }, async find() { return []; },
       async create(input) { creates++; return { ...input, resourceId: "replacement", state: "running", target: "eu", metadata: {} }; },
       async stop() { stops++; observed = { ...observed!, state: "stopped" }; return observed; }, async start() { throw new Error("source must not restart"); },
       async archive() { throw new Error("unexpected archive"); }, async delete() {}, async *listManaged() {} };
@@ -862,7 +863,7 @@ d("cloud workspace content durability", () => {
       metadata: {},
     };
     const provider: CloudWorkspaceProvider = {
-      name: "daytona",
+      name: "boat",
       async find() {
         return resource ? [resource] : [];
       },

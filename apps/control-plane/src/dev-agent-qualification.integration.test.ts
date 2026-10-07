@@ -5,8 +5,8 @@ import { runMigrations } from "./migrate.js";
 import { seedReadyCloudWorkspace } from "./cloud-workspaces/test-fixtures.js";
 import { DatabaseCloudAgentCredentialService } from "./cloud-workspaces/agent-credentials.js";
 import { inspectDevAgents } from "./dev-agent-qualification.js";
-import { DatabaseCloudComputerService } from "./cloud-workspaces/computer.js";
-import type { CloudWorkspaceBackendConfig } from "./config.js";
+import { ensureCloudComputerIdentity } from "./cloud-workspaces/computer-identity.js";
+import { withSystemTx } from "./db.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 d("connected Dev agent qualification discovery", () => {
@@ -21,7 +21,7 @@ d("connected Dev agent qualification discovery", () => {
   afterEach(()=>vi.unstubAllEnvs());
   beforeEach(async () => {
     await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public"); await runMigrations(pool);
-    fixture = await seedReadyCloudWorkspace(pool);
+    fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     await pool.query("CREATE TABLE zeros_development_identity(owner text, generation uuid)");
     await pool.query("INSERT INTO zeros_development_identity VALUES ($1,$2)", [owner, generation]);
     await pool.query("UPDATE users SET staff_role='platform_owner',email=$2 WHERE id=$1", [fixture.userId, request.fixture.expectedEmail]);
@@ -57,9 +57,7 @@ d("connected Dev agent qualification discovery", () => {
   });
   it('discovers only attested images of the fixture organization, current base and provider account',async()=>{
     await connect();
-    const computers = new DatabaseCloudComputerService(pool, {} as CloudWorkspaceBackendConfig);
-    await computers.save(fixture.organizationId,fixture.userId,{expectedRevision:0,operationId:randomUUID(),
-      document:{repositories:[],installScript:'mkdir -p $PREFIX/bin',timeoutSeconds:30},sources:[]});
+    await withSystemTx(pool, tx => ensureCloudComputerIdentity(tx, fixture.organizationId, fixture.userId));
     const id=randomUUID(),snapshotId=`zeros-org-${id.replaceAll('-','')}`,buildSha256='e'.repeat(64),contractSha256='d'.repeat(64);
     await pool.query(`INSERT INTO cloud_computer_builds(id,org_id,profile_id,version,repository_owner,repository_name,state)
       SELECT $1,org_id,profile_id,draft_version,'fixture','repository','succeeded' FROM cloud_computers WHERE org_id=$2`,[id,fixture.organizationId]);
@@ -89,9 +87,7 @@ d("connected Dev agent qualification discovery", () => {
   });
   it.each(["image", "source"] as const)("enables organization-image credentials only for the image contract (%s approval)", async qualifiedContract => {
     const credential = await connect();
-    const computers = new DatabaseCloudComputerService(pool, {} as CloudWorkspaceBackendConfig);
-    await computers.save(fixture.organizationId, fixture.userId, { expectedRevision: 0, operationId: randomUUID(),
-      document: { repositories: [], installScript: "mkdir -p $PREFIX/bin", timeoutSeconds: 30 }, sources: [] });
+    await withSystemTx(pool, tx => ensureCloudComputerIdentity(tx, fixture.organizationId, fixture.userId));
     const id = randomUUID(), snapshotId = `zeros-org-${id.replaceAll("-", "")}`, buildSha256 = "e".repeat(64);
     const sourceContractSha256 = "d".repeat(64), imageContractSha256 = "f".repeat(64), imageRef = `boat:${snapshotId}@sha256:${buildSha256}`;
     await pool.query(`INSERT INTO cloud_computer_builds(id,org_id,profile_id,version,repository_owner,repository_name,state)

@@ -25,12 +25,10 @@ interface CloudRuntimePaths {
     "setupProcess" | "profile" | "consumeAdmission" | "gitAskpass" | "installPreviewLinks" |
     "installGithubCredential" | "githubRefreshRequest", string>>;
 }
-export type CloudRuntimeRoot = Readonly<CloudRuntimePaths & (
-  { profile: "v3" } | ({ profile: "v4" } & CloudActiveRuntime)
-)>;
+export type CloudRuntimeRoot = Readonly<CloudRuntimePaths & CloudActiveRuntime & { profile: "v4" }>;
 export interface CloudRuntimeResolver {
   resolve(): CloudRuntimeRoot;
-  resolveChild(): Readonly<Omit<CloudRuntimePaths, "cgroupRoot"> & { profile: "v3" | "v4"; runtimeId?: string }>;
+  resolveChild(): Readonly<Omit<CloudRuntimePaths, "cgroupRoot"> & { profile: "v4"; runtimeId: string }>;
   assertPath(file: string, directory?: boolean): void;
   assertChildPath(file: string, directory?: boolean): void;
   packagePath(file: string): string;
@@ -59,9 +57,9 @@ export function parseCloudActiveRuntime(value: unknown): CloudActiveRuntime;
 export function cloudActiveRuntimeDescriptor(runtime: CloudRuntimeRoot): CloudActiveRuntime;
 export function validateCloudRuntimeMarker(value: unknown, projection?: boolean): unknown;
 export function isCloudRuntimeCgroupRoot(value: unknown): boolean;
-export function cloudProfileIdentityMapVersion(version: number): 2 | 3 | null;
+export function cloudProfileIdentityMapVersion(version: number): 3 | null;
 export function isCloudEngineIdMap(source: unknown): boolean;
 export function cloudEngineIdMapVersion(source: unknown): 2 | 3 | null;
-export function hasCloudEngineUserNamespace(version?: 2 | 3 | 4): boolean;
+export function hasCloudEngineUserNamespace(version?: 4): boolean;
 export function isReadOnlyCloudMount(candidate: string, source: string): boolean;
 export function isCloudDeploymentOwner(candidate: string, uid: number): boolean;

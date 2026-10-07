@@ -1,7 +1,13 @@
-import {describe,expect,it} from "vitest";
+import {describe,expect,it,vi} from "vitest";
 import {cloudCoordinatorArguments,cloudCoordinatorEnvironment} from "../cloud-coordinator-view.mjs";
 import {createCloudRuntimeResolver} from "../cloud-runtime-root.mjs";
 import {cloudRuntimeFixture} from "./cloud-runtime-fixture";
+
+vi.mock("../cloud-runtime-root.mjs",async original=>({
+  ...await original<typeof import("../cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime:(await import("../../__tests__/helpers/test-cloud-runtime")).testCloudRuntime,
+}));
+import {testCloudRuntime} from "../../__tests__/helpers/test-cloud-runtime";
 
 it("pins v4 coordinator mounts and children without exposing host or engine authority",()=>{
   const tree=cloudRuntimeFixture();
@@ -34,7 +40,7 @@ describe("private provider coordinator view",()=>{
   });
   it("contains only one private HOME and scratch, with a fresh PID/proc view and fixed UID",()=>{
     const directory=`/run/zeros/coordinators/${"a".repeat(32)}`;
-    const args=cloudCoordinatorArguments(directory,"/opt/zeros-runtime/bin/node",["/opt/zeros/host.cjs"]);
+    const args=cloudCoordinatorArguments(directory,testCloudRuntime().node,[`${testCloudRuntime().workerRoot}/host.cjs`]);
     const writable=args.flatMap((value,index)=>value==="--bind"?[args.slice(index+1,index+3)]:[]);
     expect(writable).toEqual([[`${directory}/home`,"/home/zeros-agent"],[`${directory}/scratch`,"/srv/zeros/workspace"]]);
     expect(args).toContain("--unshare-pid");expect(args.slice(args.indexOf("--proc"),args.indexOf("--proc")+2)).toEqual(["--proc","/proc"]);

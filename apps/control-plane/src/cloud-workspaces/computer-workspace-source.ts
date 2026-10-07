@@ -1,7 +1,7 @@
 import type pg from "pg";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
-import { lockCloudComputerOrganization } from "./computer.js";
+import { lockCloudComputerOrganization } from "./computer-identity.js";
 import { CloudComputerV2RepositoryManifestSchema, type CloudComputerV2RepositoryManifest, CloudWorkspaceCheckoutSourceSchema, type CloudWorkspaceCheckoutSource } from "./computer-v2-contract.js";
 import { loadPinnedCloudRuntime, selectCloudRuntime, type CloudRuntimePin } from "./runtime-selection.js";
 import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
@@ -103,7 +103,7 @@ export async function readActiveComputerRepositoryGrant(tx: Tx, input: {
      JOIN users actor ON actor.id=$2
      WHERE head.org_id=$1 AND NOT org.is_personal AND build.state='succeeded' AND template.state='ready'
        AND template.stopped_at IS NOT NULL AND template.protected_contract_digest IS NOT NULL
-       AND actor.staff_role IN ('developer','platform_owner') AND actor.auth_status='active' AND actor.deleted_at IS NULL
+       AND actor.auth_status='active' AND actor.deleted_at IS NULL
        AND repo.repository_owner=lower($3) AND repo.repository_name=lower($4)`,
     [input.organizationId, input.actorUserId, input.owner, input.name])).rows[0];
   if (!active) return null;
@@ -114,7 +114,7 @@ export async function readActiveComputerRepositoryGrant(tx: Tx, input: {
   return { buildId: active.build_id, accountLogin: active.account_login, ...grant };
 }
 
-/** Only the engineering-staff create path calls this. The organization and
+/** Organization workspace creation calls this. The organization and
  * head locks serialize enrollment/activation/retirement with source retention.
  * No provider or GitHub request runs while these locks are held. */
 export async function selectComputerWorkspaceSource(tx: Tx, input: {

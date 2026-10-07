@@ -15,6 +15,11 @@ import {codexAppServerFeatureArgs} from "../app-server";
 import {createInterface} from "node:readline";
 import type {CloudProviderExecution} from "../../../cloud-provider-execution";
 import type {BoundaryProcess,BoundarySpawnRequest} from "../../../containment/types";
+vi.mock("../../../containment/cloud-runtime-root.mjs", async original => ({
+  ...await original<typeof import("../../../containment/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime: () => ({ ...(importedRuntime), workerRoot: process.cwd(), node: process.execPath, binRoot: path.dirname(process.execPath) }),
+}));
+const importedRuntime = (await import("../../../__tests__/helpers/test-cloud-runtime")).testCloudRuntime();
 
 describe.skipIf(process.platform!=="linux")("cloud native executor wire (no model or credential)",()=>{
   it("initializes the real app-server with the complete cloud configuration in an empty private HOME",async()=>{
@@ -43,7 +48,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
     const child={stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),wait:()=>Promise.resolve({code:1,signal:null}),stopAndProve:async()=>{}} as unknown as BoundaryProcess;
     const execution={lease:{assertLive(){if(abort.signal.aborted)throw new Error("retired");},signal:abort.signal,attach:(domain:{stopAndProve():Promise<void>})=>domains.add(domain),launch:async()=>child,close},coordinator:{workload:{spawn:vi.fn()}}} as unknown as CloudProviderExecution;
     try {
-      await expect(CloudCodexExecServer.start(execution,"/opt/zeros/pinned/bin/codex")).rejects.toThrow("retired");
+      await expect(CloudCodexExecServer.start(execution,path.join(process.cwd(),"pinned/bin/codex"))).rejects.toThrow("retired");
       await close();
       for(const server of listeners.mock.instances as Server[]) expect(server.listening).toBe(false);
     } finally {for(const server of listeners.mock.instances as Server[]) server.close();listeners.mockRestore();}
@@ -57,7 +62,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
     const helper=path.join(root,"cloud-codex-executor.mjs");
     await copyFile(path.resolve("apps/desktop/src/engine/agents/containment/cloud-codex-executor.mjs"),helper);
     // Only the runtime's absolute deployment paths differ in this offline fixture.
-    await writeFile(path.join(root,"cloud-runtime-root.mjs"),`export const resolveCloudRuntimeChild=()=>(${JSON.stringify({profile:"v3",workerRoot:path.dirname(nativeBinary),binRoot:"/usr/bin"})});export const assertCloudRuntimeChildPath=()=>{throw new Error('unexpected v4 fixture');};`);
+    await writeFile(path.join(root,"cloud-runtime-root.mjs"),`export const resolveCloudRuntimeChild=()=>(${JSON.stringify({...importedRuntime,workerRoot:process.cwd(),binRoot:path.dirname(process.execPath)})});export const assertCloudRuntimeChildPath=file=>{if(file!==${JSON.stringify(nativeBinary)})throw new Error('unadmitted fixture executable');};`);
     const values={ORG_VALUE:"synthetic-org-value",REPO_VALUE:"synthetic-repository-value",PERSONAL_VALUE:actor,ORG_SECRET:"synthetic-org-secret",EMPTY_VALUE:"",LANG:"C",
       OPENAI_API_KEY:"synthetic-provider-value",ANTHROPIC_API_KEY:"synthetic-provider-value",CURSOR_API_KEY:"synthetic-provider-value",CODEX_API_KEY:"synthetic-provider-value"};
     const abort=new AbortController(),domains=new Set<{stopAndProve():Promise<void>}>();let closing:Promise<void>|undefined;
@@ -77,7 +82,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
       launch:async(callback:()=>Promise<BoundaryProcess>)=>callback(),close},coordinator:{workload:{spawn:workloadSpawn}}} as unknown as CloudProviderExecution;
     let socket:WebSocket|undefined,uncooperative:Socket|undefined,proofTimer:ReturnType<typeof setTimeout>|undefined;
     try{
-      const bridge=await CloudCodexExecServer.start(execution,"/opt/zeros/pinned/bin/codex");
+      const bridge=await CloudCodexExecServer.start(execution,nativeBinary);
       uncooperative=connect({host:"127.0.0.1",port:Number(new URL(bridge.url).port),allowHalfOpen:true});uncooperative.on("error",()=>{});
       await once(uncooperative,"connect");const rejection=once(uncooperative,"data");
       uncooperative.write("GET /wrong HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n");

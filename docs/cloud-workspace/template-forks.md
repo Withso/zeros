@@ -1,26 +1,28 @@
 # Cloud Computer template workspace creation
 
-Engineering staff (`developer` and `platform_owner`) creating a workspace in an
-organization with a `cloud_computer_v2_heads` row use that computer's active,
-successful build and ready, stopped template. A missing ready active template
-returns `409 cloud_computer_build_required` before repository lookup or provider
-allocation. This path has no shared-base fallback. Non-staff and organizations
-without a v2 head retain the existing image and v4-base selection behavior.
+Every authorized organization member creates from the Cloud Computer's active,
+successful v2 build and ready, stopped template. An active account and current
+organization/repository authority are required; owners/admins manage the
+computer. Staff status and the desktop internal feature flag do not select a
+creation path. A missing ready active template returns
+`409 cloud_computer_build_required` before repository lookup or provider
+allocation. Creation has no legacy image or bare-base fallback.
 
 The desktop Create composer uses the active build's ordered `activeRepositories`
-when its internal `cloudComputerV2` gate is active and the template is ready.
-State and history reads opt in with `activeRepositories=true`; responses without
-that query flag retain the exact legacy shape for shipped strict-schema clients.
-Draft-only additions are excluded. A repository choice is restored synchronously
-per user and organization, then pruned against the active list. Add repository
-opens Cloud Computer settings; no registered local project is required.
+when the template is ready. State and history reads opt in with
+`activeRepositories=true`; responses without that query retain the exact shipped
+shape for strict-schema clients. Draft-only additions are excluded. Repository
+choice is restored synchronously per user and organization, then pruned against
+the active list. Add repository opens Cloud Computer settings; no registered
+local project is required. Local and organization-owned local creation retain
+their existing paths.
 
-The composer reads the default branch through `create-options` with
-`cloudComputerV2=true`. For engineering staff and an active-config repository,
-this read uses the existing organization grant and repository resolver, without
-personal GitHub proof or database writes. Other requests retain the personal-proof
-path. The read rechecks organization access and active build identity after GitHub
-returns, and exposes the existing options response shape with no credentials.
+The composer reads the default branch through `create-options`, retaining the
+`cloudComputerV2=true` query for compatibility. An active-config repository uses
+the organization's existing grant and repository resolver without a personal
+GitHub proof or database writes. Requests outside the configured repository set
+return empty options. The read rechecks organization access and active build
+identity after GitHub returns, and exposes no credentials.
 
 Desktop GitHub branch and open-PR reads are optional, cached by user, organization
 and repository grant, and warmed on pointer/focus intent. Branch listing uses the
@@ -37,6 +39,27 @@ and preserve the composer prompt. Create-options drift uses the same recovery,
 bounded to one automatic attempt until a confirmed metadata read succeeds.
 Completions are fenced to their current account and repository owner; a hidden
 Create surface defers recovery reads until that same owner is visible again.
+
+## Historical retirement
+
+Only saved v2 sources with complete v4 runtime pins and actor protocol 2 can
+execute. Historical records remain readable, and stop/archive/delete remain
+available. Wake, generation replacement and checkpoint recovery return
+`409 cloud_workspace_v2_required` for unsupported generations. Retrying or
+restarting does not migrate their immutable runtime pins; create a new workspace.
+
+The old authenticated `/cloud-computer` endpoints return the same typed
+retirement error and cannot save, build, publish or activate. V2 enrollment
+cancels old builds under the organization lock and proceeds. Background
+retirement handles their disposable workspaces and receipt-verified resource
+deletion; it has no allocation, install, capture, attestation or publication port.
+Unknown dispatched allocations remain unresolved without replaying creation.
+An unsettled capture retains its builder. Active/previous selections, all
+persisted generations (including stopped/archived), configured bases and
+dependent images retain their snapshots. The final reference check locks the
+image and marks retirement before provider deletion, blocking new references.
+Compute and snapshot admission are released only with their respective cleanup
+proofs. Applied migrations and historical identities are preserved.
 
 ## Accepted source and runtime
 

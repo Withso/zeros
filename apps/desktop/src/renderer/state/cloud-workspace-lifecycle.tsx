@@ -1,4 +1,3 @@
-import { clearCloudComputers } from "../features/settings/cloud-computer-client";
 import { clearCloudComputersV2 } from "../features/settings/cloud-computer-v2-client";
 import { cloudServiceAccessCache, cloudServiceContextCache } from "./read-caches";
 import { clearCloudGithub } from "../platform/cloud-github";
@@ -7,8 +6,9 @@ import { isLocalDevelopment, isElectron, nativeInvoke, nativeListen } from "../p
 import { cloudWorkspaceCapability } from "../platform/cloud-workspace-access";
 import { getActiveBridge, onActiveBridgeChange } from "../platform/bridge/active-bridge";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
+import { wireCloudTranscriptCheckpoints } from "../platform/bridge/cloud-transcript-checkpoints";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
-import { useInternalFeatureActive } from "../features/settings/internal-features";
+import { hasCloudWorkspaceAccountAccess, useCloudWorkspaceAccountAccess } from "../features/team/cloud-workspace-account-access";
 import { subscribeCloudWorkspaceOpens } from "./cloud-workspace-open-intent";
 import {
   getSession,
@@ -43,6 +43,7 @@ import { completeCloudChatCacheRestore, loadCloudChatCache, persistWorkspaceChat
 import { CHATS_STORAGE_KEY } from "./chats-local-cache";
 import { useSessionsStore } from "../features/agent/sessions-store";
 import { clearCloudAgentRegistry } from "../features/agent/workspace-agent-registry";
+import { setCloudTranscriptCacheOwner, readCachedCloudTranscriptWindow, forgetRemovedCloudTranscriptWorkspaces, retainAuthorizedCloudTranscriptWorkspaces } from "../platform/cloud-transcript-cache";
 import { clearCloudProviderConnections } from "../features/settings/cloud-provider-connection";
 import { toast } from "../shared/ui/primitives/elements";
 import { warmCloudWorkspaceDestination } from "./cloud-workspace-warmup";
@@ -62,7 +63,19 @@ function recordCloudOpenFailure(key: string, error: unknown): void {
  * controller. It never replaces the conversation or workbench renderers. */
 export function CloudWorkspaceLifecycle() {
   const folder = useWorkspaceStore(selectActiveFolder);
-  const cloudComputerV2 = useInternalFeatureActive("cloudComputerV2");
+  const cloudComputerV2 = useCloudWorkspaceAccountAccess();
+  useEffect(() => {
+    if (isLocalDevelopment() || !isElectron()) return;
+    let stop: (() => void) | undefined;
+    const install = (bridge: ReturnType<typeof getActiveBridge>) => {
+      stop?.();
+      stop = bridge instanceof WorkspaceRuntimeClient
+        ? wireCloudTranscriptCheckpoints(bridge, useWorkspaceStore) : undefined;
+    };
+    install(getActiveBridge());
+    const offBridge = onActiveBridgeChange(install);
+    return () => { offBridge(); stop?.(); };
+  }, []);
   useEffect(() => {
     if (isLocalDevelopment()) return;
     let alive = true;
@@ -106,8 +119,9 @@ export function CloudWorkspaceLifecycle() {
       lastRefresh = Date.now();
       const version = authVersion;
       void refreshCloudWorkspaceCatalog()
-        .then(() => {
+        .then(async () => {
           if (!alive || version !== authVersion) return;
+          retainAuthorizedCloudTranscriptWorkspaces();
           const bridge = getActiveBridge();
           if (bridge instanceof WorkspaceRuntimeClient)
             bridge.pruneCloudConnections();
@@ -118,6 +132,11 @@ export function CloudWorkspaceLifecycle() {
             const target = parseCloudWorkspaceKey(row.folder);
             return target && canReadCloudWorkspace(cloudWorkspaceDocument(target));
           });
+          // Prime the saved destination before releasing its chat metadata.
+          // Initial hydration then paints the window in the same microtask.
+          const activeChatId = useWorkspaceStore.getState().activeChatId;
+          if (activeChatId && authorized.some(chat => chat.id === activeChatId)) await readCachedCloudTranscriptWindow(activeChatId);
+          if (!alive || version !== authVersion) return;
           if (authorized.length)
             useWorkspaceStore
               .getState()
@@ -130,6 +149,7 @@ export function CloudWorkspaceLifecycle() {
     };
     const offCatalog = subscribeCloudWorkspaceRows((change) => {
       pruneCloudLatencySpans();
+      forgetRemovedCloudTranscriptWorkspaces(change.removedWorkspaceIds);
       const bridge = getActiveBridge();
       if (bridge instanceof WorkspaceRuntimeClient) bridge.pruneCloudConnections();
       if (change.removedWorkspaceIds.length) pruneCloudWorkspaceCollections(change.removedWorkspaceIds);
@@ -139,6 +159,7 @@ export function CloudWorkspaceLifecycle() {
     });
     const clear = (preservePendingTarget = false) => {
       clearCloudLatencySpans();
+      setCloudTranscriptCacheOwner(null);
       setCloudChatCacheOwner(null);
       setCloudCreationModeOwner(null);
       if (preservePendingTarget) {
@@ -157,7 +178,6 @@ export function CloudWorkspaceLifecycle() {
       clearCloudAgentRegistry();
       clearCloudProviderConnections();
       clearCloudGithub();
-      clearCloudComputers();
       clearCloudComputersV2();
       cloudServiceAccessCache.clear();
       cloudServiceContextCache.clear();
@@ -175,6 +195,7 @@ export function CloudWorkspaceLifecycle() {
       lastRefresh = 0;
       restored = false;
       setCloudChatCacheOwner(next);
+      setCloudTranscriptCacheOwner(next);
       cached = loadCloudChatCache();
       refresh();
       setCloudCreationModeOwner(next);
@@ -214,6 +235,7 @@ export function CloudWorkspaceLifecycle() {
       document.removeEventListener("visibilitychange", visibility);
       window.removeEventListener("focus", refresh);
       setCloudChatCacheOwner(null);
+      setCloudTranscriptCacheOwner(null);
       setCloudCreationModeOwner(null);
     };
   }, []);
@@ -336,7 +358,8 @@ export function CloudWorkspaceLifecycle() {
     };
     const off = subscribeCloudWorkspaceOpens(target => {
       const key = cloudWorkspaceKey(target);
-      if (!ownsView(key) || pending?.key === key || !cloudWorkspaceDocument(target)?.capabilities.canWrite) return;
+      if (!ownsView(key) || pending?.key === key || !hasCloudWorkspaceAccountAccess(target.organizationId) ||
+          !cloudWorkspaceDocument(target)?.capabilities.canWrite) return;
       const bridge = getActiveBridge();
       if (!(bridge instanceof WorkspaceRuntimeClient)) return;
       cancel();
@@ -371,7 +394,7 @@ export function CloudWorkspaceLifecycle() {
       const document = target ? cloudWorkspaceDocument(target) : undefined;
       // Settings and other app actions can use the selected workspace too.
       // Selection is the owner; retained surfaces and hover cannot change it.
-      return target && document && canReadCloudWorkspace(document) ? {
+      return target && hasCloudWorkspaceAccountAccess(target.organizationId) && document && canReadCloudWorkspace(document) ? {
         key: cloudWorkspaceKey(target), document, stopVersion: cloudWorkspaceStopVersion(target),
       } : null;
     };

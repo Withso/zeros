@@ -64,6 +64,22 @@ describe("same-run Alpha producer readiness", () => {
     test.state.artifact.name = `zeros-alpha-runtime-build-${sourceSha}`;
     expect(await waitForAlphaBuild("runtime", env, test.read)).toMatchObject({ kind: "runtime", artifactId: 500 });
   });
+  it("authenticates the reusable Linux producer with the same run and immutable artifact guards", async () => {
+    const test = fixture();
+    test.state.jobs = [{ ...producer, name: "Build Linux runtime bundle / Build Linux runtime bundle",
+      steps: ["Build and verify the exact-source runtime", "Save runtime bundle outputs"].map(name => ({ name, status: "completed", conclusion: "success" })) }];
+    test.state.artifact.name = `zeros-alpha-runtime-build-${sourceSha}`;
+    const proof = await waitForAlphaBuild("runtime", env, test.read);
+    await expect(validateAlphaProducerProof(proof, env, test.read)).resolves.toEqual(proof);
+    test.state.jobs[0].id = 401;
+    await expect(validateAlphaProducerProof(proof, env, test.read)).rejects.toThrow(/producer/);
+  });
+  it.each(["Other / Build Linux runtime bundle", "Build Linux runtime bundle / Other"])("refuses a similar reusable producer name: %s", async name => {
+    const test = fixture();
+    test.state.jobs = [{ ...producer, name,
+      steps: ["Build and verify the exact-source runtime", "Save runtime bundle outputs"].map(step => ({ name: step, status: "completed", conclusion: "success" })) }];
+    await expect(waitForAlphaBuild("runtime", env, test.read)).rejects.toThrow(/producer/);
+  });
   it.each(["queued", "in_progress"])("waits at the fixed poll interval for a %s producer", async status => {
     const test = fixture(); test.state.jobs[0] = { ...producer, status, conclusion: null as any };
     const sleep = vi.fn(async (milliseconds: number) => { expect(milliseconds).toBe(10_000); test.state.jobs[0] = { ...producer }; });

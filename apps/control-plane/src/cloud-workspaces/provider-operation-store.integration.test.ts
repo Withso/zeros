@@ -24,10 +24,11 @@ d("provider operation journal", () => {
   });
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     fixture = await seedReadyCloudWorkspace(pool);
     store = new DatabaseCloudProviderOperationStore(
       pool,
-      "daytona",
+      "boat",
       "qualified-account-1",
     );
   });
@@ -49,7 +50,7 @@ d("provider operation journal", () => {
     await store.bindResource(first, "resource-1");
     const restarted = new DatabaseCloudProviderOperationStore(
       pool,
-      "daytona",
+      "boat",
       "qualified-account-1",
     );
     expect(await restarted.find(first)).toMatchObject({
@@ -67,7 +68,7 @@ d("provider operation journal", () => {
     await store.bindResource(identity, "resource-1");
     const other = new DatabaseCloudProviderOperationStore(
       pool,
-      "daytona",
+      "boat",
       "qualified-account-2",
     );
     expect(await other.get("resource-1")).toBeNull();
@@ -89,7 +90,7 @@ d("provider operation journal", () => {
   it("rejects unadmitted providers and allocations after a concurrent delete", async () => {
     const wrong = new DatabaseCloudProviderOperationStore(
       pool,
-      "boat",
+      "unsupported" as never,
       "qualified-account-1",
     );
     await expect(wrong.prepareCreate(input())).rejects.toMatchObject({
@@ -152,7 +153,7 @@ d("provider operation journal", () => {
     await store.beginCreateAttempt(identity, attemptId);
     expect(await store.closeUnallocatedCreate(identity)).toBe(false);
     await store.recordCreateRejection(identity, attemptId, "trial_compute_limit_reached");
-    const restarted = new DatabaseCloudProviderOperationStore(pool, "daytona", "qualified-account-1");
+    const restarted = new DatabaseCloudProviderOperationStore(pool, "boat", "qualified-account-1");
     expect(await restarted.closeUnallocatedCreate(identity)).toBe(true);
     expect(await restarted.find(identity)).toMatchObject({ createClosedAt: expect.any(Date), resourceId: null, deletedAt: null });
     await expect(restarted.beginCreateAttempt(identity, randomUUID())).rejects.toMatchObject({ code: "provider_generation_retired" });
@@ -180,7 +181,7 @@ d("provider operation journal", () => {
     // The migration defaults legacy/old-writer inserts to untracked.
     await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_workspace_provider_operations
       (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256)
-      VALUES ('daytona','qualified-account-1',$1,1,$2,$3,$4)`,
+      VALUES ('boat','qualified-account-1',$1,1,$2,$3,$4)`,
     [fixture.workspaceId, fixture.organizationId, identity.idempotencyKey, identity.requestSha256]));
     await store.prepareCreate(identity);
     const attempt = randomUUID();
@@ -199,7 +200,7 @@ d("provider operation journal", () => {
     pool.query(`INSERT INTO cloud_workspace_provider_absence_attestations
       (provider,account_scope,workspace_id,generation,id,attested_by,database_principal,target_fingerprint,reason,
        provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,covers_dispatches_through)
-      SELECT 'daytona','qualified-account-1',$1,1,$2,$3,'postgres','0123456789abcdef','Batch 7 regression attestation fixture',
+      SELECT 'boat','qualified-account-1',$1,1,$2,$3,'postgres','0123456789abcdef','Batch 7 regression attestation fixture',
         'fixture-account',$4,covers+interval '1 second',0,covers FROM (SELECT ${covers} AS covers) evidence`,
     [identity.workspaceId, randomUUID(), fixture.userId, Buffer.alloc(32)]);
 
@@ -226,7 +227,7 @@ d("provider operation journal", () => {
     const identity = input();
     await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_workspace_provider_operations
       (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256)
-      VALUES ('daytona','qualified-account-1',$1,1,$2,$3,$4)`,
+      VALUES ('boat','qualified-account-1',$1,1,$2,$3,$4)`,
     [fixture.workspaceId, fixture.organizationId, identity.idempotencyKey, identity.requestSha256]));
     expect(await store.closeUnallocatedCreate(identity)).toBe(false);
     await expect(withSystemTx(pool, tx => tx.query("UPDATE cloud_workspace_provider_operations SET create_closed_at=clock_timestamp()")))
@@ -255,7 +256,7 @@ d("provider operation journal", () => {
     await expect(withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_workspace_provider_absence_attestations
       (provider,account_scope,workspace_id,generation,id,attested_by,database_principal,target_fingerprint,reason,
        provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,covers_dispatches_through)
-      VALUES ('daytona','qualified-account-1',$1,1,$2,$3,'zeros_app','0123456789abcdef','self-issued attestation attempt','fixture-account',$4,now(),0,now()-interval '1 second')`,
+      VALUES ('boat','qualified-account-1',$1,1,$2,$3,'zeros_app','0123456789abcdef','self-issued attestation attempt','fixture-account',$4,now(),0,now()-interval '1 second')`,
     [fixture.workspaceId, randomUUID(), fixture.userId, Buffer.alloc(32)]))).rejects.toThrow(/permission denied/);
     await attest(identity);
     expect((await withSystemTx(pool, tx => tx.query("SELECT 1 FROM cloud_workspace_provider_absence_attestations"))).rowCount).toBe(1);
@@ -270,7 +271,7 @@ d("provider operation journal", () => {
 
   // The database owner records loss attestations for an exact bound resource.
   const attestLoss = (identity: { workspaceId: string }, resourceId: string) =>
-    seedProviderLossAttestation(pool, { provider: "daytona", accountScope: "qualified-account-1", workspaceId: identity.workspaceId,
+    seedProviderLossAttestation(pool, { provider: "boat", accountScope: "qualified-account-1", workspaceId: identity.workspaceId,
       resourceId, attestedBy: fixture.userId, markLost: false });
   const markLost = () => withSystemTx(pool, tx => tx.query("UPDATE cloud_workspace_provider_operations SET lost_at=clock_timestamp()"));
 
@@ -284,7 +285,7 @@ d("provider operation journal", () => {
     await expect(withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_workspace_provider_loss_attestations
       (provider,account_scope,workspace_id,generation,resource_id,id,attested_by,database_principal,target_fingerprint,reason,
        provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,lookup_observed_at)
-      VALUES ('daytona','qualified-account-1',$1,1,'resource-1',$2,$3,'zeros_app','0123456789abcdef','self-issued loss attempt',
+      VALUES ('boat','qualified-account-1',$1,1,'resource-1',$2,$3,'zeros_app','0123456789abcdef','self-issued loss attempt',
         'fixture-account',$4,now(),0,now())`,
     [fixture.workspaceId, randomUUID(), fixture.userId, Buffer.alloc(32)]))).rejects.toThrow(/permission denied/);
     await attestLoss(identity, "resource-1");
@@ -319,7 +320,7 @@ d("provider operation journal", () => {
     await store.prepareCreate(identity);
     await store.beginCreateAttempt(identity, attempt);
     await expect(store.beginCreateAttempt(identity, attempt)).rejects.toMatchObject({ code: "provider_operation_conflict" });
-    const other = new DatabaseCloudProviderOperationStore(pool, "daytona", "qualified-account-2");
+    const other = new DatabaseCloudProviderOperationStore(pool, "boat", "qualified-account-2");
     await expect(other.recordCreateRejection(identity, attempt, "limit_reached")).rejects.toMatchObject({ code: "provider_operation_conflict" });
     await expect(store.recordCreateRejection(identity, randomUUID(), "limit_reached")).rejects.toMatchObject({ code: "provider_operation_conflict" });
     await store.recordCreateRejection(identity, attempt, "limit_reached");
@@ -364,7 +365,7 @@ d("provider operation journal", () => {
     const releasePromise=new Promise<void>(r=>{release=r;});
     const insert=async(tx:Tx,tracked:boolean)=>tx.query(`INSERT INTO cloud_workspace_provider_operations
       (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,create_attempts_tracked)
-      VALUES ('daytona','qualified-account-1',$1,1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+      VALUES ('boat','qualified-account-1',$1,1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
     [identity.workspaceId,fixture.organizationId,identity.idempotencyKey,tracked?identity.requestSha256:legacyHash,tracked]);
     const first=withSystemTx(pool,async tx=>{await insert(tx,winner==='tracked');inserted();await releasePromise;});
     await insertedPromise;

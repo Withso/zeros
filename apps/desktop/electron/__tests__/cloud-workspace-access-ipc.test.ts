@@ -5,19 +5,29 @@ const broker = vi.hoisted(() => ({
   listServices: vi.fn(),
   copySshCommand: vi.fn(),
   openSshTerminal: vi.fn(),
+  openSshIde: vi.fn(),
   startTunnel: vi.fn(),
   revoke: vi.fn(),
 }));
+const forwarding = vi.hoisted(() => ({ readPreferences: vi.fn(), setPreferences: vi.fn(), publishRuntime: vi.fn(), removeWorkspace: vi.fn() }));
 vi.mock("../cloud-workspace-access-runtime", () => ({
   getCloudWorkspaceAccessBroker: () => broker,
+  getCloudWorkspacePortForwarding: () => forwarding,
+  setCloudWorkspacePortForwardingPreferences: (input: unknown, change: unknown) => forwarding.setPreferences(input, change),
+  revokeCloudWorkspaceNativeAccess: (id: string) => broker.revoke(id),
 }));
 import {
   cloudWorkspaceAccessContext,
   cloudWorkspaceAccessList,
   cloudWorkspaceAccessRevoke,
   cloudWorkspaceSshCopy,
+  cloudWorkspaceSshIde,
   cloudWorkspaceSshTerminal,
   cloudWorkspaceTunnelStart,
+  cloudWorkspacePortForwardingGet,
+  cloudWorkspacePortForwardingSet,
+  cloudWorkspacePortForwardingRuntime,
+  cloudWorkspacePortForwardingForget,
 } from "../ipc/commands/cloud-workspace-access";
 
 const target = {
@@ -50,6 +60,7 @@ describe("native cloud access IPC", () => {
   it.each([
     cloudWorkspaceSshCopy,
     cloudWorkspaceSshTerminal,
+    cloudWorkspaceSshIde,
     cloudWorkspaceTunnelStart,
   ])("rejects a stale staff action before issuing any authority", (action) => {
     broker.listServices.mockImplementation(() => {
@@ -57,12 +68,13 @@ describe("native cloud access IPC", () => {
     });
     expect(() =>
       action(
-        { ...target, ...context, localPort: 5173, remotePort: 4173 },
+        { ...target, ...context, appId: "cursor", localPort: 5173, remotePort: 4173 },
         event,
       ),
     ).toThrow(/authority changed/);
     expect(broker.copySshCommand).not.toHaveBeenCalled();
     expect(broker.openSshTerminal).not.toHaveBeenCalled();
+    expect(broker.openSshIde).not.toHaveBeenCalled();
     expect(broker.startTunnel).not.toHaveBeenCalled();
   });
 
@@ -93,5 +105,29 @@ describe("native cloud access IPC", () => {
     });
     cloudWorkspaceAccessRevoke({ accessId: context.authorityId }, event);
     expect(broker.revoke).toHaveBeenCalledWith(context.authorityId);
+  });
+
+  it("validates IDE context and its fixed editor allowlist before launching", () => {
+    cloudWorkspaceSshIde({ ...target, ...context, appId: "vscode" }, event);
+    expect(broker.listServices).toHaveBeenCalledWith({ ...target, ...context });
+    expect(broker.openSshIde).toHaveBeenCalledWith({ ...target, appId: "vscode" });
+    expect(() => cloudWorkspaceSshIde({ ...target, ...context, appId: "shell" }, event)).toThrow(/unsupported/);
+    expect(broker.openSshIde).toHaveBeenCalledTimes(1);
+  });
+  it("reads and mutates only fenced forwarding preferences and validates switch values", () => {
+    forwarding.readPreferences.mockReturnValue({ forwardingEnabled: false, autoForwardEnabled: true });
+    expect(cloudWorkspacePortForwardingGet({ ...target, ...context }, event)).toEqual({ forwardingEnabled: false, autoForwardEnabled: true });
+    cloudWorkspacePortForwardingSet({ ...target, ...context, forwardingEnabled: true }, event);
+    expect(forwarding.setPreferences).toHaveBeenCalledWith({ ...target, ...context }, { forwardingEnabled: true });
+    expect(() => cloudWorkspacePortForwardingSet({ ...target, ...context, autoForwardEnabled: "true" }, event)).toThrow(/invalid/);
+    expect(() => cloudWorkspacePortForwardingSet({ ...target, ...context }, event)).toThrow(/invalid/);
+  });
+  it("publishes only the safe runtime identity and never forwards admission material", () => {
+    const runtime = { ...target, runtimeId: context.authorityId, generation: 1, authorityEpoch: 2, engineInstanceId: context.deviceId, connectionSequence: 3, connected: true };
+    cloudWorkspacePortForwardingRuntime({ ...runtime, cloudToken: "unexpected", url: "wss://unexpected.test" }, event);
+    expect(forwarding.publishRuntime).toHaveBeenCalledWith(runtime);
+    expect(() => cloudWorkspacePortForwardingRuntime({ ...runtime, connected: "true" }, event)).toThrow(/invalid/);
+    cloudWorkspacePortForwardingForget(target, event);
+    expect(forwarding.removeWorkspace).toHaveBeenCalledWith(target);
   });
 });

@@ -22,16 +22,15 @@ import type { CloudWorkspaceAccessService } from "./access.js";
 import type { CloudWorkspaceRepositoryResolver } from "./github-repositories.js";
 import { createCloudWorkspaceRoutes } from "./routes.js";
 import { WorkspaceReplicaError } from "./replicas.js";
-import { sealCloudProviderCredential } from "./provider-connections.js";
 import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
 import { reserveWriterSlot } from "./pro-sharing.js";
 import { DatabaseCloudWorkspaceCollaborationService } from "./actors.js";
 import { DatabaseProMonthlyAllowance } from "./pro-allowance.js";
-import { runtimeBase, seedRuntimeBase, seedRuntimeBundle } from "./runtime-test-fixtures.js";
+import { runtimeBase, runtimeWitness, seedRuntimeBase, seedRuntimeBundle } from "./runtime-test-fixtures.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
 import type { CloudWorkspaceProvider } from "./provider.js";
-import { ensureCloudComputerIdentity } from "./computer.js";
+import { ensureCloudComputerIdentity } from "./computer-identity.js";
 import { seedComputerTemplate, computerTestAccount, computerTestWallet } from "./computer-workspace-test-fixtures.js";
 import { copyComputerWorkspaceSource, resolveComputerTemplateFork } from "./computer-workspace-source.js";
 
@@ -41,8 +40,8 @@ const DEVICE_ID = "11111111-1111-4111-8111-111111111111";
 const TUNNEL_SESSION_ID = "22222222-2222-4222-8222-222222222222";
 
 const cloudConfig: CloudWorkspaceBackendConfig = {
-  provider: "daytona",
-  apiKey: "daytona-api-key-for-integration-tests",
+  provider: "boat",
+  apiKey: "boat-api-key-for-integration-tests",
   apiUrl: "https://api.example.test",
   target: "eu",
   snapshotId: "snap-pinned",
@@ -55,13 +54,14 @@ const cloudConfig: CloudWorkspaceBackendConfig = {
   operationTimeoutSeconds: 30,
   autoArchiveMinutes: 10_080,
   reconcileIntervalMs: 1_000,
-  providerCredentialKeys: {},
   settingsSecretEncryptionKeys: {},
   currentSettingsSecretEncryptionKeyVersion: null,
   settingsSecretKeyV1: null,
+  boat: { accountScope: computerTestAccount, billingOrg: computerTestWallet, ttlSeconds: 1800 },
+  runtime: { qualificationMode: "full" },
   access: {
-    allowedSshHosts: ["ssh.app.daytona.io"],
-    allowedPreviewHostSuffixes: ["proxy.daytona.work"],
+    allowedSshHosts: ["ssh.fixture.test"],
+    allowedPreviewHostSuffixes: ["preview.fixture.test"],
     previewBaseDomain: "cloud-preview.example.test",
   },
   durability: null,
@@ -161,10 +161,10 @@ d("cloud workspace API contracts", () => {
     ...overrides,
   });
 
-  const v4Config = (staffOnly = true): CloudWorkspaceBackendConfig => ({
+  const v4Config = (): CloudWorkspaceBackendConfig => ({
     ...cloudConfig, provider: "boat", snapshotId: "zeros-v2-test-legacy",
     imageRef: `boat:zeros-v2-test-legacy@sha256:${"0".repeat(64)}`,
-    runtime: { newWorkspaceProfile: "v4", staffOnly, qualificationMode: "full" },
+    runtime: { qualificationMode: "full" },
   });
   const seedV4 = () => withSystemTx(pool, async tx => {
     await seedRuntimeBase(tx);
@@ -176,6 +176,7 @@ d("cloud workspace API contracts", () => {
 
   async function createV4LifecycleWorkspace(status: "ready" | "stopped" = "ready") {
     await seedV4();
+    await seedTemplate();
     actor = { ...owner, staffRole: "developer" };
     configureApp(false, v4Config());
     const created = await request(`/v1/organizations/${orgId}/cloud-workspaces`, {
@@ -212,7 +213,7 @@ d("cloud workspace API contracts", () => {
       await seedRuntimeBundle(tx, { digit: "2", releaseOrder: 2 });
       await seedRuntimeBase(tx, { ...runtimeBase, id: "zeros-v2-test-new-base", imageRef: "boat:zeros-v2-test-new-base" }, new Date(Date.now() + 1_000));
     });
-    configureApp(false, { ...v4Config(), runtime: { newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full" } });
+    configureApp(false, { ...v4Config(), runtime: { qualificationMode: "full" } });
     const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspace.id}/generations`, {
       method: "POST", key: randomUUID(), body: { operation: "upgrade" },
     });
@@ -261,7 +262,7 @@ d("cloud workspace API contracts", () => {
 
   const templateConfig = (): CloudWorkspaceBackendConfig => ({
     ...v4Config(),
-    runtime: { newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full" },
+    runtime: { qualificationMode: "full" },
     boat: { accountScope: computerTestAccount, billingOrg: computerTestWallet, ttlSeconds: 1800 },
   });
   const seedTemplate = (options: { version?: number; primaryName?: string } = {}) => withSystemTx(pool, tx =>
@@ -349,22 +350,24 @@ d("cloud workspace API contracts", () => {
       }
     });
 
-    it.each([null, "support_admin"] as const)("rejects non-engineering staff (%s) without creating a workspace", async staffRole => {
+    it.each([null, "support_admin"] as const)("creates a private admin workspace for a nonstaff organization admin (%s)", async staffRole => {
       await prepareAdmin();
+      await pool.query("UPDATE users SET staff_role=$2 WHERE id=$1", [owner.id, staffRole]);
       actor = { ...owner, staffRole };
+      await pool.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')", [owner.id]);
       const response = await createAdmin();
-      expect(response.status).toBe(404);
-      expect(repositoryResolver.resolve).not.toHaveBeenCalled();
-      expect((await pool.query("SELECT 1 FROM cloud_workspaces")).rowCount).toBe(0);
+      expect(response.status).toBe(202);
+      expect((await response.json()).workspace.adminWorkspace).toEqual({ creatorUserId: owner.id });
+      expect((await pool.query("SELECT 1 FROM cloud_workspace_computer_sources")).rowCount).toBe(1);
     });
 
-    it("rechecks the live staff and organization admin roles", async () => {
+    it("rechecks the active account and organization admin role", async () => {
       await prepareAdmin();
-      await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1", [owner.id]);
-      expect((await createAdmin()).status).toBe(404);
-      await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [owner.id]);
       await pool.query("UPDATE organization_members SET role='member' WHERE org_id=$1 AND user_id=$2", [orgId, owner.id]);
       expect((await createAdmin()).status).toBe(403);
+      await pool.query("UPDATE organization_members SET role='owner' WHERE org_id=$1 AND user_id=$2", [orgId, owner.id]);
+      await pool.query("UPDATE users SET deleted_at=now() WHERE id=$1", [owner.id]);
+      expect((await createAdmin()).status).toBe(404);
       expect(repositoryResolver.resolve).not.toHaveBeenCalled();
       expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(0);
     });
@@ -547,15 +550,15 @@ d("cloud workspace API contracts", () => {
       expect((await pool.query(`SELECT 1 FROM ${table}`)).rowCount).toBe(0);
   });
 
-  it("keeps non-engineering creation unchanged for an enrolled v2 org", async () => {
+  it("pins the qualified v2 source and runtime for a nonstaff organization member", async () => {
     await seedV4();
     await seedTemplate();
     actor = { ...owner, staffRole: "support_admin" };
     configureApp(false, templateConfig());
     const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
     expect(response.status).toBe(202);
-    expect((await generationPin((await response.json()).workspace.id)).rows[0].runtime_id).toBeNull();
-    expect((await pool.query("SELECT 1 FROM cloud_workspace_computer_sources")).rowCount).toBe(0);
+    expect((await generationPin((await response.json()).workspace.id)).rows[0].runtime_id).toBe(`r1-${"a".repeat(64)}`);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_computer_sources")).rowCount).toBe(1);
   });
 
   it("accepts the template/runtime/config/SHA tuple using the org grant and replays it after activation", async () => {
@@ -791,8 +794,9 @@ d("cloud workspace API contracts", () => {
     expect((await pool.query("SELECT 1 FROM cloud_workspace_generations")).rowCount).toBe(0);
   });
 
-  it("pins the latest eligible runtime under the create lock and replays the saved pin after the head advances", async () => {
+  it("pins the template runtime under the create lock and replays it after the channel advances", async () => {
     await seedV4();
+    await seedTemplate();
     actor = { ...owner, staffRole: "developer" };
     configureApp(false, v4Config());
     const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
@@ -805,8 +809,8 @@ d("cloud workspace API contracts", () => {
     expect(response.status).toBe(202);
     const created = await response.json();
     const saved = (await generationPin(created.workspace.id)).rows[0];
-    expect(saved).toMatchObject({ image_ref: runtimeBase.imageRef, source_commit: runtimeBase.sourceCommit,
-      architecture: runtimeBase.architecture, runtime_id: `r1-${"1".repeat(64)}`, runtime_manifest_sha256: "1".repeat(64),
+    expect(saved).toMatchObject({ image_ref: "boat-template:zeros-v2-test-template-1", source_commit: runtimeBase.sourceCommit,
+      architecture: runtimeBase.architecture, runtime_id: `r1-${"a".repeat(64)}`, runtime_manifest_sha256: "a".repeat(64),
       runtime_base_image_id: runtimeBase.id, runtime_base_compatibility_id: runtimeBase.compatibilityId, runtime_profile: "zeros-cloud-worker-v4" });
     expect(Number(saved.storage_mib)).toBe(runtimeBase.storageMiB);
     expect(created.workspace.generation.runtime).toEqual({ runtimeId: saved.runtime_id, manifestSha256: saved.runtime_manifest_sha256,
@@ -823,6 +827,9 @@ d("cloud workspace API contracts", () => {
   });
 
   it("rejects an unavailable v4 head before any workspace or provider allocation", async () => {
+    await seedV4();
+    await seedTemplate();
+    await pool.query("UPDATE cloud_runtime_bundles SET revoked_at=now()");
     actor = { ...owner, staffRole: "developer" };
     configureApp(false, v4Config());
     const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
@@ -835,11 +842,12 @@ d("cloud workspace API contracts", () => {
 
   it("rejects v4 create before allocation when setup uses an allowed older protocol override", async () => {
     await seedV4();
+    await seedTemplate();
     const olderProtocol = CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION - 1;
     await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "1", releaseOrder: 2, engineProtocolVersion: olderProtocol }));
     actor = { ...owner, staffRole: "developer" };
     const setupExecution = {
-      controlPlaneOrigin: "https://api.example.test", allowedToolboxOrigins: [], setupSecretEncryptionKeys: {},
+      controlPlaneOrigin: "https://api.example.test", setupSecretEncryptionKeys: {},
       currentSetupSecretEncryptionKeyVersion: 1, setupSecretKeyV1: null, engineProtocolVersion: olderProtocol,
       enginePort: 4317, engineHeartbeatIntervalMs: 5000, intervalMs: 1000, timeoutSeconds: 1800, leaseMs: 60000, admissionTtlSeconds: 120,
     };
@@ -852,15 +860,15 @@ d("cloud workspace API contracts", () => {
     expect((await pool.query("SELECT 1 FROM cloud_workspace_generations WHERE org_id=$1", [orgId])).rowCount).toBe(0);
     expect((await pool.query("SELECT 1 FROM cloud_workspace_provider_operations WHERE org_id=$1", [orgId])).rowCount).toBe(0);
 
-    // The supported rolling-deployment override remains valid for legacy creates.
     configureApp(false, { ...cloudConfig, setupExecution });
-    const legacy = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
-    expect(legacy.status).toBe(202);
-    expect((await generationPin((await legacy.json()).workspace.id)).rows[0].runtime_id).toBeNull();
+    const retiredOverride = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(retiredOverride.status).toBe(409);
+    expect((await pool.query("SELECT 1 FROM cloud_workspaces")).rowCount).toBe(0);
   });
 
   it("rechecks v4 head revocation after repository resolution, before inserting the generation", async () => {
     await seedV4();
+    await seedTemplate();
     actor = { ...owner, staffRole: "developer" };
     configureApp(false, v4Config());
     const resolve = vi.mocked(repositoryResolver.resolve).getMockImplementation()!;
@@ -877,6 +885,7 @@ d("cloud workspace API contracts", () => {
 
   it("wakes the saved v4 generation after the head advances and new v4 creation is disabled", async () => {
     await seedV4();
+    await seedTemplate();
     actor = { ...owner, staffRole: "developer" };
     configureApp(false, v4Config());
     const created = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
@@ -889,24 +898,22 @@ d("cloud workspace API contracts", () => {
       await tx.query("UPDATE cloud_workspaces SET status='stopped',desired_state='stopped' WHERE id=$1", [workspace.id]);
       await tx.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id=$2,observed_state='stopped' WHERE workspace_id=$1", [workspace.id, `sandbox-${workspace.id}`]);
     });
-    configureApp(false, { ...v4Config(), runtime: { newWorkspaceProfile: "legacy", staffOnly: true, qualificationMode: "full" } });
+    configureApp(false, { ...v4Config(), runtime: { qualificationMode: "full" } });
     const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspace.id}/wake`, { method: "POST", key: randomUUID() });
     expect(response.status).toBe(202);
     expect((await response.json()).workspace.generation.runtime).toEqual(workspace.generation.runtime);
     expect((await generationPin(workspace.id)).rows).toEqual([saved]);
   });
 
-  it("preserves legacy creation for non-engineering actors until staff-only is disabled", async () => {
+  it("uses v2 for nonstaff actors without a rollout switch", async () => {
     await seedV4();
+    await seedTemplate();
     actor = { ...owner, staffRole: "support_admin" };
     configureApp(false, v4Config());
-    const legacy = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
-    expect(legacy.status).toBe(202);
-    expect((await generationPin((await legacy.json()).workspace.id)).rows[0].runtime_id).toBeNull();
-    configureApp(false, v4Config(false));
-    const v4 = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
-    expect(v4.status).toBe(202);
-    expect((await generationPin((await v4.json()).workspace.id)).rows[0].runtime_id).toBe(`r1-${"a".repeat(64)}`);
+    const created = await request(`/v1/organizations/${orgId}/cloud-workspaces`, { method: "POST", key: randomUUID(), body: createBody() });
+    expect(created.status).toBe(202);
+    expect((await generationPin((await created.json()).workspace.id)).rows[0].runtime_id).toBe(`r1-${"a".repeat(64)}`);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_computer_sources")).rowCount).toBe(1);
   });
 
   it("returns only the signed-in member's compute balance with no caching",async()=>{
@@ -945,29 +952,30 @@ d("cloud workspace API contracts", () => {
     return { response, body, key };
   };
 
-  it("requires recent user repository access even when the GitHub App can read the repository", async () => {
+  it("uses the qualified organization grant without a personal repository access proof", async () => {
+    await seedV4(); await seedTemplate();
     await pool.query("DELETE FROM cloud_github_source_access WHERE owner_user_id=$1", [owner.id]);
     const result = await createWorkspace();
-    expect(result.response.status).toBe(409);
-    expect(result.body).toMatchObject({ error: { code: "github_cloud_source_authorization_required" } });
-    expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+    expect(result.response.status, JSON.stringify(result.body)).toBe(202);
+    expect(repositoryResolver.resolve).toHaveBeenCalledOnce();
   });
 
-  it.each(["expired", "repository-identity", "membership-revision"])("rejects %s repository access proofs", async reason => {
+  it.each(["expired", "repository-identity", "membership-revision"])("uses the organization grant despite %s personal repository access proofs", async reason => {
+    await seedV4(); await seedTemplate();
     if (reason === "expired") await pool.query("UPDATE cloud_github_source_access SET expires_at=now()-interval '1 second'");
     else if (reason === "repository-identity") await pool.query("UPDATE cloud_github_source_access SET forge_repository_id='999'");
     else await pool.query("UPDATE organization_members SET authorization_revision=authorization_revision+1 WHERE org_id=$1 AND user_id=$2",[orgId,owner.id]);
     const created = await createWorkspace();
-    expect(created.response.status).toBe(409);
-    expect(created.body).toMatchObject({error:{code:"github_cloud_source_authorization_required"}});
-    expect((await pool.query("SELECT 1 FROM cloud_workspaces")).rowCount).toBe(0);
+    expect(created.response.status, JSON.stringify(created.body)).toBe(202);
+    expect((await pool.query("SELECT 1 FROM cloud_workspaces")).rowCount).toBe(1);
   });
 
-  it("returns only authorized installation metadata for Cloud creation", async () => {
-    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=withso`);
+  it("returns only the configured organization repository installation for Cloud creation", async () => {
+    await seedV4(); await seedTemplate();
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=withso&repository=zeros`);
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(await response.json()).toEqual({ configured: true, installations: [{ id: installationId, accountLogin: "withso" }] });
+    expect(await response.json()).toMatchObject({ configured: true, installations: [{ id: installationId, accountLogin: "withso" }] });
     const otherOwner = await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=another-owner`);
     expect(await otherOwner.json()).toMatchObject({ installations: [] });
     actor = outsider;
@@ -980,10 +988,11 @@ d("cloud workspace API contracts", () => {
   });
 
   it("resolves the cloud creation source without a device checkout", async () => {
+    await seedV4(); await seedTemplate();
     const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/create-options?owner=withso&repository=zeros`);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ repository: { owner: "withso", name: "zeros", defaultBranch: "main" } });
-    expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros" });
+    expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros", repositoryId: "123456789" });
   });
 
   describe("Cloud Computer create-options", () => {
@@ -1022,15 +1031,14 @@ d("cloud workspace API contracts", () => {
       expect(await response.json()).toMatchObject({ repository: { defaultBranch: "main" } });
       expect((await pool.query("SELECT 1 FROM cloud_github_connections WHERE owner_user_id=$1", [outsider.id])).rowCount).toBe(0);
     });
-    it("keeps non-computer repositories on the existing personal-proof path", async () => {
+    it("does not offer a repository outside the active computer configuration", async () => {
       await prepare("other");
       const response = await request(path());
       expect(response.status).toBe(200);
-      expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros" });
-      await pool.query("DELETE FROM cloud_github_source_access");
-      expect((await request(path())).status).toBe(409);
+      expect(await response.json()).toEqual({ configured: true, installations: [] });
+      expect(repositoryResolver.resolve).not.toHaveBeenCalled();
     });
-    it.each(["flag off", "non-engineering member"])("retains personal proof with %s", async mode => {
+    it.each(["flag off", "non-engineering member"])("uses the organization grant with %s", async mode => {
       await prepare();
       if (mode === "non-engineering member") {
         await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1", [owner.id]);
@@ -1040,9 +1048,9 @@ d("cloud workspace API contracts", () => {
       }
       const url = mode === "flag off" ? path().replace("&cloudComputerV2=true", "") : path();
       expect((await request(url)).status).toBe(200);
-      expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros" });
+      expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros", repositoryId: "123456789" });
       await pool.query("DELETE FROM cloud_github_source_access");
-      expect((await request(url)).status).toBe(409);
+      expect((await request(url)).status).toBe(200);
     });
     it("closes resolver errors and rechecks a revoked org grant", async () => {
       await prepare();
@@ -1061,7 +1069,7 @@ d("cloud workspace API contracts", () => {
       expect(revoked.status).toBe(409);
       expect(await revoked.json()).toMatchObject({ error: { code: "cloud_computer_repository_unavailable" } });
     });
-    it.each(["no computer", "no active build", "inactive template"])("preserves personal-proof options with %s", async mode => {
+    it.each(["no computer", "no active build", "inactive template"])("offers no source when the computer has %s", async mode => {
       if (mode !== "no computer") {
         const template = await prepare();
         if (mode === "no active build") await pool.query("UPDATE cloud_computer_v2_heads SET active_build_id=NULL WHERE org_id=$1", [orgId]);
@@ -1069,8 +1077,8 @@ d("cloud workspace API contracts", () => {
       }
       const response = await request(path());
       expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({ repository: { defaultBranch: "main" } });
-      expect(repositoryResolver.resolve).toHaveBeenCalledWith({ installationId: 123456, owner: "withso", repository: "zeros" });
+      expect(await response.json()).toEqual({ configured: true, installations: [] });
+      expect(repositoryResolver.resolve).not.toHaveBeenCalled();
     });
     it("rechecks active build identity after the bounded GitHub read", async () => {
       await prepare();
@@ -1087,6 +1095,7 @@ d("cloud workspace API contracts", () => {
   });
 
   it("rechecks source authorization after GitHub returns", async () => {
+    await seedV4(); await seedTemplate();
     const resolve = repositoryResolver.resolve;
     repositoryResolver.resolve = async (input) => {
       const result = await resolve(input);
@@ -1098,6 +1107,7 @@ d("cloud workspace API contracts", () => {
   });
 
   it("creates for a non-staff Pro member without an Organization subscription or seat",async()=>{
+    await seedV4(); await seedTemplate();
     await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1",[owner.id]);
     await pool.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')",[owner.id]);
     await pool.query("DELETE FROM organization_seat_assignments WHERE org_id=$1",[orgId]);
@@ -1112,54 +1122,6 @@ d("cloud workspace API contracts", () => {
       .toEqual([{billing_owner_user_id:owner.id,entitlement_scope:'account',entitlement_plan:'pro'}]);
   });
 
-  const customerDaytona = async () => {
-    const id = randomUUID();
-    const endpoint = "https://app.daytona.io/api";
-    const sealed = sealCloudProviderCredential(
-      "test-customer-provider-key-0123456789",
-      {
-        connectionId: id,
-        organizationId: orgId,
-        version: 1,
-        provider: "daytona",
-        endpoint,
-      },
-      randomBytes(32).toString("base64url"),
-    );
-    await withSystemTx(pool, async (tx) => {
-      await tx.query(
-        `INSERT INTO provider_connections
-           (id, org_id, owner_kind, owner_user_id, provider, display_name,
-            credential_source, current_version, state, region)
-         VALUES ($1, $2, 'user', $3, 'daytona', 'Customer Daytona', 'delegated', 1, 'active', 'eu')`,
-        [id, orgId, owner.id],
-      );
-      await tx.query(
-        `INSERT INTO provider_connection_versions
-           (connection_id, org_id, version, credential_source, endpoint, key_version,
-            nonce, ciphertext, auth_tag, credential_sha256, capabilities, created_by)
-         VALUES ($1, $2, 1, 'delegated', $3, 1, $4, $5, $6, $7, $8::jsonb, $9)`,
-        [
-          id,
-          orgId,
-          endpoint,
-          sealed.nonce,
-          sealed.ciphertext,
-          sealed.authTag,
-          sealed.credentialSha256,
-          JSON.stringify({
-            qualified: true,
-            lifecycle: true,
-            commandExecution: true,
-            daytonaTarget: "eu",
-          }),
-          owner.id,
-        ],
-      );
-    });
-    return id;
-  };
-
   const managedBoatConfig = (): CloudWorkspaceBackendConfig => ({
     ...cloudConfig,
     provider: "boat",
@@ -1167,17 +1129,7 @@ d("cloud workspace API contracts", () => {
     snapshotId: "boat-qualified-template",
     cpuMillicores: 4_000,
     memoryMiB: 8_192,
-    providerProfiles: {
-      daytona: {
-        provider: "daytona",
-        imageRef: cloudConfig.imageRef,
-        architecture: cloudConfig.architecture,
-        cpuMillicores: cloudConfig.cpuMillicores,
-        memoryMiB: cloudConfig.memoryMiB,
-        storageMiB: cloudConfig.storageMiB,
-        sourceCommit: cloudConfig.sourceCommit,
-      },
-    },
+
   });
 
   beforeAll(() => {
@@ -1190,6 +1142,7 @@ d("cloud workspace API contracts", () => {
 
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     owner = await signup("Owner");
     outsider = await signup("Outsider");
     actor = owner;
@@ -1280,16 +1233,16 @@ d("cloud workspace API contracts", () => {
           ? {
               ssh: {
                 username: "ssh-token-abcdefghijklmnopqrstuvwxyz",
-                host: "ssh.app.daytona.io",
+                host: "ssh.fixture.test",
                 command:
-                  "ssh ssh-token-abcdefghijklmnopqrstuvwxyz@ssh.app.daytona.io",
+                  "ssh ssh-token-abcdefghijklmnopqrstuvwxyz@ssh.fixture.test",
               },
             }
           : input.kind === "tunnel"
             ? {
                 tunnel: {
                   sshUsername: "ssh-token-abcdefghijklmnopqrstuvwxyz",
-                  sshHost: "ssh.app.daytona.io",
+                  sshHost: "ssh.fixture.test",
                   remoteHost: "127.0.0.1" as const,
                   remotePort: input.remotePort!,
                   session: {
@@ -1347,6 +1300,40 @@ d("cloud workspace API contracts", () => {
     configureApp();
   });
 
+  it.each([false, true])("uses v2 templates despite a selected historical image (explicit connection: %s)", async explicitConnection => {
+    const { cloudWorkspaceProvisioningProfile } = await import("./provisioning-profile.js");
+    const { ensureHostedCloudProviderConnection } = await import("./provider-connections.js");
+    const config = v4Config(); configureApp(false, config);
+    await withSystemTx(pool, tx => ensureCloudComputerIdentity(tx, orgId, owner.id));
+    const id = randomUUID(), name = `zeros-org-${id.replaceAll("-", "")}`, imageRef = `boat:${name}@sha256:${"b".repeat(64)}`;
+    await pool.query(`INSERT INTO cloud_computer_builds(id,org_id,profile_id,version,requested_by,repository_owner,repository_name,state)
+      SELECT $1,org_id,profile_id,1,$3,'','','succeeded' FROM cloud_computers WHERE org_id=$2`, [id,orgId,owner.id]);
+    await pool.query(`INSERT INTO cloud_computer_images(id,org_id,account_scope,snapshot_name,snapshot_id,image_ref,base_image_ref,base_source_commit,
+      recipe_sha256,build_sha256,source_contract,image_contract,profile,state,attested_at,attestation_sha256)
+      VALUES($1,$2,'fixture',$3,'snapshot-fixture',$4,$5,$6,$7,$7,$7,$7,$8,'attested',now(),$7)`,
+      [id,orgId,name,imageRef,config.imageRef,config.sourceCommit,"b".repeat(64),cloudWorkspaceProvisioningProfile(config,"boat")]);
+    await pool.query("UPDATE cloud_computers SET active_image_id=$1 WHERE org_id=$2", [id,orgId]);
+    await seedV4(); const template = await seedTemplate();
+    const connection = await withSystemTx(pool, tx => ensureHostedCloudProviderConnection(tx, {
+      organizationId:orgId,ownerUserId:owner.id,isPersonal:false,provider:"boat",actorUserId:owner.id,
+    }));
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, {
+      method:"POST",key:randomUUID(),body:createBody(explicitConnection ? {providerConnectionId:connection.id} : {}),
+    });
+    const body = await response.json(); expect(response.status,JSON.stringify(body)).toBe(202);
+    expect((await pool.query("SELECT image_ref,computer_image_id FROM cloud_workspace_generations WHERE workspace_id=$1", [body.workspace.id])).rows[0])
+      .toEqual({ image_ref: `boat-template:${template.sourceSandboxId}`, computer_image_id: null });
+    expect((await pool.query("SELECT build_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1", [body.workspace.id])).rows[0])
+      .toEqual({ build_id: template.buildId });
+    expect((await pool.query("SELECT active_image_id FROM cloud_computers WHERE org_id=$1", [orgId])).rows[0].active_image_id).toBe(id);
+  });
+
+  describe("qualified-template workspace contracts", () => {
+    beforeEach(async () => {
+      await seedV4();
+      await seedTemplate();
+    });
+
   it("keeps route fixtures usable beyond the live signup budget", async () => {
     const actors = [];
     for (let index = 0; index < 201; index++) actors.push(await signup("Fixture"));
@@ -1377,7 +1364,7 @@ d("cloud workspace API contracts", () => {
 
   it("rejects legacy member-authorized builds before allocating a credential-bearing workspace", async () => {
     configureApp(false, { ...managedBoatConfig(), setupExecution: {
-      controlPlaneOrigin: "https://api.example.test", allowedToolboxOrigins: [], setupSecretEncryptionKeys: {},
+      controlPlaneOrigin: "https://api.example.test", setupSecretEncryptionKeys: {},
       currentSetupSecretEncryptionKeyVersion: 1, setupSecretKeyV1: null, engineProtocolVersion: 1,
       enginePort: 4317, engineHeartbeatIntervalMs: 5000, intervalMs: 1000, timeoutSeconds: 900, leaseMs: 60000, admissionTtlSeconds: 120,
     } });
@@ -1387,7 +1374,7 @@ d("cloud workspace API contracts", () => {
       document: { repositories: [{id:"123456789",owner:"withso",name:"zeros",defaultBranch:"main",private:true}], installScript: "printf computer-setup", timeoutSeconds: 30 },
       sources: [{repositoryId:"123456789",installationId}],
     } });
-    expect(saved.status).toBe(200);
+    expect(saved.status).toBe(409);
     expect(saved.headers.get("cache-control")).toBe("no-store");
     const id = randomUUID(), key = `computer-build.${id}`;
     const body = createBody({cloudComputerBuild:{id,version:1}});
@@ -1396,117 +1383,11 @@ d("cloud workspace API contracts", () => {
     expect(created.status,JSON.stringify(result)).toBe(409);
     expect(result.error.code).toBe("cloud_computer_build_unavailable");
     expect((await pool.query("SELECT 1 FROM cloud_computer_builds WHERE org_id=$1",[orgId])).rowCount).toBe(0);
-    expect((await (await request(root)).json()).activeVersion).toBeNull();
+    const retired = await request(root);
+    expect(retired.status).toBe(409);
+    expect(await retired.json()).toMatchObject({ error: { code: "cloud_workspace_v2_required" } });
     const limited = await app.request(root, {method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({padding:"x".repeat(66000)})});
     expect(limited.status).toBe(413);
-  });
-
-  it.each([false, true])("allocates the active Cloud Computer image (explicit hosted connection: %s)", async explicitConnection => {
-    const { DatabaseCloudComputerService } = await import("./computer.js");
-    const { cloudWorkspaceProvisioningProfile } = await import("./provisioning-profile.js");
-    const { ensureHostedCloudProviderConnection } = await import("./provider-connections.js");
-    const config = { ...managedBoatConfig(), imageRef: `boat:release-base@sha256:${"a".repeat(64)}` };
-    configureApp(false, config);
-    const original = explicitConnection ? null : await createWorkspace();
-    if (original) expect(original.response.status).toBe(202);
-    const computer = new DatabaseCloudComputerService(pool, config);
-    await computer.save(orgId, owner.id, { expectedRevision: 0, operationId: randomUUID(), sources: [],
-      document: { repositories: [], installScript: "true", timeoutSeconds: 30 } });
-    const id = randomUUID(), name = `zeros-org-${id.replaceAll("-", "")}`, imageRef = `boat:${name}@sha256:${"b".repeat(64)}`;
-    await pool.query(`INSERT INTO cloud_computer_builds(id,org_id,profile_id,version,requested_by,repository_owner,repository_name)
-      SELECT $1,org_id,profile_id,1,$3,'','' FROM cloud_computers WHERE org_id=$2`, [id, orgId, owner.id]);
-    await pool.query(`INSERT INTO cloud_computer_images(id,org_id,account_scope,snapshot_name,snapshot_id,image_ref,base_image_ref,base_source_commit,
-      recipe_sha256,build_sha256,source_contract,image_contract,profile,state,attested_at,attestation_sha256)
-      VALUES($1,$2,'fixture',$3,'snapshot-fixture',$4,$5,$6,$7,$7,$7,$7,$8,'attested',now(),$7)`,
-      [id,orgId,name,imageRef,config.imageRef,config.sourceCommit,"b".repeat(64),cloudWorkspaceProvisioningProfile(config,"boat")]);
-    await pool.query("UPDATE cloud_computer_builds SET state='succeeded',completed_at=now() WHERE id=$1", [id]);
-    for (const ref of [config.imageRef, imageRef]) await pool.query(`INSERT INTO cloud_agent_runtime_qualifications
-      (provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled,qualified_at)
-      VALUES('boat',$1,$2,'codex-api-key','zeros-cloud-worker-v3',true,clock_timestamp())`, [ref,"c".repeat(64)]);
-    await computer.activate(orgId,owner.id,1,1,id);
-    const connection = await withSystemTx(pool, tx => ensureHostedCloudProviderConnection(tx, {
-      organizationId:orgId,ownerUserId:owner.id,isPersonal:false,provider:"boat",actorUserId:owner.id,
-    }));
-    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces`, {
-      method:"POST",key:randomUUID(),body:createBody(explicitConnection ? {providerConnectionId:connection.id} : {}),
-    });
-    const body = await response.json();
-    expect(response.status,JSON.stringify(body)).toBe(202);
-    expect((await pool.query("SELECT image_ref,computer_image_id FROM cloud_workspace_generations WHERE workspace_id=$1", [body.workspace.id])).rows[0])
-      .toMatchObject({image_ref:imageRef,computer_image_id:id});
-    if (original) {
-      const workspaceId = original.body.workspace.id;
-      expect((await pool.query("SELECT image_ref FROM cloud_workspace_generations WHERE workspace_id=$1", [workspaceId])).rows[0].image_ref).toBe(config.imageRef);
-      await withSystemTx(pool, async tx => {
-        await tx.query("UPDATE cloud_workspaces SET status='ready' WHERE id=$1", [workspaceId]);
-        await tx.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id='bx_23456789',observed_state='running',last_observed_at=now() WHERE workspace_id=$1", [workspaceId]);
-        await tx.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE workspace_id=$1 AND operation='create'", [workspaceId]);
-        await tx.query("UPDATE cloud_workspace_quotas SET max_cpu_millicores=20000,max_memory_mib=40960 WHERE org_id=$1", [orgId]);
-      });
-      const upgrade = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/generations`, {
-        method:"POST",key:randomUUID(),body:{operation:"upgrade"},
-      });
-      expect(upgrade.status,JSON.stringify(await upgrade.json())).toBe(202);
-      expect((await pool.query("SELECT generation,image_ref,computer_image_id FROM cloud_workspace_generations WHERE workspace_id=$1 ORDER BY generation", [workspaceId])).rows)
-        .toMatchObject([{generation:1,image_ref:config.imageRef,computer_image_id:null},{generation:2,image_ref:imageRef,computer_image_id:id}]);
-    }
-  });
-
-  it("pins VM class in the generation and retains its create receipt across default changes",async()=>{
-    configureApp(false,{...cloudConfig,sandboxClass:"linux-vm"});
-    const created=await createWorkspace();expect(created.response.status).toBe(202);
-    expect((await pool.query("SELECT sandbox_class FROM cloud_workspace_generations WHERE workspace_id=$1",[created.body.workspace.id])).rows[0].sandbox_class).toBe("linux-vm");
-    await expect(pool.query("UPDATE cloud_workspace_generations SET sandbox_class='container' WHERE workspace_id=$1",[created.body.workspace.id])).rejects.toMatchObject({code:"23514"});
-    configureApp(false,{...cloudConfig,sandboxClass:"container"});
-    expect((await request(`/v1/organizations/${orgId}/cloud-workspaces`,{method:"POST",key:created.key,body:createBody()})).status).toBe(200);
-    expect(repositoryResolver.resolve).toHaveBeenCalledTimes(1);
-  });
-
-  it("creates customer Daytona using its own profile when managed compute is Boat", async () => {
-    const connectionId = await customerDaytona();
-    configureApp(false, managedBoatConfig());
-    const response = await request(
-      `/v1/organizations/${orgId}/cloud-workspaces`,
-      {
-        method: "POST",
-        key: randomUUID(),
-        body: createBody({ providerConnectionId: connectionId }),
-      },
-    );
-    const body = await response.json();
-    expect(response.status, JSON.stringify(body)).toBe(202);
-    expect(body).toMatchObject({
-      workspace: {
-        generation: { resources: {cpuMillicores:2000,memoryMiB:4096} },
-      },
-    });
-    const generation = await pool.query(
-      "SELECT provider, provider_connection_id, cpu_millicores, memory_mib FROM cloud_workspace_generations WHERE workspace_id = $1",
-      [body.workspace.id],
-    );
-    expect(generation.rows).toEqual([
-      {
-        provider: "daytona",
-        provider_connection_id: connectionId,
-        cpu_millicores: 2_000,
-        memory_mib: 4_096,
-      },
-    ]);
-  });
-
-  it("rejects a customer provider without a configured profile before repository I/O", async () => {
-    const connectionId = await customerDaytona();
-    configureApp(false, { ...managedBoatConfig(), providerProfiles: {} });
-    const response = await request(
-      `/v1/organizations/${orgId}/cloud-workspaces`,
-      {
-        method: "POST",
-        key: randomUUID(),
-        body: createBody({ providerConnectionId: connectionId }),
-      },
-    );
-    expect(response.status).toBe(404);
-    expect(repositoryResolver.resolve).not.toHaveBeenCalled();
   });
 
   it("creates managed Boat when no customer connection is selected", async () => {
@@ -1534,7 +1415,7 @@ d("cloud workspace API contracts", () => {
       },
       intent: { state: "queued" },
     });
-    expect(JSON.stringify(created.body)).not.toMatch(/provider|imageRef|snap-pinned|daytona|boat/i);
+    expect(JSON.stringify(created.body)).not.toMatch(/provider|imageRef|snap-pinned|boat|boat/i);
 
     const records = await pool.query(
       `SELECT cw.id, cw.owner_user_id, cw.repository_id,
@@ -1567,9 +1448,9 @@ d("cloud workspace API contracts", () => {
         generation: 1,
         operation: "create",
         action: "cloud_workspace.create_requested",
-        repository_revision: "main",
+        repository_revision: "4".repeat(40),
         github_installation_id: installationId,
-        settings_snapshot: { schemaVersion: 1, values: {} },
+        settings_snapshot: { schemaVersion: 1, values: {}, setupCommands: [] },
         retention_policies: 1,
         valid_hash: true,
       }),
@@ -1699,7 +1580,7 @@ d("cloud workspace API contracts", () => {
     const response=await request(`/v1/cloud-workspaces/${created.body.workspace.id}`);
     const body=await response.json();
     expect(response.status).toBe(200);
-    expect(JSON.stringify(body)).not.toMatch(/boat|daytona|snapshot|secret-target|providerTarget|imageRef/i);
+    expect(JSON.stringify(body)).not.toMatch(/boat|boat|snapshot|secret-target|providerTarget|imageRef/i);
     expect(body.workspace.error).toEqual({code:'cloud_workspace_unavailable',message:'The cloud workspace is temporarily unavailable'});
   });
   it.each([
@@ -1722,7 +1603,7 @@ d("cloud workspace API contracts", () => {
     expect((await (await request(`/v1/cloud-workspaces/${workspaceId}`)).json()).workspace.error).toBeNull();
   });
   it.each(['stopped','archived'])("reports funded start availability for a %s workspace without exposing the sponsor's balance",async status=>{
-    const policy={provider:'daytona',policyId:'test-compute-v1',secondsPerDollar:100000,minimumTtlSeconds:60,maximumTtlSeconds:600,requestMarginSeconds:5};
+    const policy={provider:'boat',policyId:'test-compute-v1',secondsPerDollar:100000,minimumTtlSeconds:60,maximumTtlSeconds:600,requestMarginSeconds:5};
     configureApp(false,{...cloudConfig,computePolicy:policy});
     const created=await createWorkspace();
     await pool.query("UPDATE cloud_workspaces SET status=$2::text::cloud_workspace_status,desired_state=$2::text::cloud_workspace_desired_state WHERE id=$1",[created.body.workspace.id,status]);
@@ -1993,9 +1874,9 @@ d("cloud workspace API contracts", () => {
         }),
       },
     );
-    expect(response.status).toBe(404);
+    expect(response.status).toBe(409);
     await expect(response.json()).resolves.toMatchObject({
-      error: { code: "github_installation_not_found" },
+      error: { code: "cloud_computer_repository_not_configured" },
     });
     const persisted = await pool.query(
       `SELECT count(*)::integer AS count
@@ -2119,7 +2000,7 @@ d("cloud workspace API contracts", () => {
         }),
       },
     );
-    expect(foreignGrant.status).toBe(404);
+    expect(foreignGrant.status).toBe(409);
 
     expect((await createWorkspace()).response.status).toBe(202);
     const exhausted = await createWorkspace();
@@ -2480,7 +2361,7 @@ d("cloud workspace API contracts", () => {
       await tx.query("UPDATE cloud_workspaces SET status='failed',desired_state='stopped' WHERE id=$1", [workspaceId]);
       await tx.query(`INSERT INTO cloud_workspace_provider_operations
         (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,create_attempts_tracked,create_closed_at)
-        VALUES ('daytona','test-account',$1,1,$2,$3,$4,true,now())`, [workspaceId,orgId,randomUUID(),"a".repeat(64)]);
+        VALUES ('boat','test-account',$1,1,$2,$3,$4,true,now())`, [workspaceId,orgId,randomUUID(),"a".repeat(64)]);
     });
     const before = (await pool.query("SELECT current_billing_epoch,version FROM cloud_workspaces WHERE id=$1", [workspaceId])).rows;
     const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/wake`, {method:"POST",key:randomUUID()});
@@ -2503,9 +2384,9 @@ d("cloud workspace API contracts", () => {
       await tx.query("UPDATE cloud_workspaces SET status='failed',desired_state='stopped' WHERE id=$1", [workspaceId]);
       await tx.query(`INSERT INTO cloud_workspace_provider_operations
         (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,create_attempts_tracked,resource_id)
-        VALUES ('daytona','test-account',$1,1,$2,$3,$4,true,'lost-resource-1')`, [workspaceId,orgId,randomUUID(),"a".repeat(64)]);
+        VALUES ('boat','test-account',$1,1,$2,$3,$4,true,'lost-resource-1')`, [workspaceId,orgId,randomUUID(),"a".repeat(64)]);
     });
-    await seedProviderLossAttestation(pool, { provider: "daytona", accountScope: "test-account", workspaceId,
+    await seedProviderLossAttestation(pool, { provider: "boat", accountScope: "test-account", workspaceId,
       resourceId: "lost-resource-1", attestedBy: owner.id });
     const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/wake`, {method:"POST",key:randomUUID()});
     expect(response.status).toBe(409);
@@ -2573,10 +2454,9 @@ d("cloud workspace API contracts", () => {
     });
   });
 
-  it.each([false, true, "linux-vm"] as const)(
-    "pins a generation replacement across image/default changes (managed provider changed: %s)",
+  it.each([false, true] as const)(
+    "pins a generation replacement across image/default changes (default changed before acceptance: %s)",
     async (changeManagedProvider) => {
-      if(changeManagedProvider==="linux-vm")configureApp(false,{...cloudConfig,sandboxClass:"linux-vm"});
       const created = await createWorkspace();
       const workspaceId = created.body.workspace.id;
       await withSystemTx(pool, async (tx) => {
@@ -2637,7 +2517,7 @@ d("cloud workspace API contracts", () => {
       configureApp(false, {
         ...managedBoatConfig(),
         providerProfiles: {
-          daytona: { ...cloudConfig, imageRef: "new-image-after-acceptance" },
+          boat: { ...cloudConfig, imageRef: "new-image-after-acceptance" },
         },
       });
 
@@ -2713,7 +2593,7 @@ d("cloud workspace API contracts", () => {
       expect(stored.rows[0]).toEqual({
         current_generation: 1,
         source_retired_at: null,
-        candidate_image_ref: "snap-pinned",
+        candidate_image_ref: "boat-template:zeros-v2-test-template-1",
         settings_copied: true,
         intent_generation: 1,
         affects_workspace: false,
@@ -2829,7 +2709,7 @@ d("cloud workspace API contracts", () => {
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider,
            provider_resource_id, observed_state, last_observed_at
-         ) VALUES ($1, 2, $2, 'daytona', $3, 'running', now())`,
+         ) VALUES ($1, 2, $2, 'boat', $3, 'running', now())`,
         [workspaceId, orgId, `sandbox-${workspaceId}-2`],
       );
       await tx.query(
@@ -3018,43 +2898,29 @@ d("cloud workspace API contracts", () => {
         ],
       );
       const engineId = randomUUID();
-      await tx.query(
-        `INSERT INTO cloud_workspace_engine_instances (
-           id, workspace_id, generation, org_id, account_user_id,
-           setup_run_id, setup_execution_fence, registration_grant_id,
-           protocol_version, state, bridge_token_hash,
-           heartbeat_token_hash, registered_at, last_heartbeat_at,
-           lease_expires_at
-         ) VALUES ($1, $2, 1, $3, $4, $5, 1, $6, 11, 'ready', $7, $8,
-                   now(), now(), now() + interval '2 minutes')`,
-        [
-          engineId,
-          workspaceId,
-          orgId,
-          owner.id,
-          sourceRun.rows[0]!.id,
-          sourceGrant.rows[0]!.id,
-          createHash("sha256").update(randomUUID()).digest(),
-          createHash("sha256").update(randomUUID()).digest(),
-        ],
-      );
-      await tx.query(
-        `INSERT INTO cloud_workspace_setup_attestations (
-           setup_run_id, workspace_id, generation, org_id, execution_fence,
-           image_ref, image_source_commit, repository_revision,
-           repository_commit, settings_version, settings_snapshot_sha256,
-           engine_instance_id, engine_protocol_version, engine_health,
-           durable_record_connected
-         ) SELECT $1, $2, 1, $3, 1, g.image_ref, g.source_commit,
-                  ss.repository_revision, $4, ss.spec_version,
-                  ss.settings_snapshot_sha256, $5, 11, 'ready', true
-           FROM cloud_workspace_generations g
-           JOIN cloud_workspace_setup_specs ss
-             ON ss.workspace_id = g.workspace_id
-            AND ss.generation = g.generation
-           WHERE g.workspace_id = $2 AND g.generation = 1`,
-        [sourceRun.rows[0]!.id, workspaceId, orgId, "c".repeat(40), engineId],
-      );
+      await tx.query(`INSERT INTO cloud_workspace_engine_instances (
+        id,workspace_id,generation,org_id,account_user_id,setup_run_id,setup_execution_fence,registration_grant_id,
+        protocol_version,state,bridge_token_hash,heartbeat_token_hash,registered_at,last_heartbeat_at,lease_expires_at,
+        runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version,
+        runtime_installer_receipt_sha256,runtime_boot_id,runtime_supervisor_session_id,actor_protocol_version,agent_customization_version)
+        SELECT $1,$2,1,$3,$4,$5,1,$6,$9,'ready',$7,$8,now(),now(),now()+interval '2 minutes',
+          g.runtime_id,g.runtime_manifest_sha256,g.runtime_base_image_id,g.runtime_base_compatibility_id,g.runtime_profile,g.runtime_engine_protocol_version,
+          $10,$11,$12,2,3 FROM cloud_workspace_generations g WHERE workspace_id=$2 AND generation=1`,
+        [engineId,workspaceId,orgId,owner.id,sourceRun.rows[0]!.id,sourceGrant.rows[0]!.id,
+          createHash("sha256").update(randomUUID()).digest(),createHash("sha256").update(randomUUID()).digest(),
+          CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,runtimeWitness.installerReceiptSha256,randomUUID(),randomUUID()]);
+      await tx.query(`INSERT INTO cloud_workspace_setup_attestations (
+        setup_run_id,workspace_id,generation,org_id,execution_fence,image_ref,image_source_commit,repository_revision,
+        repository_commit,settings_version,settings_snapshot_sha256,engine_instance_id,engine_protocol_version,engine_health,durable_record_connected,
+        runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version,
+        runtime_installer_receipt_sha256,runtime_boot_id,runtime_supervisor_session_id)
+        SELECT $1,$2,1,$3,1,g.image_ref,g.source_commit,ss.repository_revision,$4,ss.spec_version,ss.settings_snapshot_sha256,
+          engine.id,engine.protocol_version,'ready',true,g.runtime_id,g.runtime_manifest_sha256,g.runtime_base_image_id,
+          g.runtime_base_compatibility_id,g.runtime_profile,g.runtime_engine_protocol_version,engine.runtime_installer_receipt_sha256,
+          engine.runtime_boot_id,engine.runtime_supervisor_session_id
+        FROM cloud_workspace_generations g JOIN cloud_workspace_setup_specs ss USING(workspace_id,generation,org_id)
+        JOIN cloud_workspace_engine_instances engine ON engine.id=$5 WHERE g.workspace_id=$2 AND g.generation=1`,
+        [sourceRun.rows[0]!.id,workspaceId,orgId,"c".repeat(40),engineId]);
       await tx.query(
         `UPDATE cloud_workspace_setup_runs
          SET state = 'succeeded', completed_at = now(), lease_owner = NULL,
@@ -3067,7 +2933,7 @@ d("cloud workspace API contracts", () => {
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
            source_commit, created_by, provider_connection_id
-         ) SELECT $1, 2, $2, 'daytona', 'snap-newer', 'linux/amd64',
+         ) SELECT $1, 2, $2, 'boat', 'snap-newer', 'linux/amd64',
                   2000, 4096, 20480, $3, $4, provider_connection_id
            FROM cloud_workspace_generations
            WHERE workspace_id = $1 AND generation = 1`,
@@ -3107,7 +2973,7 @@ d("cloud workspace API contracts", () => {
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider,
            provider_resource_id, observed_state, last_observed_at
-         ) VALUES ($1, 2, $2, 'daytona', $3, 'running', now())`,
+         ) VALUES ($1, 2, $2, 'boat', $3, 'running', now())`,
         [workspaceId, orgId, `sandbox-${workspaceId}-2`],
       );
       await tx.query(
@@ -3506,5 +3372,6 @@ d("cloud workspace API contracts", () => {
     expect(secondPage.workspaces).toHaveLength(1);
     expect(secondPage.workspaces[0]!.id).not.toBe(firstPage.workspaces[0]!.id);
     expect(secondPage.nextCursor).toBeNull();
+  });
   });
 });

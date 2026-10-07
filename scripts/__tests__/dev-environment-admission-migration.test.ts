@@ -19,15 +19,16 @@ function registry(records: any[]) {
 const leaseFor = (state: any) => ({ state, save: vi.fn(), fence: vi.fn() });
 const name = (state: any, suffix = "old") => `dev-${state.owner}-${state.generation.slice(0, 8)}-${suffix}`;
 async function realCanary(state: any, id = "11111111-1111-4111-8111-111111111111") {
+  // Retained registry receipt from an allocation made before native retirement.
   state.resources.images ??= [];
-  const job = { id }, lease = leaseFor(state);
-  await hostedAgentCanary(lease, profile, async (method, route) => route.startsWith("/limits")
-    ? { status: 200, body: { creditUsedSeconds: 0 } }
-    : { status: 200, body: { sandbox: { id: "bx_canary", team: { id: "org" }, snapshots: false } } }).allocate(job, { snapshotId: "base", sourceCommit: "a".repeat(40) });
-  return state.resources.images.find(image => image.agentQualificationId === id);
+  const row = { agentQualificationId: id, purpose: "native-agent-qualification", inputsSha256: "b".repeat(64),
+    sourceCommit: "a".repeat(40), sourceImage: "base", maxUsedHours: 1,
+    builderIntent: { key: id, at: Date.now(), body: { type: "default", from: "base", ttlSeconds: 360, noEnv: true, env: {}, snapshots: false } },
+    builderCreate: { phase: "acknowledged" }, builder: { id: "bx_canary" } };
+  state.resources.images.push(row); return row;
 }
 
-it("V4-04 enrolls a real qualification canary without reserving a snapshot or poisoning later operations", async () => {
+it("V4-04 enrolls a historical qualification canary without reserving a snapshot or poisoning later operations", async () => {
   const old = generation("a"), fresh = generation("b"); old.status = "ready";
   const canary = await realCanary(old), store = registry([old, fresh]);
   expect(canary.snapshotId).toBeUndefined();
@@ -95,7 +96,7 @@ it("V4-04 validates the enrolled ledger before writing any malformed resource id
   expect(store.writeAdmission).not.toHaveBeenCalled();
 });
 
-it("V4-04 reserves canary compute before dispatch and denies a second owner without inventing an intent", async () => {
+it("V4-04 retains historical canary compute and denies a second owner without inventing an intent", async () => {
   const first = generation("a"), second = generation("b"), store = registry([first, second]);
   first.resources.images = []; second.resources.images = [];
   const request = vi.fn(async (method, route) => route.startsWith("/limits")
@@ -106,9 +107,11 @@ it("V4-04 reserves canary compute before dispatch and denies a second owner with
     release: () => releaseHostedAdmission(store, leaseFor(state), profile),
   });
   const image = { snapshotId: "base", sourceCommit: "a".repeat(40) };
-  await canary(first).allocate({ id: "11111111-1111-4111-8111-111111111111" }, image);
-  await expect(canary(second).allocate({ id: "22222222-2222-4222-8222-222222222222" }, image)).rejects.toThrow(/cap/);
-  expect(request.mock.calls.filter(call => call[0] === "POST")).toHaveLength(1);
+  await realCanary(first);
+  await reserveHostedAdmission(store, first, profile, { kind: "builder", computeId: "canary:11111111-1111-4111-8111-111111111111" });
+  await expect(reserveHostedAdmission(store, second, profile, { kind: "builder", computeId: "canary:22222222-2222-4222-8222-222222222222" })).rejects.toThrow(/cap/);
+  await expect(canary(second).allocate({ id: "22222222-2222-4222-8222-222222222222" }, image)).rejects.toMatchObject({ code: "release_worker_images_retired" });
+  expect(request).not.toHaveBeenCalled();
   expect(second.resources.images).toEqual([]);
   const reservation = (await store.readAdmission()).state.reservations.find(row => row.kind === "builder");
   expect(reservation.computeId).toBe("canary:11111111-1111-4111-8111-111111111111");
@@ -120,7 +123,7 @@ it("V4-04 reserves canary compute before dispatch and denies a second owner with
       : { status: 200, body: { sandbox: { id: "bx_next", team: { id: "org" }, snapshots: false } } });
   await canary(first).retire({ id: "11111111-1111-4111-8111-111111111111" });
   expect((await store.readAdmission()).state.reservations.some(row => row.kind === "builder")).toBe(false);
-  await expect(canary(second).allocate({ id: "22222222-2222-4222-8222-222222222222" }, image)).resolves.toBeUndefined();
+  await expect(reserveHostedAdmission(store, second, profile, { kind: "builder", computeId: "canary:22222222-2222-4222-8222-222222222222" })).resolves.toBeDefined();
 });
 
 it("V4-04 reconciles an uncertain canary using its original key without fabricating a named snapshot", async () => {
@@ -146,10 +149,14 @@ it("V4-04 retires a known initial canary rejection without allocating again or r
     release: () => releaseHostedAdmission(store, lease, profile),
   });
   const job = { id: "11111111-1111-4111-8111-111111111111", image: { snapshotId: "base", sourceCommit: "a".repeat(40) } };
-  await expect(canary.allocate(job, job.image)).rejects.toThrow();
+  const row = await realCanary(state); delete row.builder;
+  row.builderCreate = { phase: "uncertain" };
+  await reserveHostedAdmission(store, state, profile, { kind: "builder", computeId: `canary:${job.id}` });
+  row.builderCreate.phase = "rejected";
+  await expect(canary.allocate(job, job.image)).rejects.toMatchObject({ code: "release_worker_images_retired" });
   expect(state.resources.images[0].builderCreate.phase).toBe("rejected");
   await expect(canary.retire(job)).resolves.toBeUndefined();
-  expect(request.mock.calls.filter(call => call[0] === "POST")).toHaveLength(1);
+  expect(request).not.toHaveBeenCalled();
   expect(state.resources.images[0].deleted).toBe(true);
   expect((await store.readAdmission()).state.reservations.some(row => row.kind === "builder")).toBe(false);
 });

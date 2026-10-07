@@ -1,3 +1,4 @@
+import { RELEASE_WORKER_IMAGES_RETIRED } from "./release-worker-retirement.js";
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -100,79 +101,34 @@ describe("audited owner credential designation", () => {
     }
     expect(available.query).not.toHaveBeenCalled();
   });
-  it("fences a different operation while that designated credential has uncertain preparation or dispatch", async () => {
-    const designation = { id: "42", action: "cloud.release_canary.designated", subject: { enabled: true, credentialId, credentialRevision: 1,
-      channel: "alpha", allowanceOwnerUserId: owner, models: ["gpt-5.6-luna"] } };
-    const available = fakePool(designation, true, true), service = new DatabaseReleaseCanaryService(available.pool, config);
-    const operationId = "55555555-5555-4555-8555-555555555555";
-    await expect(service.admit({ version: 1, ownerUserId: owner, organizationId: config.organizationId, channel: "alpha", sourceSha: config.sourceSha,
-      repository: "example/zeros", operationId, runId: "123", runAttempt: "1", branch: "main", qualificationProfile: "smoke",
-      credentialId, credentialRevision: 1, designationId: "42", kind: "codex-chatgpt", model: "gpt-5.6-luna",
-      target: { id: "bx_test", attempt: operationId, snapshotId: "test-image", sourceCommit: config.sourceSha, buildSha256: "b".repeat(64) } }, `Bearer ${token}`)).rejects.toThrow("credential requires reconciliation");
-    expect(available.writes).toHaveLength(0);
-    expect(available.query.mock.calls.some(([sql]) => sql.includes("cloud_agent_credential_versions") || sql.includes("cloud_codex_auth_caches"))).toBe(false);
-    const statements = available.query.mock.calls.map(([sql]) => sql);
-    expect(statements.findIndex(sql => sql.includes("FROM cloud_agent_credentials") && sql.includes("FOR UPDATE"))).toBeLessThan(statements.findIndex(sql => sql.includes("FROM audit_log pending")));
+  it("refuses a different operation before reading an uncertain historical dispatch", async () => {
+    const available = fakePool(undefined, true, true), service = new DatabaseReleaseCanaryService(available.pool, config);
+    await expect(service.admit({}, `Bearer ${token}`)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
+    expect(available.query).not.toHaveBeenCalled(); expect(available.writes).toHaveLength(0);
   });
 });
 
-describe("server-discovered release canary designations", () => {
-  const selection = { version: 1, ownerUserId: owner, organizationId: config.organizationId, channel: "alpha", sourceSha: config.sourceSha,
-    repository: config.repository, qualificationProfile: "smoke", runId: "91", runAttempt: "2", branch: "main" };
-  const candidates = () => [
-    { id: "55555555-5555-4555-8555-555555555555", kind: "claude-setup-token", model: "claude-haiku-4-5" },
-    { id: credentialId, kind: "codex-chatgpt", model: "gpt-5.6-luna" },
-    { id: "66666666-6666-4666-8666-666666666666", kind: "cursor-api-key", model: "composer-2.5" },
-  ].map((row, index) => ({ id: row.id, owner_user_id: owner, kind: row.kind, revision: "3", current_version: 4, revoked_at: null,
-    designation_id: String(40 + index), designation_action: "cloud.release_canary.designated", designation_subject: {
-      enabled: true, credentialId: row.id, credentialRevision: 3, channel: "alpha", allowanceOwnerUserId: owner, models: [row.model],
-    } }));
-  const serviceFor = (rows: ReturnType<typeof candidates>) => {
-    const available = fakePool(), original = available.query.getMockImplementation()!;
-    available.query.mockImplementation(async (sql, values) => sql.includes("JOIN LATERAL")
-      ? { rowCount: rows.length, rows } : original(sql, values));
-    return { ...available, service: new DatabaseReleaseCanaryService(available.pool, config) };
-  };
-  it("discovers only the exact three opted-in revisions/models without a CI-side list", async () => {
-    const available = serviceFor(candidates());
-    expect(await available.service.preflight(selection, `Bearer ${token}`)).toEqual({ ready: true, ...selection,
-      connections: candidates().map(row => ({ kind: row.kind, credentialId: row.id, credentialRevision: 3,
-        designationId: row.designation_id, model: row.designation_subject.models[0] })),
+describe("retired release canary discovery", () => {
+  it("exposes the closed retirement response through the real HTTP route without database access", async () => {
+    const available = fakePool(), service = new DatabaseReleaseCanaryService(available.pool, config);
+    const app = createReleaseCanaryAdmissionRoutes(service);
+    app.onError((error, context) => {
+      if (!(error instanceof HttpError)) throw error;
+      return context.json({ error: { code: error.code, message: error.message } }, error.status as 409);
     });
-    expect(available.query.mock.calls.every(([sql]) => !sql.includes("cloud_agent_credential_versions") && !sql.includes("cloud_codex_auth_caches"))).toBe(true);
-    expect(available.writes).toHaveLength(0);
-  });
-  it("names each missing or ambiguous kind and never chooses one arbitrarily", async () => {
-    for (const row of candidates()) {
-      await expect(serviceFor(candidates().filter(candidate => candidate.kind !== row.kind)).service.preflight(selection, `Bearer ${token}`))
-        .rejects.toThrow(`designation missing for ${row.kind}`);
-      const duplicate = { ...row, id: "77777777-7777-4777-8777-777777777777", designation_id: "99",
-        designation_subject: { ...row.designation_subject, credentialId: "77777777-7777-4777-8777-777777777777" } };
-      await expect(serviceFor([...candidates(), duplicate]).service.preflight(selection, `Bearer ${token}`))
-        .rejects.toThrow(`designation ambiguous for ${row.kind}`);
+    for (const route of ["preflight", "admissions"]) {
+      const response = await app.request(`/internal/v1/release-canaries/${route}`, { method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: "{}" });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: { code: "release_worker_images_retired", message: RELEASE_WORKER_IMAGES_RETIRED } });
     }
+    expect(available.query).not.toHaveBeenCalled(); expect(available.writes).toHaveLength(0);
   });
-  it("excludes stale, revoked, disabled, wrong-owner and wrong-channel consent", async () => {
-    for (const change of [
-      { revision: "4" }, { revoked_at: new Date() }, { owner_user_id: credentialId },
-      { designation_subject: { ...candidates()[0]!.designation_subject, enabled: false } },
-      { designation_subject: { ...candidates()[0]!.designation_subject, channel: "beta" } },
-    ]) {
-      const rows = candidates(); rows[0] = { ...rows[0]!, ...change } as typeof rows[number];
-      await expect(serviceFor(rows).service.preflight(selection, `Bearer ${token}`)).rejects.toThrow("designation missing for claude-setup-token");
-    }
-  });
-  it("requires the pinned approved SMOKE model but binds an explicitly approved FULL model", async () => {
-    const rows = candidates(); rows[0]!.designation_subject.models = ["explicit-full-test-model"];
-    await expect(serviceFor(rows).service.preflight(selection, `Bearer ${token}`)).rejects.toThrow("model not approved for claude-setup-token");
-    expect(await serviceFor(rows).service.preflight({ ...selection, qualificationProfile: "full" }, `Bearer ${token}`))
-      .toMatchObject({ connections: [expect.objectContaining({ kind: "claude-setup-token", model: "explicit-full-test-model" }), expect.anything(), expect.anything()] });
-  });
-  it("rejects caller-supplied selections, wrong scope and invalid run binding before discovery", async () => {
-    const available = serviceFor(candidates());
-    for (const change of [{ connections: [] }, { sourceSha: "b".repeat(40) }, { branch: "release/1.2.3" }, { runAttempt: "0" }])
-      await expect(available.service.preflight({ ...selection, ...change }, `Bearer ${token}`)).rejects.toThrow("canary");
-    expect(available.query).not.toHaveBeenCalled();
+  it.each(["preflight", "admit"] as const)("returns an authenticated closed %s refusal before discovery or secret access", async method => {
+    const available = fakePool(), service = new DatabaseReleaseCanaryService(available.pool, config);
+    await expect(service[method]({}, `Bearer ${token}`)).rejects.toMatchObject({ status: 409,
+      code: "release_worker_images_retired", message: RELEASE_WORKER_IMAGES_RETIRED });
+    expect(available.query).not.toHaveBeenCalled(); expect(available.writes).toHaveLength(0);
   });
 });
 

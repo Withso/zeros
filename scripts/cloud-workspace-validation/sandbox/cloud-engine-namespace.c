@@ -1,6 +1,6 @@
 /* Fixed transition from the host broker's already-restricted mount view.
  * The engine is namespace root, mapped to VM UID/GID 10003. VM root is NEVER
- * mapped. Worker 10001 and capture 10002 are mapped; v3 also maps the
+ * mapped. Worker 10001, capture 10002 and coordinator 10004 are mapped; the
  * private provider coordinator 10004.
  * Not setuid. Namespace entry accepts no selected command, identity or map.
  * The host-only --await-scope entry blocks BEFORE bubblewrap can fork, then
@@ -32,10 +32,10 @@
 #include <unistd.h>
 
 static volatile sig_atomic_t child_pid;
-static char runtime_root[128] = "/opt/zeros-runtime";
-static char worker_root[144] = "/opt/zeros";
-static char runtime_node[160] = "/opt/zeros-runtime/bin/node";
-static int runtime_version = 2;
+static char runtime_root[128];
+static char worker_root[144];
+static char runtime_node[160];
+static int runtime_version;
 
 static void fail(void) {
   fputs("cloud engine namespace admission failed\n", stderr);
@@ -156,9 +156,7 @@ static void validate_view(int qualification, int resident) {
     require_worker_path("scripts", 1);
     require_worker_path("scripts/cloud-workspace-validation", 1);
     require_worker_path("scripts/cloud-workspace-validation/sandbox", 1);
-    require_worker_path(qualification == 2 ?
-      "scripts/cloud-workspace-validation/sandbox/qualify-cloud-agent.ts" :
-      "scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs", 0);
+    require_worker_path("scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs", 0);
   }
   const char *absent[] = {
     "/root", "/home/user", "/srv/zeros/broker", "/etc/shadow", "/etc/ssh",
@@ -184,12 +182,12 @@ static void byte_io(int descriptor, int writing) {
   if (count != 1 || value != '1') fail();
 }
 
-static void write_map(pid_t child, const char *kind, int version) {
+static void write_map(pid_t child, const char *kind) {
   char file[96];
   int length = snprintf(file, sizeof(file), "/proc/%ld/%s_map", (long)child, kind);
   if (length <= 0 || (size_t)length >= sizeof(file)) fail();
   int descriptor = open(file, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
-  const char *mapping = (version == 3 || version == 4) ? "0 10003 1\n10001 10001 2\n10004 10004 1\n" : "0 10003 1\n10001 10001 2\n";
+  const char *mapping = "0 10003 1\n10001 10001 2\n10004 10004 1\n";
   size_t length_bytes = strlen(mapping);
   if (descriptor < 0 || write(descriptor, mapping, length_bytes) !=
       (ssize_t)length_bytes || close(descriptor)) fail();
@@ -274,14 +272,12 @@ int main(int argc, char **argv) {
     fail();
   }
   const int selected = argc >= 3 && strcmp(argv[1], "--runtime-id") == 0;
-  if (selected) select_runtime(argv[2]);
-  const int version = selected ? 4 : (argc >= 2 && strcmp(argv[1], "--v3") == 0 ? 3 : 2);
-  runtime_version = version;
-  const int option = version == 4 ? 3 : version == 3 ? 2 : 1;
+  if (!selected) fail();
+  select_runtime(argv[2]);
+  const int option = 3;
   const int qualification = argc == option + 1 ?
-    (strcmp(argv[option], "--qualify") == 0 ? 1 :
-      (version >= 3 && strcmp(argv[option], "--qualify-agent") == 0 ? 2 : 0)) : 0;
-  const int resident = version == 4 && argc == option + 1 && strcmp(argv[option], "--resident") == 0;
+    strcmp(argv[option], "--qualify") == 0 : 0;
+  const int resident = argc == option + 1 && strcmp(argv[option], "--resident") == 0;
   if ((argc != option && !qualification && !resident) || getuid() != 0 || geteuid() != 0 || getgid() != 0 ||
       setgroups(0, NULL)) fail();
   validate_view(qualification, resident);
@@ -308,10 +304,9 @@ int main(int argc, char **argv) {
         getgroups(0, NULL) != 0) fail();
     restrict_capabilities();
     restrict_syscalls();
-    char engine[PATH_MAX], qualify[PATH_MAX], agent[PATH_MAX], host[PATH_MAX];
+    char engine[PATH_MAX], qualify[PATH_MAX], host[PATH_MAX];
     worker_path(engine, sizeof(engine), "dist-engine/cli.js");
     worker_path(qualify, sizeof(qualify), "scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs");
-    worker_path(agent, sizeof(agent), "scripts/cloud-workspace-validation/sandbox/qualify-cloud-agent.ts");
     worker_path(host, sizeof(host), "dist-engine/resident-pty.js");
     char *arguments[] = {
       runtime_node, engine,
@@ -320,12 +315,8 @@ int main(int argc, char **argv) {
     char *qualification_arguments[] = {
       runtime_node, qualify, NULL,
     };
-    char *agent_qualification_arguments[] = {
-      runtime_node, "--import", "tsx", agent, NULL,
-    };
     char *resident_arguments[] = { runtime_node, host, NULL };
-    execv(arguments[0], resident ? resident_arguments : qualification == 2 ? agent_qualification_arguments :
-      (qualification ? qualification_arguments : arguments));
+    execv(arguments[0], resident ? resident_arguments : (qualification ? qualification_arguments : arguments));
     fail();
   }
   child_pid = (sig_atomic_t)child;
@@ -334,7 +325,7 @@ int main(int argc, char **argv) {
   if (sigemptyset(&action.sa_mask) || sigaction(SIGTERM, &action, NULL) ||
       sigaction(SIGINT, &action, NULL) || sigaction(SIGHUP, &action, NULL)) fail();
   byte_io(ready[0], 0);
-  write_map(child, "uid", version); write_map(child, "gid", version);
+  write_map(child, "uid"); write_map(child, "gid");
   byte_io(go[1], 1);
   (void)close(ready[0]); (void)close(go[1]);
   int status;

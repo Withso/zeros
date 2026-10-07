@@ -27,9 +27,10 @@ d("controlled migration service boot",()=>{
           WORKOS_COOKIE_PASSWORD:"test-cookie-password".repeat(3),WORKOS_WEBHOOK_SECRET:"test-webhook-secret"}:{}),
         GITHUB_APP_ID:"123456",GITHUB_APP_CLIENT_ID:"Iv1.test",GITHUB_APP_CLIENT_SECRET:"test-client-secret",
         GITHUB_APP_SLUG:"zeros-test",GITHUB_OAUTH_CALLBACK_URL:"https://api.example.test/v1/github/oauth/callback",GITHUB_APP_PRIVATE_KEY:privateKey,
-        CLOUD_WORKSPACES_ENABLED:"true",CLOUD_WORKSPACE_PROVIDER:"daytona",DAYTONA_API_KEY:"not-a-live-key-for-tests",DAYTONA_API_URL:"https://api.example.test",
+        CLOUD_WORKSPACES_ENABLED:"true",CLOUD_WORKSPACE_PROVIDER:"boat",BOAT_API_KEY:"not-a-live-key-for-tests",BOAT_API_URL:"https://api.example.test",
         CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED:String(background),
-        DAYTONA_SNAPSHOT_ID:"snap_test",ZEROS_CLOUD_SOURCE_COMMIT:"a".repeat(40),
+        BOAT_SNAPSHOT_ID:"snap-test",BOAT_ACCOUNT_SCOPE:"test-scope",BOAT_BILLING_ORG:"team_00000000-0000-4000-8000-000000000000",
+        BOAT_IMAGE_BUILD_SHA256:"b".repeat(64),BOAT_TTL_SECONDS:"900",BOAT_COMPUTE_POLICY_ID:"test-policy",BOAT_SECONDS_PER_DOLLAR:"3600",CLOUD_WORKSPACE_STORAGE_MIB:"20480",ZEROS_CLOUD_SOURCE_COMMIT:"a".repeat(40),
         CLOUD_WORKSPACE_SECRET_KEY_V1:randomBytes(32).toString("base64url"),RESEND_API_KEY:"not-a-live-key",EMAIL_FROM:"test@example.test"},
     });
     let output="";const exited=once(child,"exit");

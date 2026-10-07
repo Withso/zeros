@@ -5,14 +5,23 @@
 
 import type { SetupTimings } from "./setup-timings.js";
 
-export const CLOUD_WORKSPACE_PROVIDER_NAMES = ["daytona", "boat"] as const;
+export const CLOUD_WORKSPACE_PROVIDER_NAMES = ["boat"] as const;
 export type CloudWorkspaceProviderName =
   (typeof CLOUD_WORKSPACE_PROVIDER_NAMES)[number];
 
 export function isCloudWorkspaceProviderName(
   value: unknown,
 ): value is CloudWorkspaceProviderName {
-  return value === "daytona" || value === "boat";
+  return value === "boat";
+}
+
+/** Persisted schema values can outlive their adapter. Readers may project
+ * unsupported rows, but no provider/runtime I/O may use their authority. */
+export function isSupportedCloudWorkspaceProviderBinding(input: {
+  provider: unknown; sandboxClass?: unknown; credentialSource?: unknown;
+}): boolean {
+  return isCloudWorkspaceProviderName(input.provider) && input.sandboxClass == null &&
+    (input.credentialSource === undefined || input.credentialSource === "hosted");
 }
 
 /** Fixed image-owned bootstrap commands. Credentials are data in the bounded

@@ -3,7 +3,7 @@ import {spawn} from "node:child_process";
 import {randomBytes} from "node:crypto";
 import {lstat,mkdir,realpath} from "node:fs/promises";
 import {CloudLanguageService} from "../agents/cloud-language-service";
-import {CLOUD_LANGUAGE_FILE_HELPER,parseLanguageDocument} from "../agents/cloud-language-document";
+import {cloudLanguageFileHelper,parseLanguageDocument} from "../agents/cloud-language-document";
 import {LspError} from "../agents/lsp-rpc";
 import {CloudSupervisedProcess} from "../agents/containment/cloud-supervised-process";
 import {isCloudDeploymentOwner} from "../agents/containment/cloud-deployment-authority.mjs";
@@ -16,7 +16,7 @@ export function cloudLanguageLaunch(worker:CloudWorkerConfiguration,command:stri
   if(worker.uid!==10001||worker.gid!==10001||worker.toolchain.node!==NODE||worker.toolchain.bwrap!=="/usr/bin/bwrap"||
       worker.toolchain.setpriv!=="/usr/bin/setpriv"||command!==NODE)throw new LspError("denied");
   const script=args[0]==="--max-old-space-size=256"?args[1]:args[0];
-  const permitted=script===CLOUD_LANGUAGE_FILE_HELPER&&args.length===1||
+  const permitted=script===cloudLanguageFileHelper()&&args.length===1||
     script===`${runtime.workerRoot}/node_modules/typescript-language-server/lib/cli.mjs`&&args.join("\0")===["--max-old-space-size=256",script,"--stdio","--log-level","1"].join("\0")||
     script===`${runtime.workerRoot}/node_modules/pyright/langserver.index.js`&&args.join("\0")===["--max-old-space-size=256",script,"--stdio"].join("\0");
   if(!permitted)throw new LspError("denied");
@@ -72,7 +72,7 @@ export class CloudRuntimeLanguageServices {
       owner.service=new CloudLanguageService({root:WORKSPACE,assertLive,launch,retire,failed:this.failed,
         settleLaunchFailure:async()=>{await Promise.all([...owner.processes].map(retire));},
         readDocument:async(file,signal)=>{
-          if(signal?.aborted)throw new LspError();const child=await launch(NODE,[CLOUD_LANGUAGE_FILE_HELPER]);
+          if(signal?.aborted)throw new LspError();const child=await launch(NODE,[cloudLanguageFileHelper()]);
           let output:string;try{output=await this.read(child,JSON.stringify({operation:"read",path:file,offset:0,length:65536}),signal);}finally{await retire(child);}assertLive();
           return parseLanguageDocument(output);
         }});

@@ -1,5 +1,5 @@
 import type { CommandHandler } from "../router";
-import { getCloudWorkspaceAccessBroker } from "../../cloud-workspace-access-runtime";
+import { getCloudWorkspaceAccessBroker, getCloudWorkspacePortForwarding, revokeCloudWorkspaceNativeAccess, setCloudWorkspacePortForwardingPreferences } from "../../cloud-workspace-access-runtime";
 import { cloudWorkspaceDesktopCapabilityEnabled } from "../../../src/engine/cloud-workspace-capability";
 
 export const cloudWorkspaceCapability: CommandHandler = () => ({ enabled: cloudWorkspaceDesktopCapabilityEnabled() });
@@ -74,7 +74,7 @@ export const cloudWorkspaceSshIde: CommandHandler = (args) => {
   if (appId !== "cursor" && appId !== "vscode") {
     throw new Error("cloud workspace access: unsupported remote IDE");
   }
-  return getCloudWorkspaceAccessBroker().openSshIde({
+  return accessBroker(args).openSshIde({
     ...target(args),
     appId,
   });
@@ -88,13 +88,40 @@ export const cloudWorkspaceTunnelStart: CommandHandler = (args) =>
   });
 
 export const cloudWorkspaceAccessRevoke: CommandHandler = (args) =>
-  getCloudWorkspaceAccessBroker().revoke(requiredString(args, "accessId"));
+  revokeCloudWorkspaceNativeAccess(requiredString(args, "accessId"));
 
 export const cloudWorkspaceAccessContext: CommandHandler = () =>
   getCloudWorkspaceAccessBroker().serviceContext();
 
 export const cloudWorkspaceAccessList: CommandHandler = (args) => {
   return getCloudWorkspaceAccessBroker().listServices({ ...target(args), ...serviceContext(args) });
+};
+
+export const cloudWorkspacePortForwardingGet: CommandHandler = args =>
+  getCloudWorkspacePortForwarding().readPreferences({ ...target(args), ...serviceContext(args) });
+
+export const cloudWorkspacePortForwardingSet: CommandHandler = args => {
+  const change: { forwardingEnabled?: boolean; autoForwardEnabled?: boolean } = {};
+  for (const key of ["forwardingEnabled", "autoForwardEnabled"] as const) if (args[key] !== undefined) {
+    if (typeof args[key] !== "boolean") throw new Error(`cloud workspace access: invalid ${key}`);
+    change[key] = args[key];
+  }
+  if (!Object.keys(change).length) throw new Error("cloud workspace access: invalid forwarding preference");
+  return setCloudWorkspacePortForwardingPreferences({ ...target(args), ...serviceContext(args) }, change);
+};
+
+export const cloudWorkspacePortForwardingRuntime: CommandHandler = args => {
+  if (typeof args.connected !== "boolean") throw new Error("cloud workspace access: invalid connected state");
+  getCloudWorkspacePortForwarding().publishRuntime({
+    ...target(args), runtimeId: requiredString(args, "runtimeId"), generation: positiveInteger(args, "generation"),
+    authorityEpoch: positiveInteger(args, "authorityEpoch"), engineInstanceId: requiredString(args, "engineInstanceId"),
+    connectionSequence: positiveInteger(args, "connectionSequence"), connected: args.connected,
+  });
+};
+
+export const cloudWorkspacePortForwardingForget: CommandHandler = args => {
+  accessBroker(args);
+  getCloudWorkspacePortForwarding().removeWorkspace(target(args));
 };
 
 export const cloudWorkspaceRuntimeOpen: CommandHandler = (args) =>

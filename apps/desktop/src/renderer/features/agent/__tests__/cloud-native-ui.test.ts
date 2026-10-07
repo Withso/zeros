@@ -1,21 +1,10 @@
 import {describe,expect,it,vi} from "vitest";
 import {composerCommandsFor} from "@zeros/protocol/agent-events";
 import {cloudWorkspaceKey} from "../../../platform/bridge/cloud-workspace-key";
-import {cloudAgentLimitations,filterCloudNativeCommands} from "../cloud-native-ui";
+import {filterCloudNativeCommands} from "../cloud-native-ui";
 import {admitTranscriptFork} from "../fork-chat";
 const cwd=cloudWorkspaceKey({organizationId:"11111111-1111-4111-8111-111111111111",workspaceId:"22222222-2222-4222-8222-222222222222"});
 describe("cloud native UI admission",()=>{
-  it("explains the smoke runtime's unavailable features without blocking ordinary prompts", () => {
-    expect(cloudAgentLimitations()).toEqual([]);
-    const cloudExecution = {version:1 as const,profile:"zeros-cloud-native-v1" as const,runtimeProfile:"zeros-cloud-worker-v4" as const,provider:"codex" as const,designApi:"unavailable" as const};
-    expect(cloudAgentLimitations({cloudExecution,parity:{level:"restricted",restrictions:["user-mcp-disabled"]}}))
-      .toEqual(["custom MCP servers and organization skills", "goals", "native review", "forking", "connected apps", "subagents"]);
-    expect(cloudAgentLimitations({cloudExecution:{...cloudExecution,capabilities:{version:1,goals:true,nativeFork:true,transcriptFork:true,nativeReview:true,connectedApps:true,multiAgent:true}},parity:{level:"restricted",restrictions:[]}})).toEqual([]);
-    for (const provider of ["claude", "cursor"] as const) {
-      expect(cloudAgentLimitations({cloudExecution:{...cloudExecution,provider},parity:{level:"restricted",restrictions:["user-mcp-disabled"]}}))
-        .toEqual(["custom MCP servers and organization skills", "forking"]);
-    }
-  });
   it("hides unqualified goals and native review while preserving Local commands",()=>{
     const commands=composerCommandsFor("codex");
     expect(filterCloudNativeCommands(commands,"/local",undefined)).toBe(commands);

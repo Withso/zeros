@@ -37,6 +37,7 @@ d("cloud workspace endpoint grants", () => {
 
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     const subject = randomUUID();
     const owner = await ensureUser(pool, {
       provider: "auth0",
@@ -95,7 +96,7 @@ d("cloud workspace endpoint grants", () => {
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
            source_commit, created_by, provider_connection_id
-         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+         ) VALUES ($1, 1, $2, 'boat', 'snap-pinned', 'linux/amd64',
                    2000, 4096, 20480, $3, $4, $5)`,
         [id, orgId, "a".repeat(40), owner.id, canonical.providerConnectionId],
       );
@@ -110,7 +111,7 @@ d("cloud workspace endpoint grants", () => {
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider,
            provider_resource_id, observed_state
-         ) VALUES ($1, 1, $2, 'daytona', 'provider-grant-test', 'running')`,
+         ) VALUES ($1, 1, $2, 'boat', 'provider-grant-test', 'running')`,
         [id, orgId],
       );
       return { orgId, id };

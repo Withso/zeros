@@ -37,10 +37,10 @@ d("v4 smoke agent discovery and admission", () => {
     ]);
   });
 
-  it("allows unknown engines, including unadvertised v3 runtimes", async () => {
+  it("allows v4 engines with unadvertised customization-schema3 support", async () => {
     expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations[0])
       .toMatchObject({ runtimeQualified: true, runtimeUpgradeRequired: false, mcpQualified: false });
-    await executions.admit(f.scope, { ...input(), customization: { version: 3, repositoryServers: [] } });
+    await executions.admit(f.scope, { ...input(), customization: { version: 3, repositoryServers: [] } }, false, undefined, undefined, undefined, 1);
     expect((await pool.query("SELECT agent_customization_version FROM cloud_workspace_engine_instances WHERE id=$1", [f.scope.engineInstanceId])).rows[0].agent_customization_version).toBe(3);
     // Proof belongs to the exact live engine, never to a retired instance.
     await pool.query("UPDATE cloud_workspace_engine_instances SET state='revoked',revoked_at=now() WHERE id=$1", [f.scope.engineInstanceId]);
@@ -50,23 +50,23 @@ d("v4 smoke agent discovery and admission", () => {
 
   it.each([1, 2])("records required-only v%s evidence even though admission rejects", async version => {
     const request = { ...input(), customization: { version, repositoryServers: [] } };
-    await expect(executions.admit(f.scope, request))
+    await expect(executions.admit(f.scope, request, false, undefined, undefined, undefined, 1))
       .rejects.toMatchObject({ status: 409, code: "cloud_runtime_upgrade_required" });
     expect((await pool.query("SELECT agent_customization_version FROM cloud_workspace_engine_instances WHERE id=$1", [f.scope.engineInstanceId])).rows[0].agent_customization_version).toBe(version);
     expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations[0])
       .toMatchObject({ runtimeQualified: false, runtimeUpgradeRequired: true, mcpQualified: false });
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_agent_execution_leases WHERE execution_id=$1", [request.executionId])).rows[0].n).toBe(0);
     // A proved v3 admission upgrades that evidence without borrowing runtime dates.
-    await executions.admit(f.scope, { ...input(), customization: { version: 3, repositoryServers: [] } });
+    await executions.admit(f.scope, { ...input(), customization: { version: 3, repositoryServers: [] } }, false, undefined, undefined, undefined, 1);
     expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations[0])
       .toMatchObject({ runtimeQualified: true, runtimeUpgradeRequired: false });
-    await expect(executions.admit(f.scope, { ...input(), customization: { version, repositoryServers: [] } }))
+    await expect(executions.admit(f.scope, { ...input(), customization: { version, repositoryServers: [] } }, false, undefined, undefined, undefined, 1))
       .rejects.toMatchObject({ code: "cloud_runtime_upgrade_required" });
     expect((await pool.query("SELECT agent_customization_version FROM cloud_workspace_engine_instances WHERE id=$1", [f.scope.engineInstanceId])).rows[0].agent_customization_version).toBe(3);
   });
 
   it("does not record capability on an unauthorized admission", async () => {
-    await expect(executions.admit(f.scope, { ...input(), delegationId: randomUUID(), customization: { version: 3, repositoryServers: [] } }))
+    await expect(executions.admit(f.scope, { ...input(), delegationId: randomUUID(), customization: { version: 3, repositoryServers: [] } }, false, undefined, undefined, undefined, 1))
       .rejects.toMatchObject({ status: 403 });
     expect((await pool.query("SELECT agent_customization_version FROM cloud_workspace_engine_instances WHERE id=$1", [f.scope.engineInstanceId])).rows[0].agent_customization_version).toBeNull();
   });
@@ -80,7 +80,7 @@ d("v4 smoke agent discovery and admission", () => {
     });
     const claim = (await commands.claim(f.scope, "old-engine", executionId))!;
     await expect(executions.admit(f.scope, { ...input(), executionId,
-      source: { kind: "command", commandId, claimId: claim.claimId }, customization: { version: 2, repositoryServers: [] } }))
+      source: { kind: "command", commandId, claimId: claim.claimId }, customization: { version: 2, repositoryServers: [] } }, false, undefined, undefined, undefined, 1))
       .rejects.toMatchObject({ code: "cloud_runtime_upgrade_required" });
     const receipt = async () => (await pool.query("SELECT state,result_code FROM cloud_workspace_commands WHERE id=$1", [commandId])).rows[0];
     expect(await receipt()).toEqual({ state: "dispatching", result_code: "cloud_runtime_upgrade_required" });
@@ -104,7 +104,7 @@ d("v4 smoke agent discovery and admission", () => {
       expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations.find(grant => grant.id === delegationId))
         .toMatchObject({ kind, runtimeQualified: true, mcpQualified: false });
       const lease = await executions.admit(f.scope, { ...input(), delegationId, provider: kind.split("-")[0], model: "fixture-model",
-        customization: { version: 3, repositoryServers: [] } }, false, 1);
+        customization: { version: 3, repositoryServers: [] } }, false, 1, undefined, undefined, 1);
       expect(CloudAgentExecutionAuthoritySchema.safeParse(lease).success).toBe(true);
       expect(lease.credentialKind).toBe(kind);
     }
@@ -113,7 +113,7 @@ d("v4 smoke agent discovery and admission", () => {
   it("requires MCP for marked computer administration in both discovery and execution", async () => {
     await withSystemTx(pool, tx => markAdminWorkspace(tx, { workspaceId: f.fixture.workspaceId, orgId: f.fixture.organizationId, creatorUserId: f.owner.id }));
     expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations[0]).toMatchObject({ runtimeQualified: false, mcpQualified: false });
-    await expect(executions.admit(f.scope, { ...input(), customization: { version: 3, repositoryServers: [] } })).rejects.toMatchObject({ status: 403 });
+    await expect(executions.admit(f.scope, { ...input(), customization: { version: 3, repositoryServers: [] } }, false, undefined, undefined, undefined, 1)).rejects.toMatchObject({ status: 403 });
   });
 
   it.each([1, 2, 3] as const)("keeps v%s customization snapshots when the runtime has MCP proof", async version => {
@@ -123,19 +123,19 @@ d("v4 smoke agent discovery and admission", () => {
     executions = new DatabaseCloudAgentExecutionService(pool, f.encryption, false);
     const request = { ...input(), customization: { version, repositoryServers: [{ name: "fixture", transport: "stdio", command: "node", args: ["fixture.mjs"] }] } };
     expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations[0]).toMatchObject({ runtimeQualified: true, runtimeUpgradeRequired: false, mcpQualified: true });
-    const lease = await executions.admit(f.scope, request, false, 1);
+    const lease = await executions.admit(f.scope, request, false, 1, undefined, undefined, 1);
     expect(CloudAgentExecutionAuthoritySchema.safeParse(lease).success).toBe(true);
     expect(lease.customization?.servers).toHaveLength(1);
     if (version >= 2) expect(lease.customization?.history).toBeDefined();
     expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations[0]?.runtimeUpgradeRequired).toBe(false);
-    expect(await executions.admit(f.scope, request, false, 1)).toEqual(lease);
-    await expect(executions.admit(f.scope, { ...request, customization: undefined })).rejects.toMatchObject({ status: 403 });
+    expect(await executions.admit(f.scope, request, false, 1, undefined, undefined, 1)).toEqual(lease);
+    await expect(executions.admit(f.scope, { ...request, customization: undefined }, false, undefined, undefined, undefined, 1)).rejects.toMatchObject({ status: 403 });
     await pool.query("UPDATE cloud_runtime_qualifications SET enabled=false,mcp_qualified=false,revoked_at=now()");
     await expect(executions.validate(f.scope, lease.leaseId, true)).rejects.toMatchObject({ status: 403 });
   });
 
   it("omits empty native proof from admission and renewal responses", async () => {
-    const lease = await executions.admit(f.scope, input(), false, 1);
+    const lease = await executions.admit(f.scope, input(), false, 1, undefined, undefined, 1);
     expect(CloudAgentExecutionAuthoritySchema.safeParse(lease).success).toBe(true);
     expect(lease).not.toHaveProperty("nativeCapabilities");
     const renewed = await executions.validate(f.scope, lease.leaseId, true, undefined, false, 1);
@@ -145,14 +145,14 @@ d("v4 smoke agent discovery and admission", () => {
 
   it("admits the v4 gateway's optional customization request as an explicit basic turn", async () => {
     const request = { ...input(), customization: { version: 3, repositoryServers: [] } };
-    const lease = await executions.admit(f.scope, request, false, 1);
+    const lease = await executions.admit(f.scope, request, false, 1, undefined, undefined, 1);
     expect(CloudAgentExecutionAuthoritySchema.safeParse(lease).success).toBe(true);
     expect(lease).not.toHaveProperty("customization");
-    expect(await executions.admit(f.scope, request, false, 1)).toEqual(lease);
+    expect(await executions.admit(f.scope, request, false, 1, undefined, undefined, 1)).toEqual(lease);
     await expect(executions.validate(f.scope, lease.leaseId, true)).resolves.toHaveProperty("leaseId", lease.leaseId);
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_customization_execution_snapshots")).rows[0].n).toBe(0);
     for (const version of [1, 2]) {
-      await expect(executions.admit(f.scope, { ...input(), customization: { version, repositoryServers: [] } })).rejects.toMatchObject({ status: 409, code: "cloud_runtime_upgrade_required" });
+      await expect(executions.admit(f.scope, { ...input(), customization: { version, repositoryServers: [] } }, false, undefined, undefined, undefined, 1)).rejects.toMatchObject({ status: 409, code: "cloud_runtime_upgrade_required" });
     }
   });
 
@@ -166,16 +166,16 @@ d("v4 smoke agent discovery and admission", () => {
     });
     const claim = (await commands.claim(f.scope, "fork-destination", executionId))!;
     await expect(executions.admit(f.scope, { ...input(), executionId,
-      source: { kind: "command", commandId, claimId: claim.claimId } })).rejects.toMatchObject({ status: 403 });
+      source: { kind: "command", commandId, claimId: claim.claimId } }, false, undefined, undefined, undefined, 1)).rejects.toMatchObject({ status: 403 });
   });
 
   it("keeps discovery and admission closed when smoke mode is disabled or qualification is revoked", async () => {
     vi.stubEnv("CLOUD_RUNTIME_QUALIFICATION_MODE", "full");
     expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations[0]?.runtimeQualified).toBe(false);
-    await expect(executions.admit(f.scope, input())).rejects.toMatchObject({ status: 403 });
+    await expect(executions.admit(f.scope, input(), false, undefined, undefined, undefined, 1)).rejects.toMatchObject({ status: 403 });
     vi.stubEnv("CLOUD_RUNTIME_QUALIFICATION_MODE", "smoke");
     await pool.query("UPDATE cloud_runtime_qualifications SET enabled=false,mcp_qualified=false,revoked_at=now()");
     expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations[0]?.runtimeQualified).toBe(false);
-    await expect(executions.admit(f.scope, input())).rejects.toMatchObject({ status: 403 });
+    await expect(executions.admit(f.scope, input(), false, undefined, undefined, undefined, 1)).rejects.toMatchObject({ status: 403 });
   });
 });

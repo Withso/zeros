@@ -7,7 +7,6 @@ import { createRoot } from "react-dom/client";
 import { CloudDesignImageUpload } from "../features/design-workspace/cloud-design-image-upload";
 import { useDesignWorkspaceUiStore } from "../features/design-workspace/state/design-workspace-ui";
 import { acceptOrganizationSnapshot } from "../features/team/team-store";
-import { setInternalFeatureEnabled } from "../features/settings/internal-features";
 import { cloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import { acceptCloudWorkspaceDocument } from "../state/cloud-workspace-catalog";
 import type { CloudWorkspaceDocument } from "../platform/cloud-workspaces";
@@ -41,12 +40,11 @@ acceptOrganizationSnapshot({
     id: organizationId,
     email: "fixture@example.test",
     displayName: "Fixture",
-    staffRole: "developer",
+    staffRole: null,
   },
   teams: [organization],
   organizations: [organization],
 });
-setInternalFeatureEnabled("cloudComputerV2", true);
 let version = 0;
 function role(actorRole: "developer" | "prompter") {
   for (const id of ids)

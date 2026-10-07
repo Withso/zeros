@@ -3,6 +3,10 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+vi.mock("../cloud-workspace-validation/sandbox/cloud-runtime-root.mjs", async original => ({
+  ...await original<typeof import("../cloud-workspace-validation/sandbox/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime: (await import("../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime")).testCloudRuntime,
+}));
 import { stageCloudRecoveryBlobs } from "../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
 const directories: string[] = [];
 const recovery = () => ({ endpoint: "https://control.example.test/recovery", token: "test-grant", expiresAtMs: Date.now() + 30_000 });

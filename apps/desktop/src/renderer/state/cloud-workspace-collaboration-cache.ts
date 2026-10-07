@@ -1,6 +1,6 @@
 import { getOrganizationStoreGeneration, getTeamStoreState } from "../features/team/team-store";
 import { ControlPlaneError } from "../features/team/control-plane";
-import { isInternalFeatureActive } from "../features/settings/internal-features";
+import { hasCloudWorkspaceAccountAccess } from "../features/team/cloud-workspace-account-access";
 import {
   listCloudWorkspaceCollaborators,
   type CloudWorkspaceCollaborators,
@@ -260,7 +260,7 @@ export const cloudWorkspaceCollaboration = new CloudWorkspaceCollaborationCache(
 });
 
 export function warmCloudWorkspaceCollaboration(target: CloudWorkspaceTarget): void {
-  if (!isInternalFeatureActive("cloudComputerV2")) return;
+  if (!hasCloudWorkspaceAccountAccess(target.organizationId)) return;
   const document = cloudWorkspaceDocument(target);
   if (!document?.capabilities.canManage || !["owner", "manager"].includes(document.actorRole ?? "")) return;
   cloudWorkspaceCollaboration.prune();

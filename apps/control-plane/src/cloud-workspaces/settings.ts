@@ -735,18 +735,6 @@ async function loadRepositorySettings(
   return new Map(result.rows.map((row) => [row.scope, row]));
 }
 
-type SecretBindingRow = {
-  id: string;
-  name: string;
-  current_version: string | number;
-  key_version: number;
-  nonce: Buffer;
-  ciphertext: Buffer;
-  auth_tag: Buffer;
-  verifier_scheme: number;
-  value_verifier: Buffer | null;
-};
-
 export type SecretEncryptionConfiguration = {
   setupSecretKeyV1?: string | null;
   secretEncryptionKeys?: Readonly<Record<number, string>>;
@@ -784,12 +772,12 @@ export async function resolveDatabaseCloudWorkspaceSettings(
     generation: number;
     actorUserId: string;
     isPersonal: boolean;
-    organizationProfileOverride?: { id: string; version: number };
     setupSecretKeyV1?: string | null;
     secretEncryptionKeys?: Readonly<Record<number, string>>;
     currentSecretEncryptionKeyVersion?: number | null;
   },
 ): Promise<DatabaseResolvedCloudWorkspaceSettings> {
+  const computerSource = await loadCloudComputerEnvironmentSource(tx, input);
   const layers: CloudWorkspaceSettingsLayer[] = [
     { source: "built-in defaults", document: { values: {} } },
   ];
@@ -798,8 +786,6 @@ export async function resolveDatabaseCloudWorkspaceSettings(
   const sourceVersions: Record<string, JsonValue> = Object.create(null);
   let environmentProfileId: string | null = null;
   let environmentProfileVersion: number | null = null;
-  let computerSetup: Array<{command:string;timeoutSeconds:number}> | null = null;
-  let repositorySetup: Array<{command:string;timeoutSeconds:number}> | null = null;
 
   if (input.isPersonal) {
     const profile = await loadDefaultProfile(tx, {
@@ -863,25 +849,8 @@ export async function resolveDatabaseCloudWorkspaceSettings(
     if (inheritedSources.length > 0) {
       sourceVersions.inheritedPersonalProfiles = inheritedSources;
     }
-    const organizationProfile = input.organizationProfileOverride
-      ? (await tx.query<ProfileRow>(`SELECT profile.id,version.version,version.document FROM environment_profiles profile
-          JOIN environment_profile_versions version ON version.profile_id=profile.id AND version.org_id=profile.org_id AND version.version=$3
-          WHERE profile.id=$1 AND profile.org_id=$2 AND profile.owner_kind='organization' AND profile.placement='cloud' AND profile.deleted_at IS NULL`,
-          [input.organizationProfileOverride.id,input.organizationId,input.organizationProfileOverride.version])).rows[0] ?? null
-      : await loadDefaultProfile(tx, { organizationId: input.organizationId, ownerKind: "organization", ownerUserId: null });
-    if (input.organizationProfileOverride && !organizationProfile) throw new HttpError(409,"cloud_computer_changed","Cloud Computer version is unavailable.");
-    let applyOrganizationProfile = true;
-    if (organizationProfile && (await tx.query("SELECT 1 FROM cloud_computers WHERE org_id=$1 AND profile_id=$2",[input.organizationId,organizationProfile.id])).rowCount) {
-      const layer = parseLayer({ source:"Cloud Computer", document:organizationProfile.document });
-      const recipe = layer.values.cloudComputer;
-      const repository = (await tx.query<{ forge_repository_id:string }>("SELECT forge_repository_id FROM repositories WHERE id=$1 AND org_id=$2",[input.repositoryId,input.organizationId])).rows[0];
-      applyOrganizationProfile = plainRecord(recipe) && Array.isArray(recipe.repositories) && recipe.repositories.some(value=>plainRecord(value)&&value.id===repository?.forge_repository_id);
-      if (input.organizationProfileOverride && !applyOrganizationProfile) throw new HttpError(409,"cloud_computer_repository_required","This repository is not selected for the Cloud Computer build.");
-      const baked = (await tx.query("SELECT 1 FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=$2 AND org_id=$3 AND computer_image_id IS NOT NULL", [input.workspaceId,input.generation,input.organizationId])).rowCount;
-      if (baked) organizationProfile.document = { ...(organizationProfile.document as Record<string,unknown>), setupCommands: [] };
-      if (applyOrganizationProfile) computerSetup = baked ? [] : layer.setupCommands ?? [];
-    }
-    if (organizationProfile && applyOrganizationProfile) {
+    const organizationProfile = await loadDefaultProfile(tx, { organizationId: input.organizationId, ownerKind: "organization", ownerUserId: null });
+    if (organizationProfile) {
       const version = positiveVersion(organizationProfile.version);
       layers.push({
         source: `organization cloud profile:${organizationProfile.id}@${version}`,
@@ -905,7 +874,6 @@ export async function resolveDatabaseCloudWorkspaceSettings(
     const row = repository.get(scope);
     if (!row) continue;
     const version = positiveVersion(row.version);
-    if (computerSetup !== null) repositorySetup = parseLayer({source:"repository setup",document:row.document}).setupCommands ?? repositorySetup;
     layers.push({
       source: `repository ${scope}:${input.repositoryId}@${version}`,
       document: row.document,
@@ -913,10 +881,6 @@ export async function resolveDatabaseCloudWorkspaceSettings(
     repositoryEnvironmentLayers.push(layers[layers.length - 1]!);
     sourceVersions[`repository${scope === "shared" ? "Shared" : "Cloud"}`] =
       version;
-  }
-
-  if (computerSetup !== null && repositorySetup !== null) {
-    layers.push({ source:"Cloud Computer and repository setup", document:{values:{},setupCommands:[...computerSetup,...repositorySetup]} });
   }
 
   const policy = await tx.query<VersionedDocumentRow>(
@@ -939,141 +903,11 @@ export async function resolveDatabaseCloudWorkspaceSettings(
   }
 
   const merged = resolveCloudWorkspaceSettingsLayers(layers);
-  const computerSource = await loadCloudComputerEnvironmentSource(tx, input);
-  if (computerSource) {
-    return materializeCloudComputerSettings(tx, input, computerSource, {
-      resolved: merged, sourceVersions, environmentProfileId, environmentProfileVersion, managedPolicyVersion, setupSecrets: [],
-    }, [...repositoryEnvironmentLayers, ...personalEnvironmentLayers,
-      ...(policyRow ? [{ source: `managed policy:${managedPolicyVersion}`, document: policyRow.document }] : [])],
-    repository.get("cloud") ? parseLayer({ source: "repository cloud setup", document: repository.get("cloud")!.document }).setupCommands ?? [] : []);
-  }
-  const references = merged.snapshot.secretRefs ?? [];
-  const setupSecrets: CloudWorkspaceSetupSecretMaterial[] = [];
-  let resolved = merged;
-  if (references.length > 0) {
-    const secretEncryption = configuredSecretEncryption(input);
-    if (secretEncryption.currentVersion === null) {
-      throw new HttpError(
-        503,
-        "cloud_secret_material_not_configured",
-        "Cloud workspace secret material is not configured",
-      );
-    }
-    const bindings = await tx.query<SecretBindingRow>(
-      `SELECT binding.id, binding.name, binding.current_version,
-              version.key_version, version.nonce, version.ciphertext,
-              version.auth_tag, version.verifier_scheme,
-              version.value_verifier
-       FROM secret_bindings binding
-       JOIN secret_binding_versions version
-         ON version.binding_id = binding.id
-        AND version.org_id = binding.org_id
-        AND version.version = binding.current_version
-       WHERE binding.org_id = $1
-         AND binding.id = ANY($2::uuid[])
-         AND binding.state = 'active'
-         AND binding.purpose = 'environment'
-         AND binding.placement IN ('cloud', 'both')
-         AND (
-           ($3::boolean AND binding.owner_kind = 'user'
-             AND binding.owner_user_id = $4)
-           OR
-           (NOT $3::boolean AND binding.owner_kind = 'organization'
-             AND binding.owner_user_id IS NULL)
-         )`,
-      [
-        input.organizationId,
-        references.map((reference) => reference.id),
-        input.isPersonal,
-        input.actorUserId,
-      ],
-    );
-    const byId = new Map(bindings.rows.map((row) => [row.id, row]));
-    if (
-      byId.size !== references.length ||
-      references.some((reference) => byId.get(reference.id)?.name !== reference.name)
-    ) {
-      throw new HttpError(
-        409,
-        "cloud_secret_scope_invalid",
-        "A cloud workspace secret reference is unavailable in this scope",
-      );
-    }
-
-    const setupReferences: Array<{ id: string; name: string }> = [];
-    const bindingSources: Record<string, JsonValue> = Object.create(null);
-    for (const reference of references) {
-      const binding = byId.get(reference.id)!;
-      const version = positiveVersion(binding.current_version);
-      const plaintext = openCloudWorkspaceSecretBinding(
-        {
-          keyVersion: binding.key_version,
-          nonce: binding.nonce,
-          ciphertext: binding.ciphertext,
-          authTag: binding.auth_tag,
-          verifierScheme: binding.verifier_scheme,
-          valueVerifier: binding.value_verifier,
-        },
-        {
-          bindingId: binding.id,
-          organizationId: input.organizationId,
-          version,
-          name: binding.name,
-        },
-        secretEncryption.keys,
-      );
-      try {
-        const setupId = randomUUID();
-        const sealed = sealCloudWorkspaceSetupSecret(
-          plaintext,
-          {
-            id: setupId,
-            workspaceId: input.workspaceId,
-            organizationId: input.organizationId,
-            generation: input.generation,
-            name: binding.name,
-          },
-          secretEncryption.keys[secretEncryption.currentVersion]!,
-        );
-        setupReferences.push({ id: setupId, name: binding.name });
-        setupSecrets.push({
-          id: setupId,
-          name: binding.name,
-          keyVersion: secretEncryption.currentVersion,
-          nonce: sealed.nonce,
-          ciphertext: sealed.ciphertext,
-          authTag: sealed.authTag,
-        });
-        bindingSources[binding.name] = { id: binding.id, version };
-      } finally {
-        // JavaScript strings cannot be reliably zeroized. Keep the lifetime
-        // bounded to this synchronous re-seal block and never retain/log it.
-      }
-    }
-    sourceVersions.secretBindings = bindingSources;
-    const materialized = resolveCloudWorkspaceSettingsLayers([
-      {
-        source: "materialized settings",
-        document: {
-          values: merged.snapshot.values,
-          secretRefs: setupReferences,
-          ...(merged.snapshot.setupCommands
-            ? { setupCommands: merged.snapshot.setupCommands }
-            : {}),
-        },
-      },
-    ]);
-    resolved = { ...materialized, provenance: merged.provenance };
-  }
-
-  return {
-    resolved,
-    sourceVersions,
-    environmentProfileId,
-    environmentProfileVersion,
-    managedPolicyVersion,
-    setupSecrets,
-  };
+  return materializeCloudComputerSettings(tx, input, computerSource, {
+    resolved: merged, sourceVersions, environmentProfileId, environmentProfileVersion, managedPolicyVersion, setupSecrets: [],
+  }, [...repositoryEnvironmentLayers, ...personalEnvironmentLayers,
+    ...(policyRow ? [{ source: `managed policy:${managedPolicyVersion}`, document: policyRow.document }] : [])],
+  repository.get("cloud") ? parseLayer({ source: "repository cloud setup", document: repository.get("cloud")!.document }).setupCommands ?? [] : []);
 }
 
 export async function cloneDatabaseCloudWorkspaceSettingsForRollback(

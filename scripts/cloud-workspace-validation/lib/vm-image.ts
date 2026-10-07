@@ -2,7 +2,7 @@ import {createHash} from "node:crypto";
 import {constants} from "node:fs";
 import {open,mkdir,writeFile,realpath} from "node:fs/promises";
 import path from "node:path";
-import {assertRegistryImageDigest} from "./snapshot-placement";
+import {assertRegistryImageDigest} from "./registry-image";
 
 /** Export the exact declarative image into a fresh local OCI build context.
  * Only its explicit regular-file inputs enter the context, never the checkout,

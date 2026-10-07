@@ -8,7 +8,9 @@ import { launchCloudEngine, assertCloudEngineFilesProjection } from "../cloud-wo
 import { createCloudRuntimeResolver } from "../../apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
 import { cloudRuntimeFixture } from "../../apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-fixture";
 
+import { testCloudRuntime } from "../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime";
 function fixture() {
+  const runtime = testCloudRuntime();
   const order: string[] = [];
   const signals = new EventEmitter();
   const child = Object.assign(new EventEmitter(), {
@@ -42,8 +44,10 @@ function fixture() {
     return child;
   });
   const options = {
+    runtime,
     prepare: () => {
       order.push("prepare");
+      return {version:4,runtime,viewDirectory:"/run/zeros/view/runtime-11111111-1111-4111-8111-111111111111"};
     },
     scope,
     spawnProcess,
@@ -100,7 +104,7 @@ describe("cloud engine admission and lifecycle", () => {
       string,
       string[],
     ];
-    expect(call[0]).toBe("/opt/zeros-runtime/cloud-engine-namespace");
+    expect(call[0]).toBe(f.options.runtime.engineNamespace);
     expect(call[1][0]).toBe("--await-scope");
     expect(call[1]).not.toContain("--block-fd");
   });

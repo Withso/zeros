@@ -15,6 +15,7 @@ import { withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
 import {
+  seedSupportedCloudWorkspaceGeneration,
   seedCanonicalCloudWorkspaceAuthority,
   seedCanonicalCloudWorkspacePrerequisites,
   seedCanonicalWorkspaceSettingsVersion,
@@ -30,11 +31,15 @@ import {
 import { runtimeBase, runtimeWitness, seedRuntimeGeneration, seedRuntimeBundle } from "./runtime-test-fixtures.js";
 import { cloudRuntimePinValues, loadPinnedCloudRuntime } from "./runtime-selection.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
-import { CloudWorkspaceLinuxSetupExecutor, type CloudWorkspaceSetupAdmissionBroker } from "./daytona-setup-executor.js";
+import { CloudWorkspaceLinuxSetupExecutor, type CloudWorkspaceSetupAdmissionBroker } from "./linux-setup-executor.js";
 import { DatabaseCloudWorkspaceSetupAdmissionBroker } from "./setup-admission-broker.js";
 import { consumeCloudWorkspaceGrant } from "./grants.js";
 import { CloudProviderError, type CloudWorkspaceCommandRunner } from "./provider.js";
 import { parseCloudWorkspaceSetupRequest, redactCloudWorkspaceSetupHookLog } from "../../../../scripts/cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
+vi.mock("../../../../scripts/cloud-workspace-validation/sandbox/cloud-runtime-root.mjs", async original => ({
+  ...await original<typeof import("../../../../scripts/cloud-workspace-validation/sandbox/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime: (await import("../../../desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime.js")).testCloudRuntime,
+}));
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -126,6 +131,7 @@ d("cloud workspace setup worker", () => {
 
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     ownerId = randomUUID();
     await pool.query(`INSERT INTO users(id,email,display_name,staff_role)
       VALUES ($1,$2,'Setup Owner','developer')`, [ownerId, `setup-${ownerId}@example.test`]);
@@ -162,6 +168,7 @@ d("cloud workspace setup worker", () => {
 
   const seedSetup = async (input?: {
     v4?: boolean;
+    supportedGeneration?: boolean;
     state?: "queued" | "running";
     claimCount?: number;
     executionFence?: number;
@@ -192,14 +199,15 @@ d("cloud workspace setup worker", () => {
         organizationId,
         ownerUserId: ownerId,
       });
-      if (input?.v4) await seedRuntimeGeneration(tx, { workspaceId, organizationId, ownerUserId: ownerId });
+      if (input?.v4 !== false && input?.supportedGeneration !== false) await seedSupportedCloudWorkspaceGeneration(tx, { workspaceId, organizationId, ownerUserId: ownerId, providerConnectionId: canonical.providerConnectionId });
+      else if (input?.v4) await seedRuntimeGeneration(tx, { workspaceId, organizationId, ownerUserId: ownerId });
       else {
       await tx.query(
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
            source_commit, created_by, provider_connection_id
-         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+         ) VALUES ($1, 1, $2, 'boat', 'snap-pinned', 'linux/amd64',
                    2000, 4096, 20480, $3, $4, $5)`,
         [
           workspaceId,
@@ -240,7 +248,7 @@ d("cloud workspace setup worker", () => {
            workspace_id, generation, org_id, provider,
            provider_resource_id, observed_state, last_observed_at
          ) VALUES ($1, 1, $2, $4, $3, 'running', now())`,
-        [workspaceId, organizationId, `sandbox-${workspaceId}`, input?.v4 ? 'boat' : 'daytona'],
+        [workspaceId, organizationId, `sandbox-${workspaceId}`, 'boat'],
       );
       const state = input?.state ?? "queued";
       const running = state === "running";
@@ -278,26 +286,27 @@ d("cloud workspace setup worker", () => {
     };
   };
 
+  it.each([{ v4: false }, { v4: true, supportedGeneration: false }])(
+    "refuses unsupported setup before executor or grant issuance (%j)", async options => {
+      const seeded = await seedSetup(options);
+      const execute = vi.fn(async (execution: CloudWorkspaceSetupExecution) => successfulSetup(execution, ""));
+      const worker = new CloudWorkspaceSetupWorker({ pool, executor: { execute }, sanitizeLog: value => value, intervalMs: 1_000 });
+      expect(await worker.runOnce()).toBe(true);
+      expect(execute).not.toHaveBeenCalled();
+      expect((await pool.query("SELECT state,error_code FROM cloud_workspace_setup_runs WHERE id=$1", [seeded.setupRunId])).rows[0])
+        .toMatchObject({ state: "failed", error_code: "cloud_workspace_v2_required" });
+      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_endpoint_grants WHERE workspace_id=$1", [seeded.workspaceId])).rows[0].n).toBe(0);
+    },
+  );
+
   const seedReplacementSetup = async () => {
     const seeded = await seedSetup();
     const transitionId = randomUUID();
     const provisionIntentId = randomUUID();
     const setupRunId = await withSystemTx(pool, async (tx) => {
-      await tx.query(
-        `INSERT INTO cloud_workspace_generations (
-           workspace_id, generation, org_id, provider, image_ref,
-           architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by, provider_connection_id
-         ) VALUES ($1, 2, $2, 'daytona', 'snap-next', 'linux/amd64',
-                   2000, 4096, 20480, $3, $4, $5)`,
-        [
-          seeded.workspaceId,
-          organizationId,
-          "b".repeat(40),
-          ownerId,
-          seeded.providerConnectionId,
-        ],
-      );
+      await seedSupportedCloudWorkspaceGeneration(tx, {
+        workspaceId: seeded.workspaceId, organizationId, ownerUserId: ownerId, generation: 2, providerConnectionId: seeded.providerConnectionId,
+      });
       const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(
         tx,
         {
@@ -327,7 +336,7 @@ d("cloud workspace setup worker", () => {
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider,
            provider_resource_id, observed_state, last_observed_at
-         ) VALUES ($1, 2, $2, 'daytona', $3, 'running', now())`,
+         ) VALUES ($1, 2, $2, 'boat', $3, 'running', now())`,
         [seeded.workspaceId, organizationId, `sandbox-${seeded.workspaceId}-2`],
       );
       await tx.query(
@@ -440,11 +449,11 @@ d("cloud workspace setup worker", () => {
         `INSERT INTO cloud_workspace_engine_instances (
            id, workspace_id, generation, org_id, account_user_id,
            setup_run_id, setup_execution_fence, registration_grant_id,
-           protocol_version, state, bridge_token_hash,
+           protocol_version, actor_protocol_version, state, bridge_token_hash,
            heartbeat_token_hash, registered_at, last_heartbeat_at,
            lease_expires_at, runtime_id, runtime_manifest_sha256, runtime_base_image_id, runtime_base_compatibility_id,
            runtime_profile, runtime_engine_protocol_version, runtime_installer_receipt_sha256, runtime_boot_id, runtime_supervisor_session_id
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ready',
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 2, 'ready',
                    $10, $11, now(), now(), now() + interval '2 minutes', $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
         [
           result.readiness.engine.instanceId,
@@ -528,7 +537,6 @@ d("cloud workspace setup worker", () => {
   it.each([
     { v4: true, elapsedMs: 180_000, ttlSeconds: 900 },
     { v4: true, elapsedMs: 600_000, ttlSeconds: 900 },
-    { v4: false, elapsedMs: 60_000, ttlSeconds: 120 },
   ])("keeps a single admission redeemable at helper entry after $elapsedMs ms (v4=$v4)", async ({ v4, elapsedMs, ttlSeconds }) => {
     const seeded = await seedSetup({ v4 });
     const broker = new DatabaseCloudWorkspaceSetupAdmissionBroker({ pool, endpoint: admissionEndpoint });
@@ -592,6 +600,35 @@ d("cloud workspace setup worker", () => {
       { version: 1, clocks: [{ ...timings.clocks[0], spans: [{ stage: "repository", startMs: 25, endMs: 10, outcome: "passed" }] }] }]) {
       await expect(pool.query("UPDATE cloud_workspace_setup_runs SET stage_timings=$2 WHERE id=$1", [seeded.setupRunId, invalid])).rejects.toMatchObject({ code: "23514" });
     }
+  });
+
+  describe("durable retry deadlines", () => {
+    const nextDelay = (value: CloudWorkspaceSetupWorker) =>
+      (value as unknown as { readNextDelayMs(): Promise<number | null> }).readNextDelayMs();
+
+    it("reads a future queued retry and the current running lease rather than its old retry date", async () => {
+      const seeded = await seedSetup({ v4: true });
+      const current = worker(new FakeExecutor([]));
+      await pool.query("UPDATE cloud_workspace_setup_runs SET next_attempt_at=now()+interval '2 seconds' WHERE id=$1", [seeded.setupRunId]);
+      const queued = await nextDelay(current);
+      expect(queued).toBeGreaterThan(0); expect(queued).toBeLessThanOrEqual(2_000);
+      await pool.query(`UPDATE cloud_workspace_setup_runs SET state='running',lease_owner='other-worker',
+        lease_expires_at=now()+interval '3 seconds',next_attempt_at=now()+interval '1 minute',
+        claim_count=1,execution_fence=1,started_at=now(),last_heartbeat_at=now() WHERE id=$1`, [seeded.setupRunId]);
+      const leased = await nextDelay(current);
+      expect(leased).toBeGreaterThan(2_000); expect(leased).toBeLessThanOrEqual(3_000);
+      await pool.query("UPDATE cloud_workspace_setup_runs SET state='cancelled',completed_at=now(),lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [seeded.setupRunId]);
+      expect(await nextDelay(current)).toBeNull();
+    });
+
+    it.each(["stopped", "binding", "membership", "deleted"])("ignores a queued retry after %s makes it ineligible", async reason => {
+      const seeded = await seedSetup({ v4: true });
+      if (reason === "stopped") await pool.query("UPDATE cloud_workspaces SET desired_state='stopped',status='stopped' WHERE id=$1", [seeded.workspaceId]);
+      if (reason === "binding") await pool.query("UPDATE cloud_workspace_provider_bindings SET observed_state='stopped' WHERE workspace_id=$1", [seeded.workspaceId]);
+      if (reason === "membership") await pool.query("DELETE FROM team_members WHERE team_id=$1 AND user_id=$2", [teamId, ownerId]);
+      if (reason === "deleted") await pool.query("UPDATE cloud_workspaces SET deleted_at=now(),desired_state='deleted',status='deleted' WHERE id=$1", [seeded.workspaceId]);
+      expect(await nextDelay(worker(new FakeExecutor([])))).toBeNull();
+    });
   });
 
   it("persists distinct closed installer failures without URL or token-like input", async () => {
@@ -826,12 +863,12 @@ d("cloud workspace setup worker", () => {
       attempt: 1,
       executionFence: 1,
       provider: {
-        name: "daytona",
+        name: "boat",
         resourceId: `sandbox-${seeded.workspaceId}`,
       },
       image: {
-        ref: "snap-pinned",
-        sourceCommit: "a".repeat(40),
+        ref: `boat-template:zeros-v2-test-template-${seeded.workspaceId}-1`,
+        sourceCommit: runtimeBase.sourceCommit,
       },
       repository: {
         forge: "github.com",

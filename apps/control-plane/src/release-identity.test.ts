@@ -55,13 +55,19 @@ describe("public release readiness", () => {
     expect(readRuntimeIdentity).not.toHaveBeenCalled();
   });
 
-  it("requires the enabled three-kind MCP-qualified matrix on one exact runtime contract", () => {
+  it("never treats a historical v3 image qualification as a supported worker", () => {
     const rows = ["claude-setup-token", "codex-chatgpt", "cursor-api-key"].map(credential_kind => ({
       credential_kind, runtime_contract_sha256: "c".repeat(64), profile: "zeros-cloud-worker-v3", enabled: true, mcp_qualified: true }));
+    expect(qualifiedWorkerMatrix(rows)).toBe(false);
+  });
+  it("requires the enabled three-kind MCP-qualified matrix on one v4 runtime and base", () => {
+    const rows = ["claude-setup-token", "codex-chatgpt", "cursor-api-key"].map(credential_kind => ({
+      credential_kind, runtime_id: `r1-${"c".repeat(64)}`, base_compatibility_id: `bc1-${"b".repeat(64)}`,
+      profile: "zeros-cloud-worker-v4", enabled: true, mcp_qualified: true }));
     expect(qualifiedWorkerMatrix(rows)).toBe(true);
     expect(qualifiedWorkerMatrix(rows.slice(1))).toBe(false);
-    for (const changed of [{ enabled: false }, { mcp_qualified: false }, { profile: "zeros-cloud-worker-v2" },
-      { runtime_contract_sha256: "d".repeat(64) }, { runtime_contract_sha256: "invalid" }]) {
+    for (const changed of [{ enabled: false }, { mcp_qualified: false }, { profile: "zeros-cloud-worker-v3" },
+      { runtime_id: `r1-${"d".repeat(64)}` }, { base_compatibility_id: `bc1-${"e".repeat(64)}` }, { runtime_id: "invalid" }]) {
       expect(qualifiedWorkerMatrix([{ ...rows[0], ...changed }, ...rows.slice(1)])).toBe(false);
     }
     expect(qualifiedWorkerMatrix(Array.from({ length: 101 }, () => rows[0]))).toBe(false);
@@ -204,7 +210,7 @@ describe("public release readiness", () => {
     });
     expect(await (await app.request("/v1/release-identity")).json()).toMatchObject({ ready: false, sourceSha: null, migrations: { state: "controlled" } });
   });
-  it.each(["boat", "daytona"] as const)("reports only the public %s worker tuple after cloud readiness", async provider => {
+  it.each(["boat"] as const)("reports only the public %s worker tuple after cloud readiness", async provider => {
     const imageRef = provider === "boat" ? `boat:zeros-fixture@sha256:${"c".repeat(64)}` : "11111111-1111-4111-8111-111111111111";
     const app = createReleaseIdentityRoutes({ ...config, cloudWorkspaces: {
       provider, imageRef, sourceCommit: sha, architecture: "linux/amd64", storageMiB: 4096, apiKey: "private-fixture-key",

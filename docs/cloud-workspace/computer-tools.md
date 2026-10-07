@@ -8,8 +8,8 @@ adapters. It has no global registry entry or stdio product server.
 ## Creation and admission
 
 `POST /v1/organizations/:organization/cloud-computer/v2/admin-workspaces`
-accepts only `{expectedActiveVersion, operationId}` from current engineering staff
-who are organization owners/admins. It requires an active ready template and at
+accepts only `{expectedActiveVersion, operationId}` from active accounts
+that are current organization owners/admins. It requires an active ready template and at
 least one repository. The first configured repository is primary, at its exact
 build SHA; an empty list returns 409 with guidance to configure and build a repo.
 The ordinary template-fork creation path assigns creator, owner, assignee and
@@ -40,7 +40,7 @@ transaction removes it before workspace deletion, as it does other immutable
 computer records.
 
 Engine admission adds `computerToolsVersion: 1` only for this creator in a
-marked workspace with current engineering staff and organization owner/admin
+marked workspace with an active account and current organization owner/admin
 authority, an exact v4 generation/engine pin, and an enabled MCP qualification
 for that runtime/base/credential tuple. Admission and every tool call share the
 runtime admission/renewal predicate, including bundle, base image and base
@@ -57,7 +57,7 @@ Each call uses the existing authenticated
 one strict `{name, arguments}` tool request. The engine scope is authenticated by
 its heartbeat credential. The control plane resolves the actor from the recorded
 execution lease, rechecks current engine/generation, account/device/session,
-credential consent, staff role, organization membership and immutable creator,
+credential consent, current organization role and immutable creator,
 and holds those authority fences through the operation. Body identity, prompts,
 environment variables and repository files do not grant access.
 

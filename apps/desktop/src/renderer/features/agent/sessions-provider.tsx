@@ -65,7 +65,7 @@ import { useBridge } from "../../platform/bridge/use-bridge";
 import { TranscriptHydrationRetries } from "./transcript-hydration-retries";
 import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
-import { useInternalFeatureActive } from "../settings/internal-features";
+import { hasCloudWorkspaceAccountAccess, useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import { cloudCatalogGeneration, cloudWorkspaceDocument, cloudWorkspaceStopVersion, canBackgroundSyncCloudWorkspace, canReadCloudWorkspace, isCloudWorkspaceLifecyclePending, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
 import { CloudWorkspaceWakeEndedError } from "../../state/cloud-workspace-wake";
 import { CloudSendPreparation } from "./cloud-send-preparation";
@@ -471,7 +471,7 @@ export function AgentSessionsProvider({
   children: React.ReactNode;
 }) {
   const bridge = useBridge();
-  const cloudComputerV2 = useInternalFeatureActive("cloudComputerV2");
+  const cloudComputerV2 = useCloudWorkspaceAccountAccess();
 
   // Helper: snapshot the store. Used inside async actions to bypass
   // React's closure capture problem (state read pre-await is stale).
@@ -1388,7 +1388,8 @@ export function AgentSessionsProvider({
         getStore().sessions[chatId]?.cwd;
       const target = parseCloudWorkspaceKey(folder);
       const doc = target ? cloudWorkspaceDocument(target) : undefined;
-      return target && folder && canReadCloudWorkspace(doc) && doc?.capabilities.canWrite ? {
+      return target && folder && hasCloudWorkspaceAccountAccess(target.organizationId) &&
+        canReadCloudWorkspace(doc) && doc?.capabilities.canWrite ? {
         folder, account: cloudCatalogGeneration(),
         generation: doc.generation.number, lifecyclePending: isCloudWorkspaceLifecyclePending(doc),
         stopVersion: cloudWorkspaceStopVersion(target),
@@ -2294,10 +2295,13 @@ export function AgentSessionsProvider({
       cloudQueue,
     ) => {
       const original = getStore().sessions[chatId];
-      const chat = cloudComputerV2 ? useWorkspaceStore.getState().chats.find(candidate => candidate.id === chatId) : undefined;
-      const cloudSend = cloudComputerV2 && isCloudWorkspace(chat?.folder ?? original?.cwd);
+      const chat = useWorkspaceStore.getState().chats.find(candidate => candidate.id === chatId);
+      const cloudTarget = parseCloudWorkspaceKey(chat?.folder ?? original?.cwd);
+      if (cloudTarget && !hasCloudWorkspaceAccountAccess(cloudTarget.organizationId))
+        throw new Error("Cloud workspace run access is required to send a message");
+      const cloudSend = cloudComputerV2 && cloudTarget !== null;
       const flushedCloud = cloudSend && flushBubbleRef.current.has(chatId) ? cloudFlushRef.current.get(chatId) : undefined;
-      const cloudAccount = flushedCloud ? cloudCatalogGeneration() : undefined;
+      const cloudAccount = isCloudWorkspace(chat?.folder ?? original?.cwd) ? cloudCatalogGeneration() : undefined;
       if (flushedCloud) cloudFlushRef.current.delete(chatId);
       // Accept before wake/session initialization. Readiness owns no payload;
       // the existing FIFO supplies editing, removal and exactly-once promotion.
@@ -2628,6 +2632,14 @@ export function AgentSessionsProvider({
       } | null = null;
       let promptRetryCount = 0;
       let recoveredLocalExecution: string | null = null;
+      let cloudSendOwner: { cwd: string | null; agentId: string | null; sessionId: string | null } | null = null;
+      let cloudTerminalFailure: AgentFailure | null = null;
+      const ownsCloudSend = () => !cloudSendOwner || (
+        cloudAccount === cloudCatalogGeneration() &&
+        getStore().sessions[chatId]?.cwd === cloudSendOwner.cwd &&
+        getStore().sessions[chatId]?.agentId === cloudSendOwner.agentId &&
+        getStore().sessions[chatId]?.sessionId === cloudSendOwner.sessionId
+      );
       let promptInterruptedAfterOutput:
         | (Pick<AgentFailure, "kind" | "stage"> &
             Partial<Pick<AgentFailure, "message">>)
@@ -2899,7 +2911,9 @@ export function AgentSessionsProvider({
         getStore().setPendingLocalTurn(chatId, userMessage.id);
         const submittedDraft = isCloudWorkspace(current.cwd) ? getLiveChatDraft(chatId) : null;
         const submittedModel = isCloudWorkspace(current.cwd) ? useWorkspaceStore.getState().chats.find(chat => chat.id === chatId)?.model ?? null : null;
+        if (isCloudWorkspace(current.cwd)) cloudSendOwner = { cwd: current.cwd, agentId: current.agentId, sessionId: current.sessionId };
         const settleCloudAdmission = (error: unknown) => {
+          if (isCloudWorkspace(current.cwd) && (!ownsCloudSend() || stoppedByUser())) return true;
           const admission = flushedCloud && classifyCloudAdmissionFailure({ folder: current.cwd, error,
             agentId: current.agentId, model: submittedModel });
           // These closed causes prove provider execution did not begin. Keep
@@ -2935,9 +2949,26 @@ export function AgentSessionsProvider({
           }
           if (admission?.kind === "unavailable") notifyAgentSendFailure({ folder: current.cwd, chatId,
             attemptId: flushedCloud!.queueEntryId!, agentId: current.agentId, model: submittedModel, error });
-          return recoverCloudAdmissionFailure({ folder: current.cwd, chatId, error, message: userMessage, draft: submittedDraft,
+          const recovered = recoverCloudAdmissionFailure({ folder: current.cwd, chatId, error, message: userMessage, draft: submittedDraft,
             model: submittedModel, store: getStore(), pauseQueue, persist: persistAuthPrompt,
             ...(flushedCloud?.queueEntryId ? { toastAttemptId: flushedCloud.queueEntryId } : {}) });
+          if (recovered) {
+            cloudTerminalFailure = getStore().sessions[chatId]?.failure ?? null;
+            if (cloudTerminalFailure && turnProducedOutputRef.current.get(chatId)) promptInterruptedAfterOutput = cloudTerminalFailure;
+          }
+          return recovered;
+        };
+        const settleCloudPromptFailure = (failure: AgentFailure) => {
+          if (!isCloudWorkspace(current.cwd)) return false;
+          if (!ownsCloudSend()) return true;
+          // Once a cloud command is accepted, observation loss is never
+          // permission to rebuild its provider and dispatch that prompt again.
+          cloudTerminalFailure = failure;
+          if (turnProducedOutputRef.current.get(chatId)) promptInterruptedAfterOutput = failure;
+          pauseQueue(chatId);
+          getStore().patchSession(chatId, { status: failure.kind === "auth-required" ? "auth-required" : "failed",
+            error: failure.message, failure, activeTurnStartedAt: null });
+          return true;
         };
         onAccepted?.();
 
@@ -3516,6 +3547,7 @@ export function AgentSessionsProvider({
               stage: "prompt",
               error: firstErr,
             });
+            if (settleCloudPromptFailure(failure)) return;
             if (!promptFailureShouldRecover(failure)) {
               getStore().patchSession(chatId, {
                 status: statusForFailure(failure),
@@ -3567,6 +3599,7 @@ export function AgentSessionsProvider({
               { ...resp, message: resp.error } as unknown as AgentErrorMessage,
               "prompt",
             );
+            if (settleCloudPromptFailure(failure)) return;
             // If the agent reported a
             // recoverable failure (most often `session-expired` — Codex
             // "no rollout found", Claude "session not found"), silently
@@ -3619,6 +3652,18 @@ export function AgentSessionsProvider({
               });
               return;
             }
+          }
+
+          if (isCloudWorkspace(current.cwd) && resp.stopReason !== "cancelled") {
+            // A durable receipt can beat the ordered transcript stream. Read
+            // the engine's persisted tail before publishing final completion;
+            // native empty/tool-only turns are valid and require no text test.
+            const windowed = reconcileHistoryMessages(await persistWindowMessages(chatId, HYDRATE_WINDOW));
+            if (!ownsCloudSend() || stoppedByUser()) return;
+            if (!windowed.length)
+              throw new Error("Cloud transcript could not be recovered. Review the conversation before retrying.");
+            const fresh = getStore().sessions[chatId];
+            getStore().patchSession(chatId, { messages: mergeWindowedTail(fresh.messages, windowed) });
           }
 
           // Fold per-turn usage counters into the running session total.
@@ -3806,6 +3851,7 @@ export function AgentSessionsProvider({
             stage: "prompt",
             error: err,
           });
+          if (settleCloudPromptFailure(failure)) return;
           getStore().patchSession(chatId, {
             status: statusForFailure(failure),
             error: failure.message,
@@ -3815,10 +3861,11 @@ export function AgentSessionsProvider({
       } finally {
         cancelLatency?.();
         const terminalSlot = getStore().sessions[chatId];
+        const ownsTerminalSlot = ownsCloudSend();
         const terminalPrompt =
           terminalSlot && lastUserPrompt(terminalSlot.messages);
         if (
-          !stoppedByUser() && terminalSlot?.failure &&
+          ownsTerminalSlot && !stoppedByUser() && terminalSlot?.failure &&
           terminalPrompt?.id === sentUserMessageId
         ) {
           const failedPrompt: AgentTextMessage = {
@@ -3836,7 +3883,7 @@ export function AgentSessionsProvider({
           persistAuthPrompt(chatId, failedPrompt);
         }
         if (
-          terminalSlot?.failure?.kind === "auth-required" &&
+          ownsTerminalSlot && terminalSlot?.failure?.kind === "auth-required" &&
           terminalPrompt &&
           terminalSlot.agentId
         ) {
@@ -3863,14 +3910,15 @@ export function AgentSessionsProvider({
         // stop, bailed before dispatch). Unconditional and first: leaving it set
         // would strand the tail shimmer on a settled turn — the inverse of the
         // bug this fact exists to fix.
-        getStore().setPendingLocalTurn(chatId, null);
+        if (ownsTerminalSlot) getStore().setPendingLocalTurn(chatId, null);
         if (promptDiagnostics) {
           const terminal = getStore().sessions[chatId];
           const stopReason =
-            promptResult?.stopReason ?? terminal?.lastStopReason ?? undefined;
-          const cancelled = stopReason === "cancelled";
+            promptResult?.stopReason ?? (ownsTerminalSlot ? terminal?.lastStopReason : undefined) ?? undefined;
+          const cancelled = stopReason === "cancelled" || (!!cloudSendOwner && lifecycleCancelled);
           const healthy =
             !promptInterruptedAfterOutput &&
+            (!cloudSendOwner || promptResult !== null) &&
             terminal?.status === "ready" &&
             !terminal.failure;
           trackAgentPromptFinished({
@@ -3896,92 +3944,95 @@ export function AgentSessionsProvider({
             costUsd: promptResult?.costUsd,
             failure:
               promptInterruptedAfterOutput ??
-              (healthy ? null : terminal?.failure),
+              (healthy ? null : cloudTerminalFailure ?? (ownsTerminalSlot ? terminal?.failure : null)),
           });
         }
-        if (getStore().sessions[chatId]?.status === "ready")
-          authPromptsRef.current.delete(chatId);
-        if (recoveredLocalExecution && bridge &&
-          getStore().sessions[chatId]?.sessionId === recoveredLocalExecution &&
-          getStore().sessions[chatId]?.status !== "streaming") {
-          // Fill any stream gap from the engine's saved transcript before a
-          // queued successor can make history reads ineligible again, including
-          // another disconnect between terminal delivery and this finalizer.
-          const ownsRecovery = () => !stoppedByUser() &&
+        if (!ownsTerminalSlot) sendingChatsRef.current.delete(chatId);
+        if (ownsTerminalSlot) {
+          if (getStore().sessions[chatId]?.status === "ready")
+            authPromptsRef.current.delete(chatId);
+          if (recoveredLocalExecution && bridge &&
             getStore().sessions[chatId]?.sessionId === recoveredLocalExecution &&
-            getStore().sessions[chatId]?.status !== "streaming";
-          const applied = await backfillLocalPromptTranscript(bridge, {
-            isCurrent: ownsRecovery,
-            reconcile: async () => {
-              await reconcileChatMessagesRef.current(chatId);
-              return getStore().sessions[chatId]?.transcriptDirty === false;
-            },
-          });
-          if (!applied && ownsRecovery()) pauseQueue(chatId);
-        }
-        sendingChatsRef.current.delete(chatId);
-        // Drop a STRANDED plan-review card. A plan gate BLOCKS its turn, so in
-        // the happy path Approve / a typed follow-up cleared pendingPermission
-        // before we reached here — this only bites when the turn hit a terminal
-        // state with the gate still pending (the adapter's 30-min auto-deny, or
-        // a turn that died mid-plan), which would otherwise leave the
-        // PlanReviewCard up with buttons that click into an already-resolved
-        // gate. Gated to plan reviews (a real Allow/Deny gate is untouched).
-        // Status is terminal by here, so a pending plan gate is stranded by
-        // definition — see clearStrandedPlanReview.
-        getStore().clearStrandedPlanReview(chatId);
-        // If this was a queued-send flush that bailed BEFORE committing a live
-        // bubble (e.g. the session couldn't be re-established under engine
-        // churn), the placeholder is still present and greyed. Demote it to a
-        // normal bubble — moved to the transcript END, because a follow-up
-        // placeholder's array slot can be mid-old-turn. An active admission
-        // placeholder is already the tail. Either way the user's text remains;
-        // on success the placeholder was already promoted, so this is a no-op.
-        if (flushBubbleId) {
-          const slot = getStore().sessions[chatId];
-          const ph = slot?.messages.find((m) => m.id === flushBubbleId);
-          if (ph && ph.kind === "text" && ph.queued &&
-              !(cloudSend && sendQueueRef.current.get(chatId)?.some(entry => entry.bubbleId === flushBubbleId))) {
-            getStore().patchSession(chatId, {
-              messages: capUserAppend(
-                slot!.messages.filter((m) => m.id !== flushBubbleId),
-                {
-                  ...ph,
-                  queued: false,
-                  queuedPresentation: undefined,
-                  queuedEditable: undefined,
-                },
-                slot!.historyExpanded,
-              ),
-              ...(ph.queuedPresentation === "active-turn"
-                ? { activeTurnStartedAt: null }
-                : {}),
+            getStore().sessions[chatId]?.status !== "streaming") {
+            // Fill any stream gap from the engine's saved transcript before a
+            // queued successor can make history reads ineligible again, including
+            // another disconnect between terminal delivery and this finalizer.
+            const ownsRecovery = () => !stoppedByUser() &&
+              getStore().sessions[chatId]?.sessionId === recoveredLocalExecution &&
+              getStore().sessions[chatId]?.status !== "streaming";
+            const applied = await backfillLocalPromptTranscript(bridge, {
+              isCurrent: ownsRecovery,
+              reconcile: async () => {
+                await reconcileChatMessagesRef.current(chatId);
+                return getStore().sessions[chatId]?.transcriptDirty === false;
+              },
             });
+            if (!applied && ownsRecovery()) pauseQueue(chatId);
           }
+          sendingChatsRef.current.delete(chatId);
+          // Drop a STRANDED plan-review card. A plan gate BLOCKS its turn, so in
+          // the happy path Approve / a typed follow-up cleared pendingPermission
+          // before we reached here — this only bites when the turn hit a terminal
+          // state with the gate still pending (the adapter's 30-min auto-deny, or
+          // a turn that died mid-plan), which would otherwise leave the
+          // PlanReviewCard up with buttons that click into an already-resolved
+          // gate. Gated to plan reviews (a real Allow/Deny gate is untouched).
+          // Status is terminal by here, so a pending plan gate is stranded by
+          // definition — see clearStrandedPlanReview.
+          getStore().clearStrandedPlanReview(chatId);
+          // If this was a queued-send flush that bailed BEFORE committing a live
+          // bubble (e.g. the session couldn't be re-established under engine
+          // churn), the placeholder is still present and greyed. Demote it to a
+          // normal bubble — moved to the transcript END, because a follow-up
+          // placeholder's array slot can be mid-old-turn. An active admission
+          // placeholder is already the tail. Either way the user's text remains;
+          // on success the placeholder was already promoted, so this is a no-op.
+          if (flushBubbleId) {
+            const slot = getStore().sessions[chatId];
+            const ph = slot?.messages.find((m) => m.id === flushBubbleId);
+            if (ph && ph.kind === "text" && ph.queued &&
+                !(cloudSend && sendQueueRef.current.get(chatId)?.some(entry => entry.bubbleId === flushBubbleId))) {
+              getStore().patchSession(chatId, {
+                messages: capUserAppend(
+                  slot!.messages.filter((m) => m.id !== flushBubbleId),
+                  {
+                    ...ph,
+                    queued: false,
+                    queuedPresentation: undefined,
+                    queuedEditable: undefined,
+                  },
+                  slot!.historyExpanded,
+                ),
+                ...(ph.queuedPresentation === "active-turn"
+                  ? { activeTurnStartedAt: null }
+                  : {}),
+              });
+            }
+          }
+          // Flush the next queued send (FIFO) — but ONLY when the turn settled
+          // HEALTHY and the queue isn't parked by an in-progress queued-message
+          // edit. By here status is "ready" (success) or a failure state
+          // (failed / reconnecting / auth-required), never "streaming".
+          //
+          // Draining into an UNHEALTHY chat is what turns a stuck turn into a
+          // spawn storm: each queued send fires into the dead/rebuilding
+          // session, hits a recoverable failure, and triggers a `force:true`
+          // rebuild — which bypasses ensureSession's de-dup — so every queued
+          // send mints a fresh AGENT_NEW_SESSION. Dozens of codex app-server
+          // children pile up, the machine thrashes, turns hang, and the
+          // composer freezes with an ever-growing queue that never sends.
+          // When the turn didn't recover, STOP draining: drop the pending
+          // queue and remove its greyed placeholders so the
+          // user resends deliberately once the chat is healthy again.
+          if (lifecycleCancelled) {
+            // Stop preserved and paused follow-ups. A later explicit send may
+            // have resumed them; the queue owns that choice, never this old turn.
+            drainNextQueued(chatId);
+          } else {
+            drainOrDropQueue(chatId);
+          }
+          evictUnretainedTranscripts();
         }
-        // Flush the next queued send (FIFO) — but ONLY when the turn settled
-        // HEALTHY and the queue isn't parked by an in-progress queued-message
-        // edit. By here status is "ready" (success) or a failure state
-        // (failed / reconnecting / auth-required), never "streaming".
-        //
-        // Draining into an UNHEALTHY chat is what turns a stuck turn into a
-        // spawn storm: each queued send fires into the dead/rebuilding
-        // session, hits a recoverable failure, and triggers a `force:true`
-        // rebuild — which bypasses ensureSession's de-dup — so every queued
-        // send mints a fresh AGENT_NEW_SESSION. Dozens of codex app-server
-        // children pile up, the machine thrashes, turns hang, and the
-        // composer freezes with an ever-growing queue that never sends.
-        // When the turn didn't recover, STOP draining: drop the pending
-        // queue and remove its greyed placeholders so the
-        // user resends deliberately once the chat is healthy again.
-        if (lifecycleCancelled) {
-          // Stop preserved and paused follow-ups. A later explicit send may
-          // have resumed them; the queue owns that choice, never this old turn.
-          drainNextQueued(chatId);
-        } else {
-          drainOrDropQueue(chatId);
-        }
-        evictUnretainedTranscripts();
       }
     },
     [
@@ -5265,7 +5316,21 @@ export function AgentSessionsProvider({
           return;
         }
         try {
-          const messages = await persistWindowMessages(chatId, HYDRATE_WINDOW);
+          const messages = await persistWindowMessages(chatId, HYDRATE_WINDOW, undefined,
+            parseCloudScopedId(chatId) ? cached => {
+              if (!isCurrentTranscriptRequest(hydrateInFlightRef.current, chatId, request)) return;
+              const fresh = getStore().sessions[chatId];
+              if (!fresh || fresh.transcriptState !== "loading" || fresh.status === "streaming" || fresh.transcriptDirty) return;
+              const deduped = reconcileHistoryMessages(cached);
+              getStore().patchSession(chatId, {
+                // Provisional data never satisfies admission/send/completion.
+                // Queued bubbles remain owned by the existing send path.
+                messages: [...deduped, ...fresh.messages.filter(message => message.kind === "text" && message.queued && !deduped.some(saved => saved.id === message.id))],
+                transcriptState: "loading",
+                transcriptDirty: false,
+                hasTranscript: deduped.length > 0,
+              });
+            } : undefined);
           if (
             !isCurrentTranscriptRequest(
               hydrateInFlightRef.current,

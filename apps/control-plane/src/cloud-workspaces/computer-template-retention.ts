@@ -3,7 +3,7 @@ import { z } from "zod";
 import { withSystemTx, type Tx } from "../db.js";
 import { BOAT_RESOURCE_ID_PATTERN, type BoatApiClient } from "./boat-client.js";
 import type { BuilderVmOperation } from "./cloud-builder-vm-store.js";
-import { lockCloudComputerOrganization } from "./computer.js";
+import { lockCloudComputerOrganization } from "./computer-identity.js";
 import { CloudProviderError } from "./provider.js";
 
 export const COMPUTER_TEMPLATE_RETENTION_CHANNEL =

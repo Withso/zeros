@@ -17,6 +17,8 @@ import { deferCloudRecoveryResourceBlock } from "./automatic-recovery.js";
 import { Hono } from "hono";
 import { HttpError } from "../authz.js";
 import { createCloudWorkspaceRoutes } from "./routes.js";
+import { cloudRuntimePinValues } from "./runtime-selection.js";
+import { runtimeWitness } from "./runtime-test-fixtures.js";
 import { previousBackendRecoveryRollback } from "./lifecycle-compatibility-fixtures.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -45,10 +47,15 @@ suite("automatic Boat checkpoint recovery", () => {
     await pool.query("UPDATE cloud_workspace_provider_bindings SET provider='boat' WHERE workspace_id=$1", [workspaceId]);
     await pool.query(`INSERT INTO cloud_workspace_setup_attestations (setup_run_id,workspace_id,generation,org_id,execution_fence,
       image_ref,image_source_commit,repository_revision,repository_commit,settings_version,settings_snapshot_sha256,
-      engine_instance_id,engine_protocol_version,engine_health,durable_record_connected)
-      SELECT sr.id,sr.workspace_id,1,sr.org_id,sr.execution_fence,g.image_ref,g.source_commit,'main',$2,1,ss.settings_snapshot_sha256,$3,11,'ready',true
-      FROM cloud_workspace_setup_runs sr JOIN cloud_workspace_generations g USING(workspace_id,generation,org_id)
-      JOIN cloud_workspace_setup_specs ss USING(workspace_id,generation,org_id) WHERE sr.workspace_id=$1`, [workspaceId, "c".repeat(40), engineInstanceId]);
+      engine_instance_id,engine_protocol_version,engine_health,durable_record_connected,
+      runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version,
+      runtime_installer_receipt_sha256,runtime_boot_id,runtime_supervisor_session_id)
+      SELECT run.id,run.workspace_id,1,run.org_id,run.execution_fence,g.image_ref,g.source_commit,'main',$2,1,spec.settings_snapshot_sha256,
+        engine.id,engine.protocol_version,'ready',true,g.runtime_id,g.runtime_manifest_sha256,g.runtime_base_image_id,g.runtime_base_compatibility_id,
+        g.runtime_profile,g.runtime_engine_protocol_version,engine.runtime_installer_receipt_sha256,engine.runtime_boot_id,engine.runtime_supervisor_session_id
+      FROM cloud_workspace_setup_runs run JOIN cloud_workspace_generations g USING(workspace_id,generation,org_id)
+      JOIN cloud_workspace_setup_specs spec USING(workspace_id,generation,org_id)
+      JOIN cloud_workspace_engine_instances engine ON engine.setup_run_id=run.id WHERE run.workspace_id=$1`, [fixture.workspaceId,"c".repeat(40)]);
     await pool.query("UPDATE cloud_workspace_setup_runs SET state='succeeded',completed_at=now(),lease_owner=NULL,lease_expires_at=NULL WHERE workspace_id=$1", [workspaceId]);
     const objects = new Map<string, Buffer>();
     blobs = new DatabaseCloudWorkspaceBlobService({ pool, workosEnabled: false, encryptionKeyV1: randomBytes(32).toString("base64url"),
@@ -113,10 +120,13 @@ suite("automatic Boat checkpoint recovery", () => {
       [execution.workspaceId, execution.generation, execution.organizationId, fixture.userId, randomBytes(32), execution.setupRunId, execution.executionFence])).rows[0].id;
       await tx.query(`INSERT INTO cloud_workspace_engine_instances(id,workspace_id,generation,org_id,account_user_id,
         setup_run_id,setup_execution_fence,registration_grant_id,protocol_version,state,bridge_token_hash,heartbeat_token_hash,
-        registered_at,last_heartbeat_at,lease_expires_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'ready',$10,$11,now(),now(),now()+interval '2 minutes')`,
+        registered_at,last_heartbeat_at,lease_expires_at,
+        runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version,
+        runtime_installer_receipt_sha256,runtime_boot_id,runtime_supervisor_session_id,actor_protocol_version,agent_customization_version)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'ready',$10,$11,now(),now(),now()+interval '2 minutes',$12,$13,$14,$15,$16,$17,$18,$19,$20,2,3)`,
       [engineId, execution.workspaceId, execution.generation, execution.organizationId, fixture.userId,
-        execution.setupRunId, execution.executionFence, grant, CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, randomBytes(32), createHash("sha256").update(admittedEngine.heartbeatToken).digest()]);
+        execution.setupRunId, execution.executionFence, grant, CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION, randomBytes(32), createHash("sha256").update(admittedEngine.heartbeatToken).digest(),
+        ...cloudRuntimePinValues(execution.runtime),runtimeWitness.installerReceiptSha256,randomUUID(),randomUUID()]);
     });
     return { readiness: { version: 1, setupRunId: execution.setupRunId, workspaceId: execution.workspaceId,
       organizationId: execution.organizationId, generation: execution.generation, executionFence: execution.executionFence,
@@ -320,35 +330,20 @@ suite("automatic Boat checkpoint recovery", () => {
     expect(response.status).toBe(200);
     expect((await response.text())).not.toContain(`sandbox-${fixture.workspaceId}`);
   });
-  it("recovers into the currently qualified organization image and preserves its accepted replay", async () => {
+  it("recovers with the accepted saved v2 source after the active template changes and preserves replay", async () => {
     await exhaust("setup_provider_bootstrap_unavailable");
-    const { DatabaseCloudComputerService } = await import("./computer.js");
-    const { cloudWorkspaceProvisioningProfile } = await import("./provisioning-profile.js");
-    const computer = new DatabaseCloudComputerService(pool, recoveryConfig);
-    await computer.save(fixture.organizationId, fixture.userId, { expectedRevision: 0, operationId: randomUUID(), sources: [],
-      document: { repositories: [], installScript: "true", timeoutSeconds: 30 } });
-    const id = randomUUID(), name = `zeros-org-${id.replaceAll("-", "")}`, imageRef = `boat:${name}@sha256:${"b".repeat(64)}`;
-    await pool.query(`INSERT INTO cloud_computer_builds(id,org_id,profile_id,version,requested_by,repository_owner,repository_name)
-      SELECT $1,org_id,profile_id,1,$3,'','' FROM cloud_computers WHERE org_id=$2`, [id, fixture.organizationId, fixture.userId]);
-    await pool.query(`INSERT INTO cloud_computer_images(id,org_id,account_scope,snapshot_name,snapshot_id,image_ref,base_image_ref,base_source_commit,
-      recipe_sha256,build_sha256,source_contract,image_contract,profile,state,attested_at,attestation_sha256)
-      VALUES($1,$2,'fixture',$3,'snapshot-fixture',$4,$5,$6,$7,$7,$7,$7,$8,'attested',now(),$7)`,
-      [id, fixture.organizationId, name, imageRef, recoveryConfig.imageRef, recoveryConfig.sourceCommit, "b".repeat(64), cloudWorkspaceProvisioningProfile(recoveryConfig, "boat")]);
-    await pool.query("UPDATE cloud_computer_builds SET state='succeeded',completed_at=now() WHERE id=$1", [id]);
-    for (const ref of [recoveryConfig.imageRef, imageRef]) await pool.query(`INSERT INTO cloud_agent_runtime_qualifications
-      (provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled,qualified_at)
-      VALUES('boat',$1,$2,'codex-api-key','zeros-cloud-worker-v3',true,clock_timestamp())`, [ref, "c".repeat(64)]);
-    await computer.activate(fixture.organizationId, fixture.userId, 1, 1, id);
-    await pool.query("UPDATE cloud_agent_runtime_qualifications SET enabled=false WHERE image_ref=$1", [imageRef]);
-    const body = { operation: "recover", sourceGeneration: 1, checkpointId };
-    const blocked = await route("/generations", body);
-    expect(blocked.status).toBe(409);
-    expect(await blocked.json()).toEqual({ code: "cloud_computer_qualification_required" });
-    await pool.query("UPDATE cloud_agent_runtime_qualifications SET enabled=true WHERE image_ref=$1", [imageRef]);
-    const key = randomUUID(), accepted = await route("/generations", body, key);
+    const acceptedSource = (await pool.query("SELECT build_id,template_id,config_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId])).rows[0];
+    const acceptedGeneration = (await pool.query("SELECT image_ref,runtime_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId])).rows[0];
+    const { seedComputerTemplate } = await import("./computer-workspace-test-fixtures.js");
+    await withSystemTx(pool, tx => seedComputerTemplate(tx, { organizationId: fixture.organizationId, ownerUserId: fixture.userId,
+      installationId: randomUUID(), version: 2 }));
+    const body = { operation: "recover", sourceGeneration: 1, checkpointId }, key = randomUUID();
+    const accepted = await route("/generations", body, key);
     expect(accepted.status, JSON.stringify(await accepted.json())).toBe(202);
-    expect((await pool.query("SELECT image_ref,computer_image_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=2", [fixture.workspaceId])).rows[0])
-      .toEqual({ image_ref: imageRef, computer_image_id: id });
+    expect((await pool.query("SELECT image_ref,runtime_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=2", [fixture.workspaceId])).rows[0])
+      .toEqual(acceptedGeneration);
+    expect((await pool.query("SELECT build_id,template_id,config_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1 AND generation=2", [fixture.workspaceId])).rows[0])
+      .toEqual(acceptedSource);
     expect((await route("/generations", body, key)).status).toBe(200);
   });
   it("keeps an explicitly recovered source quarantined after its replacement is cancelled", async () => {

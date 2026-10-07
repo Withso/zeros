@@ -213,6 +213,20 @@ describe("sidebar workspace list", () => {
     expect(outline(entries)).toEqual(["#alpha", "a-1"]);
   });
 
+  it.each(["grouped", "ungrouped"] as const)(
+    "shows the first cloud create in %s before its repository is confirmed",
+    filter => {
+      const create = { ...pending("cloud-repository", "cloud-request", 60), placement: "cloud" as const,
+        organizationId: "organization", path: undefined, branch: undefined,
+        repository: { name: "first-repository", originUrl: "https://github.com/example/first-repository.git" } };
+      const entries = buildSidebarWorkspaceEntries({ filter, projects: [], workspaces: [], pending: [create] });
+      expect(outline(entries)).toEqual(["cloud-request"]);
+      expect(entries[0].kind).toBe("row");
+      expect(sidebarWorkspaceItems(entries)[0].project.name).toBe("first-repository");
+      expect(create.path).toBeUndefined();
+    },
+  );
+
   it("never mutates the bridge-owned arrays it projects", () => {
     const rows = [...workspaces];
     const creates = [pending("alpha", "p-1", 1), pending("alpha", "p-2", 2)];

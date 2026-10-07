@@ -76,9 +76,7 @@ jobs:
             scripts/__tests__/cloud-publication-disk-budget.test.ts \
             scripts/__tests__/cloud-publication-process.test.ts \
             scripts/__tests__/cloud-publication-registry-auth.test.ts \
-            scripts/__tests__/cloud-vm-workflow.test.ts \
             scripts/__tests__/cloud-vm-snapshot.test.ts \
-            scripts/__tests__/cloud-qualification-attestation.test.ts \
             scripts/__tests__/cloud-workspace-qualification-gates.test.ts
           pnpm --dir apps/control-plane typecheck
           pnpm --dir apps/control-plane exec node --input-type=module -e '

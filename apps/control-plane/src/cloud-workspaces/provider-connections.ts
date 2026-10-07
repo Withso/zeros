@@ -1,19 +1,11 @@
-import {
-  createCipheriv,
-  createDecipheriv,
-  createHash,
-  randomBytes,
-} from "node:crypto";
-
 import type { Tx } from "../db.js";
 import {
-  isCloudWorkspaceProviderName,
+  isSupportedCloudWorkspaceProviderBinding,
   type CloudWorkspaceProviderName,
 } from "./provider.js";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const MAX_CREDENTIAL_BYTES = 64 * 1024;
 
 export type CloudProviderConnection = {
   id: string;
@@ -34,177 +26,6 @@ type StoredProviderConnection = {
   region: string | null;
   current_version: string | number;
 };
-
-type SelectableProviderConnection = StoredProviderConnection & {
-  owner_kind: "user" | "organization";
-  owner_user_id: string | null;
-  state: "active" | "revoked" | "invalid";
-  capabilities: Record<string, unknown>;
-  credential_expires_at: Date | string | null;
-  retired_at: Date | string | null;
-};
-
-function parseEnvelopeKey(encodedKey: string): Buffer {
-  if (!/^[A-Za-z0-9_-]{43}$/.test(encodedKey)) {
-    throw new Error("cloud credential key must be 32-byte base64url");
-  }
-  const key = Buffer.from(encodedKey, "base64url");
-  if (key.length !== 32 || key.toString("base64url") !== encodedKey) {
-    key.fill(0);
-    throw new Error("cloud credential key must be canonical base64url");
-  }
-  return key;
-}
-
-function credentialAad(input: {
-  connectionId: string;
-  organizationId: string;
-  version: number;
-  provider: CloudWorkspaceProviderName;
-  endpoint: string;
-}): Buffer {
-  return Buffer.from(
-    [
-      "zeros-cloud-provider-credential-v1",
-      input.organizationId,
-      input.connectionId,
-      String(input.version),
-      input.provider,
-      input.endpoint,
-    ].join("\0"),
-    "utf8",
-  );
-}
-
-function validCredentialBinding(input: {
-  connectionId: string;
-  organizationId: string;
-  version: number;
-  provider: CloudWorkspaceProviderName;
-  endpoint: string;
-}): boolean {
-  if (
-    !UUID_PATTERN.test(input.connectionId) ||
-    !UUID_PATTERN.test(input.organizationId) ||
-    !Number.isSafeInteger(input.version) ||
-    input.version < 1 ||
-    !isCloudWorkspaceProviderName(input.provider)
-  ) {
-    return false;
-  }
-  try {
-    const endpoint = new URL(input.endpoint);
-    return (
-      endpoint.protocol === "https:" &&
-      endpoint.username === "" &&
-      endpoint.password === "" &&
-      endpoint.hash === "" &&
-      endpoint.search === "" &&
-      endpoint.hostname.length > 0 &&
-      input.endpoint.length <= 2_048
-    );
-  } catch {
-    return false;
-  }
-}
-
-export function sealCloudProviderCredential(
-  credential: string,
-  binding: {
-    connectionId: string;
-    organizationId: string;
-    version: number;
-    provider: CloudWorkspaceProviderName;
-    endpoint: string;
-  },
-  encodedKey: string,
-): {
-  nonce: Buffer;
-  ciphertext: Buffer;
-  authTag: Buffer;
-  credentialSha256: Buffer;
-} {
-  const bytes = Buffer.byteLength(credential, "utf8");
-  if (
-    bytes < 16 ||
-    bytes > MAX_CREDENTIAL_BYTES ||
-    /[\0\r\n]/.test(credential) ||
-    !validCredentialBinding(binding)
-  ) {
-    throw new Error("cloud provider credential input is invalid");
-  }
-  const key = parseEnvelopeKey(encodedKey);
-  const nonce = randomBytes(12);
-  try {
-    const cipher = createCipheriv("aes-256-gcm", key, nonce);
-    cipher.setAAD(credentialAad(binding));
-    const ciphertext = Buffer.concat([
-      cipher.update(credential, "utf8"),
-      cipher.final(),
-    ]);
-    return {
-      nonce,
-      ciphertext,
-      authTag: cipher.getAuthTag(),
-      credentialSha256: createHash("sha256")
-        .update(credential, "utf8")
-        .digest(),
-    };
-  } finally {
-    key.fill(0);
-  }
-}
-
-export function openCloudProviderCredential(
-  sealed: {
-    keyVersion: number;
-    nonce: Buffer;
-    ciphertext: Buffer;
-    authTag: Buffer;
-  },
-  binding: {
-    connectionId: string;
-    organizationId: string;
-    version: number;
-    provider: CloudWorkspaceProviderName;
-    endpoint: string;
-  },
-  encodedKey: string,
-): string {
-  if (
-    !Number.isSafeInteger(sealed.keyVersion) ||
-    sealed.keyVersion < 1 ||
-    sealed.nonce.length !== 12 ||
-    sealed.authTag.length !== 16 ||
-    sealed.ciphertext.length < 1 ||
-    sealed.ciphertext.length > MAX_CREDENTIAL_BYTES ||
-    !validCredentialBinding(binding)
-  ) {
-    throw new Error("cloud provider credential is invalid");
-  }
-  const key = parseEnvelopeKey(encodedKey);
-  try {
-    const decipher = createDecipheriv("aes-256-gcm", key, sealed.nonce);
-    decipher.setAAD(credentialAad(binding));
-    decipher.setAuthTag(sealed.authTag);
-    const credential = Buffer.concat([
-      decipher.update(sealed.ciphertext),
-      decipher.final(),
-    ]).toString("utf8");
-    if (
-      Buffer.byteLength(credential, "utf8") < 16 ||
-      Buffer.byteLength(credential, "utf8") > MAX_CREDENTIAL_BYTES ||
-      /[\0\r\n]/.test(credential)
-    ) {
-      throw new Error("cloud provider credential is invalid");
-    }
-    return credential;
-  } catch {
-    throw new Error("cloud provider credential is invalid");
-  } finally {
-    key.fill(0);
-  }
-}
 
 function document(row: StoredProviderConnection): CloudProviderConnection {
   const credentialVersion = Number(row.current_version);
@@ -279,7 +100,7 @@ export async function ensureHostedCloudProviderConnection(
       input.isPersonal ? "user" : "organization",
       input.isPersonal ? input.ownerUserId : null,
       input.provider,
-      `Hosted ${input.provider === "daytona" ? "Daytona" : input.provider}`,
+      `Hosted ${input.provider}`,
     ],
   );
   const connectionId = inserted.rows[0]!.id;
@@ -301,11 +122,9 @@ export async function ensureHostedCloudProviderConnection(
   };
 }
 
-/** Select an explicitly requested provider account for a new immutable
- * generation. Personal tenants may use only their account-owned connection;
- * an Organization owner may choose either their own delegated account or an
- * Organization-owned connection. Existing generations never call this helper
- * and remain pinned to their original credential version. */
+/** Select an explicitly requested hosted account for a new immutable
+ * generation, enforcing its tenant and owner. Existing generations never call
+ * this helper and remain pinned to their original connection version. */
 export async function selectCloudProviderConnectionForNewGeneration(
   tx: Tx,
   input: {
@@ -317,13 +136,10 @@ export async function selectCloudProviderConnectionForNewGeneration(
   },
 ): Promise<CloudProviderConnection | null> {
   if (!UUID_PATTERN.test(input.connectionId)) return null;
-  const selected = await tx.query<SelectableProviderConnection>(
+  const selected = await tx.query<StoredProviderConnection>(
     `SELECT connection.id, connection.org_id, connection.provider,
-            connection.credential_source, connection.owner_kind,
-            connection.owner_user_id, connection.state,
-            version.capabilities, connection.region,
-            connection.current_version, version.endpoint,
-            version.credential_expires_at, version.retired_at
+            connection.credential_source, connection.region,
+            connection.current_version, version.endpoint
      FROM provider_connections connection
      JOIN provider_connection_versions version
        ON version.connection_id = connection.id
@@ -331,6 +147,8 @@ export async function selectCloudProviderConnectionForNewGeneration(
       AND version.version = connection.current_version
      WHERE connection.id = $1 AND connection.org_id = $2
        AND connection.provider = ANY($3::text[]) AND connection.state = 'active'
+       AND connection.credential_source = 'hosted'
+       AND version.credential_source = 'hosted'
        AND version.retired_at IS NULL
        AND (
          (connection.owner_kind = 'user' AND connection.owner_user_id = $4)
@@ -349,18 +167,7 @@ export async function selectCloudProviderConnectionForNewGeneration(
     ],
   );
   const row = selected.rows[0];
-  if (!row) return null;
-  if (
-    row.credential_source === "delegated" &&
-    (row.capabilities.qualified !== true ||
-      row.capabilities.lifecycle !== true ||
-      row.capabilities.commandExecution !== true ||
-      (row.credential_expires_at !== null &&
-        new Date(row.credential_expires_at).getTime() <=
-          Date.now() + 5 * 60_000))
-  ) {
-    return null;
-  }
+  if (!row || !isSupportedCloudWorkspaceProviderBinding({ provider: row.provider, credentialSource: row.credential_source })) return null;
   return document(row);
 }
 
@@ -376,7 +183,7 @@ export async function loadGenerationCloudProviderConnection(
   const result = await tx.query<StoredProviderConnection>(
     `SELECT connection.id, connection.org_id, connection.provider,
             connection.credential_source, version.endpoint,
-            connection.region, version.version AS current_version
+            connection.region, version.version AS current_version, generation.sandbox_class
      FROM cloud_workspace_generations generation
      JOIN provider_connections connection
        ON connection.id = generation.provider_connection_id
@@ -388,23 +195,13 @@ export async function loadGenerationCloudProviderConnection(
      WHERE generation.workspace_id = $1
        AND generation.org_id = $2
        AND generation.generation = $3
+       AND connection.credential_source = 'hosted'
+       AND version.credential_source = 'hosted'
        AND (
          $4::boolean = false
          OR (
            connection.state = 'active'
            AND version.retired_at IS NULL
-           AND (
-             version.credential_source = 'hosted'
-             OR (
-               version.capabilities ->> 'qualified' = 'true'
-               AND version.capabilities ->> 'lifecycle' = 'true'
-               AND version.capabilities ->> 'commandExecution' = 'true'
-               AND (
-                 version.credential_expires_at IS NULL
-                 OR version.credential_expires_at > now() + interval '5 minutes'
-               )
-             )
-           )
          )
        )`,
     [
@@ -414,5 +211,6 @@ export async function loadGenerationCloudProviderConnection(
       input.requireActive !== false,
     ],
   );
-  return result.rows[0] ? document(result.rows[0]) : null;
+  const row = result.rows[0];
+  return row && isSupportedCloudWorkspaceProviderBinding({ provider: row.provider, credentialSource: row.credential_source, sandboxClass: (row as StoredProviderConnection & { sandbox_class?: unknown }).sandbox_class }) ? document(row) : null;
 }

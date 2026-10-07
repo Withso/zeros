@@ -43,6 +43,10 @@ export interface PendingWorkspaceCreate {
    * flight cannot move the optimistic row to another tenant. */
   organizationId?: string | null;
   placement?: "local" | "cloud";
+  /** Honest cloud-create label before the server allocates a name and id. */
+  label?: string;
+  /** Display-only repository before its first cloud workspace is confirmed. */
+  repository?: { name: string; originUrl: string };
   /** The announced final path (workspace.prepareCreate) — known before
    *  checkout, but not created until workspace.create owns the operation. */
   path?: string;
@@ -88,27 +92,38 @@ let tokenCounter = 0;
 /** Register an in-flight create and get its token. Call synchronously in the
  *  click handler, BEFORE the RPC, so the pending tab renders this frame. */
 export function beginPendingCreate(args: {
+  token?: string;
   repoRoot: string;
   repoSlug: string;
   kind?: "code" | "design";
   organizationId?: string | null;
   placement?: "local" | "cloud";
+  label?: string;
+  repository?: { name: string; originUrl: string };
   path?: string;
   branch?: string;
 }): string {
-  const token = `pwc-${Date.now().toString(36)}-${++tokenCounter}`;
-  usePendingWorkspacesStore.setState((s) => ({
+  const { token = `pwc-${Date.now().toString(36)}-${++tokenCounter}`, ...row } = args;
+  usePendingWorkspacesStore.setState((s) => s.creates.some(create => create.token === token) ? s : ({
     creates: [
       ...s.creates,
       {
         token,
-        ...args,
+        ...row,
         kind: args.kind === "design" ? "design" : "code",
         startedAt: Date.now(),
       },
     ],
   }));
   return token;
+}
+
+/** Bind a receipt's exact identity before publishing its confirmed catalog row.
+ * Shared selectors then replace the placeholder without double-counting it. */
+export function bindPendingCreate(token: string, path: string): void {
+  usePendingWorkspacesStore.setState(state => state.creates.some(create => create.token === token && create.path !== path)
+    ? { creates: state.creates.map(create => create.token === token ? { ...create, path } : create) }
+    : state);
 }
 
 /** Remove an in-flight create after authoritative publication/rollback.

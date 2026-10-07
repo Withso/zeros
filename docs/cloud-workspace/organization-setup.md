@@ -84,11 +84,11 @@ relay permissions remain separate. A successful checkout of another branch
 clears the old branch's PR binding atomically with the branch change. A failed
 or unchanged checkout preserves it; explicit cancelled/backlog status is kept.
 
-## Staff workspace sharing
+## Workspace sharing
 
-Cloud workspace details expose sharing controls to staff with the
-`cloudComputerV2` internal feature active. Staff eligibility controls visibility;
-workspace authority still comes from the backend's current actor role. An
+Cloud workspace details expose sharing controls under current account/organization
+admission (`useCloudWorkspaceAccountAccess`). There is no retired staff rollout
+preference; workspace authority comes from the backend's current actor role. An
 organization admin is a default **viewer** on an account-funded Pro workspace
 until explicitly assigned another role. Organization-funded workspaces retain
 their existing authority rules, including inherited manager/developer access.

@@ -1,5 +1,6 @@
 import { McpWorkingDirectoryError, validateMcpWorkingDirectory } from "./mcp-working-directory";
-import { cloudPermissionMode } from "@zeros/protocol/cloud-commands";
+import { cloudPermissionMode, cloudCommandFailureCode, decodeCloudCommandFailure, CloudCommandFailureError,
+  type CloudCommandFailureCause } from "@zeros/protocol/cloud-commands";
 import {
   sessionToolsSnapshotSchema,
   sessionToolsInventorySnapshotSchema,
@@ -136,6 +137,14 @@ import type {
 import type { AgentFilesystemTerritory } from "./types";
 import type { AccountDetails, EnrichedRegistryAgent } from "../types";
 import { AgentFailureError } from "./types";
+
+function cloudProviderFailure(error: unknown, stage: CloudCommandFailureCause["stage"]): Error {
+  const code = cloudCommandFailureCode(error, stage);
+  // Keep the redacted native explanation and recovery link alongside the safe
+  // receipt category. Generic native/driver diagnostics never become UI copy.
+  if (error instanceof AgentFailureError) return Object.assign(error, { code });
+  return new CloudCommandFailureError(decodeCloudCommandFailure(code)!);
+}
 import {
   advertiseAgentCapabilities,
   resolveAgentCapabilityPorts,
@@ -5094,7 +5103,7 @@ export class AgentGateway {
     } catch (err) {
       const redacted = cloudProviderExecution(preparedBoundary)?.redactor?.error(err) ?? err;
       await this.disposeRejectedExecutions(adapter, [executionId]);
-      throw redacted;
+      throw cloudAdmission ? cloudProviderFailure(redacted, "provider_start") : redacted;
     }
     if (
       session.executionId !== executionId ||
@@ -5429,7 +5438,7 @@ export class AgentGateway {
       // that provisional execution after its engine route is torn down.
       const redacted = cloudProviderExecution(preparedBoundary)?.redactor?.error(err) ?? err;
       await this.disposeRejectedExecutions(adapter, [executionId]);
-      throw redacted;
+      throw cloudAdmission ? cloudProviderFailure(redacted, "provider_start") : redacted;
     }
     if (response.executionId && response.executionId !== executionId) {
       await this.disposeRejectedExecutions(adapter, [executionId]);
@@ -5552,6 +5561,9 @@ export class AgentGateway {
     const cloudAdmission=this.cloudAdmission(agentId,opts);
     if (cloudAdmission && (agentId!=="codex" || !opts.sourceConversationId || opts.sourceConversationId===opts.conversationId))
       throw new Error("Cloud native fork requires distinct admitted Codex conversations");
+    const worker = cloudAdmission ? loadCloudWorkerConfiguration() : null;
+    if (cloudAdmission && worker?.version !== 4)
+      throw new Error("Cloud native fork requires a qualified worker");
     const providerBinding = coerceProviderBinding(binding);
     if (!providerBinding || providerBinding.providerId !== agentId) {
       throw new AgentFailureError({
@@ -5722,11 +5734,9 @@ export class AgentGateway {
       },
     );
     if (!cloudAdmission) return perform();
-    const worker=loadCloudWorkerConfiguration();
-    if(worker?.version!==3)throw new Error("Cloud native fork requires a qualified worker");
     opts.admissionSignal?.throwIfAborted();
     return copyCloudNativeForkHistory({root:CLOUD_NATIVE_HISTORY_ROOT,conversationId:opts.sourceConversationId!,
-      destinationConversationId:opts.conversationId!,provider:"codex",uid:worker.uid,gid:worker.gid},async()=>{
+      destinationConversationId:opts.conversationId!,provider:"codex",uid:worker!.uid,gid:worker!.gid},async()=>{
       opts.admissionSignal?.throwIfAborted();
       return perform();
     });
@@ -6254,7 +6264,8 @@ export class AgentGateway {
       if (!cloud && failure?.kind === "auth-required" && (!authFingerprint || authFingerprint === this.providerAuthConfigFingerprint(agentId))) {
         this.markAuthFailed(adapter.agentId);
       }
-      throw cloud?.redactor?.error(err) ?? err;
+      const redacted = cloud?.redactor?.error(err) ?? err;
+      throw cloud ? cloudProviderFailure(redacted, "provider_prompt") : redacted;
     } finally {
       for (const notification of cloud?.redactor?.finishSession(sessionId) ?? [])
         this.publishedEvents.onSessionUpdate(agentId, notification);

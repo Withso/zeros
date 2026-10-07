@@ -19,39 +19,25 @@ export type CloudWorkspaceProviderRuntime = {
   commandRunner?: CloudWorkspaceCommandRunner;
 };
 
-export type CloudWorkspaceDelegatedProviderInput = {
-  apiKey: string;
-  apiUrl: string;
-  region: string | null;
-  capabilities: Readonly<Record<string, unknown>>;
-  imageRef: string;
-  sandboxClass?: "container" | "linux-vm";
-  architecture: "linux/amd64" | "linux/arm64";
-  cpuMillicores: number;
-  memoryMiB: number;
-  storageMiB: number;
-  purpose: CloudWorkspaceProviderPurpose;
-};
-
 export type CloudWorkspaceProviderRegistration = {
   name: CloudWorkspaceProviderName;
-  /** Keep historical hosted accounts registered while allocations need cleanup.
-   * The managed default is deliberately not part of this registry. */
+  /** Hosted account identity is retained for exact generation resolution. */
   hosted?: CloudWorkspaceProviderRuntime;
   /** Image/resource inputs belong to the accepted generation. A deployment
    * default change must not repoint queued or recovering allocations. */
   hostedForGeneration?: (
     profile: CloudWorkspaceProviderGenerationProfile,
   ) => CloudWorkspaceProviderRuntime;
-  delegated?: (
-    input: CloudWorkspaceDelegatedProviderInput,
-  ) => CloudWorkspaceProviderRuntime;
 };
 
-export type CloudWorkspaceProviderGenerationProfile = Pick<
-  CloudWorkspaceDelegatedProviderInput,
-  "imageRef" | "architecture" | "cpuMillicores" | "memoryMiB" | "storageMiB" | "sandboxClass"
->;
+export type CloudWorkspaceProviderGenerationProfile = {
+  imageRef: string;
+  sandboxClass?: "container" | "linux-vm";
+  architecture: "linux/amd64" | "linux/arm64";
+  cpuMillicores: number;
+  memoryMiB: number;
+  storageMiB: number;
+};
 
 function unavailable(): CloudProviderError {
   return new CloudProviderError(
@@ -74,7 +60,7 @@ export class CloudWorkspaceProviderRegistry {
       if (
         !isCloudWorkspaceProviderName(registration.name) ||
         this.registrations.has(registration.name) ||
-        (!registration.hosted && !registration.delegated)
+        !registration.hosted
       ) {
         throw new Error("Cloud provider registration is invalid or duplicated");
       }
@@ -111,15 +97,6 @@ export class CloudWorkspaceProviderRegistry {
         : runtime,
       purpose,
     );
-  }
-
-  delegated(
-    name: CloudWorkspaceProviderName,
-    input: CloudWorkspaceDelegatedProviderInput,
-  ): CloudWorkspaceProviderRuntime {
-    const factory = this.registrations.get(name)?.delegated;
-    if (!factory) throw unavailable();
-    return this.validateRuntime(name, factory(input), input.purpose);
   }
 
   hostedScopes(): CloudWorkspaceProviderRuntime[] {

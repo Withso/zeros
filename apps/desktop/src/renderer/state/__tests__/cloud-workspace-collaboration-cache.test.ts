@@ -5,7 +5,7 @@ import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 
 const account = vi.hoisted(() => ({ userId: null as string | null }));
 vi.mock("../../features/team/team-store", () => ({ getOrganizationStoreGeneration: () => 1, getTeamStoreState: () => ({ me: account.userId ? { user: { id: account.userId } } : null }) }));
-vi.mock("../../features/settings/internal-features", () => ({ isInternalFeatureActive: () => false }));
+vi.mock("../../features/team/cloud-workspace-account-access", () => ({ hasCloudWorkspaceAccountAccess: () => false }));
 vi.mock("../cloud-workspace-catalog", () => ({
   cloudCatalogGeneration: () => 1, cloudWorkspaceCatalogConfirmed: () => true, cloudWorkspaceDocument: vi.fn(),
   refreshCloudWorkspace: vi.fn(), subscribeCloudWorkspaces: vi.fn(), subscribeCloudWorkspaceRefresh: vi.fn(),

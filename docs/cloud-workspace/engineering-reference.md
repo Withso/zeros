@@ -1,388 +1,165 @@
 # Cloud workspace engineering reference
 
-Native recovery format, compatibility, ownership and capacity limits are defined
-in [checkpoint-native-format.md](checkpoint-native-format.md). Exact-image
-allocation-loss and native-session resume qualification remain release gates.
+Cloud execution is Boat-only: saved v2 Computer source, qualified v4 runtime,
+actor protocol 2. [Architecture](architecture.md) owns the end-to-end boundaries;
+[qualification status](qualification-status.md) owns release evidence. The
+source map below describes current repository behavior, not a live deployment.
 
-## Current implementation status
+## Source map
 
-| Capability                                                | Repository status                                                                  | Current anchor                                                                                        |
-| --------------------------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| Remote engine transport and exact runtime registry        | Implemented, gated; signed macOS/live E2E open                                     | `apps/desktop/src/engine/transport/cloud.ts`, `bridge/connection-registry.ts`, Electron access broker |
-| Provider image/lifecycle qualification                    | Harness and protected workflow implemented; live evidence open                     | `scripts/cloud-workspace-validation/`, `.github/workflows/zsr-cloud-qualification.yml`                |
-| WorkOS identity and membership projection                 | Implemented with Auth0 rollback compatibility                                      | control-plane auth migrations/services and web WorkOS session/event handlers                          |
-| Individual Pro and deferred Business funding boundaries | Implemented and database-tested                                                    | migrations `0076`, `0079`, `authorization.ts`, `paid-authority.ts`, `compute-funding.ts`                    |
-| Reviewed entitlement, compute, and storage provisioning   | Implemented and database-tested                                                    | migrations `0054`–`0055`, `0062`, owner management commands                                           |
-| Repository/settings/environment/secret/provider model     | Implemented and database-tested                                                    | migrations `0026`–`0027`, `0041`–`0047`, `0056`                                                       |
-| Lifecycle, setup worker, admission, and engine lease      | Implemented behind disabled setup-worker gate; live qualification open             | migrations `0020`–`0025`, setup and engine services                                                   |
-| Generation replacement and provider reconciliation        | Implemented and database-tested; live rollback/delete evidence open                | `generation-transitions.ts`, `reconciler.ts`, `daytona-provider.ts`                                   |
-| SSH, authenticated preview, and localhost forward         | Control plane and native desktop boundary implemented; UI/macOS qualification open | `access.ts`, `runtime-access.ts`, Electron access/SSH services                                        |
-| Ordered durable record and content/checkpoints            | Implemented and database-tested                                                    | migrations `0028`–`0031`, durable/content/recovery services                                           |
-| Encrypted object storage, admission, rotation, deletion   | Implemented; production restore/DR drills open                                     | `object-store.ts`, `object-maintenance.ts`, migrations `0037`, `0055`, `0057`, `0058`, `0060`         |
-| Local→cloud and cloud→local immutable forks               | Implemented with fresh destination UUIDs                                           | `forks.ts`, desktop cloud-workspace-fork services, migrations `0032`, `0038`, `0048`, `0051`          |
-| Per-user/per-device receive-only replicas                 | Implemented with exact actor/workspace/device authorization                                                 | `replicas.ts`, desktop cloud-replica services, migrations `0033`–`0035`, `0049`–`0052`                |
-| Remote-authoritative Design routing                       | Implemented through the normal exact runtime bridge; product UI E2E open           | runtime connection registry and existing Design protocol/service                                      |
-| Management, usage, outbox, health, and self-host seams    | Implemented as APIs/services; dashboards/drills/template publication open          | `management*.ts`, `usage.ts`, `outbox.ts`, `health.ts`                                                |
-| Cloud creation/catalog/details/onboarding UI              | Deliberately deferred                                                              | final UI phase                                                                                        |
-| Organization multiplayer and external workspace guests   | Implemented, staff gated; hosted guest qualification open                          | collaboration routes, actor sessions and individual Pro authority                                                                   |
-| Native mobile clients                                     | Deferred                                                                           | no `apps/ios` or `apps/android` boundary                                                              |
+Paths in this table are relative to the stated directory.
 
-## Existing environment contract
-
-### New image storage layout
-
-New qualification images use the version-2 physical layout in
-`scripts/cloud-workspace-validation/sandbox/runtime-layout.json`:
-
-| Purpose | Physical path |
+| Responsibility | Current source |
 | --- | --- |
-| Immutable engine and bundled toolchain | `/opt/zeros` |
-| Host broker helpers and fixed Node runtime | `/opt/zeros-runtime` |
-| Repository checkout | `/srv/zeros/workspace` |
-| Database and workspace state | `/srv/zeros/state` |
-| Host-only setup journals and managed settings | `/srv/zeros/setup`, `/srv/zeros/managed-settings` |
-| Agent home | `/srv/zeros/home/agent` |
-| Separate capture home | `/srv/zeros/home/capture` |
-| Engine log | `/srv/zeros/log/engine.log` |
+| Generation floor and immutable source | `apps/control-plane/src/cloud-workspaces/supported-generation.ts`, `computer-workspace-source.ts`, `generation-pins.ts` |
+| Lifecycle, setup, retry deadlines and fresh readiness | Same directory: `routes.ts`, `reconciler.ts`, `setup-worker.ts`, `worker-scheduler.ts`, `setup-materials.ts`, `setup-resume.ts` |
+| Computer authority, builds and cleanup-only retirement | Same directory: `computer-identity.ts`, `computer-v2.ts`, `computer-template-worker.ts`, `computer-retirement.ts`, `computer-retirement-boat.ts` |
+| Runtime selection, transfer and staging | Same directory: `runtime-selection.ts`, `runtime-transition.ts`, `runtime-transfer.ts`, `runtime-staging.ts`, `runtime-resident-update.ts` |
+| Durable commands, receipts, records and history | Same directory: `commands.ts`, `action-receipts.ts`, `durable-record.ts`, `history.ts` |
+| Actor/device authority and native services | Same directory: `actor-sessions.ts`, `engine-client-admission.ts`, `access.ts`, `runtime-access.ts` |
+| GitHub read and per-operation write authority | Same directory: `github-read-routes.ts`, `github-read-proxy.ts`, `github-write-grants.ts`, `github-native-grants.ts` |
+| Funding, usage and durable storage | Same directory: `paid-authority.ts`, `compute-funding.ts`, `compute-leases.ts`, `object-store.ts`, `object-maintenance.ts` |
+| Protected base and pinned runtime | `scripts/cloud-workspace-validation/runtime-base-v4/`, `runtime-bundle/`, `sandbox/setup-cloud-workspace.mjs`, `sandbox/attest-cloud-worker.mjs` |
+| Live engine/transport/publication | `apps/desktop/src/engine/zeros-engine.ts`, `files/cloud-workspace-ownership.ts`, `workspace/service.ts`, `apps/desktop/src/engine/transport/cloud.ts` |
+| Exact desktop routing and receipt recovery | `apps/desktop/src/renderer/platform/bridge/workspace-runtime-client.ts`, `cloud-agent-connection.ts`, `open-cloud-runtime.ts` |
+| Create, catalog, wake/restart | `apps/desktop/src/renderer/state/cloud-workspace-create.ts`, `cloud-workspace-catalog.ts`, `cloud-workspace-wake.ts`, `cloud-workspace-restart.ts` |
+| Native access and replica lifetime | `apps/desktop/electron/cloud-workspace-access-broker.ts`, `cloud-workspace-ssh-runtime.ts`, `cloud-workspace-port-forwarding.ts`; engine `cloud-replica-broker.ts` |
+| Desktop transcript presentation cache | `apps/desktop/electron/cloud-transcript-cache-store.ts`, `ipc/commands/cloud-transcript-cache.ts`; renderer `state/cloud-transcript-cache.ts` |
 
-The layout is included in image metadata, the image contract hash and admission
-verification. It avoids relying on arbitrary `/workspace` and `/home` directories
-that are not retained by every provider's stop/resume capture. Both image build
-paths package the same capture identity and pinned browser installation.
-Qualification must verify persistence on the exact provider/image; a provider
-snapshot is not a substitute for durable checkpoint/export recovery.
+Applied migrations remain forward-only compatibility contracts. Historical
+schema numbers do not describe executable worker support. Do not rename a
+migration or infer the current schema from the last migration named in an old
+plan. The canonical ladder and alias handling in `apps/control-plane/src/migrate.ts`
+remain authoritative. See [database qualification](database-qualification.md).
 
-Existing generations retain their accepted image and its original layout. This
-change does not relocate a live checkout or create filesystem aliases. A layout
-upgrade requires a new qualified image/generation and the normal validated restore
-path. Headless clients discover the workspace through its runtime contract;
-desktop SSH/IDE integration must remove its legacy fixed checkout assumption
-before enabling this image for that client.
+## Bootstrap and readiness
 
-Version-2 broker entrypoints use `/opt/zeros-runtime/lib/zeros` and
-`/opt/zeros-runtime/bin`. The version-1 `/usr/local` helper prefix is an image
-compatibility contract, not a directory to rename on a running allocation.
-Provider resume may restore files while resetting ownership of provider-managed
-parent directories. New images therefore qualify both content and ancestry;
-they never repair a user-writable helper prefix just before privileged execution.
+The fixed setup executor carries one bounded expiring envelope to the
+image-owned helper; repository text never becomes a privileged command.
+Claims and final publication recheck workspace, generation, allocation, lease,
+setup-run and fence. Setup logs are sanitized and capped at 256 KiB; arbitrary
+exception messages are not durable diagnostics. A process exit or live broker
+alone cannot publish ready: exact attestation, fresh registration, protocol,
+health and initial durable sync are required.
 
-Boat restores the disk without re-running the OCI image entrypoint. Before
-bootstrap credentials are installed, the provider runner invokes the fixed
-`ensure-cloud-worker-supervisor.mjs` helper. It verifies the version-2 image
-profile and root-controlled paths, recreates private `/run/zeros` after a cold
-boot, and probes or starts the broker. A lifetime kernel file lock prevents
-concurrent startup from replacing a live endpoint. Readiness probes do not stop
-an active engine or consume a setup session. Setup admission and engine readiness
-remain separate checks; a live broker alone never makes a workspace ready.
+Protected deployment/launch layout is in [runtime bundles](runtime-bundles.md)
+and [security](security.md). Preserve observable bootstrap names:
+`ZEROS_CLOUD_PORT`, `ZEROS_CLOUD_TOKEN`, `ZEROS_ACCOUNT_JWT_*`,
+`ZEROS_REQUIRE_ACCOUNT`, `ZEROS_CLOUD_OWNER_SUB` and
+`ZEROS_ACCOUNT_JWT_CONTRACT=zeros-access-v1`. WorkOS launch material binds one
+issuer/client ID; partial/mixed issuer contracts fail closed. These names do not
+authorize historical executable profiles.
 
-Cgroup admission checks the process scope and every visible ancestor, taking the
-tightest independent memory, CPU-rate and process bound. A child reporting `max`
-can still be constrained by its parent. Malformed membership/limits fail admission;
-an unrestricted VM is not treated as bounded. See the
-[kernel cgroup v2 contract](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html).
+`CLOUD_WORKSPACES_ENABLED`, `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` and the desktop
+build capability `ZEROS_CLOUD_WORKSPACES_ENABLED` remain independent release
+gates. Credentials do not enable them. Desktop capability is baked into engine,
+main and sidecar artifacts; launch-time overrides cannot enable a disabled
+package. Preview suffixes and SSH host pins are separately validated public
+configuration. A preview-free release keeps Local previews and independently
+admitted runtime tunnels available. See
+[desktop compatibility](../desktop-client-compatibility.md).
 
-### Existing bootstrap variables
+Late provider results cannot overwrite newer intent/generation state. Stop,
+archive, delete and authority loss retire runtime/service grants and setup work.
+A provider timeout is unknown until reconciled; acceptance/404 is not physical
+storage-erasure proof. Keep exact cleanup journals until terminal evidence.
 
-The validation foundation recognizes:
+## Git and GitHub
 
-- `ZEROS_CLOUD_PORT`: enables the engine's additional remote listener;
-- `ZEROS_CLOUD_TOKEN`: mandatory bounded capability gating the Zeros WebSocket
-  upgrade in the validation boundary;
-- `ZEROS_ACCOUNT_JWT_*`, `ZEROS_REQUIRE_ACCOUNT`, and
-  `ZEROS_CLOUD_OWNER_SUB`: required asymmetric owner binding for an attested
-  cloud worker; and
-- validation-only provider variables documented in
-  [`scripts/cloud-workspace-validation/README.md`](../../scripts/cloud-workspace-validation/README.md).
+### Accepted source and target
 
-These names are externally observable bootstrap contracts. Do not rename them
-without compatibility handling. The bridge capability remains defense in
-depth; production desktop runtime admission additionally binds account, tenant,
-workspace, generation, purpose, and expiry.
-When the control plane uses WorkOS, setup material and the engine launch must
-also carry `ZEROS_ACCOUNT_JWT_CONTRACT=zeros-access-v1`, the exact desktop
-client ID, and one exact issuer. Auth0 compatibility leaves the contract and
-client ID absent. Partial or mixed shapes are rejected at the control plane,
-image helper, supervisor, and qualification boundary.
+Creation binds repository installation/immutable ID, accepted SHA and coherent
+named source/PR metadata. Default/commit sources use the Local branch allocator;
+named branches retain their name. PR head/base/number/state must match the
+accepted SHA. Targets are named branches, never commit IDs. A matching persisted
+row wins on restart, retaining the user's target, PR linkage, index and edits.
+Only old empty/SHA targets are repaired from verified named metadata, without
+moving HEAD. Migration 0132 stores the immutable checkout source; old source rows
+remain nullable compatibility data. See [template forks](template-forks.md).
 
-The production control plane additionally recognizes the explicitly gated
-`CLOUD_WORKSPACES_ENABLED` block documented in
-`apps/control-plane/.env.example`. Credentials alone never enable creation.
-`CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` is an independent second gate: when it
-is false, reconciliation may create the provider resource but deliberately
-leaves it at `setting_up`; internal setup/registration routes and the setup
-worker are not mounted or started.
-The desktop has a separate release/build capability,
-`ZEROS_CLOUD_WORKSPACES_ENABLED`. It defaults to disabled and only the exact
-literal `true` enables it. This is not a user-controlled preference and does
-not replace either control-plane gate. `build:sidecar`, `build:engine`, and
-`electron:compile` bake the decision into their artifacts; Electron main also
-pins the value inherited by its engine child. A packaged artifact built with
-the capability disabled therefore cannot be enabled by a launch-time or child-
-process environment override. While disabled, desktop cloud access, device
-enrollment and safeStorage key creation, replica session seeding/refresh, and
-the local replica/fork runtimes remain unconstructed. Direct cloud worker
-runtime registration remains governed by its qualified bootstrap contract. A
-release may enable cloud without preview DNS suffixes; the first cloud release
-intentionally leaves previews off. Supplied suffixes still require 1-8 unique,
-exact lowercase DNS names. Daytona requires canonical base64url OpenSSH pins
-covering every allowed gateway; managed Boat does not require Daytona pins.
-The desktop main process accepts `ZEROS_CLOUD_SSH_HOSTS` as an exact comma-
-separated SSH gateway allowlist; the default is `ssh.app.daytona.io`. Cloud
-preview issuance additionally fails closed unless
-`VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES` was baked into Electron main or the
-development/self-host override `ZEROS_CLOUD_PREVIEW_HOST_SUFFIXES` is present.
-The response must use one 32-hex label immediately below an allowed suffix.
-The public `VITE_*` suffix list is baked into both main and renderer. Without
-it the renderer hides cloud previews, skips preview reads/grants and prevents
-restoring broken cloud preview tabs. Native development/self-host overrides
-remain validated and require a matching renderer setting to expose the UI.
-Local previews and independent SSH/control-plane runtime tunnels do not depend
-on the preview domain and remain intact. These settings are public, never
-credentials. See [Desktop compatibility and preview-free cloud releases](../desktop-client-compatibility.md).
-The configured image, architecture, source commit, CPU, memory, and storage are
-recorded per generation and passed through the provider boundary. Public API
-documents use the stable Zeros workspace id and never expose provider resource
-ids. Creation also requires the appropriate Organization entitlement/seat
-policy plus available compute and durable object-storage limits. Personal
-workspaces remain device-local.
+Cloud checkout fetches full accepted-source and target history, unshallowing a
+prepared clone when needed. Each attempt has a 60-second / 256 MiB object-growth
+bound, sampled every 250 ms, then TERM/KILL cleanup (two-second kill grace).
+Only a budget limit permits depth 128 fallback; authentication/other errors fail
+immediately. Two attempts may consume twice the per-attempt bound and one sample
+can overshoot it. These are object-growth guards, not exact network-byte quotas.
 
-Provider observations are accepted only when their immutable workspace and
-generation labels match the requested identity. Lifecycle results and failures
-recheck desired state and current generation while holding the workspace lock,
-so a late provider response is retained as an observation but cannot overwrite
-a newer workspace generation or command. Completion paths use the same
-workspace-before-intent lock order as lifecycle routes, preventing a provider
-response racing stop/delete from deadlocking the API transaction. Healthy drift
-observations preserve application-owned `ready`, `busy`, `setting_up`, and
-`failed` states, and repair a missing setup-verification run without duplicating
-a queued/running attempt.
-Delete remains `observing` after provider acceptance until a separate inspection
-reports the generation absent or deleted; only then is deletion durably verified.
-Daytona rate-limit delays are propagated into the durable retry schedule,
-bounded to five minutes, and do not trigger an immediate recovery probe that
-would consume another request while the provider is throttling the account.
-Any stop, archive, or delete request now revokes every workspace endpoint grant
-before changing lifecycle state and cancels queued/running setup attempts in the
-same transaction, including when the requested state was already satisfied.
-Provider drift, permanent provider failures, and late superseded results enforce
-the same generation-scoped retirement. A later wake therefore allocates a fresh
-setup-verification attempt instead of being blocked by an attempt from the old
-runtime.
+Changes/Review show the actual shallow flag in their one status banner.
+**Fetch full history** is explicit, single-flight and actor-authorized;
+`unshallow:true` is part of the grant digest. It preserves HEAD/index/edits and
+uses the same 60-second/256 MiB guard with a 90-second renderer request budget.
+There is no automatic retry/depth fallback for this action. Only confirmed
+non-shallow status clears the notice. Hidden and Local tabs make no notice reads.
 
-Migration `0020_cloud_workspace_setup_worker.sql` adds immutable per-generation
-repository/settings inputs plus bounded claims, heartbeat/expiry, retry timing,
-cancellation, and an incrementing execution fence. The orchestration in
-`setup-worker.ts` locks workspace before setup rows, commits the claim before
-calling an executor, and rechecks workspace, generation, provider resource,
-lease owner, and fence before publishing readiness. A reclaimed execution can
-therefore finish, but its late result cannot mutate durable state. Logs cross a
-required sanitizer and a 256 KiB database ceiling; exception messages are not
-persisted.
+### Read and write authority
 
-Migration `0021_cloud_workspace_setup_authority.sql` binds each new setup grant
-to one setup-run ID and live execution fence. It retires pre-fence setup grants
-during upgrade, and a database trigger rejects a new unbound or stale-fence
-grant even from system code. Consumption rechecks the token digest, account,
-Organization and Team membership, workspace/generation/lifecycle, audience,
-expiry, one-use state, setup run, live lease, and fence. Successful setup now
-requires an exact structured proof covering the pinned image/source commit,
-requested and resolved repository commits, settings version/hash, engine
-instance/protocol/health, and durable-record connectivity. That immutable proof
-is inserted before the setup run and workspace become `succeeded`/`ready` in
-the same transaction. A database trigger also rejects a proof after lease
-expiry or when its pinned image, repository revision, or settings identity
-differs from the immutable generation contract. A successful process exit alone
-cannot publish readiness.
+Computer bootstrap GitHub tokens are revoked and their projection removed.
+Repository/PR discovery uses the backend installation read proxy with a current
+read-capable actor, exact engine/source/repository and authority rechecks after
+I/O and cache hits. Fixed REST/GraphQL policy rejects arbitrary queries,
+contents, origins and mutations. Bounds per CP process: 8 MiB response,
+64 upstream operations, 256 responses/32 MiB, 5-second fresh cache and
+5-minute ETag reuse; 240 requests/workspace/minute across at most 1000 workspace
+budgets. Installation tokens are memory-only (64 entries, expiry-minus-five-
+minutes), repository identity checks expire after 60 seconds (256 entries).
+Shutdown drains/revokes and aborts pending reads. These are process-local limits,
+not fleet-wide quotas. See the `github-read-*` sources/tests.
 
-`daytona-command-runner.ts` resolves the exact opaque resource id, rejects
-malformed commands, relative working directories, invalid environment maps,
-and zero/unbounded timeouts before a provider call, supplies an explicit Daytona
-execution timeout, and bounds returned UTF-8 output without splitting a
-character. A local abort stops the generated toolbox request and stops waiting
-immediately; aborting the HTTP request is not accepted as proof that an
-already-dispatched remote process terminated, so the mandatory provider timeout
-and stale setup fence remain the authoritative bounds. The control plane depends
-on Daytona's narrow generated toolbox client rather than adding the full
-image/AWS/telemetry SDK tree to the Railway runtime.
+Managed Fetch/Pull/Push and PR mutations use the exact actor's desktop courier.
+Fetch/Pull redeem upload-pack-only authority; Pull composes the actor's commit
+author scope, strategy and explicit autostash with the grant digest. Native Git
+tries at most four distinct eligible devices of that actor after a null reply,
+within one 15-second deadline. Session/connection binding, cancellation and
+expiry apply throughout. No desktop means a clear authorization failure, never
+another member's credentials or automatic write replay. Another actor typing
+in a terminal retires its creator's Git authority; create a new terminal.
 
-The provider and toolbox clients are intentionally pinned together at
-`0.214.0`. Daytona's current SDK documentation describes newer event-streamed
-lifecycle behavior; upgrading either client is therefore an adapter change,
-not routine dependency maintenance. It requires contract tests plus the full
-live stop/wake/delete/SSH qualification before promotion. Preview routing
-qualification is additionally required before shipping a preview-enabled
-release; the first cloud release leaves preview URLs disabled.
+Push admits one current branch, upstream by default and explicit
+`--force-with-lease`; tags/ref deletion/multiple refs are denied. Prompter/viewer
+reads do not grant writes. Expiry/revocation requires explicit fresh authority.
+Git/PR reads still need a running engine; stopped history endpoints cover chats,
+not an invented durable offline Git API.
 
-`daytona-setup-executor.ts` accepts only a pinned Daytona generation and invokes
-the fixed image-owned command
-`/opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs`. Repository
-text is never concatenated into the command. Its single compact environment
-envelope contains an expiring admission plus expected hashes/versions, not the
-settings document, installation ID, or provider credential. The database
-admission broker stores only the token digest, binds it to the claimed setup
-run/fence, and requires retirement before executor success can be returned.
-Helper error codes are allowlisted, provider details are collapsed, output is
-bounded, and an echoed admission makes the run fail closed.
+### Shared Git invariants
 
-Migration `0022_cloud_workspace_setup_materials.sql` adds encrypted per-
-generation setup secrets and durable engine instances whose bridge and
-heartbeat capabilities are stored only as SHA-256 verifiers. The capability-
-authenticated internal routes are mounted only with the setup gate. Redemption
-rechecks the live setup fence, tenant/member/repository authority, consumes the
-admission once, resolves the exact immutable settings snapshot, decrypts only
-its referenced secrets, and mints a one-hour GitHub App token restricted to the
-single repository with `contents:read`, `pull_requests:read`, `checks:read`, and
-`statuses:read`. The engine uses that same credential for PR, review and CI
-reads; it does not grant publishing or other writes. Authority is checked again
-after the external mint; a raced token is revoked.
+All/Uncommitted/Staged/Unstaged derive from their own comparisons. An `AD` path
+contributes 0/0/1/1; Changes counts All. Target selection changes metadata only;
+fetch/rebase/merge/autostash/Continue/Abort remain explicit. Conflicts pause Design
+until shared source resolution. Checked publication keeps engine-authored Code
+and Design writable by the contained worker without widening protected roots.
 
-The image-owned `setup-cloud-workspace.mjs` accepts only the canonical bounded
-envelope, exchanges it over HTTPS, clones through askpass without placing the
-token in a URL or argv, rejects redirects and non-GitHub askpass prompts,
-writes managed settings atomically, and runs declared setup commands as
-UID/GID 10001 with individual deadlines and bounded output.
-It then rechecks the physical in-repository Git directory, origin, top level,
-and HEAD before it can attest readiness; setup-generated files are allowed, but
-setup cannot silently change repository authority.
-Its root-only journal resumes after commands whose completion was durably
-recorded. Setup commands must still tolerate replay across the unavoidable
-command-success/journal-write crash window. A root-only Unix-socket supervisor
-turns one prepare session into one fixed engine launch and stops a prior process
-group before replacement. Live image/ZSR attestation runs immediately before
-launch. A sandbox-wide file lock serializes helper invocations, an interrupted
-clone is recovered only through exact temporary-directory shapes, and the
-worker's shutdown path stops waiting even when a provider executor ignores its
-abort signal; the durable run fence prevents that late process from publishing.
+Direct and draft-direct Create PR intentionally commit the exact net pending
+Code+Design before push/create. Empty/conflicted state is refused; a successful
+commit survives publication failure, so a retry resumes publication. The same
+explicit behavior applies to Personal Local, organization Local and cloud.
 
-The engine consumes and erases its registration envelope, registers the exact
-instance/protocol/setup fence, and exposes private readiness only after durable
-registration. A heartbeat (10 seconds by default,
-`CLOUD_WORKSPACE_ENGINE_HEARTBEAT_INTERVAL_MS` 5–30 seconds) renews a
-90-second lease; rejection or lease exhaustion stops the engine. Checkpoint
-directives ride the heartbeat, so its cadence bounds how long a stop, archive
-or rebuild waits before the final checkpoint begins. Internal engine routes pass
-a per-address pre-auth limit (600 requests a minute) before token parsing or
-database work. Registration and heartbeats have a separate bucket sized for 300
-engines per address at the configured cadence, so streaming traffic from
-engines behind one egress address cannot starve the requests whose rejection
-stops an engine. The root-owned GitHub projection requests a
-replacement ten minutes before expiry (or after a credential rejection), and
-the heartbeat returns only an owner-bound replacement document. PostgreSQL and
-audit rows never contain the raw GitHub token.
+## Local and cloud regression guards
 
-Migration `0023_cloud_workspace_generation_transitions.sql` binds lifecycle
-intents to an immutable generation and records a drain-first transition. The
-source is stopped and its client/runtime authority retired before candidate
-creation; only structured candidate readiness can promote it. A permanent
-drain failure restores the source without creating the candidate, while a
-rejected candidate is deleted before a source wake is queued. Provider results
-remain fenced by transition, generation, desired state, lease owner, and intent.
+Placement, owner and selection are independent. A parsed cloud key, cloud
+connection or immutable worker marker selects cloud behavior. Personal Local
+and organization Local retain the sidecar, native credentials, checkout/worktree,
+Git/GitHub and offline source/history. Importing shared modules does not resolve
+cloud deployment authority. A present retired marker refuses cloud execution;
+an absent marker is the Local path.
 
-Migration `0024_cloud_workspace_client_access.sql` stores only capability
-verifiers and operational provider IDs for SSH, localhost tunnels, and isolated
-preview origins. Access issuance rechecks Organization/Team/current-generation
-authority on both sides of the provider call. Unknown SSH issue outcomes enter
-a durable provider-wide revocation queue; stop/archive/delete and membership
-loss do the same. Preview requests recheck the live database row on every
-request, keep Daytona's standard token coordinator-side, reject WebSocket
-upgrade in favor of the SSH tunnel path, bound bodies and headers, and run
-through a pre-auth IP abuse limit before database work. Exact-key endpoint
-lookups are coalesced and both the completed and in-flight provider caches are
-bounded, preventing concurrent preview requests from multiplying provider API
-calls. Valid streaming responses retain a bounded slot through completion or
-cancellation (4 per grant, 32 per process). External provider-edge limits are
-still required for production.
+Paths below are relative to `apps/desktop/`; suite names are adjacent regressions,
+not a claim that native macOS qualification passed.
 
-Migration `0025_cloud_workspace_engine_authority.sql` closes authority that is
-not represented by an ordinary lifecycle request. Organization/Team membership
-loss retires issuing and active client grants, endpoint grants, and live engine
-instances even when the removal runs under user-context RLS. WorkOS account
-deletion applies the same immediate retirement; while `created_by` remains the
-temporary billing-owner compatibility field, it also queues provider-verified
-deletion for every workspace owned by that account. Organization and Team soft
-deletion cancels active setup and generation replacement, supersedes non-delete
-intents, and queues one durable delete per provider generation. Existing delete
-work remains valid, and no workspace reaches `deleted` before independent
-provider inspection proves absence.
-The migration itself requires a controlled deployment: it first drains
-workspace row lockers with a `cloud_workspaces` table boundary, then changes the
-engine schema and installs/backfills authority retirement. Old and new control
-plane processes must not overlap that transaction; the exact one-time approval
-and rollout procedure are in
-[`infrastructure-and-operations.md`](./infrastructure-and-operations.md).
+| Shared area | Local guard and switching contract | Regression anchors |
+| --- | --- | --- |
+| Runtime/requests | Local CONNECTED is immediate; sent requests reject on disconnect and are not replayed. Cloud readiness/caps do not affect the sidecar. | renderer `platform/bridge/__tests__/ws-client-local-lifecycle.test.ts`, `workspace-runtime-client.test.ts`; engine `__tests__/local-workspace-dispatch.test.ts` |
+| Git/GitHub/Design | No cloud grant/actor/source-generation precondition for Local reads or Undo/Redo beside an active cloud peer. Local tokens and viewer hints remain authoritative. | engine `git/__tests__/github-local-read.test.ts`, `diff.test.ts`, `fetch.test.ts`; renderer `platform/bridge/__tests__/design-bridge.test.ts`, `features/design-workspace/__tests__/design-workspace-cache.test.ts` |
+| Provider/native imports and forks | Cloud CLI/lease/language/fork paths require immutable worker authority; Local imports/forks do not resolve or copy cloud credentials/history. | engine `agents/__tests__/cloud-language-local-import.test.ts`, `gateway-cloud-fork-runtime.test.ts`, `__tests__/engine-startup.test.ts` |
+| Create/settings/resource/ports | Personal does not mount Computer reads; org-Local metadata does not gate its engine. Cloud pending/usage/ports caches are account/org/workspace/generation keyed; passive reads never wake. | renderer `state/__tests__/cloud-workspace-create.test.ts`; settings/create-gate and resource/ports hook suites |
+| Shared conversation/status UI | Two-row header is shared; Local Open In uses its checkout and cloud Open In uses a real Local replica. One tab frame retains exact-key content and gates hidden effects/focus/polling. Cloud status/restart is in details. | renderer `shell/__tests__/conversation-header-open-in.test.ts`, workspace-header/tab-status/access-control suites |
+| Durable cloud transcript cache | Local IDs bypass IPC and cloud revision filtering. Optional cache cleanup failure cannot stop Local command registration; retired cache epochs cannot revive across account switches. Cached text does not satisfy send/completion. | electron `__tests__/cloud-transcript-cache-lifecycle.test.ts`; renderer `platform/__tests__/cloud-transcript-cache-history.test.ts`, `features/agent/__tests__/cloud-transcript-cache-hydrate.test.ts` |
+| Native access and release configuration | Typed cloud targets/main-owned device grants gate forwards/SSH; Local localhost/Open In and provider credentials remain independent. Dead cloud dependencies do not remove general Local/Dev smoke. | electron access/SSH/forwarding suites; `scripts/__tests__/electron-local.test.ts`, development/release-environment and agent-smoke suites |
 
-Runtime retirement follows one cross-controller child lock order: client access
-rows, endpoint grants, setup work when applicable, then engine instances.
-Engine registration and final readiness lock the exact one-use registration
-grant before its engine. This matches membership retirement and prevents stop,
-membership-loss, registration, and readiness publication from constructing
-inverse waits. A provider-wide SSH revoke first commits a workspace-locked
-pending fence over every matching `issuing`, `active`, or already-pending row,
-then drains the provider, then terminally fences the same set. A sibling issuance
-already in its provider call is captured before the drain, and a later issuance
-cannot cross the pending marker.
-
-`cloud-workspace-access-client.ts` and `cloud-workspace-access-broker.ts` are
-the desktop consumption boundary for those routes. The bounded main-process
-client rejects redirects, unapproved SSH hosts, inconsistent grant identity,
-kind, port, generation, or expiry, and untrusted free-form error text. If a
-response published a valid-looking grant but fails the rest of the contract,
-the client attempts exact revocation before failing; an unproven cleanup has a
-distinct fail-closed error. The broker limits live device leases, coalesces
-provider-wide SSH revocation by workspace generation, attempts to stop tunnels
-before revocation without letting a local cleanup failure preserve remote
-authority, clears all local authority on auth/app lifetime changes, and returns
-no raw capability through IPC.
-
-`cloud-workspace-ssh-runtime.ts` owns macOS Terminal, Cursor/VS Code, and
-OpenSSH tunnel processes. Terminal and tunnel credentials are projected into
-private one-use SSH configs. Packaged builds require a baked, verified
-`known_hosts` entry for every allowed gateway and use strict checking;
-trust-on-first-use is available only through an explicit development flag.
-Forwards bind exact `127.0.0.1` endpoints and require control-socket readiness. Preview
-capabilities stay in `PreviewFrameAuthorizations` and are injected only for an
-exact HTTPS origin whose request ancestry contains the authorized Browser
-iframe. Capacity exhaustion refuses the new authorization so the broker can
-revoke it instead of silently orphaning an older grant. IDE launch uses a fixed
-`zeros-cloud` authority plus an isolated user-data directory that points
-Remote-SSH at the per-launch private config; the provider username is absent
-from child argv and recent-workspace state. Auth replacement, sign-out, and app
-disposal remove every tracked projection immediately; expiry and the next
-broker lifetime clean up their bounded fallback paths. A new broker lifetime
-removes only exact mkdtemp-shaped one-shot SSH directories left by a prior crash
-before projecting another credential. The disposed broker/runtime cannot be
-reused, and a late provider issuance is revoked before native launch.
-
-This remains pre-production. Setup admission requires qualification of the
-exact provider, image, worker identity and helper contract. The current image
-places the engine in a user namespace mapped to host UID/GID 10003; the fixed
-host broker remains privileged. Workspace/agent and capture identities use
-10001 and 10002. The legacy host-root engine is not a production exception; see
-[the runtime threat model](root-coordinator-threat-model.md). Sandbox commands
-run outside database transactions. The engine compute sponsor is bound to the
-workspace billing epoch; each human/agent action separately records its actor.
-Deleting or deauthorizing that account fails closed by retiring its paid
-runtime and queuing provider-verified cleanup. Organization or Team soft deletion
-similarly cancels setup/replacement work, revokes runtime/client grants, and
-queues every provider generation for deletion. Membership triggers cross FORCE
-RLS only through a narrowly privileged fixed-search-path function, so a normal
-user-context self-leave cannot retain a provider bearer.
-WorkOS identity, account lifecycle, and notification migrations own `0011`
-through `0019`; cloud workspace additions resume at `0020`. The append-only
-ladder in `apps/control-plane/migrations/` is authoritative; do not infer the
-current schema from an old phase's final migration number. The migration runner explicitly recognizes the
-`a80ac25` `0013`–`0018` and `c2b7418` `0018`–`0050` histories as aliases for
-their canonical `0020`–`0052` equivalents. `0053` repairs the Personal
-local-only constraint for those databases.
-Never rename a migration after deployment and never edit
-`0010_cloud_workspace_control_plane.sql` in place.
-
-The cloud API models Organization-owned cloud rows and rejects Personal
-ownership. Desktop local workspaces remain in SQLite; fork jobs allocate fresh
-UUID destinations and preserve released local identifiers as compatibility
-data. The placement-aware resolver preserves `.zeros/settings.toml` as optional
-shared input and always excludes `.zeros/settings.local.toml` and secret
-material from copies.
+Native follow-up: open both Local owner types beside cloud; switch A→B→A and
+accounts; exercise prompt/reconnect/Stop, files/Design/history, Git/PR, Open In,
+shortcuts, split header and terminal focus. Repeat Local editing/history/restart
+signed out/offline; restore networking for GitHub/provider work. Unreadable/full
+optional cloud-cache storage must leave Local startup/commands available.
 
 ## Checkpoint throughput and bounded storage admission
 
@@ -435,72 +212,17 @@ reclaim, UUID casing, fragmented bodies and shared scalar/batch capacity. These
 are algorithm and correctness checks; hosted cold capture/restore remains a
 separate qualification gate, measured through the deployed API and object store.
 
-## Protocol contract
+## Verification and ownership
 
-Remote clients use `PROTOCOL_VERSION` from `packages/protocol/src/version.ts`.
-Wire-shape changes require the protocol guard and mixed-version behavior. The
-validation client imports the shared version rather than duplicating a numeric
-constant.
+Run adjacent exact-path Vitest suites with `--maxWorkers=2` and use an isolated
+DB for control-plane integration. Repository verification and platform-specific
+gates are in `AGENTS.md`; release/qualification procedures are in
+[qualification status](qualification-status.md), [release worker qualification](release-worker-qualification.md),
+[runtime skew](runtime-skew-gate.md) and [native access](native-access-acceptance.md).
+Shared protocol changes use `PROTOCOL_VERSION` and the mixed-version guard;
+`LocalTransport` stays loopback-only and cloud work never relaxes its defenses.
 
-## Security boundary already preserved
-
-`LocalTransport` remains loopback-only with local host/origin defenses.
-`CloudTransport` is a separate listener behind a remote network boundary; cloud
-work must never relax local transport checks. The current bridge token is kept
-out of the validation URL, and harness state is written atomically with
-owner-only permissions and removed after successful cleanup. The browser and
-operator clients use the same safe `zeros-v1` + credential-carrier protocol and
-the shared canonical `source: "browser"` discriminator; the client forces that
-value so a call site cannot produce a connected-but-discarded false green.
-
-The listener enforces aggregate—not merely per-socket—handler and retained-byte
-limits, preserves a separately bounded control lane, and bounds total outbound
-buffering and HTTP/WS connection/shutdown state. Qualified account verification
-coalesces JWKS lookups, has fetch and streamed-body deadlines/caps, validates
-key-use/algorithm metadata, and cannot fall back to symmetric signing.
-
-## Useful commands
-
-```bash
-pnpm exec vitest run apps/desktop/src/engine/transport/__tests__/cloud-transport.test.ts
-pnpm exec vitest run apps/desktop/electron/__tests__/cloud-workspace-access-client.test.ts
-pnpm exec vitest run apps/desktop/electron/__tests__/cloud-workspace-access-broker.test.ts
-pnpm exec vitest run apps/desktop/electron/__tests__/cloud-workspace-ssh-runtime.test.ts
-pnpm exec vitest run apps/desktop/electron/__tests__/preview-frame-authorizations.test.ts
-pnpm exec vitest run scripts/__tests__/cloud-bridge-client.test.ts
-pnpm exec vitest run scripts/__tests__/cloud-workspace-validation-config.test.ts
-pnpm exec vitest run scripts/__tests__/cloud-workspace-setup-helper.test.ts
-pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/daytona-provider.test.ts
-pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/access.integration.test.ts
-pnpm exec vitest run scripts/__tests__/repository-layout.test.ts
-pnpm build:engine
-pnpm check:protocol
-pnpm check:secrets
-pnpm --dir apps/control-plane audit:prod
-```
-
-The provider-account sequence is documented beside the harness. It is never a
-fork/PR-CI claim. The protected manual workflow uses exact-commit image builds,
-an ephemeral asymmetric validation identity, required live
-Claude/Codex/Cursor turns with a per-turn challenge, the same browser-safe WSS
-credential carrier as the renderer, outbound-reachability/soak/SSH verdicts, and
-production-adapter private-preview, stop/wake, drain/candidate-delete/source-
-wake rollback primitives, plus fresh-inventory-verified cleanup. A workflow
-existing in source is not evidence that it ran: record platform, region, image
-ID, runtime versions, measured latencies, soak duration, cleanup result, and
-sanitized failures in the private operational record.
-
-## Ownership rules
-
-- Keep lifecycle schemas and routes in `apps/control-plane`, not in desktop UI.
-- Put remote desktop connection orchestration in a semantic cloud-workspace
-  feature/engine boundary, not in `renderer/shared`.
-- Keep provider SDK types behind the control-plane/provider boundary.
-- Add a shared package only after a stable contract has multiple deployable
-  consumers.
-- Keep device absolute paths, replica application state, local-only settings,
-  SSH client configuration, and localhost tunnel processes in desktop-owned
-  storage/process boundaries.
-- Add a new app only when it owns an independent build and deployment.
-- Update this reference and `REPOSITORY-ARCHITECTURE.md` whenever those
-  boundaries become real.
+Keep provider SDKs, provisioning and tenant authorization in the control plane;
+device absolute paths, cache, SSH files and tunnel processes in desktop-owned
+storage; and live workspace operation ordering in the engine. Update this source
+map and `REPOSITORY-ARCHITECTURE.md` when those boundaries change.

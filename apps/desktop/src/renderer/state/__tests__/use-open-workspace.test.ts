@@ -7,8 +7,21 @@ const prefetchWorkspaceSurface = vi.fn();
 const prepareChatView = vi.fn();
 const selectChatToRestoreForFolder = vi.fn();
 const pendingWorkspaceMode = vi.fn();
-const wake = vi.hoisted(() => ({ enabled: true, request: vi.fn() }));
+const wake = vi.hoisted(() => ({ enabled: true, signedIn: true, entitled: true, request: vi.fn() }));
 vi.mock("../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => wake.enabled }));
+vi.mock("../../features/team/team-store", () => ({
+  getOrganizationStoreGeneration: () => 0,
+  getTeamStoreState: () => ({ me: wake.signedIn ? {
+    user: { id: "nonstaff-member", staffRole: null },
+    organizations: [{ id: "11111111-1111-4111-8111-111111111111", isPersonal: false, workspaceCapabilities: { cloud: wake.entitled } }],
+    teams: [],
+  } : null }),
+  useTeams: () => ({ me: wake.signedIn ? {
+    user: { id: "nonstaff-member", staffRole: null },
+    organizations: [{ id: "11111111-1111-4111-8111-111111111111", isPersonal: false, workspaceCapabilities: { cloud: wake.entitled } }],
+    teams: [],
+  } : null }),
+}));
 vi.mock("../cloud-workspace-open-intent", () => ({ requestCloudWorkspaceOpen: wake.request }));
 
 vi.mock("react", async (importOriginal) => ({
@@ -44,10 +57,25 @@ const { useOpenWorkspace } = await import("../use-open-workspace");
 beforeEach(() => {
   vi.clearAllMocks();
   pendingWorkspaceMode.mockReturnValue(null);
-  wake.enabled = true;
+  wake.enabled = true; wake.signedIn = true; wake.entitled = true;
 });
 
 describe("useOpenWorkspace", () => {
+  it.each(["code", "design"] as const)("keeps Local %s navigation free of Cloud open intents for a signed-in member", kind => {
+    selectChatToRestoreForFolder.mockReturnValue("saved-chat");
+    const open = useOpenWorkspace();
+    for (const path of ["/personal/local", "/organization/local"]) {
+      open({ id: path, path, repoRoot: path, kind });
+    }
+    expect(wake.request).not.toHaveBeenCalled();
+  });
+  it("publishes a nonstaff member's cloud open intent without enabling the retired preference", () => {
+    wake.enabled = false;
+    const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    selectChatToRestoreForFolder.mockReturnValue("saved-chat");
+    useOpenWorkspace()({ id: folder, path: folder, repoRoot: folder, kind: "code" });
+    expect(wake.request).toHaveBeenCalledExactlyOnceWith(folder);
+  });
   it("publishes the exact destination before requesting a wake on explicit cloud open", () => {
     const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
     selectChatToRestoreForFolder.mockReturnValue("saved-chat");
@@ -57,9 +85,10 @@ describe("useOpenWorkspace", () => {
     expect(wake.request).toHaveBeenCalledExactlyOnceWith(folder);
     expect(dispatch.mock.invocationCallOrder[0]).toBeLessThan(wake.request.mock.invocationCallOrder[0]);
   });
-  it.each(["gate", "archive"])("does not request compute for a cloud open blocked by %s", reason => {
+  it.each(["signed-out", "no-entitlement", "archive"])("does not request compute for a cloud open blocked by %s", reason => {
     const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
-    wake.enabled = reason !== "gate";
+    wake.signedIn = reason !== "signed-out";
+    wake.entitled = reason !== "no-entitlement";
     selectChatToRestoreForFolder.mockReturnValue("saved-chat");
     useOpenWorkspace()({ id: folder, path: folder, repoRoot: folder, ...(reason === "archive" ? { archivedAt: 100 } : {}) });
     expect(wake.request).not.toHaveBeenCalled();

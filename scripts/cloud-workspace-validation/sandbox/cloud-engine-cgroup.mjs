@@ -180,10 +180,9 @@ export class CloudEngineCgroup {
   } = {}) {
     directory ??= cloudCgroupDirectory(runtime, kind, instanceId);
     const leaf = directory.slice(runtime.cgroupRoot.length + 1);
-    const valid = runtime.profile === "v4"
-      ? isCloudRuntimeCgroupRoot(runtime.cgroupRoot) && path.dirname(directory) === runtime.cgroupRoot &&
-        (leaf === "setup" || leaf.startsWith("engine-") && INSTANCE.test(leaf.slice(7)) || workloadLeaf(leaf))
-      : /^\/sys\/fs\/cgroup\/zeros-cloud-(?:engine(?:-[a-f0-9-]{36})?|setup)$/.test(directory);
+    const valid = runtime.profile === "v4" &&
+      isCloudRuntimeCgroupRoot(runtime.cgroupRoot) && path.dirname(directory) === runtime.cgroupRoot &&
+      (leaf === "setup" || leaf.startsWith("engine-") && INSTANCE.test(leaf.slice(7)) || workloadLeaf(leaf));
     if (!valid)
       throw new Error("Invalid cloud engine scope identity");
     this.directory = directory;
@@ -241,9 +240,8 @@ export class CloudEngineCgroup {
 }
 
 export function cloudCgroupDirectory(runtime, kind, instanceId) {
-  if (!["setup", "engine", "workload"].includes(kind) || kind === "workload" && runtime.profile !== "v4")
+  if (runtime.profile !== "v4" || !["setup", "engine", "workload"].includes(kind))
     throw new Error("Invalid cloud engine scope identity");
-  if (runtime.profile !== "v4") return kind === "setup" ? CLOUD_SETUP_CGROUP : CLOUD_ENGINE_CGROUP;
   if (!isCloudRuntimeCgroupRoot(runtime.cgroupRoot) || kind !== "setup" && !INSTANCE.test(instanceId ?? ""))
     throw new Error("Invalid cloud engine scope identity");
   return `${runtime.cgroupRoot}/${kind === "setup" ? "setup" : `${kind === "workload" ? WORKLOAD_PREFIX : "engine-"}${instanceId}`}`;

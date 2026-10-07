@@ -279,6 +279,9 @@ describe("sidebar collapse and geometry", () => {
   const PANE = source(
     "apps/desktop/src/renderer/shell/conversation/conversation-pane.tsx",
   );
+  const WORKSPACE_HEADER = source(
+    "apps/desktop/src/renderer/shell/conversation/workspace-header.tsx",
+  );
 
   it("seats the panel-left toggle after the traffic lights in both states", () => {
     expect(TOGGLE).toContain('import { PanelLeft } from "lucide-react";');
@@ -314,10 +317,15 @@ describe("sidebar collapse and geometry", () => {
     );
     expect(SHELL).toContain('collapsedControlsVisible ? "mt-10" : ""');
     expect(SHELL).toContain("windowControlsInset={sidebarCollapsed}");
-    // 8px leading-slot gutter + 108px spacer = the collapsed band's 116px.
+    // The reserve belongs to the single column header, above all split panes.
     expect(PANE).toMatch(
-      /windowControlsInset \? \(\s*<span\s*className="block h-full w-\[108px\] shrink-0"/,
+      /<ConversationWorkspaceHeader\s[\s\S]*?windowControlsInset=\{windowControlsInset\}/,
     );
+    expect(WORKSPACE_HEADER).toMatch(
+      /windowControlsInset && <span className="block h-full w-\[108px\] shrink-0"[^>]*data-window-controls-reserve/,
+    );
+    expect(PANE).not.toContain("data-window-controls-reserve");
+    expect(WORKSPACE_HEADER.match(/data-window-controls-reserve/g)).toHaveLength(1);
   });
 
   it("uses 30px rows and 2px gaps, with a quiet section header", () => {

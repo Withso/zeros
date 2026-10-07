@@ -62,8 +62,8 @@ function api(): CloudWorkspaceAccessBrokerApi {
       },
       ssh: {
         username: SSH_CREDENTIAL,
-        host: "ssh.app.daytona.io",
-        command: `ssh ${SSH_CREDENTIAL}@ssh.app.daytona.io`,
+        host: "ssh.fixture.test",
+        command: `ssh ${SSH_CREDENTIAL}@ssh.fixture.test`,
       },
     })),
     issueTunnel: vi.fn(async (_accessToken, input) => ({
@@ -77,7 +77,7 @@ function api(): CloudWorkspaceAccessBrokerApi {
       },
       tunnel: {
         sshUsername: SSH_CREDENTIAL,
-        sshHost: "ssh.app.daytona.io",
+        sshHost: "ssh.fixture.test",
         remoteHost: "127.0.0.1" as const,
         remotePort: input.remotePort,
         session: {
@@ -282,6 +282,38 @@ describe("native service broker", () => {
     await expect(f.access.copySshCommand(target)).rejects.toThrow(/device authority changed/i);
     expect(f.nativeServices.prepareSsh).not.toHaveBeenCalled();
     expect(f.clipboard).not.toHaveBeenCalled();
+    expect(f.nativeServices.api.revoke).toHaveBeenCalledOnce();
+    await f.access.dispose();
+  });
+
+  async function automaticFixture() {
+    const f = nativeFixture();
+    vi.mocked(f.legacy.issueEngineAdmission).mockResolvedValue({ version: 2, audience: "zeros-cloud-workspace-engine-client-admission-v2",
+      ...target, generation: 7, authorityEpoch: 9, engineInstanceId: ENGINE_INSTANCE_ID, remotePort: 47891,
+      grantToken: `zwa_${"d".repeat(43)}`, expiresAt: new Date(NOW + 120000).toISOString(), bridgeUrl: "wss://api.zeros.test/v1/cloud-workspaces/bridge" });
+    const runtime = await f.access.openRuntime(target);
+    return { ...f, runtime, context: f.access.serviceContext() };
+  }
+  it("issues automatic tunnels only for the exact admitted runtime and records safe ownership", async () => {
+    const f = await automaticFixture();
+    const receipt = await f.access.startAutomaticTunnel({ ...f.runtime, ...f.context, localPort: 5173, remotePort: 4173 });
+    expect(f.nativeServices.api.issue).toHaveBeenCalledWith("account-access-token", expect.objectContaining({
+      ...target, kind: "tunnel", remotePort: 4173, idempotencyKey: "desktop:auto-tunnel:55555555-5555-4555-8555-555555555555",
+    }));
+    expect(f.access.listServices({ ...target, ...f.context })).toEqual([expect.objectContaining({ accessId: receipt.accessId, ownership: "auto" })]);
+    await f.access.dispose();
+  });
+  it.each(["generation", "authorityEpoch", "connectionSequence"] as const)("rejects an automatic tunnel under stale %s before admission", async field => {
+    const f = await automaticFixture();
+    await expect(f.access.startAutomaticTunnel({ ...f.runtime, ...f.context, [field]: f.runtime[field] + 1, localPort: 5173, remotePort: 4173 })).rejects.toThrow(/superseded/i);
+    expect(f.nativeServices.api.issue).not.toHaveBeenCalled();
+    await f.access.dispose();
+  });
+  it("retires a late automatic grant when its runtime closes during admission", async () => {
+    const f = await automaticFixture(), issue = f.nativeServices.api.issue.getMockImplementation()!;
+    f.nativeServices.api.issue.mockImplementationOnce(async (...args) => { await f.access.closeRuntime(f.runtime.runtimeId); return issue(...args); });
+    await expect(f.access.startAutomaticTunnel({ ...f.runtime, ...f.context, localPort: 5173, remotePort: 4173 })).rejects.toThrow(/superseded/i);
+    expect(f.nativeServices.startTunnel).not.toHaveBeenCalled();
     expect(f.nativeServices.api.revoke).toHaveBeenCalledOnce();
     await f.access.dispose();
   });
@@ -517,7 +549,7 @@ describe("CloudWorkspaceAccessBroker", () => {
     });
 
     expect(writeClipboard).toHaveBeenCalledWith(
-      `ssh ${SSH_CREDENTIAL}@ssh.app.daytona.io`,
+      `ssh ${SSH_CREDENTIAL}@ssh.fixture.test`,
     );
     expect(result).toEqual({ accessId: GRANT_ID, expiresAt: EXPIRES_AT });
     expect(JSON.stringify(result)).not.toContain(SSH_CREDENTIAL);
@@ -572,7 +604,7 @@ describe("CloudWorkspaceAccessBroker", () => {
       remoteHost: "127.0.0.1",
       remotePort: 4173,
       sshUsername: SSH_CREDENTIAL,
-      sshHost: "ssh.app.daytona.io",
+      sshHost: "ssh.fixture.test",
       expiresAt: EXPIRES_AT,
     });
     expect(accessApi.issueTunnel).toHaveBeenCalledWith(

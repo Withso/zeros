@@ -35,8 +35,10 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   "apps/control-plane/",
   // Desktop clients and protocol schemas the admission contracts import.
   "apps/desktop/electron/cloud-workspace-access-client.ts",
+  "apps/desktop/electron/cloud-workspace-detected-ports.ts",
   "apps/desktop/electron/tsconfig.json",
   "apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs",
+  "apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime.ts",
   "apps/desktop/src/engine/cloud-agent-execution-client.ts",
   "apps/desktop/src/engine/cloud-command-client.ts",
   "apps/desktop/src/engine/cloud-event-client.ts",

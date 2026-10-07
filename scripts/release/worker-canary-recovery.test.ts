@@ -50,21 +50,23 @@ describe("bounded historical native recovery crash windows", () => {
     expect(test.core.retire).not.toHaveBeenCalled(); expect(test.reconcile).not.toHaveBeenCalled();
     expect(test.core.allocate).not.toHaveBeenCalled(); expect(test.core.start).not.toHaveBeenCalled();
   });
-  it("resumes the adapter's durably saved empty allocation using its original operation ID after an interrupted save", async () => {
-    const test = fixture(true), run = test.state.releaseRuns[0], image = { ...test.job.image, architecture: "linux/amd64" as const, storageMiB: 4096 };
-    run.canaries = []; test.state.resources.images = [];
+  it("retains the historically saved empty allocation after an interrupted save while qualification stays retired", async () => {
+    const test = fixture(true), image = { ...test.job.image, architecture: "linux/amd64" as const, storageMiB: 4096 };
+    test.job.phase = "allocating"; test.state.resources.images = [];
     const credentials = new Map(workerConnections().map(connection => [connection.kind, connection]));
     const core = { ...test.core, ready: vi.fn() }; let durable: any;
     test.lease.save.mockImplementationOnce(async () => { durable = structuredClone(test.state); throw new Error("Synthetic interrupted allocation save"); });
-    await expect(releaseCanaryAdapter(test.lease, run, credentials, core, { qualificationProfile: "smoke" }).qualify(image, "claude-setup-token"))
-      .rejects.toThrow("interrupted allocation save");
+    // This is the original save-job-before-allocation crash window. Seed the
+    // archived job directly; the retired producer cannot create or resume it.
+    await expect(test.lease.save()).rejects.toThrow("interrupted allocation save");
     expect(core.allocate).not.toHaveBeenCalled(); expect(durable.releaseRuns[0].canaries).toHaveLength(1);
     const recovered = { state: durable, signal: new AbortController().signal, fence: vi.fn(async () => {}), save: vi.fn(async () => {}) };
     expect(await reconcileReleaseCanaryRetirements(test.config, test.actor, recovered, core, test.reconcile)).toBe(0);
-    core.allocate.mockRejectedValueOnce(new Error("Synthetic resumed allocation boundary"));
+    const before = structuredClone(durable);
     await expect(releaseCanaryAdapter(recovered, durable.releaseRuns[0], credentials, core, { qualificationProfile: "smoke" }).qualify(image, "claude-setup-token"))
-      .rejects.toThrow("resumed allocation boundary");
-    expect(core.allocate).toHaveBeenCalledExactlyOnceWith(durable.releaseRuns[0].canaries[0], image);
+      .rejects.toMatchObject({ code: "release_worker_images_retired", message: "v3 release worker images are retired; v4 runtime bundles are the supported artifact" });
+    expect(core.allocate).not.toHaveBeenCalled(); expect(recovered.save).not.toHaveBeenCalled(); expect(recovered.fence).not.toHaveBeenCalled();
+    expect(durable).toEqual(before); expect(durable.releaseRuns[0].canaries[0].id).toBe(test.job.id);
     expect(durable.releaseRuns[0].canaries).toHaveLength(1); expect(test.reconcile).not.toHaveBeenCalled();
     expect(core.start).not.toHaveBeenCalled(); expect(core.poll).not.toHaveBeenCalled(); expect(core.retire).not.toHaveBeenCalled();
   });

@@ -30,6 +30,7 @@ import {
   RUNTIME_STAFF_PATH,
 } from "./runtime-publication-routes.js";
 import type { RuntimePublicationProvenance } from "./runtime-oidc.js";
+import { selectCloudRuntime } from "./runtime-selection.js";
 
 const fixtures = new URL(
   "../../../../packages/protocol/src/__tests__/fixtures/cloud-runtime/",
@@ -54,13 +55,13 @@ const descriptor = {
 const body = {
   descriptor,
   manifestHeader,
-  releaseOrder: 42,
+  releaseOrder: 1234,
   githubRunId: 1234,
   githubRunAttempt: 1,
 };
 const provenance: RuntimePublicationProvenance = {
   runId: body.githubRunId,
-  runNumber: body.releaseOrder,
+  runNumber: 42,
   runAttempt: body.githubRunAttempt,
   sha: descriptor.sourceCommit,
   workflowRef:
@@ -371,7 +372,7 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
       await expect(
         service.complete(
           { ...body, releaseOrder: 43 },
-          { ...provenance, runNumber: 43 },
+          provenance,
         ),
       ).rejects.toMatchObject({ status: 409 });
       expect(await registeredRows()).toEqual(before);
@@ -380,7 +381,7 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
     it("reuses a bundle for a later independently verified release with the same source", async () => {
       await complete();
       await service.complete(
-        { ...body, releaseOrder: 43, githubRunId: 1235 },
+        { ...body, releaseOrder: 1235, githubRunId: 1235 },
         { ...provenance, runNumber: 43, runId: 1235 },
       );
       const rows = await registeredRows();
@@ -585,7 +586,7 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
             runtimeId: `r1-${digest}`,
             manifestSha256: digest,
           },
-          releaseOrder: 43 + index,
+          releaseOrder: 1235 + index,
           githubRunId: 1235 + index,
         };
         objects.set(
@@ -597,7 +598,7 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
         );
         await service.complete(next, {
           ...provenance,
-          runNumber: next.releaseOrder,
+          runNumber: 43 + index,
           runId: next.githubRunId,
         });
       }
@@ -613,7 +614,7 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
           ),
         ),
       ).toBe(true);
-      expect(status.channelReleases[0].releaseOrder).toBe(62);
+      expect(status.channelReleases[0].releaseOrder).toBe(1254);
     });
 
     it("revokes the bundle and all qualifications, preserves timestamps on retries and logs a closed audit line", async () => {
@@ -737,6 +738,133 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
       expect(
         (await post(RUNTIME_BASE_REGISTRATION_PATH, baseBody)).status,
       ).toBe(200);
+    });
+
+    it.each(["alpha", "beta", "production"] as const)(
+      "publishes standalone bundles only into its configured %s channel and preserves replay",
+      async channel => {
+        const verifyOidc = vi.fn(async () => ({ ...provenance,
+          workflowRef: "Withso/zeros/.github/workflows/cloud-runtime-bundle.yml@refs/heads/main" }));
+        const app = createRuntimePublicationRoutes({ ...config, deploymentChannel: channel,
+          cloudRuntimePublication: { ...config.cloudRuntimePublication!, environment: channel } }, pool, { artifacts, verifyOidc, enqueueSmoke });
+        app.onError((error, c) => c.json({ error: { code: (error as HttpError).code } }, (error as HttpError).status));
+        const post = (path: string, payload: unknown) => app.request(path, { method: "POST",
+          headers: { Authorization: "Bearer synthetic-oidc-token", "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        expect((await post(RUNTIME_PUBLICATION_PATH, body)).status).toBe(200);
+        expect((await post(RUNTIME_PUBLICATION_PATH, { ...body, channel: "foreign" })).status).toBe(422);
+        objects.set(objectKey, descriptor.archiveBytes);
+        expect((await post(`${RUNTIME_PUBLICATION_PATH}/complete`, body)).status).toBe(200);
+        const first = await registeredRows();
+        expect(first.releases).toHaveLength(1);
+        expect(first.releases[0]).toMatchObject({ channel, github_release_run_id: String(provenance.runId) });
+        expect((await post(`${RUNTIME_PUBLICATION_PATH}/complete`, body)).status).toBe(200);
+        expect(await registeredRows()).toEqual(first);
+        expect((await pool.query("SELECT * FROM cloud_runtime_qualifications")).rows).toHaveLength(0);
+        if (channel !== "alpha") {
+          verifyOidc.mockClear();
+          expect((await post(RUNTIME_BASE_REGISTRATION_PATH, baseBody)).status).toBe(404);
+          expect(verifyOidc).not.toHaveBeenCalled();
+          expect((await pool.query("SELECT * FROM cloud_runtime_base_images")).rows).toHaveLength(0);
+        }
+      },
+    );
+
+    it("isolates conflicting workflow counters across configured publication channels", async () => {
+      objects.set(objectKey, descriptor.archiveBytes);
+      await service.complete(body, provenance);
+      for (const [channel, runId] of [["beta", 2234], ["production", 3234]] as const) {
+        const other = new DatabaseRuntimePublicationService(pool, artifacts, enqueueSmoke, channel);
+        const request = { ...body, releaseOrder: runId, githubRunId: runId };
+        const identity = { ...provenance, runId,
+          workflowRef: "Withso/zeros/.github/workflows/cloud-runtime-bundle.yml@refs/heads/main" };
+        await expect(other.publication(request, identity)).resolves.toMatchObject({ objectKey });
+        await expect(other.complete(request, identity)).resolves.toMatchObject({ registered: true });
+      }
+      const rows = (await registeredRows()).releases;
+      expect(rows.map(row => row.channel).sort()).toEqual(["alpha", "beta", "production"]);
+      for (const channel of ["alpha", "beta", "production"] as const) {
+        const status = await readRuntimeStatus(pool, channel);
+        expect(status.channelReleases).toHaveLength(1);
+        const release = rows.find(row => row.channel === channel)!;
+        expect(status.channelReleases[0]).toMatchObject({
+          releaseOrder: Number(release.github_release_run_id),
+          githubRunId: Number(release.github_release_run_id),
+        });
+      }
+    });
+
+    it("interleaves standalone and Alpha workflow counters while preserving historical release retries", async () => {
+      await complete();
+      await withSystemTx(pool, async tx => {
+        await tx.query(`INSERT INTO cloud_runtime_channel_releases
+          (channel,release_order,runtime_id,github_release_run_id,github_release_run_attempt,confirmed_at)
+          VALUES('alpha',42,$1,1001,1,now()) ON CONFLICT DO NOTHING`, [descriptor.runtimeId]);
+      });
+      const historical = (await registeredRows()).releases.find(row => row.github_release_run_id === "1001");
+      await qualify();
+      const head = () => withSystemTx(pool, tx => selectCloudRuntime(tx, "smoke"));
+      const standalone = { ...body, releaseOrder: 2001, githubRunId: 2001 };
+      const standaloneIdentity = { ...provenance, runId: 2001,
+        workflowRef: "Withso/zeros/.github/workflows/cloud-runtime-bundle.yml@refs/heads/main" };
+      await expect(service.publication(standalone, standaloneIdentity)).resolves.toMatchObject({ objectKey });
+      await expect(service.complete(standalone, standaloneIdentity)).resolves.toMatchObject({ registered: true });
+      expect((await head())?.releaseOrder).toBe(2001n);
+      await service.complete({ ...body, releaseOrder: 2002, githubRunId: 2002 }, { ...provenance, runNumber: 43, runId: 2002 });
+      expect((await head())?.releaseOrder).toBe(2002n);
+      const rows = (await registeredRows()).releases;
+      const standaloneRow = rows.find(row => row.github_release_run_id === "2001");
+      const nextAlpha = rows.find(row => row.github_release_run_id === "2002");
+      expect(Number(standaloneRow!.release_order)).toBe(2001);
+      expect(Number(nextAlpha!.release_order)).toBe(2002);
+      expect((await readRuntimeStatus(pool, "alpha")).channelReleases[0].releaseOrder).toBe(2002);
+      const legacy = { ...body, releaseOrder: 42, githubRunId: 1001 };
+      const legacyIdentity = { ...provenance, runId: 1001 };
+      const beforeRetry = await registeredRows();
+      await expect(service.publication(legacy, legacyIdentity)).resolves.toMatchObject({ objectKey, upload: null });
+      await service.complete(legacy, legacyIdentity);
+      // Updated publishers can retry a historical run without assigning it a new order.
+      await service.complete({ ...legacy, releaseOrder: 1001 }, legacyIdentity);
+      expect(await registeredRows()).toEqual(beforeRetry);
+      expect((await head())?.releaseOrder).toBe(2002n);
+      expect((await registeredRows()).releases.find(row => row.github_release_run_id === "1001")).toEqual(historical);
+    });
+
+    it.each(["alpha", "beta", "production"] as const)(
+      "refuses new legacy run-number releases in %s before artifact or registry effects",
+      async channel => {
+        const publisher = new DatabaseRuntimePublicationService(pool, artifacts, enqueueSmoke, channel);
+        const legacy = { ...body, releaseOrder: provenance.runNumber };
+        const identity = { ...provenance,
+          workflowRef: channel === "alpha" ? provenance.workflowRef :
+            "Withso/zeros/.github/workflows/cloud-runtime-bundle.yml@refs/heads/main" };
+        for (const operation of ["publication", "complete"] as const) {
+          await expect(publisher[operation](legacy, identity)).rejects.toMatchObject({
+            status: 409, code: "runtime_identity_conflict",
+          });
+        }
+        expect(artifacts.head).not.toHaveBeenCalled();
+        expect(artifacts.presignCreatePut).not.toHaveBeenCalled();
+        expect(enqueueSmoke).not.toHaveBeenCalled();
+        expect(await registeredRows()).toEqual({ bundles: [], releases: [] });
+      },
+    );
+
+    it("requires a legacy retry to retain its existing channel and runtime", async () => {
+      await complete();
+      await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_runtime_channel_releases
+        (channel,release_order,runtime_id,github_release_run_id,github_release_run_attempt,confirmed_at)
+        VALUES('alpha',42,$1,1001,1,now())`, [descriptor.runtimeId]));
+      const legacy = { ...body, releaseOrder: 42, githubRunId: 1001 };
+      const identity = { ...provenance, runId: 1001 };
+      const before = await registeredRows();
+      const beta = new DatabaseRuntimePublicationService(pool, artifacts, enqueueSmoke, "beta");
+      await expect(beta.complete(legacy, identity)).rejects.toMatchObject({ status: 409, code: "runtime_identity_conflict" });
+      const digest = "d".repeat(64);
+      await expect(service.complete({ ...legacy, descriptor: { ...descriptor,
+        runtimeId: `r1-${digest}`, manifestSha256: digest } }, identity)).rejects.toMatchObject({
+        status: 409, code: "runtime_identity_conflict",
+      });
+      expect(await registeredRows()).toEqual(before);
     });
   },
 );

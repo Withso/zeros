@@ -8,7 +8,12 @@ import { promisify } from "node:util";
 import { PassThrough, Readable } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
+import { testCloudRuntime } from "../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime";
 import { PROTOCOL_VERSION } from "@zeros/protocol/version";
+vi.mock("../cloud-workspace-validation/sandbox/cloud-runtime-root.mjs", async original => ({
+  ...await original<typeof import("../cloud-workspace-validation/sandbox/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime: (await import("../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime")).testCloudRuntime,
+}));
 import {
   CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
   MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
@@ -67,6 +72,7 @@ describe("versioned cloud recovery manifests", () => {
   it("retains only the closed revoked code from a bounded admission error", async () => {
     const responses = [
       { body: JSON.stringify({ error: { code: "computer_environment_revoked", retryable: false } }), status: 409, code: "computer_environment_revoked" },
+      { body: JSON.stringify({ error: { code: "cloud_workspace_v2_required", retryable: false } }), status: 409, code: "cloud_workspace_v2_required" },
       { body: JSON.stringify({ error: { code: "private-provider-output" } }), status: 409, code: "request_invalid" },
       { body: "private-provider-output".repeat(100), status: 409, code: "request_invalid" },
       { body: "private-provider-output", status: 503, code: "admission_temporarily_unavailable" },
@@ -170,12 +176,11 @@ describe("cloud image admission diagnostics", () => {
     expect(checks).toMatchObject({
       execution: false,
       report: true,
-      profile: true,
+      profile: false,
       qualified: false,
-      source: true,
-      build: true,
+      metadata: false,
       helpers: true,
-      resources: true,
+      resources: false,
       runtime: false,
     });
     expect(
@@ -812,7 +817,7 @@ describe("cloud worker supervisor protocol", () => {
     expect(children).toHaveLength(1);
     expect(spawnCalls).toEqual([
       {
-        file: "/opt/zeros-runtime/bin/start-engine.sh",
+        file: testCloudRuntime().startEngine,
         args: [],
         options: {
           cwd: "/",
@@ -821,7 +826,7 @@ describe("cloud worker supervisor protocol", () => {
           env: {
             HOME: "/root",
             LANG: "C.UTF-8",
-            PATH: "/opt/zeros-runtime/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            PATH: `${testCloudRuntime().binRoot}:/usr/bin:/bin:/usr/sbin:/sbin`,
             ZEROS_ACCOUNT_JWT_AUD: "zeros-cloud",
             ZEROS_ACCOUNT_JWT_CLIENT_ID: "client_desktop_example",
             ZEROS_ACCOUNT_JWT_CONTRACT: "zeros-access-v1",

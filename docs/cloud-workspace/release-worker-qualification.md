@@ -1,280 +1,87 @@
-# Release worker qualification
+# Release worker retirement and cleanup
 
-Worker qualification is per channel and exact image/source. Keep
-`ZEROS_WORKER_PROMOTION` disabled except for an explicitly authorized,
-protected-channel rehearsal or a previously qualified channel's guarded release.
-A rehearsal must pass the complete protected lane before that channel is treated
-as qualified or customer cloud is enabled. Never run it on PRs/forks, from
-`.env.agent`, or with Dev fixture identities. Unit tests use fakes and cannot
-certify provider behavior, native account availability, quota, cleanup latency
-or a Mac release.
+The opt-in **v3 image-kit worker-promotion lane is retired**. When
+`ZEROS_WORKER_PROMOTION=enabled`, release workflows and producer, canary,
+readiness and publication entrypoints refuse before allocation, build or
+credential preparation with the fixed error:
 
-While `ZEROS_WORKER_PROMOTION` is not `enabled`, releases skip the worker lane
-and a desktop built with `ZEROS_CLOUD_WORKSPACES_ENABLED=true` still publishes
-after the hosted services gate (migrations, backup, Railway, Pages, WorkOS)
-passes. The API keeps its current worker state, which may be none or an
-unqualified image, so cloud workspaces work only where that state already
-allows it. Set the switch to `enabled` to require a qualified worker again.
+> v3 release worker images are retired; v4 runtime bundles are the supported artifact
+
+Authenticated release-canary preflight/admission returns HTTP 409 with code
+`release_worker_images_retired`; invalid bearers still receive HTTP 401. The old
+native runner is refused before commands or uploads and never invokes the
+removed `--qualify-agent` entry. There is no frozen engine dependency copy.
+
+Current workspace admission remains saved-v2 Computer source + qualified v4
+runtime/base + actor protocol 2. The supported bundle consumers are `release-alpha.yml`
+and `alpha-publication.yml`; see [runtime bundles](runtime-bundles.md) and
+[qualification status](qualification-status.md). Profiles 1–3 and historical
+native-v3 approvals cannot admit current cloud workspaces. Personal Local and
+organization Local workspaces do not use the release worker lane.
 
 ## Order and handoff
 
-For a channel's first worker, provision encrypted account keys and release-only
-Boat admission first, then deploy the reviewed API/schema with customer cloud
-disabled. Owners can connect accounts and record audited canary designations;
-the release bearer can qualify native runtimes before an image tuple exists.
-These bootstrap surfaces do not admit customer workspaces, execution or
-customization. After qualification and tuple selection, redeploy that same API
-still cloud-off so `/v1/release-identity` can verify the selected worker's actual
-database approval matrix. Only then may cloud provisioning enable customer
-cloud; an explicit subsequent deploy/readiness check precedes desktop rollout.
-See [channel backend provisioning](../deployment-environments.md#provision-a-channels-cloud-backend).
+With `ZEROS_WORKER_PROMOTION` absent or different from `enabled`, releases keep
+the existing hosted services gate: exact-source CI, compatible migrations,
+backup, Railway deployment/readiness, Pages, WorkOS, hosted receipt and desktop
+publication. A cloud-enabled signed desktop still publishes after those gates
+pass. The current API worker tuple remains pinned to the hosted receipt;
+`workerQualified=false` from rejected historical v3 evidence does not introduce
+a release qualification requirement on this disabled lane. Existing source,
+migration, Pages, cloud-capability and receipt checks still apply.
 
-The release order is exact-SHA Preflight + CodeQL → compatible DB migrations →
-API → Pages → WorkOS verification → worker build/native canaries → atomic tuple
-selection → same-SHA API redeploy/readiness → hosted receipt → desktop feed.
-The worker refuses allocation without the new exact-SHA API/current schema and
-the trusted `hosted-services-<channel>-<sha>` receipt. Its independent CI gate
-also checks the current branch before mutation.
+The enabled retired lane cannot issue a new worker receipt, approve v3 evidence,
+select a tuple, redeploy an API for that tuple or publish. This removes the old
+v3 approval → v4-only identity readback mismatch without relaxing workspace or
+runtime-bundle qualification.
 
-Worker producer contract:
-
-| Field | Exact value |
-| --- | --- |
-| Job ID/display name | `worker` (nested producer name ends in `/ worker`) |
-| Execution step | `Worker plan or guarded execution` (`promote`) |
-| Success upload step | `Save success receipt` |
-| Artifact | `worker-promotion-<channel>-<source_sha>` |
-| Artifact file | `worker-receipt.json` |
-| Callable outputs | `receipt_issued`, `receipt_artifact` |
-
-A success receipt binds the repository, branch, channel, immutable event SHA,
-committed input digest, parent run and recorded attempt, profile, three proven
-kinds, complete tuple, native contract/evidence/approval hashes, completion time
-and cleanup. It contains no account material, credential IDs, user identity,
-native stdout, provider responses or prompts. Plans and standalone genuine
-reuse emit `receipt_issued=false`, never a synthetic receipt. The hosted guard
-normally skips an unchanged, affirmatively qualified selected input tree.
-Callable execution defaults `receipt_required=true`: if the guard requests a
-worker job, that job must qualify and emit the real handoff even if post-services
-identity now permits reuse. Explicit standalone FULL never reuses a worker.
-
-Worker owns the **only** six-field Railway `variableCollectionUpsert`, with
-`replace:false, skipDeploys:true`. The adapter validates the exact Boat/source/
-architecture/storage tuple and channel marker, reconciles a lost write by
-readback without another mutation, and checks final readback. Hosted
-finalization authenticates artifact/job/step/run-attempt provenance, reads the
-tuple back, redeploys the exact API SHA and checks public qualification/identity
-before issuing the hosted receipt. Standalone dispatch needs
-`services_run_id`/`WORKER_SERVICES_RUN_ID` for a trusted prior exact-source services
-run; its worker receipt remains bound to its own run and cannot be substituted
-for a different parent release.
+Historical receipt versions 1–3, their exact source/run binding, original cleanup
+certificates and audit records remain compatibility contracts. Their readers
+cannot issue a new receipt or restart native qualification. The shared Boat
+image-kit CLI/templates also have a separate explicit Dev-tooling consumer and
+are retained; they are not the supported v4 workspace artifact. The separate
+flat OCI publication path still needs its own consumer/base-contract review.
 
 ## Infrastructure authority
 
-The channel's non-admin `BOAT_API_KEY` must authorize the actual operations, not
-merely carry a channel label or preset name. Worker build/qualification requires
-`account.read`, `sandbox.create`, `sandbox.read`, `sandbox.delete`, `exec`,
-`file.write`, `snapshot.read` and `snapshot.write`. Private native input uses
-`file.write`; it must not be replaced with command interpolation or another
-credential path. Managed runtime lifecycle also requires `sandbox.update`,
-`sandbox.stop` and `sandbox.resume`. The engine bridge requires `host`:
-`BoatRuntimeEndpointResolver.bridge` calls `POST /sandboxes/:id/host` for the
-engine endpoint even when optional previews are off.
-
-Protected cloud-off provisioning and exact readback establish the actual
-supplied channel binding; inventory labels alone do not. Successful variable
-readback does not establish provider permissions. Verify the bound authority's
-required actions before qualification and activation. A non-admin key cannot
-expand its own scope, and rotation preserves scope. If a required action is
-missing, an authorized account owner must supply a correctly scoped replacement
-through the provider's browser/session or existing-admin setup path and the
-channel's protected secret/configuration/deployment gates. Do not borrow another
-channel's infrastructure or native credentials, mint an admin runtime key, or
-bypass the Production approval boundary.
+Cleanup uses the original channel, account, owner, saved generation and provider
+operation. Keep the independent Production approval, exact-source CI, encrypted
+shared admission ledger, fencing and provider readback. Retirement neither
+borrows another channel's authority nor grants new provider permissions. No
+credentials, native material or raw provider output belong in command arguments,
+logs, public receipts or documentation.
 
 ## Rotation-safe owner consent
 
-Each channel configures the owner's own active `platform_owner` by UUID in
-`RUNTIME_QUALIFICATION_ACTOR_USER_ID`, never by email. That member must own the
-configured canary organization and have a live Pro allowance. Connect the
-intended Claude Account, Codex ChatGPT Account and Cursor API-key credentials
-once through the normal channel app. **Connection alone is not consent.**
-Only a per-credential, current-revision, model-specific designation permits use;
-default is off. Native credentials and the rotating Codex native cache remain
-under the existing control-plane envelope/key/fingerprint/renewal journals.
-CI never receives them. Real Codex renewal updates that durable store; the VM
-gets only two bound access-only versions and fixed renewal proof, never a
-refresh token. This avoids a static CI refresh secret becoming stale after its
-first use.
-
-In **Settings → Agents**, the configured `platform_owner` can switch on **Use
-for release checks** on each intended connected cloud account. Consent defaults
-off. The control shows the approved model and last audited start time; unknown
-consent cannot appear enabled. Only Claude Account, Codex ChatGPT Account and
-Cursor API-key connections are eligible. Other connection types are disabled,
-and non-owner staff and ordinary members cannot see these controls. An enabled
-control approves the pinned low-cost model for that kind. Reconnecting or
-changing the credential revision visibly turns it off and requires new consent.
-Turning it off revokes consent without disconnecting normal agent usage.
-
-The Settings control uses the authenticated, audited designation API:
-
-- `GET /v1/cloud-agent-credentials/<credential UUID>/release-canary` returns
-  current designation ID/revision, enabled state, approved models and
-  `lastUsedAt` (the last audited canary start, or null).
-- `PUT` to that same route accepts only `operationId` (new UUID),
-  `expectedDesignationId` (the GET result, initially `"0"`),
-  `credentialRevision`, `enabled` and `models` (one to three explicitly approved
-  model IDs). Use `enabled:true` to opt in; `enabled:false` revokes designation.
-  Replaying the exact operation is idempotent; changed/stale consent is refused.
-  After a lost response, Settings reads the current consent before retrying the
-  same immutable operation. It does not replace a stale operation silently.
-  If Settings becomes inactive, reconciliation waits until active again; Retry
-  retains the original operation instead of dispatching another consent change.
-
-The authenticated user must be the configured owner; the request cannot select
-another member. Credential revocation/reconnection or a revision change also
-invalidates old consent. Designation is available with the actor/organization
-configured even while the paid admission switch is off; no CI bearer or native
-credential export is needed to operate Settings. The designation/use audit
-names the allowance owner by UUID. Native model requests use that member's
-explicitly selected provider credentials, so provider token/account limits are
-charged to that member's provider allowance. Release VM compute is separately
-bounded in the shared infrastructure Boat wallet; this path does not create a
-customer workspace or debit a customer workspace's managed-compute credit
-ledger. It does not borrow any other credential, personal session or workspace.
-
-The pipeline's release-only bearer can only preflight/admit designated canaries
-on authenticated shared-account release receipts: exact channel/source/run/job,
-image/model/profile, active lease, fresh clone, correct wallet, machine
-attestation and no normal workspace/computer allocation. Consent is rechecked
-before preparation/upload. Every use is audited. Uncertain preparation/dispatch
-fences the credential even across different operation IDs; a new run cannot
-blindly rotate it again. Lost dispatched responses observe the native runner.
-
-Before any allocation, that bearer discovers connections **server-side**, for
-the configured actor only. There must be exactly one active, current-revision,
-model-approved designation for each required kind. Missing or ambiguous consent
-fails closed with `Release canary designation missing/ambiguous for <kind>`;
-unapproved SMOKE models fail with `Release canary model not approved for <kind>`.
-Revoke additional designations or approve the required model in Settings, then
-start a new reviewed run. There is no CI-side connection list to maintain.
-
-Discovery binds the credential UUID, revision, designation audit ID, kind and
-approved model into the private run journal, each disposable-canary job and the
-hashed approval evidence. Recovery cannot substitute a changed designation.
-Admission rechecks live consent before credential preparation/upload. These
-bindings contain no credential material and are not included in public receipts,
-logs or the uploaded handoff artifact; only verified hashes cross that boundary.
+Recorded owner designations and native audit phases remain readable. Existing
+canary retirement can settle after owner credential rotation or revocation; it
+uses its bound original operation and never decrypts account material or starts
+a replacement native turn. New release-native admission is always refused.
 
 ## Protected configuration
 
-All CI credentials belong to the protected channel environment. GitHub masking
-is defense in depth, not permission to print secrets. Secret values are supplied
-only as step environment, never interpolated into commands or artifacts.
+For explicit observation of existing release storage, use the protected
+`cloud-worker-promotion.yml` dispatch with `reconcile_storage=true` and
+`execute=false`, or its equivalent guarded command:
 
-| Protected secret | Purpose |
-| --- | --- |
-| `WORKER_CANARY_ADMISSION_TOKEN` | At least 32 characters; independent release-only bearer, also held server-side |
-| `WORKER_ADMISSION_CONFIG_JSON` | Existing shared R2 registry credentials/encryption key and canonical infrastructure profile |
-| `BOAT_API_KEY` | Shared Boat infrastructure authority, never a native model credential |
-| `RAILWAY_DEPLOY_TOKEN` | Channel target's complete tuple selection |
-| `PLANETSCALE_SERVICE_TOKEN_ID`, `PLANETSCALE_SERVICE_TOKEN` | Short-lived channel owner-role creation/deletion for audited approval |
+```sh
+pnpm exec tsx scripts/release/worker-cli.ts --reconcile-storage
+```
 
-`GH_TOKEN` comes from the Actions token with contents/actions read permissions.
-Discovery rejects extra fields/kinds, duplicate credential identities or kinds,
-stale revision, wrong actor/channel/run and unapproved models. There is no
-`WORKER_CANARY_CREDENTIALS` interface and no static
-`WORKER_CANARY_CLAUDE_API_KEY`, OpenAI API key or Codex auth JSON seed.
-
-Channel variables include the existing Railway/PlanetScale target IDs,
-`BOAT_ACCOUNT_SCOPE`, `BOAT_BILLING_ORG`, `BOAT_BASE_SNAPSHOT`,
-`BOAT_BUILDER_BUDGET_HOURS` (>0, ≤2), `BOAT_CANARY_BUDGET_HOURS` (>0, ≤1),
-`BOAT_WORKER_BUDGET_HOURS` (covers builder, ≤6 account-wide hours), actor UUID,
-`WORKER_CANARY_ORGANIZATION_ID` and exactly
-`RUNTIME_QUALIFICATION_CREDENTIAL_KINDS=claude-setup-token,codex-chatgpt,cursor-api-key`.
-The control plane additionally needs `ZEROS_RELEASE_CANARIES_ENABLED=true`,
-the same admission bearer/actor/organization/repository configuration
-(`WORKER_CANARY_REPOSITORY`), immutable `RAILWAY_GIT_COMMIT_SHA`, existing
-encrypted credential/Codex renewal keys and the same shared admission profile.
-No migration or qualification-table fixture seed is required.
-
-Owner setup for each channel is therefore:
-
-1. Configure the owner's UUID and owned canary organization server-side. Connect
-   the three intended accounts in that channel's app, using its normal encrypted
-   credential flow.
-2. In Settings → Agents, enable **Use for release checks** for exactly one
-   eligible connection per kind, review its displayed model and allowance cost,
-   and leave every other connection undesignated.
-3. Install the protected admission bearer and infrastructure secrets/configuration
-   listed here. No account session, refresh token or manual connection document
-   belongs in CI. Keep execution switches off until the isolated rehearsal is
-   approved; then enable the server admission and worker lane in the required
-   release order.
-
-The shared admission secret is version 1 with `registry` fields `endpoint`
-(HTTPS R2), `bucket`, `accessKeyId`, `secretAccessKey`, `encryptionKey`, and
-`profile` fields `boat` (`accountScope`, `billingOrg`, `baseSnapshot`), `railway`
-(`projectId`), `planetscale` (`organization`, `database`) and `cloudflare`
-(`accountId`). These canonical fingerprint inputs must be identical across
-Dev, all release channels and custom-build services, not replaced with each
-channel's deployment targets. Initialize/reconcile the existing encrypted
-`admission/v1/account.json` authority before execution. Missing/mismatched
-configuration fails closed.
+This cleanup works while `ZEROS_WORKER_PROMOTION` is disabled. It still requires
+protected CI, the same channel/account configuration and bearer, current source
+and schema, and the original authenticated registry/admission state. It visits
+bounded builder-retention and failed-builder-hold observations, then native
+retirement. It does not allocate, capture, upload access, qualify, update the
+tuple or emit a receipt. `--plan` writes a credential-free retirement plan;
+`--execute` cannot promote a worker. Existing bound builder/native stop/delete
+helpers, cleanup certificates and original-operation recovery stay available.
 
 ## Profiles, cost and qualification truth
 
-SMOKE is the default for non-native worker input changes: start, one combined
-read/edit/shell/MCP message, real Codex renewal/adoption, end/load native history,
-one history-only resume message, permission-mode selection, stop and revocation.
-There are **two message submissions per agent** and no extended paid turns.
-Replies are marker-only and bounded to 4096 characters; Codex uses low thinking
-effort. The named low-cost families are pinned to the committed catalog above;
-this is not a claim that live pricing/availability was checked. The profile
-does not advertise native goals, forks, review, apps or multi-agent capabilities.
-
-Automatic FULL is selected for changes to:
-
-- `apps/desktop/src/engine/agents/**` (adapters, containment, native contracts)
-  and `apps/desktop/src/engine/cloud-runtime-attestation.ts`;
-- protocol `cloud-agent*`/`cloud-mcp*` sources;
-- `scripts/cloud-workspace-validation/config.ts`, its `sandbox/**` and
-  `lib/native-*` inputs; `scripts/zsr-qualification/**`;
-- supervisor build/Codex code-generation scripts, third-party/patch/catalog
-  provenance, root `package.json` or `pnpm-lock.yaml` dependency pins.
-
-The comparison is against the **selected worker's committed source**, not just
-the last push. Explicit FULL is supported; an explicit SMOKE request cannot
-downgrade changed native inputs. FULL retains the extended suite and verifies
-the advertised checks before approval. Dev retains its existing FULL default;
-the cheaper release profile is not silently applied to Dev.
-
-Each allocation checks the account meter and the persisted total-run ceiling.
-Per-canary ceilings and VM TTLs never extend on recovery. Explicit profile
-leases are capped by the profile deadline plus cleanup headroom, per-canary
-budget and remaining account budget: SMOKE native deadline 420 seconds (at most
-720 seconds VM lease); FULL native deadline 2400 seconds (at most 2700 seconds
-VM lease). A smaller approved budget shortens the lease; budget failure cannot
-become successful qualification. Allocate adequate FULL budget deliberately
-instead of raising it automatically. The workflow has a 330-minute outer bound,
-but account-hour ceilings, bounded polls and disposable-VM TTLs apply first.
-
-An unsuccessful `errorKind: rate-limited` never consumes Dev's three real
-qualification attempts per connection/image. Dev retries automatically after
-60-second exponential backoff capped at 15 minutes, with a clear account-rate
-message and bounded retired-history compaction. Explicit retry cannot bypass
-that delay. Release fails with `canary account rate-limited`, retires its VMs and
-does not automatically retry, approve or select a tuple.
-
-`workerQualified` is true only for the entire three-kind, enabled, MCP-qualified
-matrix on one `zeros-cloud-worker-v3` contract. A single approved kind is not
-readiness. Cloud grant metadata binds the live engine's image/profile/contract
-and MCP proof; the renderer excludes unqualified-only providers and prefers a
-qualified account grant over a matching unqualified API-key grant. Local
-behavior and older additive metadata remain compatible. Anthropic/OpenAI
-API-key modes remain unoffered until their exact image/kind is independently
-proved.
+Historical SMOKE/FULL and native evidence schema versions retain their stored
+meaning. A historical proof is not current v4 workspace or publication
+qualification. No paid native provider turn is part of the retired lane.
 
 ## Provider snapshot quota and recovery
 
@@ -300,18 +107,18 @@ fully paginate, rejecting missing/looping cursors or changed duplicate names.
 When Boat refuses a capture for quota, the owner can upgrade the plan or retire
 an **unreferenced** old rollback or failed candidate; release admission never
 deletes current/rollback snapshots.
-On the next release, read-only reconciliation can free an already acknowledged,
+During explicit cleanup, read-only reconciliation can free an already acknowledged,
 ready candidate's named-slot hold only after a certified physically deleted
 builder, complete inventory and exact named-snapshot GET 404. It persists a
 tombstone before releasing admission. Snapshot-name absence is not proof of
 backing-storage erasure. Published snapshots remain intentionally retained.
 
 A separate reviewed release-only path may settle the named slot while certified
-builder/native storage remains pending. It consumes a strict version2 named
+builder/native storage remains pending. It consumes a strict version 2 named
 DELETE acknowledgement from a separately reviewed literal action: saved original
-intent, then saved/fenced dispatch, then HTTP200 with the exact
+intent, then saved/fenced dispatch, then HTTP 200 with the exact
 `snapshot.named.deleted` name and deleted status. A lost response, HTTP404,
-version1 intent or mere deletion request cannot authorize this path. The
+version 1 intent or mere deletion request cannot authorize this path. The
 maintained worker exposes no named DELETE entrypoint.
 
 The encrypted journal retains the complete original builder provenance,
@@ -343,7 +150,7 @@ pending/unmeasured storage certificates and never marks backing bytes erased.
 
 Historical v1 receipts remain readable: `resourcesDeleted:true` retains its
 original physical-deletion meaning for temporary builder/canary allocations,
-not the selected named image. New executions issue v2 when credential-bearing
+not the selected named image. Historical executions issued v2 when credential-bearing
 canaries are physically deleted, or v3 for the release-only storage deferral
 described below. V2 still requires
 `cleanup.credentialCanaryResourcesDeleted:true`. V3 instead requires that field
@@ -362,7 +169,7 @@ their exact operation is reconciled. Credential-bearing canaries require
 matching physical-deletion proof or the explicit release-only native storage
 certificate below; unmarked history remains physically gated.
 
-New disposable native qualification VMs, in both Dev and release lanes, set
+Historical release-native VMs, and the separate Dev allocation policy, set
 `snapshots:false` when created from the qualified named image. Marked new intents
 require authenticated provider readback of `sandbox.snapshots === false` at
 allocation/readiness and again at fresh server dispatch, before native material
@@ -375,8 +182,8 @@ VM has no provider backup and cannot resume. Historical recovery replays its exa
 persisted creation key/body, including an omitted or enabled snapshot flag; it
 never retrofits the new policy onto an existing intent. Requested snapshots-off
 is only intent; observed snapshots-off is policy proof, not physical-deletion
-completion or assurance about inherited/source storage. The release lane sets
-`strictCleanup:true` and explicitly enables the certified storage boundary
+completion or assurance about inherited/source storage. Historical release allocations set
+`strictCleanup:true` and explicitly enabled the certified storage boundary
 below. Dev's existing deferred-storage cleanup behavior remains unchanged.
 
 ### Strict native retirement and historical recovery
@@ -400,7 +207,7 @@ question identities, content, arguments or output. Incomplete or incoherent
 summaries are omitted independently; older reports do not acquire measured
 zeros. The question failure latch and every qualification predicate stay intact.
 
-An allowlisted private-input upload HTTP403 records a bounded
+An allowlisted private-input upload HTTP 403 records a bounded
 `prelaunchFailure`, separate from qualification outcome, and stops promptly.
 Resume cannot restart absent-runner polling or reupload account material.
 Generic transport failures and lost acknowledgments remain uncertain; an absent
@@ -413,7 +220,7 @@ source/image/build/creation/account-bound physical cleanup proof before marking
 the builder deleted or releasing its compute reservation. It requires the exact
 authenticated operation to be completed with coherent provider timestamps and
 the exact sandbox to return 404. An elapsed `expectedBy`, a cancelled run,
-snapshots-off or sandbox404 alone never releases that hold. Pending storage
+snapshots-off or sandbox 404 alone never releases that hold. Pending storage
 without the release-only certificate and server acknowledgment below remains
 unconfirmed.
 Lost DELETE responses and malformed or missing ownership/provenance remain
@@ -425,7 +232,7 @@ operation. The server matches its immutable original audit/request hash,
 channel/repository/run/attempt, owner/credential revision/designation/model,
 source/image/build, authenticated encrypted journal, original intent, builder
 provenance and shared-account binding. It freshly observes the retained terminal
-operation and sandbox404 before appending a truthful `cloud.release_canary.retired`
+operation and sandbox 404 before appending a truthful `cloud.release_canary.retired`
 audit event. Earlier events and their original source remain unchanged. Cleanup
 may settle an older source under a newer API without opening account material,
 renewing credentials or granting new execution consent. A historical named image
@@ -433,31 +240,26 @@ need not still exist merely to settle a deleted native VM.
 
 Audit settlement is exact and retryable even if the compute-release CAS already
 succeeded or an audit response was lost. The local terminal marker and retired
-flag are saved together after acknowledgment. Later guarded executions observe
-at most 16 historical canaries within a 15-second budget before fresh preflight;
+flag are saved together after acknowledgment. Explicit guarded cleanup observes
+at most 16 historical canaries within a 15-second budget;
 they never allocate, rebuild, reupload, prune images or release holds by age.
-Alpha publication temporarily skips the automatic historical builder and native
-canary recovery pass. It retains the complete journal and account reservations;
-the new run still requires all three agents to qualify and its own strict
-cleanup before publication. Explicit `--reconcile-storage` remains available.
-Beta and Production retain their automatic historical recovery. Restore the
-Alpha recovery pass when the deferred cleanup work is addressed.
-Before a fresh builder reservation, an acknowledged failed image build still
-occupying this owner's compute slot may be observed on demand as described
-below. This does not resume the historical storage/canary scan.
+Default-disabled release publication skips the retired worker lane. Existing
+journals and reservations remain; `--reconcile-storage` observes historical
+builder/native cleanup without a new reservation or preflight. It can observe an
+acknowledged failed image build occupying the original owner's compute slot,
+as described below.
+
 An authenticated unstarted allocation saved before its resource row exists is
 nonexecuted history, including a superseded run or truthful empty cleanup after
 admission denial. Scanning it never releases admission or fabricates cleanup or
-audit proof. Only an unretired current-run job may resume its original allocation
-ID; a retired empty job never allocates again. Missing rows for starting/running
+audit proof. A retired empty job never allocates again. Missing rows for starting/running
 jobs or dispatch evidence, and uncertain allocations without retained operations,
 remain fenced. An owned pre-dispatch
-VM with a retained DELETE is observed strictly after completion and sandbox404
+VM with a retained DELETE is observed strictly after completion and sandbox 404
 to release its own compute hold without another DELETE or an invented audit.
 Existing same-source active jobs remain observation-only. Terminal settlement
-permits only a separately fresh operation
-with current source, owner allowance and consent; it is not successful native
-qualification, a worker approval or permission to enable customer cloud.
+settles the original cleanup/admission record; it cannot authorize new native
+qualification, worker approval or allocation.
 
 ### Release-only native storage deferral
 
@@ -466,7 +268,7 @@ while provider storage deletion continues. It must retain its exact acknowledged
 irreversible sandbox DELETE, original creation/source/image/build/account and
 parent builder provenance, plus a marked `snapshots:false` intent and the bound
 actual snapshots-off observation before dispatch. Fresh authenticated reads must
-observe that same operation, then sandbox404. Only documented blocked stages
+observe that same operation, then sandbox 404. Only documented blocked stages
 `waiting_for_uploads`, `kept_for_newer_snapshots` and `waiting_for_restore` qualify;
 upload retention requires a coherent provider estimate bounded by the documented
 six-hour upload-link fence. Estimates are never completion proof. Unknown,
@@ -475,14 +277,14 @@ This boundary does not apply to customer VMs, Dev policy or unmarked histories.
 
 The source/image/creation/account-bound `storageRetirement` certificate is saved
 under the owning lease before the server appends
-`cloud.release_canary.storage_retired`. The matching version2 local audit marker
+`cloud.release_canary.storage_retired`. The matching version 2 local audit marker
 and retired flag are saved together before compute admission is released. No
 physical proof or `builder.deleted:true` is invented; the original operation and
 certificate remain observable after admission compaction. The old operation is
-terminal before credential access; any subsequent operation needs fresh current
-source and consent. Three genuine native successes, exact artifacts, audited
-approval, owner-role deletion and selected tuple/readiness still precede release
-publication. Old partial results never qualify a new image or source.
+terminal before credential access in the historical contract. Historical
+publication required three native successes, exact artifacts, audited approval,
+owner-role deletion and selected tuple/readiness. Retirement refuses every new
+operation, and old partial results never qualify a new image or source.
 
 V3 receipts bind the pending certificate count/digest to the exact qualified
 jobs, with `credentialCanaryResourcesDeleted:false`; they do not claim retained
@@ -493,7 +295,7 @@ source storage and intentionally retained published images are distinct.
 Bounded historical recovery visits deferred records before retired shortcuts.
 The certificate remains pending through authenticated processing/removing or
 retrying observations. Actual matching operation completion plus a subsequent
-sandbox404 persists physical proof and appends `cloud.release_canary.retired`;
+sandbox 404 persists physical proof and appends `cloud.release_canary.retired`;
 earlier audits and issued v3 receipts remain truthful historical observations.
 No named-image existence is required merely to settle physically deleted native
 storage. Recovery never reallocates, executes native work or reissues DELETE.
@@ -505,8 +307,8 @@ For later observation without a new qualification, the maintained protected
 `create:false` and retains current channel/ref/source, CI, API/schema and
 Production approval gates. It performs bounded retained cleanup observation,
 not allocation, credential execution, tuple selection or a success receipt.
-The normal worker also performs this bounded reconciliation before preflight;
-no new scheduler, pruning policy or automatic erasure claim is added.
+There is no production worker preflight or automatic recovery scheduler for the
+retired lane. Existing pruning policy and physical-erasure requirements remain.
 
 ### Release-owned builder retirement receipts
 
@@ -562,13 +364,13 @@ ordinary historical or deduplicated storage. Published/shared named-image data
 remains independently retained. The complete cleanup/provenance/storage record
 is saved before the compute-terminal marker or admission release. Only compute
 is released: `builder.deleted` stays false and named-image/storage holds survive.
-Native allocation, approval, tuple selection and v2/v3 success all require this
+Historical native allocation, approval, tuple selection and v2/v3 receipts required this
 validated builder state and the matching physical or certified logical native
-retirement. Unknown stage,
+retirement. An unknown stage,
 available sandbox, mismatched operation, lost response, malformed recovery or
-missing proof withholds approval and success.
+missing proof cannot qualify a historical record or settle incomplete cleanup.
 
-Later executions observe at most 16 retained builders within a 15-second provider
+Explicit cleanup observes at most 16 retained builders within a 15-second provider
 read budget under the same owner/account. They keep one compact record per
 builder, never rebuild, replay DELETE, prune selected/rollback images, add a
 cron service or release by age. Authenticated terminal operation plus sandbox
@@ -578,7 +380,7 @@ recovery checks physical completion before named-image readiness; a ready name
 with the exact source builder is still required for pending-storage eligibility.
 The name hold remains until separate exact retirement readback releases it;
 recovery never deletes or prunes a name. Unknown/malformed historical proof is
-retained and blocks new release work for reviewed reconciliation of its exact
+retained for reviewed reconciliation of its exact
 saved operation, not a new deletion or inferred success.
 
 After the separately reviewed named settlement above, only the combined
@@ -591,25 +393,16 @@ settlement, not another action. Initial/current provenance and admission remain
 strict. Later physical completion uses the original operation proof and retains
 the earlier pending-storage and named-retirement history.
 
-The kit journal intentionally excludes the binary source archive. A recovered
-source manifest without its archive **before install** fails before allocation/
-upload; reconcile or begin a separately reviewed fresh run rather than silently
-regenerating partially uploaded bytes. Already-started installs resume their
-status/attestation without another install. Custom cleanup may finish a proven
-unstarted/no-resource image with missing shared configuration, but never
-pretends to free an unknown shared reservation.
+Historical kit journals, immutable candidates, original intent, cleanup proof,
+reviewed named settlement and issued receipts remain readable. New release
+source export, build, image attestation, native dispatch, approval and tuple
+selection are refused. Retained records must be reconciled using their exact
+owner/account and original provider operation; retirement does not authorize
+another build, credential upload, snapshot capture, or synthetic success.
 
-Ready candidates with validated builder cleanup discard bulky build-only kit
-files only after sufficient authenticated provenance survives; immutable
-candidate, original intent and cleanup proof still permit resume. Certificates
-are bounded at 4 KiB, run history at 100, and the encrypted registry retains its
-existing 1 MiB document cap. Saves/fencing precede provider allocation, so
-reaching a bound fails before another allocation. Reconciliation is reviewed,
-never automatic removal of uncertain intents or retained storage history.
-
-Rehearse exact-source ordering, all three modes/real renewal, rate limits,
-consent revocation, quota/slots, lost responses, physical cleanup, old-generation
-compatibility and final API tuple/qualification readback before enabling Alpha.
-Beta and reviewed Production require their independent protected configuration
-and evidence. Normal cloud Files/Changes/terminal/Git/reconnect/stop/wake/archive
-and an actual cloud-enabled macOS release remain separate live acceptance.
+Follow-up: **re-qualify a v4 release-worker lane if needed**. This requires a real
+bundle/base installation and current runtime qualification, exact publication
+identity, and a separately reviewed producer/canary contract. A marker relabel,
+frozen engine copy, or historical native-v3 receipt is not that qualification.
+Actual cloud-enabled macOS release and live Alpha behavior remain separate
+acceptance checks.

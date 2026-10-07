@@ -41,7 +41,13 @@ export function recoverCloudAdmissionFailure(input: {
   if (failure.kind === "unavailable") {
     // A generic dispatch failure can occur after a quiet provider has started.
     // Retain the entire transcript and require review; never invent a refusal.
-    store.patchSession(chatId, { status: "ready", error: null, failure: null, activeTurnStartedAt: null, cloudAdmissionFailure });
+    const terminal = { kind: "protocol-error" as const, stage: "prompt" as const, agentId: slot.agentId, message: failure.message };
+    const saved: AgentTextMessage = { ...message, queued: false, queuedPresentation: undefined, queuedEditable: undefined,
+      recoveryFailure: { kind: terminal.kind, message: terminal.message } };
+    store.patchSession(chatId, { status: "failed", error: terminal.message, failure: terminal, lastStopReason: null,
+      activeTurnStartedAt: null, cloudAdmissionFailure,
+      messages: slot.messages.map(row => row.id === message.id ? saved : row) });
+    if (useWorkspaceStore.getState().chats.some(chat => chat.id === chatId)) input.persist?.(chatId, saved);
     notifyFailure();
     return true;
   }
@@ -71,9 +77,4 @@ export function recoverCloudAdmissionFailure(input: {
   });
   notifyFailure();
   return true;
-}
-
-/** Compatibility entry point used by runtime-only recovery callers. */
-export function recoverCloudRuntimeUpgrade(input: Parameters<typeof recoverCloudAdmissionFailure>[0]): boolean {
-  return cloudAdmissionFailureCode(input.error) === "cloud_runtime_upgrade_required" && recoverCloudAdmissionFailure(input);
 }

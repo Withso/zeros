@@ -259,20 +259,29 @@ describe("workspace mode header row", () => {
   });
 });
 
-describe("Code seats its column controls in the chat strip", () => {
+describe("Code seats its column controls above the chat strips", () => {
   it("leaves agent-mode controls to the future composer integration", () => {
     expect(conversationPaneSource).not.toContain("WorkspaceModeToggle");
     expect(conversationPaneSource).toContain("<ConversationPaneLayout");
   });
 
-  it("keeps the collapsed-workbench control in the strip's trailing slot", () => {
+  it("keeps Summary and the collapsed-workbench control in the single column header", () => {
     expect(conversationPaneSource).toContain("<WorkbenchToggleButton");
     expect(conversationPaneSource).toMatch(
-      /stripTrailing=\{[\s\S]*?<ConversationSummaryTrigger\s*\/>[\s\S]*?workbenchCollapsed && onToggleWorkbench \? \(/,
+      /<ConversationWorkspaceHeader\s[\s\S]*?trailing=\{[\s\S]*?<ConversationSummaryTrigger\s*\/>[\s\S]*?workbenchCollapsed && onToggleWorkbench \? \(/,
     );
-    // Ownership stays with the column (the strip is a dumb slot host).
+    expect(conversationPaneSource.match(/<ConversationWorkspaceHeader\s/g)).toHaveLength(1);
+    expect(conversationPaneSource.match(/<ConversationSummaryTrigger\s*\/>/g)).toHaveLength(1);
+    expect(conversationPaneSource.match(/<WorkbenchToggleButton\s/g)).toHaveLength(1);
+    expect(conversationPaneSource.indexOf("<ConversationWorkspaceHeader")).toBeLessThan(
+      conversationPaneSource.indexOf("<ConversationPaneLayout"),
+    );
+    expect(conversationPaneSource).not.toContain("stripTrailing={");
+    // Column actions do not become per-pane controls when the tree splits.
     expect(paneLayoutSource).not.toContain("<WorkbenchToggleButton");
     expect(chatTabsSource).not.toContain("<WorkbenchToggleButton");
+    expect(paneLayoutSource).not.toContain("<ConversationSummaryTrigger");
+    expect(chatTabsSource).not.toContain("<ConversationSummaryTrigger");
   });
 
   it("gives each control to exactly one pane, at the corner it belongs to", () => {

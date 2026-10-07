@@ -2,12 +2,29 @@ import { spawn, execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
-import { buildMcpServerOverrides } from '../../app-server';
-import { cloudCodexRequest } from '../../cloud-policy';
-import { resolveCloudCodexBinaryFromImage } from '../../binary-resolver';
+import Module, { createRequire } from 'node:module';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { testCloudRuntime } from '../../../../__tests__/helpers/test-cloud-runtime';
 import type { McpServerRegistration } from '../../../../types';
 import type { CloudProviderExecution } from '../../../../cloud-provider-execution';
 
+// This subprocess exercises the pinned CLI/MCP contract without an installed
+// host runtime. Inject the same explicit v4 authority as the consumer tests.
+const runtimeFile = fileURLToPath(new URL('../../../../containment/cloud-runtime-root.mjs', import.meta.url));
+const runtime = { ...testCloudRuntime(), workerRoot: process.cwd() };
+// tsx loads this source tree through CommonJS. Replace only runtime authority
+// in this disposable subprocess, retaining the real CLI/package pin checks.
+const require = createRequire(import.meta.url);
+const authority = new Module(runtimeFile);
+authority.filename = runtimeFile;
+authority.loaded = true;
+authority.exports = { ...require(runtimeFile), resolveCloudRuntime: () => runtime,
+  resolveCloudRuntimePackagePath: (file: string) => realpathSync(file) };
+require.cache[runtimeFile] = authority;
+const { buildMcpServerOverrides } = await import('../../app-server');
+const { cloudCodexRequest } = await import('../../cloud-policy');
+const { resolveCloudCodexBinaryFromImage } = await import('../../binary-resolver');
 const {path:binary}=await resolveCloudCodexBinaryFromImage(process.cwd());
 const root=await mkdtemp('/tmp/v7-native-codex-');
 const cwd=path.join(root,'repo'), home=path.join(root,'home');

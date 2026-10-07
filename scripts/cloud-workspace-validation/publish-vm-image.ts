@@ -1,4 +1,4 @@
-// Builds the same Zeros image outside Daytona's container-only image builder.
+// Publishes the portable OCI runtime image from its explicit build recipe.
 // Docker registry authentication is supplied through Docker's credential store.
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,7 +11,7 @@ import {
   imageContractSha256,
 } from "./config";
 import { writeVmImageContext } from "./lib/vm-image";
-import { assertRegistryImageDigest } from "./lib/snapshot-placement";
+import { assertRegistryImageDigest } from "./lib/registry-image";
 import {
   publicationMinimumFreeBytes,
   withPublicationDiskBudget,

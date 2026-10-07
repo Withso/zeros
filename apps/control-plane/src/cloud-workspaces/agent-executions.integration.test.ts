@@ -4,7 +4,7 @@ import {afterAll,afterEach,beforeAll,beforeEach,describe,expect,it,vi} from "vit
 import {DevConnectionRuntime} from "../dev-connections/runtime.js";
 import {resetMigratedTestDatabase} from "../test-database.js";
 import {ensureUser} from "../auth.js";
-import {ensureCloudPilotUser,seedReadyCloudWorkspace} from "./test-fixtures.js";
+import {ensureCloudPilotUser,seedReadyCloudWorkspace,withCloudFixtureOwnerTx} from "./test-fixtures.js";
 import {DatabaseCloudAgentCredentialService} from "./agent-credentials.js";
 import {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
 import { DatabaseCloudCustomizationService } from "./customization-store.js";
@@ -20,16 +20,31 @@ import {interceptQueries,withAuthorityDeadlineBarrier,pauseBeforeQuery,withHeldE
 import {cloudWorkspaceHasActiveWork} from "./idle-workloads.js";
 import { consentTestPersonalEnvironment, persistTestComputerSettings, pinTestComputerEnvironment } from "./computer-environment-test-fixtures.js";
 import { resolveDatabaseCloudWorkspaceSettings } from "./settings.js";
+import { runtimeWitness } from "./runtime-test-fixtures.js";
 
 const d=process.env.TEST_DATABASE_URL?describe:describe.skip;
-// Measured budgets for the approval path (see the statement-budget test).
-const APPROVAL_BEGIN_STATEMENTS=59,APPROVAL_RECHECK_STATEMENTS=28,LEASE_VALIDATION_STATEMENTS=15;
+// Measured budgets include saved-source/v4 checks and actor environment
+// validation. The retired alternate-member delegation lookup is removed.
+const APPROVAL_BEGIN_STATEMENTS=73,APPROVAL_RECHECK_STATEMENTS=33,LEASE_VALIDATION_STATEMENTS=26;
 d("private provider execution leases",()=>{
   let pool:pg.Pool,fixture:Awaited<ReturnType<typeof seedReadyCloudWorkspace>>,owner:Awaited<ReturnType<typeof ensureUser>>;
   let credentials:DatabaseCloudAgentCredentialService,service:DatabaseCloudAgentExecutionService,actorSessionId:string,credentialId:string,delegationId:string;
   const encryption={keys:{1:randomBytes(32).toString("base64url")},currentKeyVersion:1,refreshFingerprints:{keys:{1:randomBytes(32).toString("base64url")},currentKeyVersion:1}},secret="synthetic-cursor-credential-key";
   const engine=()=>({workspaceId:fixture.workspaceId,organizationId:fixture.organizationId,generation:1,engineInstanceId:fixture.engineInstanceId,heartbeatToken:fixture.heartbeatToken});
   const admission=()=>({executionId:randomUUID(),delegationId,provider:"cursor" as const,model:"grok-4.6",source:{kind:"session" as const,actorSessionId}});
+  // Current workers negotiate actor-2 Computer Environment delivery. Keep the
+  // explicit missing-negotiation regression on the raw service below.
+  function admitSupported(target: DatabaseCloudAgentExecutionService, ...args: Parameters<DatabaseCloudAgentExecutionService["admit"]>) {
+    return target.admit(args[0], args[1], args[2], args[3], args[4], args[5], args[6] ?? 1);
+  }
+  async function updateRuntimeFixture(sql: string, values: unknown[] = []) {
+    // Mutable v3 qualifications are retired. Only the disposable DB owner
+    // replaces immutable fixture evidence; production cannot resurrect it.
+    await withCloudFixtureOwnerTx(pool, async tx => {
+      await tx.query("SET LOCAL session_replication_role=replica");
+      await tx.query(sql, values);
+    });
+  }
   async function connectActor(user:typeof owner){
     const pair=generateKeyPairSync("ed25519"),publicKey=Buffer.from(pair.publicKey.export({format:"jwk"}).x!,"base64url");
     const device=(await pool.query<{id:string}>("INSERT INTO devices(user_id,label,platform,public_key,key_fingerprint) VALUES($1,'Actor device','macos',$2,$3) RETURNING id",
@@ -43,16 +58,14 @@ d("private provider execution leases",()=>{
   afterAll(async()=>{await pool.end();});
   afterEach(()=>{vi.unstubAllEnvs();vi.restoreAllMocks();});
   beforeEach(async()=>{
-    await resetMigratedTestDatabase(pool);fixture=await seedReadyCloudWorkspace(pool);
+    await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");fixture=await seedReadyCloudWorkspace(pool);
     await new DatabaseCloudWorkspaceCollaborationService(pool).setSharing({workspaceId:fixture.workspaceId,organizationId:fixture.organizationId,
       actorUserId:fixture.userId,sharingMode:"organization",expectedRevision:1});
     owner=await ensureUser(pool,{provider:"workos",providerSubject:`workos|${fixture.userId}`,email:`durable-${fixture.userId}@example.test`,displayName:"Owner",
       session:{id:`session_${randomUUID()}`,clientKind:"desktop",authTime:Math.floor(Date.now()/1000),tokenExpiresAt:Math.floor(Date.now()/1000)+3600}});
     await pool.query("INSERT INTO auth_sessions(provider_session_id,provider_sub,user_id,client_kind,last_token_expires_at) VALUES($1,$2,$3,'desktop',now()+interval '1 hour')",
       [owner.authentication.sessionId,owner.identity.subject,owner.id]);
-    await pool.query("UPDATE cloud_workspace_engine_instances SET actor_protocol_version=2,agent_runtime_profile='zeros-cloud-worker-v3',agent_runtime_contract_sha256=$2 WHERE id=$1",[fixture.engineInstanceId,"a".repeat(64)]);
-    await pool.query(`INSERT INTO cloud_agent_runtime_qualifications(provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled)
-      VALUES('daytona','snapshot-pinned',$1,'cursor-api-key','zeros-cloud-worker-v3',true)`,["a".repeat(64)]);
     actorSessionId=await connectActor(owner);
     credentials=new DatabaseCloudAgentCredentialService(pool,encryption);service=new DatabaseCloudAgentExecutionService(pool,encryption,false);
     credentialId=randomUUID();await credentials.put({ownerUserId:owner.id,credentialId,operationId:randomUUID(),expectedRevision:0,displayName:"Cursor",material:{kind:"cursor-api-key",apiKey:secret}});
@@ -65,7 +78,7 @@ d("private provider execution leases",()=>{
     await commands.mutate({...engine(),actorSessionId},{conversationId:"chat",operationId:randomUUID(),expectedRevision:0,action:{kind:"enqueue",commandId,payload}});
     const claim=(await commands.claim(engine(),"chat",executionId))!;
     const input={...admission(),executionId,source:{kind:"command" as const,commandId,claimId:claim.claimId}};
-    const lease=await service.admit(engine(),input,false,undefined,1);
+    const lease=await admitSupported(service,engine(),input,false,undefined,1);
     const snapshot={tasks:[{taskId:"native-child",name:"Background task",startedAt:Date.now(),updatedAt:Date.now()}],waiting:true,processWork:true};
     return {commands,commandId,claim,input,lease,payload,snapshot};
   }
@@ -80,17 +93,32 @@ d("private provider execution leases",()=>{
     service = new DatabaseCloudAgentExecutionService(pool, encryption, false, undefined, undefined, { setupSecretKeyV1: key });
     return { consent };
   }
+  it("retains a proved retired-generation refusal on a claimed command without admitting credentials", async () => {
+    const commands = new DatabaseCloudWorkspaceCommandService({ pool }), commandId = randomUUID(), executionId = randomUUID();
+    await commands.mutate({ ...engine(), actorSessionId }, { conversationId: "retired-generation", operationId: randomUUID(), expectedRevision: 0,
+      action: { kind: "enqueue", commandId, payload: { agentId: "cursor", model: "grok-4.6", userMessageId: randomUUID(),
+        prompt: [{ type: "text", text: "Synthetic queued turn" }], modeRevision: 0, agentCredentialGrantId: delegationId } } });
+    const claim = (await commands.claim(engine(), "retired-generation", executionId))!;
+    await pool.query("UPDATE cloud_computer_templates SET state='quarantined' WHERE build_id=(SELECT build_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1 AND generation=1)", [fixture.workspaceId]);
+    await expect(admitSupported(service, engine(), { ...admission(), executionId, source: { kind: "command", commandId, claimId: claim.claimId } }))
+      .rejects.toMatchObject({ code: "cloud_workspace_v2_required" });
+    expect((await pool.query("SELECT result_code FROM cloud_workspace_commands WHERE id=$1", [commandId])).rows[0].result_code).toBe("cloud_workspace_v2_required");
+    expect((await pool.query("SELECT id FROM cloud_agent_execution_leases")).rowCount).toBe(0);
+    await commands.settle(engine(), { commandId, claimId: claim.claimId, state: "failed", resultCode: null });
+    expect((await pool.query("SELECT state,result_code FROM cloud_workspace_commands WHERE id=$1", [commandId])).rows[0])
+      .toEqual({ state: "failed", result_code: "cloud_workspace_v2_required" });
+  });
   it("never labels an already admitted execution replay as a pre-provider refusal", async () => {
     const f=await backgroundFixture();
     await credentials.revokeDelegation(owner.id,delegationId);
-    await expect(service.admit(engine(),f.input)).rejects.toMatchObject({status:403,code:"cloud_agent_authority_rejected"});
+    await expect(admitSupported(service,engine(),f.input)).rejects.toMatchObject({status:403,code:"cloud_agent_authority_rejected"});
     expect((await pool.query("SELECT result_code FROM cloud_workspace_commands WHERE id=$1",[f.commandId])).rows[0].result_code).toBeNull();
     expect((await pool.query("SELECT id FROM cloud_agent_execution_leases WHERE id=$1",[f.lease.leaseId])).rowCount).toBe(1);
   });
   it("delivers v2 org env only to opted-in executions and revalidates personal consent and pinned versions", async () => {
     const { consent } = await computerEnvironment();
     await expect(service.admit(engine(), admission())).rejects.toMatchObject({ code: "computer_environment_runtime_required" });
-    const lease = await service.admit(engine(), admission(), false, undefined, undefined, undefined, 1);
+    const lease = await admitSupported(service,engine(),admission(),false,undefined,undefined,undefined,1);
     expect(lease.environment?.values).toEqual({ ORG_SETTING: "synthetic-org-value", COLLISION: "creator-personal-value" });
     expect(lease.environment?.history).toHaveProperty("owner");
     expect((await service.validate(engine(), lease.leaseId)).environmentRevision).toBe(lease.environment?.revision);
@@ -112,8 +140,8 @@ d("private provider execution leases",()=>{
     await pool.query("INSERT INTO organization_seat_assignments(org_id,user_id,assigned_by) VALUES($1,$2,$3)", [fixture.organizationId, member.id, owner.id]);
     const memberSession = await connectActor(member), grant = randomUUID();
     await credentials.delegate(owner.id, { id: grant, credentialId, expectedRevision: 1, workspaceId: fixture.workspaceId, granteeUserId: member.id, models: ["grok-4.6"], expiresAt: new Date(Date.now()+3600_000).toISOString() });
-    const request = admission(), creator = await service.admit(engine(), request, false, undefined, undefined, undefined, 1);
-    const other = await service.admit(engine(), { ...admission(), delegationId: grant, source: { kind: "session", actorSessionId: memberSession } }, false, undefined, undefined, undefined, 1);
+    const request = admission(), creator = await admitSupported(service,engine(),request,false,undefined,undefined,undefined,1);
+    const other = await admitSupported(service,engine(),{ ...admission(), delegationId: grant, source: { kind: "session", actorSessionId: memberSession } },false,undefined,undefined,undefined,1);
     expect(other.environment?.values).toEqual({ ORG_SETTING: "synthetic-org-value", COLLISION: "org-default" });
     expect(other.environment?.history.owner).not.toBe(creator.environment?.history.owner);
     expect((await service.terminalEnvironment(engine(), memberSession)).environment).toEqual(other.environment?.values);
@@ -179,7 +207,7 @@ d("private provider execution leases",()=>{
     await expect(service.background(engine(),f.lease.leaseId,{kind:"read",conversationId:"chat"})).resolves.toMatchObject({snapshot:f.snapshot,phase:"background"});
   });
   it("background capability is opt-in and task snapshots enforce revision and conversation ownership",async()=>{
-    const legacy=await service.admit(engine(),admission());expect(legacy).not.toHaveProperty("backgroundTasksVersion");
+    const legacy=await admitSupported(service,engine(),admission());expect(legacy).not.toHaveProperty("backgroundTasksVersion");
     await expect(service.background(engine(),legacy.leaseId,{kind:"read",conversationId:"chat"})).rejects.toThrow();
     const f=await backgroundFixture();const retain={kind:"retain",conversationId:"chat",revision:1,snapshot:f.snapshot};
     await service.background(engine(),f.lease.leaseId,retain);await service.background(engine(),f.lease.leaseId,retain);
@@ -187,13 +215,13 @@ d("private provider execution leases",()=>{
     await expect(service.background(engine(),f.lease.leaseId,{kind:"read",conversationId:"another-chat"})).rejects.toThrow();
   });
   it("does not advertise computer tools from an ordinary workspace admission opt-in",async()=>{
-    const result=await service.admit(engine(),admission(),false,undefined,undefined,1);
+    const result=await admitSupported(service,engine(),admission(),false,undefined,undefined,1);
     expect(result).not.toHaveProperty("computerToolsVersion");
   });
   it("requires a runtime update for a marked legacy execution and rolls back its admission",async()=>{
     await pool.query(`INSERT INTO cloud_computer_admin_workspaces(workspace_id,org_id,creator_user_id)
       VALUES($1,$2,$3)`,[fixture.workspaceId,fixture.organizationId,fixture.userId]);
-    await expect(service.admit(engine(),admission(),false,undefined,undefined,1))
+    await expect(admitSupported(service,engine(),admission(),false,undefined,undefined,1))
       .rejects.toMatchObject({status:409,code:"cloud_computer_tools_update_required"});
     expect((await pool.query("SELECT 1 FROM cloud_agent_execution_leases")).rowCount).toBe(0);
   });
@@ -202,7 +230,7 @@ d("private provider execution leases",()=>{
     for(const [name,value] of Object.entries({ZEROS_DEPLOY_ENV:'dev',ZEROS_DEV_ENVIRONMENT:'hosted',ZEROS_DEV_CONNECTIONS_ENABLED:'true',ZEROS_DEV_GENERATION:generation,
       DEV_CONNECTIONS_GENERATION:generation,DEV_CONNECTIONS_ORIGIN:'https://connections.example.test',DEV_CONNECTIONS_AUDIENCE:'zeros-dev-connections-v1',DEV_CONNECTIONS_GENERATION_CREDENTIAL:'a'.repeat(43)}))vi.stubEnv(name,value);
     vi.spyOn(DevConnectionRuntime.prototype,'consumeInvalidations').mockResolvedValue();
-    await expect(service.admit(engine(),admission())).rejects.toThrow();
+    await expect(admitSupported(service,engine(),admission())).rejects.toThrow();
   });
   it("admits references only after exact-image checks, caps persisted and replayed leases, and fails closed on outage",async()=>{
     const generation=randomUUID(),ref={mode:'dev-reference',bindingId:credentialId,connectionId:randomUUID(),generationId:generation,organization:'org_dev',revision:1,consentRevision:1};
@@ -213,13 +241,13 @@ d("private provider execution leases",()=>{
     const expiresAt=new Date(Date.now()+15000).toISOString();
     const issue=vi.spyOn(DevConnectionRuntime.prototype,'issue').mockResolvedValue({bindingId:credentialId,expiresAt,providerExpiresAt:null,materialVersion:7,
       scope:{action:'agent',workspaceId:fixture.workspaceId,model:'grok-4.6'},material:{kind:'cursor-api-key',apiKey:'synthetic-broker-access'}});
-    await pool.query('UPDATE cloud_agent_runtime_qualifications SET enabled=false');
-    await expect(service.admit(engine(),admission())).rejects.toThrow();expect(issue).not.toHaveBeenCalled();
-    await pool.query('UPDATE cloud_agent_runtime_qualifications SET enabled=true');
-    const request=admission(),lease=await service.admit(engine(),request);
+    await updateRuntimeFixture('UPDATE cloud_runtime_qualifications SET enabled=false');
+    await expect(admitSupported(service,engine(),admission())).rejects.toThrow();expect(issue).not.toHaveBeenCalled();
+    await updateRuntimeFixture('UPDATE cloud_runtime_qualifications SET enabled=true');
+    const request=admission(),lease=await admitSupported(service,engine(),request);
     expect(lease).toMatchObject({expiresAt,credentialVersion:7,material:{kind:'cursor-api-key',apiKey:'synthetic-broker-access'}});
     expect((await pool.query('SELECT expires_at FROM cloud_agent_execution_leases WHERE id=$1',[lease.leaseId])).rows[0].expires_at.toISOString()).toBe(expiresAt);
-    expect((await service.admit(engine(),request)).expiresAt).toBe(expiresAt);
+    expect((await admitSupported(service,engine(),request)).expiresAt).toBe(expiresAt);
     issue.mockRejectedValue(new Error('Synthetic broker outage'));
     await expect(service.validate(engine(),lease.leaseId,true,7)).rejects.toThrow('Synthetic broker outage');
   });
@@ -229,8 +257,6 @@ d("private provider execution leases",()=>{
     await credentials.importCodex(input);
     const grant=randomUUID();await credentials.delegate(owner.id,{id:grant,credentialId:input.credentialId,expectedRevision:1,workspaceId:fixture.workspaceId,
       granteeUserId:owner.id,models:["gpt-5.6-sol"],expiresAt:new Date(Date.now()+3600_000).toISOString()});
-    await pool.query(`INSERT INTO cloud_agent_runtime_qualifications(provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled)
-      VALUES('daytona','snapshot-pinned',$1,'codex-chatgpt','zeros-cloud-worker-v3',true) ON CONFLICT DO NOTHING`,["a".repeat(64)]);
     return {input,grant,request:{executionId:randomUUID(),delegationId:grant,provider:"codex" as const,model:"gpt-5.6-sol",source:{kind:"session" as const,actorSessionId}}};
   }
   it("uses the prompting collaborator's Git identity when agent credentials belong to another member", async () => {
@@ -243,55 +269,59 @@ d("private provider execution leases",()=>{
     await pool.query("INSERT INTO github_authorizations(owner_user_id,app_variant,github_login,github_user_id,git_author_name) VALUES($1,'github.com','owner',1234,'Owner'),($2,'github.com','member',5678,'Member')", [owner.id, member.id]);
     const memberSession = await connectActor(member), grant = randomUUID();
     await credentials.delegate(owner.id, { id: grant, credentialId, expectedRevision: 1, workspaceId: fixture.workspaceId, granteeUserId: member.id, models: ["grok-4.6"], expiresAt: new Date(Date.now()+3600_000).toISOString() });
-    const lease = await service.admit(engine(), { ...admission(), delegationId: grant, source: { kind: "session", actorSessionId: memberSession } }, true);
+    const lease = await admitSupported(service,engine(),{ ...admission(), delegationId: grant, source: { kind: "session", actorSessionId: memberSession } },true);
     expect(lease.gitAuthor).toEqual({ name: "Member", email: "5678+member@users.noreply.github.com" });
-    const legacy = await service.admit(engine(), admission());
+    const legacy = await admitSupported(service,engine(),admission());
     expect(legacy).not.toHaveProperty("gitAuthor");
-    const owned = await service.admit(engine(), admission(), true);
+    const owned = await admitSupported(service,engine(),admission(),true);
     expect(owned.gitAuthor).toEqual({ name: "Owner", email: "1234+owner@users.noreply.github.com" });
   });
   it("requires exact-image MCP qualification for customization admission",async()=>{
-    await expect(service.admit(engine(),{...admission(),customization:{version:1,repositoryServers:[]}})).rejects.toMatchObject({status:403});
+    await updateRuntimeFixture("UPDATE cloud_runtime_qualifications SET mcp_qualified=false");
+    await expect(admitSupported(service,engine(),{...admission(),customization:{version:1,repositoryServers:[]}})).rejects.toMatchObject({status:409,code:"cloud_runtime_upgrade_required"});
   });
-  it("keeps legacy discovery aligned with its gateway's required customization", async () => {
+  it("keeps pinned runtime discovery aligned with its gateway's required customization", async () => {
+    await updateRuntimeFixture("UPDATE cloud_runtime_qualifications SET mcp_qualified=false");
+    expect((await credentials.forWorkspace(owner.id, fixture.workspaceId)).delegations[0]).toMatchObject({runtimeQualified:true,mcpQualified:false});
+    await pool.query("UPDATE cloud_workspace_engine_instances SET agent_customization_version=1 WHERE id=$1",[fixture.engineInstanceId]);
     expect((await credentials.forWorkspace(owner.id, fixture.workspaceId)).delegations[0]?.runtimeQualified).toBe(false);
-    await pool.query("UPDATE cloud_agent_runtime_qualifications SET mcp_qualified=true");
+    await updateRuntimeFixture("UPDATE cloud_runtime_qualifications SET mcp_qualified=true");
     expect((await credentials.forWorkspace(owner.id, fixture.workspaceId)).delegations[0]?.runtimeQualified).toBe(true);
   });
   it("delivers history authority only to version-2 admitted executions and binds it through renewals",async()=>{
-    await pool.query("UPDATE cloud_agent_runtime_qualifications SET mcp_qualified=true");
-    const legacy=await service.admit(engine(),{...admission(),customization:{version:1,repositoryServers:[]}});
+    await updateRuntimeFixture("UPDATE cloud_runtime_qualifications SET mcp_qualified=true");
+    const legacy=await admitSupported(service,engine(),{...admission(),customization:{version:1,repositoryServers:[]}});
     expect(legacy.customization).not.toHaveProperty("history");
     const request={...admission(),customization:{version:2,repositoryServers:[]}};
-    const result=await service.admit(engine(),request),history=result.customization?.history;
+    const result=await admitSupported(service,engine(),request),history=result.customization?.history;
     expect(history?.owner).toMatch(/^[a-f0-9]{64}$/);expect(history?.keys['1']).toHaveLength(43);
     expect(JSON.stringify((await pool.query("SELECT * FROM cloud_customization_execution_snapshots")).rows)).not.toContain(history!.keys['1']);
-    expect((await service.admit(engine(),request)).customization?.history).toEqual(history);
-    await expect(service.admit(engine(),{...request,customization:{version:1,repositoryServers:[]}})).rejects.toThrow();
+    expect((await admitSupported(service,engine(),request)).customization?.history).toEqual(history);
+    await expect(admitSupported(service,engine(),{...request,customization:{version:1,repositoryServers:[]}})).rejects.toThrow();
     expect((await service.validate(engine(),result.leaseId,true)).leaseId).toBe(result.leaseId);
-    const next=await service.admit(engine(),{...request,executionId:randomUUID()});
+    const next=await admitSupported(service,engine(),{...request,executionId:randomUUID()});
     expect(next.customization?.history).toEqual(history);
   });
   it("binds customization snapshots, secrets, repository overrides and rotations to the lease",async()=>{
-    await pool.query("UPDATE cloud_agent_runtime_qualifications SET mcp_qualified=true");
+    await updateRuntimeFixture("UPDATE cloud_runtime_qualifications SET mcp_qualified=true");
     const customization=new DatabaseCloudCustomizationService(pool,encryption),id=randomUUID();
     const document={servers:[{id,name:"example",transport:"http",url:"https://example.test/mcp",headers:{Authorization:"Bearer synthetic-mcp-value"}},
       {id:randomUUID(),name:"repo",transport:"http",url:"https://example.test/replaced",headers:{Authorization:"synthetic-do-not-inherit"}}],
       skills:[{name:"example",content:"# Organization"}],cursorTeamSettings:"disabled"};
     await customization.save(fixture.organizationId,owner.id,"organization",{expectedRevision:0,document});
     const request={...admission(),customization:{version:1,repositoryServers:[{name:"repo",transport:"stdio",command:"node",args:["tool.mjs"]}]}};
-    const result=await service.admit(engine(),request);
+    const result=await admitSupported(service,engine(),request);
     expect(result.customization).toMatchObject({servers:[{server:{name:"example",headers:{Authorization:"Bearer synthetic-mcp-value"}},secretRef:id},{server:{name:"repo",command:"node"}}],skills:[{name:"example"}]});
     expect(result.customization?.servers[1]).toMatchObject({scope:"repository",secretRef:null,revision:0});
     expect(result.customization?.servers[1]?.server).not.toHaveProperty("headers");
     expect(JSON.stringify((await pool.query("SELECT * FROM cloud_customization_execution_snapshots")).rows)).not.toContain("synthetic-mcp-value");
-    expect((await service.admit(engine(),request)).customization).toEqual(result.customization);
-    await expect(service.admit(engine(),{...request,customization:{version:1,repositoryServers:[]}})).rejects.toThrow();
-    await expect(service.admit(engine(),{...request,customization:undefined})).rejects.toThrow();
+    expect((await admitSupported(service,engine(),request)).customization).toEqual(result.customization);
+    await expect(admitSupported(service,engine(),{...request,customization:{version:1,repositoryServers:[]}})).rejects.toThrow();
+    await expect(admitSupported(service,engine(),{...request,customization:undefined})).rejects.toThrow();
     await customization.save(fixture.organizationId,owner.id,"organization",{expectedRevision:1,document:{...document,servers:[],skills:[]}});
     await expect(service.validate(engine(),result.leaseId,true)).rejects.toThrow();
-    await expect(service.admit(engine(),request)).rejects.toThrow();
-    const next=await service.admit(engine(),{...request,executionId:randomUUID()});
+    await expect(admitSupported(service,engine(),request)).rejects.toThrow();
+    const next=await admitSupported(service,engine(),{...request,executionId:randomUUID()});
     expect(next.customization?.servers).toHaveLength(1);expect(next.customization?.skills).toEqual([]);
   });
   it("lists, saves and removes organization skills through the authenticated workspace actor", async () => {
@@ -306,10 +336,10 @@ d("private provider execution leases",()=>{
     expect(await service.customization(scope, session, "skills.listZeros", {})).toEqual([]);
   });
   it("isolates customization from another collaborator even with the same provider grant",async()=>{
-    await pool.query("UPDATE cloud_agent_runtime_qualifications SET mcp_qualified=true");
+    await updateRuntimeFixture("UPDATE cloud_runtime_qualifications SET mcp_qualified=true");
     const customization=new DatabaseCloudCustomizationService(pool,encryption);
     await customization.save(fixture.organizationId,owner.id,"member",{expectedRevision:0,document:{servers:[],skills:[{name:"private",content:"# Private"}],cursorTeamSettings:"disabled"}});
-    const request={...admission(),customization:{version:1,repositoryServers:[]}},result=await service.admit(engine(),request);
+    const request={...admission(),customization:{version:1,repositoryServers:[]}},result=await admitSupported(service,engine(),request);
     const other=await seedReadyCloudWorkspace(pool);
     const member=await ensureUser(pool,{provider:"workos",providerSubject:`workos|${other.userId}`,email:`mcp-${other.userId}@example.test`,displayName:"Member",
       session:{id:`session_${randomUUID()}`,clientKind:"desktop",authTime:Math.floor(Date.now()/1000),tokenExpiresAt:Math.floor(Date.now()/1000)+3600}});
@@ -319,7 +349,7 @@ d("private provider execution leases",()=>{
     const session=await connectActor(member),grant=randomUUID();
     await credentials.delegate(owner.id,{id:grant,credentialId,expectedRevision:1,workspaceId:fixture.workspaceId,granteeUserId:member.id,models:["grok-4.6"],expiresAt:new Date(Date.now()+3600_000).toISOString()});
     await expect(service.authorizeAction(engine(),request.executionId,session)).rejects.toThrow();
-    const own=await service.admit(engine(),{...request,executionId:randomUUID(),delegationId:grant,source:{kind:"session",actorSessionId:session}});
+    const own=await admitSupported(service,engine(),{...request,executionId:randomUUID(),delegationId:grant,source:{kind:"session",actorSessionId:session}});
     expect(own.customization?.skills).toEqual([]);expect(result.customization?.skills).toHaveLength(1);
   });
   it("persists an admitted Claude context suffix without weakening model validation",async()=>{
@@ -328,20 +358,21 @@ d("private provider execution leases",()=>{
       material:{kind:"claude-api-key",apiKey:"synthetic-claude-credential"}});
     await credentials.delegate(owner.id,{id:delegationId,credentialId,expectedRevision:1,workspaceId:fixture.workspaceId,granteeUserId:owner.id,
       models:[model],expiresAt:new Date(Date.now()+3600_000).toISOString()});
-    await pool.query(`INSERT INTO cloud_agent_runtime_qualifications(provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled)
-      VALUES('daytona','snapshot-pinned',$1,'claude-api-key','zeros-cloud-worker-v3',true)`,["a".repeat(64)]);
-    const lease=await service.admit(engine(),{executionId:randomUUID(),delegationId,provider:"claude",model,source:{kind:"session",actorSessionId}});
+    await pool.query(`INSERT INTO cloud_runtime_qualifications(runtime_id,base_compatibility_id,credential_kind,profile,enabled,mcp_qualified,evidence,qualified_at)
+      SELECT runtime_id,base_compatibility_id,'claude-api-key',profile,enabled,mcp_qualified,evidence,qualified_at
+      FROM cloud_runtime_qualifications WHERE credential_kind='claude-setup-token'`);
+    const lease=await admitSupported(service,engine(),{executionId:randomUUID(),delegationId,provider:"claude",model,source:{kind:"session",actorSessionId}});
     expect((await pool.query("SELECT model FROM cloud_agent_execution_leases WHERE id=$1",[lease.leaseId])).rows).toEqual([{model}]);
     await expect(pool.query("UPDATE cloud_agent_execution_leases SET model=$2 WHERE id=$1",[lease.leaseId,"claude[anything]"])).rejects.toMatchObject({code:"23514"});
   });
   it.each(["renew", "replay", "action"] as const)("rejects lease expiry after the %s transaction starts",async operation=>{
-    const request=admission(),lease=await service.admit(engine(),request);
+    const request=admission(),lease=await admitSupported(service,engine(),request);
     let expired:Date|undefined;
     const controlled=withAuthorityDeadlineBarrier(pool,/cloud_workspace_engine_authority_current/,async()=>{
       expired=(await pool.query("UPDATE cloud_agent_execution_leases SET expires_at=clock_timestamp() WHERE id=$1 RETURNING expires_at",[lease.leaseId])).rows[0].expires_at;
     });
     const waiting=new DatabaseCloudAgentExecutionService(controlled,encryption,false);
-    const result=operation==="renew"?waiting.validate(engine(),lease.leaseId,true):operation==="replay"?waiting.admit(engine(),request):waiting.authorizeAction(engine(),request.executionId,actorSessionId);
+    const result=operation==="renew"?waiting.validate(engine(),lease.leaseId,true):operation==="replay"?admitSupported(waiting,engine(),request):waiting.authorizeAction(engine(),request.executionId,actorSessionId);
     await expect(result).rejects.toMatchObject({code:"cloud_agent_authority_rejected"});
     expect((await pool.query("SELECT expires_at FROM cloud_agent_execution_leases WHERE id=$1",[lease.leaseId])).rows[0].expires_at).toEqual(expired);
   });
@@ -362,7 +393,7 @@ d("private provider execution leases",()=>{
     await credentials.delegate(owner.id,{id:grant,credentialId:codex?.input.credentialId??credentialId,expectedRevision:1,workspaceId:fixture.workspaceId,granteeUserId:guest.id,
       models:[codex?"gpt-5.6-sol":"grok-4.6"],expiresAt:new Date(Date.now()+3600_000).toISOString()});
     const request={...(codex?.request??admission()),delegationId:grant,source:{kind:"session" as const,actorSessionId:guestSession}};
-    const lease=operation==="admit"?null:await service.admit(engine(),request);
+    const lease=operation==="admit"?null:await admitSupported(service,engine(),request);
     if(codex){
       const renewing=new DatabaseCloudAgentExecutionService(pool,encryption,false,new DatabaseCodexAuthRenewal(pool,encryption,async(_cache,dispatch)=>{
         await dispatch();return syntheticCodexCache({refresh:`rotated-refresh-${randomUUID()}`,expiresAt:Math.floor(Date.now()/1000)+7200});
@@ -381,17 +412,17 @@ d("private provider execution leases",()=>{
       if(deadline==="guest")await pool.query("UPDATE cloud_workspace_guest_grants SET expires_at=clock_timestamp() WHERE user_id=$1",[guest.id]);
     });
     const waiting=new DatabaseCloudAgentExecutionService(controlled,encryption,false);
-    const result=operation==="admit"?waiting.admit(engine(),request):operation==="rotation"?waiting.validate(engine(),lease!.leaseId,true,1):waiting.authorizeAction(engine(),request.executionId,guestSession);
+    const result=operation==="admit"?admitSupported(waiting,engine(),request):operation==="rotation"?waiting.validate(engine(),lease!.leaseId,true,1):waiting.authorizeAction(engine(),request.executionId,guestSession);
     await expect(result).rejects.toBeDefined();expect(intercepted).toBe(true);
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_agent_execution_leases")).rows[0].n).toBe(lease?1:0);
   });
   it("imports an expired native access token only to renew before admitting a worker",async()=>{
     const c=await codexCredential(Math.floor(Date.now()/1000)-60),renew=vi.fn(async(_cache,dispatch)=>{await dispatch();return syntheticCodexCache({refresh:`rotated-refresh-${randomUUID()}`});});
     service=new DatabaseCloudAgentExecutionService(pool,encryption,false,new DatabaseCodexAuthRenewal(pool,encryption,renew));
-    expect((await service.admit(engine(),c.request)).credentialVersion).toBe(2);expect(renew).toHaveBeenCalledTimes(1);
+    expect((await admitSupported(service,engine(),c.request)).credentialVersion).toBe(2);expect(renew).toHaveBeenCalledTimes(1);
   });
   it.each(["engine","session","execution","delegation"] as const)("rolls back an action receipt when %s expires during its insert",async deadline=>{
-    const request=admission(),lease=await service.admit(engine(),request);
+    const request=admission(),lease=await admitSupported(service,engine(),request);
     const controlled=withAuthorityDeadlineBarrier(pool,/INSERT INTO cloud_workspace_action_receipts/,async client=>{
       if(deadline==="engine")await client.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp() WHERE id=$1",[fixture.engineInstanceId]);
       if(deadline==="session")await client.query("UPDATE cloud_workspace_actor_sessions SET last_renewed_at=clock_timestamp()-interval '30 seconds' WHERE id=$1",[actorSessionId]);
@@ -408,20 +439,20 @@ d("private provider execution leases",()=>{
     const c=await codexCredential(Math.floor(Date.now()/1000)+120),updated=syntheticCodexCache({refresh:`rotated-refresh-${randomUUID()}`,expiresAt});
     const renew=vi.fn(async(_cache,dispatch)=>{await dispatch();return updated;});
     service=new DatabaseCloudAgentExecutionService(pool,encryption,false,new DatabaseCodexAuthRenewal(pool,encryption,renew));
-    const authority=await service.admit(engine(),c.request);
+    const authority=await admitSupported(service,engine(),c.request);
     expect(renew).toHaveBeenCalledTimes(1);expect(authority.credentialVersion).toBe(2);
     expect(authority.material).toEqual({kind:"codex-chatgpt",accessToken:updated.tokens.access_token,accountId:updated.tokens.account_id,expiresAt});
     expect(JSON.stringify(authority)).not.toMatch(/refresh_token|id_token|last_refresh/);
     expect((await pool.query("SELECT revision,current_version FROM cloud_agent_credentials WHERE id=$1",[c.input.credentialId])).rows[0]).toEqual({revision:"1",current_version:2});
     expect((await pool.query("SELECT revoked_at FROM cloud_agent_credential_delegations WHERE id=$1",[c.grant])).rows[0]!.revoked_at).toBeNull();
     expect(await credentials.importCodex(c.input)).toMatchObject({replayed:true,credential:{revision:1}});
-    expect((await service.admit(engine(),c.request)).credentialVersion).toBe(2);expect(renew).toHaveBeenCalledTimes(1);
+    expect((await admitSupported(service,engine(),c.request)).credentialVersion).toBe(2);expect(renew).toHaveBeenCalledTimes(1);
   });
   it("returns only access material on a current lease after a forced Codex renewal",async()=>{
     const c=await codexCredential(),updated=syntheticCodexCache({refresh:`rotated-refresh-${randomUUID()}`,expiresAt:Math.floor(Date.now()/1000)+7200});
     const renew=vi.fn(async(_cache,dispatch)=>{await dispatch();return updated;});
     service=new DatabaseCloudAgentExecutionService(pool,encryption,false,new DatabaseCodexAuthRenewal(pool,encryption,renew));
-    const authority=await service.admit(engine(),c.request);
+    const authority=await admitSupported(service,engine(),c.request);
     const response=await service.validate(engine(),authority.leaseId,true,authority.credentialVersion,true);
     expect(response).toMatchObject({credentialVersion:2,rotation:{authorityId:authority.authorityId,material:{kind:"codex-chatgpt",accessToken:updated.tokens.access_token}}});
     expect(JSON.stringify(response)).not.toMatch(/refresh_token|id_token|last_refresh/);
@@ -429,7 +460,7 @@ d("private provider execution leases",()=>{
     await expect(service.validate(engine(),authority.leaseId,true,2,true)).rejects.toMatchObject({status:409});
   });
   it("waits outside authorization locks for a credential publication without retiring live executions",async()=>{
-    const c=await codexCredential(),one=await service.admit(engine(),c.request),two=await service.admit(engine(),{...c.request,executionId:randomUUID()});
+    const c=await codexCredential(),one=await admitSupported(service,engine(),c.request),two=await admitSupported(service,engine(),{...c.request,executionId:randomUUID()});
     const publisher=await pool.connect();await publisher.query("BEGIN");await publisher.query("SELECT id FROM cloud_agent_credentials WHERE id=$1 FOR UPDATE",[c.input.credentialId]);
     const first=service.validate(engine(),one.leaseId,true,one.credentialVersion),second=service.validate(engine(),two.leaseId,true,two.credentialVersion);
     const outcomes=Promise.allSettled([first,second]);
@@ -445,7 +476,7 @@ d("private provider execution leases",()=>{
       return syntheticCodexCache({refresh:`rotated-refresh-${randomUUID()}`,expiresAt:Math.floor(Date.now()/1000)+7200});
     });
     service=new DatabaseCloudAgentExecutionService(pool,encryption,false,new DatabaseCodexAuthRenewal(pool,encryption,renew));
-    const authority=await service.admit(engine(),c.request);leaseId=authority.leaseId;
+    const authority=await admitSupported(service,engine(),c.request);leaseId=authority.leaseId;
     await expect(service.validate(engine(),leaseId,true,authority.credentialVersion,true)).rejects.toMatchObject({status:403});
     expect((await pool.query("SELECT material_version FROM cloud_codex_auth_caches WHERE credential_id=$1",[c.input.credentialId])).rows[0]!.material_version).toBe(2);
   });
@@ -458,7 +489,7 @@ d("private provider execution leases",()=>{
     await commands.mutate({...engine(),actorSessionId},{conversationId:"refresh-refusal",operationId:randomUUID(),expectedRevision:0,
       action:{kind:"enqueue",commandId,payload:{agentId:"codex",model:c.request.model,userMessageId:randomUUID(),prompt:[{type:"text",text:"Keep my prompt"}],modeRevision:0,agentCredentialGrantId:c.grant}}});
     const claim=(await commands.claim(engine(),"refresh-refusal",c.request.executionId))!;
-    await expect(service.admit(engine(),{...c.request,source:{kind:"command",commandId,claimId:claim.claimId}}))
+    await expect(admitSupported(service,engine(),{...c.request,source:{kind:"command",commandId,claimId:claim.claimId}}))
       .rejects.toMatchObject({status:409,code:"cloud_agent_credential_refresh_required"});
     await commands.settle(engine(),{commandId,claimId:claim.claimId,state:"failed",resultCode:"command_dispatch_rejected"});
     expect((await pool.query("SELECT result_code FROM cloud_workspace_commands WHERE id=$1",[commandId])).rows[0].result_code).toBe("cloud_agent_credential_refresh_required");
@@ -469,29 +500,30 @@ d("private provider execution leases",()=>{
     const c=await codexCredential(Math.floor(Date.now()/1000)+120);
     const renew=vi.fn(async(_cache,dispatch)=>{await dispatch();await credentials.revokeDelegation(owner.id,c.grant);return syntheticCodexCache({refresh:`rotated-refresh-${randomUUID()}`});});
     service=new DatabaseCloudAgentExecutionService(pool,encryption,false,new DatabaseCodexAuthRenewal(pool,encryption,renew));
-    await expect(service.admit(engine(),c.request)).rejects.toMatchObject({status:409,code:"cloud_agent_credential_revoked"});
+    await expect(admitSupported(service,engine(),c.request)).rejects.toMatchObject({status:409,code:"cloud_agent_credential_revoked"});
     expect((await pool.query("SELECT state,material_version FROM cloud_codex_auth_caches WHERE credential_id=$1",[c.input.credentialId])).rows[0]).toEqual({state:"ready",material_version:2});
     expect((await pool.query("SELECT 1 FROM cloud_agent_execution_leases")).rowCount).toBe(0);
   });
   it("replays an admission without duplicate execution and keeps validation free of credential material",async()=>{
-    const request=admission(),[one,two]=await Promise.all([service.admit(engine(),request),service.admit(engine(),request)]);
+    const request=admission(),[one,two]=await Promise.all([admitSupported(service,engine(),request),admitSupported(service,engine(),request)]);
     expect(one).toEqual(two);expect(one.material).toEqual({kind:"cursor-api-key",apiKey:secret});
     expect((await pool.query("SELECT 1 FROM cloud_agent_execution_leases")).rowCount).toBe(1);
     const valid=await service.validate(engine(),one.leaseId,true);expect(valid.leaseId).toBe(one.leaseId);expect(JSON.stringify(valid)).not.toContain(secret);
-    await service.release(engine(),one.leaseId);await expect(service.admit(engine(),request)).rejects.toMatchObject({status:403});
+    await service.release(engine(),one.leaseId);await expect(admitSupported(service,engine(),request)).rejects.toMatchObject({status:403});
   });
   it("denies unqualified images, authentication modes, models, and a forged engine",async()=>{
-    await expect(service.admit({...engine(),heartbeatToken:`zwh_${randomBytes(32).toString("base64url")}`},admission())).rejects.toThrow();
-    await expect(service.admit(engine(),{...admission(),model:"another-model"})).rejects.toMatchObject({status:409,code:"cloud_agent_model_not_authorized"});
-    await expect(service.admit(engine(),{...admission(),provider:"codex"})).rejects.toMatchObject({status:403});
-    await pool.query("UPDATE cloud_agent_runtime_qualifications SET enabled=false");
-    await expect(service.admit(engine(),admission())).rejects.toMatchObject({status:403});
-    await pool.query("UPDATE cloud_agent_runtime_qualifications SET enabled=true,runtime_contract_sha256=$1",["b".repeat(64)]);
-    await expect(service.admit(engine(),admission())).rejects.toMatchObject({status:403});
+    await expect(admitSupported(service,{...engine(),heartbeatToken:`zwh_${randomBytes(32).toString("base64url")}`},admission())).rejects.toThrow();
+    await expect(admitSupported(service,engine(),{...admission(),model:"another-model"})).rejects.toMatchObject({status:409,code:"cloud_agent_model_not_authorized"});
+    await expect(admitSupported(service,engine(),{...admission(),provider:"codex"})).rejects.toMatchObject({status:403});
+    await updateRuntimeFixture("UPDATE cloud_runtime_qualifications SET enabled=false");
+    await expect(admitSupported(service,engine(),admission())).rejects.toMatchObject({status:403});
+    await updateRuntimeFixture("UPDATE cloud_runtime_qualifications SET enabled=true");
+    await updateRuntimeFixture("UPDATE cloud_workspace_engine_instances SET runtime_manifest_sha256=$2 WHERE id=$1", [fixture.engineInstanceId,"b".repeat(64)]);
+    await expect(admitSupported(service,engine(),admission())).rejects.toMatchObject({status:403});
     expect((await pool.query("SELECT 1 FROM cloud_agent_execution_leases")).rowCount).toBe(0);
   });
   it("authorizes an approval beside other engine work but waits behind a revocation",async()=>{
-    const request=admission();await service.admit(engine(),request);
+    const request=admission();await admitSupported(service,engine(),request);
     const rows={workspaceId:fixture.workspaceId,engineInstanceId:fixture.engineInstanceId};
     const authorize=(lockPool:pg.Pool)=>new DatabaseCloudAgentExecutionService(lockPool,encryption,false).authorizeAction(engine(),request.executionId,actorSessionId);
     await expect(withHeldEngineRows(pool,rows,"SHARE",authorize)).resolves.toEqual({authorized:true,executionId:request.executionId,actorSessionId});
@@ -500,7 +532,7 @@ d("private provider execution leases",()=>{
   it("begins an approval and rechecks its actor within a fixed statement budget",async()=>{
     // Every statement is a database round trip while the approval holds the
     // workspace and engine rows, so the approval path keeps an exact budget.
-    const request=admission(),lease=await service.admit(engine(),request);
+    const request=admission(),lease=await admitSupported(service,engine(),request);
     const statements:string[]=[],counted=interceptQueries(pool,sql=>{statements.push(sql);});
     const begun=await new DatabaseCloudWorkspaceActionService({pool:counted}).request({...engine(),actorSessionId},{kind:"begin",admissible:true,
       action:{operationId:randomUUID(),conversationId:"chat",executionId:request.executionId,kind:"permission",requestId:randomUUID(),payload:{response:{outcome:"cancelled"}}}});
@@ -522,7 +554,7 @@ d("private provider execution leases",()=>{
     const sessions=new DatabaseCloudWorkspaceActorSessionService({pool,enginePort:39393,bridgeUrl:"wss://api.example.test/v1/cloud-workspaces/bridge",workosEnabled:false});
     const grant=await sessions.issue({...engine(),actorUserId:owner.id,authenticatedUser:owner,proof});
     const renewing=(await sessions.consume({...engine(),token:grant.grantToken})).actorSessionId;
-    const request={...admission(),source:{kind:"session" as const,actorSessionId:renewing}};await service.admit(engine(),request);
+    const request={...admission(),source:{kind:"session" as const,actorSessionId:renewing}};await admitSupported(service,engine(),request);
     // Hold the renewal after it has locked the session row.
     const barrier=pauseBeforeQuery(pool,/UPDATE cloud_workspace_actor_sessions\s+SET consumed_at/);
     const renewal=new DatabaseCloudWorkspaceActorSessionService({pool:barrier.pool,enginePort:39393,bridgeUrl:"wss://api.example.test/v1/cloud-workspaces/bridge",workosEnabled:false})
@@ -534,12 +566,12 @@ d("private provider execution leases",()=>{
     await expect(renewal).resolves.toMatchObject({admitted:true});
   });
   it("requires current actor and credential-owner consent at every tool authorization",async()=>{
-    const lease=await service.admit(engine(),admission());await credentials.revokeDelegation(owner.id,delegationId);
+    const lease=await admitSupported(service,engine(),admission());await credentials.revokeDelegation(owner.id,delegationId);
     await expect(service.validate(engine(),lease.leaseId)).rejects.toMatchObject({status:403});
     await expect(service.validate(engine(),lease.leaseId,true)).rejects.toMatchObject({status:403});
   });
   it("requires live credential consent before retaining a new paid action",async()=>{
-    const request=admission();await service.admit(engine(),request);await credentials.revokeDelegation(owner.id,delegationId);
+    const request=admission();await admitSupported(service,engine(),request);await credentials.revokeDelegation(owner.id,delegationId);
     const actions=new DatabaseCloudWorkspaceActionService({pool});
     await expect(actions.request({...engine(),actorSessionId},{kind:"begin",admissible:true,action:{operationId:randomUUID(),conversationId:"chat",
       executionId:request.executionId,kind:"permission",requestId:randomUUID(),payload:{response:{outcome:{outcome:"selected",optionId:"allow"}}}}})).rejects.toMatchObject({status:403});
@@ -553,7 +585,7 @@ d("private provider execution leases",()=>{
       [member.authentication.sessionId,member.identity.subject,member.id]);
     await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')",[fixture.organizationId,member.id]);
     await pool.query("INSERT INTO organization_seat_assignments(org_id,user_id,assigned_by) VALUES($1,$2,$3)",[fixture.organizationId,member.id,owner.id]);
-    const memberSession=await connectActor(member),secondDevice=await connectActor(owner),request=admission();await service.admit(engine(),request);
+    const memberSession=await connectActor(member),secondDevice=await connectActor(owner),request=admission();await admitSupported(service,engine(),request);
     await expect(service.authorizeAction(engine(),request.executionId,secondDevice)).resolves.toEqual({authorized:true,executionId:request.executionId,actorSessionId:secondDevice});
     await expect(service.authorizeAction(engine(),request.executionId,memberSession)).rejects.toMatchObject({status:403});
     const actions=new DatabaseCloudWorkspaceActionService({pool}),action={kind:"begin",admissible:true,action:{operationId:randomUUID(),conversationId:"chat",
@@ -561,11 +593,15 @@ d("private provider execution leases",()=>{
     await expect(actions.request({...engine(),actorSessionId:memberSession},action)).rejects.toMatchObject({status:403});
     const grant={id:randomUUID(),credentialId,expectedRevision:1,workspaceId:fixture.workspaceId,granteeUserId:member.id,models:["grok-4.6"],expiresAt:new Date(Date.now()+3600_000).toISOString()};
     await credentials.delegate(owner.id,grant);
-    const allowed=await service.authorizeAction(engine(),request.executionId,memberSession);expect(allowed).toEqual({authorized:true,executionId:request.executionId,actorSessionId:memberSession});
+    await expect(service.authorizeAction(engine(),request.executionId,memberSession)).rejects.toMatchObject({status:403});
+    const ownRequest={...admission(),delegationId:grant.id,source:{kind:"session" as const,actorSessionId:memberSession}};
+    await admitSupported(service,engine(),ownRequest);
+    action.action.executionId=ownRequest.executionId;
+    const allowed=await service.authorizeAction(engine(),ownRequest.executionId,memberSession);expect(allowed).toEqual({authorized:true,executionId:ownRequest.executionId,actorSessionId:memberSession});
     expect(JSON.stringify(allowed)).not.toContain(secret);
     const receipt=await actions.request({...engine(),actorSessionId:memberSession},action);expect(receipt.replayed).toBe(false);
     await credentials.revokeDelegation(owner.id,grant.id);
-    await expect(service.authorizeAction(engine(),request.executionId,memberSession)).rejects.toMatchObject({status:403});
+    await expect(service.authorizeAction(engine(),ownRequest.executionId,memberSession)).rejects.toMatchObject({status:403});
     // Historical receipts remain observable but cannot grant another dispatch.
     expect(await actions.request({...engine(),actorSessionId:memberSession},action)).toMatchObject({replayed:true,claimId:receipt.claimId});
     await expect(actions.request({...engine(),actorSessionId:memberSession},{...action,action:{...action.action,operationId:randomUUID()}})).rejects.toMatchObject({status:403});
@@ -575,19 +611,19 @@ d("private provider execution leases",()=>{
     await expect(service.authorizeAction(engine(),request.executionId,memberSession)).rejects.toMatchObject({status:403});
   });
   it("preserves admitted work after disconnect but rejects explicit WorkOS session revocation",async()=>{
-    const lease=await service.admit(engine(),admission());
+    const lease=await admitSupported(service,engine(),admission());
     await pool.query("UPDATE cloud_workspace_actor_sessions SET last_renewed_at=now()-interval '1 minute' WHERE id=$1",[actorSessionId]);
     await expect(service.validate(engine(),lease.leaseId,true)).resolves.toHaveProperty("leaseId",lease.leaseId);
-    await expect(service.admit(engine(),admission())).rejects.toMatchObject({status:401});
+    await expect(admitSupported(service,engine(),admission())).rejects.toMatchObject({status:401});
     await pool.query("UPDATE auth_sessions SET status='revoked',revoked_at=now() WHERE provider_session_id=$1",[owner.authentication.sessionId]);
     await expect(service.validate(engine(),lease.leaseId)).rejects.toMatchObject({status:401});
   });
   it("does not resurrect expired leases or accept a different workspace",async()=>{
-    const request=admission(),lease=await service.admit(engine(),request);
+    const request=admission(),lease=await admitSupported(service,engine(),request);
     await expect(service.validate({...engine(),workspaceId:randomUUID()},lease.leaseId)).rejects.toThrow();
     await pool.query("UPDATE cloud_agent_execution_leases SET created_at=now()-interval '1 hour',expires_at=now()-interval '1 second' WHERE id=$1",[lease.leaseId]);
     await expect(service.validate(engine(),lease.leaseId,true)).rejects.toMatchObject({status:403});
-    await expect(service.admit(engine(),request)).rejects.toMatchObject({status:403});
+    await expect(admitSupported(service,engine(),request)).rejects.toMatchObject({status:403});
   });
   it("binds queued spending to its exact command claim and selected delegation",async()=>{
     const commands=new DatabaseCloudWorkspaceCommandService({pool}),commandId=randomUUID(),executionId=randomUUID();
@@ -596,8 +632,8 @@ d("private provider execution leases",()=>{
     const claim=await commands.claim(engine(),"chat",executionId);
     expect(claim?.payload).toMatchObject({model:"grok-4.6",effort:"xhigh",fast:true,agentCredentialGrantId:delegationId});
     const request={executionId,delegationId,provider:"cursor" as const,model:"grok-4.6",source:{kind:"command" as const,commandId,claimId:claim!.claimId}};
-    await expect(service.admit(engine(),{...request,source:{...request.source,claimId:randomUUID()}})).rejects.toMatchObject({status:403});
-    const lease=await service.admit(engine(),request);
+    await expect(admitSupported(service,engine(),{...request,source:{...request.source,claimId:randomUUID()}})).rejects.toMatchObject({status:403});
+    const lease=await admitSupported(service,engine(),request);
     await commands.settle(engine(),{commandId,claimId:claim!.claimId,state:"succeeded",resultCode:null});
     await expect(service.validate(engine(),lease.leaseId)).rejects.toMatchObject({status:403});
   });
@@ -608,15 +644,15 @@ d("private provider execution leases",()=>{
         operation:{version:1,kind:"fork",sourceConversationId:"source",strategy:"transcript"}}}});
     const claim=(await commands.claim(engine(),"fork-destination",executionId))!;
     const request={executionId,delegationId,provider:"cursor" as const,model:"grok-4.6",source:{kind:"command" as const,commandId,claimId:claim.claimId}};
-    await expect(service.admit(engine(),request)).rejects.toMatchObject({status:403});
+    await expect(admitSupported(service,engine(),request)).rejects.toMatchObject({status:403});
     const nativeCapabilities={version:1,goals:false,nativeFork:false,transcriptFork:true,nativeReview:false,connectedApps:false,multiAgent:false};
-    await pool.query("UPDATE cloud_agent_runtime_qualifications SET native_capabilities=$1::jsonb",[JSON.stringify(nativeCapabilities)]);
-    const legacy=await service.admit(engine(),admission());
+    await updateRuntimeFixture("UPDATE cloud_runtime_qualifications SET native_capabilities=$1::jsonb",[JSON.stringify(nativeCapabilities)]);
+    const legacy=await admitSupported(service,engine(),admission());
     expect(legacy).not.toHaveProperty("nativeCapabilities");
-    const lease=await service.admit(engine(),request,false,1);
+    const lease=await admitSupported(service,engine(),request,false,1);
     expect(lease).toMatchObject({nativeCapabilities});
     expect(await service.validate(engine(),lease.leaseId,false,undefined,false,1)).toMatchObject({nativeCapabilities});
-    await pool.query("UPDATE cloud_agent_runtime_qualifications SET native_capabilities=NULL");
+    await updateRuntimeFixture("UPDATE cloud_runtime_qualifications SET native_capabilities='{}'::jsonb");
     await expect(service.validate(engine(),lease.leaseId)).rejects.toMatchObject({status:403});
   });
   it("erases reciprocal credential delegations concurrently without a cascade deadlock",async()=>{

@@ -39,10 +39,6 @@ vi.mock("../../team/team-store", () => ({
     isPersonal: false,
   }),
 }));
-vi.mock("../internal-features", () => ({
-  isInternalFeatureActive: () => transport.feature,
-  useInternalFeatureActive: () => transport.feature,
-}));
 vi.mock("../../../platform/cloud-workspaces", async (original) => ({
   ...(await original<typeof import("../../../platform/cloud-workspaces")>()),
   cloudAccountRequest: transport.request,
@@ -156,13 +152,10 @@ beforeEach(() => {
 });
 
 describe("Cloud Computer admin client and destination", () => {
-  it("refuses writes with a warm snapshot after demotion, flag loss, missing build or account replacement", async () => {
+  it("refuses writes with a warm snapshot after demotion, missing build or account replacement", async () => {
     for (const change of [
       () => {
         transport.role = "member";
-      },
-      () => {
-        transport.feature = false;
       },
       () => {
         cloudComputerV2Cache.setData(key, computerState());
@@ -181,6 +174,12 @@ describe("Cloud Computer admin client and destination", () => {
       ).rejects.toThrow();
     }
     expect(transport.request).not.toHaveBeenCalled();
+  });
+
+  it("allows current organization admins with the retired rollout flag off", async () => {
+    transport.feature = false;
+    await expect(configureCloudComputerV2AdminWorkspace(key, 1, computerOperationId)).resolves.toMatchObject(result());
+    expect(transport.request).toHaveBeenCalledOnce();
   });
 
   it("shares concurrent exact-operation requests and sends only D1's current-version contract", async () => {
@@ -352,9 +351,6 @@ describe("Cloud Computer admin client and destination", () => {
         transport.role = "member";
       },
       () => {
-        transport.feature = false;
-      },
-      () => {
         transport.epoch++;
       },
     ]) {
@@ -424,7 +420,7 @@ describe("Cloud Computer admin client and destination", () => {
 });
 
 describe("server-derived Admin badge", () => {
-  it("uses only marked cloud metadata and the effective internal gate", () => {
+  it("uses only server-marked cloud metadata independently of the retired rollout flag", () => {
     const folder = cloudWorkspaceKey({
       organizationId: computerOrg,
       workspaceId: computerOperationId,
@@ -443,7 +439,7 @@ describe("server-derived Admin badge", () => {
     );
     expect(render()).toContain(">Admin<");
     transport.feature = false;
-    expect(render()).toBe("");
+    expect(render()).toContain(">Admin<");
     transport.feature = true;
     expect(
       renderToStaticMarkup(

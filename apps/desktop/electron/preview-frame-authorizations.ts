@@ -116,7 +116,7 @@ export class PreviewFrameAuthorizations {
   }
 
   /** Bind a pre-navigation, capability-free authorization to the exact
-   * top-level Browser iframe that starts using it. Ordinary Daytona preview
+   * top-level Browser iframe that starts using it. Ordinary preview
    * authorization is requested before React mounts the iframe, so the frame
    * tree id does not exist at IPC time. The trusted WebContents navigation
    * observer supplies that id before request headers are released. */
@@ -198,13 +198,7 @@ export class PreviewFrameAuthorizations {
         candidate.frameTreeNodeId !== null &&
         frameTreeNodeIds.includes(candidate.frameTreeNodeId),
     );
-    if (!grant) return null;
-    return {
-      "X-Daytona-Skip-Preview-Warning": "true",
-      ...(grant.capability
-        ? { "x-zeros-preview-capability": grant.capability }
-        : {}),
-    };
+    return grant?.capability ? { "x-zeros-preview-capability": grant.capability } : null;
   }
 
   revoke(frameName: string, capability?: string): void {

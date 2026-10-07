@@ -575,11 +575,13 @@ export async function runCloudComputerV2Smoke({
       await page.getByRole("button", { name: "Refresh sources", exact: true }).click();
       await expect(page.getByText("Desktop GitHub access is unavailable", { exact: true })).toBeVisible();
       await page.keyboard.press("Escape");
-      await button("Disable computer v2").click();
+      await button("Toggle settings activity").click();
+      const hiddenSurfaceReads = stateReads();
+      await page.clock.runFor(30_000);
+      expect(stateReads()).toBe(hiddenSurfaceReads);
+      await button("Toggle settings activity").click();
       await choose().click();
-      await expect(menu).toContainText("Open project");
-      await expect(menu).toContainText("Open GitHub project");
-      await expect(menu).toContainText("Start from scratch");
+      await expect(menu).toContainText("example/project");
       await page.keyboard.press("Escape");
       check("Cloud Create uses built repositories without a project, restores/prunes per-org choices, creates Code/Design, bounds metadata recovery, and defers hidden conflicts without losing the prompt", true);
     } else if (regression === "role-loss") {
@@ -1344,38 +1346,16 @@ export async function runCloudComputerV2Smoke({
     .getByRole("button", { name: "Organization A", exact: true })
     .click();
   await expect(page.getByText("Active v2", { exact: true })).toBeVisible();
-  await page
-    .getByRole("button", { name: "Disable computer v2", exact: true })
-    .click();
-  await expect(
-    page.getByText(/Each member must have their own GitHub access/),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Configure with an agent", exact: true }),
-  ).toHaveCount(0);
-  await page
-    .getByRole("button", { name: "Enable computer v2", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Ordinary member", exact: true }).click();
   await expect(page.getByText("Active v2", { exact: true })).toBeVisible();
-  await page
-    .getByRole("button", { name: "Ordinary member", exact: true })
-    .click();
-  await expect(
-    page.getByRole("button", { name: "Configure with an agent", exact: true }),
-  ).toHaveCount(0);
-  const revokedReads = requests.filter((row) =>
-    row.path.includes("/cloud-computer/v2"),
-  ).length;
+  await expect(page.getByRole("button", { name: "Configure with an agent", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Organization member", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Build computer", exact: true })).toBeDisabled();
+  await expect(editor).toHaveAttribute("contenteditable", "false");
+  await page.getByRole("button", { name: "Toggle settings activity", exact: true }).click();
+  const hiddenSurfaceReads = requests.filter(row => row.path.includes("/cloud-computer/v2")).length;
   await page.clock.runFor(30_000);
-  expect(
-    requests.filter((row) => row.path.includes("/cloud-computer/v2")).length,
-  ).toBe(revokedReads);
-  await page
-    .getByRole("button", { name: "Disable computer v2", exact: true })
-    .click();
+  expect(requests.filter(row => row.path.includes("/cloud-computer/v2")).length).toBe(hiddenSurfaceReads);
   expect(errors).toEqual([]);
-  check(
-    "Org switching restores exact-key state, successful builds release both Create paths, and flag/staff loss retires all v2 surfaces and polling",
-    true,
-  );
+  check("Org switching restores exact-key state; nonstaff v2 stays available, members cannot mutate, and hidden surfaces stop polling", true);
 }

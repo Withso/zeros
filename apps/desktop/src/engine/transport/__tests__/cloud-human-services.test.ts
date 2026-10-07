@@ -1,30 +1,34 @@
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { describe,expect,it } from 'vitest';
+import { describe,expect,it,vi } from 'vitest';
 import { cloudSshWorkerLaunch,parseCloudSshIntro,CloudRuntimeHumanServices } from '../cloud-human-services';
 import type { CloudWorkerConfiguration } from '../../agents/containment/cloud-worker-config';
 const {utils}=createRequire(import.meta.url)('ssh2');
-const worker:CloudWorkerConfiguration={version:2,backend:'cloud-worker',profile:'zeros-cloud-worker-v2',uid:10001,gid:10001,
- toolchain:{node:'/opt/zeros-runtime/bin/node',setpriv:'/usr/bin/setpriv',supervisor:'/opt/zeros/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs',bwrap:'/usr/bin/bwrap'}};
+import {testCloudRuntime,testCloudWorker} from "../../agents/__tests__/helpers/test-cloud-runtime";
+vi.mock("../../agents/containment/cloud-runtime-root.mjs",async original=>({
+  ...await original<typeof import("../../agents/containment/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime:(await import("../../agents/__tests__/helpers/test-cloud-runtime")).testCloudRuntime,
+}));
+const worker:CloudWorkerConfiguration=testCloudWorker();
 const intro=()=>{const keys=utils.generateKeyPairSync('ed25519'),raw=utils.parseKey(keys.public).getPublicSSH();return{version:1,kind:'ssh',publicKey:keys.public,hostKeySha256:createHash('sha256').update(raw).digest('base64').replace(/=+$/,'')};};
 describe('cloud human service process boundary',()=>{
  it('counts forwarding traffic for ten minutes but never lets an unused listener renew activity',()=>{
   let now=0;
   const services=new CloudRuntimeHumanServices(worker,()=>[],()=>now);
   const stream={bytesRead:0,bytesWritten:0};
-  const tunnels=(services as unknown as {tunnels:Map<typeof stream,{bytes:number;at:number}>}).tunnels;
-  tunnels.set(stream,{bytes:0,at:now});
-  expect(services.hasActiveWork()).toBe(true);
+  const tunnels=(services as unknown as {tunnels:Map<typeof stream,{bytes:number}>}).tunnels;
+  tunnels.set(stream,{bytes:0});
+  expect(services.hasActiveWork()).toBe(false);
   now=600_000;expect(services.hasActiveWork()).toBe(false);
   stream.bytesWritten=1;expect(services.hasActiveWork()).toBe(true);
   now+=600_000;expect(services.hasActiveWork()).toBe(false);
  });
  it('launches the image-owned Node worker after dropping identity and privilege elevation',()=>{
-  expect(cloudSshWorkerLaunch(worker)).toEqual({command:'/usr/bin/bwrap',script:'/opt/zeros/apps/desktop/src/engine/transport/cloud-ssh-session.mjs',
+  expect(cloudSshWorkerLaunch(worker)).toEqual({command:'/usr/bin/bwrap',script:`${testCloudRuntime().workerRoot}/apps/desktop/src/engine/transport/cloud-ssh-session.mjs`,
    args:['--unshare-pid','--die-with-parent','--new-session','--bind','/','/','--proc','/proc','--dev','/dev',
     '--cap-drop','ALL','--cap-add','CAP_SETUID','--cap-add','CAP_SETGID','--','/usr/bin/setpriv',
-    '--reuid=10001','--regid=10001','--clear-groups','--no-new-privs','--','/opt/zeros-runtime/bin/node','/opt/zeros/apps/desktop/src/engine/transport/cloud-ssh-session.mjs']});
+    '--reuid=10001','--regid=10001','--clear-groups','--no-new-privs','--',testCloudRuntime().node,`${testCloudRuntime().workerRoot}/apps/desktop/src/engine/transport/cloud-ssh-session.mjs`]});
  });
  it('rejects root identity and relative executables',()=>{
   expect(()=>cloudSshWorkerLaunch({...worker,uid:0})).toThrow();

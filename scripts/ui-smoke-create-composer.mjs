@@ -1,5 +1,18 @@
 import { expect } from "@playwright/test";
 
+const unbuiltComputer = () => ({
+  state: "not_built",
+  revision: 0,
+  draft: { configId: null, repositories: [], installScript: "", timeoutSeconds: 900, environment: [] },
+  active: null,
+  activeRepositories: [],
+  previous: null,
+  latestBuild: null,
+  unbuiltChanges: false,
+  history: { builds: [], nextCursor: null },
+  canManage: true,
+});
+
 async function expectContextControlsInOneRow(page) {
   const [context, project, source, mode] = await Promise.all([
     page.locator("[data-dispatcher-context]").boundingBox(),
@@ -30,7 +43,13 @@ async function expectContextControlsInOneRow(page) {
 
 /** Real Create page, menus, editor and create requests; only transport is fake. */
 export async function runCreateComposerSmoke({ page, check, harnessBase }) {
-  await page.goto(`${harnessBase}/harness-folder-workspace.html?create`);
+  // Organization Create depends on its v2 template, not a Local checkout.
+  // Mock the read at the transport boundary; production validates its schema.
+  await page.route(/^https:\/\/api\.example\.test\/v1\/organizations\/[^/]+\/cloud-computer\/v2(?:\?|$)/, route => {
+    expect(route.request().method()).toBe("GET");
+    return route.fulfill({ json: unbuiltComputer() });
+  });
+  await page.goto(`${harnessBase}/harness-folder-workspace.html?create&cloud-enabled`);
   await page
     .getByRole("button", { name: "Open folder fixture", exact: true })
     .click();
@@ -71,11 +90,14 @@ export async function runCreateComposerSmoke({ page, check, harnessBase }) {
   await page.evaluate(() => window.setCreateOrganization("organization"));
   await expect(location).toHaveCount(0);
   await expect(card.getByRole("button", { name: "Create", exact: true })).toBeDisabled();
-  await expect(page.getByRole("status").filter({ hasText: "Choose a project first." })).toBeVisible();
+  const buildRequired = page.getByRole("status").filter({ hasText: "Build your Cloud Computer first." });
+  await expect(buildRequired).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Cloud Computer settings", exact: true })).toBeVisible();
   await page.screenshot({ path: ".context/cloud-create-ui.png" });
   await page.evaluate(() => window.setCreateOrganization("other"));
   await expect(location).toHaveCount(0);
   await expect(card.getByRole("button", { name: "Create", exact: true })).toBeDisabled();
+  await expect(buildRequired).toBeVisible();
   await page.evaluate(() => window.setCreateOrganization("personal"));
   await expect(page.getByRole("status").filter({ hasText: "Cloud" })).toHaveCount(0);
   await expect(card.getByRole("button", { name: "Create", exact: true })).toBeEnabled();
@@ -295,13 +317,25 @@ export async function runCreateComposerSmoke({ page, check, harnessBase }) {
 /** A delayed real create response must not retarget the newly selected owner. */
 export async function runCloudCreateOwnerSmoke({ page, check, harnessBase }) {
   const organizationId = "11111111-1111-4111-8111-111111111111";
+  const active = {
+    id: "77777777-7777-4777-8777-777777777777", version: 1,
+    configId: "88888888-8888-4888-8888-888888888888", acceptedRevision: 1,
+    state: "succeeded", stage: "done", errorCode: null, rebuiltFromBuildId: null,
+    templateState: "ready", createdAt: "2026-10-04T10:00:00.000Z",
+    startedAt: "2026-10-04T10:00:00.000Z", completedAt: "2026-10-04T10:00:00.000Z", cancelRequestedAt: null,
+  };
   let releaseCreate;
   const createGate = new Promise(resolve => { releaseCreate = resolve; });
   const creates = [];
   await page.route("https://api.example.test/**", async route => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
-    if (pathname.endsWith("/create-options")) {
+    if (pathname.endsWith("/cloud-computer/v2") && request.method() === "GET") {
+      await route.fulfill({ json: { ...unbuiltComputer(), state: "active", revision: 1, active,
+        activeRepositories: [{ id: "123", owner: "example", name: "project", installationId: "33333333-3333-4333-8333-333333333333" }],
+        latestBuild: active, history: { builds: [active], nextCursor: null },
+      } });
+    } else if (pathname.endsWith("/create-options")) {
       await route.fulfill({ json: { configured: true, repository:{owner:"example",name:"project",defaultBranch:"main"}, installations: [{
         id: "33333333-3333-4333-8333-333333333333", accountLogin: "example",
       }] } });
@@ -343,6 +377,7 @@ export async function runCloudCreateOwnerSmoke({ page, check, harnessBase }) {
     const editor = card.locator(".composer-pm");
     const location = page.getByRole("button", { name: "Workspace location", exact: true });
     await expect(location).toHaveCount(0);
+    await expect(card.getByRole("button", { name: "Create", exact: true })).toBeEnabled();
     await editor.fill("Preserve this prompt while creation finishes");
     await card.getByRole("button", { name: "Create", exact: true }).click();
     await expect.poll(() => creates.length).toBe(1);

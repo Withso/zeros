@@ -22,7 +22,7 @@ suite("0114 with released lifecycle writers", () => {
         await client.query("COMMIT");
       }
     } finally { await client.query("ROLLBACK"); client.release(); }
-    fixture = await seedReadyCloudWorkspace(pool);
+    fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     await pool.query("UPDATE cloud_workspaces SET status='stopped',desired_state='stopped' WHERE id=$1", [fixture.workspaceId]);
   });
   async function apply(client: pg.PoolClient) {

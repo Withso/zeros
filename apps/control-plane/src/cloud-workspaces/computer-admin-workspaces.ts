@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { HttpError, requireOrganizationCreationCapability, type StaffRole } from "../authz.js";
+import { HttpError } from "../authz.js";
 import type { Tx } from "../db.js";
-import { requireCloudComputerAuthority } from "./computer.js";
+import { requireCloudComputerAuthority } from "./computer-identity.js";
 import { cloudRuntimeQualificationMode } from "./runtime-config.js";
 import { runtimeCredentialQualificationJoin } from "./runtime-selection.js";
 
@@ -29,10 +29,10 @@ export async function markAdminWorkspace(tx: Tx, value: z.infer<typeof marker>):
 }
 
 async function requireAdmin(tx: Tx, orgId: string, userId: string) {
-  const user = (await tx.query<{ staff_role: StaffRole | null }>(
-    "SELECT staff_role FROM users WHERE id=$1 AND deleted_at IS NULL AND auth_status='active' FOR SHARE", [userId],
+  const user = (await tx.query(
+    "SELECT id FROM users WHERE id=$1 AND deleted_at IS NULL AND auth_status='active' FOR SHARE", [userId],
   )).rows[0];
-  requireOrganizationCreationCapability(user?.staff_role ?? null);
+  if (!user) throw new HttpError(404, "not_found", "Cloud Computer not found");
   await requireCloudComputerAuthority(tx, orgId, userId, true);
 }
 export { requireAdmin as requireCloudComputerAdmin };

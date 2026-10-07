@@ -1,8 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 
-const api = vi.hoisted(() => ({ enabled: true, read: vi.fn(), wake: vi.fn(), list: vi.fn() }));
+const api = vi.hoisted(() => ({ enabled: true, signedIn: true, entitled: true, read: vi.fn(), wake: vi.fn(), list: vi.fn() }));
 vi.mock("../../features/settings/internal-features", () => ({ isInternalFeatureActive: () => api.enabled }));
+vi.mock("../../features/team/team-store", async original => ({
+  ...await original<typeof import("../../features/team/team-store")>(),
+  getTeamStoreState: () => ({ me: api.signedIn ? {
+    user: { id: "nonstaff-member", staffRole: null },
+    organizations: [{ id: "11111111-1111-4111-8111-111111111111", isPersonal: false, workspaceCapabilities: { cloud: api.entitled } }],
+    teams: [],
+  } : null }),
+  useTeams: () => ({ me: api.signedIn ? {
+    user: { id: "nonstaff-member", staffRole: null },
+    organizations: [{ id: "11111111-1111-4111-8111-111111111111", isPersonal: false, workspaceCapabilities: { cloud: api.entitled } }],
+    teams: [],
+  } : null }),
+}));
 vi.mock("../../platform/cloud-workspaces", async original => ({
   ...await original<typeof import("../../platform/cloud-workspaces")>(),
   getCloudWorkspaceDocument: api.read,
@@ -29,7 +42,7 @@ function doc(version: number, status = "stopped"): CloudWorkspaceDocument {
   };
 }
 beforeEach(() => {
-  vi.useFakeTimers(); vi.clearAllMocks(); api.enabled = true;
+  vi.useFakeTimers(); vi.clearAllMocks(); api.enabled = true; api.signedIn = true; api.entitled = true;
   clearCloudWorkspaceCatalog(); acceptCloudWorkspaceDocument(doc(1));
   api.wake.mockResolvedValue(doc(2, "waking"));
   api.read.mockResolvedValue(doc(3, "ready"));
@@ -37,17 +50,80 @@ beforeEach(() => {
 afterEach(() => { clearCloudWorkspaceCatalog(); vi.useRealTimers(); });
 
 describe("explicit cloud wake readiness", () => {
+  it("wakes for a nonstaff member without enabling the retired preference", async () => {
+    api.enabled = false;
+    const pending = wakeCloudWorkspace(target, doc(1));
+    await Promise.all([expect(pending).resolves.toMatchObject({ status: "ready" }), vi.advanceTimersByTimeAsync(2_000)]);
+    expect(api.wake).toHaveBeenCalledOnce();
+  });
+  it("settles catalog readiness immediately without a fallback poll", async () => {
+    acceptCloudWorkspaceDocument(doc(2, "waking"));
+    let result: CloudWorkspaceDocument | undefined;
+    const failed = vi.fn();
+    const pending = wakeCloudWorkspace(target, doc(2, "waking")).then(value => { result = value; }, failed);
+    await vi.advanceTimersByTimeAsync(25);
+    const ready = doc(3, "ready");
+    acceptCloudWorkspaceDocument(ready);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result).toEqual(ready);
+    expect(result).toBe(cloudWorkspaceDocument(target));
+    await pending;
+    expect(api.read).not.toHaveBeenCalled();
+    expect(api.wake).not.toHaveBeenCalled();
+    expect(failed).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("settles catalog readiness while the fallback refresh is hung", async () => {
+    acceptCloudWorkspaceDocument(doc(2, "waking"));
+    api.read.mockReturnValue(new Promise(() => {}));
+    let result: CloudWorkspaceDocument | undefined;
+    const failed = vi.fn();
+    const pending = wakeCloudWorkspace(target, doc(2, "waking")).then(value => { result = value; }, failed);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(api.read).toHaveBeenCalledOnce();
+    const ready = doc(3, "ready");
+    acceptCloudWorkspaceDocument(ready);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result).toEqual(ready);
+    expect(result).toBe(cloudWorkspaceDocument(target));
+    await pending;
+    expect(failed).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("follows catalog stop completion immediately and ignores another workspace's readiness", async () => {
+    acceptCloudWorkspaceDocument(doc(1, "stopping"));
+    let result: CloudWorkspaceDocument | undefined;
+    const failed = vi.fn();
+    const pending = wakeCloudWorkspace(target, doc(1, "stopping")).then(value => { result = value; }, failed);
+    await vi.advanceTimersByTimeAsync(25);
+    acceptCloudWorkspaceDocument({ ...doc(2, "ready"), id: "33333333-3333-4333-8333-333333333333" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result).toBeUndefined();
+    expect(api.wake).not.toHaveBeenCalled();
+    acceptCloudWorkspaceDocument(doc(2, "stopped"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.wake).toHaveBeenCalledOnce();
+    acceptCloudWorkspaceDocument(doc(3, "ready"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result?.status).toBe("ready");
+    await pending;
+    expect(api.read).not.toHaveBeenCalled();
+    expect(failed).not.toHaveBeenCalled();
+  });
+
   it("preserves an interaction wake reason when send preparation joins the same lifecycle intent", async () => {
     const automatic = wakeCloudWorkspace(target, doc(1), undefined, "interaction");
     const sending = wakeCloudWorkspace(target, doc(1));
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(2_000);
     await Promise.all([automatic, sending]);
     expect(api.wake).toHaveBeenCalledExactlyOnceWith(target, "wake", expect.any(String), "interaction");
   });
   it("shares the lifecycle intent for open and send, retains history ownership, and admits the same generation", async () => {
     const first = wakeCloudWorkspace(target, doc(1));
     const second = wakeCloudWorkspace(target, doc(1));
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(2_000);
     const [opened, sending] = await Promise.all([first, second]);
     expect(api.wake).toHaveBeenCalledExactlyOnceWith(target, "wake", expect.any(String));
     expect(api.read).toHaveBeenCalledOnce();
@@ -59,14 +135,15 @@ describe("explicit cloud wake readiness", () => {
   it("joins an already waking workspace without creating another lifecycle operation", async () => {
     acceptCloudWorkspaceDocument(doc(2, "waking"));
     const pending = wakeCloudWorkspace(target, doc(2, "waking"));
-    await vi.advanceTimersByTimeAsync(1_000); await pending;
+    await vi.advanceTimersByTimeAsync(2_000); await pending;
     expect(api.wake).not.toHaveBeenCalled();
   });
 
-  it.each(["viewer", "gate", "archived", "failed"])("does not start compute for %s", async reason => {
+  it.each(["viewer", "signed-out", "no-entitlement", "archived", "failed"])("does not start compute for %s", async reason => {
     const initial = doc(2, ["archived", "failed"].includes(reason) ? reason : "stopped");
     if (reason === "viewer") initial.capabilities.canWrite = false;
-    if (reason === "gate") api.enabled = false;
+    if (reason === "signed-out") api.signedIn = false;
+    if (reason === "no-entitlement") api.entitled = false;
     acceptCloudWorkspaceDocument(initial);
     await expect(wakeCloudWorkspace(target, initial)).rejects.toThrow();
     expect(api.wake).not.toHaveBeenCalled();
@@ -97,7 +174,7 @@ describe("explicit cloud wake readiness", () => {
     const opened = wakeCloudWorkspace(target, doc(1), undefined, "interaction");
     const sending = wakeCloudWorkspace(target, doc(1));
     const completed = Promise.all([opened, sending]);
-    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.advanceTimersByTimeAsync(6_000);
     expect((await completed).map(value => value.generation.number)).toEqual([8, 8]);
     expect(api.wake).toHaveBeenCalledOnce();
   });
@@ -108,7 +185,7 @@ describe("explicit cloud wake readiness", () => {
     api.read.mockResolvedValueOnce(candidate(3, "setting_up")).mockResolvedValueOnce(doc(4, "waking")).mockResolvedValue(doc(5, "ready"));
     const failed = vi.fn();
     const completed = Promise.all([wakeCloudWorkspace(target, doc(1), undefined, "interaction"), wakeCloudWorkspace(target, doc(1))]).catch(failed);
-    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.advanceTimersByTimeAsync(6_000);
     expect((await completed)?.map((value: CloudWorkspaceDocument) => value.generation.number)).toEqual([7, 7]);
     expect(failed).not.toHaveBeenCalled(); expect(api.wake).toHaveBeenCalledOnce();
   });
@@ -120,7 +197,7 @@ describe("explicit cloud wake readiness", () => {
     const pending = wakeCloudWorkspace(target, doc(1, "stopping"));
     const rejected = expect(pending).rejects.toMatchObject({ name: "CloudWorkspaceWakeEndedError", message: expect.stringContaining("stopping") });
     expect(api.wake).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(2_000); await rejected;
+    await vi.advanceTimersByTimeAsync(4_000); await rejected;
     expect(api.wake).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(5_000);
     expect(api.read).toHaveBeenCalledTimes(2);

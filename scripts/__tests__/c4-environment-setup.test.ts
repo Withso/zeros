@@ -60,13 +60,12 @@ function fixture(
         ],
       });
     if (path.endsWith("/setup")) {
-      if (
-        (init.headers as Record<string, string>).authorization !==
-        `Bearer ${config.adminToken}`
-      )
+      if (![`Bearer ${config.adminToken}`, `Bearer ${config.nonstaffToken}`].includes(
+        (init.headers as Record<string, string>).authorization,
+      ))
         return json({ error: "private-auth-detail" }, 403);
       if (body.expectedSettingsVersion !== revision)
-        return json({ error: "private-cas-detail" }, 409);
+        return json({ error: { code: "cloud_settings_version_conflict", message: "private-cas-detail" } }, 409);
       current = {
         ...current,
         setupCommands: body.script

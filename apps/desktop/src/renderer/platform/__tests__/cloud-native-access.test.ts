@@ -10,7 +10,12 @@ import {
   readCloudServiceAccess,
   readCloudServiceContext,
   warmCloudServiceAccess,
+  readCloudWorkspacePortForwarding,
+  setCloudWorkspacePortForwarding,
+  publishCloudWorkspacePortForwardingRuntime,
+  readCloudWorkspaceSshEditors,
 } from "../cloud-workspace-access";
+import type { CloudRuntimeConnectionTarget } from "../bridge/ws-client";
 import {
   cloudServiceAccessCache,
   cloudServiceContextCache,
@@ -133,5 +138,44 @@ describe("native cloud access metadata", () => {
     await expect(
       readCloudServiceContext(cloudServiceContextKey()),
     ).rejects.toThrow();
+  });
+  it("accepts safe automatic ownership while retaining strict service metadata", async () => {
+    await warmCloudServiceAccess(target);
+    state.invoke.mockResolvedValueOnce([{ ...row, ownership: "auto" }]);
+    expect(await readCloudServiceAccess(cloudServiceAccessKey(target, context))).toEqual([{ ...row, ownership: "auto" }]);
+    state.invoke.mockResolvedValueOnce([{ ...row, ownership: "auto", cloudToken: "unexpected" }]);
+    await expect(readCloudServiceAccess(cloudServiceAccessKey(target, context))).rejects.toThrow();
+  });
+  it("publishes only safe runtime identity without copying admission URL or bearer fields", async () => {
+    state.invoke.mockResolvedValueOnce(undefined);
+    const runtime = { ...target, kind: "cloud", runtimeId: context.authorityId, generation: 2, authorityEpoch: 3,
+      engineInstanceId: context.deviceId, connectionSequence: 4, cloudToken: "test-only-bearer", url: "wss://test.invalid/private" } as CloudRuntimeConnectionTarget;
+    await publishCloudWorkspacePortForwardingRuntime(runtime, true);
+    expect(state.invoke).toHaveBeenCalledExactlyOnceWith("cloud_workspace_port_forwarding_runtime", {
+      ...target, runtimeId: context.authorityId, generation: 2, authorityEpoch: 3, engineInstanceId: context.deviceId, connectionSequence: 4, connected: true,
+    });
+  });
+  it("reads and mutates forwarding intent with the exact device context", async () => {
+    const flags = { forwardingEnabled: true, autoForwardEnabled: true };
+    state.invoke.mockResolvedValue(flags);
+    expect(await readCloudWorkspacePortForwarding({ ...target, ...context })).toEqual(flags);
+    expect(await setCloudWorkspacePortForwarding({ ...target, ...context, forwardingEnabled: true })).toEqual(flags);
+    expect(state.invoke.mock.calls).toEqual([
+      ["cloud_workspace_port_forwarding_get", { ...target, ...context }],
+      ["cloud_workspace_port_forwarding_set", { ...target, ...context, forwardingEnabled: true }],
+    ]);
+  });
+  it("rejects a late forwarding read after account replacement and malformed switch receipts", async () => {
+    let resolve!: (value: unknown) => void;
+    state.invoke.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    const pending = readCloudWorkspacePortForwarding({ ...target, ...context });
+    const rejected = expect(pending).rejects.toThrow(/account/);
+    state.epoch++; resolve({ forwardingEnabled: true, autoForwardEnabled: true }); await rejected;
+    state.invoke.mockResolvedValueOnce({ forwardingEnabled: "true", autoForwardEnabled: true });
+    await expect(readCloudWorkspacePortForwarding({ ...target, ...context })).rejects.toThrow();
+  });
+  it("keeps unsupported native editors unavailable without issuing grants or probing applications", async () => {
+    expect(await readCloudWorkspaceSshEditors({ ...target, ...context })).toEqual([]);
+    expect(state.invoke).not.toHaveBeenCalled();
   });
 });

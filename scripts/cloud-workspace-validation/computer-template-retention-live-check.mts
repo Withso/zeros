@@ -7,7 +7,7 @@ import { parseArgs, parseEnv } from "node:util";
 import { pathToFileURL } from "node:url";
 import type pg from "pg";
 import { withSystemTx } from "../../apps/control-plane/src/db.js";
-import { lockCloudComputerOrganization } from "../../apps/control-plane/src/cloud-workspaces/computer.js";
+import { lockCloudComputerOrganization } from "../../apps/control-plane/src/cloud-workspaces/computer-identity.js";
 import { CloudComputerTemplateRetentionWorker } from "../../apps/control-plane/src/cloud-workspaces/computer-template-retention.js";
 import type { DatabaseCloudComputerV2Service } from "../../apps/control-plane/src/cloud-workspaces/computer-v2.js";
 

@@ -4,7 +4,7 @@ import { executeBoatPinnedSsh, type BoatBootstrapChannel } from "./boat-pinned-s
 export { boatAuthorizedKeyCommand, isPublicBoatAddress, openBoatBootstrapChannel,
   parseBoatHostKey, parseBoatSshEndpoint, type BoatBootstrapExecution } from "./boat-pinned-ssh.js";
 export type { BoatBootstrapChannel } from "./boat-pinned-ssh.js";
-import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND, CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "./daytona-setup-executor.js";
+import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND, CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "./linux-setup-executor.js";
 import { RuntimeBaseStatusSchema, RuntimeInstallInputSchema, RUNTIME_INSTALL_MAX_ENCODED_BYTES } from "./runtime-contract.js";
 import { setupTimingClock } from "./setup-timings.js";
 import {

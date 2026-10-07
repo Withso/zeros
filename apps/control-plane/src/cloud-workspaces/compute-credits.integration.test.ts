@@ -473,10 +473,10 @@ suite("managed compute credit ledger", () => {
     ]);
   });
 
-  it("never reserves managed credits for delegated Daytona compute", async () => {
+  it("never reserves managed credits for delegated compute", async () => {
     const { periodId } = await grant();
     await pool.query(
-      `UPDATE provider_connection_versions SET credential_source='delegated',endpoint='https://app.daytona.io/api',
+      `UPDATE provider_connection_versions SET credential_source='delegated',endpoint='https://api.fixture.test',
       key_version=1,nonce=$2,ciphertext=$3,auth_tag=$4,credential_sha256=$5 WHERE org_id=$1`,
       [
         f.organizationId,

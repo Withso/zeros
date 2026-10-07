@@ -4,7 +4,7 @@ import {afterAll,beforeAll,beforeEach,describe,expect,it,vi} from "vitest";
 import {ensureUser} from "../auth.js";
 import {resetMigratedTestDatabase} from "../test-database.js";
 import {getSecuritySnapshot,listSecurityEvents,publishPendingSecurityEvents,PostgresSecurityEventBroker,startSecurityEventPublisher} from "../security-events.js";
-import {seedReadyCloudWorkspace,seedReadyProCloudWorkspace} from "./test-fixtures.js";
+import {seedReadyCloudWorkspace,seedReadyProCloudWorkspace,withCloudFixturePurgeTx} from "./test-fixtures.js";
 import {DatabaseCloudWorkspaceCollaborationService} from "./actors.js";
 import {eraseCloudWorkspaceCollaborationIdentity} from "./actors.js";
 import {withSystemTx} from "../db.js";
@@ -25,7 +25,10 @@ d("cloud workspace directory live updates",()=>{
       SELECT gen_random_uuid(),$1,$2,id,'viewer',now()+interval '1 day' FROM recipients`,[fixture.workspaceId,fixture.organizationId]);
     await pool.query("UPDATE cloud_workspaces SET status='deleted',desired_state='deleted',deleted_at=now(),version=version+1 WHERE id=$1",[fixture.workspaceId]);
     await pool.query("DELETE FROM cloud_workspace_guest_grants WHERE workspace_id=$1",[fixture.workspaceId]);
-    await pool.query("DELETE FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId]);
+    await withCloudFixturePurgeTx(pool,fixture,async tx=>{
+      await tx.query("DELETE FROM cloud_workspace_computer_sources WHERE workspace_id=$1",[fixture.workspaceId]);
+      await tx.query("DELETE FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId]);
+    });
     await publishCloudWorkspaceDirectoryChanges(pool);
     expect((await pool.query("SELECT count(*)::int AS n FROM security_events WHERE user_id IS NOT NULL")).rows[0].n).toBeLessThanOrEqual(100);
     await publishCloudWorkspaceDirectoryChanges(pool);
@@ -55,13 +58,21 @@ d("cloud workspace directory live updates",()=>{
     const snapshot=await getSecuritySnapshot(pool,guest);
     await pool.query("UPDATE cloud_workspaces SET status='deleted',desired_state='deleted',deleted_at=now(),version=version+1 WHERE id=$1",[fixture.workspaceId]);
     await pool.query("DELETE FROM cloud_workspace_guest_grants WHERE workspace_id=$1",[fixture.workspaceId]);
-    await pool.query("DELETE FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId]);
-    expect((await pool.query("SELECT guest_user_ids FROM cloud_workspace_directory_outbox WHERE workspace_id=$1",[fixture.workspaceId])).rows[0]!.guest_user_ids).toEqual([guest.id]);
-    await pool.query("DELETE FROM repositories WHERE org_id=$1",[fixture.organizationId]);
-    await pool.query("UPDATE organizations SET lifecycle_status='purging' WHERE id=$1",[fixture.organizationId]);
-    await withSystemTx(pool,tx=>tx.query("SELECT public.purge_cloud_workspace_operator_configuration($1)",[fixture.organizationId]));
-    await pool.query("DELETE FROM audit_log WHERE org_id=$1",[fixture.organizationId]);
-    await pool.query("DELETE FROM organizations WHERE id=$1",[fixture.organizationId]);
+    await withCloudFixturePurgeTx(pool,fixture,async tx=>{
+      await tx.query("DELETE FROM cloud_workspace_computer_sources WHERE workspace_id=$1",[fixture.workspaceId]);
+      await tx.query("DELETE FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId]);
+      expect((await tx.query("SELECT guest_user_ids FROM cloud_workspace_directory_outbox WHERE workspace_id=$1",[fixture.workspaceId])).rows[0]!.guest_user_ids).toEqual([guest.id]);
+      // Match final-erasure ordering, retaining the immutable-source lease guard.
+      for(const table of ["cloud_computer_admin_workspace_requests","cloud_computer_admin_workspaces",
+        "cloud_computer_build_logs","cloud_computer_v2_operations","cloud_computer_templates",
+        "cloud_computer_v2_builds","cloud_computer_v2_heads","cloud_computer_v2_config_repositories",
+        "cloud_computer_environment_refs","cloud_computer_v2_configs"])
+        await tx.query(`DELETE FROM ${table} WHERE org_id=$1`,[fixture.organizationId]);
+      await tx.query("DELETE FROM repositories WHERE org_id=$1",[fixture.organizationId]);
+      await tx.query("SELECT public.purge_cloud_workspace_operator_configuration($1)",[fixture.organizationId]);
+      await tx.query("DELETE FROM audit_log WHERE org_id=$1",[fixture.organizationId]);
+      await tx.query("DELETE FROM organizations WHERE id=$1",[fixture.organizationId]);
+    });
     expect(await listSecurityEvents(pool,guest,snapshot.cursor)).toEqual([expect.objectContaining({organizationId:null,workspaceId:null,payload:{reason:"workspace_directory_changed"}})]);
   });
   it("scrubs purged identities from an undrained directory row",async()=>{

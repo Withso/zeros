@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import {
   CloudCommandClientRequestSchema, CloudCommandSnapshotSchema, CloudCommandEntrySchema, CloudCommandClaimSchema, CloudGoalSnapshotSchema,
-  type CloudCommandEngineRequest, type CloudCommandClaim, type CloudCommandResult, type CloudQueuedPrompt,
+  type CloudCommandEngineRequest, type CloudCommandClaim, type CloudCommandResult, type CloudQueuedPrompt, type CloudCommandSnapshot,
+  cloudCommandFailureCode, type CloudCommandFailureCause,
 } from "@zeros/protocol/cloud-commands";
+import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
 
 type Dependencies = {
@@ -20,6 +22,8 @@ type Dependencies = {
   dispatch(claim: CloudCommandClaim): Promise<Pick<CloudCommandResult, "state" | "resultCode" | "result">>;
   cancel(conversationId: string): Promise<void>;
   changed(conversationId: string): void;
+  failed?(claim: CloudCommandClaim, resultCode: string, error: unknown): void;
+  interrupted?(conversationId: string, receipt: CloudCommandSnapshot["receipts"][number]): void;
 };
 
 /** Devices submit intentions. Only this engine-owned pump dispatches prompts.
@@ -38,6 +42,7 @@ export class CloudCommandRuntime {
   private readonly unsettled = new Map<string, CloudCommandResult>();
   private readonly receiptRetries = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly retryDelays = new Map<string, number>();
+  private readonly recoveredInterruptions = new Set<string>();
   private closed = false;
   private claimsPaused = false;
   private serviceRequests = 0;
@@ -206,6 +211,14 @@ export class CloudCommandRuntime {
   private observe(snapshot: ReturnType<typeof CloudCommandSnapshotSchema.parse>): void {
     const previous = this.controls.get(snapshot.conversationId);
     if (previous && snapshot.revision < previous.revision) return;
+    for (const receipt of snapshot.receipts) {
+      if (receipt.state !== "uncertain" || !receipt.payload || receipt.payload.operation || this.recoveredInterruptions.has(receipt.commandId)) continue;
+      // A replacement engine observes the old claim; it never dispatches or
+      // settles it again. Retain a terminal error in normalized VM history.
+      this.dependencies.interrupted?.(snapshot.conversationId, receipt);
+      this.recoveredInterruptions.add(receipt.commandId);
+      if (this.recoveredInterruptions.size > 256) this.recoveredInterruptions.delete(this.recoveredInterruptions.values().next().value!);
+    }
     this.controls.set(snapshot.conversationId, { revision: snapshot.revision, paused: snapshot.paused });
     if (snapshot.pending.length) this.pendingConversations.add(snapshot.conversationId);
     else this.pendingConversations.delete(snapshot.conversationId);
@@ -246,25 +259,37 @@ export class CloudCommandRuntime {
       if (claim.dispatchAllowed===false) result={state:"cancelled",resultCode:"actor_authority_revoked"};
       else if (this.closed || this.blocked(conversationId,goalOperation) || cancelledClaim) result = { state: "cancelled", resultCode: "stopped_before_dispatch" };
       else {
+        let failureStage: CloudCommandFailureCause["stage"] = "validation";
+        let failurePublishingError: unknown;
         try {
           // Mode and execution may have changed while the claim was in flight.
           this.dependencies.validate(conversationId, claim.payload);
           this.active.set(conversationId, claim.commandId);
+          failureStage = "admission";
           await this.dependencies.prepare?.(claim);
           if(this.closed||this.blocked(conversationId,goalOperation)||this.cancelledClaims.delete(claim.commandId))result={state:"cancelled",resultCode:"stopped_before_dispatch"};
           else {
+            failureStage = "validation";
             this.dependencies.validate(conversationId,claim.payload);
             // A fork is turnless and its short-lived provider process has
             // already retired during prepare. It never owns a live route.
             if (claim.payload.operation?.kind !== "fork" && this.dependencies.execution(conversationId) !== executionId) throw new Error("execution changed");
+            failureStage = "provider_prompt";
             result = await this.dependencies.dispatch(claim);
           }
-        } catch { result = { state: "failed", resultCode: "command_dispatch_rejected" }; }
+        } catch (error) {
+          const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+          const resultCode = isCloudAgentAdmissionCode(code) ? code : cloudCommandFailureCode(error, failureStage);
+          result = { state: "failed", resultCode };
+          try { this.dependencies.failed?.(claim, resultCode, error); }
+          catch (error) { failurePublishingError = error; }
+        }
         // Dispatch is caught above, so retirement always runs. Its failure
         // closes the pump before a terminal receipt can be published.
         try { await this.dependencies.retire?.(claim,result); }
         catch(error) { this.close(); throw error; }
         finally { this.active.delete(conversationId); this.cancelledClaims.delete(claim.commandId); }
+        if (failurePublishingError) { this.close(); throw failurePublishingError; }
       }
       this.dependencies.releaseRetainedExecution?.(executionId);
       const receipt = { commandId: claim.commandId, claimId: claim.claimId, ...result };

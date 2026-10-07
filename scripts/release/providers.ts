@@ -1,3 +1,4 @@
+import { refuseRetiredWorkerPromotion } from "./worker-retirement";
 import { ReleaseIdentity, WorkerIdentity, requireCheck, type PromotionConfig, type Surface } from "./contracts";
 import { command, jsonClient, poll, sleep, type Command } from "./io";
 import type { z } from "zod";
@@ -272,6 +273,7 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
       }, { sleep: options.pause });
     },
     async waitIdentity(manifest: { head: string; sha256: string }, expectedWorker?: z.infer<typeof WorkerIdentity>, requireWorkerQualification = true) {
+      if (config.requireQualifiedWorker || expectedWorker && requireWorkerQualification) refuseRetiredWorkerPromotion();
       return poll(async () => {
         let value: unknown;
         try { value = await json(`${config.api}/v1/release-identity`); } catch { return false; }
@@ -280,8 +282,6 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
         const identity = parsed.data;
         if (identity.channel !== config.channel || identity.sourceSha !== config.sourceSha || identity.migrations.head !== manifest.head ||
           identity.migrations.expectedHead !== manifest.head || identity.migrations.manifestSha256 !== manifest.sha256) return false;
-        if (config.requireQualifiedWorker && (!identity.cloud.enabled || identity.cloud.state !== "healthy" || identity.worker?.provider !== config.provider)) return false;
-        if (requireWorkerQualification && (config.requireQualifiedWorker && !expectedWorker || (config.requireQualifiedWorker || expectedWorker) && identity.workerQualified !== true)) return false;
         if (expectedWorker && JSON.stringify(identity.worker) !== JSON.stringify(expectedWorker)) return false;
         return identity;
       }, { sleep: options.pause });

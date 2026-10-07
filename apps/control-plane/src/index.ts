@@ -1,4 +1,4 @@
-import { createCloudComputerBuildWorker } from "./cloud-workspaces/computer.js";
+import { createCloudComputerRetirementWorker } from "./cloud-workspaces/computer-retirement.js";
 // ──────────────────────────────────────────────────────────
 // Zeros control plane — entrypoint.
 // Boot order: config → pool → migrations (idempotent) → HTTP server.
@@ -128,7 +128,7 @@ let stopCloudReconciler = async () => {};
 let stopCloudWorkerNotifications = async () => {};
 let stopCloudProAllowances = async () => {};
 let stopCloudSetupWorker = async () => {};
-let stopCloudComputerBuildWorker = async () => {};
+let stopCloudComputerRetirementWorker = async () => {};
 let stopCloudComputerTemplateWorker = async () => {};
 let stopCloudRuntimeQualificationWorker = async () => {};
 let stopCloudRuntimeStagingWorker = async () => {};
@@ -212,7 +212,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     import("./cloud-workspaces/provider-deployment.js"),
     import("./cloud-workspaces/provider-resolver.js"),
     import("./cloud-workspaces/reconciler.js"),
-    import("./cloud-workspaces/daytona-setup-executor.js"),
+    import("./cloud-workspaces/linux-setup-executor.js"),
     import("./cloud-workspaces/setup-admission-broker.js"),
     import("./cloud-workspaces/engine-client-admission.js"),
     import("./cloud-workspaces/setup-materials.js"),
@@ -255,7 +255,6 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
   const { provider, registry } = createCloudProviderDeployment(pool, cloud);
   const providerResolver = new DatabaseCloudWorkspaceProviderResolver({
     pool,
-    credentialKeys: cloud.providerCredentialKeys,
     workosEnabled: config.auth.provider === "workos",
     registry,
   });
@@ -600,7 +599,8 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     if (outboxWorker) stopCloudOutboxWorker = outboxWorker.start();
     if (invitationWorker) stopCloudInvitationWorker=invitationWorker.start();
 
-    if (setupWorker) { stopCloudSetupWorker = setupWorker.start(); stopCloudComputerBuildWorker = createCloudComputerBuildWorker(pool, cloud).start(); }
+    if (setupWorker) stopCloudSetupWorker = setupWorker.start();
+    stopCloudComputerRetirementWorker = createCloudComputerRetirementWorker(pool, cloud).start();
     if (runtimeStagingWorker) stopCloudRuntimeStagingWorker = runtimeStagingWorker.start();
     // Reserve a separate session even without DATABASE_LISTEN_URL: long-held
     // listeners must not consume request/worker transaction pool capacity.
@@ -735,7 +735,7 @@ function shutdown(signal: string): void {
     cloudGithubReads?.close(),
     githubWriteCleanupPending,
     stopCloudSetupWorker(),
-    stopCloudComputerBuildWorker(),
+    stopCloudComputerRetirementWorker(),
     stopCloudComputerTemplateWorker(),
     stopCloudRuntimeQualificationWorker(),
     stopCloudRuntimeStagingWorker(),

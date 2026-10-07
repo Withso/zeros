@@ -18,6 +18,7 @@ import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
 import { ControlPlaneError } from "../features/team/control-plane";
 import type { Project } from "./projects-store";
 import { clearCloudComposerPrs } from "./read-caches";
+import { cloudWorkspaceExecutionRefusal } from "../platform/cloud-workspace-execution";
 
 export const cloudWorkspaceDetails =
   new KeyedAsyncCache<CloudWorkspaceDocument>(128);
@@ -95,13 +96,13 @@ export function canReadCloudWorkspace(doc: CloudWorkspaceDocument | undefined): 
  * engine mirrors wait for a running generation instead of trying to wake it. */
 export function canBackgroundSyncCloudWorkspace(target: CloudWorkspaceTarget): boolean {
   const doc = cloudWorkspaceDocument(target);
-  return canReadCloudWorkspace(doc) && (doc?.status === "ready" || doc?.status === "busy");
+  return canReadCloudWorkspace(doc) && !cloudWorkspaceExecutionRefusal(doc) && (doc?.status === "ready" || doc?.status === "busy");
 }
 export function cloudCatalogNeedsFastRefresh(): boolean {
   // Provider storage deletion can take much longer than an interactive setup
   // transition. Keep observing it at the normal cadence without refetching
   // every other workspace and its history every two seconds.
-  return documents.some(doc => doc.deletedAt === null &&
+  return documents.some(doc => doc.deletedAt === null && !cloudWorkspaceExecutionRefusal(doc) &&
     !["ready", "busy", "stopped", "archived", "failed", "error", "deleting", "deleted"].includes(doc.status));
 }
 export function cloudProjectForFolder(folder: string): Project | null {
@@ -356,13 +357,14 @@ export function clearCloudWorkspaceCatalog(): void {
   inflight = null;
   detailReads.clear();
   detailOwnerGenerations.clear();
-  const hadDocuments = documents.length > 0;
   documents = [];
   engineRows.clear();
   cloudWorkspaceDetails.clear();
   lifecycleIntents.clear();
   localStopVersions.clear();
-  rebuild(hadDocuments);
+  // Account retirement invalidates subscribers even before the first create
+  // receipt or list has published any confirmed documents.
+  rebuild(true);
 }
 
 type LifecycleIntent = { id: string; task?: Promise<CloudWorkspaceDocument>; owner?: number; generation?: number; version?: number; reason?: "interaction" };
@@ -428,6 +430,8 @@ export async function manageCloudWorkspace(
   wait = false,
   reason?: "interaction",
 ): Promise<CloudWorkspaceDocument> {
+  const refusal = operation === "wake" ? cloudWorkspaceExecutionRefusal(cloudWorkspaceDocument(target)) : null;
+  if (refusal) throw new ControlPlaneError(409, refusal.code, refusal.message);
   const workspaceKey = cloudWorkspaceKey(target);
   const key = `${epoch}:${workspaceKey}:${operation}`;
   const owner = operation === "wake"
@@ -543,6 +547,8 @@ export async function cloudWorkspaceOperation(
 }
 
 export async function manageCloudWorkspaceRecovery(target: CloudWorkspaceTarget, input: CloudWorkspaceRecoveryInput): Promise<CloudWorkspaceDocument> {
+  const refusal = cloudWorkspaceExecutionRefusal(cloudWorkspaceDocument(target));
+  if (refusal) throw new ControlPlaneError(409, refusal.code, refusal.message);
   const version = epoch;
   const key = `${epoch}:${cloudWorkspaceKey(target)}:recover:${input.sourceGeneration}:${input.checkpointId}:${input.allowDataLoss === true}`;
   const intent = lifecycleIntents.get(key) ?? { id: crypto.randomUUID() };

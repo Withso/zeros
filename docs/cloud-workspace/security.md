@@ -109,36 +109,63 @@ relevance ordering. A changed projection retries the complete search once.
 - Treat snapshots and caches as sensitive copies subject to encryption,
   retention, and deletion policy.
 
-Legacy image profile 1 runs the general engine as VM root and remains an
-unapproved pre-production exception. New profile 2 runs the engine in a fixed
-user namespace: namespace root maps to VM UID/GID 10003; only worker 10001 and
-capture 10002 are also mapped. VM root and the provider login identity are
-unmapped. The image uses a fixed native launcher, read-only deployment mounts,
-explicit workspace/state mounts, no supplementary groups, `NoNewPrivs`, and a
-seccomp filter. Its namespace capabilities support ownership-preserving edits
-and sandbox construction without VM-root authority.
+## Protected bootstrap and v4 engine boundary
 
-The engine view and native transition retain `CAP_SETFCAP` through exec into
-the ZSR supervisor because Linux 5.12+ requires it for nested UID-0 mappings.
-It is confined to the engine user namespace (host UID 10003); inherited
-`NoNewPrivs` prevents file capabilities from adding privilege on exec. Worker,
-capture, coordinator and setup children still drop every capability when they
-enter their nonzero identities.
+Only worker profile 4 with a saved v2 source and actor protocol 2 executes. Profiles 1–3,
+including the old VM-root engine, are retired and have no production root
+exception. A missing cloud marker is the Local path; a present unsupported
+marker fails before cloud credential preparation or execution. Historical
+metadata/schema records remain readable for audit/cleanup. See
+[runtime bundles](runtime-bundles.md) for immutable layout and witnesses.
 
-The root broker retains only fixed setup, attestation and engine lifecycle
-operations. Its socket and setup journals are absent from the engine view.
-Broker ownership uses a lifetime kernel file lock; cgroup retirement drains all
-engine descendants before another setup session is admitted. The runtime and
-complete helper path chain live under root-controlled `/opt/zeros-runtime`,
-independently of provider-owned tools or login homes. Admission verifies the
-engine's own seccomp and no-new-privileges evidence; a provider filter on the
-outer VM broker cannot substitute for those checks.
+The v4 engine is namespace root mapped to **VM UID/GID 10003**. Worker 10001,
+capture 10002 and private coordinator 10004 are separately mapped; VM root and
+the provider login identity are absent. The fixed launcher supplies read-only
+protected deployment and explicit workspace/state views, no supplementary
+groups, `NoNewPrivs` and seccomp. Namespace capabilities allow checked ownership
+publication and child containment without VM-root authority.
 
-The root exception is eliminated only after both exact provider images pass
-the full behavior and security qualification, including setup, readiness,
-agent/Design work, PTY, access and recovery. The production gate stays closed
-while those gates remain incomplete. See
-[`root-coordinator-threat-model.md`](./root-coordinator-threat-model.md).
+`CAP_SETFCAP` is retained through exec into the ZSR supervisor for Linux nested
+UID 0 mapping, confined to this namespace. Inherited `NoNewPrivs` prevents gaining
+privilege from file capabilities. Nonzero worker/capture/coordinator/setup
+children drop all capabilities. Process-local procfs permits nested worker and
+browser namespaces; VM-global controls remain unmapped-root owned and unwritable.
+Admission checks real procfs UID maps, read-only deployment, host-process/root-
+link and ancestor-namespace denial, finite cgroup ancestry, memory/CPU/PID bounds
+and actual nested execution. A provider broker filter cannot substitute for
+engine confinement. Malformed/unbounded evidence fails admission.
+
+On restricted AppArmor hosts, the initial-host-user-namespace launcher loads the
+image-owned `zeros-cloud-engine` profile for the fixed namespace helper and its
+descendants; it never disables global restrictions. A provider-owned outer user
+namespace keeps its own policy. Hosts needing unavailable policy support fail
+closed. Bounded root-owned provider FUSE sysctl reads are distinct from real
+procfs identity maps. Only the exact `/sys` and `/sys/fs` sysfs ancestors permit
+unmapped owners; writable cgroup controls still require UID 0/cgroup-v2 identity.
+Private shared memory is a bounded 512 MiB tmpfs charged to the engine cgroup.
+
+The minimal VM-root bootstrap/broker owns verified runtime installation,
+attestation and lifecycle. Its mode-0700 state/0600 socket, setup journals, provider
+login homes and root credentials are absent from the engine view. Engine launch
+material uses a separate private projection. Fixed exact-schema operations
+accept no arbitrary executable/path/environment; prepare is a one-use session.
+A lifetime kernel lock prevents replacing a live endpoint; retirement drains
+engine/setup cgroups, including detached descendants, before a new launch.
+
+| Threat | Current control | Remaining qualification |
+| --- | --- | --- |
+| Repository replaces privileged code | Root-controlled pinned tree/manifest/receipt, checked ancestry/links/modes and restored-tree verification before launch. | Exact base/kernel/provider restoration and tamper negatives. |
+| Engine or parser compromise | VM root unmapped; deployment read-only; minimal root protocol, separate worker/capture/coordinator views and grants. | Engine still sees its own working credentials and workspace state; qualify actual namespaces and broker isolation. |
+| Stale proof or overlapping engines | Boot/session/mount/cgroup/runtime-bound one-use proof, shared locks and complete descendant retirement. | Cold/warm restore, stale-session and crash/ambiguous-reply boundaries. |
+| Resource exhaustion | Finite memory/CPU/PID ancestry, bounded processes/commands/I/O and explicit deadlines. | Exact provider resource envelope and edge abuse limits; no per-agent egress guarantee. |
+| Runtime/client authority survives stop/revocation | Current actor/device/generation/epoch checks, durable grant retirement and positive cleanup. | Actual provider and signed Mac cleanup/expiry races. |
+| Desktop or preview obtains bearer | Main-only keys/configs, exact frame/origin header injection and bearer-free IPC. | Packaged native trust, frame isolation and multi-connection/editor behavior. |
+
+Qualification must exercise the actual worker/engine identities, base/runtime
+pair, setup/readiness, native tools, Git/Files/Design, PTY, SSH/preview/tunnels,
+recovery/rollback and cleanup. Code/Linux root probes are insufficient. No old
+root exception can qualify v4; keep unqualified release capabilities gated.
+See [qualification status](qualification-status.md).
 
 Boat bootstrap uses the provider API only for public SSH material and fixed
 image-owned operations. The setup admission crosses host-key-pinned OpenSSH on
@@ -184,9 +211,9 @@ the worker; those remain external or narrowly scoped as described above.
 
 A provider connection belongs to a user or Organization and is stored through
 an encrypted credential boundary. Workspace/generation rows reference its
-opaque ID. The control plane decrypts it only while performing an authorized
-provider operation and never injects the Daytona API key itself into the
-sandbox or renderer.
+opaque ID. Boat provider credentials stay in coordinator configuration and never enter
+the sandbox or renderer. Historical customer credential envelopes remain
+persisted but do not authorize supported compute operations.
 
 Agent and compute usage records snapshot actor, billing owner, billing epoch,
 provider/agent connection, and idempotency identity. Reassignment does not
@@ -220,6 +247,23 @@ material, affected generations, and restorable backups no longer require it.
 Fail startup or secret resolution when a referenced version is missing. Never
 reuse this keyring for object blobs, provider credentials, endpoint grants, or
 other digest domains.
+
+## Desktop transcript cache
+
+The durable latest-window cache stores selected sanitized presentation fields,
+not raw tool input/results, credentials, secret-question answers or attachment
+bytes/paths. Main independently derives account identity and gates IPC by an
+opaque cache epoch; retirement rotates it before I/O, and failed purge blocks
+further access until cleanup succeeds. Renderer additionally requires confirmed
+catalog read authority and exact semantic owner/chat identity. Local IDs bypass
+cache IPC. Tombstones/denial/catalog removal prune disk and memory.
+
+Bounds are 512 entries/64 MiB total and 200 rows/512 KiB per window. Per-file/index
+atomic replacement is a recoverable presentation cache, not a transactional
+durable feed. Cached rows grant no execution permission and cannot settle a
+prompt, mask an uncertain receipt or override native streaming/current history.
+Optional cache failure cannot abort Local command registration. See
+[client/runtime contract](client-runtime-contract.md).
 
 ## Local replica and copy boundary
 
@@ -266,9 +310,8 @@ other digest domains.
 The current coordinator implements account/Team/current-generation checks,
 5–60 minute grants, verifier-only persistence, lifecycle/member-triggered
 revocation, localhost-only tunnel documents, isolated per-grant preview origins,
-and a pre-auth preview IP ceiling. Daytona's exact-token revoke API carries the
-bearer in a query parameter, so Zeros deliberately uses provider-wide SSH
-revocation instead: the caller proves possession to Zeros, no bearer enters a
+and a pre-auth preview IP ceiling. Resource-wide SSH revocation fences every
+sibling grant: the caller proves possession to Zeros, no bearer enters a
 provider URL, and every active SSH/tunnel row for that sandbox is retired. A
 desktop must treat any such revocation as invalidating all of its forwards and
 obtain a fresh grant. WebSocket previews use the SSH tunnel path; the HTTP proxy
@@ -313,8 +356,10 @@ revoked before the client returns an error. Local tunnel teardown is attempted
 before remote revocation, but a local cleanup error cannot prevent retirement of
 provider authority.
 
-Cursor and VS Code launch against the fixed `zeros-cloud` SSH alias rather than
-the short-lived Daytona username. Each launch gets an owner-private isolated
+The retained Cursor/VS Code launcher uses the fixed `zeros-cloud` SSH alias
+rather than a short-lived runtime identity, but editor launch is hidden pending
+qualification of multi-connection SSH. Terminal and forwarding remain available
+through their independently admitted native flows. Each launch gets an owner-private isolated
 user-data directory whose settings point Remote-SSH at the matching `0600`
 OpenSSH config; the provider credential therefore stays out of process argv and
 recent-workspace state. The launch directory is removed immediately when the
@@ -375,11 +420,10 @@ are never readiness evidence.
 
 ## Release blockers
 
-- the native SSH/preview/tunnel broker is not yet bound to a shipped
-  cloud-workspace catalog/details UI, and no protected live provider/edge plus
-  signed-macOS qualification is green for that boundary;
+- missing exact provider/edge plus signed-macOS qualification of the implemented
+  native catalog/details/SSH/preview/tunnel boundary;
 - the setup-worker gate is enabled before exact-image, provider lifecycle, and
-  root-coordinator qualification is complete;
+  v4 bootstrap/engine isolation qualification is complete;
 - unverified tenant isolation or deletion behavior;
 - secrets appearing in images, snapshots, URLs, logs, or transcripts;
 - an unqualified provider lifecycle or unresolved reconciliation/orphan race;

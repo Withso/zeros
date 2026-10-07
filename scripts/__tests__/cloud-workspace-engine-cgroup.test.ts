@@ -7,6 +7,7 @@ import {
   cloudCgroupDirectory,
 } from "../cloud-workspace-validation/sandbox/cloud-engine-cgroup.mjs";
 import { createCloudRuntimeResolver } from "../../apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
+import { testCloudRuntime } from "../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime";
 import { cloudRuntimeFixture } from "../../apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-fixture";
 
 function fixture() {
@@ -31,6 +32,8 @@ function fixture() {
   };
   const scope = new CloudEngineCgroup({
     io,
+    runtime: testCloudRuntime(),
+    instanceId: "32345678-1234-4234-8234-123456789abc",
     now: () => clock,
     pause: async (milliseconds: number) => {
       clock += milliseconds;
@@ -98,14 +101,22 @@ with tempfile.TemporaryDirectory(prefix='zeros-resident-base-') as directory:
       for (const preserveWorkload of ["../host", "", "32345678-1234-4234-8234-123456789abc"])
         await expect(scopes.retire({ preserveWorkload })).rejects.toThrow(/workload/);
       expect(io.write).not.toHaveBeenCalled();
-      expect(() => new CloudEngineCgroup({ kind: "workload", instanceId: "32345678-1234-4234-8234-123456789abc" }))
+      expect(() => new CloudEngineCgroup({ runtime: { ...runtime, profile: "v3" }, kind: "workload", instanceId: "32345678-1234-4234-8234-123456789abc" }))
         .toThrow(/scope identity/);
     } finally { tree.dispose(); }
   });
-  it("provides a separate fixed setup scope without accepting arbitrary host cgroups", () => {
-    expect(new CloudEngineCgroup({ directory: "/sys/fs/cgroup/zeros-cloud-setup" }).directory).toBe("/sys/fs/cgroup/zeros-cloud-setup");
-    for (const directory of ["/sys/fs/cgroup/user.slice", "/sys/fs/cgroup/zeros-cloud-setup/../", "/sys/fs/cgroup/zeros-cloud-setup-extra"])
-      expect(() => new CloudEngineCgroup({ directory })).toThrow(/scope identity/);
+  it("provides a setup leaf only in the v4 delegated cgroup root", () => {
+    const runtime = testCloudRuntime(), directory = `${runtime.cgroupRoot}/setup`;
+    expect(new CloudEngineCgroup({ runtime, kind: "setup" }).directory).toBe(directory);
+    for (const directory of ["/sys/fs/cgroup/user.slice", `${runtime.cgroupRoot}/setup/../`, `${runtime.cgroupRoot}/setup-extra`])
+      expect(() => new CloudEngineCgroup({ runtime, directory })).toThrow(/scope identity/);
+  });
+  it.each(["v1", "v2", "v3"])("rejects retired %s before touching cgroups", profile => {
+    const runtime = { ...testCloudRuntime(), profile };
+    const io = { write: vi.fn(), exists: vi.fn() };
+    expect(() => new CloudEngineCgroup({ runtime, directory: "/sys/fs/cgroup/zeros-cloud-engine", io })).toThrow(/scope identity/);
+    expect(() => cloudCgroupDirectory(runtime, "setup")).toThrow(/scope identity/);
+    expect(io.write).not.toHaveBeenCalled(); expect(io.exists).not.toHaveBeenCalled();
   });
   it("removes a newly created empty scope when applying its limits fails", () => {
     const { scope, io } = fixture();
@@ -189,7 +200,7 @@ with tempfile.TemporaryDirectory(prefix='zeros-resident-base-') as directory:
       "/sys/fs/cgroup/another",
       "/tmp/zeros-cloud-engine",
     ])
-      expect(() => new CloudEngineCgroup({ directory })).toThrow(
+      expect(() => new CloudEngineCgroup({ runtime: testCloudRuntime(), directory })).toThrow(
         /scope identity/,
       );
   });

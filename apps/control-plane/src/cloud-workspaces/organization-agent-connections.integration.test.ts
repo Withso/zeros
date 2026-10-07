@@ -2,7 +2,10 @@ import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../migrate.js";
-import { seedReadyCloudWorkspace } from "./test-fixtures.js";
+import { resetMigratedTestDatabase } from "../test-database.js";
+import { withSystemTx } from "../db.js";
+import { seedRuntimeBase, seedRuntimeBundle, runtimeBase, runtimeWitness } from "./runtime-test-fixtures.js";
+import { seedReadyCloudWorkspace, withCloudFixturePurgeTx } from "./test-fixtures.js";
 import { DatabaseCloudAgentCredentialService } from "./agent-credentials.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -58,9 +61,10 @@ d("organization agent accounts", () => {
     );
   }
   it("connects multiple private accounts before a workspace exists and isolates organizations", async () => {
-    await pool.query("DELETE FROM cloud_workspaces WHERE id=$1", [
-      fixture.workspaceId,
-    ]);
+    await withCloudFixturePurgeTx(pool, fixture, async tx => {
+      await tx.query("DELETE FROM cloud_workspace_computer_sources WHERE workspace_id=$1", [fixture.workspaceId]);
+      await tx.query("DELETE FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId]);
+    });
     const first = await account("First"),
       second = await account("Second");
     await select(second.id);
@@ -133,37 +137,45 @@ d("organization agent accounts", () => {
       ),
     ).rejects.toMatchObject({ status: 404 });
   });
-  it("reports qualification for the current image and credential kind without replacing account consent", async () => {
-    const credential = await account();
-    await select(credential.id);
-    const scope = (await pool.query(
-      "SELECT provider,image_ref FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1",
-      [fixture.workspaceId],
-    )).rows[0];
-    const first = await service.authorizeOrganizationForWorkspace(fixture.userId, fixture.workspaceId);
-    expect(first.delegations).toMatchObject([{ runtimeQualified: false }]);
-    // Grants are offered to the live engine, so a qualification must match its
-    // exact runtime contract and profile and carry MCP proof.
-    await pool.query("UPDATE cloud_workspace_engine_instances SET actor_protocol_version=2,agent_runtime_profile='zeros-cloud-worker-v3',agent_runtime_contract_sha256=$2 WHERE id=$1",
-      [fixture.engineInstanceId, "a".repeat(64)]);
-    const qualify = (imageRef: string, contract: string, mcpQualified: boolean) => pool.query(`INSERT INTO cloud_agent_runtime_qualifications
-      (provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled,mcp_qualified)
-      VALUES ($1,$2,$3,'claude-setup-token','zeros-cloud-worker-v3',true,$4)`,
-    [scope.provider, imageRef, contract, mcpQualified]);
-    const delegations = async () => (await service.forWorkspace(fixture.userId, fixture.workspaceId)).delegations;
-    await qualify(`${scope.image_ref}-another-image`, "a".repeat(64), true);
-    expect(await delegations()).toMatchObject([{ id: first.delegations[0]!.id, runtimeQualified: false }]);
-    await qualify(scope.image_ref, "b".repeat(64), true);
-    expect(await delegations()).toMatchObject([{ runtimeQualified: false }]);
-    await qualify(scope.image_ref, "a".repeat(64), false);
-    expect(await delegations()).toMatchObject([{ runtimeQualified: false }]);
-    await pool.query("UPDATE cloud_agent_runtime_qualifications SET mcp_qualified=true WHERE image_ref=$1 AND runtime_contract_sha256=$2",
-      [scope.image_ref, "a".repeat(64)]);
-    expect(await delegations()).toMatchObject([{ id: first.delegations[0]!.id, runtimeQualified: true }]);
-    await pool.query("UPDATE cloud_agent_runtime_qualifications SET enabled=false WHERE image_ref=$1", [scope.image_ref]);
-    expect((await service.forWorkspace(fixture.userId, fixture.workspaceId)).delegations)
-      .toMatchObject([{ runtimeQualified: false }]);
-  });
+  it.each(["missing", "wrong-runtime", "wrong-base", "missing-mcp", "smoke", "qualified", "revoked"] as const)(
+    "reports exact v4 credential qualification (%s) without replacing account consent", async variant => {
+      // Register the supported bundle without this credential's evidence first.
+      // Qualification records are immutable; each variant receives a fresh registry.
+      await resetMigratedTestDatabase(pool);
+      await withSystemTx(pool, async tx => {
+        await seedRuntimeBase(tx);
+        await seedRuntimeBundle(tx, { kinds: [] });
+      });
+      fixture = await seedReadyCloudWorkspace(pool);
+      const credential = await account();
+      await select(credential.id);
+      const first = await service.authorizeOrganizationForWorkspace(fixture.userId, fixture.workspaceId);
+      expect(first.delegations).toMatchObject([{ runtimeQualified: false }]);
+      let runtimeId = runtimeWitness.runtimeId, compatibilityId = runtimeBase.compatibilityId;
+      if (variant === "wrong-runtime") {
+        const other = await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "c", releaseOrder: 2, kinds: [] }));
+        runtimeId = other.pin.runtimeId;
+      }
+      if (variant === "wrong-base") {
+        const other = await withSystemTx(pool, tx => seedRuntimeBase(tx, { ...runtimeBase,
+          id: "zeros-v2-test-other-base", compatibilityId: `bc1-${"d".repeat(64)}`, imageRef: "boat:other-fixture-base" }));
+        compatibilityId = other.compatibilityId;
+      }
+      if (variant !== "missing") await pool.query(`INSERT INTO cloud_runtime_qualifications
+        (runtime_id,base_compatibility_id,credential_kind,profile,enabled,mcp_qualified,evidence,qualified_at)
+        VALUES($1,$2,'claude-setup-token','zeros-cloud-worker-v4',true,$3,$4::jsonb,now())`,
+      [runtimeId, compatibilityId, variant !== "missing-mcp", JSON.stringify({ mode: variant === "smoke" ? "smoke" : "full", checks: ["manifest_digest"] })]);
+      if (variant === "revoked") {
+        expect((await service.forWorkspace(fixture.userId, fixture.workspaceId)).delegations)
+          .toMatchObject([{ id: first.delegations[0]!.id, runtimeQualified: true }]);
+        await pool.query(`UPDATE cloud_runtime_qualifications SET enabled=false,mcp_qualified=false,revoked_at=now()
+          WHERE runtime_id=$1 AND base_compatibility_id=$2 AND credential_kind='claude-setup-token'`, [runtimeId, compatibilityId]);
+      }
+      expect((await service.forWorkspace(fixture.userId, fixture.workspaceId)).delegations)
+        .toMatchObject([{ id: first.delegations[0]!.id, runtimeQualified: variant === "qualified" || variant === "missing-mcp",
+          mcpQualified: variant === "qualified" }]);
+    },
+  );
   it("uses compare-and-set, invalidates old grants on switching, and disconnects without deleting another org's credentials", async () => {
     const a = await account("A"),
       b = await account("B");
@@ -235,7 +247,7 @@ d("organization agent accounts", () => {
       )
     ).rows[0].id;
     await pool.query(
-      `UPDATE provider_connection_versions SET credential_source='delegated',endpoint='https://app.daytona.io/api',
+      `UPDATE provider_connection_versions SET credential_source='delegated',endpoint='https://api.fixture.test',
       key_version=1,nonce=$2,ciphertext=$3,auth_tag=$4,credential_sha256=$5 WHERE connection_id=$1`,
       [
         connection,

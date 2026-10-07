@@ -5,6 +5,10 @@ import {afterEach,describe,expect,it,vi} from "vitest";
 import {CloudAgentLease} from "../../cloud-agent-lease";
 import {CloudCoordinatorBoundary} from "../cloud-coordinator-boundary";
 import type {PreparedBoundary} from "../types";
+vi.mock("../cloud-runtime-root.mjs",async original=>({
+  ...await original<typeof import("../cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime:(await import("../../__tests__/helpers/test-cloud-runtime")).testCloudRuntime,
+}));
 const mocked=vi.hoisted(()=>({stop:vi.fn(),rm:vi.fn()}));
 vi.mock("node:fs/promises",async original=>({...await original<typeof import("node:fs/promises")>(),rm:mocked.rm}));
 vi.mock("../cloud-supervised-process",()=>({CloudSupervisedProcess:class{

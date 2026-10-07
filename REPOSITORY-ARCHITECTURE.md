@@ -210,26 +210,33 @@ mode controls authoring intent independently of tab selection. See the
 
 ## Cloud workspaces and future clients
 
-Cloud workspaces are not a shipping product in this snapshot. The gated,
-disabled-by-default non-UI foundation now includes the control-plane registry,
-lifecycle/setup orchestration, durable record, encrypted object storage,
-integrity-checked local/cloud forks, and owner-only device replicas. The desktop
-engine and Electron main contain the corresponding remote transport, native
-access client, credential broker, frame-scoped preview admission, SSH owner,
-fork, and replica boundaries; renderer platform code exposes only narrow
-bearer-free receipts. Workspace management UI and Organization-member
-collaboration remain future work, with the latter owned by Phase 6A.
+Cloud execution is Boat-only and requires an immutable saved v2 Cloud Computer
+source, a qualified v4 worker runtime pin and actor protocol 2. The control plane
+owns organization/actor/device authority, generation and allocation journals,
+one durable command queue, receipts, normalized history and encrypted objects.
+The Boat engine owns live Git/Files/Design/native-agent operations with checked
+publication. Desktop routes by exact `cloud://` identity; Electron main owns
+native access, bounded transcript presentation cache and receive-only replicas.
+Personal Local and organization-owned Local remain on the local engine.
 
-The provider qualification harness remains isolated in
-`scripts/cloud-workspace-validation/`; it is not imported by an app or included
-in release packages. Its bridge probe imports the current shared protocol
-version, image construction fails closed through native SQLite rebuilding, and
-bearer-bearing state is owner-only and removed with successful sandbox cleanup.
-The current product contract, target architecture, security model, and phased
-delivery checklist live in `docs/cloud-workspace/`; the prior dated competitive
-research pack is not authoritative. `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED`
-remains false until the exact image, root exception, lifecycle/rollback, access,
-and provider-edge qualification gates are satisfied.
+Creation, catalog, context/status, sharing and native Terminal/forwarding surfaces
+are implemented. Retired generations retain authorized metadata/history and
+cleanup while refusing new execution with `cloud_workspace_v2_required`. Current
+connections use the authenticated provider-mediated relay plus engine outbound
+HTTP. A VM durable delivery journal, resident outbound stream, multiplexed
+client/backend channel, Mac send outbox and accounted warm pool remain proposed.
+See [cloud architecture](docs/cloud-workspace/architecture.md),
+[engineering reference](docs/cloud-workspace/engineering-reference.md) and
+[follow-ups](docs/cloud-workspace/warm-pool.md).
+
+The protected build/qualification harness lives in
+`scripts/cloud-workspace-validation/`; code presence is not release evidence.
+Alpha operation predates this overhaul. New VM fixes require publication and
+compatible pin adoption; desktop/control-plane deployment alone leaves a pinned
+VM unchanged. Live Alpha, signed macOS, lifecycle/recovery/delete and runtime-skew
+qualification remain explicit in [qualification status](docs/cloud-workspace/qualification-status.md).
+The cloud guides retain current contracts and acceptance procedures; dated
+competitive research and completed implementation diaries are not authoritative.
 
 As the product is wired into end-user surfaces, use existing boundaries before
 creating new ones:
@@ -376,7 +383,7 @@ stay component-owned.
   UI, security, public-repository, and test invariants without depending on
   dated internal plans.
 - `docs/` contains curated durable engineering contracts plus explicitly
-  retained, actively owned agent and cloud-workspace roadmaps. Completed dated
+  retained agent backlog and cloud-workspace qualification/follow-up guides. Completed dated
   audits, private operational plans, and competitive research were removed.
 - The tracked-file secret checker no longer embeds reversible maintainer or
   product identities and no longer blanket-exempts lockfiles, examples, or
@@ -589,7 +596,7 @@ the current `apps/desktop` and `packages/protocol` paths, indexed from
 
 The former cloud-workspace research pack was not restored verbatim. Its durable
 requirements were rewritten as current product, architecture, data, security,
-operations, enterprise, roadmap, and engineering-reference documents under
+operations, enterprise, qualification and engineering-reference documents under
 `docs/cloud-workspace/`. The dated vendor comparisons, generated HTML copies,
 reverse-engineering notes, and obsolete repository paths remain historical and
 non-authoritative.

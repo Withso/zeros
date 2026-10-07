@@ -30,7 +30,7 @@ TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 - @anthropic-ai/claude-agent-sdk@0.3.288: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.35: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (641 resolved package/version records)
+PACKAGE INVENTORY (625 resolved package/version records)
 -----------------
 
 @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.288
@@ -447,20 +447,6 @@ PACKAGE INVENTORY (641 resolved package/version records)
   Surfaces: root pnpm workspace
   Source: https://github.com/cursor/cursor
   License documents: 8d17330e28e3
-
-@daytona/api-client@0.214.0
-  License: Apache-2.0
-  Surfaces: control plane
-  Author: OpenAPI-Generator Contributors
-  Source: https://github.com/daytona/clients
-  License documents: d17f227e4df5
-
-@daytona/toolbox-api-client@0.214.0
-  License: Apache-2.0
-  Surfaces: control plane
-  Author: OpenAPI-Generator Contributors
-  Source: https://github.com/daytona/clients
-  License documents: d17f227e4df5
 
 @decimalturn/toml-patch@2.0.0
   License: MIT
@@ -1610,13 +1596,6 @@ accepts@2.0.0
   Source: https://github.com/jshttp/accepts
   License documents: 71f83c4c0621
 
-agent-base@6.0.2
-  License: MIT
-  Surfaces: control plane
-  Author: Nathan Rajlich <nathan@tootallnate.net> (http://n8.io/)
-  Source: https://github.com/TooTallNate/node-agent-base
-  License documents: 89e3b638927b
-
 ajv-formats@3.0.1
   License: MIT
   Surfaces: root pnpm workspace
@@ -1665,26 +1644,12 @@ async-lock@1.4.1
   Source: https://github.com/rogierschouten/async-lock
   License documents: 47792a9eed0a
 
-asynckit@0.4.0
-  License: MIT
-  Surfaces: control plane
-  Author: Alex Indigo <iam@alexindigo.com>
-  Source: https://github.com/alexindigo/asynckit
-  License documents: 1953150d5d4b
-
 available-typed-arrays@1.0.7
   License: MIT
   Surfaces: root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/inspect-js/available-typed-arrays
   License documents: 6d0917530cf3
-
-axios@1.20.0
-  License: MIT
-  Surfaces: control plane
-  Author: Matt Zabriskie
-  Source: https://github.com/axios/axios
-  License documents: 82761059eaed
 
 bail@2.0.2
   License: MIT
@@ -1763,7 +1728,7 @@ bytes@3.1.2
 
 call-bind-apply-helpers@1.0.2
   License: MIT
-  Surfaces: control plane, root pnpm workspace
+  Surfaces: root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/call-bind-apply-helpers
   License documents: 5e325595b4ea
@@ -1858,13 +1823,6 @@ codemirror@6.0.2
   Author: Marijn Haverbeke <marijn@haverbeke.berlin> http://marijnhaverbeke.nl
   Source: https://github.com/codemirror/basic-setup
   License documents: 05c6130cda97
-
-combined-stream@1.0.8
-  License: MIT
-  Surfaces: control plane
-  Author: Felix Geisendörfer <felix@debuggable.com> (http://debuggable.com/)
-  Source: https://github.com/felixge/node-combined-stream
-  License documents: 47eb8ca82c79
 
 comma-separated-tokens@2.0.3
   License: MIT
@@ -1966,7 +1924,7 @@ csstype@3.2.3
 
 debug@4.4.3
   License: MIT
-  Surfaces: control plane, marketing standalone deployment, root pnpm workspace
+  Surfaces: marketing standalone deployment, root pnpm workspace
   Author: Josh Junon (https://github.com/qix-)
   Source: https://github.com/debug-js/debug
   License documents: 23eb8602cd59
@@ -1998,13 +1956,6 @@ define-data-property@1.1.4
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/define-data-property
   License documents: b41d08bc3624
-
-delayed-stream@1.0.0
-  License: MIT
-  Surfaces: control plane
-  Author: Felix Geisendörfer <felix@debuggable.com> (http://debuggable.com/)
-  Source: https://github.com/felixge/node-delayed-stream
-  License documents: 47eb8ca82c79
 
 depd@2.0.0
   License: MIT
@@ -2056,7 +2007,7 @@ dompurify@3.4.16
 
 dunder-proto@1.0.1
   License: MIT
-  Surfaces: control plane, root pnpm workspace
+  Surfaces: root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/es-shims/dunder-proto
   License documents: 2b770a704c15
@@ -2097,14 +2048,14 @@ entities@6.0.1
 
 es-define-property@1.0.1
   License: MIT
-  Surfaces: control plane, root pnpm workspace
+  Surfaces: root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/es-define-property
   License documents: 5e325595b4ea
 
 es-errors@1.3.0
   License: MIT
-  Surfaces: control plane, root pnpm workspace
+  Surfaces: root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/es-errors
   License documents: 5e325595b4ea
@@ -2115,20 +2066,6 @@ es-object-atoms@1.1.1
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/es-object-atoms
   License documents: 5e325595b4ea
-
-es-object-atoms@1.1.2
-  License: MIT
-  Surfaces: control plane
-  Author: Jordan Harband <ljharb@gmail.com>
-  Source: https://github.com/ljharb/es-object-atoms
-  License documents: 5e325595b4ea
-
-es-set-tostringtag@2.1.0
-  License: MIT
-  Surfaces: control plane
-  Author: Jordan Harband <ljharb@gmail.com>
-  Source: https://github.com/es-shims/es-set-tostringtag
-  License documents: 1a3aeb1f1398
 
 escape-html@1.0.3
   License: MIT
@@ -2275,26 +2212,12 @@ fix-path@5.0.0
   Source: https://github.com/sindresorhus/fix-path
   License documents: 5c932d88256b
 
-follow-redirects@1.16.0
-  License: MIT
-  Surfaces: control plane
-  Author: Ruben Verborgh <ruben@verborgh.org> (https://ruben.verborgh.org/)
-  Source: ssh://git@github.com/follow-redirects/follow-redirects
-  License documents: bfa8a54bb952
-
 for-each@0.3.5
   License: MIT
   Surfaces: root pnpm workspace
   Author: Raynos <raynos2@gmail.com>
   Source: https://github.com/Raynos/for-each
   License documents: c88d22f01383
-
-form-data@4.0.6
-  License: MIT
-  Surfaces: control plane
-  Author: Felix Geisendörfer <felix@debuggable.com> (http://debuggable.com/)
-  Source: https://github.com/form-data/form-data
-  License documents: e5b780d4f38d
 
 forwarded@0.2.0
   License: MIT
@@ -2324,14 +2247,14 @@ fsevents@2.3.3
 
 function-bind@1.1.2
   License: MIT
-  Surfaces: control plane, root pnpm workspace
+  Surfaces: root pnpm workspace
   Author: Raynos <raynos2@gmail.com>
   Source: https://github.com/Raynos/function-bind
   License documents: 916586c760c1
 
 get-intrinsic@1.3.0
   License: MIT
-  Surfaces: control plane, root pnpm workspace
+  Surfaces: root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/get-intrinsic
   License documents: 39c5ec504cf6
@@ -2345,7 +2268,7 @@ get-nonce@1.0.1
 
 get-proto@1.0.1
   License: MIT
-  Surfaces: control plane, root pnpm workspace
+  Surfaces: root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/get-proto
   License documents: be46ce1e3b04
@@ -2359,7 +2282,7 @@ get-stream@6.0.1
 
 gopd@1.2.0
   License: MIT
-  Surfaces: control plane, root pnpm workspace
+  Surfaces: root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/ljharb/gopd
   License documents: d90bf0a089da
@@ -2385,14 +2308,14 @@ has-property-descriptors@1.0.2
 
 has-symbols@1.1.0
   License: MIT
-  Surfaces: control plane, root pnpm workspace
+  Surfaces: root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com> http://ljharb.codes
   Source: https://github.com/inspect-js/has-symbols
   License documents: 206c1adcf206
 
 has-tostringtag@1.0.2
   License: MIT
-  Surfaces: control plane, root pnpm workspace
+  Surfaces: root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com> http://ljharb.codes
   Source: https://github.com/inspect-js/has-tostringtag
   License documents: e2560e002e13
@@ -2400,13 +2323,6 @@ has-tostringtag@1.0.2
 hasown@2.0.2
   License: MIT
   Surfaces: root pnpm workspace
-  Author: Jordan Harband <ljharb@gmail.com>
-  Source: https://github.com/inspect-js/hasOwn
-  License documents: bf9b0d665be2
-
-hasown@2.0.4
-  License: MIT
-  Surfaces: control plane
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/inspect-js/hasOwn
   License documents: bf9b0d665be2
@@ -2494,13 +2410,6 @@ http-errors@2.0.1
   Author: Jonathan Ong <me@jongleberry.com> (http://jongleberry.com)
   Source: https://github.com/jshttp/http-errors
   License documents: dcb94ff9b1e0
-
-https-proxy-agent@5.0.1
-  License: MIT
-  Surfaces: control plane
-  Author: Nathan Rajlich <nathan@tootallnate.net> (http://n8.io/)
-  Source: https://github.com/TooTallNate/node-https-proxy-agent
-  License documents: 89e3b638927b
 
 human-signals@2.1.0
   License: Apache-2.0
@@ -2775,7 +2684,7 @@ marked@18.0.2
 
 math-intrinsics@1.1.0
   License: MIT
-  Surfaces: control plane, root pnpm workspace
+  Surfaces: root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
   Source: https://github.com/es-shims/math-intrinsics
   License documents: 2b770a704c15
@@ -3101,23 +3010,11 @@ micromark@4.0.2
   Source: https://github.com/micromark/micromark
   License documents: dd1081884a92
 
-mime-db@1.52.0
-  License: MIT
-  Surfaces: control plane
-  Source: https://github.com/jshttp/mime-db
-  License documents: cc1dfd4dafa2
-
 mime-db@1.54.0
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/jshttp/mime-db
   License documents: cc1dfd4dafa2
-
-mime-types@2.1.35
-  License: MIT
-  Surfaces: control plane
-  Source: https://github.com/jshttp/mime-types
-  License documents: 71f83c4c0621
 
 mime-types@3.0.2
   License: MIT
@@ -3155,7 +3052,7 @@ minimisted@2.0.1
 
 ms@2.1.3
   License: MIT
-  Surfaces: control plane, marketing standalone deployment, root pnpm workspace
+  Surfaces: marketing standalone deployment, root pnpm workspace
   Source: https://github.com/vercel/ms
   License documents: 1662fae9b531
 
@@ -3566,13 +3463,6 @@ proxy-addr@2.0.8
   Author: Douglas Christopher Wilson <doug@somethingdoug.com>
   Source: https://github.com/jshttp/proxy-addr
   License documents: a7996721249a
-
-proxy-from-env@2.1.0
-  License: MIT
-  Surfaces: control plane
-  Author: Rob Wu <rob@robwu.nl> (https://robwu.nl/)
-  Source: https://github.com/Rob--W/proxy-from-env
-  License documents: f55828df4b87
 
 pyright@1.1.414
   License: MIT
@@ -4347,7 +4237,7 @@ zwitch@2.0.4
   Source: https://github.com/wooorm/zwitch
   License documents: ca4662cb5d1b
 
-LICENSE AND NOTICE TEXTS (287 unique documents)
+LICENSE AND NOTICE TEXTS (279 unique documents)
 ------------------------
 
 ================================================================================
@@ -6500,64 +6390,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ================================================================================
-DOCUMENT 1953150d5d4b
-SHA-256: 1953150d5d4b10c7542cee6f6e0c613b2682545233f069d75cfff1936386ce10
-Applies to: asynckit@0.4.0
-Source labels: asynckit@0.4.0 — LICENSE
-================================================================================
-
-The MIT License (MIT)
-
-Copyright (c) 2016 Alex Indigo
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-================================================================================
-DOCUMENT 1a3aeb1f1398
-SHA-256: 1a3aeb1f1398bd697d57c3c585faadf59d825aca6e3162cd7eeb72ff76eb2466
-Applies to: es-set-tostringtag@2.1.0
-Source labels: es-set-tostringtag@2.1.0 — LICENSE
-================================================================================
-
-MIT License
-
-Copyright (c) 2022 ECMAScript Shims
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-================================================================================
 DOCUMENT 1a526fbe8d85
 SHA-256: 1a526fbe8d8577f5a4b1c2821842b55b7c0e18862531c62ae4ce69c9b19b74b6
 Applies to: unpipe@1.0.0
@@ -8672,33 +8504,6 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
-DOCUMENT 47eb8ca82c79
-SHA-256: 47eb8ca82c798246774946d1be0f9aa08f025fa8325ced0947aeeb4c05fe5547
-Applies to: combined-stream@1.0.8, delayed-stream@1.0.0
-Source labels: combined-stream@1.0.8 — License; delayed-stream@1.0.0 — License
-================================================================================
-
-Copyright (c) 2011 Debuggable Limited <felix@debuggable.com>
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-
-================================================================================
 DOCUMENT 4842ef52d000
 SHA-256: 4842ef52d00055c18ce2cad08cd8733113ec02e3b0a02293e9478ac511acd5f4
 Applies to: pgpass@1.0.5
@@ -9528,8 +9333,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT 5e325595b4ea
 SHA-256: 5e325595b4ea8cfec3802f545b1def5d7b73e4a5b8e9ba63e32a320f67732292
-Applies to: call-bind-apply-helpers@1.0.2, call-bound@1.0.4, es-define-property@1.0.1, es-errors@1.3.0, es-object-atoms@1.1.1, es-object-atoms@1.1.2, possible-typed-array-names@1.1.0, side-channel-list@1.0.1, side-channel-map@1.0.1
-Source labels: call-bind-apply-helpers@1.0.2 — LICENSE; call-bound@1.0.4 — LICENSE; es-define-property@1.0.1 — LICENSE; es-errors@1.3.0 — LICENSE; es-object-atoms@1.1.1 — LICENSE; es-object-atoms@1.1.2 — LICENSE; possible-typed-array-names@1.1.0 — LICENSE; side-channel-list@1.0.1 — LICENSE; side-channel-map@1.0.1 — LICENSE
+Applies to: call-bind-apply-helpers@1.0.2, call-bound@1.0.4, es-define-property@1.0.1, es-errors@1.3.0, es-object-atoms@1.1.1, possible-typed-array-names@1.1.0, side-channel-list@1.0.1, side-channel-map@1.0.1
+Source labels: call-bind-apply-helpers@1.0.2 — LICENSE; call-bound@1.0.4 — LICENSE; es-define-property@1.0.1 — LICENSE; es-errors@1.3.0 — LICENSE; es-object-atoms@1.1.1 — LICENSE; possible-typed-array-names@1.1.0 — LICENSE; side-channel-list@1.0.1 — LICENSE; side-channel-map@1.0.1 — LICENSE
 ================================================================================
 
 MIT License
@@ -10155,8 +9960,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ================================================================================
 DOCUMENT 71f83c4c0621
 SHA-256: 71f83c4c0621102a56d9853812777b85751bce7e9726f686f5b056c1f8a4b0e6
-Applies to: accepts@2.0.0, mime-types@2.1.35, mime-types@3.0.2
-Source labels: accepts@2.0.0 — LICENSE; mime-types@2.1.35 — LICENSE; mime-types@3.0.2 — LICENSE
+Applies to: accepts@2.0.0, mime-types@3.0.2
+Source labels: accepts@2.0.0 — LICENSE; mime-types@3.0.2 — LICENSE
 ================================================================================
 
 (The MIT License)
@@ -10671,21 +10476,6 @@ IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
 CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
 TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-================================================================================
-DOCUMENT 82761059eaed
-SHA-256: 82761059eaedacb3356803aea8a170d8298609f91b14fc32ee1bfb40d690183c
-Applies to: axios@1.20.0
-Source labels: axios@1.20.0 — LICENSE
-================================================================================
-
-# Copyright (c) 2014-present Matt Zabriskie & Collaborators
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
 DOCUMENT 82974dbf2639
@@ -11393,35 +11183,6 @@ The rest of the code licensed under:
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
-
-================================================================================
-DOCUMENT 89e3b638927b
-SHA-256: 89e3b638927bd966985caee505db617913fab5bf022d20559ab8df0a2de8d65a
-Applies to: agent-base@6.0.2, https-proxy-agent@5.0.1
-Source labels: agent-base@6.0.2 — declared MIT terms (archive omitted a standalone file); https-proxy-agent@5.0.1 — declared MIT terms (archive omitted a standalone file)
-================================================================================
-
-MIT License
-
-Copyright (c) Nathan Rajlich <nathan@tootallnate.net> (http://n8.io/)
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 
 ================================================================================
 DOCUMENT 89e57da97f98
@@ -13238,8 +12999,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT bf9b0d665be2
 SHA-256: bf9b0d665be2a689851eea667ca9f42066ea1d903b38349c51e6a44b2577680a
-Applies to: hasown@2.0.2, hasown@2.0.4, set-function-length@1.2.2
-Source labels: hasown@2.0.2 — LICENSE; hasown@2.0.4 — LICENSE; set-function-length@1.2.2 — LICENSE
+Applies to: hasown@2.0.2, set-function-length@1.2.2
+Source labels: hasown@2.0.2 — LICENSE; set-function-length@1.2.2 — LICENSE
 ================================================================================
 
 MIT License
@@ -13263,32 +13024,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-================================================================================
-DOCUMENT bfa8a54bb952
-SHA-256: bfa8a54bb952ccda79f0f1889721d108f5b605babbb2b8a3705ffb52f4132eb7
-Applies to: follow-redirects@1.16.0
-Source labels: follow-redirects@1.16.0 — LICENSE
-================================================================================
-
-Copyright 2014–present Olivier Lalonde <olalonde@gmail.com>, James Talmage <james@talmage.io>, Ruben Verborgh
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
 DOCUMENT bfdeded4040e
@@ -14129,8 +13864,8 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ================================================================================
 DOCUMENT cc1dfd4dafa2
 SHA-256: cc1dfd4dafa27271e8212cd3b274eeb3f262e40a6fdab36ddc3f9696f706f58b
-Applies to: mime-db@1.52.0, mime-db@1.54.0
-Source labels: mime-db@1.52.0 — LICENSE; mime-db@1.54.0 — LICENSE
+Applies to: mime-db@1.54.0
+Source labels: mime-db@1.54.0 — LICENSE
 ================================================================================
 
 (The MIT License)
@@ -14610,8 +14345,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT d17f227e4df5
 SHA-256: d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc
-Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @daytona/api-client@0.214.0, @daytona/toolbox-api-client@0.214.0, @openai/codex@0.154.0, @openai/codex@0.154.0-linux-x64, @openai/codex@0.160.0, @openai/codex@0.160.0-darwin-arm64, clean-git-ref@2.0.1
-Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/api-client@0.214.0 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/toolbox-api-client@0.214.0 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex@0.154.0 generated protocol — LICENSE; @openai/codex@0.154.0-linux-x64 staged native runtime — LICENSE; @openai/codex@0.160.0 generated protocol — LICENSE; @openai/codex@0.160.0-darwin-arm64 staged native runtime — LICENSE; clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
+Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @openai/codex@0.154.0, @openai/codex@0.154.0-linux-x64, @openai/codex@0.160.0, @openai/codex@0.160.0-darwin-arm64, clean-git-ref@2.0.1
+Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex@0.154.0 generated protocol — LICENSE; @openai/codex@0.154.0-linux-x64 staged native runtime — LICENSE; @openai/codex@0.160.0 generated protocol — LICENSE; @openai/codex@0.160.0-darwin-arm64 staged native runtime — LICENSE; clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
 ================================================================================
 
                                  Apache License
@@ -16093,33 +15828,6 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
-DOCUMENT e5b780d4f38d
-SHA-256: e5b780d4f38d1d3328e3e53186c4e62d3fa149ea6f2bacd5de5ad0c30ac85343
-Applies to: form-data@4.0.6
-Source labels: form-data@4.0.6 — License
-================================================================================
-
-Copyright (c) 2012 Felix Geisendörfer (felix@debuggable.com) and contributors
-
- Permission is hereby granted, free of charge, to any person obtaining a copy
- of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights
- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- copies of the Software, and to permit persons to whom the Software is
- furnished to do so, subject to the following conditions:
-
- The above copyright notice and this permission notice shall be included in
- all copies or substantial portions of the Software.
-
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- THE SOFTWARE.
-
-================================================================================
 DOCUMENT e7dc37bf662d
 SHA-256: e7dc37bf662d7f786efcb46c545615e70c1daf458a38385521c63cf6607cdfe1
 Applies to: qs@6.16.0
@@ -16704,34 +16412,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE
-
-================================================================================
-DOCUMENT f55828df4b87
-SHA-256: f55828df4b8752c48e765a806465b76a103e3cb363379c569b15a1df2ba2d79e
-Applies to: proxy-from-env@2.1.0
-Source labels: proxy-from-env@2.1.0 — LICENSE
-================================================================================
-
-The MIT License
-
-Copyright (C) 2016-2018 Rob Wu <rob@robwu.nl>
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
-COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ================================================================================
 DOCUMENT f6196c64e144

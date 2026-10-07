@@ -137,7 +137,7 @@ jobs:
       # Protected release capability, baked into both Electron main and the
       # packaged engine. Unset environments remain explicitly fail-closed.
       ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
-      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'daytona' }}
+      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'boat' }}
 
     steps:
       - name: Require a Beta-validated release branch
@@ -660,7 +660,7 @@ jobs:
       ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
       ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
       ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
-      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'daytona' }}
+      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'boat' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

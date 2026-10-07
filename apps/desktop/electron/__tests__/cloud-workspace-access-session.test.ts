@@ -5,9 +5,11 @@ const state = vi.hoisted(() => ({
   listener: (() => {}) as () => void,
   events: vi.fn(),
   revoke: vi.fn(async () => undefined),
+  signedIn: true,
+  pruneAccount: vi.fn(),
 }));
 vi.mock("electron", () => ({
-  app: { getPath: () => "/tmp/zeros-cloud-test" },
+  app: { getPath: () => "/tmp/zeros-cloud-test", whenReady: async () => {} },
   clipboard: { writeText: vi.fn() },
 }));
 vi.mock("../../src/engine/cloud-workspace-capability", () => ({
@@ -27,15 +29,19 @@ vi.mock("../cloud-replica-host-runtime", () => ({
 }));
 vi.mock("../ipc/commands/auth-session", () => ({
   getValidAccessTokenForMain: async () => `token-${state.account}`,
-  getSessionUserForMain: () => ({
+  getSessionUserForMain: () => state.signedIn ? ({
     provider: "workos",
     accountId: state.account,
     sessionId: state.session,
     sub: "workos-sub",
-  }),
+  }) : null,
   onMainAuthSessionChanged: (listener: () => void) => {
     state.listener = listener;
   },
+}));
+vi.mock("../cloud-workspace-port-forwarding-store", async importOriginal => ({
+  ...(await importOriginal<object>()),
+  CloudPortForwardingPreferences: class { removeAccount = state.pruneAccount; },
 }));
 vi.mock("../cloud-workspace-ssh-runtime", () => ({
   CloudWorkspaceNativeSshRuntime: class { async dispose() {} },
@@ -81,9 +87,17 @@ afterEach(async () => {
   await disposeCloudWorkspaceAccessBroker();
   state.account = "account-a";
   state.session = "session-a";
+  state.signedIn = true;
+  state.listener();
   vi.clearAllMocks();
 });
 describe("main cloud access source-session lifecycle", () => {
+  it("prunes persisted account intent on sign-out before any native access has been opened", () => {
+    state.signedIn = false;
+    state.listener();
+    expect(state.pruneAccount).toHaveBeenCalledExactlyOnceWith(JSON.stringify(["workos", "account-a"]));
+    expect(state.events).not.toHaveBeenCalled();
+  });
   it.each(["local", "shared"])(
     "retires %s store replacement synchronously even when remote revocation fails",
     async (source) => {

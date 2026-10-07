@@ -16,10 +16,6 @@ const RUNTIME_AUDIENCE = "zeros-cloud-engine-runtime-v1" as const;
 const REGISTRATION_AUDIENCE =
   "zeros-cloud-workspace-engine-registration-v1" as const;
 const HEARTBEAT_AUDIENCE = "zeros-cloud-workspace-engine-heartbeat-v1" as const;
-const ENGINE_CLIENT_ADMISSION_AUDIENCE =
-  "zeros-cloud-workspace-engine-client-admission-v1" as const;
-const ENGINE_CLIENT_ADMISSION_PATH =
-  "/internal/v1/cloud-workspaces/engine/client-admission" as const;
 export const CLOUD_RUNTIME_ENV = "ZEROS_CLOUD_RUNTIME_B64" as const;
 
 const UUID_PATTERN =
@@ -38,7 +34,6 @@ function isCloudAgentRuntimeAttestation(value: unknown): value is CloudAgentRunt
   const fields = value as Record<string, unknown>;
   const digest = (field: unknown): field is string => typeof field === "string" && /^[a-f0-9]{64}$/.test(field);
   const uuid = (field: unknown): field is string => typeof field === "string" && field === field.toLowerCase() && UUID_PATTERN.test(field);
-  if (fields.profile === "zeros-cloud-worker-v3") return digest(fields.contractSha256);
   return fields.profile === "zeros-cloud-worker-v4" &&
     Object.keys(fields).sort().join("\0") === ["baseCompatibilityId", "bootId", "installerReceiptSha256", "manifestSha256", "profile", "runtimeId", "supervisorSessionId"].join("\0") &&
     digest(fields.manifestSha256) && fields.runtimeId === `r1-${fields.manifestSha256}` &&
@@ -470,7 +465,7 @@ export class CloudRuntimeRegistration {
         protocolVersion: this.config.engine.protocolVersion,
         actorProtocolVersion: 2,
         agentRuntime: this.agentRuntime,
-        ...(this.agentRuntime.profile === "zeros-cloud-worker-v4" ? { agentCustomizationVersion: 3 } : {}),
+        agentCustomizationVersion: 3,
       },
     );
     const document = this.parseRegistration(raw);
@@ -634,14 +629,14 @@ export class CloudRuntimeRegistration {
   ): Promise<CloudRuntimeClientAdmission | null> {
     const document = this.document;
     if (
-      !/^zw[sa]_[A-Za-z0-9_-]{43}$/.test(grantToken) ||
+      !/^zwa_[A-Za-z0-9_-]{43}$/.test(grantToken) ||
       !document ||
       !this.hasControlAuthority(document)
     ) {
       return null;
     }
     const endpoint = new URL(
-      grantToken.startsWith("zwa_") ? "/internal/v2/cloud-workspaces/engine/client-admission" : ENGINE_CLIENT_ADMISSION_PATH,
+      "/internal/v2/cloud-workspaces/engine/client-admission",
       document.heartbeat.endpoint,
     ).toString();
     try {
@@ -660,35 +655,11 @@ export class CloudRuntimeRegistration {
         !this.hasControlAuthority(document)
       )
         return null;
-      if (grantToken.startsWith("zwa_")) {
-        const parsed = CloudActorAdmissionResponseSchema.safeParse(raw);
-        if (!parsed.success) return null;
-        const admitted = parsed.data;
-        return {accountUserId:admitted.accountUserId,authorityEpoch:admitted.authorityEpoch,
-          actor:{sessionId:admitted.actorSessionId,deviceId:admitted.deviceId,role:admitted.role,fingerprint:admitted.fingerprint}};
-      }
-      if (
-        isRecord(raw) &&
-        exactKeys(raw, [
-          "accountUserId",
-          "admitted",
-          "audience",
-          "authorityEpoch",
-          "version",
-        ]) &&
-        raw.version === 1 &&
-        raw.audience === ENGINE_CLIENT_ADMISSION_AUDIENCE &&
-        raw.admitted === true &&
-        positiveInteger(raw.authorityEpoch) &&
-        typeof raw.accountUserId === "string" &&
-        UUID_PATTERN.test(raw.accountUserId)
-      ) {
-        return {
-          accountUserId: raw.accountUserId,
-          authorityEpoch: Number(raw.authorityEpoch),
-        };
-      }
-      return null;
+      const parsed = CloudActorAdmissionResponseSchema.safeParse(raw);
+      if (!parsed.success) return null;
+      const admitted = parsed.data;
+      return {accountUserId:admitted.accountUserId,authorityEpoch:admitted.authorityEpoch,
+        actor:{sessionId:admitted.actorSessionId,deviceId:admitted.deviceId,role:admitted.role,fingerprint:admitted.fingerprint}};
     } catch {
       return null;
     }

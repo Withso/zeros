@@ -44,7 +44,8 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
     return `https://api.example.test/v1/organizations/${document.organizationId}/cloud-workspaces/${document.id}/stop`;
   });
   const setup = page.getByRole("region", { name: "Setup tab", exact: true });
-  const status = setup.getByLabel("Cloud workspace status", { exact: true });
+  await expect(setup.getByLabel("Cloud workspace status", { exact: true })).toHaveCount(0);
+  const status = page.getByRole("region", { name: "Cloud workspace details", exact: true }).getByLabel("Cloud workspace status", { exact: true });
   const restart = status.getByRole("button", { name: "Restart workspace", exact: true });
   const row = page.locator("[data-workspace-tab]");
   const confirm = page.getByRole("dialog", { name: "Restart this workspace?", exact: true });
@@ -260,7 +261,10 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
   await closeWorkspaceMenu();
   for (const state of ["archived", "deleting"]) {
     await page.evaluate(state => window.cloudRestartFixture.publish({ status: state }), state);
-    await expect(status).toHaveCount(0);
+    if (state === "archived") {
+      await expect(status.getByRole("status")).toHaveText("Archived");
+      await expect(restart).toHaveCount(0);
+    } else await expect(status).toHaveCount(0);
     await row.click({ button: "right" });
     // Absence of Restart alone can pass before the menu has opened.
     await expect(workspaceMenu).toBeVisible();

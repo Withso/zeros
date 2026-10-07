@@ -6,7 +6,6 @@ import { HttpError } from "../authz.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { rateLimit } from "../ratelimit.js";
 import { DatabaseCloudWorkspaceManagementService } from "./management.js";
-import type { DaytonaProviderConnectionQualifier } from "./provider-qualification.js";
 
 const Uuid = z.string().uuid();
 const ExpectedVersion = z.number().int().nonnegative();
@@ -143,7 +142,6 @@ export function createCloudWorkspaceManagementRoutes(
   config: CloudWorkspaceBackendConfig,
   options: {
     workosEnabled: boolean;
-    qualifier?: DaytonaProviderConnectionQualifier;
   },
 ): Hono {
   const app = new Hono();

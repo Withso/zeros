@@ -31,7 +31,7 @@ export function newHostedGeneration(identity, previous, now = Date.now()) {
     version: 2, owner: identity.owner, identity: identity.identity,
     lastUserActivityAt: new Date(now).toISOString(), expiresAt: null,
     generation: randomUUID(), status: "provisioning", createdAt: new Date(now).toISOString(),
-    keys: Object.fromEntries(["cookie", "settings", "objects", "provider", "agent"].map(k => [k, randomBytes(32).toString("hex")])),
+    keys: Object.fromEntries(["cookie", "settings", "objects", "agent"].map(k => [k, randomBytes(32).toString("hex")])),
     resources: {}, steps: {},
     ...(previous ? { previous: { generation: previous.generation, archivedAt: previous.archivedAt },
       pendingBuilderDeletions: globalThis.structuredClone(previous.pendingBuilderDeletions ?? []),
@@ -77,7 +77,7 @@ export async function resolveHostedOwner(store, root, env = process.env, { creat
 function validate(record, owner) {
   if (![1, 2].includes(record?.version) || record.owner !== owner || !UUID.test(record.generation ?? "") ||
       !["provisioning", "ready", "archiving", "archived"].includes(record.status) || !record.resources || !record.steps ||
-      (record.status !== "archived" && !["cookie", "settings", "objects", "provider", "agent"].every(k => KEY.test(record.keys?.[k] ?? "")))) {
+      (record.status !== "archived" && !["cookie", "settings", "objects", "agent"].every(k => KEY.test(record.keys?.[k] ?? "")))) {
     throw new Error("Invalid hosted Dev ownership receipt; remote resources were preserved");
   }
   return record;

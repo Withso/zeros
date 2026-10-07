@@ -38,6 +38,7 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
   });
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     fixture = await seedReadyCloudWorkspace(pool);
     service = new DatabaseCloudWorkspaceAccessService({
       pool,
@@ -195,24 +196,6 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
         )
       )?.status,
     ).toBe(401);
-  });
-
-  it("retains proof-free scalar issuance for a verified legacy provider runtime", async () => {
-    const legacy = new DatabaseCloudWorkspaceAccessService({
-      pool,
-      previewBaseDomain: "preview.example.test",
-      provider: {
-        getPreviewEndpoint: vi.fn(async () => ({
-          url: "https://5173-legacy.proxy.daytona.work/",
-          headerName: "x-daytona-preview-token",
-          headerValue: "legacy-fixture-preview-token",
-        })),
-      } as unknown as CloudWorkspaceAccessProvider,
-    });
-    const { proof: _proof, ...legacyShape } = (await device()).request();
-    await expect(legacy.issue(legacyShape)).resolves.toMatchObject({
-      grant: { kind: "preview", remotePort: 5173 },
-    });
   });
 
   it("binds opaque identity to the signed device and rejects a changed target", async () => {

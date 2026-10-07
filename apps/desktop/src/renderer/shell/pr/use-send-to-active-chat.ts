@@ -21,8 +21,8 @@ import { envForChat } from "../../features/agent/model-catalog";
 import type { AutoActionKind } from "../../features/agent/auto-action";
 import { useBridge } from "../../platform/bridge/use-bridge";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
-import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
-import { useInternalFeatureActive } from "../../features/settings/internal-features";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { useCloudWorkspaceAccountAccess } from "../../features/team/cloud-workspace-account-access";
 import type {
   AgentTextMessageAttachment,
   MessageContentSegment,
@@ -57,7 +57,7 @@ export function useSendToActiveChat(
 ): (args: SendToActiveChatArgs) => boolean {
   const sessions = useAgentSessions();
   const bridge = useBridge();
-  const cloudComputerV2 = useInternalFeatureActive("cloudComputerV2");
+  const cloudComputerV2 = useCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(workspacePath)?.organizationId);
   // Capture the click's chat across PR preflight awaits. Reading the global
   // active id when those finish would redirect the action after navigation.
   const activeChatId = useActiveChatId();

@@ -18,8 +18,8 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
     .poll(() => lane.evaluate((element) => element.scrollLeft))
     .toBeGreaterThan(0);
   expect((await button.boundingBox()).x).toBe(before.x);
-  expect((await button.boundingBox()).x + before.width).toBeLessThanOrEqual(
-    (await lane.boundingBox()).x,
+  expect((await button.boundingBox()).y + before.height).toBeLessThanOrEqual(
+    (await lane.boundingBox()).y,
   );
   await button.click();
   const details = page.getByRole("dialog", { name: "Cloud workspace details" });
@@ -29,11 +29,13 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
     "Setup succeeded",
     "Running",
     "2 cores",
-    "4 GiB",
-    "20 GiB",
+    "4.3 GB",
+    "21.5 GB",
   ])
     await expect(details.getByText(value, { exact: true })).toBeVisible();
-  await expect(details).not.toContainText(/SSH|Agent costs|%/);
+  await expect(details).not.toContainText(/Agent costs|%/);
+  await expect(details).toContainText("Use the Mac app to open SSH or forward a port.");
+  await expect(details).toContainText("Sync is available in the Mac app.");
   await page.screenshot({ path: ".context/cloud-workspace-ui.png" });
   await page.keyboard.press("Escape");
   await expect(details).toHaveCount(0);
@@ -62,23 +64,40 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
   await expect(button).toHaveCount(0);
   await expect(lane.getByRole("tab")).toHaveCount(12);
   check(
-    "Cloud details stay fixed beside the existing chat tabs, show capacities, and restore keyboard focus",
+    "Cloud details stay fixed above the existing chat tabs, show capacities, and restore keyboard focus",
     true,
   );
   check("Failed cloud setup shows its closed code and pre-script explanation in details and Setup without a loader or rerun action", true);
 
   await page.clock.install();
+  await page.route("https://api.example.test/v1/organizations/*/cloud-workspaces/*/detected-ports*", route => route.fulfill({ json: {
+    version: 1, organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222",
+    generation: 1, status: "ready", observedAt: null, ports: null,
+  } }));
   await page.goto(`${harnessBase}/harness-cloud-native-access.html`);
-  const access = page.getByRole("region", { name: "SSH and port forwarding" });
-  await expect(access.getByRole("button", { name: "Open Terminal", exact: true })).toBeEnabled();
+  const access = page.getByRole("region", { name: "Open via SSH", exact: true });
+  const ports = page.getByRole("region", { name: "Workspace ports", exact: true });
+  await expect(access.getByRole("button", { name: "Open via SSH in Terminal", exact: true })).toBeEnabled();
   expect(await page.evaluate(() => window.cloudNativeFixture.calls.every(call =>
-    ["cloud_workspace_access_context", "cloud_workspace_access_list"].includes(call.command)))).toBe(true);
-  await access.getByRole("button", { name: "Copy SSH command", exact: true }).click();
-  await expect(access.getByText("SSH connection", { exact: true })).toBeVisible();
-  await access.getByLabel("Workspace port", { exact: true }).fill("4173");
-  await access.getByLabel("Mac port", { exact: true }).fill("5173");
-  await access.getByRole("button", { name: "Forward port", exact: true }).click();
-  await expect(access.getByText("127.0.0.1:5173 → 4173", { exact: true })).toBeVisible();
+    ["cloud_workspace_access_context", "cloud_workspace_access_list", "cloud_workspace_port_forwarding_get", "auth_get_access_token", "auth_get_session_user", "app_info"].includes(call.command)))).toBe(true);
+  const forwarding = ports.getByRole("switch", { name: "Forward to localhost", exact: true });
+  const auto = ports.getByRole("switch", { name: "Auto-forwarding", exact: true });
+  await expect(forwarding).not.toBeChecked();
+  await expect(auto).toBeChecked();
+  await expect(auto).toBeDisabled();
+  await forwarding.click();
+  await expect(forwarding).toBeChecked();
+  await expect(auto).toBeEnabled();
+  await auto.click();
+  await expect(auto).not.toBeChecked();
+  await access.getByRole("button", { name: "SSH options", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Copy SSH command", exact: true }).click();
+  await expect.poll(async () => (await page.evaluate(() => window.cloudNativeFixture.calls)).filter(call => call.command === "cloud_workspace_ssh_copy").length).toBe(1);
+  await ports.getByRole("button", { name: "Add port", exact: true }).click();
+  await ports.getByLabel("Workspace port", { exact: true }).fill("4173");
+  await ports.getByLabel("Mac port", { exact: true }).fill("5173");
+  await ports.getByRole("button", { name: "Forward port", exact: true }).click();
+  await expect(ports.getByText("localhost:5173", { exact: false })).toBeVisible();
   const mutation = await page.evaluate(() => window.cloudNativeFixture.calls.find(call => call.command === "cloud_workspace_tunnel_start"));
   expect(mutation.args).toMatchObject({ remotePort: 4173, localPort: 5173, keyVersion: 1 });
   expect(Object.keys(mutation.args).sort()).toEqual(["authorityId", "deviceId", "keyVersion", "localPort", "organizationId", "remotePort", "workspaceId"]);
@@ -87,8 +106,10 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
   // neither subscribes to reads nor polls while the pending read completes.
   await page.evaluate(() => { window.cloudNativeFixture.holdRead = true; });
   await page.clock.fastForward(5_001);
-  await expect(access.getByText("SSH connection", { exact: true })).toBeVisible();
-  await expect(access.getByText("127.0.0.1:5173 → 4173", { exact: true })).toBeVisible();
+  await access.getByRole("button", { name: "SSH options", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Close SSH connection", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(ports.getByText("localhost:5173", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "Toggle visibility", exact: true }).click();
   await expect(access).toHaveCount(0);
   await page.evaluate(() => { window.cloudNativeFixture.holdRead = false; window.cloudNativeFixture.releaseRead(); });
@@ -96,17 +117,23 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
   await page.clock.fastForward(10_001);
   expect(await page.evaluate(() => window.cloudNativeFixture.calls.length)).toBe(hiddenCalls);
   await page.getByRole("button", { name: "Toggle visibility", exact: true }).click();
-  await expect(access.getByText("SSH connection", { exact: true })).toBeVisible();
-  await access.getByRole("button", { name: "Close", exact: true }).first().click();
-  await expect(access.getByText("SSH connection", { exact: true })).toHaveCount(0);
-  await expect(access.getByText("127.0.0.1:5173 → 4173", { exact: true })).toBeVisible();
+  await access.getByRole("button", { name: "SSH options", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Close SSH connection", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await access.getByRole("button", { name: "SSH options", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Close SSH connection", exact: true }).click();
+  await access.getByRole("button", { name: "SSH options", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Close SSH connection", exact: true })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(ports.getByText("localhost:5173", { exact: false })).toBeVisible();
   await page.screenshot({ path: ".context/e1-native-access-ui.png" });
   await page.getByRole("button", { name: "Toggle edit access", exact: true }).click();
-  await expect(access.getByRole("button", { name: "Open Terminal", exact: true })).toBeDisabled();
-  await expect(access.getByRole("button", { name: "Forward port", exact: true })).toBeDisabled();
-  await page.getByRole("button", { name: "Disable internal feature", exact: true }).click();
+  await expect(access.getByRole("button", { name: "Open via SSH in Terminal", exact: true })).toBeDisabled();
+  await expect(ports.getByRole("button", { name: "Add port", exact: true })).toBeDisabled();
+  await expect(forwarding).toBeDisabled();
+  await page.getByRole("button", { name: "Sign out fixture", exact: true }).click();
   await expect(access).toHaveCount(0);
-  check("Staff native access uses exact device context, retains snapshots, isolates close and leaves hidden controls inert", true);
+  check("Authorized native access uses exact device context, retains snapshots, isolates close and leaves hidden controls inert", true);
   await runCloudWorkspaceSharingSmoke({ page, check, harnessBase });
   await runCloudWorkspaceRestartSmoke({ page, check, harnessBase });
 }
@@ -174,12 +201,11 @@ export async function runCloudWorkspaceSharingSmoke({ page, check, harnessBase }
     throw new Error(`Unexpected sharing fixture request: ${request.method()} ${url.pathname}`);
   });
   await page.goto(`${harnessBase}/harness-cloud-workspace.html?sharing=1`);
-  const button = page.getByRole("button", { name: "Cloud workspace details", exact: true });
+  const button = page.getByRole("button", { name: "Share workspace", exact: true });
   await button.hover();
   await expect.poll(() => collaboratorReads).toBe(1);
   await button.click();
-  const details = page.getByRole("dialog", { name: "Cloud workspace details" });
-  await details.getByRole("button", { name: "Manage sharing", exact: true }).click();
+  const details = page.getByRole("dialog", { name: "Share workspace" });
   await expect(details.getByText("9 / 10 writer slots used", { exact: true })).toBeVisible();
   expect(collaboratorReads).toBe(1);
   await expect(details.getByRole("combobox", { name: "Role for You" })).toHaveCount(0);
@@ -213,7 +239,8 @@ export async function runCloudWorkspaceSharingSmoke({ page, check, harnessBase }
   await page.keyboard.press("Escape");
   await details.getByRole("button", { name: "Cancel invitation", exact: true }).click();
   await expect(details.getByText("9 / 10 writer slots used", { exact: true })).toBeVisible();
-  await expect(details.getByText("No pending invitations.", { exact: true })).toBeVisible();
+  await expect(details.getByRole("button", { name: "Cancel invitation", exact: true })).toHaveCount(0);
+  await expect(details.getByText("Invitation ·", { exact: false })).toHaveCount(0);
 
   for (const [fixture, role] of [["Developer fixture", "Developer"], ["Prompter fixture", "Prompter"], ["Viewer admin fixture", "Viewer"]]) {
     const before = collaboratorReads;
@@ -227,18 +254,17 @@ export async function runCloudWorkspaceSharingSmoke({ page, check, harnessBase }
   }
   await page.getByRole("button", { name: "Owner fixture", exact: true }).click();
   await button.click();
-  await details.getByRole("button", { name: "Manage sharing", exact: true }).click();
   await expect(details.getByRole("textbox", { name: "Collaborator email", exact: true })).toBeVisible();
   await page.evaluate(() => window.cloudWorkspaceSharingFixture.setPage("dashboard"));
   await expect(details).toHaveCount(0);
   const hiddenReads = collaboratorReads;
-  await button.hover();
+  await expect(button).toBeDisabled();
+  await button.hover({ force: true });
   await page.evaluate(() => window.cloudWorkspaceSharingFixture.setPage("workspace"));
   await expect(details).toHaveCount(0);
   expect(collaboratorReads).toBe(hiddenReads);
-  await page.getByRole("button", { name: "Flag off", exact: true }).click();
-  await button.click();
-  await expect(details.getByRole("region", { name: "Workspace sharing", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Sign out fixture", exact: true }).click();
+  await expect(button).toHaveCount(0);
   expect(collaboratorReads).toBe(hiddenReads);
   // Preserved owner-only workspaces start Private. Selecting that same scope
   // is a no-op; enabling collaboration must be an explicit versioned write.
@@ -246,7 +272,6 @@ export async function runCloudWorkspaceSharingSmoke({ page, check, harnessBase }
   await page.goto(`${harnessBase}/harness-cloud-workspace.html?sharing=1`);
   await page.evaluate(() => window.cloudWorkspaceSharingFixture.publishSharing("private", 2));
   await button.click();
-  await details.getByRole("button", { name: "Manage sharing", exact: true }).click();
   await details.getByRole("textbox", { name: "Collaborator email", exact: true }).fill("guest@example.test");
   await details.getByRole("combobox", { name: "Invitation role", exact: true }).click();
   await page.getByRole("option", { name: "Developer", exact: true }).click();
@@ -265,7 +290,7 @@ export async function runCloudWorkspaceSharingSmoke({ page, check, harnessBase }
   await expect(details.getByRole("combobox", { name: "Workspace sharing scope", exact: true })).toContainText("Private");
   check("Preserved owner-only private workspaces enable collaboration with exact CAS and invite without changing scope", true);
   await page.unrouteAll({ behavior: "wait" });
-  check("Staff sharing respects roles, writer slots, pagination, CAS, account switches and inactive surfaces", true);
+  check("Workspace sharing respects roles, writer slots, pagination, CAS, account switches and inactive surfaces", true);
   await runCloudWorkspaceSharingWarmingSmoke({ page, check, harnessBase });
 }
 
@@ -292,7 +317,7 @@ export async function runCloudWorkspaceSharingWarmingSmoke({ page, check, harnes
       window.cloudWorkspaceSharingFixture.invalidateDetails();
     });
     const failedWarm = page.waitForResponse(response => response.url().includes("/collaborators"));
-    await page.getByRole("button", { name: "Cloud workspace details", exact: true }).hover();
+    await page.getByRole("button", { name: "Share workspace", exact: true }).hover();
     await (await failedWarm).finished();
     await expect.poll(() => detailsRequested).toBe(true);
     expect(collaboratorReads).toBe(1);
@@ -304,7 +329,7 @@ export async function runCloudWorkspaceSharingWarmingSmoke({ page, check, harnes
     if (departure !== "account replaced") await expect.poll(() => page.evaluate(() => window.cloudWorkspaceSharingFixture.details?.version)).toBe(2);
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     expect(collaboratorReads).toBe(departure === "visible" ? 2 : 1);
-    await expect(page.getByRole("dialog", { name: "Cloud workspace details" })).toHaveCount(0);
+    await expect(page.getByRole("dialog", { name: "Share workspace" })).toHaveCount(0);
     await page.unrouteAll({ behavior: "wait" });
     check(departure === "visible" ? "Delayed details response still warms collaborators for the current visible owner" :
       `Delayed details response leaves collaborator reads inert after the sharing surface is ${departure}`, true);

@@ -36,7 +36,6 @@ import {
   getOrganizationStoreGeneration,
   getTeamStoreState,
 } from "../team/team-store";
-import { isInternalFeatureActive } from "./internal-features";
 
 const uuid = z.string().uuid();
 const revision = z.number().int().nonnegative().safe();
@@ -316,7 +315,6 @@ export function canConfigureCloudComputerV2AdminWorkspace(key: string) {
   );
   const computer = cloudComputerV2Cache.peekSnapshot(key).data;
   return (
-    isInternalFeatureActive("cloudComputerV2") &&
     me?.user.id === user &&
     Boolean(
       organization &&

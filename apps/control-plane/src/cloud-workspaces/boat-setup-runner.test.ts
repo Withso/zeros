@@ -20,7 +20,7 @@ import {
   boatAuthorizedKeyCommand,
   type BoatBootstrapExecution,
 } from "./boat-setup-runner.js";
-import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND, CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "./daytona-setup-executor.js";
+import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND, CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "./linux-setup-executor.js";
 import { runtimeBase } from "./runtime-test-fixtures.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 

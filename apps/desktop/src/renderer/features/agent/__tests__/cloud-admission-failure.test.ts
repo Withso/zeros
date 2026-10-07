@@ -4,6 +4,7 @@ const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-
 const classify = (error: unknown, cwd = folder) => classifyCloudAdmissionFailure({ folder: cwd, error, model: "gpt-6.1-sol", agentId: "codex" });
 describe("cloud admission presentation", () => {
   it.each([
+    ["cloud_workspace_v2_required", "retired-runtime", "This workspace uses a retired cloud runtime — create a new workspace.", "none"],
     ["cloud_runtime_upgrade_required", "runtime-upgrade-required", "This workspace gets the new cloud runtime the next time it wakes", "none"],
     ["cloud_agent_model_not_authorized", "model-not-authorized", "GPT-6.1 Sol isn't enabled for this workspace", "choose-model"],
     ["cloud_agent_credential_required", "credential-required", "Connect Codex to use agents in this workspace", "reconnect"],

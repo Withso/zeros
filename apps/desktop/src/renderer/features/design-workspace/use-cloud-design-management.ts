@@ -4,7 +4,7 @@ import {
   cloudWorkspaceDocument,
   subscribeCloudWorkspaces,
 } from "../../state/cloud-workspace-catalog";
-import { useInternalFeatureActive } from "../settings/internal-features";
+import { useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 
 /** UI admission follows the same role split as the worker. Missing role or
  * capabilities fail closed; the engine independently checks every request. */
@@ -12,8 +12,8 @@ export function useCloudDesignManagement(
   workspaceId: string,
   active: boolean,
 ): boolean {
-  const enabled = useInternalFeatureActive("cloudComputerV2");
   const target = parseCloudWorkspaceKey(workspaceId);
+  const enabled = useCloudWorkspaceAccountAccess(target?.organizationId);
   const cloud = target !== null;
   const subscribe = useCallback(
     (listener: () => void) =>

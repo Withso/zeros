@@ -30,20 +30,19 @@ describe("verified cloud runtime root", () => {
     }
     expect(tree.resolver.resolve().profile).toBe("v4");
   });
-  it("preserves the legacy paths exactly for absent and v1–v3 markers", () => {
+  it("never selects executable cloud paths when the cloud marker is absent", () => {
     const tree = fixture();
-    for (const version of [null, 1, 2, 3]) {
-      if (version === null) fs.unlinkSync(tree.physical("/etc/zeros/cloud-worker.json"));
-      else tree.write("/etc/zeros/cloud-worker.json", { ...tree.marker, version, profile: `zeros-cloud-worker-v${version}` });
-      const runtime = createCloudRuntimeResolver({ filesystem: tree.filesystem }).resolve();
-      expect(runtime).toMatchObject({ profile: "v3", root: "/opt/zeros-runtime", workerRoot: "/opt/zeros",
-        libRoot: "/opt/zeros-runtime/lib/zeros", node: "/opt/zeros-runtime/bin/node",
-        startEngine: "/opt/zeros-runtime/bin/start-engine.sh", cgroupRoot: "/sys/fs/cgroup",
-        processSupervisor: "/opt/zeros-runtime/cloud-process-supervisor", engineNamespace: "/opt/zeros-runtime/cloud-engine-namespace",
-        helpers: { setup: "/opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs", attester: "/opt/zeros-runtime/lib/zeros/attest-cloud-worker.mjs",
-          supervisor: "/opt/zeros-runtime/lib/zeros/cloud-worker-supervisor.mjs", launcher: "/opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs" } });
-      expect(runtime).not.toHaveProperty("runtimeId");
-    }
+    fs.unlinkSync(tree.physical("/etc/zeros/cloud-worker.json"));
+    expect(() => tree.resolver.resolve()).toThrow(/runtime/);
+  });
+  it.each([1, 2, 3])("refuses a present worker-v%i marker before resolving executable paths", version => {
+    const tree = fixture();
+    tree.write("/etc/zeros/cloud-worker.json", { ...tree.marker, version, profile: `zeros-cloud-worker-v${version}` });
+    expect(() => tree.resolver.resolve()).toThrow(/runtime/);
+  });
+  it.each(["/opt/zeros-runtime/bin/node", "/usr/local/bin/node"])("refuses retired child executable %s", node => {
+    const tree = fixture();
+    expect(() => createCloudRuntimeResolver({ filesystem: tree.filesystem, executable: () => node }).resolveChild()).toThrow(/runtime/);
   });
   it("resolves the allowed facade before applying the strict physical-entrypoint guard", () => {
     const { resolver, descriptor } = fixture();
@@ -218,8 +217,8 @@ describe("verified cloud runtime root", () => {
   });
   it("maps the declared v4 profile to map version 3 without inferring the profile from maps", () => {
     expect(cloudProfileIdentityMapVersion(4)).toBe(3);
-    expect(cloudProfileIdentityMapVersion(3)).toBe(3);
-    expect(cloudProfileIdentityMapVersion(2)).toBe(2);
+    expect(cloudProfileIdentityMapVersion(3)).toBeNull();
+    expect(cloudProfileIdentityMapVersion(2)).toBeNull();
     expect(cloudProfileIdentityMapVersion(5)).toBeNull();
   });
   it("rejects runtime paths and unknown fields in the base-owned host marker", () => {

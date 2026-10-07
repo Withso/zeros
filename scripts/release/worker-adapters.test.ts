@@ -1,11 +1,11 @@
 import path from "node:path";
 import os from "node:os";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { boatImageAdapter, buildBoatImage, runtimeOwnerAdapter } from "./worker-adapters";
 import { workerExecutionConfig } from "./worker-config";
 import { workerEnvironment } from "./worker-test-fixtures";
-import { KitError } from "../cloud-workspace-validation/boat-image/boat-image";
+import { RELEASE_WORKER_IMAGES_RETIRED } from "../../apps/control-plane/src/cloud-workspaces/release-worker-retirement";
 
 const sourceSha = "a".repeat(40), buildSha256 = "b".repeat(64);
 const input = { sourceSha, directory: "/tmp/zeros-worker-fake", baseSnapshot: "test-base", maxUsedHours: 1 };
@@ -15,42 +15,22 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true }))); });
 const branch = { status: 200, body: { name: config.databaseBranch, production: true } };
 const lease = () => ({ save: vi.fn(async () => {}), fence: vi.fn(async () => {}) });
-const kit = async (args: string[]) => {
-  if (args[0] === "attestation") return { finished: true, qualified: true, matchesCommit: true, sourceCommit: sourceSha, measuredStorageMiB: 4096, buildSha256 };
-  if (args[1] === "status") return { state: "ready", wallet: "billing-org" };
-  if (args[2]?.endsWith("build-hash.sh")) return JSON.stringify({ commit: sourceSha });
-  if (args[2]?.endsWith("build-status.sh")) return JSON.stringify({ result: { passed: true } });
-  return {};
-};
-
-describe("worker kit recovery", () => {
-  it.each([false, true])("retains a failed attestation command receipt before image cleanup without exposing its output (large=%s)", async large => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), "zeros-worker-attestation-failure-")); directories.push(directory);
-    const prefix = sourceSha.slice(0, 12), receipt = JSON.stringify({ status: 200, exitCode: 0,
-      stdout: JSON.stringify({ exit: { code: 1, retirement: 0, scopePresent: false }, report: "{\"qualified\":false}",
-        error: large ? "synthetic-private-detail".repeat(10_000) : "synthetic-private-detail" }) });
-    const record: any = { sourceCommit: sourceSha, snapshotId: "test-new", installStarted: true, attestationStarted: true,
-      builder: { id: "bx_test" }, kitFiles: { "builder.json": "{}", [`${prefix}/source.json`]: "{}", [`${prefix}/generation.json`]: "{}" } };
-    const call = vi.fn(async (args: string[], deps: any) => {
-      if (args[0] !== "attestation") return kit(args);
-      await mkdir(path.join(deps.stateDir, "commands"), { recursive: true });
-      await writeFile(path.join(deps.stateDir, "commands", "99-attest-status.sh.json"), "previous poll");
-      await writeFile(path.join(deps.stateDir, "commands", "123-attest-status.sh.json"), receipt);
-      throw new KitError("synthetic-private-detail");
-    });
-    const request = vi.fn(async () => ({ status: 200, body: { creditUsedSeconds: 0 } }));
-    const adapter = await boatImageAdapter(config, environment, directory, { lease: lease(), record, profile: {}, maxUsedHours: 1,
-      snapshotName: record.snapshotId, request, reserve: vi.fn(), release: vi.fn(), kit: call as any });
-    await expect(adapter.build()).rejects.toThrow("Worker image attestation failed");
-    expect(record.kitFiles["commands/99-attest-status.sh.json"]).toBeUndefined();
-    const saved = record.kitFiles["commands/123-attest-status.sh.json"];
-    if (large) {
-      expect(JSON.parse(saved)).toMatchObject({ truncated: true, bytes: Buffer.byteLength(receipt), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
-      expect(Buffer.byteLength(saved)).toBeLessThan(64 * 1024);
-    } else expect(saved).toBe(receipt);
-    expect(record.candidate).toBeUndefined(); expect(record.qualified).not.toBe(true);
+describe("retired worker image producer and historical cleanup", () => {
+  it.each([{}, { installStarted: true, attestationStarted: true }])("refuses fresh and resumed builds before calling the shared image kit (%j)", async state => {
+    const call = vi.fn(async () => ({}));
+    await expect(buildBoatImage({ ...input, state }, { kit: call, nameSnapshot: async () => "test-new" })).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
+    expect(call).not.toHaveBeenCalled();
   });
-  it("discards large build-only recovery files after candidate readiness and physical builder deletion without breaking resume", async () => {
+  it("refuses the adapter build before provider reads, admission reservation, or source restoration", async () => {
+    const request = vi.fn(), reserve = vi.fn(), release = vi.fn(), call = vi.fn();
+    const record = { sourceCommit: sourceSha, snapshotId: "test-new" };
+    const adapter = await boatImageAdapter(config, environment, "/tmp/unused-retired-worker", {
+      lease: lease(), record, profile: {}, maxUsedHours: 1, snapshotName: record.snapshotId, request, reserve, release, kit: call,
+    });
+    await expect(adapter.build()).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
+    expect(request).not.toHaveBeenCalled(); expect(reserve).not.toHaveBeenCalled(); expect(call).not.toHaveBeenCalled();
+  });
+  it("discards large build-only recovery files after candidate readiness and physical builder deletion while refusing further builds", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "zeros-worker-adapter-test-")); directories.push(directory);
     const candidate = { snapshotId: "test-new", sourceCommit: sourceSha, buildSha256, architecture: "linux/amd64" as const, storageMiB: 4096 };
     const record: any = { sourceCommit: sourceSha, snapshotId: candidate.snapshotId, candidate, qualified: true,
@@ -68,38 +48,11 @@ describe("worker kit recovery", () => {
     expect(await first.cleanup()).toMatchObject({ kind: "physically-deleted", sandboxId: record.builder.id, deletionOperationId: record.builder.deletionOperationId });
     expect(record.kitFiles).toBeUndefined();
     const resumed = await boatImageAdapter(config, environment, path.join(directory, "resumed"), context);
-    expect(await resumed.build()).toEqual(candidate);
+    await expect(resumed.build()).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
     expect(call).not.toHaveBeenCalled(); expect(reserve).not.toHaveBeenCalled();
     expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
   });
-  it("keeps a kit file the interrupted build wrote and refuses a symlinked recovery file", async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), "zeros-worker-adapter-test-")); directories.push(directory);
-    const kitDirectory = path.join(directory, "kit"); await mkdir(kitDirectory, { recursive: true });
-    await writeFile(path.join(kitDirectory, "builder.json"), '{"written":"by the build"}');
-    await writeFile(path.join(directory, "elsewhere.json"), "{}");
-    await symlink(path.join(directory, "elsewhere.json"), path.join(kitDirectory, "builder-intent.json"));
-    const record: any = { sourceCommit: sourceSha, snapshotId: "test-new", kitFiles: { "builder.json": '{"from":"receipt"}' } };
-    const request = vi.fn(async (_method: string, route: string) => route.startsWith("/limits") ? { status: 200, body: { creditUsedSeconds: 0 } } : { status: 503, body: {} });
-    const context = { lease: lease(), record, profile: {}, maxUsedHours: 1, snapshotName: "test-new", request, reserve: vi.fn(), release: vi.fn(), kit: vi.fn(kit) };
-    const adapter = await boatImageAdapter(config, environment, kitDirectory, context);
-    expect(await readFile(path.join(kitDirectory, "builder.json"), "utf8")).toBe('{"written":"by the build"}');
-    await expect(adapter.build()).rejects.toThrow("Invalid worker kit recovery file");
-  });
-  it("refuses a recovered source manifest without its archive before allocating or uploading", async () => {
-    const call = vi.fn(kit);
-    await expect(buildBoatImage(input, { kit: call, nameSnapshot: async () => "test-new", exists: file => path.basename(file) === "source.json" })).rejects.toThrow("archive");
-    expect(call).not.toHaveBeenCalled();
-  });
-  it("resumes an acknowledged install without requiring or redispatching the source archive", async () => {
-    const call = vi.fn(kit);
-    const candidate = await buildBoatImage({ ...input, state: { installStarted: true, attestationStarted: true } }, {
-      kit: call, nameSnapshot: async () => "test-new", exists: file => path.basename(file) !== "source.tar.gz", pause: async () => {},
-    });
-    expect(candidate).toMatchObject({ sourceCommit: sourceSha, buildSha256 });
-    expect(call.mock.calls.map(([args]) => args.join(" "))).not.toContain("builder create");
-    expect(call.mock.calls.map(([args]) => args.join(" "))).not.toContain("builder upload");
-  });
-});
+ });
 
 describe("worker approval login recovery", () => {
   it("does not infer noncreation or create a second owner role after a lost response and empty inventory", async () => {

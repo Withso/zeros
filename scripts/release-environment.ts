@@ -21,7 +21,7 @@ const DNS_NAME_PATTERN =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/;
 const SSH_HOST_KEY_TYPE_PATTERN = /^[A-Za-z0-9@._+-]{1,128}$/;
 const SSH_HOST_KEY_BLOB_PATTERN = /^[A-Za-z0-9+/]{16,21844}={0,2}$/;
-const RELEASE_SSH_HOSTS = new Set(["ssh.app.daytona.io"]);
+
 
 export type HostedReleaseEnvironment = keyof typeof EXPECTED;
 
@@ -151,8 +151,8 @@ function validSshKnownHosts(raw: string | undefined): boolean {
     const hosts = entries.map(pinnedKnownHost);
     return (
       hosts.every(
-        (host): host is string => host !== null && RELEASE_SSH_HOSTS.has(host),
-      ) && [...RELEASE_SSH_HOSTS].every((host) => hosts.includes(host))
+        (host): host is string => host !== null,
+      ) && hosts.length > 0
     );
   } catch {
     return false;
@@ -191,18 +191,10 @@ export function releaseEnvironmentErrors(
     );
   }
   if (cloudWorkspacesEnabled === "true") {
-    // An omitted provider retains the legacy Daytona policy. Boat's managed
-    // terminal uses the backend tunnel and has no Daytona SSH gateway.
-    const provider = env.CLOUD_WORKSPACE_PROVIDER || "daytona";
-    if (provider !== "boat" && provider !== "daytona") {
-      errors.push("CLOUD_WORKSPACE_PROVIDER must be boat or daytona");
-    }
+    const provider = env.CLOUD_WORKSPACE_PROVIDER || "boat";
+    if (provider !== "boat") errors.push("CLOUD_WORKSPACE_PROVIDER must be boat");
     const knownHosts = env.VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64;
-    if (!knownHosts?.trim() && provider !== "boat") {
-      errors.push(
-        "VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 is required when ZEROS_CLOUD_WORKSPACES_ENABLED=true",
-      );
-    } else if (knownHosts?.trim() && !validSshKnownHosts(knownHosts)) {
+    if (knownHosts?.trim() && !validSshKnownHosts(knownHosts)) {
       errors.push(
         "VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 must be canonical base64url for a valid OpenSSH known_hosts document covering every allowed SSH host",
       );

@@ -22,14 +22,6 @@ import {
 } from "../../db/paths";
 import { designRecognitionStorePath } from "../../design/recognition-store";
 import { sessionDir } from "../session-paths";
-import {
-  ENGINE_BASE_PORT_ALPHA,
-  ENGINE_BASE_PORT_BETA,
-  ENGINE_BASE_PORT_DEV,
-  ENGINE_BASE_PORT_PROD,
-  ENGINE_PORT_SPAN,
-  engineBasePort,
-} from "../../runtime";
 import type {
   BoundaryRequest,
   CloudWorkerRuntimeConfiguration,
@@ -296,43 +288,6 @@ function validPort(value: unknown): value is number {
   return (
     Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 65_535
   );
-}
-
-function environmentPort(name: string): number | null {
-  const value = Number.parseInt(process.env[name]?.trim() ?? "", 10);
-  return validPort(value) ? value : null;
-}
-
-function deniedZerosControlPorts(trusted: readonly number[]): number[] {
-  if (trusted.some((port) => !validPort(port))) {
-    throw new Error("trusted local service ports must be valid TCP ports");
-  }
-  const trustedSet = new Set(trusted);
-  const denied = new Set<number>();
-  for (const base of new Set([
-    ENGINE_BASE_PORT_PROD,
-    ENGINE_BASE_PORT_BETA,
-    ENGINE_BASE_PORT_ALPHA,
-    ENGINE_BASE_PORT_DEV,
-    engineBasePort(),
-  ])) {
-    for (let offset = 0; offset < ENGINE_PORT_SPAN + 2; offset += 1) {
-      denied.add(base + offset);
-    }
-  }
-  for (const name of ["ZEROS_CLOUD_PORT", "CONDUCTOR_PORT"]) {
-    const port = environmentPort(name);
-    if (port) denied.add(port);
-  }
-  for (const port of trustedSet) denied.delete(port);
-  return [...denied].sort((a, b) => a - b);
-}
-
-/** Used by internal capability allocators before the immutable policy is
- * serialized. Internal random listeners remain ordinary allowed ports and may
- * never carve a hole in a reserved Zeros control range. */
-export function isDeniedZerosControlPort(port: number): boolean {
-  return deniedZerosControlPorts([]).includes(port);
 }
 
 /** Build the actor-scoped ZSR policy. Cloud Code workers that reach this

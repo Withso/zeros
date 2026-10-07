@@ -171,7 +171,7 @@ export function ConversationSummaryTrigger() {
               <Button
                 variant="ghost"
                 size="icon-sm"
-                className="text-fg2 size-6 shrink-0 [&_svg]:size-4"
+                className="text-fg2 shrink-0 [&_svg]:size-4"
                 aria-label="Summary"
                 onPointerEnter={state.warm}
                 onFocus={state.warm}

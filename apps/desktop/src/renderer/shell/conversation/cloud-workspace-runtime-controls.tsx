@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef } from "react";
-import { useInternalFeatureActive } from "../../features/settings/internal-features";
+import { useCloudWorkspaceAccountAccess } from "../../features/team/cloud-workspace-account-access";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
+import { cloudWorkspaceExecutionRefusal } from "../../platform/cloud-workspace-execution";
 import { cloudCatalogGeneration, refreshCloudWorkspace } from "../../state/cloud-workspace-catalog";
 import { cloudRuntimeUpgradeAvailability, cloudRuntimeUpgradeAvailabilityKey, loadCloudRuntimeUpgradeAvailability } from "../../state/cloud-runtime-upgrade";
 import { useCachedRead } from "../../state/use-cached-read";
 
 export function CloudWorkspaceRuntimeControls({ workspace, active, focusRequest = 0 }: { workspace: CloudWorkspaceDocument; active: boolean; focusRequest?: number }) {
-  const enabled = useInternalFeatureActive("cloudComputerV2") && workspace.capabilities.canManage;
+  const enabled = useCloudWorkspaceAccountAccess(workspace.organizationId) && workspace.placement === "cloud" &&
+    workspace.capabilities.canManage && !cloudWorkspaceExecutionRefusal(workspace);
   const target = useMemo(() => ({ organizationId: workspace.organizationId, workspaceId: workspace.id }), [workspace.organizationId, workspace.id]);
   const readKey = enabled ? cloudRuntimeUpgradeAvailabilityKey(target, workspace.generation.number) : null;
   const availability = useCachedRead(cloudRuntimeUpgradeAvailability, readKey, loadCloudRuntimeUpgradeAvailability,
@@ -32,12 +34,11 @@ export function CloudWorkspaceRuntimeControls({ workspace, active, focusRequest 
     row.current?.focus();
   }, [enabled, active, runtime, focusRequest]);
   if (!enabled) return null;
-  const current = runtime?.currentRuntimeId;
   return (
-    <section ref={row} tabIndex={-1} aria-label="Workspace runtime" className="border-border1 mt-3 space-y-2 border-t pt-3">
-      <p className="text-fg2 text-xs" title={current ?? undefined}>Runtime · {current ? current.slice(0, 11) : runtime ? "Legacy" : "Checking…"}</p>
+    <section ref={row} tabIndex={-1} aria-label="Runtime updates" className="space-y-2">
+      <h3 className="text-fg1 text-xs font-medium">Runtime updates</h3>
       {pending ? <p role="status" aria-live="polite" className="text-fg3 text-xs">Starting the cloud workspace…</p>
-        : runtime?.updateAvailable && <p className="text-fg3 text-xs">Updates automatically the next time this workspace wakes</p>}
+        : <p className="text-fg3 text-xs">{runtime?.updateAvailable ? "Updates automatically the next time this workspace wakes" : runtime ? "Runtime is up to date" : "Checking runtime…"}</p>}
       {availability.error && <p className="text-fg3 text-xs" role="status">Couldn’t refresh runtime details. Try reopening workspace details.</p>}
     </section>
   );

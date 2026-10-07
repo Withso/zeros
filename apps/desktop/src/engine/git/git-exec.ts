@@ -3,7 +3,7 @@
 // "args array, never a concatenated string" guarantee against shell
 // injection.
 
-import { execFile, type ExecFileException } from "node:child_process";
+import { execFile, execFileSync, type ExecFileException } from "node:child_process";
 import {
   accessSync,
   chmodSync,
@@ -36,6 +36,58 @@ import { scopedCloudGitAuthorEnvironment } from "./cloud-git-author";
 export { gitExecutionIdentity } from "./git-execution-identity";
 
 const execFileAsync = promisify(execFile);
+
+export type GitProbeOperation = "policy_config" | "rev_parse" | "check_ignore" | "worktree_list" | "ls_files";
+
+/** Child-process errors include argv and stderr in their message/cause. Keep
+ * probe diagnostics closed, including serialization and console inspection. */
+export function gitProbeFailure(operation: GitProbeOperation, cause: unknown): GitError {
+  const error = cause as { code?: unknown; status?: unknown; stderr?: unknown; killed?: boolean; signal?: unknown } | null;
+  const stderr = String(error?.stderr ?? "");
+  const reason = /dubious ownership|unsafe repository/i.test(stderr) ? "dubious_ownership"
+    : error?.code === "EACCES" || error?.code === "EPERM" || /permission denied|operation not permitted/i.test(stderr) ? "permission_denied"
+    : /not a git repository|not a repository/i.test(stderr) ? "not_a_repository"
+    : /must be run in a work tree|cannot be used without a working tree/i.test(stderr) ? "worktree_required"
+    : /bad config|invalid config|invalid key|bad boolean config/i.test(stderr) ? "invalid_configuration"
+    : error?.code === "ENOENT" ? "process_unavailable"
+    : error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? "output_limit"
+    : error?.code === "ABORT_ERR" ? "cancelled"
+    : error?.code === "ETIMEDOUT" || (error?.killed && error.signal === "SIGTERM") ? "timeout"
+    : "command_failed";
+  const exitCode = typeof error?.status === "number" ? error.status : typeof error?.code === "number" ? error.code : undefined;
+  const remediation = gitTransportRemediation("GIT_COMMAND_FAILED", stderr);
+  return new GitError({
+    code: "GIT_COMMAND_FAILED",
+    message: `Managed Git ${operation} failed (${reason}).`,
+    ...(remediation ? { remediation } : {}),
+    context: { operation, reason, ...(exitCode !== undefined ? { exitCode } : {}) },
+  });
+}
+
+/** Synchronous read probes used while admitting Design transactions. Preserve
+ * the qualified Git identity and expected exits without retaining raw errors. */
+export function runGitProbeSync(
+  cwd: string,
+  operation: Exclude<GitProbeOperation, "policy_config">,
+  args: string[],
+  options: { input?: string; expectedExitCodes?: readonly number[]; timeoutMs?: number; maxBufferBytes?: number } = {},
+): string {
+  if (!cwd) throw new GitError({ code: "VALIDATION_FAILED", message: "Managed Git probe requires a checkout." });
+  try {
+    return execFileSync("git", ["-c", "core.fsmonitor=false", ...args], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: options.timeoutMs ?? 10_000,
+      maxBuffer: options.maxBufferBytes ?? 1024 * 1024,
+      ...(options.input !== undefined ? { input: options.input } : {}),
+      ...gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }),
+    });
+  } catch (error) {
+    if (options.expectedExitCodes?.includes((error as { status: number }).status)) return "";
+    throw gitProbeFailure(operation, error);
+  }
+}
 
 export interface RunFileOptions {
   cwd?: string;
@@ -530,12 +582,20 @@ export function classifyGitTransportError(
  *  getWorkspaceRepoAccess — say something more specific.) */
 export function gitTransportRemediation(
   code: GitErrorCode,
+  stderr = "",
 ): string | undefined {
   if (code === "NOT_AUTHENTICATED") {
     return "GitHub refused this operation. Check Settings → Integrations, and that the connected account can access this repository.";
   }
   if (code === "NETWORK_ERROR") {
     return "Couldn't reach the remote. Check your connection, then try again.";
+  }
+  if (code === "GIT_COMMAND_FAILED" &&
+      /permission denied|operation not permitted|insufficient permission/i.test(stderr) &&
+      !/permission denied\s*\(publickey/i.test(stderr)) {
+    // Only fixed copy crosses the renderer boundary. Paths and credential
+    // echoes in stderr remain in the existing redacted diagnostic context.
+    return "Workspace file permissions need repair.";
   }
   return undefined;
 }
@@ -1362,7 +1422,7 @@ async function dynamicEngineGitPolicy(
         "--includes",
       ],
       { cwd, env, timeoutMs: 5_000, maxBufferBytes: 4 * 1024 * 1024 },
-    );
+    ).catch(error => { throw gitProbeFailure("policy_config", error); });
     const entries = parseOriginConfigList(stdout);
     if (entries.length > 8_192) {
       throw unsafeGitInvocation(
@@ -1767,39 +1827,39 @@ export async function runGit(
         ...(opts.identity ? { consumerIdentity: opts.identity } : {}),
       })
     : null;
-  // Explicit internal author fields (amend/replay/system snapshots) retain
-  // their meaning; this request supplies the defaults, never ambient config.
-  const baseChildEnv = gitChildEnv({ ...scopedCloudGitAuthorEnvironment(), ...opts.env });
-  const policyArgs = await engineGitPolicyArgs(
-    cwd,
-    parsedCommand.globalArgs,
-    baseChildEnv,
-    parsedCommand.command,
-    networkTarget.transport === "ssh",
-    opts.identity,
-  );
-  const childArgs = [
-    ...parsedCommand.globalArgs,
-    "--no-pager",
-    ...policyArgs,
-    ...(credentialInvocation?.gitConfigArgs ?? []),
-    parsedCommand.command,
-    ...safeDiffArgs(parsedCommand.command, parsedCommand.commandArgs),
-  ];
-  const controlledEnv: Record<string, string | undefined> = {
-    ...(opts.readOnly ? { GIT_OPTIONAL_LOCKS: "0" } : {}),
-    ...(networkTarget.network ? { GIT_TERMINAL_PROMPT: "0" } : {}),
-    ...(networkTarget.transport === "ssh" &&
-    process.env.SSH_AUTH_SOCK &&
-    path.isAbsolute(process.env.SSH_AUTH_SOCK) &&
-    !process.env.SSH_AUTH_SOCK.includes("\0")
-      ? { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK }
-      : {}),
-    ...credentialInvocation?.env,
-  };
-  let lockAttempt = 0;
-  let retriedAuthentication = false;
   try {
+    // Policy probes must share this release boundary: a config failure can
+    // occur before the final Git command starts.
+    const baseChildEnv = gitChildEnv({ ...scopedCloudGitAuthorEnvironment(), ...opts.env });
+    const policyArgs = await engineGitPolicyArgs(
+      cwd,
+      parsedCommand.globalArgs,
+      baseChildEnv,
+      parsedCommand.command,
+      networkTarget.transport === "ssh",
+      opts.identity,
+    );
+    const childArgs = [
+      ...parsedCommand.globalArgs,
+      "--no-pager",
+      ...policyArgs,
+      ...(credentialInvocation?.gitConfigArgs ?? []),
+      parsedCommand.command,
+      ...safeDiffArgs(parsedCommand.command, parsedCommand.commandArgs),
+    ];
+    const controlledEnv: Record<string, string | undefined> = {
+      ...(opts.readOnly ? { GIT_OPTIONAL_LOCKS: "0" } : {}),
+      ...(networkTarget.network ? { GIT_TERMINAL_PROMPT: "0" } : {}),
+      ...(networkTarget.transport === "ssh" &&
+      process.env.SSH_AUTH_SOCK &&
+      path.isAbsolute(process.env.SSH_AUTH_SOCK) &&
+      !process.env.SSH_AUTH_SOCK.includes("\0")
+        ? { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK }
+        : {}),
+      ...credentialInvocation?.env,
+    };
+    let lockAttempt = 0;
+    let retriedAuthentication = false;
     for (;;) {
       try {
         const result = await runFile("git", childArgs, {
@@ -1875,7 +1935,7 @@ export async function runGit(
           }
         }
         const code = opts.mapErrorCode?.(stderr) ?? "GIT_COMMAND_FAILED";
-        const remediation = gitTransportRemediation(code);
+        const remediation = gitTransportRemediation(code, stderr);
         throw new GitError({
           code,
           message: `git ${redactSensitive(args.join(" "))} failed`,

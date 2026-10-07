@@ -9,6 +9,11 @@ import type {BoundaryProcess} from "../containment/types";
 import {CloudLanguageService,type CloudLanguageHost} from "../cloud-language-service";
 import {parseLanguageDocument} from "../cloud-language-document";
 
+import {testCloudRuntime} from "./helpers/test-cloud-runtime";
+vi.mock("../containment/cloud-runtime-root.mjs",async original=>({
+  ...await original<typeof import("../containment/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime:(await import("./helpers/test-cloud-runtime")).testCloudRuntime,
+}));
 const roots:string[]=[],services:CloudLanguageService[]=[];
 afterEach(async()=>{for(const service of services.splice(0))await service.stopAndProve();for(const root of roots.splice(0))await rm(root,{recursive:true,force:true});vi.useRealTimers();});
 async function nativeFixture(){
@@ -18,7 +23,7 @@ async function nativeFixture(){
     readDocument:async file=>{const text=await readFile(file,"utf8");return {text,sha256:createHash("sha256").update(text).digest("hex")};},
     retire:async process=>process.stopAndProve(),
     launch:async(_command,args)=>{
-      const actual=args.map(value=>value.replace("/opt/zeros/",process.cwd()+"/"));
+      const actual=args.map(value=>value.replace(`${testCloudRuntime().workerRoot}/`,process.cwd()+"/"));
       const child=spawn(process.execPath,actual,{cwd:root,env:{PATH:"/usr/bin:/bin",HOME:root,NODE_OPTIONS:"--max-old-space-size=256"},stdio:["pipe","pipe","pipe"],detached:process.platform!=="win32"});
       // Only test transport substitution. Production launch pins immutable
       // paths; this adapter rewrites the initialization path for a local probe.
@@ -26,7 +31,7 @@ async function nativeFixture(){
       const stdin=new Transform({transform(chunk,_encoding,done){
         pending=Buffer.concat([pending,chunk]);
         for(;;){const end=pending.indexOf("\r\n\r\n");if(end<0)break;const length=Number(/Content-Length: (\d+)/.exec(pending.subarray(0,end).toString())?.[1]);if(pending.length<end+4+length)break;
-          const body=Buffer.from(pending.subarray(end+4,end+4+length).toString().replaceAll("/opt/zeros/",process.cwd()+"/"));
+          const body=Buffer.from(pending.subarray(end+4,end+4+length).toString().replaceAll(`${testCloudRuntime().workerRoot}/`,process.cwd()+"/"));
           this.push(Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`),body]));pending=pending.subarray(end+4+length);}
         done();}});stdin.pipe(child.stdin);
       const wait=new Promise<{code:number|null;signal:NodeJS.Signals|null}>(resolve=>child.once("exit",(code,signal)=>resolve({code,signal})));

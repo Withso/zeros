@@ -16,7 +16,7 @@ import { forceDeletionRequestPurgeByStaff } from "../deletion-lifecycle.js";
 import { BoatApiClient } from "./boat-client.js";
 import { prepareBuilderVmOperation } from "./cloud-builder-vm.js";
 import { DatabaseBuilderVmOperationStore } from "./cloud-builder-vm-store.js";
-import { lockCloudComputerOrganization } from "./computer.js";
+import { lockCloudComputerOrganization } from "./computer-identity.js";
 import {
   COMPUTER_TEMPLATE_RETENTION_CHANNEL,
   CloudComputerTemplateRetentionWorker,
@@ -97,7 +97,7 @@ d("Cloud Computer template retention", () => {
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
     await seedComputerTemplateRuntime(pool);
-    fixture = await seedReadyCloudWorkspace(pool);
+    fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     service = new DatabaseCloudComputerV2Service(
       pool,
       {} as CloudWorkspaceBackendConfig,

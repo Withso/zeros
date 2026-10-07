@@ -5,7 +5,7 @@ import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import { recoverCloudAdmissionFailure } from "../cloud-runtime-upgrade";
 import { getLiveChatDraft, setLiveChatDraft } from "../composer-live-drafts";
-import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
+import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
 import { BLANK, useSessionsStore } from "../sessions-store";
 import { AuthPromptRecovery } from "../auth-prompt-recovery";
 import * as lifecycle from "../session-reload-lifecycle";
@@ -13,6 +13,9 @@ import { SendQueue } from "../send-queue";
 import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode } from "../cloud-admission-failure";
 import { reportCloudAgentRuntimeUpgrade, invalidateCloudAgentRegistry } from "../workspace-agent-registry";
 import { notifyAgentSendFailure } from "../agent-send-failure-toast";
+import { turnFailureForCard } from "../turn-failure";
+import type { AgentMessage } from "../use-agent-session";
+import type { AgentFailure } from "../../../platform/bridge/failure";
 
 const mocks = vi.hoisted(() => ({ refresh: vi.fn(), toast: vi.fn(), workspace: { chats: [{ id: "chat", additionalDirectories: [], model: "gpt-6.1-sol" }], chatComposerDrafts: {}, dispatch: vi.fn() } }));
 vi.mock("../../../shared/ui/primitives/elements/toast", () => ({ toast: { error: mocks.toast } }));
@@ -34,18 +37,24 @@ function collect(node: ts.Node) {
 collect(ast);
 const code = ts.transpileModule(`${promotion}\nglobalThis.send = ${callback};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 
-function harness(folder: string, cause = "cloud_runtime_upgrade_required", duringRequest?: () => void, queued = false) {
+function harness(folder: string, cause = "cloud_runtime_upgrade_required", duringRequest?: () => void, queued = false,
+  options: { success?: boolean; history?: () => Promise<AgentMessage[]>; failureKind?: AgentFailure["kind"] } = {}) {
   vi.clearAllMocks();
   const draft = { text: "Preserve my prompt", json: { type: "doc" }, attachments: [] };
   setLiveChatDraft("chat", draft);
   useSessionsStore.setState({ sessions: { chat: { ...BLANK, cwd: folder, agentId: "codex", sessionId: "session", status: "ready", messages: [] } } });
-  const request = vi.fn(async (_message: unknown) => { duringRequest?.(); return { type: "AGENT_PROMPT_FAILED", error: cause }; });
+  const request = vi.fn(async (_message: unknown) => { duringRequest?.(); return options.success
+    ? { type: "AGENT_PROMPT_COMPLETE", sessionId: "session", executionId: "session", stopReason: "end_turn", response: {} }
+    : { type: "AGENT_PROMPT_FAILED", error: cause }; });
   const sending = new Set<string>(), pauseQueue = vi.fn(), drainOrDropQueue = vi.fn(), failureNotice = vi.fn(notifyAgentSendFailure);
   const queue = new SendQueue<any>(), readiness = vi.fn(() => useSessionsStore.getState().patchSession("chat", { cloudSendWait: { state: "waiting" } }));
   const entry = { cloud: true, bubbleId: "accepted-prompt", args: ["chat", draft.text, draft.text], waitStartedAt: 42 };
-  const failure = { kind: "protocol-error", stage: "prompt", message: cause };
+  const failure = { kind: options.failureKind ?? "protocol-error", stage: "prompt", message: cause };
+  const finished = vi.fn(), persist = vi.fn(), output = new Map<string, boolean>();
+  const history = vi.fn(options.history ?? (async () => useSessionsStore.getState().sessions.chat.messages));
   const context: Record<string, unknown> = {
     ...lifecycle, Error, DOMException, AbortController, setTimeout, clearTimeout, crypto: { randomUUID },
+    parseCloudWorkspaceKey, hasCloudWorkspaceAccountAccess: () => true,
     bridge: { request }, cloudComputerV2: !isCloudWorkspace(folder) || queued, prepareForSend: () => null, getStore: useSessionsStore.getState,
     // Exercise post-readiness dispatch; cloud FIFO preparation has its own
     // integration suite and hands off the already-claimed stable bubble id.
@@ -60,20 +69,24 @@ function harness(folder: string, cause = "cloud_runtime_upgrade_required", durin
     capUserAppend: (messages: unknown[], message: unknown) => [...messages, message],
     useWorkspaceStore: { getState: () => mocks.workspace }, announcedDirsRef: { current: new Map() },
     pendingAuthenticationPrompts: () => [], prependSystemInstruction: (_notice: string, text: string) => text,
-    turnProducedOutputRef: { current: new Map() }, getLiveChatDraft, recoverCloudAdmissionFailure, pauseQueue,
+    turnProducedOutputRef: { current: output }, getLiveChatDraft, recoverCloudAdmissionFailure, pauseQueue,
     newPromptDiagnosticId: () => "diagnostic", promptActivityRef: { current: new Map() },
     PROMPT_INACTIVITY_TIMEOUT_MS: 10_000, PROMPT_ABSOLUTE_TIMEOUT_MS: 10_000,
     awaitComposerMode: () => null, requestLocalPrompt: request,
     countPromptAttachments: () => ({ image: 0, text: 0 }), trackAgentPromptStarted: vi.fn(), trackAgentTurnStarted: vi.fn(),
-    trackAgentPromptFinished: vi.fn(), failureFromAgentError: () => failure, classifyRpcError: () => failure,
+    trackAgentPromptFinished: finished, trackAgentPromptCompleted: vi.fn(), trackAiGeneration: vi.fn(),
+    failureFromAgentError: () => failure, classifyRpcError: () => failure,
     statusForFailure: () => "failed", lastUserPrompt: (messages: Array<{ role: string }>) => [...messages].reverse().find(m => m.role === "user"),
-    redactLogSecrets: (text: string) => text, persistAuthPrompt: vi.fn(), authPromptsRef: { current: new AuthPromptRecovery() },
+    redactLogSecrets: (text: string) => text, persistAuthPrompt: persist, authPromptsRef: { current: new AuthPromptRecovery() },
+    persistWindowMessages: history, HYDRATE_WINDOW: 100, reconcileHistoryMessages: (messages: AgentMessage[]) => messages,
+    mergeWindowedTail: (_current: AgentMessage[], messages: AgentMessage[]) => messages,
     drainNextQueued: vi.fn(), drainOrDropQueue, evictUnretainedTranscripts: vi.fn(),
   };
   vm.runInNewContext(code, context);
   const send = () => (context.send as (...args: unknown[]) => Promise<void>)("chat", draft.text, draft.text, undefined, undefined, undefined, undefined,
     () => setLiveChatDraft("chat", null));
-  return { request, pauseQueue, drainOrDropQueue, sending, draft, queue, readiness, send, failureNotice,
+  return { request, pauseQueue, drainOrDropQueue, sending, draft, queue, readiness, send, failureNotice, finished, persist, history,
+    markOutput: () => output.set("chat", true),
     retry: () => {
       const next = queue.get("chat")![0]; queue.delete("chat");
       (context.flushBubbleRef as { current: Map<string, string> }).current.set("chat", next.bubbleId);
@@ -152,7 +165,14 @@ describe("production send callback on runtime rejection", () => {
     expect(h.request).toHaveBeenCalledOnce();
     expect(getLiveChatDraft("chat")).toBeNull();
     expect(useSessionsStore.getState().sessions.chat.messages).toHaveLength(1);
-    expect(useSessionsStore.getState().sessions.chat.messages[0]).not.toHaveProperty("recoveryFailure");
+    const saved = useSessionsStore.getState().sessions.chat.messages[0];
+    expect(saved).toMatchObject({ recoveryFailure: { kind: "protocol-error", message: expect.stringContaining("Review the conversation") } });
+    const recoveryFailure = saved.kind === "text" ? saved.recoveryFailure : undefined;
+    expect(turnFailureForCard({ turnId: saved.id, events: [], recoveryFailure })).toMatchObject({
+      kind: "protocol-error", message: expect.stringContaining("Review the conversation"),
+    });
+    expect(h.persist).toHaveBeenCalledWith("chat", expect.objectContaining({ id: saved.id, recoveryFailure }));
+    expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed", retryCount: 0 }));
     expect(useSessionsStore.getState().sessions.chat.cloudAdmissionFailure?.message).toContain("Review the conversation");
     expect(mocks.toast).toHaveBeenCalledExactlyOnceWith("Cloud request couldn't be completed", expect.objectContaining({
       description: "Review the conversation before retrying.",
@@ -177,6 +197,100 @@ describe("production send callback on runtime rejection", () => {
     expect(useSessionsStore.getState().sessions.chat.messages[0]).toMatchObject({ id: "accepted-prompt" });
     expect(useSessionsStore.getState().sessions.chat.messages[0]).not.toMatchObject({ queued: true });
     expect(useSessionsStore.getState().sessions.chat.cloudAdmissionFailure?.message).toContain("Review the conversation");
+  });
+  it("reports a refused ready cloud slot as failed rather than completed", async () => {
+    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222");
+    await h.send();
+    expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed", retryCount: 0 }));
+  });
+  it("retains partial output and reports uncertain dispatch as interrupted", async () => {
+    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "command_dispatch_rejected", () => {
+      h.markOutput();
+      const slot = useSessionsStore.getState().sessions.chat;
+      useSessionsStore.getState().patchSession("chat", { messages: [...slot.messages,
+        { kind: "text", role: "agent", id: "partial", text: "Partial answer", createdAt: 2, updatedAt: 2 }] });
+    });
+    await h.send();
+    expect(useSessionsStore.getState().sessions.chat.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "partial", text: "Partial answer" }),
+    ]));
+    expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "interrupted", retryCount: 0 }));
+    expect(h.request).toHaveBeenCalledOnce();
+  });
+  it("does not overwrite or persist to a replacement owner after late dispatch failure", async () => {
+    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "command_dispatch_rejected", () => {
+      useSessionsStore.getState().patchSession("chat", { ...BLANK, cwd: "/organization/replacement", agentId: "claude",
+        sessionId: "replacement", status: "ready" });
+      useSessionsStore.getState().setPendingLocalTurn("chat", "replacement-turn");
+    });
+    await h.send();
+    expect(useSessionsStore.getState().sessions.chat).toMatchObject({ cwd: "/organization/replacement", agentId: "claude",
+      status: "ready", failure: null, messages: [] });
+    expect(useSessionsStore.getState().pendingLocalTurns.chat).toBe("replacement-turn");
+    expect(h.persist).not.toHaveBeenCalled(); expect(mocks.toast).not.toHaveBeenCalled();
+  });
+  it.each(["timeout", "transport-closed", "session-expired"] as const)("never rebuilds and replays a claimed cloud %s prompt", async failureKind => {
+    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "Provider observation failed", undefined, true, { failureKind });
+    await h.send();
+    expect(h.request).toHaveBeenCalledOnce();
+    expect(useSessionsStore.getState().sessions.chat).toMatchObject({ status: "failed", failure: { kind: failureKind } });
+    expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed", retryCount: 0 }));
+  });
+  it("holds final completion until the saved cloud transcript has caught up", async () => {
+    let finish!: (messages: AgentMessage[]) => void;
+    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "", undefined, true,
+      { success: true, history: () => new Promise(resolve => { finish = resolve; }) });
+    const flight = h.send();
+    await vi.waitFor(() => expect(h.request).toHaveBeenCalledOnce());
+    expect(h.finished).not.toHaveBeenCalled();
+    expect(useSessionsStore.getState().pendingLocalTurns.chat).toBe("accepted-prompt");
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    finish([...useSessionsStore.getState().sessions.chat.messages,
+      { kind: "text", role: "agent", id: "saved-answer", text: "Saved answer", createdAt: 2, updatedAt: 2 }]);
+    await flight;
+    expect(useSessionsStore.getState().sessions.chat.messages.at(-1)).toMatchObject({ id: "saved-answer", text: "Saved answer" });
+    expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "completed" }));
+    expect(h.request).toHaveBeenCalledOnce();
+  });
+  it.each([false, true])("accepts an empty or tool-only native success (tool=%s)", async tool => {
+    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "", undefined, true,
+      { success: true, history: async () => [...useSessionsStore.getState().sessions.chat.messages,
+        ...(tool ? [{ id: "tool", kind: "tool" as const, title: "Read", toolKind: "read", status: "completed" as const, createdAt: 2, updatedAt: 2, toolCallId: "tool" }] : [])] });
+    await h.send();
+    expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "completed" }));
+    expect(useSessionsStore.getState().sessions.chat.failure).toBeNull(); expect(h.request).toHaveBeenCalledOnce();
+  });
+  it("does not report success when the saved window cannot recover the submitted turn", async () => {
+    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "Cloud transcript unavailable", undefined, true,
+      { success: true, history: async () => [] });
+    await h.send();
+    expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed", retryCount: 0 }));
+    expect(useSessionsStore.getState().sessions.chat.status).toBe("failed");
+    expect(h.request).toHaveBeenCalledOnce();
+  });
+  it("accepts a saved tool tail when a long successful turn has paged its user row out", async () => {
+    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "", undefined, true,
+      { success: true, history: async () => [{ id: "tool-tail", kind: "tool", title: "Read", toolKind: "read",
+        status: "completed", createdAt: 2, updatedAt: 2, toolCallId: "tool-tail" }] });
+    await h.send();
+    expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "completed" }));
+    expect(h.request).toHaveBeenCalledOnce();
+  });
+  it("discards a late transcript read after the cloud chat changes owner", async () => {
+    let finish!: (messages: AgentMessage[]) => void;
+    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "", undefined, true,
+      { success: true, history: () => new Promise(resolve => { finish = resolve; }) });
+    const flight = h.send();
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    useSessionsStore.getState().patchSession("chat", { ...BLANK, cwd: "/organization/replacement", agentId: "claude",
+      sessionId: "replacement", status: "ready", lastStopReason: "cancelled" });
+    useSessionsStore.getState().setPendingLocalTurn("chat", "replacement-turn");
+    finish([{ id: "old-answer", kind: "text", role: "agent", text: "Old answer", createdAt: 2, updatedAt: 2 }]);
+    await flight;
+    expect(useSessionsStore.getState().sessions.chat).toMatchObject({ cwd: "/organization/replacement", messages: [], failure: null });
+    expect(useSessionsStore.getState().pendingLocalTurns.chat).toBe("replacement-turn");
+    expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed", stopReason: undefined }));
+    expect(h.persist).not.toHaveBeenCalled();
   });
   it.each(["/personal/local/workspace", "/organization/local/workspace"])("keeps %s on the existing local failure path", async folder => {
     const h = harness(folder);

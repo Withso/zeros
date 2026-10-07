@@ -13,6 +13,7 @@ import {
   type SecretEncryptionConfiguration,
 } from "./settings.js";
 import { sealCloudWorkspaceSetupSecret } from "./setup-materials.js";
+import { requireSupportedCloudWorkspaceGeneration } from "./supported-generation.js";
 
 type Scope = {
   organizationId: string;
@@ -88,14 +89,8 @@ function environmentName(name: string) {
 export async function loadCloudComputerEnvironmentSource(
   tx: Tx,
   scope: Scope,
-): Promise<ComputerEnvironmentSource | null> {
-  const source = (
-    await tx.query<{ config_id: string }>(
-      "SELECT config_id FROM cloud_workspace_computer_sources WHERE workspace_id=$1 AND generation=$2 AND org_id=$3",
-      [scope.workspaceId, scope.generation, scope.organizationId],
-    )
-  ).rows[0];
-  if (!source) return null;
+): Promise<ComputerEnvironmentSource> {
+  const { source } = await requireSupportedCloudWorkspaceGeneration(tx, scope);
   const bindings = (
     await environmentLocks(() =>
       tx.query<Binding>(
@@ -114,7 +109,7 @@ export async function loadCloudComputerEnvironmentSource(
        FOR SHARE OF binding,version NOWAIT
      ) material ON true
      WHERE ref.config_id=$1 AND ref.org_id=$2 ORDER BY ref.name`,
-        [source.config_id, scope.organizationId],
+        [source.configId, scope.organizationId],
       ),
     )
   ).rows;
@@ -122,7 +117,7 @@ export async function loadCloudComputerEnvironmentSource(
     if (!binding.available) revoked();
     environmentName(binding.name);
   }
-  return { configId: source.config_id, bindings };
+  return { configId: source.configId, bindings };
 }
 
 /** Only explicitly consented ordinary values cross the personal org boundary.
@@ -395,7 +390,6 @@ export async function resolveCloudComputerExecutionEnvironment(
   encryption: SecretEncryptionConfiguration,
 ) {
   const source = await loadCloudComputerEnvironmentSource(tx, scope);
-  if (!source) return null;
   const snapshot = (
     await tx.query<{
       source_versions: Record<string, JsonValue>;

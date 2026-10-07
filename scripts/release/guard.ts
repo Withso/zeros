@@ -1,7 +1,8 @@
+import { refuseRetiredWorkerPromotion } from "./worker-retirement";
 import { appendFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { CHANNELS, ReleaseIdentity, releaseSource, promotionConfig, type Channel } from "./contracts";
+import { CHANNELS, ReleaseIdentity, releaseSource, promotionConfig, PromotionError, type Channel } from "./contracts";
 import { channelBaseline, migrationManifest, workerInputsSha256 } from "./source";
 import { githubClient } from "./github";
 
@@ -55,13 +56,9 @@ export async function publicPagesSource(origin: string, surface: "app" | "ops", 
   } catch { return null; } finally { clearTimeout(timer); }
 }
 
-export async function hostedWorkerPromotionRequired(enabled: boolean, candidate: Pick<DisabledCandidate, "channel" | "sourceSha" | "provider">, deps: GuardDependencies = {}) {
+export async function hostedWorkerPromotionRequired(enabled: boolean, _candidate: Pick<DisabledCandidate, "channel" | "sourceSha" | "provider">, _deps: GuardDependencies = {}) {
   if (!enabled) return false;
-  const { identity } = await publicIdentity(candidate.channel, deps.fetch);
-  if (!identity?.cloud.enabled || identity.cloud.state !== "healthy" || identity.workerQualified !== true || !identity.worker || identity.worker.provider !== candidate.provider) return true;
-  const hash = deps.workerInputsSha256 ?? workerInputsSha256;
-  try { return await hash(identity.worker.sourceSha) !== await hash(candidate.sourceSha); }
-  catch { return true; }
+  refuseRetiredWorkerPromotion();
 }
 
 function manualCutoverSteps(candidate: DisabledCandidate) {
@@ -108,7 +105,7 @@ export async function disabledGuard(_files: string[], candidate: DisabledCandida
   let workerChanged = true, workerVerified = false;
   const hash = deps.workerInputsSha256 ?? workerInputsSha256;
   if (baseline) { try { workerChanged = await hash(baseline.sourceSha) !== await hash(candidate.sourceSha); } catch { /* Unknown is changed. */ } }
-  if (identity?.cloud.enabled && identity.cloud.state === "healthy" && identity.workerQualified === true && identity.worker?.provider === (candidate.provider || "daytona")) {
+  if (identity?.cloud.enabled && identity.cloud.state === "healthy" && identity.workerQualified === true && identity.worker?.provider === (candidate.provider || "boat")) {
     try {
       workerVerified = identity.worker.sourceSha === candidate.sourceSha ||
         await hash(identity.worker.sourceSha) === await hash(candidate.sourceSha);
@@ -135,6 +132,7 @@ export async function disabledGuard(_files: string[], candidate: DisabledCandida
   return { ...changes, blocked, manualCutoverVerified, workerVerified, message: notes.join(" ") };
 }
 async function main() {
+  if (process.env.ZEROS_WORKER_PROMOTION === "enabled") refuseRetiredWorkerPromotion();
   const source = releaseSource(process.env);
   const enabled = process.env.ZEROS_HOSTED_PROMOTION === "enabled";
   if (enabled) promotionConfig(process.env); // Missing authority is a failure, never a silent skip.
@@ -150,6 +148,6 @@ async function main() {
   if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `enabled=${enabled}\nworker_enabled=${workerRequired}\n`);
   if (result.blocked) process.exitCode = 1;
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) void main().catch(() => {
-  console.error("::error::Release guard failed: missing authority, invalid channel identity, or unavailable comparison. No publication is authorized."); process.exitCode = 1;
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) void main().catch(error => {
+  console.error(error instanceof PromotionError ? `::error::${error.message}` : "::error::Release guard failed: missing authority, invalid channel identity, or unavailable comparison. No publication is authorized."); process.exitCode = 1;
 });

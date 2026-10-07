@@ -115,28 +115,15 @@ describe("v4 attester to setup admission", () => {
     expect(parseSetupDiagnostic(diagnostic)).toEqual(diagnostic);
   });
 
-  it.each([1, 2, 3])("keeps v%i whole-report parsing and legacy source/build admission", async version => {
+  it.each([1, 2, 3])("refuses worker v%i before attestation or material access", async version => {
     tree.dispose();
     tree = attestationFixture(version);
     host.resolve.mockImplementation(createCloudRuntimeResolver({
       filesystem: tree.filesystem, executable: () => "/usr/local/bin/node", isEngine: () => false,
     }).resolve);
-    const { attestImage, cloudWorkspaceImageAdmissionChecks } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
-    const admitted = material(), legacyProfile = { version, profile: `zeros-cloud-worker-v${version}` };
-    tree.write("/etc/zeros/image-build.json", {
-      ...JSON.parse(tree.filesystem.readFileSync("/etc/zeros/image-build.json", "utf8")),
-      source: { commit: admitted.image.sourceCommit },
-    });
-    const result = attesterOutput(), report = JSON.parse(result.stdout), record = vi.fn();
-    admitted.image.ref = `boat:base-fixture@sha256:${report.metadata.buildSha256}`;
-    returnOutput(result);
-    await expect(attestImage(admitted, legacyProfile, record)).resolves.toBeUndefined();
-    expect(record.mock.calls[0][0]).toEqual({ execution: true, report: true, profile: true, qualified: true,
-      source: true, build: true, helpers: true, resources: true, runtime: true });
-    expect(cloudWorkspaceImageAdmissionChecks({ ...admitted, image: { ...admitted.image, sourceCommit: "f".repeat(40) } },
-      legacyProfile, result, report).source).toBe(false);
-    expect(cloudWorkspaceImageAdmissionChecks({ ...admitted, image: { ...admitted.image, ref: `boat:base-fixture@sha256:${"f".repeat(64)}` } },
-      legacyProfile, result, report).build).toBe(false);
+    await expect(import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs"))
+      .rejects.toThrow(/runtime descriptor/);
+    expect(host.spawn).not.toHaveBeenCalled();
   });
 
   it.each([

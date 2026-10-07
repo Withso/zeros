@@ -4,7 +4,6 @@ import { useCachedRead } from "../../state/use-cached-read";
 import { useWorkspaceDispatch } from "../../state/store";
 import { Button } from "../../shared/ui";
 import { useActiveOrganization, useTeams } from "../team/team-store";
-import { useInternalFeatureActive } from "./internal-features";
 import { requestUserSettingsSection } from "./settings-navigation";
 import {
   cloudComputerV2Cache,
@@ -36,11 +35,10 @@ export function cloudComputerV2CreateReason(
 }
 
 export function useCloudComputerV2CreateGate(active: boolean) {
-  const authorized = useInternalFeatureActive("cloudComputerV2");
   const organization = useActiveOrganization();
   const { me } = useTeams();
   const enabled =
-    authorized && Boolean(organization && !organization.isPersonal && me);
+    Boolean(organization && !organization.isPersonal && me);
   const visible = useCloudComputerV2Visible(active);
   const key = enabled
     ? cloudComputerV2Key(me!.user.id, organization!.id)
@@ -113,9 +111,8 @@ export function CloudComputerV2CreateNotice({
   warm: () => void;
   onOpenSettings?: () => void;
 }) {
-  const authorized = useInternalFeatureActive("cloudComputerV2");
   const dispatch = useWorkspaceDispatch();
-  if (!authorized || !required) return null;
+  if (!required) return null;
   return (
     <div
       className="flex items-center gap-2"

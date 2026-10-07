@@ -1,3 +1,4 @@
+import { RELEASE_WORKER_IMAGES_RETIRED } from "../../apps/control-plane/src/cloud-workspaces/release-worker-retirement";
 import { describe, expect, it, vi } from "vitest";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -74,24 +75,10 @@ describe("enabled worker lane selection", () => {
     expect(deps.fetch).not.toHaveBeenCalled();
     expect(deps.workerInputsSha256).not.toHaveBeenCalled();
   });
-  it("reuses an older qualified image with the exact same committed worker input tree", async () => {
-    const identity = liveIdentity(); identity.worker.sourceSha = baselineSha;
-    const deps = fakeIdentity(identity); deps.workerInputsSha256.mockResolvedValue("d".repeat(64));
-    expect(await hostedWorkerPromotionRequired(true, candidate, deps)).toBe(false);
-    expect(deps.workerInputsSha256).toHaveBeenCalledWith(baselineSha);
-    expect(deps.workerInputsSha256).toHaveBeenCalledWith(sha);
-  });
-  it("selects native qualification when selected inputs differ or their hash cannot be verified", async () => {
-    const identity = liveIdentity(); identity.worker.sourceSha = baselineSha;
+  it.each([null, liveIdentity(), { ...liveIdentity(), workerQualified: false }])("refuses enabled qualification and reuse before any external read", async identity => {
     const deps = fakeIdentity(identity);
-    expect(await hostedWorkerPromotionRequired(true, candidate, deps)).toBe(true);
-    deps.workerInputsSha256.mockRejectedValue(new Error("private-git-detail"));
-    expect(await hostedWorkerPromotionRequired(true, candidate, deps)).toBe(true);
-  });
-  it("never skips an enabled lane on absent, unqualified, cross-channel or wrong-provider identity", async () => {
-    for (const identity of [null, { ...liveIdentity(), workerQualified: false }, { ...liveIdentity(), channel: "beta" },
-      { ...liveIdentity(), worker: { ...liveIdentity().worker, provider: "daytona" } }])
-      expect(await hostedWorkerPromotionRequired(true, candidate, fakeIdentity(identity))).toBe(true);
+    await expect(hostedWorkerPromotionRequired(true, candidate, deps)).rejects.toThrow(RELEASE_WORKER_IMAGES_RETIRED);
+    expect(deps.fetch).not.toHaveBeenCalled(); expect(deps.workerInputsSha256).not.toHaveBeenCalled();
   });
 });
 describe("disabled promotion guard", () => {
@@ -127,7 +114,7 @@ describe("disabled promotion guard", () => {
     unavailable.workerInputsSha256.mockRejectedValue(new Error("private-provider-message"));
     const result = await disabledGuard([workerFile], { ...candidate, cloudEnabled: true }, unavailable);
     expect(result.blocked).toBe(true); expect(result.message).not.toContain("private-provider-message");
-    expect(await disabledGuard([workerFile], { ...candidate, cloudEnabled: true, provider: "daytona" }, fakeIdentity(liveIdentity()))).toMatchObject({ blocked: true });
+    expect(await disabledGuard([workerFile], { ...candidate, cloudEnabled: true, provider: "unsupported" }, fakeIdentity(liveIdentity()))).toMatchObject({ blocked: true });
   });
   it("unblocks a rerun after the exact candidate backend was deployed manually", async () => {
     const identity = liveIdentity(); identity.migrations.manifestSha256 = "f".repeat(64);

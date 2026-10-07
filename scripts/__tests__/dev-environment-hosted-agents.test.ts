@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { advanceHostedAgents, nativeRuntimeEvidence, retireUnfinishedHostedAgents, QUALIFICATION_DEADLINE_MS } from "../dev-environment/hosted-agents.mjs";
+import { advanceHostedAgents, nativeRuntimeEvidence, retireUnfinishedHostedAgents, QUALIFICATION_DEADLINE_MS, qualificationRateLimited } from "../dev-environment/hosted-agents.mjs";
 import { hostedAgentRequest, canaryBudgetHours } from "../dev-environment/hosted-agent-canary.mjs";
 
 function fixture() {
@@ -19,251 +19,32 @@ function outcome(f: ReturnType<typeof fixture>) {
     checks: ["privateProviderHome", "engineAuthorityIsolation", "nativeWorkspaceTools", "actorAdmission", "stopAndRevocation", "nativeTurn", "nativeResume", "authentication", "nativePermissionSelection", "nativeMcp"] } };
 }
 
-describe("automatic hosted Dev agent enablement", () => {
-  it("defers rate-limited qualifications without spending any of the three attempts", async () => {
-    const f = fixture(); let now = Date.now(); f.deps.now = () => now;
-    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0, report: { qualified: false, failureKind: "rate-limited" } });
-    for (let throttle = 0; throttle < 5; throttle++) {
-      expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
-      const result = await advanceHostedAgents(f.lease, f.profile, f.deps);
-      expect(result).toMatchObject({ state: "rate-limited", message: expect.stringContaining("rate-limited") });
-      const job = f.state.agentQualifications.at(-1);
-      expect(job).toMatchObject({ phase: "failed", retired: true, failure: { errorKind: "rate-limited" } });
-      const retryAt = Date.parse(result.retryAfter);
-      expect(retryAt - now).toBeGreaterThanOrEqual(60_000);
-      expect(retryAt - now).toBeLessThanOrEqual(15 * 60_000);
-      expect((await advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true })).state).toBe("rate-limited");
-      expect(f.deps.allocate).toHaveBeenCalledTimes(throttle + 1);
-      now = retryAt;
-    }
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
-    f.deps.poll.mockResolvedValue({ ...outcome(f), report: { ...outcome(f).report, qualifiedAt: new Date(now).toISOString() } });
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("enabled");
-    expect(f.deps.enable).toHaveBeenCalledOnce();
-  });
-  it("does not let rate limits erase real failures or dispatch while retirement is unconfirmed", async () => {
-    const f = fixture(); let now = Date.now(); f.deps.now = () => now;
-    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0, errorKind: "rate-limited" });
-    await advanceHostedAgents(f.lease, f.profile, f.deps);
-    f.deps.retire.mockRejectedValueOnce(new Error("cleanup pending"));
-    await expect(advanceHostedAgents(f.lease, f.profile, f.deps)).rejects.toThrow("cleanup pending");
-    expect(f.deps.allocate).toHaveBeenCalledOnce();
-    await advanceHostedAgents(f.lease, f.profile, f.deps);
-    now = Date.parse(f.state.agentQualifications[0].retryAfter);
-    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0, report: { qualified: false, failureKind: "authentication" } });
-    for (let attempt = 0; attempt < 3; attempt++) {
-      expect((await advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true })).state).toBe("testing");
-      expect((await advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true })).state).toBe("failed");
-    }
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true })).state).toBe("failed");
-    expect(f.deps.allocate).toHaveBeenCalledTimes(4);
-  });
-  it("automatically resumes a deferred retry even when the connection has an older real failure", async () => {
-    const f = fixture(); let now = Date.now(); f.deps.now = () => now;
-    await advanceHostedAgents(f.lease, f.profile, f.deps);
-    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0 });
-    await advanceHostedAgents(f.lease, f.profile, f.deps);
-    await advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true });
-    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0, errorKind: "rate-limited" });
-    const result = await advanceHostedAgents(f.lease, f.profile, f.deps);
-    now = Date.parse(result.retryAfter);
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
-    expect(f.deps.allocate).toHaveBeenCalledTimes(3);
-  });
-  it("compacts retired rate-limit history without losing backoff or real-attempt accounting", async () => {
-    const f = fixture(); let now = Date.now(); f.deps.now = () => now;
-    await advanceHostedAgents(f.lease, f.profile, f.deps);
-    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0 });
-    await advanceHostedAgents(f.lease, f.profile, f.deps);
-    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0, errorKind: "rate-limited" });
-    for (let throttle = 0; throttle < 105; throttle++) {
-      expect((await advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true })).state).toBe("testing");
-      const result = await advanceHostedAgents(f.lease, f.profile, f.deps);
-      expect(result.state).toBe("rate-limited");
-      expect(Date.parse(result.retryAfter) - now).toBe(Math.min(15 * 60_000, 60_000 * 2 ** Math.min(throttle, 7)));
-      now = Date.parse(result.retryAfter);
-    }
-    expect(f.state.agentQualifications.length).toBeLessThanOrEqual(3);
-    expect(f.state.agentQualifications.filter((job: any) => job.failure?.errorKind !== "rate-limited")).toHaveLength(1);
-  });
-  function organizationFixture() {
+describe("retired hosted Dev native qualification", () => {
+  it.each([undefined, "allocating", "starting", "running", "passed", "failed", "enabled"])("refuses native qualification with historical phase %s before any effect", async phase => {
     const f = fixture();
-    const organizationImage = { id: "44444444-4444-4444-8444-444444444444", snapshotId: `zeros-org-${"4".repeat(32)}`,
-      sourceCommit: f.image.sourceCommit, buildSha256: "e".repeat(64), contractSha256: "d".repeat(64),
-      connections: [{ ...f.connection }] };
-    f.connection.enabled = true;
-    Object.assign(f.status, { organizationImages: [organizationImage] });
-    return { ...f, organizationImage };
-  }
-  it("qualifies an attested organization image independently of the enabled worker image", async () => {
-    const f = organizationFixture();
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
-    expect(f.deps.allocate).toHaveBeenCalledWith(expect.anything(), f.organizationImage);
-    const job = f.state.agentQualifications[0];
-    expect(job.organizationImageId).toBe(f.organizationImage.id);
-    const result = outcome(f); result.report.identity.buildSha256 = f.organizationImage.buildSha256;
-    expect(() => nativeRuntimeEvidence({ ...f.organizationImage, contractSha256: "f".repeat(64) },
-      f.connection, result, job.startedAt)).toThrow();
-    f.deps.poll.mockResolvedValue(result);
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("enabled");
-    expect(f.deps.enable).toHaveBeenCalledWith(expect.objectContaining({ evidence: expect.objectContaining({
-      imageRef: `boat:${f.organizationImage.snapshotId}@sha256:${f.organizationImage.buildSha256}`,
-    }) }));
-    expect(f.state.resources.images).toEqual([f.image]);
-    const request = hostedAgentRequest(f.state, { fixture: {}, boat: { accountScope: "fixture" }, connections: { enabled: true } }, f.organizationImage);
-    expect(request).toMatchObject({ image: { snapshotId: f.image.snapshotId }, accountScope: "fixture", referenceMode: true,
-      organizationImage: { id: f.organizationImage.id, snapshotId: f.organizationImage.snapshotId } });
+    if (phase) f.state.agentQualifications = [{ id: "historical", phase, evidence: { digest: "stored" }, retired: phase === "enabled" }];
+    const before = structuredClone(f.state);
+    await expect(advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true })).rejects.toMatchObject({
+      status: 409, code: "release_worker_images_retired", message: "v3 release worker images are retired; v4 runtime bundles are the supported artifact" });
+    for (const name of ["inspect", "seed", "allocate", "ready", "start", "poll", "enable", "retire"] as const) expect(f.deps[name]).not.toHaveBeenCalled();
+    expect(f.lease.save).not.toHaveBeenCalled(); expect(f.lease.fence).not.toHaveBeenCalled(); expect(f.state).toEqual(before);
   });
-  it("retires removed organization images and bounds retries without approving base-image evidence", async () => {
-    const f = organizationFixture();
-    f.deps.poll.mockResolvedValue(outcome(f)); // Wrong image digest.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      expect((await advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true })).state).toBe("testing");
-      expect((await advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true })).state).toBe("failed");
-    }
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true })).state).toBe("failed");
-    expect(f.deps.allocate).toHaveBeenCalledTimes(3); expect(f.deps.enable).not.toHaveBeenCalled();
-    const pending = organizationFixture();
-    await advanceHostedAgents(pending.lease, pending.profile, pending.deps);
-    Object.assign(pending.status, { organizationImages: [] });
-    expect((await advanceHostedAgents(pending.lease, pending.profile, pending.deps)).state).toBe("ready");
-    expect(pending.deps.retire).toHaveBeenCalledOnce(); expect(pending.deps.enable).not.toHaveBeenCalled();
-  });
-  it("preserves only explicitly completed native extension proofs",()=>{
-    const f=fixture(),result=outcome(f);
-    result.report.checks.push("transcriptFork","nativeGoals","nativeFork","nativeReview","nativeApps","nativeMultiAgent","inventedFeature");
-    const evidence=nativeRuntimeEvidence(f.image,f.connection,result,Date.now()-1000);
-    expect(evidence.credentials[0].checks).toMatchObject({transcriptFork:true,nativeGoals:true,nativeFork:true,nativeReview:true,nativeApps:true,nativeMultiAgent:true});
-    expect(evidence.credentials[0].checks).not.toHaveProperty("inventedFeature");
-    expect(nativeRuntimeEvidence(f.image,f.connection,outcome(f),Date.now()-1000).credentials[0].checks).not.toHaveProperty("nativeGoals");
-  });
-  it("waits for real sign-in and connections without allocating paid workers", async () => {
-    const f = fixture(); f.deps.inspect.mockResolvedValue({ needsSignIn: true } as any);
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("sign-in");
-    expect(f.deps.allocate).not.toHaveBeenCalled(); expect(f.deps.enable).not.toHaveBeenCalled();
-    f.deps.inspect.mockResolvedValue({ ...f.status, connections: [] });
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("connections");
-  });
-  it("automatically seeds the verified fixture after first sign-in", async () => {
-    const f = fixture(); f.deps.inspect.mockResolvedValue({ needsSeed: true } as any);
-    await advanceHostedAgents(f.lease, f.profile, f.deps);
-    expect(f.deps.seed).toHaveBeenCalledOnce(); expect(f.deps.allocate).not.toHaveBeenCalled();
-  });
-  it("never sends account material to a clone that failed machine attestation", async () => {
-    const f = fixture(); f.deps.ready.mockResolvedValue("failed" as any);
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("failed");
-    expect(f.deps.start).not.toHaveBeenCalled(); expect(f.deps.enable).not.toHaveBeenCalled(); expect(f.deps.retire).toHaveBeenCalledOnce();
-  });
-  it("persists dispatch before testing and only enables a successful exact-image report", async () => {
-    const f = fixture(); f.deps.start.mockImplementation(async () => { expect(f.state.agentQualifications[0].phase).toBe("starting"); });
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
-    expect(f.deps.enable).not.toHaveBeenCalled();
-    f.deps.poll.mockResolvedValue(outcome(f));
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("enabled");
-    expect(f.deps.enable).toHaveBeenCalledOnce(); expect(f.deps.retire).toHaveBeenCalledOnce();
-    await advanceHostedAgents(f.lease, f.profile, f.deps);
-    expect(f.deps.start).toHaveBeenCalledOnce(); expect(f.deps.enable).toHaveBeenCalledOnce();
-  });
-  it("does not redispatch a lost start response or repeat paid failures on later launches", async () => {
-    const f = fixture(); f.deps.start.mockRejectedValueOnce(new Error("private-provider-output"));
-    await expect(advanceHostedAgents(f.lease, f.profile, f.deps)).rejects.toThrow();
-    expect(f.state.agentQualifications[0].phase).toBe("starting");
-    await advanceHostedAgents(f.lease, f.profile, f.deps);
-    expect(f.deps.start).toHaveBeenCalledOnce();
-    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0 });
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("failed");
-    await advanceHostedAgents(f.lease, f.profile, f.deps);
-    expect(f.deps.start).toHaveBeenCalledOnce(); expect(f.deps.enable).not.toHaveBeenCalled();
-    expect(JSON.stringify(f.state)).not.toContain("private-provider-output");
-  });
-  it("retires a known failure before dispatch immediately instead of polling an unstarted VM", async () => {
-    const f = fixture(); f.deps.start.mockRejectedValueOnce(Object.assign(new Error("private-output"), { code: "DEV_AGENT_NOT_DISPATCHED" }));
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("failed");
-    expect(f.state.agentQualifications[0]).toMatchObject({ phase: "failed", retired: true });
-    expect(f.deps.poll).not.toHaveBeenCalled(); expect(f.deps.retire).toHaveBeenCalledOnce();
-    expect(JSON.stringify(f.state)).not.toContain("private-output");
-  });
-  it("retires a test when its connected credential is revoked or switched", async () => {
-    const f = fixture(); await advanceHostedAgents(f.lease, f.profile, f.deps);
-    f.deps.inspect.mockResolvedValue({ ...f.status, connections: [] });
-    await advanceHostedAgents(f.lease, f.profile, f.deps);
-    expect(f.deps.retire).toHaveBeenCalledOnce(); expect(f.deps.enable).not.toHaveBeenCalled();
-  });
-  it("keeps cleanup retryable and refuses another image's evidence", async () => {
-    const f = fixture(); await advanceHostedAgents(f.lease, f.profile, f.deps);
-    const report = outcome(f); report.report.identity.buildSha256 = "e".repeat(64); f.deps.poll.mockResolvedValue(report);
-    f.deps.retire.mockRejectedValueOnce(new Error("deletion pending"));
-    await expect(advanceHostedAgents(f.lease, f.profile, f.deps)).rejects.toThrow();
-    await advanceHostedAgents(f.lease, f.profile, f.deps);
-    expect(f.deps.retire).toHaveBeenCalledTimes(2); expect(f.deps.enable).not.toHaveBeenCalled();
-  });
-  it("retains bounded fixed failure evidence before deleting a failed native test VM", async () => {
-    const f = fixture(); await advanceHostedAgents(f.lease, f.profile, f.deps);
-    f.deps.poll.mockResolvedValue({ code: 1, retirement: 0, report: { qualified: false,
-      checks: ["privateProviderHome", "nativeTurn", "secret-sentinel"], error: "private-provider-output" } });
-    f.deps.retire.mockImplementation(async () => { expect(f.state.agentQualifications[0].failure).toEqual({
-      stage: "native", exitCode: 1, retirementCode: 0, qualified: false, completedChecks: ["privateProviderHome", "nativeTurn"],
-    }); });
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("failed");
-    expect(JSON.stringify(f.state)).not.toContain("private-provider-output");
-    expect(JSON.stringify(f.state)).not.toContain("secret-sentinel");
-  });
-  it("does not qualify during archive or silently adopt a mismatched worker", async () => {
+  it("preserves inactive and no-fixture callers without native qualification", async () => {
     const f = fixture(); f.state.status = "archiving";
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("inactive");
-    expect(f.deps.inspect).not.toHaveBeenCalled(); f.state.status = "ready";
-    f.state.source.workerInputsSha256 = "f".repeat(64);
-    await expect(advanceHostedAgents(f.lease, f.profile, f.deps)).rejects.toThrow(/image/);
-    expect(f.deps.allocate).not.toHaveBeenCalled();
+    expect(await advanceHostedAgents(f.lease, f.profile, f.deps)).toEqual({ state: "inactive" });
+    f.state.status = "ready";
+    expect(await advanceHostedAgents(f.lease, {}, f.deps)).toEqual({ state: "inactive" });
+    expect(f.deps.inspect).not.toHaveBeenCalled(); expect(f.lease.save).not.toHaveBeenCalled();
   });
-  it("requires independent Codex renewal and worker refresh adoption evidence", () => {
-    const f = fixture(); f.connection.kind = "codex-chatgpt"; f.connection.provider = "codex"; f.connection.model = "gpt-5.6-luna";
-    const report: any = outcome(f);
-    expect(() => nativeRuntimeEvidence(f.image, f.connection, report, Date.now() - 1000)).toThrow();
-    report.report.checks.push("nativeAccessRefresh");
-    report.renewal = { accountBinding: true, accessChanged: true, cachePublished: true, consentPreserved: true };
-    expect(nativeRuntimeEvidence(f.image, f.connection, report, Date.now() - 1000).credentials[0].renewal).toBe(true);
-    report.retirement = 1;
-    expect(() => nativeRuntimeEvidence(f.image, f.connection, report, Date.now() - 1000)).toThrow();
+  it("keeps failed retirement retryable without approving historical evidence or dispatching another attempt", async () => {
+    const f = fixture(); f.state.agentQualifications = [{ id: "historical", phase: "passed", retired: false, evidence: { digest: "stored" } }];
+    f.deps.retire.mockRejectedValueOnce(new Error("deletion pending"));
+    await expect(retireUnfinishedHostedAgents(f.lease, f.deps)).rejects.toThrow("deletion pending");
+    expect(f.state.agentQualifications[0]).toMatchObject({ phase: "failed", retired: false, evidence: { digest: "stored" } });
+    expect(await retireUnfinishedHostedAgents(f.lease, f.deps)).toBe(1);
+    expect(f.state.agentQualifications[0].retired).toBe(true); expect(f.deps.retire).toHaveBeenCalledTimes(2);
+    expect(f.deps.allocate).not.toHaveBeenCalled(); expect(f.deps.start).not.toHaveBeenCalled(); expect(f.deps.enable).not.toHaveBeenCalled();
   });
-  it("reconciles a lost enablement acknowledgement without repeating the privileged write", async () => {
-    const f = fixture(); await advanceHostedAgents(f.lease, f.profile, f.deps);
-    f.deps.poll.mockResolvedValue(outcome(f)); f.deps.enable.mockRejectedValueOnce(new Error("response lost after commit"));
-    await expect(advanceHostedAgents(f.lease, f.profile, f.deps)).rejects.toThrow();
-    f.connection.enabled = true;
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("enabled");
-    expect(f.deps.enable).toHaveBeenCalledOnce();
-  });
-});
-
-describe("native agent qualification deadline", () => {
-  it("lets an extended native run finish, then retires an overdue one with an explicit deadline failure", async () => {
-    // Codex's extended checks (goals, forks, review, multi-agent, apps) run
-    // past twelve minutes; its canary machine must also outlive that run.
-    const f = fixture(); let now = Date.now(); f.deps.now = () => now;
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
-    now += 20 * 60_000;
-    expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
-    expect(f.deps.retire).not.toHaveBeenCalled();
-    now += 25 * 60_000;
-    await advanceHostedAgents(f.lease, f.profile, f.deps);
-    expect(f.state.agentQualifications[0]).toMatchObject({ phase: "failed", retired: true, failure: { stage: "deadline" } });
-  });
-});
-
-it("reports a failed native run's fixed-format error code and class name, never free text", async () => {
-  const f = fixture();
-  await advanceHostedAgents(f.lease, f.profile, f.deps);
-  f.deps.poll.mockResolvedValue({ code: 1, retirement: 0, report: { qualified: false, phase: "native-start", checks: ["actorAdmission"], failure: "runtime",
-    failureCode: "EROFS", failureName: "Error" } });
-  await advanceHostedAgents(f.lease, f.profile, f.deps);
-  expect(f.state.agentQualifications[0].failure).toMatchObject({ nativePhase: "native-start", category: "runtime", errorCode: "EROFS", errorName: "Error" });
-  const g = fixture();
-  await advanceHostedAgents(g.lease, g.profile, g.deps);
-  g.deps.poll.mockResolvedValue({ code: 1, retirement: 0, report: { qualified: false, phase: "native-start", failure: "runtime", failureCode: "read-only: /srv", failureName: "Error: text" } });
-  await advanceHostedAgents(g.lease, g.profile, g.deps);
-  expect(g.state.agentQualifications[0].failure).not.toHaveProperty("errorCode");
-  expect(g.state.agentQualifications[0].failure).not.toHaveProperty("errorName");
 });
 
 it("retires unfinished checks of a replaced image so the new build can take the owner's builder slot", async () => {
@@ -285,41 +66,46 @@ it("retires unfinished checks of a replaced image so the new build can take the 
   expect(await retireUnfinishedHostedAgents(f.lease, f.deps)).toBe(0);
 });
 
-it("fails a check at once when its canary exceeded the builder budget, instead of retrying a deleted machine", async () => {
-  // The budget guard deletes the canary; polling it again can only fail.
-  const f = fixture();
-  await advanceHostedAgents(f.lease, f.profile, f.deps);
-  const job = f.state.agentQualifications[0];
-  f.state.resources.images.push({ purpose: "native-agent-qualification", agentQualificationId: job.id, budgetExceeded: true });
-  f.deps.allocate.mockRejectedValue(new Error("Dev agent canary provider identity changed"));
-  await advanceHostedAgents(f.lease, f.profile, f.deps);
-  expect(f.state.agentQualifications[0]).toMatchObject({ phase: "failed", retired: true, failure: { stage: "budget" } });
-});
 
-it("sizes a canary's usage allowance to its qualification window within the owner's builder budget", () => {
-  expect(canaryBudgetHours({ builderBudgetHours: 2 })).toBeCloseTo(QUALIFICATION_DEADLINE_MS / 3_600_000 + 0.25);
-  expect(canaryBudgetHours({ builderBudgetHours: 0.5 })).toBe(0.5);
-});
-
-it("checks a report's completion time against the time it was read, not the start of a slow advance", async () => {
-  // Inspection runs an operator build and a database call; a run finishing
-  // meanwhile reports a qualifiedAt after the advance began.
-  const f = fixture(); let clock = Date.now(); f.deps.now = () => clock;
-  await advanceHostedAgents(f.lease, f.profile, f.deps);
-  const result = outcome(f);
-  f.deps.inspect.mockImplementation(async () => { clock += 20_000; return f.status; });
-  f.deps.poll.mockImplementation(async () => ({ ...result, report: { ...result.report, qualifiedAt: new Date(clock - 1000).toISOString() } }));
-  expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("enabled");
-});
-
-it("supersedes a passed check of a replaced image instead of treating it as the active canary", async () => {
-  // A relaunch between a check's pass and its enable leaves it "passed"; once
-  // the worker image changes it must not block the new image's checks.
-  const f = fixture();
-  f.state.agentQualifications = [{ id: "old", signature: "0".repeat(64), phase: "passed", retired: true, startedAt: Date.now() - 60_000,
-    connection: f.connection, image: { snapshotId: "dev-previous-image" } }];
-  expect((await advanceHostedAgents(f.lease, f.profile, f.deps)).state).toBe("testing");
-  expect(f.state.agentQualifications[0]).toMatchObject({ phase: "failed", failure: { stage: "superseded" } });
-  expect(f.state.agentQualifications).toHaveLength(2);
-  expect(f.deps.allocate).toHaveBeenCalledOnce();
+describe("historical native evidence and request readers", () => {
+  it("preserves only explicitly completed native extension proofs", () => {
+    const f = fixture(), result = outcome(f);
+    result.report.checks.push("transcriptFork", "nativeGoals", "nativeFork", "nativeReview", "nativeApps", "nativeMultiAgent", "inventedFeature");
+    const evidence = nativeRuntimeEvidence(f.image, f.connection, result, Date.now() - 1000);
+    expect(evidence.credentials[0].checks).toMatchObject({ transcriptFork: true, nativeGoals: true, nativeFork: true, nativeReview: true, nativeApps: true, nativeMultiAgent: true });
+    expect(evidence.credentials[0].checks).not.toHaveProperty("inventedFeature");
+    expect(nativeRuntimeEvidence(f.image, f.connection, outcome(f), Date.now() - 1000).credentials[0].checks).not.toHaveProperty("nativeGoals");
+  });
+  it.each(["source", "digest", "model", "MCP", "retirement", "profile", "stale time"])("rejects historical %s proof", failure => {
+    const f = fixture(), result = outcome(f);
+    if (failure === "source") result.report.identity.sourceCommit = "f".repeat(40);
+    if (failure === "digest") result.report.identity.buildSha256 = "e".repeat(64);
+    if (failure === "model") result.report.identity.model = "another-model";
+    if (failure === "MCP") result.report.checks = result.report.checks.filter(check => check !== "nativeMcp");
+    if (failure === "retirement") result.retirement = 1;
+    if (failure === "profile") result.report.executionProfile = "unsupported";
+    if (failure === "stale time") result.report.qualifiedAt = new Date(Date.now() - 2 * 24 * 3600_000).toISOString();
+    expect(() => nativeRuntimeEvidence(f.image, f.connection, result, Date.now() - 1000)).toThrow();
+  });
+  it("requires independent Codex renewal and worker refresh adoption evidence", () => {
+    const f = fixture(); f.connection.kind = "codex-chatgpt"; f.connection.provider = "codex"; f.connection.model = "gpt-5.6-luna";
+    const report: any = outcome(f);
+    expect(() => nativeRuntimeEvidence(f.image, f.connection, report, Date.now() - 1000)).toThrow();
+    report.report.checks.push("nativeAccessRefresh"); report.renewal = { accountBinding: true, accessChanged: true, cachePublished: true, consentPreserved: true };
+    expect(nativeRuntimeEvidence(f.image, f.connection, report, Date.now() - 1000).credentials[0].renewal).toBe(true);
+    report.retirement = 1; expect(() => nativeRuntimeEvidence(f.image, f.connection, report, Date.now() - 1000)).toThrow();
+  });
+  it("retains bounded historical rate-limit classification and budget calculations", () => {
+    expect(qualificationRateLimited({ code: 1, report: { qualified: false, failureKind: "rate-limited" } })).toBe(true);
+    expect(qualificationRateLimited({ code: 0, report: { qualified: true, failureKind: "rate-limited" } })).toBe(false);
+    expect(canaryBudgetHours({ builderBudgetHours: 2 })).toBeCloseTo(QUALIFICATION_DEADLINE_MS / 3_600_000 + 0.25);
+    expect(canaryBudgetHours({ builderBudgetHours: 0.5 })).toBe(0.5);
+  });
+  it("keeps organization-image metadata bound to the current base without preparing credentials", () => {
+    const f = fixture(), profile = { fixture: { workosUserId: "user_test", workosOrganizationId: "org_test", expectedEmail: "dev@example.test", expectedOrganizationSlug: "test" } };
+    const image = { ...f.image, id: "image-id", snapshotId: "org-image" };
+    expect(hostedAgentRequest(f.state, profile, image)).toMatchObject({ image: { snapshotId: f.image.snapshotId }, organizationImage: { id: image.id, snapshotId: image.snapshotId } });
+    f.state.source.workerInputsSha256 = "f".repeat(64);
+    expect(() => hostedAgentRequest(f.state, profile, image)).toThrow("current worker base");
+  });
 });

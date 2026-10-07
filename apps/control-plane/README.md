@@ -473,7 +473,7 @@ The authenticated Organization surface is:
 Mutating requests require an `Idempotency-Key`; replaying the same key and
 semantic request returns the original workspace/intent, while reusing it for
 different parameters returns `409`. Public documents contain the stable Zeros
-workspace id, never Daytona's resource id. PostgreSQL records the immutable
+workspace id, never the Boat resource id. PostgreSQL records the immutable
 image, architecture, source commit, and resource allocation per generation.
 The provider reconciler uses leases, observes before mutating, recovers lost
 create responses, converges drift, and only deletes a managed true orphan after
@@ -733,7 +733,7 @@ and `CLOUD_WORKSPACE_OBJECT_KEYS_JSON` are independent cryptographic domains.
 Provider creation queues a setup run and leaves the workspace in `setting_up`
 while `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED=false`. The setup worker,
 workspace-bound admission and engine grant issuer are implemented, but remain
-behind that separate operator gate until the exact Daytona image, lifecycle,
+behind that separate operator gate until the exact Boat image, lifecycle,
 root-coordinator decision, and signed macOS access paths complete protected
 qualification. End-user cloud catalog, creation, details, and management UI is
 also intentionally unwired. Configuration and safe defaults are documented in

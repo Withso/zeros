@@ -468,6 +468,7 @@ export function PendingSidebarWorkspaceRow({
   branch,
   kind = "code",
   project,
+  projectInteractive = true,
   mixedRepositories = false,
   grouped = false,
   active = false,
@@ -478,6 +479,7 @@ export function PendingSidebarWorkspaceRow({
   branch?: string;
   kind?: "code" | "design";
   project?: Project | null;
+  projectInteractive?: boolean;
   mixedRepositories?: boolean;
   grouped?: boolean;
   active?: boolean;
@@ -505,7 +507,7 @@ export function PendingSidebarWorkspaceRow({
     >
       <span className={SIDEBAR_WORKSPACE_CONTENT_CLS}>
         {mixedRepositories && project ? (
-          <WorkspaceProjectIcon project={project} />
+          projectInteractive ? <WorkspaceProjectIcon project={project} /> : <RepositoryIcon project={project} className="size-4 rounded-sm" />
         ) : (
           <span className={GLYPH_BOX_CLS} aria-hidden="true">
             {kind === "design" ? (

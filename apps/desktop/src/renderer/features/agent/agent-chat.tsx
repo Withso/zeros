@@ -99,7 +99,7 @@ import {
 } from "./encode-attachments";
 import type { ComposerAttachment } from "./composer-attachments";
 import { isSubmittedComposerDocument } from "./composer-submission";
-import { useInternalFeatureActive } from "../settings/internal-features";
+import { useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 // Wave 4 (2026-05-16): the composer card is now built on the canonical
 // AI Elements PromptInput recipe (form-shaped InputGroup with a
 // block-end addon toolbar). Only COMPOSER_FILE_ACCEPT survives here
@@ -869,7 +869,7 @@ export function AgentChat({
   const agentsList = useWorkspaceAgents(chatThread?.folder, interactive);
   const runtimeUpgradeRequired = agentsList?.find(agent => agent.id === (chatThread?.agentId ?? session.agentId))?.runtimeUpgradeRequired === true;
   const agentSessions = useAgentSessions();
-  const cloudComputerV2 = useInternalFeatureActive("cloudComputerV2");
+  const cloudComputerV2 = useCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(chatThread?.folder)?.organizationId);
   const retryTurn = useCallback(
     (prompt: AgentTextMessage, events: AgentMessage[], newChat: boolean) => {
       if (!chatId || !interactive) return Promise.resolve();
@@ -1468,7 +1468,7 @@ export function AgentChat({
   ]);
 
   const openBoundaryPort = session.openBoundaryPort;
-  const cloudPreviewsEnabled = useInternalFeatureActive("cloudComputerV2");
+  const cloudPreviewsEnabled = useCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(chatThread?.folder)?.organizationId);
   const cloudCanEdit = useCloudWorkspaceCanEdit(chatThread?.folder);
   const cloudPreviewsActive = cloudPreviewsEnabled && cloudCanEdit;
   const warmBoundaryPreview = useCallback(() => {

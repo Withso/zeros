@@ -8,6 +8,7 @@ import {
   type CloudNativeOperation,
   CloudNativeOperationSchema,
   CloudNativeResultSchema,
+  cloudCommandFailureFromCode,
 } from "@zeros/protocol/cloud-commands";
 import type { RuntimeClient } from "./ws-client";
 import type { BackgroundTasksUpdate } from "@zeros/protocol/agent-events";
@@ -811,6 +812,20 @@ export class CloudAgentConnection {
             owner.execution = entry.executionId;
             this.executionOwners.set(entry.executionId, owner.id);
           }
+          if (entry?.state === "succeeded") {
+            // Receipt persistence proves dispatch completion, not consumption
+            // of the ordered transcript. Install its existing snapshot floor
+            // before the renderer reads history, so delayed chunks cannot be
+            // appended a second time to that normalized tail.
+            const state = await this.restoreNativeState(owner);
+            if (!observing) { state.restoration?.finish(); return terminal!; }
+            try {
+              this.attachSnapshot(state);
+              const changed = { type: "DB_CHANGED", kinds: ["messages"], chatIds: [owner.id] };
+              for (const listener of this.listeners.get("DB_CHANGED") ?? []) listener(changed as unknown as BridgeMessage);
+              this.publishControls(state);
+            } catch (error) { state.restoration?.finish(); throw error; }
+          }
           if (entry && ["succeeded", "cancelled"].includes(entry.state))
             return {
               type: "AGENT_PROMPT_COMPLETE",
@@ -827,11 +842,15 @@ export class CloudAgentConnection {
               sessionId: routeId(owner.id),
               executionId: routeId(owner.id),
               error:
-                isCloudAgentAdmissionCode(entry.resultCode)
+                isCloudAgentAdmissionCode(entry.resultCode) || cloudCommandFailureFromCode(entry.resultCode)
                   ? entry.resultCode
                   : entry.state === "uncertain"
                   ? "The cloud command outcome is unknown. Review the transcript before retrying."
                   : "command_dispatch_rejected",
+              ...(entry.state === "failed" && cloudCommandFailureFromCode(entry.resultCode, owner.agentId)
+                ? { failure: cloudCommandFailureFromCode(entry.resultCode, owner.agentId) } : {}),
+              requestId: commandId,
+              chatId: owner.id,
             };
           await new Promise<void>(resolve => {
             const timer = setTimeout(() => { wakeReceiptWait = undefined; resolve(); }, 1000);
@@ -851,6 +870,9 @@ export class CloudAgentConnection {
           if (receipt.commandId === commandId && receipt.conversationId === owner.id &&
               isCloudAgentAdmissionCode(receipt.resultCode))
             result = { ...result, error: receipt.resultCode };
+          else if (receipt.commandId === commandId && receipt.conversationId === owner.id && !result.failure &&
+              cloudCommandFailureFromCode(receipt.resultCode, owner.agentId))
+            result = { ...result, error: receipt.resultCode, failure: cloudCommandFailureFromCode(receipt.resultCode, owner.agentId) };
         } catch { /* An unavailable receipt cannot prove a pre-provider denial. */ }
       }
       // A terminal receipt also ends the execution's interactive controls when

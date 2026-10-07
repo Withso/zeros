@@ -1,13 +1,27 @@
 # Cloud Computer v2 environment and repository setup
 
-This contract applies when a workspace generation has a
-`cloud_workspace_computer_sources` row. Generations without that row retain the
-legacy settings resolver. The row's `config_id` selects exact
+Cloud execution requires a valid saved `cloud_workspace_computer_sources` row,
+a complete v4 worker runtime pin, and actor protocol 2. Generations without a
+source, with an invalid saved template, or with an unpinned/retired worker are
+refused with the closed `cloud_workspace_v2_required` code before setup,
+credentials, wake/fork, or replacement/recovery admission. The server and client
+show: “This workspace uses a retired cloud runtime — create a new workspace.”
+This refusal is terminal for setup and automatic recovery.
+
+The saved row's `config_id` selects exact
 `cloud_computer_environment_refs(binding_id, binding_version)`; neither the
 current draft nor a binding's latest version supplies org values to an existing
 generation. A revoked, missing, retired or unauthorized pinned version fails
 with `computer_environment_revoked`, including when a higher layer overrides it.
 Concurrent authority changes fail closed and retry with `computer_environment_busy`.
+
+Saved metadata and transcript history remain authorized reads. Retirement does
+not delete resources, change existing pins, select today's template, or silently
+create a source sidecar. Owners may create a fresh v2 workspace or explicitly
+delete a retained workspace through normal resource cleanup. Runtime updates
+within a supported generation do not convert a legacy workspace; automatic
+legacy-data conversion is deferred. Local and organization-owned local
+workspaces continue to use their normal local settings and runtime paths.
 
 Environment precedence, lowest to highest, is:
 
@@ -78,8 +92,9 @@ ID, as in the computer config. The generic settings API still uses the internal
 repository UUID. The admin tool translates that UUID and invokes the exported
 `updateRepositorySetupScript` service within its existing authority transaction.
 
-The actor must be engineering staff and an org owner/admin; failing either
-check returns 403. The repository must occur in the active or draft config.
+The actor must have an active account and a current org owner/admin role.
+Ordinary members receive 403; unavailable accounts receive 404. Staff status
+is not a prerequisite. The repository must occur in the active or draft config.
 Only cloud `setupCommands` are replaced, under the same repository lock as
 generic settings writes. Other values, secret references and shared settings
 remain intact. An empty/whitespace script disables setup. Scripts are bounded
@@ -101,7 +116,8 @@ redaction, then retain at most 16 KiB of UTF-8 output in the
 root setup log and existing setup-run log fields. The private helper's version-3
 error envelope is accepted only on v4 and only for hook failures. Other provider
 output keeps the existing withholding boundary. Existing version-1 journals
-and legacy helper behavior remain compatible. Publish a runtime bundle with the
+remain readable by the supported v4 helper; retired helpers cannot execute.
+Publish a runtime bundle with the
 updated helper and engine together with the control-plane change.
 
 ## Alpha live runbook
@@ -121,14 +137,14 @@ command arguments or include them in reports:
 - `ZEROS_C4_ALPHA_ORGANIZATION_ID`
 - `ZEROS_C4_ALPHA_REPOSITORY_ID` (internal UUID for the same GitHub repository)
 - `ZEROS_C4_ALPHA_GITHUB_REPOSITORY_ID`
-- `ZEROS_C4_ALPHA_ADMIN_TOKEN` (engineering staff, org owner/admin)
-- `ZEROS_C4_ALPHA_MEMBER_TOKEN` (engineering staff, ordinary org member)
+- `ZEROS_C4_ALPHA_ADMIN_TOKEN` (active org owner/admin)
+- `ZEROS_C4_ALPHA_MEMBER_TOKEN` (active ordinary org member)
 - `ZEROS_C4_ALPHA_NONSTAFF_TOKEN` (nonstaff org owner/admin)
 
 Run `node scripts/cloud-workspace-validation/c4-environment-setup.mjs --run`.
 The script pins the public Alpha API origin, bounds response bodies and emits
-only closed check names, IDs and settings version numbers. It exercises both
-403 cases, CAS, preservation and disabling, and checks that the computer
+only closed check names, IDs and settings version numbers. It exercises member
+403, nonstaff-admin stale-CAS 409 without a write, preservation and disabling, and checks that the computer
 revision stays unchanged. It restores the prior cloud document with CAS in
 `finally`, including after a lost response. `cleanup: "required"` means cleanup
 was not confirmed: stop and restore the dedicated fixture through its ordinary

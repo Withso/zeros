@@ -32,7 +32,7 @@ database("factory-started computer template worker", () => {
       provider: "boat", apiKey: "zeros-v2-test-boat-key",
       boat: { accountScope: "zeros-v2-test-template-account", billingOrg: BUILDER_WALLET, ttlSeconds: null },
       computerMaxConcurrentBuilds: 1, settingsSecretKeyV1: randomBytes(32).toString("base64url"),
-      runtime: { qualificationMode: "smoke", qualificationEnabled: false, newWorkspaceProfile: "legacy", staffOnly: true },
+      runtime: { qualificationMode: "smoke", qualificationEnabled: false },
     } } as Config;
     const cloud = config.cloudWorkspaces!;
     const service = new DatabaseCloudComputerV2Service(pool, cloud);

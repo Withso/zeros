@@ -13,8 +13,8 @@ are outside E1.
    and sanitized Cloud Computer template. Verify the ordinary fork's primary and
    secondary repository revisions and engine admission. Retain the actual B10
    mount/machine-id receipts; older persistence experiments are not substitutes.
-2. The Mac build includes the `cloudComputerV2` Internal toggle and E5's
-   server-derived `capabilities.canEdit`. Enable that toggle as staff. Use owner,
+2. The Mac build uses current account/organization cloud admission and
+   server-derived `capabilities.canEdit`, without the retired staff toggle. Use owner,
    manager/developer, prompter and viewer fixtures, with two separately registered
    Mac devices. Missing `canEdit` must disable the access controls.
 3. Name disposable workspaces/templates and remote test directories with
@@ -168,8 +168,8 @@ several simultaneous local connections and verify isolation. Test these cases:
    their original workspace, with no read flicker or capability in renderer
    state. Hiding/closing the popover does not close deliberate Terminal/TCP
    access, and does stop metadata polling. Revalidation retains same-key rows.
-   Prompters/viewers must not open access; turn off the Internal toggle and
-   confirm the entire new surface disappears.
+   Prompters/viewers must not open access. Sign out or withdraw current
+   account/organization cloud access and confirm the surface disappears.
 4. Change accounts while admission is pending and while streams are active.
    Old local listeners close; late results cannot copy/launch into the new
    account. Only the issuing account is used for remote cleanup. Disconnect

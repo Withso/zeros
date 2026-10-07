@@ -63,23 +63,16 @@ export function runtimeQualificationPredicate(mode: string, requireMcp = "false"
 }
 
 /** Shared by grant discovery and every execution/renewal admission. Callers
- * provide generation, engine and credential aliases; the v3 branch keeps its
- * image/contract identity while v4 requires the saved generation pin. */
+ * provide generation, engine and credential aliases with the saved v4 pin. */
 export function runtimeCredentialQualificationJoin(mode: string, requireMcp: string): string {
   return `JOIN LATERAL (
-    SELECT qualification.native_capabilities,qualification.mcp_qualified FROM cloud_agent_runtime_qualifications qualification
-    WHERE generation.runtime_id IS NULL AND engine.runtime_id IS NULL
-      AND qualification.provider=generation.provider::text AND qualification.image_ref=generation.image_ref
-      AND qualification.runtime_contract_sha256=engine.agent_runtime_contract_sha256 AND qualification.profile=engine.agent_runtime_profile
-      AND qualification.profile='zeros-cloud-worker-v3' AND qualification.credential_kind=credential.kind AND qualification.enabled
-      AND (NOT (${requireMcp}) OR qualification.mcp_qualified)
-    UNION ALL
     SELECT qualification.native_capabilities,qualification.mcp_qualified FROM cloud_runtime_qualifications qualification
     JOIN cloud_runtime_bundles bundle ON bundle.runtime_id=qualification.runtime_id AND bundle.revoked_at IS NULL
     JOIN cloud_runtime_base_images base ON base.base_image_id=generation.runtime_base_image_id
       AND base.base_compatibility_id=qualification.base_compatibility_id AND base.revoked_at IS NULL
     JOIN cloud_runtime_base_contracts contract ON contract.base_compatibility_id=base.base_compatibility_id AND contract.revoked_at IS NULL
-    WHERE qualification.runtime_id=generation.runtime_id AND qualification.base_compatibility_id=generation.runtime_base_compatibility_id
+    WHERE generation.provider='boat' AND generation.sandbox_class IS NULL AND base.provider='boat'
+      AND qualification.runtime_id=generation.runtime_id AND qualification.base_compatibility_id=generation.runtime_base_compatibility_id
       AND qualification.credential_kind=credential.kind AND ${runtimeQualificationPredicate(mode, requireMcp)}
       AND bundle.manifest_sha256=generation.runtime_manifest_sha256
       AND bundle.engine_protocol_version=generation.runtime_engine_protocol_version
@@ -122,7 +115,7 @@ export async function selectCloudRuntime(tx: Tx, mode: CloudRuntimeQualification
   // existing three-kind floor. Other callers retain their default selection.
   const requiredKinds = [...new Set([...REQUIRED_KINDS, ...additionalKinds])];
   const base = (await tx.query<BaseRow>(`SELECT base.* FROM cloud_runtime_base_images base
-    WHERE base.revoked_at IS NULL AND ($1::text IS NULL OR base.base_image_id=$1)
+    WHERE base.provider='boat' AND base.revoked_at IS NULL AND ($1::text IS NULL OR base.base_image_id=$1)
     ORDER BY base.approved_at DESC, base.base_image_id LIMIT 1 FOR SHARE OF base`, [baseImageId ?? null])).rows[0];
   if (!base) return null;
   if (!(await tx.query(`SELECT 1 FROM cloud_runtime_base_contracts contract
@@ -155,7 +148,7 @@ export async function loadPinnedCloudRuntime(tx: Tx, pin: CloudRuntimePin, mode:
     JOIN cloud_runtime_base_images base ON base.base_image_id=$3 AND base.base_compatibility_id=$4
     JOIN cloud_runtime_base_contracts contract ON contract.base_compatibility_id=base.base_compatibility_id
     WHERE bundle.runtime_id=$1 AND bundle.manifest_sha256=$2 AND bundle.revoked_at IS NULL
-      AND base.revoked_at IS NULL AND contract.revoked_at IS NULL
+      AND base.provider='boat' AND base.revoked_at IS NULL AND contract.revoked_at IS NULL
       AND bundle.engine_protocol_version=$5 AND bundle.engine_protocol_version=$6
     FOR SHARE OF base, contract, bundle`, [pin.runtimeId, pin.manifestSha256, pin.baseImageId, pin.baseCompatibilityId,
     pin.engineProtocolVersion, CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION])).rows[0];

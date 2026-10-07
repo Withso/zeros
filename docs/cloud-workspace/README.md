@@ -1,139 +1,59 @@
 # Cloud workspaces
 
-This folder is the current public engineering source for Zeros cloud workspaces.
-It describes the product contract, target boundaries, security model, operating
-requirements, and implementation sequence without depending on a particular
-sandbox vendor.
+Zeros cloud execution uses **Boat**, an immutable saved **v2 Cloud Computer
+source**, a qualified **v4 worker runtime pin**, and **actor protocol 2**.
+Personal workspaces remain Local. Organization-owned Local workspaces use the
+local engine; organization ownership alone never selects cloud execution.
 
-Cloud workspaces are **pre-production** in this repository. The original non-UI
-foundation roadmap through Phase 5 is implemented behind release gates. The
-provider and multi-device expansion described in the client/runtime contract
-has separate implementation and qualification work remaining:
+The control plane owns authorization, lifecycle/allocation journals, one durable
+command queue, receipts and normalized history. The Boat engine owns live
+workspace ordering, native agents, Git, Files and Design. Desktop routes by the
+exact `cloud://` workspace identity and retains confirmed views during refresh.
+Electron main owns native access, receive-only replicas and the bounded cloud
+transcript presentation cache. See [architecture](architecture.md).
 
-- WorkOS proves account and Organization identity. Zeros remains authoritative
-  for Personal's local-only boundary, individual Pro account authority,
-  Business/Enterprise seats, Team and repository scope, workspace ownership,
-  billing epochs, quotas, and every paid-runtime admission.
-- The control plane owns immutable workspace/generation identity, idempotent
-  lifecycle intents, provider-connection versions, encrypted settings and
-  secret resolution, short-lived GitHub credentials, usage attribution,
-  reconciliation, outbox delivery, retention, export, and deletion.
-- The image-owned setup path uses one-use admission redemption, bounded
-  commands, immutable readiness attestation, engine registration/heartbeats,
-  credential rotation, and drain-first generation replacement/rollback.
-- PostgreSQL stores the ordered durable record and content projections.
-  Encrypted blobs and checkpoints use the object-store abstraction. Its S3
-  adapter was qualified against a private R2 bucket; a filesystem adapter serves
-  a private mounted volume.
-- Local-to-cloud and cloud-to-local are immutable copy/fork workflows. The
-  destination always receives a new workspace UUID and the source remains
-  unchanged. Each authorized member/device receive-only replica may mirror a
-  cloud workspace, but never becomes cloud authority or uploads local edits.
-- Electron main owns exact-execution remote connection leases, short-lived SSH,
-  authenticated previews, and `127.0.0.1` forwards. Raw provider capabilities
-  do not enter renderer state.
+Retired generations return terminal `cloud_workspace_v2_required` before new
+execution authority or allocation. Authorized metadata, history, sharing,
+management and deletion remain available. No automatic source conversion or
+Local fallback occurs. Saved source/runtime pins and historical database/wire
+schema versions remain compatibility contracts.
 
-Public cloud routes and `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` must
-remain disabled until the exact images for each enabled provider, lifecycle/rollback/delete paths,
-engine/worker isolation, and signed macOS SSH/preview/tunnel flow have passed
-their protected qualification. Repository tests are not substitutes for that
-evidence. A staff-only isolated API qualification backend may set
-`CLOUD_WORKSPACES_ENABLED=true`, `CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED=false`
-and `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED=false`. This pauses background loops;
-it does not block direct provider calls. Qualification must avoid provider
-operations until their separate release gates pass.
+Repository implementation is separate from deployment and release qualification.
+Cloud already operates in Alpha; this overhaul has not itself been qualified on
+live Alpha or signed macOS. Updating desktop/control-plane source does not change
+an existing VM's pin. See [qualification status](qualification-status.md) for
+migration, publication, adoption and acceptance gates.
 
-Cloud creation, catalog, details and organization setup use the existing desktop
-workbench behind the cloud feature gate. These surfaces still require native and
-live provider qualification; their presence is not a customer rollout approval.
-Organization sharing and individually entitled external collaborators have
-backend contracts, regression coverage and isolated deployed API evidence.
-Managed Boat runtime passed qualification on the isolated deployment, apart
-from the open items in [qualification status](qualification-status.md); Daytona
-and native client qualification remain open. Presence UI, ownership transfer
-execution, mobile apps, and a published customer-managed Railway template are
-later work. Documents in this folder distinguish implemented repository
-behavior from release qualification and deferred product surfaces.
+## Read first
 
-## Documents
+- [Architecture](architecture.md): authority, identity and create/command paths.
+- [Product contract](product-contract.md): ownership and user-visible behavior.
+- [Engineering reference](engineering-reference.md): source map, Git and Local guards.
+- [Qualification status](qualification-status.md): implementation versus release evidence.
+- [Wake performance](wake-performance.md): readiness, preparation reuse and measurement.
+- [Warm pool and reliability follow-ups](warm-pool.md): accounted prebooted capacity,
+  VM durable outbox, outbound VM transport, one multiplexed client↔backend channel,
+  incremental transcript feeds and Mac send outbox with acks.
 
-- [Organization setup](organization-setup.md) defines organization settings,
-  agent accounts, authorized GitHub repositories and Cloud Computer validation.
-- [Computer environment and setup](computer-environment.md) defines v2 generation
-  pins, actor-specific environment delivery, repository hooks and the Alpha runbook.
-- [Cloud Computer template forks](template-forks.md) defines staff v2 create
-  admission, saved sources, checkout projections and the Alpha verification runbook.
-- [Agent authentication and language tools](agent-authentication-and-language-tools.md) defines personal consent, native subscription renewal and bounded language services.
-- [MCP and skills](mcp-and-skills.md) defines cloud customization authority and provider configuration.
-- [Computer agent tools](computer-tools.md) defines marked admin workspaces, execution authority and the five computer tools.
-- [Provider background work](provider-background-work.md) defines retained native tasks, renewable leases and task recovery.
-- [Lifecycle diagnostics](lifecycle-diagnostics.md) defines setup progress, failure evidence and recovery diagnostics.
-- [In-place runtime updates](runtime-hot-update.md) proposes quiet engine updates,
-  immutable generation handoff, rollback and the bootstrap qualification gates.
-- [Live runtime updates](live-runtime-updates.md) proposes staging qualified runtimes
-  in running workspaces and swapping the engine at a safe point without stopping user work.
+## Behavior guides
 
-- [Qualification status](qualification-status.md) separates the current eight
-  backend steps, native tool coverage, live evidence and remaining release gates.
-- [Release worker qualification](release-worker-qualification.md) defines the
-  automated worker-image canaries, designated owner accounts and snapshot budgets.
-- [Pro backend](pro-backend.md) defines individual sponsorship, monthly
-  allowances, staff benefits, explicit writers, unlimited Read-only Pro guests
-  and the provider-neutral API migration. Its hosted rollout is separate.
-- [Managed compute credits](compute-credits.md) defines automatic and explicit grants,
-  reservations, finite provider leases, settlement and operator rollout.
-- [Database qualification](database-qualification.md) defines the selected
-  PlanetScale Postgres target, migration prerequisites and recovery acceptance.
-- [Product contract](product-contract.md) defines what users may rely on.
-- [Architecture](architecture.md) defines runtime and repository ownership.
-- [Provider contract](provider-contract.md) defines generation-bound selection,
-  operation evidence, asynchronous deletion and the current integration gates.
-- [Client and runtime contract](client-runtime-contract.md) defines the backend
-  expansion for independent provider connections, shared Code/Design sessions,
-  live access from multiple devices, and complete recovery. Its acceptance
-  requirements are not claims of completed implementation or qualification.
-- [Local workspace impact audit](local-workspace-impact-audit.md) records the
-  shared-path review of the merged Cloud v2 changes and the local regression guards.
-- [Data, copies, and local sync](data-and-sync.md)
-  defines sources of truth, recovery, conflict rules, Personal/Organization
-  placement, repository settings, immutable forks, per-device replicas, SSH,
-  forwarded ports, and the target data model.
-- [Native checkpoint recovery](checkpoint-native-format.md) defines chunked Git,
-  harness, Design and attachment recovery, its bounds and format compatibility.
-- [Security](security.md) defines trust boundaries and release blockers.
-- [Root coordinator exception review](root-coordinator-threat-model.md)
-  records the privileged coordinator boundary, unprivileged engine/worker
-  separation and required provider evidence.
-- [Infrastructure and operations](infrastructure-and-operations.md) defines
-  image, lifecycle, observability, and provider requirements.
-- [Enterprise and self-hosting](enterprise-and-self-hosting.md) defines the
-  control-plane/data-plane seams to preserve.
-- [Implementation roadmap](implementation-roadmap.md) is the temporary delivery
-  checklist.
-- [Engineering reference](engineering-reference.md) maps the plan to current
-  code and validation commands.
+| Area | Owning guides |
+| --- | --- |
+| Client routing, commands and access | [Client/runtime contract](client-runtime-contract.md), [relay capacity](relay-capacity.md), [native access acceptance](native-access-acceptance.md), [native preview acceptance](native-preview-acceptance.md) |
+| Durable data and copies | [Data and sync](data-and-sync.md), [native checkpoint format](checkpoint-native-format.md) |
+| Organization and account authority | [Organization setup](organization-setup.md), [Pro backend](pro-backend.md), [account Pro operations](account-pro-operations.md), [compute credits](compute-credits.md) |
+| Cloud Computer | [Template builds](computer-template-builds.md), [template forks](template-forks.md), [template retention](computer-template-retention.md), [Computer tools](computer-tools.md), [environment/setup](computer-environment.md) |
+| Native agents and customization | [Authentication/language tools](agent-authentication-and-language-tools.md), [MCP and skills](mcp-and-skills.md), [provider background work](provider-background-work.md) |
+| Runtime and updates | [Runtime bundles](runtime-bundles.md), [live runtime updates](live-runtime-updates.md), [runtime lifecycle acceptance](runtime-lifecycle-acceptance.md), [runtime skew gate](runtime-skew-gate.md), [release worker retirement and cleanup](release-worker-qualification.md) |
+| Operations | [Provider contract](provider-contract.md), [lifecycle diagnostics](lifecycle-diagnostics.md), [infrastructure and operations](infrastructure-and-operations.md), [database qualification](database-qualification.md) |
+| Security and deployment seams | [Security](security.md), [enterprise/self-hosting](enterprise-and-self-hosting.md) |
 
-## Retention policy
+## Documentation policy
 
-Do not delete the whole folder when cloud workspaces ship.
-
-- Keep the product contract, architecture, data, security, operations,
-  enterprise, and engineering-reference documents synchronized with the
-  implementation.
-- Retire a roadmap item only after its exit criteria and tests pass.
-- When the roadmap is fully resolved, replace it with a short shipped-status
-  page or move its lasting decisions into the durable documents.
-- Keep dated vendor comparisons, pricing snapshots, reverse-engineering notes,
-  credentials, and account-specific deployment investigations in the private
-  planning system, not this public repository.
-
-The former July 2026 research pack remains recoverable from Git history but is
-not authoritative: it duplicated Markdown as generated HTML, referenced the old
-repository layout, and mixed durable architecture with time-sensitive market
-research.
-
-## Authority
-
-Code, tests, database migrations, and deployment manifests remain authoritative.
-When a document and working behavior disagree, fix the document in the same
-change and add a test for the intended contract where practical.
+Give each behavior one owning guide and link to it from other guides. Keep
+schemas, authority, recovery, limits and acceptance procedures current with code.
+Keep unfinished work explicitly proposed and live/platform qualification
+explicitly unproven. Completed implementation roadmaps and dated audits belong
+in Git history; their durable decisions belong in the guides above. Private
+operational evidence, credentials and scratch vendor research stay outside public
+docs. Code, tests, migrations and deployment manifests remain authoritative.

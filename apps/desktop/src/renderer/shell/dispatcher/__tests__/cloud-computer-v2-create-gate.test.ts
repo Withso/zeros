@@ -174,13 +174,23 @@ describe("first-build cloud create admission", () => {
     expect(create().reason).toBeNull();
   });
 
-  it("gates v2 reads, intent warming and guidance on staff, flag, owner, and activity", () => {
+  it("warms and checks v2 for every organization member", () => {
     readGate().warm();
     expect(state.warm).toHaveBeenCalledWith(computerUser, computerOrg);
+    for (const role of [null, "support_admin", "developer"]) {
+      state.feature = false;
+      state.role = role;
+      state.warm.mockReset();
+      const gate = readGate();
+      gate.warm();
+      expect(gate.enabled).toBe(true);
+      expect(gate.reason).toBe("Build your Cloud Computer first");
+      expect(state.warm).toHaveBeenCalledWith(computerUser, computerOrg);
+    }
+  });
+
+  it("gates reads and intent warming on owner and activity", () => {
     for (const [feature, role, personal, active] of [
-      [false, "developer", false, true],
-      [true, null, false, true],
-      [true, "support_admin", false, true],
       [true, "developer", true, true],
       [true, "developer", false, false],
     ] as const) {
@@ -193,15 +203,14 @@ describe("first-build cloud create admission", () => {
       gate.warm();
       expect(state.reads.every((row) => !row.enabled)).toBe(true);
       expect(state.warm).not.toHaveBeenCalled();
-      if (!feature || !role || role === "support_admin" || personal)
+      if (personal)
         expect(gate.reason).toBeNull();
     }
   });
 
-  it("keeps legacy creation unchanged when v2 is off and directs members to an admin", () => {
+  it("requires the computer with the retired flag off and directs members to an admin", () => {
     state.feature = false;
-    expect(create().reason).toBeNull();
-    state.feature = true;
+    expect(create().reason).toBe("Build your Cloud Computer first");
     const html = renderToStaticMarkup(
       createElement(CloudComputerV2CreateNotice, {
         required: true,

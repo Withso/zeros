@@ -1,3 +1,4 @@
+import { refuseRetiredDevNativeCanary } from "./native-agent-retirement.mjs";
 import { devBoatClient, confirmBoatDeletion, assertDevBuilderBudget } from "./hosted-image.mjs";
 import { sha256 } from "./state.mjs";
 import { dispatchDevCreate, DevProviderError } from "./provider-http.mjs";
@@ -45,7 +46,6 @@ export function nativeRuntimeEvidence(image, connection, outcome, startedAt, now
 }
 
 
-const CANARY_TTL_SECONDS = QUALIFICATION_DEADLINE_MS / 1000 + 5 * 60;
 export function canaryBudgetHours(boat) {
   return Math.min(boat.builderBudgetHours, QUALIFICATION_DEADLINE_MS / 3_600_000 + 0.25);
 }
@@ -86,7 +86,11 @@ function nativeStorageProof(state, row, job, profile, operation) {
     status: "blocked", stage: operation.stage, requestedAt: operation.requestedAt, expectedBy: operation.expectedBy ?? null } };
 }
 
-export function nativeAgentCanary(lease, profile, request = devBoatClient(profile.boat, lease.signal), admission, options = {}) {
+export function nativeAgentCanary(lease, profile, providerRequest, admission, options = {}) {
+  const request = (...args) => {
+    providerRequest ??= devBoatClient(profile.boat, lease.signal);
+    return providerRequest(...args);
+  };
   const nativeDeadlineSeconds = options.nativeDeadlineSeconds ?? QUALIFICATION_DEADLINE_MS / 1000;
   if (!Number.isSafeInteger(nativeDeadlineSeconds) || nativeDeadlineSeconds < 60 || nativeDeadlineSeconds > 2400) throw new Error("Invalid native canary deadline");
   const boundedLease = options.nativeDeadlineSeconds !== undefined || options.maxUsedHours !== undefined;
@@ -120,113 +124,56 @@ export function nativeAgentCanary(lease, profile, request = devBoatClient(profil
     }
     return response.body.sandbox;
   };
-  const command = async (job, script) => {
-    const result = await request("POST", `/sandboxes/${record(job).builder.id}/commands`, { body: { command: script, timeoutSeconds: 20 } });
-    if (result.status !== 200 || result.body?.exitCode !== 0 || result.body.timedOut) throw new Error("Dev canary command could not be confirmed");
-    return result.body.stdout;
+  // Only retirement may replay a lost historical allocation, using its exact
+  // saved request and idempotency key. This is never a fresh canary producer.
+  const recoverAllocation = async (job, image) => {
+    const row = record(job);
+    if (!row.builderIntent || row.builderIntent.key !== job.id || !row.builderIntent.body ||
+        !Number.isFinite(row.builderIntent.at) || row.builderIntent.at > Date.now() + 5000 ||
+        row.sourceCommit !== image.sourceCommit || row.sourceImage !== image.snapshotId)
+      throw new Error("Dev canary recovery requires its recorded original allocation intent");
+    if (row.builder?.deleteRequested || row.builder?.retiredAt) throw new Error("Dev agent canary was retired");
+    const usedSeconds = await assertBudget(row);
+    if (boundedLease && !row.builder) {
+      const remainingSeconds = Math.floor(row.maxUsedHours * 3600 - usedSeconds);
+      if (row.builderIntent.body.ttlSeconds < 60 || row.builderIntent.body.ttlSeconds > remainingSeconds)
+        throw new Error("Native canary budget cannot cover its retained VM lease; reconcile before dispatch");
+    }
+    await lease.fence();
+    await admission?.reserve(job);
+    try {
+      if (!row.builder) {
+        if (Date.now() - row.builderIntent.at > 23 * 3600_000) throw new Error("Dev canary creation must be reconciled before its idempotency window expires");
+        await dispatchDevCreate(lease, row, "Boat Dev", async () => {
+          const response = await request("POST", "/sandboxes", { body: row.builderIntent.body,
+            headers: { "idempotency-key": row.builderIntent.key, "x-boat-org": profile.boat.billingOrg }, timeoutMs: 120_000 });
+          if (response.status >= 300) throw new DevProviderError("Boat Dev", response.status, response.requestId);
+          if (!/^bx_[a-z0-9]+$/.test(response.body?.sandbox?.id ?? "")) throw new Error("Dev canary creation is unconfirmed; its intent was retained");
+          row.builder = { id: response.body.sandbox.id }; await lease.save();
+        }, { key: "builderCreate", idempotentReplay: true });
+      }
+      await owned(job);
+    } finally { await admission?.release(); }
   };
   return {
-    async allocate(job, image) {
-      let row = lease.state.resources.images.find(value => value.agentQualificationId === job.id);
-      const newRecord = !row;
-      const existingIntent = Boolean(row?.builderIntent);
-      if (row?.builder?.deleteRequested || row?.builder?.retiredAt) throw new Error("Dev agent canary was retired");
-      if (!row) {
-        const meter = await request("GET", `/limits?org=${encodeURIComponent(profile.boat.billingOrg)}`);
-        if (meter.status !== 200 || !Number.isFinite(meter.body?.creditUsedSeconds) || meter.body.creditUsedSeconds < 0) throw new Error("Dev agent test budget is unavailable");
-        row = { agentQualificationId: job.id, inputsSha256: sha256(`native-agent:${job.id}`), purpose: "native-agent-qualification", snapshotPolicyVersion: 1,
-          sourceCommit: image.sourceCommit, sourceImage: image.snapshotId,
-          maxUsedHours: Math.min(options.maxUsedHours ?? Infinity, meter.body.creditUsedSeconds / 3600 + canaryBudgetHours(profile.boat)),
-          builderIntent: { key: job.id, at: Date.now(), body: { type: "default", from: image.snapshotId, ttlSeconds: CANARY_TTL_SECONDS, noEnv: true, env: {}, snapshots: false } } };
-      }
-      const usedSeconds = await assertBudget(row);
-      if (boundedLease && !row.builder) {
-        const remainingSeconds = Math.floor(row.maxUsedHours * 3600 - usedSeconds);
-        if (newRecord) row.builderIntent.body.ttlSeconds = Math.min(nativeDeadlineSeconds + 300, Math.floor(canaryBudgetHours(profile.boat) * 3600), remainingSeconds);
-        if (row.builderIntent.body.ttlSeconds < 60 || row.builderIntent.body.ttlSeconds > remainingSeconds)
-          throw new Error("Native canary budget cannot cover its retained VM lease; reconcile before dispatch");
-      }
-      await lease.fence();
-      await admission?.reserve(job);
-      try {
-        if (newRecord) { lease.state.resources.images.push(row); await lease.save(); }
-        if (!row.builder) {
-          if (Date.now() - row.builderIntent.at > 23 * 3600_000) throw new Error("Dev canary creation must be reconciled before its idempotency window expires");
-          await dispatchDevCreate(lease, row, "Boat Dev", async () => {
-            const response = await request("POST", "/sandboxes", { body: row.builderIntent.body,
-              headers: { "idempotency-key": row.builderIntent.key, "x-boat-org": profile.boat.billingOrg }, timeoutMs: 120_000 });
-            if (response.status >= 300) throw new DevProviderError("Boat Dev", response.status, response.requestId);
-            if (!/^bx_[a-z0-9]+$/.test(response.body?.sandbox?.id ?? "")) throw new Error("Dev canary creation is unconfirmed; its intent was retained");
-            row.builder = { id: response.body.sandbox.id }; await lease.save();
-          }, { key: "builderCreate", idempotentReplay: existingIntent });
-        }
-        await owned(job);
-      } finally { await admission?.release(); }
-    },
-    async ready(job) {
-      const sandbox = await owned(job);
-      if (!["ready", "running", "idle"].includes(sandbox.state ?? sandbox.status)) return false;
-      const row = record(job), attempt = job.id.replaceAll("-", "");
-      if (!/^[a-f0-9]{32}$/.test(attempt)) throw new Error("Invalid Dev attestation identity");
-      const directory = `/srv/zeros-qualification/machine-${attempt}`;
-      if (!row.machineAttestationStarted) {
-        row.machineAttestationStarted = true; await lease.save(); await lease.fence();
-        const runner = `import pathlib,subprocess,json,time,os
-base=pathlib.Path('${directory}')
-passed=False
-deadline=time.monotonic()+300
-for attempt in range(5):
- if time.monotonic()>=deadline:break
- try:
-  with (base/'stdout').open('wb') as out,(base/'stderr').open('wb') as err:
-   result=subprocess.run(['/opt/zeros-runtime/bin/node','/opt/zeros-runtime/lib/zeros/attest-cloud-worker.mjs'],stdin=subprocess.DEVNULL,stdout=out,stderr=err,timeout=min(150,deadline-time.monotonic()),env={'PATH':'/opt/zeros-runtime/bin:/usr/bin:/bin','HOME':'/root'})
-  if (base/'stdout').stat().st_size>4194304:break
-  report=json.loads((base/'stdout').read_text())
-  passed=result.returncode==0 and report.get('qualified') is True and report.get('metadata',{}).get('buildSha256')=='${job.image.buildSha256}' and report.get('metadata',{}).get('build',{}).get('source',{}).get('commit')=='${job.image.sourceCommit}'
-  if passed:break
- except (OSError,ValueError,subprocess.TimeoutExpired):pass
- time.sleep(5)
-(base/'result.tmp').write_text(json.dumps({'qualified':passed}));os.replace(base/'result.tmp',base/'result.json')
-`;
-        await command(job, `sudo -n /usr/bin/python3 - <<'PY'
-import pathlib,subprocess
-base=pathlib.Path('${directory}');base.mkdir(mode=0o700,parents=True,exist_ok=False)
-(base/'runner.py').write_text(${JSON.stringify(runner)})
-subprocess.Popen(['/usr/bin/python3',str(base/'runner.py')],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
-print('started')
-PY`);
-        return false;
-      }
-      const result = JSON.parse(await command(job, `sudo -n /usr/bin/python3 - <<'PY'
-import pathlib,json
-p=pathlib.Path('${directory}/result.json')
-print(p.read_text() if p.exists() and p.stat().st_size<1024 else json.dumps({'running':True}))
-PY`));
-      return result.running ? false : result.qualified === true ? true : "failed";
-    },
+    async allocate() { refuseRetiredDevNativeCanary(); },
+    async ready() { refuseRetiredDevNativeCanary(); },
     target(job) { return { id: record(job).builder.id, attempt: job.id, snapshotId: job.image.snapshotId,
       sourceCommit: job.image.sourceCommit, buildSha256: job.image.buildSha256 }; },
-    async start(job, input, renewal, runner) {
-      await owned(job); await assertBudget(record(job));
-      const row = record(job);
-      if (row.nativeDispatchStarted) {
-        const attempt = job.id.replaceAll("-", "");
-        const observed = JSON.parse(await command(job, `sudo -n /usr/bin/python3 - <<'PY'
-import pathlib,json
-p=pathlib.Path('/srv/zeros-qualification/native-${attempt}')
-print(json.dumps({'started':p.is_dir() and (p/'runner.py').is_file()}))
-PY`));
-        if (observed.started !== true) throw new Error("Native canary dispatch is unconfirmed; reconcile before retrying, never redispatch credentials");
-        return;
-      }
-      row.nativeDispatchStarted = true; await lease.save(); await lease.fence();
-      runner ??= (await import("../../apps/control-plane/src/cloud-workspaces/dev-native-canary.ts")).startNativeDevCanary;
-      await runner({ command: script => command(job, script), upload: async (file, contents) => {
-        const response = await request("PUT", `/sandboxes/${row.builder.id}/files`, { body: { path: file, encoding: "base64", content: contents.toString("base64") } });
-        if (response.status !== 200 || response.body?.size !== contents.length) throw new Error("Native canary private input upload is unconfirmed");
-      } }, this.target(job), input, renewal, { deadlineSeconds: options.nativeDeadlineSeconds });
-    },
+    async start() { refuseRetiredDevNativeCanary(); },
     async poll(job) {
+      const row = lease.state.resources.images?.find(value => value.agentQualificationId === job.id);
+      // The historical hosted SSH dispatcher saved starting/running on the
+      // qualification job, but did not write the native transport's marker.
+      // Observe that exact recorded attempt without restoring dispatch.
+      const recorded = lease.state.agentQualifications?.find(value => value.id === job.id);
+      const hostedStarted = ["starting", "running"].includes(recorded?.phase) &&
+        row?.purpose === "native-agent-qualification" && row.builder?.id &&
+        recorded.image?.sourceCommit === row.sourceCommit && recorded.image?.snapshotId === row.sourceImage &&
+        recorded.image?.sourceCommit === job.image?.sourceCommit && recorded.image?.snapshotId === job.image?.snapshotId &&
+        recorded.image?.buildSha256 === job.image?.buildSha256;
+      if (row?.nativeDispatchStarted !== true && !hostedStarted)
+        refuseRetiredDevNativeCanary();
       await owned(job); await assertBudget(record(job));
       const id = record(job).builder.id, attempt = job.id.replaceAll("-", "");
       if (!/^[a-f0-9]{32}$/.test(attempt)) throw new Error("Invalid Dev canary attempt");
@@ -258,7 +205,7 @@ PY` } });
       if (!row.builder) {
         // Reconcile a lost create response with its original request. Never
         // erase an allocation intent on the assumption that creation failed.
-        await this.allocate(job, job.image);
+        await recoverAllocation(job, job.image);
       }
       let confirmed = false, storageAcknowledged = false;
       try {

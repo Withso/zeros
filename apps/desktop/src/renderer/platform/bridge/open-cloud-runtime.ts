@@ -2,6 +2,7 @@ import {
   closeCloudWorkspaceRuntime,
   openCloudWorkspaceRuntime,
   refreshCloudWorkspaceRuntime,
+  publishCloudWorkspacePortForwardingRuntime,
 } from "../cloud-workspace-access";
 import {
   acceptCloudEngineWorkspace,
@@ -62,8 +63,14 @@ export async function openCloudRuntime(
     void closeCloudWorkspaceRuntime(descriptor.runtimeId).catch(() => {});
     throw error;
   }
+  let latestDescriptor = descriptor;
   const client = new RuntimeClient(descriptor, {
-    refreshCloudConnectionTarget: refreshCloudWorkspaceRuntime,
+    refreshCloudConnectionTarget: async (previous) => {
+      const next = await refreshCloudWorkspaceRuntime(previous);
+      if (next.kind !== "cloud") throw new Error("Cloud runtime identity changed.");
+      latestDescriptor = next;
+      return next;
+    },
   });
   let agents: CloudAgentConnection | undefined;
   let events: CloudEventReader | undefined;
@@ -75,6 +82,7 @@ export async function openCloudRuntime(
     for (const off of listeners) off();
     events?.dispose();
     agents?.dispose();
+    void publishCloudWorkspacePortForwardingRuntime(latestDescriptor, false).catch(() => {});
     client.dispose();
     void closeCloudWorkspaceRuntime(descriptor.runtimeId).catch(() => {});
   };
@@ -139,9 +147,11 @@ export async function openCloudRuntime(
     );
     listeners.push(
       client.onStatusChange((status) => {
+        void publishCloudWorkspacePortForwardingRuntime(latestDescriptor, status === "connected").catch(() => {});
         if (status === "connected") void agents!.refreshAttachments();
       }),
     );
+    void publishCloudWorkspacePortForwardingRuntime(latestDescriptor, client.status === "connected").catch(() => {});
     const reader = events;
     const adapter = agents;
     return {

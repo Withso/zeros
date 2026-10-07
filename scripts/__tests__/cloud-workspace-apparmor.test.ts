@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { testCloudRuntime } from "../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime";
 import { prepareCloudEngineAppArmor } from "../cloud-workspace-validation/sandbox/cloud-engine-launcher.mjs";
 
 function fixture(value = "1") {
   return {
+    runtime: testCloudRuntime(),
     read: vi.fn((file: string) => Buffer.from(file === "/proc/self/uid_map" ? "0 0 4294967295\n" : value)),
     verify: vi.fn(),
     execute: vi.fn(() => ({ status: 0, signal: null })),
@@ -31,14 +33,14 @@ describe("cloud application-scoped user namespaces", () => {
     );
     expect(f.verify.mock.calls).toEqual([
       ["/usr/sbin/apparmor_parser"],
-      ["/opt/zeros-runtime/lib/zeros/zeros-cloud-engine.apparmor"],
+      ["/etc/apparmor.d/zeros-cloud-engine"],
     ]);
     expect(f.execute).toHaveBeenCalledWith(
       "/usr/sbin/apparmor_parser",
       [
         "--replace",
         "--skip-cache",
-        "/opt/zeros-runtime/lib/zeros/zeros-cloud-engine.apparmor",
+        "/etc/apparmor.d/zeros-cloud-engine",
       ],
       expect.objectContaining({
         timeout: 10000,

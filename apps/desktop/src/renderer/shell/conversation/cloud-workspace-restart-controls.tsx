@@ -1,8 +1,9 @@
 import { useCallback, useRef, useState, useSyncExternalStore } from "react";
 import { RotateCw } from "lucide-react";
-import { useInternalFeatureActive } from "../../features/settings/internal-features";
+import { useCloudWorkspaceAccountAccess } from "../../features/team/cloud-workspace-account-access";
 import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
-import { cloudCatalogGeneration, cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
+import { cloudWorkspaceExecutionRefusal } from "../../platform/cloud-workspace-execution";
+import { canReadCloudWorkspace, cloudCatalogGeneration, cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
 import { cloudWorkspaceRestartVisible, restartCloudWorkspace } from "../../state/cloud-workspace-restart";
 import { cloudWorkspaceRestartPhase, subscribeCloudWorkspaceRestarts } from "../../state/cloud-workspace-restart-status";
 import { useWorkbenchAvailability } from "../../state/workbench-availability";
@@ -11,8 +12,8 @@ import { describeWorkspaceRuntimeStatus } from "../workbench/tab-status-model";
 import { cloudWorkspaceHasRunningWork } from "./cloud-workspace-running-work";
 
 export function useCloudWorkspaceRestartAction(folder: string, active: boolean) {
-  const enabled = useInternalFeatureActive("cloudComputerV2");
   const target = parseCloudWorkspaceKey(folder);
+  const enabled = useCloudWorkspaceAccountAccess(target?.organizationId);
   const cloud = target !== null;
   const subscribe = useCallback((listener: () => void) =>
     enabled && active && cloud ? subscribeCloudWorkspaces(listener) : () => {}, [enabled, active, cloud]);
@@ -22,7 +23,7 @@ export function useCloudWorkspaceRestartAction(folder: string, active: boolean) 
     enabled && active && cloud ? subscribeCloudWorkspaceRestarts(listener) : () => {}, [enabled, active, cloud]);
   const readRestart = () => cloudWorkspaceRestartPhase(folder);
   const phase = useSyncExternalStore(subscribeRestart, readRestart, readRestart);
-  const visible = enabled && cloudWorkspaceRestartVisible(folder, workspace);
+  const visible = enabled && !cloudWorkspaceExecutionRefusal(workspace) && cloudWorkspaceRestartVisible(folder, workspace);
   const disabledReason = !workspace?.capabilities.canWrite
     ? "Workspace run access is required to restart."
     : phase ? "This workspace is restarting." : undefined;
@@ -60,32 +61,33 @@ export function useCloudWorkspaceRestartAction(folder: string, active: boolean) 
       </DialogContent>
     </Dialog>
   );
-  return { visible, disabledReason, request, dialog };
+  return { visible, disabledReason, request, dialog, workspace, enabled };
 }
 
 /** The cloud boundary prevents adding observers or controls to Local rows. */
-export function CloudWorkspaceStatusRow({ folder, active }: { folder: string; active: boolean }) {
-  return parseCloudWorkspaceKey(folder) ? <CloudWorkspaceStatusRowContent folder={folder} active={active} /> : null;
+export function CloudWorkspaceStatusRow({ folder, active, inline = false }: { folder: string; active: boolean; inline?: boolean }) {
+  return parseCloudWorkspaceKey(folder) ? <CloudWorkspaceStatusRowContent folder={folder} active={active} inline={inline} /> : null;
 }
 
-function CloudWorkspaceStatusRowContent({ folder, active }: { folder: string; active: boolean }) {
+function CloudWorkspaceStatusRowContent({ folder, active, inline }: { folder: string; active: boolean; inline: boolean }) {
   const restart = useCloudWorkspaceRestartAction(folder, active);
-  const { availability } = useWorkbenchAvailability(folder, active && restart.visible);
-  if (!restart.visible) return null;
+  const target = parseCloudWorkspaceKey(folder)!;
+  const readable = restart.enabled && restart.workspace?.id === target.workspaceId &&
+    restart.workspace.organizationId === target.organizationId && canReadCloudWorkspace(restart.workspace);
+  const { availability } = useWorkbenchAvailability(folder, active && readable);
+  if (!readable) return null;
   const status = describeWorkspaceRuntimeStatus(availability, Date.now());
   return (
     <>
-      <div aria-label="Cloud workspace status" className="border-border1 flex shrink-0 items-center gap-2 border-b px-3 py-1 text-xs">
-        <span className="text-fg3">Status</span>
-        <span className="text-muted-fg" aria-hidden>·</span>
-        <Tooltip label={restart.disabledReason ?? "Restart workspace"}>
+      <div aria-label="Cloud workspace status" className={inline ? "inline-flex items-center justify-end gap-1 text-xs" : "border-border1 flex shrink-0 items-center gap-2 border-b px-3 py-1 text-xs"}>
+        {!inline && <span className="text-fg3">Status</span>}
+        {restart.visible && <Tooltip label={restart.disabledReason ?? "Restart workspace"}>
           <span className="inline-flex">
             <Button variant="ghost" size="compact" aria-label="Restart workspace" disabled={!!restart.disabledReason}
               onClick={restart.request}><RotateCw />Restart</Button>
           </span>
-        </Tooltip>
-        <span className="text-muted-fg" aria-hidden>·</span>
-        <span role="status" aria-live={active ? "polite" : "off"} className="text-fg3 inline-flex items-center gap-1.5">
+        </Tooltip>}
+        <span role="status" aria-live={active ? "polite" : "off"} className="text-fg1 inline-flex items-center gap-1.5">
           {status === "Running" && <span className="bg-green-primary size-1.5 rounded-full" aria-hidden />}
           {status}
         </span>

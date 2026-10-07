@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ effects: [] as Array<() => void | (() => void)>,
   listeners: new Set<() => void>(), generation: 1, warm: vi.fn<() => Promise<void>>(), toast: vi.fn() }));
-vi.mock("../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => false }));
+vi.mock("../../features/team/cloud-workspace-account-access", () => ({ useCloudWorkspaceAccountAccess: () => false, hasCloudWorkspaceAccountAccess: () => false }));
 vi.mock("react", async original => ({ ...await original<typeof import("react")>(),
   useEffect: (effect: () => void | (() => void)) => mocks.effects.push(effect),
   useCallback: (callback: unknown) => callback,
@@ -35,7 +35,7 @@ it("starts the newly selected generation without waiting for a retired connectio
   let rejectOld!: (error: Error) => void;
   const old = new Promise<void>((_r, reject) => { rejectOld = reject; });
   mocks.warm.mockReturnValueOnce(old).mockResolvedValue(undefined);
-  CloudWorkspaceLifecycle(); cleanup = mocks.effects[2]();
+  CloudWorkspaceLifecycle(); cleanup = mocks.effects.find(effect => effect.toString().includes("warmCloudWorkspaceDestination"))!();
   expect(mocks.warm).toHaveBeenCalledTimes(1);
   mocks.generation++;
   for (const listener of mocks.listeners) listener();

@@ -92,6 +92,11 @@ export type CloudServiceContext = { authorityId: string; deviceId: string | null
 export type CloudServiceReceipt = {
   accessId: string; kind: "ssh" | "tunnel"; generation: number; expiresAt: string;
   localPort: number | null; remotePort: number | null; closing: boolean;
+  ownership?: "auto";
+};
+/** Safe native handle identity, without its one-use admission or URL. */
+export type CloudWorkspaceRuntimeIdentity = AccessTarget & {
+  runtimeId: string; generation: number; authorityEpoch: number; engineInstanceId: string; connectionSequence: number;
 };
 type NativeServices = {
   api: CloudRuntimeServiceApi;
@@ -102,6 +107,7 @@ type NativeServices = {
 type NativeLease = AccessTarget & {
   access: CloudRuntimeServiceAccess; token: string; handle: CloudServiceHandle;
   localPort: number | null; closing: boolean; retiring?: Promise<void>;
+  automatic?: boolean;
 };
 type SshLaunch = {
   sshUsername: string;
@@ -420,7 +426,7 @@ export class CloudWorkspaceAccessBroker {
     try {
       await this.cleanup(accessToken, lease);
     } finally {
-      // Daytona revocation retires the sandbox's complete SSH token set. A
+      // Provider revocation retires the resource's complete SSH token set. A
       // timeout is an unknown result, so fail closed locally in that case too.
       for (const [id, candidate] of this.leases) {
         if (
@@ -491,6 +497,7 @@ export class CloudWorkspaceAccessBroker {
       lease.access.grant.deviceId === current.deviceId && lease.access.deviceKeyVersion === current.keyVersion).map(lease => ({
       accessId: lease.access.grant.id, kind: lease.access.grant.kind, generation: lease.access.grant.generation,
       expiresAt: lease.access.grant.expiresAt, localPort: lease.localPort, remotePort: lease.access.grant.remotePort, closing: lease.closing,
+      ...(lease.automatic ? { ownership: "auto" as const } : {}),
     }));
   }
 
@@ -527,7 +534,7 @@ export class CloudWorkspaceAccessBroker {
     return lease.retiring;
   }
 
-  private async openNativeService(input: AccessTarget, action: "copy" | "terminal" | { remotePort: number; localPort: number }): Promise<{
+  private async openNativeService(input: AccessTarget, action: "copy" | "terminal" | { remotePort: number; localPort: number; automaticRuntime?: CloudWorkspaceRuntimeIdentity }): Promise<{
     accessId: string; expiresAt: string; localHost: "127.0.0.1"; localPort: number | null; remotePort: number | null;
   }> {
     const release = this.reserveCapacity();
@@ -535,11 +542,17 @@ export class CloudWorkspaceAccessBroker {
     let token: string | undefined, access: CloudRuntimeServiceAccess | undefined, handle: CloudServiceHandle | undefined, lease: NativeLease | undefined;
     try {
       const initiatingDevice = services.readDeviceIdentity();
+      const automaticRuntime = typeof action === "object" ? action.automaticRuntime : undefined;
+      if (automaticRuntime) this.assertRuntime(automaticRuntime);
       const tunnel = typeof action === "object" ? { remotePort: applicationPort(action.remotePort, "Remote port"), localPort: applicationPort(action.localPort, "Local port") } : null;
       token = await this.token();
       access = await services.api.issue(token, { ...input, kind: tunnel ? "tunnel" : "ssh", ...(tunnel ? { remotePort: tunnel.remotePort } : {}),
-        expiresInMinutes: 15, idempotencyKey: this.key(tunnel ? "tunnel" : "ssh") });
+        expiresInMinutes: 15, idempotencyKey: automaticRuntime ? `desktop:auto-tunnel:${this.randomId()}` : this.key(tunnel ? "tunnel" : "ssh") });
       this.assertNativeAuthority(access);
+      if (automaticRuntime) {
+        this.assertRuntime(automaticRuntime);
+        if (access.grant.generation !== automaticRuntime.generation) throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+      }
       if (initiatingDevice && (access.grant.deviceId !== initiatingDevice.deviceId || access.deviceKeyVersion !== initiatingDevice.keyVersion))
         throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "Cloud service device authority changed during admission.");
       let localPort: number | null = null;
@@ -550,7 +563,8 @@ export class CloudWorkspaceAccessBroker {
         handle = await services.prepareSsh(access);
       }
       this.assertNativeAuthority(access);
-      lease = { ...input, access, token, handle, localPort, closing: false };
+      if (automaticRuntime) this.assertRuntime(automaticRuntime);
+      lease = { ...input, access, token, handle, localPort, closing: false, ...(automaticRuntime ? { automatic: true } : {}) };
       const current = lease;
       this.nativeLeases.set(access.grant.id, current);
       void handle.closed.then(() => {
@@ -561,6 +575,7 @@ export class CloudWorkspaceAccessBroker {
         if (action === "copy") await this.writeClipboard(ssh.command); else await ssh.launchTerminal();
       }
       this.assertNativeAuthority(access);
+      if (automaticRuntime) this.assertRuntime(automaticRuntime);
       if (lease.closing || this.nativeLeases.get(access.grant.id) !== lease) throw new Error("Cloud service connection has ended.");
       return { accessId: access.grant.id, expiresAt: access.grant.expiresAt, localHost: "127.0.0.1", localPort, remotePort: access.grant.remotePort };
     } catch (error) {
@@ -571,7 +586,8 @@ export class CloudWorkspaceAccessBroker {
         // the user can retry it instead of blocking idle until grant expiry.
         const cleanup: NativeLease = { ...input, access, token,
           handle: handle ?? { closed: Promise.resolve(), stop: async () => {} },
-          localPort: typeof action === "object" ? action.localPort : null, closing: true };
+          localPort: typeof action === "object" ? action.localPort : null, closing: true,
+          ...(typeof action === "object" && action.automaticRuntime ? { automatic: true } : {}) };
         if (this.hasCurrentSession()) this.nativeLeases.set(access.grant.id, cleanup);
         await this.retireNativeLease(cleanup).catch(() => undefined);
       }
@@ -993,6 +1009,33 @@ export class CloudWorkspaceAccessBroker {
     }
   }
 
+  /** Admission describes authority, not connectivity. The main coordinator
+   * separately requires the renderer's exact connected-handle publication. */
+  assertRuntime(input: CloudWorkspaceRuntimeIdentity): void {
+    const actor = this.actorRuntimes.get(input.runtimeId);
+    const accessId = this.runtimeById.get(input.runtimeId), legacy = accessId ? this.leases.get(accessId) : undefined;
+    const current = actor && !actor.closing ? actor.target : legacy?.runtime ? {
+      ...legacy, runtimeId: legacy.runtime.id, authorityEpoch: legacy.runtime.authorityEpoch,
+      engineInstanceId: legacy.runtime.engineInstanceId, connectionSequence: legacy.runtime.sequence,
+    } : undefined;
+    if (!this.hasCurrentSession() || !current ||
+      current.organizationId !== input.organizationId || current.workspaceId !== input.workspaceId || current.generation !== input.generation ||
+      current.authorityEpoch !== input.authorityEpoch || current.engineInstanceId !== input.engineInstanceId || current.connectionSequence !== input.connectionSequence)
+      throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+  }
+
+  async startAutomaticTunnel(input: CloudWorkspaceRuntimeIdentity & CloudServiceContext & { remotePort: number; localPort: number }): Promise<{
+    accessId: string; expiresAt: string; localHost: "127.0.0.1"; localPort: number; remotePort: number;
+  }> {
+    if (!this.nativeServices) throw new Error("Native cloud forwarding is unavailable.");
+    this.listServices(input);
+    this.assertRuntime(input);
+    const result = await this.openNativeService({ organizationId: input.organizationId, workspaceId: input.workspaceId }, {
+      remotePort: input.remotePort, localPort: input.localPort, automaticRuntime: input,
+    });
+    return { ...result, localPort: result.localPort!, remotePort: result.remotePort! };
+  }
+
   private actorRuntimeTarget(admission:CloudActorRuntimeGrant,runtimeId:string,sequence:number):CloudWorkspaceRuntimeConnectionTarget {
     return {kind:"cloud",channel:"control-plane-websocket",runtimeId,connectionSequence:sequence,
       organizationId:admission.organizationId,workspaceId:admission.workspaceId,generation:admission.generation,
@@ -1358,8 +1401,8 @@ export class CloudWorkspaceAccessBroker {
       lease.previewAuthorizationCleanup?.();
       return true;
     }
-    // Daytona's bearer-free server-side revoke invalidates the entire
-    // sandbox's SSH token set, so every sibling SSH/tunnel lease is stale too.
+    // Provider-wide revocation invalidates the generation's SSH/tunnel grants,
+    // so every sibling lease must close too.
     for (const [id, candidate] of this.leases) {
       if (
         candidate.organizationId !== lease.organizationId ||

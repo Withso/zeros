@@ -1,281 +1,49 @@
-import { createHash } from "node:crypto";
-
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
-import pg from "pg";
-
-import { resetMigratedTestDatabase } from "../test-database.js";
+import { describe, expect, it, vi } from "vitest";
+import type pg from "pg";
 import {
   CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH,
-  CloudWorkspaceEngineClientAdmissionError,
   DatabaseCloudWorkspaceEngineClientAdmissionService,
 } from "./engine-client-admission.js";
-import {
-  seedReadyCloudWorkspace,
-  type ReadyCloudWorkspaceFixture,
-} from "./test-fixtures.js";
 
-const databaseUrl = process.env.TEST_DATABASE_URL;
-const d = databaseUrl ? describe : describe.skip;
-
-describe("cloud workspace engine client admission failures", () => {
-  it("preserves unexpected infrastructure failures as retryable transport errors", async () => {
-    const unavailable = new Error("database temporarily unavailable");
-    const pool = {
-      connect: vi.fn(async () => {
-        throw unavailable;
-      }),
-    } as unknown as pg.Pool;
-    const service = new DatabaseCloudWorkspaceEngineClientAdmissionService({
-      pool,
-      endpoint: `https://api.example.test${CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH}`,
-      enginePort: 39_393,
-      workosEnabled: false,
-    });
-
-    await expect(
-      service.consume({
-        token: `zws_${"A".repeat(43)}`,
-        heartbeatToken: `zwh_${"B".repeat(43)}`,
-        organizationId: "11111111-1111-4111-8111-111111111111",
-        workspaceId: "22222222-2222-4222-8222-222222222222",
-        generation: 1,
-        engineInstanceId: "33333333-3333-4333-8333-333333333333",
-      }),
-    ).rejects.toBe(unavailable);
+function fixture() {
+  const connect = vi.fn(async () => { throw new Error("Database must not be contacted for retired actor admission"); });
+  const service = new DatabaseCloudWorkspaceEngineClientAdmissionService({
+    pool: { connect } as unknown as pg.Pool,
+    endpoint: `https://api.example.test${CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH}`,
+    enginePort: 39393,
+    relayEnabled: true,
   });
-});
+  return { service, connect };
+}
+const scope = {
+  organizationId: "11111111-1111-4111-8111-111111111111",
+  workspaceId: "22222222-2222-4222-8222-222222222222",
+  actorUserId: "33333333-3333-4333-8333-333333333333",
+};
+const refusal = { code: "cloud_workspace_client_update_required", message: "Update Zeros to connect to cloud workspaces." };
 
-d("cloud workspace engine client admission", () => {
-  let pool: pg.Pool;
-  let fixture: ReadyCloudWorkspaceFixture;
-  let service: DatabaseCloudWorkspaceEngineClientAdmissionService;
-
-  beforeAll(() => {
-    pool = new pg.Pool({ connectionString: databaseUrl, max: 4 });
+describe("retired actor-protocol-1 engine admission", () => {
+  it("tells an older desktop to update before device or grant admission", async () => {
+    const { service, connect } = fixture();
+    await expect(service.issue(scope)).rejects.toMatchObject(refusal);
+    expect(connect).not.toHaveBeenCalled();
   });
-
-  afterAll(async () => {
-    await pool.end();
+  it.each([false, true])("refuses redemption and renewal (renew=%s) of historical grants", async renew => {
+    const { service, connect } = fixture();
+    await expect(service.consume({ ...scope, generation: 1, engineInstanceId: scope.actorUserId,
+      token: `zws_${"A".repeat(43)}`, heartbeatToken: `zwh_${"B".repeat(43)}`, renew })).rejects.toMatchObject(refusal);
+    expect(connect).not.toHaveBeenCalled();
   });
-
-  beforeEach(async () => {
-    await resetMigratedTestDatabase(pool);
-    fixture = await seedReadyCloudWorkspace(pool);
-    service = new DatabaseCloudWorkspaceEngineClientAdmissionService({
-      pool,
-      endpoint: `https://api.example.test${CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH}`,
-      enginePort: 39_393,
-      ttlSeconds: 60,
-      workosEnabled: false,
-    });
+  it.each([false, true])("never opens or retains an old grant relay (connected=%s)", async connected => {
+    const { service, connect } = fixture();
+    expect(await service.authorizeRelay(`zws_${"A".repeat(43)}`, { connected })).toBeNull();
+    expect(connect).not.toHaveBeenCalled();
   });
-
-  const issue = () =>
-    service.issue({
-      organizationId: fixture.organizationId,
-      workspaceId: fixture.workspaceId,
-      actorUserId: fixture.userId,
+  it("keeps trusted device admission mandatory for modern actors", async () => {
+    const { service, connect } = fixture();
+    await expect(service.issueActor({ ...scope, authenticatedUser: undefined as never })).rejects.toMatchObject({
+      code: "engine_client_admission_invalid", message: "A trusted device is required for actor admission",
     });
-
-  it("fences legacy admission and renewal once a workspace becomes shared", async () => {
-    const issued=await issue();
-    await pool.query("UPDATE cloud_workspaces SET single_member_mode=false,sharing_mode='organization' WHERE id=$1",[fixture.workspaceId]);
-    await expect(issue()).rejects.toMatchObject({code:"engine_client_admission_ineligible"});
-    await expect(service.consume({token:issued.grantToken,heartbeatToken:fixture.heartbeatToken,
-      organizationId:fixture.organizationId,workspaceId:fixture.workspaceId,generation:1,engineInstanceId:fixture.engineInstanceId}))
-      .rejects.toMatchObject({code:"engine_client_admission_rejected"});
-    expect(await service.authorizeRelay(issued.grantToken)).toBeNull();
-  });
-
-  it("does not issue legacy admission to an actor-aware engine", async () => {
-    await pool.query("UPDATE cloud_workspace_engine_instances SET actor_protocol_version=2 WHERE id=$1",[fixture.engineInstanceId]);
-    await expect(issue()).rejects.toMatchObject({code:"engine_client_admission_ineligible"});
-  });
-
-  it("locks organization before workspace so concurrent service renewal cannot deadlock admission", async () => {
-    const baseline = await pool.query("SELECT count(*) AS count FROM cloud_workspace_endpoint_grants WHERE workspace_id=$1 AND purpose='engine-connect'", [fixture.workspaceId]);
-    const renewal = await pool.connect();
-    let admissionPid = 0;
-    let admission: ReturnType<typeof issue> | undefined;
-    const instrumentedPool = { connect: async () => {
-      const client = await pool.connect();
-      admissionPid = (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
-      return client;
-    } } as unknown as pg.Pool;
-    const contender = new DatabaseCloudWorkspaceEngineClientAdmissionService({ pool: instrumentedPool,
-      endpoint: `https://api.example.test${CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH}`,
-      enginePort: 39_393, ttlSeconds: 60, workosEnabled: false });
-    try {
-      await renewal.query("BEGIN");
-      await renewal.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [fixture.organizationId]);
-      admission = contender.issue({ organizationId: fixture.organizationId, workspaceId: fixture.workspaceId, actorUserId: fixture.userId });
-      await vi.waitFor(async () => {
-        expect(admissionPid).toBeGreaterThan(0);
-        const blocked = await pool.query("SELECT cardinality(pg_blocking_pids($1)) AS count", [admissionPid]);
-        expect(blocked.rows[0].count).toBeGreaterThan(0);
-      });
-      await renewal.query("SET LOCAL lock_timeout='250ms'");
-      await expect(renewal.query("SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE", [fixture.workspaceId])).resolves.toMatchObject({ rowCount: 1 });
-      await renewal.query("COMMIT");
-      await expect(admission).resolves.toMatchObject({ workspaceId: fixture.workspaceId });
-      const grants = await pool.query("SELECT count(*) AS count FROM cloud_workspace_endpoint_grants WHERE workspace_id=$1 AND purpose='engine-connect'", [fixture.workspaceId]);
-      expect(Number(grants.rows[0].count)).toBe(Number(baseline.rows[0].count) + 1);
-    } finally {
-      await renewal.query("ROLLBACK");
-      renewal.release();
-      await admission?.catch(() => {});
-    }
-  });
-
-  it("authorizes a portable relay without consuming the engine's one-use proof", async () => {
-    const document = await issue();
-    const relay = await service.authorizeRelay(document.grantToken);
-    expect(relay).toMatchObject({
-      workspaceId: fixture.workspaceId,
-      organizationId: fixture.organizationId,
-      generation: 1,
-      engineInstanceId: fixture.engineInstanceId,
-      authorityEpoch: 1,
-      resourceId: `sandbox-${fixture.workspaceId}`,
-      // Legacy grants are owner-only, so they always use writer capacity.
-      readOnly: false,
-    });
-    await service.consume({
-      token: document.grantToken,
-      heartbeatToken: fixture.heartbeatToken,
-      organizationId: fixture.organizationId,
-      workspaceId: fixture.workspaceId,
-      generation: 1,
-      engineInstanceId: fixture.engineInstanceId,
-    });
-    await expect(
-      service.authorizeRelay(document.grantToken),
-    ).resolves.toBeNull();
-    await expect(
-      service.authorizeRelay(document.grantToken, { connected: true }),
-    ).resolves.toEqual(relay);
-    await pool.query(
-      "UPDATE cloud_workspace_endpoint_grants SET expires_at = now() - interval '1 second', created_at = now() - interval '2 minutes' WHERE token_hash = $1",
-      [createHash("sha256").update(document.grantToken).digest()],
-    );
-    // Connection-grant expiry limits admission, not an already admitted stream.
-    await expect(
-      service.authorizeRelay(document.grantToken, { connected: true }),
-    ).resolves.toEqual(relay);
-    await pool.query(
-      "UPDATE users SET auth_revision = auth_revision + 1 WHERE id = $1",
-      [fixture.userId],
-    );
-    await expect(
-      service.authorizeRelay(document.grantToken, { connected: true }),
-    ).resolves.toBeNull();
-  });
-
-  it("binds a one-use capability to the exact live engine and authority epoch", async () => {
-    const document = await issue();
-    expect(document).toMatchObject({
-      version: 1,
-      workspaceId: fixture.workspaceId,
-      organizationId: fixture.organizationId,
-      generation: 1,
-      authorityEpoch: 1,
-      engineInstanceId: fixture.engineInstanceId,
-      remotePort: 39_393,
-    });
-    expect(document.grantToken).toMatch(/^zws_[A-Za-z0-9_-]{43}$/);
-    const stored = await pool.query<{
-      token_hash: Buffer;
-      authority_epoch: string | number;
-      engine_instance_id: string;
-    }>(
-      `SELECT token_hash, authority_epoch, engine_instance_id
-       FROM cloud_workspace_endpoint_grants
-       WHERE purpose = 'engine-connect' AND consumed_at IS NULL
-         AND revoked_at IS NULL`,
-    );
-    expect(stored.rows).toHaveLength(1);
-    expect(
-      stored.rows[0]!.token_hash.equals(
-        createHash("sha256").update(document.grantToken).digest(),
-      ),
-    ).toBe(true);
-    expect(Number(stored.rows[0]!.authority_epoch)).toBe(1);
-    expect(stored.rows[0]!.engine_instance_id).toBe(fixture.engineInstanceId);
-
-    const admitted = await service.consume({
-      token: document.grantToken,
-      heartbeatToken: fixture.heartbeatToken,
-      organizationId: fixture.organizationId,
-      workspaceId: fixture.workspaceId,
-      generation: 1,
-      engineInstanceId: fixture.engineInstanceId,
-    });
-    expect(admitted).toMatchObject({
-      admitted: true,
-      authorityEpoch: 1,
-      accountUserId: fixture.userId,
-    });
-    await expect(
-      service.consume({
-        token: document.grantToken,
-        heartbeatToken: fixture.heartbeatToken,
-        organizationId: fixture.organizationId,
-        workspaceId: fixture.workspaceId,
-        generation: 1,
-        engineInstanceId: fixture.engineInstanceId,
-      }),
-    ).rejects.toMatchObject<Partial<CloudWorkspaceEngineClientAdmissionError>>({
-      code: "engine_client_admission_rejected",
-    });
-  });
-
-  it("rolls back consumption on bad engine proof and rejects an old authority epoch", async () => {
-    const first = await issue();
-    await expect(
-      service.consume({
-        token: first.grantToken,
-        heartbeatToken: `zwh_${"A".repeat(43)}`,
-        organizationId: fixture.organizationId,
-        workspaceId: fixture.workspaceId,
-        generation: 1,
-        engineInstanceId: fixture.engineInstanceId,
-      }),
-    ).rejects.toMatchObject({ code: "engine_client_admission_rejected" });
-    await expect(
-      service.consume({
-        token: first.grantToken,
-        heartbeatToken: fixture.heartbeatToken,
-        organizationId: fixture.organizationId,
-        workspaceId: fixture.workspaceId,
-        generation: 1,
-        engineInstanceId: fixture.engineInstanceId,
-      }),
-    ).resolves.toMatchObject({ admitted: true });
-
-    const stale = await issue();
-    await pool.query(
-      `UPDATE cloud_workspaces
-       SET authority_epoch = authority_epoch + 1
-       WHERE id = $1`,
-      [fixture.workspaceId],
-    );
-    await expect(
-      service.consume({
-        token: stale.grantToken,
-        heartbeatToken: fixture.heartbeatToken,
-        organizationId: fixture.organizationId,
-        workspaceId: fixture.workspaceId,
-        generation: 1,
-        engineInstanceId: fixture.engineInstanceId,
-      }),
-    ).rejects.toMatchObject({ code: "engine_client_admission_rejected" });
+    expect(connect).not.toHaveBeenCalled();
   });
 });

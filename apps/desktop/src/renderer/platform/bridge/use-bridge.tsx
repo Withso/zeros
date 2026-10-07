@@ -70,6 +70,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
         },
         manage: cloudWorkspaceOperation,
         readHistory: readCloudWorkspaceHistory,
+        checkpointHistory: true,
         prepareGithubWrite: prepareCloudGithubWrite,
       }),
   );

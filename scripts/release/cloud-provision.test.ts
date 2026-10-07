@@ -295,7 +295,7 @@ describe("cloud backend planning", () => {
     expect(CLOUD_WORKER_VARIABLES.some(field => Object.hasOwn(plan.changes, field))).toBe(false);
   });
   it.each([["BOAT_IMAGE_BUILD_SHA256", "invalid"], ["ZEROS_CLOUD_IMAGE_ARCHITECTURE", "linux/arm64"],
-    ["CLOUD_WORKSPACE_STORAGE_MIB", "0"], ["CLOUD_WORKSPACE_PROVIDER", "daytona"]])("rejects an invalid selected tuple field %s", (name, value) => {
+    ["CLOUD_WORKSPACE_STORAGE_MIB", "0"], ["CLOUD_WORKSPACE_PROVIDER", "unsupported"]])("rejects an invalid selected tuple field %s", (name, value) => {
     const options = fixture(); Object.assign(options.current, tuple(), { [name]: value });
     const plan = planCloudProvision({ ...options, enableCloud: true });
     expect(plan.validation.ok).toBe(false); expect(plan.enableGate.ok).toBe(false);
@@ -444,7 +444,7 @@ describe("guarded cloud backend CLI", () => {
       [{}, harness => { harness.state.alphaIdentity = { ...served, worker: null }; }, "ADOPT_BASE_WORKER fail"],
       [{}, harness => { harness.state.alphaIdentity = { ...served, channel: "beta" }; }, "ADOPT_BASE_WORKER fail"],
       [{}, harness => { harness.state.alphaIdentity = { ...served, cloud: { enabled: false, ready: true, state: "disabled" } }; }, "ADOPT_BASE_WORKER fail"],
-      [{}, harness => { harness.state.alphaIdentity = { ...served, worker: { ...served.worker, provider: "daytona", imageRef: "11111111-1111-4111-8111-111111111111" } }; }, "ADOPT_BASE_WORKER fail"],
+      [{}, harness => { harness.state.alphaIdentity = { ...served, worker: { ...served.worker, provider: "unsupported", imageRef: "11111111-1111-4111-8111-111111111111" } }; }, "ADOPT_BASE_WORKER fail"],
       [{}, harness => { harness.variables.BOAT_SNAPSHOT_ID = "partial-tuple"; }, "WORKER_TUPLE fail"],
     ];
     for (const [patch, prepare, message] of cases) {

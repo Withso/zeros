@@ -31,6 +31,7 @@ import {
 } from "../../workspace/service";
 import { semanticDesignDirectories } from "../../git/design-draft-guard";
 import { migrateDesignDirectoryPages } from "../pages-migration";
+import * as ownership from "../../files/cloud-workspace-ownership";
 
 const live = vi.hoisted(() => ({
   workspaces: [] as Array<{ kind: string; repoRoot: string }>,
@@ -58,6 +59,7 @@ describe("remove Design registration", () => {
     await runGit(root, ["commit", "-m", "Design folders"]);
   });
   afterEach(() => {
+    vi.restoreAllMocks();
     forgetDesignDirectoryName(root);
     delete process.env.ZEROS_DATA_DIR;
     rmSync(root, { recursive: true, force: true });
@@ -227,6 +229,14 @@ describe("remove Design registration", () => {
       )?.directory_id,
     ).toBe(id);
     expect(await discoverDesignDirectories(root)).toEqual(["Other", "Studio"]);
+  });
+
+  it("publishes a newly created nested rename parent before worker Git moves the directory", async () => {
+    const parent = path.join(root, "apps", "web");
+    const publish = vi.spyOn(ownership, "publishCloudWorkspacePath");
+    await renameDesignDirectory({ repoRoot: root, from: "Brand", to: "apps/web/Studio" });
+    expect(publish).toHaveBeenCalledWith(parent);
+    expect(existsSync(path.join(parent, "Studio/meta/design.toml"))).toBe(true);
   });
 
   it("clears a removed selection and supports untracked registration", async () => {

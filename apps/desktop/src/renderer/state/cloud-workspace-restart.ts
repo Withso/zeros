@@ -1,4 +1,4 @@
-import { isInternalFeatureActive } from "../features/settings/internal-features";
+import { hasCloudWorkspaceAccountAccess } from "../features/team/cloud-workspace-account-access";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey, type CloudWorkspaceTarget } from "../platform/bridge/cloud-workspace-key";
 import type { CloudWorkspaceDocument } from "../platform/cloud-workspaces";
 import {
@@ -26,7 +26,7 @@ export function restartCloudWorkspace(workspace: CloudWorkspaceTarget | string):
   const initial = target ? cloudWorkspaceDocument(target) : undefined;
   if (!target || !cloudWorkspaceRestartVisible(folder, initial))
     return Promise.reject(new Error("This cloud workspace cannot be restarted"));
-  if (!isInternalFeatureActive("cloudComputerV2") || !initial!.capabilities.canWrite)
+  if (!hasCloudWorkspaceAccountAccess(target.organizationId) || !initial!.capabilities.canWrite)
     return Promise.reject(new Error("Workspace run access is required to restart it"));
   const owner = cloudWorkspaceKey(target);
   const account = cloudCatalogGeneration();
@@ -40,7 +40,7 @@ export function restartCloudWorkspace(workspace: CloudWorkspaceTarget | string):
     const current = cloudWorkspaceDocument(target);
     if (!cloudWorkspaceRestartVisible(owner, current) || current!.generation.number !== generation)
       throw new Error("Cloud workspace generation or access changed while restarting");
-    if (!isInternalFeatureActive("cloudComputerV2") || !current!.capabilities.canWrite)
+    if (!hasCloudWorkspaceAccountAccess(target.organizationId) || !current!.capabilities.canWrite)
       throw new Error("Workspace run access changed while restarting");
     return current!;
   };

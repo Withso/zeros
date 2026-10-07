@@ -1,11 +1,11 @@
 import type pg from "pg";
-import { canCreateOrganization, HttpError, type StaffRole } from "../authz.js";
+import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
 import type { UpdateRepositorySetupScript } from "./computer-tools.js";
 import {
   lockCloudComputerOrganization,
   requireCloudComputerAuthority,
-} from "./computer.js";
+} from "./computer-identity.js";
 import {
   CloudComputerV2RepositorySchema,
   CloudComputerV2RepositorySetupSchema,
@@ -17,7 +17,7 @@ import {
 } from "./settings.js";
 
 /** Also called by the Phase D tool. The actor is authenticated by the caller;
- * current staff and organization authority are always checked here. The public
+ * active-account and organization authority are always checked here. The public
  * repository ID is GitHub's canonical ID, matching the computer configuration. */
 export async function updateRepositorySetupScript(
   pool: pg.Pool,
@@ -40,16 +40,16 @@ export async function updateRepositorySetupScript(
   const input = parsed.data;
   const write = async (tx: Tx) => {
     const account = (
-      await tx.query<{ staff_role: StaffRole | null }>(
-        "SELECT staff_role FROM users WHERE id=$1 AND deleted_at IS NULL AND auth_status='active' FOR SHARE",
+      await tx.query(
+        "SELECT id FROM users WHERE id=$1 AND deleted_at IS NULL AND auth_status='active' FOR SHARE",
         [actorUserId],
       )
     ).rows[0];
-    if (!canCreateOrganization(account?.staff_role ?? null))
+    if (!account)
       throw new HttpError(
-        403,
-        "forbidden",
-        "Engineering staff access is required.",
+        404,
+        "not_found",
+        "Cloud Computer not found",
       );
     await requireCloudComputerAuthority(tx, organizationId, actorUserId, true);
     await lockCloudComputerOrganization(tx, organizationId);

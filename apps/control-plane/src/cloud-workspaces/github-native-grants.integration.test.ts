@@ -367,15 +367,13 @@ suite("cloud native GitHub authority", () => {
   );
   it("binds native agent credentials to their live execution and provider consent independently of a terminal", async () => {
     const request = await nativeFixture();
-    await pool.query(
-      "UPDATE cloud_workspace_engine_instances SET agent_runtime_profile='zeros-cloud-worker-v3',agent_runtime_contract_sha256=$2 WHERE id=$1",
-      [fixture.engineInstanceId, "a".repeat(64)],
-    );
-    await pool.query(
-      `INSERT INTO cloud_agent_runtime_qualifications(provider,image_ref,runtime_contract_sha256,credential_kind,profile,enabled)
-      VALUES('daytona','snapshot-pinned',$1,'cursor-api-key','zeros-cloud-worker-v3',true)`,
-      ["a".repeat(64)],
-    );
+    // The ready fixture already records the matching full v4 qualification.
+    expect((await pool.query(`SELECT qualification.profile,qualification.mcp_qualified,qualification.evidence->>'mode' AS mode
+      FROM cloud_workspace_generations generation JOIN cloud_runtime_qualifications qualification
+      ON qualification.runtime_id=generation.runtime_id AND qualification.base_compatibility_id=generation.runtime_base_compatibility_id
+      WHERE generation.workspace_id=$1 AND generation.generation=1 AND qualification.credential_kind='cursor-api-key'
+        AND qualification.enabled AND qualification.revoked_at IS NULL`, [fixture.workspaceId])).rows)
+      .toEqual([{ profile: "zeros-cloud-worker-v4", mcp_qualified: true, mode: "full" }]);
     const keys = {
       keys: { 1: randomBytes(32).toString("base64url") },
       currentKeyVersion: 1,
@@ -407,7 +405,7 @@ suite("cloud native GitHub authority", () => {
       provider: "cursor",
       model: "grok-4.6",
       source: { kind: "session", actorSessionId },
-    });
+    }, false, undefined, undefined, undefined, 1);
     const requestId = randomUUID();
     const agent = { ...request, native: { ...request.native, requestId, source: { kind: "agent" as const, leaseId: lease.leaseId } },
       paramsSha256: createHash("sha256").update(JSON.stringify(["git.push", { nativeRequestId: requestId }])).digest("hex") };

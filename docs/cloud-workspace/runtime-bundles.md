@@ -3,16 +3,75 @@
 V4 separates the immutable engine runtime from the Boat base image. The schemas
 in [cloud-runtime-bundle.ts](../../packages/protocol/src/cloud-runtime-bundle.ts),
 migration `0124_cloud_runtime_registry.sql`, and their tests are authoritative.
-This is the internal Alpha contract. The control plane implements OIDC
-publication, base registration, and staff registry operations. It selects and
+The control plane implements channel-scoped OIDC publication for Alpha, Beta
+and Production, Alpha base registration, and staff registry operations. It selects and
 pins runtimes at creation, admits installation, and binds redemption,
 registration and readiness to that pin. The base installer, qualification workers
 and generation upgrade/recovery services have their own implementation boundaries.
 
 The [version-skew gate](runtime-skew-gate.md) pins historical runtime/desktop
 source contracts for required CI testing and documents pin advancement and
-cohort retirement. It is a first slice; released-engine qualification remains
+cohort retirement. It verifies source compatibility; released-engine qualification remains
 separate.
+
+## Qualified bundle versus retained image publication
+
+The supported workspace artifact is the physical v4 tarball built by
+`runtime-bundle/build.cjs` through the reusable `cloud-runtime-bundle-build.yml`.
+The Alpha desktop release and the standalone `cloud-runtime-bundle.yml` use this
+build; runtime eligibility requires qualification against the protected Boat base and saved
+Computer source. The separate `cloud-runtime-publication.yml` still uses
+`publish-vm-image`/`buildEngineImage` and its flat `/opt/zeros-runtime` OCI recipe.
+The shared image kit retains separate Dev callers. Flat-image publication is an
+explicit follow-up, not qualified v4 workspace execution merely because a marker
+is changed. The opt-in v3 release-worker promotion lane now refuses before
+allocation/build; it retains historical receipts and cleanup, while the disabled
+lane preserves ordinary release publication. See
+[qualification status](qualification-status.md) and
+[release worker qualification](release-worker-qualification.md).
+
+[Runtime updates](live-runtime-updates.md) owns staging, retained allocation,
+consumption/enrollment and rollback. One journal owns those transitions; staging
+never activates and ordinary resume never changes a saved pin implicitly.
+
+## Standalone publication
+
+Dispatch [cloud-runtime-bundle.yml](../../.github/workflows/cloud-runtime-bundle.yml)
+with `channel=alpha`, `beta`, or `production` to build and publish the runtime
+without a desktop release. Alpha accepts only `refs/heads/main`; Beta and
+Production accept `refs/heads/main` or a nonempty `refs/heads/release/*` branch.
+Forks are refused. Each channel has its own non-cancelling publication lock.
+
+The reusable build retains the contained user-namespace runner setup, verifies
+the exact event SHA, and uploads the tarball, descriptor, manifest and build
+receipt. The publisher downloads that same run's immutable artifact ID. Its
+job names the selected GitHub environment, so that environment's branch rules
+and configured reviewer protections apply before OIDC access. It verifies the
+current checkout and branch plus the latest exact-SHA Preflight and CodeQL
+results immediately before publishing; automatic Alpha's fast path does not
+apply to this dispatch.
+
+Set `CLOUD_WORKSPACE_CONTROL_PLANE_URL` and `CLOUD_RUNTIME_OIDC_AUDIENCE` as
+Actions variables in each selected environment, matching that channel's
+control plane. See [deployment environments](../deployment-environments.md).
+The control plane holds the artifact credentials; the workflow receives an
+expiring upload capability through OIDC. No VM is allocated by this workflow.
+
+Deploy the matching control plane before running the updated publisher. The
+existing `alpha-publication.yml` `runtime-publish` job already depends on
+`hosted`, which deploys the control plane first. Both publication paths now send
+the GitHub run ID as `releaseOrder`. An older control plane refuses that body
+with HTTP 409 `runtime_identity_conflict`; rerun publication after deploying the
+updated control plane. This change needs no database migration or historical
+release rewrite.
+
+Publication registers immutable bundle bytes and a channel release; it grants
+no runtime/base qualification or workspace execution authority. Workspaces
+adopt a bundle only through the existing qualified upgrade and wake paths.
+Running allocations retain their pin, and missing qualifications, revoked
+identities or failed lifecycle admission still refuse adoption. Qualification,
+staging, generation replacement and existing channel rollout policies are
+unchanged by standalone publication.
 
 ## Identity and installed layout
 
@@ -130,8 +189,15 @@ Diagnostics cannot include free text, paths, URLs, stderr or exception fields.
 
 The registry has five tables: base compatibility contracts, approved Boat base
 images, runtime bundles, ordered channel releases, and per-runtime/base/
-credential-kind v4 qualifications. Channel ordering is the parent release run
-number, separate from run ID and attempt. The five credential kinds remain
+credential-kind v4 qualifications. Every new channel release uses the
+OIDC-verified GitHub run ID as its order, shared across the Alpha and standalone
+workflows; their workflow-specific run numbers cannot order interleaved
+publications. Historical run-number orders remain unchanged. A legacy
+`releaseOrder` equal to the verified run number is accepted only as a retry of
+an existing row with the same run ID, channel and runtime; it cannot insert a
+new release. Updated publishers can also retry those rows using their run ID
+without changing the saved order. Run attempt and source checks still apply.
+The five credential kinds remain
 `claude-api-key`, `claude-setup-token`, `codex-api-key`, `codex-chatgpt`, and
 `cursor-api-key`. Qualification `evidence` is a required JSON object bounded to
 64 KiB; contract/header objects have the same bound and native capabilities are
@@ -148,7 +214,8 @@ rows. System writes cannot delete them or change identity/evidence. Only
 `confirmed_at`. Those timestamps cannot later be cleared or changed.
 Qualification `enabled`/`mcp_qualified` can only move to false while revoked;
 revoked qualifications must have both false. Native capabilities are immutable.
-The v3 qualification/operator write boundary remains unchanged.
+Historical qualification rows remain immutable audit data; current executable
+admission joins only exact v4 qualification records.
 
 Generations carry the nullable six-column group `runtime_id`,
 `runtime_manifest_sha256`, `runtime_base_image_id`, `runtime_base_compatibility_id`,
@@ -157,7 +224,7 @@ Composite foreign keys bind runtime/digest and base image/compatibility. A
 registered v4 base's image ref requires a pin. The pinned base must match the
 generation's provider, source commit, architecture and storage. The generation's
 image ref must equal the base's registered ref or match
-`^boat-template:[A-Za-z0-9_-]{1,128}$` for an org template fork. Phase C's
+`^boat-template:[A-Za-z0-9_-]{1,128}$` for an org template fork. The saved v2
 `cloud_workspace_computer_sources` sidecar validates template/build and org
 provenance; this guard only admits the ref format. The protocol must match its
 bundle. The six columns are immutable after insert, including NULL-to-v4 updates.
@@ -176,11 +243,13 @@ must match the exact engine's pin, receipt, boot, session and setup fence, while
 retaining the existing live setup/engine readiness checks. Engine pins/witnesses
 and every setup attestation are immutable after insertion.
 
-NULL pins continue to mean legacy, never “latest”. Old rows are not backfilled.
+NULL pins identify retired generations, never “latest”. Old rows are not
+backfilled or admitted to execution; authorized history/management/cleanup remain.
 Revoked registry records remain referenced for audit and retirement. Explicit
 upgrades and copying pins across generation transitions belong to the lifecycle
-services; the registry schemas grant none of that authority. Browser diagnostics accept v3 and v4
-profiles, with missing/unknown reports unavailable. Shipping capture Chromium
+services; the registry schemas grant none of that authority. Current worker
+attestation admits v4 only; missing/unknown reports are unavailable. Historical
+diagnostic schemas do not re-enable a retired profile. Shipping capture Chromium
 does not qualify native provider Browser access.
 
 The shared [plain JSON fixtures](../../packages/protocol/src/__tests__/fixtures/cloud-runtime/)
@@ -192,17 +261,21 @@ against a disposable PostgreSQL 18 database with `TEST_DATABASE_URL` set.
 
 ## Publication and operator API
 
-Publication is disabled by default and can be enabled only on Alpha. The
-control plane verifies GitHub Actions OIDC with `jose` and a cached GitHub JWKS
-at `https://token.actions.githubusercontent.com/.well-known/jwks`. It requires
+Publication is disabled by default and can be enabled on Alpha, Beta or
+Production. The control plane verifies GitHub Actions OIDC with `jose` and a
+cached GitHub JWKS at
+`https://token.actions.githubusercontent.com/.well-known/jwks`. It requires
 RS256, issuer `https://token.actions.githubusercontent.com`, the configured
-audience, a case-insensitive repository match, `ref=refs/heads/main`, an exact
-`workflow_ref`, and the configured environment. Runtime publication accepts
-only the `release-alpha.yml` workflow with event `push`; base registration
-accepts only `cloud-runtime-base.yml` with event `workflow_dispatch`. Each
-workflow ref includes the configured repository and `@refs/heads/main` suffix.
-Run ID, number, attempt and source SHA come from verified claims. Body run
-values and runtime/base source commits must agree with those claims.
+audience, a case-insensitive repository match, and an exact `workflow_ref`
+containing that repository, an allowed workflow file and the token's actual
+ref. Publication accepts `release-alpha.yml` with event `push` on Alpha/main,
+or `cloud-runtime-bundle.yml` with event `workflow_dispatch` under the
+channel/ref matrix above. Standalone tokens must name an environment equal to
+the control plane's deployment channel. Base registration remains restricted
+to Alpha/main `cloud-runtime-base.yml` with event `workflow_dispatch` and an
+Alpha environment. Run ID, number, attempt and source SHA come from verified
+claims. Body run values and runtime/base source commits must agree with those
+claims.
 Issued-at times may be at most 60 seconds ahead of the control plane's clock;
 token expiration remains enforced independently.
 
@@ -211,8 +284,8 @@ token expiration remains enforced independently.
 | `CLOUD_RUNTIME_PUBLICATION_ENABLED` | `false`; the three CI endpoints return 404 before auth or database work |
 | `CLOUD_RUNTIME_OIDC_AUDIENCE` | `zeros-control-plane-<deployment channel>` |
 | `CLOUD_RUNTIME_OIDC_REPOSITORY` | `Withso/zeros`; its spelling also determines the exact workflow ref |
-| `CLOUD_RUNTIME_OIDC_ENVIRONMENT` | `alpha`; an explicit empty value disables the optional environment check |
-| `CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE` | `legacy`; `legacy\|v4` is reported in release identity; workspace selection is implemented separately |
+| `CLOUD_RUNTIME_OIDC_ENVIRONMENT` | Deployment channel (`alpha`, `beta`, or `production`); an explicit mismatch is rejected. An empty value retains only the legacy Alpha push opt-out and cannot authorize standalone publication or base registration. |
+| `CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE` | `v4`; only `v4` is accepted; saved v2 source and current qualification are required |
 
 Enabling publication requires the existing CP-held
 `CLOUD_WORKSPACE_S3_ENDPOINT`, `CLOUD_WORKSPACE_S3_BUCKET`,
@@ -249,20 +322,20 @@ maintenance and controlled-migration barriers still apply.
 | Endpoint | Request and result |
 | --- | --- |
 | `POST /internal/v1/runtime-bundles/publications` | `{descriptor, manifestHeader, releaseOrder, githubRunId, githubRunAttempt}` → `{objectKey, upload:{url,expiresAt,headers}\|null}`. `manifestHeader` is the manifest without `files`; `upload` is null only when HEAD reports the exact advertised size. No registry row is inserted. |
-| `POST /internal/v1/runtime-bundles/publications/complete` | **The same full request** → `{runtimeId,registered:true}`. The endpoint is stateless: it needs neither a prior call nor pending metadata. It revalidates descriptor/header/claims, HEADs the derived key, requires exact bytes, then inserts or validates the bundle and Alpha channel release atomically in system context. |
+| `POST /internal/v1/runtime-bundles/publications/complete` | **The same full request** → `{runtimeId,registered:true}`. The endpoint is stateless: it needs neither a prior call nor pending metadata. It revalidates descriptor/header/claims, HEADs the derived key, requires exact bytes, then inserts or validates the bundle and configured channel release atomically in system context. New releases require `releaseOrder=githubRunId` from verified claims; run-number requests require an existing same-run/channel/runtime row. |
 | `POST /internal/v1/runtime-bases` | `{baseImageId,imageRef,sourceCommit,imageBuildSha256,storageMib,compatibilityRawB64,compatibilitySha256,compatibility?}` → `{baseImageId,baseCompatibilityId}`. `imageRef` uses `boat:<snapshot>@sha256:<imageBuildSha256>`. Canonical standard base64 decodes to at most 64 KiB of strict UTF-8 JSON; SHA-256 covers those original bytes. An optional parsed `compatibility` echo must agree with them. Contract and approved base image are inserted atomically. |
 
 The descriptor's runtime ID must equal `r1-<manifestSha256>`, its header source,
 ABI and protocol fields must agree, and registry byte counts must be positive
 safe integers. An exact replay preserves registration, approval and
 confirmation timestamps; conflicting immutable identities return 409. Missing
-or short/long artifacts cannot register a bundle. Completion sets the parent
-release's `confirmed_at` only once; the publishing job must run after hosted
-promotion succeeds. An identical rerun with the same run ID and number may
+or short/long artifacts cannot register a bundle. Completion sets the channel
+release's `confirmed_at` only once; the Alpha desktop publishing job runs after
+hosted promotion succeeds. An identical rerun with the same run ID and number may
 use an equal or later verified attempt, preserving the first stored attempt
 as provenance, the release order and all registration timestamps. Completion
 retries smoke enqueue after a lost response or post-commit scheduling failure.
-An attempt older than the first stored attempt, different content/run/order,
+An attempt older than the first stored attempt, different content/run, an unverified order,
 or a revoked identity still conflicts. A later release run may reference an
 identical bundle. Registration does not verify archive contents by downloading them;
 the installer verifies the archive and manifest digests before execution.
@@ -384,8 +457,8 @@ prepare/discovery response; no credential material is involved. Missing or
 retired engines do not inherit the previous engine's capability. Runtime
 selection on wake is owned by lifecycle policy, not this discovery flag.
 
-Legacy v3 gateways still require MCP in discovery because they always request
-required customization.
+Worker-profile3 gateways are retired. Customization schema versions1–3 remain
+independent compatibility contracts used by v4; they do not identify worker profiles.
 The empty native capability object in a smoke row is absence of proof and is
 omitted from execution and renewal responses. Revoked, mismatched, disabled or
 wrong-mode qualifications still reject. Marked computer administration workspaces
@@ -496,8 +569,7 @@ directly. The control-plane worker owns VM cleanup.
 
 | Variable | Default | Behavior |
 | --- | --- | --- |
-| `CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE` | `legacy` | `v4` opts eligible new managed Boat workspaces into runtime selection. |
-| `CLOUD_RUNTIME_V4_STAFF_ONLY` | `true` | V4 creation requires the `developer` or `platform_owner` staff role. |
+| `CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE` | `v4` | Only `v4` is accepted; new cloud workspaces require a saved v2 Computer source and qualified pin. |
 | `CLOUD_RUNTIME_QUALIFICATION_MODE` | `full` | `full` requires full evidence; `smoke` accepts smoke or full evidence for selection and credential admission. |
 
 The configured base is the newest approved, non-revoked base image. A revoked
@@ -507,27 +579,27 @@ whose bundle is not revoked, uses the deployed engine protocol, and has enabled,
 non-revoked qualifications for all of `claude-setup-token`, `codex-chatgpt`, and
 `cursor-api-key` for that base's compatibility ID and the configured evidence
 mode. MCP approval is checked independently when a credential path requires it.
-V4 admission supports only the current tested engine protocol. An older
-`CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION` override retains legacy behavior but
-closes new v4 creates with HTTP 409 before allocation.
+V4 admission supports only the current tested engine protocol. An incompatible
+`CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION` override closes new creates before
+allocation. The removed staff rollout selector grants no execution fallback;
+current organization/member/admin roles, funding and qualification still apply.
 
 Create reselects under the organization lock and saves base provenance and all
 six runtime fields in the generation transaction, without provider or artifact
 I/O. No eligible head returns HTTP 409 `cloud_runtime_unavailable` before
-allocation. Workspace responses include the saved six-field `generation.runtime`
-only for v4. Idempotent replay and setup retry retain the saved pin; a stopped
-workspace may automatically select a compatible successor on wake, independently
-of the new-workspace profile switch. Existing selected legacy
-organization images and delegated provider connections retain their current path;
-Cloud Computer v2 template forks belong to Phase C.
+allocation. Workspace responses include the saved six-field `generation.runtime` for supported execution. Idempotent replay and setup retry retain the saved pin; a stopped
+workspace may automatically select a compatible successor on wake, through the existing lifecycle decision. Unsupported saved sources/pins return
+`cloud_workspace_v2_required`; no active-template/legacy resolver substitutes
+new inputs. See [template forks](template-forks.md).
 
 ### V4 lifecycle pins and automatic wake updates
 
 Ordinary resume, setup retry, rebuild, rollback and automatic or explicit
 checkpoint recovery keep all six saved runtime fields through
 `copyGenerationPins` in `generation-pins.ts`, together with the provisioning
-profile. Legacy generations retain their existing profile selection and NULL
-runtime fields. C5 extends this transaction for Cloud Computer source pins.
+profile. Retired generations keep their historical NULL fields for metadata/cleanup but
+cannot use execution replacement or recovery. Saved v2 source pins copy with the
+supported generation; current-template selection never repairs an old source.
 
 A stopped or archived v4 allocation now checks for a newer runtime before its
 ordinary start/resume. The existing `/wake` route and direct create/wake lifecycle
@@ -630,14 +702,13 @@ PostgreSQL and mocked tests do not constitute live Alpha acceptance.
 V4 setup checks the base status and compatibility ID, requiring `idle` or
 `waiting_for_runtime`. The existing pinned SSH transport delivers a maximum
 64 KiB encoded installer input containing the descriptor, a 15-minute artifact
-GET capability and the unchanged nested setup payload. Legacy input remains
-bounded to 48 KiB. Artifact URLs never enter workspace responses, persisted
+GET capability and the unchanged nested setup payload. Artifact URLs never enter workspace responses, persisted
 setup logs, grants or errors. The helper result uses the existing parser and the
 final installer diagnostic must also confirm success.
 V4 uses a 900-second one-use setup admission, covering the ten-minute install
 allowance and the helper's five-second minimum remaining lifetime. The executor
-rejects an admission without that remaining budget before installation. Legacy
-keeps `CLOUD_WORKSPACE_SETUP_ADMISSION_TTL_SECONDS` (120 seconds by default).
+rejects an admission without that remaining budget before installation. The historical setup-TTL configuration name remains a compatibility contract;
+it does not enable an old helper or worker profile.
 Materials are minted by the single redemption after installation, so their
 lifetime covers the remaining setup work independently of admission expiry.
 Outer timeout and setup-lock contention use the worker's bounded retries with
@@ -645,13 +716,13 @@ fresh admission and artifact delivery for the same pin. Integrity failures stay
 terminal. Validated installer component, stage, exit code, timeout flag and
 failed checks are retained in bounded diagnostics without raw output or URLs.
 Publication and setup share one artifact store from `CLOUD_WORKSPACE_S3_*`;
-without that store v4 setup rejects with `cloud_runtime_unavailable`. Delivery
-remains enabled for saved v4 generations when new v4 creation is disabled.
+without that store v4 setup rejects with `cloud_runtime_unavailable`. Saved supported pins still require current qualification and artifact delivery;
+release gates and registry revocation remain authoritative.
 
 The v4 helper redeems the existing setup admission with a strict `runtime`
 witness: runtime ID, manifest digest, base compatibility ID, installer receipt
-digest, boot ID and supervisor session ID. Legacy redemption rejects that field;
-v4 requires it. Redemption compares the first three with the generation and
+digest, boot ID and supervisor session ID. Current v4 redemption requires that witness; unsupported generations fail
+before credentials or enrollment. Redemption compares the first three with the generation and
 inserts all nine engine identity columns atomically. Registration must repeat
 the exact witness using the v4 `agentRuntime` union; its registration grant keeps
 `purpose = 'setup'` and the existing run/fence binding. Readiness copies the
@@ -661,6 +732,5 @@ grant-before-engine lock order.
 Every fresh setup, registration and readiness publication rechecks the pinned
 runtime's current qualifications and revocation state. Credential discovery,
 execution and renewal share the exact per-kind v4 qualification join, including
-evidence mode and independent MCP/native-capability requirements. V3 retains its
-provider/image/contract join. Revocation closes new admissions without choosing a
+evidence mode and independent MCP/native-capability requirements. No v3 worker credential-qualification fallback remains. Revocation closes new admissions without choosing a
 different runtime; existing in-flight credentials retain their lease deadlines.

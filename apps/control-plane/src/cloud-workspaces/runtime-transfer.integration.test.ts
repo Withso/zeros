@@ -176,7 +176,7 @@ import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
       const commands = new DatabaseCloudWorkspaceCommandService({ pool }), commandId = randomUUID();
       const scope = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
         engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken };
-      await commands.mutate(scope, { conversationId: "after-cancel", operationId: randomUUID(), expectedRevision: 0,
+      await commands.mutate(await queueActor(), { conversationId: "after-cancel", operationId: randomUUID(), expectedRevision: 0,
         action: { kind: "enqueue", commandId, payload: { agentId: "claude", userMessageId: randomUUID(),
           prompt: [{ type: "text", text: "fixture prompt" }], modeRevision: 0 } } });
       expect((await commands.claim(scope, "after-cancel", "resumed-source"))?.commandId).toBe(commandId);
@@ -895,7 +895,25 @@ import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
 
   it("lets existing workspace erasure cascade through retained-transition records",async()=>{
     const {claim}=await registered();
-    await pool.query("DELETE FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId]);
+    const removeSources="DELETE FROM cloud_workspace_computer_sources WHERE workspace_id=$1";
+    await expect(pool.query(removeSources,[fixture.workspaceId])).rejects.toMatchObject({code:"23514"});
+    // Use the existing organization/request/worker lease authority; saved
+    // sources precede generations in final erasure, as in the real processor.
+    await withSystemTx(pool,async tx=>{
+      const requestId=randomUUID(),worker="retained-transition-erasure";
+      await tx.query(`INSERT INTO deletion_requests(id,public_code,target_kind,target_id,target_organization_id,
+        requested_by_user_id,state,requested_at,purge_after,purge_started_at,lease_owner,lease_expires_at,lease_revision)
+        VALUES($1,'ZD-TEST-ERAS','organization',$2,$2,$3,'provider_deleting',now()-interval '31 days',
+          now()-interval '1 day',now(),$4,now()+interval '1 minute',1)`,
+        [requestId,fixture.organizationId,fixture.userId,worker]);
+      await tx.query("UPDATE organizations SET lifecycle_status='purging',deletion_request_id=$2 WHERE id=$1",
+        [fixture.organizationId,requestId]);
+      await tx.query(`SELECT set_config('app.cloud_computer_v2_purge_request_id',$1,true),
+        set_config('app.cloud_computer_v2_purge_worker_id',$2,true),
+        set_config('app.cloud_computer_v2_purge_lease_revision','1',true)`,[requestId,worker]);
+      expect((await tx.query(removeSources,[fixture.workspaceId])).rowCount).toBe(2);
+      await tx.query("DELETE FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId]);
+    });
     expect((await pool.query("SELECT 1 FROM cloud_workspace_runtime_transitions WHERE transition_id=$1",[claim.transitionId])).rowCount).toBe(0);
     expect((await pool.query("SELECT 1 FROM cloud_workspace_allocation_owners WHERE workspace_id=$1",[fixture.workspaceId])).rowCount).toBe(0);
   });

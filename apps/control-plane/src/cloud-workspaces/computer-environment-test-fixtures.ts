@@ -4,6 +4,8 @@ import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { DatabaseCloudComputerV2Service } from "./computer-v2.js";
 import { seedComputerTemplateRuntime, templateRuntime } from "./computer-template-test-fixtures.js";
+import { computerTestAccount, computerTestWallet } from "./computer-workspace-test-fixtures.js";
+import type { CloudComputerV2RepositoryManifest } from "./computer-v2-contract.js";
 import {
   persistDatabaseCloudWorkspaceSettings,
   type DatabaseResolvedCloudWorkspaceSettings,
@@ -16,15 +18,25 @@ export async function pinTestComputerEnvironment(
   key: string,
   values: Record<string, string>,
 ) {
-  await seedComputerTemplateRuntime(pool);
+  if (!(await pool.query("SELECT 1 FROM cloud_runtime_bundles WHERE runtime_id=$1", [templateRuntime.descriptor.runtimeId])).rowCount)
+    await seedComputerTemplateRuntime(pool);
   const service = new DatabaseCloudComputerV2Service(pool, {
     settingsSecretKeyV1: key,
   } as CloudWorkspaceBackendConfig);
+  const saved = (await pool.query<{ config_id: string; repository_manifest: CloudComputerV2RepositoryManifest }>(
+    `SELECT source.config_id,build.repository_manifest FROM cloud_workspace_computer_sources source
+     JOIN cloud_computer_v2_builds build ON build.id=source.build_id AND build.org_id=source.org_id
+     WHERE source.workspace_id=$1 AND source.generation=1`, [fixture.workspaceId])).rows[0];
+  const repositories = saved ? (await pool.query<{ repository_id: string; repository_owner: string; repository_name: string; installation_id: string }>(
+    `SELECT repository_id,repository_owner,repository_name,installation_id FROM cloud_computer_v2_config_repositories
+     WHERE config_id=$1 ORDER BY position`, [saved.config_id])).rows.map(row => ({
+      id: row.repository_id, owner: row.repository_owner, name: row.repository_name, installationId: row.installation_id,
+    })) : [];
   const built = await service.build(fixture.organizationId, fixture.userId, {
-    expectedRevision: 0,
+    expectedRevision: Number((await pool.query("SELECT revision FROM cloud_computer_v2_heads WHERE org_id=$1", [fixture.organizationId])).rows[0]?.revision ?? 0),
     operationId: randomUUID(),
     draft: {
-      repositories: [],
+      repositories,
       installScript: "",
       timeoutSeconds: 900,
       environment: Object.entries(values).map(([name, value]) => ({
@@ -37,22 +49,30 @@ export async function pinTestComputerEnvironment(
   const pins = {
     baseImageId: templateRuntime.baseImageId,
     runtimeId: templateRuntime.descriptor.runtimeId,
-    repositoryManifest: [],
+    repositoryManifest: saved?.repository_manifest ?? [],
   };
   await service.claimNextBuild(1);
   await service.markBuildStage(built.build.id, 1, "capture_confirmed", pins);
   await service.completeBuild(built.build.id, 1, {
     ...pins,
     template: {
-      providerResourceId: null,
-      accountScope: null,
-      billingOrg: null,
+      providerResourceId: `zeros-env-template-${built.build.id}`,
+      accountScope: computerTestAccount,
+      billingOrg: computerTestWallet,
       protectedContractDigest: "f".repeat(64),
       stoppedAt: new Date().toISOString(),
     },
   });
-  await withSystemTx(pool, (tx) =>
-    tx.query(
+  // Replace only a disposable fixture's earlier placeholder source. Both
+  // production source and generation rows remain immutable and unmigrated.
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL session_replication_role=replica");
+    await client.query("DELETE FROM cloud_workspace_computer_sources WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId]);
+    await client.query("UPDATE cloud_workspace_generations SET image_ref=$2 WHERE workspace_id=$1 AND generation=1",
+      [fixture.workspaceId, `boat-template:zeros-env-template-${built.build.id}`]);
+    await client.query(
       `INSERT INTO cloud_workspace_computer_sources(workspace_id,generation,org_id,build_id,template_id,config_id)
     VALUES($1,1,$2,$3,$3,$4)`,
       [
@@ -61,9 +81,13 @@ export async function pinTestComputerEnvironment(
         built.build.id,
         built.build.configId,
       ],
-    ),
-  );
-  return { service, configId: built.build.configId };
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally { client.release(); }
+  return { service, configId: built.build.configId, imageRef: `boat-template:zeros-env-template-${built.build.id}` };
 }
 
 /** Replace only the disposable fixture's placeholder settings through real

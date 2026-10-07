@@ -6,7 +6,6 @@ import { useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { acceptOrganizationSnapshot } from "../features/team/team-store";
-import { setInternalFeatureEnabled } from "../features/settings/internal-features";
 import { useSessionsStore } from "../features/agent/sessions-store";
 import type { AgentSessionState } from "../features/agent/use-agent-session";
 import { cloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
@@ -29,6 +28,8 @@ import { SetupView } from "../shell/workbench/tabs/setup-tab";
 import { publishTerminalTabIndicators } from "../shell/terminal/terminal-tab-indicators";
 import { useTerminalStore } from "../shell/terminal/terminal-store";
 import { defaultTabs } from "../shell/workbench/tab-model";
+import { CloudWorkspaceDetailsContent } from "../shell/conversation/cloud-workspace-details";
+import { CloudWorkspaceStatusRow } from "../shell/conversation/cloud-workspace-restart-controls";
 
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
 const folder = cloudWorkspaceKey(target);
@@ -44,9 +45,8 @@ let document: CloudWorkspaceDocument = {
 const organization = { id: target.organizationId, slug: "fixture", name: "Example organization", logo: null,
   isPersonal: false, role: "admin" as const, defaultTeamId: target.organizationId,
   workspaceCapabilities: { local: false, cloud: true }, teamCapabilities: { multiple: false as const, canCreate: false as const } };
-acceptOrganizationSnapshot({ user: { id: target.organizationId, email: "fixture@example.test", displayName: "Fixture", staffRole: "developer" },
+acceptOrganizationSnapshot({ user: { id: target.organizationId, email: "fixture@example.test", displayName: "Fixture", staffRole: null },
   organizations: [organization], teams: [organization] });
-setInternalFeatureEnabled("cloudComputerV2", true);
 acceptCloudWorkspaceDocument(document);
 const initialRow = getCloudWorkspaceRows()[0];
 window.__ZEROS_NATIVE__ = {
@@ -138,6 +138,10 @@ function Harness() {
           <SidebarWorkspaceRow workspace={workspace} active chatIds={["restart-chat"]} project={null} mixedRepositories={false} grouped={false}
             onSelect={noop} onPrefetch={noop} onArchive={noop} />
         </Surface>
+        {cloud && <section aria-label="Cloud workspace details" className="border-border1 bg-bg1 w-[360px] shrink-0 overflow-y-auto rounded-lg border p-3">
+          <CloudWorkspaceDetailsContent workspace={document} creator="Fixture"
+            status={<CloudWorkspaceStatusRow folder={workspace.path} active inline />} />
+        </section>}
         <section aria-label="Setup tab" className="border-border1 bg-bg1 flex min-w-0 flex-1 flex-col overflow-hidden rounded-lg border">
           <WorkbenchTabFrame folder={workspace.path} tab={setupTab} active>
             <TerminalWorkbenchLayout folder={workspace.path} tab={setupTab} active bodyRef={setBody} entries={[]}

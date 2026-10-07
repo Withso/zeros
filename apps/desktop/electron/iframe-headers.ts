@@ -21,13 +21,10 @@
 // whose Electron type is `subFrame`. The renderer document and scripts, XHR,
 // styles, images, and other subresources retain their original headers.
 //
-// Daytona signed-preview origins are a separate exact, volatile allowlist.
-// Requests to one of those origins receive the provider's documented warning-
-// page bypass header. Control-plane cloud-preview origins additionally receive
-// a short-lived Zeros capability kept only in Electron main. Both headers are
-// exact-origin and frame-ancestry scoped; no provider API key enters the
-// renderer or request. The authorization expires with the signed origin and is
-// replaced atomically when the renderer renews it.
+// Control-plane cloud-preview origins receive a short-lived Zeros capability
+// kept only in Electron main. Headers are scoped to the exact origin and frame
+// ancestry. The authorization expires with the origin and is replaced atomically
+// when the renderer renews it.
 //
 // Iframe trade-offs:
 //   - Lose per-tab Chromium process isolation. All iframes share the

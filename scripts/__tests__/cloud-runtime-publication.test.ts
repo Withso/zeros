@@ -23,7 +23,7 @@ describe("cloud runtime publication authority", () => {
     expect(source).toContain("packages: write");
     expect(source).toContain("secrets.GITHUB_TOKEN");
     expect(source).not.toMatch(
-      /secrets\.(?!GITHUB_TOKEN)[A-Z_]+|bake-snapshot|provision\.ts|DAYTONA_API_KEY|BOAT_API_KEY/,
+      /secrets\.(?!GITHUB_TOKEN)[A-Z_]+|bake-snapshot|provision\.ts|BOAT_API_KEY/,
     );
     expect(source).toContain("--password-stdin");
     expect(source).toContain("if: always()");

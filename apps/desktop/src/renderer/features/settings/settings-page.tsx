@@ -1,5 +1,4 @@
-import { CloudComputerPanel } from "./cloud-computer-panel";
-import { prefetchCloudComputer } from "./cloud-computer-client";
+import { CloudComputerV2Panel } from "./cloud-computer-v2-panel";
 import { prefetchCloudComputerV2 } from "./cloud-computer-v2-client";
 import { CloudMcpPanel, CloudSkillsPanel } from "./cloud-customization-panel";
 import { prefetchCloudCustomization } from "./cloud-customization-client";
@@ -127,7 +126,7 @@ import {
   setShowHiddenWorkspaces,
   useShowHiddenWorkspaces,
 } from "./dashboard-settings";
-import { useInternalFeature, useInternalFeatureActive, useIsInternalUser } from "./internal-features";
+import { useInternalFeature, useIsInternalUser } from "./internal-features";
 import {
   UserEnvironmentPanel,
   isRepoSectionId,
@@ -248,7 +247,7 @@ const SECTIONS: SectionDef[] = [
     icon: Box,
     Panel: ModelsPanel,
   },
-  { id: "cloud-computer", label: "Cloud Computer", icon: Box, Panel: CloudComputerPanel },
+  { id: "cloud-computer", label: "Cloud Computer", icon: Box, Panel: CloudComputerV2Panel },
   { id: "cloud-mcp", label: "MCP servers", icon: Blocks, Panel: CloudMcpPanel },
   { id: "cloud-skills", label: "Skills", icon: Blocks, Panel: CloudSkillsPanel },
   {
@@ -619,7 +618,6 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   // non-internal account) can never leave the panel reachable.
   const [terminalAgentsEnabled] = useExperimentalFeature("terminalAgents");
   const internalUser = useIsInternalUser();
-  const cloudComputerV2 = useInternalFeatureActive("cloudComputerV2");
   const availableSections = useMemo(
     () =>
       SECTIONS.filter(
@@ -755,9 +753,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                           section.id === "integrations"
                             ? prefetchGithubAuthSnapshot
                             : section.id === "cloud-computer" && organization && me
-                              ? () => cloudComputerV2
-                                ? prefetchCloudComputerV2(me.user.id, organization.id)
-                                : prefetchCloudComputer(me.user.id, organization.id)
+                              ? () => prefetchCloudComputerV2(me.user.id, organization.id)
                             : (section.id === "cloud-mcp" || section.id === "cloud-skills") && organization && me
                               ? () => prefetchCloudCustomization(me.user.id, organization.id)
                             : undefined
@@ -1630,13 +1626,9 @@ function ExperimentalPanel() {
 // staff-only, so the headline stands alone (2026-09-14).
 function InternalPanel() {
   const [copyLogs, setCopyLogs] = useInternalFeature("copyLogs");
-  const [cloudComputerV2, setCloudComputerV2] = useInternalFeature("cloudComputerV2");
   return (
     <div className="flex flex-col gap-6">
       <SettingsGroup>
-        <SettingsRow label="Cloud Computer v2" hint="Versioned builds, shared repositories and first-build workspace guidance.">
-          <Switch checked={cloudComputerV2} onCheckedChange={setCloudComputerV2} aria-label="Enable Cloud Computer v2" />
-        </SettingsRow>
         <SettingsRow
           label="Copy logs"
           hint="⇧⌘L copies recent app logs to the clipboard."

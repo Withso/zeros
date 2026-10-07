@@ -1,16 +1,14 @@
-import { devConnectionRuntime } from "./dev-connections/runtime.js";
 import { devConnectionsEnabled } from "./dev-connections/config.js";
-import { prepareDevReferenceCanaryAccess } from "./dev-connections/qualification.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type pg from "pg";
 import { z } from "zod";
-import { createPool, withSystemTx, type Tx } from "./db.js";
+import { withSystemTx } from "./db.js";
 import { DatabaseCloudAgentCredentialService, CloudAgentModelSchema } from "./cloud-workspaces/agent-credentials.js";
-import { openCloudAgentCredential, type CloudAgentCredentialKeys, type CloudAgentCredentialKind, type CloudAgentCredentialMaterial } from "./cloud-workspaces/agent-credential-envelope.js";
-import { DatabaseCodexAuthRenewal } from "./cloud-workspaces/codex-auth-renewal.js";
-import { DevCanaryTargetSchema, startNativeDevCanary, type DevRenewalProof } from "./cloud-workspaces/dev-native-canary.js";
-import { prepareNativeCanaryAccess as prepareDevCanaryAccess } from "./cloud-workspaces/native-canary-access.js";
+import { type CloudAgentCredentialKind } from "./cloud-workspaces/agent-credential-envelope.js";
+import { DevCanaryTargetSchema } from "./cloud-workspaces/dev-native-canary.js";
+import { refuseRetiredReleaseWorker } from "./cloud-workspaces/release-worker-retirement.js";
+import { HttpError } from "./authz.js";
 
 const imageSchema = DevCanaryTargetSchema.omit({ id: true, attempt: true });
 export const DevAgentRequestSchema = z.object({
@@ -23,10 +21,6 @@ export const DevAgentRequestSchema = z.object({
   organizationImage: imageSchema.extend({ id: z.string().uuid() }).strict().optional(),
 }).strict();
 type Request = z.infer<typeof DevAgentRequestSchema>;
-const startSchema = DevAgentRequestSchema.extend({ target: DevCanaryTargetSchema, credentialId: z.string().uuid(),
-  credentialRevision: z.number().int().positive(), connectionRevision: z.number().int().positive(),
-  model: CloudAgentModelSchema, startedAt: z.number().int().positive() }).strict();
-
 export function assertDevAgentEnvironment(request: Request, env: NodeJS.ProcessEnv) {
   DevAgentRequestSchema.parse(request);
   if (env.ZEROS_DEV_ENVIRONMENT !== "hosted" || env.ZEROS_DEV_OWNER !== request.owner || env.ZEROS_DEV_GENERATION !== request.generation ||
@@ -115,79 +109,9 @@ export async function inspectDevAgents(pool: pg.Pool, input: Request): Promise<S
 
 export { prepareNativeCanaryAccess as prepareDevCanaryAccess } from "./cloud-workspaces/native-canary-access.js";
 
-/** SSH-only operator entrypoint, never registered as a public API. The login
- * role is the ordinary runtime role: approval writes remain migration-owned. */
-async function start(input: unknown, env: NodeJS.ProcessEnv) {
-  const request = startSchema.parse(input), base = DevAgentRequestSchema.parse({ owner: request.owner, generation: request.generation,
-    fixture: request.fixture, image: request.image, accountScope: request.accountScope, referenceMode: request.referenceMode,
-    organizationImage: request.organizationImage });
-  assertDevAgentEnvironment(base, env);
-  const image = request.organizationImage ?? request.image;
-  if (process.platform !== "linux" || Date.now() - request.startedAt > 12 * 60_000 || request.startedAt > Date.now() + 5000 ||
-      request.target.snapshotId !== image.snapshotId || request.target.sourceCommit !== image.sourceCommit ||
-      request.target.buildSha256 !== image.buildSha256) throw new Error("Invalid Dev canary dispatch");
-  const pool = createPool(env.DATABASE_URL!, { maxConnections: 2, applicationName: "zeros-dev-agent-canary" });
-  try {
-    const status = await inspectDevAgents(pool, base);
-    if (!("connections" in status)) throw new Error("Dev member is not ready");
-    const connection = status.connections.find(row => row.credentialId === request.credentialId && row.credentialRevision === request.credentialRevision &&
-      row.connectionRevision === request.connectionRevision && row.model === request.model);
-    if (!connection) throw new Error("Dev connection changed before qualification");
-    const occupied = await withSystemTx(pool, tx => tx.query("SELECT 1 FROM cloud_workspace_provider_operations WHERE resource_id=$1", [request.target.id]));
-    if (occupied.rowCount) throw new Error("Dev qualification requires a separate disposable worker");
-    if (request.organizationImage && (await withSystemTx(pool, tx => tx.query(
-      "SELECT 1 FROM cloud_computer_images WHERE builder_id=$1 OR verifier_id=$1", [request.target.id]))).rowCount)
-      throw new Error("An image builder or verifier cannot qualify its own output");
-    const keys: CloudAgentCredentialKeys = { keys: { 1: env.CLOUD_WORKSPACE_SECRET_KEY_V1! }, currentKeyVersion: 1,
-      refreshFingerprints: { keys: JSON.parse(env.CLOUD_CODEX_REFRESH_FINGERPRINT_KEYS_JSON!), currentKeyVersion: Number(env.CLOUD_CODEX_REFRESH_FINGERPRINT_CURRENT_KEY_VERSION) } };
-    const read = async (tx: Tx) => {
-      const row = (await tx.query<{ id: string; owner_user_id: string; revision: string; current_version: number }>(`SELECT id,owner_user_id,revision::text,current_version
-        FROM cloud_agent_credentials WHERE id=$1 AND owner_user_id=$2 AND revision=$3 AND kind=$4 AND revoked_at IS NULL FOR UPDATE`,
-      [connection.credentialId, status.actorUserId, connection.credentialRevision, connection.kind])).rows[0];
-      if (!row) throw new Error("Dev credential changed");
-      const version = (await tx.query("SELECT * FROM cloud_agent_credential_versions WHERE credential_id=$1 AND version=$2", [row.id, row.current_version])).rows[0];
-      const material = openCloudAgentCredential({ nonce: version.nonce, ciphertext: version.ciphertext, authTag: version.auth_tag },
-        { credentialId: row.id, ownerUserId: row.owner_user_id, kind: connection.kind, version: row.current_version, keyVersion: version.key_version }, keys.keys);
-      if (material.kind === "codex-chatgpt" && material.refreshToken) throw new Error("Only access material may reach the canary");
-      return { credential: row, material };
-    };
-    const renew = new DatabaseCodexAuthRenewal(pool, keys);
-    const runtime=connection.mode==='dev-reference'?devConnectionRuntime(pool,keys,env):null;
-    if(connection.mode==='dev-reference'&&!runtime)throw new Error('Dev reference qualification is disabled');
-    if(runtime)await runtime.consumeInvalidations();
-    const referenceAccess=(expectedVersion?:number)=>withSystemTx(pool,async tx=>{
-      const selected=await tx.query(`SELECT 1 FROM cloud_agent_organization_connections c JOIN cloud_agent_credentials a ON a.id=c.credential_id
-        WHERE c.org_id=$1 AND c.owner_user_id=$2 AND c.credential_id=$3 AND c.revision=$4 AND a.revision=$5 AND a.revoked_at IS NULL AND $6=ANY(c.models)`,
-      [status.organizationId,status.actorUserId,connection.credentialId,connection.connectionRevision,connection.credentialRevision,connection.model]);
-      if(!selected.rowCount)throw new Error('Dev qualification consent changed');
-      return runtime!.issue(tx,connection.credentialId,status.actorUserId,status.organizationId,{action:'agent',workspaceId:request.target.attempt,model:connection.model},
-        expectedVersion===undefined?undefined:{expectedVersion});
-    });
-    const access=runtime?await prepareDevReferenceCanaryAccess(()=>referenceAccess(),version=>referenceAccess(version)):await prepareDevCanaryAccess(() => withSystemTx(pool, read), async () => {
-      const reservation = await withSystemTx(pool, async tx => { const current = await read(tx); return renew.reserve(tx, current.credential, true); });
-      if (!reservation) throw new Error("Dev native renewal unavailable");
-      await renew.complete(reservation);
-    });
-    const {before,renewedCodex,renewal}=access;
-    const accessDeadline='expiresAt' in access?access.expiresAt as number:Date.now()+14*60_000;
-    const boat = async (method: string, route: string, body?: unknown): Promise<any> => {
-      const response = await fetch(`https://boat.dev/api/v1${route}`, { method, redirect: "error", signal: AbortSignal.timeout(55_000),
-        headers: { authorization: `Bearer ${env.BOAT_API_KEY}`, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-      if (!response.ok) throw new Error("Dev canary provider request failed");
-      const bytes = await response.text(); if (bytes.length > 1024 * 1024) throw new Error("Dev canary response exceeded its bound");
-      return JSON.parse(bytes);
-    };
-    const sandbox = await boat("GET", `/sandboxes/${request.target.id}`);
-    if (sandbox.sandbox?.team?.id !== env.BOAT_BILLING_ORG) throw new Error("Dev canary account mismatch");
-    await startNativeDevCanary({
-      command: async command => { const result = await boat("POST", `/sandboxes/${request.target.id}/commands`, { command, timeoutSeconds: 25 });
-        if (result.exitCode !== 0 || result.timedOut) throw new Error("Dev canary command failed"); return String(result.stdout); },
-      upload: async (file, contents) => { const result = await boat("PUT", `/sandboxes/${request.target.id}/files`, { path: file, encoding: "base64", content: contents.toString("base64") });
-        if (result.size !== contents.length) throw new Error("Dev canary private input upload was not confirmed"); },
-    }, request.target, { version: 1, expiresAtMs: accessDeadline, sourceCommit: image.sourceCommit,
-      buildSha256: image.buildSha256, model: connection.model, material: before.material, ...(renewedCodex ? { renewedCodex } : {}) }, renewal);
-    return { started: true };
-  } finally { await pool.end(); }
+/** SSH-only historical entrypoint: refuse before DB, credential or provider access. */
+export async function start(_input: unknown, _env: NodeJS.ProcessEnv): Promise<never> {
+  refuseRetiredReleaseWorker();
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -196,5 +120,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     for await (const chunk of process.stdin) { input += chunk; if (input.length > 8192) throw new Error(); }
     const result = await start(JSON.parse(input), process.env);
     console.log(JSON.stringify(result));
-  } catch { console.error("Dev agent qualification could not start; credentials and provider output were withheld"); process.exitCode = 1; }
+  } catch (error) {
+    console.error(error instanceof HttpError && error.code === "release_worker_images_retired"
+      ? JSON.stringify({ code: error.code, message: error.message })
+      : "Dev agent qualification could not start; credentials and provider output were withheld");
+    process.exitCode = 1;
+  }
 }

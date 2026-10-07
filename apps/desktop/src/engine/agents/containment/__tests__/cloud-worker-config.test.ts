@@ -11,8 +11,8 @@ import {
 
 const roots: string[] = [];
 const toolchain = {
-  node: "/usr/local/bin/node",
-  supervisor: "/opt/zeros/zsr-supervisor.mjs",
+  node: `/opt/zeros-infra/r1-${"a".repeat(64)}/bin/node`,
+  supervisor: `/opt/zeros-infra/r1-${"a".repeat(64)}/worker/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs`,
   bwrap: "/usr/bin/bwrap",
   setpriv: "/usr/bin/setpriv",
 };
@@ -29,18 +29,18 @@ describe("cloud worker deployment configuration", () => {
     expect(
       parseCloudWorkerConfiguration(
         JSON.stringify({
-          version: 1,
+          version: 4,
           backend: "cloud-worker",
-          profile: "zeros-cloud-worker-v1",
+          profile: "zeros-cloud-worker-v4",
           uid: 10_001,
           gid: 10_001,
           toolchain,
         }),
       ),
     ).toEqual({
-      version: 1,
+      version: 4,
       backend: "cloud-worker",
-      profile: "zeros-cloud-worker-v1",
+      profile: "zeros-cloud-worker-v4",
       uid: 10_001,
       gid: 10_001,
       toolchain,
@@ -48,18 +48,18 @@ describe("cloud worker deployment configuration", () => {
 
     for (const value of [
       {
-        version: 1,
+        version: 4,
         backend: "cloud-worker",
-        profile: "zeros-cloud-worker-v1",
+        profile: "zeros-cloud-worker-v4",
         uid: 10_001,
         gid: 10_001,
         toolchain,
         permissive: true,
       },
       {
-        version: 1,
+        version: 4,
         backend: "cloud-worker",
-        profile: "zeros-cloud-worker-v1",
+        profile: "zeros-cloud-worker-v4",
         uid: 0,
         gid: 10_001,
         toolchain,
@@ -67,7 +67,7 @@ describe("cloud worker deployment configuration", () => {
       {
         version: 2,
         backend: "cloud-worker",
-        profile: "zeros-cloud-worker-v1",
+        profile: "zeros-cloud-worker-v4",
         uid: 10_001,
         gid: 10_001,
         toolchain,
@@ -79,6 +79,13 @@ describe("cloud worker deployment configuration", () => {
     }
   });
 
+  it.each([1, 2, 3])("refuses a present retired worker-v%i marker", (version) => {
+    expect(() => parseCloudWorkerConfiguration(JSON.stringify({
+      version, backend: "cloud-worker", profile: `zeros-cloud-worker-v${version}`,
+      uid: 10001, gid: 10001, toolchain,
+    }))).toThrow(/unsupported contract/);
+  });
+
   it("treats an absent marker as a normal local runtime", () => {
     expect(
       loadCloudWorkerConfiguration(
@@ -87,35 +94,12 @@ describe("cloud worker deployment configuration", () => {
     ).toBeNull();
   });
 
-  it("keeps the isolated namespace profile distinct from legacy root images", () => {
-    const marker = {
-      version: 2,
-      backend: "cloud-worker",
-      profile: "zeros-cloud-worker-v2",
-      uid: 10001,
-      gid: 10001,
-      toolchain,
-    };
-    expect(parseCloudWorkerConfiguration(JSON.stringify(marker))).toEqual(
-      marker,
-    );
-    const privateProvider={...marker,version:3,profile:"zeros-cloud-worker-v3"};
-    expect(parseCloudWorkerConfiguration(JSON.stringify(privateProvider))).toEqual(privateProvider);
-    const runtimeRoot = `/opt/zeros-infra/r1-${"a".repeat(64)}`;
-    const v4 = {...marker, version:4, profile:"zeros-cloud-worker-v4", toolchain:{...toolchain,
-      node:`${runtimeRoot}/bin/node`, supervisor:`${runtimeRoot}/worker/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs`}};
-    expect(parseCloudWorkerConfiguration(JSON.stringify(v4))).toEqual(v4);
-    for (const changed of [
-      { version: 1 },
-      { profile: "zeros-cloud-worker-v1" },
-      { uid: 10003 },
-      { gid: 10002 },
-    ])
-      expect(() =>
-        parseCloudWorkerConfiguration(
-          JSON.stringify({ ...marker, ...changed }),
-        ),
-      ).toThrow(/unsupported contract/);
+  it("keeps the v4 worker identity separate from the engine identity", () => {
+    const marker = { version: 4, backend: "cloud-worker", profile: "zeros-cloud-worker-v4",
+      uid: 10001, gid: 10001, toolchain };
+    expect(parseCloudWorkerConfiguration(JSON.stringify(marker))).toEqual(marker);
+    for (const changed of [{ version: 1 }, { profile: "zeros-cloud-worker-v1" }, { uid: 10003 }, { gid: 10002 }])
+      expect(() => parseCloudWorkerConfiguration(JSON.stringify({ ...marker, ...changed }))).toThrow(/unsupported contract/);
   });
 
   it("rejects a marker reachable through an untrusted writable ancestor", async () => {
@@ -128,9 +112,9 @@ describe("cloud worker deployment configuration", () => {
     await writeFile(
       marker,
       `${JSON.stringify({
-        version: 1,
+        version: 4,
         backend: "cloud-worker",
-        profile: "zeros-cloud-worker-v1",
+        profile: "zeros-cloud-worker-v4",
         uid: 10_001,
         gid: 10_001,
         toolchain,

@@ -36,25 +36,20 @@ describe("Cloud create source metadata", () => {
       new Error("Desktop GitHub access is unavailable"),
     );
     await expect(
-      getCloudWorkspaceCreateOptions(org, "example", "project", {
-        cloudComputerV2: true,
-      }),
+      getCloudWorkspaceCreateOptions(org, "example", "project"),
     ).resolves.toEqual(options);
     expect(api.proof).not.toHaveBeenCalled();
     expect(api.fetch.mock.calls[0][0]).toBe(
       `https://api.example.test/v1/organizations/${org}/cloud-workspaces/create-options?owner=example&repository=project&cloudComputerV2=true`,
     );
   });
-  it("retains personal proof and the original endpoint for legacy creation", async () => {
+  it("uses the organization computer grant by default without a desktop GitHub proof", async () => {
+    api.proof.mockRejectedValue(new Error("proof missing"));
     await expect(
       getCloudWorkspaceCreateOptions(org, "example", "project"),
     ).resolves.toEqual(options);
-    expect(api.proof).toHaveBeenCalledWith(org, "example", "project");
-    expect(api.fetch.mock.calls[0][0]).not.toContain("cloudComputerV2");
-    api.proof.mockRejectedValueOnce(new Error("proof missing"));
-    await expect(
-      getCloudWorkspaceCreateOptions(org, "example", "project"),
-    ).rejects.toThrow("proof missing");
+    expect(api.proof).not.toHaveBeenCalled();
+    expect(api.fetch.mock.calls[0][0]).toContain("cloudComputerV2=true");
     expect(api.fetch).toHaveBeenCalledOnce();
   });
 });

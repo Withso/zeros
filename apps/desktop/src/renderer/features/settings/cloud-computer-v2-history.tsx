@@ -5,7 +5,6 @@ import type {
 } from "@zeros/protocol/cloud-computer-v2";
 import { Button } from "../../shared/ui";
 import { getOrganizationStoreGeneration } from "../team/team-store";
-import { useInternalFeatureActive } from "./internal-features";
 import { loadCloudComputerV2History } from "./cloud-computer-v2-client";
 import { SettingsList, SettingsRow, SettingsSection } from "./settings-ui";
 
@@ -43,7 +42,6 @@ export function CloudComputerV2History({
     row: CloudComputerV2BuildSummary,
   ) => Promise<CloudComputerV2BuildSummary | void>;
 }) {
-  const authorized = useInternalFeatureActive("cloudComputerV2");
   const [older, setOlder] = useState({
     revision: snapshot.revision,
     pages: [] as OlderPage[],
@@ -76,7 +74,7 @@ export function CloudComputerV2History({
     ].sort((a, b) => b.version - a.version);
   }, [snapshot.history.builds, older.pages]);
   useEffect(() => {
-    if (!authorized || !active || busy || refreshed.current === refreshVersion)
+    if (!active || busy || refreshed.current === refreshVersion)
       return;
     refreshed.current = refreshVersion;
     if (!older.pages.length || older.revision !== snapshot.revision) return;
@@ -124,7 +122,6 @@ export function CloudComputerV2History({
         if (mounted.current) setBusy(false);
       });
   }, [
-    authorized,
     active,
     busy,
     refreshVersion,
@@ -134,7 +131,7 @@ export function CloudComputerV2History({
     snapshot.history.builds.length,
   ]);
   const readOlder = async () => {
-    if (!authorized || !active || !older.cursor || pending.current) return;
+    if (!active || !older.cursor || pending.current) return;
     const epoch = getOrganizationStoreGeneration(),
       revision = snapshot.revision;
     pending.current = true;
@@ -176,7 +173,7 @@ export function CloudComputerV2History({
     kind: "activate" | "rebuild",
     row: CloudComputerV2BuildSummary,
   ) => {
-    if (!authorized || !active || disabled || pending.current) return;
+    if (!active || disabled || pending.current) return;
     const epoch = getOrganizationStoreGeneration();
     pending.current = true;
     setBusy(true);
@@ -206,7 +203,7 @@ export function CloudComputerV2History({
       if (mounted.current) setBusy(false);
     }
   };
-  if (!authorized || !rows.length) return null;
+  if (!rows.length) return null;
   return (
     <SettingsSection title="History">
       <SettingsList>

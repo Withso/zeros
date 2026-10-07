@@ -87,7 +87,14 @@ describe("concurrent Alpha preparation and serialized publication", () => {
       expect(steps[download].with["run-id"]).toBe("${{ github.run_id }}");
       expect(steps[download].with["merge-multiple"]).toBe(true);
       expect(steps[download].with.name).toBeUndefined();
-      expect(workflow("release-alpha").jobs[kind === "desktop" ? "build" : "runtime-build"].steps.find((step: any) => step.uses?.startsWith("actions/upload-artifact@")).with.name).toBe(`${artifact}-\${{ github.sha }}`);
+      const producer = kind === "desktop" ? workflow("release-alpha").jobs.build : workflow("cloud-runtime-bundle-build").jobs.build;
+      const upload = producer.steps.find((step: any) => step.uses?.startsWith("actions/upload-artifact@"));
+      if (kind === "desktop") expect(upload.with.name).toBe(`${artifact}-\${{ github.sha }}`);
+      else {
+        expect(workflow("release-alpha").jobs["runtime-build"].uses).toBe("./.github/workflows/cloud-runtime-bundle-build.yml");
+        expect(workflow("cloud-runtime-bundle-build").on.workflow_call.inputs.artifact_name.default).toBe(artifact);
+        expect(upload.with.name).toBe("${{ inputs.artifact_name }}-${{ github.sha }}");
+      }
       expect(publisher.environment).toBe("alpha");
       expect(publisher.permissions.actions).toBe("read");
     });

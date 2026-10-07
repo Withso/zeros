@@ -5,13 +5,11 @@ import {
   subscribeCloudWorkspaces,
 } from "../../state/cloud-workspace-catalog";
 import { Badge } from "../../shared/ui/primitives/badge";
-import { useInternalFeatureActive } from "./internal-features";
 
 export function CloudComputerAdminBadge({ folder }: { folder: string }) {
-  const authorized = useInternalFeatureActive("cloudComputerV2");
   const target = parseCloudWorkspaceKey(folder);
   const snapshot = () =>
-    authorized && target
+    target
       ? cloudWorkspaceDocument(target)?.adminWorkspace?.creatorUserId
       : undefined;
   const creator = useSyncExternalStore(

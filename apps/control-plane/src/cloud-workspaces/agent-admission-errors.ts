@@ -1,5 +1,6 @@
 // Closed pre-provider refusals only. Mirrored with the independently deployed protocol.
 export const CLOUD_AGENT_ADMISSION_CODES = [
+  "cloud_workspace_v2_required",
   "cloud_runtime_upgrade_required",
   "cloud_agent_model_not_authorized",
   "cloud_agent_credential_required",

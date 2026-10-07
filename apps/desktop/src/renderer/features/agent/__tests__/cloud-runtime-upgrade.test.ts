@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { recoverCloudRuntimeUpgrade } from "../cloud-runtime-upgrade";
+import { recoverCloudAdmissionFailure } from "../cloud-runtime-upgrade";
 import { registerLiveChatDraftRestorer, setLiveChatDraft, getLiveChatDraft } from "../composer-live-drafts";
 import { BLANK, useSessionsStore } from "../sessions-store";
 import type { AgentTextMessage } from "../use-agent-session";
@@ -14,7 +14,7 @@ const message: AgentTextMessage = { id: "turn", kind: "text", role: "user", text
 function setup(cwd = folder) {
   useSessionsStore.setState({ sessions: { chat: { ...BLANK, cwd, agentId: "codex", sessionId: "session", status: "streaming", messages: [message] } } });
   const pause = vi.fn(), persist = vi.fn();
-  const recover = (error: unknown = "cloud_runtime_upgrade_required", draft?: Parameters<typeof recoverCloudRuntimeUpgrade>[0]["draft"]) => recoverCloudRuntimeUpgrade({
+  const recover = (error: unknown = "cloud_runtime_upgrade_required", draft?: Parameters<typeof recoverCloudAdmissionFailure>[0]["draft"]) => recoverCloudAdmissionFailure({
     folder: cwd, chatId: "chat", error, message, draft, store: useSessionsStore.getState(), pauseQueue: pause, persist,
   });
   return { recover, pause, persist };

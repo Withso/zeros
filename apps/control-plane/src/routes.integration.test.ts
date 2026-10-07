@@ -53,6 +53,7 @@ d("organization routes", () => {
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: url, max: 3 });
     await resetMigratedTestDatabase(pool);
+    await pool.query("UPDATE managed_compute_provider_requirements SET require_credit=false WHERE provider='boat'");
     owner = { ...(await signup("Ada")), staffRole: "platform_owner" };
     member = await signup("Grace");
     actor = owner;
@@ -1072,7 +1073,7 @@ d("organization routes", () => {
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib, created_by,
            provider_connection_id
-         ) VALUES ($1, 1, $2, 'daytona', 'zeros:test', 'linux/amd64',
+         ) VALUES ($1, 1, $2, 'boat', 'zeros:test', 'linux/amd64',
                    1000, 2048, 10240, $3, $4)`,
         [
           workspaceId,
@@ -1084,7 +1085,7 @@ d("organization routes", () => {
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider
-         ) VALUES ($1, 1, $2, 'daytona')`,
+         ) VALUES ($1, 1, $2, 'boat')`,
         [workspaceId, body.organization.id],
       );
     });

@@ -13,7 +13,6 @@ import { recoverCloudAdmissionFailure } from "../features/agent/cloud-runtime-up
 import { invalidateCloudAgentRegistry, warmCloudAgentRegistry } from "../features/agent/workspace-agent-registry";
 import { loadAgents } from "../features/agent/agents-cache";
 import { acceptOrganizationSnapshot } from "../features/team/team-store";
-import { setInternalFeatureEnabled } from "../features/settings/internal-features";
 import { Button, TooltipProvider } from "../shared/ui/primitives";
 import { Toaster } from "../shared/ui/primitives/elements/toast";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
@@ -49,9 +48,8 @@ setActiveBridge({ status: "connected", on: () => () => {}, onStatusChange: () =>
 const organization = { id: organizationId, slug: "fixture", name: "Example organization", logo: null,
   isPersonal: false, role: "admin" as const, defaultTeamId: organizationId,
   workspaceCapabilities: { local: true, cloud: true }, teamCapabilities: { multiple: false as const, canCreate: false as const } };
-acceptOrganizationSnapshot({ user: { id: organizationId, email: "fixture@example.test", displayName: "Fixture", staffRole: "developer" },
+acceptOrganizationSnapshot({ user: { id: organizationId, email: "fixture@example.test", displayName: "Fixture", staffRole: null },
   organizations: [organization], teams: [organization] });
-setInternalFeatureEnabled("cloudComputerV2", true);
 let document: CloudWorkspaceDocument = {
   id: workspaceId, organizationId, teamId: organizationId, createdBy: organizationId, name: "Composer fixture",
   placement: "cloud", status: "ready", version: 1, error: null, deletedAt: null,

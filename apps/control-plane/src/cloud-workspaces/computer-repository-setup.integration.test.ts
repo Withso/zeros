@@ -33,7 +33,7 @@ d("Cloud Computer repository setup", () => {
   });
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
-    fixture = await seedReadyCloudWorkspace(pool);
+    fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     service = new DatabaseCloudComputerV2Service(pool, config);
     const installationId = randomUUID();
     await withSystemTx(pool, async (tx) => {
@@ -214,7 +214,7 @@ d("Cloud Computer repository setup", () => {
     });
     await expect(update()).resolves.toMatchObject({ version: 1 });
     await expect(update(input(), "456")).rejects.toMatchObject({ status: 404 });
-    const other = await seedReadyCloudWorkspace(pool);
+    const other = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     await expect(
       service.updateRepositorySetupScript(
         other.organizationId,
@@ -225,7 +225,7 @@ d("Cloud Computer repository setup", () => {
     ).rejects.toMatchObject({ status: 404 });
   });
 
-  it.each(["member", "support_admin", "nonstaff"])(
+  it.each(["member"])(
     "returns 403 for %s, including direct service callers",
     async (role) => {
       if (role === "member")
@@ -267,6 +267,14 @@ d("Cloud Computer repository setup", () => {
       expect(await current()).toBeUndefined();
     },
   );
+
+  it.each([null, "support_admin"])("allows nonstaff organization admins (%s) to update repository setup", async role => {
+    await pool.query("UPDATE users SET staff_role=$2 WHERE id=$1", [fixture.userId, role]);
+    await pool.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator') ON CONFLICT(user_id) DO UPDATE SET plan='pro',status='active',cloud_workspaces_allowed=true", [fixture.userId]);
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_github_source_access SET actor_fingerprint=cloud_github_actor_fingerprint(org_id,owner_user_id)"));
+    expect(await update()).toMatchObject({ repositoryId: "123", version: 1 });
+    expect(await current()).toMatchObject({ current_version: "1" });
+  });
 
   it.each([
     { timeoutSeconds: 901 },

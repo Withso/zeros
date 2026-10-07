@@ -199,9 +199,6 @@ export type CloudWorkspaceBackendConfig = {
       Record<CloudWorkspaceProviderName, CloudWorkspaceProvisioningProfile>
     >
   >;
-  /** Customer Daytona onboarding is independent of the managed provider. The
-   * legacy flat endpoint/target is used only when Daytona is the default. */
-  daytonaConnection?: { apiUrl: string; target: string };
   boat?: { accountScope: string; ttlSeconds: number | null; billingOrg: string };
   computerMaxConcurrentBuilds?: number;
   computePolicy?: import("./cloud-workspaces/compute-leases.js").ManagedComputePolicy;
@@ -221,9 +218,6 @@ export type CloudWorkspaceBackendConfig = {
   reconcileIntervalMs: number;
   /** API replicas can leave background work to a separate worker replica. */
   backgroundWorkersEnabled?: boolean;
-  /** Envelope keys used only by the coordinator for delegated provider
-   * credentials. An empty keyring keeps hosted-provider mode available. */
-  providerCredentialKeys: Readonly<Record<number, string>>;
   /** Coordinator-only envelope key for versioned environment secret bindings.
    * It is independent from setup execution so settings can be prepared while
    * the unqualified image worker remains disabled. */
@@ -263,7 +257,6 @@ export type CloudWorkspaceBackendConfig = {
    * setup remains paused at `setting_up` until the image is qualified. */
   setupExecution: {
     controlPlaneOrigin: string;
-    allowedToolboxOrigins: readonly string[];
     setupSecretEncryptionKeys: Readonly<Record<number, string>>;
     currentSetupSecretEncryptionKeyVersion: number;
     setupSecretKeyV1: string | null;
@@ -346,13 +339,13 @@ export type Config = {
   /** Dedicated server credential for automatic titles; absent disables titles. */
   chatTitleApiKey?: string | null;
   /** Null unless the explicit paid-resource gate and complete provider block
-   * are present. Merely setting a Daytona API key never enables creation. */
+   * are present. Merely setting a Boat API key never enables creation. */
   cloudWorkspaces: CloudWorkspaceBackendConfig | null;
   cloudAgentCredentials?: CloudAgentCredentialConfig;
   selectedCloudWorker?: SelectedCloudWorker | null;
   cloudRuntimePublication?: CloudRuntimePublicationConfig;
   /** Metadata for release identity; workspace selection is owned separately. */
-  cloudWorkspaceNewRuntimeProfile?: "legacy" | "v4";
+  cloudWorkspaceNewRuntimeProfile?: "v4";
   cloudWorkspaceResumeExistingEnabled?: boolean;
 };
 
@@ -361,7 +354,7 @@ export type CloudRuntimePublicationConfig = RuntimeOidcConfig & RuntimeArtifactS
 };
 
 export type SelectedCloudWorker = {
-  provider: "boat" | "daytona";
+  provider: "boat";
   imageRef: string;
   sourceSha: string;
   architecture: "linux/amd64" | "linux/arm64";
@@ -372,17 +365,7 @@ const CloudWorkspaceEnvSchema = z.object({
   CLOUD_WORKSPACES_ENABLED: z.literal("true"),
   CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: z.enum(["true", "false"]).default("true"),
   CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS: z.coerce.number().int().min(1).max(32).default(2),
-  // Managed Boat Linux VMs are the default; Daytona must be selected explicitly.
-  CLOUD_WORKSPACE_PROVIDER: z.enum(["daytona", "boat"]).default("boat"),
-  DAYTONA_API_KEY: z.string().trim().min(16).max(4096).optional(),
-  DAYTONA_API_URL: z.string().url().default("https://app.daytona.io/api"),
-  DAYTONA_TARGET: z
-    .string()
-    .trim()
-    .regex(/^[A-Za-z0-9._-]{1,64}$/)
-    .default("eu"),
-  DAYTONA_SNAPSHOT_ID: z.string().trim().min(1).max(512).optional(),
-  DAYTONA_SANDBOX_CLASS: z.enum(["container", "linux-vm"]).optional(),
+  CLOUD_WORKSPACE_PROVIDER: z.literal("boat").default("boat"),
   BOAT_API_KEY: z
     .string()
     .trim()
@@ -410,8 +393,6 @@ const CloudWorkspaceEnvSchema = z.object({
   BOAT_COMPUTE_POLICY_ID: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/).optional(),
   BOAT_SECONDS_PER_DOLLAR: z.string().regex(/^[1-9][0-9]{0,12}$/).transform(Number)
     .pipe(z.number().int().max(1_000_000_000_000)).optional(),
-  DAYTONA_BYO_ENABLED: z.enum(["true", "false"]).optional(),
-  DAYTONA_CONNECTIONS_ENABLED: z.enum(["true", "false"]).default("false"),
   ZEROS_CLOUD_IMAGE_ARCHITECTURE: z
     .enum(["linux/amd64", "linux/arm64"])
     .default("linux/amd64"),
@@ -454,29 +435,11 @@ const CloudWorkspaceEnvSchema = z.object({
     .min(1_000)
     .max(300_000)
     .default(5_000),
-  DAYTONA_SSH_HOSTS: z
-    .string()
-    .trim()
-    .min(1)
-    .max(8 * 254)
-    .default("ssh.app.daytona.io"),
-  DAYTONA_PREVIEW_HOST_SUFFIXES: z
-    .string()
-    .trim()
-    .min(1)
-    .max(8 * 254)
-    .default("proxy.daytona.work"),
   CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN: z
     .string()
     .trim()
     .min(1)
     .max(253)
-    .optional(),
-  CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1: z
-    .string()
-    .trim()
-    .min(1)
-    .max(256)
     .optional(),
   ...CloudAgentCredentialEnvSchema.shape,
 });
@@ -507,12 +470,6 @@ function loadSelectedCloudWorker(env: NodeJS.ProcessEnv): SelectedCloudWorker | 
 const CloudWorkspaceSetupEnvSchema = z.object({
   CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: z.literal("true"),
   CLOUD_WORKSPACE_CONTROL_PLANE_URL: z.string().url(),
-  DAYTONA_TOOLBOX_ORIGINS: z
-    .string()
-    .trim()
-    .min(1)
-    .max(8 * 4_096)
-    .optional(),
   CLOUD_WORKSPACE_SECRET_KEY_V1: z.string().trim().min(1).max(256).optional(),
   CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: z.coerce
     .number()
@@ -1120,21 +1077,14 @@ function loadCloudWorkspaceConfig(
     return null;
   }
 
-  const managedBoat = (env.CLOUD_WORKSPACE_PROVIDER ?? "boat") === "boat";
-  const requiredProviderFields =
-    managedBoat
-      ? [
-          "BOAT_API_KEY",
-          "BOAT_ACCOUNT_SCOPE",
-          "BOAT_BILLING_ORG",
-          "BOAT_SNAPSHOT_ID",
-          "BOAT_IMAGE_BUILD_SHA256",
-          "BOAT_TTL_SECONDS",
-          "BOAT_COMPUTE_POLICY_ID",
-          "BOAT_SECONDS_PER_DOLLAR",
-          "CLOUD_WORKSPACE_STORAGE_MIB",
-        ]
-      : ["DAYTONA_API_KEY", "DAYTONA_SNAPSHOT_ID"];
+  if (env.CLOUD_WORKSPACE_PROVIDER && env.CLOUD_WORKSPACE_PROVIDER !== "boat") {
+    throw new Error("Invalid cloud workspace environment: CLOUD_WORKSPACE_PROVIDER must be boat");
+  }
+  const requiredProviderFields = [
+    "BOAT_API_KEY", "BOAT_ACCOUNT_SCOPE", "BOAT_BILLING_ORG", "BOAT_SNAPSHOT_ID",
+    "BOAT_IMAGE_BUILD_SHA256", "BOAT_TTL_SECONDS", "BOAT_COMPUTE_POLICY_ID",
+    "BOAT_SECONDS_PER_DOLLAR", "CLOUD_WORKSPACE_STORAGE_MIB",
+  ];
   for (const name of requiredProviderFields) {
     if (!env[name]?.trim())
       throw new Error(
@@ -1143,13 +1093,8 @@ function loadCloudWorkspaceConfig(
   }
   const parsed = CloudWorkspaceEnvSchema.safeParse({
     ...env,
-    ...(managedBoat
-      ? {
-          CLOUD_WORKSPACE_CPU_MILLICORES:
-            env.CLOUD_WORKSPACE_CPU_MILLICORES ?? "4000",
-          CLOUD_WORKSPACE_MEMORY_MIB: env.CLOUD_WORKSPACE_MEMORY_MIB ?? "8192",
-        }
-      : {}),
+    CLOUD_WORKSPACE_CPU_MILLICORES: env.CLOUD_WORKSPACE_CPU_MILLICORES ?? "4000",
+    CLOUD_WORKSPACE_MEMORY_MIB: env.CLOUD_WORKSPACE_MEMORY_MIB ?? "8192",
     CLOUD_WORKSPACES_ENABLED: enabled,
     CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: backgroundEnabled || undefined,
   });
@@ -1193,88 +1138,12 @@ function loadCloudWorkspaceConfig(
     throw new Error(
       "Invalid cloud workspace environment: Boat requires a supported linux/amd64 CPU/memory profile",
     );
-  const daytonaApiUrl = validatedServiceUrl(
-    value.DAYTONA_API_URL,
-    "DAYTONA_API_URL",
-    { allowPath: true },
-  );
-  let daytonaByoProfile: CloudWorkspaceProvisioningProfile | undefined;
-  if (
-    value.DAYTONA_BYO_ENABLED === "true" &&
-    value.CLOUD_WORKSPACE_PROVIDER !== "daytona"
-  ) {
-    const profile = z
-      .object({
-        DAYTONA_BYO_SNAPSHOT_ID: z.string().trim().min(1).max(512),
-        DAYTONA_BYO_SANDBOX_CLASS: z.enum(["container", "linux-vm"]).optional(),
-        DAYTONA_BYO_SOURCE_COMMIT: z
-          .string()
-          .regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
-        DAYTONA_BYO_ARCHITECTURE: z
-          .enum(["linux/amd64", "linux/arm64"])
-          .default("linux/amd64"),
-        DAYTONA_BYO_CPU_MILLICORES: z.coerce.number().int().min(250).max(64000),
-        DAYTONA_BYO_MEMORY_MIB: z.coerce.number().int().min(512).max(262144),
-        DAYTONA_BYO_STORAGE_MIB: z.coerce.number().int().min(1024).max(2097152),
-      })
-      .safeParse(env);
-    if (!profile.success)
-      throw new Error(
-        "Invalid cloud workspace environment: " +
-          profile.error.issues
-            .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-            .join("; "),
-      );
-    const p = profile.data;
-    daytonaByoProfile = {
-      provider: "daytona",
-      ...(p.DAYTONA_BYO_SANDBOX_CLASS?{sandboxClass:p.DAYTONA_BYO_SANDBOX_CLASS}:{}),
-      imageRef: p.DAYTONA_BYO_SNAPSHOT_ID,
-      sourceCommit: p.DAYTONA_BYO_SOURCE_COMMIT,
-      architecture: p.DAYTONA_BYO_ARCHITECTURE,
-      cpuMillicores: p.DAYTONA_BYO_CPU_MILLICORES,
-      memoryMiB: p.DAYTONA_BYO_MEMORY_MIB,
-      storageMiB: p.DAYTONA_BYO_STORAGE_MIB,
-    };
-  }
-  const allowedSshHosts = validatedDnsList(
-    value.DAYTONA_SSH_HOSTS,
-    "DAYTONA_SSH_HOSTS",
-  );
-  const allowedPreviewHostSuffixes = validatedDnsList(
-    value.DAYTONA_PREVIEW_HOST_SUFFIXES,
-    "DAYTONA_PREVIEW_HOST_SUFFIXES",
-  );
   const previewBaseDomain = value.CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN
     ? validatedDnsName(
         value.CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN,
         "CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN",
       )
     : null;
-  const providerCredentialKeys: Record<number, string> = {};
-  if (value.CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1) {
-    const key = Buffer.from(
-      value.CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1,
-      "base64url",
-    );
-    try {
-      if (
-        key.length !== 32 ||
-        key.toString("base64url") !==
-          value.CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1
-      ) {
-        throw new Error("invalid key");
-      }
-      providerCredentialKeys[1] =
-        value.CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1;
-    } catch {
-      throw new Error(
-        "Invalid cloud workspace environment: CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1 must be canonical base64url for exactly 32 bytes",
-      );
-    } finally {
-      key.fill(0);
-    }
-  }
   const { settingsSecretEncryptionKeys, currentSettingsSecretEncryptionKeyVersion, settingsSecretKeyV1, codexRefreshFingerprints } =
     loadCloudAgentCredentialConfig(env);
   const durabilityRequested =
@@ -1436,26 +1305,8 @@ function loadCloudWorkspaceConfig(
       "CLOUD_WORKSPACE_CONTROL_PLANE_URL",
       { allowPath: false },
     );
-    const allowedToolboxOrigins = setup.data.DAYTONA_TOOLBOX_ORIGINS
-      ? [
-          ...new Set(
-            setup.data.DAYTONA_TOOLBOX_ORIGINS.split(",").map((origin) =>
-              validatedServiceUrl(origin.trim(), "DAYTONA_TOOLBOX_ORIGINS", {
-                allowPath: false,
-              }),
-            ),
-          ),
-        ]
-      : [];
-    if (
-      ((value.CLOUD_WORKSPACE_PROVIDER === "daytona" || daytonaByoProfile) &&
-        allowedToolboxOrigins.length < 1) ||
-      allowedToolboxOrigins.length > 8 ||
-      setup.data.CLOUD_WORKSPACE_ENGINE_PORT === 22_222
-    ) {
-      throw new Error(
-        "Invalid cloud workspace setup environment: DAYTONA_TOOLBOX_ORIGINS or engine port are invalid",
-      );
+    if (setup.data.CLOUD_WORKSPACE_ENGINE_PORT === 22_222) {
+      throw new Error("Invalid cloud workspace setup environment: engine port is invalid");
     }
     if (
       value.CLOUD_WORKSPACE_PROVIDER === "boat" &&
@@ -1472,7 +1323,6 @@ function loadCloudWorkspaceConfig(
     }
     setupExecution = {
       controlPlaneOrigin,
-      allowedToolboxOrigins,
       setupSecretEncryptionKeys: settingsSecretEncryptionKeys,
       currentSetupSecretEncryptionKeyVersion:
         currentSettingsSecretEncryptionKeyVersion,
@@ -1539,33 +1389,11 @@ function loadCloudWorkspaceConfig(
             requestMarginSeconds:value.CLOUD_WORKSPACE_OPERATION_TIMEOUT_SECONDS+5},
         }
       : {}),
-    ...(daytonaByoProfile ? { providerProfiles: { daytona: daytonaByoProfile } } : {}),
-    ...(daytonaByoProfile || value.DAYTONA_CONNECTIONS_ENABLED === "true"
-      ? {
-          daytonaConnection: {
-            apiUrl: daytonaApiUrl,
-            target: value.DAYTONA_TARGET,
-          },
-        }
-      : {}),
-    apiKey: (value.CLOUD_WORKSPACE_PROVIDER === "boat"
-      ? value.BOAT_API_KEY
-      : value.DAYTONA_API_KEY)!,
-    apiUrl:
-      value.CLOUD_WORKSPACE_PROVIDER === "boat"
-        ? "https://boat.dev/api/v1"
-        : daytonaApiUrl,
-    target:
-      value.CLOUD_WORKSPACE_PROVIDER === "boat"
-        ? "managed"
-        : value.DAYTONA_TARGET,
-    snapshotId: (value.CLOUD_WORKSPACE_PROVIDER === "boat"
-      ? value.BOAT_SNAPSHOT_ID
-      : value.DAYTONA_SNAPSHOT_ID)!,
-    ...(value.CLOUD_WORKSPACE_PROVIDER==="daytona"&&value.DAYTONA_SANDBOX_CLASS?{sandboxClass:value.DAYTONA_SANDBOX_CLASS}:{}),
-    imageRef: (value.CLOUD_WORKSPACE_PROVIDER === "boat"
-      ? `boat:${value.BOAT_SNAPSHOT_ID}@sha256:${value.BOAT_IMAGE_BUILD_SHA256}`
-      : value.DAYTONA_SNAPSHOT_ID)!,
+    apiKey: value.BOAT_API_KEY!,
+    apiUrl: "https://boat.dev/api/v1",
+    target: "managed",
+    snapshotId: value.BOAT_SNAPSHOT_ID!,
+    imageRef: `boat:${value.BOAT_SNAPSHOT_ID}@sha256:${value.BOAT_IMAGE_BUILD_SHA256}`,
     architecture: value.ZEROS_CLOUD_IMAGE_ARCHITECTURE,
     cpuMillicores: value.CLOUD_WORKSPACE_CPU_MILLICORES,
     memoryMiB: value.CLOUD_WORKSPACE_MEMORY_MIB,
@@ -1576,14 +1404,13 @@ function loadCloudWorkspaceConfig(
     reconcileIntervalMs: value.CLOUD_WORKSPACE_RECONCILE_INTERVAL_MS,
     backgroundWorkersEnabled: value.CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED === "true",
     computerMaxConcurrentBuilds: value.CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS,
-    providerCredentialKeys,
     settingsSecretEncryptionKeys,
     ...(codexRefreshFingerprints?{codexRefreshFingerprints}:{}),
     currentSettingsSecretEncryptionKeyVersion,
     settingsSecretKeyV1,
     access: {
-      allowedSshHosts,
-      allowedPreviewHostSuffixes,
+      allowedSshHosts: [],
+      allowedPreviewHostSuffixes: [],
       previewBaseDomain,
     },
     durability,
@@ -1686,12 +1513,12 @@ const CloudRuntimePublicationEnvSchema = z.object({
   CLOUD_RUNTIME_PUBLICATION_ENABLED: z.enum(["true", "false"]).default("false"),
   CLOUD_RUNTIME_OIDC_AUDIENCE: z.string().trim().min(1).max(256).refine(value => !/\s/.test(value)).optional(),
   CLOUD_RUNTIME_OIDC_REPOSITORY: z.string().max(140).regex(/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/).default("Withso/zeros"),
-  CLOUD_RUNTIME_OIDC_ENVIRONMENT: z.enum(["alpha", ""]).default("alpha"),
-  CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE: z.enum(["legacy", "v4"]).default("legacy"),
+  CLOUD_RUNTIME_OIDC_ENVIRONMENT: z.enum(["alpha", "beta", "production", ""]).optional(),
+  CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE: z.literal("v4").default("v4"),
 });
 
 function loadCloudRuntimePublicationConfig(env: NodeJS.ProcessEnv, channel: Config["deploymentChannel"]): {
-  publication: CloudRuntimePublicationConfig; newWorkspaceProfile: "legacy" | "v4";
+  publication: CloudRuntimePublicationConfig; newWorkspaceProfile: "v4";
 } {
   const parsed = CloudRuntimePublicationEnvSchema.safeParse(env);
   if (!parsed.success) {
@@ -1701,9 +1528,17 @@ function loadCloudRuntimePublicationConfig(env: NodeJS.ProcessEnv, channel: Conf
   }
   const values = parsed.data;
   const enabled = values.CLOUD_RUNTIME_PUBLICATION_ENABLED === "true";
+  const environment = values.CLOUD_RUNTIME_OIDC_ENVIRONMENT === undefined
+    ? (channel === "beta" || channel === "production" ? channel : "alpha")
+    : values.CLOUD_RUNTIME_OIDC_ENVIRONMENT || null;
   let s3: CloudRuntimePublicationConfig["s3"] = null;
   if (enabled) {
-    if (channel !== "alpha") throw new Error("Invalid runtime publication environment: publication requires the Alpha channel");
+    if (channel !== "alpha" && channel !== "beta" && channel !== "production") {
+      throw new Error("Invalid runtime publication environment: publication requires an alpha, beta or production channel");
+    }
+    if (environment !== channel && !(channel === "alpha" && environment === null)) {
+      throw new Error("Invalid runtime publication environment: CLOUD_RUNTIME_OIDC_ENVIRONMENT must match the deployment channel");
+    }
     const artifacts = CloudWorkspaceDurabilityEnvSchema.pick({ CLOUD_WORKSPACE_S3_ENDPOINT: true, CLOUD_WORKSPACE_S3_REGION: true,
       CLOUD_WORKSPACE_S3_BUCKET: true, CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: true, CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: true }).safeParse(env);
     if (!artifacts.success || !artifacts.data.CLOUD_WORKSPACE_S3_ENDPOINT || !artifacts.data.CLOUD_WORKSPACE_S3_BUCKET ||
@@ -1721,7 +1556,7 @@ function loadCloudRuntimePublicationConfig(env: NodeJS.ProcessEnv, channel: Conf
       accessKeyId: store.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID!, secretAccessKey: store.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY! };
   }
   return { publication: { enabled, audience: values.CLOUD_RUNTIME_OIDC_AUDIENCE ?? `zeros-control-plane-${channel}`,
-    repository: values.CLOUD_RUNTIME_OIDC_REPOSITORY, environment: values.CLOUD_RUNTIME_OIDC_ENVIRONMENT || null, s3 },
+    repository: values.CLOUD_RUNTIME_OIDC_REPOSITORY, environment, s3 },
     newWorkspaceProfile: values.CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE };
 }
 
@@ -1748,7 +1583,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
   const e = parsed.data;
   const channel = (env.RAILWAY_ENVIRONMENT_NAME ?? "development").trim().toLowerCase();
   const deploymentChannel = channel === "alpha" || channel === "beta" || channel === "production" ? channel : "development";
-  const resumeFlag = env.CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED ?? "false";
+  const resumeFlag = env.CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED ?? (deploymentChannel === "alpha" ? "true" : "false");
   if (!["true", "false"].includes(resumeFlag)) throw new Error("Invalid cloud workspace resume configuration");
   if (resumeFlag === "true" && deploymentChannel !== "alpha") throw new Error("Cloud workspace resume is available only on Alpha");
   const runtime = loadCloudRuntimePublicationConfig(env, deploymentChannel);

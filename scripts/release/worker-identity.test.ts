@@ -16,7 +16,7 @@ function harness(lost = false, apply = true) {
 }
 describe("complete worker tuple mutation", () => {
   it("validates every tuple value against the exact committed Boat identity before any provider call", async () => {
-    const invalid = { CLOUD_WORKSPACE_PROVIDER: ["daytona"], BOAT_SNAPSHOT_ID: ["test;unsafe", "x".repeat(64)],
+    const invalid = { CLOUD_WORKSPACE_PROVIDER: ["unsupported"], BOAT_SNAPSHOT_ID: ["test;unsafe", "x".repeat(64)],
       BOAT_IMAGE_BUILD_SHA256: ["bad"], ZEROS_CLOUD_SOURCE_COMMIT: ["c".repeat(40)], ZEROS_CLOUD_IMAGE_ARCHITECTURE: ["linux/arm64"],
       CLOUD_WORKSPACE_STORAGE_MIB: ["0", "-1", "01", "1e3", "1.5", "Infinity", "9007199254740993"] };
     for (const [key, values] of Object.entries(invalid)) for (const value of values) {

@@ -15,6 +15,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { ClaudeSdkAdapter } from "../adapter";
 import * as cloudExecutions from "../../../cloud-provider-execution";
 import * as claudeRuntime from "../binary-resolver";
+import * as cloudRuntimeRoot from "../../../containment/cloud-runtime-root.mjs";
+import { cloudRuntimeFixture } from "../../../containment/__tests__/cloud-runtime-fixture";
+import { testCloudRuntime } from "../../../__tests__/helpers/test-cloud-runtime";
 import {
   AgentFailureError,
   type AgentAdapterContext,
@@ -22,6 +25,38 @@ import {
   type SessionNotification,
 } from "../../../types";
 import type { AvailableCommand, RequestPermissionRequest } from "@zeros/protocol/agent-events";
+
+vi.mock("../../../containment/cloud-runtime-root.mjs", async original => {
+  const actual = await original<typeof import("../../../containment/cloud-runtime-root.mjs")>();
+  return { ...actual, resolveCloudRuntime: vi.fn(actual.resolveCloudRuntime),
+    resolveCloudRuntimePackagePath: vi.fn(actual.resolveCloudRuntimePackagePath) };
+});
+
+function admittedClaudeRuntimeFixture() {
+  const tree = cloudRuntimeFixture();
+  const runtime = testCloudRuntime();
+  const resolver = cloudRuntimeRoot.createCloudRuntimeResolver({ filesystem: tree.filesystem });
+  const worker = runtime.workerRoot;
+  const sdk = `${worker}/node_modules/@anthropic-ai/claude-agent-sdk`;
+  tree.write(`${worker}/package.json`, {});
+  tree.write(`${sdk}/package.json`, { name: "@anthropic-ai/claude-agent-sdk", exports: "./sdk.mjs" });
+  tree.write(`${sdk}/sdk.mjs`, "export {};");
+  const native = `${worker}/node_modules/${claudeRuntime.claudePlatformPackages()[0]!}/${claudeRuntime.claudeBinaryName()}`;
+  tree.write(native, "scripted-query fixture", 0o555);
+  const authority = vi.spyOn(cloudRuntimeRoot, "resolveCloudRuntime").mockReturnValue({ ...runtime, workerRoot: tree.physical(worker) });
+  // Translate only this disposable VM tree; retain the real pinned-package
+  // admission checks before Node resolves the SDK and executable.
+  const guard = vi.spyOn(cloudRuntimeRoot, "resolveCloudRuntimePackagePath").mockImplementation(file => {
+    if (!file.startsWith(tree.directory + "/")) throw new Error("Unexpected cloud fixture path");
+    return tree.physical(resolver.packagePath(file.slice(tree.directory.length)));
+  });
+  const desktop = vi.spyOn(claudeRuntime, "resolveClaudeCli").mockImplementation(() => {
+    throw new Error("Cloud query consumed the desktop CLI resolver");
+  });
+  return { binary: tree.physical(native), desktop, dispose: () => {
+    desktop.mockRestore(); guard.mockRestore(); authority.mockRestore(); tree.dispose();
+  } };
+}
 
 const TMP_DATA = path.join(os.tmpdir(), `zeros-sdk-test-${process.pid}`);
 let prevDataDir: string | undefined;
@@ -53,7 +88,7 @@ describe("Claude private cloud coordinator policy",()=>{
       tools: { call: vi.fn() }, productServers: [] } as unknown as cloudExecutions.CloudProviderExecution;
     const original = cloudExecutions.cloudProviderExecution;
     const authority = vi.spyOn(cloudExecutions, "cloudProviderExecution").mockImplementation(value => value === boundary ? execution : original(value));
-    const runtime = vi.spyOn(claudeRuntime, "resolveClaudeCli").mockReturnValue({ path: "/opt/zeros/node_modules/native/claude", source: "bundled" });
+    const runtime = admittedClaudeRuntimeFixture();
     const emitted: SessionNotification[] = [];
     const live = makePushableQuery();
     const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: live.queryFn });
@@ -70,7 +105,8 @@ describe("Claude private cloud coordinator policy",()=>{
       live.fail(new Error("Claude Code process exited with code 137"));
       await tick();
       expect(emitted.filter(event => event.update.sessionUpdate === "error_notice")).toHaveLength(retired ? 0 : 1);
-    } finally { await adapter.dispose(); runtime.mockRestore(); authority.mockRestore(); }
+      expect(runtime.desktop).not.toHaveBeenCalled();
+    } finally { await adapter.dispose(); runtime.dispose(); authority.mockRestore(); }
   });
 
   it("keeps native workspace tools and fences external credential/model overrides",async()=>{
@@ -80,7 +116,7 @@ describe("Claude private cloud coordinator policy",()=>{
       productServers:[{name:"zeros_design",transport:"http",url:"http://127.0.0.1:42000/mcp",headers:{Authorization:"Bearer synthetic-scoped-tool"}}]} as unknown as cloudExecutions.CloudProviderExecution;
     const original=cloudExecutions.cloudProviderExecution;
     const authority=vi.spyOn(cloudExecutions,"cloudProviderExecution").mockImplementation(value=>value===boundary?execution:original(value));
-    const runtime=vi.spyOn(claudeRuntime,"resolveClaudeCli").mockReturnValue({path:"/opt/zeros/node_modules/native/claude",source:"bundled"});
+    const runtime=admittedClaudeRuntimeFixture();
     const {queryFn,captured}=makeScriptedQuery([[initMsg("cloud-session"),resultOk("cloud-session")]]);
     const adapter=new ClaudeSdkAdapter(makeCtx([],[]),{queryFn});
     try{
@@ -89,14 +125,15 @@ describe("Claude private cloud coordinator policy",()=>{
         cliBinary:"/untrusted/claude",mcpServers:[{name:"untrusted",transport:"stdio",command:"/untrusted/program"}],browserUse:{kind:"claude-agent-sdk"} as never});
       await adapter.prompt({sessionId:session.executionId,prompt:[{type:"text",text:"Continue"}]});
       expect(captured[0]).toMatchObject({tools:{type:"preset",preset:"claude_code"},strictMcpConfig:true,settingSources:[],
-        settings:{autoMemoryEnabled:true,permissions:{additionalDirectories:[],allow:[],deny:[]}},pathToClaudeCodeExecutable:"/opt/zeros/node_modules/native/claude"});
+        settings:{autoMemoryEnabled:true,permissions:{additionalDirectories:[],allow:[],deny:[]}},pathToClaudeCodeExecutable:runtime.binary});
       expect(Object.keys(captured[0].mcpServers as object).sort()).toEqual(["zeros_design"]);
       expect(captured[0].plugins).toBeUndefined();expect(captured[0].getOAuthToken).toBeUndefined();
       expect(captured[0].extraArgs).toEqual({"thinking-display":"summarized"});
       await expect(adapter.setModel({sessionId:session.executionId,model:"unadmitted-model"})).rejects.toThrow(/admission/);
       await expect(adapter.updateConfig({sessionId:session.executionId,env:{ANTHROPIC_API_KEY:"replaced"}})).rejects.toThrow(/admission/);
       expect(assertLive).toHaveBeenCalled();
-    }finally{await adapter.dispose();runtime.mockRestore();authority.mockRestore();}
+      expect(runtime.desktop).not.toHaveBeenCalled();
+    }finally{await adapter.dispose();runtime.dispose();authority.mockRestore();}
   });
 });
 

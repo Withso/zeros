@@ -5,6 +5,10 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
+vi.mock("../cloud-workspace-validation/sandbox/cloud-runtime-root.mjs", async original => ({
+  ...await original<typeof import("../cloud-workspace-validation/sandbox/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime: (await import("../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime")).testCloudRuntime,
+}));
 const fixture = vi.hoisted(() => ({
   root: "", head: "a".repeat(40), version: 4, failPublish: false, layout: {} as Record<string, unknown>,
   owners: new Map<string, [number, number]>(), renames: [] as [string, string][], spawn: vi.fn(),
@@ -74,6 +78,7 @@ beforeEach(() => {
   directory(`${fixture.root}/srv/zeros/files/workspace`, 10001, 0o700);
   directory(`${fixture.root}/srv/zeros/files/workspace/.git`, 10001, 0o700);
   fs.writeFileSync(`${fixture.root}/srv/zeros/files/workspace/seed`, "original checkout");
+  fixture.spawn.mockClear();
   fixture.spawn.mockImplementation((_file: string, args: string[], options: { cwd: string; env: { HOME: string } }) => {
     const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough() });
     queueMicrotask(() => {
@@ -128,10 +133,11 @@ it("reuses the v4 seed after publication completed before the journal was writte
   expect(fixture.renames).toEqual(renames);
 });
 
-it("keeps the legacy staging and seed paths unchanged", async () => {
-  await expect(setup(3)).resolves.toBe(commit);
-  expect(fs.readFileSync(`${fixture.root}/srv/zeros/.zeros-image-seed/seed`, "utf8")).toBe("original checkout");
-  expect(fs.existsSync(`${fixture.root}/srv/zeros/files/.zeros-setup`)).toBe(false);
+it("refuses legacy setup before changing checkout or preparation journals", async () => {
+  await expect(setup(3)).rejects.toMatchObject({ code: "cloud_workspace_v2_required" });
+  expect(fixture.spawn).not.toHaveBeenCalled();
+  expect(fixture.renames).toEqual([]);
+  expect(fs.readFileSync(`${fixture.root}/srv/zeros/files/workspace/seed`, "utf8")).toBe("original checkout");
 });
 
 it.each([

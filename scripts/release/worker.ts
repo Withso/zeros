@@ -1,11 +1,9 @@
-import { createHash } from "node:crypto";
+import { refuseRetiredWorkerPromotion } from "./worker-retirement";
 import { z } from "zod";
-import { nativeRuntimeEvidence, qualificationRateLimited } from "../dev-environment/native-agent-canary.mjs";
-import { CloudAgentRuntimeEvidenceSchema } from "../../apps/control-plane/src/manage-cloud-agent-runtime";
-import { CHANNELS, DIGEST, SHA, WorkerIdentity, requireCheck, type Channel } from "./contracts";
+import { DIGEST, SHA, WorkerIdentity, requireCheck, type Channel } from "./contracts";
 import type { WorkerQualificationProfile } from "./worker-profile";
-import { ReleaseCanaryBindingsSchema, RELEASE_CANARY_MODELS, type ReleaseCanaryConnection } from "../../apps/control-plane/src/cloud-workspaces/release-canary-contract";
-import { WorkerBuilderCleanupSchema, WorkerCandidateSchema, WorkerCleanupSchema, WorkerDeferredCleanupSchema, WorkerReleaseCleanupSchema, builderCleanupBelongsToRun,
+import { type ReleaseCanaryConnection } from "../../apps/control-plane/src/cloud-workspaces/release-canary-contract";
+import { WorkerCleanupSchema, WorkerDeferredCleanupSchema, builderCleanupBelongsToRun,
   type WorkerBuilderCleanup, type WorkerReleaseCleanup } from "./worker-builder-retirement";
 
 export const WORKER_CREDENTIAL_KINDS = ["claude-setup-token", "codex-chatgpt", "cursor-api-key"] as const;
@@ -53,81 +51,8 @@ export type WorkerDependencies = {
   assertCurrent?(): Promise<void>;
   saveEvidence?(evidence: unknown): Promise<void>;
 };
-export async function promoteWorker(input: WorkerPromotionInput, deps: WorkerDependencies) {
-  requireCheck(Object.hasOwn(CHANNELS, input.channel) && SHA.test(input.sourceSha) && DIGEST.test(input.inputsSha256) &&
-    z.string().uuid().safeParse(input.actorUserId).success && z.string().uuid().safeParse(input.operationId).success &&
-    input.kinds.length === WORKER_CREDENTIAL_KINDS.length && WORKER_CREDENTIAL_KINDS.every(kind => input.kinds.includes(kind)) &&
-    new Set(input.kinds).size === input.kinds.length && ["smoke", "full"].includes(input.qualificationProfile) && /^[\w.-]+\/[\w.-]+$/.test(input.repository) && /^[1-9]\d*$/.test(input.runId) && /^[1-9]\d*$/.test(input.runAttempt) &&
-    (input.channel === "alpha" ? input.branch === "main" : /^release\/\d+\.\d+\.\d+$/.test(input.branch)), "Invalid worker source/credential policy");
-  const bindings = ReleaseCanaryBindingsSchema.safeParse(input.releaseCanaryBindings);
-  requireCheck(bindings.success && (input.qualificationProfile !== "smoke" || bindings.data.every(row => row.model === RELEASE_CANARY_MODELS[row.kind])),
-    "Worker qualification requires exact discovered credential designation bindings");
-  let cleaned = false;
-  try {
-    await deps.assertCurrent?.();
-    const built = WorkerCandidateSchema.safeParse(await deps.build());
-    requireCheck(built.success && built.data.sourceCommit === input.sourceSha, "Worker build source differs from the event SHA");
-    const image = built.data;
-    const builderCleanup = WorkerBuilderCleanupSchema.safeParse(await deps.cleanupBuilder());
-    requireCheck(builderCleanup.success && builderCleanupBelongsToRun(builderCleanup.data, input, image), "Worker builder cleanup is unconfirmed; no native canary may start");
-    const evidence = [];
-    for (const kind of input.kinds) {
-      const result = await deps.qualify(image, kind);
-      requireCheck(result.connection.kind === kind, "Canary credential kind mismatch");
-      requireCheck(!qualificationRateLimited(result.outcome), "canary account rate-limited; release qualification stopped without retrying or approving this image");
-      const binding = bindings.data.find(row => row.kind === kind);
-      requireCheck(binding && ["credentialId", "credentialRevision", "designationId", "model"].every(key =>
-        result.connection[key as keyof ReleaseCanaryConnection] === binding[key as keyof ReleaseCanaryConnection]), "Canary credential designation binding changed");
-      // Reuse only the pure report verifier. Replace the Dev channel label
-      // before hashing and pass the release document through the real schema.
-      const checked = nativeRuntimeEvidence(image, { ...result.connection, qualificationProfile: input.qualificationProfile }, result.outcome, result.startedAt);
-      if (input.qualificationProfile === "full") {
-        const required = kind === "codex-chatgpt" ? ["nativeGoals", "nativeFork", "transcriptFork", "nativeReview", "nativeApps", "nativeMultiAgent"] : ["transcriptFork"];
-        requireCheck(required.every(check => (result.outcome as any)?.report?.checks?.includes(check)), "Full native qualification did not prove its advertised capabilities");
-      }
-      evidence.push(checked);
-    }
-    const first = evidence[0];
-    requireCheck(evidence.every(row => row.runtimeContractSha256 === first.runtimeContractSha256), "Canaries measured different runtime contracts");
-    const { evidenceSha256: _oldDigest, ...base } = first;
-    const document = { ...base, channel: input.channel, releaseCanaryBindings: bindings.data, credentials: evidence.flatMap(row => row.credentials),
-      qualifiedAt: evidence.map(row => row.qualifiedAt).sort()[0] };
-    const approvedEvidence = CloudAgentRuntimeEvidenceSchema.parse({ ...document,
-      evidenceSha256: createHash("sha256").update(JSON.stringify(document)).digest("hex") });
-    await deps.saveEvidence?.(approvedEvidence);
-    // Retire every credential-bearing canary before creating an approval.
-    const cleanup = WorkerReleaseCleanupSchema.safeParse(await deps.cleanup());
-    requireCheck(cleanup.success && builderCleanupBelongsToRun(cleanup.data.imageBuilder, input, image) &&
-      cleanup.data.imageBuilder.sandboxId === builderCleanup.data.sandboxId &&
-      cleanup.data.imageBuilder.deletionOperationId === builderCleanup.data.deletionOperationId &&
-      (builderCleanup.data.kind !== "physically-deleted" || cleanup.data.imageBuilder.kind === "physically-deleted") &&
-      (cleanup.data.imageBuilder.kind !== "release-owned-sanitized-unavailable" || builderCleanup.data.kind === "release-owned-sanitized-unavailable" &&
-        cleanup.data.imageBuilder.provenanceSha256 === builderCleanup.data.provenanceSha256), "Worker canary/builder cleanup is unconfirmed");
-    cleaned = true;
-    await deps.assertCurrent?.();
-    const change = { operationId: input.operationId, actorUserId: input.actorUserId, enabled: true,
-      reason: "Ordered channel worker promotion after native qualification", evidence: approvedEvidence };
-    const approval = await deps.withOwner(async owner => {
-      const login = owner.loginIdentity;
-      const plan = await owner.manage(change);
-      requireCheck(["planned", "replayed"].includes(plan.state) && DIGEST.test(plan.planSha256 ?? "") && DIGEST.test(plan.targetSha256 ?? ""), "Runtime approval plan missing");
-      requireCheck(owner.loginIdentity === login, "Runtime approval login changed between plan and execute");
-      const applied = await owner.manage(change, plan.planSha256);
-      requireCheck(["changed", "replayed"].includes(applied.state) && applied.planSha256 === plan.planSha256 && applied.targetSha256 === plan.targetSha256,
-        "Runtime approval execution does not match its plan");
-      return { planSha256: plan.planSha256 as string, targetSha256: plan.targetSha256 as string };
-    });
-    requireCheck(approval.deleted, "Worker approval owner-role deletion is unconfirmed");
-    const worker = WorkerIdentity.parse({ provider: "boat", imageRef: approvedEvidence.imageRef, sourceSha: image.sourceCommit,
-      architecture: image.architecture, storageMiB: image.storageMiB });
-    // One provider operation; skipDeploys must stay true in the adapter.
-    await deps.assertCurrent?.();
-    await deps.updateIdentity({ CLOUD_WORKSPACE_PROVIDER: "boat", BOAT_SNAPSHOT_ID: image.snapshotId, BOAT_IMAGE_BUILD_SHA256: image.buildSha256,
-      ZEROS_CLOUD_SOURCE_COMMIT: image.sourceCommit, ZEROS_CLOUD_IMAGE_ARCHITECTURE: image.architecture, CLOUD_WORKSPACE_STORAGE_MIB: String(image.storageMiB) });
-    return WorkerReceipt.parse({ version: cleanup.data.credentialCanaryResourcesDeleted ? 2 : 3, status: "success", channel: input.channel, sourceSha: input.sourceSha,
-      repository: input.repository, branch: input.branch, runId: input.runId, runAttempt: input.runAttempt,
-      inputsSha256: input.inputsSha256, worker, qualifiedKinds: input.kinds, qualificationProfile: input.qualificationProfile, runtimeContractSha256: approvedEvidence.runtimeContractSha256,
-      evidenceSha256: approvedEvidence.evidenceSha256, approvalPlanSha256: approval.value.planSha256, approvalTargetSha256: approval.value.targetSha256,
-      roleDeleted: true, cleanup: cleanup.data, completedAt: new Date().toISOString() });
-  } finally { if (!cleaned) await deps.cleanup(); }
+/** Historical receipt schemas above remain readable; new v3 promotion cannot
+ * build, obtain credentials, approve an image, or update a release tuple. */
+export async function promoteWorker(_input: WorkerPromotionInput, _deps: WorkerDependencies): Promise<z.infer<typeof WorkerReceipt>> {
+  refuseRetiredWorkerPromotion();
 }

@@ -13,7 +13,11 @@ export function reportDesignDirectoryFailure(workspaceId: string, action: Design
     return;
   }
   const message = cause instanceof Error ? cause.message : "";
-  const reason = message.startsWith("Command failed:") ? "git_command_failed"
+  // Only the exact managed-probe vocabulary is safe to report. Neither argv
+  // nor free-form stderr can become a log field through this message parser.
+  const probe = /^Managed Git (policy_config|rev_parse|check_ignore|worktree_list|ls_files) failed \((dubious_ownership|permission_denied|not_a_repository|worktree_required|invalid_configuration|process_unavailable|output_limit|cancelled|timeout|command_failed)\)\.$/.exec(message);
+  const reason = probe ? `git_${probe[1]}_${probe[2]}`
+    : message.startsWith("Command failed:") ? "git_command_failed"
     : message.startsWith("Request timeout:") ? "request_timeout" : "operation_rejected";
   console.warn("[Design] Cloud directory action failed", { action, reason });
   toast.error(`Couldn't ${verbs[action]} the Design directory. Try again.`);

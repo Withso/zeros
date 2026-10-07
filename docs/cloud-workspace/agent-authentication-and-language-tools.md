@@ -120,83 +120,49 @@ Capacity returns only after process retirement is proven, including a failed
 launch with a late child. Unproven cleanup quarantines the affected runtime.
 
 Local native-process, root namespace and regression tests establish these
-contracts. Exact Boat/Daytona image, native-account and hosted end-to-end
+contracts. Exact Boat image, native-account and hosted end-to-end
 qualification remain separate release requirements; see
 [qualification status](qualification-status.md).
 
 ## Runtime qualification and activation
 
-Runtime registration sends actor protocol 2 and the immutable
-`zeros-cloud-worker-v3` attestation. The engine checks image metadata ownership,
-source-contract files and compiled artifact hashes before registration. The
-registered `contractSha256` is the baked image **recipe** digest
-(`imageContractSha256`), not a report digest, source commit or metadata-file
-hash. The host bootstrap independently verifies the full image provenance.
+Current registration requires actor protocol2 and an exact
+`zeros-cloud-worker-v4` pin/attestation: runtime/manifest/base/installer receipt,
+boot/session and the live setup/enrollment fence. The engine validates protected
+runtime identity before registration; setup publishes ready only after fresh
+registration, authenticated readiness and initial durable synchronization.
+Saved source, pin and current registry revocation are independently checked
+before credential delivery. Unsupported worker profiles1–3 or actor1 refuse
+execution; there is no v3 credential-qualification fallback.
 
-Application SQL credentials can read qualifications but cannot enable them.
-Use `pnpm --dir apps/control-plane cloud-runtime:manage <evidence.json>` with
-migration-owner `DATABASE_URL` and
-`CONTROL_PLANE_RUNTIME_QUALIFICATION_CHANNEL`. The default is a read-only plan.
-The document contains an operation UUID, active platform owner UUID, enabled
-flag, reason and `CloudAgentRuntimeEvidenceSchema` evidence. Retain the actual
-private qualification artifacts and their digest. The command validates the
-operator's assertions; it does not execute those tests or cryptographically
-prove that a submitted evidence hash names genuine test results.
+Current discovery/admission joins exact v4 runtime/base/credential-kind evidence
+in the configured smoke/full mode. Basic `runtimeQualified` and `mcpQualified`
+are distinct: customization schema 3 permits a basic non-admin turn without
+user MCP/organization skills when only basic evidence exists. Computer-admin
+workspaces and admitted MCP require enabled current MCP proof. Renewal/replay
+cannot add or remove an already admitted customization snapshot. Native goal,
+review and fork capabilities require their own advertised proof.
 
-After reviewing the exact target and evidence, set
-`CONTROL_PLANE_RUNTIME_QUALIFICATION_APPROVAL` to the returned plan hash and
-repeat with `--execute`. Plans bind channel, database host/name, routing login
-(including PlanetScale's branch suffix), immutable image, recipe, exact
-credential kinds, current rows and append-only image revision. Password rotation
-does not change the target. A routing/login change or intervening qualification
-change requires a new plan. Successful operation retries return their original
-receipt even after evidence expires. New enables require evidence at most seven
-days old. Disable uses a new operation UUID and preserves all prior receipts.
-Only qualified credential kinds are enabled; a successful API-key test cannot
-enable subscription authentication. Codex subscription evidence also requires
-native renewal. Keep these commands outside the application runtime and public
-API. Native provider turn/resume/Stop tests remain necessary for every enabled
-image and authentication kind.
+Qualification must exercise real native reads/edits/shell effects, private HOME,
+engine-authority isolation, actor admission, Stop/descendant retirement, native
+turn/continuation and authentication for each enabled kind. Assistant prose or
+an MCP bridge call alone cannot stand in for independent file/tool effects.
+Codex subscription additionally needs real native-cache rotation, backend
+publication and adoption of renewed access without refresh/ID tokens entering
+the VM. A successful API-key canary cannot qualify subscription authentication.
+Smoke self-tests without credentials do not establish paid native turns.
 
-The explicit `cloud-engine-launcher.mjs --qualify-agent` entry runs a paid native
-canary in a disposable clone of the exact v3 worker snapshot. It is unavailable
-through application RPC. Hold the host engine lock and require an idle worker;
-do not run it in a user's workspace or inject credentials into an image builder.
-Prepare an empty Git repository in the disposable clone's workspace first;
-the sanitized image intentionally contains no checkout. Initialization belongs
-to the test fixture and must not modify the attested installation.
-Its input is the single-use `/srv/zeros/state/.zeros-live-qualification.json`,
-owned by the engine host UID 10003 with mode 0600, no symlink or hard link. The
-strict version-1 document binds `sourceCommit`, the metadata-file `buildSha256`,
-`model`, protocol `material`, and an `expiresAtMs` within fifteen minutes.
-
-The canary consumes that file, uses the production gateway and execution
-boundary with an isolated test authority, and reports only fixed checks and
-image identity. Version-2/3 reports identify `zeros-cloud-native-v1` and verify
-private provider HOME, engine authority isolation, actor admission, native tool
-effects, history continuation, Stop and lease revocation. Only successful native
-read, edit and shell events plus independently read file bytes count as tool
-proof; MCP calls and assistant prose do not substitute for those native file
-checks. Version-3 additionally requires a successful stdio MCP probe and an
-independently verified VM-side effect. Version-1 credential-free workload
-evidence remains readable for older images and cannot qualify this new profile. Challenge files and
-the temporary conversation's native history are removed. Destroy the test VM
-and retain its deletion receipt afterward. This isolated authority check does
-not establish the real control-plane admission chain or end-to-end desktop
-streaming; test those after applying valid exact-image evidence. Machine
-attestation does not invoke this paid entry or automatically enable a provider.
-The private process supervisor retires both its original launcher and adopted
-children on Stop. It signals only its own unreaped children, repeats after
-adoption, and writes the retirement receipt only after `waitpid` proves there
-are no remaining children. A detached launcher exiting first is not proof that
-its descendants stopped; Linux regression coverage includes that case and an
-unrelated process that must remain alive.
-Codex ChatGPT input additionally requires a `renewedCodex` access version with
-the same account and different token bytes. Neither version may contain refresh
-or ID tokens. The image checks adoption of that newer access and a native
-history continuation using it. This does not prove backend renewal: retain the
-separate real native-cache rotation and database-publication evidence before
-enabling this authentication kind.
+Use the current [runtime registry/qualification contract](runtime-bundles.md)
+and [release gates](qualification-status.md), with explicitly authorized
+private evidence and disposable resources. The retired paid
+`cloud-engine-launcher.mjs --qualify-agent` v3 entry no longer exists.
+Historical `cloud-runtime:manage` image approvals and versioned native evidence
+remain readable for Dev image-kit and cleanup/audit contracts, not v4 workspace
+admission. The opt-in v3 release-worker promotion lane is
+[retired](release-worker-qualification.md). App SQL cannot publish operator
+qualifications; immutable evidence
+and revocation are not overwritten on retry. Flat-image publication remains a
+separate cutover/qualification follow-up.
 
 ## Device connection lifetime
 
@@ -282,13 +248,14 @@ unavailable. Product-specific MCP integrations can still exist; ordinary
 repository file and shell operations do not require a workspace MCP replacement.
 
 Organization/member/repository MCP and organization skills have explicit
-[snapshot admission](mcp-and-skills.md), gated by version-3 exact-image evidence.
-OAuth MCP, additional host directories and native session fork remain unavailable.
+[snapshot admission](mcp-and-skills.md), gated by current exact-v4 MCP evidence.
+OAuth MCP and additional host directories remain unavailable; native session fork
+requires its independent qualified capability and current actor/engine authority.
 Organization settings remain separate from this Mac's settings. Codex host/configuration mutation RPCs remain
 allowlisted; connected apps and native review/goal mutation RPCs are not yet
 admitted. Full product parity must not be inferred from native file/shell
-execution. The old `zeros-cloud-core-v1` restriction manifest remains readable
-for compatibility with existing images and qualification artifacts.
+execution. The old `zeros-cloud-core-v1` restriction manifest remains readable as persisted
+compatibility data; it does not enable retired executable worker profiles.
 
 The explicitly selected `zeros-cloud-native-v1` smoke requires the declared
 profile, admitted Design API, successful native reads/edits/commands, independently
@@ -298,8 +265,9 @@ before that continuation. Wrong profiles, MCP bridge evidence, stale execution
 IDs or unproven cleanup fail qualification. The stricter `full-native` gate is
 unchanged and neither profile silently falls back to another.
 
-Runtime activation requires new exact-image version-2 or version-3 evidence for every enabled
-credential kind. Version-2 checks are `privateProviderHome`,
+Historical native evidence versions2/3 remain serialization contracts for retained
+image-kit consumers. Current v4 activation requires exact runtime/base evidence
+for every enabled credential kind and independent MCP/native capabilities. Version-2 checks are `privateProviderHome`,
 `engineAuthorityIsolation`, `nativeWorkspaceTools`, `actorAdmission`,
 `stopAndRevocation`, `nativeTurn`, `nativeResume` and `authentication`. Version-3
 adds `nativeMcp` and is required for customization admission. Codex

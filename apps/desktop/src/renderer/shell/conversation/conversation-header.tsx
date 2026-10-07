@@ -371,7 +371,7 @@ type OpenInMenu = ReturnType<typeof useOpenInMenu>;
  *  identical in the topbar split-button dropdown and the pane-menu
  *  submenu. The current default is marked with the ⌘O hint (and
  *  data-selected, which the menu's focus-on-open pass highlights). */
-function OpenInMenuRows({ menu }: { menu: OpenInMenu }) {
+function OpenInMenuRows({ menu, shortcuts = true }: { menu: OpenInMenu; shortcuts?: boolean }) {
   const {
     ides,
     defaultApp,
@@ -381,7 +381,7 @@ function OpenInMenuRows({ menu }: { menu: OpenInMenu }) {
     handleCopyPath,
   } = menu;
   const shortcutHint = (appId: string) =>
-    defaultApp.id === appId ? <Kbd className="ml-auto">⌘O</Kbd> : null;
+    shortcuts && defaultApp.id === appId ? <Kbd className="ml-auto">⌘O</Kbd> : null;
 
   return (
     <>
@@ -419,7 +419,7 @@ function OpenInMenuRows({ menu }: { menu: OpenInMenu }) {
       <DropdownMenuItem onSelect={handleCopyPath}>
         <Copy className="text-fg2 size-3.5" />
         <span>Copy path</span>
-        <Kbd className="ml-auto">⌘C</Kbd>
+        {shortcuts && <Kbd className="ml-auto">⌘C</Kbd>}
       </DropdownMenuItem>
     </>
   );
@@ -551,6 +551,23 @@ export function OpenInBadgeMenu({
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+/** A Local replica path has its own action target. It reuses the native app
+ * menu without claiming the active workspace's global keyboard shortcuts. */
+export function OpenInPathButton({ path }: OpenInDropdownProps) {
+  const menu = useOpenInMenu(path);
+  return <div className="flex min-w-0 items-center">
+    <Tooltip label={`Open ${path} in ${menu.defaultApp.name}`}>
+      <Button variant="outline" className="min-w-0 flex-1 justify-start rounded-r-none" disabled={!menu.canOpenLocally}
+        aria-label={`Open sync directory in ${menu.defaultApp.name}`} onClick={() => { void menu.openWith(menu.defaultApp); }}>
+        <OpenAppIcon app={menu.defaultApp} /><span className="min-w-0 truncate">{path}</span>
+      </Button>
+    </Tooltip>
+    <DropdownMenu><DropdownMenuTrigger asChild>
+      <Button variant="outline" size="icon-sm" className="-ml-px rounded-l-none" aria-label="Sync directory options"><ChevronDown /></Button>
+    </DropdownMenuTrigger><DropdownMenuContent align="start"><OpenInMenuRows menu={menu} shortcuts={false} /></DropdownMenuContent></DropdownMenu>
+  </div>;
 }
 
 /** Pane-menu "Open in" surface: a submenu whose trigger carries the

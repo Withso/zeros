@@ -4,9 +4,11 @@ import type pg from "pg";
 
 import { withSystemTx, type Tx } from "../db.js";
 import { ensureUser } from "../auth.js";
-import { seedRuntimeGeneration, runtimeWitness } from "./runtime-test-fixtures.js";
+import { seedRuntimeGeneration, seedRuntimeBase, seedRuntimeBundle, runtimeBase, runtimeWitness } from "./runtime-test-fixtures.js";
+import { seedComputerTemplate } from "./computer-workspace-test-fixtures.js";
 import { cloudRuntimePinValues } from "./runtime-selection.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
+import { ensureHostedCloudProviderConnection } from "./provider-connections.js";
 
 /** Explicit owner-only fixture setup. Production application transactions
  * cannot grant personal Pro. Keep that distinction visible in integration tests. */
@@ -19,6 +21,32 @@ export async function withCloudFixtureOwnerTx<T>(pool:pg.Pool,fn:(tx:Tx)=>Promis
     const result=await fn(client);await client.query("COMMIT");return result;
   }catch(error){await client.query("ROLLBACK").catch(()=>{discard=true;});throw error;}
   finally{client.release(discard);}
+}
+
+/** Disposable fixture erasure uses the same bound purge lease as the worker.
+ * Restore a surviving organization so tests can prepare a workspace-free org. */
+export async function withCloudFixturePurgeTx<T>(pool:pg.Pool,input:{organizationId:string;userId:string},fn:(tx:Tx)=>Promise<T>):Promise<T> {
+  return withCloudFixtureOwnerTx(pool,async tx=>{
+    const previous=(await tx.query<{lifecycle_status:string;deletion_request_id:string|null}>(
+      "SELECT lifecycle_status,deletion_request_id FROM organizations WHERE id=$1 FOR UPDATE",[input.organizationId])).rows[0];
+    if(!previous)throw new Error("Cloud purge fixture requires an organization");
+    const requestId=randomUUID(),worker="cloud-fixture-erasure";
+    await tx.query(`INSERT INTO deletion_requests(id,public_code,target_kind,target_id,target_organization_id,
+      requested_by_user_id,state,requested_at,purge_after,purge_started_at,lease_owner,lease_expires_at,lease_revision)
+      VALUES($1,$2,'organization',$3,$3,$4,'provider_deleting',now()-interval '31 days',
+        now()-interval '1 day',now(),$5,now()+interval '1 minute',1)`,
+      [requestId,`ZD-TEST-${requestId.slice(0,4).toUpperCase().replace(/[01]/g,"A")}`,input.organizationId,input.userId,worker]);
+    await tx.query("UPDATE organizations SET lifecycle_status='purging',deletion_request_id=$2 WHERE id=$1",
+      [input.organizationId,requestId]);
+    await tx.query(`SELECT set_config('app.cloud_computer_v2_purge_request_id',$1,true),
+      set_config('app.cloud_computer_v2_purge_worker_id',$2,true),
+      set_config('app.cloud_computer_v2_purge_lease_revision','1',true)`,[requestId,worker]);
+    const result=await fn(tx);
+    await tx.query("UPDATE organizations SET lifecycle_status=$2,deletion_request_id=$3 WHERE id=$1",
+      [input.organizationId,previous.lifecycle_status,previous.deletion_request_id]);
+    await tx.query("DELETE FROM deletion_requests WHERE id=$1",[requestId]);
+    return result;
+  });
 }
 
 /** Loss evidence as the database-owner loss operator records it for a bound
@@ -117,22 +145,23 @@ export async function seedCanonicalCloudWorkspacePrerequisites(
 
 export async function seedHostedCloudWorkspaceProviderConnection(
   tx: Tx,
-  input: { organizationId: string; createdBy: string },
+  input: { organizationId: string; createdBy: string; provider?: string },
 ): Promise<string> {
   const providerConnectionId = randomUUID();
+  const provider = input.provider ?? "boat";
   await tx.query(
     `INSERT INTO provider_connections (
        id, org_id, owner_kind, provider, display_name,
        credential_source, current_version, state
-     ) VALUES ($1, $2, 'organization', 'daytona', 'Hosted Daytona',
+     ) VALUES ($1, $2, 'organization', $3, 'Hosted fixture',
                'hosted', 1, 'active')`,
-    [providerConnectionId, input.organizationId],
+    [providerConnectionId, input.organizationId, provider],
   );
   await tx.query(
     `INSERT INTO provider_connection_versions (
        connection_id, org_id, version, credential_source, endpoint, created_by
-     ) VALUES ($1, $2, 1, 'hosted', 'hosted://daytona', $3)`,
-    [providerConnectionId, input.organizationId, input.createdBy],
+     ) VALUES ($1, $2, 1, 'hosted', $4, $3)`,
+    [providerConnectionId, input.organizationId, input.createdBy, `hosted://${provider}`],
   );
   return providerConnectionId;
 }
@@ -217,9 +246,46 @@ export async function seedReadyProCloudWorkspace(pool:pg.Pool,options:{ownerUser
 
 /** Canonical Phase-3 fixture. It deliberately seeds every current authority
  * edge instead of relying on legacy migration backfills. */
+/** Supported execution fixture, with immutable generation/source INSERTs.
+ * Historical fixtures opt out explicitly; production never fabricates a source. */
+export async function seedSupportedCloudWorkspaceGeneration(tx: Tx, input: {
+  workspaceId: string; organizationId: string; ownerUserId: string; generation?: number; providerConnectionId?: string;
+  computerSource?: Pick<Parameters<typeof seedComputerTemplate>[1], "installationId" | "repositories">;
+}) {
+  const generation = input.generation ?? 1;
+  await seedRuntimeBase(tx);
+  if (!(await tx.query("SELECT 1 FROM cloud_runtime_bundles WHERE runtime_id=$1", [runtimeWitness.runtimeId])).rowCount)
+    await seedRuntimeBundle(tx);
+  const version = Number((await tx.query<{ next_version: string }>(
+    "SELECT next_version FROM cloud_computer_v2_heads WHERE org_id=$1 FOR UPDATE", [input.organizationId])).rows[0]?.next_version ?? 1);
+  const source = await seedComputerTemplate(tx, { ...input,
+    installationId: input.computerSource?.installationId ?? randomUUID(), repositories: input.computerSource?.repositories ?? [],
+    version,
+    sourceSandboxId: `zeros-v2-test-template-${input.workspaceId}-${generation}` });
+  const providerConnectionId = input.providerConnectionId ?? (await ensureHostedCloudProviderConnection(tx, {
+    organizationId: input.organizationId, ownerUserId: input.ownerUserId, actorUserId: input.ownerUserId,
+    isPersonal: false, provider: "boat",
+  })).id;
+  const pin = { runtimeId: runtimeWitness.runtimeId, manifestSha256: runtimeWitness.manifestSha256,
+    baseImageId: runtimeBase.id, baseCompatibilityId: runtimeBase.compatibilityId,
+    profile: "zeros-cloud-worker-v4" as const, engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION };
+  await tx.query(`INSERT INTO cloud_workspace_generations
+    (workspace_id,generation,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,source_commit,
+     created_by,provider_connection_id,runtime_id,runtime_manifest_sha256,runtime_base_image_id,runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version)
+    VALUES($1,$2,$3,'boat',$4,'linux/amd64',2000,4096,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+  [input.workspaceId, generation, input.organizationId, `boat-template:${source.sourceSandboxId}`, runtimeBase.storageMiB,
+    runtimeBase.sourceCommit, input.ownerUserId, providerConnectionId, ...cloudRuntimePinValues(pin)]);
+  // The fixture does not author checkout content. Preserve the nullable historic
+  // checkout field, while pinning the exact valid Computer build/config.
+  await tx.query(`INSERT INTO cloud_workspace_computer_sources(workspace_id,generation,org_id,build_id,template_id,config_id)
+    VALUES($1,$2,$3,$4,$4,$5)`, [input.workspaceId,generation,input.organizationId,source.buildId,source.configId]);
+  return { pin, providerConnectionId, source };
+}
+
 export async function seedReadyCloudWorkspace(
   pool: pg.Pool,
-  options: {ownerUserId?:string; runtimeV4?: boolean} = {},
+  options: {ownerUserId?:string; runtimeV4?: boolean; supportedGeneration?: boolean; persistedProvider?: string; persistedSandboxClass?: "container" | "linux-vm";
+    computerSource?: Pick<Parameters<typeof seedComputerTemplate>[1], "installationId" | "repositories">} = {},
 ): Promise<ReadyCloudWorkspaceFixture> {
   const userId = options.ownerUserId ?? randomUUID();
   const organizationId = randomUUID();
@@ -241,6 +307,12 @@ export async function seedReadyCloudWorkspace(
       [userId, email],
   );
   await withCloudFixtureOwnerTx(pool, async (tx) => {
+    // These ready fixtures exercise fake provider/runtime seams. Preserve their
+    // unmetered setup without changing the production Boat requirement. Metered
+    // suites enable the requirement explicitly after seeding their first fixture.
+    await tx.query(`UPDATE managed_compute_provider_requirements SET require_credit=false
+      WHERE provider='boat' AND NOT EXISTS (SELECT 1 FROM cloud_workspace_generations)`);
+
     if(!options.ownerUserId) {
     await tx.query(
       `INSERT INTO user_identities (
@@ -325,27 +397,31 @@ export async function seedReadyCloudWorkspace(
          FROM organization_entitlements WHERE org_id = $2`,
       [workspaceId, organizationId, userId],
     );
-    const runtime = options.runtimeV4 ? await seedRuntimeGeneration(tx, { workspaceId, organizationId, ownerUserId: userId }) : null;
+    const supported = options.runtimeV4 !== false && options.supportedGeneration !== false &&
+      (options.persistedProvider === undefined || options.persistedProvider === "boat") && options.persistedSandboxClass === undefined;
+    const runtime = supported ? await seedSupportedCloudWorkspaceGeneration(tx, { workspaceId, organizationId, ownerUserId: userId,
+      ...(options.computerSource ? { computerSource: options.computerSource } : {}) })
+      : options.runtimeV4 ? await seedRuntimeGeneration(tx, { workspaceId, organizationId, ownerUserId: userId }) : null;
     providerConnectionId = runtime?.providerConnectionId ?? await seedHostedCloudWorkspaceProviderConnection(
       tx,
       {
         organizationId,
-        createdBy: userId,
+        createdBy: userId, provider: options.persistedProvider ?? "boat",
       },
     );
     if (!runtime) await tx.query(
       `INSERT INTO cloud_workspace_generations (
          workspace_id, generation, org_id, provider, image_ref, architecture,
          cpu_millicores, memory_mib, storage_mib, source_commit, created_by,
-         provider_connection_id
-       ) VALUES ($1, 1, $2, 'daytona', 'snapshot-pinned', 'linux/amd64',
-                 2000, 4096, 20480, $3, $4, $5)`,
+         provider_connection_id, sandbox_class
+       ) VALUES ($1, 1, $2, $6, 'snapshot-pinned', 'linux/amd64',
+                 2000, 4096, 20480, $3, $4, $5, $7)`,
       [
         workspaceId,
         organizationId,
         "a".repeat(40),
         userId,
-        providerConnectionId,
+        providerConnectionId, options.persistedProvider ?? "boat", options.persistedSandboxClass ?? null,
       ],
     );
     await tx.query(
@@ -353,8 +429,9 @@ export async function seedReadyCloudWorkspace(
          id, workspace_id, generation, org_id, effective_document,
          provenance, source_versions, created_by
        ) VALUES ($1, $2, 1, $3, '{"schemaVersion":1,"values":{}}',
-                 '{}', '{"fixture":1}', $4)`,
-      [settingsVersionId, workspaceId, organizationId, userId],
+                 '{}', $5::jsonb, $4)`,
+      [settingsVersionId, workspaceId, organizationId, userId,
+        JSON.stringify(supported && runtime && "source" in runtime ? { fixture: 1, computerEnvironment: { configId: runtime.source.configId, bindings: [] } } : { fixture: 1 })],
     );
     await tx.query(
       `INSERT INTO cloud_workspace_setup_specs (
@@ -374,7 +451,7 @@ export async function seedReadyCloudWorkspace(
          workspace_id, generation, org_id, provider,
          provider_resource_id, observed_state, last_observed_at
        ) VALUES ($1, 1, $2, $4, $3, 'running', now())`,
-      [workspaceId, organizationId, `sandbox-${workspaceId}`, runtime ? "boat" : "daytona"],
+      [workspaceId, organizationId, `sandbox-${workspaceId}`, options.persistedProvider ?? "boat"],
     );
     await tx.query(
       `INSERT INTO workspace_executions (
@@ -415,9 +492,9 @@ export async function seedReadyCloudWorkspace(
          setup_execution_fence, registration_grant_id, protocol_version,
          state, bridge_token_hash, heartbeat_token_hash, registered_at,
          last_heartbeat_at, lease_expires_at
-         ${runtime ? ", runtime_id, runtime_manifest_sha256, runtime_base_image_id, runtime_base_compatibility_id, runtime_profile, runtime_engine_protocol_version, runtime_installer_receipt_sha256, runtime_boot_id, runtime_supervisor_session_id" : ""}
+         ${runtime ? ", actor_protocol_version, agent_customization_version, runtime_id, runtime_manifest_sha256, runtime_base_image_id, runtime_base_compatibility_id, runtime_profile, runtime_engine_protocol_version, runtime_installer_receipt_sha256, runtime_boot_id, runtime_supervisor_session_id" : ""}
        ) VALUES ($1, $2, 1, $3, $4, $5, 1, $6, $9, 'ready', $7, $8,
-                 now(), now(), now() + interval '10 minutes' ${runtime ? ", $10,$11,$12,$13,$14,$15,$16,$17,$18" : ""})`,
+                 now(), now(), now() + interval '10 minutes' ${runtime ? ", 2, 3, $10,$11,$12,$13,$14,$15,$16,$17,$18" : ""})`,
       [
         engineInstanceId,
         workspaceId,

@@ -9,7 +9,6 @@ import { CloudWorkspaceDetails } from "../shell/conversation/cloud-workspace-det
 import { Button, TooltipProvider } from "../shared/ui/primitives";
 import { acceptOrganizationSnapshot, clearTeamStore, getTeamStoreState } from "../features/team/team-store";
 import { controlPlane, type StaffRole } from "../features/team/control-plane";
-import { setInternalFeatureEnabled } from "../features/settings/internal-features";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
 import type { RuntimeClient } from "../platform/bridge/ws-client";
 import { cloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
@@ -32,7 +31,7 @@ const rows = new Map<string, CloudReplica>();
 const changes = new Map<string, Array<{ path: string; detectedAt: number }>>();
 const calls: Array<{ op: string; params: Record<string, unknown> }> = [];
 const ownerKey = (params: Record<string, unknown>) => JSON.stringify([params.accountUserId, params.deviceId, params.organizationId, params.workspaceId]);
-function installAccount(role: StaffRole | null = "developer") {
+function installAccount(role: StaffRole | null = null) {
   acceptOrganizationSnapshot({ user: { id: accountUserId, email: "fixture@example.test", displayName: "Fixture", staffRole: role }, teams: [] });
 }
 function workspaceDocument(id: string): CloudWorkspaceDocument {
@@ -93,7 +92,6 @@ const bridge = {
 } as unknown as RuntimeClient;
 setActiveBridge(bridge);
 installAccount(); publishDocuments();
-setInternalFeatureEnabled("cloudComputerV2", true);
 useWorkspaceStore.setState({ activePage: "workspace" });
 
 function Harness() {
@@ -106,6 +104,7 @@ function Harness() {
     hide: () => useWorkspaceStore.setState({ activePage: "dashboard" }),
     show: () => useWorkspaceStore.setState({ activePage: "workspace" }),
     offline: (value: boolean) => { offline = value; invalidate(); },
+    signOut: () => clearTeamStore(),
     staff: (value: boolean) => installAccount(value ? "developer" : null),
     canEdit: (value: boolean | undefined) => { editAccess = value; publishDocuments(); },
     device: (value: string) => { deviceId = value; invalidate(); },

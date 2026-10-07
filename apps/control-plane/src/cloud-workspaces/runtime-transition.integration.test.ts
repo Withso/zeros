@@ -3,7 +3,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
-import { copyGenerationPins, loadGenerationSource } from "./generation-pins.js";
+import { copyGenerationPins } from "./generation-pins.js";
 import { readCloudRuntimeResumeProofEpoch } from "./runtime-transition.js";
 import { seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
 
@@ -80,10 +80,9 @@ import { seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test
 
   async function addGeneration() {
     await withSystemTx(pool, async tx => {
-      const source = await loadGenerationSource(tx, scope());
       const connection = (await tx.query("SELECT provider_connection_id FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId])).rows[0];
       await copyGenerationPins(tx, { ...scope(), sourceGeneration: 1, targetGeneration: 2, actorUserId: fixture.userId,
-        providerConnectionId: connection.provider_connection_id, legacyProfile: source.profile, qualificationMode: "full" });
+        providerConnectionId: connection.provider_connection_id, qualificationMode: "full" });
     });
   }
 
@@ -190,7 +189,7 @@ import { seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test
     await attest();
     await pool.query("UPDATE cloud_workspaces SET status='deleted',desired_state='deleted',deleted_at=now() WHERE id=$1", [fixture.workspaceId]);
     expect(await epoch()).toBeNull();
-    fixture = await seedReadyCloudWorkspace(pool);
+    fixture = await seedReadyCloudWorkspace(pool, { runtimeV4: false });
     await attest();
     expect(await epoch()).toBeNull();
   });

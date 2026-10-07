@@ -108,23 +108,18 @@ describe("isInternalUser — the staff gate", () => {
 });
 
 describe("internal feature flags", () => {
-  it("keeps Cloud Computer v2 opt-in and limited to current engineering staff", async () => {
-    installLocalStorageStub();
+  it("reads the retired Cloud Computer key without granting access or losing other flags", async () => {
+    const backing = installLocalStorageStub();
+    backing.set("zeros.internalFeatures", JSON.stringify({ cloudComputerV2: true, copyLogs: true }));
     const store = await freshStore();
-    signedInAs("developer");
-    expect(store.isInternalFeatureEnabled("cloudComputerV2")).toBe(false);
-    expect(store.isInternalFeatureActive("cloudComputerV2")).toBe(false);
-    store.setInternalFeatureEnabled("cloudComputerV2", true);
-    for (const role of ["developer", "platform_owner"] as const) {
+    for (const role of [null, "developer", "platform_owner", "support_admin"] as const) {
       signedInAs(role);
-      expect(store.isInternalFeatureActive("cloudComputerV2")).toBe(true);
+      expect(store.isInternalFeatureEnabled("cloudComputerV2" as never)).toBe(false);
+      expect(store.isInternalFeatureActive("cloudComputerV2" as never)).toBe(false);
     }
-    for (const role of [null, "support_admin"] as const) {
-      signedInAs(role);
-      expect(store.isInternalFeatureActive("cloudComputerV2")).toBe(false);
-    }
-    signedOut();
-    expect(store.isInternalFeatureActive("cloudComputerV2")).toBe(false);
+    expect(store.isInternalFeatureEnabled("copyLogs")).toBe(true);
+    store.setInternalFeatureEnabled("copyLogs", false);
+    expect(JSON.parse(backing.get("zeros.internalFeatures")!)).toEqual({ cloudComputerV2: true, copyLogs: false });
   });
   it("makes release-check controls discoverable only to platform owners without enabling credential consent", async () => {
     const store = await freshStore();
