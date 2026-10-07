@@ -4,6 +4,7 @@ import { createCloudRuntimeResolver } from "../../apps/desktop/src/engine/agents
 import { cloudRuntimeFixture } from "../../apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-fixture";
 import { CloudWorkerSupervisor, parseCloudWorkerSupervisorRequest, CLOUD_WORKER_SUPERVISOR_AUDIENCE }
   from "../cloud-workspace-validation/sandbox/cloud-worker-supervisor.mjs";
+import { CloudResidentWorkload } from "../cloud-workspace-validation/sandbox/cloud-resident-workload.mjs";
 
 function fixture() {
   const tree = cloudRuntimeFixture();
@@ -77,6 +78,11 @@ describe("resident supervisor attach fencing", () => {
       // new session. Replay is bound to the same receipt while it is unspent.
       expect(await f.supervisor.apply({ operation: "prepare", resident: source, handoff: f.handoff })).toEqual(prepared);
       expect(f.resident.detach).toHaveBeenCalledOnce();
+      // A preserved source receipt cannot be stripped or replaced on retry.
+      await expect(f.supervisor.apply({ operation: "prepare", resident: source })).rejects.toThrow(/authority/);
+      expect(await f.supervisor.apply({ operation: "prepare", resident: source,
+        handoff: { ...f.handoff, challenge: randomUUID() } })).toMatchObject({ outcome: "rejected" });
+      expect(await f.supervisor.apply({ operation: "prepare", resident: source, handoff: f.handoff })).toEqual(prepared);
     } finally { f.tree.dispose(); }
   });
 
@@ -131,6 +137,48 @@ describe("resident supervisor attach fencing", () => {
       expect(f.resident.enroll.mock.calls[0][0].engineId).toBe(environment.runtime.engine.instanceId);
       expect(await f.supervisor.apply(start)).toMatchObject({ outcome: "rejected" });
       expect(f.launch).toHaveBeenCalledOnce();
+    } finally { f.tree.dispose(); }
+  });
+
+  it("replays a lost rollback prepare reply without detaching the failed target twice", async () => {
+    const f = fixture();
+    try {
+      const request = { operation: "prepare", resident: { hostId: f.hostId, engineId: f.sourceId, fence: 1 } };
+      const prepared = await f.supervisor.apply(request);
+      expect(await f.supervisor.apply(request)).toEqual(prepared);
+      expect(f.resident.detach).toHaveBeenCalledOnce();
+      expect(f.retire).toHaveBeenCalledOnce();
+      expect(f.resident.stop).not.toHaveBeenCalled();
+      for (const changed of [{ engineId: randomUUID() }, { hostId: randomUUID() }, { fence: 2 }])
+        await expect(f.supervisor.apply({ ...request, resident: { ...request.resident, ...changed } })).rejects.toThrow(/authority/);
+      expect(await f.supervisor.apply({ ...request, handoff: f.handoff })).toMatchObject({ outcome: "rejected" });
+      // Only the exact same request can recover the unspent session.
+      expect(await f.supervisor.apply(request)).toEqual(prepared);
+      expect(await f.supervisor.apply({ operation: "start", session: prepared.session,
+        environment: f.environment(), resident: { hostId: f.hostId, fence: 3 } })).toMatchObject({ outcome: "started" });
+      await expect(f.supervisor.apply(request)).rejects.toThrow(/authority/);
+      expect(f.launch).toHaveBeenCalledOnce();
+    } finally { f.tree.dispose(); }
+  });
+
+  it("retains the actual resident descriptor and detached authority on rollback prepare replay", async () => {
+    const f = fixture();
+    try {
+      const host = new CloudResidentWorkload({ runtime: f.supervisor.runtime,
+        hostId: f.hostId, organizationId: f.organizationId, workspaceId: f.workspaceId });
+      // Only kernel/IPC effects are substituted; descriptor, enroll, detach
+      // and supervisor requests use the real production implementations.
+      host.request = vi.fn(async () => ({}));
+      await host.enroll({ organizationId: f.organizationId, workspaceId: f.workspaceId,
+        generation: 2, engineId: f.sourceId, fence: 3, token: "synthetic" });
+      f.supervisor.resident = host;
+      const request = { operation: "prepare", resident: { hostId: f.hostId, engineId: f.sourceId, fence: 3 } };
+      const prepared = await f.supervisor.apply(request);
+      expect(prepared.resident).toMatchObject({ engineId: null, generation: null, fence: 4,
+        scope: `${f.supervisor.runtime.cgroupRoot}/engine-workload-${f.hostId}` });
+      expect(await f.supervisor.apply(request)).toEqual(prepared);
+      expect(await host.witness()).toEqual(prepared.resident);
+      expect(f.retire).toHaveBeenCalledExactlyOnceWith({ preserveWorkload: f.hostId });
     } finally { f.tree.dispose(); }
   });
 

@@ -579,11 +579,14 @@ export class CloudWorkerSupervisor {
   }
 
   async #prepare(request) {
+    // A failed target's rollback uses resident prepare without a source
+    // handoff receipt. Recover its lost reply with the same unspent session,
+    // just as for source consumption; detaching it twice would lose recovery.
+    const replay = this.#handoffPrepared;
+    if (request.resident && replay && this.#sessionMatches(replay.response.session) &&
+        ["hostId", "engineId", "fence"].every(key => request.resident[key] === replay.resident[key]) &&
+        (request.handoff ? sameHandoff(request.handoff, replay.request) : replay.request === null)) return replay.response;
     if (request.handoff) {
-      const replay = this.#handoffPrepared;
-      if (replay && this.#sessionMatches(replay.response.session) && sameHandoff(request.handoff, replay.request) &&
-        request.resident?.hostId === replay.request.hostId && request.resident?.engineId === replay.request.engineInstanceId &&
-        request.resident?.fence === replay.request.fence) return replay.response;
       if (this.#handoffReceipt?.receipt.phase !== "fenced" || !sameHandoff(request.handoff, this.#handoffReceipt.request) ||
         request.resident?.hostId !== request.handoff.hostId || request.resident?.engineId !== request.handoff.engineInstanceId ||
         request.resident?.fence !== request.handoff.fence || !await this.#engineHandoffRequest("consume", request.handoff)) return rejectSupervisorRequest();
@@ -602,7 +605,8 @@ export class CloudWorkerSupervisor {
     this.preparedResident = resident;
     this.session = `zsp_${randomBytes(32).toString("base64url")}`;
     const response = supervisorResponse("prepared", { session: this.session, ...(resident ? { resident } : {}) });
-    if (request.handoff) this.#handoffPrepared = { request: { ...request.handoff }, response };
+    if (request.resident) this.#handoffPrepared = { resident: { ...request.resident },
+      request: request.handoff ? { ...request.handoff } : null, response };
     return response;
   }
 
