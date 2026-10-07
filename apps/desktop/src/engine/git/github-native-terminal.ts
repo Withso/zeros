@@ -11,10 +11,16 @@ export class NativeGithubTerminals {
     actorUserId: string | null; clients: TransportClient[]; shared: boolean; invalidate(): void;
   }>();
   create(id: string, client: TransportClient) {
+    return this.install(id, client.accountUserId ?? null, false, [client]);
+  }
+  restore(id: string, state: { actorUserId: string | null; shared: boolean }) {
+    return this.install(id, state.actorUserId, state.shared, []);
+  }
+  private install(id: string, actorUserId: string | null, shared: boolean, clients: TransportClient[]) {
     this.terminals.get(id)?.invalidate();
     // Opening a shell does not acquire Git authority. An unidentified creator
     // gets a usable terminal whose Git requests fail closed when invoked.
-    const record = { actorUserId: client.accountUserId ?? null, clients: [client], shared: false, invalidate: () => {} };
+    const record = { actorUserId, clients, shared, invalidate: () => {} };
     this.terminals.set(id, record);
     return {
       source: (): CloudGithubNativeSource => {

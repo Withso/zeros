@@ -1,5 +1,25 @@
 import { expect } from "@playwright/test";
 
+async function expectFirstFocusEscape(page) {
+  await expect(page.getByRole("menu", { includeHidden: true })).toHaveCount(0);
+  await page.evaluate(() => {
+    window.cloudDesignFixture.firstEscapeSent = false;
+    const onFocus = (event) => {
+      if (event.target.getAttribute?.("role") !== "menu") return;
+      document.removeEventListener("focusin", onFocus, true);
+      event.target.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "Escape", bubbles: true, cancelable: true,
+      }));
+      window.cloudDesignFixture.firstEscapeSent = true;
+    };
+    document.addEventListener("focusin", onFocus, true);
+  });
+  await page.getByRole("button", { name: "Choose Design directory" }).click();
+  await expect.poll(() => page.evaluate(() => window.cloudDesignFixture.firstEscapeSent)).toBe(true);
+  await expect(page.getByRole("button", { name: "Choose Design directory", includeHidden: true })).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByRole("menu", { includeHidden: true })).toHaveCount(0);
+}
+
 export async function runCloudDesignDirectoriesSmoke({
   page,
   check,
@@ -100,11 +120,15 @@ export async function runCloudDesignDirectoriesSmoke({
       page.getByRole("menuitem", { name: "Manage directories…" }),
     ).toHaveCount(0);
     await page.keyboard.press("Escape");
+    await expect(page.getByRole("button", { name: "Choose Design directory" })).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByRole("menu")).toHaveCount(0);
   }
   check(
     "cloud Design management is manager-only in settings and the canvas menu",
     true,
   );
+  await expectFirstFocusEscape(page);
+  check("the read-only cloud Design menu handles Escape at its first focus", true);
   await page.getByRole("button", { name: "Manager", exact: true }).click();
   await page.evaluate(() => window.cloudDesignFixture.holdNextBrowse());
   await settings.getByRole("button", { name: "Browse VM folders…" }).click();
@@ -137,6 +161,16 @@ export async function runCloudDesignDirectoriesSmoke({
     waitUntil: "networkidle",
   });
   await page.getByRole("button", { name: "Prompter", exact: true }).click();
+  await page.evaluate(() => {
+    window.cloudDesignFixture.nativeOverlayActive = false;
+    document.addEventListener("zeros-native-surface-overlay-intent", (event) => {
+      window.cloudDesignFixture.nativeOverlayActive = event.detail.active;
+    });
+  });
+  await expectFirstFocusEscape(page);
+  await page.getByRole("button", { name: "Prompter", exact: true }).focus();
+  await expect.poll(() => page.evaluate(() => window.cloudDesignFixture.nativeOverlayActive)).toBe(false);
+  check("the Local Design menu handles first-focus Escape and releases native overlays", true);
   await page.getByRole("button", { name: "Choose Design directory" }).click();
   await page.getByRole("menuitem", { name: "Other", exact: true }).click();
   await expect.poll(() => page.evaluate(() => window.cloudDesignFixture.requests

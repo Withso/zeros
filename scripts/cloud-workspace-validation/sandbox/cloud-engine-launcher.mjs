@@ -267,6 +267,21 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
     } catch { throw new Error("Invalid cloud engine scope identity"); }
   }
   const computer = readCloudComputerWorkspaceAdmission(runtime, { engineIdentity });
+  let residentHostId;
+  if (runtime.profile === "v4" && operation === "resident") residentHostId = source.ZEROS_RESIDENT_HOST_ID;
+  else if (runtime.profile === "v4" && operation === "serve" && source.ZEROS_RESIDENT_PTY_B64 !== undefined) {
+    try {
+      if (source.ZEROS_RESIDENT_PTY_B64.length > 4096) throw new Error();
+      residentHostId = JSON.parse(Buffer.from(source.ZEROS_RESIDENT_PTY_B64, "base64url").toString("utf8")).hostId;
+    } catch { throw new Error("Invalid resident service identity"); }
+  }
+  if (residentHostId !== undefined || operation === "resident") {
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(residentHostId ?? ""))
+      throw new Error("Invalid resident service identity");
+    privateDirectory("/run/zeros/resident-workloads", 0, 0, 0o700);
+    privateDirectory(`/run/zeros/resident-workloads/${residentHostId}`, 10003, 10001, 0o750);
+    rootPath("/opt/zeros-infra", true);
+  }
   for (const file of [
     "/usr/bin/bwrap",
     "/usr/bin/setpriv",
@@ -356,7 +371,7 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
     const epoch = readPhysical("/opt/zeros/disk-epoch", 64);
     if (!/^[0-9]+\n?$/.test(epoch.toString("utf8"))) throw new Error("Invalid cloud disk epoch");
     publishViewFile(`${viewDirectory}/facade/disk-epoch`, epoch, 0, 0, 0o444);
-    return {...profile, runtime, viewDirectory,
+    return {...profile, runtime, viewDirectory, residentHostId,
       ...(computer ? { primaryRepository: computer.repositoryDirectory } : {}),
       releaseView: () => rmSync(viewDirectory, {recursive:true,force:true})};
   } catch (error) {
@@ -381,7 +396,7 @@ export async function launchCloudEngine({
   runtime = profile?.runtime ?? runtime;
   let args, environment;
   try {
-    args = cloudEngineViewArguments(operation,profile?.version??2,runtime,profile?.viewDirectory,profile?.primaryRepository);
+    args = cloudEngineViewArguments(operation,profile?.version??2,runtime,profile?.viewDirectory,profile?.primaryRepository,profile?.residentHostId);
     environment = cloudEngineViewEnvironment(source, operation,runtime);
     if (!scope) {
       let instanceId;

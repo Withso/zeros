@@ -14,12 +14,15 @@ export function cloudEngineWorkspacePaths(primaryRepository) {
  * engine request. The host launcher verifies their physical ownership first.
  * Private broker authority, provider login homes and the host shadow/SSH files
  * have no mount in this view. */
-export function cloudEngineViewArguments(operation = "serve",version=2,runtime=resolveCloudRuntime(),viewDirectory,primaryRepository) {
+export function cloudEngineViewArguments(operation = "serve",version=2,runtime=resolveCloudRuntime(),viewDirectory,primaryRepository,residentHostId) {
   if (!["serve", "qualify", "qualify-agent", "resident"].includes(operation))
     throw new Error("Invalid cloud engine launch operation");
   if(![2,3,4].includes(version)||(version===4)!==(runtime.profile==="v4"))throw new Error("Invalid cloud engine profile version");
   if(operation==="qualify-agent"&&version<3)throw new Error("Native agent qualification requires v3 or v4");
   if(operation==="resident"&&version!==4)throw new Error("Resident workloads require v4");
+  if (residentHostId !== undefined && (version !== 4 || !["serve", "resident"].includes(operation) ||
+    !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(residentHostId)))
+    throw new Error("Invalid resident service projection");
   if(version===4&&(!/^\/run\/zeros\/view\/runtime-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(viewDirectory??"")))
     throw new Error("Invalid cloud engine runtime projection");
   if (primaryRepository !== undefined && (version !== 4 || !isCloudComputerRepositoryDirectory(primaryRepository)))
@@ -62,11 +65,15 @@ export function cloudEngineViewArguments(operation = "serve",version=2,runtime=r
     "/dev/shm",
     "--tmpfs",
     "/tmp",
+    ...(residentHostId ? ["--bind", `/run/zeros/resident-workloads/${residentHostId}`, "/tmp/zeros-resident"] : []),
     "--ro-bind",
     "/sys/fs/cgroup",
     "/sys/fs/cgroup",
     ...(version === 4 ? [
-      "--ro-bind", runtime.root, runtime.root,
+      // The resident remains pinned, but future shells need the selected
+      // immutable runtime's binaries. No mutable facade/host authority is
+      // exposed by this root-owned, read-only installation parent.
+      ...(operation === "resident" ? ["--ro-bind", "/opt/zeros-infra", "/opt/zeros-infra"] : ["--ro-bind", runtime.root, runtime.root]),
       "--ro-bind", `${viewDirectory}/facade`, "/opt/zeros",
       "--symlink", "/opt/zeros", "/zeros",
       "--ro-bind", `${viewDirectory}/etc`, "/etc/zeros",

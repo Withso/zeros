@@ -18,6 +18,10 @@ function DropdownMenu({
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Root>) {
   const publishOverlay = useNativeSurfaceOverlayIntent();
+  React.useEffect(() => {
+    // A controlled owner can close the menu without Radix's callback.
+    if (props.open !== undefined) publishOverlay(props.open);
+  }, [props.open, publishOverlay]);
   return (
     <DropdownMenuPrimitive.Root
       {...props}

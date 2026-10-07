@@ -38,7 +38,9 @@ import {
   MAX_BRIDGE_FRAME_BYTES,
   safeParseClientBridgeMessage,
 } from "@zeros/protocol/schemas";
+import { CloudRuntimeQuietSnapshotSchema, type CloudRuntimeQuietSnapshot } from "@zeros/protocol/cloud-runtime-lifecycle";
 import type { EngineMessage } from "../types";
+import { CloudRuntimeHandoffCommandSchema, type CloudRuntimeHandoffCommand, type CloudRuntimeHandoffReply } from "../cloud-runtime-quiet-state";
 import type { Transport, TransportClient } from "./types";
 import type {
   CloudRuntimeClientAdmission,
@@ -150,6 +152,8 @@ const MAX_HANDLER_RETAINED_BYTES = 64 * 1024 * 1024;
 const FORCE_CLOSE_TIMEOUT_MS = 1_000;
 const MAX_CLIENT_AUTHORITY_LEASE_MS = 10_000;
 const INTERNAL_READINESS_PATH = "/internal/readiness";
+const INTERNAL_QUIET_PATH = "/internal/runtime-quiet";
+const INTERNAL_HANDOFF_PATH = "/internal/runtime-handoff";
 const READINESS_TOKEN_PATTERN = /^zwr_[A-Za-z0-9_-]{43}$/;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -232,6 +236,8 @@ export interface CloudTransportOptions {
   internalReadiness?: {
     token: string;
     read: () => CloudRuntimeReadiness | null;
+    readQuiet?: (challenge: string) => Promise<CloudRuntimeQuietSnapshot | null>;
+    handoff?: (command: CloudRuntimeHandoffCommand) => Promise<CloudRuntimeHandoffReply | null>;
   };
 }
 
@@ -358,9 +364,7 @@ export class CloudTransport implements Transport {
   private readonly handshakeTimeoutMs: number;
   private readonly maxBufferedBytes: number;
   private readonly maxTotalBufferedBytes: number;
-  private readonly internalReadiness:
-    | { token: string; read: () => CloudRuntimeReadiness | null }
-    | undefined;
+  private readonly internalReadiness: CloudTransportOptions["internalReadiness"];
   private handlerInFlight = 0;
   private controlHandlerInFlight = 0;
   private handlerInFlightBytes = 0;
@@ -379,6 +383,7 @@ export class CloudTransport implements Transport {
   >();
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private pendingUpgrades = 0;
+  private handoffFenced = false;
   private getInfo:
     | (() => { version: string; uptime: number; connections: number })
     | null = null;
@@ -951,6 +956,15 @@ export class CloudTransport implements Transport {
     return this.serviceGateway !== null;
   }
   setHumanServicesPaused(paused: boolean): void { this.serviceGateway?.setPaused(paused); }
+  handoffBusy(): boolean {
+    return this.handlerInFlight > 0 || this.controlHandlerInFlight > 0 || this.handlerQueue.length > 0 || this.pendingUpgrades > 0 ||
+      this.previewGateway?.handoffBusy() === true || this.serviceGateway?.handoffBusy() === true;
+  }
+  setHandoffFenced(fenced: boolean): void {
+    this.handoffFenced = fenced;
+    this.previewGateway?.setHandoffFenced(fenced);
+    this.serviceGateway?.setHandoffFenced(fenced);
+  }
 
   get connectionCount(): number {
     return this.clients.size;
@@ -1093,6 +1107,7 @@ export class CloudTransport implements Transport {
     // defense for a 127.0.0.1 server). An exact capability is the boundary.
     if (
       url.pathname !== "/ws" ||
+      this.handoffFenced ||
       credential === null ||
       this.clients.size + this.pendingUpgrades >= this.maxConnections
     ) {
@@ -1108,7 +1123,7 @@ export class CloudTransport implements Transport {
       const admissionStartedAt = Date.now();
       const admission = await this.authenticateToken(credential);
       if (
-        !admission ||
+        !admission || this.handoffFenced ||
         (admission.accountUserId !== null &&
           Date.now() >= admissionStartedAt + this.clientAuthorityLeaseMs) ||
         socket.destroyed ||
@@ -1136,12 +1151,12 @@ export class CloudTransport implements Transport {
   }
 
   private handleHTTP(req: IncomingMessage, res: ServerResponse): void {
-    if (this.previewGateway?.handle(req, res)) return;
     const url = new URL(req.url ?? "", "http://sandbox");
-    if (url.pathname === INTERNAL_READINESS_PATH) {
-      this.handleInternalReadiness(url, req, res);
+    if ([INTERNAL_READINESS_PATH, INTERNAL_QUIET_PATH, INTERNAL_HANDOFF_PATH].includes(url.pathname)) {
+      void this.handleInternalReadiness(url, req, res).catch(() => res.destroy());
       return;
     }
+    if (this.previewGateway?.handle(req, res)) return;
     if (url.pathname === "/health" && req.method === "GET") {
       const info = this.getInfo?.() ?? {
         version: "unknown",
@@ -1163,11 +1178,11 @@ export class CloudTransport implements Transport {
     );
   }
 
-  private handleInternalReadiness(
+  private async handleInternalReadiness(
     url: URL,
     req: IncomingMessage,
     res: ServerResponse,
-  ): void {
+  ): Promise<void> {
     const reject = () => {
       res.writeHead(404, {
         "Cache-Control": "no-store",
@@ -1191,9 +1206,10 @@ export class CloudTransport implements Transport {
     }
     const rawToken = req.headers["x-zeros-readiness-token"];
     const token = Array.isArray(rawToken) ? "" : (rawToken ?? "");
+    const handoff = url.pathname === INTERNAL_HANDOFF_PATH;
     if (
       !this.internalReadiness ||
-      req.method !== "GET" ||
+      req.method !== (handoff ? "POST" : "GET") ||
       url.search !== "" ||
       !remoteIsLoopback ||
       !hostIsLoopback ||
@@ -1202,9 +1218,44 @@ export class CloudTransport implements Transport {
       reject();
       return;
     }
+    if (handoff) {
+      const length = req.headers["content-length"];
+      if (!this.internalReadiness.handoff || req.headers["content-type"] !== "application/json" ||
+        typeof length !== "string" || !/^[1-9][0-9]{0,3}$/.test(length) || Number(length) > 4096) { reject(); return; }
+      req.setTimeout(5000, () => req.destroy());
+      let source = "";
+      try {
+        for await (const chunk of req) {
+          source += String(chunk);
+          if (Buffer.byteLength(source) > 4096) { reject(); return; }
+        }
+      } finally { req.setTimeout(0); }
+      let command: CloudRuntimeHandoffCommand;
+      try { command = CloudRuntimeHandoffCommandSchema.parse(JSON.parse(source)); }
+      catch { reject(); return; }
+      const result = await this.internalReadiness.handoff(command);
+      if (!result) { res.writeHead(503, { "Cache-Control": "no-store" }); res.end("unavailable"); return; }
+      res.writeHead(200, { "Cache-Control": "no-store", "Content-Type": "application/json; charset=utf-8",
+        "X-Content-Type-Options": "nosniff" });
+      res.end(JSON.stringify(result)); return;
+    }
+    const quiet = url.pathname === INTERNAL_QUIET_PATH;
+    const challenge = req.headers["x-zeros-quiet-challenge"];
+    if (quiet && (!this.internalReadiness.readQuiet || typeof challenge !== "string" || !UUID_PATTERN.test(challenge))) {
+      reject();
+      return;
+    }
     let readiness: CloudRuntimeReadiness | null = null;
+    let snapshot: CloudRuntimeQuietSnapshot | null = null;
     try {
       readiness = this.internalReadiness.read();
+      if (quiet && readiness) {
+        const initialInstanceId = readiness.instanceId;
+        const parsed = CloudRuntimeQuietSnapshotSchema.safeParse(await this.internalReadiness.readQuiet!(challenge as string));
+        readiness = this.internalReadiness.read();
+        if (parsed.success && parsed.data.challenge === challenge && parsed.data.engineInstanceId === initialInstanceId &&
+            parsed.data.engineInstanceId === readiness?.instanceId) snapshot = parsed.data;
+      }
     } catch {
       readiness = null;
     }
@@ -1216,7 +1267,8 @@ export class CloudTransport implements Transport {
       readiness.protocolVersion < 1 ||
       readiness.protocolVersion > 65_535 ||
       readiness.health !== "ready" ||
-      readiness.durableRecordConnected !== true
+      readiness.durableRecordConnected !== true ||
+      (quiet && !snapshot)
     ) {
       res.writeHead(503, {
         "Cache-Control": "no-store",
@@ -1233,7 +1285,7 @@ export class CloudTransport implements Transport {
       "X-Content-Type-Options": "nosniff",
     });
     res.end(
-      JSON.stringify({
+      JSON.stringify(quiet ? snapshot : {
         version: 1,
         audience: "zeros-cloud-engine-readiness-v1",
         ready: true,

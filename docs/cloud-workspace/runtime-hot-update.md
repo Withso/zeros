@@ -192,8 +192,9 @@ never argv or environments. Keep the existing UID process scan conservative.
 
 Until the disposable acceptance runner measures a reconnect gap **at most 10
 seconds**, automatic activation also requires **no present client on any device**.
-Use IW2's presence signal: no window focused with input in the preceding 15
-minutes. Unknown/stale presence blocks activation. After measured qualification
+Use IW2's presence signal: no visible window with input in the preceding 15
+minutes on a device that is neither locked nor suspended. Unknown/stale presence
+blocks activation. After measured qualification
 establishes the 10-second bound for the applicable execution path and runtime
 pair, a present user may be merely quiet under the same 60-second rule. Bootstrap
 and engine-only measurements are separate; a fast engine swap does not qualify
@@ -486,3 +487,130 @@ organization and workspace. This slice changes no renderer selection or local
 engine path. Automatic triggers, LU's VM-side behavior, RU/IW2 command-queue
 handoff and the disposable Alpha acceptance runner are separate slices; they
 must be integrated and verified before enabling automatic transfers.
+
+
+## Implemented quiet observation and trigger (slice 3)
+
+`apps/desktop/src/engine/cloud-runtime-quiet-state.ts` exports
+`CloudRuntimeQuietState`, `CloudRuntimeQuietStateOptions`,
+`CloudRuntimeQuietScope` and `CloudRuntimeQuietSnapshot`.
+`snapshot(challenge: string): Promise<CloudRuntimeQuietSnapshot | null>` is
+read-only: it does not drain work, reserve a safe point, change admission or
+stop a process. LU's handoff code can consume the same typed snapshot.
+
+Each version-1 snapshot binds a fresh UUID challenge to organization, workspace,
+generation and engine instance. It contains the monotonic activity revision,
+quiet duration, durable-record synchronization state, idle-stop workload guard,
+live PTY guard, process-scan result and presence state. The reader samples guards
+before and after process inspection; changed activity marks the snapshot
+unstable, a changed identity rejects it, and unavailable process evidence is
+unknown. `CloudIdleStopScheduler.readActivity()` does not renew activity or
+consume an idle-stop attempt. Idle-stop still includes presence in its busy
+check; the update snapshot reports presence separately for policy selection.
+
+The hook is exposed at `GET /internal/runtime-quiet` on the engine's existing
+internal-readiness boundary: loopback peer and Host, exact readiness capability,
+no query string, and `x-zeros-quiet-challenge`. It rechecks engine readiness after
+the asynchronous read. Missing hooks, old engines, invalid challenges and
+unavailable readiness never imply quiet. Responses contain only the closed
+snapshot schema; errors return the existing fixed unavailable/not-found body.
+There is no client RPC for this observation. Local and organization-owned local
+engines never perform the inspection.
+
+`CloudUserPresence.snapshot(attached)` requires a fresh admitted report for each
+attached cloud client. An explicit negative report proves absence for its
+90-second lease; a missing, expired, replaced or revoked client report is
+unknown. Any present device blocks the default policy. No attached clients means
+absent. The renderer's existing presence rule is a visible window with input in
+the last 15 minutes, on a device that is neither locked nor suspended.
+IW2 currently sends a negative report on withdrawal, without periodic negative
+renewal (`CloudWorkspaceInteraction.refresh`). After 90 seconds an attached
+inactive client therefore becomes unknown and this policy defers until a new
+report or disconnect. Keeping absence continuously provable requires an IW2
+renewal change; this slice does not infer absence from an expired lease.
+
+The control-plane module
+`apps/control-plane/src/cloud-workspaces/runtime-quiet-trigger.ts` exports:
+
+- `CloudRuntimeQuietReader`: an injected, authenticated pinned-controller reader
+  accepting the exact source scope, a fresh challenge and an abort signal.
+- `readFreshCloudRuntimeQuietSnapshot`: validates the closed schema, exact scope
+  and challenge, and a two-second monotonic bound. It aborts hung reads and
+  suppresses raw reader errors. The adapter must additionally bound response
+  bytes and authenticate the pinned source; the challenge is not authentication.
+- `cloudRuntimeQuietAbsentPolicy`: the default policy, requiring 60 quiet
+  seconds, stable activity, ready record synchronization, absent presence and
+  all workload/PTY/process guards clear. Unknown evidence defers activation.
+- `DatabaseCloudRuntimeQuietTrigger.consider(input)`: an optional quiet offer
+  entry point that reuses RU's server workload query and the transfer service's
+  selection and single-transition lock. It cannot activate a runtime.
+- `DatabaseCloudRuntimeQuietTrigger.prepareActivation(claim)`: returns a
+  `CloudRuntimeActivationPolicy` for a staged, live worker claim. Its `authorize`
+  callback runs under the transfer service's existing lock, requires the exact
+  claim, obtains a new snapshot with the same activity revision, and checks
+  server work before and after that read. A refusal leaves the transition staged
+  and the source usable; it changes no command or queue pause state.
+
+LU-4's background staging continues to call `offer` independently of quietness;
+this module adds no scheduler, poll interval or startup wiring. LU-3 owns the
+resident-host safe-point/attach fence and must combine it with the final
+observation policy before activating. A read-only snapshot cannot close the
+last race between an observation and new VM work. The policy is injectable so
+qualified live handoff can change the presence/PTY gates without duplicating
+selection, enrollment or transition ownership. No gate is relaxed automatically:
+that still requires the appropriate runtime/controller qualification and
+measured reconnect gap (at most 2 seconds for the live-handoff path). Until then
+the default remains absent clients and 60 quiet seconds. Bootstrap qualification
+and measurement remain separate.
+
+This slice enables the hook and callable policy only. It does not enable
+production activation, supply the pinned-controller reader, implement LU's
+fence, or claim a measured gap or exactly-once queue handoff. Those remain the
+VM integration and later acceptance/queue slices.
+
+## Acceptance-runner composition interface (slice 5)
+
+The types-only module
+`scripts/cloud-workspace-validation/runtime-hot-update-contract.ts` is the
+shared HU/LU-5 interface. LU imports its hook/context/evidence types; HU will
+implement `runRuntimeHotUpdateAcceptance` with the exported
+`RuntimeHotUpdateAcceptanceRunner` signature:
+
+```ts
+runRuntimeHotUpdateAcceptance<State>(
+  options: RuntimeHotUpdateAcceptanceOptions,
+  hooks: RuntimeHotUpdateAcceptanceHooks<State>,
+): Promise<RuntimeHotUpdateAcceptanceResult>;
+```
+
+Options select the source/target qualified runtimes, `bootstrap-quiet`,
+`engine-quiet` or `engine-resident`, and `healthy` or `target-health-failure`.
+There is deliberately no existing-workspace input. HU reads `.env.agent`,
+creates a disposable `zeros-v2-test-hu-*` workspace, supplies two independently
+admitted reconnecting devices, stages the target and calls `hooks.prepare`.
+After that hook resolves, HU performs the authenticated activation, enrollment
+and health protocol (or its bounded rollback), then calls `hooks.verify` with
+the saved hook state and measured evidence. The failure scenario uses the
+bounded test-controller health refusal on that disposable transition; it does
+not revoke an owner's credentials or change global qualification settings.
+
+LU creates resident PTYs/dev servers and attaches listeners in `prepare`; those
+listeners remain active during the swap. Hook state is private and is never
+serialized into diagnostics. `context.addCleanup` is registered immediately
+for each probe, including partial preparation. HU always runs registered
+cleanup in reverse order before deleting its workspace/allocation/objects;
+the result records every owned resource ID and whether cleanup succeeded.
+Neither hook receives provider credentials or enrollment capabilities. Device
+requests use the existing typed bridge boundary, not a second provider runner.
+
+HU measures both devices on one monotonic clock, from the last successful
+source response to the first usable replacement response after registration,
+normal client admission and ordered snapshot replay. Evidence includes sample
+interval and exact old/new identities; rollback has a fresh engine UUID and
+proof epoch too. LU's `verify` checks PID/session/output survival and the
+at-most-two-second live-handoff bound against that evidence. Bootstrap and quiet
+engine gaps are reported separately. Missing evidence fails closed.
+
+This commit publishes the composition types, not a live runner or CLI. HU's
+implementation will own activation and cleanup; LU-5 contributes the hooks
+rather than provisioning a second workspace or writing a second update runner.

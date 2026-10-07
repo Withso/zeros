@@ -106,4 +106,5 @@ export class CloudActionRuntime {
     this.closed = true; for (const { timer } of this.retries.values()) clearTimeout(timer);
     this.retries.clear(); this.unsettled.clear();
   }
+  hasActiveWork(): boolean { return this.closed || this.flights.size > 0 || this.unsettled.size > 0 || this.retries.size > 0; }
 }

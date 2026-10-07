@@ -47,6 +47,8 @@ describe("ZerosEngine.stop", () => {
           throw new Error("mcp stop failed");
         },
       },
+      residentTerminals: { closeAll: async () => { calls.push("resident"); }, disconnect: () => { calls.push("resident-disconnect"); } },
+      residentGithubBrokers: new Map(),
       pty: { killAll: () => calls.push("pty") },
       terminals: { clear: () => calls.push("terminals") },
       watcher: { stop: async () => calls.push("watcher") },
@@ -74,6 +76,7 @@ describe("ZerosEngine.stop", () => {
       "cloud-registration",
       "agents",
       "mcp",
+      "resident-disconnect",
       "pty",
       "terminals",
       "watcher",

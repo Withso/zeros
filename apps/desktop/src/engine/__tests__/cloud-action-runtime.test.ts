@@ -27,6 +27,15 @@ function fixture() {
   return { action, runtime, request, dispatch, validate, changed,authorize };
 }
 describe("durable native cloud actions", () => {
+  it("keeps the handoff busy through native dispatch and a pending terminal receipt", async () => {
+    const f = fixture(); let finish!: () => void;
+    f.dispatch.mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve({ outcome: "delivered", turnId: "turn" }); }));
+    expect(f.runtime.hasActiveWork()).toBe(false);
+    const work = f.runtime.handle({ kind: "submit", action: f.action });
+    expect(f.runtime.hasActiveWork()).toBe(true);
+    await vi.waitFor(() => expect(f.dispatch).toHaveBeenCalledOnce());
+    finish(); await work; expect(f.runtime.hasActiveWork()).toBe(false);
+  });
   it("rejects paid actions when the acting member has lost credential delegation",async()=>{
     const f=fixture(),actorSessionId=randomUUID();f.authorize.mockRejectedValueOnce(new Error("credential grant revoked"));
     const result=await f.runtime.handle({kind:"submit",action:f.action},actorSessionId);

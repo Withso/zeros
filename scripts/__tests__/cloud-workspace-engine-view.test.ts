@@ -8,6 +8,23 @@ import {
 } from "../cloud-workspace-validation/sandbox/cloud-engine-view.mjs";
 
 describe("fixed cloud engine mount and environment contract", () => {
+  it("shares only one validated resident service directory and exposes future immutable runtimes only to the resident", () => {
+    const tree = cloudRuntimeFixture();
+    try {
+      const runtime = createCloudRuntimeResolver({ filesystem: tree.filesystem }).resolve();
+      const hostId = "11111111-1111-4111-8111-111111111111";
+      const view = `/run/zeros/view/runtime-${hostId}`;
+      const resident = cloudEngineViewArguments("resident", 4, runtime, view, undefined, hostId);
+      const engine = cloudEngineViewArguments("serve", 4, runtime, view, undefined, hostId);
+      for (const args of [resident, engine]) expect(args.join("\n")).toContain(
+        `--bind\n/run/zeros/resident-workloads/${hostId}\n/tmp/zeros-resident`);
+      expect(resident.join("\n")).toContain("--ro-bind\n/opt/zeros-infra\n/opt/zeros-infra");
+      expect(engine.join("\n")).not.toContain("--ro-bind\n/opt/zeros-infra\n/opt/zeros-infra");
+      for (const invalid of ["../engine", "", "/run/zeros"]) expect(() =>
+        cloudEngineViewArguments("serve", 4, runtime, view, undefined, invalid)).toThrow();
+      expect(() => cloudEngineViewArguments("serve", 3, undefined, undefined, undefined, hostId)).toThrow();
+    } finally { tree.dispose(); }
+  });
   it("admits the fixed resident entry only in v4 without giving it registration credentials", () => {
     const tree = cloudRuntimeFixture();
     try {

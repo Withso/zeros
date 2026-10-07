@@ -48,6 +48,7 @@ export class CloudRuntimeServiceGateway {
   private readonly streams = new Set<() => void>();
   private closed = false;
   private paused = false;
+  private handoffFenced = false;
   private pendingVerifications = 0;
   constructor(private readonly options: {
     verify(token: string): Promise<CloudRuntimeServiceAccess | null>;
@@ -78,7 +79,7 @@ export class CloudRuntimeServiceGateway {
     if (!token || req.method !== 'GET' || req.headers.upgrade?.toLowerCase() !== 'websocket' ||
         req.headers['sec-websocket-version'] !== '13' || typeof key !== 'string' || !/^[+/0-9A-Za-z]{22}==$/.test(key) ||
         !(req.headers.connection ?? '').toLowerCase().split(',').map(value => value.trim()).includes('upgrade') || head.length > MAX_FRAME_BYTES) { deny(401); return true; }
-    if (this.closed || this.paused) { deny(503); return true; }
+    if (this.closed || this.paused || this.handoffFenced) { deny(503); return true; }
     if (this.streams.size >= MAX_STREAMS) { deny(429); return true; }
     socket.pause();
     let finished = false, upgraded = false;
@@ -147,6 +148,10 @@ export class CloudRuntimeServiceGateway {
     this.paused = paused;
     if (paused) for (const abort of [...this.streams]) abort();
   }
+  /** A live update waits for existing streams; it must never terminate them
+   * in order to manufacture a safe point. Pending handshakes also count. */
+  handoffBusy(): boolean { return this.streams.size > 0 || this.pendingVerifications > 0; }
+  setHandoffFenced(fenced: boolean): void { this.handoffFenced = fenced; }
   close(): void {
     this.closed = true;
     for (const abort of [...this.streams]) abort();

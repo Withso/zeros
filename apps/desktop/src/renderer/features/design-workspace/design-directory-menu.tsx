@@ -112,7 +112,12 @@ export function DesignDirectoryMenu({
           </button>
         </DropdownMenuTrigger>
       </Tooltip>
-      <DropdownMenuContent align="start" className="max-w-sm">
+      <DropdownMenuContent align="start" className="max-w-sm" onKeyDown={(event) => {
+        // First-focus Escape can precede Radix's document listener setup.
+        if (event.key !== "Escape" || event.defaultPrevented) return;
+        event.preventDefault();
+        setOpen(false);
+      }}>
         {listing.error && (
           <DropdownMenuItem onSelect={listing.refresh}>
             Couldn't load directories — Retry

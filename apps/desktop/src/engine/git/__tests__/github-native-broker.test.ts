@@ -1,11 +1,30 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { afterEach, expect, it } from "vitest";
 import { createNativeGithubBroker } from "../github-native-broker";
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+});
+it("rebinds a resident terminal's stable Git shim without retaining a credential route", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "zeros-resident-git-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, `git-${randomUUID()}`);
+  const options = { directory, visibleDirectory: directory, cwd: root,
+    path: "/usr/bin:/bin", node: process.execPath, resident: true,
+    source: { kind: "terminal" as const, actorSessionId: randomUUID() }, authorized: () => true };
+  const first = await createNativeGithubBroker(options);
+  cleanups.push(() => first.stopAndProve());
+  expect(first.busy()).toBe(false);
+  expect(first.pauseIfIdle()).toBe(true);
+  await first.stopAndProve();
+  expect(await readFile(path.join(directory, "git"), "utf8")).toContain("github.zeros.invalid");
+  const second = await createNativeGithubBroker(options);
+  cleanups.push(() => second.stopAndProve());
+  expect(second.env.PATH).toBe(first.env.PATH);
+  expect(second.busy()).toBe(false);
 });
 it("does not configure gh or expose GitHub credentials in a cloud environment", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "zeros-native-git-only-"));
