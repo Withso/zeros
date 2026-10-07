@@ -3,13 +3,17 @@
  * credentials on private channels and emit no raw diagnostics. */
 export type Operation = { version: 1; operationId: string; name: string };
 export type Workspace = { organizationId: string; workspaceId: string };
-export type Preflight = {
+export const TEST_NAME_PREFIXES = ["zeros-v2-test-lu", "zeros-v2-test-hu"] as const;
+export type TestNamePrefix = typeof TEST_NAME_PREFIXES[number];
+export type Identity = {
   version: 1; channel: "alpha"; staff: true; organizationId: string;
+};
+export type Preflight = Identity & {
   sourceRuntimeId: string; targetRuntimeId: string;
   capabilities: {
-    residentHandoff: true; freshProofs: true; rollbackPair: true;
-    heldTurn: true; inputAcknowledgements: true; healthFailureInjection: true;
-    idempotentCreateAndCleanup: true;
+    residentHandoff: boolean; freshProofs: boolean; rollbackPair: boolean;
+    heldTurn: boolean; inputAcknowledgements: boolean; healthFailureInjection: boolean;
+    idempotentCreateAndCleanup: boolean;
   };
 };
 export type Observation = Workspace & {
@@ -27,6 +31,9 @@ export interface Device {
   /** A dedicated synthetic shell, detached HTTP server, sentinel file and
    * ordinary provider turn held at a test gate. Never touch user resources. */
   startWorkload(input: { operationId: string; terminalId: string }, signal: AbortSignal): Promise<void>;
+  /** Start a second ordinary provider turn at the same test gate. The supplied
+   * identity is already journaled; retries must not launch duplicate turns. */
+  holdTurn(operationId: string, signal: AbortSignal): Promise<void>;
   /** Authenticated round trip to the actual engine; identities/proof IDs must
    * come from server-verified enrollment, never desired state or cached UI. */
   observe(signal: AbortSignal): Promise<Observation>;
@@ -37,6 +44,9 @@ export interface Device {
   close(): Promise<void>;
 }
 export interface AlphaLiveUpdateAdapter {
+  /** Read-only staff/org authority, independent of runtime qualification, so
+   * cleanup remains available after an exact-pair qualification is revoked. */
+  identity(signal: AbortSignal): Promise<Identity>;
   /** Read-only; must verify exact runtime-pair qualifications before creation. */
   preflight(signal: AbortSignal): Promise<Preflight>;
   /** Same operation ID must recover a lost reply, never create a second VM. */
@@ -53,7 +63,12 @@ export interface AlphaLiveUpdateAdapter {
   cleanup(operation: Operation, signal: AbortSignal): Promise<{ complete: boolean; remainingResources: number }>;
 }
 export type Journal = Operation & { workspace?: Workspace;
-  actions?: { input: string; prompt: string; update: string; rollback: string };
+  /** Preflight scope is durable before provision; older journals may instead
+   * recover it from workspace. Never guess the org for an unscoped journal. */
+  organizationId?: string;
+  /** Retry IDs are absent only in journals from the earlier runner. */
+  actions?: { input: string; prompt: string; update: string; rollback: string;
+    retryTurn?: string; retryPrompt?: string };
   phase: "allocated" | "created" | "cleanup_required" | "cleaned" };
 export type Report = { version: 1; operationId: string; workspaceId?: string;
   outcome: "passed" | "failed" | "blocked" | "cleanup_required"; code: string;

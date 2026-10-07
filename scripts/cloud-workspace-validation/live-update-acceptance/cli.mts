@@ -2,12 +2,12 @@ import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { z } from "zod";
 import { KNOWN_KEYS, parseAgentEnv } from "../../agent-env-check.mjs";
-import { cleanupAcceptance, journalSchema, runAcceptance } from "./runner";
+import { cleanupAcceptance, journalSchema, namePrefixSchema, runAcceptance } from "./runner";
 import type { AlphaLiveUpdateAdapter, Journal, Operation, Report } from "./contract";
 
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
+const CREDENTIAL_KEYS = [...KNOWN_KEYS, "ZEROS_HU_ALPHA_ACCESS_TOKEN", "ZEROS_HU_ALPHA_DATABASE_URL"];
 
 /** fsync before acknowledging the journal: create may succeed without a reply.
  * Journal contains only fixed phases, test operation/name and workspace UUIDs. */
@@ -38,26 +38,29 @@ export async function main(args: string[]): Promise<number> {
   try {
     const flags = new Map<string, string>();
     for (let i = 0; i < args.length; i += 2) {
-      if (!["--adapter", "--cleanup"].includes(args[i]) || !args[i + 1] || flags.has(args[i])) throw new Error();
+      if (!["--adapter", "--config", "--cleanup", "--name-prefix"].includes(args[i]) || !args[i + 1] || flags.has(args[i])) throw new Error();
       flags.set(args[i], args[i + 1]);
     }
     if (flags.has("--cleanup")) { report.outcome = "cleanup_required"; report.cleaned = false; }
     if (!flags.has("--adapter")) return 2;
     report.code = "adapter_configuration_rejected";
+    if (!flags.has("--config")) throw new Error();
+    const namePrefix = namePrefixSchema.parse(flags.get("--name-prefix") ?? "zeros-v2-test-lu");
+    const configPath = await realpath(path.resolve(ROOT, flags.get("--config")!));
     const adapterPath = await realpath(path.resolve(ROOT, flags.get("--adapter")!));
     const allowed = await realpath(path.join(ROOT, "scripts/cloud-workspace-validation"));
     if (!adapterPath.startsWith(allowed + path.sep) || !/\.(?:mjs|ts)$/.test(adapterPath)) throw new Error();
     const credentials = parseAgentEnv(await readFile(path.join(ROOT, ".env.agent"), "utf8"));
     if (credentials.malformedLines.length || credentials.duplicateKeys.length) throw new Error();
     const values = new Map<string, string>();
-    for (const key of KNOWN_KEYS) { const value = credentials.values.get(key); if (value) values.set(key, value); }
+    for (const key of CREDENTIAL_KEYS) { const value = credentials.values.get(key); if (value) values.set(key, value); }
     // The reviewed local adapter is trusted code. Factory/import/preflight are
     // read-only and silent; no arbitrary provider URL is accepted by this CLI.
     const module = await import(pathToFileURL(adapterPath).href) as {
-      createAlphaLiveUpdateAdapter(input: { credentials: ReadonlyMap<string, string>; signal: AbortSignal }): Promise<AlphaLiveUpdateAdapter>;
+      createAlphaLiveUpdateAdapter(input: { credentials: ReadonlyMap<string, string>; configPath: string; signal: AbortSignal }): Promise<AlphaLiveUpdateAdapter>;
     };
     if (typeof module.createAlphaLiveUpdateAdapter !== "function") throw new Error();
-    const adapter = await module.createAlphaLiveUpdateAdapter({ credentials: values, signal: controller.signal });
+    const adapter = await module.createAlphaLiveUpdateAdapter({ credentials: values, configPath, signal: controller.signal });
     const journal = (record: Journal) => writeJournal(path.join(ROOT, ".context"), record);
     if (flags.has("--cleanup")) {
       const file = await realpath(path.resolve(ROOT, flags.get("--cleanup")!));
@@ -67,16 +70,13 @@ export async function main(args: string[]): Promise<number> {
       if (path.basename(file) !== `${saved.name}.json`) throw new Error();
       report = { version: 1, operationId: saved.operationId, workspaceId: saved.workspace?.workspaceId,
         outcome: "cleanup_required", code: "cleanup_unconfirmed", cleaned: false };
-      // Cleanup stays available after a qualification is revoked. Verify Alpha
-      // and org authority, but do not require an eligible target pair to delete.
-      const preflight = z.object({ version: z.literal(1), channel: z.literal("alpha"), staff: z.literal(true), organizationId: z.uuid() })
-        .parse(await adapter.preflight(AbortSignal.timeout(10_000)));
-      if (saved.workspace && saved.workspace.organizationId !== preflight.organizationId) throw new Error();
+      // cleanupAcceptance checks independent Alpha staff/org identity. It must
+      // not ask the qualification-gated preflight to permit deleting resources.
       const operation: Operation = { version: 1, operationId: saved.operationId, name: saved.name };
-      const cleaned = await cleanupAcceptance(adapter, operation, { journal }, saved.workspace, saved.actions);
+      const cleaned = await cleanupAcceptance(adapter, operation, { journal }, saved.workspace, saved.actions, saved.organizationId);
       report = { version: 1, operationId: saved.operationId, workspaceId: saved.workspace?.workspaceId,
         outcome: cleaned ? "passed" : "cleanup_required", code: cleaned ? "cleanup_verified" : "cleanup_unconfirmed", cleaned };
-    } else report = await runAcceptance(adapter, { journal, signal: controller.signal });
+    } else report = await runAcceptance(adapter, { journal, signal: controller.signal, namePrefix });
     return report.outcome === "passed" ? 0 : report.outcome === "blocked" ? 2 : 1;
   } catch { return 2; }
   finally {
