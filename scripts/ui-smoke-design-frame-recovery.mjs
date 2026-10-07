@@ -7,6 +7,10 @@ export async function runDesignFrameRecoverySmoke({ page, check }) {
   const resourcePattern = "**/__design-native/**";
   const requests = [];
   let documents = {};
+  let releaseUnavailable;
+  const unavailableGate = new Promise((resolve) => {
+    releaseUnavailable = resolve;
+  });
   let releaseReload;
   const reloadGate = new Promise((resolve) => {
     releaseReload = resolve;
@@ -50,6 +54,9 @@ export async function runDesignFrameRecoverySmoke({ page, check }) {
         body: source,
       });
     } else {
+      // Keep the native attempt observable until readiness and the cold cache
+      // have been checked. A fast 404 can otherwise finish fallback first.
+      await unavailableGate;
       await route.fulfill({
         status: 404,
         contentType: "text/plain",
@@ -147,6 +154,7 @@ export async function runDesignFrameRecoverySmoke({ page, check }) {
         await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
       designFrameDocumentCache.clear();
     });
+    releaseUnavailable();
     await page.waitForFunction(
       (selector) => {
         const iframe = document.querySelector(selector);
@@ -298,6 +306,7 @@ export async function runDesignFrameRecoverySmoke({ page, check }) {
           )),
     );
   } finally {
+    releaseUnavailable();
     releaseReload();
     await page.unroute(nativePattern);
     await page.unroute(protocolPattern);
