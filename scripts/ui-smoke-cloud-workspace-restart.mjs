@@ -107,6 +107,11 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
   await page.evaluate(() => window.cloudRestartFixture.work("agent"));
   await row.click({ button: "right" });
   const menuRestart = page.getByRole("menuitem", { name: "Restart workspace", exact: true });
+  const workspaceMenu = page.getByRole("menu").first();
+  const closeWorkspaceMenu = async () => {
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+  };
   await expect(menuRestart).toBeVisible();
   await screenshot("menu", "light");
   await menuRestart.click();
@@ -165,13 +170,15 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
   await page.mouse.move(1, 1);
   await row.click({ button: "right" });
   await expect(menuRestart).toBeDisabled();
-  await page.keyboard.press("Escape");
+  await closeWorkspaceMenu();
   for (const state of ["archived", "deleting"]) {
     await page.evaluate(state => window.cloudRestartFixture.publish({ status: state }), state);
     await expect(status).toHaveCount(0);
     await row.click({ button: "right" });
+    // Absence of Restart alone can pass before the menu has opened.
+    await expect(workspaceMenu).toBeVisible();
     await expect(menuRestart).toHaveCount(0);
-    await page.keyboard.press("Escape");
+    await closeWorkspaceMenu();
   }
   await page.evaluate(() => window.cloudRestartFixture.publish({ status: "ready", deletedAt: null,
     capabilities: { ...window.cloudRestartFixture.document.capabilities, canWrite: true } }));
@@ -180,8 +187,10 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
     await page.getByRole("button", { name: `Local ${owner} fixture`, exact: true }).click();
     await expect(status).toHaveCount(0);
     await row.click({ button: "right" });
+    // Absence of Restart alone can pass before the menu has opened.
+    await expect(workspaceMenu).toBeVisible();
     await expect(menuRestart).toHaveCount(0);
-    await page.keyboard.press("Escape");
+    await closeWorkspaceMenu();
   }
   expect(writes.length).toBe(beforeLocal);
   await page.getByRole("button", { name: "Cloud fixture", exact: true }).click();

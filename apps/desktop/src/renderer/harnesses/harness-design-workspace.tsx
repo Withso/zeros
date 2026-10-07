@@ -193,6 +193,18 @@ async function main() {
   const { setActiveBridge } = await import("../platform/bridge/active-bridge");
   const { setWorkspaceRowsForTesting } = await import("../state/use-projects");
   const { useWorkspaceStore } = await import("../state/store");
+  if (workbenchHarness) {
+    (window as Window & {
+      __zerosHarnessSelectWorkspace?: (id: string) => void;
+    }).__zerosHarnessSelectWorkspace = (id) => {
+      const destination = workspaces.find((row) => row.id === id);
+      if (!destination) throw new Error("Unknown Design harness workspace");
+      useWorkspaceStore.setState({
+        activeChatId: null,
+        newAgentFolder: destination.path,
+      });
+    };
+  }
 
   setWorkspaceRowsForTesting(workspace.repoSlug, workspaces);
   useWorkspaceStore.setState({
