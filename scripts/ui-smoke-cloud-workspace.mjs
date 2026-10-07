@@ -82,17 +82,33 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
   const trace = [];
   page.on("console", message => { if (["error", "warning"].includes(message.type())) trace.push(`console.${message.type()}: ${message.text().slice(0, 300)}`); });
   page.on("requestfailed", request => trace.push(`request failed: ${request.url().slice(0, 200)}`));
+  const diagnose = async reason => {
+    const state = await page.evaluate(() => ({
+      visibility: document.visibilityState,
+      ports: document.querySelector('[aria-label="Workspace ports"]')?.textContent ?? null,
+      portsHidden: !!document.querySelector('[aria-label="Workspace ports"]')?.closest('[aria-hidden="true"], [inert]'),
+      menus: [...document.querySelectorAll('[role="menu"]')].map(menu => ({ state: menu.getAttribute("data-state"), animation: getComputedStyle(menu).animationName })),
+      animations: document.getAnimations().map(animation => ({ name: animation.animationName ?? animation.id, state: animation.playState, time: animation.currentTime })),
+      timeline: document.timeline.currentTime,
+      calls: window.cloudNativeFixture.calls.map(call => call.command),
+    })).catch(failure => ({ unavailable: String(failure) }));
+    console.error(`cloud native access diagnostics (${reason}): ${JSON.stringify({ state, trace: trace.slice(-40) })}`);
+  };
+  // A modal menu hides the rest of the page until its exit animation ends.
+  const closeMenu = async () => {
+    await page.keyboard.press("Escape");
+    try {
+      await expect(page.getByRole("menu")).toHaveCount(0, { timeout: 15_000 });
+    } catch (error) {
+      await diagnose("menu still open");
+      throw error;
+    }
+  };
   const expectForwardedPort = async () => {
     try {
       await expect(ports.getByText("localhost:5173", { exact: false })).toBeVisible();
     } catch (error) {
-      const state = await page.evaluate(() => ({
-        visibility: document.visibilityState,
-        ports: document.querySelector('[aria-label="Workspace ports"]')?.textContent ?? null,
-        ssh: document.querySelector('[aria-label="Open via SSH"]')?.textContent ?? null,
-        calls: window.cloudNativeFixture.calls.map(call => call.command),
-      })).catch(failure => ({ unavailable: String(failure) }));
-      console.error(`cloud native access diagnostics: ${JSON.stringify({ state, trace: trace.slice(-40) })}`);
+      await diagnose("forwarded port hidden");
       throw error;
     }
   };
@@ -127,7 +143,7 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
   await page.clock.fastForward(5_001);
   await access.getByRole("button", { name: "SSH options", exact: true }).click();
   await expect(page.getByRole("menuitem", { name: "Close SSH connection", exact: true })).toBeVisible();
-  await page.keyboard.press("Escape");
+  await closeMenu();
   await expectForwardedPort();
   await page.getByRole("button", { name: "Toggle visibility", exact: true }).click();
   await expect(access).toHaveCount(0);
@@ -138,12 +154,12 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
   await page.getByRole("button", { name: "Toggle visibility", exact: true }).click();
   await access.getByRole("button", { name: "SSH options", exact: true }).click();
   await expect(page.getByRole("menuitem", { name: "Close SSH connection", exact: true })).toBeVisible();
-  await page.keyboard.press("Escape");
+  await closeMenu();
   await access.getByRole("button", { name: "SSH options", exact: true }).click();
   await page.getByRole("menuitem", { name: "Close SSH connection", exact: true }).click();
   await access.getByRole("button", { name: "SSH options", exact: true }).click();
   await expect(page.getByRole("menuitem", { name: "Close SSH connection", exact: true })).toHaveCount(0);
-  await page.keyboard.press("Escape");
+  await closeMenu();
   await expectForwardedPort();
   await page.screenshot({ path: ".context/e1-native-access-ui.png" });
   await page.getByRole("button", { name: "Toggle edit access", exact: true }).click();
