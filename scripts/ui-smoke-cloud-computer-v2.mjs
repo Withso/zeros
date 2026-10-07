@@ -49,6 +49,7 @@ export const cloudComputerV2ReviewRegressions = [
   "history-conflict",
   "history-hidden-conflict",
   "external-first-build",
+  "external-first-build-held-read",
   "admin-flow",
   "create-from-computer-repos",
 ];
@@ -896,7 +897,8 @@ export async function runCloudComputerV2Smoke({
       expect(writes("/admin-workspaces").at(-1).input.operationId).toBe(lostOperation);
       expect(adminWorkspaces.size).toBe(2);
       check("Configure shares creator reuse, follows a newly active version, publishes a fresh conversation atomically, and fences hidden/role/org races and lost replies", true);
-    } else if (regression === "external-first-build") {
+    } else if (regression === "external-first-build" || regression === "external-first-build-held-read") {
+      const delayedInitialRead = regression === "external-first-build-held-read";
       await expect(
         page.getByText("Not built yet", { exact: true }),
       ).toBeVisible();
@@ -950,6 +952,30 @@ export async function runCloudComputerV2Smoke({
       const hidden = stateReads();
       await page.clock.runFor(120_000);
       expect(stateReads()).toBe(hidden);
+      if (delayedInitialRead) await page.evaluate(organization => {
+        const fetch = window.fetch.bind(window);
+        let resume, next = true;
+        window.__cloudComputerReadDelay = {
+          pending: () => Boolean(resume),
+          release: () => { const complete = resume; resume = undefined; complete(); },
+        };
+        window.fetch = async (...args) => {
+          const response = await fetch(...args);
+          if (next && new URL(response.url).pathname === `/v1/organizations/${organization}/cloud-computer/v2`) {
+            next = false;
+            const bytes = await response.arrayBuffer();
+            // Hold the body after transport completes, so advancing fake time
+            // cannot turn the delayed snapshot into a timeout-driven retry.
+            const body = new ReadableStream({ start(controller) {
+              resume = () => { controller.enqueue(new Uint8Array(bytes)); controller.close(); };
+            } });
+            const delayed = new Response(body, { status: response.status, headers: response.headers });
+            Object.defineProperty(delayed, "url", { value: response.url });
+            return delayed;
+          }
+          return response;
+        };
+      }, orgB);
       await page.evaluate(() => {
         Object.defineProperty(document, "visibilityState", {
           configurable: true,
@@ -977,6 +1003,27 @@ export async function runCloudComputerV2Smoke({
       await expect(
         dialog.getByRole("button", { name: /^Create workspace/ }),
       ).toBeDisabled();
+      if (delayedInitialRead) {
+        await expect.poll(() => page.evaluate(() => window.__cloudComputerReadDelay.pending())).toBe(true);
+        await expect(dialog.getByRole("button", { name: /^Create workspace/ })).toBeDisabled();
+        await page.evaluate(() => window.__cloudComputerReadDelay.release());
+      }
+      // Disabled also covers a retained failed snapshot whose refresh is still
+      // in flight. Polling schedules its next timer only after that read ends.
+      // Confirm the exact owner's read before advancing time for a new build.
+      const settledComputerRead = () => page.evaluate(async ([user, organization]) => {
+        const { cloudComputerV2Cache, cloudComputerV2Key } = await import("/apps/desktop/src/renderer/features/settings/cloud-computer-v2-client.ts");
+        const key = cloudComputerV2Key(user, organization);
+        // Join an in-flight read without issuing another API request.
+        await cloudComputerV2Cache.load(key, () => {
+          throw new Error("The fixture must already have a confirmed Cloud Computer read");
+        }, { maxAgeMs: Infinity });
+        const snapshot = cloudComputerV2Cache.peekSnapshot(key);
+        return { revision: snapshot.data?.revision, state: snapshot.data?.state,
+          loading: snapshot.loading, refreshing: snapshot.refreshing, error: snapshot.error?.message ?? null };
+      }, [adminUser, orgB]);
+      await expect.poll(settledComputerRead).toEqual({ revision: 1, state: "failed", loading: false, refreshing: false, error: null });
+      if (delayedInitialRead) check("a delayed failed-build read settles before the retry polling clock advances", true);
       const retry = build(2);
       Object.assign(second, {
         state: "active",
@@ -985,7 +1032,13 @@ export async function runCloudComputerV2Smoke({
         latestBuild: retry,
         history: { builds: [retry, failed], nextCursor: null },
       });
-      await page.clock.runFor(121_000);
+      // Preserve the discovery deadline while letting network responses finish
+      // between steps, instead of expiring their 20 s transport timeout.
+      for (let elapsed = 0; elapsed < 121_000; elapsed += 1000) {
+        await page.clock.runFor(1000);
+        const snapshot = await settledComputerRead();
+        if (snapshot.state === "active" && snapshot.revision === 2) break;
+      }
       await expect(
         dialog.getByRole("button", { name: /^Create workspace/ }),
       ).toBeEnabled();
