@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdtemp, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import Module, { createRequire } from 'node:module';
@@ -12,7 +12,37 @@ import type { CloudProviderExecution } from '../../../../cloud-provider-executio
 // This subprocess exercises the pinned CLI/MCP contract without an installed
 // host runtime. Inject the same explicit v4 authority as the consumer tests.
 const runtimeFile = fileURLToPath(new URL('../../../../containment/cloud-runtime-root.mjs', import.meta.url));
-const runtime = { ...testCloudRuntime(), workerRoot: process.cwd() };
+// CI links installed packages from a pnpm store on the same filesystem, and the
+// v4 image check correctly refuses a hard-linked executable. Runtime bundles
+// copy files, so mirror the resolver's pinned package tree into a private
+// worker root with an unlinked copy of the native executable.
+async function imageRoot(): Promise<string> {
+  const repo = realpathSync(process.cwd());
+  const wrapper = realpathSync(createRequire(path.join(repo, 'package.json')).resolve('@openai/codex/package.json'));
+  const platform = realpathSync(createRequire(wrapper).resolve(`@openai/codex-linux-${process.arch}/package.json`));
+  const vendor = path.join(path.dirname(platform), 'vendor');
+  const [triple] = await readdir(vendor);
+  const native = path.join(vendor, triple!, 'bin', 'codex');
+  if ((await stat(native)).nlink === 1) return repo;
+  const image = realpathSync(await mkdtemp('/tmp/zeros-codex-image-'));
+  const target = path.join(image, `node_modules/@openai/codex-linux-${process.arch}`);
+  const bin = path.join(target, 'vendor', triple!, 'bin');
+  await mkdir(bin, { recursive: true });
+  await mkdir(path.join(image, 'node_modules/@openai/codex'), { recursive: true });
+  const pin = JSON.parse(await readFile(path.join(repo, 'package.json'), 'utf8')).dependencies['@openai/codex'];
+  await writeFile(path.join(image, 'package.json'), JSON.stringify({ dependencies: { '@openai/codex': pin } }));
+  await copyFile(wrapper, path.join(image, 'node_modules/@openai/codex/package.json'));
+  await copyFile(platform, path.join(target, 'package.json'));
+  await copyFile(native, path.join(bin, 'codex'));
+  await chmod(path.join(bin, 'codex'), 0o755);
+  for (const entry of await readdir(path.join(vendor, triple!)))
+    if (entry !== 'bin') await symlink(path.join(vendor, triple!, entry), path.join(target, 'vendor', triple!, entry));
+  for (const entry of await readdir(path.dirname(native)))
+    if (entry !== 'codex') await symlink(path.join(path.dirname(native), entry), path.join(bin, entry));
+  return image;
+}
+const workerRoot = await imageRoot();
+const runtime = { ...testCloudRuntime(), workerRoot };
 // tsx loads this source tree through CommonJS. Replace only runtime authority
 // in this disposable subprocess, retaining the real CLI/package pin checks.
 const require = createRequire(import.meta.url);
@@ -25,7 +55,7 @@ require.cache[runtimeFile] = authority;
 const { buildMcpServerOverrides } = await import('../../app-server');
 const { cloudCodexRequest } = await import('../../cloud-policy');
 const { resolveCloudCodexBinaryFromImage } = await import('../../binary-resolver');
-const {path:binary}=await resolveCloudCodexBinaryFromImage(process.cwd());
+const {path:binary}=await resolveCloudCodexBinaryFromImage(workerRoot);
 const root=await mkdtemp('/tmp/v7-native-codex-');
 const cwd=path.join(root,'repo'), home=path.join(root,'home');
 await mkdir(path.join(cwd,'.codex'),{recursive:true});
@@ -70,4 +100,7 @@ try {
   await probe('lower layer environment inheritance', '[mcp_servers.example]\ncommand="node"\nstartup_timeout_sec=1\n[mcp_servers.example.env]\nLOWER_LAYER="v7-synthetic-lower-layer-secret"\n', [{name:'example',transport:'stdio',command:'node',args:['-e',
     "require('fs').writeFileSync('inherited-env',process.env.LOWER_LAYER||'absent');require('readline').createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.id===undefined)return;const result=r.method==='initialize'?{protocolVersion:r.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'probe',version:'1'}}:r.method==='tools/list'?{tools:[]}:{};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,result})+'\\n');})"]}]);
   await probe('empty snapshot then repository edit', '', [],async()=>{await writeFile(path.join(cwd,'.codex/config.toml'),'[mcp_servers.late]\ncommand="node"\nargs=["-e","require(\'fs\').writeFileSync(\'late-launched\',\'yes\');process.stdin.resume()"]\nstartup_timeout_sec=1\n');});
-}finally{await rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:200});}
+}finally{
+  await rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:200});
+  if(workerRoot!==realpathSync(process.cwd()))await rm(workerRoot,{recursive:true,force:true});
+}

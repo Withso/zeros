@@ -297,7 +297,9 @@ function client(kind: "local" | "cloud" = "local"): TransportClient {
 }
 
 function qualifiedCloudWorker(): CloudWorkerConfiguration {
-  return testCloudWorker();
+  // Engine-side brokers chown their sockets to the worker. Use this process's
+  // identity so unprivileged CI can assign it, as in production ownership.
+  return { ...testCloudWorker(), uid: process.getuid?.() || 10_001, gid: process.getgid?.() || 10_001 };
 }
 
 async function canAssignCloudWorkerOwnership(
