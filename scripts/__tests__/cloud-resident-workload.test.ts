@@ -15,7 +15,8 @@ describe("resident workload launcher ownership", () => {
         signalCode: null, stdin: new PassThrough(), stdout: new PassThrough(), unref: vi.fn() });
       const spawnProcess = vi.fn(() => child);
       const hostId = randomUUID(), organizationId = randomUUID(), workspaceId = randomUUID();
-      const host = new CloudResidentWorkload({ runtime, hostId, organizationId, workspaceId, spawnProcess });
+      const removeServices = vi.fn();
+      const host = new CloudResidentWorkload({ runtime, hostId, organizationId, workspaceId, spawnProcess, removeServices });
       const retire = vi.spyOn(host.scope, "retire").mockResolvedValue(undefined);
       let acknowledge = true;
       child.stdin.on("data", chunk => {
@@ -40,6 +41,8 @@ describe("resident workload launcher ownership", () => {
       await vi.waitFor(() => expect(retire).toHaveBeenCalledOnce());
       await host.stop();
       expect(retire).toHaveBeenCalledOnce();
+      expect(removeServices).toHaveBeenCalledExactlyOnceWith(hostId);
+      expect(removeServices.mock.invocationCallOrder[0]).toBeGreaterThan(retire.mock.invocationCallOrder[0]!);
       expect(child.stdin.destroyed).toBe(true);
     } finally { tree.dispose(); }
   });

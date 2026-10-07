@@ -74,6 +74,67 @@ afterEach(() => {
 });
 
 describe("cloud runtime registration", () => {
+  it("flushes once for handoff and parks record writes while renewing the engine lease", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
+    const sync = completedDurableRecordSync();
+    const fetcher = vi.fn(async (url: URL | string) => new URL(url).pathname.endsWith("/register")
+      ? Response.json(registrationResponse()) : Response.json({ version: 1,
+        audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+        engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: Date.now() + 90_000 }));
+    const registration = new CloudRuntimeRegistration(runtime, {
+      agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
+      fetch: fetcher as typeof fetch, now: Date.now, onAuthorityLost: vi.fn(), onDurableRecordSync: sync,
+    });
+    try {
+      await registration.start();
+      let finish!: () => void;
+      sync.mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve(undefined); }));
+      const parked = registration.pauseRecordForRuntimeHandoff();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sync).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(sync).toHaveBeenCalledTimes(2);
+      finish(); await parked;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(fetcher).toHaveBeenCalledTimes(3);
+      expect(sync).toHaveBeenCalledTimes(2);
+      await expect(registration.commandRequest({ kind: "claim", conversationId: "chat", executionId: "execution" }))
+        .rejects.toMatchObject({ code: "command_durability_unavailable" });
+      registration.resumeRecordAfterRuntimeHandoff();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(sync).toHaveBeenCalledTimes(3);
+    } finally { await registration.stop(); }
+  });
+  it("does not resume a parked record writer after the source lease is lost", async () => {
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const registration = new CloudRuntimeRegistration(runtime, {
+      agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
+      fetch: vi.fn(async () => Response.json(registrationResponse())), now: () => NOW,
+      onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync(),
+    });
+    await registration.start(); await registration.pauseRecordForRuntimeHandoff();
+    await registration.stop();
+    expect(() => registration.resumeRecordAfterRuntimeHandoff()).toThrow("authority");
+  });
+  it("never promotes a failed handoff flush to a successful duplicate", async () => {
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const sync = completedDurableRecordSync();
+    const registration = new CloudRuntimeRegistration(runtime, {
+      agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
+      fetch: vi.fn(async () => Response.json(registrationResponse())), now: () => NOW,
+      onAuthorityLost: vi.fn(), onDurableRecordSync: sync,
+    });
+    try {
+      await registration.start(); sync.mockRejectedValueOnce(new Error("record unavailable"));
+      await expect(registration.pauseRecordForRuntimeHandoff()).rejects.toThrow();
+      await expect(registration.pauseRecordForRuntimeHandoff()).rejects.toThrow();
+      registration.resumeRecordAfterRuntimeHandoff();
+      await registration.pauseRecordForRuntimeHandoff();
+      expect(sync).toHaveBeenCalledTimes(3);
+    } finally { await registration.stop(); }
+  });
   it("leaves local engines outside the cloud registration path", () => {
     expect(consumeCloudRuntimeEnvironment({}, () => NOW)).toBeNull();
   });

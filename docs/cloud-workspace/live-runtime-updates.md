@@ -204,7 +204,7 @@ the preceding desktop build.
 | LU-0: this decision | LU; separate doc, no edits to HU's design | Sources and exact limitations above. |
 | LU-1: skew gate | Separate agent assigned by the orchestrator; frozen contracts, compatibility harness and required CI integration | Deliberately incompatible request fails; both placements and released N/N−1 matrix pass. Baseline artifact/provenance must be agreed first. CI changes require owner merge. |
 | LU-2: resident workload host | LU; new host/engine adapter, terminal registry/mirror ownership and packaging | Real shell plus detached dev server keep PID/state/output across old-engine exit, target attach and rollback; stale engine/refused auth, bounded buffers, explicit close, stop and host-crash tests. |
-| LU-3: safe-point handoff | LU engine admission/drain; HU supervisor protocol, final decision and enrollment | No admitted mutation/claim crosses fence; source/candidate race, pending approval, drain failure, SQLite close/reopen and rollback tests. |
+| LU-3: safe-point handoff | LU engine admission/drain and agreed resident supervisor extensions; HU final control-plane decision and enrollment | No admitted mutation/claim crosses fence; source/candidate race, pending approval, drain failure, SQLite close/reopen and rollback tests. |
 | LU-4: qualification-driven staging | LU trigger/staging integration; HU transition APIs; PERF notification worker | Busy workspace stages without pointer/process change; duplicate/lost push, supersession, revocation and source-generation races. |
 | LU-5: Alpha acceptance | LU workload-survival and latency assertions compose with HU's runner | Two clients, active PTY/server, queued sends, failed target health, fresh proof/UUID, same allocation/boot, cleanup and measured ≤2s successful gap. |
 | HU existing slices | HU owns 0135, retained allocation/compute fencing, transition enrollment, journal reconciliation, quiet fallback and IW2 queue integration | LU consumes these; does not edit their files/protocol without agreement through the orchestrator. |
@@ -227,6 +227,66 @@ rollback, two-device replay and unaffected user files. Delete in `finally`,
 recover lost create replies by idempotency, and verify all generations' pending
 deletion inventory is empty. Never print tokens, signed URLs, process arguments,
 environments or raw provider errors. No live run was performed here.
+
+## LU-3 VM integration contract
+
+The VM implementation extends HU's shared `cloud-runtime-quiet-state.ts` and
+existing supervisor `prepare` / one-use session / `select-runtime` / `start`
+path. It does not enable a control-plane activation policy or change the quiet
+path's conservative eligibility rules. LU-4 staging is already merged.
+
+- Root sends `runtime-handoff`, action `prepare` or `cancel`, with `handoff`:
+  `{challenge, organizationId, workspaceId, generation, engineInstanceId,
+  hostId, fence, expiresAtMs}`. IDs are UUIDs, counters are positive safe
+  integers, and expiry is at most 15 minutes away. The private engine endpoint
+  uses the distinct readiness credential from root's admitted launch material;
+  callers cannot choose its destination or credential.
+- `prepare` pauses new queue claims and returns `draining` while admitted turns,
+  approvals, tools, mutations, legacy PTYs, active preview/native-service streams
+  or unknown user processes remain. Resident terminal processes alone do not
+  block. Only the exact kernel resident cgroup is excluded from process census.
+- When drained, fence new engine/service admission, recheck activity and
+  authority after census, finish checkpoint/event/record writes, and close/seal
+  SQLite. A `fenced` receipt repeats the request plus `version: 1`, `phase` and
+  `activityRevision`. Before consumption, cancellation/expiry may restore the
+  writer and admission only under the same live source authority.
+- Root then uses existing `prepare` with both `resident: {hostId, engineId,
+  fence}` and the identical `handoff`. It rechecks/consumes the receipt, detaches
+  resident authority, and proves engine/setup retirement while preserving that
+  resident scope. The response contains the existing one-use session and the
+  detached resident witness. A lost response can replay the same unspent
+  session; a consumed source writer never resumes, even after expiry.
+- Existing `select-runtime` and `start` use that session. Target and rollback
+  attachments need a fresh engine UUID, higher resident fence and fresh server
+  enrollment/proofs. The controller runtime, resident-host runtime and selected
+  engine runtime are distinct proof inputs; selected engine bytes do not attest
+  the still-running host. Protected v4-5 base assets are unchanged.
+
+**HU wiring required before activation:** the current update adapter's ordinary
+`prepare` kills the resident scope, and its populated-cgroup check rejects the
+preserved workload. Add the resident mode explicitly. Agree transaction/journal
+ordering before using it: current `authorize()` retires source server authority;
+the VM must consume the source receipt while that authority is still live.
+Recovery must distinguish unconsumed cancellation from consumed retirement and
+must never fall back to destructive ordinary `prepare` after an ambiguous reply.
+Keep latest-candidate/revocation/claim checks under HU's existing ownership lock.
+
+First qualification must include this resident host and adapter together; no
+resident capability is advertised by this slice. The private snapshot request
+opts into retained exit status with `includeExit: true`; legacy requests retain
+their exact response shape. Replay cursors are per device and reauthorize after
+snapshot reads. Root consumes private launch material before user subprocesses
+are constructed; the engine's registry is a disposable resident-host view.
+
+Local Linux tests exercise real PTY/dev-server PID survival, repeated attachment,
+rollback fences, redaction, two-device ordered replay, fast/disconnected exits,
+drain/cancel/expiry, SQLite sealing and active-stream blockers. They do **not**
+qualify a live Alpha swap, schema rollback, fresh provider proof or the ≤2-second
+gap. Active SSH/preview streams and engine-owned Setup/Run/provider processes
+still delay activation. Device-to-engine terminal input has no durable client
+acknowledgement today; host-side input deduplication alone does not establish
+lossless typing during a client reconnect. Keep present-client activation gated
+until LU-5 verifies that path and the agreed client retry contract.
 
 ## Local workspace impact
 

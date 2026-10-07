@@ -23,6 +23,7 @@ export class ResidentPtyClient {
   constructor(private readonly options: { socketPath: string; authority: ResidentEngineAuthority }) {}
 
   events(listener: typeof this.onEvent): void { this.onEvent = listener; }
+  isConnected(): boolean { return this.ready && this.socket !== null && !this.socket.destroyed; }
 
   async connect(): Promise<void> {
     if (this.socket) throw new ResidentPtyError("host_unavailable");
@@ -77,9 +78,14 @@ export class ResidentPtyClient {
 
   async list() { return z.array(ResidentPtySessionSchema).max(RESIDENT_MAX_SESSIONS).parse(await this.request({ op: "list" })); }
   async create(launch: ResidentPtyCreate) { return ResidentPtySessionSchema.parse(await this.request({ op: "create", launch })); }
-  async snapshot(sessionId: string) { return ResidentPtySnapshotSchema.parse(await this.request({ op: "snapshot", sessionId })); }
+  async snapshot(sessionId: string, includeExit = false) {
+    return ResidentPtySnapshotSchema.parse(await this.request({ op: "snapshot", sessionId, ...(includeExit ? { includeExit: true as const } : {}) }));
+  }
   async write(sessionId: string, input: ResidentPtyInput) {
     return z.enum(["applied", "duplicate"]).parse(await this.request({ op: "write", sessionId, input }));
+  }
+  async cursor(sessionId: string, producerId: string) {
+    return z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).parse(await this.request({ op: "cursor", sessionId, producerId }));
   }
   async resize(sessionId: string, cols: number, rows: number) { z.literal(true).parse(await this.request({ op: "resize", sessionId, cols, rows })); }
   async close(sessionId: string) { z.literal(true).parse(await this.request({ op: "close", sessionId })); }

@@ -39,6 +39,8 @@ export class CloudCommandRuntime {
   private readonly receiptRetries = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly retryDelays = new Map<string, number>();
   private closed = false;
+  private claimsPaused = false;
+  private serviceRequests = 0;
   /** Queue ownership outlives client sockets and foreground preparation.
    * Empty snapshot/claim polling and completed receipts are not work. */
   hasActiveWork(): boolean {
@@ -48,12 +50,38 @@ export class CloudCommandRuntime {
     if(Boolean(dependencies.prepare)!==Boolean(dependencies.retire))throw new Error("Cloud command admission requires paired retirement");
   }
 
+  /** Stop taking new turns without cancelling an admitted turn or preventing
+   * devices from appending to the durable queue. The VM handoff owner holds
+   * this pause until either cancellation or retirement of this exact engine. */
+  pauseClaims(): void { this.claimsPaused = true; }
+
+  resumeClaims(): void {
+    if (this.closed) return;
+    this.claimsPaused = false;
+    for (const conversationId of new Set([...this.pendingConversations, ...this.pendingClaims.keys(), ...this.unsettled.keys()]))
+      this.kick(conversationId);
+  }
+
+  /** A pending durable intent is safe to leave for the next engine. A claim,
+   * actor operation, provider dispatch or unacknowledged receipt is not. */
+  handoffDrained(): boolean {
+    return this.claimsPaused && !this.closed && this.serviceRequests === 0 && this.pumping.size === 0 &&
+      this.claiming.size === 0 && this.pendingClaims.size === 0 && this.active.size === 0 &&
+      this.unsettled.size === 0 && this.stopping.size === 0 && this.unacknowledgedStop.size === 0;
+  }
+
+  private async request(...args: Parameters<Dependencies["request"]>): Promise<unknown> {
+    this.serviceRequests++;
+    try { return await this.dependencies.request(...args); }
+    finally { this.serviceRequests--; }
+  }
+
   async confirmGoal(claim:CloudCommandClaim,sequence:number,goal:import("@zeros/protocol/agent-events").AgentGoal|null) {
     if(this.closed)throw new CloudCommandRuntimeError("engine_authority_rejected");
     const request={kind:"confirm-goal" as const,commandId:claim.commandId,claimId:claim.claimId,sequence,goal};
     for(let attempt=0;;attempt++){
       try{
-        const confirmed=CloudGoalSnapshotSchema.parse(await this.dependencies.request(request));
+        const confirmed=CloudGoalSnapshotSchema.parse(await this.request(request));
         if(confirmed.conversationId!==claim.conversationId)throw new CloudCommandRuntimeError("command_response_invalid");
         return confirmed;
       }catch(error){
@@ -94,7 +122,7 @@ export class CloudCommandRuntime {
       intents.add(stopIntent); this.stopping.set(request.conversationId, intents);
     }
     let raw: unknown;
-    try { raw = await (actorSessionId?this.dependencies.request(engineRequest,actorSessionId):this.dependencies.request(engineRequest)); }
+    try { raw = await (actorSessionId?this.request(engineRequest,actorSessionId):this.request(engineRequest)); }
     catch (error) {
       // Even an unacknowledged Stop cancels local activity. The caller receives
       // an error and can retry its same durable identity after recovery.
@@ -188,12 +216,13 @@ export class CloudCommandRuntime {
   private async drain(conversationId: string): Promise<void> {
     const unsettled = this.unsettled.get(conversationId);
     if (unsettled) {
-      this.observe(CloudCommandSnapshotSchema.parse(await this.dependencies.request({ kind: "settle", result: unsettled })));
+      this.observe(CloudCommandSnapshotSchema.parse(await this.request({ kind: "settle", result: unsettled })));
       this.unsettled.delete(conversationId);
       this.clearReceiptRetry(conversationId);
       this.dependencies.changed(conversationId);
     }
-    while (!this.closed && (!this.blocked(conversationId,this.pendingGoals.has(conversationId)) || this.pendingClaims.has(conversationId))) {
+    while (!this.closed && (!this.claimsPaused || this.pendingClaims.has(conversationId)) &&
+      (!this.blocked(conversationId,this.pendingGoals.has(conversationId)) || this.pendingClaims.has(conversationId))) {
       const previous = this.pendingClaims.get(conversationId);
       const executionId = previous?.executionId ?? (this.dependencies.prepare?
         this.dependencies.retainedExecution?.(conversationId)??randomUUID():this.dependencies.execution(conversationId));
@@ -202,7 +231,7 @@ export class CloudCommandRuntime {
       this.pendingClaims.set(conversationId, intent);
       let raw: unknown;
       this.claiming.add(conversationId);
-      try { raw = await this.dependencies.request({ kind: "claim", conversationId, ...intent }); }
+      try { raw = await this.request({ kind: "claim", conversationId, ...intent }); }
       finally { this.claiming.delete(conversationId); }
       if (raw === null) { this.dependencies.releaseRetainedExecution?.(executionId);this.pendingClaims.delete(conversationId); this.clearReceiptRetry(conversationId); return; }
       const claim = CloudCommandClaimSchema.parse(raw);
@@ -240,7 +269,7 @@ export class CloudCommandRuntime {
       this.dependencies.releaseRetainedExecution?.(executionId);
       const receipt = { commandId: claim.commandId, claimId: claim.claimId, ...result };
       this.unsettled.set(conversationId, receipt);
-      this.observe(CloudCommandSnapshotSchema.parse(await this.dependencies.request({ kind: "settle", result: receipt })));
+      this.observe(CloudCommandSnapshotSchema.parse(await this.request({ kind: "settle", result: receipt })));
       this.unsettled.delete(conversationId);
       this.clearReceiptRetry(conversationId);
       this.dependencies.changed(conversationId);

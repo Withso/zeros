@@ -18,6 +18,9 @@ async function main(): Promise<void> {
         !membership.endsWith(`/engine-workload-${identity.hostId}`))
         throw new Error("Resident scope required");
       return new ResidentPtyHost({ ...identity, root: "/srv/zeros/workspace",
+        // Fixed roots already projected by the qualified cloud view. The
+        // engine additionally resolves each cwd through its managed registry.
+        additionalRoots: ["/srv/zeros/repos", "/srv/zeros/state/workspaces", "/srv/zeros/state/design workspaces", "/srv/zeros/state/worktrees"],
         socketPath: `/run/zeros/resident-${identity.hostId}.sock`, shell: "/bin/bash", identity: { uid: 10001, gid: 10001 } });
     });
   } finally { process.off("SIGTERM", stop); process.off("SIGINT", stop); }

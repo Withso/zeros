@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { rmSync } from "node:fs";
 import { CloudEngineCgroup } from "./cloud-engine-cgroup.mjs";
 
 const TIMEOUT_MS = 5000;
@@ -6,12 +7,14 @@ const TIMEOUT_MS = 5000;
 /** Root-owned lifetime controller. The child launcher owns a distinct workload
  * cgroup and private namespace; the replaceable engine owns only a socket. */
 export class CloudResidentWorkload {
-  constructor({ runtime, hostId, organizationId, workspaceId, spawnProcess = spawn }) {
+  constructor({ runtime, hostId, organizationId, workspaceId, spawnProcess = spawn,
+    removeServices = id => rmSync(`/run/zeros/resident-workloads/${id}`, { recursive: true, force: true }) }) {
     if (runtime.profile !== "v4") throw new Error("Resident workloads require v4");
     this.scope = new CloudEngineCgroup({ runtime, kind: "workload", instanceId: hostId });
     this.runtime = runtime;
     this.identity = Object.freeze({ hostId, organizationId, workspaceId });
     this.spawnProcess = spawnProcess;
+    this.removeServices = removeServices;
     this.child = null;
     this.authority = null;
     this.fence = 0;
@@ -130,6 +133,7 @@ export class CloudResidentWorkload {
       child?.stdin.destroy(); child?.stdout.destroy(); child?.unref();
       // Also handles a crashed launcher and detached jobs outside its PID group.
       await this.scope.retire();
+      this.removeServices(this.identity.hostId);
     }
   }
 }

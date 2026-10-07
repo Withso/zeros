@@ -3,6 +3,19 @@ import { CloudIdleStopScheduler, hasCloudUserProcesses, isCloudIdleMaintenance }
 import type { CloudDurabilityAuthority } from "../cloud-durability-runtime";
 const authority = {} as CloudDurabilityAuthority;
 describe("cloud idle stop", () => {
+  it("excludes only the exact root-owned resident workload scope during a live handoff", async () => {
+    const residentScope = "/zeros-host.service/engine-workload-11111111-1111-4111-8111-111111111111";
+    let membership = `0::${residentScope}\n`;
+    const read = async (file: string) => file.endsWith("/cgroup") ? membership
+      : "State:\tS (sleeping)\nUid:\t10001\t10001\t10001\t10001\nPPid:\t1\n";
+    const options = { list: async () => ["12"], read, residentScope };
+    expect(await hasCloudUserProcesses(options)).toBe(false);
+    // Ordinary idle-stop remains conservative, including detached descendants.
+    expect(await hasCloudUserProcesses({ ...options, residentScope: undefined })).toBe(true);
+    for (membership of [`0::${residentScope}-foreign\n`, `0::${residentScope}/child\n`, "0::/zeros-cloud/engine-source\n", "unknown"])
+      expect(await hasCloudUserProcesses(options)).toBe(true);
+    expect(await hasCloudUserProcesses({ ...options, residentScope: "/zeros-cloud/../engine-source" })).toBe(true);
+  });
   it("exposes a read-only activity revision and record-sync state", () => {
     let now = 0, busy = false;
     const stop = vi.fn(async () => true);

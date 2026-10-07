@@ -25,6 +25,7 @@ import type { EngineMessage } from "../../types";
 import type { TransportClient } from "../types";
 import type { CloudRuntimeClientAdmission } from "../../cloud-runtime-registration";
 import type { CloudRuntimeQuietSnapshot } from "@zeros/protocol/cloud-runtime-lifecycle";
+import type { CloudRuntimeHandoffCommand, CloudRuntimeHandoffReply } from "../../cloud-runtime-quiet-state";
 
 const TOKEN = "worker-minted-conn-token";
 const ACCOUNT_USER_ID = "11111111-1111-4111-8111-111111111111";
@@ -59,6 +60,7 @@ async function startTransport(
     internalReadiness?: {
       token: string;
       readQuiet?: (challenge: string) => Promise<CloudRuntimeQuietSnapshot | null>;
+      handoff?: (command: CloudRuntimeHandoffCommand) => Promise<CloudRuntimeHandoffReply | null>;
       read: () => {
         version: 1;
         instanceId: string;
@@ -195,6 +197,8 @@ function httpRequest(
     origin?: string;
     host?: string;
     headers?: Record<string, string>;
+    method?: string;
+    body?: string;
   },
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
@@ -202,7 +206,7 @@ function httpRequest(
     if (opts.origin !== undefined) headers["Origin"] = opts.origin;
     if (opts.host !== undefined) headers["Host"] = opts.host;
     const req = http.request(
-      { host: "127.0.0.1", port, path: opts.path, method: "GET", headers },
+      { host: "127.0.0.1", port, path: opts.path, method: opts.method ?? "GET", headers },
       (res) => {
         let body = "";
         res.on("data", (c) => (body += c.toString()));
@@ -210,7 +214,7 @@ function httpRequest(
       },
     );
     req.on("error", reject);
-    req.end();
+    req.end(opts.body);
   });
 }
 
@@ -1236,6 +1240,30 @@ describe("CloudTransport — /health is ungated", () => {
 });
 
 describe("CloudTransport — image-helper readiness", () => {
+  it("accepts bounded handoff commands only on the separate authenticated loopback POST path", async () => {
+    const probeToken = `zwr_${"R".repeat(43)}`;
+    const handoff = vi.fn(async (command: CloudRuntimeHandoffCommand): Promise<CloudRuntimeHandoffReply> =>
+      ({ version: 1, ...command, accepted: false }));
+    const { port } = await startTransport({ token: TOKEN, internalReadiness: { token: probeToken, read: () => null, handoff } });
+    const request = { challenge: ACCOUNT_USER_ID, organizationId: ACCOUNT_USER_ID, workspaceId: ACCOUNT_USER_ID,
+      generation: 1, engineInstanceId: ACCOUNT_USER_ID, hostId: ACCOUNT_USER_ID, fence: 1, expiresAtMs: Date.now() + 30_000 };
+    const command = { action: "cancel" as const, request };
+    const url = `http://127.0.0.1:${port}/internal/runtime-handoff`;
+    const headers = { "content-type": "application/json", "x-zeros-readiness-token": probeToken };
+    expect((await fetch(url, { method: "POST", headers: { ...headers, "x-zeros-readiness-token": TOKEN }, body: JSON.stringify(command) })).status).toBe(404);
+    expect((await httpRequest(port, { path: "/internal/runtime-handoff", method: "POST", host: "provider.example.test",
+      headers: { ...headers, "content-length": String(Buffer.byteLength(JSON.stringify(command))) }, body: JSON.stringify(command) })).status).toBe(404);
+    expect((await fetch(url, { headers })).status).toBe(404);
+    expect((await fetch(url, { method: "POST", headers, body: JSON.stringify({ ...command, arbitrary: true }) })).status).toBe(404);
+    expect(handoff).not.toHaveBeenCalled();
+    const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(command) });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ version: 1, ...command, accepted: false });
+    expect(handoff).toHaveBeenCalledOnce();
+    const local = await startTransport();
+    expect((await fetch(`http://127.0.0.1:${local.port}/internal/runtime-handoff`,
+      { method: "POST", headers, body: JSON.stringify(command) })).status).toBe(404);
+  });
   it("authenticates quiet snapshots, echoes the challenge, and rechecks readiness after the read", async () => {
     const probeToken = `zwr_${"R".repeat(43)}`;
     const challenge = "55555555-5555-4555-8555-555555555555";

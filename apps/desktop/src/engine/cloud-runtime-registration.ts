@@ -403,6 +403,9 @@ export class CloudRuntimeRegistration {
   private durableRecordConnected = false;
   private initialRecordConnected = false;
   private durableRecordSyncInFlight: Promise<void> | null = null;
+  private recordHandoffPaused = false;
+  private recordHandoffFlushed = false;
+  private recordHandoffFlight: Promise<void> | null = null;
   private checkpointInFlight: string | null = null;
 
   constructor(
@@ -489,7 +492,7 @@ export class CloudRuntimeRegistration {
     const document = this.document;
     if (!document || !this.hasControlAuthority(document))
       throw new CloudCommandRuntimeError("engine_authority_rejected");
-    if (request.kind === "claim" && !this.durableRecordConnected)
+    if (this.recordHandoffPaused || (request.kind === "claim" && !this.durableRecordConnected))
       throw new CloudCommandRuntimeError("command_durability_unavailable");
     if (request.kind === "settle") {
       // An older heartbeat sync may have captured state before this turn
@@ -587,6 +590,38 @@ export class CloudRuntimeRegistration {
     this.abortController.abort();
     this.document = null;
     await this.durableRecordSyncInFlight?.catch(() => undefined);
+  }
+
+  /** Admission is already fenced by the engine. Retain heartbeat authority
+   * while draining any older projection and then flushing a fresh one. */
+  pauseRecordForRuntimeHandoff(): Promise<void> {
+    if (this.recordHandoffFlight) return this.recordHandoffFlight;
+    const document = this.document;
+    if (!document || !this.hasControlAuthority(document))
+      return Promise.reject(new Error("Cloud runtime handoff authority is unavailable"));
+    if (this.recordHandoffPaused) return this.recordHandoffFlushed ? Promise.resolve()
+      : Promise.reject(new Error("Cloud runtime handoff record flush failed"));
+    this.recordHandoffPaused = true;
+    this.recordHandoffFlushed = false;
+    const task = Promise.resolve().then(async () => {
+      await this.durableRecordSyncInFlight;
+      if (!this.hasControlAuthority(document)) throw new Error("Cloud runtime handoff authority is unavailable");
+      await this.synchronizeDurableRecord(document, { initial: false });
+      if (!this.hasControlAuthority(document) || !this.durableRecordConnected)
+        throw new Error("Cloud runtime handoff record flush failed");
+      this.recordHandoffFlushed = true;
+    }).finally(() => { if (this.recordHandoffFlight === task) this.recordHandoffFlight = null; });
+    this.recordHandoffFlight = task;
+    return task;
+  }
+
+  hasRuntimeHandoffAuthority(): boolean { return !!this.document && this.hasControlAuthority(this.document); }
+
+  resumeRecordAfterRuntimeHandoff(): void {
+    if (!this.document || !this.hasControlAuthority(this.document) || this.recordHandoffFlight)
+      throw new Error("Cloud runtime handoff authority is unavailable");
+    this.recordHandoffPaused = false;
+    this.recordHandoffFlushed = false;
   }
 
   /** Redeem one desktop connection capability through this engine's current
@@ -858,10 +893,10 @@ export class CloudRuntimeRegistration {
       );
       document.leaseExpiresAtMs = Number(raw.leaseExpiresAtMs);
       this.scheduleHeartbeat(document.heartbeat.intervalMs);
-      void this.synchronizeDurableRecord(document, { initial: false }).catch(
+      if (!this.recordHandoffPaused) void this.synchronizeDurableRecord(document, { initial: false }).catch(
         () => undefined,
       );
-      if (checkpointRequest) {
+      if (checkpointRequest && !this.recordHandoffPaused) {
         this.dispatchCheckpointRequest(checkpointRequest, document);
       }
     } catch (error) {

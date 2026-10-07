@@ -172,10 +172,16 @@ export async function hasCloudUserProcesses(options: {
   /** Engine-owned read-only language services are restartable infrastructure.
    * Their live supervised roots, never names/argv, identify this exception. */
   infrastructurePids?: readonly number[];
+  /** Live handoff only: derived from the admitted immutable runtime's cgroup
+   * root and healthy root-enrolled resident host. Kernel membership survives
+   * reparenting; process names, argv and numeric ancestry cannot authorize it. */
+  residentScope?: string;
 } = {}): Promise<boolean> {
   if (process.platform !== "linux" && !options.list) return true;
   const read = options.read ?? (path => readFile(path, "utf8"));
   try {
+    if (options.residentScope !== undefined && (!/^\/(?:[A-Za-z0-9_.@-]+\/)*zeros-host\.service\/engine-workload-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(options.residentScope) ||
+      options.residentScope.split("/").some(part => part === "." || part === ".."))) return true;
     const names = await (options.list ?? (() => readdir("/proc")))();
     const pids = names.filter(name => /^[1-9][0-9]{0,9}$/.test(name));
     if (pids.length > 8192) return true;
@@ -189,6 +195,7 @@ export async function hasCloudUserProcesses(options: {
       const state = /^State:\s+(\S)/m.exec(status)?.[1];
       if (!uid || !state) return true;
       if (state !== "Z" && uid.slice(1).some(value => ["10001", "10002", "10004"].includes(value))) {
+        if (options.residentScope && await read(`/proc/${pid}/cgroup`) === `0::${options.residentScope}\n`) continue;
         if (infrastructure.size) {
           let ancestor = pid, source = status, restartable = false;
           for (let depth = 0; depth < 64; depth++) {

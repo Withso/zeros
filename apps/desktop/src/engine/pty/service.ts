@@ -177,7 +177,7 @@ interface Session {
   mirror?: PtyMirror;
 }
 
-function coerceDim(value: unknown, fallback: number): number {
+export function coerceDim(value: unknown, fallback: number): number {
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return Math.max(2, Math.min(500, Math.floor(n)));

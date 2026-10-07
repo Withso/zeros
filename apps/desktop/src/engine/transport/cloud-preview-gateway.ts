@@ -67,6 +67,7 @@ function proxyHeaders(source: IncomingMessage["headers"]): OutgoingHttpHeaders {
 export class CloudRuntimePreviewGateway {
   private readonly requests = new Set<() => void>();
   private closed = false;
+  private handoffFenced = false;
   private pendingVerifications = 0;
   constructor(
     private readonly options: {
@@ -82,7 +83,7 @@ export class CloudRuntimePreviewGateway {
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): boolean {
     if (req.headers[HEADER] === undefined) return false;
     const deny = (status: number) => socket.end(`HTTP/1.1 ${status} Preview unavailable\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Length: 0\r\n\r\n`, () => socket.destroy());
-    if (this.closed) { deny(503); return true; }
+    if (this.closed || this.handoffFenced) { deny(503); return true; }
     if (this.requests.size >= MAX_REQUESTS || this.pendingVerifications >= MAX_REQUESTS) { deny(429); return true; }
     const token = req.headers[HEADER], key = req.headers["sec-websocket-key"];
     if (typeof token !== "string" || !/^zwp_[A-Za-z0-9_-]{43}$/.test(token) ||
@@ -193,7 +194,7 @@ export class CloudRuntimePreviewGateway {
       });
       res.end(status === 401 ? "Preview access denied" : "Preview unavailable");
     };
-    if (this.closed) {
+    if (this.closed || this.handoffFenced) {
       deny(503);
       return true;
     }
@@ -357,6 +358,9 @@ export class CloudRuntimePreviewGateway {
       this.pendingVerifications -= 1;
     }
   }
+
+  handoffBusy(): boolean { return this.requests.size > 0 || this.pendingVerifications > 0; }
+  setHandoffFenced(fenced: boolean): void { this.handoffFenced = fenced; }
 
   close(): void {
     this.closed = true;

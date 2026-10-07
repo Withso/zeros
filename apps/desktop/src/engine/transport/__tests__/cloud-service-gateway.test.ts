@@ -51,6 +51,18 @@ describe('cloud native service gateway',()=>{
   f.gateway.setPaused(false);await connect(f.url).ready;
   expect(f.open).toHaveBeenCalledTimes(2);
  });
+ it('fences new admission for handoff without closing an existing user stream',async()=>{
+  const f=await fixture(),c=connect(f.url);await c.ready;
+  expect(f.gateway.handoffBusy()).toBe(true);
+  f.gateway.setHandoffFenced(true);
+  await expect(connect(f.url).ready).rejects.toThrow('503');
+  expect(c.ws.readyState).toBe(WebSocket.OPEN);
+  const echoed=new Promise<Buffer>(resolve=>c.ws.once('message',data=>resolve(Buffer.from(data as Buffer))));
+  c.ws.send(Buffer.from('work continues'));expect(await echoed).toEqual(Buffer.from('work continues'));
+  c.ws.close();await new Promise(resolve=>c.ws.once('close',resolve));
+  await vi.waitFor(()=>expect(f.gateway.handoffBusy()).toBe(false));
+  f.gateway.setHandoffFenced(false);await connect(f.url).ready;
+ });
  it.each([null,{...grant(),kind:'preview' as const},{...grant(),remotePort:43001},{...grant(),remotePort:22},{...grant(),remotePort:null}])('denies invalid service admission before I/O',async admitted=>{
   const f=await fixture({verify:async()=>admitted}),c=connect(f.url);
   await expect(c.ready).rejects.toThrow();expect(f.open).not.toHaveBeenCalled();
