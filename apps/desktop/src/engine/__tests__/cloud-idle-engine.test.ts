@@ -32,7 +32,7 @@ function fixture() {
   return state as typeof state & {
     handleCloudCheckpointRequest(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): Promise<void>;
     stopIdleCloudWorkspace(authority: CloudDurabilityAuthority, stillIdle: () => boolean): Promise<void>;
-    cloudIdleBusy(): boolean;
+    cloudIdleBusy(includePresence?: boolean): boolean;
   };
 }
 beforeEach(() => { vi.mocked(hasCloudUserProcesses).mockReset().mockResolvedValue(false); });
@@ -114,6 +114,14 @@ describe("idle checkpoint execution", () => {
       expect(resumes.every(write => write.operationId === resumes[0].operationId && write.expectedRevision === 7)).toBe(true);
       expect(executions).toBe(1);
     } finally { release(); await cancelled; connection.dispose(); vi.useRealTimers(); }
+  });
+  it("keeps idle-stop presence while allowing the update snapshot to read it separately", () => {
+    const state = fixture();
+    state.cloudUserPresence.active = () => true;
+    expect(state.cloudIdleBusy()).toBe(true);
+    expect(state.cloudIdleBusy(false)).toBe(false);
+    state.activePromptContexts.set("turn", {});
+    expect(state.cloudIdleBusy(false)).toBe(true);
   });
   it("does not keep an idle VM awake for background PR metadata reconciliation", () => {
     const state = fixture(), maintenance = Promise.resolve(), write = Promise.resolve();
