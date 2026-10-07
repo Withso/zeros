@@ -53,6 +53,66 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
     await expect(errors).toHaveCount(0);
     await expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
   };
+  await page.evaluate(() => {
+    window.cloudRestartFixture.menuOverlayActive = false;
+    document.addEventListener(
+      "zeros-native-surface-overlay-intent",
+      (event) => {
+        window.cloudRestartFixture.menuOverlayActive = event.detail.active;
+      },
+    );
+  });
+  const expectFirstFocusEscape = async () => {
+    const before = writes.length;
+    await expect(page.getByRole("menu", { includeHidden: true })).toHaveCount(
+      0,
+    );
+    await page.evaluate(() => {
+      window.cloudRestartFixture.firstFocusEscapeSent = false;
+      const onFocus = (event) => {
+        const menu = event.target.closest('[role="menu"]');
+        if (!menu) return;
+        document.removeEventListener("focusin", onFocus, true);
+        window.cloudRestartFixture.focusInsideMenu = menu.contains(
+          document.activeElement,
+        );
+        window.cloudRestartFixture.overlayActiveAtFirstFocus =
+          window.cloudRestartFixture.menuOverlayActive;
+        menu.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "Escape",
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+        window.cloudRestartFixture.firstFocusEscapeSent = true;
+      };
+      document.addEventListener("focusin", onFocus, true);
+    });
+    await row.click({ button: "right" });
+    await expect
+      .poll(() =>
+        page.evaluate(() => window.cloudRestartFixture.firstFocusEscapeSent),
+      )
+      .toBe(true);
+    expect(
+      await page.evaluate(() => window.cloudRestartFixture.focusInsideMenu),
+    ).toBe(true);
+    expect(
+      await page.evaluate(() => window.cloudRestartFixture.overlayActiveAtFirstFocus),
+    ).toBe(true);
+    await expect(page.getByRole("menu", { includeHidden: true })).toHaveCount(
+      0,
+    );
+    await expect(row).toHaveAttribute("data-state", "closed");
+    await expect
+      .poll(() =>
+        page.evaluate(() => window.cloudRestartFixture.menuOverlayActive),
+      )
+      .toBe(false);
+    expect(writes.length).toBe(before);
+  };
+  await expectFirstFocusEscape();
   for (const theme of ["dark", "light"]) {
     await page.evaluate(() => window.cloudRestartFixture.work("idle"));
     await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
@@ -206,6 +266,7 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
     await expect(workspaceMenu).toBeVisible();
     await expect(menuRestart).toHaveCount(0);
     await closeWorkspaceMenu();
+    await expectFirstFocusEscape();
   }
   await page.evaluate(() => window.cloudRestartFixture.publish({ status: "ready", deletedAt: null,
     capabilities: { ...window.cloudRestartFixture.document.capabilities, canWrite: true } }));
@@ -218,8 +279,10 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
     await expect(workspaceMenu).toBeVisible();
     await expect(menuRestart).toHaveCount(0);
     await closeWorkspaceMenu();
+    await expectFirstFocusEscape();
   }
   expect(writes.length).toBe(beforeLocal);
+  check("Cloud and both Local owners' workspace context menus handle first-focus Escape and release native overlays without lifecycle writes", true);
   await page.getByRole("button", { name: "Cloud fixture", exact: true }).click();
   await expect(restart).toBeEnabled();
   failNext = "stop";
