@@ -39,7 +39,7 @@ const handoff = { challenge: "abababab-abab-4bab-8bab-abababababab", workspaceId
 const resident = { hostId: handoff.hostId, workspaceId: handoff.workspaceId, organizationId: handoff.organizationId,
   protocol: "zeros.resident-pty/v1" as const, runtimeId: source.runtimeId, manifestSha256: source.manifestSha256,
   bootId: source.bootId, supervisorSessionId: source.supervisorSessionId,
-  scope: `${source.cgroupRoot}/workload-${handoff.hostId}`, fence: 1, engineId: handoff.engineInstanceId, generation: 1 };
+  scope: `${source.cgroupRoot}/engine-workload-${handoff.hostId}`, fence: 1, engineId: handoff.engineInstanceId, generation: 1 };
 const receipt = { ...handoff, version: 1, phase: "fenced", activityRevision: 7 };
 const detached = { ...resident, fence: 2, engineId: null, generation: null };
 

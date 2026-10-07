@@ -104,7 +104,7 @@ import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
       const resident = { hostId: handoff.hostId, organizationId: fixture.organizationId, workspaceId: fixture.workspaceId,
         protocol: "zeros.resident-pty/v1" as const, runtimeId: runtimeWitness.runtimeId, manifestSha256: runtimeWitness.manifestSha256,
         bootId: runtimeWitness.bootId, supervisorSessionId: runtimeWitness.supervisorSessionId,
-        scope: `${sourceActive().cgroupRoot}/workload-${handoff.hostId}`, fence: 1, engineId: fixture.engineInstanceId, generation: 1 };
+        scope: `${sourceActive().cgroupRoot}/engine-workload-${handoff.hostId}`, fence: 1, engineId: fixture.engineInstanceId, generation: 1 };
       await pool.query(`INSERT INTO cloud_runtime_resident_transfer_qualifications
         (source_runtime_id,target_runtime_id,controller_runtime_id,base_compatibility_id,mode,qualification_mode,
           resident_runtime_id,enabled,evidence_sha256) VALUES($1,$2,$1,$3,'engine','full',$1,true,$4)`,

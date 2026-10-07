@@ -97,7 +97,7 @@ def resident_document(b, value):
         b.text_match(value[key], b.UUID, "input_schema")
     b.text_match(value["runtimeId"], b.RID, "input_schema")
     require(value["manifestSha256"] == value["runtimeId"][3:] and value["protocol"] == "zeros.resident-pty/v1")
-    require(value["scope"] == b.CGROUP + "/workload-" + value["hostId"])
+    require(value["scope"] == b.CGROUP + "/engine-workload-" + value["hostId"])
     b.integer(value["fence"], 1, 2**53 - 2, "input_schema")
     if value["engineId"] is None:
         require(value["generation"] is None)
@@ -479,7 +479,9 @@ class SystemRuntime:
     def check_scope(self, retired):
         root = self.app.path(self.b.CGROUP)
         allowed = "engine-" + self.request["scope"]["sourceEngineInstanceId"]
-        retained = "workload-" + self.resident["hostId"] if self.resident else None
+        # The resident uses the base-compatible engine-* namespace. Only its
+        # exact verified leaf may stay populated when ordinary engines retire.
+        retained = "engine-workload-" + self.resident["hostId"] if self.resident else None
         with self.app.directory(self.b.CGROUP):
             require(not (root / "cgroup.procs").read_text().strip())
             leaves = [entry for entry in root.iterdir() if entry.is_dir()]

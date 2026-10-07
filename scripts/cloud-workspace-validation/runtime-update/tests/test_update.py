@@ -309,7 +309,7 @@ class UpdateTests(unittest.TestCase):
         resident = {"hostId": handoff["hostId"], "organizationId": scope["organizationId"], "workspaceId": scope["workspaceId"],
                     "protocol": "zeros.resident-pty/v1", **{key: self.source[key] for key in
                     ("runtimeId", "manifestSha256", "bootId", "supervisorSessionId")},
-                    "scope": b.CGROUP + "/workload-" + handoff["hostId"], "fence": 1,
+                    "scope": b.CGROUP + "/engine-workload-" + handoff["hostId"], "fence": 1,
                     "engineId": scope["sourceEngineInstanceId"], "generation": 1}
         request = {**self.request, "mode": "engine", "handoff": handoff}
         pipe = mock.Mock()
@@ -375,7 +375,7 @@ class UpdateTests(unittest.TestCase):
     def test_resident_scope_preserves_only_the_exact_attested_workload(self):
         runtime, _, _, resident, _, _ = self.resident_fixture()
         root = fixture.cgroup_fixture(self.case.root)
-        workload = root / ("workload-" + resident["hostId"])
+        workload = root / ("engine-workload-" + resident["hostId"])
         workload.mkdir()
         (workload / "cgroup.events").write_text("populated 1\nfrozen 0\n")
         runtime.resident = resident
@@ -391,6 +391,24 @@ class UpdateTests(unittest.TestCase):
         (workload / "unexpected").mkdir()
         with self.assertRaises(update.UpdateFailure):
             runtime.check_scope(retired=True)
+
+    def test_resident_scope_rejects_a_populated_foreign_workload(self):
+        runtime, _, _, resident, _, _ = self.resident_fixture()
+        root = fixture.cgroup_fixture(self.case.root)
+        foreign = root / "engine-workload-11111111-1111-4111-8111-111111111111"
+        foreign.mkdir()
+        (foreign / "cgroup.events").write_text("populated 1\nfrozen 0\n")
+        runtime.resident = resident
+        for retired in (False, True):
+            with self.subTest(retired=retired), self.assertRaises(update.UpdateFailure):
+                runtime.check_scope(retired=retired)
+
+    def test_resident_document_rejects_foreign_wrong_prefix_and_nested_scopes(self):
+        _, _, _, resident, _, _ = self.resident_fixture()
+        for scope in (b.CGROUP + "/engine-workload-11111111-1111-4111-8111-111111111111",
+                      b.CGROUP + "/workload-" + resident["hostId"], resident["scope"] + "/nested"):
+            with self.subTest(scope=scope), self.assertRaises(update.UpdateFailure):
+                update.resident_document(b, {**resident, "scope": scope})
 
     def test_resident_foreign_witness_and_unfenced_receipt_cannot_authorize_consumption(self):
         for change in ("resident", "receipt"):
