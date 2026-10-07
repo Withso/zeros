@@ -15,6 +15,7 @@ export async function runDesignPreviewSmoke({ page, check }) {
     };
     const React = await dependency("react");
     const { createRoot } = await dependency("react-dom_client");
+    const { flushSync } = await dependency("react-dom");
     const { DesignInspector } = await import("/apps/desktop/src/renderer/features/design-workspace/design-inspector.tsx");
     const { TooltipProvider } = await import("/apps/desktop/src/renderer/shared/ui/primitives/tooltip.tsx");
     const { getActiveBridge } = await import("/apps/desktop/src/renderer/platform/bridge/active-bridge.ts");
@@ -33,14 +34,15 @@ export async function runDesignPreviewSmoke({ page, check }) {
     const request = bridge.request.bind(bridge);
     bridge.request = (message) => message.op === "design.verification.open"
       ? new Promise(resolve => { settle = resolve; requestedWorkspace = message.params.workspaceId; }) : request(message);
-    const render = () => root.render(React.createElement(React.StrictMode, null,
+    // Commit fixture visibility/owner changes before settling a bridge reply.
+    const render = () => flushSync(() => root.render(React.createElement(React.StrictMode, null,
       React.createElement(TooltipProvider, null, React.createElement(DesignInspector, {
         workspaceId, folder, active,
         frame: { file: "phone.html", frameId: "frame-a", title: "Phone", width: 390, height: 844, x: 0, y: 0, z: 0, nodeCount: 1, modifiedAt: 1, sourceVersion: "a".repeat(24) },
         frameSelected: true, selectedNodeId: null, selectedNodeIds: [], details: null, lint: null,
         canvasBackground: "white", onCanvasBackgroundChange() {}, motionTimelineOpen: false,
         motionProperties: [], onOpenMotionTimeline() {}, zoomActionsRef: { current: null },
-      }))));
+      })))));
     const directory = (id) => useDesignWorkspaceUiStore.getState().bindDirectory(workspaceId, id);
     const { useWorkspaceStore, workbenchScopeForFolder } = await import("/apps/desktop/src/renderer/state/workspace-store.ts");
     const browserIntents = [];
