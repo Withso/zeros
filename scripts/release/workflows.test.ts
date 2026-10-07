@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { load } from "js-yaml";
 const workflow = (name: string) => readFileSync(`.github/workflows/${name}.yml`, "utf8");
+const publicationWorkflow = (name: string) => workflow(name === "release-alpha" ? "alpha-publication" : name);
 function job(text: string, name: string) {
   return text.split(`\n  ${name}:\n`)[1]?.split(/\n {2}[a-z][a-z_-]+:\n/)[0] ?? "";
 }
@@ -58,19 +59,15 @@ describe("cloud backend provisioning workflow", () => {
   });
 });
 describe("release dependency and authority contracts", () => {
-  it("frees the Alpha slot only for a proven pre-mutation supersession", () => {
-    const text = workflow("release-alpha"), slot = job(text, "release-slot");
-    expect(slot).toContain("needs: ci");
-    expect(slot).toContain("if: github.event.repository.fork == false && needs.ci.result == 'success' && needs.ci.outputs.ready == 'false'");
-    expect(slot).toContain("permissions:\n      actions: write\n");
-    expect(slot).toContain('run: gh run cancel "$RUN_ID" --repo "$REPOSITORY"');
-    expect(slot).not.toMatch(/secrets\.|contents:|id-token:|environment:|actions\/checkout/);
-    // The barrier itself stays read-only; only this job may cancel the run.
-    expect(job(text, "ci")).not.toContain("actions: write");
+  it("skips superseded Alpha publication without cancelling independent preparation", () => {
+    const text = workflow("release-alpha");
+    expect(job(text, "release-slot")).toBe("");
+    expect(job(text, "publication")).toContain("if: github.event.repository.fork == false && needs.ci.outputs.ready == 'true'");
+    expect(text).not.toContain("actions: write");
     for (const name of ["release-beta", "release"]) expect(workflow(name)).not.toContain("release-slot");
   });
   it("builds the exact Alpha runtime without waiting for CI and publishes it after hosted promotion", () => {
-    const text = workflow("release-alpha"), build = job(text, "runtime-build"), publish = job(text, "runtime-publish");
+    const text = workflow("release-alpha"), build = job(text, "runtime-build"), publish = job(workflow("alpha-publication"), "runtime-publish");
     // The read-only build starts with the run; only publication waits for the
     // CI barrier, through hosted promotion.
     expect(build).not.toMatch(/^ {4}needs:/m);
@@ -83,9 +80,10 @@ describe("release dependency and authority contracts", () => {
     expect(build).toContain("if-no-files-found: error");
     expect(build).toContain("overwrite: true");
     for (const file of ["*.tar.gz", "descriptor.json", "manifest.json", "build-receipt.json"]) expect(build).toContain(`/cloud-runtime-bundle/${file}`);
-    expect(publish).toContain("needs: [ci, runtime-build, hosted]");
+    expect(publish).toContain("needs: [entry, hosted]");
     expect(publish).toContain("environment: alpha");
-    expect(publish).toContain("timeout-minutes: 15");
+    expect(publish).toContain("timeout-minutes: 60");
+    expect(publish).toContain("alpha-build-cli.ts --wait runtime");
     expect(publish).toContain("uses: actions/download-artifact@");
     expect(publish).toContain("scripts/cloud-workspace-validation/runtime-bundle/publish.ts");
     expect(publish).toContain("scripts/release/ci-cli.ts --verify");
@@ -99,15 +97,17 @@ describe("release dependency and authority contracts", () => {
     }
   });
   it("grants Alpha OIDC only to runtime publication and keeps its feed independent of runtime jobs", () => {
-    const text = workflow("release-alpha"), publish = job(text, "runtime-publish"), feed = job(text, "publish");
+    const text = workflow("alpha-publication"), parent = workflow("release-alpha"), publish = job(text, "runtime-publish"), feed = job(text, "publish");
     expect(publish).toContain("id-token: write");
     expect(publish).toContain("contents: read");
     expect((text.match(/id-token: write/g) ?? []).length).toBe(1);
-    for (const name of ["ci", "hosted", "build", "runtime-build", "publish"]) expect(job(text, name)).not.toContain("id-token:");
-    expect(feed).toContain("needs: [ci, build, hosted]");
+    for (const name of ["entry", "hosted", "publish"]) expect(job(text, name)).not.toContain("id-token:");
+    for (const name of ["ci", "build", "runtime-build"]) expect(job(parent, name)).not.toContain("id-token:");
+    expect(feed).toContain("needs: [entry, hosted]");
     expect(feed).not.toMatch(/^ {4}needs:.*runtime-(?:build|publish)/m);
-    expect(job(text, "hosted")).toContain("needs: ci");
-    expect(job(text, "build")).not.toMatch(/^ {4}needs:/m);
+    expect(job(text, "hosted")).toContain("needs: entry");
+    expect(job(parent, "publication")).toContain("needs: [ci, metadata]");
+    expect(job(parent, "build")).toContain("needs: metadata");
     for (const name of ["release-beta", "release"]) expect(workflow(name)).not.toMatch(/runtime-build|runtime-publish/);
   });
   it.each(["release-alpha", "release-beta", "release"])("gates %s mutations on exact-source required CI without delaying the build", name => {
@@ -119,8 +119,8 @@ describe("release dependency and authority contracts", () => {
     expect(ci).toContain("RELEASE_SHA: ${{ github.sha }}");
     expect(ci).toContain("pnpm exec tsx scripts/release/ci-cli.ts --wait");
     // Production's build waits only for its single human approval.
-    expect(job(text, "hosted")).toContain(name === "release" ? "needs: [approve, ci]" : "needs: ci");
-    expect(job(text, "build")).not.toMatch(name === "release" ? /^    needs: (?!approve$)/m : /^    needs:/m);
+    expect(job(text, name === "release-alpha" ? "publication" : "hosted")).toContain(name === "release" ? "needs: [approve, ci]" : name === "release-alpha" ? "needs: [ci, metadata]" : "needs: ci");
+    expect((load(text) as any).jobs.build.needs).toBe(name === "release" ? "approve" : name === "release-alpha" ? "metadata" : undefined);
     expect(job(text, "test")).toBe("");
     expect(text).not.toMatch(/pnpm (?:typecheck|lint|test:git)\b/);
     expect(text).not.toContain("scripts/release/vitest.config.ts");
@@ -134,17 +134,17 @@ describe("release dependency and authority contracts", () => {
     expect(ci).toContain("ready: ${{ steps.barrier.outputs.ready }}");
     expect(ci).toContain("id: barrier");
     expect(ci).toContain("ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}");
-    for (const name of ["hosted", "publish", "runtime-publish"]) {
-      expect(job(text, name)).toContain("if: github.event.repository.fork == false && needs.ci.outputs.ready == 'true'");
-    }
-    expect(job(text, "hosted")).toContain("alpha_ci_fast_path: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}");
-    expect(job(text, "publish")).toContain("ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}");
-    const runtime = job(text, "runtime-publish");
-    expect(runtime).toContain("ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}");
+    expect(job(text, "publication")).toContain("if: github.event.repository.fork == false && needs.ci.outputs.ready == 'true'");
+    expect(job(text, "publication")).toContain("alpha_ci_fast_path: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}");
+    const called = workflow("alpha-publication");
+    expect(job(called, "hosted")).toContain("alpha_ci_fast_path: ${{ inputs.alpha_ci_fast_path }}");
+    expect(job(called, "publish")).toContain("ZEROS_ALPHA_CI_FAST_PATH: ${{ inputs.alpha_ci_fast_path }}");
+    const runtime = job(called, "runtime-publish");
+    expect(runtime).toContain("ZEROS_ALPHA_CI_FAST_PATH: ${{ inputs.alpha_ci_fast_path }}");
     expect(runtime).toContain("actions: read");
     expect(runtime.indexOf("ci-cli.ts --verify")).toBeLessThan(runtime.indexOf("runtime-bundle/publish.ts"));
-    expect(job(text, "publish")).toContain('name: Publish rolling "alpha" prerelease');
-    expect(job(text, "publish")).toContain("name: Publish Alpha feed");
+    expect(job(called, "publish")).toContain('name: Publish rolling "alpha" prerelease');
+    expect(job(called, "publish")).toContain("name: Publish Alpha feed");
   });
 
   it("keeps the hosted default DAG independent of Alpha outputs on every channel", () => {
@@ -180,8 +180,10 @@ describe("release dependency and authority contracts", () => {
 
   it("passes forward-only only from the automatic Alpha parent and uploads only successful admission", () => {
     const text = workflow("release-alpha"), ci = job(text, "ci"), parsed = load(text) as any;
-    for (const name of ["ci", "publish", "runtime-publish"]) expect(job(text, name)).toContain("ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}");
-    expect(job(text, "hosted")).toContain("alpha_forward_only: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}");
+    expect(ci).toContain("ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}");
+    expect(job(text, "publication")).toContain("alpha_forward_only: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}");
+    for (const name of ["entry", "publish", "runtime-publish"]) expect(job(workflow("alpha-publication"), name)).toContain("ZEROS_ALPHA_FORWARD_ONLY: ${{ inputs.alpha_forward_only }}");
+    expect(job(workflow("alpha-publication"), "hosted")).toContain("alpha_forward_only: ${{ inputs.alpha_forward_only }}");
     const receipt = parsed.jobs.ci.steps.find((step: any) => step.name === "Save Alpha admission receipt");
     expect(receipt.if).toBe("success() && steps.barrier.outputs.admission_issued == 'true'");
     expect(receipt.with).toMatchObject({ name: "alpha-admission-${{ github.sha }}", path: ".context/release/alpha-admission.json",
@@ -191,7 +193,7 @@ describe("release dependency and authority contracts", () => {
 
   it("carries both Alpha policies into the nested worker while direct dispatch defaults stay strict", () => {
     const hosted = load(workflow("hosted-promotion")) as any, worker = load(workflow("cloud-worker-promotion")) as any;
-    for (const [input, variable] of [["alpha_ci_fast_path", "ZEROS_ALPHA_CI_FAST_PATH"], ["alpha_forward_only", "ZEROS_ALPHA_FORWARD_ONLY"]]) {
+    for (const [input, variable] of [["alpha_ci_fast_path", "ZEROS_ALPHA_CI_FAST_PATH"], ["alpha_forward_only", "ZEROS_ALPHA_FORWARD_ONLY"], ["alpha_prepared_version", "ALPHA_PREPARED_VERSION"]]) {
       expect(hosted.jobs.worker.with[input]).toBe(`\${{ inputs.${input} }}`);
       expect(worker.on.workflow_call.inputs[input]).toMatchObject({ default: "", type: "string" });
       expect(worker.on.workflow_dispatch.inputs[input]).toBeUndefined();
@@ -215,7 +217,7 @@ describe("release dependency and authority contracts", () => {
   it("passes the worker promotion switch to every stage that decides whether cloud needs a qualified worker", () => {
     const text = workflow("hosted-promotion");
     for (const name of ["services", "promote"]) expect(job(text, name)).toContain("ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}");
-    for (const name of ["release-alpha", "release-beta", "release"]) expect(job(workflow(name), "publish")).toContain("ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}");
+    for (const name of ["release-alpha", "release-beta", "release"]) expect(job(publicationWorkflow(name), "publish")).toContain("ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}");
     expect(job(workflow("controlled-cutover"), "cutover")).toContain("ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}");
   });
   it("takes the worker decision from qualified input comparison rather than the switch alone", () => {
@@ -225,7 +227,7 @@ describe("release dependency and authority contracts", () => {
     expect(guard).not.toContain("if [ \"$WORKER_SWITCH\" = enabled ]");
   });
   it.each([["release-alpha", "alpha"], ["release-beta", "beta"], ["release", "production"]])("publishes and anonymously verifies the cumulative ledger in %s", (name, channel) => {
-    const text = job(workflow(name), "publish");
+    const text = job(publicationWorkflow(name), "publish");
     expect(text).toContain("scripts/release/release-ledger-cli.ts --build");
     expect(text).toContain("scripts/release/release-ledger-cli.ts --verify");
     const asset = name === "release" ? "release/release-ledger.json" : `release/${channel}-release-ledger.json`;
@@ -236,22 +238,22 @@ describe("release dependency and authority contracts", () => {
     expect(spawnSync("git", ["check-ignore", "--no-index", "--quiet", "scripts/release/cli.ts"]).status).toBe(1);
   });
   it.each([["release-alpha", "alpha"], ["release-beta", "beta"], ["release", "production"]])("publishes %s only after CI, parallel signing, and hosted success", (name, channel) => {
-    const text = workflow(name);
-    expect(text).toContain(`group: release-${channel}\n  cancel-in-progress: false`);
-    const hosted = job(text, "hosted");
-    expect(hosted).toContain(channel === "production" ? "needs: [approve, ci]" : "needs: ci"); expect(hosted).toContain("uses: ./.github/workflows/hosted-promotion.yml");
+    const text = workflow(name), mutations = publicationWorkflow(name), parsed = load(text) as any;
+    expect(channel === "alpha" ? parsed.jobs.publication.concurrency : parsed.concurrency).toEqual({ group: `release-${channel}`, "cancel-in-progress": false });
+    const hosted = job(mutations, "hosted");
+    expect(hosted).toContain(channel === "production" ? "needs: [approve, ci]" : channel === "alpha" ? "needs: entry" : "needs: ci"); expect(hosted).toContain("uses: ./.github/workflows/hosted-promotion.yml");
     expect(hosted).toContain("source_sha: ${{ github.sha }}");
     expect(hosted).not.toContain("needs: build");
-    const build = job(text, "build"), publish = job(text, "publish");
+    const build = job(text, "build"), publish = job(mutations, "publish");
     expect(build).toContain(`environment: ${channel}`);
     expect(build).toContain("contents: read");
-    expect(build).not.toMatch(channel === "production" ? /^    needs: (?!approve$)/m : /^    needs:/m);
+    expect(parsed.jobs.build.needs).toBe(channel === "production" ? "approve" : channel === "alpha" ? "metadata" : undefined);
     expect(build).toContain("if: github.event.repository.fork == false");
-    expect(publish).toContain(channel === "production" ? "needs: [approve, ci, build, hosted, notarize]" : "needs: [ci, build, hosted]");
+    expect(publish).toContain(channel === "production" ? "needs: [approve, ci, build, hosted, notarize]" : channel === "alpha" ? "needs: [entry, hosted]" : "needs: [ci, build, hosted]");
     expect(publish).toContain("contents: write");
     expect(publish).toContain("actions: read");
     expect(publish).toContain("ref: ${{ github.sha }}");
-    expect(publish).toContain("VERSION: ${{ needs.build.outputs.version }}");
+    expect(publish).toContain(channel === "alpha" ? "VERSION: ${{ steps.metadata.outputs.version }}" : "VERSION: ${{ needs.build.outputs.version }}");
     expect(publish).not.toContain("always()");
     expect(build).not.toContain("contents: write");
     expect(build.replace(/^\s*#.*$/gm, "")).not.toMatch(/(?:gh release|gh api|notarytool|scripts\/release\/(?:cli|publication-cli|release-ledger-cli)\.ts)/);
@@ -271,13 +273,13 @@ describe("release dependency and authority contracts", () => {
     expect(build).toContain("if-no-files-found: error");
     expect(build).toContain(".zip.blockmap");
     expect(build).not.toContain("release/notarization-submission-id.txt");
-    expect(job(workflow(name), "publish")).toContain("uses: actions/download-artifact@");
+    expect(job(publicationWorkflow(name), "publish")).toContain("uses: actions/download-artifact@");
   });
   it.each(["release-alpha", "release-beta", "release"])("binds %s publication to the cloud capability its build baked in", name => {
-    const text = workflow(name), build = job(text, "build"), publish = job(text, "publish");
+    const text = workflow(name), build = job(text, "build"), publish = job(publicationWorkflow(name), "publish");
     expect(build).toContain("cloud_enabled: ${{ steps.capability.outputs.cloud_enabled }}");
     expect(build).toContain("id: capability");
-    expect(publish).toContain("BUILD_CLOUD_ENABLED: ${{ needs.build.outputs.cloud_enabled }}");
+    expect(publish).toContain(name === "release-alpha" ? "BUILD_CLOUD_ENABLED: ${{ steps.metadata.outputs.cloud_enabled }}" : "BUILD_CLOUD_ENABLED: ${{ needs.build.outputs.cloud_enabled }}");
   });
   it("submits to Apple only after CI and signing, preserving a submission for cheap notarization retries", () => {
     const text = workflow("release"), submit = job(text, "submit"), notarize = job(text, "notarize");
@@ -407,7 +409,7 @@ esac
   });
   it("V6: revalidates publication in all desktop writers, including notarization-only retries", () => {
     for (const [name, publish] of [["release-alpha", 'Publish rolling "alpha" prerelease'], ["release-beta", 'Publish rolling "beta" prerelease'], ["release", "Publish GitHub release"]]) {
-      const text = job(workflow(name), "publish"), step = text.split(`- name: ${publish}`)[1]?.split(/\n {6}- name:/)[0] ?? "";
+      const text = job(publicationWorkflow(name), "publish"), step = text.split(`- name: ${publish}`)[1]?.split(/\n {6}- name:/)[0] ?? "";
       expect(step).toContain("pnpm exec tsx scripts/release/publication-cli.ts");
       expect(text).toContain("actions: read");
     }
@@ -416,7 +418,7 @@ esac
   });
   it("V6: advances rolling Git tag refs after their assets are published", () => {
     for (const name of ["release-alpha", "release-beta"]) {
-      const text = workflow(name);
+      const text = publicationWorkflow(name);
       expect(text).toContain('git/refs/tags/$TAG');
       expect(text.indexOf('git/refs/tags/$TAG')).toBeGreaterThan(text.indexOf('gh release upload "$TAG"'));
     }

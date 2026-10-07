@@ -19,9 +19,10 @@ export const greenJobs = [
   "ui-smoke (composer)",
   "secret scan (PR commit range)",
   "source-sync workload (macOS)",
-  "tests-vitest (1/2)",
-  "tests-vitest (2/2)",
-  ...[1, 2, 3, 4].map((part) => "control-plane database (" + part + ")"),
+  ...[1, 2, 3, 4].map((part) => "tests-vitest (" + part + "/4)"),
+  ...[1, 2, 3, 4, 5, 6, 7, 8].map(
+    (part) => "control-plane database (" + part + ")",
+  ),
 ].map((name, i) => ({
   id: 201 + i,
   name,

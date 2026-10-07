@@ -7,15 +7,11 @@ export async function runDesignPreviewSmoke({ page, check }) {
   await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`);
   await expect(page.locator("[data-design-inspector]")).toBeVisible();
   await page.evaluate(async () => {
-    // Reuse the harness's exact Vite module instances, including its cache key.
-    const dependency = async (file) => {
-      const url = performance.getEntriesByType("resource").find(entry => new URL(entry.name).pathname.endsWith(`/${file}.js`))?.name;
-      if (!url) throw new Error(`Harness dependency was not loaded: ${file}`);
-      return (await import(url)).default;
-    };
-    const React = await dependency("react");
-    const { createRoot } = await dependency("react-dom_client");
-    const { flushSync } = await dependency("react-dom");
+    // Resource timings are bounded browser metadata, not runtime ownership.
+    // Exercise the preview races even when no dependency entries are retained.
+    performance.clearResourceTimings();
+    // Reuse the module instances published before the harness mounts.
+    const { React, createRoot, flushSync } = window.__zerosDesignHarnessRuntime;
     const { DesignInspector } = await import("/apps/desktop/src/renderer/features/design-workspace/design-inspector.tsx");
     const { TooltipProvider } = await import("/apps/desktop/src/renderer/shared/ui/primitives/tooltip.tsx");
     const { getActiveBridge } = await import("/apps/desktop/src/renderer/platform/bridge/active-bridge.ts");
@@ -95,6 +91,7 @@ export async function runDesignPreviewSmoke({ page, check }) {
     };
     directory("directory-a"); render();
   });
+  check("preview races use the exact harness runtime after resource timings are cleared", true);
   const open = page.locator("[data-preview-race]").getByRole("button", { name: "Open preview", exact: true });
   const request = async () => {
     await open.click();
@@ -127,6 +124,15 @@ export async function runDesignPreviewSmoke({ page, check }) {
   await expect.poll(() => page.evaluate(() => window.__designPreviewRace.opened.length)).toBe(2);
   check("unmount cancels a pending preview and remount can open a new one", true);
 
+  await request();
+  await page.evaluate(async () => {
+    window.__designPreviewRace.visible(false);
+    await window.__designPreviewRace.resolve();
+  });
+  expect(await page.evaluate(() => window.__designPreviewRace.opened.length)).toBe(2);
+  await page.evaluate(() => window.__designPreviewRace.visible(true));
+  check("hiding Local retires a preview reply delivered in the same browser task", true);
+
   await page.evaluate(() => window.__designPreviewRace.cloud());
   await expect(open).toBeVisible();
   await request();
@@ -155,8 +161,10 @@ export async function runDesignPreviewSmoke({ page, check }) {
   expect(await page.evaluate(() => window.__designPreviewRace.browserIntents.length)).toBe(2);
   await page.evaluate(() => window.__designPreviewRace.role(true));
   await request();
-  await page.evaluate(() => window.__designPreviewRace.visible(false));
-  await page.evaluate(() => window.__designPreviewRace.resolve());
+  await page.evaluate(async () => {
+    window.__designPreviewRace.visible(false);
+    await window.__designPreviewRace.resolve();
+  });
   expect(await page.evaluate(() => window.__designPreviewRace.opened.length)).toBe(2);
   expect(await page.evaluate(() => window.__designPreviewRace.browserIntents.length)).toBe(2);
   check("cloud permission loss and hiding retire pending preview intents", true);

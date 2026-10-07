@@ -1,0 +1,302 @@
+name: Alpha publication
+
+# Called only by the authenticated push/main Alpha parent. The caller's one
+# release-alpha concurrency slot surrounds every job in this transaction.
+# GITHUB_RUN_ID/ATTEMPT/NUMBER, workflow_ref and artifact ownership stay with it.
+on:
+  workflow_call:
+    inputs:
+      alpha_prepared_version:
+        required: true
+        type: string
+      before_sha:
+        default: ""
+        type: string
+      alpha_ci_fast_path:
+        default: ""
+        type: string
+      alpha_forward_only:
+        default: ""
+        type: string
+permissions:
+  contents: read
+
+jobs:
+  entry:
+    name: Revalidate Alpha publication
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    env:
+      RELEASE_CHANNEL: alpha
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_BRANCH: ${{ github.ref_name }}
+      ALPHA_PREPARED_VERSION: ${{ inputs.alpha_prepared_version }}
+      ZEROS_ALPHA_CI_FAST_PATH: ${{ inputs.alpha_ci_fast_path }}
+      ZEROS_ALPHA_FORWARD_ONLY: ${{ inputs.alpha_forward_only }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Revalidate before the first destination mutation
+        run: pnpm exec tsx scripts/release/alpha-transaction-cli.ts
+
+  hosted:
+    name: Hosted promotion (alpha)
+    needs: entry
+    if: github.event.repository.fork == false
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/hosted-promotion.yml
+    with:
+      channel: alpha
+      source_sha: ${{ github.sha }}
+      branch: ${{ github.ref_name }}
+      alpha_prepared_version: ${{ inputs.alpha_prepared_version }}
+      before_sha: ${{ inputs.before_sha }}
+      alpha_ci_fast_path: ${{ inputs.alpha_ci_fast_path }}
+      alpha_forward_only: ${{ inputs.alpha_forward_only }}
+    secrets: inherit
+
+  publish:
+    name: Publish Alpha feed
+    needs: [entry, hosted]
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: alpha
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_CHANNEL: alpha
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_BRANCH: ${{ github.ref_name }}
+      ALPHA_PREPARED_VERSION: ${{ inputs.alpha_prepared_version }}
+      ZEROS_ALPHA_CI_FAST_PATH: ${{ inputs.alpha_ci_fast_path }}
+      ZEROS_ALPHA_FORWARD_ONLY: ${{ inputs.alpha_forward_only }}
+      ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
+      ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
+      ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
+      CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'daytona' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Wait for this run's signed Alpha build
+        id: producer
+        run: pnpm exec tsx scripts/release/alpha-build-cli.ts --wait desktop
+      - name: Download signed Alpha artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.producer.outputs.artifact_id }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: release
+      - name: Verify signed Alpha build metadata
+        id: metadata
+        run: pnpm exec tsx scripts/release/alpha-build-cli.ts --verify-metadata
+      - name: Publish rolling "alpha" prerelease
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.metadata.outputs.version }}
+          BUILD_CLOUD_ENABLED: ${{ steps.metadata.outputs.cloud_enabled }}
+        run: |
+          set -euo pipefail
+          pnpm exec tsx scripts/release/publication-cli.ts
+
+          # Assert the channel feed exists — if electron-builder ever stopped
+          # emitting alpha-mac.yml (e.g. channel detection changed), fail loudly
+          # rather than ship a build the alpha auto-updater can't find.
+          if [ ! -f release/alpha-mac.yml ]; then
+            echo "::error::release/alpha-mac.yml not found — electron-builder did not emit the alpha channel feed. Ensure the version is a -alpha prerelease."
+            exit 1
+          fi
+          DMG="release/Zeros-Alpha-${VERSION}-arm64.dmg"
+          ZIP="release/Zeros-Alpha-${VERSION}-arm64-mac.zip"
+          if [ ! -f "$DMG" ] || [ ! -f "$ZIP" ]; then
+            echo "::error::alpha .dmg/.zip not found in release/"
+            ls -la release || true
+            exit 1
+          fi
+          ZIP_BLOCKMAP="${ZIP}.blockmap"
+          if [ ! -f "$ZIP_BLOCKMAP" ]; then
+            echo "::error::alpha zip blockmap not found: $ZIP_BLOCKMAP"
+            ls -la release || true
+            exit 1
+          fi
+
+          # Constant-named copy of the .dmg → a PERMANENT download link that always
+          # serves the newest alpha. electron-updater ignores it (it reads only the
+          # versioned files listed in alpha-mac.yml); it exists purely so humans have
+          # one URL that never changes:
+          #   https://github.com/${GITHUB_REPOSITORY}/releases/download/alpha/Zeros-Alpha-latest-arm64.dmg
+          # The versioned path above binds this copy to the authenticated build.
+          LATEST_DMG="release/Zeros-Alpha-latest-arm64.dmg"
+          cp "$DMG" "$LATEST_DMG"
+
+          TAG="alpha"
+          RELEASE_VERSION="$VERSION" pnpm exec tsx scripts/release/release-ledger-cli.ts --build
+          TITLE="Zeros Alpha v${VERSION}"
+          # Keep the permanent link owner-agnostic. The quoted heredoc protects
+          # Markdown backticks from shell expansion; sed replaces only the
+          # repository placeholder with GitHub's trusted owner/name value.
+          NOTES=$(
+            sed "s|__GITHUB_REPOSITORY__|${GITHUB_REPOSITORY}|g" <<'EOF'
+          Rolling **alpha** — auto-built from `main`. Signed but not notarized.
+
+          **⬇︎ Always-newest .dmg (permanent link):**
+          https://github.com/__GITHUB_REPOSITORY__/releases/download/alpha/Zeros-Alpha-latest-arm64.dmg
+
+          **First install:** right-click **Zeros Alpha.app** → Open (or System
+          Settings ▸ Privacy & Security ▸ Open Anyway). One time only — every
+          update after that applies in place silently via the auto-updater.
+
+          Alpha is a separate app from production: own data, own auto-update feed.
+          EOF
+          )
+
+          # ONE rolling prerelease at tag "alpha": move the tag to this commit and
+          # clobber the assets each push. NOT marked --latest, so the prod
+          # auto-updater (latest-mac.yml) never sees alpha builds. Alongside the
+          # versioned .dmg/.zip/blockmap we (re)upload the constant "latest" .dmg
+          # (permanent link) and alpha-mac.yml feed; a later step prunes to newest 3.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --prerelease --title "$TITLE" --notes "$NOTES" --target "$GITHUB_SHA"
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+              "$DMG" "$ZIP" "$ZIP_BLOCKMAP" "$LATEST_DMG" "release/alpha-mac.yml" "release/alpha-release-ledger.json"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --prerelease --title "$TITLE" --notes "$NOTES" --target "$GITHUB_SHA" \
+              "$DMG" "$ZIP" "$ZIP_BLOCKMAP" "$LATEST_DMG" "release/alpha-mac.yml" "release/alpha-release-ledger.json"
+          fi
+          # Updating a release's target_commitish does not move an existing tag.
+          # Advance the schema/worker baseline only after publishing the assets.
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
+            -f sha="$GITHUB_SHA" -F force=true --silent
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)" = "$GITHUB_SHA"
+          pnpm exec tsx scripts/release/release-ledger-cli.ts --verify
+          echo "✓ published $TITLE → release '$TAG' (prerelease, alpha-mac.yml feed)"
+
+      - name: Prune old alpha assets (keep newest 3)
+        # Best-effort retention — NEVER fail a shipped release over cleanup. Each
+        # alpha's versioned .dmg/.zip/.blockmap carries a monotonic
+        # "-alpha.<N>-arm64" token; we keep the 3 highest N and delete the rest.
+        # The constant "latest" .dmg and alpha-mac.yml have no such token, so they
+        # are always kept.
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          TAG="alpha"
+          KEEP=3
+
+          NAMES=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+
+          # Newest KEEP distinct alpha run-numbers (assets are "...-alpha.<N>-arm64...").
+          # awk (not head) takes the top KEEP so sort never gets SIGPIPE under pipefail.
+          KEEP_NUMS=$(printf '%s\n' "$NAMES" \
+            | sed -n 's/.*-alpha\.\([0-9][0-9]*\)-arm64.*/\1/p' \
+            | sort -rnu | awk -v k="$KEEP" 'NR<=k')
+
+          # Guard: if nothing parsed (naming scheme drifted), delete NOTHING.
+          if [ -z "$KEEP_NUMS" ]; then
+            echo "No versioned alpha assets parsed — nothing to prune."
+            exit 0
+          fi
+          printf 'Keeping newest %s alpha(s):' "$KEEP"
+          while IFS= read -r NUMBER; do
+            [ -n "$NUMBER" ] || continue
+            printf ' %s' "$NUMBER"
+          done <<< "$KEEP_NUMS"
+          printf '\n'
+
+          printf '%s\n' "$NAMES" | while IFS= read -r ASSET; do
+            [ -n "$ASSET" ] || continue
+            N=$(printf '%s\n' "$ASSET" | sed -n 's/.*-alpha\.\([0-9][0-9]*\)-arm64.*/\1/p')
+            [ -n "$N" ] || continue                        # keep alpha-mac.yml + "latest" .dmg
+            if ! printf '%s\n' "$KEEP_NUMS" | grep -qx "$N"; then
+              echo "Pruning $ASSET (alpha.$N)"
+              gh release delete-asset "$TAG" "$ASSET" --repo "$GITHUB_REPOSITORY" --yes || true
+            fi
+          done
+  runtime-publish:
+    name: Publish Alpha runtime bundle
+    needs: [entry, hosted]
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-24.04
+    environment: alpha
+    timeout-minutes: 60
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    env:
+      RELEASE_CHANNEL: alpha
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_BRANCH: ${{ github.ref_name }}
+      ALPHA_PREPARED_VERSION: ${{ inputs.alpha_prepared_version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Wait for this run's Linux runtime build
+        id: producer
+        run: pnpm exec tsx scripts/release/alpha-build-cli.ts --wait runtime
+      - name: Download this run's runtime bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.producer.outputs.artifact_id }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/cloud-runtime-bundle
+      - name: Publish using GitHub Actions OIDC
+        env:
+          RELEASE_CHANNEL: alpha
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_BRANCH: ${{ github.ref_name }}
+          ZEROS_ALPHA_CI_FAST_PATH: ${{ inputs.alpha_ci_fast_path }}
+          ZEROS_ALPHA_FORWARD_ONLY: ${{ inputs.alpha_forward_only }}
+          GH_TOKEN: ${{ github.token }}
+          CLOUD_WORKSPACE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL }}
+          CLOUD_RUNTIME_OIDC_AUDIENCE: ${{ vars.CLOUD_RUNTIME_OIDC_AUDIENCE || 'zeros-control-plane-alpha' }}
+        run: |
+          set -euo pipefail
+          pnpm exec tsx scripts/release/alpha-build-cli.ts --verify-producer runtime
+          pnpm exec tsx scripts/release/ci-cli.ts --verify
+          pnpm exec tsx scripts/cloud-workspace-validation/runtime-bundle/publish.ts --out-dir "$RUNNER_TEMP/cloud-runtime-bundle"

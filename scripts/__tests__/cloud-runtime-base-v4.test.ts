@@ -11,7 +11,11 @@ import { cleanupLiveObjects, installOverSsh, presignGet, probePersistence, probe
 
 const scratch: string[] = [];
 const temp = () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-base-v4-")); scratch.push(dir); return dir; };
-afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); for (const dir of scratch.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => {
+  vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs();
+  // Temporary repositories can retain entries briefly during filesystem cleanup.
+  for (const dir of scratch.splice(0)) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const BASE = path.join(ROOT, "scripts/cloud-workspace-validation/runtime-base-v4");
 const compatibilityBytes = fs.readFileSync(path.join(BASE, "compatibility.json"));
@@ -41,7 +45,8 @@ function fullKit(failColdBoot = false) {
   for (const directory of ["runtime-base-v4", "boat-image/templates"]) {
     fs.cpSync(path.join(ROOT, relative, directory), path.join(root, relative, directory), { recursive: true, filter: source => !source.includes("__pycache__") });
   }
-  const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", ...args], { cwd: root, encoding: "utf8" }).trim();
+  // Fixture commits must not leave detached maintenance writing into their checkout.
+  const git = (...args: string[]) => execFileSync("git", ["-c", "maintenance.auto=false", "-c", "gc.auto=0", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", ...args], { cwd: root, encoding: "utf8" }).trim();
   git("init", "-q"); git("add", "."); git("commit", "-qm", "fixture");
   const commit = git("rev-parse", "HEAD");
   d.repoRoot = root;

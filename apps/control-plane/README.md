@@ -216,10 +216,11 @@ recreates and migrates the `public` schema once per run. Between tests,
 replays the ladder only after a test changed the schema, a privilege or a
 trigger. `src/migrations.test.ts` still replays the ladder itself.
 
-CI skips the database suites when none of their inputs changed
-(`scripts/ci/control-plane-scope.mjs`). Otherwise it splits them across four
+Path-selected PR CI can skip the database suites when none of their inputs
+changed (`scripts/ci/control-plane-scope.mjs`). Selected suites run across eight
 PostgreSQL services with Vitest `--shard`, and the required `control plane`
-check rejects any skipped database-backed test.
+check rejects any skipped database-backed test. Independent Full CI runs all
+eight shards on every PR, and Preflight runs all eight on every main push.
 
 ### Clean authentication cutover reset
 

@@ -14,6 +14,28 @@ export const AlphaAdmissionReceipt = z.object({ version: z.literal(1), channel: 
 }).strict();
 export const alphaAdmissionArtifact = (sourceSha: string) => `alpha-admission-${sourceSha}`;
 
+/** Preparation completion and lock acquisition are unordered. The parent
+ * workflow's immutable counter owns every Alpha version, so reject an older
+ * order before provider mutation even when it has the same source SHA. Stable
+ * tag snapshots can also invert across candidates: fence the immutable full
+ * prepared version with the same semantic policy used by final publication. */
+export function assertAlphaReleaseOrder(sourceSha: string, runNumber: number, previous: unknown | null, preparedVersion: string | undefined) {
+  requireCheck(SHA.test(sourceSha) && Number.isSafeInteger(runNumber) && runNumber > 0, "Alpha publication order is invalid");
+  requireCheck(typeof preparedVersion === "string" && preparedVersion.endsWith(`-alpha.${runNumber}`), "Alpha prepared version does not belong to its immutable parent order");
+  const candidate = { version: preparedVersion, sourceSha, publishedAt: new Date().toISOString() };
+  if (previous === null) { buildReleaseLedger("alpha", null, candidate); return; } // Existing unflagged legacy bootstrap.
+  const parsed = ReleaseLedger.safeParse(previous);
+  requireCheck(parsed.success && parsed.data.channel === "alpha" && parsed.data.releases.length > 0, "Alpha publication ledger is invalid");
+  const latest = parsed.data.releases.at(-1)!;
+  buildReleaseLedger("alpha", parsed.data, latest);
+  for (const release of parsed.data.releases) {
+    const prior = BigInt(release.version.split("-alpha.")[1]);
+    requireCheck(BigInt(runNumber) > prior || BigInt(runNumber) === prior && release.sourceSha === sourceSha && release.version === preparedVersion,
+      "Alpha publication order would regress or replace another source; no provider mutation is authorized");
+  }
+  buildReleaseLedger("alpha", parsed.data, candidate);
+}
+
 /** Compare immutable Git identities, never run IDs, timestamps or tree equality.
  * Unknown responses and request failures are errors, not benign supersession. */
 export async function alphaAncestor(base: string, head: string, read: Read): Promise<boolean> {
@@ -129,4 +151,5 @@ export async function assertAlphaDestinations(candidate: { repository: string; s
   // must still be <= X and at least one must identify this admitted X.
   requireDestination(tag === entry.sourceSha || env.GITHUB_JOB !== "ci" && (tag === candidate.sourceSha || entry.sourceSha === candidate.sourceSha),
     "Alpha rolling tag and release ledger disagree; reconcile publication before admission");
+  return parsed.data;
 }

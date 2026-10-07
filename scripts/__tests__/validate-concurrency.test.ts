@@ -50,7 +50,7 @@ function fixture(files: Record<string, string>) {
 }
 
 describe("queued concurrency policy", () => {
-  it("accepts max only on the canary job; coalesced Preflight jobs have no queue", () => {
+  it("accepts max only on the canary job; independent Preflight jobs have no queue", () => {
     const queued = (job: string) =>
       load(`jobs:\n  ${job}:\n    concurrency: { group: lane, queue: max }`);
     expect(validateQueuedConcurrency(queued("queue-canary"), CANARY)).toEqual(

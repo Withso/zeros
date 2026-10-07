@@ -9,7 +9,7 @@ name: Workflow Checks
 # This job is a required ruleset context, so the pull_request trigger must stay
 # unfiltered. A path-filtered required workflow leaves unrelated PRs permanently
 # at "Expected — Waiting for status to be reported" because no check run exists.
-# The repository is small enough to lint every workflow on every PR.
+# Lint every workflow on every PR, main push and merge-queue commit.
 
 on:
   pull_request:
@@ -17,7 +17,6 @@ on:
   merge_group:
   push:
     branches: [main]
-    paths: [".github/workflows/**"]
 
 permissions:
   contents: read

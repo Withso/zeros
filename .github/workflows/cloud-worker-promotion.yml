@@ -49,6 +49,10 @@ on:
         description: Forward-only freshness only for an authenticated automatic Alpha parent
         default: ''
         type: string
+      alpha_prepared_version:
+        description: Immutable full version from the authenticated automatic Alpha parent
+        default: ''
+        type: string
       execute:
         default: false
         type: boolean
@@ -112,6 +116,7 @@ jobs:
       RELEASE_BASE: ${{ inputs.before_sha || '' }}
       ZEROS_ALPHA_CI_FAST_PATH: ${{ inputs.alpha_ci_fast_path }}
       ZEROS_ALPHA_FORWARD_ONLY: ${{ inputs.alpha_forward_only }}
+      ALPHA_PREPARED_VERSION: ${{ inputs.alpha_prepared_version }}
       ZEROS_WORKER_PROMOTION: ${{ vars.ZEROS_WORKER_PROMOTION }}
       WORKER_EXECUTE: ${{ inputs.execute }}
       WORKER_RECONCILE_STORAGE: ${{ inputs.reconcile_storage }}

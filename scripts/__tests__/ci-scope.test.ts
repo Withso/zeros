@@ -77,6 +77,19 @@ const jobs = (
   }).jobs;
 
 describe("CI scope job mapping", () => {
+  it("registers all eight database partitions without changing job selection", () => {
+    const database = POLICY.checks["control-plane-database"];
+    expect(database.execution_group).toBe("control-plane-database-matrix-8");
+    expect(database.commands).toEqual([
+      "pnpm --dir apps/control-plane exec vitest run --shard=<i>/8 --reporter=json --outputFile.json=<report>",
+    ]);
+    expect(database.when).toEqual({
+      always: false,
+      full: true,
+      any_lanes: ["control-plane-db"],
+    });
+  });
+
   it("maps the current workload groups to the checks they execute", () => {
     expect(Object.keys(POLICY.jobs ?? {}).sort()).toEqual(jobIds);
     expect(POLICY.jobs?.quality).toEqual([

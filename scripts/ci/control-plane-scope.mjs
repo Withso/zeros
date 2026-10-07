@@ -111,7 +111,10 @@ export function changedFilesSince(base, { cwd } = {}) {
   }
 }
 
-export function decideControlPlaneScope({ base, changedFiles, eventName, ref }) {
+export function decideControlPlaneScope({ base, changedFiles, eventName, ref, fullDatabase = false }) {
+  if (fullDatabase) {
+    return { database: true, reason: "Full CI always runs every database shard." };
+  }
   if (eventName === "push" && ref === "refs/heads/main") {
     return {
       database: true,
@@ -146,12 +149,17 @@ export function decideControlPlaneScope({ base, changedFiles, eventName, ref }) 
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const fullDatabase = process.env.CI_FULL_DATABASE ?? "false";
+  if (!["true", "false", ""].includes(fullDatabase)) {
+    throw new Error("CI_FULL_DATABASE must be true or false");
+  }
   const base = comparisonBase(process.env);
   const decision = decideControlPlaneScope({
     base,
     changedFiles: base ? changedFilesSince(base) : null,
     eventName: process.env.EVENT_NAME,
     ref: process.env.GITHUB_REF,
+    fullDatabase: fullDatabase === "true",
   });
   process.stdout.write(`database=${decision.database}\n`);
   console.error(decision.reason);

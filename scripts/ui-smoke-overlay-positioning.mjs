@@ -215,9 +215,15 @@ export async function runOverlayPositioningSmoke({ page, check, harnessBase }) {
         page.getByRole("menuitem", { name: "Context submenu", exact: true }),
       ).toBeFocused();
       await page.keyboard.press("ArrowRight");
+      const submenu = page.getByTestId("context-submenu");
       await expect(
-        page.getByTestId("context-submenu").getByRole("menuitem"),
+        submenu.getByRole("menuitem"),
       ).toBeFocused();
+      // The item can receive focus before Radix's opening focus handler settles.
+      // Finish the entry transition before testing focus on the way back out.
+      await submenu.evaluate((node) => Promise.all(
+        node.getAnimations().map((animation) => animation.finished),
+      ));
       await page.keyboard.press("ArrowLeft");
       await expect(
         page.getByRole("menuitem", { name: "Context submenu", exact: true }),

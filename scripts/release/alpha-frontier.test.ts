@@ -1,9 +1,41 @@
 import { describe, expect, it, vi } from "vitest";
-import { alphaAncestor, alphaAncestry } from "./alpha-frontier";
+import { alphaAncestor, alphaAncestry, assertAlphaReleaseOrder } from "./alpha-frontier";
 import { PromotionError } from "./contracts";
 import { jsonClient } from "./io";
 
 const base = "a".repeat(40), head = "b".repeat(40);
+describe("Alpha publication counter fencing", () => {
+  const fence = (sourceSha: string, runNumber: number, previous: unknown, version = `0.1.20-alpha.${runNumber}`) =>
+    assertAlphaReleaseOrder(sourceSha, runNumber, previous, version);
+  const ledger = (order: number, sourceSha = base) => ({ version: 1, channel: "alpha", releases: [
+    { version: `0.1.20-alpha.${order}`, sourceSha, publishedAt: "2026-10-01T00:00:00.000Z" },
+  ] });
+  it("allows a later parent order and the latest same-source retry, while blocking an older order", () => {
+    expect(() => fence(head, 151, ledger(150))).not.toThrow();
+    expect(() => fence(base, 150, ledger(150))).not.toThrow();
+    expect(() => fence(head, 150, ledger(150))).toThrow(/order/);
+    expect(() => fence(base, 149, ledger(150))).toThrow(/order/);
+  });
+  it("rejects the full stable-base inversion before provider writes even when the parent counter increases", () => {
+    const previous = ledger(401); previous.releases[0].version = "1.0.1-alpha.401";
+    expect(() => fence(head, 402, previous, "1.0.0-alpha.402")).toThrow(/monotonically/);
+    expect(() => fence(head, 402, previous, "1.0.1-alpha.402")).not.toThrow();
+    expect(() => fence(base, 401, previous, "1.0.1-alpha.401")).not.toThrow();
+    expect(() => fence(base, 401, previous, "1.0.2-alpha.401")).toThrow(/order/);
+    expect(() => fence(head, 402, previous, "1.0.2-alpha.403")).toThrow(/version/);
+  });
+  it("validates all retained counters, independently of a manually advanced stable version base", () => {
+    const previous = { ...ledger(150), releases: [...ledger(151).releases, { ...ledger(149).releases[0], version: "0.2.0-alpha.149" }] };
+    expect(() => fence(base, 150, previous)).toThrow(/order|monotonically/);
+  });
+  it("retains legacy null-ledger bootstrap but refuses malformed, duplicate and wrong-channel history", () => {
+    expect(() => fence(head, 151, null)).not.toThrow();
+    for (const invalid of [{ ...ledger(150), channel: "beta" }, { ...ledger(150), releases: [] },
+      { ...ledger(150), releases: [...ledger(150).releases, ...ledger(150).releases] },
+      { ...ledger(150), releases: [{ ...ledger(150).releases[0], version: "0.1.20-alpha.invalid" }] }])
+      expect(() => fence(head, 151, invalid)).toThrow();
+  });
+});
 describe("Alpha GitHub ancestry comparison", () => {
   it.each(["identical", "ahead", "behind", "diverged"])("handles %s without inferring ancestry from timestamps", async status => {
     const target = status === "identical" ? base : head;

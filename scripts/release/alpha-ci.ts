@@ -45,7 +45,7 @@ function newestRun(candidate: Candidate, file: string, name: string, value: unkn
     .sort((left, right) => right.id - left.id || right.run_attempt - left.run_attempt)[0];
 }
 
-async function jobPages(read: Read, route: string) {
+export async function jobPages(read: Read, route: string) {
   const jobs: any[] = [];
   let total: number | undefined;
   for (let page = 1; page <= 10; page++) {
@@ -94,8 +94,8 @@ export async function alphaRequiredChecks(candidate: Candidate, read: Read): Pro
       await read(`/actions/workflows/${check.file}/runs?head_sha=${candidate.sourceSha}&event=push&per_page=100`));
     const evidence = { workflow: check.name, runId: run?.id ?? 0, attempt: run?.run_attempt ?? 0, succeeded: false };
     if (!run) return evidence;
-    // Main Preflight coalesces pushes: a newer push replaces a pending run, so
-    // its gate never reports. A failed gate or a completed attempt without a
+    // Historical coalesced Preflight runs may have been replaced while pending,
+    // so their gates never reported. A failed gate or a completed attempt without a
     // green gate also cannot succeed without a rerun. Once main has moved on,
     // supersede such a candidate instead of waiting out the barrier; only the
     // unmutated initial barrier turns that into a green skip.
@@ -132,7 +132,7 @@ export async function alphaRequiredChecks(candidate: Candidate, read: Read): Pro
 export async function alphaBarrierUnmutated(candidate: Candidate, env: NodeJS.ProcessEnv, read: Read) {
   if (env.GITHUB_JOB !== "ci" || !await automaticAlpha(candidate, env, read)) return false;
   const jobs = await jobPages(read, `/actions/runs/${env.GITHUB_RUN_ID}/jobs?filter=all`);
-  const readOnly = new Set(["Exact-source Preflight and CodeQL barrier", "Build Linux runtime bundle",
+  const readOnly = new Set(["Exact-source Preflight and CodeQL barrier", "Prepare Alpha version", "Build Linux runtime bundle",
     "Build + sign Alpha (macOS arm64 · NOT notarized)"]);
   requireCheck(jobs.length > 0 && jobs.every(job => job && job.run_id === Number(env.GITHUB_RUN_ID) && job.head_sha === candidate.sourceSha &&
     job.head_branch === "main" && typeof job.name === "string"), "Alpha parent mutation evidence is unavailable");

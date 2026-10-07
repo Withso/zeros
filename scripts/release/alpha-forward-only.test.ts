@@ -9,10 +9,13 @@ import { githubClient } from "./github";
 const ancestor = "a".repeat(40), sourceSha = "b".repeat(40), descendant = "c".repeat(40), divergent = "d".repeat(40);
 const candidate = { repository: "example/zeros", sourceSha, branch: "main" };
 const parent = { id: 300, run_attempt: 1, name: "Release (alpha)", path: ".github/workflows/release-alpha.yml",
+  run_number: 150,
   head_sha: sourceSha, head_branch: "main", event: "push", status: "in_progress", conclusion: null,
   repository: { full_name: candidate.repository }, head_repository: { full_name: candidate.repository } };
-const env: NodeJS.ProcessEnv = { RELEASE_CHANNEL: "alpha", RELEASE_SHA: sourceSha, GITHUB_SHA: sourceSha,
+const env: NodeJS.ProcessEnv = { RELEASE_CHANNEL: "alpha", RELEASE_SHA: sourceSha, RELEASE_BRANCH: "main", GITHUB_SHA: sourceSha,
   GITHUB_REPOSITORY: candidate.repository, GITHUB_RUN_ID: "300", GITHUB_RUN_ATTEMPT: "1", GITHUB_JOB: "services",
+  GITHUB_RUN_NUMBER: "150",
+  ALPHA_PREPARED_VERSION: "0.1.0-alpha.150",
   GITHUB_WORKFLOW_REF: `${candidate.repository}/.github/workflows/release-alpha.yml@refs/heads/main`,
   ZEROS_ALPHA_CI_FAST_PATH: "enabled", ZEROS_ALPHA_FORWARD_ONLY: "admitted" };
 
@@ -20,7 +23,7 @@ function fixture(overrides: NodeJS.ProcessEnv = {}, source: Partial<typeof candi
   const state = {
     head: sourceSha as string, api: ancestor as string, app: ancestor as string, ops: ancestor as string,
     tag: ancestor as string, ledger: ancestor as string, worker: null as any,
-    identityStatus: 200, unready: false, maintenance: false, schemaAhead: false, compareError: false,
+    identityStatus: 200, unready: false, maintenance: false, schemaAhead: false, compareError: false, fullCI: false,
     identityChannel: "alpha", migrationState: "current", cloudState: undefined as string | undefined,
     comparison: undefined as any, ledgerStatus: 200, tagType: "commit", parent: { ...parent },
     unreadable: "", ledgerValue: undefined as any, cloudEnabled: undefined as boolean | undefined,
@@ -78,7 +81,7 @@ function fixture(overrides: NodeJS.ProcessEnv = {}, source: Partial<typeof candi
       const isPreflight = workflow[1] === "preflight";
       return Response.json({ total_count: 1, workflow_runs: [{ ...parent, id: isPreflight ? 100 : 101,
         name: isPreflight ? "Preflight" : "CodeQL", path: `.github/workflows/${workflow[1]}.yml`,
-        status: isPreflight ? "in_progress" : "completed", conclusion: isPreflight ? null : "success" }] });
+        status: isPreflight && !state.fullCI ? "in_progress" : "completed", conclusion: isPreflight && !state.fullCI ? null : "success" }] });
     }
     if (route === "/actions/runs/100/attempts/1/jobs") return Response.json({ total_count: 1, jobs: [
       { run_id: 100, run_attempt: 1, head_sha: sourceSha, head_branch: "main", name: "alpha-gate", status: "completed", conclusion: "success" },
@@ -93,6 +96,125 @@ function fixture(overrides: NodeJS.ProcessEnv = {}, source: Partial<typeof candi
   });
   return { state, requests, command, fetcher, client: githubClient({ ...candidate, ...source }, { ...env, ...overrides }, { fetch: fetcher, command }) };
 }
+
+describe("Alpha publication transaction entry", () => {
+  it.each(["admitted", "enabled", undefined, "disabled", "invalid"])("fences the prepared full version before entry or downstream writes with flag %s", async flag => {
+    for (const job of ["entry", "guard", "services", "worker", "promote", "publish", "runtime-publish"]) {
+      const test = fixture({ GITHUB_JOB: job, GITHUB_RUN_NUMBER: "402", ALPHA_PREPARED_VERSION: "1.0.0-alpha.402", ZEROS_ALPHA_FORWARD_ONLY: flag });
+      test.state.parent.run_number = 402;
+      test.state.ledgerValue = { version: 1, channel: "alpha", releases: [
+        { version: "1.0.1-alpha.401", sourceSha: ancestor, publishedAt: "2026-10-01T00:00:00.000Z" },
+      ] };
+      const providers = vi.fn();
+      await expect((async () => {
+        if (job === "entry") await test.client.assertAlphaTransaction();
+        else await test.client.assertCurrent();
+        providers();
+      })()).rejects.toThrow(/monotonically/);
+      expect(providers).not.toHaveBeenCalled();
+    }
+  });
+  it.each(["admitted", "enabled", undefined, "disabled", "invalid"])("refuses changed automatic parent authority before downstream CI or mutation with flag %s", async flag => {
+    for (const boundary of ["attempt", "cancelled"]) {
+      const test = fixture({ GITHUB_JOB: "entry", GITHUB_RUN_ATTEMPT: "2", ZEROS_ALPHA_FORWARD_ONLY: flag });
+      test.state.parent.run_attempt = 2; test.state.fullCI = true;
+      await expect(test.client.assertAlphaTransaction()).resolves.toBeUndefined();
+      if (boundary === "attempt") test.state.parent.run_attempt = 3;
+      else { test.state.parent.status = "completed"; test.state.parent.conclusion = "cancelled" as any; }
+      const retry = githubClient(candidate, { ...env, GITHUB_JOB: "services", GITHUB_RUN_ATTEMPT: "2", ZEROS_ALPHA_FORWARD_ONLY: flag },
+        { fetch: test.fetcher, command: test.command });
+      await expect(retry.assertRequiredChecks()).rejects.toThrow(/parent/);
+      await expect(retry.assertCurrent()).rejects.toThrow(/parent/);
+      const providers = vi.fn();
+      await expect((async () => { await retry.assertRequiredChecks(); await retry.assertCurrent(); providers(); })()).rejects.toThrow(/parent/);
+      expect(providers).not.toHaveBeenCalled();
+    }
+  });
+  it("refuses missing prepared version authority before any provider callback", async () => {
+    const test = fixture({ GITHUB_JOB: "entry", ALPHA_PREPARED_VERSION: undefined });
+    const providers = vi.fn();
+    await expect((async () => { await test.client.assertAlphaTransaction(); providers(); })()).rejects.toThrow(/version/);
+    expect(providers).not.toHaveBeenCalled();
+  });
+  it.each([undefined, "disabled", "invalid"])("refuses a carried downstream entry after publication order advances with flag %s", async flag => {
+    for (const job of ["guard", "services", "worker", "promote", "publish", "runtime-publish"]) {
+      const test = fixture({ GITHUB_JOB: "entry", ZEROS_ALPHA_FORWARD_ONLY: flag });
+      test.state.ledgerValue = { version: 1, channel: "alpha", releases: [
+        { version: "0.1.0-alpha.149", sourceSha, publishedAt: "2026-10-01T00:00:00.000Z" },
+      ] };
+      await expect(test.client.assertAlphaTransaction()).resolves.toBeUndefined();
+      test.state.parent.run_attempt = 2;
+      test.state.ledgerValue.releases[0].version = "0.1.0-alpha.151";
+      const retry = githubClient(candidate, { ...env, GITHUB_JOB: job, GITHUB_RUN_ATTEMPT: "2", ZEROS_ALPHA_FORWARD_ONLY: flag },
+        { fetch: test.fetcher, command: test.command });
+      const providers = vi.fn();
+      await expect((async () => { await retry.assertCurrent(); providers(); })()).rejects.toThrow(/order/);
+      expect(providers).not.toHaveBeenCalled();
+    }
+  });
+  it.each([undefined, "disabled", "invalid"])("authenticates off-mode downstream parent and allows only a current latest-order retry with flag %s", async flag => {
+    const test = fixture({ GITHUB_JOB: "services", GITHUB_RUN_ATTEMPT: "2", ZEROS_ALPHA_FORWARD_ONLY: flag });
+    test.state.parent.run_attempt = 2; test.state.artifactPresent = false;
+    test.state.ledgerValue = { version: 1, channel: "alpha", releases: [
+      { version: "0.1.0-alpha.150", sourceSha, publishedAt: "2026-10-01T00:00:00.000Z" },
+    ] };
+    await expect(test.client.assertCurrent()).resolves.toBeUndefined();
+    expect(test.requests.some(route => route.includes("/artifacts"))).toBe(false);
+    test.state.parent.run_attempt = 3;
+    await expect(test.client.assertCurrent()).rejects.toThrow(/parent/);
+    test.state.parent.run_attempt = 2; test.state.head = descendant;
+    await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(CandidateSupersededError);
+  });
+  it("preserves direct callers' strict main policy without requiring an automatic parent or order", async () => {
+    const test = fixture({ GITHUB_JOB: "cutover", ZEROS_ALPHA_FORWARD_ONLY: "disabled",
+      GITHUB_WORKFLOW_REF: `${candidate.repository}/.github/workflows/controlled-cutover.yml@refs/heads/main` });
+    test.state.ledgerStatus = 503; test.state.parent.run_attempt = 3;
+    await expect(test.client.assertCurrent()).resolves.toBeUndefined();
+    expect(test.requests).toEqual(["https://api.github.com/commits/main"]);
+  });
+  it.each(["guard", "services", "worker", "promote", "publish", "runtime-publish"])(
+    "revalidates admitted-mode destinations at a carried %s checkpoint after another candidate publishes", async job => {
+      const test = fixture({ GITHUB_JOB: job, GITHUB_RUN_ATTEMPT: "2" }); test.state.parent.run_attempt = 2;
+      test.state.head = descendant; test.state.api = descendant;
+      const providers = vi.fn();
+      await expect((async () => { await test.client.assertCurrent(); providers(); })()).rejects.toBeInstanceOf(PromotionError);
+      expect(providers).not.toHaveBeenCalled();
+    });
+  it.each(["admitted", "enabled"])("revalidates all destinations after taking the lock in %s mode", async mode => {
+    const test = fixture({ GITHUB_JOB: "entry", ZEROS_ALPHA_FORWARD_ONLY: mode }); test.state.head = descendant;
+    await expect(test.client.assertAlphaTransaction()).resolves.toBeUndefined();
+    test.state.ops = descendant;
+    const providers = vi.fn();
+    await expect((async () => { await test.client.assertAlphaTransaction(); providers(); })()).rejects.toBeInstanceOf(PromotionError);
+    expect(providers).not.toHaveBeenCalled();
+    expect(test.requests.filter(route => route === "https://ops-alpha.zeros.build/zeros-deployment.json").length).toBeGreaterThanOrEqual(2);
+  });
+  it("refuses an older run's publication order before providers even when sources are equal", async () => {
+    const test = fixture({ GITHUB_JOB: "entry" });
+    test.state.ledgerValue = { version: 1, channel: "alpha", releases: [{ version: "0.1.0-alpha.151", sourceSha, publishedAt: "2026-10-01T00:00:00.000Z" }] };
+    test.state.tag = sourceSha;
+    const providers = vi.fn();
+    await expect((async () => { await test.client.assertAlphaTransaction(); providers(); })()).rejects.toThrow(/order/);
+    expect(providers).not.toHaveBeenCalled();
+  });
+  it("allows an idempotent latest-source/order retry with authenticated carried admission", async () => {
+    const test = fixture({ GITHUB_JOB: "entry", GITHUB_RUN_ATTEMPT: "2" }); test.state.parent.run_attempt = 2;
+    test.state.ledgerValue = { version: 1, channel: "alpha", releases: [{ version: "0.1.0-alpha.150", sourceSha, publishedAt: "2026-10-01T00:00:00.000Z" }] };
+    test.state.tag = sourceSha;
+    await expect(test.client.assertAlphaTransaction()).resolves.toBeUndefined();
+  });
+  it("keeps off-mode entry strict and refuses any untrusted parent", async () => {
+    const test = fixture({ GITHUB_JOB: "entry", ZEROS_ALPHA_FORWARD_ONLY: "disabled" }); test.state.head = descendant;
+    await expect(test.client.assertAlphaTransaction()).rejects.toBeInstanceOf(CandidateSupersededError);
+    test.state.head = sourceSha; test.state.parent.path = ".github/workflows/controlled-cutover.yml";
+    await expect(test.client.assertAlphaTransaction()).rejects.toThrow(/parent/);
+  });
+  it("requires the in-lock entry identity and never acquires the original ci green-skip authority", async () => {
+    await expect(fixture({ GITHUB_JOB: "ci" }).client.assertAlphaTransaction()).rejects.toThrow(/entry/);
+    const test = fixture({ GITHUB_JOB: "entry" }); test.state.artifactPresent = false;
+    await expect(test.client.assertAlphaTransaction()).rejects.toThrow(/admission/);
+  });
+});
 
 describe("automatic Alpha admitted freshness", () => {
   it.each(["admitted", "enabled"])("continues an admitted candidate as main advances with %s", async flag => {
@@ -354,7 +476,7 @@ describe("forward-only channel and operation invariance", () => {
   it.each([undefined, "", "disabled", "observe", "true", "ENABLED", "other"])("keeps flag %s strict", async flag => {
     const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: flag }); test.state.head = descendant;
     await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(CandidateSupersededError);
-    expect(test.requests).toEqual(["https://api.github.com/commits/main"]);
+    expect(test.requests).toEqual(["https://api.github.com/actions/runs/300", "https://api.github.com/commits/main"]);
   });
 
   it.each(["beta", "production"])("keeps %s strict with both Alpha flags enabled", async channel => {
@@ -367,13 +489,16 @@ describe("forward-only channel and operation invariance", () => {
   it("does not select fast CI merely because forward-only freshness is enabled", async () => {
     const test = fixture({ ZEROS_ALPHA_CI_FAST_PATH: "", ZEROS_ALPHA_FORWARD_ONLY: "enabled" });
     await expect(test.client.assertRequiredChecks()).rejects.toThrow();
-    expect(test.requests).toHaveLength(2);
-    expect(test.requests.every(route => route.includes("/actions/workflows/") && !route.includes("event=push"))).toBe(true);
+    const workflows = test.requests.filter(route => route.includes("/actions/workflows/"));
+    expect(workflows).toHaveLength(2);
+    expect(workflows.every(route => !route.includes("event=push"))).toBe(true);
+    expect(test.requests[0]).toBe("https://api.github.com/actions/runs/300");
   });
 
   it.each(["cloud-worker-promotion", "controlled-cutover", "staff-owner-bootstrap", "manual-alpha"])(
     "keeps %s strict even with forged opt-in flags", async workflow => {
-      const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled" }); test.state.head = descendant;
+      const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled",
+        GITHUB_WORKFLOW_REF: `${candidate.repository}/.github/workflows/${workflow}.yml@refs/heads/main` }); test.state.head = descendant;
       test.state.parent.path = `.github/workflows/${workflow}.yml`;
       await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(CandidateSupersededError);
       expect(test.requests.some(route => route.includes("compare") || route.includes("artifacts"))).toBe(false);

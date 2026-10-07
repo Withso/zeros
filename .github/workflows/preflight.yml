@@ -1,9 +1,9 @@
 name: Preflight
 
-# The full exact-source check suite. It runs on pushes to main (coalesced; see
-# `concurrency:` below) and release branches, and on merge-queue commits. Pull
-# requests run the same jobs, under the same required check names, in `ci.yml`
-# ("CI"); the composer UI smoke runs only here, after merge. Releases read this
+# The full exact-source check suite. It runs independently for every main push,
+# on release-branch pushes, and on merge-queue commits. Pull
+# requests use selected required jobs in `ci.yml` ("CI") and this full graph
+# through `ci-full.yml` ("Full CI"), including composer smoke. Releases read this
 # workflow by name and path (scripts/release/ci.ts): Beta and Production
 # require a successful Preflight and CodeQL run on their exact release commit.
 # Automatic Alpha can opt in to the successful alpha-gate job alone while the
@@ -14,7 +14,7 @@ name: Preflight
 #
 #   quality — type safety (renderer + engine + Electron main + packages) and
 #             lint. CI adds an advisory Prettier pass over a PR's changed files.
-#   test    — the vitest suite (two native shards behind the `test` aggregate) +
+#   test    — the vitest suite (four native shards behind the `test` aggregate) +
 #             the repo's correctness guards (preload allowlist, model catalog,
 #             Cursor asar closure, migration forward-only, secret scan,
 #             settings-schema drift).
@@ -32,16 +32,22 @@ name: Preflight
 #             sharded across Postgres service containers whenever one of that
 #             suite's inputs changed. One aggregate job owns the required check.
 #   ui-smoke — the Playwright-driven renderer smoke pass (real browser, real CSS).
-#             It runs here, after merge; pull requests skip it.
+#             Full CI also runs all browser shards on every pull request.
 #
-# Heavier/secret macOS work (full electron-builder pack, native ABI rebuild, live
-# model-catalog drift) remains in the scheduled workflow, not on the per-PR path.
+# Additional secret-free macOS work (full electron-builder pack, native ABI
+# rebuild) and runtime drift share the scheduled workflow, also called by Full CI.
 # The credentialed live-agent smoke (`pnpm agents:smoke`) is NOT wired into any
 # workflow yet — only the offline variant runs here. The pnpm + Node setup mirrors
 # release.yml so the two stay consistent (pnpm via packageManager, Node 22, pnpm
 # cache).
 
 on:
+  workflow_call:
+    inputs:
+      full_database:
+        description: Run every database shard for full pull-request assurance
+        type: boolean
+        default: false
   # Required checks must also run for GitHub's synthetic merge-queue commit.
   merge_group:
   push:
@@ -64,14 +70,12 @@ on:
 permissions:
   contents: read
 
-# Release branches and merge groups cancel superseded runs. Main pushes
-# coalesce: one run in progress is never cancelled, and at most one newer push
-# waits behind it. A later push replaces the waiting run, so a burst of merges
-# is tested together by its newest commit, which contains every earlier merge.
-# CI Recovery reports the commit range since the last green run, and automatic
-# Alpha supersedes a candidate whose waiting run was replaced.
+# Each main push gets its own full Preflight run, keyed by run ID, so newer
+# pushes neither cancel active runs nor replace pending runs. Jobs compete
+# only for the organization's available runner capacity. Release branches
+# and merge groups retain per-ref cancellation of their superseded runs.
 concurrency:
-  group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'preflight-main' || format('preflight-{0}', github.ref) }}
+  group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('preflight-main-{0}', github.run_id) || format('preflight-{0}', github.ref) }}
   cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -126,17 +130,17 @@ jobs:
         run: pnpm check:ui
 
   test-shard:
-    name: tests-vitest (${{ matrix.part }}/2)
+    name: tests-vitest (${{ matrix.part }}/4)
     runs-on: ubuntu-latest
     strategy:
       # Every part reports, so one failure never hides another.
       fail-fast: false
       matrix:
-        # Root Vitest runs as two native shards. Part 1 also owns the
-        # repository guards and part 2 the explicit containment matrix, so
-        # both legs finish close together. The `test` job below is the
-        # required aggregate.
-        part: [1, 2]
+        # Root Vitest runs as four native shards. Part 1 also owns the
+        # repository guards and part 2 the explicit containment matrix.
+        # Parts 3 and 4 run the suite with the same shared setup. The `test`
+        # job below remains the required aggregate.
+        part: [1, 2, 3, 4]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -213,7 +217,7 @@ jobs:
         # bubblewrap/seccomp path as the explicit containment matrix below.
         env:
           VITEST_PART: ${{ matrix.part }}
-        run: bash scripts/ci/with-userns.sh pnpm test:git --shard="${VITEST_PART}/2"
+        run: bash scripts/ci/with-userns.sh pnpm test:git --shard="${VITEST_PART}/4"
 
       - name: Cloud runtime version-skew contracts
         if: matrix.part == 1
@@ -393,8 +397,8 @@ jobs:
 
 
   # The repository ruleset requires `test`. Keep that context as an explicit
-  # aggregate of both Vitest parts; `always()` turns a failed or cancelled part
-  # into a red required check rather than a skipped one that can be missed.
+  # aggregate of all four Vitest parts; `always()` turns a failed or cancelled
+  # part into a red required check rather than a skipped one that can be missed.
   test:
     name: test
     if: always()
@@ -636,6 +640,9 @@ jobs:
         # Routed through `env:`: a `${{ github.event.* }}` value spliced into
         # `run:` is a shell-injection sink.
         env:
+          # Additive assurance override; the classifier emits the same full
+          # decision in its output and human-readable coverage summary.
+          CI_FULL_DATABASE: ${{ inputs.full_database }}
           EVENT_NAME: ${{ github.event_name }}
           PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
@@ -686,7 +693,7 @@ jobs:
       fail-fast: false
       matrix:
         # Keep in step with DATABASE_SHARDS in the `control-plane` job.
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     # The DB suite requires real Postgres; otherwise integration tests self-skip.
     # Exercise migrations before the guarded deployment step. Hosted boot only
     # verifies the migration ledger. Each shard owns an ephemeral database, so
@@ -734,7 +741,7 @@ jobs:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
           SHARD: ${{ matrix.shard }}
         run: >-
-          pnpm exec vitest run --shard="${SHARD}/4"
+          pnpm exec vitest run --shard="${SHARD}/8"
           --reporter=default --reporter=json
           --outputFile.json="${RUNNER_TEMP}/control-plane-report/shard-${SHARD}.json"
       - name: Upload the shard's test report
@@ -781,14 +788,15 @@ jobs:
           DATABASE_SCOPE: ${{ needs.control-plane-scope.outputs.database }}
           STATIC_RESULT: ${{ needs.control-plane-static.result }}
           DATABASE_RESULT: ${{ needs.control-plane-database.result }}
-          DATABASE_SHARDS: 4
+          DATABASE_SHARDS: 8
         run: node scripts/ci/control-plane-results.mjs "$RUNNER_TEMP/control-plane-reports"
 
   # Automatic Alpha consumes this job from the newest exact-SHA main push
   # attempt. The full Preflight run continues for release evidence and history.
   alpha-gate:
     name: alpha-gate
-    if: always()
+    # Full CI's PR invocation supplies coverage, never Alpha admission.
+    if: always() && github.event_name != 'pull_request'
     needs: [quality, test, build, control-plane, secret-scan]
     runs-on: ubuntu-latest
     steps:
@@ -859,6 +867,9 @@ jobs:
 
   secret-scan:
     name: secret scan (PR commit range)
+    # CI owns the required PR commit-range scanner. Avoid a second scanner in
+    # Full CI; direct push/merge-group Preflight keeps its existing scan.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # ── Why the PR's COMMIT RANGE, not the tree and not all history ──
     #

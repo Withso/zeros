@@ -7,7 +7,9 @@ import {
   failureSignature,
   isFullyGreen,
   isSourceRun,
+  laneForJob,
   recoveryMode,
+  requiredLanesCovered,
 } from "../ci/recovery-policy.mjs";
 
 const jobs = JSON.parse(
@@ -87,6 +89,69 @@ describe("CI recovery source authentication", () => {
 });
 
 describe("root failures and retry eligibility", () => {
+  it("classifies precise historical and current partition names", () => {
+    for (const name of [
+      "tests-vitest (1/2)",
+      "tests-vitest (2/2)",
+      "test-shard (1)",
+      "test-shard (2)",
+      ...[1, 2, 3, 4].map((part) => `tests-vitest (${part}/4)`),
+    ]) {
+      expect(laneForJob(name), name).toBe("vitest");
+    }
+    for (const name of [
+      "control-plane database",
+      ...[1, 2, 3, 4, 5, 6, 7, 8].map(
+        (part) => `control-plane database (${part})`,
+      ),
+      ...[1, 2, 3, 4].map((part) => `tests-control-plane-db (${part}/4)`),
+    ]) {
+      expect(laneForJob(name), name).toBe("control-plane-db");
+    }
+  });
+
+  it("does not broaden partition recognition to malformed or unregistered names", () => {
+    for (const name of [
+      "tests-vitest (0/4)",
+      "tests-vitest (5/4)",
+      "tests-vitest (3/2)",
+      "tests-vitest (1/3)",
+      "tests-vitest (1/8)",
+      "tests-vitest (1/4) extra",
+      "test-shard (3)",
+      "control-plane database (0)",
+      "control-plane database (9)",
+      "control-plane database (01)",
+      "control-plane database (1/8)",
+      "tests-control-plane-db (5/4)",
+      "tests-control-plane-db (8/8)",
+    ]) {
+      expect(laneForJob(name), name).toBe("unknown");
+    }
+  });
+
+  it("keeps substantive failures in the new final partitions ineligible for retry", () => {
+    for (const [name, step, lane] of [
+      ["tests-vitest (4/4)", "Run vitest suite", "vitest"],
+      [
+        "control-plane database (8)",
+        "Control-plane tests (migrations + auth/invite contracts)",
+        "control-plane-db",
+      ],
+    ]) {
+      const classification = classifyFailures([
+        {
+          ...jobs.database,
+          name,
+          steps: [{ number: 8, name: step, conclusion: "failure" }],
+        },
+      ]);
+      expect(classification.eligible).toBe(false);
+      expect(classification.roots).toHaveLength(1);
+      expect(classification.roots[0].lane).toBe(lane);
+    }
+  });
+
   it("retries registered composer test steps, including legacy runs", () => {
     for (const job of [jobs.composer, jobs.legacyComposer]) {
       const classification = classifyFailures([job]);
@@ -118,12 +183,22 @@ describe("root failures and retry eligibility", () => {
         "Enforce the test result",
       ],
       [
+        { ...jobs.provisioning, name: "tests-vitest (4/4)" },
+        jobs.testAggregate,
+        "Enforce the test result",
+      ],
+      [
         jobs.setupFailure,
         { ...jobs.testAggregate, name: "source-sync (macOS)" },
         "Enforce the source-sync result",
       ],
       [
         { ...jobs.provisioning, name: "control-plane database (1)" },
+        { ...jobs.testAggregate, name: "control plane" },
+        "Enforce control-plane results",
+      ],
+      [
+        { ...jobs.provisioning, name: "control-plane database (8)" },
         { ...jobs.testAggregate, name: "control plane" },
         "Enforce control-plane results",
       ],
@@ -452,6 +527,66 @@ describe("recovery decisions, dedupe and budgets", () => {
 });
 
 describe("green resolution", () => {
+  it.each([
+    {
+      lane: "vitest",
+      names: [1, 2, 3, 4].map((part) => `tests-vitest (${part}/4)`),
+    },
+    {
+      lane: "control-plane-db",
+      names: [1, 2, 3, 4, 5, 6, 7, 8].map(
+        (part) => `control-plane database (${part})`,
+      ),
+    },
+  ])(
+    "requires every current $lane partition exactly once",
+    ({ lane, names }) => {
+      const contract = { required_lanes: [lane] };
+      const green = names.map((name) => ({ name, conclusion: "success" }));
+      expect(requiredLanesCovered(contract, green)).toBe(true);
+      for (let index = 0; index < green.length; index++) {
+        const incomplete = green.filter((_, part) => part !== index);
+        expect(requiredLanesCovered(contract, incomplete), names[index]).toBe(
+          false,
+        );
+        const duplicate = [...incomplete, green[index === 0 ? 1 : 0]];
+        expect(requiredLanesCovered(contract, duplicate), names[index]).toBe(
+          false,
+        );
+        for (const conclusion of ["failure", "cancelled", "skipped"]) {
+          const unsuccessful = green.map((job, part) =>
+            part === index ? { ...job, conclusion } : job,
+          );
+          expect(
+            requiredLanesCovered(contract, unsuccessful),
+            `${names[index]}:${conclusion}`,
+          ).toBe(false);
+        }
+      }
+    },
+  );
+
+  it("does not use the smaller historical matrices as current failed-lane coverage", () => {
+    expect(
+      requiredLanesCovered(
+        { required_lanes: ["vitest"] },
+        [1, 2].map((part) => ({
+          name: `tests-vitest (${part}/2)`,
+          conclusion: "success",
+        })),
+      ),
+    ).toBe(false);
+    expect(
+      requiredLanesCovered(
+        { required_lanes: ["control-plane-db"] },
+        [1, 2, 3, 4].map((part) => ({
+          name: `control-plane database (${part})`,
+          conclusion: "success",
+        })),
+      ),
+    ).toBe(false);
+  });
+
   const greenJobs = [
     "quality",
     "test",

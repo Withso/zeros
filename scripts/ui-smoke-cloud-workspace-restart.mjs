@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 /** Called by the cloud-workspace shard, which already owns the page clock. */
 export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }) {
@@ -11,6 +12,7 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
   };
   const writes = [];
   let failNext = null;
+  let delayNextStopReceipt = true;
   await page.route("https://api.example.test/v1/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (request.method() === "GET") {
@@ -27,10 +29,20 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
       window.cloudRestartFixture.bridge.setConnection("disconnected");
       return window.cloudRestartFixture.publish({ status: operation === "stop" ? "stopping" : "waking" });
     }, operation);
+    // Keep a slow Stop receipt as a regression: the checkpoint clock must not
+    // advance past the transport deadline while that request is still pending.
+    if (operation === "stop" && delayNextStopReceipt) {
+      delayNextStopReceipt = false;
+      await delay(1_000);
+    }
     return route.fulfill({ json: { workspace: document } });
   });
   await page.goto(`${harnessBase}/harness-cloud-workspace-restart.html`);
   await page.waitForFunction(() => !!window.cloudRestartFixture);
+  const stopUrl = await page.evaluate(() => {
+    const document = window.cloudRestartFixture.document;
+    return `https://api.example.test/v1/organizations/${document.organizationId}/cloud-workspaces/${document.id}/stop`;
+  });
   const setup = page.getByRole("region", { name: "Setup tab", exact: true });
   const status = setup.getByLabel("Cloud workspace status", { exact: true });
   const restart = status.getByRole("button", { name: "Restart workspace", exact: true });
@@ -49,12 +61,20 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
     await screenshot("running", theme);
     await page.evaluate(() => { window.cloudRestartFixture.bridge.holdConnect = true; });
     const before = writes.length;
+    const stopReceipt = page.waitForResponse(response =>
+      response.url() === stopUrl && response.request().method() === "POST",
+    );
     await restart.click();
     await expect(confirm).toHaveCount(0);
     await expect(status.getByRole("status")).toHaveText("Restarting…");
     await expect(restart).toBeDisabled();
     await expect.poll(() => writes.length).toBe(before + 1);
     expect(writes.at(-1).operation).toBe("stop");
+    // The route records a request before its response body arrives. Confirm
+    // the original Stop receipt before advancing the final-checkpoint clock.
+    const stopResponse = await stopReceipt;
+    expect(stopResponse.ok()).toBe(true);
+    expect(await stopResponse.finished()).toBeNull();
     await noErrors();
     await screenshot("restarting", theme);
     // The deliberate final checkpoint may take longer than the normal 45s
@@ -109,6 +129,13 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
   const menuRestart = page.getByRole("menuitem", { name: "Restart workspace", exact: true });
   const workspaceMenu = page.getByRole("menu").first();
   const closeWorkspaceMenu = async () => {
+    // A disabled item can appear before the menu's opening focus settles.
+    // Wait for the actual menu lifecycle before sending its dismissal key.
+    await expect(workspaceMenu).toBeVisible();
+    await expect(workspaceMenu).toBeFocused();
+    await workspaceMenu.evaluate(node => Promise.all(
+      node.getAnimations().map(animation => animation.finished),
+    ));
     await page.keyboard.press("Escape");
     await expect(page.getByRole("menu")).toHaveCount(0);
   };

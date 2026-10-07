@@ -25,6 +25,12 @@ function job(kind: "services" | "worker", patch: Record<string, unknown> = {}) {
       .map(name => ({ name, conclusion: "success" })), ...patch };
 }
 describe("authenticated release artifact handoff", () => {
+  it("retains services and worker receipt discovery under the encompassing Alpha reusable call", async () => {
+    const services = job("services", { name: "Alpha publication / Hosted promotion (alpha) / Hosted services" });
+    const worker = job("worker", { name: "Alpha publication / Hosted promotion (alpha) / worker" });
+    expect(validateServicesReceipt(serviceReceipt(), run, config, "alpha", [services])).toMatchObject({ runId: "123", runAttempt: "1" });
+    await expect(validateWorkerArtifact(workerReceipt(), run, config, "alpha", [worker])).resolves.toMatchObject({ runId: "123", runAttempt: "1" });
+  });
   it("authenticates a truthful v3 pending-storage receipt without reinterpreting v1/v2 or producer provenance", async () => {
     const { resourcesDeleted: _deleted, ...base } = workerReceipt(), completedAt = base.completedAt;
     const deferred = { ...base, version: 3, cleanup: { credentialCanaryResourcesDeleted: false,
