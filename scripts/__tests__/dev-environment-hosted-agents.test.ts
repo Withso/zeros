@@ -24,16 +24,16 @@ describe("retired hosted Dev native qualification", () => {
     const f = fixture();
     if (phase) f.state.agentQualifications = [{ id: "historical", phase, evidence: { digest: "stored" }, retired: phase === "enabled" }];
     const before = structuredClone(f.state);
-    await expect(advanceHostedAgents(f.lease, f.profile, f.deps, { retry: true })).rejects.toMatchObject({
+    await expect(advanceHostedAgents(f.lease, f.profile)).rejects.toMatchObject({
       status: 409, code: "release_worker_images_retired", message: "v3 release worker images are retired; v4 runtime bundles are the supported artifact" });
     for (const name of ["inspect", "seed", "allocate", "ready", "start", "poll", "enable", "retire"] as const) expect(f.deps[name]).not.toHaveBeenCalled();
     expect(f.lease.save).not.toHaveBeenCalled(); expect(f.lease.fence).not.toHaveBeenCalled(); expect(f.state).toEqual(before);
   });
   it("preserves inactive and no-fixture callers without native qualification", async () => {
     const f = fixture(); f.state.status = "archiving";
-    expect(await advanceHostedAgents(f.lease, f.profile, f.deps)).toEqual({ state: "inactive" });
+    expect(await advanceHostedAgents(f.lease, f.profile)).toEqual({ state: "inactive" });
     f.state.status = "ready";
-    expect(await advanceHostedAgents(f.lease, {}, f.deps)).toEqual({ state: "inactive" });
+    expect(await advanceHostedAgents(f.lease, {})).toEqual({ state: "inactive" });
     expect(f.deps.inspect).not.toHaveBeenCalled(); expect(f.lease.save).not.toHaveBeenCalled();
   });
   it("keeps failed retirement retryable without approving historical evidence or dispatching another attempt", async () => {

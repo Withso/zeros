@@ -49,7 +49,7 @@ it("refuses mismatched key material before touching provider access", async () =
 it("refuses native SSH dispatch before key registration or local transport preparation", async () => {
   const f = fixture(), directory = fs.mkdtempSync(path.join(os.tmpdir(), "dev-ssh-")); f.registered.pop();
   try {
-    await expect(startHostedAgentOverSsh(f.lease, f.profile, directory, { probe: true }, f.execute, f.request))
+    await expect(startHostedAgentOverSsh())
       .rejects.toMatchObject({ status: 409, code: "release_worker_images_retired" });
     expect(f.request).not.toHaveBeenCalled(); expect(f.execute).not.toHaveBeenCalled();
     expect(f.lease.save).not.toHaveBeenCalled(); expect(f.lease.fence).not.toHaveBeenCalled();
@@ -66,7 +66,7 @@ it("retains an uncertain SSH create after an empty inventory and does not regist
   (f.key as any).create = { version: 1, phase: "uncertain", dispatchedAt: new Date().toISOString() };
   try {
     await expect(retireHostedAgentSsh(f.lease, f.profile, f.request)).rejects.toThrow(/unconfirmed/);
-    await expect(startHostedAgentOverSsh(f.lease, f.profile, directory, {}, f.execute, f.request)).rejects.toThrow();
+    await expect(startHostedAgentOverSsh()).rejects.toThrow();
     expect(f.request.mock.calls.filter(([query]) => query.includes("CreateDevSshKey"))).toHaveLength(0);
     expect(f.lease.state.resources.agentSsh).toBe(f.key);
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }

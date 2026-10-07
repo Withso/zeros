@@ -298,7 +298,7 @@ export class DatabaseCloudAgentExecutionService {
       const actor=await source(tx,scope,input,previous?.actor_source_session_id);
       try { await requireSupportedCloudWorkspaceGeneration(tx,scope); }
       catch(error) {
-        if(error instanceof HttpError&&error.code===CLOUD_WORKSPACE_V2_REQUIRED&&!previous)
+        if((error instanceof HttpError)&&error.code===CLOUD_WORKSPACE_V2_REQUIRED&&!previous)
           return recordAdmissionDenial(tx,scope,input,CLOUD_WORKSPACE_V2_REQUIRED);
         throw error;
       }

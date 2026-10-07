@@ -41,9 +41,9 @@ function getForwardingPreferences(): CloudPortForwardingPreferences {
   return forwardingPreferences ??= new CloudPortForwardingPreferences(path.join(app.getPath("userData"), "cloud-port-forwarding.json"));
 }
 
-function retireForwarding(pruneAccount: boolean): Promise<void> {
+async function retireForwarding(pruneAccount: boolean): Promise<void> {
   const previous = forwarding; forwarding = null;
-  return previous?.coordinator.dispose({ pruneAccount }) ?? Promise.resolve();
+  await previous?.coordinator.dispose({ pruneAccount });
 }
 
 function controlPlaneBaseUrl(): string {

@@ -104,6 +104,6 @@ export async function requestCloudAgentExecution(authority:CloudRuntimeAuthority
     }
     if(!value||typeof value!=="object"||Object.keys(value).join()!=="released"||(value as {released?:unknown}).released!==true)throw new CloudAgentExecutionError();
     return {released:true};
-  }catch(error){await reader.cancel().catch(()=>{});if(error instanceof CloudComputerToolsUpdateRequiredError||error instanceof CloudAgentAdmissionError)throw error;
+  }catch(error){await reader.cancel().catch(()=>{});if((error instanceof CloudComputerToolsUpdateRequiredError)||(error instanceof CloudAgentAdmissionError))throw error;
     throw new CloudAgentExecutionError(response.ok?"authority_response_invalid":response.status>=500?"authority_http_5xx":"authority_http_4xx",stage);}finally{reader.releaseLock();}
 }

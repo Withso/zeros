@@ -90,12 +90,28 @@ export async function runCloudWorkspaceSmoke({ page, check, harnessBase }) {
       menus: [...document.querySelectorAll('[role="menu"]')].map(menu => ({ state: menu.getAttribute("data-state"), animation: getComputedStyle(menu).animationName })),
       animations: document.getAnimations().map(animation => ({ name: animation.animationName ?? animation.id, state: animation.playState, time: animation.currentTime })),
       timeline: document.timeline.currentTime,
+      escapes: window.smokeEscapeEvents ?? null,
+      active: document.activeElement ? { tag: document.activeElement.tagName, role: document.activeElement.getAttribute("role"),
+        label: document.activeElement.getAttribute("aria-label"), text: document.activeElement.textContent?.slice(0, 60) } : null,
+      layers: [...document.querySelectorAll('[data-radix-popper-content-wrapper] > *, [role="tooltip"], [role="dialog"]')].map(element => ({
+        role: element.getAttribute("role"), state: element.getAttribute("data-state"), text: element.textContent?.slice(0, 60) })),
       calls: window.cloudNativeFixture.calls.map(call => call.command),
     })).catch(failure => ({ unavailable: String(failure) }));
     console.error(`cloud native access diagnostics (${reason}): ${JSON.stringify({ state, trace: trace.slice(-40) })}`);
   };
   // A modal menu hides the rest of the page until its exit animation ends.
   const closeMenu = async () => {
+    await page.evaluate(() => {
+      window.smokeEscapeEvents = [];
+      if (window.smokeEscapeHooks) return;
+      window.smokeEscapeHooks = true;
+      const record = phase => event => {
+        if (event.key === "Escape") window.smokeEscapeEvents.push({ phase, prevented: event.defaultPrevented,
+          target: event.target?.getAttribute?.("role") ?? event.target?.nodeName ?? null });
+      };
+      window.addEventListener("keydown", record("window capture"), true);
+      document.addEventListener("keydown", record("document bubble"));
+    });
     await page.keyboard.press("Escape");
     try {
       await expect(page.getByRole("menu")).toHaveCount(0, { timeout: 15_000 });

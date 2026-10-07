@@ -20,7 +20,6 @@ import {interceptQueries,withAuthorityDeadlineBarrier,pauseBeforeQuery,withHeldE
 import {cloudWorkspaceHasActiveWork} from "./idle-workloads.js";
 import { consentTestPersonalEnvironment, persistTestComputerSettings, pinTestComputerEnvironment } from "./computer-environment-test-fixtures.js";
 import { resolveDatabaseCloudWorkspaceSettings } from "./settings.js";
-import { runtimeWitness } from "./runtime-test-fixtures.js";
 
 const d=process.env.TEST_DATABASE_URL?describe:describe.skip;
 // Measured budgets include saved-source/v4 checks and actor environment

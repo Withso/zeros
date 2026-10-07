@@ -687,7 +687,8 @@ export class CloudAgentConnection {
     ).join("");
     const commandId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
     this.commandOwners.set(commandId, owner.id);
-    let observing = true;
+    // Mutated by the finally below while observeReceipt may still be awaiting.
+    const observation = { live: true };
     let terminal: WireRecord | undefined;
     let wakeReceiptWait: (() => void) | undefined;
     const completed = new Promise<WireRecord>(resolve => {
@@ -725,7 +726,7 @@ export class CloudAgentConnection {
                 const current = CloudCommandSnapshotSchema.parse(await this.op("cloudCommands.request", {
                   request: { kind: "snapshot", conversationId: owner.id },
                 }));
-                if (!observing) return terminal!;
+                if (!observation.live) return terminal!;
                 // Resume may race the stopped turn's durable retirement. A
                 // changed pause/queue intent must still reject this stale send.
                 if (signal?.aborted || !onlyCommandRetirements(queue, current)) throw error;
@@ -733,7 +734,7 @@ export class CloudAgentConnection {
               }
             }
           }
-          if (!observing) return terminal!;
+          if (!observation.live) return terminal!;
           const enqueue = () => this.op("cloudCommands.request", {
             request: {
               kind: "mutate",
@@ -775,7 +776,7 @@ export class CloudAgentConnection {
               const current = CloudCommandSnapshotSchema.parse(await this.op("cloudCommands.request", {
                 request: { kind: "snapshot", conversationId: owner.id },
               }));
-              if (!observing) return terminal!;
+              if (!observation.live) return terminal!;
               if ([...current.pending, ...current.receipts].some(row => row.commandId === commandId)) break;
               // A concurrent Stop or unchanged revision is a real conflict,
               // not permission to resume or rewrite someone else's command.
@@ -787,7 +788,7 @@ export class CloudAgentConnection {
         // Receipts recover completion after reconnect or lost terminal frames.
         // The server still serializes subsequent execution behind retirement.
         for (;;) {
-          if (!observing) return terminal!;
+          if (!observation.live) return terminal!;
           if (signal?.aborted || this.closed)
             throw new Error(
               "Cloud prompt observation ended; reconnect to view its result",
@@ -800,10 +801,10 @@ export class CloudAgentConnection {
               }),
             );
           } catch (error) {
-            if (!observing) return terminal!;
+            if (!observation.live) return terminal!;
             if (this.client.status === "connected") throw error;
           }
-          if (!observing) return terminal!;
+          if (!observation.live) return terminal!;
           if (entry && (entry.commandId !== commandId || entry.conversationId !== owner.id))
             throw new Error("Cloud command receipt does not match this conversation");
           if (entry?.executionId) {
@@ -818,7 +819,7 @@ export class CloudAgentConnection {
             // before the renderer reads history, so delayed chunks cannot be
             // appended a second time to that normalized tail.
             const state = await this.restoreNativeState(owner);
-            if (!observing) { state.restoration?.finish(); return terminal!; }
+            if (!observation.live) { state.restoration?.finish(); return terminal!; }
             try {
               this.attachSnapshot(state);
               const changed = { type: "DB_CHANGED", kinds: ["messages"], chatIds: [owner.id] };
@@ -880,7 +881,7 @@ export class CloudAgentConnection {
       owner.promptActive = false;
       return result;
     } finally {
-      observing = false;
+      observation.live = false;
       wakeReceiptWait?.();
       this.promptResults.delete(commandId);
       this.commandOwners.delete(commandId);

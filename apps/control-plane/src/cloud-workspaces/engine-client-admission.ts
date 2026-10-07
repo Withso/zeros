@@ -109,7 +109,7 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
   }
 
   async authorizeRelay(token: string, options: { connected?: boolean } = {}): Promise<CloudEngineRelayGrant | null> {
-    return CLOUD_ACTOR_TOKEN_PATTERN.test(token) ? this.actors?.authorizeRelay(token, options) ?? null : null;
+    return CLOUD_ACTOR_TOKEN_PATTERN.test(token) ? (await this.actors?.authorizeRelay(token, options)) ?? null : null;
   }
 
   async consume(_input: {
