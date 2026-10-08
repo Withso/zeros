@@ -20,6 +20,7 @@ export function createCloudCommandRoutes(service: DatabaseCloudWorkspaceCommandS
   routes.use(CLOUD_COMMAND_PATH, bodyLimit({ maxSize: 256 * 1024 }));
   routes.post(CLOUD_COMMAND_PATH, async c => {
     c.header("Cache-Control", "no-store");
+    c.header("x-zeros-cloud-turn-protocol", "1");
     const token = /^Bearer (zwh_[A-Za-z0-9_-]{43})$/.exec(c.req.header("authorization") ?? "")?.[1];
     if (!token) return c.json({ error: "engine_authority_rejected" }, 401);
     if (c.req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json")
@@ -29,6 +30,7 @@ export function createCloudCommandRoutes(service: DatabaseCloudWorkspaceCommandS
     const { request, actorSessionId, ...binding } = parsed.data;
     const scope = { ...binding, heartbeatToken: token,...(actorSessionId?{actorSessionId}:{}) };
     const native=c.req.header("x-zeros-native-commands")==="1";
+    const turnProtocol=native&&c.req.header("x-zeros-cloud-turn-protocol")==="1";
     if(!native&&request.kind==="confirm-goal")return c.json({error:"invalid_command"},422);
     if(!native&&request.kind==="mutate"&&"payload" in request.mutation.action&&request.mutation.action.payload.operation)
       return c.json({error:"invalid_command"},422);
@@ -43,7 +45,7 @@ export function createCloudCommandRoutes(service: DatabaseCloudWorkspaceCommandS
         case "settle": result = await service.settle(scope, request.result); break;
         case "confirm-goal": result = await service.confirmGoal(scope,request); break;
       }
-      return c.json({ result:native?result:legacyCloudCommandResponse(result) });
+      return c.json({ result:turnProtocol?result:legacyCloudCommandResponse(result,native?1:undefined) });
     } catch (error) {
       if (error instanceof CloudWorkspaceEngineAuthorityError) return c.json({ error: "engine_authority_rejected" }, 401);
       if (error instanceof HttpError) return c.json({error:"cloud_actor_authority_rejected"},403);

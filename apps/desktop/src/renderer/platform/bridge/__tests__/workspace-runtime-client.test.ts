@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RuntimeClient } from "../ws-client";
+import { RuntimeClient, type ConnectionStatus } from "../ws-client";
 import { CloudAgentConnection } from "../cloud-agent-connection";
 import {
   WorkspaceRuntimeClient,
@@ -112,6 +112,30 @@ function providerRouting(open: WorkspaceRuntimeOptions["open"]) {
 }
 
 describe("workspace runtime routing", () => {
+  it("releases a terminally rejected peer while retaining its last confirmed cloud history", async () => {
+    const pa = fakePeer(a), replacement = fakePeer(a); let status!: (value: ConnectionStatus) => void;
+    pa.peer.client.onStatusChange = (listener) => { status = listener; return () => {}; };
+    pa.request.mockResolvedValue({ type: "WORKSPACE_RESPONSE", result: { chats: [{ id: "saved" }], chatDeletions: [] } });
+    const open = vi.fn().mockResolvedValueOnce(pa.peer).mockResolvedValueOnce(replacement.peer), client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+    await client.warmWorkspace(a); expect(client.hasChatSnapshot(cloudWorkspaceKey(a))).toBe(true);
+    pa.peer.client.lastRejection = { reason: "cloud-superseded", code: "cloud_workspace_access_superseded", message: "Replaced" };
+    status("disconnected");
+    expect(pa.release).toHaveBeenCalledOnce(); expect(client.hasChatSnapshot(cloudWorkspaceKey(a))).toBe(true); expect(open).toHaveBeenCalledOnce();
+    await client.warmWorkspace(a); expect(open).toHaveBeenCalledTimes(2); client.dispose();
+  });
+  it("routes cloud permission and question ownership to its peer without touching the Local socket", async () => {
+    const pa = fakePeer(a), local = vi.spyOn(RuntimeClient.prototype, "send"), client = new WorkspaceRuntimeClient({ open: async () => pa.peer, workspaces: () => [] });
+    await client.warmWorkspace(a);
+    const ownership = { chatId: cloudScopedId(a, "chat"), executionId: cloudScopedId(a, "native") };
+    client.send({ type: "AGENT_PERMISSION_RESPONSE", ...ownership, permissionId: "permission", response: { outcome: { outcome: "cancelled" } } });
+    client.send({ type: "AGENT_QUESTION_RESPONSE", ...ownership, questionId: "question", response: { outcome: { outcome: "dismissed" } } });
+    expect(local).not.toHaveBeenCalled(); expect(pa.send).toHaveBeenCalledTimes(2);
+    expect(pa.send).toHaveBeenNthCalledWith(1, { type: "AGENT_PERMISSION_RESPONSE", chatId: "chat", executionId: "native", permissionId: "permission",
+      response: { outcome: { outcome: "cancelled" } } });
+    expect(pa.send).toHaveBeenNthCalledWith(2, { type: "AGENT_QUESTION_RESPONSE", chatId: "chat", executionId: "native", questionId: "question",
+      response: { outcome: { outcome: "dismissed" } } });
+    client.dispose();
+  });
   it("caps the entire logical open at fifteen minutes even if native admission never settles", async () => {
     vi.useFakeTimers(); const ready = deferred<CloudPeer>(), peer = fakePeer(a), failed = vi.fn();
     const client = new WorkspaceRuntimeClient({ open: () => ready.promise, workspaces: () => [] });
@@ -1050,6 +1074,106 @@ describe("workspace runtime routing", () => {
     expect(pb.send).not.toHaveBeenCalled();
     off();
     client.dispose();
+  });
+
+  it("isolates Personal Local → org-A cloud → org-B cloud → organization-local → Personal Local with delayed frames and replies", async () => {
+    // Equal native roots, workspace IDs and resolver IDs must still be owned
+    // by the exact organization. Both cloud owners initially remain admitted.
+    const other = { ...a, organizationId: "44444444-4444-4444-8444-444444444444" };
+    const pa = fakePeer(a), pb = fakePeer(other);
+    const subscriptionA = vi.spyOn(pa.peer.client, "on");
+    const subscriptionB = vi.spyOn(pb.peer.client, "on");
+    for (const [peer, title] of [[pa, "Org A"], [pb, "Org B"]] as const) {
+      peer.request.mockImplementation(async message => ({ type: "WORKSPACE_RESPONSE", op: message.op,
+        result: message.op === "chats.list" ? { chats: [{ id: "chat", folder: "/workspace/repo", title }], chatDeletions: [] } : { content: title } }));
+    }
+    const localRequest = vi.spyOn(RuntimeClient.prototype, "request").mockImplementation(async message => ({
+      type: "WORKSPACE_RESPONSE", op: (message as { op: string }).op,
+      result: (message as { op: string }).op === "chats.list"
+        ? { chats: [{ id: "chat", folder: "/personal/local", title: "Local" }], chatDeletions: [] }
+        : { content: "Local" },
+    } as BridgeMessage));
+    const localSend = vi.spyOn(RuntimeClient.prototype, "send").mockImplementation(() => {});
+    const allowed = new Set([a.organizationId, other.organizationId]);
+    const open = vi.fn(async (target: CloudWorkspaceTarget) => target.organizationId === a.organizationId ? pa.peer : pb.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [], identity: () => "same-account",
+      canAccess: target => allowed.has(target.organizationId) });
+    const updates = vi.fn();
+    const off = client.on("AGENT_SESSION_UPDATE", updates);
+    const fileRead = (cwd: string) => ({ type: "WORKSPACE_REQUEST" as const, op: "file.read", params: { cwd, path: "same.ts" } });
+    const localDecision = { type: "AGENT_PERMISSION_RESPONSE" as const, permissionId: "permission",
+      response: { outcome: { outcome: "cancelled" as const } } };
+    try {
+      await client.request(fileRead("/personal/local"));
+      await client.chatSnapshot("local");
+      await client.warmWorkspace(a);
+      const delayedA = deferred<Record<string, unknown>>();
+      pa.request.mockImplementationOnce(() => delayedA.promise);
+      const replyA = client.request(fileRead(cloudWorkspaceKey(a)));
+      const refusedA = expect(replyA).rejects.toThrow(/connection changed/);
+      await vi.waitFor(() => expect(pa.request).toHaveBeenCalledTimes(2));
+
+      await client.warmWorkspace(other);
+      const delayedB = deferred<Record<string, unknown>>();
+      pb.request.mockImplementationOnce(() => delayedB.promise);
+      const replyB = client.request(fileRead(cloudWorkspaceKey(other)));
+      const refusedB = expect(replyB).rejects.toThrow(/connection changed/);
+      await vi.waitFor(() => expect(pb.request).toHaveBeenCalledTimes(2));
+      const retained = await client.chatSnapshot("retained");
+      expect(retained.chats).toEqual([
+        { id: "chat", folder: "/personal/local", title: "Local" },
+        { id: cloudScopedId(a, "chat"), folder: cloudWorkspaceKey(a), title: "Org A" },
+        { id: cloudScopedId(other, "chat"), folder: cloudWorkspaceKey(other), title: "Org B" },
+      ]);
+
+      // A late frame while B is selected still belongs to A. Exact captured
+      // resolver ownership routes each answer to its originating peer.
+      const frame = { agentId: "codex", chatId: "chat", executionId: "native", notification: { sessionId: "native",
+        update: { sessionUpdate: "agent_message_chunk" as const, content: { type: "text" as const, text: "late" } } } };
+      pa.emit("AGENT_SESSION_UPDATE", frame);
+      pb.emit("AGENT_SESSION_UPDATE", frame);
+      expect(updates.mock.calls.map(([event]) => [event.chatId, event.executionId, event.notification.sessionId])).toEqual([
+        [cloudScopedId(a, "chat"), cloudScopedId(a, "native"), cloudScopedId(a, "native")],
+        [cloudScopedId(other, "chat"), cloudScopedId(other, "native"), cloudScopedId(other, "native")],
+      ]);
+      for (const target of [a, other]) client.send({ ...localDecision, chatId: cloudScopedId(target, "chat"),
+        executionId: cloudScopedId(target, "native") });
+      for (const peer of [pa, pb]) expect(peer.send).toHaveBeenCalledExactlyOnceWith({ ...localDecision, chatId: "chat", executionId: "native" });
+      expect(localSend).not.toHaveBeenCalled();
+      expect(() => client.send({ ...localDecision, chatId: cloudScopedId(other, "chat"), executionId: cloudScopedId(a, "native") }))
+        .toThrow(/cannot cross cloud workspace boundaries/);
+      expect(pa.send).toHaveBeenCalledOnce();
+      expect(pb.send).toHaveBeenCalledOnce();
+
+      // Revoke the old owners and retain callback references to reproduce a
+      // frame already queued before unsubscribe, rather than an empty emitter.
+      const staleA = subscriptionA.mock.calls.find(([type]) => type === "AGENT_SESSION_UPDATE")![1];
+      const staleB = subscriptionB.mock.calls.find(([type]) => type === "AGENT_SESSION_UPDATE")![1];
+      allowed.delete(a.organizationId);
+      client.pruneCloudConnections();
+      await client.request(fileRead("/organization/local"));
+      client.send(localDecision);
+      allowed.delete(other.organizationId);
+      client.pruneCloudConnections();
+      await client.request(fileRead("/personal/local"));
+      for (const receive of [staleA, staleB]) receive({ type: "AGENT_SESSION_UPDATE", ...frame } as BridgeMessage);
+      delayedA.resolve({ type: "WORKSPACE_RESPONSE", op: "file.read", result: { content: "stale A" } });
+      delayedB.resolve({ type: "WORKSPACE_RESPONSE", op: "file.read", result: { content: "stale B" } });
+      await Promise.all([refusedA, refusedB]);
+      expect(updates).toHaveBeenCalledTimes(2);
+      expect(pa.release).toHaveBeenCalledOnce();
+      expect(pb.release).toHaveBeenCalledOnce();
+      expect(client.hasChatSnapshot(cloudWorkspaceKey(a))).toBe(false);
+      expect(client.hasChatSnapshot(cloudWorkspaceKey(other))).toBe(false);
+      expect((await client.chatSnapshot("retained")).chats).toEqual([{ id: "chat", folder: "/personal/local", title: "Local" }]);
+      expect(client.executionIdentity).toMatchObject({ kind: "local" });
+      expect(localSend).toHaveBeenCalledExactlyOnceWith(localDecision);
+      expect(localRequest.mock.calls.map(([message]) => message)).toEqual([
+        fileRead("/personal/local"), { type: "WORKSPACE_REQUEST", op: "chats.list" },
+        fileRead("/organization/local"), fileRead("/personal/local"),
+      ]);
+      expect(open.mock.calls.map(([target]) => target)).toEqual([a, other]);
+    } finally { off(); client.dispose(); }
   });
 
   it("closes late connections after sign-out and never dispatches their pending write", async () => {

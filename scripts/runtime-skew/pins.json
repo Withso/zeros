@@ -3,15 +3,15 @@
   "mode": "source-contracts",
   "retainedRuntimes": [],
   "previousRuntime": {
-    "runtimeIdPrefix": "r1-89d46240",
-    "sourceCommit": "ea34b8ac84ee13aaf89a5d76eb2a4c22540cb36e",
-    "sourceTree": "f70d5aab0b5560165f523cc942da584da07c9582",
-    "provenance": "Task SK supplied runtime-to-source mapping; full bundle and base/profile qualification remain unverified here."
+    "runtimeIdPrefix": "r1-7a4e5161",
+    "sourceCommit": "c8e60c064ec1e4661254c46dee24bc8cfcc300e5",
+    "sourceTree": "a3d284577be7d17163a560db8c2b92a0df94f390",
+    "provenance": "Alpha runtime r1-7a4e5161 source mapping supplied by the operator for #406; immutable merge commit/tree verified from Git objects. This source-contract gate does not verify the full bundle digest, signed artifact, base/profile or qualification evidence."
   },
   "previousDesktop": {
-    "release": "v0.1.22",
-    "sourceCommit": "1dc0d625c74388559374fd634852c60b1005123c",
-    "sourceTree": "ff6e3a49767d396afe476c26ca1e89202ba54cb1",
-    "provenance": "Resolved release tag v0.1.22; exercises released source contracts, not a signed Alpha desktop binary."
+    "release": "Alpha #406",
+    "sourceCommit": "c8e60c064ec1e4661254c46dee24bc8cfcc300e5",
+    "sourceTree": "a3d284577be7d17163a560db8c2b92a0df94f390",
+    "provenance": "Alpha desktop source mapping supplied by the operator for #406; immutable merge commit/tree verified from Git objects. Exercises the Alpha source contracts, not a signed or enrolled desktop binary."
   }
 }

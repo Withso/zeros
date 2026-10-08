@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -44,6 +44,7 @@ beforeEach(async () => {
   previousDataDir = process.env.ZEROS_DATA_DIR; process.env.ZEROS_DATA_DIR = path.join(root, "engine");
   delete process.env.CURSOR_API_KEY;
   createSpy.mockReset().mockResolvedValue(agent); resumeSpy.mockReset().mockResolvedValue(agent);
+  agent.send.mockReset().mockImplementation(async () => ({ id: "run-1", stream: async function* () {}, wait: async () => ({ status: "finished" }) }));
   prewarmSpy.mockReset().mockResolvedValue({ prewarmed: true });
   createRuntimeSpy.mockReset().mockImplementation(() => ({
     module: { Agent: { create: createSpy, resume: resumeSpy, list: vi.fn(async () => ({ items: [] })) }, Cursor: { models: { list: vi.fn(async () => []) } }, platform: { prewarm: prewarmSpy } },
@@ -59,6 +60,46 @@ afterEach(async () => {
 });
 
 describe("Cursor cloud product tools", () => {
+  it.each(["new", "resume"])("projects admitted repo instructions through SDK messages on %s, later turns and mode rebuilds", async operation => {
+    const cwd = path.join(root, "managed-worktree");
+    await mkdir(path.join(cwd, ".cursor/rules"), { recursive: true });
+    await writeFile(path.join(cwd, "AGENTS.md"), "ADMITTED_AGENTS_SENTINEL");
+    await writeFile(path.join(cwd, ".cursor/rules/always.mdc"), "---\nalwaysApply: true\n---\nADMITTED_RULE_SENTINEL");
+    await writeFile(path.join(cwd, ".cursor/mcp.json"), '{"mcpServers":{"unadmitted":{}}}');
+    await writeFile(path.join(root, "AGENTS.md"), "CALLER_ROOT_SENTINEL");
+    vi.spyOn(cloudExecution, "cloudProviderExecution").mockReturnValue({ cwd, productServers: [minted], lease: { customization: {} } } as unknown as cloudExecution.CloudProviderExecution);
+    const adapter = new CursorSdkAdapter(ctx());
+    try {
+      const options = { ...sessionOptions(), executionId: "cloud-projection-fixture", env: { CURSOR_API_KEY: "key", CURSOR_MODEL: "grok-4.6", ZEROS_PERMISSION_MODE: "plan" } };
+      const started = operation === "new" ? (await adapter.newSession(options)).session : await adapter.loadSession({ ...options, sessionId: "saved-native-id" });
+      const sessionId = options.executionId;
+      expect(started.executionId).toBe(sessionId);
+      const prompt = [{ type: "text" as const, text: "inspect" }, { type: "image" as const, data: "c3ludGhldGlj", mimeType: "image/png" }];
+      await adapter.prompt({ sessionId, prompt });
+      expect(agent.send.mock.calls[0]![0].text).toContain("ADMITTED_AGENTS_SENTINEL");
+      expect(agent.send.mock.calls[0]![0].text).toContain("ADMITTED_RULE_SENTINEL");
+      expect(agent.send.mock.calls[0]![0].text).not.toContain("CALLER_ROOT_SENTINEL");
+      expect(agent.send.mock.calls[0]![0].text).not.toContain("unadmitted");
+      expect(agent.send.mock.calls[0]![0].images).toEqual([{ data: "c3ludGhldGlj", mimeType: "image/png" }]);
+      expect(agent.send.mock.calls[0]![1]).toMatchObject({ mode: "plan", model: { id: "grok-4.6" } });
+      await writeFile(path.join(cwd, "AGENTS.md"), "MUTATED_AFTER_ADMISSION");
+      await adapter.setMode({ sessionId, modeId: "auto" });
+      await adapter.prompt({ sessionId, prompt });
+      expect(agent.send.mock.calls[1]![0].text).toContain("ADMITTED_AGENTS_SENTINEL");
+      expect(agent.send.mock.calls[1]![0].text).not.toContain("MUTATED_AFTER_ADMISSION");
+      await adapter.setMode({ sessionId, modeId: "plan" });
+      await adapter.prompt({ sessionId, prompt });
+      expect(agent.send.mock.calls[2]![0].text).toContain("ADMITTED_RULE_SENTINEL");
+      expect(agent.send.mock.calls[2]![1].mode).toBe("plan");
+      const nativeOptions = [...createSpy.mock.calls.map(call => call[0]), ...resumeSpy.mock.calls.map(call => call[1]), ...prewarmSpy.mock.calls.map(call => call[0])];
+      for (const native of nativeOptions) {
+        expect(native.local.settingSources).toEqual(["user"]);
+        expect(native.systemPrompt).toBeUndefined();
+        expect(native.apiKey).toBe("key");
+        expect(Object.keys(configured(native) ?? {})).toEqual(["design-draft"]);
+      }
+    } finally { await adapter.dispose(); }
+  });
   it("starts a cloud session with only the admitted, already-minted product tools", async () => {
     const adapter = new CursorSdkAdapter(ctx());
     try {

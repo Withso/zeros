@@ -667,10 +667,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
           !wire.executionId
         )
           return;
-        this.emit(
-          type,
-          cloudIncoming(entry.scope, entry.agents?.incoming(wire) ?? wire),
-        );
+        const incoming = entry.agents ? entry.agents.incoming(wire) : wire;
+        if (incoming) this.emit(type, cloudIncoming(entry.scope, incoming));
       }),
     );
   }
@@ -771,6 +769,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         this.peers.set(key, entry);
         for (const type of this.routedHandlers.keys()) this.attach(entry, type);
         entry.stopStatus = entry.client.onStatusChange((status) => {
+          if (!entry.retired && status === "disconnected" && entry.client.lastRejection) this.retirePeer(entry);
           this.workspaceStatusChanged(key);
           if (entry.retired || status !== "connected" || epoch !== this.accountEpoch) return;
           void this.readChats(entry)
@@ -896,11 +895,9 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     if (entry.epoch !== this.accountEpoch)
       throw new Error("Cloud account changed before the response arrived");
     this.assertCurrent(entry);
-    const incoming = cloudIncoming(
-      entry.scope,
-      entry.agents?.incoming(response as unknown as WireRecord) ??
-        (response as unknown as WireRecord),
-    );
+    const mapped = entry.agents ? entry.agents.incoming(response as unknown as WireRecord) : response as unknown as WireRecord;
+    if (!mapped) throw new Error("Cloud execution changed before the response arrived");
+    const incoming = cloudIncoming(entry.scope, mapped);
     if (["AGENT_PROMPT_COMPLETE", "AGENT_PROMPT_FAILED"].includes(String(incoming.type)) && typeof incoming.chatId === "string")
       this.checkpointCloudTranscript(incoming.chatId);
     return incoming as unknown as BridgeMessage;

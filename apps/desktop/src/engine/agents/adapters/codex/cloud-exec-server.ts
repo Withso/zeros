@@ -62,7 +62,7 @@ export class CloudCodexExecServer {
       let timer:ReturnType<typeof setTimeout>|undefined;
       try{
         bridge.child=await Promise.race([execution.lease.launch(()=>execution.coordinator.workload.spawn({
-          command:runtime.node,args:[`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-codex-executor.mjs`,binary],cwd:"/srv/zeros/workspace",
+          command:runtime.node,args:[`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-codex-executor.mjs`,binary],cwd:execution.cwd,
           env:cloudComputerProcessEnvironment({HOME:"/srv/zeros/home/agent",PATH:`${runtime.binRoot}:/usr/bin:/bin`,LANG:"C.UTF-8"},execution.lease.environment?.values,"agent"),stdio:"pipe",
         })),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error("Cloud executor launch timed out")),5000);})]);
       }finally{if(timer)clearTimeout(timer);}

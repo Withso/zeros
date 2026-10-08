@@ -16,15 +16,29 @@ Paths in this table are relative to the stated directory.
 | Computer authority, builds and cleanup-only retirement | Same directory: `computer-identity.ts`, `computer-v2.ts`, `computer-template-worker.ts`, `computer-retirement.ts`, `computer-retirement-boat.ts` |
 | Runtime selection, transfer and staging | Same directory: `runtime-selection.ts`, `runtime-transition.ts`, `runtime-transfer.ts`, `runtime-staging.ts`, `runtime-resident-update.ts` |
 | Durable commands, receipts, records and history | Same directory: `commands.ts`, `action-receipts.ts`, `durable-record.ts`, `history.ts` |
+| Agent grant, typed admission and renewal | Same directory: `agent-credential-routes.ts`, `agent-executions.ts`; engine `cloud-agent-execution-client.ts`, `agents/cloud-agent-lease.ts`; protocol `cloud-commands.ts` |
 | Actor/device authority and native services | Same directory: `actor-sessions.ts`, `engine-client-admission.ts`, `access.ts`, `runtime-access.ts` |
 | GitHub read and per-operation write authority | Same directory: `github-read-routes.ts`, `github-read-proxy.ts`, `github-write-grants.ts`, `github-native-grants.ts` |
 | Funding, usage and durable storage | Same directory: `paid-authority.ts`, `compute-funding.ts`, `compute-leases.ts`, `object-store.ts`, `object-maintenance.ts` |
 | Protected base and pinned runtime | `scripts/cloud-workspace-validation/runtime-base-v4/`, `runtime-bundle/`, `sandbox/setup-cloud-workspace.mjs`, `sandbox/attest-cloud-worker.mjs` |
 | Live engine/transport/publication | `apps/desktop/src/engine/zeros-engine.ts`, `files/cloud-workspace-ownership.ts`, `workspace/service.ts`, `apps/desktop/src/engine/transport/cloud.ts` |
+| Native cloud factory and shared adapters | Engine `agents/cloud-provider-execution.ts`, `agents/gateway.ts`, `agents/adapters/`, `agents/containment/cloud-native-boundary.ts`, `agents/containment/cloud-native-view.mjs` |
+| Bounded native instructions/config and MCP | Engine `agents/adapters/claude-sdk/cloud-instructions.ts`, `agents/adapters/codex/cloud-project-config.ts`, `agents/adapters/cursor-sdk/cloud-instructions.ts`, `agents/cloud-mcp.ts`, `agents/cloud-skills.ts` |
+| Actor-owned reference images | Engine `files/cloud-attachment-transfer.ts`, `workspace/service.ts`, `cloud-actor-policy.ts`; protocol `attachment-policy.ts` |
 | Exact desktop routing and receipt recovery | `apps/desktop/src/renderer/platform/bridge/workspace-runtime-client.ts`, `cloud-agent-connection.ts`, `open-cloud-runtime.ts` |
 | Create, catalog, wake/restart | `apps/desktop/src/renderer/state/cloud-workspace-create.ts`, `cloud-workspace-catalog.ts`, `cloud-workspace-wake.ts`, `cloud-workspace-restart.ts` |
 | Native access and replica lifetime | `apps/desktop/electron/cloud-workspace-access-broker.ts`, `cloud-workspace-ssh-runtime.ts`, `cloud-workspace-port-forwarding.ts`; engine `cloud-replica-broker.ts` |
 | Desktop transcript presentation cache | `apps/desktop/electron/cloud-transcript-cache-store.ts`, `ipc/commands/cloud-transcript-cache.ts`; renderer `state/cloud-transcript-cache.ts` |
+| Source-mode native agent harness | `scripts/cloud-workspace-validation/cloud-agent-e2e/`, including fixture control plane; `scripts/__tests__/cloud-agent-e2e*.test.ts` |
+
+The agent factory retains the existing containment, history locks, lease and
+retirement layers; it does not run providers as the engine. The legacy workload
+bridge/coordinator retains production factory/adapter wiring and qualification
+callers. Human LSP/file/process helpers are unchanged. Owning contracts:
+[native configuration](agent-authentication-and-language-tools.md#repository-instructions-and-configuration),
+[MCP](mcp-and-skills.md), [typed failures](lifecycle-diagnostics.md#agent-command-failures),
+[reply/snapshot/image transport](client-runtime-contract.md) and
+[source-mode evidence limits](qualification-status.md#source-mode-agent-harness).
 
 Applied migrations remain forward-only compatibility contracts. Historical
 schema numbers do not describe executable worker support. Do not rename a

@@ -173,6 +173,14 @@ dispatcher. Runtime self-test is `R/bin/node R/lib/zeros/runtime-self-test.mjs` 
 emits a qualification diagnostic. These executable entrypoints belong to their
 runtime/base implementation changes.
 
+The `cursor_load` check verifies the shipped Linux platform payload as worker
+UID/GID 10001, executing its actual `rg --version` and `cursorsandbox --help`
+entrypoints under bundled Node. Resolved files must stay inside R. The bundle
+probe uses a private user/network namespace and read-only runtime; the installed
+self-test uses the worker identity. Importing the SDK alone cannot establish
+that its ELF payload survived packaging. These loader/ABI probes use no provider
+credentials and do not establish a successful model turn or runtime qualification.
+
 `ClosedDiagnostic` (`zeros.diagnostic/v1`) contains only `component`, `stage`,
 `ok`, nullable `exitCode`, `timedOut`, and deduplicated `failedChecks` (at most 32).
 Components are `bundle`, `publication`, `base`, `bootstrap`, `installer`,

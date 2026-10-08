@@ -12,6 +12,7 @@ import {
   type CloudCommandSnapshot,
 } from "@zeros/protocol/cloud-commands";
 import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
+import { CloudTurnOutcomeSchema, type CloudTurnOutcome } from "@zeros/protocol/cloud-events";
 import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
 import { CloudCommandRuntime } from "../../../../engine/cloud-command-runtime";
@@ -194,6 +195,7 @@ type Scenario = {
   historyGate?: ReturnType<typeof deferred<void>>;
   snapshotGate?: ReturnType<typeof deferred<void>>;
   emptyHistory?: boolean;
+  historyError?: boolean;
   delayedChunk?: boolean;
   successContent?: "empty" | "tool";
 };
@@ -317,6 +319,8 @@ async function harness(options: Scenario = {}) {
     isCloudAgentAdmissionCode,
     createMessage,
     getChat: () => ({ id: CHAT, agentId }),
+    getTurnRow: () => null,
+    CloudTurnOutcomeSchema,
     openZerosDb: () => ({
       prepare: () => ({
         all: (_chat: string, ...ids: string[]) =>
@@ -338,7 +342,7 @@ async function harness(options: Scenario = {}) {
       claim: CloudCommandClaim,
       code: string,
       error?: unknown,
-    ) => void;
+    ) => CloudTurnOutcome | undefined;
     dispatchCloudCommand: (
       claim: CloudCommandClaim,
     ) => Promise<Pick<CloudCommandResult, "state" | "resultCode" | "result">>;
@@ -400,6 +404,8 @@ async function harness(options: Scenario = {}) {
             throw new Error("Wrong command settlement");
           entry.state = input.result.state;
           entry.resultCode = input.result.resultCode;
+          entry.result = input.result.result;
+          entry.payload = null;
           entry.updatedAt = new Date(2).toISOString();
           revision++;
           settled.resolve();
@@ -560,6 +566,7 @@ async function harness(options: Scenario = {}) {
           modeRevision: 0,
           permissionModeVersion: 1,
           nativeCommandsVersion: 1,
+          cloudTurnProtocolVersion: 1,
         };
         break;
       case "cloudCommands.request":
@@ -619,6 +626,7 @@ async function harness(options: Scenario = {}) {
   const updates = vi.fn((frame: BridgeMessage) => {
     if (useSessionsStore.getState().sessions[CHAT]?.cwd !== CLOUD) return;
     const mapped = connection.incoming(frame as unknown as WireRecord);
+    if (!mapped) return;
     useSessionsStore
       .getState()
       .applyBridgeUpdate(mapped.notification as SessionNotification);
@@ -702,6 +710,7 @@ async function harness(options: Scenario = {}) {
   } as unknown as RuntimeClient;
   const historyRead = vi.fn(async () => {
     await options.historyGate?.promise;
+    if (options.historyError) throw new Error("Cloud transcript recovery failed");
     if (options.emptyHistory) return [];
     if (options.historyGate)
       save([
@@ -1169,7 +1178,7 @@ describe("cloud turn failure visibility across renderer, command runtime, and du
         failure: {
           kind: "protocol-error",
           stage: "prompt",
-          message: expect.stringContaining("Cloud provider prompt"),
+          message: "The synthetic provider rejected this request.",
         },
       });
       expect(h.receipt()).toMatchObject({
@@ -1299,8 +1308,8 @@ describe("cloud turn failure visibility across renderer, command runtime, and du
     },
   );
 
-  it("reports transcript recovery failure durably instead of completing an empty succeeded receipt", async () => {
-    const h = await harness({ emptyHistory: true });
+  it("reports a transcript read failure durably after a succeeded receipt", async () => {
+    const h = await harness({ historyError: true });
     await h.send();
     await h.flushPersistence();
     expect(slot()).toMatchObject({

@@ -2,13 +2,23 @@ import {describe,expect,it,vi} from "vitest";
 import type {CloudProviderExecution} from "../../../../cloud-provider-execution";
 import {cloudCursorRequest} from "../cloud-policy";
 
-function execution(){
-  return {lease:{assertLive:vi.fn(),admission:{model:"qualified-model"}},
+function execution(cwd="/srv/zeros/workspace"){
+  return {cwd,lease:{assertLive:vi.fn(),admission:{model:"qualified-model"}},
     coordinator:{environment:()=>({CURSOR_API_KEY:"synthetic-private-key"})},
     productServers:[{name:"design",transport:"http",url:"http://127.0.0.1:7000/scoped",headers:{Authorization:"Bearer synthetic-capability"}}],
     tools:{inputSchema:{type:"object"}}} as unknown as CloudProviderExecution;
 }
 describe("Cursor cloud request authority",()=>{
+  it.each(["/srv/zeros/workspace","/srv/zeros/state/workspaces/managed-worktree","/srv/zeros/workspace/packages/app"])("binds every workspace operation to the admitted root %s",cwd=>{
+    const admitted=execution(cwd);
+    for(const operation of ["agent.create","platform.prewarm","agent.resume","agent.list","store.open"]){
+      const unsafe={cwd:"/untrusted-renderer-root",local:{cwd:"/other-member-root"},opts:{cwd:"/untrusted-renderer-root"}};
+      const actual=cloudCursorRequest(admitted,operation,operation==="agent.resume"?{agentId:"native",opts:unsafe}:unsafe) as {cwd?:string;local?:{cwd:string};opts?:{cwd:string;local:{cwd:string}}};
+      const options=operation==="agent.resume"?actual.opts!:operation==="agent.list"?actual.opts!:actual;
+      expect(options.cwd).toBe(cwd);
+      if(operation!=="agent.list"&&operation!=="store.open")expect(options.local?.cwd).toBe(cwd);
+    }
+  });
   it.each(["agent.create","agent.resume","platform.prewarm"])("keeps native tools and reapplies credential policy for %s",operation=>{
     const unsafe={apiKey:"untrusted-key",model:{id:"qualified-model"},tools:["shell","task"],
       cwd:"/private",local:{settingSources:["project"],customTools:{override:{}},enableAgentRetries:true},

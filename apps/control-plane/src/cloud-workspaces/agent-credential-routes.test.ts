@@ -10,6 +10,107 @@ import type {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
 import {CloudWorkspaceEngineAuthorityError} from "./engine-authority.js";
 
 describe("personal cloud credential HTTP boundaries",()=>{
+  it.each(["admit", "validate", "refresh-codex"] as const)("preserves closed %s refusal categories without service prose", async kind => {
+    const service = { admit: vi.fn(), validate: vi.fn() };
+    const app = createCloudAgentExecutionRoutes(service as unknown as DatabaseCloudAgentExecutionService);
+    const scope = { workspaceId: randomUUID(), organizationId: randomUUID(), generation: 1, engineInstanceId: randomUUID() };
+    const request = kind === "admit" ? { kind, admission: {} } : { kind, leaseId: randomUUID(), ...(kind === "refresh-codex" ? { credentialVersion: 1 } : {}) };
+    const method = kind === "refresh-codex" ? "validate" : kind;
+    const stage = kind === "admit" ? "admission" : "validation";
+    const cases = [
+      [503, "cloud_agent_credential_busy", "lock_busy"],
+      [429, "cloud_agent_execution_limit", "execution_limit"],
+      [403, "cloud_customization_changed", "customization_changed"],
+      [403, "cloud_workspace_capability_required", "access_denied"],
+      [401, "cloud_actor_admission_rejected", "access_denied"],
+      [404, "cloud_workspace_not_found", "access_denied"],
+      [404, "not_found", "access_denied"],
+      [403, "forbidden", "access_denied"],
+      [409, "computer_environment_revoked", "environment_revoked"],
+      [409, "computer_environment_runtime_required", "environment_runtime_required"],
+      [409, "cloud_settings_snapshot_unavailable", "environment_unavailable"],
+      [503, "computer_environment_busy", "lock_busy"],
+      [409, "codex_auth_reconnect_required", "credential_refresh_rejected"],
+    ] as const;
+    for (const [status, code, category] of cases) {
+      service[method].mockRejectedValueOnce(new HttpError(status, code, "private-token-and-SQL-sentinel"));
+      const response = await app.request(CLOUD_AGENT_EXECUTION_PATH, { method: "POST",
+        headers: { authorization: `Bearer zwh_${"x".repeat(43)}`, "content-type": "application/json" },
+        body: JSON.stringify({ ...scope, request }) });
+      expect(response.status).toBe(category === "access_denied" ? 403 : status);
+      expect(await response.json()).toEqual({ error: `cloud_${stage}_${category}` });
+    }
+  });
+
+  it.each(["admit", "validate", "refresh-codex"] as const)("does not disclose resource existence through typed %s statuses", async kind => {
+    const refusal = vi.fn(), method = kind === "admit" ? "admit" : "validate";
+    const app = createCloudAgentExecutionRoutes({ [method]: refusal } as unknown as DatabaseCloudAgentExecutionService);
+    const scope = { workspaceId: randomUUID(), organizationId: randomUUID(), generation: 1, engineInstanceId: randomUUID() };
+    const request = kind === "admit" ? { kind, admission: {} } : { kind, leaseId: randomUUID(), ...(kind === "refresh-codex" ? { credentialVersion: 1 } : {}) };
+    const stage = kind === "admit" ? "admission" : "validation";
+    for (const [status, code, expected] of [
+      [404, "not_found", `cloud_${stage}_access_denied`],
+      [403, "forbidden", `cloud_${stage}_access_denied`],
+      [401, "forbidden", `cloud_${stage}_access_denied`],
+      [404, "cloud_workspace_not_found", `cloud_${stage}_access_denied`],
+      [404, "cloud_validation_lock_busy", "cloud_validation_lock_busy"],
+      [401, "cloud_validation_access_denied", "cloud_validation_access_denied"],
+    ] as const) {
+      refusal.mockRejectedValueOnce(new HttpError(status, code, "private-prose-and-path-sentinel"));
+      const response = await app.request(CLOUD_AGENT_EXECUTION_PATH, { method: "POST",
+        headers: { authorization: `Bearer zwh_${"x".repeat(43)}`, "content-type": "application/json" },
+        body: JSON.stringify({ ...scope, request }) });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: expected });
+    }
+  });
+
+  it.each([
+    ["computerTool", { kind: "computer-tool", leaseId: randomUUID(), toolCallId: "native-tool-fixture", tool: { name: "ListComputers", arguments: {} } }],
+    ["background", { kind: "background", leaseId: randomUUID(), operation: { kind: "retain", conversationId: "chat", revision: 1, snapshot: { tasks: [], waiting: false, processWork: true } } }],
+    ["release", { kind: "release", leaseId: randomUUID() }],
+    ["authorizeAction", { kind: "authorize-action", executionId: randomUUID(), actorSessionId: randomUUID() }],
+    ["customization", { kind: "customization", actorSessionId: randomUUID(), operation: "extensions.list", params: {} }],
+    ["terminalEnvironment", { kind: "terminal-environment", actorSessionId: randomUUID() }],
+  ] as const)("retains legacy non-disclosure for %s outside lease validation", async (method, request) => {
+    const refusal = vi.fn(), app = createCloudAgentExecutionRoutes({ [method]: refusal } as unknown as DatabaseCloudAgentExecutionService);
+    const scope = { workspaceId: randomUUID(), organizationId: randomUUID(), generation: 1, engineInstanceId: randomUUID() };
+    for (const [status, code, expectedStatus] of [
+      [403, "cloud_agent_authority_rejected", 403],
+      [403, "forbidden", 403],
+      [404, "not_found", 403],
+      [404, "cloud_validation_access_denied", 403],
+      [409, "cloud_agent_credential_busy", 403],
+      [429, "cloud_agent_execution_limit", 429],
+      [503, "computer_environment_busy", 503],
+    ] as const) {
+      refusal.mockRejectedValueOnce(new HttpError(status, code, "private-prose-and-path-sentinel"));
+      const response = await app.request(CLOUD_AGENT_EXECUTION_PATH, { method: "POST",
+        headers: { authorization: `Bearer zwh_${"x".repeat(43)}`, "content-type": "application/json" },
+        body: JSON.stringify({ ...scope, request }) });
+      expect(response.status).toBe(expectedStatus);
+      expect(await response.json()).toEqual({ error: "cloud_agent_authority_rejected" });
+    }
+    refusal.mockRejectedValueOnce(new Error("private-prose-and-path-sentinel"));
+    const unavailable = await app.request(CLOUD_AGENT_EXECUTION_PATH, { method: "POST",
+      headers: { authorization: `Bearer zwh_${"x".repeat(43)}`, "content-type": "application/json" },
+      body: JSON.stringify({ ...scope, request }) });
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toEqual({ error: "cloud_agent_execution_unavailable" });
+  });
+
+  it("retains an already typed inner stage and never serializes an unknown error code", async () => {
+    const service = { admit: vi.fn() }, app = createCloudAgentExecutionRoutes(service as unknown as DatabaseCloudAgentExecutionService);
+    const call = () => app.request(CLOUD_AGENT_EXECUTION_PATH, { method: "POST",
+      headers: { authorization: `Bearer zwh_${"x".repeat(43)}`, "content-type": "application/json" },
+      body: JSON.stringify({ workspaceId: randomUUID(), organizationId: randomUUID(), generation: 1,
+        engineInstanceId: randomUUID(), request: { kind: "admit", admission: {} } }) });
+    service.admit.mockRejectedValueOnce(new HttpError(503, "cloud_validation_lock_busy", "private-prose-sentinel"));
+    expect(await (await call()).json()).toEqual({ error: "cloud_validation_lock_busy" });
+    service.admit.mockRejectedValueOnce(new HttpError(403, "cloud_admission_private-secret-sentinel", "private-prose-sentinel"));
+    expect(await (await call()).json()).toEqual({ error: "cloud_admission_authority_http_4xx" });
+  });
+
   it("authenticates terminal environment requests and returns only closed authority errors",async()=>{
     const service={terminalEnvironment:vi.fn().mockResolvedValue({version:1,environment:{ORG_VALUE:"synthetic-org-value"}})};
     const app=createCloudAgentExecutionRoutes(service as unknown as DatabaseCloudAgentExecutionService);

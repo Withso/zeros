@@ -1,6 +1,7 @@
 import { McpWorkingDirectoryError, validateMcpWorkingDirectory } from "./mcp-working-directory";
 import { cloudPermissionMode, cloudCommandFailureCode, decodeCloudCommandFailure, CloudCommandFailureError,
   type CloudCommandFailureCause } from "@zeros/protocol/cloud-commands";
+import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
 import {
   sessionToolsSnapshotSchema,
   sessionToolsInventorySnapshotSchema,
@@ -139,6 +140,9 @@ import type { AccountDetails, EnrichedRegistryAgent } from "../types";
 import { AgentFailureError } from "./types";
 
 function cloudProviderFailure(error: unknown, stage: CloudCommandFailureCause["stage"]): Error {
+  // Lease retirement can fail while starting or sending to a native provider.
+  // Its typed grant cause must survive the provider-stage wrapper.
+  if (error instanceof Error && isCloudAgentAdmissionCode((error as Error & { code?: unknown }).code)) return error;
   const code = cloudCommandFailureCode(error, stage);
   // Keep the redacted native explanation and recovery link alongside the safe
   // receipt category. Generic native/driver diagnostics never become UI copy.
@@ -1520,6 +1524,14 @@ export class AgentGateway {
   /** Live outer boundary per Zeros execution. It is installed before adapter
    * startup and revoked before any adapter teardown can run user code. */
   private readonly executionBoundaries = new Map<string, PreparedBoundary>();
+  /** Retired causes contain bounded sanitized data, never a boundary/lease/key. */
+  private readonly cloudBoundaryIdentities = new WeakMap<PreparedBoundary, symbol>();
+  private readonly cloudTerminationCauses = new Map<string, {
+    readonly identity: symbol;
+    readonly agentId: string;
+    readonly code: string;
+    readonly failure: Readonly<AgentFailure>;
+  }>();
   /** A rejected teardown proof remains owned by that exact execution. Keeping
    * the boundary and failure lets the recovery loop retry idempotent teardown
    * without turning one stuck process into global agent/auth/Run/Setup state. */
@@ -1619,6 +1631,7 @@ export class AgentGateway {
       readonly promise: Promise<void>;
       readonly settle: () => void;
       readonly controller: AbortController;
+      readonly stage: "newSession" | "loadSession";
     }
   >();
 
@@ -2884,7 +2897,13 @@ export class AgentGateway {
     providerId: string,
     stage: "newSession" | "loadSession" | "forkSession",
     error: unknown,
-  ): AgentFailureError {
+  ): Error {
+    if (this.executionBoundary.backend === "cloud-worker") {
+      const code = (error as { code?: unknown } | null)?.code;
+      const diagnosis = decodeCloudCommandFailure(code);
+      if (diagnosis) return new CloudCommandFailureError(diagnosis);
+      if (error instanceof Error && isCloudAgentAdmissionCode(code)) return error;
+    }
     if (error instanceof AdmissionCancelledError) {
       // The chat was closed during admission. Proven cleanup already ran, and
       // the provider's durable thread is untouched, so route this like losing
@@ -3916,6 +3935,19 @@ export class AgentGateway {
         const execution = cloudProviderExecution(this.executionBoundaries.get(request.sessionId));
         if (execution?.lease.admission.provider === agentId && execution.redactor) request = execution.redactor.question(request);
         opts.events.onQuestionRequest(agentId, id, request);
+      },
+      onAgentExit: (agentId, code, signal, executionId) => {
+        const boundary = executionId ? this.executionBoundaries.get(executionId) : undefined;
+        if (executionId && boundary) {
+          const stage = this.adapterStartupFlights.get(executionId)?.stage ?? "prompt";
+          const reason = new AgentFailureError({ kind: "subprocess-exited", stage, agentId,
+            message: "The native provider process exited before this execution completed.",
+            exit: { code, signal, stderrTail: "" } });
+          this.rememberCloudTermination(executionId, agentId, boundary,
+            this.cloudTerminationReason(executionId, boundary, reason),
+            stage === "prompt" ? "provider_prompt" : "provider_start");
+        }
+        opts.events.onAgentExit(agentId, code, signal, executionId);
       },
     } : opts.events;
     this.executionBoundary =
@@ -5031,6 +5063,10 @@ export class AgentGateway {
             preparedBoundary.attestation,
             territoryRevalidation,
           ]).then(() => undefined);
+          if (cloudAdmission) {
+            this.cloudBoundaryIdentities.set(preparedBoundary, Symbol());
+            this.cloudTerminationCauses.delete(executionId);
+          }
           this.executionBoundaries.set(executionId, preparedBoundary);
           this.observeBoundaryAttestation(
             executionId,
@@ -5102,6 +5138,7 @@ export class AgentGateway {
       ));
     } catch (err) {
       const redacted = cloudProviderExecution(preparedBoundary)?.redactor?.error(err) ?? err;
+      if (cloudAdmission) this.rememberCloudTermination(executionId, agentId, preparedBoundary, redacted, "provider_start");
       await this.disposeRejectedExecutions(adapter, [executionId]);
       throw cloudAdmission ? cloudProviderFailure(redacted, "provider_start") : redacted;
     }
@@ -5360,6 +5397,10 @@ export class AgentGateway {
             preparedBoundary.attestation,
             territoryRevalidation,
           ]).then(() => undefined);
+          if (cloudAdmission) {
+            this.cloudBoundaryIdentities.set(preparedBoundary, Symbol());
+            this.cloudTerminationCauses.delete(executionId);
+          }
           this.executionBoundaries.set(executionId, preparedBoundary);
           this.observeBoundaryAttestation(
             executionId,
@@ -5419,6 +5460,7 @@ export class AgentGateway {
         executionId,
         startup,
         opts.admissionSignal,
+        "loadSession",
       );
       response = await this.raceBoundaryAttestation(
         executionId,
@@ -5437,6 +5479,7 @@ export class AgentGateway {
       // that the provider locator is invalid. A rejected load must not strand
       // that provisional execution after its engine route is torn down.
       const redacted = cloudProviderExecution(preparedBoundary)?.redactor?.error(err) ?? err;
+      if (cloudAdmission) this.rememberCloudTermination(executionId, agentId, preparedBoundary, redacted, "provider_start");
       await this.disposeRejectedExecutions(adapter, [executionId]);
       throw cloudAdmission ? cloudProviderFailure(redacted, "provider_start") : redacted;
     }
@@ -5812,6 +5855,15 @@ export class AgentGateway {
     sessionId: string,
   ): Promise<void> {
     const boundary = this.executionBoundaries.get(sessionId);
+    const cloudIdentity = boundary ? this.cloudBoundaryIdentities.get(boundary) : undefined;
+    const owner = this.executionOwnership.get(sessionId);
+    if (boundary && this.executionBoundary.backend === "cloud-worker") {
+      this.rememberCloudTermination(sessionId, resolvedAgentId, boundary,
+        this.cloudTerminationReason(sessionId, boundary, new AgentFailureError({
+          kind: "lifecycle-superseded", stage: "prompt", agentId: resolvedAgentId,
+          message: "This cloud execution was closed before the prompt could continue.",
+        })), "provider_prompt");
+    }
     const protectionCompletion =
       this.boundaryAttestations.get(sessionId)?.completion;
     this.adapterStartupFlights.get(sessionId)?.controller.abort();
@@ -5896,7 +5948,10 @@ export class AgentGateway {
           (err instanceof Error ? err.message : String(err)),
       );
     }
-    if (boundaryStopped) {
+    const ownsBoundary = this.executionBoundary.backend !== "cloud-worker" ||
+      (this.executionBoundaries.get(sessionId) === boundary &&
+        (!boundary || this.cloudBoundaryIdentities.get(boundary) === cloudIdentity));
+    if (boundaryStopped && ownsBoundary) {
       this.failedBoundaryPreparations.delete(sessionId);
       this.executionBoundaries.delete(sessionId);
       this.failedBoundaryRetirements.delete(sessionId);
@@ -5907,7 +5962,8 @@ export class AgentGateway {
     // workspace the caller may archive or delete immediately afterward.
     await protectionCompletion?.catch(() => undefined);
     if (failure) throw failure;
-    this.executionOwnership.delete(sessionId);
+    if (this.executionBoundary.backend !== "cloud-worker" || this.executionOwnership.get(sessionId) === owner)
+      this.executionOwnership.delete(sessionId);
   }
 
   async listSessions(
@@ -6100,15 +6156,23 @@ export class AgentGateway {
     executionId: string,
     operation: Promise<unknown>,
     admissionSignal?: AbortSignal,
+    stage: "newSession" | "loadSession" = "newSession",
   ): AbortSignal {
     let settle!: () => void;
     const promise = new Promise<void>((resolve) => {
       settle = resolve;
     });
     const controller = new AbortController();
-    const flight = { promise, settle, controller };
+    const flight = { promise, settle, controller, stage };
     this.adapterStartupFlights.set(executionId, flight);
-    void operation.catch(() => this.settleAdapterStartup(executionId, flight));
+    const boundary = this.executionBoundaries.get(executionId);
+    const identity = boundary ? this.cloudBoundaryIdentities.get(boundary) : undefined;
+    void operation.catch((error: unknown) => {
+      const provider = boundary ? cloudProviderExecution(boundary)?.lease.admission.provider : undefined;
+      if (boundary && provider && this.cloudBoundaryIdentities.get(boundary) === identity)
+        this.rememberCloudTermination(executionId, provider, boundary, error, "provider_start");
+      this.settleAdapterStartup(executionId, flight);
+    });
     return admissionSignal
       ? AbortSignal.any([admissionSignal, controller.signal])
       : controller.signal;
@@ -6133,6 +6197,62 @@ export class AgentGateway {
     if (flight) await flight.promise;
   }
 
+  /** Preserve an already closed grant/proof cause before revocation clears it. */
+  private cloudTerminationReason(executionId: string, boundary: PreparedBoundary, fallback: AgentFailureError): unknown {
+    const proof = this.boundaryAttestations.get(executionId)?.failure;
+    if (proof) return new AgentFailureError(proof);
+    try { cloudProviderExecution(boundary)?.lease.assertLive?.(); }
+    catch (error) {
+      // A generic close alone cannot explain an observed process exit. Explicit
+      // Stop is captured first; expired/revoked grants keep their precise code.
+      if ((error as { code?: unknown })?.code !== "cloud_validation_lifecycle_superseded" ||
+          fallback.failure.kind === "lifecycle-superseded") return error;
+    }
+    return fallback;
+  }
+
+  private sanitizedCloudTermination(agentId: string, boundary: PreparedBoundary | undefined, error: unknown,
+    stage: CloudCommandFailureCause["stage"]): AgentFailureError & { code: string } {
+    const normalized = cloudProviderFailure(cloudProviderExecution(boundary)?.redactor?.error(error) ?? error, stage);
+    const code = cloudCommandFailureCode(normalized, stage);
+    const admissionCode = (normalized as Error & { code?: unknown }).code;
+    const known = (normalized as Error & { failure?: AgentFailure }).failure;
+    const failure: AgentFailure = known ? {
+      kind: known.kind, stage: known.stage, agentId, message: known.message.slice(0, 4096),
+      ...(known.advice ? { advice: known.advice.slice(0, 4096) } : {}),
+      ...(known.exit ? { exit: { code: known.exit.code, signal: known.exit.signal,
+        stderrTail: known.exit.stderrTail.slice(0, 4096) } } : {}),
+    } : { kind: "cloud-credentials-unavailable", stage: stage === "provider_start" ? "newSession" : "prompt", agentId,
+      message: "The admitted cloud credential is no longer available." };
+    return Object.assign(new AgentFailureError(failure), { code: isCloudAgentAdmissionCode(admissionCode) ? admissionCode : code });
+  }
+
+  private rememberedCloudTermination(executionId: string, agentId: string): (AgentFailureError & { code: string }) | null {
+    const remembered = this.cloudTerminationCauses.get(executionId);
+    if (!remembered || remembered.agentId !== agentId) return null;
+    const boundary = this.executionBoundaries.get(executionId);
+    if (boundary && this.cloudBoundaryIdentities.get(boundary) !== remembered.identity) return null;
+    return Object.assign(new AgentFailureError({ ...remembered.failure,
+      ...(remembered.failure.exit ? { exit: { ...remembered.failure.exit } } : {}) }), { code: remembered.code });
+  }
+
+  private rememberCloudTermination(executionId: string, agentId: string, boundary: PreparedBoundary, error: unknown,
+    stage: CloudCommandFailureCause["stage"]): (AgentFailureError & { code: string }) | null {
+    if (this.executionBoundary.backend !== "cloud-worker" || this.executionBoundaries.get(executionId) !== boundary ||
+        cloudProviderExecution(boundary)?.lease.admission.provider !== agentId) return null;
+    const prior = this.rememberedCloudTermination(executionId, agentId);
+    if (prior) return prior;
+    let identity = this.cloudBoundaryIdentities.get(boundary);
+    if (!identity) { identity = Symbol(); this.cloudBoundaryIdentities.set(boundary, identity); }
+    const sanitized = this.sanitizedCloudTermination(agentId, boundary, error, stage);
+    const failure = Object.freeze({ ...sanitized.failure,
+      ...(sanitized.failure.exit ? { exit: Object.freeze({ ...sanitized.failure.exit }) } : {}) });
+    this.cloudTerminationCauses.set(executionId, Object.freeze({ identity, agentId, code: sanitized.code, failure }));
+    if (this.cloudTerminationCauses.size > 128)
+      this.cloudTerminationCauses.delete(this.cloudTerminationCauses.keys().next().value!);
+    return sanitized;
+  }
+
   private assertSelectedAccountConnected(agentId: string): void {
     const profile = usesProviderApiKey(this.projectRoot, agentId) ? null : providerAccountProfile(agentId);
     if (profile && profile.state !== "connected") {
@@ -6148,8 +6268,19 @@ export class AgentGateway {
   ): Promise<PromptResponse> {
     this.sessionTools.beginPrompt(sessionId);
     await this.awaitAdapterStartupSettled(sessionId);
-    const cloud=cloudProviderExecution(this.executionBoundaries.get(sessionId));
-    if(this.executionBoundary.backend==="cloud-worker"&&!cloud)throw new Error("Cloud agent credential admission is required");
+    const boundary = this.executionBoundaries.get(sessionId);
+    if (this.executionBoundary.backend === "cloud-worker") {
+      const retirement = this.failedBoundaryRetirements.get(sessionId);
+      if (retirement && retirement.boundary === boundary)
+        throw this.sanitizedCloudTermination(agentId, boundary, retirement.error, "containment");
+      const ended = this.rememberedCloudTermination(sessionId, agentId);
+      if (ended) throw ended;
+    }
+    const cloud=cloudProviderExecution(boundary);
+    if(this.executionBoundary.backend==="cloud-worker"&&!cloud)throw cloudProviderFailure(new AgentFailureError({
+      kind: "session-expired", stage: "prompt", agentId,
+      message: "This cloud execution is no longer admitted. Reopen this session before sending.",
+    }), "provider_prompt");
     if(cloud)await cloud.lease.validate();
     const authFingerprint = this.executionAuthFingerprint.get(sessionId);
     if (!cloud && authFingerprint && authFingerprint !== this.providerAuthConfigFingerprint(agentId)) {
@@ -6277,6 +6408,11 @@ export class AgentGateway {
     const adapter = this.adapterForSession(sessionId, agentId);
     const cloud=cloudProviderExecution(this.executionBoundaries.get(sessionId));
     if(cloud){
+      const boundary = this.executionBoundaries.get(sessionId)!;
+      this.rememberCloudTermination(sessionId, agentId, boundary, new AgentFailureError({
+        kind: "lifecycle-superseded", stage: "prompt", agentId,
+        message: "This cloud execution was cancelled before the prompt could continue.",
+      }), "provider_prompt");
       // Retiring authority is synchronous. No late native tool call can race
       // Stop, and already-returned background jobs belong to the same lease.
       const retirement=cloud.lease.close();
@@ -6856,6 +6992,7 @@ export class AgentGateway {
     }
     await Promise.allSettled(protectionCompletions);
     this.executionBoundaries.clear();
+    this.cloudTerminationCauses.clear();
     this.failedBoundaryRetirements.clear();
     this.adapters.clear();
     this.executionToAgent.clear();

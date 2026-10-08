@@ -4,6 +4,7 @@ import {
   cloudWorkspaceKey,
   parseCloudScopedId,
   parseCloudWorkspaceKey,
+  isCloudWorkspace,
   type CloudWorkspaceTarget,
 } from "./cloud-workspace-key";
 import { runSessionId } from "@zeros/protocol/run-actions";
@@ -20,6 +21,12 @@ export function record(value: unknown): WireRecord {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as WireRecord)
     : {};
+}
+
+/** Local resolver envelopes stay compatible. Cloud replies always select the
+ * owning peer and carry the native execution captured with the request. */
+export function cloudReplyOwnership(cwd: string | null | undefined, chatId: string, request: { sessionId: string; executionId?: string }): { chatId?: string; executionId?: string } {
+  return isCloudWorkspace(cwd) ? { chatId, executionId: request.executionId ?? request.sessionId } : {};
 }
 
 /** Only envelope identities select a runtime. Prompt text, tools, provider
@@ -247,6 +254,14 @@ export function cloudIncoming(
     out.notification = mapFields(scope, record(message.notification), "in");
   if (message.request)
     out.request = mapFields(scope, record(message.request), "in");
+  if (message.cloudSnapshot) {
+    const snapshot = record(message.cloudSnapshot);
+    out.cloudSnapshot = { ...mapFields(scope, snapshot, "in"),
+      ...(snapshot.latestTurn ? { latestTurn: mapFields(scope, record(snapshot.latestTurn), "in") } : {}),
+      permissions: (Array.isArray(snapshot.permissions) ? snapshot.permissions : []).map(item => ({ ...record(item), request: mapFields(scope, record(record(item).request), "in") })),
+      questions: (Array.isArray(snapshot.questions) ? snapshot.questions : []).map(item => ({ ...record(item), request: mapFields(scope, record(record(item).request), "in") })),
+    };
+  }
   if (Array.isArray(message.chatIds))
     out.chatIds = message.chatIds.map((id) => cloudScopedId(scope, String(id)));
   if (Array.isArray(message.terminals))

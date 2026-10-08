@@ -31,6 +31,21 @@ function fixture(headless?:{prepare(claim:CloudCommandClaim):Promise<void>;retir
   return { claim, snapshot, completion, dependencies, runtime, send, stop, read };
 }
 describe("engine-owned cloud command dispatch", () => {
+  it("persists bounded pre-provider terminal identity without retaining the prompt payload", async () => {
+    const prepare = vi.fn(async () => { throw new CloudCommandFailureError({ stage: "provider_start", category: "auth_required" }); });
+    const f = fixture({ prepare, retire: vi.fn(async () => {}) });
+    const terminal = { commandId: f.claim.commandId, conversationId: f.claim.conversationId, executionId: "execution", turnId: f.claim.payload.userMessageId,
+      agentId: "claude", status: "failed", stopReason: null, error: "Authentication required", failure: { kind: "auth-required", stage: "newSession", message: "Authentication required" } };
+    Object.assign(f.dependencies, { failed: vi.fn((claim: CloudCommandClaim) => ({ ...terminal, executionId: claim.executionId })) });
+    try {
+      await f.send();
+      await vi.waitFor(() => expect(f.dependencies.request.mock.calls.some(([input]) => input.kind === "settle")).toBe(true));
+      expect(f.dependencies.request.mock.calls.find(([input]) => input.kind === "settle")![0]).toMatchObject({ result: {
+        state: "failed", resultCode: "cloud_provider_start_auth_required", result: { version: 1, terminal: { ...terminal, executionId: f.claim.executionId } },
+      } });
+      expect(f.dependencies.dispatch).not.toHaveBeenCalled();
+    } finally { f.runtime.close(); }
+  });
   it("recovers an interrupted receipt once on reconnect without dispatching its prompt", async () => {
     const f = fixture(), interrupted = vi.fn();
     const receipt = { commandId: f.claim.commandId, position: 1, state: "uncertain" as const, payload: f.claim.payload,

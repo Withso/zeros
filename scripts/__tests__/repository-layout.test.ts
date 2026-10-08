@@ -819,7 +819,7 @@ describe("repository layout contracts", () => {
     ])
       expect(cloudIndex).toContain(contract);
     expect(read(`${cloudDocs}/qualification-status.md`)).toContain(
-      "0138_cloud_workspace_usage_and_ui.sql",
+      "0138_cloud_workspace_ui_metadata.sql",
     );
     const followUps = read(`${cloudDocs}/warm-pool.md`);
     for (const boundary of [

@@ -6,6 +6,7 @@ import {
 } from "@zeros/protocol/cloud-commands";
 import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
+import { CloudTurnOutcomeSchema, type CloudTurnOutcome } from "@zeros/protocol/cloud-events";
 
 type Dependencies = {
   request(input: CloudCommandEngineRequest,actorSessionId?:string): Promise<unknown>;
@@ -22,7 +23,7 @@ type Dependencies = {
   dispatch(claim: CloudCommandClaim): Promise<Pick<CloudCommandResult, "state" | "resultCode" | "result">>;
   cancel(conversationId: string): Promise<void>;
   changed(conversationId: string): void;
-  failed?(claim: CloudCommandClaim, resultCode: string, error: unknown): void;
+  failed?(claim: CloudCommandClaim, resultCode: string, error: unknown): CloudTurnOutcome | void;
   interrupted?(conversationId: string, receipt: CloudCommandSnapshot["receipts"][number]): void;
 };
 
@@ -281,7 +282,16 @@ export class CloudCommandRuntime {
           const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
           const resultCode = isCloudAgentAdmissionCode(code) ? code : cloudCommandFailureCode(error, failureStage);
           result = { state: "failed", resultCode };
-          try { this.dependencies.failed?.(claim, resultCode, error); }
+          try {
+            const published = this.dependencies.failed?.(claim, resultCode, error);
+            if (published) {
+              const terminal = CloudTurnOutcomeSchema.parse(published);
+              if (terminal.commandId !== claim.commandId || terminal.conversationId !== claim.conversationId || terminal.executionId !== claim.executionId ||
+                  terminal.turnId !== claim.payload.userMessageId || terminal.agentId !== claim.payload.agentId || terminal.status !== "failed")
+                throw new CloudCommandRuntimeError("command_response_invalid");
+              result.result = { version: 1, terminal };
+            }
+          }
           catch (error) { failurePublishingError = error; }
         }
         // Dispatch is caught above, so retirement always runs. Its failure

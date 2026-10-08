@@ -12,7 +12,9 @@ operational records, not this guide.
 | --- | --- | --- |
 | Execution floor | Boat-only; immutable saved v2 Computer source, complete qualified v4 pin, actor2. Retired rows retain metadata/history/cleanup and refuse new execution. | Exact released worker/base pair, intentional old-profile/actor-v1 refusals and supported-cohort skew. |
 | Computer/create | Current organization members see v2 settings; admins manage builds/repository setup. Source/CAS/role/funding checks precede allocation. Renderer pending creation binds the confirmed UUID atomically. | Signed Mac create/failure/account-switch flows and exact template qualification. |
-| Commands/native agents | One durable queue; stable IDs, guarded claims, truthful failed/uncertain outcomes, receipt-to-history catch-up. Native CLIs and per-actor credential/delegation authority. | Actual Claude/Codex turns, Stop/approval, lost events/reconnect and deployed admission. Synthetic startup handshakes are insufficient. |
+| Commands/native agents | One durable queue; immutable actor/model/key/cwd admission, typed failures, exact terminal receipts, atomic per-chat recovery and owned decision replies. | Actual Claude/Codex/Cursor turns, native tools, resume, Stop/approval, lost events/reconnect and deployed admission. Synthetic startup handshakes are insufficient. |
+| Native customization | Exclusive admitted MCP/skills; tolerant per-provider repo MCP with bounded notices; bounded Claude/Codex/Cursor instruction projections. Raw project/plugin authority remains disabled. | Exact worker/base native MCP and skill markers, auth/model/env traps, explicit Plan and actor-scoped permission isolation; safe additional native features only after proof. |
+| Reference images | Chunked actor-owned VM publication and opaque prompt references; large PNG bytes tested through all three adapter paths, without increasing the queue cap. | Real-provider image reading and signed-client attachment/reattachment flows. |
 | Git/Files/Design | Checked engine publication and required startup ownership recovery; finite Git diagnostics; direct PR commits net pending Code+Design. | Worker read/diff/commit, Design creation/Files refresh/capture, named targets, real GitHub installation/courier and conflicts on the adopted pin. |
 | Lifecycle/recovery | Fenced setup/engine registration; periodic maintenance plus notifications/retry deadlines; checkpoints, stopped wake and generation recovery. | Fresh-allocation restore, rollback, unknown provider outcomes, authority loss, physical deletion and object cleanup. |
 | Desktop/native access | Exact runtime routing, status/details/resources/ports, receive-only sync, main-owned Terminal/forwarding and revocation. Native editor launch remains hidden. | Signed macOS SSH/host trust/PTY/SFTP/tunnels/preview, frame isolation, focus and account/device/generation retirement. |
@@ -26,10 +28,77 @@ MCP/native Computer operations require their additional current evidence.
 WorkOS membership alone does not grant paid authority or another person's agent
 credentials. Personal stays Local; org-Local stays on the sidecar.
 
+## Source-mode agent harness
+
+`pnpm cloud:agent:e2e` builds the current headless engine with the production
+configuration and pinned Linux provider closure, then attempts the real v4
+launcher against a disposable TLS fixture control plane. It exercises the
+durable queue, gateway and adapters without production credentials, registry
+publication or Alpha allocation. The fixture seeds one actor/engine and bounded
+in-memory ledgers; it does not qualify production identity, PostgreSQL, billing
+or recovery authority. See the
+[operator README](../../scripts/cloud-workspace-validation/cloud-agent-e2e/README.md)
+for Linux dependencies, private mount layout and retained tests.
+
+```sh
+umask 022
+pnpm cloud:agent:e2e --providers claude,codex,cursor --credentials invalid
+```
+
+Strict scope is the default and keeps production cgroup admission. Hosts unable
+to delegate memory/pids controllers fail that gate. An explicit debugging scope
+is available:
+
+```sh
+pnpm cloud:agent:e2e --providers claude --credentials invalid --scope cpu-private-pid-fixture
+```
+
+Its evidence is **PARTIAL CLI/bridge evidence — cgroup/resource qualification
+pending**, **SOURCE-MODE, no memory/pids cgroup limits**. A real CPU group and
+private PID namespace supply separate retirement proof; native UID/canary,
+attestation and authority checks remain required. This is not Level B or
+worker/base qualification. Source staging also identifies its fixture-only
+SQLite N-API prebuild instead of representing it as a release artifact.
+
+Invalid mode never reads ambient provider tokens. It proves only the stages
+actually reached before authentication refusal. Real responses require explicit
+owner authorization and both `--credentials environment` and
+`--owner-authorized-provider-turns`; optional `--claude-model`, `--codex-model`
+and `--cursor-model` bind exact fixture grants. Each private `evidence.json`
+records closed stages/codes/counts, pending cases and `qualified: false`.
+Credentials, prompts, provider prose and tool output never enter that ledger.
+
+The driver checks authenticated live frames and paginated replay, receipt/native
+terminal identity, fresh independent read/edit/shell markers, native UID, reused
+provider binding and Stop after a fresh shell-start marker. Fixture inspection
+cannot replace replay. Retirement requires final child close, successful exit,
+positive domain proof and no late cleanup failure. These implemented assertions
+are separate from an actual passing provider run.
+
+Current PARTIAL source-mode evidence reaches build, TLS, resolver, launcher,
+engine registration, SQLite durable head/append, internal readiness and an
+actor-admitted `CloudTransport` `workspace.list` request against the fixture.
+Queued command/event delivery also reaches a typed pre-credential boundary
+refusal. The recorded Amazon Linux fixture fails closed with
+`cloud_containment_environment_setup_failed` and fixed reason
+`podman_unavailable`, matching its command receipt and failure event with zero
+execution admissions. A newer SHA-verified Ubuntu 24.04 private fixture with
+160 real apt packages, including Podman, proves the engine UID/GID maps,
+authenticated snapshot/replay and successful private-PID/own-CPU retirement.
+Native preparation reaches preflight and activation. Its final recorded canary
+exits 1 with `permission_denied`, before any provider admission; the earlier
+missing sandbox-tool prerequisites are cleared. The integrated provider path
+remains under test.
+First delta, native tools, images, resume and mid-tool Stop require real provider
+runs. Integrated excluded-project/plugin MCP markers, spawn faults and strict
+resource qualification remain pending. Pinned native unit probes establish
+configuration/startup behavior only. Never mark the success matrix passed from
+invalid auth, synthetic fixtures or an all-skipped run.
+
 ## Rollout order
 
 1. Back up/drain as required and apply forward migrations, including
-   `0138_cloud_workspace_usage_and_ui.sql`, through the protected migration path.
+   `0138_cloud_workspace_ui_metadata.sql`, through the protected migration path.
    Keep application/migration roles separate. See
    [database qualification](database-qualification.md) and
    [operations](infrastructure-and-operations.md).
@@ -39,12 +108,18 @@ credentials. Personal stays Local; org-Local stays on the sidecar.
 3. Build, qualify and publish the exact v4 runtime and compatible base through
    the supported bundle consumers (`release-alpha.yml`, `alpha-publication.yml`).
    Source fixes on the server/Mac do not replace a VM's accepted runtime.
-4. Adopt a qualified same-base runtime through the existing stopped next-wake or
+4. Publish a compatible desktop and qualify the negotiated cloud compatibility
+   boundary before activation: advertised client opt-in, legacy projection and
+   CP acknowledgement before terminal writes. A maximum protocol bump alone
+   is insufficient. Keep Local compatibility unchanged.
+5. Adopt a qualified same-base runtime through the existing stopped next-wake or
    explicit fenced upgrade. Retain source/template/settings, Git/index/edits,
    Design and durable chats. Never patch base bytes under an old compatibility ID
    or rewrite historical pins. Ordinary resume of an unchanged pin is not adoption.
-5. Publish the desktop with the compatible protocol/capabilities and finish the
-   signed Mac + authorized disposable Alpha acceptance matrix.
+
+Finish the signed Mac and authorized disposable Alpha acceptance matrix on the
+adopted pair. The implemented negotiation still needs source and released-binary
+skew proof; this guide does not claim that pending gate passed.
 
 The separate `cloud-runtime-publication.yml` flat OCI pipeline is retired. Its
 static `/opt/zeros-runtime` recipe still installs the v3 worker profile, so the
@@ -80,6 +155,9 @@ and always needs fresh final attestation/launch/registration. See
 - Run the supported N/N−1 released-binary matrix within the saved-v2/v4/actor2
   floor. Intentional retired-profile refusals are a separate negative contract.
   No skew test may restore unsupported execution or revoked qualifications.
+- Prove old desktop/new VM and new desktop/old v4 VM behavior for strict terminal
+  results and owned permission/question replies, plus CP-first settlement. Refuse
+  incompatible cloud clients before send and preserve Local protocol support.
 - Exercise ordinary public actor admission, not provider-admin execution, for
   agents, Git/Files/Design, durable queue/receipts/replay, SSH/preview/tunnels,
   stop/wake/archive, recovery and cleanup. Use explicitly authorized disposable

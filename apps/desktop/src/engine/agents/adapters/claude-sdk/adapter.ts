@@ -80,7 +80,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { isClaudeParentProgress } from "../claude/event-feedback";
 import {cloudProviderExecution} from "../../cloud-provider-execution";
-import {cloudClaudeTools} from "./cloud-tools";
+import {cloudClaudeTools,CLAUDE_INSTRUCTION_FILES} from "./cloud-tools";
 
 import type {
   AdvertisedModel,
@@ -206,15 +206,6 @@ function claudeSettingSources(boundary?: PreparedBoundary): ClaudeSettingSources
   if (cloud) return cloud.lease.customization ? ["user"] : [];
   return isNativeCodeActor(boundary) ? ["user", "project", "local"] : [];
 }
-
-/** Claude reads AGENTS.md only where no CLAUDE.md exists. Load both. Claude
- *  honors this option in user, flag and policy settings, never in a
- *  repository's own settings files, so Zeros passes it as a flag setting. */
-const CLAUDE_INSTRUCTION_FILES: NonNullable<Settings["pluginConfigs"]> = {
-  "agents-md@builtin": {
-    options: { instructionFiles: "claude-md-and-agents-md" },
-  },
-};
 
 type ClaudeOAuthTokenProvider = (options: {
   readonly forceRefresh: true;
@@ -1198,7 +1189,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     await ensureSessionDir(zerosSessionId);
     await writeSessionMeta(zerosSessionId, {
       agentId: this.agentId,
-      cwd: opts.cwd,
+      cwd: cloudProviderExecution(opts.executionBoundary)?.cwd??opts.cwd,
       pid: process.pid,
       createdAt: Date.now(),
     });
@@ -1260,7 +1251,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         this.sessions.delete(executionId);
         await this.teardown(existing);
       } else {
-        existing.cwd = opts.cwd;
+        existing.cwd = cloudProviderExecution(opts.executionBoundary)?.cwd??opts.cwd;
         existing.env = opts.env;
         existing.cliBinary = opts.cliBinary?.trim() || undefined;
         existing.mcpServers = opts.mcpServers;
@@ -1347,7 +1338,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     return {
       modelState,
       zerosSessionId,
-      cwd: opts.cwd,
+      cwd: cloudProviderExecution(opts.executionBoundary)?.cwd??opts.cwd,
       env: opts.env,
       cliBinary: opts.cliBinary?.trim() || undefined,
       mcpServers: opts.mcpServers,
@@ -1357,7 +1348,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       browserUse: opts.browserUse?.kind === "claude-agent-sdk",
       // Fresh chat → honour the user's configured default mode (settings.json
       // hierarchy); a persisted per-chat mode overrides via reconcile.
-      permissionMode: (opts.env?.ZEROS_PERMISSION_MODE ? defaultModeTokenToClaudeMode(opts.env.ZEROS_PERMISSION_MODE) : null) ?? resolveDefaultPermissionMode(opts.cwd),
+      permissionMode: (opts.env?.ZEROS_PERMISSION_MODE ? defaultModeTokenToClaudeMode(opts.env.ZEROS_PERMISSION_MODE) : null) ??
+        (cloudProviderExecution(opts.executionBoundary)?"default":resolveDefaultPermissionMode(opts.cwd)),
       claudeSessionId: null,
       // Protocol-v8 builds persisted chats.session_id and can only reopen a
       // Claude session directory by this Zeros locator. Keep it as the
@@ -3216,9 +3208,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       const scopedRules = (options.suggestions ?? [])
         .filter((s) => s.type === "addRules" && s.behavior === "allow")
         .map((s) => ({ ...s, destination: "localSettings" as const }));
-      let projectRules: PermissionUpdate[] = requiresExplicitApproval ? [] : scopedRules;
+      // The cloud checkout is shared by organization actors. Until there is
+      // engine-owned actor-scoped persistence, offer only once/chat approval;
+      // never ask the SDK to write localSettings for a cloud actor.
+      const cloud=cloudProviderExecution(state.executionBoundary);
+      let projectRules: PermissionUpdate[] = requiresExplicitApproval||cloud ? [] : scopedRules;
       let projectName = "Allow for this project";
-      if (!requiresExplicitApproval && scopedRules.length === 0 && EDIT_TOOLS.has(toolName)) {
+      if (!cloud&&!requiresExplicitApproval && scopedRules.length === 0 && EDIT_TOOLS.has(toolName)) {
         projectRules = [
           {
             type: "addRules",
@@ -4293,6 +4289,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     const systemAppend = [appendSys, nativeInstruction]
       .filter((value): value is string => Boolean(value))
       .join("\n\n");
+    const {settings:cloudSettings,...cloudOptions}=cloud?cloudClaudeTools(cloud,systemAppend):{};
     // Zeros no longer configures an overload backup or a spend ceiling.
     // Ignore legacy env values from saved sessions/older clients. Explicit
     // native fallback notices continue to drive narration and model adoption.
@@ -4515,6 +4512,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       ...(maxEffort ? { effort: maxEffort } : {}),
       settings: {
         ...settings,
+        ...cloudSettings,
         showThinkingSummaries: true,
         ...(settingSources.includes("project")
           ? { pluginConfigs: CLAUDE_INSTRUCTION_FILES }
@@ -4540,7 +4538,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // order (user override → staged Contents/Resources/claude → bundled
       // package → the user's own install).
       pathToClaudeCodeExecutable: cliPath,
-      ...(cloud?cloudClaudeTools(cloud):{}),
+      ...cloudOptions,
     };
     // Verification breadcrumb: one line per query (re)creation echoing the
     // composer knobs actually sent to the SDK. Tail the engine log (main.log /

@@ -10,15 +10,18 @@ import {resolveCloudRuntime} from "./containment/cloud-runtime-root.mjs";
 import type {PreparedBoundary} from "./containment/types";
 import type {McpServerRegistration} from "./types";
 import {materializeMcpServerRegistrations} from "./mcp-registration";
-import { readCloudRepositoryMcp, cloudCodexMcpServer, freezeCloudSnapshot } from "./cloud-mcp";
+import { readCloudRepositoryMcp, cloudCodexMcpServer, freezeCloudSnapshot, type CloudRepositoryMcpNotice } from "./cloud-mcp";
 import { CloudCustomizationRedactor } from "./cloud-customization-redaction";
 import {CloudBackgroundExecution} from "./cloud-background-execution";
 import {CloudComputerMcpServer} from "./cloud-computer-tools";
 import {CLOUD_COMPUTER_TOOLS_SERVER} from "@zeros/protocol/cloud-computer-tools";
 import {CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE} from "@zeros/protocol/system-instructions";
+import path from "node:path";
 
 export type CloudAgentSelection=Omit<CloudAgentExecutionAdmission,"executionId"|"provider"|"customization">;
 export type CloudProviderExecution={
+  /** Trusted server-selected checkout root, never a renderer request cwd. */
+  readonly cwd:string;
   readonly lease:CloudAgentLease;
   readonly tools:CloudAgentToolBridge;
   readonly coordinator:CloudNativeBoundary;
@@ -53,6 +56,7 @@ export interface CloudAgentExecutionFactory {
 export function createCloudAgentExecutionFactory(options:{
   request(request:CloudAgentExecutionRequest,signal:AbortSignal):Promise<unknown>;
   supervisor:CloudAgentLeaseSupervisor;
+  onRepositoryMcpNotice?(context:{executionId:string;conversationId:string;provider:CloudAgentExecutionAdmission["provider"];notice:CloudRepositoryMcpNotice}):void;
 }):CloudAgentExecutionFactory{
   return {async prepare({admission,conversationId,workload,cwd,signal,productTools,providerSettings,customization}){
     let lease:CloudAgentLease|undefined;
@@ -61,7 +65,8 @@ export function createCloudAgentExecutionFactory(options:{
     try{
       signal.throwIfAborted();
       if(resolveCloudRuntime().profile!=="v4")throw new Error("Cloud agents require a qualified v4 worker");
-      const requested=customization?{...admission,customization:{version:3 as const,repositoryServers:await readCloudRepositoryMcp(cwd)}}:admission;
+      const requested=customization?{...admission,customization:{version:3 as const,repositoryServers:await readCloudRepositoryMcp(cwd,admission.provider,notice=>
+        options.onRepositoryMcpNotice?.({executionId:admission.executionId,conversationId,provider:admission.provider,notice}))}}:admission;
       stage = "admission";
       lease=await CloudAgentLease.admit(requested,options.request,signal,options.supervisor);
       redactor=new CloudCustomizationRedactor([...Object.values(lease.environment?.values??{}),...(lease.customization?.servers??[]).flatMap(({server})=>
@@ -80,7 +85,14 @@ export function createCloudAgentExecutionFactory(options:{
         const computer=await lease.launch(()=>CloudComputerMcpServer.start(ownedLease));
         productServers.push(computer.registration);
       }
-      const userServers=lease.customization?.servers.map(({server})=>admission.provider==="codex"?cloudCodexMcpServer(server):server)??[];
+      const userServers=lease.customization?.servers.map(({server,scope})=>{
+        // Repository cwd is a compatible wire-relative projection. Translate
+        // only after exact CP echo/digest verification, and only for repository
+        // entries. Org/member absolute paths retain their original meaning.
+        const materialized=scope==="repository"&&server.transport==="stdio"&&server.cwd?
+          {...server,cwd:path.resolve(cwd,path.posix.relative("/srv/zeros/workspace",server.cwd))}:server;
+        return admission.provider==="codex"?cloudCodexMcpServer(materialized):materialized;
+      })??[];
       if(userServers.some(server=>productServers.some(product=>product.name===server.name)))throw new Error("Cloud MCP server name conflicts with a product tool");
       const owned=lease;
       const runtimeProfile="zeros-cloud-worker-v4" as const;
@@ -108,14 +120,22 @@ export function createCloudAgentExecutionFactory(options:{
       redactor=coordinator.redactor??redactor;
       redactor.addSecrets(productServers.flatMap(server=>server.transport==="stdio"?[]:Object.values(server.headers??{})));
       const background=new CloudBackgroundExecution(lease,conversationId,()=>coordinator.hasBackgroundServers());
-      admitted.set(boundary,{lease,tools,coordinator,background,productServers:freezeCloudSnapshot(structuredClone(productServers)),userServers:freezeCloudSnapshot(structuredClone(userServers)),redactor});
+      admitted.set(boundary,Object.freeze({cwd,lease,tools,coordinator,background,productServers:freezeCloudSnapshot(structuredClone(productServers)),userServers:freezeCloudSnapshot(structuredClone(userServers)),redactor}));
       return {boundary,env:coordinator.environment(),authorityId:lease.authorityId};
     }catch(error){
       const redacted=redactor?.error(error)??error;
-      if(lease)await lease.close();else await workload.stopAndProve();
       const innerCode = redacted && typeof redacted === "object" && "code" in redacted ? redacted.code : undefined;
+      const code = isCloudAgentAdmissionCode(innerCode)?innerCode:cloudCommandFailureCode(redacted, stage);
+      try { if(lease)await lease.close();else await workload.stopAndProve(); }
+      catch(retirementError){
+        const retirementCode=cloudCommandFailureCode(retirementError,"containment");
+        if(!lease)options.supervisor.onRetirementFailure(new CloudCommandFailureError(decodeCloudCommandFailure(retirementCode)!));
+        // Retirement remains failed and retry/quarantine ownership stays live.
+        // The original preparation cause is still the receipt's diagnosis.
+        throw Object.assign(new AggregateError([redacted,new CloudCommandFailureError(decodeCloudCommandFailure(retirementCode)!)],
+          redacted instanceof Error?redacted.message:"Cloud agent preparation failed"),{code});
+      }
       if (isCloudAgentAdmissionCode(innerCode)) throw redacted;
-      const code = cloudCommandFailureCode(redacted, stage);
       if (redacted instanceof Error) throw Object.assign(redacted, { code });
       throw new CloudCommandFailureError(decodeCloudCommandFailure(code)!);
     }

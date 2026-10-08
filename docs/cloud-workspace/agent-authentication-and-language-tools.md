@@ -7,6 +7,9 @@ native provider and commands inside the VM, as on a local machine. This is a
 trust boundary: repository code and native tools must be trusted with the
 active account. Delegation and model checks govern admission; they are not a
 credential proxy that limits arbitrary uses of an exported provider token.
+Repository hooks, when enabled, share that trust and keep native semantics,
+including running in Plan. Plan constrains agent permissions; it does not make
+repository hooks safe to run with an account's credentials.
 Other accounts, control-plane credentials and refresh tokens stay outside it. Each delegation
 names one current collaborator, workspace, compute trust boundary, model consent
 and expiry. The immutable workspace sponsor funds compute independently.
@@ -17,6 +20,11 @@ identity erasure and image disqualification invalidate that authority.
 Organization settings can connect these accounts before a workspace exists.
 See [organization setup](organization-setup.md) for native sign-in, private
 account selection, explicit compute/model consent, and automatic self-delegations.
+
+The default grant uses the sending user's control-plane account UUID. An identity
+provider subject is not that UUID, and selecting another member's credential
+requires an explicit delegation. Account and organization switches fence pending
+grant responses; Local workspaces never enter this cloud admission path.
 
 ## Codex subscription renewal
 
@@ -230,6 +238,12 @@ handler remains for persisted threads created by the old core profile. Resume
 retains their history; it does not rewrite provider logs or silently reset a
 conversation to remove a persisted tool declaration.
 
+The durable control-plane command is the sole prompt dispatcher. Admission binds
+the actor/device, provider, exact model/key and factory-verified managed cwd;
+the adapters use that immutable cwd for creation, resume, tools and configuration.
+Renderer cwd values cannot choose another checkout, and a valid managed root
+does not require `.git` metadata. A cloud refusal never falls back to Local.
+
 Each execution mounts an ephemeral private HOME over the worker's normal HOME
 and exactly one locked conversation history directory. Existing histories are
 adopted under that lock when worker identity changes. The provider and its
@@ -239,6 +253,45 @@ Code/Design filesystem policy, unprivileged worker identity and process domain
 still apply. Stop/revocation must prove descendant retirement before releasing
 history or removing HOME. Local launch descriptors retain their version and
 behavior; only native cloud launches use the private HOME overlay.
+
+### Repository instructions and configuration
+
+Repository configuration cannot replace provider credentials, login/auth helpers,
+endpoints, proxies, headers, provider/model/profile selection or protected
+HOME/config/state, PATH/loader, engine, Git and Computer environment. Raw native
+project/plugin sources stay disabled where their precedence cannot enforce that
+contract. The engine captures a bounded data projection from the admitted cwd
+and passes it through a supported native instruction/configuration channel;
+the provider never rereads the raw config as a trusted source.
+
+| Provider | Shipped repository projection | Remaining restrictions |
+| --- | --- | --- |
+| Claude | Root `CLAUDE.md` and `AGENTS.md` appended to the native preset. Regular UTF-8 files, at most 64 KiB each and 128 KiB combined. | Native project/local settings, hooks and plugins remain disabled. |
+| Codex | Safe data settings from `.codex/config.toml`; root instructions prefer `AGENTS.override.md`, then `AGENTS.md`, then validated flat fallback names. Native config/developer-instruction channels receive the immutable snapshot on start/resume/fork. | Provider/auth/model/env/MCP/permission fields are excluded. Ancestor/nested instructions, hooks/plugins and custom prompt body execution are unproved. |
+| Cursor | Root `AGENTS.md` plus at most 15 immediate `.cursor/rules/*.md` or `*.mdc` files, captured once and prepended through SDK user-message text on each turn. At most 64 KiB/file and 128 KiB combined. | Native project/plugin/team sources remain disabled. The projection does not implement native nested/ancestor or conditional rule matching. |
+
+Reads reject final symlinks and escaping file descriptors and preserve explicit model,
+credential and permission choices. Codex's safe keys are `developer_instructions`,
+`model_reasoning_summary`, `model_verbosity`, `personality`,
+`project_doc_max_bytes` (at most 64 KiB) and bounded basename-only
+`project_doc_fallback_filenames`. Combined Codex instructions are at most 64 KiB
+(96 KiB JSON encoded). Repository `.agents/skills` discovery is native and tested;
+bounded `.codex/prompts/*.md` discovery supplies command metadata only.
+
+Explicit Ask, Plan and read-only intent wins over repository defaults, resumed
+state and helper output. Cloud Claude's approval is session-only and labelled
+“this chat”; a stale project-persistence choice is rejected. Any future cloud
+project approval must be engine-owned and keyed by workspace plus actor, never
+written into the shared checkout. Cursor keeps its native auto-review and JSONL
+resume behavior. Local Personal and organization-local keep their existing native
+configuration and approval behavior.
+
+The [MCP snapshot](mcp-and-skills.md) stays exclusive, including at initialization.
+Admitted member/organization skills remain in private read-only native mounts.
+Native browser binding and additional host directories are unavailable; plugins,
+account/team settings and optional native fork/review/goal capabilities require
+separate safe admission and exact-runtime proof. These projections establish
+bounded instruction/configuration behavior, not complete Local feature parity.
 
 The additive `cloudExecution` diagnostic identifies the installed profile; it
 is not authority or runtime qualification. `designApi: admitted` means the

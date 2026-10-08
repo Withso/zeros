@@ -9,7 +9,9 @@ import {
   type CloudAgentExecutionRequest,
   type CloudNativeCapabilities,
   type CloudComputerExecutionEnvironment,
+  isCloudAgentAdmissionCode,
 } from "@zeros/protocol/cloud-agent-execution";
+import { encodeCloudCommandFailure, decodeCloudCommandFailure, cloudCommandFailureFromCode, type CloudCommandFailureCause } from "@zeros/protocol/cloud-commands";
 import type { CloudCustomizationSnapshot } from "@zeros/protocol/cloud-customization";
 import { cloudMcpDigest, freezeCloudSnapshot } from "./cloud-mcp";
 import { isDeepStrictEqual } from "node:util";
@@ -23,6 +25,18 @@ export type CloudAgentLeaseSupervisor = {
   onRetirementFailure(error: Error): void;
 };
 const clock: Clock = { wall: () => Date.now(), monotonic: () => performance.now() };
+function leaseFailure(category:CloudCommandFailureCause["category"],message="Cloud agent authority changed",stage:CloudCommandFailureCause["stage"]="validation"){
+  const code=encodeCloudCommandFailure({stage,category});
+  return Object.assign(new Error(message),{code,failure:cloudCommandFailureFromCode(code)});
+}
+/** Preserve only closed authority metadata. Raw driver/provider diagnostics
+ * must not become a user-facing error when a lease retires. */
+function safeLeaseFailure(error:unknown,category:CloudCommandFailureCause["category"]="authority_unavailable",message="Cloud agent authority changed",stage:CloudCommandFailureCause["stage"]="validation"){
+  const code=error&&typeof error==="object"&&"code" in error?error.code:undefined;
+  if(decodeCloudCommandFailure(code)||isCloudAgentAdmissionCode(code))
+    return Object.assign(new Error(message),{code:code as string,failure:cloudCommandFailureFromCode(code)});
+  return leaseFailure(category,message,stage);
+}
 
 /** Owns coordinator and workload lifetime. Admission cancellation is separate
  * from execution Stop: an ordinary device disconnect does not stop committed work. */
@@ -33,6 +47,7 @@ export class CloudAgentLease {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private deadline = 0;
   private retired = false;
+  private retirementCause:Error|null=null;
   private released = false;
   private retirementFailures = 0;
   private escalated = false;
@@ -67,17 +82,20 @@ export class CloudAgentLease {
     supervisor: CloudAgentLeaseSupervisor, time: Clock = clock,
   ): Promise<CloudAgentLease> {
     const start = time.monotonic();
-    const response = CloudAgentExecutionAuthoritySchema.safeParse(await request({ kind: "admit", admission, includeGitAuthor: true,nativeCapabilitiesVersion:1,backgroundTasksVersion:1,computerToolsVersion:1,environmentVersion:1 }, signal));
+    let raw:unknown;
+    try{raw=await request({ kind: "admit", admission, includeGitAuthor: true,nativeCapabilitiesVersion:1,backgroundTasksVersion:1,computerToolsVersion:1,environmentVersion:1 }, signal);}
+    catch(error){throw safeLeaseFailure(error,"authority_unavailable","Cloud agent admission failed","admission");}
+    const response = CloudAgentExecutionAuthoritySchema.safeParse(raw);
     if (!response.success || response.data.provider !== admission.provider || response.data.model !== admission.model)
-      throw new Error("Cloud agent admission failed");
+      throw leaseFailure("authority_response_invalid","Cloud agent admission failed","admission");
     const value = response.data;
     if (admission.customization && !value.customization && admission.customization.version !== 3)
-      throw new Error("Cloud customization admission is unavailable. Update the cloud runtime and control plane.");
+      throw leaseFailure("customization_changed","Cloud customization admission is unavailable. Update the cloud runtime and control plane.","admission");
     if (admission.customization && value.customization) {
       if (!isDeepStrictEqual(value.customization.servers.filter(entry => entry.scope === "repository").map(entry => entry.server), admission.customization.repositoryServers))
-        throw new Error("Cloud customization admission is unavailable. Update the cloud runtime and control plane.");
+        throw leaseFailure("customization_changed","Cloud customization admission is unavailable. Update the cloud runtime and control plane.","admission");
       const { digest, ...snapshot } = value.customization;
-      if (digest !== cloudMcpDigest(snapshot)) throw new Error("Cloud customization admission is invalid");
+      if (digest !== cloudMcpDigest(snapshot)) throw leaseFailure("authority_response_invalid","Cloud customization admission is invalid","admission");
     }
     const lease = new CloudAgentLease(value.leaseId, value.authorityId, value.credentialVersion,
       freezeCloudSnapshot(structuredClone(admission)), value.material, request, supervisor, time, value.gitAuthor ? Object.freeze({ ...value.gitAuthor }) : null,
@@ -85,11 +103,11 @@ export class CloudAgentLease {
       value.nativeCapabilities ? Object.freeze({...value.nativeCapabilities}) : null,value.backgroundTasksVersion??null,value.computerToolsVersion??null,
       value.environment ? freezeCloudSnapshot(value.environment) : null);
     try {
-      lease.acceptExpiry(value.expiresAt, start);
+      lease.acceptExpiry(value.expiresAt, start,"admission");
       if (signal.aborted) throw new Error("Cloud agent admission cancelled");
       lease.schedule();
       return lease;
-    } catch (error) { await lease.close().catch(() => {}); throw error; }
+    } catch (error) { const failure=safeLeaseFailure(error,"authority_response_invalid","Cloud agent admission failed","admission");lease.retirementCause=failure;await lease.close().catch(() => {});throw failure; }
   }
   get signal(): AbortSignal { return this.controller.signal; }
   get credentialVersion(): number { return this.materialVersion; }
@@ -100,11 +118,11 @@ export class CloudAgentLease {
     this.assertLive();
     if(!this.codexMaterial||!Number.isSafeInteger(credentialVersion)||credentialVersion<1||credentialVersion>this.materialVersion||
       (previousAccountId!=null&&previousAccountId!==this.codexMaterial.accountId)){
-      void this.close().catch(()=>{});throw new Error("Cloud agent authority changed");
+      const failure=leaseFailure("credential_refresh_invalid");this.retirementCause??=failure;void this.close().catch(()=>{});throw failure;
     }
     await this.check(true,credentialVersion);
     this.assertLive();const current=this.codexAuth();
-    if(!current||current.credentialVersion<=credentialVersion)throw new Error("Cloud agent authority changed");
+    if(!current||current.credentialVersion<=credentialVersion)throw leaseFailure("credential_refresh_unchanged");
     return current;
   }
   takeMaterial(): CloudAgentAccessMaterial {
@@ -124,9 +142,9 @@ export class CloudAgentLease {
     this.domains.add(domain);
     if (this.retired) {
       // Even if close is awaiting the CP, take immediate ownership of this child.
-      void this.stopDomain(domain).catch(() => this.queueRetirement());
+      void this.stopDomain(domain).catch(error => this.queueRetirement(error));
       void this.close().catch(() => {});
-      throw new Error("Cloud agent lease is retired");
+      throw this.retirementCause??leaseFailure("lifecycle_superseded","Cloud agent lease is retired");
     }
   }
   /** Release a short-lived child only after proof; keep execution ownership
@@ -137,19 +155,20 @@ export class CloudAgentLease {
   }
   assertLive(): void {
     if (this.retired || this.controller.signal.aborted || this.time.monotonic() >= Math.min(this.deadline,this.backgroundDeadline)) {
-      void this.close().catch(() => {}); throw new Error("Cloud agent lease is retired");
+      this.retirementCause??=leaseFailure(this.retired||this.controller.signal.aborted?"lifecycle_superseded":"lease_expired","Cloud agent lease is retired");
+      void this.close().catch(() => {}); throw this.retirementCause;
     }
   }
-  private acceptExpiry(expiresAt: string, requestStart: number): void {
+  private acceptExpiry(expiresAt: string, requestStart: number,stage:CloudCommandFailureCause["stage"]="validation"): void {
     const remaining = Math.min(this.backgroundDeadline-this.time.monotonic(),Date.parse(expiresAt) - this.time.wall() - 1000,
       requestStart + 44_000 - this.time.monotonic());
-    if (!Number.isFinite(remaining) || remaining <= 0) throw new Error("Cloud agent lease expired");
+    if (!Number.isFinite(remaining) || remaining <= 0) throw leaseFailure("lease_expired","Cloud agent lease expired",stage);
     this.deadline = this.time.monotonic() + remaining;
     this.armExpiry();
   }
   private armExpiry():void{
     if (this.expiryTimer) clearTimeout(this.expiryTimer);
-    this.expiryTimer = setTimeout(() => { this.expiryTimer = null; void this.close().catch(() => {}); }, Math.max(0,this.deadline-this.time.monotonic()));
+    this.expiryTimer = setTimeout(() => { this.expiryTimer = null;this.retirementCause??=leaseFailure("lease_expired","Cloud agent lease is retired");void this.close().catch(() => {}); }, Math.max(0,this.deadline-this.time.monotonic()));
     this.expiryTimer.unref?.();
   }
   private schedule(): void {
@@ -198,7 +217,7 @@ export class CloudAgentLease {
   /** Serialize adoption so an older HTTP response cannot roll back material
    * or authority. Concurrent callers remain bounded by the tool/host queues. */
   private check(renew:boolean,refreshVersion?:number):Promise<void>{
-    if(this.pendingValidations>=16){void this.close().catch(()=>{});return Promise.reject(new Error("Cloud agent validation capacity exceeded"));}
+    if(this.pendingValidations>=16){const failure=leaseFailure("execution_limit","Cloud agent validation capacity exceeded");this.retirementCause??=failure;void this.close().catch(()=>{});return Promise.reject(failure);}
     this.pendingValidations++;
     const operation=this.validationTail.then(async()=>{
       this.assertLive();const start=this.time.monotonic();
@@ -208,21 +227,21 @@ export class CloudAgentLease {
           {kind:"refresh-codex",leaseId:this.leaseId,credentialVersion:refreshVersion,...(this.nativeCapabilities?{nativeCapabilitiesVersion:1 as const}:{})};
         const parsed=CloudAgentExecutionLeaseSchema.safeParse(await this.request(request,this.signal));
         this.assertLive();
-        if(!parsed.success||parsed.data.leaseId!==this.leaseId||parsed.data.credentialVersion<this.materialVersion)throw new Error("Invalid authority");
+        if(!parsed.success||parsed.data.leaseId!==this.leaseId||parsed.data.credentialVersion<this.materialVersion)throw leaseFailure("authority_response_invalid");
         const response=parsed.data,rotation=response.rotation;
-        if((response.environmentRevision??null)!==(this.environment?.revision??null))throw new Error("Cloud environment authority changed");
-        if(!isDeepStrictEqual(response.nativeCapabilities??null,this.nativeCapabilities))throw new Error("Cloud native capabilities changed");
+        if((response.environmentRevision??null)!==(this.environment?.revision??null))throw leaseFailure("environment_revoked");
+        if(!isDeepStrictEqual(response.nativeCapabilities??null,this.nativeCapabilities))throw leaseFailure("customization_changed");
         if(rotation){
           const material=rotation.material;
           if(!this.codexMaterial||rotation.authorityId!==this.authorityId||material.accountId!==this.codexMaterial.accountId||
               material.expiresAt*1000<=this.time.wall()+60_000||
-              (response.credentialVersion===this.materialVersion&&JSON.stringify(material)!==JSON.stringify(this.codexMaterial)))throw new Error("Invalid rotation");
+              (response.credentialVersion===this.materialVersion&&JSON.stringify(material)!==JSON.stringify(this.codexMaterial)))throw leaseFailure("credential_refresh_invalid");
           this.codexMaterial={...material};this.materialVersion=response.credentialVersion;
           if(this.material)this.material={...material};
-        }else if(response.credentialVersion!==this.materialVersion)throw new Error("Missing rotation");
-        if(refreshVersion!==undefined&&response.credentialVersion<=refreshVersion)throw new Error("Unchanged material");
+        }else if(response.credentialVersion!==this.materialVersion)throw leaseFailure("credential_refresh_invalid");
+        if(refreshVersion!==undefined&&response.credentialVersion<=refreshVersion)throw leaseFailure("credential_refresh_unchanged");
         if(renew){this.acceptExpiry(response.expiresAt,start);this.schedule();}
-      }catch{await this.close().catch(()=>{});throw new Error("Cloud agent authority changed");}
+      }catch(error){const failure=safeLeaseFailure(error);this.retirementCause??=failure;await this.close().catch(()=>{});throw failure;}
     });
     this.validationTail=operation.catch(()=>{});
     void operation.finally(()=>{this.pendingValidations--;}).catch(()=>{});
@@ -232,7 +251,7 @@ export class CloudAgentLease {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([operation, new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("Cloud agent process retirement timed out")), 5000);
+        timer = setTimeout(() => reject(leaseFailure("timeout","Cloud agent process retirement timed out","containment")), 5000);
         timer.unref?.();
       })]);
     } finally { if (timer) clearTimeout(timer); }
@@ -245,11 +264,11 @@ export class CloudAgentLease {
     void stopping.finally(() => { if (this.stopping.get(domain) === stopping) this.stopping.delete(domain); }).catch(() => {});
     return stopping;
   }
-  private queueRetirement(): void {
+  private queueRetirement(error:unknown): void {
     if (this.retryTimer || this.escalated) return;
     if (++this.retirementFailures >= 3) {
       this.escalated = true;
-      this.supervisor.onRetirementFailure(new Error("Cloud agent process retirement is incomplete"));
+      this.supervisor.onRetirementFailure(safeLeaseFailure(error,"attestation_failed","Cloud agent process retirement is incomplete","containment"));
       return;
     }
     this.retryTimer = setTimeout(() => { this.retryTimer = null; void this.close().catch(() => {}); }, 1000);
@@ -260,10 +279,12 @@ export class CloudAgentLease {
       // A late launch registers its domain in its continuation before this resumes.
       if (this.launches.size) await this.boundedRetirement(Promise.allSettled([...this.launches]));
       const results = await Promise.allSettled([...this.domains].map(domain => this.stopDomain(domain)));
-      if (results.some(result => result.status === "rejected")) throw new Error("Cloud agent process retirement is incomplete");
+      const failed=results.find(result=>result.status==="rejected");
+      if(failed?.status==="rejected")throw safeLeaseFailure(failed.reason,"attestation_failed","Cloud agent process retirement is incomplete","containment");
     }
   }
   close(): Promise<void> {
+    this.retirementCause??=leaseFailure("lifecycle_superseded","Cloud agent lease is retired");
     this.retired = true; this.material = null; this.codexMaterial = null; this.controller.abort();
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
     if (this.expiryTimer) { clearTimeout(this.expiryTimer); this.expiryTimer = null; }
@@ -272,13 +293,17 @@ export class CloudAgentLease {
       try {
         await this.drain();
         if (!this.released) {
-          await this.request({ kind: "release", leaseId: this.leaseId }, AbortSignal.timeout(5000)).catch(() => {});
+          try {
+            const result=await this.request({ kind: "release", leaseId: this.leaseId }, AbortSignal.timeout(5000));
+            if(!result||typeof result!=="object"||Array.isArray(result)||Object.keys(result).join()!=="released"||(result as {released?:unknown}).released!==true)
+              throw leaseFailure("authority_response_invalid");
+          }catch(error){throw safeLeaseFailure(error);}
           this.released = true;
         }
         // Also prove exit for rejected attachments arriving during release I/O.
         do { await this.drain(); } while (this.launches.size || this.domains.size);
         if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
-      } catch (error) { this.queueRetirement(); throw error; }
+      } catch (error) { this.queueRetirement(error); throw error; }
     })();
     this.closing = closing;
     void closing.finally(() => { if (this.closing === closing) this.closing = null; }).catch(() => {});

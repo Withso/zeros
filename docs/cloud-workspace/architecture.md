@@ -81,6 +81,13 @@ ambiguous dispatch or missing terminal event cannot fabricate success or justify
 automatically replaying a native turn. Delivery ACKs alone cannot establish
 exactly-once external tool effects.
 
+Native agents use the shared Local gateway/adapters after cloud admission:
+actor-bound grant → execution lease → UID-10001 native boundary → provider.
+The factory pins cwd, model/key, private HOME and MCP/skill snapshots. Cloud-only
+authority checks stay outside the adapters' ordinary tool/transcript path;
+refusal never bypasses containment or dispatches through the live bridge.
+See [native configuration and restrictions](agent-authentication-and-language-tools.md#native-execution-and-compatibility).
+
 Authorized history can be read without a running VM. Desktop's bounded durable
 cache stores a sanitized confirmed latest window/revision and tail message ID;
 it is presentation state, not command or execution authority. Native streaming

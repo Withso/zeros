@@ -6,12 +6,14 @@ import type { TransportClient } from "../transport/types";
 const prototype = ZerosEngine.prototype as unknown as {
   handleAgentMessage(this: unknown, message: EngineMessage, client: TransportClient): Promise<void>;
   isHostRelayClient(this: unknown, client: TransportClient): boolean;
+  handleLegacyCloudAction(this: unknown, message: EngineMessage, client: TransportClient): Promise<void>;
 };
 
 function fixture(cloud = true) {
   const engine = {
     cloudWorker: cloud ? { uid: 10001 } : null,
     sessionAgent: new Map([["execution", "claude"]]),
+    sessionChat: new Map([["execution", "chat"]]),
     permissionOwner: new Map([["permission", "first-device"]]),
     questionOwner: new Map([["question", "first-device"]]),
     pendingPermissionRequests: new Map([["permission", { agentId: "claude", request: { sessionId: "execution" } }]]),
@@ -26,6 +28,35 @@ function fixture(cloud = true) {
 }
 
 describe("cloud decisions across devices", () => {
+  it.each(["AGENT_PERMISSION_RESPONSE", "AGENT_QUESTION_RESPONSE"])("keeps old unnegotiated %s compatible while requiring ownership after negotiation", async type => {
+    const { engine, client } = fixture();
+    const handle = vi.fn(async (input: { kind: string }) => input.kind === "read" ? null : { outcome: "delivered" });
+    const protocols = new WeakMap<TransportClient, number>();
+    Object.assign(engine, { cloudActions: { handle }, cloudTurnProtocols: protocols });
+    const reply = { id: "legacy", type, permissionId: "permission", questionId: "question", response: { outcome: { outcome: "cancelled" } } } as unknown as EngineMessage;
+    await prototype.handleLegacyCloudAction.call(engine, reply, client);
+    expect(handle).toHaveBeenCalledWith(expect.objectContaining({ kind: "submit", action: expect.objectContaining({ executionId: "execution", conversationId: "chat" }) }), undefined);
+    protocols.set(client, 1); handle.mockClear();
+    await expect(prototype.handleLegacyCloudAction.call(engine, reply, client)).rejects.toMatchObject({ code: "command_context_changed" });
+    expect(handle).toHaveBeenCalledOnce();
+  });
+  it.each(["AGENT_PERMISSION_RESPONSE", "AGENT_QUESTION_RESPONSE"])("fences durable %s before submitting an action", async type => {
+    const { engine, client } = fixture();
+    const handle = vi.fn(async (input: { kind: string }) => input.kind === "read" ? null : { outcome: "delivered" });
+    Object.assign(engine, { cloudActions: { handle } });
+    const reply = { id: "reply", type, chatId: "chat", executionId: "retired-execution", permissionId: "permission", questionId: "question", response: { outcome: { outcome: "cancelled" } } } as unknown as EngineMessage;
+    await expect(prototype.handleLegacyCloudAction.call(engine, reply, client)).rejects.toMatchObject({ code: "command_context_changed" });
+    expect(handle).toHaveBeenCalledOnce(); expect(handle).toHaveBeenCalledWith({ kind: "read", operationId: "reply" }, undefined);
+    expect(engine.pendingPermissionRequests.size).toBe(1); expect(engine.pendingQuestionRequests.size).toBe(1);
+    await prototype.handleLegacyCloudAction.call(engine, { ...reply, executionId: "execution" } as EngineMessage, client);
+    expect(handle).toHaveBeenCalledWith(expect.objectContaining({ kind: "submit", action: expect.objectContaining({ conversationId: "chat", executionId: "execution" }) }), undefined);
+  });
+  it.each(["AGENT_PERMISSION_RESPONSE", "AGENT_QUESTION_RESPONSE"])("rejects %s from a different execution without consuming the resolver", async type => {
+    const { engine, dispatch } = fixture();
+    await dispatch({ type, chatId: "chat", executionId: "retired-execution", permissionId: "permission", questionId: "question", response: { outcome: { outcome: "cancelled" } } });
+    expect(engine.agents.answerPermission).not.toHaveBeenCalled(); expect(engine.agents.answerQuestion).not.toHaveBeenCalled();
+    expect(engine.pendingPermissionRequests.size).toBe(1); expect(engine.pendingQuestionRequests.size).toBe(1);
+  });
   it.each(["revoked", "disconnected", "allowed"])("checks actor credential delegation before a paid native control (%s)",async scenario=>{
     const {engine,client,dispatch}=fixture();let authorized=true;
     const compactContext=vi.fn(),authorizeCloudAgentAction=vi.fn(async()=>{
@@ -84,7 +115,7 @@ describe("cloud decisions across devices", () => {
   });
   it("allows another authenticated workspace device to settle a permission exactly once", async () => {
     const { engine, dispatch } = fixture();
-    const message = { type: "AGENT_PERMISSION_RESPONSE", permissionId: "permission", response: { outcome: { outcome: "cancelled" } } };
+    const message = { type: "AGENT_PERMISSION_RESPONSE", chatId: "chat", executionId: "execution", permissionId: "permission", response: { outcome: { outcome: "cancelled" } } };
     await dispatch(message);
     await dispatch(message);
     expect(engine.agents.answerPermission).toHaveBeenCalledExactlyOnceWith("permission", message.response);
@@ -93,7 +124,7 @@ describe("cloud decisions across devices", () => {
 
   it("allows another device to answer the exact pending question and rejects late replay", async () => {
     const { engine, dispatch } = fixture();
-    const message = { type: "AGENT_QUESTION_RESPONSE", questionId: "question", nativeRequestId: "native-question", response: { outcome: "dismissed" } };
+    const message = { type: "AGENT_QUESTION_RESPONSE", chatId: "chat", executionId: "execution", questionId: "question", nativeRequestId: "native-question", response: { outcome: "dismissed" } };
     await dispatch(message);
     await dispatch(message);
     expect(engine.agents.answerQuestion).toHaveBeenCalledExactlyOnceWith("question", message.response, undefined);

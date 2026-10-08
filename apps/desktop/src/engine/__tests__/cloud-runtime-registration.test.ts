@@ -280,6 +280,21 @@ describe("cloud runtime registration", () => {
     );
     await expect(pending).resolves.toBeNull();
   });
+  it.each(["network", "503", "408", "429", "401", "403"])("distinguishes %s renewal from initial admission without disclosing upstream details", async kind => {
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json(registrationResponse()));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    await registration.start();
+    for (const renew of [false, true]) {
+      if (kind === "network") fetcher.mockRejectedValueOnce(new Error("private upstream content"));
+      else fetcher.mockResolvedValueOnce(new Response("private upstream content", { status: Number(kind) }));
+      const reply = registration.verifyClientAdmission(`zwa_${"A".repeat(43)}`, renew);
+      if (renew && kind !== "401" && kind !== "403") await expect(reply).rejects.toMatchObject({ code: "cloud_client_authority_transient", message: "Cloud client authority is temporarily unavailable" });
+      else await expect(reply).resolves.toBeNull();
+    }
+    await registration.stop();
+  });
 
   it("rechecks service access through current heartbeat authority and refuses stale replies", async () => {
     const runtime = consumeCloudRuntimeEnvironment(

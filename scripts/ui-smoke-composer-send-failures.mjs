@@ -13,8 +13,9 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
     const request = route.request(), path = new URL(request.url()).pathname;
     if (path.endsWith("/agent-credentials/prepare")) {
       const required = await page.evaluate(() => window.composerSendFailureFixture.runtimeRequired);
+      // The harness session's accountId; cloud sends select only the sender's own grant.
       return route.fulfill({ json: { delegations: [{ id: "33333333-3333-4333-8333-333333333333", kind: "codex-chatgpt",
-        models: ["gpt-6.1-sol"], expiresAt: "2099-01-01T00:00:00Z", runtimeQualified: !required, runtimeUpgradeRequired: required }] } });
+        ownerUserId: "11111111-1111-4111-8111-111111111111", models: ["gpt-6.1-sol"], expiresAt: "2099-01-01T00:00:00Z", runtimeQualified: !required, runtimeUpgradeRequired: required }] } });
     }
     if (request.method() === "GET" && path.endsWith("/runtime-upgrade")) {
       return route.fulfill({ json: await page.evaluate(() => window.composerSendFailureFixture.runtimeAvailability) });

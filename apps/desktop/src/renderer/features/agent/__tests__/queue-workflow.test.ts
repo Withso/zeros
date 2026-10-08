@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SendQueue } from "../send-queue";
 import { CloudSendPreparation } from "../cloud-send-preparation";
 import * as lifecycle from "../session-reload-lifecycle";
+import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 
 // Exercise the actual provider callbacks with an in-memory bridge/store. This
 // keeps Stop/Send now races deterministic without mounting unrelated app UI.
@@ -97,6 +98,7 @@ function setup(agentId = "claude", status = "streaming") {
   const flush = new Map<string, string>();
   const context: any = {
     ...lifecycle,
+    isCloudWorkspace,
     crypto: {
       randomUUID: (() => {
         let id = 0;
@@ -178,6 +180,19 @@ function setup(agentId = "claude", status = "streaming") {
 }
 
 afterEach(() => vi.useRealTimers());
+
+describe("cloud Stop acknowledgement", () => {
+  it("sends a correlated owned request and a late acknowledgement does not clear a newer turn", async () => {
+    const h = setup("codex"); h.store.sessions.chat.cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    const pending = h.actions.cancel("chat");
+    expect(h.requests).toHaveLength(1);
+    expect(h.requests[0].message).toMatchObject({ type: "AGENT_CANCEL", chatId: "chat", id: expect.any(String), executionId: "execution" });
+    expect(h.context.bridge.send).not.toHaveBeenCalled();
+    h.store.sessions.chat.status = "streaming"; h.store.sessions.chat.activeTurnStartedAt = 100;
+    h.requests[0].resolve({ type: "WORKSPACE_RESPONSE", result: { paused: true, conversationId: "chat" } }); await pending;
+    expect(h.store.sessions.chat).toMatchObject({ status: "streaming", activeTurnStartedAt: 100 });
+  });
+});
 
 describe.each(["claude", "codex", "cursor"])(
   "%s queue and Stop workflow",

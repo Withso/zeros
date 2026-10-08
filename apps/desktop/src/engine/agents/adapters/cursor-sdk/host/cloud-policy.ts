@@ -1,6 +1,6 @@
 import {executionMcpServers,type CloudProviderExecution} from "../../../cloud-provider-execution";
 import type {McpServerConfig as CursorMcpConfig} from "@cursor/sdk";
-const CWD="/srv/zeros/workspace";
+import path from "node:path";
 const record=(value:unknown):Record<string,unknown>=>value&&typeof value==="object"&&!Array.isArray(value)?value as Record<string,unknown>:{};
 
 /** Applied at the engine→native-host boundary, including resume, recovery,
@@ -8,8 +8,11 @@ const record=(value:unknown):Record<string,unknown>=>value&&typeof value==="obje
  * callers cannot replace the admitted credential, host, or model. */
 export function cloudCursorRequest(execution:CloudProviderExecution,operation:string,raw:unknown):unknown{
   execution.lease.assertLive();const args=record(raw);
+  const cwd=execution.cwd;
+  if(!cwd||!path.isAbsolute(cwd)||path.resolve(cwd)!==cwd||cwd.includes("\0"))
+    throw new Error("Cloud Cursor admitted workspace root is invalid");
   const apiKey=execution.coordinator.environment().CURSOR_API_KEY;
-  if(!apiKey)throw new Error("Cloud Cursor credential is unavailable");
+  if(!apiKey)throw Object.assign(new Error("Cloud Cursor credential is unavailable"),{code:"cloud_agent_credential_required"});
   const model=(value:unknown)=>{
     if(value===undefined)return {id:execution.lease.admission.model};
     const selected=record(value);
@@ -32,8 +35,8 @@ export function cloudCursorRequest(execution:CloudProviderExecution,operation:st
         ...(server.args?{args:server.args}:{}),...(server.env?{env:server.env}:{}),...(server.cwd?{cwd:server.cwd}:{})}:
         {...(server.transport==="sse"?{type:"sse" as const}:{}),url:server.url,...(server.headers?{headers:server.headers}:{})};
     }
-    return {apiKey,model:model(original.model),cwd:CWD,
-      local:{cwd:CWD,settingSources:execution.lease.customization?["user"]:[],enableAgentRetries:false,
+    return {apiKey,model:model(original.model),cwd,
+      local:{cwd,settingSources:execution.lease.customization?["user"]:[],enableAgentRetries:false,
         autoReview:record(original.local).autoReview===true},
       ...mode(original.mode),mcpServers};
   };
@@ -51,8 +54,8 @@ export function cloudCursorRequest(execution:CloudProviderExecution,operation:st
           ...(record(send.local).force===true?{local:{force:true}}:{})}};
     }
     case "models.list":return {opts:{apiKey}};
-    case "agent.list":return {opts:{runtime:"local",cwd:CWD,apiKey}};
-    case "store.open":return {cwd:CWD};
+    case "agent.list":return {opts:{runtime:"local",cwd,apiKey}};
+    case "store.open":return {cwd};
     default:return args;
   }
 }

@@ -112,7 +112,7 @@ describe("Claude private cloud coordinator policy",()=>{
   it("keeps native workspace tools and fences external credential/model overrides",async()=>{
     const boundary={status:{actor:"agent-code",backend:"zeros-srt"}} as never;
     const lease=new AbortController(),assertLive=vi.fn();
-    const execution={lease:{signal:lease.signal,assertLive,admission:{model:"claude-haiku-4-5"}},tools:{call:vi.fn()},
+    const execution={cwd:"/srv/zeros/workspace",lease:{signal:lease.signal,assertLive,admission:{model:"claude-haiku-4-5"}},tools:{call:vi.fn()},
       productServers:[{name:"zeros_design",transport:"http",url:"http://127.0.0.1:42000/mcp",headers:{Authorization:"Bearer synthetic-scoped-tool"}}]} as unknown as cloudExecutions.CloudProviderExecution;
     const original=cloudExecutions.cloudProviderExecution;
     const authority=vi.spyOn(cloudExecutions,"cloudProviderExecution").mockImplementation(value=>value===boundary?execution:original(value));
@@ -120,17 +120,21 @@ describe("Claude private cloud coordinator policy",()=>{
     const {queryFn,captured}=makeScriptedQuery([[initMsg("cloud-session"),resultOk("cloud-session")]]);
     const adapter=new ClaudeSdkAdapter(makeCtx([],[]),{queryFn});
     try{
-      const {session}=await adapter.newSession({cwd:"/srv/zeros/workspace",executionBoundary:boundary,
+      const {session}=await adapter.newSession({cwd:"/untrusted",executionBoundary:boundary,
         env:{ANTHROPIC_MODEL:"claude-haiku-4-5",ANTHROPIC_API_KEY:"synthetic-provider-key"},
         cliBinary:"/untrusted/claude",mcpServers:[{name:"untrusted",transport:"stdio",command:"/untrusted/program"}],browserUse:{kind:"claude-agent-sdk"} as never});
       await adapter.prompt({sessionId:session.executionId,prompt:[{type:"text",text:"Continue"}]});
-      expect(captured[0]).toMatchObject({tools:{type:"preset",preset:"claude_code"},strictMcpConfig:true,settingSources:[],
+      expect(captured[0]).toMatchObject({cwd:"/srv/zeros/workspace",tools:{type:"preset",preset:"claude_code"},strictMcpConfig:true,settingSources:[],
         settings:{autoMemoryEnabled:true,permissions:{additionalDirectories:[],allow:[],deny:[]}},pathToClaudeCodeExecutable:runtime.binary});
       expect(Object.keys(captured[0].mcpServers as object).sort()).toEqual(["zeros_design"]);
       expect(captured[0].plugins).toBeUndefined();expect(captured[0].getOAuthToken).toBeUndefined();
-      expect(captured[0].extraArgs).toEqual({"thinking-display":"summarized"});
+      expect(captured[0].extraArgs).toEqual({"no-chrome":null,"thinking-display":"summarized"});
+      expect(captured[0].settings).toMatchObject({pluginConfigs:{"agents-md@builtin":{options:{instructionFiles:"claude-md-and-agents-md"}}}});
       await expect(adapter.setModel({sessionId:session.executionId,model:"unadmitted-model"})).rejects.toThrow(/admission/);
       await expect(adapter.updateConfig({sessionId:session.executionId,env:{ANTHROPIC_API_KEY:"replaced"}})).rejects.toThrow(/admission/);
+      await adapter.loadSession({executionId:session.executionId,cwd:"/untrusted-resume",executionBoundary:boundary,
+        env:{ANTHROPIC_MODEL:"claude-haiku-4-5",ANTHROPIC_API_KEY:"synthetic-provider-key"}});
+      expect((adapter as unknown as {sessions:Map<string,{cwd:string}>}).sessions.get(session.executionId)?.cwd).toBe("/srv/zeros/workspace");
       expect(assertLive).toHaveBeenCalled();
       expect(runtime.desktop).not.toHaveBeenCalled();
     }finally{await adapter.dispose();runtime.dispose();authority.mockRestore();}
@@ -138,6 +142,37 @@ describe("Claude private cloud coordinator policy",()=>{
 });
 
 describe("Claude explicit approval hints", () => {
+  it("offers cloud approvals only for this chat and preserves another actor's explicit Plan",async()=>{
+    const boundary={status:{actor:"agent-code",backend:"cloud-worker"}} as never;
+    const execution={cwd:"/srv/zeros/workspace",lease:{signal:new AbortController().signal,assertLive:vi.fn(),admission:{model:"claude-haiku-4-5"}},productServers:[]} as unknown as cloudExecutions.CloudProviderExecution;
+    const original=cloudExecutions.cloudProviderExecution;
+    const authority=vi.spyOn(cloudExecutions,"cloudProviderExecution").mockImplementation(value=>value===boundary?execution:original(value));
+    const runtime=admittedClaudeRuntimeFixture();
+    try{
+      for(const mode of ["default","plan"]){
+        const permissions:PermCapture[]=[],{queryFn,captured}=makeScriptedQuery([[initMsg(`actor-${mode}`),resultOk(`actor-${mode}`)]]);
+        const adapter=new ClaudeSdkAdapter(makeCtx([],permissions),{queryFn});
+        try{
+          const {session}=await adapter.newSession({cwd:"/srv/zeros/workspace",executionBoundary:boundary,env:{ANTHROPIC_MODEL:"claude-haiku-4-5",ANTHROPIC_API_KEY:"synthetic-key",ZEROS_PERMISSION_MODE:mode}});
+          const turn=adapter.prompt({sessionId:session.executionId,prompt:[textBlock("Continue")]});await tick();
+          expect(captured[0].permissionMode).toBe(mode);
+          const canUseTool=captured[0].canUseTool as (name:string,input:object,options:object)=>Promise<Record<string,unknown>>;
+          const input={command:"node tool.mjs"},options={signal:new AbortController().signal,toolUseID:`tool-${mode}`,suggestions:[{type:"addRules",behavior:"allow",destination:"session",rules:[{toolName:"Bash",ruleContent:"node tool.mjs"}]}]};
+          const forged=canUseTool("Bash",input,options);
+          const request=permissions.at(-1)!;
+          const offered=request.request as RequestPermissionRequest;
+          expect(offered.options.map(option=>option.optionId)).toEqual(["allow_once","allow_always","reject_once"]);
+          expect(offered.options.map(option=>option.name)).toContain("Allow for this chat");
+          adapter.respondToPermission({permissionId:request.id,response:{outcome:{outcome:"selected",optionId:"allow_project"}}});
+          expect(await forged).toMatchObject({behavior:"deny"});
+          const approved=canUseTool("Bash",input,{...options,toolUseID:`chat-${mode}`});
+          adapter.respondToPermission({permissionId:permissions.at(-1)!.id,response:{outcome:{outcome:"selected",optionId:"allow_always"}}});
+          expect(await approved).toEqual({behavior:"allow",updatedInput:input});
+          await turn;
+        }finally{await adapter.dispose();}
+      }
+    }finally{runtime.dispose();authority.mockRestore();}
+  });
   const hints = [
     { defaultToNo: true },
     { suppressAlwaysAllowRule: true },

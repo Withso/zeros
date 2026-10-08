@@ -97,6 +97,13 @@ function harness(folder: string, cause = "cloud_runtime_upgrade_required", durin
 }
 
 describe("production send callback on runtime rejection", () => {
+  it("accepts a successful empty native turn when the durable transcript tail is empty", async () => {
+    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "", undefined, false,
+      { success: true, history: async () => [] });
+    await h.send();
+    expect(useSessionsStore.getState().sessions.chat).toMatchObject({ status: "ready", error: null, failure: null });
+    expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "completed" })); expect(h.request).toHaveBeenCalledOnce();
+  });
   it.each(["cloud_workspace_not_ready", "CLOUD_WORKSPACE_CHECKPOINTING"])("returns accepted %s to its stable editable queue without an error or replay", async cause => {
     const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", cause, undefined, true);
     await h.send();
@@ -260,12 +267,13 @@ describe("production send callback on runtime rejection", () => {
     expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "completed" }));
     expect(useSessionsStore.getState().sessions.chat.failure).toBeNull(); expect(h.request).toHaveBeenCalledOnce();
   });
-  it("does not report success when the saved window cannot recover the submitted turn", async () => {
+  it("accepts a proved successful empty turn and retains its optimistic user row", async () => {
     const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "Cloud transcript unavailable", undefined, true,
       { success: true, history: async () => [] });
     await h.send();
-    expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed", retryCount: 0 }));
-    expect(useSessionsStore.getState().sessions.chat.status).toBe("failed");
+    expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "completed", retryCount: 0 }));
+    expect(useSessionsStore.getState().sessions.chat.status).toBe("ready");
+    expect(useSessionsStore.getState().sessions.chat.messages[0]).toMatchObject({ id: "accepted-prompt", role: "user" });
     expect(h.request).toHaveBeenCalledOnce();
   });
   it("accepts a saved tool tail when a long successful turn has paged its user row out", async () => {

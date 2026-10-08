@@ -1,4 +1,5 @@
 import { nativeInvoke } from "./runtime";
+import { unwrapCloudRuntimeAccess } from "./bridge/cloud-runtime-access-error";
 import { z } from "zod";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
 import { cloudServiceAccessCache, cloudServiceContextCache } from "../state/read-caches";
@@ -180,16 +181,16 @@ export function forgetCloudWorkspacePortForwarding(target: CloudWorkspaceAccessT
   return nativeInvoke("cloud_workspace_port_forwarding_forget", target);
 }
 
-export function openCloudWorkspaceRuntime(
+export async function openCloudWorkspaceRuntime(
   target: CloudWorkspaceAccessTarget,
 ): Promise<CloudRuntimeConnectionTarget> {
-  return nativeInvoke("cloud_workspace_runtime_open", target);
+  return unwrapCloudRuntimeAccess<CloudRuntimeConnectionTarget>(await nativeInvoke("cloud_workspace_runtime_open", target));
 }
 
-export function refreshCloudWorkspaceRuntime(
+export async function refreshCloudWorkspaceRuntime(
   target: CloudRuntimeConnectionTarget,
 ): Promise<RuntimeConnectionTarget> {
-  return nativeInvoke("cloud_workspace_runtime_refresh", {
+  return unwrapCloudRuntimeAccess<RuntimeConnectionTarget>(await nativeInvoke("cloud_workspace_runtime_refresh", {
     runtimeId: target.runtimeId,
     organizationId: target.organizationId,
     workspaceId: target.workspaceId,
@@ -197,7 +198,7 @@ export function refreshCloudWorkspaceRuntime(
     authorityEpoch: target.authorityEpoch,
     engineInstanceId: target.engineInstanceId,
     connectionSequence: target.connectionSequence,
-  });
+  }));
 }
 
 export function closeCloudWorkspaceRuntime(

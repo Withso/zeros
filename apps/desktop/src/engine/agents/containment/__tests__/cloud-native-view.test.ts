@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { CLOUD_CODEX_STATE_DIRECTORIES, CLOUD_NATIVE_HOME, cloudNativeHomeMounts, cloudNativeBwrapWrapper } from "../cloud-native-view.mjs";
-import { prepareCloudSkillHomes } from "../cloud-native-boundary";
+import { prepareCloudSkillHomes, prepareCloudCursorConfigView } from "../cloud-native-boundary";
 
 const home = {
   directory: `/run/zeros/coordinators/${"a".repeat(32)}`,
@@ -12,6 +12,25 @@ const home = {
 };
 
 describe("native cloud provider home", () => {
+  it("pins Cursor user configuration read-only while keeping scoped history and admitted skills",()=>{
+    const cursor={...home,cursorConfig:true,skills:true,history:{provider:"cursor",directory:home.history.directory.replace(/claude$/,"cursor")}};
+    const mounts=cloudNativeHomeMounts(cursor),text=mounts.join("\n");
+    expect(text).toContain(`--ro-bind\n${home.directory}/cursor-config\n${CLOUD_NATIVE_HOME}/.cursor`);
+    expect(text).toContain(`--bind\n${cursor.history.directory}\n${CLOUD_NATIVE_HOME}/.cursor/zeros-store`);
+    expect(text).toContain(`--ro-bind\n${home.directory}/skills\n${CLOUD_NATIVE_HOME}/.cursor/skills`);
+    const writable=mounts.flatMap((arg,i)=>arg==="--bind"?[mounts[i+2]]:arg==="--tmpfs"?[mounts[i+1]]:[]);
+    expect(writable.filter(target=>target===`${CLOUD_NATIVE_HOME}/.cursor`||/\/\.cursor\/(mcp\.json|cli-config\.json|plugins|rules)$/.test(target??""))).toEqual([]);
+    expect(()=>cloudNativeHomeMounts({...home,cursorConfig:true})).toThrow();
+  });
+  it("prepares only empty native Cursor config mount points",async()=>{
+    const root=await mkdtemp(path.join(os.tmpdir(),"zeros-cursor-view-"));
+    try{
+      await prepareCloudCursorConfigView(root);
+      const {readdir}=await import("node:fs/promises");
+      expect(await readdir(`${root}/cursor-config`)).toEqual(["skills","zeros-store"]);
+      expect((await stat(`${root}/cursor-config`)).mode&0o777).toBe(0o755);
+    }finally{await rm(root,{recursive:true,force:true});}
+  });
   it("projects only this run's home and this conversation's native history", () => {
     expect(cloudNativeHomeMounts(home)).toEqual([
       "--bind", `${home.directory}/home`, "/srv/zeros/home/agent",

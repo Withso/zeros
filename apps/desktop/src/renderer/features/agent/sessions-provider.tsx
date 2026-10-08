@@ -64,6 +64,7 @@ import type {
 import { useBridge } from "../../platform/bridge/use-bridge";
 import { TranscriptHydrationRetries } from "./transcript-hydration-retries";
 import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { cloudReplyOwnership } from "../../platform/bridge/cloud-runtime-wire";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
 import { hasCloudWorkspaceAccountAccess, useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import { cloudCatalogGeneration, cloudWorkspaceDocument, cloudWorkspaceStopVersion, canBackgroundSyncCloudWorkspace, canReadCloudWorkspace, isCloudWorkspaceLifecyclePending, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
@@ -631,6 +632,7 @@ export function AgentSessionsProvider({
     const questionSettledBuffer: Array<{
       questionId: string;
       outcome: import("../../platform/bridge/agent-events").QuestionOutcome;
+      chatId?: string;
     }> = [];
     const stderrBuffer: Array<{ agentId: string; line: string }> = [];
     const exitBuffer: Array<{
@@ -696,6 +698,7 @@ export function AgentSessionsProvider({
         if (policyOption) {
           bridge.send({
             type: "AGENT_PERMISSION_RESPONSE",
+            ...cloudReplyOwnership(chatId ? store.sessions[chatId]?.cwd : undefined, chatId ?? "", p.request),
             permissionId: p.permissionId,
             response: {
               outcome: { outcome: "selected", optionId: policyOption.optionId },
@@ -854,9 +857,22 @@ export function AgentSessionsProvider({
     const admissionMetadata = (raw: AgentSessionCreatedMessage | AgentSessionLoadedMessage) => {
       const state = useSessionsStore.getState();
       const executionId = raw.type === "AGENT_SESSION_CREATED" ? raw.session.executionId ?? raw.session.sessionId : raw.executionId ?? raw.sessionId;
-      const chatId = state.executionToChatId[executionId];
+      const chatId = raw.cloudSnapshot?.conversationId ?? state.executionToChatId[executionId];
       if (!chatId) return;
       const patch = cloudSessionMetadata(state.sessions[chatId], raw);
+      if (raw.cloudSnapshot) {
+        // The snapshot already contains buffered frames through its cursor.
+        // Remove only this owner's prefix before replacing the exact state.
+        for (let i = updateBuffer.length - 1; i >= 0; i--)
+          if ((updateBuffer[i] as SessionNotification & { chatId?: string }).chatId === chatId || updateBuffer[i].sessionId === executionId) updateBuffer.splice(i, 1);
+        for (let i = permBuffer.length - 1; i >= 0; i--) if (permBuffer[i].request.sessionId === executionId) permBuffer.splice(i, 1);
+        for (let i = questionBuffer.length - 1; i >= 0; i--) if (questionBuffer[i].request.sessionId === executionId) questionBuffer.splice(i, 1);
+        for (let i = permissionSettledBuffer.length - 1; i >= 0; i--) if (permissionSettledBuffer[i].sessionId === executionId) permissionSettledBuffer.splice(i, 1);
+        for (let i = questionSettledBuffer.length - 1; i >= 0; i--) if (questionSettledBuffer[i].chatId === chatId) questionSettledBuffer.splice(i, 1);
+        if (patch && !raw.cloudSnapshot.initialize) delete patch.initialize;
+        state.installCloudSnapshot(chatId, raw.cloudSnapshot, patch ?? {});
+        return;
+      }
       if (patch) state.patchSession(chatId, patch);
     };
     const unsubCreated = bridge.on("AGENT_SESSION_CREATED", raw => admissionMetadata(raw as AgentSessionCreatedMessage));
@@ -1108,6 +1124,7 @@ export function AgentSessionsProvider({
       const msg = raw as {
         questionId: string;
         outcome: import("../../platform/bridge/agent-events").QuestionOutcome;
+        chatId?: string;
       };
       const chatId = questionChatRef.current.get(msg.questionId);
       if (chatId) {
@@ -1125,6 +1142,7 @@ export function AgentSessionsProvider({
       questionSettledBuffer.push({
         questionId: msg.questionId,
         outcome: msg.outcome,
+        chatId: msg.chatId ?? chatId,
       });
       schedule();
     });
@@ -3660,10 +3678,8 @@ export function AgentSessionsProvider({
             // native empty/tool-only turns are valid and require no text test.
             const windowed = reconcileHistoryMessages(await persistWindowMessages(chatId, HYDRATE_WINDOW));
             if (!ownsCloudSend() || stoppedByUser()) return;
-            if (!windowed.length)
-              throw new Error("Cloud transcript could not be recovered. Review the conversation before retrying.");
             const fresh = getStore().sessions[chatId];
-            getStore().patchSession(chatId, { messages: mergeWindowedTail(fresh.messages, windowed) });
+            if (windowed.length) getStore().patchSession(chatId, { messages: mergeWindowedTail(fresh.messages, windowed) });
           }
 
           // Fold per-turn usage counters into the running session total.
@@ -4270,12 +4286,21 @@ export function AgentSessionsProvider({
         // answer into a dead resolver.
         pendingQuestions: [],
       });
-      bridge.send({
+      const stop = {
         type: "AGENT_CANCEL",
         agentId: current.agentId,
         executionId: currentExecutionId,
         sessionId: currentExecutionId,
-      });
+      } as const;
+      if (isCloudWorkspace(current.cwd)) {
+        try { await bridge.request({ ...stop, id: crypto.randomUUID(), chatId }, { timeoutMs: 60_000 }); }
+        catch {
+          const slot = getStore().sessions[chatId];
+          if (slot?.cwd === current.cwd && (slot.executionId ?? slot.sessionId) === currentExecutionId && slot.status === "ready" && !slot.activeTurnStartedAt)
+            getStore().patchSession(chatId, { error: "Stop could not be confirmed. Reconnect to check this turn.",
+              failure: { kind: "transport-closed", stage: "cancel", agentId: current.agentId, message: "Stop could not be confirmed. Reconnect to check this turn." } });
+        }
+      } else bridge.send(stop);
     },
     [bridge, getStore, cancelStalledAdmission, evictUnretainedTranscripts, pauseQueue],
   );
@@ -4289,6 +4314,7 @@ export function AgentSessionsProvider({
       if (!current?.pendingPermission) return;
       bridge.send({
         type: "AGENT_PERMISSION_RESPONSE",
+        ...cloudReplyOwnership(current.cwd, chatId, current.pendingPermission.request),
         permissionId: current.pendingPermission.permissionId,
         response,
       });
@@ -4344,15 +4370,21 @@ export function AgentSessionsProvider({
           });
         });
       }
-      bridge.send({
+      const cloudReply = isCloudWorkspace(current.cwd);
+      const replySessionId = current.sessionId;
+      const replyCwd = current.cwd;
+      const reply = {
         type: "AGENT_QUESTION_RESPONSE",
+        ...cloudReplyOwnership(current.cwd, chatId, head.request),
+        ...(cloudReply ? { id: crypto.randomUUID() } : {}),
         questionId: head.questionId,
         response,
         // Vendor-id fallback: lets the adapter settle the ask even when its
         // questionId went stale (replay / session rebuild minted a fresh one
         // while this client deduped and kept the original).
         nativeRequestId: head.request.nativeRequestId,
-      });
+      } as const;
+      bridge.send(reply);
       trackAgentQuestionAnswered({
         chatId,
         agentId: current.agentId ?? "unknown",
@@ -4413,6 +4445,7 @@ export function AgentSessionsProvider({
           // Turn already over (finished / cancelled / crashed) — the missing
           // echo doesn't matter anymore.
           if (!slot || slot.status !== "streaming") return;
+          if (cloudReply && (slot.sessionId !== replySessionId || slot.cwd !== replyCwd || Date.now() >= head.request.expiresAt!)) return;
           // Echo-lost-but-answer-landed guard: if the agent visibly resumed
           // (any timeline activity after the answer), the answer WAS
           // delivered and only the receipt went missing — do nothing.
@@ -4425,18 +4458,17 @@ export function AgentSessionsProvider({
           if (!retriedAnswersRef.current.has(questionId)) {
             // Miss 1 — silent re-send over the (hopefully healed) socket.
             retriedAnswersRef.current.add(questionId);
-            bridge.send({
-              type: "AGENT_QUESTION_RESPONSE",
-              questionId,
-              response,
-              nativeRequestId: head.request.nativeRequestId,
-            });
+            try { bridge.send(reply); }
+            catch (error) { if (!cloudReply) throw error; }
             armWatchdog();
             return;
           }
           // Miss 2 — the blocking channel is gone. Deliver the answer the
           // guaranteed way: stop the parked turn, send it as a prompt.
           retriedAnswersRef.current.delete(questionId);
+          // Cloud has an exact durable action/resolver. Missing its settled
+          // echo is never authority to Stop a shared turn or dispatch again.
+          if (cloudReply) return;
           toast.warning("Answer didn't reach the agent", {
             description:
               "Delivering it as a message instead — no action needed.",

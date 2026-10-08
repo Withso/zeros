@@ -72,15 +72,16 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
       abort.abort();return closing??=(async()=>{await Promise.all([...domains].map(domain=>domain.stopAndProve()));})();
     });
     const workloadSpawn=vi.fn(async(request:BoundarySpawnRequest)=>{
+      expect(request.cwd).toBe(root);
       expect(request.env).toMatchObject({ORG_VALUE:values.ORG_VALUE,REPO_VALUE:values.REPO_VALUE,PERSONAL_VALUE:actor});
-      const child=spawn(process.execPath,[helper,nativeBinary],{cwd:root,env:{...request.env},stdio:["pipe","pipe","pipe"],detached:true});
+      const child=spawn(process.execPath,[helper,nativeBinary],{cwd:request.cwd,env:{...request.env},stdio:["pipe","pipe","pipe"],detached:true});
       const exited=new Promise<{code:number|null;signal:string|null}>(resolve=>child.once("close",(code,signal)=>resolve({code,signal})));
       let stopped:Promise<void>|undefined;
       const domain:BoundaryProcess={pid:child.pid!,child,stdin:child.stdin,stdout:child.stdout,stderr:child.stderr,
         wait:()=>exited,signal:async signal=>{child.kill(signal);},stopAndProve:()=>stopped??=(async()=>{child.stdin.end();const timer=setTimeout(()=>{try{process.kill(-child.pid!,"SIGKILL");}catch{}},250);try{await exited;}finally{clearTimeout(timer);}})()};
       domains.add(domain);return domain;
     });
-    const execution={lease:{environment:{values},assertLive(){if(abort.signal.aborted)throw new Error("retired");},signal:abort.signal,attach:(domain:{stopAndProve():Promise<void>})=>domains.add(domain),
+    const execution={cwd:root,lease:{environment:{values},assertLive(){if(abort.signal.aborted)throw new Error("retired");},signal:abort.signal,attach:(domain:{stopAndProve():Promise<void>})=>domains.add(domain),
       launch:async(callback:()=>Promise<BoundaryProcess>)=>callback(),close},coordinator:{workload:{spawn:workloadSpawn}}} as unknown as CloudProviderExecution;
     let socket:WebSocket|undefined,uncooperative:Socket|undefined,proofTimer:ReturnType<typeof setTimeout>|undefined;
     try{

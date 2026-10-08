@@ -23,6 +23,7 @@ import type { BridgeMessage } from "./messages";
 import { createMessageId } from "./messages";
 import { PROTOCOL_VERSION } from "@zeros/protocol/version";
 import { cloudBridgeCloseDiagnostic } from "@zeros/protocol/cloud-bridge-diagnostics";
+import { CloudRuntimeAccessError } from "./cloud-runtime-access-error";
 import {
   MAX_BRIDGE_FRAME_BYTES,
   safeParseBridgeMessage,
@@ -446,6 +447,7 @@ export function cloudRuntimeWebSocketProtocols(cloudToken: string): string[] {
 export interface ConnectionRejection {
   reason: string;
   message: string;
+  code?: string;
 }
 
 /** Whether an engine RESPAWN (watchdog `engine-restarted`) can plausibly cure a
@@ -627,6 +629,8 @@ export class RuntimeClient {
   private readonly refreshCloudConnectionTarget?: CloudRuntimeConnectionTargetRefresher;
   private cloudTargetNeedsRefresh = false;
   private cloudTargetRefreshPromise: Promise<boolean> | null = null;
+  private cloudRefreshFailures = 0;
+  private cloudConnectFailures = 0;
 
   constructor(
     target: RuntimeConnectionTarget = { kind: "local" },
@@ -678,7 +682,7 @@ export class RuntimeClient {
   }
 
   async connect(): Promise<void> {
-    if (this._disposed) return;
+    if (this._disposed || (this.connectionTarget.kind === "cloud" && this._rejected)) return;
     if (this.ws?.readyState === WebSocket.OPEN) return;
     // In-flight guard. Without it, two concurrent connect() calls both
     // await enginePortPromise then both `new WebSocket(...)` — the
@@ -796,6 +800,15 @@ export class RuntimeClient {
       this.cloudDiagnostic("close", { ...cloudBridgeCloseDiagnostic(event?.code, event?.reason),
         stage: wasPending ? "upgrade" : this.handshakeReady ? "ready" : "handshake" });
       if (this.ws === ws) this.ws = null;
+      if (this.connectionTarget.kind === "cloud") {
+        const category = cloudBridgeCloseDiagnostic(event?.code, event?.reason).class;
+        if (["authority_revoked", "account_binding_required", "actor_forbidden"].includes(category))
+          this.rejectCloudConnection(new CloudRuntimeAccessError({ code: "cloud_workspace_access_revoked", status: 403 }));
+        else if (category === "protocol_mismatch")
+          this.rejectCloudConnection(new CloudRuntimeAccessError({ code: "cloud_workspace_client_update_required", status: 409 }));
+        else if (!this.handshakeReady && ++this.cloudConnectFailures >= 5)
+          this.rejectCloudConnection(new CloudRuntimeAccessError({ code: "cloud_actor_runtime_unavailable", status: 503 }));
+      }
       this.afterDisconnect();
     };
 
@@ -835,6 +848,8 @@ export class RuntimeClient {
     assertCloudRuntimeNotRetired(parsedTarget);
     this.connectionTarget = parsedTarget;
     this.cloudTargetNeedsRefresh = false;
+    this.cloudRefreshFailures = 0;
+    this.cloudConnectFailures = 0;
     this.armConnectionTargetExpiry();
     this._rejected = false;
     this.lastRejection = null;
@@ -1219,6 +1234,7 @@ export class RuntimeClient {
     const ready = () => {
       if (this._disposed || this.ws !== socket || socket?.readyState !== WebSocket.OPEN || this._rejected) return;
       this.handshakeReady = true;
+      this.cloudConnectFailures = 0;
       this._engineConnected = true;
       this.reconnectAttempts = 0;
       this.cloudDiagnostic("ready", {});
@@ -1457,6 +1473,8 @@ export class RuntimeClient {
     this._rejected = false;
     this.lastRejection = null;
     this.reconnectAttempts = 0;
+    this.cloudRefreshFailures = 0;
+    this.cloudConnectFailures = 0;
     if (opts.reconnect === false) return;
     void this.connect().catch(() => {
       /* scheduleReconnect handles retries */
@@ -1585,7 +1603,7 @@ export class RuntimeClient {
           candidate.workspaceId !== current.workspaceId ||
           candidate.connectionSequence !== current.connectionSequence + 1
         ) {
-          return false;
+          throw new CloudRuntimeAccessError({ code: "cloud_workspace_access_superseded", status: 409 });
         }
         if (
           this._disposed ||
@@ -1597,17 +1615,32 @@ export class RuntimeClient {
         const previousKey = runtimeExecutionKey(this.executionIdentity);
         this.connectionTarget = candidate;
         this.cloudTargetNeedsRefresh = false;
+        this.cloudRefreshFailures = 0;
         this.armConnectionTargetExpiry();
         if (runtimeExecutionKey(this.executionIdentity) !== previousKey) {
           this.notifyExecutionIdentityChanged();
         }
         return true;
-      } catch {
+      } catch (error) {
+        if (this._disposed || epoch !== this.connectionTargetEpoch || this.connectionTarget !== current) return false;
+        const failure = new CloudRuntimeAccessError(error);
+        this.cloudRefreshFailures++;
+        if (failure.category !== "transient" || this.cloudRefreshFailures >= 5) {
+          this.rejectCloudConnection(failure);
+        }
         return false;
       } finally {
         this.cloudTargetRefreshPromise = null;
       }
     })();
     return this.cloudTargetRefreshPromise;
+  }
+  private rejectCloudConnection(failure: CloudRuntimeAccessError): void {
+    this._rejected = true;
+    this.lastRejection = { reason: `cloud-${failure.category}`, message: failure.message, code: failure.code };
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.setStatus("disconnected");
+    for (const listener of this.rejectionListeners) listener(this.lastRejection);
   }
 }

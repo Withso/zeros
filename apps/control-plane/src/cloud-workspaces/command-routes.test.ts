@@ -10,12 +10,27 @@ function fixture() {
   const app = createCloudCommandRoutes(service as unknown as DatabaseCloudWorkspaceCommandService);
   const scope = { workspaceId: randomUUID(), organizationId: randomUUID(), generation: 1, engineInstanceId: randomUUID() };
   const token = "zwh_" + "x".repeat(43);
-  const call = (request: unknown, authorization = `Bearer ${token}`,native=true) => app.request(CLOUD_COMMAND_PATH, {
-    method: "POST", headers: { "content-type": "application/json", authorization,...(native?{"x-zeros-native-commands":"1"}:{}) }, body: JSON.stringify({ ...scope, request }),
+  const call = (request: unknown, authorization = `Bearer ${token}`,native=true,turnProtocol=false) => app.request(CLOUD_COMMAND_PATH, {
+    method: "POST", headers: { "content-type": "application/json", authorization,...(native?{"x-zeros-native-commands":"1"}:{}),
+      ...(turnProtocol ? {"x-zeros-cloud-turn-protocol":"1"} : {}) }, body: JSON.stringify({ ...scope, request }),
   });
   return { service, scope, token, call };
 }
 describe("cloud command routes", () => {
+  it.each(["read", "snapshot"] as const)("projects %s terminals for old native engines and acknowledges new opt-in", async kind => {
+    const f = fixture(), commandId = randomUUID(), native = { version: 1, model: "model", terminal: {
+      commandId, conversationId: "chat", executionId: "execution", turnId: "turn", agentId: "claude", status: "completed", stopReason: "max_tokens" } };
+    const result = kind === "read" ? { commandId, conversationId: "chat", payload: null, result: native } :
+      { version: 1, conversationId: "chat", pending: [], receipts: [{ commandId, payload: null, result: native }] };
+    f.service[kind].mockResolvedValue(result as never);
+    const request = kind === "read" ? { kind, commandId } : { kind, conversationId: "chat" };
+    const old = await f.call(request), oldBody = await old.json();
+    expect(kind === "read" ? oldBody.result.result : oldBody.result.receipts[0].result).toEqual({ version: 1, model: "model" });
+    expect(old.headers.get("x-zeros-cloud-turn-protocol")).toBe("1");
+    const negotiated = await f.call(request, undefined, true, true);
+    expect(await negotiated.json()).toEqual({ result });
+    expect(native).toHaveProperty("terminal.stopReason", "max_tokens");
+  });
   it("keeps native receipts opaque and native claims disabled for older engines",async()=>{
     const f=fixture();f.service.snapshot.mockResolvedValue({revision:1,nativeGoal:{version:1,conversationId:"chat",revision:1,goal:null},pending:[{payload:{operation:{kind:"goal"}}}],receipts:[{result:{version:1,goal:null},payload:null}]} as never);
     const response=await f.call({kind:"snapshot",conversationId:"chat"},undefined,false);

@@ -13,6 +13,7 @@ import type {TransportClient} from "../transport/types";
 import {closeZerosDb,setZerosDbPathForTesting} from "../db";
 import {deleteChat,getChat,upsertChat,setChatComposerMode} from "../db/chats";
 import { windowChatMessages } from "../db/messages";
+import { startTurn, finishTurn } from "../db/turns";
 import type {CloudAgentSelection} from "../agents/cloud-provider-execution";
 import {AgentGateway} from "../agents/gateway";
 import type {AgentAdapter} from "../agents/types";
@@ -29,9 +30,15 @@ const methods=ZerosEngine.prototype as unknown as {
   deleteCloudConversation(this:unknown,id:string,operationId:string,client:TransportClient,remove:()=>Promise<unknown>):Promise<unknown>;
   agentSpawnOpts(this:unknown,message:Start,client:TransportClient,stage:string):Promise<Spawn>;
   validateCloudCommand(this:unknown,id:string,payload?:unknown):void;
-  handleCloudEventOperation(this:unknown,params:Record<string,unknown>):Promise<unknown>;
+  handleCloudEventOperation(this:unknown,params:Record<string,unknown>,client:TransportClient):Promise<unknown>;
   publishCloudCommandFailure(this:unknown,claim:Pick<CloudCommandClaim,"commandId"|"conversationId"|"payload"> & {executionId:string|null},code:string):void;
+  publishCloudRepositoryMcpNotice(this:unknown,context:{executionId:string;conversationId:string;provider:"cursor";notice:{excluded:number;omitted:number;diagnostics:[]}}):void;
 };
+function snapshotClient(): TransportClient {
+  return { id: "snapshot-client", kind: "cloud", accountUserId: randomUUID(), authorityEpoch: 1,
+    cloudActor: { sessionId: randomUUID(), deviceId: randomUUID(), role: "developer", fingerprint: "a".repeat(64) },
+    authorized: () => true, send: vi.fn(), close: vi.fn() };
+}
 let root:string;
 beforeEach(async()=>{root=await mkdtemp(path.join(os.tmpdir(),"zeros-command-admit-"));setZerosDbPathForTesting(path.join(root,"state.db"));await mkdir(path.join(root,"workspace"));});
 afterEach(async()=>{closeZerosDb();setZerosDbPathForTesting(null);await rm(root,{recursive:true,force:true});});
@@ -70,6 +77,140 @@ function failingRetirement(engine:ReturnType<typeof fixture>["engine"],execution
   return proof;
 }
 describe("cloud engine credential admission",()=>{
+  it("retains exact command/turn terminal stop reason, usage and effective model", async () => {
+    const { claim, engine } = fixture(); await methods.prepareCloudCommand.call(engine, claim);
+    engine.handleAgentMessage.mockImplementationOnce(async (_message, client) => {
+      client.send({ type: "AGENT_PROMPT_COMPLETE", agentId: "cursor", executionId: claim.executionId, requestId: claim.commandId,
+        stopReason: "max_tokens", response: { stopReason: "max_tokens", effectiveModel: "actual-model",
+          userMessageId: claim.payload.userMessageId, usage: { accountingVersion: 1, inputTokens: 10, outputTokens: 12, reasoningTokens: 4,
+            totalCostUsd: 0.01, perModel: [{ model: "actual-model", outputTokens: 12 }] } } } as never);
+    });
+    expect(await methods.dispatchCloudCommand.call(engine, claim)).toMatchObject({ state: "succeeded", result: { version: 1, terminal: {
+      commandId: claim.commandId, conversationId: claim.conversationId, executionId: claim.executionId, turnId: claim.payload.userMessageId,
+      agentId: "cursor", status: "completed", stopReason: "max_tokens", response: { effectiveModel: "actual-model", usage: { outputTokens: 12 } },
+    } } });
+  });
+  it("keeps the full native failure kind and stage in its exact terminal receipt", async () => {
+    const { claim, engine } = fixture(); await methods.prepareCloudCommand.call(engine, claim);
+    engine.handleAgentMessage.mockImplementationOnce(async (_message, client) => {
+      client.send({ type: "AGENT_PROMPT_FAILED", executionId: claim.executionId, error: "Native account verification",
+        failure: { kind: "verification-required", stage: "prompt", message: "Verify account", advice: "Complete verification" } } as never);
+    });
+    expect(await methods.dispatchCloudCommand.call(engine, claim)).toMatchObject({ result: { terminal: {
+      turnId: claim.payload.userMessageId, status: "failed", error: "Native account verification",
+      failure: { kind: "verification-required", stage: "prompt", advice: "Complete verification" },
+    } } });
+  });
+  it("does not settle a claim from another execution's late terminal", async () => {
+    const { claim, engine } = fixture(); await methods.prepareCloudCommand.call(engine, claim);
+    engine.handleAgentMessage.mockImplementationOnce(async (_message, client) => {
+      client.send({ type: "AGENT_PROMPT_COMPLETE", executionId: "old-execution", stopReason: "end_turn", response: {} } as never);
+    });
+    expect(await methods.dispatchCloudCommand.call(engine, claim)).toMatchObject({ state: "failed", resultCode: "cloud_provider_prompt_protocol_error" });
+  });
+  it("persists an optional repository MCP exclusion as a nonfatal sending-conversation notice", () => {
+    const { claim, engine } = fixture();
+    methods.publishCloudRepositoryMcpNotice.call(engine, { executionId: claim.executionId, conversationId: claim.conversationId,
+      provider: "cursor", notice: { excluded: 2, omitted: 1, diagnostics: [] } });
+    expect(windowChatMessages(claim.conversationId, 100).map(row => JSON.parse(row.payload))).toMatchObject([
+      { kind: "error_notice", severity: "warning", recoverable: true, code: "CLOUD_REPOSITORY_MCP_EXCLUDED", message: "2 optional repository MCP entries were skipped." },
+    ]);
+    expect(engine.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: "AGENT_SESSION_UPDATE", chatId: claim.conversationId,
+      notification: { sessionId: claim.executionId, update: expect.objectContaining({ sessionUpdate: "error_notice", recoverable: true }) } }));
+    expect(engine.agents.endSession).not.toHaveBeenCalled(); expect(engine.agents.cancel).not.toHaveBeenCalled();
+  });
+  it("includes the latest durable terminal even when no execution remains", async () => {
+    const { claim, engine } = fixture();
+    startTurn({ chatId: claim.conversationId, turnId: claim.payload.userMessageId, agentId: "cursor", workspaceId: null,
+      folder: engine.root, summary: null, startedAt: 10, preSnapshot: null });
+    finishTurn(claim.conversationId, claim.payload.userMessageId, { status: "completed", stopReason: "max_tokens", endedAt: 20,
+      postSnapshot: null, files: [], usage: { outputTokens: 12, perModel: [{ model: "actual-model", outputTokens: 12 }] } });
+    Object.assign(engine, { cloudEvents: { snapshot: (capture: () => unknown) => ({ cursor: { streamId: randomUUID(), sequence: 0 }, snapshot: capture() }) },
+      sessionLoadResponses: new Map(), pendingPermissionRequests: new Map(), pendingQuestionRequests: new Map() });
+    expect(await methods.handleCloudEventOperation.call(engine, { request: { kind: "snapshot", conversationId: claim.conversationId } }, snapshotClient())).toMatchObject({ snapshot: {
+      executionId: null, activeTurn: null, latestTurn: { turnId: claim.payload.userMessageId, status: "completed", stopReason: "max_tokens", response: { usage: { outputTokens: 12 } } },
+    } });
+  });
+  it("restores the exact retired native receipt including model and failure details", async () => {
+    const { claim, engine } = fixture();
+    startTurn({ chatId: claim.conversationId, turnId: claim.payload.userMessageId, agentId: "cursor", workspaceId: null,
+      folder: engine.root, summary: null, startedAt: 10, preSnapshot: null });
+    finishTurn(claim.conversationId, claim.payload.userMessageId, { status: "failed", stopReason: null, endedAt: 20, postSnapshot: null, files: [] });
+    Object.assign(engine, { cloudEvents: { snapshot: (capture: () => unknown) => ({ cursor: { streamId: randomUUID(), sequence: 0 }, snapshot: capture() }) },
+      sessionLoadResponses: new Map(), pendingPermissionRequests: new Map(), pendingQuestionRequests: new Map(),
+      cloudCommands: { handle: async () => ({ version: 1, conversationId: claim.conversationId, revision: 1, paused: false, pending: [], receipts: [{
+        commandId: claim.commandId, position: 1, state: "failed", payload: null, executionId: claim.executionId, generation: 1,
+        resultCode: "cloud_provider_prompt_verification_required", createdAt: new Date(10).toISOString(), updatedAt: new Date(20).toISOString(), result: { version: 1, terminal: {
+          commandId: claim.commandId, conversationId: claim.conversationId, executionId: claim.executionId, turnId: claim.payload.userMessageId, agentId: "cursor",
+          status: "failed", stopReason: null, startedAt: 10, endedAt: 20, error: "Verification", failure: { kind: "verification-required", stage: "prompt", message: "Verify account", advice: "Complete verification" },
+        } },
+      }] }) } });
+    expect(await methods.handleCloudEventOperation.call(engine, { request: { kind: "snapshot", conversationId: claim.conversationId } }, snapshotClient())).toMatchObject({ snapshot: {
+      executionId: null, latestTurn: { commandId: claim.commandId, executionId: claim.executionId, failure: { kind: "verification-required", stage: "prompt", advice: "Complete verification" } },
+    } });
+  });
+  it("restores a failed user-bubble-only turn from its durable refusal rather than marking it completed", async () => {
+    const { claim, engine } = fixture(); methods.publishCloudCommandFailure.call(engine, claim, "cloud_provider_start_auth_required");
+    Object.assign(engine, { cloudEvents: { snapshot: (capture: () => unknown) => ({ cursor: { streamId: randomUUID(), sequence: 0 }, snapshot: capture() }) },
+      sessionLoadResponses: new Map(), pendingPermissionRequests: new Map(), pendingQuestionRequests: new Map(),
+      cloudCommands: { handle: async () => ({ version: 1, conversationId: claim.conversationId, revision: 1, paused: false, pending: [], receipts: [{
+        commandId: claim.commandId, position: 1, state: "failed", payload: null, executionId: claim.executionId, generation: 1,
+        resultCode: "cloud_provider_start_auth_required", createdAt: new Date(10).toISOString(), updatedAt: new Date(20).toISOString(),
+      }] }) } });
+    expect(await methods.handleCloudEventOperation.call(engine, { request: { kind: "snapshot", conversationId: claim.conversationId } }, snapshotClient())).toMatchObject({ snapshot: {
+      executionId: null, activeTurn: null, latestTurn: { commandId: claim.commandId, turnId: claim.payload.userMessageId, status: "failed", failure: { kind: "auth-required", stage: "newSession" } },
+    } });
+  });
+  it("does not replace a newer durable turn with an older null-payload receipt", async () => {
+    const { claim, engine } = fixture();
+    methods.publishCloudCommandFailure.call(engine, claim, "cloud_provider_start_auth_required");
+    startTurn({ chatId: claim.conversationId, turnId: "newer-turn", agentId: "cursor", workspaceId: null,
+      folder: engine.root, summary: null, startedAt: 30, preSnapshot: null });
+    finishTurn(claim.conversationId, "newer-turn", { status: "completed", stopReason: "end_turn", endedAt: 40, postSnapshot: null, files: [] });
+    Object.assign(engine, { cloudEvents: { snapshot: (capture: () => unknown) => ({ cursor: { streamId: randomUUID(), sequence: 0 }, snapshot: capture() }) },
+      sessionLoadResponses: new Map(), pendingPermissionRequests: new Map(), pendingQuestionRequests: new Map(),
+      cloudCommands: { handle: async () => ({ version: 1, conversationId: claim.conversationId, revision: 1, paused: false, pending: [], receipts: [{
+        commandId: claim.commandId, position: 1, state: "failed", payload: null, executionId: claim.executionId, generation: 1,
+        resultCode: "cloud_provider_start_auth_required", createdAt: new Date(10).toISOString(), updatedAt: new Date(20).toISOString(), result: { version: 1, terminal: {
+          commandId: claim.commandId, conversationId: claim.conversationId, executionId: claim.executionId, turnId: claim.payload.userMessageId,
+          agentId: "cursor", status: "failed", stopReason: null, error: "Authentication required",
+        } },
+      }] }) } });
+    expect(await methods.handleCloudEventOperation.call(engine, { request: { kind: "snapshot", conversationId: claim.conversationId } }, snapshotClient())).toMatchObject({ snapshot: {
+      executionId: null, activeTurn: null, latestTurn: { turnId: "newer-turn", status: "completed", stopReason: "end_turn" },
+    } });
+  });
+  it("rejects terminal identity belonging to another command in a null-payload receipt", async () => {
+    const { claim, engine } = fixture();
+    Object.assign(engine, { cloudEvents: { snapshot: (capture: () => unknown) => ({ cursor: { streamId: randomUUID(), sequence: 0 }, snapshot: capture() }) },
+      sessionLoadResponses: new Map(), pendingPermissionRequests: new Map(), pendingQuestionRequests: new Map(),
+      cloudCommands: { handle: async () => ({ version: 1, conversationId: claim.conversationId, revision: 1, paused: false, pending: [], receipts: [{
+        commandId: claim.commandId, position: 1, state: "failed", payload: null, executionId: claim.executionId, generation: 1,
+        resultCode: "cloud_provider_start_auth_required", createdAt: new Date(10).toISOString(), updatedAt: new Date(20).toISOString(), result: { version: 1, terminal: {
+          commandId: randomUUID(), conversationId: claim.conversationId, executionId: claim.executionId, turnId: claim.payload.userMessageId,
+          agentId: "cursor", status: "failed", stopReason: null,
+        } },
+      }] }) } });
+    await expect(methods.handleCloudEventOperation.call(engine, { request: { kind: "snapshot", conversationId: claim.conversationId } }, snapshotClient())).rejects.toMatchObject({ code: "invalid_event" });
+  });
+  it("classifies an admitted prompt without a terminal as a provider protocol failure", async () => {
+    const { claim, engine } = fixture();
+    await methods.prepareCloudCommand.call(engine, claim);
+    engine.handleAgentMessage.mockImplementationOnce(async () => {});
+    expect(await methods.dispatchCloudCommand.call(engine, claim)).toMatchObject({
+      state: "failed", resultCode: "cloud_provider_prompt_protocol_error",
+    });
+  });
+  it.each(["end_turn", "cancelled"] as const)("keeps an empty native %s terminal valid", async stopReason => {
+    const { claim, engine } = fixture();
+    await methods.prepareCloudCommand.call(engine, claim);
+    engine.handleAgentMessage.mockImplementationOnce(async (_message, client) => {
+      client.send({ type: "AGENT_PROMPT_COMPLETE", response: {}, stopReason } as never);
+    });
+    expect(await methods.dispatchCloudCommand.call(engine, claim)).toMatchObject(stopReason === "cancelled"
+      ? { state: "cancelled", resultCode: "stopped_by_user" }
+      : { state: "succeeded", resultCode: null });
+  });
   it("keeps a typed startup refusal instead of replacing it with generic admission failure", async () => {
     const { claim, engine } = fixture();
     const failure = new CloudCommandFailureError({ stage: "containment", category: "canary_failed" });
@@ -248,7 +389,7 @@ describe("cloud engine credential admission",()=>{
     Object.assign(engine, { cloudEvents: { snapshot: (capture: () => unknown) => ({ snapshot: capture() }) },
       sessionLoadResponses: new Map([[claim.executionId, session]]), pendingPermissionRequests: new Map(), pendingQuestionRequests: new Map() });
     Object.assign(engine.agents, { agentInitializeSnapshot: vi.fn(() => initialize) });
-    expect(await methods.handleCloudEventOperation.call(engine, { request: { kind: "snapshot", conversationId: "conversation" } })).toMatchObject({
+    expect(await methods.handleCloudEventOperation.call(engine, { request: { kind: "snapshot", conversationId: "conversation" } }, snapshotClient())).toMatchObject({
       snapshot: { executionId: claim.executionId, session, initialize },
     });
     expect(engine.handleAgentMessage).not.toHaveBeenCalled();
@@ -262,9 +403,9 @@ describe("cloud engine credential admission",()=>{
       pendingPermissionRequests:new Map(),pendingQuestionRequests:new Map()});
     Object.assign(engine.agents,{readCloudBackgroundTasks:vi.fn(async()=>durable),agentInitializeSnapshot:()=>null});
     const request={request:{kind:"snapshot",conversationId:"conversation"}};
-    expect(await methods.handleCloudEventOperation.call(engine,request)).toMatchObject({snapshot:{session:{...session,backgroundTasks:durable}}});
+    expect(await methods.handleCloudEventOperation.call(engine,request,snapshotClient())).toMatchObject({snapshot:{session:{...session,backgroundTasks:durable}}});
     const newer={...durable,tasks:[]};sessions.set(claim.executionId,{...session,backgroundTasks:newer});
-    expect(await methods.handleCloudEventOperation.call(engine,request)).toMatchObject({snapshot:{session:{backgroundTasks:newer}}});
+    expect(await methods.handleCloudEventOperation.call(engine,request,snapshotClient())).toMatchObject({snapshot:{session:{backgroundTasks:newer}}});
   });
   it("attempts strict retirement and quarantines when native cancellation fails",async()=>{
     const {claim,engine}=fixture();await methods.prepareCloudCommand.call(engine,claim);

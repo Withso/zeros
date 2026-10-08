@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { once } from "node:events";
+import { WebSocket } from "ws";
 import { createCloudWorkspaceInternalRoutes } from "../../apps/control-plane/src/cloud-workspaces/internal-routes.ts";
+import { CloudCommandError } from "../../apps/control-plane/src/cloud-workspaces/commands.ts";
 import { loadContractSource } from "./source.mjs";
 
 const id = (n) =>
@@ -43,6 +46,13 @@ async function until(condition, timeoutMs = 1_000) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("runtime_skew_contract_timeout");
+}
+
+async function bounded(promise, code, timeoutMs = 5_000) {
+  let timer;
+  return Promise.race([promise, new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(code)), timeoutMs);
+  })]).finally(() => clearTimeout(timer));
 }
 
 function controlPlane() {
@@ -118,6 +128,7 @@ function controlPlane() {
           state: result.state,
           resultCode: result.resultCode,
           payload: null,
+          ...(result.result ? { result: clone(result.result) } : {}),
         });
         revision++;
         return snapshot();
@@ -149,6 +160,7 @@ function controlPlane() {
           return clone(receipt);
         }
         const receipt = actionReceipts.get(request.operationId);
+        if (!receipt && request.kind === "read") throw new CloudCommandError("command_not_found");
         assert.ok(receipt);
         if (request.kind === "settle")
           Object.assign(receipt, {
@@ -209,6 +221,17 @@ function controlPlane() {
       expiresAtMs: now + 5_000,
       leaseDurationMs: 5_000,
     }),
+    admitActorClient: async () => ({
+      version: 2,
+      audience: "zeros-cloud-workspace-engine-client-admission-v2",
+      admitted: true,
+      accountUserId: id(9),
+      authorityEpoch: 1,
+      actorSessionId: id(6),
+      deviceId: id(7),
+      role: "developer",
+      fingerprint: "a".repeat(64),
+    }),
     appendRecord: async (input) => ({
       version: 1,
       revision: input.expectedRevision + 1,
@@ -230,7 +253,7 @@ function controlPlane() {
   };
 }
 
-async function commandRoundtrip(client, engine, negativeFixture, stop = true) {
+async function commandRoundtrip(client, engine, negativeFixture, stop = true, settled) {
   const cp = controlPlane(),
     completion = deferred();
   const journal = new engine.CloudEventRuntime(streamId, {
@@ -252,6 +275,9 @@ async function commandRoundtrip(client, engine, negativeFixture, stop = true) {
     execution: () => "execution-contract-fixture",
     dispatch: async (claim) => {
       assert.deepEqual(claim.payload.prompt, prompt);
+      if (settled?.result?.terminal) settled = { ...settled, result: { ...settled.result,
+        terminal: { ...settled.result.terminal, commandId: claim.commandId, conversationId: claim.conversationId,
+          executionId: claim.executionId, turnId: claim.payload.userMessageId } } };
       dispatched++;
       return completion.promise;
     },
@@ -264,6 +290,10 @@ async function commandRoundtrip(client, engine, negativeFixture, stop = true) {
     },
     changed: () => {},
   });
+  const peer = { cloudActor: { sessionId: id(6) } };
+  const commandHost = { cloudCommands: runtime, cloudTurnProtocols: new WeakMap() };
+  const commandHandler = engine.engineReplies.EngineReplyContract.prototype.handleCloudCommandOperation;
+  const responses = [], commandRequests = [];
   const bridge = {
     status: "connected",
     request: async (message) => {
@@ -276,6 +306,7 @@ async function commandRoundtrip(client, engine, negativeFixture, stop = true) {
           modeRevision: 0,
           permissionModeVersion: 1,
           nativeCommandsVersion: 1,
+          ...(engine.engineReplies.cloudTurnProtocolVersion === 1 ? { cloudTurnProtocolVersion: 1 } : {}),
         };
       } else if (op === "cloudCommands.conversation") {
         engine.commands.CloudConversationReadSchema.parse(params);
@@ -284,6 +315,7 @@ async function commandRoundtrip(client, engine, negativeFixture, stop = true) {
           modeRevision: 0,
           permissionModeVersion: 1,
           nativeCommandsVersion: 1,
+          ...(engine.engineReplies.cloudTurnProtocolVersion === 1 ? { cloudTurnProtocolVersion: 1 } : {}),
         };
       } else if (op === "cloudEvents.request") {
         // The receiving cohort supplies both the strict client parser and the
@@ -312,10 +344,10 @@ async function commandRoundtrip(client, engine, negativeFixture, stop = true) {
           throw new Error(
             "runtime_skew_incompatible: queued prompt rejected before durable dispatch",
           );
-        result = await runtime.handle(request);
-        if (params.nativeCommandsVersion !== 1)
-          result = engine.commands.legacyCloudCommandResponse(result);
+        commandRequests.push(clone(params));
+        result = await commandHandler.call(commandHost, op, { ...params, request }, peer);
       }
+      responses.push(clone(result));
       return { type: "WORKSPACE_RESPONSE", op, result };
     },
   };
@@ -368,23 +400,47 @@ async function commandRoundtrip(client, engine, negativeFixture, stop = true) {
           agentId: "codex",
         }),
       );
-    else completion.resolve({ state: "succeeded", resultCode: null });
-    const result = await observed;
+    else completion.resolve(settled ?? { state: "succeeded", resultCode: null });
+    const result = await bounded(observed, "runtime_skew_receipt_completion_incompatible");
     assert.ifError(result.error);
-    assert.equal(result.value.type, "AGENT_PROMPT_COMPLETE");
+    const failed = settled?.state === "failed";
+    assert.equal(result.value.type, failed ? "AGENT_PROMPT_FAILED" : "AGENT_PROMPT_COMPLETE");
+    if (failed) {
+      const typed = client.commands.cloudCommandFailureFromCode(settled.resultCode, "codex");
+      assert.equal(result.value.error, typed ? settled.resultCode : "command_dispatch_rejected");
+      if (typed) assert.deepEqual(result.value.failure, typed);
+      else assert.equal(client.failureDisplay.classifyCloudAdmissionFailure({
+        folder: `cloud://${organizationId}/${workspaceId}`, error: result.value.error,
+      }).message, "The cloud agent request could not be completed. Review the conversation before trying again");
+    }
+    if (settled?.result?.terminal && client.engineReplies.cloudTurnProtocolVersion === 1) {
+      assert.equal(result.value.stopReason, settled.result.terminal.stopReason);
+      assert.deepEqual(result.value.response, settled.result.terminal.response);
+    }
     assert.equal(cancelled, stop ? 1 : 0);
     await until(() =>
       cp.requests.some((request) => request.body.request?.kind === "settle"),
     );
-    client.commands.CloudCommandSnapshotSchema.parse(cp.snapshot());
+    engine.commands.CloudCommandSnapshotSchema.parse(cp.snapshot());
     assert.equal(
       cp.snapshot().receipts[0].state,
-      stop ? "cancelled" : "succeeded",
+      stop ? "cancelled" : settled?.state ?? "succeeded",
     );
     for (const kind of ["mutate", "claim", "settle", ...(stop ? ["stop"] : [])])
       assert.ok(
         cp.requests.some((request) => request.body.request?.kind === kind),
       );
+    const negotiated = client.engineReplies.cloudTurnProtocolVersion === 1 && engine.engineReplies.cloudTurnProtocolVersion === 1;
+    for (const request of commandRequests)
+      assert.equal(request.cloudTurnProtocolVersion, negotiated ? 1 : undefined, "runtime_skew_turn_negotiation_incompatible");
+    if (!negotiated) for (const response of responses) {
+      if (response?.version === 1 && Array.isArray(response.receipts))
+        client.commands.CloudCommandSnapshotSchema.parse(response);
+      if (response?.commandId) client.commands.CloudCommandEntrySchema.extend({
+        conversationId: client.commands.CloudCommandSnapshotSchema.shape.conversationId,
+      }).parse(response);
+    }
+    return result.value;
   } finally {
     completion.resolve({
       state: "cancelled",
@@ -468,10 +524,226 @@ async function approvalAndReplay(client, engine) {
   }
 }
 
-async function registrationRoundtrip(engine) {
-  const cp = controlPlane();
-  let lost = false;
-  const registration = new engine.registration.CloudRuntimeRegistration(
+const executionId = "execution-contract-fixture";
+const terminalResult = () => ({ version: 1, model: "contract-model", goal: null,
+  terminal: { commandId, conversationId, executionId, turnId: "native-turn-fixture", agentId: "codex",
+    status: "completed", stopReason: "max_tokens",
+    response: { stopReason: "max_tokens", effectiveModel: "contract-model", userMessageId: "synthetic-message",
+      usage: { inputTokens: 12, outputTokens: 34 } } } });
+
+function receipt(result, pending = false) {
+  return { commandId, position: 1, state: pending ? "dispatching" : "succeeded", payload: null,
+    executionId, generation: 1, resultCode: null, createdAt: stamp, updatedAt: stamp, result };
+}
+
+export async function controlPlaneTerminalNegotiation(current, previous) {
+  const result = terminalResult(), original = clone(result);
+  const settle = { kind: "settle", result: { commandId, claimId, state: "succeeded", resultCode: null, result } };
+  assert.equal(previous.controlCommands.CloudCommandRequestSchema.safeParse(settle).success, false,
+    "runtime_skew_old_control_plane_terminal_incompatible");
+  current.controlCommands.CloudCommandRequestSchema.parse(settle);
+  // Terminal negotiation cannot make the old CP accept this PR's newly
+  // closed failure vocabulary. CP-first rollout remains required.
+  for (const category of current.commands.CLOUD_COMMAND_FAILURE_CATEGORIES.filter(category =>
+    !previous.commands.CLOUD_COMMAND_FAILURE_CATEGORIES.includes(category))) {
+    const failed = clone(settle);
+    delete failed.result.result.terminal;
+    failed.result.state = "failed";
+    failed.result.resultCode = current.commands.encodeCloudCommandFailure({ stage: "provider_prompt", category });
+    assert.equal(previous.controlCommands.CloudCommandRequestSchema.safeParse(failed).success, false,
+      "runtime_skew_control_plane_first_incompatible");
+    current.controlCommands.CloudCommandRequestSchema.parse(failed);
+  }
+  const cp = controlPlane(), sent = [];
+  cp.service.commands.read = async () => ({ ...receipt(result), conversationId });
+  cp.service.commands.settle = async (_scope, settled) => ({ version: 1, conversationId,
+    revision: 1, paused: false, pending: [], receipts: [receipt(settled.result)] });
+  let cohort = "previous", acknowledged = true;
+  const requestFetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    sent.push(clone(body));
+    assert.equal(new Headers(init.headers).get("x-zeros-cloud-turn-protocol"), "1");
+    if (cohort === "previous") {
+      previous.controlCommands.CloudCommandRequestSchema.parse(body.request);
+      return Response.json({ result: { ...receipt(body.request.result?.result ?? { version: 1 }), conversationId } });
+    }
+    const response = await cp.fetch(url, init);
+    if (!acknowledged) response.headers.delete("x-zeros-cloud-turn-protocol");
+    return response;
+  };
+  const send = (request, binding = authority) => current.commandTransport.requestCloudCommand(binding, request, abort.signal, requestFetch);
+  await send(settle);
+  await send(settle);
+  assert.ok(sent.every(body => body.request.result.result.terminal === undefined));
+  cohort = "current";
+  await send({ kind: "read", commandId }); // Real current route acknowledges the capability.
+  await send(settle);
+  assert.deepEqual(sent.at(-1).request.result.result.terminal, result.terminal);
+  // A capability belongs only to this CP + organization + workspace +
+  // generation + engine identity, even when the same fetcher is reused.
+  for (const changed of [{ heartbeatEndpoint: "https://other.example.invalid/heartbeat" },
+    { organizationId: id(8) }, { workspaceId: id(9) }, { generation: 2 }, { engineInstanceId: id(7) }]) {
+    cohort = "previous";
+    await send(settle, { ...authority, ...changed });
+    assert.equal(sent.at(-1).request.result.result.terminal, undefined);
+  }
+  cohort = "current";
+  acknowledged = false;
+  await send({ kind: "read", commandId }); // Missing acknowledgement forgets learned support.
+  cohort = "previous";
+  await send(settle);
+  assert.equal(sent.at(-1).request.result.result.terminal, undefined);
+  // The Alpha producer's known native-v1 fields remain readable by the new CP.
+  const legacy = clone(settle);
+  delete legacy.result.result.terminal;
+  await previous.commandTransport.requestCloudCommand(authority, legacy, abort.signal, cp.fetch);
+  assert.deepEqual(result, original);
+  return { oldBody: true, acknowledgedBody: true, forgottenAcknowledgement: true, exactBinding: true };
+}
+
+async function failureCategoryFallback(client, engine, current, previous) {
+  const added = current.commands.CLOUD_COMMAND_FAILURE_CATEGORIES.filter(category =>
+    !previous.commands.CLOUD_COMMAND_FAILURE_CATEGORIES.includes(category));
+  assert.ok(added.length >= 17, "runtime_skew_failure_taxonomy_incompatible");
+  let checked = 0;
+  for (const stage of current.commands.CLOUD_COMMAND_FAILURE_STAGES) for (const category of added) {
+    const code = current.commands.encodeCloudCommandFailure({ stage, category });
+    const row = { ...receipt(undefined), state: "failed", resultCode: code };
+    client.commands.CloudCommandEntrySchema.parse(row);
+    const known = client === current;
+    assert.equal(!!client.commands.cloudCommandFailureFromCode(code), known, "runtime_skew_failure_fallback_incompatible");
+    const displayed = client.failureDisplay.classifyCloudAdmissionFailure({
+      folder: `cloud://${organizationId}/${workspaceId}`, error: known ? code : "command_dispatch_rejected",
+    });
+    if (!known) assert.match(displayed.message, /could not be completed/);
+    checked++;
+  }
+  // Exercise the renderer/HTTP/pump/receipt path for every added category.
+  // All stages above share the same receiving parser and decoder.
+  for (const category of added) await commandRoundtrip(client, engine, null, false, {
+    state: "failed", resultCode: current.commands.encodeCloudCommandFailure({ stage: "provider_prompt", category }),
+  });
+  const unknown = "cloud_provider_prompt_future_contract";
+  assert.equal(client.commands.cloudCommandFailureFromCode(unknown), null);
+  client.commands.CloudCommandEntrySchema.parse({ ...receipt(undefined), state: "failed", resultCode: unknown });
+  assert.match(client.failureDisplay.classifyCloudAdmissionFailure({
+    folder: `cloud://${organizationId}/${workspaceId}`, error: "command_dispatch_rejected",
+  }).message, /could not be completed/);
+  // Unknown future codes are readable, but the current CP producer correctly
+  // rejects them. Only today's closed taxonomy enters the durable pump above.
+  return { categories: added.length, codes: checked, receiptFailures: added.length, unknownFallback: true };
+}
+
+async function terminalReceiptNegotiation(client, engine) {
+  const supported = engine.engineReplies.cloudTurnProtocolVersion === 1;
+  const result = terminalResult();
+  if (!supported) delete result.terminal;
+  const row = { ...receipt(result), conversationId };
+  const snapshot = { version: 1, conversationId, revision: 1, paused: false,
+    pending: [receipt(result, true)], receipts: [receipt(result)],
+    nativeGoal: { version: 1, conversationId, revision: 1, goal: null } };
+  const durable = clone({ row, snapshot });
+  const peer = {}, host = { cloudCommands: { handle: async request => request.kind === "read" ? row : snapshot },
+    cloudTurnProtocols: new WeakMap() };
+  const handler = engine.engineReplies.EngineReplyContract.prototype.handleCloudCommandOperation;
+  const nativeParams = { nativeCommandsVersion: 1 };
+  for (const request of [{ kind: "read", commandId }, { kind: "snapshot", conversationId }]) {
+    const projected = await handler.call(host, "cloudCommands.request", { ...nativeParams, request }, peer);
+    if (request.kind === "read") {
+      assert.equal(projected.result?.terminal, undefined);
+      assert.equal(projected.result?.model, "contract-model");
+      client.commands.CloudCommandEntrySchema.extend({ conversationId: client.commands.CloudCommandSnapshotSchema.shape.conversationId }).parse(projected);
+    } else {
+      assert.equal(projected.pending[0].result?.terminal, undefined);
+      assert.equal(projected.receipts[0].result?.terminal, undefined);
+      assert.equal(projected.nativeGoal?.goal, null);
+      client.commands.CloudCommandSnapshotSchema.parse(projected);
+    }
+  }
+  if (supported) {
+    assert.equal(client.commands.CloudNativeResultSchema.safeParse(result).success, client.engineReplies.cloudTurnProtocolVersion === 1,
+      "runtime_skew_old_reader_terminal_leak");
+    for (const request of [{ kind: "read", commandId }, { kind: "snapshot", conversationId }]) {
+      const negotiated = await handler.call(host, "cloudCommands.request", { ...nativeParams, cloudTurnProtocolVersion: 1, request }, peer);
+      assert.deepEqual(request.kind === "read" ? negotiated.result.terminal : negotiated.receipts[0].result.terminal, result.terminal);
+      assert.equal(host.cloudTurnProtocols.get(peer), 1);
+    }
+    for (const version of [0, 2, "1"]) await assert.rejects(handler.call(host, "cloudCommands.request", {
+      ...nativeParams, cloudTurnProtocolVersion: version, request: { kind: "read", commandId },
+    }, peer), error => error.code === "invalid_command");
+  }
+  const returned = await commandRoundtrip(client, engine, null, false, { state: "succeeded", resultCode: null, result });
+  if (client.engineReplies.cloudTurnProtocolVersion !== 1 || !supported) assert.equal(returned.stopReason, "end_turn");
+  assert.deepEqual({ row, snapshot }, durable); // Projection never mutates durable storage.
+  return { directRead: true, snapshot: true, terminal: supported };
+}
+
+async function permissionQuestionReplies(client, engine) {
+  const cp = controlPlane(), peer = { cloudActor: { sessionId: id(6) } }, submitted = [];
+  const connection = new client.CloudAgentConnection({ request: async () => ({ type: "WORKSPACE_RESPONSE", result: {
+    conversationId, modeRevision: 0, nativeCommandsVersion: 1,
+    ...(engine.engineReplies.cloudTurnProtocolVersion === 1 ? { cloudTurnProtocolVersion: 1 } : {}),
+  } }) }, "local-main", async () => grantId);
+  const actions = new engine.CloudActionRuntime({
+    request: request => engine.commandTransport.requestCloudAction(authority, request, abort.signal, cp.fetch),
+    validate: action => action.executionId === executionId && action.conversationId === conversationId,
+    authorize: async () => {}, changed: () => {},
+    dispatch: async action => { submitted.push(clone(action)); return { outcome: "delivered", turnId: null }; },
+  });
+  const host = { cloudActions: actions, cloudTurnProtocols: new WeakMap(),
+    pendingPermissionRequests: new Map([["permission-fixture", { request: { sessionId: executionId } }]]),
+    pendingQuestionRequests: new Map([["question-fixture", { request: { sessionId: executionId, nativeRequestId: "native-question" } }]]),
+    sessionChat: new Map([[executionId, conversationId]]) };
+  const handler = engine.engineReplies.EngineReplyContract.prototype.handleLegacyCloudAction;
+  try {
+    await connection.request({ type: "AGENT_NEW_SESSION", chatId: conversationId, agentId: "codex", env: { OPENAI_MODEL: "contract-model" } });
+    connection.incoming({ type: "AGENT_SESSION_CREATED", chatId: conversationId, agentId: "codex", executionId,
+      session: { sessionId: executionId } });
+    for (const kind of ["permission", "question"]) {
+      const message = { id: kind === "permission" ? id(1) : id(2), source: "browser", timestamp: now,
+        type: kind === "permission" ? "AGENT_PERMISSION_RESPONSE" : "AGENT_QUESTION_RESPONSE",
+        chatId: conversationId, executionId,
+        ...(kind === "permission" ? { permissionId: "permission-fixture", response: { outcome: { outcome: "selected", optionId: "allow" } } }
+          : { questionId: "question-fixture", nativeRequestId: "native-question", response: { outcome: { outcome: "answered", answers: [{ questionId: "q1", selectedOptionIds: ["option"], freeText: "answer" }] } } }),
+      };
+      // Released renderers did not send these additive ownership fields.
+      if (client.engineReplies.cloudTurnProtocolVersion !== 1) { delete message.chatId; delete message.executionId; }
+      const outgoing = connection.outgoing(message);
+      assert.ok(engine.schemas.safeParseClientBridgeMessage(outgoing));
+      if (client.engineReplies.cloudTurnProtocolVersion === 1 && engine.engineReplies.cloudTurnProtocolVersion !== 1) {
+        assert.equal(outgoing.chatId, undefined); assert.equal(outgoing.executionId, undefined);
+      }
+      if (client.engineReplies.cloudTurnProtocolVersion === 1 && engine.engineReplies.cloudTurnProtocolVersion === 1) {
+        assert.equal(outgoing.chatId, conversationId); assert.equal(outgoing.executionId, executionId);
+        host.cloudTurnProtocols.set(peer, 1);
+      }
+      await handler.call(host, outgoing, peer);
+      assert.equal(submitted.at(-1).kind, kind); assert.equal(submitted.at(-1).executionId, executionId);
+      const before = submitted.length;
+      await assert.rejects(handler.call(host, { ...outgoing, id: id(3),
+        permissionId: "missing-resolver", questionId: "missing-resolver" }, peer), error => error.code === "command_context_changed");
+      if (engine.engineReplies.cloudTurnProtocolVersion === 1) {
+        host.cloudTurnProtocols.set(peer, 1);
+        for (const identity of [{}, { chatId: conversationId }, { executionId },
+          { chatId: id(8), executionId }, { chatId: conversationId, executionId: "retired-execution" }]) {
+          const { chatId: _chat, executionId: _execution, ...legacy } = outgoing;
+          const wrong = { ...legacy, id: id(4), ...identity };
+          await assert.rejects(handler.call(host, wrong, peer), error => error.code === "command_context_changed");
+        }
+        host.cloudTurnProtocols.delete(peer);
+        for (const identity of [{ chatId: conversationId }, { executionId }]) {
+          const { chatId: _chat, executionId: _execution, ...legacy } = outgoing;
+          await assert.rejects(handler.call(host, { ...legacy, id: id(4), ...identity }, peer), error => error.code === "command_context_changed");
+        }
+      }
+      assert.equal(submitted.length, before);
+    }
+    return { permission: true, question: true };
+  } finally { connection.dispose(); actions.close(); }
+}
+
+function createRegistration(engine, requestFetch, onAuthorityLost) {
+  return new engine.registration.CloudRuntimeRegistration(
     {
       version: 1,
       audience: "zeros-cloud-engine-runtime-v1",
@@ -503,14 +775,18 @@ async function registrationRoundtrip(engine) {
         bootId: id(8),
         supervisorSessionId: id(9),
       },
-      fetch: cp.fetch,
+      fetch: requestFetch,
       now: () => now,
-      onAuthorityLost: () => {
-        lost = true;
-      },
+      onAuthorityLost,
       onDurableRecordSync: async () => {},
     },
   );
+}
+
+async function registrationRoundtrip(engine) {
+  const cp = controlPlane();
+  let lost = false;
+  const registration = createRegistration(engine, cp.fetch, () => { lost = true; });
   try {
     await registration.start();
     assert.equal(registration.readiness().health, "ready");
@@ -560,6 +836,80 @@ async function registrationRoundtrip(engine) {
     assert.equal(response.status, 200);
     assert.equal((await response.json()).revision, 1);
   } finally {
+    await registration.stop();
+  }
+}
+
+async function renewalTransientContract(engine, current) {
+  const cp = controlPlane();
+  let fault = null, lost = false, renewals = 0;
+  const requestFetch = async (url, init) => {
+    if (new URL(String(url)).pathname.endsWith("/client-admission") && fault) {
+      if (JSON.parse(init.body).renew) renewals++;
+      if (fault === "network") throw new Error("private upstream fixture detail");
+      return new Response("private upstream fixture detail", { status: fault });
+    }
+    return cp.fetch(url, init);
+  };
+  const registration = createRegistration(engine, requestFetch, () => { lost = true; });
+  const grant = `zwa_${"A".repeat(43)}`;
+  let transport, socket;
+  try {
+    await registration.start();
+    const confirmed = await registration.verifyClientAdmission(grant);
+    assert.equal(confirmed.accountUserId, id(9));
+    assert.equal(confirmed.authorityEpoch, 1);
+    assert.equal(confirmed.actor.sessionId, id(6));
+    let cases = 0;
+    for (const failure of ["network", 408, 429, 503, 401, 403]) {
+      fault = failure;
+      assert.equal(await registration.verifyClientAdmission(grant), null);
+      const renewal = registration.verifyClientAdmission(grant, true);
+      if (engine === current && ![401, 403].includes(failure)) await assert.rejects(renewal, error => {
+        assert.equal(error.code, "cloud_client_authority_transient", "runtime_skew_renewal_transient_incompatible");
+        assert.equal(error.message, "Cloud client authority is temporarily unavailable");
+        return true;
+      });
+      else assert.equal(await renewal, null);
+      cases++;
+    }
+    assert.equal(lost, false); // A socket-local denial never surrenders engine authority.
+    fault = null;
+    assert.deepEqual(await registration.verifyClientAdmission(grant, true), confirmed);
+    // Exercise the actual frozen/current transport on an ephemeral local socket.
+    // Only the typed transient can retain the remaining confirmed lease; it
+    // never changes that lease's deadline or resurrects an expired connection.
+    const leaseMs = 300;
+    transport = new engine.CloudTransport({ port: 0, token: "runtime-skew-synthetic-transport",
+      verifyToken: token => registration.verifyClientAdmission(token),
+      renewToken: token => registration.verifyClientAdmission(token, true),
+      clientAuthorityLeaseMs: leaseMs });
+    const received = [];
+    transport.onMessage((_peer, message) => { received.push(message.type); });
+    await transport.start();
+    socket = new WebSocket(`ws://127.0.0.1:${transport.boundPort}/ws`, {
+      headers: { "x-zeros-cloud-token": grant },
+    });
+    const closed = once(socket, "close");
+    void closed.catch(() => {}); // Observe upgrade errors before waiting for expiry.
+    await bounded(once(socket, "open"), "runtime_skew_renewal_socket_incompatible");
+    socket.send(JSON.stringify({ id: "renewal-handshake", source: "browser", timestamp: now,
+      type: "CONNECTED", capabilities: [], protocolVersion: engine.version.PROTOCOL_VERSION }));
+    await until(() => received.includes("CONNECTED"));
+    fault = 503;
+    renewals = 0;
+    let timer;
+    const [code, reason] = await Promise.race([closed, new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("runtime_skew_renewal_expiry_incompatible")), 2_000);
+    })]).finally(() => clearTimeout(timer));
+    assert.equal(renewals, 1, "runtime_skew_renewal_expiry_incompatible");
+    assert.equal(code, 1008);
+    assert.equal(reason.toString(), engine === current ? "client authority expired" : "client authority revoked");
+    assert.equal(lost, false);
+    return { cases, transient: engine === current, expiredWithoutExtension: true };
+  } finally {
+    socket?.terminate();
+    await transport?.stop();
     await registration.stop();
   }
 }
@@ -713,7 +1063,8 @@ export async function runRuntimeSkewGate({ negativeFixture = false } = {}) {
         ),
       )
     : null;
-  const directions = [];
+  assert.equal(current.engineReplies.cloudTurnProtocolVersion, 1, "runtime_skew_turn_version_incompatible");
+  const directions = [], contracts = [];
   const retained = await Promise.all(
     pins.retainedRuntimes.map((pin) => loadContractSource(pin)),
   );
@@ -733,8 +1084,19 @@ export async function runRuntimeSkewGate({ negativeFixture = false } = {}) {
     await approvalAndReplay(client, engine);
     await registrationRoundtrip(engine);
     await terminalContract(client, engine);
+    contracts.push({ direction,
+      failures: await failureCategoryFallback(client, engine, current, previousDesktop),
+      receipts: await terminalReceiptNegotiation(client, engine),
+      replies: await permissionQuestionReplies(client, engine),
+      renewal: await renewalTransientContract(engine, current),
+    });
     directions.push(direction);
   }
+  // A same-version positive control ensures negotiated terminal/reply support
+  // cannot disappear while all legacy downgrade checks still pass.
+  const negotiated = { receipts: await terminalReceiptNegotiation(current, current),
+    replies: await permissionQuestionReplies(current, current),
+    controlPlane: await controlPlaneTerminalNegotiation(current, previousRuntime) };
   await capabilityRefusal(current);
   // All local path identities retain the existing local dispatch selection,
   // independently of owner metadata. Switching to cloud selects its exact key.
@@ -759,6 +1121,8 @@ export async function runRuntimeSkewGate({ negativeFixture = false } = {}) {
   return {
     mode: "source-contracts",
     directions,
+    contracts,
+    negotiated,
     checks: [
       "handshake-range",
       "queued-prompt/claim/settle/stop/approval",
@@ -768,6 +1132,10 @@ export async function runRuntimeSkewGate({ negativeFixture = false } = {}) {
       "terminal-renderer-contract",
       "capability-refusal",
       "local-dispatch-selection",
+      "failure-category-fallback",
+      "terminal-receipt-negotiation",
+      "permission-question-reply-ownership",
+      "renewal-transient-refusal",
     ],
   };
 }

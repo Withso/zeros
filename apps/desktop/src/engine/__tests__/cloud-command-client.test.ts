@@ -1,8 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
 import { requestCloudCommand, requestCloudAction } from "../cloud-command-client";
+import { randomUUID } from "node:crypto";
 const authority = { heartbeatEndpoint: "https://control.example.test/internal/v1/cloud-workspaces/engine/heartbeat",
   heartbeatToken: "fixture-private-heartbeat", workspaceId: "workspace", organizationId: "organization", generation: 3, engineInstanceId: "engine" };
 describe("cloud command HTTP boundary", () => {
+  it("declares turn support and keeps settlement compatible until the control plane acknowledges it", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => Response.json({ result: null }));
+    const commandId = randomUUID(), terminal = { commandId, conversationId: "chat", executionId: "execution", turnId: "turn", agentId: "claude",
+      status: "completed" as const, stopReason: "end_turn" as const, response: { stopReason: "end_turn" as const } };
+    const settle = { kind: "settle" as const, result: { commandId, claimId: randomUUID(), state: "succeeded" as const, resultCode: null,
+      result: { version: 1 as const, model: "model", terminal } } };
+    const signal = new AbortController().signal;
+    await requestCloudCommand(authority, settle, signal, fetcher);
+    expect(fetcher.mock.calls[0]![1]?.headers).toMatchObject({ "x-zeros-native-commands": "1", "x-zeros-cloud-turn-protocol": "1" });
+    expect(JSON.parse(String(fetcher.mock.calls[0]![1]?.body)).request.result.result).toEqual({ version: 1, model: "model" });
+    fetcher.mockImplementationOnce(async () => Response.json({ result: null }, { headers: { "x-zeros-cloud-turn-protocol": "1" } }));
+    await requestCloudCommand(authority, { kind: "snapshot", conversationId: "chat" }, signal, fetcher);
+    await requestCloudCommand(authority, settle, signal, fetcher);
+    expect(JSON.parse(String(fetcher.mock.calls[2]![1]?.body)).request.result.result.terminal).toEqual(terminal);
+    expect(settle.result.result.terminal).toEqual(terminal);
+    // The server may be replaced with an older deployment; a missing response
+    // acknowledgement immediately removes the additive field on later writes.
+    await requestCloudCommand(authority, settle, signal, fetcher);
+    expect(JSON.parse(String(fetcher.mock.calls[3]![1]?.body)).request.result.result).toEqual({ version: 1, model: "model" });
+  });
   it("uses the same engine-only authority for action receipts", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ result: null }));
     await requestCloudAction(authority, { kind: "read", operationId: "fixture" }, new AbortController().signal, fetcher);

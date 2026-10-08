@@ -20,6 +20,9 @@ export const CLOUD_COMMAND_FAILURE_CATEGORIES = [
   "authority_response_invalid", "canary_failed", "attestation_failed", "timeout", "auth_required", "verification_required",
   "cloud_credential_error", "subprocess_exited", "protocol_error", "transport_closed", "lifecycle_superseded", "rate_limited",
   "design_protection_failed", "session_expired",
+  "executor_start_failed", "provider_login_failed", "environment_setup_failed", "environment_identity_mismatch", "environment_not_ready",
+  "credential_refresh_invalid", "credential_refresh_timeout", "credential_refresh_unchanged", "credential_refresh_rejected", "lock_busy", "execution_limit",
+  "customization_changed", "access_denied", "environment_revoked", "environment_runtime_required", "environment_unavailable", "lease_expired",
 ] as const;
 const cloudFailureCodes = new Set(CLOUD_COMMAND_FAILURE_STAGES.flatMap(stage =>
   CLOUD_COMMAND_FAILURE_CATEGORIES.map(category => `cloud_${stage}_${category}`)));
@@ -33,7 +36,25 @@ export const CloudNativeOperationSchema = z.discriminatedUnion("kind", [
     strategy: z.enum(["native", "transcript"]) }).strict(),
   z.object({ version: z.literal(1), kind: z.literal("goal"), action: z.enum(["get", "set", "clear"]), update: CloudGoalUpdateSchema.optional() }).strict(),
 ]).refine(value => value.kind !== "goal" || (value.action === "set") === (value.update !== undefined));
+// Standalone Zod 3 mirror of protocol/cloud-events CloudTurnOutcomeSchema.
+// command-failure.test.ts verifies accept/reject and terminal-field parity.
+const terminalAmount=z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const terminalStopReason=z.enum(["end_turn","max_tokens","max_turn_requests","refusal","cancelled","budget_exhausted","blocking_limit","prompt_too_long"]);
+const terminalUsage=z.object({accountingVersion:z.literal(1).optional(),revision:terminalAmount.int().optional(),costKind:z.enum(["estimated","reported"]).optional(),
+  inputTokens:terminalAmount.optional(),outputTokens:terminalAmount.optional(),cacheReadTokens:terminalAmount.optional(),cacheWriteTokens:terminalAmount.optional(),
+  reasoningTokens:terminalAmount.optional(),totalCostUsd:terminalAmount.optional(),perModel:z.array(z.object({model:z.string().min(1).max(256),
+    inputTokens:terminalAmount.optional(),outputTokens:terminalAmount.optional(),cacheReadTokens:terminalAmount.optional(),cacheWriteTokens:terminalAmount.optional(),costUsd:terminalAmount.optional()}).strict()).max(32).optional()}).strict();
+const cloudTurnOutcome=z.object({commandId:uuid.optional(),conversationId:identity,executionId:identity.nullable(),turnId:identity,agentId:z.string().min(1).max(64),
+  status:z.enum(["completed","failed","cancelled"]),stopReason:terminalStopReason.nullable(),startedAt:terminalAmount.optional(),endedAt:terminalAmount.nullable().optional(),
+  response:z.object({stopReason:terminalStopReason.optional(),usage:terminalUsage.optional(),effectiveModel:z.string().min(1).max(256).optional(),userMessageId:identity.optional()}).strict().optional(),
+  error:z.string().max(8000).optional(),failure:z.object({
+    kind:z.enum(["timeout","auth-required","verification-required","cloud-credentials-unavailable","subprocess-exited","protocol-error","transport-closed","lifecycle-superseded","rate-limited","design-protection-failed","session-expired"]),
+    message:z.string().max(8000),agentId:z.string().max(64).optional(),advice:z.string().max(8000).optional(),
+    stage:z.enum(["initialize","newSession","loadSession","forkSession","prompt","cancel","stopBackgroundTask","setMode"]).optional(),
+    exit:z.object({code:z.number().int().safe().nullable(),signal:z.string().max(64).nullable(),stderrTail:z.string().max(8000)}).strict().optional(),
+  }).strict().optional()}).strict();
 export const CloudNativeResultSchema = z.object({ version: z.literal(1),
+  terminal:cloudTurnOutcome.optional(),
   capabilities: z.object({version:z.literal(1),goals:z.boolean(),nativeFork:z.boolean(),transcriptFork:z.boolean(),
     nativeReview:z.boolean(),connectedApps:z.boolean(),multiAgent:z.boolean()}).strict().optional(),model:z.string().min(1).max(256).optional(),
   goal: z.object({ objective: z.string().max(32_768),
@@ -105,11 +126,19 @@ export const CloudCommandRequestSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("settle"), result: CloudCommandSettleSchema }).strict(),
   CloudGoalConfirmationSchema,
 ]);
-export function legacyCloudCommandResponse(value:unknown):unknown {
+export function legacyCloudCommandResponse(value:unknown,nativeCommandsVersion?:1):unknown {
   if(!value||typeof value!=="object"||Array.isArray(value))return value;
-  const {nativeGoal:_goal,...row}=value as Record<string,unknown>;
+  const native=nativeCommandsVersion===1;
+  const {nativeGoal:_goal,...legacy}=value as Record<string,unknown>;
+  const row=native?value as Record<string,unknown>:legacy;
   const entry=(value:unknown)=>{
     if(!value||typeof value!=="object"||Array.isArray(value))return value;
+    if(native){
+      const row=value as Record<string,unknown>,result=row.result;
+      if(!result||typeof result!=="object"||Array.isArray(result)||!("terminal" in result))return value;
+      const {terminal:_terminal,...legacyResult}=result as Record<string,unknown>;
+      return {...row,result:legacyResult};
+    }
     const {result:_result,...rest}=value as Record<string,unknown>;
     return rest.payload&&typeof rest.payload==="object"&&"operation" in rest.payload?{...rest,payload:null}:rest;
   };

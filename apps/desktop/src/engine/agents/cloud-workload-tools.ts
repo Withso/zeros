@@ -35,7 +35,10 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
   private readonly env:Record<string,string>;
   private readonly runtime=resolveCloudRuntime();
   constructor(readonly lease:CloudAgentLease,private readonly boundary:PreparedBoundary,private readonly cwd:string){
-    if(!path.isAbsolute(cwd)||path.resolve(cwd)!==cwd||!(cwd==="/srv/zeros/workspace"||cwd.startsWith("/srv/zeros/workspace/")))
+    // The engine resolves and admits this managed root before constructing the
+    // bridge. Workspace authorization belongs to that admission and boundary;
+    // secondary managed worktrees need not live below the primary checkout.
+    if(!path.isAbsolute(cwd)||path.resolve(cwd)!==cwd||cwd.includes("\0"))
       throw new Error("Cloud workload root is invalid");
     this.env=cloudComputerProcessEnvironment({HOME:"/srv/zeros/home/agent",PATH:`${this.runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,LANG:"C.UTF-8",
       USER:"zeros-agent",LOGNAME:"zeros-agent",SHELL:"/bin/bash",TMPDIR:"/tmp",ZEROS_WORKTREE_PATH:cwd,

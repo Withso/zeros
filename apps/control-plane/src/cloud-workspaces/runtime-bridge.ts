@@ -128,7 +128,8 @@ type Pair = {
   queued: number;
   /** Inbound budget held by this pair's partially received messages. */
   charged: number;
-  retire: (reason: CloudRuntimeRelayRetirement, status?: number) => void;
+  retiring?: boolean;
+  retire: (reason: CloudRuntimeRelayRetirement, status?: number, close?: { code: number; reason: string }) => void;
   refuse: (reason: CloudRuntimeRelayRefusal, status?: number) => void;
 };
 
@@ -396,23 +397,50 @@ export class CloudRuntimeBridgeRelay {
       reason: CloudRuntimeRelayRefusal | CloudRuntimeRelayRetirement,
       admitted: boolean,
       status: number | undefined,
+      nativeClose?: { code: number; reason: string },
     ) => {
       if (retired) return;
       retired = true;
+      pair.retiring = true;
       clearTimeout(handshake);
       clearTimeout(authorityDeadline);
       clearInterval(authorityTimer);
       clearInterval(pingTimer);
-      this.pairs.delete(pair);
-      this.release(pair);
       this.count(
         admitted ? (reason as CloudRuntimeRelayRetirement) : null,
         admitted ? null : (reason as CloudRuntimeRelayRefusal),
       );
-      pair.client?.terminate();
-      pair.upstream?.terminate();
-      if (!upgraded && status) reject(status);
-      else socket.destroy();
+      const finalize = () => { this.pairs.delete(pair); this.release(pair); };
+      if (!upgraded) {
+        pair.client?.terminate(); pair.upstream?.terminate(); finalize();
+        if (status) reject(status); else socket.destroy();
+        return;
+      }
+      if (["outbound_budget", "inbound_budget", "target_buffer", "message_limit"].includes(reason)) {
+        // A memory admission cannot wait for the close handshake to release
+        // its reservation. Pressure retains the existing immediate teardown.
+        pair.client?.terminate(); pair.upstream?.terminate(); socket.destroy(); finalize(); return;
+      }
+      const close = nativeClose ?? (reason === "shutdown" ? { code: 1012, reason: "Engine shutting down" }
+        : reason === "authority" ? { code: 1008, reason: "client authority revoked" }
+        : reason === "client_closed" ? { code: 1000, reason: "" }
+        : reason === "message_limit" ? { code: 1009, reason: "outbound buffer limit" }
+        : { code: 1013, reason: "client authority unavailable" });
+      const peers = [pair.client, pair.upstream].filter((peer): peer is WebSocket => !!peer);
+      // Forwarding is fenced immediately. Retain capacity/buffer reservations
+      // until close finishes, so the grace cannot multiply relay memory.
+      const force = setTimeout(() => {
+        for (const peer of peers) if (peer.readyState !== WebSocket.CLOSED) peer.terminate();
+        socket.destroy(); finalize();
+      }, 1_000);
+      force.unref();
+      const settled = () => { if (peers.every(peer => peer.readyState === WebSocket.CLOSED)) { clearTimeout(force); finalize(); } };
+      for (const peer of peers) {
+        peer.once("close", settled);
+        if (peer.readyState === WebSocket.OPEN) peer.close(close.code, close.reason);
+        else if (peer.readyState === WebSocket.CONNECTING) peer.terminate();
+      }
+      settled();
     };
     const pair: Pair = {
       socket,
@@ -421,7 +449,7 @@ export class CloudRuntimeBridgeRelay {
       grant: null,
       queued: 0,
       charged: 0,
-      retire: (reason, status) => end(reason, true, status),
+      retire: (reason, status, close) => end(reason, true, status, close),
       refuse: (reason, status) => end(reason, false, status),
     };
     this.pairs.add(pair);
@@ -500,7 +528,10 @@ export class CloudRuntimeBridgeRelay {
       });
       remote.once("close", (code, reason) => {
         if (!retired) this.reportUpstreamClose(destination, code, reason.toString(), upgraded, startedAt);
-        pair.retire(upgraded ? "upstream_closed" : "upstream_failed", 502);
+        const safe = cloudBridgeCloseDiagnostic(code, reason.toString());
+        pair.retire(upgraded ? "upstream_closed" : "upstream_failed", 502,
+          [1000, 1001, 1008, 1009, 1011, 1012, 1013].includes(code) ? { code,
+            reason: safe.class !== "other" && safe.class !== "empty" ? reason.toString() : "cloud handshake failed" } : undefined);
       });
       remote.once("open", () => {
         if (retired || this.closed) {
@@ -750,7 +781,7 @@ export class CloudRuntimeBridgeRelay {
       let largest = pair;
       let most = pair.queued + size;
       for (const candidate of this.pairs)
-        if (candidate.queued > most) {
+        if (!candidate.retiring && candidate.queued > most) {
           largest = candidate;
           most = candidate.queued;
         }

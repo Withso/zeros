@@ -207,6 +207,16 @@ masking or credential-injection proxy. This does not permit provisioning,
 control-plane, signing, production database, or broad repository credentials in
 the worker; those remain external or narrowly scoped as described above.
 
+An admitted native provider, its shell, MCP children and enabled repository hooks
+share the active account's trust. Hooks retain native Plan semantics; Plan is
+not a credential boundary. Other actors' provider HOME and engine authority stay
+outside that worker domain. Repository config cannot choose auth, endpoint,
+provider/model or protected launch environment. Raw project/plugin sources remain
+disabled unless native precedence is proved; current instruction/configuration
+parity uses an engine-owned bounded projection. See
+[native agent configuration](agent-authentication-and-language-tools.md#repository-instructions-and-configuration)
+and [exclusive MCP admission](mcp-and-skills.md).
+
 ## Provider connections and owner-funded work
 
 A provider connection belongs to a user or Organization and is stored through

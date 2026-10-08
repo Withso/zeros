@@ -74,6 +74,8 @@ import type { ChatEffort } from "../../state/store";
 import { sameProviderBinding } from "@zeros/protocol/identities";
 import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
 import type { AgentGoal } from "@zeros/protocol/agent-events";
+import type { CloudConversationSnapshot } from "@zeros/protocol/cloud-events";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 
 const MAX_STDERR_LINES = 200;
 const MAX_BACKGROUND_TASKS_PER_CHAT = 100;
@@ -393,6 +395,7 @@ export interface SessionsStoreState {
    *  `available_commands_update` patch top-level fields; everything else
    *  feeds into the messages reducer (`applyUpdate`). */
   applyBridgeUpdate: (notification: SessionNotification) => void;
+  installCloudSnapshot: (chatId: string, snapshot: CloudConversationSnapshot, metadata?: Partial<AgentSessionState>) => void;
 
   /** Permission requests are routed through the request's sessionId. */
   applyBridgePermissionRequest: (
@@ -1249,6 +1252,40 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         },
       };
     });
+  },
+
+  installCloudSnapshot: (chatId, snapshot, metadata = {}) => {
+    let installed = false;
+    set(state => {
+      const slot = state.sessions[chatId];
+      if (!slot || !isCloudWorkspace(slot.cwd) || snapshot.conversationId !== chatId || slot.agentId !== snapshot.agentId) return state;
+      const windowed = snapshot.messages.flatMap(row => {
+        try {
+          const message = JSON.parse(row.payload) as AgentMessage;
+          return message.id === row.msgId && message.kind === row.kind ? [message] : [];
+        } catch { return []; }
+      });
+      const pendingId = state.pendingLocalTurns[chatId];
+      const optimistic = slot.messages.filter(message => !windowed.some(saved => saved.id === message.id) &&
+        (message.kind === "text" && message.queued || message.id === pendingId));
+      const restored = windowed.length ? mergeWindowedTail(slot.messages, windowed) : [];
+      const messages = capMessages([...restored, ...optimistic.filter(message => !restored.some(saved => saved.id === message.id))]);
+      const permissions = snapshot.permissions.reduce<PendingPermission[]>((queue, item) => queuePermission(queue, item), []);
+      const terminal = snapshot.latestTurn;
+      const newerPending = pendingId && pendingId !== terminal?.turnId && pendingId !== snapshot.activeTurn?.turnId;
+      const failure = !newerPending && !snapshot.activeTurn && terminal?.status === "failed"
+        ? terminal.failure ?? { kind: "protocol-error" as const, stage: "prompt" as const, message: terminal.error ?? "The cloud turn failed.", agentId: snapshot.agentId }
+        : null;
+      installed = true;
+      return { pendingLocalTurns: !snapshot.activeTurn && terminal?.turnId === pendingId ? withoutPendingLocalTurn(state.pendingLocalTurns, chatId) : state.pendingLocalTurns,
+        sessions: { ...state.sessions, [chatId]: { ...slot, ...metadata, messages, hasTranscript: hasDurableMessages(messages), transcriptState: "resident",
+        transcriptDirty: false, pendingPermissions: permissions, pendingPermission: permissions[0] ?? null, pendingQuestions: snapshot.questions,
+        status: snapshot.activeTurn || newerPending ? "streaming" : failure ? "failed" : "ready", failure, error: failure?.message ?? null,
+        activeTurnStartedAt: newerPending ? slot.activeTurnStartedAt : snapshot.activeTurn?.startedAt ?? null,
+        lastStopReason: newerPending ? slot.lastStopReason : snapshot.activeTurn ? null : terminal?.stopReason ?? (terminal?.status === "cancelled" ? "cancelled" : null),
+      } } };
+    });
+    if (installed && snapshot.latestTurn) turnRowCache.invalidate(turnRowKey(chatId, snapshot.latestTurn.turnId));
   },
 
   applyBridgePermissionRequest: (agentId, permissionId, request) => {

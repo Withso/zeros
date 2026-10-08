@@ -9,10 +9,13 @@ storage. No Mac HOME configuration is imported into a cloud workspace.
 Cloud admission merges organization servers, the executing member's servers,
 and repository declarations, in that order. A later entry replaces the whole
 server with that name; it never inherits the earlier entry's credentials.
-Repository sources, in increasing precedence, are `.codex/config.toml`
-`[mcp_servers]`, `.cursor/mcp.json`, and `.mcp.json`. Reads are bounded regular
-files inside the checkout; symlinks that escape it are rejected. These reads
-run on the Linux worker. Product names, including `design-draft` and
+Only the requesting provider's repository source is read: Claude `.mcp.json`,
+Codex `.codex/config.toml` `[mcp_servers]`, or Cursor `.cursor/mcp.json`.
+Another provider's file cannot block the turn. The engine reads bounded regular
+files (at most 64 KiB) from the admitted managed cwd, rejects final symlinks and
+escaping descriptors, and resolves accepted
+relative server cwd values against that same root after control-plane echo
+validation. Product names, including `design-draft` and
 `cloud-computer`, remain reserved. [Computer agent tools](computer-tools.md) are
 admitted separately for the immutable creator of a marked admin workspace.
 
@@ -20,8 +23,19 @@ Stdio servers run as children of the provider inside its existing VM execution
 boundary and UID. Streamable HTTP and legacy SSE accept literal header maps;
 Codex uses an in-boundary stdio relay for SSE. Remote URLs cannot embed
 credentials, query strings or fragments. OAuth and implicit environment-variable
-imports are unsupported and produce an explicit error. Secrets belong in the
+imports are unsupported. Secrets belong in the
 dedicated environment/header field, not in commands or arguments.
+
+Optional repository configuration is tolerant. A malformed, unsafe or oversized
+file contributes no servers; invalid or unsupported entries are excluded while
+valid entries continue. Digit-leading names such as `0canvas` are valid. Accepted
+servers are bounded to 32 and only that accepted set enters the digest and echo.
+At most 16 exclusion notices carry a closed reason, fixed provider filename and
+optional validated server ID of at most 64 characters, bounding serialized bytes;
+they never contain config excerpts, URLs, commands,
+environment values or parser errors. The transcript shows bounded counts.
+Required organization policy and authority failures still fail closed with a
+[typed failure](lifecycle-diagnostics.md#agent-command-failures).
 
 The control plane encrypts complete customization documents and execution
 snapshots using tenant/owner/revision-bound AES-GCM envelopes. Settings reads
@@ -44,11 +58,15 @@ Skills retain a name, discovery description and Markdown body. Member skills
 override organization skills by name. Before launch, the engine writes the
 snapshot into root-owned files and mounts it read-only at `.agents/skills`,
 `.claude/skills`, `.codex/skills` and `.cursor/skills` in the execution's private
-HOME. Claude and Cursor use the explicit private user setting source. Cursor
-account/team settings and provider plugins are not imported; the UI reports
-that limitation. Repository skills remain subject to each provider's existing
-native discovery and workspace policy; this feature does not copy Local plugins
-or entire account configuration directories.
+HOME. Claude and Cursor retain the explicit private user setting source for
+these admitted skills. Cursor's `.cursor` config view is engine-owned and
+read-only, with separate writable history and read-only skill mounts; it cannot
+acquire user MCP declarations from the checkout. Codex repository `.agents/skills`
+discovery is independently tested with raw project config disabled. Other native
+repository/plugin discovery is restricted unless separately proved safe. This
+feature does not copy Local plugins, Mac HOME or account/team settings. Bounded
+repository instruction projections are described in
+[native configuration](agent-authentication-and-language-tools.md#repository-instructions-and-configuration).
 
 Migration **0115** is additive and uses forced system-only RLS. Roll out the
 migration/control plane before the new worker image. Older requests without the
@@ -79,11 +97,14 @@ callback cannot clear a later owner's marker. Native forks copy the protected me
 alongside their private history; the destination still needs its own admission.
 Legacy native stores without metadata receive the same fresh-session treatment.
 
-Codex reads only admitted MCP definitions: its user and system configuration
-namespaces are immutable mounts, and the process override suppresses repository
-config layers even if files change after admission. Repository declarations are
-read once by the engine's bounded reader. Claude's strict MCP config and Cursor's
-explicit settings sources retain their existing admitted behavior.
+The snapshot is exclusive at prewarm, creation, resume, prompt and rebuild,
+including an empty server map. Codex's immutable user/system mounts and process
+override suppress raw repository MCP; Claude uses strict MCP configuration.
+Cursor's native project/plugin sources remain disabled and its private user
+config is immutable. Passing `mcpServers: {}` alone is insufficient: the pinned
+Cursor SDK otherwise launches project/user MCP during workspace initialization,
+before its per-session override takes effect. Native marker regressions verify
+excluded servers never start and admitted skills remain discoverable.
 
 Publication filtering preserves protocol identities and permission choices,
 withholds incomplete literals in text and cumulative tool snapshots, and scrubs

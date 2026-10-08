@@ -163,10 +163,15 @@ class CloudRuntimeRequestError extends Error {
   constructor(
     message: string,
     readonly terminal: boolean,
+    readonly status?: number,
   ) {
     super(message);
     this.name = "CloudRuntimeRequestError";
   }
+}
+export class CloudClientAuthorityTransientError extends Error {
+  readonly code = "cloud_client_authority_transient";
+  constructor() { super("Cloud client authority is temporarily unavailable"); this.name = "CloudClientAuthorityTransientError"; }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -660,7 +665,10 @@ export class CloudRuntimeRegistration {
       const admitted = parsed.data;
       return {accountUserId:admitted.accountUserId,authorityEpoch:admitted.authorityEpoch,
         actor:{sessionId:admitted.actorSessionId,deviceId:admitted.deviceId,role:admitted.role,fingerprint:admitted.fingerprint}};
-    } catch {
+    } catch (error) {
+      if (renew && this.document === document && this.hasControlAuthority(document) && error instanceof CloudRuntimeRequestError &&
+          (!error.terminal || error.status === 408 || error.status === 429))
+        throw new CloudClientAuthorityTransientError();
       return null;
     }
   }
@@ -1146,6 +1154,7 @@ export class CloudRuntimeRegistration {
       throw new CloudRuntimeRequestError(
         "cloud engine registration request rejected",
         response.status >= 400 && response.status < 500,
+        response.status,
       );
     }
     if (

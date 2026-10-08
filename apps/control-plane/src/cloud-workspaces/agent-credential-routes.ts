@@ -11,6 +11,51 @@ import {ComputerToolConflictError} from "./computer-tools.js";
 import {CloudWorkspaceEngineAuthorityError} from "./engine-authority.js";
 import { CloudCustomizationOperationSchema } from "./customization-workspace.js";
 import {CloudBackgroundOperationSchema} from "./agent-background-tasks.js";
+import { CLOUD_COMMAND_FAILURE_CATEGORIES, CLOUD_COMMAND_FAILURE_STAGES } from "./commands.js";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
+
+const executionRefusalCategories: Readonly<Record<string, string>> = {
+  cloud_agent_credential_busy: "lock_busy",
+  computer_environment_busy: "lock_busy",
+  cloud_agent_execution_limit: "execution_limit",
+  cloud_customization_changed: "customization_changed",
+  forbidden: "access_denied",
+  not_found: "access_denied",
+  cloud_workspace_not_found: "access_denied",
+  cloud_workspace_capability_required: "access_denied",
+  cloud_actor_admission_rejected: "access_denied",
+  computer_environment_revoked: "environment_revoked",
+  cloud_secret_scope_invalid: "environment_revoked",
+  computer_environment_runtime_required: "environment_runtime_required",
+  cloud_settings_snapshot_unavailable: "environment_unavailable",
+  cloud_secret_material_not_configured: "environment_unavailable",
+  cloud_settings_invalid: "environment_unavailable",
+  codex_auth_reconnect_required: "credential_refresh_rejected",
+};
+const typedExecutionFailureCodes = new Set(CLOUD_COMMAND_FAILURE_STAGES.flatMap(stage =>
+  CLOUD_COMMAND_FAILURE_CATEGORIES.map(category => `cloud_${stage}_${category}`)));
+
+/** Never return service messages, SQL codes or an arbitrary caller-supplied
+ * code. Known inner diagnoses retain their original stage. */
+function executionRefusal(error: unknown, kind: string): { error: string; status: ContentfulStatusCode } {
+  // Lease diagnostics belong only to admission/validation. Other operations
+  // keep the legacy denial so foreign Computer/lease/build identities stay
+  // indistinguishable, including already typed internal causes.
+  if (kind !== "admit" && kind !== "validate" && kind !== "refresh-codex") {
+    if (!(error instanceof HttpError)) return { error: "cloud_agent_execution_unavailable", status: 503 };
+    return { error: "cloud_agent_authority_rejected", status: error.status === 503 ? 503 : error.status === 429 ? 429 : 403 };
+  }
+  const stage = kind === "admit" ? "admission" : "validation";
+  if (!(error instanceof HttpError)) return { error: `cloud_${stage}_authority_unavailable`, status: 503 };
+  const typed = error.code.length <= 64 && typedExecutionFailureCodes.has(error.code);
+  const category = Object.hasOwn(executionRefusalCategories, error.code) ? executionRefusalCategories[error.code] : undefined;
+  // Keep existing non-disclosure for unknown/foreign authority. Known closed
+  // refusals retain 429/409/503 and other statuses needed for correct recovery.
+  const accessDenied = category === "access_denied" || typed && error.code.endsWith("_access_denied");
+  const status = accessDenied || error.status === 404 ? 403 : (typed || category) && error.status >= 400 && error.status <= 599
+    ? error.status : error.status === 503 ? 503 : error.status === 429 ? 429 : 403;
+  return { error: typed ? error.code : `cloud_${stage}_${category ?? (status >= 500 ? "authority_http_5xx" : "authority_http_4xx")}`, status };
+}
 
 export function createCloudAgentCredentialRoutes(service:DatabaseCloudAgentCredentialService,options:{workspaceEnabled?:boolean}={}):Hono{
   const app=new Hono(),base="/v1/cloud-agent-credentials";
@@ -108,9 +153,9 @@ export function createCloudAgentExecutionRoutes(service:DatabaseCloudAgentExecut
       if(request.kind==="computer-tool"&&error instanceof ComputerToolConflictError)return c.json({result:error.result},409);
       if(request.kind==="admit"&&error instanceof HttpError&&(error.code==="cloud_computer_tools_update_required"||isCloudAgentAdmissionCode(error.code)))
         return c.json({error:error.code},409);
-      if(error instanceof HttpError&&["computer_environment_revoked","computer_environment_runtime_required"].includes(error.code))return c.json({error:error.code},409);
-      if(error instanceof HttpError)return c.json({error:"cloud_agent_authority_rejected"},error.status===503?503:error.status===429?429:403);
-      return c.json({error:"cloud_agent_execution_unavailable"},503);
+      if(request.kind==="terminal-environment"&&error instanceof HttpError&&["computer_environment_revoked","computer_environment_runtime_required"].includes(error.code))return c.json({error:error.code},409);
+      const refusal=executionRefusal(error,request.kind);
+      return c.json({error:refusal.error},refusal.status);
     }
   });return app;
 }

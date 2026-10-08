@@ -30,6 +30,8 @@ migration, publication, adoption and acceptance gates.
 - [Product contract](product-contract.md): ownership and user-visible behavior.
 - [Engineering reference](engineering-reference.md): source map, Git and Local guards.
 - [Qualification status](qualification-status.md): implementation versus release evidence.
+- [Source-mode agent harness](qualification-status.md#source-mode-agent-harness):
+  `cloud:agent:e2e`, strict versus explicit PARTIAL scope, and pending provider proof.
 - [Wake performance](wake-performance.md): readiness, preparation reuse and measurement.
 - [Warm pool and reliability follow-ups](warm-pool.md): accounted prebooted capacity,
   VM durable outbox, outbound VM transport, one multiplexed client↔backend channel,
@@ -43,7 +45,7 @@ migration, publication, adoption and acceptance gates.
 | Durable data and copies | [Data and sync](data-and-sync.md), [native checkpoint format](checkpoint-native-format.md) |
 | Organization and account authority | [Organization setup](organization-setup.md), [Pro backend](pro-backend.md), [account Pro operations](account-pro-operations.md), [compute credits](compute-credits.md) |
 | Cloud Computer | [Template builds](computer-template-builds.md), [template forks](template-forks.md), [template retention](computer-template-retention.md), [Computer tools](computer-tools.md), [environment/setup](computer-environment.md) |
-| Native agents and customization | [Authentication/language tools](agent-authentication-and-language-tools.md), [MCP and skills](mcp-and-skills.md), [provider background work](provider-background-work.md) |
+| Native agents and customization | [Authentication/language tools](agent-authentication-and-language-tools.md), [bounded repo configuration](agent-authentication-and-language-tools.md#repository-instructions-and-configuration), [MCP and skills](mcp-and-skills.md), [provider background work](provider-background-work.md) |
 | Runtime and updates | [Runtime bundles](runtime-bundles.md), [live runtime updates](live-runtime-updates.md), [runtime lifecycle acceptance](runtime-lifecycle-acceptance.md), [runtime skew gate](runtime-skew-gate.md), [release worker retirement and cleanup](release-worker-qualification.md) |
 | Operations | [Provider contract](provider-contract.md), [lifecycle diagnostics](lifecycle-diagnostics.md), [infrastructure and operations](infrastructure-and-operations.md), [database qualification](database-qualification.md) |
 | Security and deployment seams | [Security](security.md), [enterprise/self-hosting](enterprise-and-self-hosting.md) |

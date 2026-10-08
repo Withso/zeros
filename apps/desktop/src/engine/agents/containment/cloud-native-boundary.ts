@@ -1,8 +1,8 @@
 import type { ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmod, chown, lstat, mkdir, readlink, realpath, rm, writeFile } from "node:fs/promises";
-import type { CloudAgentAccessMaterial } from "@zeros/protocol/cloud-agent-execution";
-import { CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
+import {isCloudAgentAdmissionCode,type CloudAgentAccessMaterial} from "@zeros/protocol/cloud-agent-execution";
+import {CloudCommandFailureError,decodeCloudCommandFailure,type CloudCommandFailureCause} from "@zeros/protocol/cloud-commands";
 import type { CloudAgentLease } from "../cloud-agent-lease";
 import { attestCloudCoordinator } from "./cloud-coordinator-attestation";
 import { cloudCoordinatorEnvironment, CLOUD_COORDINATOR_HOME } from "./cloud-coordinator-view.mjs";
@@ -20,12 +20,21 @@ import { materializeCloudSkills } from "../cloud-skills";
 const ROOT = "/run/zeros/coordinators";
 const AUTH_ENV = new Set(["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CURSOR_API_KEY", "OPENAI_API_KEY"]);
 const STARTUP_ENV = new Set(["CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS", "CLAUDE_CODE_STARTUP_FAILURE_RESULTS", "NODE_USE_ENV_PROXY"]);
-const CANARY = `const fs=require('node:fs');
+const SDK_METADATA_ENV={CLAUDE_CODE_ENTRYPOINT:"sdk-ts"} as const;
+function containmentFailure(error:unknown,category:CloudCommandFailureCause["category"]):Error{
+  const code=error&&typeof error==="object"&&"code" in error?error.code:undefined;
+  const cause=decodeCloudCommandFailure(code);
+  if(cause)return new CloudCommandFailureError(cause);
+  if(isCloudAgentAdmissionCode(code))return Object.assign(new Error("Cloud agent authority changed"),{code});
+  return new CloudCommandFailureError({stage:"containment",category});
+}
+export const CLOUD_NATIVE_ADMISSION_CANARY = `const fs=require('node:fs');
 if(process.getuid()!==10001||process.getgid()!==10001||!/^CapEff:\\s+0+$/m.test(fs.readFileSync('/proc/self/status','utf8')))process.exit(91);
 if(fs.readlinkSync('/proc/self/ns/pid')===process.argv[1])process.exit(92);
 try{fs.readFileSync(process.argv[2]);process.exit(93);}catch(error){if(!['EACCES','EPERM','ENOENT'].includes(error.code))process.exit(94);}
 const file=process.env.HOME+'/.zeros-canary';fs.writeFileSync(file,'canary',{flag:'wx'});fs.unlinkSync(file);
-if(!fs.statSync('/srv/zeros/workspace/.git').isDirectory()&&!fs.statSync('/srv/zeros/workspace/.git').isFile())process.exit(95);
+const root='/srv/zeros/workspace',cwd=fs.realpathSync(process.cwd());
+if(fs.realpathSync(root)!==root||(cwd!==root&&!cwd.startsWith(root+'/'))||!fs.statSync(cwd).isDirectory())process.exit(95);
 process.stdout.write('zeros-native-provider-v1');`;
 
 /** Runtime home translation applies to managed values, never to an org or
@@ -54,6 +63,16 @@ export async function prepareCloudCodexConfigView(directory: string): Promise<vo
   }
   await writeFile(`${directory}/codex-config/installation_id`, "", { flag: "wx", mode: 0o444 });
   await writeFile(`${directory}/codex-installation-id`, randomUUID(), { flag: "wx", mode: 0o600 });
+}
+
+/** Cursor loads user MCP during native workspace prewarm, before its explicit
+ * per-run override. Pin the directory itself; a worker cannot replace it with
+ * a new settings/MCP file. History and admitted skills mount into fixed slots. */
+export async function prepareCloudCursorConfigView(directory: string): Promise<void> {
+  for(const name of ["","/zeros-store","/skills"]){
+    await mkdir(`${directory}/cursor-config${name}`,{mode:0o755});
+    await chmod(`${directory}/cursor-config${name}`,0o755);
+  }
 }
 
 /** Each provider home that receives the organization's skills belongs to the
@@ -107,7 +126,7 @@ export class CloudNativeBoundary implements PreparedBoundary {
       throw new Error("Native cloud agents require a qualified cloud worker");
     lease.assertLive();
     try { await workload.attestation; }
-    catch { throw new CloudCommandFailureError({ stage: "containment", category: "attestation_failed" }); }
+    catch(error) { throw containmentFailure(error,"attestation_failed"); }
     lease.assertLive();
     await mkdir(ROOT, { recursive: true, mode: 0o700 });
     const root = await lstat(ROOT);
@@ -135,6 +154,7 @@ export class CloudNativeBoundary implements PreparedBoundary {
         await prepareCloudCodexConfigView(directory);
         await chown(`${directory}/codex-installation-id`, configuration.uid, configuration.gid);
       }
+      if(lease.admission.provider==="cursor")await prepareCloudCursorConfigView(directory);
       const env = cloudNativeProviderEnvironment(lease.takeMaterial(), lease.admission.model, settings, lease.environment?.values);
       env.USER = env.LOGNAME = "zeros-agent";
       for (const key of Object.keys(env)) if (/^(GH_|GITHUB_)/.test(key)) delete env[key];
@@ -148,6 +168,7 @@ export class CloudNativeBoundary implements PreparedBoundary {
       }
       boundary = new CloudNativeBoundary(lease, workload, { directory, history: history.mount,
         ...(lease.admission.provider === "codex" ? { codexConfig: true as const } : {}),
+        ...(lease.admission.provider === "cursor" ? { cursorConfig: true as const } : {}),
         ...(lease.customization ? { skills: true as const } : {}) }, env, history);
       lease.attach(boundary);
       const owned = boundary;
@@ -155,10 +176,10 @@ export class CloudNativeBoundary implements PreparedBoundary {
       await writeFile(authorityCanary, "engine-private", { flag: "wx", mode: 0o600 });
       const parentNamespace = await readlink("/proc/self/ns/pid");
       const canary = await lease.launch(() => workload.spawn(owned.request({ command: configuration.toolchain.node,
-        args: ["-e", CANARY, parentNamespace, authorityCanary], cwd: "/srv/zeros/workspace", env: {}, stdio: "pipe" }, true)));
+        args: ["-e", CLOUD_NATIVE_ADMISSION_CANARY, parentNamespace, authorityCanary], cwd: "/srv/zeros/workspace", env: {}, stdio: "pipe" }, true)));
       canary.stderr?.resume();
       try { await attestCloudCoordinator(lease, canary, "zeros-native-provider-v1"); }
-      catch { throw new CloudCommandFailureError({ stage: "containment", category: "canary_failed" }); }
+      catch(error) { throw containmentFailure(error,"canary_failed"); }
       await lease.validate(); lease.assertLive();
       return boundary;
     } catch (error) {
@@ -180,6 +201,7 @@ export class CloudNativeBoundary implements PreparedBoundary {
     this.assertLive();
     const env = Object.fromEntries(Object.entries(this.env).filter(([name]) => !canary || !AUTH_ENV.has(name)));
     for (const name of STARTUP_ENV) if (request.env[name] === "1") env[name] = "1";
+    for(const [name,value] of Object.entries(SDK_METADATA_ENV))if(request.env[name]===value)env[name]=value;
     return { command: request.command, args: request.args, cwd: request.cwd,
       env, stdio: request.stdio, cloudNativeHome: this.view };
   }

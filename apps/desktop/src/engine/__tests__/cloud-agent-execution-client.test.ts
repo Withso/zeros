@@ -7,6 +7,29 @@ const admission={executionId:randomUUID(),delegationId:randomUUID(),provider:"cu
 const grant={leaseId:randomUUID(),authorityId:"a".repeat(64),expiresAt:new Date(Date.now()+45_000).toISOString(),credentialVersion:1,credentialKind:"cursor-api-key",
   provider:"cursor",model:"grok-4.6",material:{kind:"cursor-api-key",apiKey:"synthetic-private-cursor-token"}};
 describe("private agent execution client",()=>{
+  it.each([401,403,404,409,429,503])("preserves a closed typed HTTP %s body including its original stage",async status=>{
+    const code="cloud_provider_start_credential_refresh_rejected";
+    const fetcher=vi.fn().mockResolvedValue(Response.json({error:code},{status}));
+    await expect(requestCloudAgentExecution(authority,{kind:"validate",leaseId:grant.leaseId,renew:true},new AbortController().signal,fetcher))
+      .rejects.toMatchObject({code,message:"Cloud agent execution authority is unavailable"});
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it.each(["cloud_agent_credential_expired","cloud_agent_credential_revoked","cloud_agent_credential_refresh_required"])("retains the legacy %s authority code during validation",async code=>{
+    const fetcher=vi.fn().mockResolvedValue(Response.json({error:code},{status:409}));
+    await expect(requestCloudAgentExecution(authority,{kind:"validate",leaseId:grant.leaseId,renew:true},new AbortController().signal,fetcher)).rejects.toMatchObject({code});
+  });
+  it("classifies untyped HTTP 429 as rate_limited and excludes unsafe typed-body lookalikes",async()=>{
+    for(const body of ["private limit diagnostic",JSON.stringify({error:"cloud_validation_access_denied",details:"private"}),JSON.stringify({error:"cloud_validation_private_diagnostic"}),"x".repeat(1025)]){
+      const fetcher=vi.fn().mockResolvedValue(new Response(body,{status:429}));
+      await expect(requestCloudAgentExecution(authority,{kind:"validate",leaseId:grant.leaseId,renew:true},new AbortController().signal,fetcher))
+        .rejects.toMatchObject({code:"cloud_validation_rate_limited",message:"Cloud agent execution authority is unavailable"});
+    }
+  });
+  it("does not negotiate capabilities on a typed 422 rejection",async()=>{
+    const code="cloud_admission_access_denied",fetcher=vi.fn().mockResolvedValue(Response.json({error:code},{status:422}));
+    await expect(requestCloudAgentExecution(authority,{kind:"admit",admission,computerToolsVersion:1,backgroundTasksVersion:1},new AbortController().signal,fetcher)).rejects.toMatchObject({code});
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
   it.each(["private provider diagnostic", JSON.stringify({ error: "unknown_private_refusal" }),
     JSON.stringify({ error: "cloud_agent_credential_expired", details: "private" })])("classifies an untyped HTTP409 without borrowing its diagnostic body", async body => {
     const fetcher = vi.fn().mockResolvedValue(new Response(body, { status: 409 }));

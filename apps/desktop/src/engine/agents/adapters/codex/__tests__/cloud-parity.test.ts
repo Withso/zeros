@@ -3,7 +3,7 @@ import type { CloudProviderExecution } from "../../../cloud-provider-execution";
 import { bindCloudCodexThread, cloudCodexCapabilities, cloudCodexConfig, cloudCodexRequest } from "../cloud-policy";
 
 function execution(apps = false) {
-  return { lease: { assertLive: vi.fn(), nativeCapabilities: {version:1,goals:true,nativeReview:true,nativeFork:true,multiAgent:true,connectedApps:true}, admission: { model: "qualified-model" }, codexAuth: () => apps ? { material: { accountId: "selected-account" } } : null } } as unknown as CloudProviderExecution;
+  return { cwd:"/srv/zeros/workspace", lease: { assertLive: vi.fn(), nativeCapabilities: {version:1,goals:true,nativeReview:true,nativeFork:true,multiAgent:true,connectedApps:true}, admission: { model: "qualified-model" }, codexAuth: () => apps ? { material: { accountId: "selected-account" } } : null } } as unknown as CloudProviderExecution;
 }
 describe("admitted Codex cloud extensions", () => {
   it("admits goal set/get/clear for the execution's exact native conversation", () => {

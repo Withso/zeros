@@ -14,7 +14,7 @@ vi.mock("../containment/cloud-runtime-root.mjs", async original => ({
   resolveCloudRuntime: (await import("./helpers/test-cloud-runtime")).testCloudRuntime,
 }));
 const roots:string[]=[],hosts:CloudWorkloadTools[]=[];
-async function fixture(gitAuthor?:{name:string;email:string},values?:Record<string,string>){
+async function fixture(gitAuthor?:{name:string;email:string},values?:Record<string,string>,cwd="/srv/zeros/workspace"){
   const root=await mkdtemp(path.join(os.tmpdir(),"zeros-cloud-tools-"));roots.push(root);
   const domains=new Set<{stopAndProve():Promise<void>}>();
   const controller=new AbortController();
@@ -33,10 +33,15 @@ async function fixture(gitAuthor?:{name:string;email:string},values?:Record<stri
       stopAndProve:async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill("SIGKILL");await exit;}};
   });
   const boundary={spawn:launched,stopAndProve:async()=>{}} as unknown as PreparedBoundary;
-  const tools=new CloudWorkloadTools(lease,boundary,"/srv/zeros/workspace");hosts.push(tools);return {root,tools,launched,domains,lease,controller};
+  const tools=new CloudWorkloadTools(lease,boundary,cwd);hosts.push(tools);return {root,tools,launched,domains,lease,controller};
 }
 afterEach(async()=>{for(const host of hosts.splice(0))await host.stopAndProve();for(const root of roots.splice(0))await rm(root,{recursive:true,force:true});});
 describe.skipIf(process.platform!=="linux")("credential-free cloud workspace tools",()=>{
+  it.each(["/srv/zeros/workspace","/srv/zeros/state/workspaces/managed-worktree"])("uses the server-admitted managed root %s",async cwd=>{
+    const {tools,launched}=await fixture(undefined,undefined,cwd);
+    expect(await tools.call({operation:"exec",command:"true"})).toMatchObject({ok:true});
+    expect(launched).toHaveBeenCalledWith(expect.objectContaining({cwd,env:expect.objectContaining({ZEROS_WORKTREE_PATH:cwd})}));
+  });
   it("delivers each actor's admitted environment to shells without provider credentials or values in argv",async()=>{
     for(const actor of ["member-one","member-two"]){
       const values={ORG_VALUE:"synthetic-org-value",REPO_VALUE:"synthetic-repository-value",PERSONAL_VALUE:actor,ORG_SECRET:"synthetic-org-secret",EMPTY_VALUE:"",

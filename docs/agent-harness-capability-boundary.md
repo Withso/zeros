@@ -38,6 +38,16 @@ Zeros-owned input, output, authorization, timeout, cancellation, redaction, and
 error semantics. Its adapter may then translate that operation to each
 provider's native protocol.
 
+Cloud uses these same adapters after durable actor/model/key/cwd admission and
+the private UID-10001 native boundary. Repository config cannot replace provider
+authority or the protected launch environment; admitted MCP is exclusive even
+at startup. Bounded engine-read instruction/config projections preserve native
+tools while raw project/plugin sources stay restricted. Cloud approvals are
+session-only unless engine-owned actor-scoped persistence is proved; explicit
+Ask/Plan wins. Local Personal and organization-local retain their native path.
+See [cloud native configuration](cloud-workspace/agent-authentication-and-language-tools.md#repository-instructions-and-configuration)
+and [qualification limits](cloud-workspace/qualification-status.md#source-mode-agent-harness).
+
 ## Turn failure and explicit recovery
 
 Every started provider turn must settle once. Normal stream EOF without a
@@ -61,6 +71,11 @@ catalog before any output. Expired conversations and transport interruptions
 retain their existing session recovery. Unknown errors preserve the provider
 explanation without guessing a sign-in remedy. Typed failures also
 outrank legacy authentication notices after reload and during prompt replay.
+
+Typed cloud admission/startup/renewal causes also survive adapter and gateway
+classification and cleanup. Their closed stage/category codes restore safe
+guidance from receipts without provider bodies or stderr. See
+[cloud command failures](cloud-workspace/lifecycle-diagnostics.md#agent-command-failures).
 
 The engine persists a terminal `error_notice` with optional `turnFailure`
 identity before publishing the failed turn. The renderer displays its reason

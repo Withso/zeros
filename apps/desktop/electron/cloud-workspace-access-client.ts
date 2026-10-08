@@ -2,6 +2,7 @@ import { CloudActorRuntimeGrantSchema, type CloudActorRuntimeGrant } from "@zero
 import type { CloudReplicaDeviceProof } from "../src/engine/cloud-replica-device";
 import { cloudDetectedPortsSchema, type CloudDetectedPorts } from "./cloud-workspace-detected-ports";
 import { isCloudAgentPreviewTarget, type CloudAgentPreviewTarget } from "@zeros/protocol/containment";
+import { CLOUD_RUNTIME_ACCESS_ERRORS } from "../src/renderer/platform/bridge/cloud-runtime-access-error";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -16,6 +17,7 @@ const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
 
 const SAFE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
+  ...Object.fromEntries(Object.entries(CLOUD_RUNTIME_ACCESS_ERRORS).filter(([code]) => code !== "request_failed").map(([code, value]) => [code, value.message])),
   cloud_workspace_client_update_required:
     "Update Zeros to connect to cloud workspaces.",
   cloud_workspace_v2_required:

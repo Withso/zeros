@@ -98,6 +98,14 @@ export type CloudServiceReceipt = {
 export type CloudWorkspaceRuntimeIdentity = AccessTarget & {
   runtimeId: string; generation: number; authorityEpoch: number; engineInstanceId: string; connectionSequence: number;
 };
+function runtimeIdentity(value: CloudWorkspaceRuntimeIdentity): CloudWorkspaceRuntimeIdentity {
+  const { runtimeId, organizationId, workspaceId, generation, authorityEpoch, engineInstanceId, connectionSequence } = value;
+  return { runtimeId, organizationId, workspaceId, generation, authorityEpoch, engineInstanceId, connectionSequence };
+}
+function sameRuntimeIdentity(a: CloudWorkspaceRuntimeIdentity, b: CloudWorkspaceRuntimeIdentity): boolean {
+  return a.runtimeId === b.runtimeId && a.organizationId === b.organizationId && a.workspaceId === b.workspaceId &&
+    a.generation === b.generation && a.authorityEpoch === b.authorityEpoch && a.engineInstanceId === b.engineInstanceId && a.connectionSequence === b.connectionSequence;
+}
 type NativeServices = {
   api: CloudRuntimeServiceApi;
   readDeviceIdentity(): { deviceId: string; keyVersion: number } | null;
@@ -223,6 +231,10 @@ export class CloudWorkspaceAccessBroker {
   private readonly previewFrameTails = new Map<string, Promise<void>>();
   private readonly runtimeById = new Map<string, string>();
   private readonly actorRuntimes = new Map<string,{target:CloudWorkspaceRuntimeConnectionTarget;grantToken:string;retainUntil:number;closing?:boolean}>();
+  // One receipt per active handle reconciles an IPC response lost after publish.
+  // Reuse never renews the published admission or its expiry.
+  private readonly runtimeRefreshReceipts = new Map<string, { source: CloudWorkspaceRuntimeIdentity; target: CloudWorkspaceRuntimeConnectionTarget }>();
+  private readonly runtimeRefreshFlights = new Map<string, { source: CloudWorkspaceRuntimeIdentity; promise: Promise<CloudWorkspaceRuntimeConnectionTarget> }>();
   private pendingAccess = 0;
   // The auth store is cleared before its session-change listeners run. Keep
   // the most recent token that actually issued/revoked one of this broker's
@@ -314,6 +326,8 @@ export class CloudWorkspaceAccessBroker {
       lease.previewAuthorizationCleanup?.();
       if (lease.tunnel) void lease.tunnel.stop().catch(() => undefined);
     }
+    for (const id of this.runtimeRefreshReceipts.keys())
+      if (!this.actorRuntimes.has(id) && !this.runtimeById.has(id)) this.runtimeRefreshReceipts.delete(id);
   }
 
   private forgetLease(id: string, lease: AccessLease): void {
@@ -1215,18 +1229,39 @@ export class CloudWorkspaceAccessBroker {
     }
   }
 
-  /** Mint a fresh one-use admission for the exact active runtime session. A
-   * sequence compare-and-swap prevents concurrent refreshes from publishing
-   * two descriptors for one reconnect boundary. */
-  async refreshRuntime(input: {
-    runtimeId: string;
-    organizationId: string;
-    workspaceId: string;
-    generation: number;
-    authorityEpoch: number;
-    engineInstanceId: string;
-    connectionSequence: number;
-  }): Promise<CloudWorkspaceRuntimeConnectionTarget> {
+  /** Reconcile the exact reconnect boundary before minting. Concurrent and
+   * retried requests share one published descriptor, even if IPC lost it. */
+  async refreshRuntime(input: CloudWorkspaceRuntimeIdentity): Promise<CloudWorkspaceRuntimeConnectionTarget> {
+    this.pruneExpired();
+    if (!this.hasCurrentSession())
+      throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+    const receipt = this.runtimeRefreshReceipts.get(input.runtimeId);
+    if (receipt && sameRuntimeIdentity(receipt.source, input)) {
+      const actor = this.actorRuntimes.get(input.runtimeId);
+      const accessId = this.runtimeById.get(input.runtimeId), lease = accessId ? this.leases.get(accessId) : undefined;
+      const current = actor ? !actor.closing && actor.target === receipt.target : lease?.runtime && lease.tunnel && sameRuntimeIdentity(receipt.target, {
+        ...lease, runtimeId: lease.runtime.id, connectionSequence: lease.runtime.sequence, authorityEpoch: lease.runtime.authorityEpoch, engineInstanceId: lease.runtime.engineInstanceId,
+      });
+      if (!current || receipt.target.expiresAt - this.now() < 5_000)
+        throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+      return receipt.target;
+    }
+    const flight = this.runtimeRefreshFlights.get(input.runtimeId);
+    if (flight) {
+      if (sameRuntimeIdentity(flight.source, input)) return flight.promise;
+      throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+    }
+    const source = runtimeIdentity(input);
+    const entry = { source, promise: this.mintRuntimeRefresh(source).then(target => {
+      if (this.hasCurrentSession()) this.runtimeRefreshReceipts.set(source.runtimeId, { source, target });
+      return target;
+    }) };
+    this.runtimeRefreshFlights.set(input.runtimeId, entry);
+    try { return await entry.promise; }
+    finally { if (this.runtimeRefreshFlights.get(input.runtimeId) === entry) this.runtimeRefreshFlights.delete(input.runtimeId); }
+  }
+
+  private async mintRuntimeRefresh(input: CloudWorkspaceRuntimeIdentity): Promise<CloudWorkspaceRuntimeConnectionTarget> {
     this.pruneExpired();
     const actor=this.actorRuntimes.get(input.runtimeId);
     if(actor){
@@ -1350,6 +1385,7 @@ export class CloudWorkspaceAccessBroker {
 
   async closeRuntime(runtimeId: string): Promise<boolean> {
     this.pruneExpired();
+    this.runtimeRefreshReceipts.delete(runtimeId);
     const actor=this.actorRuntimes.get(runtimeId);
     if(actor){
       if (!actor.closing) {
@@ -1431,6 +1467,7 @@ export class CloudWorkspaceAccessBroker {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.runtimeRefreshReceipts.clear();
     const nativeCleanup = Promise.allSettled([...this.nativeLeases.values()].map(lease => this.retireNativeLease(lease)));
     const runtimeIds = [...this.actorRuntimes.keys(), ...this.runtimeById.keys()];
     try { this.onRuntimeRetired(runtimeIds); } catch { /* local cleanup must continue */ }

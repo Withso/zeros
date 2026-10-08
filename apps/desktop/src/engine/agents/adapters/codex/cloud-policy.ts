@@ -4,7 +4,7 @@ import type {DynamicToolCallResponse} from "./generated/v2/DynamicToolCallRespon
 import { z } from "zod";
 import { CloudGoalUpdateSchema } from "@zeros/protocol/cloud-commands";
 import {cloudComputerProcessEnvironment} from "../../cloud-computer-environment";
-const cwd="/srv/zeros/workspace";
+import { cloudCodexProjectSettings } from "./cloud-project-config";
 const record=(value:unknown):Record<string,unknown>=>value&&typeof value==="object"&&!Array.isArray(value)?value as Record<string,unknown>:{};
 const reads=new Set(["model/list","account/read","account/rateLimits/read","config/read","configRequirements/read","permissionProfile/list",
   "mcpServerStatus/list","thread/read","thread/list","thread/loaded/list","thread/backgroundTerminals/list","skills/list"]);
@@ -66,7 +66,7 @@ export function cloudCodexCapabilities(execution: CloudProviderExecution) {
     connectedApps: admitted?.connectedApps===true && !!execution.lease.codexAuth?.(), multiAgent: admitted?.multiAgent===true };
 }
 export function cloudCodexConfig(execution: CloudProviderExecution): Record<string, unknown> {
-  const config: Record<string, unknown> = {...CLOUD_CODEX_CONFIG};
+  const config: Record<string, unknown> = {...cloudCodexProjectSettings(execution), ...CLOUD_CODEX_CONFIG};
   if(execution.lease.environment){
     // These config entries also reach app-server argv: pass names only. The
     // executor inherits values from its private, credential-free launch env.
@@ -91,7 +91,7 @@ function ownThread(execution: CloudProviderExecution, value: unknown): string {
 /** No caller can clear the remote environment or change admitted model/auth.
  * Host process/fs/config mutation RPCs have no cloud-facing route. */
 export function cloudCodexRequest(execution:CloudProviderExecution,environmentId:string,method:string,input:unknown):unknown{
-  execution.lease.assertLive();const params=record(input),model=execution.lease.admission.model;
+  execution.lease.assertLive();const params=record(input),model=execution.lease.admission.model,cwd=execution.cwd;
   if(params.model!==undefined&&params.model!==null&&params.model!==model)throw new Error("Cloud model changes require a new credential admission");
   const environments=[{environmentId,cwd,runtimeWorkspaceRoots:[cwd]}];
   const servers=executionMcpServers(execution,[])??[];
@@ -128,7 +128,10 @@ export function cloudCodexRequest(execution:CloudProviderExecution,environmentId
       if(!cloudCodexCapabilities(execution).nativeFork)throw new Error("This native provider operation is not admitted for this account and image");
       ownThread(execution,params.threadId);
     }
-    return {...pick(params,["serviceTier","baseInstructions","developerInstructions","personality",...(method==="thread/start"?["historyMode"]:["threadId","excludeTurns"])]),
+    const repositoryInstructions=cloudCodexProjectSettings(execution).developer_instructions;
+    const developerInstructions=[typeof params.developerInstructions==="string"?params.developerInstructions:undefined,
+      typeof repositoryInstructions==="string"?repositoryInstructions:undefined].filter(Boolean).join("\n\n")||undefined;
+    return {...pick(params,["serviceTier","baseInstructions","personality",...(method==="thread/start"?["historyMode"]:["threadId","excludeTurns"])]),developerInstructions,
       model,modelProvider:"openai",allowProviderModelFallback:false,cwd,runtimeWorkspaceRoots:[cwd],config:{...config,...cloudCodexConfig(execution),...(Object.keys(disabled).length?{mcp_servers:disabled}:{})},
       ...(method==="thread/fork"?{ephemeral:false,excludeTurns:true,deferGoalContinuation:true}:{}),
       ...(method==="thread/start"?{environments}:{environments:undefined}),
@@ -170,6 +173,8 @@ export function cloudCodexRequest(execution:CloudProviderExecution,environmentId
       ? z.object({threadId:z.string().optional(),cursor:z.string().max(8192).nullable().optional(),limit:z.number().int().min(1).max(100).optional(),forceRefetch:z.boolean().optional()}).strict().parse(params)
       : z.object({threadId:z.string().optional(),forceRefresh:z.boolean().optional()}).strict().parse(params);
   }
+  if(method==="config/read")return {...pick(params,["includeLayers"]),cwd};
+  if(method==="skills/list")return {...pick(params,["forceReload"]),cwds:[cwd]};
   if(reads.has(method)||controls.has(method))return params;
   throw new Error("This native provider operation is not admitted for cloud execution");
 }

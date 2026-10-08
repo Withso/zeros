@@ -1,6 +1,30 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { CloudCustomizationDocumentSchema, sealCustomization, openCustomization, publicCustomization, customizationDigest, repositoryCustomizationDigest } from "./mcp-contract.js";
+import { CloudCustomizationDocumentSchema, CloudRepositoryMcpSchema, sealCustomization, openCustomization, publicCustomization, customizationDigest, repositoryCustomizationDigest } from "./mcp-contract.js";
+import { CloudRepositoryMcpSchema as ProtocolRepositoryMcpSchema } from "../../../../packages/protocol/src/cloud-customization.js";
+
+describe("standalone CP / protocol repository MCP parity", () => {
+  const names = ["0canvas", "0", "123tool", "Tool-1_ok", "a".repeat(64), "a".repeat(65), "_tool", "-tool", "tool.name", "tool/name", "", "design-draft", "cloud-computer", "zeros_workspace", "codex_apps", "__proto__", "constructor", "prototype", "秘密"];
+  it.each(names)("shares the safe-name decision for %s", name => {
+    const servers = [{ name, transport: "http", url: "http://localhost:24193/mcp" }];
+    const expected = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name) && !["design-draft", "cloud-computer", "zeros_workspace", "codex_apps", "__proto__", "constructor", "prototype"].includes(name);
+    expect(ProtocolRepositoryMcpSchema.safeParse(servers).success).toBe(expected);
+    expect(CloudRepositoryMcpSchema.safeParse(servers).success).toBe(expected);
+  });
+  it.each([
+    [{ name: "0canvas", transport: "http", url: "http://localhost:24193/mcp" }],
+    [{ name: "valid", transport: "stdio", command: "node", args: ["tool.mjs"], env: { TOKEN: "synthetic-value" } }],
+    [{ name: "invalid", transport: "stdio", command: "node", env: { TOKEN: "${env:TOKEN}" } }],
+    [{ name: "invalid", transport: "http", url: "https://user:password@example.test/mcp" }],
+    [{ name: "invalid", transport: "http", url: "https://example.test/mcp?token=value" }],
+    [{ name: "invalid", transport: "stdio", command: "node", cwd: "/srv/zeros/workspace/../outside" }],
+    [{ name: "invalid", transport: "http", url: "https://example.test/mcp", oauth: {} }],
+    [{ name: "invalid", id: randomUUID(), transport: "stdio", command: "node" }],
+    [{ name: "duplicate", transport: "stdio", command: "node" }, { name: "duplicate", transport: "stdio", command: "node" }],
+  ])("shares accepted-set decisions for %j", servers => {
+    expect(CloudRepositoryMcpSchema.safeParse(servers).success).toBe(ProtocolRepositoryMcpSchema.safeParse(servers).success);
+  });
+});
 
 describe("organization customization contract", () => {
   const keys = { keys: { 1: randomBytes(32).toString("base64url") }, currentKeyVersion: 1 };

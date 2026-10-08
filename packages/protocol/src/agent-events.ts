@@ -859,6 +859,8 @@ export interface PermissionOption {
 
 export interface RequestPermissionRequest {
   sessionId: SessionId;
+  /** Exact native resolver owner, preserved across cloud conversation aliases. */
+  executionId?: ExecutionId;
   toolCall: ToolCall;
   options: PermissionOption[];
   /** The adapter already resolved this gate without user input. The renderer
@@ -972,6 +974,7 @@ export interface QuestionSpec {
 
 export interface QuestionRequest {
   sessionId: SessionId;
+  executionId?: ExecutionId;
   /** Adapter-minted uuid — the UI resolver key. */
   questionId: string;
   /** Vendor correlation id for replay dedup: Claude → SDK control request_id /

@@ -3,7 +3,7 @@ import {CloudAgentExecutionAuthoritySchema,CloudAgentExecutionLeaseSchema,CloudA
 import type {CloudRuntimeAuthority} from "./cloud-runtime-registration";
 import { CloudCustomizationResultSchema } from "@zeros/protocol/cloud-customization";
 import { CLOUD_COMPUTER_TOOL_MAX_RESPONSE_BYTES, CloudComputerToolConflictSchema, CloudComputerToolResultSchemas } from "@zeros/protocol/cloud-computer-tools";
-import { encodeCloudCommandFailure, cloudCommandFailureFromCode, type CloudCommandFailureCause } from "@zeros/protocol/cloud-commands";
+import { encodeCloudCommandFailure, decodeCloudCommandFailure, cloudCommandFailureFromCode, type CloudCommandFailureCause } from "@zeros/protocol/cloud-commands";
 
 export class CloudAgentExecutionError extends Error{
   readonly code: string;
@@ -38,72 +38,74 @@ export async function requestCloudAgentExecution(authority:CloudRuntimeAuthority
     if(error instanceof CloudAgentExecutionError)throw error;
     throw new CloudAgentExecutionError(error instanceof Error && error.name === "TimeoutError" ? "authority_timeout" : "authority_transport",stage);
   }
-  if(response.status===422&&request.kind==="admit"&&request.computerToolsVersion===1){
-    await response.body?.cancel().catch(()=>{});
-    const {computerToolsVersion:_version,...previous}=request;
-    return requestCloudAgentExecution(authority,previous,signal,requestFetch);
-  }
-  // Older control planes reject unknown request fields before admission. Only
-  // that definite schema rejection permits a legacy retry; never retry a
-  // timeout or ambiguous credential publication.
-  if(response.status===422&&request.kind==="admit"&&request.backgroundTasksVersion===1){
-    await response.body?.cancel().catch(()=>{});
-    // The previous strict route accepts only kind/admission, not any of the
-    // independently added capability opt-ins. Required customization cannot
-    // be silently discarded to make that profile accept the execution.
-    if(request.admission.customization)throw new CloudAgentExecutionError();
-    return requestCloudAgentExecution(authority,{kind:"admit",admission:request.admission},signal,requestFetch);
-  }
+  const httpCategory = (): CloudCommandFailureCause["category"] => response.status === 429 ? "rate_limited" :
+    response.status >= 500 ? "authority_http_5xx" : response.status >= 400 ? "authority_http_4xx" : "authority_unavailable";
+  const invalidResponse = () => new CloudAgentExecutionError(response.ok ? "authority_response_invalid" : httpCategory(), stage);
   const typedConflict=response.status===409&&(request.kind==="computer-tool"||request.kind==="admit");
   const limit=response.ok?(request.kind==="terminal-environment"||(request.kind==="admit"&&request.environmentVersion===1)?2*1024*1024:request.kind==="computer-tool"?CLOUD_COMPUTER_TOOL_MAX_RESPONSE_BYTES:request.kind==="background"?256*1024:request.kind==="customization"||(request.kind==="admit"&&request.admission.customization)?1024*1024:40*1024):1024;
-  if(!response.ok&&!typedConflict){await response.body?.cancel().catch(()=>{});throw new CloudAgentExecutionError(
-    response.status>=500?"authority_http_5xx":response.status>=400?"authority_http_4xx":"authority_unavailable",stage);}
-  if(!response.body||Number(response.headers.get("content-length"))>limit){await response.body?.cancel().catch(()=>{});throw new CloudAgentExecutionError("authority_response_invalid",stage);}
+  if(!response.body||Number(response.headers.get("content-length"))>limit){await response.body?.cancel().catch(()=>{});throw invalidResponse();}
   const reader=response.body.getReader();let size=0;const chunks:Uint8Array[]=[];
   try{
-    for(;;){const item=await reader.read();if(item.done)break;size+=item.value.byteLength;if(size>limit)throw new CloudAgentExecutionError();chunks.push(item.value);}
-    const document:unknown=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(Buffer.concat(chunks)));
+    for(;;){const item=await reader.read();if(item.done)break;size+=item.value.byteLength;if(size>limit)throw invalidResponse();chunks.push(item.value);}
+    let document:unknown;
+    try { document=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(Buffer.concat(chunks))); }
+    catch { if(response.status!==422) throw invalidResponse(); }
+    if(!response.ok&&document&&typeof document==="object"&&!Array.isArray(document)&&Object.keys(document).join()==="error"){
+      const cause=decodeCloudCommandFailure((document as {error?:unknown}).error);
+      if(cause)throw new CloudAgentExecutionError(cause.category,cause.stage);
+    }
     if(request.kind==="admit"&&response.status===409&&document&&typeof document==="object"&&
       Object.keys(document).join()==="error"&&(document as {error?:unknown}).error==="cloud_computer_tools_update_required")
       throw new CloudComputerToolsUpdateRequiredError();
-    if(request.kind==="admit"&&response.status===409&&document&&typeof document==="object"&&
+    if((request.kind==="admit"||request.kind==="validate"||request.kind==="refresh-codex")&&response.status===409&&document&&typeof document==="object"&&
       Object.keys(document).join()==="error"&&isCloudAgentAdmissionCode((document as {error?:unknown}).error)) {
       const code=(document as {error:CloudAgentAdmissionCode}).error;
       throw code==="cloud_runtime_upgrade_required"?new CloudRuntimeUpgradeRequiredError():new CloudAgentAdmissionError(code);
     }
-    if(!document||typeof document!=="object"||Array.isArray(document)||Object.keys(document).join()!=="result")throw new CloudAgentExecutionError();
+    // Only a definite, untyped schema rejection permits capability fallback.
+    // A typed rejection keeps its authority cause and is never replayed.
+    if(response.status===422&&request.kind==="admit"&&request.computerToolsVersion===1){
+      const {computerToolsVersion:_version,...previous}=request;
+      return requestCloudAgentExecution(authority,previous,signal,requestFetch);
+    }
+    if(response.status===422&&request.kind==="admit"&&request.backgroundTasksVersion===1){
+      if(request.admission.customization)throw invalidResponse();
+      return requestCloudAgentExecution(authority,{kind:"admit",admission:request.admission},signal,requestFetch);
+    }
+    if(!response.ok&&!typedConflict)throw invalidResponse();
+    if(!document||typeof document!=="object"||Array.isArray(document)||Object.keys(document).join()!=="result")throw invalidResponse();
     const value=(document as {result:unknown}).result;
     if(request.kind==="computer-tool"){
       const parsed=response.status===409?CloudComputerToolConflictSchema.safeParse(value):CloudComputerToolResultSchemas[request.tool.name].safeParse(value);
-      if(!parsed.success)throw new CloudAgentExecutionError();return parsed.data;
+      if(!parsed.success)throw invalidResponse();return parsed.data;
     }
-    if(!response.ok)throw new CloudAgentExecutionError();
+    if(!response.ok)throw invalidResponse();
     if(request.kind==="terminal-environment"){
-      const parsed=CloudComputerTerminalEnvironmentSchema.safeParse(value);if(!parsed.success)throw new CloudAgentExecutionError();return parsed.data;
+      const parsed=CloudComputerTerminalEnvironmentSchema.safeParse(value);if(!parsed.success)throw invalidResponse();return parsed.data;
     }
     if(request.kind==="background"){
       const parsed=CloudBackgroundStateSchema.safeParse(value);
-      if(!parsed.success||parsed.data.leaseId!==request.leaseId||parsed.data.conversationId!==request.operation.conversationId)throw new CloudAgentExecutionError();
+      if(!parsed.success||parsed.data.leaseId!==request.leaseId||parsed.data.conversationId!==request.operation.conversationId)throw invalidResponse();
       return parsed.data;
     }
     if(request.kind==="customization"){
-      const parsed=CloudCustomizationResultSchema.safeParse(value);if(!parsed.success)throw new CloudAgentExecutionError();return parsed.data;
+      const parsed=CloudCustomizationResultSchema.safeParse(value);if(!parsed.success)throw invalidResponse();return parsed.data;
     }
     if(request.kind==="admit"){
       const result=CloudAgentExecutionAuthoritySchema.safeParse(value);
-      if(!result.success||result.data.provider!==request.admission.provider||result.data.model!==request.admission.model)throw new CloudAgentExecutionError();
+      if(!result.success||result.data.provider!==request.admission.provider||result.data.model!==request.admission.model)throw invalidResponse();
       return result.data;
     }
     if(request.kind==="validate"||request.kind==="refresh-codex"){
-      const result=CloudAgentExecutionLeaseSchema.safeParse(value);if(!result.success||result.data.leaseId!==request.leaseId)throw new CloudAgentExecutionError();return result.data;
+      const result=CloudAgentExecutionLeaseSchema.safeParse(value);if(!result.success||result.data.leaseId!==request.leaseId)throw invalidResponse();return result.data;
     }
     if(request.kind==="authorize-action"){
       const result=CloudAgentActionAuthoritySchema.safeParse(value);
-      if(!result.success||result.data.executionId!==request.executionId||result.data.actorSessionId!==request.actorSessionId)throw new CloudAgentExecutionError();
+      if(!result.success||result.data.executionId!==request.executionId||result.data.actorSessionId!==request.actorSessionId)throw invalidResponse();
       return result.data;
     }
-    if(!value||typeof value!=="object"||Object.keys(value).join()!=="released"||(value as {released?:unknown}).released!==true)throw new CloudAgentExecutionError();
+    if(!value||typeof value!=="object"||Object.keys(value).join()!=="released"||(value as {released?:unknown}).released!==true)throw invalidResponse();
     return {released:true};
-  }catch(error){await reader.cancel().catch(()=>{});if((error instanceof CloudComputerToolsUpdateRequiredError)||(error instanceof CloudAgentAdmissionError))throw error;
-    throw new CloudAgentExecutionError(response.ok?"authority_response_invalid":response.status>=500?"authority_http_5xx":"authority_http_4xx",stage);}finally{reader.releaseLock();}
+  }catch(error){await reader.cancel().catch(()=>{});if((error instanceof CloudComputerToolsUpdateRequiredError)||(error instanceof CloudAgentAdmissionError)||(error instanceof CloudAgentExecutionError))throw error;
+    throw error instanceof Error&&error.name==="TimeoutError"?new CloudAgentExecutionError("authority_timeout",stage):invalidResponse();}finally{reader.releaseLock();}
 }

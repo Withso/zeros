@@ -14,6 +14,8 @@ import { CursorUsageReconciler, cursorTokenUsage, sumCursorUsage } from "./usage
 // ──────────────────────────────────────────────────────────
 
 import type { SteerOutcome } from "@zeros/protocol/messages";
+import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
+import { cloudCommandFailureFromCode, decodeCloudCommandFailure } from "@zeros/protocol/cloud-commands";
 import { createHash, randomBytes, randomUUID, scrypt } from "node:crypto";
 import { homedir } from "node:os";
 import { isAbsolute } from "node:path";
@@ -67,6 +69,7 @@ import { wrapSdkWithLocalStore, type RawCursorSdk } from "./local-store";
 import type { PreparedBoundary } from "../../containment/types";
 import { cloudCursorStateRoot, durableCursorStateRoot } from "./state-overlay";
 import { configurationProvenanceFor } from "../../provider-diagnostics";
+import { cloudCursorInstructions } from "./cloud-instructions";
 
 const AGENT_ID = "cursor";
 /** Cursor LOCAL SDK agents (we always run `local: { cwd }`) require an
@@ -1021,6 +1024,9 @@ interface Session {
   env?: Record<string, string>;
   mcpServers?: McpServerRegistration[];
   settingSources: CursorSettingSources;
+  /** Bounded engine-read guidance captured at admission, including resume.
+   * Native configuration remains off; mode rebuilds reuse this exact text. */
+  repositoryInstructions?: string;
   /** The autoReview value currently baked into `agent` (set at create/resume).
    *  A mode change flips the DESIRED value (autoReviewFor(modeId)); when it
    *  diverges, the next prompt rebuilds the agent to reconcile. */
@@ -1720,6 +1726,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     const initialMode: CursorSdkModeId = opts.env?.ZEROS_PERMISSION_MODE === "plan" ? "plan" : opts.env?.ZEROS_PERMISSION_MODE === "agent" ? "agent" : CURSOR_DEFAULT_MODE;
     const apiKey = this.resolveApiKey(opts.env);
     const settingSources = cursorSettingSources(opts.executionBoundary);
+    const repositoryInstructions = cloudCursorInstructions(cloudProviderExecution(opts.executionBoundary));
     const runtime = await this.createSessionRuntime(opts);
     const mcpSource = executionMcpServers(cloudProviderExecution(opts.executionBoundary), opts.mcpServers);
     const catalog = this.mcpCatalog(mcpSource);
@@ -1798,6 +1805,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       env: opts.env,
       mcpServers: mcpSource,
       settingSources,
+      repositoryInstructions,
       appliedAutoReview: autoReviewFor(initialMode),
       prewarmedAutoReview: new Set([autoReviewFor(initialMode)]),
       appliedMcpCatalog: catalog.key,
@@ -1831,6 +1839,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     const initialMode: CursorSdkModeId = opts.env?.ZEROS_PERMISSION_MODE === "plan" ? "plan" : opts.env?.ZEROS_PERMISSION_MODE === "agent" ? "agent" : CURSOR_DEFAULT_MODE;
     const apiKey = this.resolveApiKey(opts.env);
     const settingSources = cursorSettingSources(opts.executionBoundary);
+    const repositoryInstructions = cloudCursorInstructions(cloudProviderExecution(opts.executionBoundary));
     const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
     const providerResumeId = opts.providerBinding?.resumeId ?? opts.sessionId;
     if (!providerResumeId) {
@@ -1987,6 +1996,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       env: opts.env,
       mcpServers: mcpSource,
       settingSources,
+      repositoryInstructions,
       appliedAutoReview: autoReviewFor(initialMode),
       prewarmedAutoReview: new Set([autoReviewFor(initialMode)]),
       appliedMcpCatalog: catalog.key,
@@ -2069,7 +2079,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       });
     }
 
-    const message = buildUserMessage(opts.prompt);
+    const message = buildUserMessage(opts.prompt, session.repositoryInstructions);
     session.cancelRequested = false;
 
     // Configuration refresh is preparation, not a submitted prompt. Stop must
@@ -2821,6 +2831,14 @@ export function classifyCursorSdkError(
   stage: "newSession" | "loadSession" | "prompt",
 ): AgentFailureError {
   if (err instanceof AgentFailureError) return err;
+  const code = err && typeof err === "object" && "code" in err ? err.code : undefined;
+  if (decodeCloudCommandFailure(code)) {
+    const failure = err && typeof err === "object" && "failure" in err
+      ? (err as { failure: AgentFailureError["failure"] }).failure : cloudCommandFailureFromCode(code, "cursor")!;
+    return Object.assign(new AgentFailureError(failure), { code });
+  }
+  if (isCloudAgentAdmissionCode(code)) return Object.assign(new AgentFailureError({ kind: "cloud-credentials-unavailable", stage,
+    agentId: "cursor", message: "Cloud credentials are unavailable. Review the provider connection before retrying." }), { code });
   const native = normalizeProviderError("cursor", err);
   const message = native.message;
   // 0. An UNEXPECTED Cursor host death (tagged by host-client.onExit). The
@@ -2904,11 +2922,11 @@ export function classifyCursorSdkError(
 
 /** ContentBlock[] → the SDK's `{ text, images }` user message. Text
  *  blocks concatenate; image blocks map to SDKImage (base64 or url). */
-function buildUserMessage(blocks: ContentBlock[]): {
+function buildUserMessage(blocks: ContentBlock[], repositoryInstructions?: string): {
   text: string;
   images?: Array<{ data: string; mimeType: string } | { url: string }>;
 } {
-  const texts: string[] = [];
+  const texts: string[] = repositoryInstructions ? [repositoryInstructions] : [];
   const images: Array<{ data: string; mimeType: string } | { url: string }> =
     [];
   for (const raw of blocks) {

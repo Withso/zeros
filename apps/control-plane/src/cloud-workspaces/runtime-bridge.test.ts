@@ -215,6 +215,18 @@ afterEach(async () => {
 });
 
 describe("portable cloud runtime relay", () => {
+  it("preserves a safe native close code and reason instead of reporting abnormal 1006", async () => {
+    const f = await fixture({}, { upstream: "record" }), ws = f.connect();
+    await once(ws, "open"); const closed = once(ws, "close");
+    f.engines.at(-1)!.close(1008, "client authority revoked");
+    const [code, reason] = await closed;
+    expect(code).toBe(1008); expect(reason.toString()).toBe("client authority revoked");
+  });
+  it("uses a graceful restart close on relay shutdown", async () => {
+    const f = await fixture(), ws = f.connect(); await once(ws, "open"); const closed = once(ws, "close");
+    f.relay.close(); const [code, reason] = await closed;
+    expect(code).toBe(1012); expect(reason.toString()).toBe("Engine shutting down");
+  });
   it("reports bounded upstream close codes and classes without arbitrary reasons or credentials", async () => {
     const f = await fixture({}, { upstream: "record" });
     for (const reason of ["CONNECTED required", ...Array.from({ length: 10 }, () => "private-upstream-text")]) {

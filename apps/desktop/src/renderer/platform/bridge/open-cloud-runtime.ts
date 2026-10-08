@@ -107,8 +107,8 @@ export async function openCloudRuntime(
     if (!workspace?.path || !workspace.path.startsWith("/"))
       throw new Error("Cloud engine did not confirm its workspace root");
     acceptCloudEngineWorkspace(target, workspace, generation);
-    events = new CloudEventReader(client, () => {
-      void agents?.refreshAttachments();
+    events = new CloudEventReader(client, conversationId => {
+      void agents?.refreshAttachments(conversationId);
     });
     agents = new CloudAgentConnection(client, workspace.id, (agentId, model) =>
       cloudAgentGrant(target, agentId, model), events,

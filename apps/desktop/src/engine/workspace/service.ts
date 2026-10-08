@@ -251,6 +251,8 @@ import { listMentionPaths } from "../files/mention-paths";
 import { zerosStateRoot } from "../git/state";
 import { cloudActorCan, type CloudActorRole } from "@zeros/protocol/cloud-actors";
 import { transferContextAttachment } from "../files/attachment-transfer";
+import { transferCloudAttachment } from "../files/cloud-attachment-transfer";
+import { CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
 import {
   externalizeLegacyMessageImages,
   payloadNeedsLegacyImageMigration,
@@ -4378,6 +4380,15 @@ export class WorkspaceService {
         return writeWorkspaceFile(cwd, rel, content, { remote, cloudPolicy: cloudFiles, expectedCloudTarget });
       }
       case "attachment.write": {
+        if (opts.cloudWorker === true) {
+          if (!remote || !this.options.primaryDesignWorkspace || !opts.cloudActorIdentity || !opts.cloudFileActor ||
+              params.workspaceId !== LOCAL_MAIN_WORKSPACE_ID || (params.repoRoot !== undefined && params.repoRoot !== this.root))
+            throw new CloudCommandFailureError({ stage: "validation", category: "access_denied" });
+          return transferCloudAttachment(this.root, params, {
+            userId: opts.cloudActorIdentity.userId, role: opts.cloudFileActor.role, authorized: opts.cloudFileActor.authorized,
+            ownerRoots: () => [...listWorkspaces({}).map(workspace => workspace.path), ...listKnownRepoRoots()],
+          });
+        }
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
         try {
           return await transferContextAttachment(cwd, params, { allowNativeSource: !remote && hostLocalResources });

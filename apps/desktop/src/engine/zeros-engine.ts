@@ -153,9 +153,9 @@ import type { CloudAction, CloudActionReceipt } from "@zeros/protocol/cloud-acti
 import { CloudCommandRuntimeError } from "./cloud-command-client";
 import { CloudEventRuntime } from "./cloud-event-runtime";
 import { CloudEventRuntimeError } from "./cloud-event-client";
-import { CloudEventClientRequestSchema } from "@zeros/protocol/cloud-events";
+import { CloudEventClientRequestSchema, CloudTurnOutcomeSchema, type CloudTurnOutcome } from "@zeros/protocol/cloud-events";
 import { cloudPermissionMode, legacyCloudCommandResponse, type CloudCommandClaim, type CloudCommandResult, type CloudQueuedPrompt } from "@zeros/protocol/cloud-commands";
-import { CloudConversationCreateSchema, CloudConversationReadSchema, CloudConversationModeSchema } from "@zeros/protocol/cloud-commands";
+import { CloudConversationCreateSchema, CloudConversationReadSchema, CloudConversationModeSchema, CloudCommandSnapshotSchema } from "@zeros/protocol/cloud-commands";
 import { cloudCommandFailureCode, decodeCloudCommandFailure, cloudCommandFailureFromCode, CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
 import { CloudAgentAdmissionError } from "./cloud-agent-execution-client";
 import { listKnownRepoRoots } from "./db/projects";
@@ -1064,6 +1064,7 @@ export class ZerosEngine {
     return this.cloudCommands.confirmGoal(claim,sequence,goal);
   });
   private readonly cloudCommandAdmissions=new WeakMap<TransportClient,CloudCommandClaim>();
+  private readonly cloudTurnProtocols=new WeakMap<TransportClient,1>();
   private readonly cloudConversationDeletions=new Set<string>();
   private readonly cloudCommandSessions=new Map<string,{
     claim:CloudCommandClaim;receiver:TransportClient;controller:AbortController;preparation:Promise<void>;ownsExecution?:boolean;
@@ -2070,6 +2071,7 @@ export class ZerosEngine {
       ...(this.cloudRuntimeRegistration?{cloudAgentExecutionFactory:createCloudAgentExecutionFactory({
         request:(request,signal)=>this.cloudRuntimeRegistration!.agentExecutionRequest(request,signal),
         supervisor:{onRetirementFailure:()=>this.handleCloudRuntimeAuthorityLoss()},
+        onRepositoryMcpNotice: context => this.publishCloudRepositoryMcpNotice(context),
       })}:{}),
       sessionToolFactory: new DesignCodeToolAdmissions({
         workspaceTools: (input) => {
@@ -3642,6 +3644,9 @@ export class ZerosEngine {
       (msg.type === "AGENT_PERMISSION_RESPONSE" ? this.pendingPermissionRequests.get(msg.permissionId)?.request.sessionId : this.pendingQuestionRequests.get(msg.questionId)?.request.sessionId);
     const conversationId = previous?.conversationId ?? (executionId ? this.sessionChat.get(executionId) : undefined);
     if (!executionId || !conversationId) throw new CloudCommandRuntimeError("command_context_changed");
+    if (msg.type !== "AGENT_STEER" && (msg.executionId !== undefined || msg.chatId !== undefined || this.cloudTurnProtocols?.get(client) === 1) &&
+        (msg.executionId !== executionId || msg.chatId !== conversationId))
+      throw new CloudCommandRuntimeError("command_context_changed");
     let action: CloudAction;
     if (msg.type === "AGENT_STEER") {
       const turnId = previous?.turnId ?? this.activeTurnSnapshots.get(executionId)?.turnId;
@@ -3701,10 +3706,12 @@ export class ZerosEngine {
   private async handleCloudCommandOperation(op: string, params: Record<string, unknown>,client:TransportClient): Promise<unknown> {
     if (!this.cloudCommands) throw new CloudCommandRuntimeError("cloud_commands_unavailable");
     if (op === "cloudCommands.request") {
-      if (Object.keys(params).some(key=>key!=="request"&&key!=="nativeCommandsVersion") || !("request" in params) ||
-          (params.nativeCommandsVersion!==undefined&&params.nativeCommandsVersion!==1)) throw new CloudCommandRuntimeError("invalid_command");
+      if (Object.keys(params).some(key=>key!=="request"&&key!=="nativeCommandsVersion"&&key!=="cloudTurnProtocolVersion") || !("request" in params) ||
+          (params.nativeCommandsVersion!==undefined&&params.nativeCommandsVersion!==1) ||
+          (params.cloudTurnProtocolVersion!==undefined&&params.cloudTurnProtocolVersion!==1)) throw new CloudCommandRuntimeError("invalid_command");
       const result=await this.cloudCommands.handle(params.request,client.cloudActor?.sessionId);
-      return params.nativeCommandsVersion===1?result:legacyCloudCommandResponse(result);
+      if (params.cloudTurnProtocolVersion === 1) this.cloudTurnProtocols?.set(client, 1);
+      return params.cloudTurnProtocolVersion === 1 ? result : legacyCloudCommandResponse(result, params.nativeCommandsVersion === 1 ? 1 : undefined);
     }
     let conversationId: string;
     if (op === "cloudCommands.createConversation") {
@@ -3750,33 +3757,90 @@ export class ZerosEngine {
     const chat = getChat(conversationId)!;
     if (op !== "cloudCommands.conversation") this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["chats"], chatIds: [conversationId] }));
     return { conversationId, workspaceId: this.workspace.workspaceIdForCwd(chat.folder), agentId: chat.agentId,
-      providerBinding:chat.providerBinding,nativeCommandsVersion:1,
+      providerBinding:chat.providerBinding,nativeCommandsVersion:1,cloudTurnProtocolVersion:1,
       mode: chat.composerMode ?? "code", modeRevision: chat.composerModeRevision ?? 0, permissionModeVersion: 1 };
   }
 
-  private async handleCloudEventOperation(params: Record<string, unknown>): Promise<unknown> {
+  private async handleCloudEventOperation(params: Record<string, unknown>, client: TransportClient): Promise<unknown> {
     if (!this.cloudEvents) throw new CloudEventRuntimeError("cloud_events_unavailable");
     if (Object.keys(params).length !== 1 || !("request" in params)) throw new CloudEventRuntimeError("invalid_event");
     const parsed = CloudEventClientRequestSchema.safeParse(params.request);
     if (!parsed.success) throw new CloudEventRuntimeError("invalid_event");
     const request = parsed.data;
-    if (request.kind === "replay") return this.cloudEvents.replay(request.cursor);
+    const actor = client.cloudActor;
+    if (!actor) throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
+    const assertActor = () => {
+      if (client.cloudActor !== actor || client.authorized?.() !== true)
+        throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
+    };
+    assertActor();
+    if (request.kind === "replay") {
+      const result = await this.cloudEvents.replay(request.cursor);
+      assertActor();
+      return result;
+    }
     this.validateCloudCommand(request.conversationId);
     const retainedExecution=this.conversationExecution.get(request.conversationId);
-    const retainedTasks=retainedExecution?await this.agents.readCloudBackgroundTasks?.(retainedExecution):null;
+    const [retainedTasks, queueValue] = await Promise.all([
+      retainedExecution ? this.agents.readCloudBackgroundTasks?.(retainedExecution) : null,
+      this.cloudCommands?.handle({ kind: "snapshot", conversationId: request.conversationId }, actor.sessionId),
+    ]);
+    assertActor();
+    const queue = queueValue === undefined ? null : CloudCommandSnapshotSchema.parse(queueValue);
     return this.cloudEvents.snapshot(() => {
       const chat = getChat(request.conversationId)!;
       const executionId = this.conversationExecution.get(request.conversationId) ?? null;
       const prompt = executionId ? this.activePromptContexts.get(executionId) : null;
       const session=executionId?this.sessionLoadResponses.get(executionId):null;
       const backgroundTasks=session?.backgroundTasks??(executionId===retainedExecution?retainedTasks:null);
+      const latestId = openZerosDb().prepare("SELECT turn_id FROM turns WHERE chat_id = ? ORDER BY ord DESC LIMIT 1").get(chat.id) as { turn_id: string } | undefined;
+      const latest = latestId ? getTurnRow(chat.id, latestId.turn_id) : null;
+      const messages = windowChatMessages(chat.id, 100);
+      let latestTurn = latest && latest.status !== "running" ? CloudTurnOutcomeSchema.parse({
+        conversationId: chat.id, executionId: null, agentId: latest.agentId ?? chat.agentId, turnId: latest.turnId,
+        status: latest.status, stopReason: latest.stopReason, startedAt: latest.startedAt, endedAt: latest.endedAt,
+        response: { ...(latest.stopReason ? { stopReason: latest.stopReason } : {}), ...(latest.usage ? { usage: latest.usage } : {}) },
+      }) : null;
+      for (const receipt of [...queue?.receipts ?? []].sort((a, b) => b.position - a.position)) {
+        if (!["succeeded", "failed", "cancelled", "uncertain"].includes(receipt.state) || receipt.payload?.operation) continue;
+        const outcome = receipt.result?.terminal;
+        if (outcome && (outcome.commandId !== receipt.commandId || outcome.conversationId !== chat.id || outcome.executionId !== receipt.executionId ||
+            outcome.agentId !== chat.agentId || receipt.payload && (outcome.turnId !== receipt.payload.userMessageId || outcome.agentId !== receipt.payload.agentId) ||
+            receipt.state === "succeeded" && outcome.status !== "completed" || receipt.state === "cancelled" && outcome.status !== "cancelled" ||
+            receipt.state === "failed" && outcome.status !== "failed")) throw new CloudEventRuntimeError("invalid_event");
+        // Settled CP receipts deliberately omit prompt payloads. New receipts
+        // carry bounded terminal identity; old admission refusals can use only
+        // the failure notice persisted for this exact command, never a nearby
+        // user message or another receipt's provider identity.
+        const noticeRow = messages.find(row => row.msgId === `cloud-command-failure-${receipt.commandId}`);
+        let notice: AgentMessage | undefined;
+        try { if (noticeRow) notice = JSON.parse(noticeRow.payload) as AgentMessage; } catch { /* Corrupt history is not identity evidence. */ }
+        const noticeIdentity = notice?.kind === "error_notice" && notice.code === receipt.resultCode ? notice.turnFailure?.turnId : undefined;
+        const noticeTurn = noticeIdentity && messages.some(row => row.msgId === noticeIdentity && row.kind === "text") ? noticeIdentity : undefined;
+        const turnId = outcome?.turnId ?? (receipt.payload?.agentId === chat.agentId ? receipt.payload.userMessageId : noticeTurn);
+        if (!turnId) continue;
+        const receiptIndex = messages.findIndex(row => row.msgId === turnId), latestIndex = messages.findIndex(row => row.msgId === latest?.turnId);
+        if (!latest || latest.turnId === turnId || receiptIndex >= 0 &&
+            (latestIndex >= 0 ? receiptIndex > latestIndex : Date.parse(receipt.updatedAt) >= (latest.endedAt ?? latest.startedAt))) {
+          const failure = cloudCommandFailureFromCode(receipt.resultCode, chat.agentId ?? undefined);
+          latestTurn = outcome ?? CloudTurnOutcomeSchema.parse({ commandId: receipt.commandId, conversationId: chat.id, executionId: receipt.executionId,
+            turnId, agentId: chat.agentId,
+            status: receipt.state === "succeeded" ? "completed" : receipt.state === "cancelled" ? "cancelled" : "failed",
+            stopReason: receipt.state === "succeeded" ? "end_turn" : receipt.state === "cancelled" ? "cancelled" : null,
+            endedAt: Date.parse(receipt.updatedAt), ...(failure ? { failure, error: failure.message } : receipt.state === "failed" || receipt.state === "uncertain"
+              ? { error: "The cloud command outcome could not be recovered. Review the conversation before retrying." } : {}),
+          });
+        }
+        break;
+      }
       return {
         version: 1, conversationId: chat.id, agentId: chat.agentId, executionId,
         session: executionId ? (backgroundTasks?{...session,backgroundTasks}:session??null) : null,
         initialize: executionId && chat.agentId ? this.agents.agentInitializeSnapshot(chat.agentId) : null,
         mode: chat.composerMode ?? "code", modeRevision: chat.composerModeRevision ?? 0,
-        messages: windowChatMessages(chat.id, 100),
+        messages,
         activeTurn: prompt ? { turnId: prompt.turnId, startedAt: prompt.startedAt } : null,
+        latestTurn,
         permissions: [...this.pendingPermissionRequests].filter(([, pending]) => pending.request.sessionId === executionId)
           .map(([permissionId, pending]) => ({ permissionId, agentId: pending.agentId, request: pending.request })),
         questions: [...this.pendingQuestionRequests].filter(([, pending]) => pending.request.sessionId === executionId)
@@ -3959,11 +4023,29 @@ export class ZerosEngine {
     return [...this.cloudCommandSessions.values()].find(record=>record.claim.executionId===executionId&&record.claim.payload.agentId==="codex")?.claim;
   }
 
-  private publishCloudCommandFailure(claim: Pick<CloudCommandClaim, "commandId" | "conversationId" | "payload"> & { executionId: string | null }, code: string, error?: unknown): void {
+  private publishCloudRepositoryMcpNotice(context: { executionId: string; conversationId: string; provider: string; notice: { excluded: number } }): void {
+    const count = Math.min(65_535, Math.max(0, Math.trunc(context.notice.excluded)));
+    if (!count || !getChat(context.conversationId)) return;
+    // Optional configuration is an observation, never a turn failure. Only a
+    // bounded count enters prose; parser diagnostics contain no raw excerpts.
+    const noticeId = `cloud-mcp-exclusions-${context.executionId}`, at = Date.now();
+    const message = `${count} optional repository MCP ${count === 1 ? "entry was" : "entries were"} skipped.`;
+    const row: AgentMessage = { id: noticeId, kind: "error_notice", severity: "warning", recoverable: true,
+      code: "CLOUD_REPOSITORY_MCP_EXCLUDED", message, createdAt: at };
+    upsertChatMessagesBulk(context.conversationId, [{ msgId: row.id, kind: row.kind, payload: JSON.stringify(row), createdAt: at }]);
+    this.broadcast(createMessage({ type: "AGENT_SESSION_UPDATE", source: "engine", agentId: context.provider, chatId: context.conversationId,
+      notification: { sessionId: context.executionId, update: { sessionUpdate: "error_notice", noticeId, severity: "warning", recoverable: true,
+        code: "CLOUD_REPOSITORY_MCP_EXCLUDED", message, at } } }));
+    this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["messages"], chatIds: [context.conversationId] }));
+  }
+
+  private publishCloudCommandFailure(claim: Pick<CloudCommandClaim, "commandId" | "conversationId" | "payload"> & { executionId: string | null }, code: string, error?: unknown): CloudTurnOutcome | undefined {
     const chat = getChat(claim.conversationId);
     if (!chat || chat.agentId !== claim.payload.agentId || claim.payload.operation) return;
     const native = error instanceof AgentFailureError ? error.failure : null;
-    const failure = native ? { ...native, message: redactLogSecrets(native.message).slice(0, 8000) }
+    const failure = native ? { ...native, message: redactLogSecrets(native.message).slice(0, 8000),
+      ...(native.advice ? { advice: redactLogSecrets(native.advice).slice(0, 8000) } : {}),
+      ...(native.exit ? { exit: { ...native.exit, stderrTail: redactLogSecrets(native.exit.stderrTail).slice(0, 8000) } } : {}) }
       : cloudCommandFailureFromCode(code, claim.payload.agentId) ?? { kind: "protocol-error" as const, stage: "initialize" as const,
         agentId: claim.payload.agentId, message: "The cloud agent request could not be completed. Review the conversation before trying again." };
     const noticeId = `cloud-command-failure-${claim.commandId}`;
@@ -3974,7 +4056,12 @@ export class ZerosEngine {
     });
     const keyed = exact.flatMap(row => { try { return [JSON.parse(row.payload) as AgentMessage]; } catch { return []; } });
     const retained = keyed.find((row): row is AgentTextMessage => row.id === claim.payload.userMessageId && row.kind === "text" && row.role === "user");
-    if (retained?.recoveryFailure && keyed.some(row => row.id === noticeId && row.kind === "error_notice")) return;
+    const durable = getTurnRow(chat.id, claim.payload.userMessageId);
+    const terminal = CloudTurnOutcomeSchema.parse({ commandId: claim.commandId, conversationId: chat.id, executionId: claim.executionId,
+      turnId: claim.payload.userMessageId, agentId: claim.payload.agentId, status: "failed", stopReason: durable?.stopReason ?? null,
+      ...(durable ? { startedAt: durable.startedAt } : {}), endedAt: durable?.endedAt ?? keyed.find(row => row.id === noticeId)?.createdAt ?? Date.now(),
+      error: failure.message, failure });
+    if (retained?.recoveryFailure && keyed.some(row => row.id === noticeId && row.kind === "error_notice")) return terminal;
     const bubble = claim.payload.bubble as AgentPromptBubble | undefined;
     const prompt: AgentTextMessage = { ...(retained ?? { id: claim.payload.userMessageId, kind: "text", role: "user",
       text: bubble?.displayText ?? claim.payload.prompt.map(block => block.type === "text" ? block.text : "").join(""),
@@ -3995,10 +4082,11 @@ export class ZerosEngine {
       agentId: claim.payload.agentId, sessionId: claim.executionId, executionId: claim.executionId,
       error: code, failure }));
     this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["messages", "chats"], chatIds: [chat.id] }));
+    return terminal;
   }
 
   private async dispatchCloudCommand(claim: CloudCommandClaim): Promise<Pick<CloudCommandResult, "state" | "resultCode" | "result">> {
-    let result: Pick<CloudCommandResult, "state" | "resultCode" | "result"> = { state: "failed", resultCode: "command_dispatch_rejected" };
+    let result: Pick<CloudCommandResult, "state" | "resultCode" | "result"> = { state: "failed", resultCode: "cloud_provider_prompt_protocol_error" };
     // This receiver has no transport lifetime. Streaming still uses the shared
     // router; terminal receipts also reach all currently authorized devices.
     const admitted=this.cloudCommandSessions.get(claim.commandId);
@@ -4019,11 +4107,33 @@ export class ZerosEngine {
       id: `cloud-command:${claim.commandId}`, kind: "cloud", close: () => {},
       ...(claim.actor?{cloudCommandActor:claim.actor,accountUserId:claim.actor.userId}:{}),
       send: (message) => {
-        if (message.type === "AGENT_PROMPT_COMPLETE") result = message.stopReason === "cancelled"
-          ? { state: "cancelled", resultCode: "stopped_by_user" } : { state: "succeeded", resultCode: null };
-        else if (message.type === "AGENT_PROMPT_FAILED" || message.type === "AGENT_ERROR")
-          result = { state: "failed", resultCode: message.type === "AGENT_ERROR" && isCloudAgentAdmissionCode(message.code)
-            ? message.code : cloudCommandFailureCode(message.type === "AGENT_ERROR" ? message : { ...message, code: message.error }, "provider_prompt") };
+        if (message.type === "AGENT_PROMPT_COMPLETE" || message.type === "AGENT_PROMPT_FAILED" || message.type === "AGENT_ERROR") {
+          const execution = "executionId" in message ? message.executionId : undefined;
+          if (execution && execution !== claim.executionId || "sessionId" in message && message.sessionId && message.sessionId !== claim.executionId ||
+              "requestId" in message && message.requestId && message.requestId !== claim.commandId || message.agentId && message.agentId !== claim.payload.agentId ||
+              message.type === "AGENT_PROMPT_COMPLETE" && message.response.userMessageId && message.response.userMessageId !== claim.payload.userMessageId) return;
+          const complete = message.type === "AGENT_PROMPT_COMPLETE";
+          const cancelled = complete && message.stopReason === "cancelled";
+          const failure = !complete ? message.failure : undefined;
+          const durable = getTurnRow(claim.conversationId, claim.payload.userMessageId);
+          const terminal = CloudTurnOutcomeSchema.parse({ commandId: claim.commandId, conversationId: claim.conversationId,
+            executionId: claim.executionId, turnId: claim.payload.userMessageId, agentId: claim.payload.agentId,
+            status: complete ? cancelled ? "cancelled" : "completed" : "failed", stopReason: complete ? message.stopReason : durable?.stopReason ?? null,
+            ...(durable ? { startedAt: durable.startedAt } : {}), endedAt: durable?.endedAt ?? Date.now(),
+            ...(complete ? { response: { ...message.response,
+              ...(message.response.effectiveModel ? { effectiveModel: message.response.effectiveModel.slice(0, 256) } : {}),
+              ...(message.response.usage ? { usage: { ...message.response.usage, ...(message.response.usage.perModel
+                ? { perModel: message.response.usage.perModel.slice(0, 32).map(row => ({ ...row, model: row.model.slice(0, 256) })) } : {}) } } : {}),
+            } } : { error: redactLogSecrets(message.type === "AGENT_ERROR" ? message.message : message.error).slice(0, 8000),
+              ...(failure ? { failure: { ...failure, message: redactLogSecrets(failure.message).slice(0, 8000),
+                ...(failure.advice ? { advice: redactLogSecrets(failure.advice).slice(0, 8000) } : {}),
+                ...(failure.exit ? { exit: { ...failure.exit, stderrTail: redactLogSecrets(failure.exit.stderrTail).slice(0, 8000) } } : {}) } } : {}) }),
+          });
+          result = { state: complete ? cancelled ? "cancelled" : "succeeded" : "failed", resultCode: complete ? cancelled ? "stopped_by_user" : null
+            : message.type === "AGENT_ERROR" && isCloudAgentAdmissionCode(message.code) ? message.code
+            : cloudCommandFailureCode(message.type === "AGENT_ERROR" ? message : { ...message, code: message.error }, "provider_prompt"),
+            result: { ...nativeResult, version: 1, terminal } };
+        }
         this.broadcast(message);
       },
     };
@@ -4034,7 +4144,7 @@ export class ZerosEngine {
       promptId: claim.commandId, ...(claim.payload.bubble ? { bubble: claim.payload.bubble } : {}),
     }), id: claim.commandId }, receiver, 0, true);
     if(nativeResult) {
-      result.result=nativeResult;
+      result.result={ ...nativeResult, ...result.result };
       if(result.state==="succeeded" && capabilities?.goals) {
         const revision=this.cloudGoals.revision(claim);
         let goal;
@@ -4043,7 +4153,7 @@ export class ZerosEngine {
       }
     }
     const confirmed=await this.cloudGoals.flush(claim);
-    if(confirmed)result.result={...nativeResult,version:1,goal:confirmed.goal};
+    if(confirmed)result.result={...nativeResult,...result.result,version:1,goal:confirmed.goal};
     return result;
   }
 
@@ -6893,6 +7003,8 @@ export class ZerosEngine {
             // single-use decision identity; never revive an expired resolver.
             const pending = this.pendingPermissionRequests.get(msg.permissionId);
             if (!pending || this.sessionAgent.get(pending.request.sessionId) !== pending.agentId) return;
+            if ((msg.executionId !== undefined || msg.chatId !== undefined || this.cloudTurnProtocols?.get(client) === 1) &&
+                (msg.executionId !== pending.request.sessionId || msg.chatId !== this.sessionChat.get(pending.request.sessionId))) return;
           } else if (client.kind !== "local") {
             // Preserve the desktop relay's existing decision ownership rule.
             const owner = this.permissionOwner.get(msg.permissionId);
@@ -6908,7 +7020,9 @@ export class ZerosEngine {
           if (this.cloudWorker) {
             const pending = this.pendingQuestionRequests.get(msg.questionId);
             if (!pending || this.sessionAgent.get(pending.request.sessionId) !== pending.agentId ||
-              (msg.nativeRequestId !== undefined && msg.nativeRequestId !== pending.request.nativeRequestId)) return;
+              (msg.nativeRequestId !== undefined && msg.nativeRequestId !== pending.request.nativeRequestId) ||
+              (msg.executionId !== undefined || msg.chatId !== undefined || this.cloudTurnProtocols?.get(client) === 1) &&
+                (msg.executionId !== pending.request.sessionId || msg.chatId !== this.sessionChat.get(pending.request.sessionId))) return;
           } else if (client.kind !== "local") {
             const owner = this.questionOwner.get(msg.questionId);
             if (owner !== client.id) return;
@@ -9193,7 +9307,7 @@ export class ZerosEngine {
         return op === "cloudActions.request"
           ? await this.handleCloudActionOperation(params,client)
           : op === "cloudEvents.request"
-          ? await this.handleCloudEventOperation(params)
+          ? await this.handleCloudEventOperation(params,client)
           : op.startsWith("cloudCommands.")
           ? await this.handleCloudCommandOperation(op, params,client)
           : op.startsWith("cloudReplica.")
@@ -9869,7 +9983,12 @@ export class ZerosEngine {
     if (!this.cloudWorker && this.sessionRestrictedFromRemote(sessionId)) {
       this.router.broadcastLocal(msg);
     } else {
-      this.router.routeToSession(sessionId, msg);
+      // A cold cloud attachment does not yet know its native execution. The
+      // engine-owned conversation identity lets it hold post-snapshot controls
+      // before alias mapping without stalling other conversations.
+      const chatId = this.cloudWorker ? this.sessionChat.get(sessionId) : undefined;
+      const ownedMessage = chatId ? { ...msg, chatId } : msg;
+      this.router.routeToSession(sessionId, ownedMessage);
     }
   }
 
