@@ -1,14 +1,12 @@
 // Test-only pinned CLI probe. The parent runs this entire fixture inside a
 // private network namespace with loopback only. No real provider credential.
-import { createRequire } from "node:module";
 import { createServer } from "node:http";
 import { readFile, writeFile, access, mkdir, symlink } from "node:fs/promises";
 import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
-const [root, optionsFile, kind = "api", mode] = process.argv.slice(2);
-const require = createRequire(import.meta.url);
-const cli = require.resolve("@anthropic-ai/claude-agent-sdk-linux-x64/claude");
+const [root, optionsFile, kind = "api", mode, cli] = process.argv.slice(2);
+if (!cli || !path.isAbsolute(cli)) throw new Error("Native policy probe requires the resolved bundled CLI");
 const policy = JSON.parse(await readFile(optionsFile, "utf8"));
 const mcpProbe=mode==="mcp"||mode==="mcp-strict-plugin"||mode==="mcp-control";
 const observed = { claude: false, agents: false, init: false, requests: 0, admittedKey: true, admittedModel: true, trap: false, plan:true };
@@ -21,7 +19,7 @@ const server = createServer(async (request, response) => {
     observed.requests++;
     observed.claude ||= source.includes("W1_CLAUDE_SENTINEL_9b38");
     observed.agents ||= source.includes("W1_AGENTS_SENTINEL_54c2");
-    observed.admittedKey &&= kind === "api" ? request.headers["x-api-key"] === credential : request.headers.authorization === "Bearer sk-ant-api03-0000000000000000000000000000000000000000";
+    observed.admittedKey &&= kind === "api" ? request.headers["x-api-key"] === credential : request.headers.authorization === `Bearer ${credential}`;
     observed.admittedModel &&= JSON.parse(source).model === "claude-haiku-4-5";
   }
   response.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "authentication_error", message: "Synthetic test authentication failure" } }));
