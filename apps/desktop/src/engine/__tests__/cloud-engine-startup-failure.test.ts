@@ -119,9 +119,13 @@ describe("closed startup evidence", () => {
     const after = await fs.stat(f.directory);
     expect([after.dev, after.ino]).toEqual([before.dev, before.ino]);
     expect(await fs.readdir(f.directory)).toEqual(["cloud-engine-startup-failure.json"]);
-    expect((await fs.stat(f.file)).mode & 0o777).toBe(0o600);
-    expect(await fs.readFile(f.file, "utf8")).not.toContain("canary");
     expect(vi.mocked(fs.open).mock.calls.some(([, flags]) => typeof flags === "number" && (flags & constants.O_NOFOLLOW) !== 0)).toBe(true);
+    // Mode and bytes come from one descriptor, so the checked file is the read file.
+    const published = await fs.open(f.file, "r");
+    try {
+      expect((await published.stat()).mode & 0o777).toBe(0o600);
+      expect(await published.readFile("utf8")).not.toContain("canary");
+    } finally { await published.close(); }
   });
 
   it.each(["missing", "symlink", "hardlink", "directory", "public", "oversized", "malformed", "unclosed", "parent-symlink"])(
