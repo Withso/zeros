@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Db, Tx } from "../../../../apps/control-plane/src/db";
 
 // Explicit script-only sampler: an isolated target and a separate monitoring
@@ -57,6 +57,62 @@ function nowUs(): number {
   return value;
 }
 
+function databaseName(value: unknown): string {
+  if (typeof value !== "string" || !value || value.includes("\0") || Buffer.byteLength(value) > 63)
+    return refuse("postgres_cost_target_invalid");
+  return value;
+}
+function databaseUrl(value: string): URL {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") return refuse("postgres_cost_target_invalid");
+    return url;
+  } catch { return refuse("postgres_cost_target_invalid"); }
+}
+function sameServer(left: URL, right: URL): boolean {
+  return left.hostname === right.hostname && (left.port || "5432") === (right.port || "5432") &&
+    ["host", "hostaddr", "port", "service"].every(key => left.searchParams.get(key) === right.searchParams.get(key));
+}
+
+// Test-run bootstrap only: use the connected target's name, never a sandbox
+// convention. CI supplies one isolated serial database; the monitor must use
+// another database on that server so its own reads do not enter target cost.
+// This does not reset statistics, restart PostgreSQL, or create target data.
+export async function preparePostgresCostMonitor(options: {
+  producerPool: Pick<Db, "query">; producerConnectionString: string; monitorConnectionString?: string;
+}): Promise<Readonly<{ targetDatabase: string; monitorDatabase: string; monitorConnectionString: string }>> {
+  const producerUrl = databaseUrl(options.producerConnectionString);
+  const targetDatabase = databaseName(field(one((await options.producerPool.query("SELECT current_database() AS database_name")).rows), "database_name"));
+  if (options.monitorConnectionString !== undefined) {
+    const url = databaseUrl(options.monitorConnectionString);
+    let monitorDatabase: string;
+    try {
+      monitorDatabase = databaseName(url.searchParams.get("database") ?? url.searchParams.get("dbname") ?? decodeURIComponent(url.pathname.slice(1)));
+    } catch { return refuse("postgres_cost_target_invalid"); }
+    if (monitorDatabase === targetDatabase || !sameServer(producerUrl, url)) return refuse("postgres_cost_monitor_not_separate");
+    return Object.freeze({ targetDatabase, monitorDatabase, monitorConnectionString: options.monitorConnectionString });
+  }
+  const derived = `${targetDatabase}_monitor`;
+  const monitorDatabase = Buffer.byteLength(derived) <= 63 ? derived :
+    `zeros_cost_monitor_${createHash("sha256").update(targetDatabase).digest("hex").slice(0, 24)}`;
+  const exists = async () => {
+    const rows = (await options.producerPool.query("SELECT datname FROM pg_database WHERE datname=$1", [monitorDatabase])).rows;
+    return rows.length === 1 && field(rows[0], "datname") === monitorDatabase;
+  };
+  if (!await exists()) {
+    try {
+      await options.producerPool.query(`CREATE DATABASE "${monitorDatabase.replaceAll('"', '""')}"`);
+    } catch (error) {
+      // Concurrent CI bootstrap is safe only if the named DB now exists.
+      if (field(error, "code") !== "42P04" || !await exists()) return refuse("postgres_cost_monitor_bootstrap_failed");
+    }
+  }
+  producerUrl.pathname = `/${encodeURIComponent(monitorDatabase)}`;
+  producerUrl.searchParams.delete("database");
+  producerUrl.searchParams.delete("dbname");
+  return Object.freeze({ targetDatabase, monitorDatabase, monitorConnectionString: producerUrl.toString() });
+}
+
 class PostgresCostSampler {
   private readonly clockDomainId = randomUUID();
   private readonly checkpoints = new WeakMap<PostgresCostCheckpoint, PrivateCheckpoint>();
@@ -64,9 +120,12 @@ class PostgresCostSampler {
   private sampling = false;
   private readonly drainTimeoutMs: number;
   private readonly statementEntryLimit: number;
-  constructor(private readonly options: { monitorPool: Db; targetDatabase: string; drainTimeoutMs?: number; statementEntryLimit?: number;
+  private readonly monitorDatabase: string;
+  constructor(private readonly options: { monitorPool: Db; targetDatabase: string; monitorDatabase?: string; drainTimeoutMs?: number; statementEntryLimit?: number;
     statementStatistics?: "optional" | "unavailable" }) {
-    if (!/^test_[a-z0-9_]{1,58}$/.test(options.targetDatabase)) refuse("postgres_cost_target_invalid");
+    databaseName(options.targetDatabase);
+    this.monitorDatabase = databaseName(options.monitorDatabase ?? `${options.targetDatabase}_monitor`);
+    if (this.monitorDatabase === options.targetDatabase) refuse("postgres_cost_monitor_not_separate");
     this.drainTimeoutMs = options.drainTimeoutMs ?? 2000;
     this.statementEntryLimit = options.statementEntryLimit ?? 8192;
     if (!Number.isSafeInteger(this.drainTimeoutMs) || this.drainTimeoutMs < 0 || this.drainTimeoutMs > 5000 ||
@@ -126,7 +185,7 @@ class PostgresCostSampler {
       const context = one((await client.query(`SELECT current_database() AS monitor_database, current_setting('track_counts') AS track_counts,
         pg_postmaster_start_time()::text AS server_started, (SELECT oid::text FROM pg_database WHERE datname=$1) AS target_oid`, [this.options.targetDatabase])).rows);
       const monitorDatabase = field(context, "monitor_database"), targetOid = counter(field(context, "target_oid"));
-      if (monitorDatabase !== `${this.options.targetDatabase}_monitor`) refuse("postgres_cost_monitor_not_separate");
+      if (monitorDatabase !== this.monitorDatabase) refuse("postgres_cost_monitor_not_separate");
       if (targetOid === "0" || BigInt(targetOid) > 4294967295n) refuse("postgres_cost_target_invalid");
       if (field(context, "track_counts") !== "on") refuse("postgres_cost_tracking_disabled");
       const serverStarted = stamp(field(context, "server_started"))!;

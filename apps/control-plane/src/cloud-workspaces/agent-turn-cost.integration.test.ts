@@ -20,7 +20,7 @@ import { CloudLocalCommandMirrorDriver, requestCloudLocalCommandMirror } from ".
 import { CloudEventRuntime } from "../../../desktop/src/engine/cloud-event-runtime";
 import { runMigrations } from "../../../desktop/src/engine/db/migrations";
 import { openSqlite } from "../../../desktop/src/engine/db/sqlite";
-import { createPostgresCostSampler } from "../../../../scripts/cloud-workspace-validation/cloud-agent-e2e/fixture-control-plane/postgres-cost";
+import { createPostgresCostSampler, preparePostgresCostMonitor } from "../../../../scripts/cloud-workspace-validation/cloud-agent-e2e/fixture-control-plane/postgres-cost";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { DatabaseCloudAgentCredentialService } from "./agent-credentials.js";
 import { CloudAgentActorConfirmResponseSchema, CloudAgentBootActivateResponseSchema,
@@ -36,9 +36,10 @@ import { seedRecordedCloudWorkspaceActor } from "./recorded-actor-test-fixture.j
 import { CloudRuntimeBridgeRelay } from "./runtime-bridge.js";
 import { seedReadyCloudWorkspace, withCloudFixtureOwnerTx } from "./test-fixtures.js";
 
-// This opt-in measurement uses two disposable, worker-owned databases. It
-// never reads Alpha or uses the native e2e fixture as an SQL/relay substitute.
-const enabled = process.env.TEST_DATABASE_URL && process.env.TEST_OBSERVER_DATABASE_URL;
+// TEST_DATABASE_URL selects the disposable serial test database. A separate
+// monitor is supplied explicitly or bootstrapped on the same test server.
+// This never uses the native e2e fixture as an SQL/relay substitute.
+const enabled = Boolean(process.env.TEST_DATABASE_URL);
 const integration = enabled ? describe : describe.skip;
 const DELTAS = 100;
 const EVENT_COUNT = DELTAS + 3; // permission request, settled receipt, terminal
@@ -198,15 +199,20 @@ async function deliverTurn(pair: { client: WebSocket; engine: WebSocket }, turn:
 
 integration("actual control-plane synthetic turn cost", () => {
   let monitor: pg.Pool, scope: CloudCommandEngineScope, delegationId: string, fundingOwnerUserId: string;
+  let targetDatabase: string, monitorDatabase: string;
   const keys = { keys: { 1: randomBytes(32).toString("base64url") }, currentKeyVersion: 1 };
   const producer = () => new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 4,
     application_name: "zeros-w6-turn-cost-producer" });
-  beforeAll(() => {
-    if (new URL(process.env.TEST_DATABASE_URL!).pathname !== "/test_w6" ||
-        new URL(process.env.TEST_OBSERVER_DATABASE_URL!).pathname !== "/test_w6_monitor")
-      throw new Error("cost_statistics_database_not_owned");
-    monitor = new pg.Pool({ connectionString: process.env.TEST_OBSERVER_DATABASE_URL, max: 1,
-      application_name: "zeros-w6-turn-cost-monitor" });
+  beforeAll(async () => {
+    const setup = producer();
+    try {
+      const database = await preparePostgresCostMonitor({ producerPool: setup,
+        producerConnectionString: process.env.TEST_DATABASE_URL!,
+        ...(process.env.TEST_OBSERVER_DATABASE_URL ? { monitorConnectionString: process.env.TEST_OBSERVER_DATABASE_URL } : {}) });
+      ({ targetDatabase, monitorDatabase } = database);
+      monitor = new pg.Pool({ connectionString: database.monitorConnectionString, max: 1,
+        application_name: "zeros-w6-turn-cost-monitor" });
+    } finally { await setup.end(); }
   });
   afterAll(async () => { await monitor?.end(); });
   beforeEach(async () => {
@@ -271,7 +277,7 @@ integration("actual control-plane synthetic turn cost", () => {
 
   it("measures a real legacy enqueue/claim/admit/validate/journal/settle turn after setup and positive PG drain", async () => {
     const turn = workload(scope, delegationId), relay = await relayFixture(scope);
-    const pair = await relay.connect(), sampler = createPostgresCostSampler({ monitorPool: monitor, targetDatabase: "test_w6" });
+    const pair = await relay.connect(), sampler = createPostgresCostSampler({ monitorPool: monitor, targetDatabase, monitorDatabase });
     try {
       const start = await sampler.checkpoint(), writes = producer();
       const app = new Hono().route("/", createCloudCommandRoutes(new DatabaseCloudWorkspaceCommandService({ pool: writes })))
@@ -336,7 +342,7 @@ integration("actual control-plane synthetic turn cost", () => {
 
   it("measures genuine boot binding and warm actor setup separately from per-turn persistence", async () => {
     await configureBootSource();
-    const sampler = createPostgresCostSampler({ monitorPool: monitor, targetDatabase: "test_w6" });
+    const sampler = createPostgresCostSampler({ monitorPool: monitor, targetDatabase, monitorDatabase });
     const start = await sampler.checkpoint(), writes = producer();
     let bootId: string, writerEpoch: string;
     try {
@@ -410,7 +416,7 @@ integration("actual control-plane synthetic turn cost", () => {
         throw new Error("cost_local_events_requested_cp");
       }, onFailure: () => undefined });
       eventRuntime.start(); await eventRuntime.installLocalStore(eventStore);
-      const sampler = createPostgresCostSampler({ monitorPool: monitor, targetDatabase: "test_w6" });
+      const sampler = createPostgresCostSampler({ monitorPool: monitor, targetDatabase, monitorDatabase });
       const start = await sampler.checkpoint(), writes = producer();
       let mirrorRequests = 0, clientBytes = 0, engineBytes = 0;
       try {

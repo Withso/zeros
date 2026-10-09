@@ -1,4 +1,4 @@
-import { cpSync, chmodSync, chownSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
+import { cpSync, chownSync, lstatSync, mkdirSync, readdirSync, readlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { execFileSync } from "node:child_process";

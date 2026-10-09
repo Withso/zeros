@@ -263,18 +263,45 @@ BEGIN
 END $$;
 CREATE TRIGGER cloud_agent_control_guard BEFORE UPDATE ON cloud_agent_credential_controls
   FOR EACH ROW EXECUTE FUNCTION preserve_cloud_agent_control();
-DO $$ DECLARE name text; BEGIN
-  FOREACH name IN ARRAY ARRAY['cloud_agent_boot_source_deliveries','cloud_agent_credential_mutations',
-    'cloud_agent_credential_mutation_decisions','cloud_agent_credential_controls','cloud_agent_credential_remote_removals'] LOOP
-    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY',name);
-    EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY',name);
-    EXECUTE format('CREATE POLICY system_read ON %I FOR SELECT USING(app_is_system())',name);
-    EXECUTE format('CREATE POLICY system_insert ON %I FOR INSERT WITH CHECK(app_is_system())',name);
-    EXECUTE format('CREATE POLICY system_update ON %I FOR UPDATE USING(app_is_system()) WITH CHECK(app_is_system())',name);
-    EXECUTE format('CREATE POLICY system_delete ON %I FOR DELETE USING(app_is_system())',name);
-    EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON %I TO zeros_app',name);
-  END LOOP;
-END $$;
+ALTER TABLE cloud_agent_boot_source_deliveries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cloud_agent_boot_source_deliveries FORCE ROW LEVEL SECURITY;
+CREATE POLICY system_read ON cloud_agent_boot_source_deliveries FOR SELECT USING(app_is_system());
+CREATE POLICY system_insert ON cloud_agent_boot_source_deliveries FOR INSERT WITH CHECK(app_is_system());
+CREATE POLICY system_update ON cloud_agent_boot_source_deliveries FOR UPDATE USING(app_is_system()) WITH CHECK(app_is_system());
+CREATE POLICY system_delete ON cloud_agent_boot_source_deliveries FOR DELETE USING(app_is_system());
+GRANT SELECT,INSERT,UPDATE,DELETE ON cloud_agent_boot_source_deliveries TO zeros_app;
+
+ALTER TABLE cloud_agent_credential_mutations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cloud_agent_credential_mutations FORCE ROW LEVEL SECURITY;
+CREATE POLICY system_read ON cloud_agent_credential_mutations FOR SELECT USING(app_is_system());
+CREATE POLICY system_insert ON cloud_agent_credential_mutations FOR INSERT WITH CHECK(app_is_system());
+CREATE POLICY system_update ON cloud_agent_credential_mutations FOR UPDATE USING(app_is_system()) WITH CHECK(app_is_system());
+CREATE POLICY system_delete ON cloud_agent_credential_mutations FOR DELETE USING(app_is_system());
+GRANT SELECT,INSERT,UPDATE,DELETE ON cloud_agent_credential_mutations TO zeros_app;
+
+ALTER TABLE cloud_agent_credential_mutation_decisions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cloud_agent_credential_mutation_decisions FORCE ROW LEVEL SECURITY;
+CREATE POLICY system_read ON cloud_agent_credential_mutation_decisions FOR SELECT USING(app_is_system());
+CREATE POLICY system_insert ON cloud_agent_credential_mutation_decisions FOR INSERT WITH CHECK(app_is_system());
+CREATE POLICY system_update ON cloud_agent_credential_mutation_decisions FOR UPDATE USING(app_is_system()) WITH CHECK(app_is_system());
+CREATE POLICY system_delete ON cloud_agent_credential_mutation_decisions FOR DELETE USING(app_is_system());
+GRANT SELECT,INSERT,UPDATE,DELETE ON cloud_agent_credential_mutation_decisions TO zeros_app;
+
+ALTER TABLE cloud_agent_credential_controls ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cloud_agent_credential_controls FORCE ROW LEVEL SECURITY;
+CREATE POLICY system_read ON cloud_agent_credential_controls FOR SELECT USING(app_is_system());
+CREATE POLICY system_insert ON cloud_agent_credential_controls FOR INSERT WITH CHECK(app_is_system());
+CREATE POLICY system_update ON cloud_agent_credential_controls FOR UPDATE USING(app_is_system()) WITH CHECK(app_is_system());
+CREATE POLICY system_delete ON cloud_agent_credential_controls FOR DELETE USING(app_is_system());
+GRANT SELECT,INSERT,UPDATE,DELETE ON cloud_agent_credential_controls TO zeros_app;
+
+ALTER TABLE cloud_agent_credential_remote_removals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cloud_agent_credential_remote_removals FORCE ROW LEVEL SECURITY;
+CREATE POLICY system_read ON cloud_agent_credential_remote_removals FOR SELECT USING(app_is_system());
+CREATE POLICY system_insert ON cloud_agent_credential_remote_removals FOR INSERT WITH CHECK(app_is_system());
+CREATE POLICY system_update ON cloud_agent_credential_remote_removals FOR UPDATE USING(app_is_system()) WITH CHECK(app_is_system());
+CREATE POLICY system_delete ON cloud_agent_credential_remote_removals FOR DELETE USING(app_is_system());
+GRANT SELECT,INSERT,UPDATE,DELETE ON cloud_agent_credential_remote_removals TO zeros_app;
 GRANT USAGE,SELECT ON SEQUENCE cloud_agent_credential_mutations_fence_epoch_seq TO zeros_app;
 
 -- Only the current ready projection exists. Desired publication clears ALL

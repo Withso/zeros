@@ -222,7 +222,7 @@ function contextFailure(category:CloudCommandFailureCause["category"],stage:Clou
   return Object.assign(new Error("Cloud actor context is unavailable"),{code:failure.code});
 }
 function contextCause(error:unknown):Error{
-  const code=error&&typeof error==="object"&&"code" in error?error.code:undefined;
+  const code=error&&typeof error==="object"&&("code" in error)?error.code:undefined;
   if(isCloudAgentAdmissionCode(code)||decodeCloudCommandFailure(code))return Object.assign(new Error("Cloud actor context is unavailable"),{code});
   return contextFailure("authority_unavailable","admission");
 }

@@ -86,7 +86,7 @@ export class DatabaseCloudAgentCredentialService {
     if(!dev)throw new HttpError(503,"cloud_agent_credential_busy","cloud_agent_credential_busy");
     let receipt;
     try {receipt=await dev.requestConditionalRemoval(userId,outcome.operationId,source);}
-    catch(error){if(error instanceof HttpError&&error.status<500)throw error;
+    catch(error){if((error instanceof HttpError)&&error.status<500)throw error;
       throw new HttpError(503,"cloud_agent_credential_busy","cloud_agent_credential_busy");}
     return withSystemTx(this.pool,tx=>acknowledgeCloudAgentCredentialRemoteRemoval(tx,userId,outcome.operationId,receipt));
   }

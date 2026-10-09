@@ -4890,7 +4890,7 @@ export class AgentGateway {
         cwd:selection.cwd,cacheRevision:selection.cacheRevision});
       return selection;
     }
-    if("mode" in opts.cloudExecution&&opts.cloudExecution.mode==="boot-owner-v1")
+    if(("mode" in opts.cloudExecution)&&opts.cloudExecution.mode==="boot-owner-v1")
       throw new CloudCommandFailureError({stage:"validation",category:"access_denied"});
     const parsed=CloudAgentExecutionAdmissionSchema.safeParse({...opts.cloudExecution,provider:agentId,executionId:opts.cloudExecutionId??randomUUID()});
     if(!parsed.success)throw new Error("Cloud agent credential admission is invalid");

@@ -255,5 +255,5 @@ export async function requestCloudAgentExecution(authority:CloudRuntimeAuthority
     if(!value||typeof value!=="object"||Object.keys(value).join()!=="released"||(value as {released?:unknown}).released!==true)throw invalidResponse();
     return {released:true};
   }catch(error){await reader.cancel().catch(()=>{});if((error instanceof CloudComputerToolsUpdateRequiredError)||(error instanceof CloudAgentAdmissionError)||(error instanceof CloudAgentExecutionError))throw error;
-    throw error instanceof Error&&error.name==="TimeoutError"?new CloudAgentExecutionError("authority_timeout",stage):invalidResponse();}finally{reader.releaseLock();}
+    throw (error instanceof Error)&&error.name==="TimeoutError"?new CloudAgentExecutionError("authority_timeout",stage):invalidResponse();}finally{reader.releaseLock();}
 }

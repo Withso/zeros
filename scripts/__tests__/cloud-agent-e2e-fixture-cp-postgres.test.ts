@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Db } from "../../apps/control-plane/src/db";
-import { createPostgresCostSampler } from "../cloud-workspace-validation/cloud-agent-e2e/fixture-control-plane/postgres-cost";
+import { createPostgresCostSampler, preparePostgresCostMonitor } from "../cloud-workspace-validation/cloud-agent-e2e/fixture-control-plane/postgres-cost";
 
 const epoch = "2026-10-08 10:00:00+00";
 type Database = { xact_commit: string; xact_rollback: string; tup_inserted: string; tup_updated: string; tup_deleted: string; stats_reset: string | null };
@@ -39,7 +39,111 @@ const advanced = (overrides: Partial<Snapshot> = {}) => snapshot({
   statements: [{ userid: "10", dbid: "1234", queryid: "-123", toplevel: true, calls: "111", rows: "245", stats_since: epoch }], ...overrides,
 });
 
+function bootstrapPort(options: { target?: string; exists?: boolean; createError?: string; existsAfterRace?: boolean } = {}) {
+  const queries: Array<{ sql: string; values?: unknown[] }> = [];
+  let checks = 0;
+  const pool = { query: async (sql: string, values?: unknown[]) => {
+    queries.push({ sql, values });
+    if (sql.includes("current_database()")) return { rows: [{ database_name: options.target ?? "postgres" }] };
+    if (sql.includes("FROM pg_database")) {
+      checks++;
+      return { rows: (checks > 1 ? options.existsAfterRace : options.exists) ? [{ datname: values?.[0] }] : [] };
+    }
+    if (sql.startsWith("CREATE DATABASE")) {
+      if (options.createError) throw Object.assign(new Error("private driver error"), { code: options.createError });
+      return { rows: [] };
+    }
+    throw new Error("fixture_unrecognized_bootstrap_query");
+  } } as unknown as Db;
+  return { pool, queries };
+}
+
+describe("cost monitoring database bootstrap", () => {
+  const producerConnectionString = "postgres://fixture:synthetic@localhost:5432/postgres?sslmode=disable";
+  it("creates a separate same-server monitor when CI supplies only the producer URL", async () => {
+    const port = bootstrapPort();
+    const result = await preparePostgresCostMonitor({ producerPool: port.pool, producerConnectionString });
+    expect(result).toEqual({ targetDatabase: "postgres", monitorDatabase: "postgres_monitor",
+      monitorConnectionString: "postgres://fixture:synthetic@localhost:5432/postgres_monitor?sslmode=disable" });
+    expect(port.queries.filter(row => row.sql.startsWith("CREATE DATABASE"))).toEqual([
+      { sql: 'CREATE DATABASE "postgres_monitor"', values: undefined },
+    ]);
+    expect(port.queries.some(row => /RESET|DROP|BEGIN/i.test(row.sql))).toBe(false);
+  });
+  it("reuses an existing monitor without creating or resetting it", async () => {
+    const port = bootstrapPort({ target: "test_w6", exists: true });
+    const result = await preparePostgresCostMonitor({ producerPool: port.pool,
+      producerConnectionString: producerConnectionString.replace("/postgres?", "/test_w6?") });
+    expect(result.targetDatabase).toBe("test_w6");
+    expect(result.monitorDatabase).toBe("test_w6_monitor");
+    expect(port.queries.filter(row => row.sql.startsWith("CREATE DATABASE"))).toHaveLength(0);
+  });
+  it("preserves an explicit separate monitoring URL without any bootstrap DDL", async () => {
+    const port = bootstrapPort({ target: "test_w6" });
+    const monitorConnectionString = "postgres://fixture:synthetic@localhost:5432/test_w6_monitor?sslmode=disable";
+    expect(await preparePostgresCostMonitor({ producerPool: port.pool, producerConnectionString,
+      monitorConnectionString })).toEqual({ targetDatabase: "test_w6", monitorDatabase: "test_w6_monitor", monitorConnectionString });
+    expect(port.queries).toHaveLength(1);
+  });
+  it("accepts only a positively rechecked duplicate-database creation race", async () => {
+    const port = bootstrapPort({ createError: "42P04", existsAfterRace: true });
+    expect((await preparePostgresCostMonitor({ producerPool: port.pool, producerConnectionString })).monitorDatabase).toBe("postgres_monitor");
+    expect(port.queries.filter(row => row.sql.includes("FROM pg_database"))).toHaveLength(2);
+  });
+  it.each([{ createError: "42501" }, { createError: "42P04", existsAfterRace: false }])(
+    "fails closed when monitoring creation fails: %j", async options => {
+      const port = bootstrapPort(options);
+      await expect(preparePostgresCostMonitor({ producerPool: port.pool, producerConnectionString }))
+        .rejects.toThrow("postgres_cost_monitor_bootstrap_failed");
+    });
+  it("quotes the database identifier and derives a bounded name for a maximum-length target", async () => {
+    const quoted = bootstrapPort({ target: 'cost"target' });
+    const result = await preparePostgresCostMonitor({ producerPool: quoted.pool, producerConnectionString });
+    expect(result.monitorDatabase).toBe('cost"target_monitor');
+    expect(quoted.queries.at(-1)?.sql).toBe('CREATE DATABASE "cost""target_monitor"');
+    const long = bootstrapPort({ target: "x".repeat(63) });
+    const bounded = await preparePostgresCostMonitor({ producerPool: long.pool, producerConnectionString });
+    expect(Buffer.byteLength(bounded.monitorDatabase)).toBeLessThanOrEqual(63);
+    expect(bounded.monitorDatabase).not.toBe(bounded.targetDatabase);
+  });
+  it("uses the actual connected target and removes competing database query parameters from the monitor URL", async () => {
+    const port = bootstrapPort({ target: "actual_target" });
+    const result = await preparePostgresCostMonitor({ producerPool: port.pool,
+      producerConnectionString: producerConnectionString + "&database=actual_target&dbname=actual_target" });
+    const url = new URL(result.monitorConnectionString);
+    expect(result.targetDatabase).toBe("actual_target");
+    expect(url.pathname).toBe("/actual_target_monitor");
+    expect(url.searchParams.has("database") || url.searchParams.has("dbname")).toBe(false);
+    expect(url.searchParams.get("sslmode")).toBe("disable");
+  });
+  it.each([
+    "postgres://fixture:synthetic@localhost:5432/postgres",
+    "postgres://other-host:5432/postgres_monitor",
+    "postgres://fixture:synthetic@localhost:5433/postgres_monitor",
+  ])("rejects a same-database or different-server monitor", async monitorConnectionString => {
+    const port = bootstrapPort();
+    await expect(preparePostgresCostMonitor({ producerPool: port.pool, producerConnectionString, monitorConnectionString }))
+      .rejects.toThrow("postgres_cost_monitor_not_separate");
+  });
+});
+
 describe("fixture PostgreSQL authoritative aggregate statistics", () => {
+  it("measures CI's postgres target from its separate monitor with all statistics guards retained", async () => {
+    const port = monitor([snapshot({ monitor: "postgres_monitor" }), advanced({ monitor: "postgres_monitor" })]);
+    const sampler = createPostgresCostSampler({ monitorPool: port.pool, targetDatabase: "postgres" });
+    expect(sampler.window(await sampler.checkpoint(), await sampler.checkpoint())).toMatchObject({
+      databaseComplete: true, database: { xactCommit: "7", tuplesInserted: "5", tuplesUpdated: "3" },
+      statementUnavailableReason: "not-enabled", successfulStatementCalls: null,
+    });
+    expect(port.queries.find(row => row.sql.includes("current_database()"))?.values).toEqual(["postgres"]);
+  });
+  it("checks an explicitly configured monitor identity and rejects the target itself", async () => {
+    const port = monitor([snapshot({ monitor: "custom_cost_monitor" })]);
+    await expect(createPostgresCostSampler({ monitorPool: port.pool, targetDatabase: "postgres",
+      monitorDatabase: "custom_cost_monitor" }).checkpoint()).resolves.toMatchObject({ drainProof: "target-backends-exited" });
+    expect(() => createPostgresCostSampler({ monitorPool: port.pool, targetDatabase: "postgres",
+      monitorDatabase: "postgres" })).toThrow("postgres_cost_monitor_not_separate");
+  });
   it("defaults to unavailable statement counts without probing an unpreloaded module", async () => {
     const port = monitor([snapshot(), advanced()]);
     const sampler = createPostgresCostSampler({ monitorPool: port.pool, targetDatabase: "test_w6" });

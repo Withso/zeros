@@ -1,14 +1,20 @@
-import { cpSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { closeSync, constants, cpSync, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { HarnessFailure } from "./assertions";
 
 /** Snapshot a public installed tool before the private etc overlay hides its
  * alternatives link. Caller writes only inside its guarded private OS view. */
 export function snapshotSystemExecutable(file: string): Buffer {
-  const canonical = realpathSync(file), metadata = statSync(canonical);
-  if (!metadata.isFile() || !(metadata.mode & 0o111) || metadata.size > 1024 * 1024)
-    throw new HarnessFailure("fixture_contract_invalid");
-  return readFileSync(canonical);
+  // Check and read through one descriptor so the file cannot change between them.
+  const fd = openSync(realpathSync(file), constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const metadata = fstatSync(fd);
+    if (!metadata.isFile() || !(metadata.mode & 0o111) || metadata.size > 1024 * 1024)
+      throw new HarnessFailure("fixture_contract_invalid");
+    return readFileSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Caller must first guard its private mount namespace and fresh fixture root. */

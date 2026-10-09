@@ -72,8 +72,8 @@ export function createCloudAgentCredentialRoutes(service:DatabaseCloudAgentCrede
   }
   const removalBase=`${base}/removals`;
   const removalError=(error:unknown)=>{
-    if(error instanceof HttpError&&error.code==="agent_credential_conflict")return {body:{error:error.code},status:409 as const};
-    if(error instanceof HttpError&&error.status<500)return {body:{error:"cloud_validation_access_denied"},status:403 as const};
+    if((error instanceof HttpError)&&error.code==="agent_credential_conflict")return {body:{error:error.code},status:409 as const};
+    if((error instanceof HttpError)&&error.status<500)return {body:{error:"cloud_validation_access_denied"},status:403 as const};
     return {body:{error:"cloud_agent_credential_busy"},status:503 as const};
   };
   app.post(`${removalBase}/prepare`,async c=>{
@@ -239,7 +239,7 @@ export function createCloudAgentExecutionRoutes(service:DatabaseCloudAgentExecut
       if(request.kind==="computer-tool"&&error instanceof ComputerToolConflictError)return c.json({result:error.result},409);
       if(request.kind==="admit"&&error instanceof HttpError&&(error.code==="cloud_computer_tools_update_required"||isCloudAgentAdmissionCode(error.code)))
         return c.json({error:error.code},409);
-      if(request.kind==="terminal-environment"&&error instanceof HttpError&&["computer_environment_revoked","computer_environment_runtime_required"].includes(error.code))return c.json({error:error.code},409);
+      if(request.kind==="terminal-environment"&&(error instanceof HttpError)&&["computer_environment_revoked","computer_environment_runtime_required"].includes(error.code))return c.json({error:error.code},409);
       const refusal=executionRefusal(error,request.kind);
       return c.json({error:refusal.error},refusal.status);
     }

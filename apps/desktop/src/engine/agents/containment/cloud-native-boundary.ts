@@ -37,7 +37,7 @@ const AUTH_ENV = new Set(["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CURSO
 const STARTUP_ENV = new Set(["CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS", "CLAUDE_CODE_STARTUP_FAILURE_RESULTS", "NODE_USE_ENV_PROXY"]);
 const SDK_METADATA_ENV={CLAUDE_CODE_ENTRYPOINT:"sdk-ts"} as const;
 function containmentFailure(error:unknown,category:CloudCommandFailureCause["category"]):Error{
-  const code=error&&typeof error==="object"&&"code" in error?error.code:undefined;
+  const code=error&&typeof error==="object"&&("code" in error)?error.code:undefined;
   const cause=decodeCloudCommandFailure(code);
   if(cause)return new CloudCommandFailureError(cause);
   if(isCloudAgentAdmissionCode(code))return Object.assign(new Error("Cloud agent authority changed"),{code});

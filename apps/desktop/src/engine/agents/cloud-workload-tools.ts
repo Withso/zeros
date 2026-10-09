@@ -44,7 +44,7 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
     if(!path.isAbsolute(cwd)||path.resolve(cwd)!==cwd||cwd.includes("\0"))
       throw new Error("Cloud workload root is invalid");
     const boot=isCloudBootNativeAuthority(authority);
-    if((!boot&&"mode" in authority&&authority.mode==="boot-owner-v1")||(boot&&authority.cwd!==cwd))
+    if((!boot&&("mode" in authority)&&authority.mode==="boot-owner-v1")||(boot&&authority.cwd!==cwd))
       throw new Error("Cloud workload authority is invalid");
     this.legacyLease=boot?null:authority;
     this.lifetime=boot?authority.lifetime:authority;

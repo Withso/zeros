@@ -46,7 +46,7 @@ function leaseFailure(category:CloudCommandFailureCause["category"],message="Clo
 /** Preserve only closed authority metadata. Raw driver/provider diagnostics
  * must not become a user-facing error when a lease retires. */
 function safeLeaseFailure(error:unknown,category:CloudCommandFailureCause["category"]="authority_unavailable",message="Cloud agent authority changed",stage:CloudCommandFailureCause["stage"]="validation"){
-  const code=error&&typeof error==="object"&&"code" in error?error.code:undefined;
+  const code=error&&typeof error==="object"&&("code" in error)?error.code:undefined;
   if(decodeCloudCommandFailure(code)||isCloudAgentAdmissionCode(code))
     return Object.assign(new Error(message),{code:code as string,failure:cloudCommandFailureFromCode(code)});
   return leaseFailure(category,message,stage);
