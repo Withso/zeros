@@ -48,6 +48,14 @@ settings remain under engine authority for agent processes. Ordinary terminals
 may receive configured provider API keys; runtime paths and Git authority stay
 managed in both paths.
 
+
+The engine, agents, tools, terminals/SSH/LSP and capture use the [normal VM execution model](security.md#agent-execution-model):
+one non-root `zeros-engine` user (10003), the real checkout and normal VM egress, without an agent sandbox.
+The approved base's setup recipes and account inventory remain immutable. The root broker adopts
+legacy mutable checkout/HOME ownership from 10001/10002 to 10003 only after positive old-engine drain.
+Agents can read engine data on their VM: one trust domain per workspace. Conversation directories
+separate state, not agents from each other.
+
 ## Delivery and lifetime
 
 - Setup redeems its creating actor's effective environment through the private
@@ -103,8 +111,10 @@ Stale versions return `cloud_settings_version_conflict`; `operationId` is an
 audit identity and does not override CAS on retries. This operation neither
 changes the computer revision nor requests a build.
 
-The v4 helper runs only the primary repository's cloud commands, after checkout,
-as workspace UID 10001. Engine start and Ready follow successful completion.
+The frozen v4 base helper runs only the primary repository's cloud commands,
+after checkout, under its legacy workspace UID 10001 contract. The root broker
+adopts mutable checkout/HOME ownership to 10003 after positive old-engine drain;
+engine start and Ready follow successful setup and adoption.
 The root-owned journal records running/failed/completed state. Wake verifies the
 journal and skips completed commands. Interrupted or failed hooks require an
 explicit new setup run, using the existing failed-workspace wake/retry action;

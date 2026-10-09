@@ -57,12 +57,7 @@ const CODEX_STAGED = [
   "binaries/codex-runtime",
   "binaries/codex-cli-version.txt",
 ];
-const ZSR_STAGED = [
-  "binaries/zsr-supervisor.mjs",
-  "binaries/zsr-rg",
-  "binaries/zsr-macos-process-domain",
-  "binaries/zsr-git-dispatch",
-];
+const RIPGREP_STAGED = ["binaries/rg"];
 const HOST_PROCESS_SUPERVISOR =
   "apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs";
 const LEGAL_RESOURCES = [
@@ -75,7 +70,7 @@ const beforePackSource = readFileSync(
   "scripts/electron-before-pack.cjs",
   "utf8",
 );
-const zsrBuildSource = readFileSync("scripts/build-zsr-supervisor.mjs", "utf8");
+const ripgrepStageSource = readFileSync("scripts/stage-ripgrep.mjs", "utf8");
 const sidecarSource = readFileSync("apps/desktop/electron/sidecar.ts", "utf8");
 
 const froms = [...yml.matchAll(/^\s*-?\s*from:\s*(.+)$/gm)].map((m) =>
@@ -226,7 +221,7 @@ for (const from of froms) {
   if (
     CLAUDE_STAGED.includes(from) ||
     CODEX_STAGED.includes(from) ||
-    ZSR_STAGED.includes(from)
+    RIPGREP_STAGED.includes(from)
   )
     continue;
   if (!existsSync(from))
@@ -285,49 +280,24 @@ if (!/stage-codex-cli\.mjs/.test(beforePackSource)) {
       "the packaged engine would silently fall back to an unpinned Codex on PATH",
   );
 }
-if (!/build-zsr-supervisor\.mjs/.test(beforePackSource)) {
-  errs.push(
-    "beforePack must build the ZSR supervisor so its generated extraResources input cannot be absent",
-  );
+if (!/stage-ripgrep\.mjs/.test(beforePackSource)) {
+  errs.push("beforePack must stage pinned ripgrep before packaging");
 }
-for (const staged of ZSR_STAGED) {
+for (const staged of RIPGREP_STAGED) {
   if (!froms.includes(staged)) {
-    errs.push(
-      `electron-builder.yml has no extraResources \`from: ${staged}\` — packaged agent containment would be unavailable`,
-    );
+    errs.push(`electron-builder.yml has no extraResources from: ${staged}`);
   }
 }
 if (
-  !/zsr-macos-process-domain\.c/.test(zsrBuildSource) ||
-  !/zsr-git-dispatch\.c/.test(zsrBuildSource) ||
-  !/\/usr\/bin\/xcrun/.test(zsrBuildSource)
+  !/@vscode\/ripgrep/.test(ripgrepStageSource) ||
+  !/0o755/.test(ripgrepStageSource)
 ) {
   errs.push(
-    "build-zsr-supervisor must compile the reviewed Darwin process-domain and Git-dispatch C sources with the Apple toolchain",
+    "stage-ripgrep must preserve the pinned executable with owner-write permissions",
   );
 }
-if (
-  !/@vscode\/ripgrep/.test(zsrBuildSource) ||
-  !/zsr-rg/.test(zsrBuildSource)
-) {
-  errs.push(
-    "build-zsr-supervisor must stage the pinned ripgrep binary required by SRT",
-  );
-}
-if (!/ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER/.test(sidecarSource)) {
-  errs.push(
-    "the Electron sidecar must pass the packaged macOS process-domain helper to the engine",
-  );
-}
-if (!/ZEROS_ZSR_GIT_DISPATCH_BINARY/.test(sidecarSource)) {
-  errs.push(
-    "the Electron sidecar must pass the packaged macOS Git dispatcher to the engine",
-  );
-}
-if (!/ZEROS_ZSR_RIPGREP_PATH/.test(sidecarSource)) {
-  errs.push(
-    "the Electron sidecar must pass the packaged ZSR ripgrep binary to the engine",
-  );
+if (!/ZEROS_RIPGREP_PATH/.test(sidecarSource)) {
+  errs.push("the Electron sidecar must pass packaged ripgrep to the engine");
 }
 if (!froms.includes(HOST_PROCESS_SUPERVISOR)) {
   errs.push(
@@ -341,7 +311,7 @@ if (!/ZEROS_HOST_SUPERVISOR_SCRIPT/.test(sidecarSource)) {
 }
 if (
   /ORBSTACK|zsr-container-worker/i.test(
-    `${yml}\n${sidecarSource}\n${zsrBuildSource}`,
+    `${yml}\n${sidecarSource}\n${ripgrepStageSource}`,
   )
 ) {
   errs.push(

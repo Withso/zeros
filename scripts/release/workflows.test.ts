@@ -79,7 +79,7 @@ describe("release dependency and authority contracts", () => {
     expect(reusable.on.workflow_call.outputs.artifact_id.value).toBe("${{ jobs.build.outputs.artifact_id }}");
     expect(reusable.jobs.build.outputs.artifact_id).toBe("${{ steps.artifact.outputs.artifact-id }}");
     expect(build).toContain("name: Build Linux runtime bundle");
-    expect(build).toContain("uses: ./.github/actions/contained-execution-runtime");
+    expect(build).toContain("uses: ./.github/actions/runtime-closure-tools");
     expect(build).toContain("name: ${{ inputs.artifact_name }}-${{ github.sha }}");
     expect(build).toContain("runs-on: ubuntu-24.04");
     expect(build).toContain("timeout-minutes: 40");
@@ -311,7 +311,7 @@ describe("release dependency and authority contracts", () => {
   });
   it.each(["release-alpha", "release-beta", "release"])("retains release-only packaged checks and a retryable signed artifact in %s", name => {
     const build = job(workflow(name), "build");
-    for (const command of ["pnpm check:zsr", "pnpm smoke:engine", "pnpm smoke:packaged-pty", "scripts/verify-macos-release-artifacts.mjs"])
+    for (const command of ["pnpm smoke:engine", "pnpm smoke:packaged-pty", "scripts/verify-macos-release-artifacts.mjs"])
       expect(build).toContain(command);
     expect(build).toContain("--publish never");
     expect(build).toContain("version: ${{ steps.version.outputs.version }}");

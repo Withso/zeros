@@ -34,7 +34,7 @@ export type ReviewSubtab =
 export type ChangesViewMode = "flat" | "tree";
 export type ViewerMode = "diff" | "preview" | "edit";
 
-/** Persistable, non-authority identity used to re-admit a live ZSR preview.
+/** Persistable, non-authority identity used to re-admit a live preview.
  * The current opaque port id and provider URL stay volatile. */
 export interface BrowserPreviewSource {
   chatId: string;

@@ -120,14 +120,13 @@ async function waitForProcessGroupExit(
   return true;
 }
 
-/** Spawn a territory-bound Claude CLI as a dedicated POSIX process group.
+/** Spawn a Claude CLI with the original scope's owned process-group lifecycle.
  *
  * The SDK normally owns its child handle privately. That makes `query.close()`
- * unable to prove teardown to Zeros while a workspace's immutable filesystem
- * authority is changing. The custom SDK spawn seam preserves the same pipes
- * and environment while retaining one observable group handle. Territory
- * admission already rejects non-macOS/Linux hosts, so falling back to an
- * unobservable Windows process tree would be a policy bypass. */
+ * unable to prove teardown to Zeros before retiring a session's authority.
+ * The custom SDK spawn seam preserves the command, arguments, cwd, pipes and
+ * environment while retaining one observable group handle. The existing
+ * macOS/Linux lifecycle requires positive group proof before state cleanup. */
 export function spawnContainedClaudeProcess(
   options: SpawnOptions,
   callbacks: {
@@ -218,7 +217,7 @@ export function spawnContainedClaudeProcess(
 
   if(boundaryProcess?.requiresOwnedSignals){
     // The SDK owns transport only. Its TERM/KILL ladder must not destroy the
-    // outer reaper before it can prove every private descendant has exited.
+    // original reaper before it can prove the owned descendants have exited.
     return {
       stdin:child.stdin,stdout:child.stdout,
       get killed(){return tracked.termination!==null;},
@@ -233,7 +232,7 @@ export function spawnContainedClaudeProcess(
   return child;
 }
 
-/** Stop and verify the complete process group before an old territory grant
+/** Stop and verify the complete owned process group before an old session grant
  * can be retired. SIGTERM follows a short graceful window; SIGKILL is the
  * bounded fail-safe. A surviving group rejects teardown, which the gateway's
  * fail-closed lifecycle path propagates instead of publishing new authority. */

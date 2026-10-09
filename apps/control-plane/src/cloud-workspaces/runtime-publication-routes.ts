@@ -185,6 +185,8 @@ const compatibilitySchema = z
       .array(z.literal("zeros.runtime-manifest/v1"))
       .min(1),
     systemdMin: positiveInteger,
+    // Frozen approved-base account inventory, not a new provider launch policy.
+    // The deployment report separately verifies execution identity.
     uids: z
       .object({
         agent: z.literal(10001),

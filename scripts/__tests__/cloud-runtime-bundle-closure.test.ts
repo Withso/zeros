@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { runInNewContext } from "node:vm";
+import { constants } from "node:fs";
 import {
   chmod,
   copyFile,
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readlink,
   rename,
@@ -35,6 +39,8 @@ import {
 } from "../cloud-workspace-validation/runtime-bundle/manifest";
 
 const temporary: string[] = [];
+const hostSources = ["host-process-supervisor.mjs", "cloud-host-workload-entry.mjs", "cloud-workload-cgroup.mjs"]
+  .map(name => `apps/desktop/src/engine/agents/containment/${name}`);
 async function directory() {
   const root = await mkdtemp(path.join(os.tmpdir(), "zeros-closure-unit-"));
   temporary.push(root);
@@ -57,7 +63,94 @@ afterEach(async () => {
   );
 });
 
+async function hostAssetProbe(options: { missing?: string; invalid?: string } = {}) {
+  const root = await directory(), worker = path.join(root, "worker");
+  for (const source of hostSources) {
+    const target = path.join(worker, source);
+    await mkdir(path.dirname(target), { recursive: true });
+    if (options.missing !== source) await writeFile(target,
+      options.invalid === source ? "export const = INVALID_SYNTAX_SENTINEL;" : await readFile(source));
+  }
+  await json(path.join(worker, "package.json"), {});
+  await json(path.join(root, "manifest.json"), {});
+  await mkdir(path.join(root, "bin"));
+  await writeFile(path.join(root, "bin/cloud-engine-namespace"), "fixture");
+  await mkdir(path.join(worker, "binaries"));
+  await writeFile(path.join(worker, "binaries/rg"), '#!/bin/sh\nprintf "ripgrep fixture\\n"\n', { mode: 0o555 });
+  const source = await readFile("scripts/cloud-workspace-validation/runtime-bundle/probe.cjs", "utf8");
+  const module = { exports: undefined as unknown };
+  const require = createRequire(import.meta.url);
+  const output: string[] = [];
+  let exitCode: number | undefined;
+  // Explicit process/rg fixtures; real Node syntax checks only. This never
+  // invokes the namespace helper or self-entry and qualifies no kernel facts.
+  const fixtureRequire = (name: string) => name === "node:child_process" ? {
+    execFileSync: (binary: string, args: string[], options: object) =>
+      execFileSync(binary === path.join(root, "bin/node") ? process.execPath : binary, args, options),
+  } : require(name);
+  runInNewContext(source.replace("Object.entries(checks)", "Object.entries({ host_assets: checks.host_assets })") +
+    "\nmodule.exports = main;", { require: fixtureRequire, module,
+    process: { argv: ["node", "probe.cjs", root, "engine"], env: { HOME: path.join(root, "home"), PATH: "/usr/bin:/bin" },
+      stdout: { write: (line: string) => output.push(line) }, exit: (code: number) => { exitCode = code; } } });
+  await (module.exports as () => Promise<void>)();
+  return { exitCode, output: output.join(""), diagnostic: JSON.parse(output.at(-1)!) };
+}
+
+describe("cloud Host staged entry closure (portable syntax/existence only)", () => {
+  it("checks all original Host/self-entry/kernel module syntax plus neutral rg", async () => {
+    const result = await hostAssetProbe();
+    expect(result).toMatchObject({ exitCode: 0, diagnostic: { ok: true, failedChecks: [] } });
+  });
+  it.each(hostSources.slice(1))("refuses missing staged %s without leaking details", async missing => {
+    const result = await hostAssetProbe({ missing });
+    expect(result).toMatchObject({ exitCode: 1, diagnostic: { ok: false, failedChecks: ["host_assets"] } });
+  });
+  it.each(hostSources.slice(1))("refuses invalid staged %s without leaking source bytes", async invalid => {
+    const result = await hostAssetProbe({ invalid });
+    expect(result).toMatchObject({ exitCode: 1, diagnostic: { ok: false, failedChecks: ["host_assets"] } });
+    expect(result.output).not.toContain("INVALID_SYNTAX_SENTINEL");
+  });
+});
+
+it("binds both offline phases to engine10003 and the exact pinned Host marker without nesting Cursor userns", async () => {
+  const root = await directory();
+  for (const relative of ["bin/node", "bin/start-engine.sh", "lib/zeros/setup-cloud-workspace.mjs", "lib/zeros/cloud-worker-supervisor.mjs"]) {
+    const filename = path.join(root, relative);
+    await mkdir(path.dirname(filename), { recursive: true });
+    await writeFile(filename, "fixture");
+  }
+  await writeFile(path.join(root, "manifest.json"), canonicalJson(createManifest({ source: { commit: "a".repeat(40), lockfileSha256: "b".repeat(64) },
+    engineProtocolVersion: 43, agents: { claude: { sdk: "1", cli: "1" }, codex: { package: "1" }, cursor: { sdk: "1" } } }, await inventoryTree(root))));
+  const tools = await import("../cloud-workspace-validation/runtime-bundle/toolchain");
+  const scopes: string[] = [];
+  vi.spyOn(tools, "runTool").mockImplementation(async (command, args) => {
+    expect(command).toBe("setpriv");
+    expect(args.filter(arg => arg === "--unshare-user")).toHaveLength(1);
+    expect(args[args.indexOf("--uid") + 1]).toBe("10003");
+    expect(args[args.indexOf("--gid") + 1]).toBe("10003");
+    const target = args.indexOf("/etc/zeros/cloud-worker.json");
+    const marker = JSON.parse(await readFile(args[target - 1], "utf8"));
+    expect(marker).toEqual({ backend: "cloud-worker", uid: 10003, gid: 10003, profile: "zeros-cloud-worker-v4", version: 4,
+      toolchain: { node: `${args.at(-2)}/bin/node`, supervisor: `${args.at(-2)}/worker/${hostSources[0]}` } });
+    const phase = args.at(-1)!;
+    scopes.push(phase);
+    return JSON.stringify({ checks: [phase === "cursor" ? "cursor_load" : "node_abi"] }) + "\n" +
+      JSON.stringify({ component: "bundle", ok: true, failedChecks: [] });
+  });
+  const { runClosureProbes } = await import("../cloud-workspace-validation/runtime-bundle/probe");
+  await expect(runClosureProbes(root)).resolves.toMatchObject({ checks: ["node_abi", "cursor_load"], isolation: "mount_namespace_no_network" });
+  expect(scopes).toEqual(["engine", "cursor"]);
+});
+
 describe("pnpm runtime closure", () => {
+  it("stages the neutral provider closure without deleted ZSR qualification sources", async () => {
+    expect(SOURCE_SLICES).not.toContain("scripts/zsr-qualification");
+    const probe = await readFile("scripts/cloud-workspace-validation/runtime-bundle/probe.cjs", "utf8");
+    expect(probe).not.toContain("@anthropic-ai/sandbox-runtime");
+    expect(probe).not.toContain("zsr-supervisor.mjs");
+    expect(probe).not.toContain("containment/zsr-boundary.ts");
+    expect(probe).toContain("host-process-supervisor.mjs");
+  });
   it("retains production, peer, optional and workspace edges, terminates cycles, and regenerates relocatable shims", async () => {
     const temp = await directory(),
       source = path.join(temp, "source"),
@@ -338,7 +431,13 @@ describe("pnpm runtime closure", () => {
       )
         .map((entry) => path.basename(entry.target))
         .sort(),
-    ).toEqual([...names, "runtime-update-adapter.py", "cloud-resident-workload.mjs"].sort());
+    ).toEqual([...names, "runtime-update-adapter.py", "cloud-resident-workload.mjs",
+      "prepare-cloud-image-files.mjs", "publish-cloud-workload-custody.mjs", "cloud-resource-budget.mjs",
+      "cloud-resident-control.mjs"].sort());
+    expect(RUNTIME_HELPERS).toContainEqual({
+      source: "scripts/cloud-workspace-validation/sandbox/cloud-resource-budget.mjs",
+      target: "lib/zeros/cloud-resource-budget.mjs", optional: false,
+    });
     expect(RUNTIME_HELPERS).toContainEqual({
       source:
         "apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs",
@@ -367,6 +466,7 @@ describe("pnpm runtime closure", () => {
       ...RUNTIME_HELPERS.filter((entry) => !entry.optional).map(
         (entry) => entry.source,
       ),
+      ...hostSources,
       "scripts/cloud-workspace-validation/sandbox/start-engine.sh",
     ]) {
       const filename = path.join(source, relative);
@@ -388,6 +488,14 @@ describe("pnpm runtime closure", () => {
     const resolver = path.join(runtime, "lib/zeros/cloud-runtime-root.mjs");
     expect(await readFile(resolver)).toEqual(contents);
     expect((await lstat(resolver)).nlink).toBe(1);
+    for (const relative of hostSources) {
+      const staged = path.join(runtime, "worker", relative);
+      const file = await open(staged, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        expect((await file.stat()).isFile()).toBe(true);
+        expect(await file.readFile()).toEqual(await readFile(path.join(source, relative)));
+      } finally { await file.close(); }
+    }
     expect(await inventoryTree(runtime)).toContainEqual(
       expect.objectContaining({
         path: "lib/zeros/cloud-runtime-root.mjs",
@@ -412,7 +520,71 @@ describe("pnpm runtime closure", () => {
         ],
         { cwd: runtime, env: { PATH: "/usr/bin:/bin" }, encoding: "utf8" },
       ),
-    ).toBe("3");
+    ).toBe("5");
+  });
+
+  it.each(hostSources.flatMap(relative => [
+    { relative, kind: "missing" }, { relative, kind: "aliased" },
+  ]))("refuses $kind required Host source $relative before staging", async ({ relative, kind }) => {
+    const temp = await directory(), source = path.join(temp, "source");
+    for (const slice of SOURCE_SLICES) await mkdir(path.join(source, slice), { recursive: true });
+    for (const filename of [...ROOT_METADATA, ...RUNTIME_HELPERS.map(helper => helper.source),
+      ...hostSources, "scripts/cloud-workspace-validation/sandbox/start-engine.sh"]) {
+      await mkdir(path.dirname(path.join(source, filename)), { recursive: true });
+      await writeFile(path.join(source, filename), "fixture");
+    }
+    await rm(path.join(source, relative));
+    if (kind === "aliased") {
+      const alias = path.join(source, `${relative}.alias`);
+      await writeFile(alias, "fixture");
+      await link(alias, path.join(source, relative));
+    }
+    await expect(stageSources(source, path.join(temp, kind))).rejects.toThrow();
+  });
+
+  it("imports the actual resource-budget helper from its copied lib/zeros deployment path", async () => {
+    const temp = await directory(), source = path.join(temp, "source"), runtime = path.join(temp, "runtime");
+    for (const slice of SOURCE_SLICES) await mkdir(path.join(source, slice), { recursive: true });
+    const actualHelpers = new Set(["cloud-resource-budget.mjs", "cloud-resource-admission.mjs", "cgroup-resources.mjs", "cloud-runtime-root.mjs"]);
+    for (const relative of [...ROOT_METADATA, ...RUNTIME_HELPERS.map(helper => helper.source),
+      ...hostSources, "scripts/cloud-workspace-validation/sandbox/start-engine.sh"]) {
+      const filename = path.join(source, relative);
+      await mkdir(path.dirname(filename), { recursive: true });
+      await writeFile(filename, actualHelpers.has(path.basename(relative)) ? await readFile(relative) : "fixture");
+    }
+    await stageSources(source, runtime);
+    const observed = execFileSync(process.execPath, ["--input-type=module", "--eval",
+      "try { const m=await import('./lib/zeros/cloud-resource-budget.mjs'); " +
+      "if(typeof m.parseCloudResourceBudgetProjection==='function'&&typeof m.readCloudResourceBudgetProjection==='function')process.stdout.write('imported'); } " +
+      "catch { process.stdout.write('refused'); }"], {
+      cwd: runtime, env: { PATH: "/usr/bin:/bin" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    });
+    expect(observed).toBe("imported");
+  });
+
+  it("stages the required resident-control helper with its actual import closure and refuses a missing source", async () => {
+    const temp = await directory(), source = path.join(temp, "source"), runtime = path.join(temp, "runtime");
+    const residentSource = "scripts/cloud-workspace-validation/sandbox/cloud-resident-control.mjs";
+    for (const slice of SOURCE_SLICES) await mkdir(path.join(source, slice), { recursive: true });
+    for (const relative of new Set([...ROOT_METADATA, ...RUNTIME_HELPERS.filter(helper => !helper.optional).map(helper => helper.source),
+      ...hostSources, residentSource, "scripts/cloud-workspace-validation/sandbox/start-engine.sh"])) {
+      const filename = path.join(source, relative);
+      await mkdir(path.dirname(filename), { recursive: true });
+      await writeFile(filename, await readFile(relative));
+    }
+    await stageSources(source, runtime);
+    const staged = path.join(runtime, "lib/zeros/cloud-resident-control.mjs");
+    expect(await readFile(staged)).toEqual(await readFile(residentSource));
+    expect(await lstat(staged)).toMatchObject({ nlink: 1 });
+    expect((await lstat(staged)).mode & 0o777).toBe(0o555);
+    execFileSync(process.execPath, ["--check", staged], { stdio: ["ignore", "pipe", "pipe"] });
+    const observed = execFileSync(process.execPath, ["--input-type=module", "--eval",
+      "const m=await import('./lib/zeros/cloud-resident-control.mjs'); process.stdout.write(typeof m.CloudLegacyResidentControl);"], {
+      cwd: runtime, env: { PATH: "/usr/bin:/bin" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    });
+    expect(observed).toBe("function");
+    await rm(path.join(source, residentSource));
+    await expect(stageSources(source, path.join(temp, "missing-resident-control"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
 
@@ -575,7 +747,7 @@ describe.skipIf(!process.env.ZEROS_RUNTIME_BUNDLE_TEST_DIR)(
         "bin/node",
         "bin/start-engine.sh",
         "bin/cloud-engine-namespace",
-        "bin/cloud-process-supervisor",
+        ...hostSources.map(relative => `worker/${relative}`),
         "lib/zeros/setup-cloud-workspace.mjs",
         "lib/zeros/cloud-worker-supervisor.mjs",
         "worker/dist-engine/cli.js",
@@ -641,8 +813,8 @@ const root = process.argv[2];
       const spy = vi
         .spyOn(toolchain, "runTool")
         .mockImplementation((command, args, options, failure) => {
-          // This fixture proves the root-only resolver. The normal payload
-          // regression and real archive case separately execute Cursor as UID10001.
+          // This fixture proves the runtime-root resolver. The normal payload
+          // regression and real archive case execute Cursor as the engine.
           if (args.at(-1) === "cursor") return Promise.resolve(
             `${JSON.stringify({ checks: ["cursor_load"] })}\n${JSON.stringify({ component: "bundle", ok: true, failedChecks: [] })}`,
           );

@@ -526,8 +526,9 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
     // Code authority is the complement of EVERY semantic Design root, not only
     // the active canvas. HEAD/index can retain an old root during a rename and
     // a repository may intentionally carry several Design documents. Sticky
-    // recognition keeps this final commit backstop aligned with ZSR after an
-    // agent or external Git command edits away the repository evidence.
+    // recognition keeps this managed checkpoint check intact after an agent
+    // or external Git command edits away the repository evidence. It is an
+    // API authority check, not same-user filesystem protection.
     // Design authority is already exact-root authorized above and deliberately
     // avoids these repository-wide reads on every explicit checkpoint.
     const [discoveredDesignDirs, stickyDesignDirs, pointer] = await Promise.all(

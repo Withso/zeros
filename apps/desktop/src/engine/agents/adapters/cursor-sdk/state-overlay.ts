@@ -252,9 +252,8 @@ async function withPromotionLock<T>(
   }
 }
 
-/** Cloud provider history is writable by the worker, outside engine authority.
- * Return the destination without creating anything as the privileged engine;
- * cursor-host initializes it after crossing the admitted identity boundary. */
+/** Compatibility reader for the previous cloud workspace store layout.
+ * New cloud hosts use their original native HOME's prepared zeros-store. */
 export function cloudCursorStateRoot(cwd: string, providerHome: string | undefined): string {
   if (!path.isAbsolute(cwd) || typeof providerHome !== "string" || !path.isAbsolute(providerHome) ||
     cwd.includes("\0") || providerHome.includes("\0"))
@@ -310,9 +309,9 @@ export async function prepareCursorStateOverlay(
   };
 }
 
-/** Persist the immutable merge baseline outside the Cursor-writable state
- * directory before its host starts. A later engine can then finish the same
- * record-level CAS promotion after a hard crash. */
+/** Legacy overlays retain their merge baseline beside the provider state.
+ * A later engine can finish the same record-level CAS promotion after a hard
+ * crash. These recovery files do not establish a filesystem boundary. */
 export async function armCursorStateRecovery(
   overlay: CursorStateOverlay,
 ): Promise<CursorStateOverlay> {

@@ -48,10 +48,14 @@ export async function runClosureProbes(
       marker,
       canonicalJson({
         backend: "cloud-worker",
-        gid: 10001,
+        gid: 10003,
         profile: "zeros-cloud-worker-v4",
-        uid: 10001,
+        uid: 10003,
         version: 4,
+        toolchain: {
+          node: `${installed}/bin/node`,
+          supervisor: `${installed}/worker/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`,
+        },
       }),
       { mode: 0o444, flag: "wx" },
     );
@@ -75,7 +79,8 @@ export async function runClosureProbes(
       "--ambient-caps=-all",
       "bwrap",
       "--unshare-user",
-      // Map the builder's ownership to namespace root without host privileges.
+      // Start namespace setup as its root, then select the shared non-root
+      // engine identity for each offline phase before installing read-only proc.
       "--uid",
       "0",
       "--gid",
@@ -182,11 +187,11 @@ export async function runClosureProbes(
       installed,
     );
     const checks: string[] = [];
-    // Each namespace maps its identity before installing the read-only proc
-    // view. Cursor must run as the worker, while engine-only imports need root.
+    // Map the shared non-root engine identity before installing read-only proc
+    // (#410). These two bounded namespaces verify archive closure only.
     for (const [phase, identity] of [
-      ["engine", "0"],
-      ["cursor", "10001"],
+      ["engine", "10003"],
+      ["cursor", "10003"],
     ] as const) {
       const phaseArgs = [...args, phase];
       phaseArgs[phaseArgs.indexOf("--uid") + 1] = identity;

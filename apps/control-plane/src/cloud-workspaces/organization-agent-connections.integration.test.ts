@@ -7,6 +7,7 @@ import { withSystemTx } from "../db.js";
 import { seedRuntimeBase, seedRuntimeBundle, runtimeBase, runtimeWitness } from "./runtime-test-fixtures.js";
 import { seedReadyCloudWorkspace, withCloudFixturePurgeTx } from "./test-fixtures.js";
 import { DatabaseCloudAgentCredentialService } from "./agent-credentials.js";
+import { cloudAgentModels } from "./agent-models.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 d("organization agent accounts", () => {
@@ -60,6 +61,19 @@ d("organization agent accounts", () => {
       },
     );
   }
+  it.each([undefined,false])("lists all supported models with a legacy allModels=%s request and preserves exact retries",async allModels=>{
+    const credential=await account(),selection={expectedRevision:0,credentialId:credential.id,credentialRevision:1,
+      models:["claude-haiku-4-5"],consent:"zeros-managed",...(allModels===undefined?{}:{allModels})};
+    expect(await service.setOrganizationConnection(fixture.userId,fixture.organizationId,"claude",selection)).toEqual({revision:1,replayed:false});
+    const saved=(await pool.query("SELECT models,all_models,revision,request_sha256 FROM cloud_agent_organization_connections WHERE org_id=$1 AND owner_user_id=$2 AND provider='claude'",[fixture.organizationId,fixture.userId])).rows[0];
+    expect(saved).toMatchObject({models:["claude-haiku-4-5"],all_models:false,revision:"1"});
+    expect((await service.organizationConnections(fixture.userId,fixture.organizationId)).connections)
+      .toMatchObject([{connected:true,credentialId:credential.id,models:cloudAgentModels("claude"),allModels:false}]);
+    expect(await service.setOrganizationConnection(fixture.userId,fixture.organizationId,"claude",selection)).toEqual({revision:1,replayed:true});
+    expect((await service.authorizeOrganizationForWorkspace(fixture.userId,fixture.workspaceId)).delegations)
+      .toMatchObject([{models:cloudAgentModels("claude"),allModels:false}]);
+    expect((await pool.query("SELECT models,all_models,revision,request_sha256 FROM cloud_agent_organization_connections WHERE org_id=$1 AND owner_user_id=$2 AND provider='claude'",[fixture.organizationId,fixture.userId])).rows[0]).toEqual(saved);
+  });
   it("connects multiple private accounts before a workspace exists and isolates organizations", async () => {
     await withCloudFixturePurgeTx(pool, fixture, async tx => {
       await tx.query("DELETE FROM cloud_workspace_computer_sources WHERE workspace_id=$1", [fixture.workspaceId]);

@@ -11,17 +11,21 @@ function fixture() {
   const runtime = createCloudRuntimeResolver({ filesystem: tree.filesystem }).resolve();
   const hostId = randomUUID(), organizationId = randomUUID(), workspaceId = randomUUID();
   const sourceId = randomUUID();
-  let witness = { hostId, organizationId, workspaceId, engineId: sourceId, generation: 1, fence: 1 };
+  let witness: {hostId:string; organizationId:string; workspaceId:string; engineId:string|null; generation:number; fence:number}
+    = { hostId, organizationId, workspaceId, engineId: sourceId, generation: 1, fence: 1 };
+  const descriptor = () => ({ ...witness, protocol: "zeros.resident-pty/v1", runtimeId: runtime.runtimeId,
+    manifestSha256: runtime.manifestSha256, bootId: runtime.bootId, supervisorSessionId: runtime.supervisorSessionId,
+    scope: `${runtime.cgroupRoot}/engine-runtime/engine-workload-${hostId}` });
   const resident = {
     identity: { hostId, organizationId, workspaceId },
-    descriptor: () => ({ ...witness }),
-    witness: vi.fn(async () => ({ ...witness })),
+    descriptor,
+    witness: vi.fn(async () => descriptor()),
     start: vi.fn(async () => {}), stop: vi.fn(async () => {}),
     detach: vi.fn(async expected => {
       if (expected.hostId !== hostId || expected.engineId !== witness.engineId || expected.fence !== witness.fence)
         throw new Error("Resident authority rejected");
       witness = { ...witness, engineId: null, fence: witness.fence + 1 };
-      return { ...witness };
+      return descriptor();
     }),
     enroll: vi.fn(async value => { witness = { ...witness, engineId: value.engineId, generation: value.generation, fence: value.fence }; }),
   };
@@ -29,7 +33,7 @@ function fixture() {
   const requestEngineHandoff = vi.fn(async (_endpoint, command) => ({ version: 1, ...command, accepted: true,
     ...(command.action === "prepare" ? { receipt: { version: 1, ...command.request, phase: "fenced", activityRevision: 9 } } : {}) }));
   const supervisor = new CloudWorkerSupervisor({ runtime, engineScope: { retire },
-    verifySelectedRuntime: value => value, createResident: () => resident, requestEngineHandoff });
+    verifySelectedRuntime: value => value, createResident: async () => resident, requestEngineHandoff });
   supervisor.resident = resident;
   const launch = vi.spyOn(supervisor, "launch").mockResolvedValue(12345);
   const environment = (engineId = randomUUID(), generation = 2) => ({
@@ -169,13 +173,16 @@ describe("resident supervisor attach fencing", () => {
       // Only kernel/IPC effects are substituted; descriptor, enroll, detach
       // and supervisor requests use the real production implementations.
       host.request = vi.fn(async () => ({}));
+      // Substitute only the root's kernel readback. Public descriptors carry
+      // no original controller PID, inode or private record authority.
+      vi.spyOn(host, "rootCustody").mockReturnValue({ version: 1 });
       await host.enroll({ organizationId: f.organizationId, workspaceId: f.workspaceId,
         generation: 2, engineId: f.sourceId, fence: 3, token: "synthetic" });
       f.supervisor.resident = host;
       const request = { operation: "prepare", resident: { hostId: f.hostId, engineId: f.sourceId, fence: 3 } };
       const prepared = await f.supervisor.apply(request);
       expect(prepared.resident).toMatchObject({ engineId: null, generation: null, fence: 4,
-        scope: `${f.supervisor.runtime.cgroupRoot}/engine-workload-${f.hostId}` });
+        scope: `${f.supervisor.runtime.cgroupRoot}/engine-runtime/engine-workload-${f.hostId}` });
       expect(await f.supervisor.apply(request)).toEqual(prepared);
       expect(await host.witness()).toEqual(prepared.resident);
       expect(f.retire).toHaveBeenCalledExactlyOnceWith({ preserveWorkload: f.hostId });

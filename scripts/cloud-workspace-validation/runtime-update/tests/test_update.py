@@ -406,9 +406,28 @@ class UpdateTests(unittest.TestCase):
     def test_resident_document_rejects_foreign_wrong_prefix_and_nested_scopes(self):
         _, _, _, resident, _, _ = self.resident_fixture()
         for scope in (b.CGROUP + "/engine-workload-11111111-1111-4111-8111-111111111111",
-                      b.CGROUP + "/workload-" + resident["hostId"], resident["scope"] + "/nested"):
+                      b.CGROUP + "/workload-" + resident["hostId"], resident["scope"] + "/nested",
+                      b.CGROUP + "/engine-runtime/engine-workload-11111111-1111-4111-8111-111111111111",
+                      b.CGROUP + "/engine-runtime/engine-" + resident["hostId"],
+                      b.CGROUP + "/engine-runtime/engine-workload-shared/workload",
+                      b.CGROUP + "/engine-runtime", b.CGROUP,
+                      b.CGROUP + "/engine-runtime/engine-workload-" + resident["hostId"] + "/nested",
+                      b.CGROUP + "/engine-runtime/engine-workload-" + resident["hostId"] + "/",
+                      b.CGROUP + "/engine-runtime/../engine-workload-" + resident["hostId"],
+                      "/sys/fs/cgroup/foreign.service/engine-runtime/engine-workload-" + resident["hostId"]):
             with self.subTest(scope=scope), self.assertRaises(update.UpdateFailure):
                 update.resident_document(b, {**resident, "scope": scope})
+
+    def test_resident_document_accepts_only_exact_current_and_legacy_controller_scopes(self):
+        _, _, _, resident, _, _ = self.resident_fixture()
+        for scope in (resident["scope"], b.CGROUP + "/engine-runtime/engine-workload-" + resident["hostId"]):
+            attached = {**resident, "scope": scope}
+            detached = {**attached, "engineId": None, "generation": None, "fence": 2}
+            for value in (attached, detached):
+                with self.subTest(scope=scope, detached=value["engineId"] is None):
+                    self.assertIs(update.resident_document(b, value), value)
+            other_scope = resident["scope"] if scope != resident["scope"] else b.CGROUP + "/engine-runtime/engine-workload-" + resident["hostId"]
+            self.assertFalse(update.same_resident(attached, {**detached, "scope": other_scope}))
 
     def test_resident_foreign_witness_and_unfenced_receipt_cannot_authorize_consumption(self):
         for change in ("resident", "receipt"):
@@ -504,7 +523,7 @@ class UpdateTests(unittest.TestCase):
                     "resident": detached}
         runtime.supervisor = supervisor
         read_fd, write_fd = os.pipe()
-        report = {"profile": "zeros-cloud-worker-v4", "qualified": True, "runtime": self.source}
+        report = {"version": 2, "boundary": "workspace-vm", "profile": "zeros-cloud-worker-v4", "qualified": True, "runtime": self.source}
         diagnostic = {"schema": "zeros.diagnostic/v1", "component": "attester", "ok": True,
                       "stage": "done", "exitCode": 0, "failedChecks": []}
         os.write(write_fd, b.packed(report) + b"\n" + b.packed(diagnostic) + b"\n")

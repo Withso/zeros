@@ -13,6 +13,7 @@ import {parseLanguageDocument} from "./cloud-language-document";
 import {LspError} from "./lsp-rpc";
 import {cloudGitAuthorEnvironment} from "../git/cloud-git-author";
 import {cloudComputerProcessEnvironment} from "./cloud-computer-environment";
+import { isCloudNativeHome, type CloudNativeHome } from "./containment/cloud-native-home";
 
 const MAX_OUTPUT=1024*1024,MAX_JOBS=8,MAX_CALLS=4;
 
@@ -21,8 +22,8 @@ type Job={process:BoundaryProcess;chunks:Buffer[];start:number;end:number;exit:{
 type ToolError=Extract<CloudAgentToolResult,{ok:false}>["error"];
 function unavailable(code:ToolError="unavailable"){return Object.assign(new Error("Cloud workload operation failed"),{toolCode:code});}
 
-/** Model tools execute only under the credential-free workload UID. The
- * execution owns every pending spawn, process, bounded output buffer and lease. */
+/** Model tools share the engine identity and the provider's physical HOME.
+ * The product tool environment contains only its admitted actor values. */
 export class CloudWorkloadTools implements CloudAgentToolBridge {
   readonly inputSchema=z.toJSONSchema(CloudAgentToolInputSchema) as Record<string,unknown>;
   private readonly jobs=new Map<string,Job>();
@@ -37,20 +38,21 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
   private readonly lifetime:CloudAgentExecutionLifetime;
   private readonly legacyLease:CloudAgentLease|null;
   private readonly runtime=resolveCloudRuntime();
-  constructor(authority:CloudAgentLease|CloudBootNativeAuthority,private readonly boundary:PreparedBoundary,private readonly cwd:string){
+  constructor(authority:CloudAgentLease|CloudBootNativeAuthority,private readonly boundary:PreparedBoundary,private readonly cwd:string,nativeHome:CloudNativeHome){
     // The engine resolves and admits this managed root before constructing the
     // bridge. Workspace authorization belongs to that admission and boundary;
     // secondary managed worktrees need not live below the primary checkout.
     if(!path.isAbsolute(cwd)||path.resolve(cwd)!==cwd||cwd.includes("\0"))
       throw new Error("Cloud workload root is invalid");
+    if (!isCloudNativeHome(nativeHome)) throw new Error("Cloud tools require the original physical native HOME");
     const boot=isCloudBootNativeAuthority(authority);
     if((!boot&&("mode" in authority)&&authority.mode==="boot-owner-v1")||(boot&&authority.cwd!==cwd))
       throw new Error("Cloud workload authority is invalid");
     this.legacyLease=boot?null:authority;
     this.lifetime=boot?authority.lifetime:authority;
     this.lifetime.assertLive();
-    this.env=cloudComputerProcessEnvironment({HOME:"/srv/zeros/home/agent",PATH:`${this.runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,LANG:"C.UTF-8",
-      USER:"zeros-agent",LOGNAME:"zeros-agent",SHELL:"/bin/bash",TMPDIR:"/tmp",ZEROS_WORKTREE_PATH:cwd,
+    this.env=cloudComputerProcessEnvironment({...nativeHome.environment(),PATH:`${this.runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,LANG:"C.UTF-8",
+      SHELL:"/bin/bash",ZEROS_WORKTREE_PATH:cwd,
       ...cloudGitAuthorEnvironment(authority.gitAuthor??null)},authority.environment?.values,"agent");
     this.lifetime.attach(this);this.lifetime.attach(boundary);
   }

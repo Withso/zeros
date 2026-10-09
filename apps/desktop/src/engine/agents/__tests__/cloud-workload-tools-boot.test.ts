@@ -1,6 +1,10 @@
 import { PassThrough } from "node:stream";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudWorkloadTools } from "../cloud-workload-tools";
+import { createCloudNativeHome } from "../containment/cloud-native-home";
 import type { BoundaryProcess, BoundarySpawnRequest, PreparedBoundary } from "../containment/types";
 import { testCloudBootFixture } from "./helpers/test-cloud-boot";
 vi.mock("../containment/cloud-runtime-root.mjs", async original => ({
@@ -10,6 +14,11 @@ vi.mock("../containment/cloud-runtime-root.mjs", async original => ({
 vi.mock("../cloud-mcp", async original => ({ ...await original<typeof import("../cloud-mcp")>(), readCloudRepositoryMcp: vi.fn(async () => []) }));
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+async function home() {
+  const root = await mkdtemp(path.join(os.tmpdir(), "zeros-boot-tool-home-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  return createCloudNativeHome({ dataRoot: root, provider: "claude", conversationId: "tools", executionId: "native-run" });
+}
 function workload() {
   const stopped = vi.fn(async () => {});
   const spawn = vi.fn(async (_request: BoundarySpawnRequest): Promise<BoundaryProcess> => {
@@ -23,7 +32,7 @@ function workload() {
 describe("genuine boot workload tools", () => {
   it.each(["/srv/zeros/workspace", "/srv/zeros/state/workspaces/managed-worktree"])("uses admitted boot authority and cwd %s without a lease or foreground CP request", async cwd => {
     const f = await testCloudBootFixture(cwd); cleanups.push(f.close);
-    const w = workload(), tools = new CloudWorkloadTools(f.authority, w.domain, cwd);
+    const w = workload(), tools = new CloudWorkloadTools(f.authority, w.domain, cwd, await home());
     cleanups.push(() => tools.stopAndProve());
     expect(f.authority).not.toHaveProperty("leaseId"); expect(f.authority).not.toHaveProperty("validate");
     expect(await tools.call({ operation: "exec", command: "synthetic", cwd: "/tmp/caller-root" })).toEqual({ ok: false, error: "invalid_input" });
@@ -35,18 +44,18 @@ describe("genuine boot workload tools", () => {
     expect(f.contextRequest).toHaveBeenCalledOnce(); expect(f.legacy.prepare).not.toHaveBeenCalled();
   });
   it("refuses copied helper-shaped boot authority before constructing a tool domain", async () => {
-    const f = await testCloudBootFixture(); cleanups.push(f.close); const w = workload();
-    expect(() => new CloudWorkloadTools({ ...f.authority }, w.domain, f.input.cwd)).toThrow();
+    const f = await testCloudBootFixture(); cleanups.push(f.close); const w = workload(), nativeHome = await home();
+    expect(() => new CloudWorkloadTools({ ...f.authority }, w.domain, f.input.cwd, nativeHome)).toThrow();
     expect(w.spawn).not.toHaveBeenCalled();
   });
   it("refuses a valid boot authority paired with a different managed root", async () => {
-    const f = await testCloudBootFixture(); cleanups.push(f.close); const w = workload();
-    expect(() => new CloudWorkloadTools(f.authority, w.domain, "/srv/zeros/state/workspaces/another-worktree")).toThrow();
+    const f = await testCloudBootFixture(); cleanups.push(f.close); const w = workload(), nativeHome = await home();
+    expect(() => new CloudWorkloadTools(f.authority, w.domain, "/srv/zeros/state/workspaces/another-worktree", nativeHome)).toThrow();
     expect(w.spawn).not.toHaveBeenCalled();
   });
   it("keeps revoked engine authority closed and owns retirement of its tool domain", async () => {
     const f = await testCloudBootFixture(); cleanups.push(f.close); const w = workload();
-    const tools = new CloudWorkloadTools(f.authority, w.domain, f.input.cwd); cleanups.push(() => tools.stopAndProve());
+    const tools = new CloudWorkloadTools(f.authority, w.domain, f.input.cwd, await home()); cleanups.push(() => tools.stopAndProve());
     await f.factory.disposeBoot();
     expect(await tools.call({ operation: "exec", command: "synthetic" })).toEqual({ ok: false, error: "unavailable" });
     expect(w.spawn).not.toHaveBeenCalled(); expect(w.domain.stopAndProve).toHaveBeenCalled();

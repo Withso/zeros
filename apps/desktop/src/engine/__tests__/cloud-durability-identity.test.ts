@@ -39,7 +39,7 @@ describe("cloud checkpoint Git identity", () => {
   afterEach(async () => {
     await rm(root, { recursive: true, force: true });
   });
-  it("enumerates checkout objects as the worker, without network or engine authority", async () => {
+  it("enumerates checkout objects as the actual engine without exposing network credentials", async () => {
     const { scanCloudWorkspaceChanges } =
       await import("../cloud-durability-runtime");
     await expect(scanCloudWorkspaceChanges(root)).rejects.toThrow(
@@ -49,8 +49,8 @@ describe("cloud checkpoint Git identity", () => {
     for (const [binary, , options] of mocks.command.mock.calls) {
       expect(binary).toBe("git");
       expect(options).toMatchObject({
-        uid: 10001,
-        gid: 10001,
+        uid: process.geteuid?.(),
+        gid: process.getegid?.(),
         env: {
           GIT_ALLOW_PROTOCOL: "",
           GIT_CONFIG_GLOBAL: "/dev/null",

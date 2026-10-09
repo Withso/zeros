@@ -8,16 +8,10 @@
 //      Playwright cache while a clean GitHub runner fails before either
 //      browser-backed assertion executes.
 //
-//   2. The contained-execution runtime. Other tests drive real
-//      bubblewrap/seccomp containment, which needs bubblewrap and socat
-//      installed AND Ubuntu's unprivileged-userns restriction lifted for the
-//      command. preflight.yml provisioned both; release.yml, release-alpha.yml
-//      and release-beta.yml provisioned neither. So the IDENTICAL
-//      `pnpm test:git` passed the PR gate and failed every release gate —
-//      3 test files on unprovisioned Ubuntu with "[zsr-supervisor] absolute
-//      bwrap unavailable", and 18 on macOS, where bubblewrap cannot exist at
-//      all. Alpha stayed red for 5 consecutive runs and both the Beta and
-//      Production gates for v0.1.10 failed on it.
+//   2. Offline archive closure. The shipped provider/ripgrep artifact tests
+//      use bubblewrap and setpriv against a read-only archive with no ambient
+//      dependencies. Ubuntu userns restrictions must be lifted only for that
+//      command. This qualifies artifact completeness, not agent isolation.
 //
 //   3. The control-plane package graph. Contract tests under scripts/ import
 //      control-plane sources, whose dependencies live in apps/control-plane's
@@ -44,7 +38,7 @@ const WORKFLOWS_DIR = path.join(ROOT, ".github", "workflows");
 // coverage — which is precisely how the release gates escaped it.
 const VITEST_COMMAND =
   /^\s+(?:run:\s*)?(?:bash scripts\/ci\/with-userns\.sh )?pnpm test:git(?: --shard="\$\{VITEST_PART\}\/\d+")?\s*$/m;
-const CONTAINMENT_ACTION = "./.github/actions/contained-execution-runtime";
+const CLOSURE_ACTION = "./.github/actions/runtime-closure-tools";
 const USERNS_WRAPPER = "bash scripts/ci/with-userns.sh pnpm test:git";
 
 type TestJob = {
@@ -90,9 +84,9 @@ describe("Vitest CI provisioning", () => {
     ]);
   });
 
-  it("runs the suite on Linux, the only host that can host the runtime", () => {
+  it("runs the artifact closure suite on Linux", () => {
     // bubblewrap does not exist on macOS. A macOS Vitest job cannot pass the
-    // containment tests at any provisioning level, so pinning the runner is
+    // archive namespace tests at any provisioning level, so pinning the runner is
     // part of the contract rather than an incidental choice.
     for (const { file, job, body } of jobs) {
       expect(body, `${file}:${job}`).toContain("runs-on: ubuntu-latest");
@@ -112,15 +106,14 @@ describe("Vitest CI provisioning", () => {
   );
 
   it.each(jobs)(
-    "provisions the contained-execution runtime before $file:$job runs Vitest",
+    "provisions offline artifact tools before $file:$job runs Vitest",
     ({ body }) => {
-      const runtime = body.indexOf(CONTAINMENT_ACTION);
+      const runtime = body.indexOf(CLOSURE_ACTION);
       const test = body.search(VITEST_COMMAND);
 
       expect(runtime).toBeGreaterThanOrEqual(0);
       expect(runtime).toBeLessThan(test);
-      // The action verifies a seccomp helper vendored under node_modules, so it
-      // cannot run before the install that puts it there.
+      // Keep the shared install/provision order before real artifact checks.
       expect(body.indexOf("pnpm install --frozen-lockfile")).toBeLessThan(
         runtime,
       );
@@ -158,9 +151,8 @@ describe("Vitest CI provisioning", () => {
   it.each(jobs)(
     "lifts the userns restriction for $file:$job's Vitest command",
     ({ body }) => {
-      // Installing bubblewrap is not sufficient: the containment tests nest a
-      // second capability-bearing user namespace that Ubuntu's bwrap AppArmor
-      // profile strips by default.
+      // Ubuntu may deny the offline artifact namespaces even with bwrap
+      // installed. Permit them only for this command, then restore policy.
       expect(body).toContain(USERNS_WRAPPER);
     },
   );

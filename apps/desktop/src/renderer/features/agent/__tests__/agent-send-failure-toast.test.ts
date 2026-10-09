@@ -1,14 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
 import type { AgentSendFailureInput } from "../agent-send-failure-toast";
+import { classifyCloudAdmissionFailure, type CloudAdmissionState } from "../cloud-admission-failure";
 
 const mocks = vi.hoisted(() => ({ error: vi.fn(), settings: vi.fn(), restart: vi.fn(),
-  workspace: vi.fn(), account: vi.fn(), restartVisible: vi.fn(), accountAccess: vi.fn() }));
+  workspace: vi.fn(), account: vi.fn(), restartVisible: vi.fn(), accountAccess: vi.fn(),
+  sessions: {} as Record<string, { cwd: string; cloudAdmissionFailure: CloudAdmissionState | null }>,
+}));
 vi.mock("../../../shared/ui/primitives/elements/toast", () => ({ toast: { error: mocks.error } }));
 vi.mock("../cloud-admission-status", () => ({ openCloudAdmissionSettings: mocks.settings }));
 vi.mock("../../../state/cloud-workspace-catalog", () => ({ cloudWorkspaceDocument: mocks.workspace, cloudCatalogGeneration: mocks.account }));
 vi.mock("../../../state/cloud-workspace-restart", () => ({ restartCloudWorkspace: mocks.restart, cloudWorkspaceRestartVisible: mocks.restartVisible }));
 vi.mock("../../team/cloud-workspace-account-access", () => ({ hasCloudWorkspaceAccountAccess: mocks.accountAccess }));
+vi.mock("../sessions-store", () => ({ useSessionsStore: { getState: () => ({ sessions: mocks.sessions }) } }));
 
 const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 let notify: typeof import("../agent-send-failure-toast").notifyAgentSendFailure;
@@ -19,6 +23,7 @@ const input = (error: unknown, extra: Partial<AgentSendFailureInput> = {}): Agen
 beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
+  mocks.sessions = {};
   mocks.workspace.mockReturnValue(undefined);
   mocks.account.mockReturnValue(1);
   mocks.restartVisible.mockReturnValue(true);
@@ -28,6 +33,52 @@ beforeEach(async () => {
 });
 
 describe("agent send failure toasts", () => {
+  it.each([
+    "cloud_workspace_v2_required", "cloud_runtime_upgrade_required", "cloud_agent_model_not_authorized",
+    "cloud_agent_credential_required", "cloud_agent_credential_expired", "cloud_agent_credential_revoked",
+    "cloud_agent_credential_refresh_required",
+  ])("does not toast %s when the exact cloud chat already owns its failure banner", code => {
+    mocks.sessions.chat = { cwd: folder, cloudAdmissionFailure: {
+      ...classifyCloudAdmissionFailure({ folder, error: code, agentId: "codex", model: "gpt-6.1-sol" })!,
+      code, turnId: "accepted-turn", agentId: "codex", model: "gpt-6.1-sol",
+    } };
+    // A flushed queue entry retains its notification UUID while admission is
+    // owned by the accepted user-turn UUID. Both describe this same refusal.
+    expect(notify(input(code, { attemptId: "original-queued-uuid" }))).toBe(false);
+    expect(mocks.error).not.toHaveBeenCalled();
+  });
+
+  it("does not hide a different workspace, chat, provider or admission cause behind another banner", () => {
+    const code = "cloud_agent_credential_expired";
+    mocks.sessions.chat = { cwd: folder, cloudAdmissionFailure: {
+      ...classifyCloudAdmissionFailure({ folder, error: code, agentId: "codex" })!,
+      code, turnId: "turn", agentId: "codex", model: "gpt-6.1-sol",
+    } };
+    expect(notify(input(code, { folder: folder.replace("22222222", "44444444") }))).toBe(true);
+    expect(notify(input(code, { chatId: "other-chat" }))).toBe(true);
+    expect(notify(input(code, { agentId: "claude", attemptId: "other-provider" }))).toBe(true);
+    expect(notify(input("cloud_agent_credential_revoked", { attemptId: "other-cause" }))).toBe(true);
+    expect(mocks.error).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps a suppressed banner acknowledgement separate from a later unrepresented attempt", () => {
+    const code = "cloud_agent_credential_expired";
+    mocks.sessions.chat = { cwd: folder, cloudAdmissionFailure: {
+      ...classifyCloudAdmissionFailure({ folder, error: code, agentId: "codex" })!,
+      code, turnId: "turn", agentId: "codex", model: "gpt-6.1-sol",
+    } };
+    expect(notify(input(code))).toBe(false);
+    mocks.sessions.chat.cloudAdmissionFailure = null;
+    expect(notify(input(code))).toBe(true);
+    expect(mocks.error).toHaveBeenCalledOnce();
+  });
+
+  it("retains ordinary queue feedback when the cloud session has no admission failure", () => {
+    mocks.sessions.chat = { cwd: folder, cloudAdmissionFailure: null };
+    expect(notify(input(undefined, { reason: "queued_timeout" }))).toBe(true);
+    expect(mocks.error).toHaveBeenCalledExactlyOnceWith("Message wasn't sent in time", expect.any(Object));
+  });
+
   it.each([
     ["cloud_workspace_v2_required", "This workspace uses a retired cloud runtime", undefined],
     ["cloud_runtime_upgrade_required", "This workspace is on an older runtime", undefined],

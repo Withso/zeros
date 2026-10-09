@@ -311,7 +311,15 @@ Zeros runs the same product against two runtimes. Handle both on every change.
      workbench status standard (docs/design-system.md).
    - Passive reads never wake a VM; explicit user actions follow the idle and
      wake policy.
-   - Credentials stay outside the VM except bounded per-operation grants.
+   - Infrastructure credentials stay outside the VM; admitted provider material
+     is delivered to the CLI. Agents can read engine data on their VM, including
+     the owner credential vault, VM credential and other conversations.
+   - The workspace VM is the cloud isolation boundary: one trust domain per
+     workspace. The engine, agents, tools, terminals/SSH/LSP and capture run as
+     one non-root user, `zeros-engine` (VM UID/GID 10003), without an agent sandbox,
+     in the real checkout with normal VM egress. Per-conversation directories
+     provide state separation, not a security boundary.
+     Cloud retains API authoring for now as policy, not OS-enforced Design protection.
    - Actor roles (prompter, developer, manager, owner) gate actions on the
      server, not only in the UI.
    - Several devices attach at once and must converge.

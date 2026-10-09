@@ -182,7 +182,6 @@ import {
 } from "./containment/types";
 import { HostExecutionBoundary } from "./containment/host-boundary";
 import { RoutingExecutionBoundary } from "./containment/routing-boundary";
-import { ZsrExecutionBoundary } from "./containment/zsr-boundary";
 import { UtilityBoundaryPool } from "./containment/utility-boundary-pool";
 import {
   WarmSessionBoundaryPool,
@@ -194,8 +193,8 @@ import {
   localPreviewGatewayFactory,
   type BoundaryPreviewGateway,
   type BoundaryPreviewGatewayFactory,
-  type ZsrPreviewTarget,
-} from "./containment/zsr-preview-gateway";
+  type PreviewTarget,
+} from "./containment/preview-gateway";
 
 /** Provider startup is a control-plane operation, not a model turn. Keep its
  * deadline below the renderer's admission ceiling so the gateway still
@@ -1408,7 +1407,7 @@ import {adminWorkspaceSystemInstruction,cloudExecutionLifetime,cloudProviderExec
   isCloudBootAgentSelection,isCloudBootAgentExecutionFactory,isCloudBootProviderExecution,
   type CloudAgentExecutionFactory,type CloudAgentSelection,type CloudBootAgentSelection,type CloudBootAgentExecutionFactory,
   type CloudBootTurnReservation} from "./cloud-provider-execution";
-import {copyCloudNativeForkHistory,CLOUD_NATIVE_HISTORY_ROOT} from "./containment/cloud-native-history";
+import {copyCloudNativeForkHistory,CLOUD_NATIVE_HISTORY_ROOT,CloudNativeHistoryError} from "./containment/cloud-native-history";
 import {loadCloudWorkerConfiguration} from "./containment/cloud-worker-config";
 import {CloudAgentExecutionAdmissionSchema,type CloudAgentExecutionAdmission} from "@zeros/protocol/cloud-agent-execution";
 import type {CloudQueuedPrompt} from "@zeros/protocol/cloud-commands";
@@ -1606,7 +1605,7 @@ export class AgentGateway {
    * flight so duplicate bridge clients cannot multiply cold SDK/auth work. */
   private readonly agentInitializeFlights = new Map<
     string,
-    Promise<InitializeResponse>
+    { result: Promise<InitializeResponse> }
   >();
   /** Dedupe concurrent listAgents calls. Without this, every render
    *  loop in the renderer that hits sessions.listAgents() spawns its
@@ -2015,6 +2014,10 @@ export class AgentGateway {
         await this.endSession(owner.agentId, executionId);
       } else {
         await this.sessionTools.stop(executionId);
+      }
+      if (this.executionBoundary.backend === "cloud-worker" && error instanceof AggregateError &&
+          error.errors[0] instanceof CloudNativeHistoryError) {
+        throw this.boundaryAdmissionFailure(owner?.agentId ?? "", "newSession", error);
       }
       throw error;
     } finally {
@@ -2905,6 +2908,14 @@ export class AgentGateway {
     error: unknown,
   ): Error {
     if (this.executionBoundary.backend === "cloud-worker") {
+      if (error instanceof CloudNativeHistoryError) return error;
+      if (error instanceof AggregateError && error.errors[0] instanceof CloudNativeHistoryError) {
+        // Keep the fixed repair banner and the remaining retirement evidence
+        // without making the primary error its own aggregate cause.
+        return Object.assign(error.errors[0], {
+          cause: new AggregateError(error.errors.slice(1), "Cloud native preparation failed"),
+        });
+      }
       const code = (error as { code?: unknown } | null)?.code;
       const diagnosis = decodeCloudCommandFailure(code);
       if (diagnosis) return new CloudCommandFailureError(diagnosis);
@@ -3161,7 +3172,6 @@ export class AgentGateway {
       // Already releasing: this IS the release's own failure (an unprovable
       // teardown at dispose time). Surface it as-is.
       if (releaseStarted) throw error;
-      releaseStarted = true;
       // The operation failed. Retire the boundary rather than reuse it, keeping
       // the SAME shape the per-call path had: an unprovable teardown is reported
       // alongside the original failure, never instead of it.
@@ -3479,7 +3489,7 @@ export class AgentGateway {
   async openBoundaryPort(
     executionId: string,
     portId: string,
-  ): Promise<import("./containment/zsr-preview-gateway").PreviewNavigation> {
+  ): Promise<import("./containment/preview-gateway").PreviewNavigation> {
     const boundary = this.executionBoundaries.get(executionId);
     if (!boundary) throw new Error("execution boundary is unavailable");
     const mapping = boundary
@@ -3494,7 +3504,7 @@ export class AgentGateway {
     if (mapping.host !== "127.0.0.1" && mapping.host !== "::1") {
       throw new Error("session preview target is not loopback");
     }
-    const target: ZsrPreviewTarget = {
+    const target: PreviewTarget = {
       targetHost: mapping.host,
       targetPort: mapping.port,
       displayPort: mapping.displayPort,
@@ -3970,7 +3980,6 @@ export class AgentGateway {
       opts.executionBoundary ??
       new RoutingExecutionBoundary({
         host: new HostExecutionBoundary({ projectRoot: opts.projectRoot }),
-        sandbox: new ZsrExecutionBoundary({ projectRoot: opts.projectRoot }),
       });
     this.previewGatewayFactory =
       opts.previewGatewayFactory ?? localPreviewGatewayFactory;
@@ -4682,7 +4691,7 @@ export class AgentGateway {
       this.agentInitializeFlights.delete(agentId);
     }
     const existing = this.agentInitializeFlights.get(agentId);
-    if (existing) return existing;
+    if (existing) return existing.result;
 
     const initialize = (async () => {
       const adapter = await this.adapterFor(agentId);
@@ -4706,11 +4715,12 @@ export class AgentGateway {
       if (!this.disposed) this.agentInitializes.set(agentId, init);
       return init;
     })();
-    this.agentInitializeFlights.set(agentId, initialize);
+    const flight = { result: initialize };
+    this.agentInitializeFlights.set(agentId, flight);
     try {
       return await initialize;
     } finally {
-      if (this.agentInitializeFlights.get(agentId) === initialize) {
+      if (this.agentInitializeFlights.get(agentId) === flight) {
         this.agentInitializeFlights.delete(agentId);
       }
     }
@@ -7076,7 +7086,7 @@ export class AgentGateway {
     // Their neutral probe roots are removed AFTER, since a pooled boundary names
     // one as its workspace root until it is retired.
     await settle([
-      () => this.warmSessionBoundariesInstance?.dispose() ?? Promise.resolve(),
+      async () => { await this.warmSessionBoundariesInstance?.dispose(); },
     ]);
     await settle([() => this.retirePooledUtilityBoundaries()]);
     const probeRoots = [...this.providerProbeRoots.values()];

@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it,vi } from "vitest
 import { withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { seedRuntimeBundle, runtimeWitness } from "./runtime-test-fixtures.js";
+import { vmTransferReport } from "./runtime-transfer-proof.test-fixtures.js";
 import { seedProviderLossAttestation, seedReadyCloudWorkspace, withCloudFixtureOwnerTx, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
 import { bindCloudAllocationProvider } from "./allocation-provider.js";
 import type { CloudWorkspaceProvider } from "./provider.js";
@@ -625,11 +626,12 @@ import {CloudAgentBootCredentialResponseSchema} from "./agent-boot-contract.js";
     expect((await pool.query("SELECT phase FROM cloud_workspace_runtime_transitions WHERE transition_id=$1", [claim.transitionId])).rows[0].phase).toBe("staged");
   });
 
-  it("enrolls a fresh engine and moves the binding and pin together only at registration", async () => {
+  it.each([1, 2])("enrolls report v%s and moves the binding and pin together only at registration", async version => {
     const observationAt=new Date('2026-01-01T00:00:00.000Z');
     await pool.query("UPDATE cloud_workspace_provider_bindings SET provider_target='retained-target',last_observed_at=$2 WHERE workspace_id=$1",[fixture.workspaceId,observationAt]);
     const claim = await activated(), active = targetActive();
-    const enrollment = await service.enroll(claim,{active,controller:sourceActive(),report:report(active),rollback:false});
+    const proof = version === 1 ? report(active) : { ...vmTransferReport(), runtime: report(active).runtime };
+    const enrollment = await service.enroll(claim,{active,controller:sourceActive(),report:proof,rollback:false});
     expect(enrollment !== null).toBe(true);
     expect(enrollment!.engineInstanceId === fixture.engineInstanceId).toBe(false);
     expect((await pool.query("SELECT current_generation FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].current_generation).toBe(1);

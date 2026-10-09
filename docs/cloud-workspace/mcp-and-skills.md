@@ -1,5 +1,8 @@
 # Organization MCP and skills
 
+Execution follows the [normal VM agent execution model](security.md#agent-execution-model).
+The workspace VM provides isolation; ordinary conversation directories do not.
+
 Organization Settings has **MCP servers** and **Skills** sections. Administrators
 can edit organization defaults; each member can edit their own override. The
 control plane authorizes every read and write against current membership.
@@ -19,8 +22,8 @@ validation. Product names, including `design-draft` and
 `cloud-computer`, remain reserved. [Computer agent tools](computer-tools.md) are
 admitted separately for the immutable creator of a marked admin workspace.
 
-Stdio servers run as children of the provider inside its existing VM execution
-boundary and UID. Streamable HTTP and legacy SSE accept literal header maps;
+Stdio servers run as children of the provider as `zeros-engine` (10003), without an agent sandbox.
+The workspace VM is their compute isolation boundary. Streamable HTTP and legacy SSE accept literal header maps;
 Codex uses an in-boundary stdio relay for SSE. Remote URLs cannot embed
 credentials, query strings or fragments. OAuth and implicit environment-variable
 imports are unsupported. Secrets belong in the
@@ -56,12 +59,12 @@ is not a separate sandbox between an MCP server and its provider.
 
 Skills retain a name, discovery description and Markdown body. Member skills
 override organization skills by name. Before launch, the engine writes the
-snapshot into root-owned files and mounts it read-only at `.agents/skills`,
-`.claude/skills`, `.codex/skills` and `.cursor/skills` in the execution's private
-HOME. Claude and Cursor retain the explicit private user setting source for
-these admitted skills. Cursor's `.cursor` config view is engine-owned and
-read-only, with separate writable history and read-only skill mounts; it cannot
-acquire user MCP declarations from the checkout. Codex repository `.agents/skills`
+admitted snapshot into the conversation's configuration directories owned by `zeros-engine`
+at `.agents/skills`, `.claude/skills`, `.codex/skills` and `.cursor/skills`.
+Claude and Cursor retain the explicit per-conversation user setting source for
+these admitted skills. Native source selection and bounded repository projections
+are application policy. Engine and agents share one user, so ordinary directories
+do not isolate MCP/configuration or engine data from a same-user tool. Codex repository `.agents/skills`
 discovery is independently tested with raw project config disabled. Other native
 repository/plugin discovery is restricted unless separately proved safe. This
 feature does not copy Local plugins, Mac HOME or account/team settings. Bounded

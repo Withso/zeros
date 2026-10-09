@@ -6,8 +6,6 @@
 // stays the single place that computes the Zeros shell setup (login shell,
 // managed ZDOTDIR, scrubbed-or-full env) and hands it to the host.
 
-import path from "node:path";
-
 import {
   buildLoginArgs,
   buildOneShotArgs,
@@ -21,34 +19,15 @@ import type { PtyHandle, PtyMirrorFactory, PtySpawnRequest } from "./service";
 export { disposePtyHost } from "./pty-host-client";
 
 export function cloudHumanPtyLaunch(
-  request: Pick<
+  _request: Pick<
     PtySpawnRequest,
     "cloudWorkerIdentity" | "cloudWorkerSetprivPath" | "wrapSpawn"
   >,
   launch: { command: string; args: readonly string[] },
 ): { command: string; args: string[] } {
-  if (!request.cloudWorkerIdentity || request.wrapSpawn) {
-    return { command: launch.command, args: [...launch.args] };
-  }
-  if (
-    !request.cloudWorkerSetprivPath ||
-    !path.isAbsolute(request.cloudWorkerSetprivPath)
-  ) {
-    throw new Error(
-      "cloud terminal identity requires an absolute setpriv path",
-    );
-  }
-  return {
-    command: request.cloudWorkerSetprivPath,
-    args: [
-      `--reuid=${request.cloudWorkerIdentity.uid}`,
-      `--regid=${request.cloudWorkerIdentity.gid}`,
-      "--clear-groups",
-      "--",
-      launch.command,
-      ...launch.args,
-    ],
-  };
+  // Human terminals inherit the non-root engine identity. An original Host
+  // wrapper retains supervision; legacy worker metadata never selects a UID.
+  return { command: launch.command, args: [...launch.args] };
 }
 
 /** The real PtySpawnFn: forks a Zeros login shell via the Node PTY host,

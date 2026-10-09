@@ -1,5 +1,8 @@
 # Cloud client and runtime contract
 
+Execution follows the [normal VM agent execution model](security.md#agent-execution-model).
+The workspace VM provides isolation; ordinary conversation directories do not.
+
 This contract describes current desktop/control-plane/engine routing, delivery,
 replay and native access. Execution requires Boat, a saved v2 Computer source,
 a qualified v4 pin and actor protocol 2. Native mobile remains deferred;
@@ -202,10 +205,19 @@ remains: running/queued/dispatching turns, preparations, approvals/questions,
 background tasks, an active goal, Setup/Run scripts, a terminal foreground or
 detached user process, an SSH session, or recent terminal input/forwarding and
 preview traffic. **Recent workload input/traffic means the last ten minutes.**
-An interactive terminal shell at its prompt alone is idle; foreground groups,
-detached children and suspended processes remain work. Kernel inspection fails
-closed and never reads process arguments or environments. The quiet interval
-starts after these guards clear and lasts ten minutes before checkpoint + stop.
+Cloud workloads enter one shared workload cgroup through the original broker
+before exec; engine/control processes stay outside it. A fresh complete census
+of the whole engine-runtime tree governs idle, including the engine leaf and any
+new sibling; only exact infrastructure births are exempt. A confirmed original quiescent interactive shell may satisfy the
+C3 quiet populated-shell exception; foreground work, detached children, builtin
+loops, exec replacements and suspended processes remain work. Unknown means busy
+with bounded recovery, and inspection never reads process arguments or
+environments. The quiet interval starts after these guards clear and lasts ten
+minutes. A per-conversation Stop proves only the original process group, not
+escaped or detached descendants. VM drain closes launches; checkpoint and seal
+complete before kill. The outside root broker then uses whole-tree `cgroup.kill`
+and owns the final `populated=0` receipt, including retirement of a quiet shell
+and the engine itself. Local Host process-group behavior is unchanged.
 Existing control-plane workload/authority guards still apply, including the
 bounded lifetime of outstanding human-service grants.
 Automatic forwarding listeners alone do not count as workload. The control
@@ -609,7 +621,7 @@ grants fail at ingress and runtime admission and must be issued again.
 The optional `AGENT_BOUNDARY_PORT_OPENED.nativeTarget` carries the same opaque
 execution/listener identity. On v4 the native factory returns bearer-free
 logical URLs with that target. v1–v3 retain the signed-link factory; local
-execution retains its ZSR factory. The runtime resolves opaque identity from
+execution retains its native Host factory. The runtime resolves opaque identity from
 the current execution boundary, connects only to its actual loopback mapping,
 and checks that mapping during every short HTTP/HMR lease. A missing or changed
 listener fails closed; the display port never selects an agent socket.
@@ -932,11 +944,13 @@ and each SSH stream admits four concurrent channels. Transfers have 64 KiB
 runtime frames, a 256 MiB limit in each direction and a 30-minute connection
 limit; clients explicitly reconnect when a limit is reached.
 
-Each SSH worker runs in a separate PID namespace with privilege elevation
-disabled and no effective capabilities. Connection retirement kills detached
-shell descendants as well. Final checkpoints close new service admission and
-wait for active SSH namespaces to drain before capturing files. An unconfirmed
-drain retires engine authority; it cannot publish a successful checkpoint.
+Each SSH worker uses the same non-root engine identity with empty capabilities,
+NNP and seccomp. Closing a connection proves its original process group only;
+escaped or detached descendants stay visible to the shared workload census.
+Final VM drain closes new launch/service admission and finishes checkpoint/seal
+before the outside root broker kills the whole engine-runtime tree and verifies
+`populated=0`. An unconfirmed drain retires engine authority; it cannot report a
+successful stopped VM.
 The provider routing credential stays in the control-plane relay. Provider
 legacy SSH grants do not authorize these native workload services.
 

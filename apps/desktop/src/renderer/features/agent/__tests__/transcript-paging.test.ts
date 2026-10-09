@@ -41,6 +41,22 @@ function collect(node: ts.Node): void {
       `globalThis.${node.name.text} = ${initializer.getText(ast)};`,
     );
   }
+  if (
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    ["useEffect", "useLayoutEffect"].includes(node.expression.text) &&
+    node.arguments[0]
+  ) {
+    const effect = node.arguments[0].getText(ast);
+    const name = effect.includes("void loadOlder()")
+      ? "autoPage"
+      : effect.includes("const onScroll") && effect.includes("setNearTop")
+        ? "watchNearTop"
+        : effect.includes("olderPageEpochRef.current += 1")
+          ? "managePageEpoch"
+          : null;
+    if (name) callbacks.push(`globalThis.${name} = ${effect};`);
+  }
   ts.forEachChild(node, collect);
 }
 collect(ast);
@@ -67,7 +83,7 @@ const answer = (text: string): AgentTextMessage => ({
   createdAt: 2,
 });
 
-function setup(agentId = "claude") {
+function setup(agentId = "claude", strictWindowReceivers = false) {
   const initial = [user("oldest"), user("steering", true), answer("First ")];
   const store = {
     sessions: {
@@ -87,7 +103,10 @@ function setup(agentId = "claude") {
       };
     },
   };
-  const requests: Array<{ resolve: (messages: AgentMessage[]) => void }> = [];
+  const requests: Array<{
+    resolve: (messages: AgentMessage[]) => void;
+    reject: (error: Error) => void;
+  }> = [];
   const frames = new Map<number, FrameRequestCallback>();
   let frameId = 0;
   const turns = [
@@ -123,16 +142,42 @@ function setup(agentId = "claude") {
       listeners.get(type)?.delete(listener);
     },
   };
+  const browserWindow = {
+    requestAnimationFrame(callback: FrameRequestCallback): number {
+      if (strictWindowReceivers && this !== browserWindow) {
+        throw new TypeError("Illegal invocation");
+      }
+      frames.set(++frameId, callback);
+      return frameId;
+    },
+    cancelAnimationFrame(id: number): void {
+      if (strictWindowReceivers && this !== browserWindow) {
+        throw new TypeError("Illegal invocation");
+      }
+      frames.delete(id);
+    },
+  };
   const context = {
     ...paging,
     chatId: "chat",
     loadingOlder: false,
+    hasOlder: true,
+    nearTop: true,
+    surfaceActive: true,
     LOAD_OLDER_PAGE: 200,
     NEAR_TOP_PX: 600,
     cancelled: false,
     SETTLE_FRAMES: 4,
     olderPageRequestRef: { current: null as object | null },
     olderPageEpochRef: { current: 0 },
+    olderPageFailureRef: {
+      current: null as {
+        epoch: number;
+        cursor: string;
+        executionId: AgentSessionState["executionId"];
+        sessionId: AgentSessionState["sessionId"];
+      } | null,
+    },
     olderScrollCancelRef: { current: () => {} },
     settleEpochRef: { current: 0 },
     settleCancelRef: { current: () => {} },
@@ -144,24 +189,36 @@ function setup(agentId = "claude") {
     useSessionsStore: { getState: () => store },
     ipcWindowOlderMessages: vi.fn(
       () =>
-        new Promise<AgentMessage[]>((resolve) => requests.push({ resolve })),
+        new Promise<AgentMessage[]>((resolve, reject) =>
+          requests.push({ resolve, reject }),
+        ),
     ),
-    setLoadingOlder: vi.fn(),
-    setHasOlder: vi.fn(),
-    setNearTop: vi.fn(),
+    setLoadingOlder: vi.fn((_value: boolean) => {}),
+    setHasOlder: vi.fn((_value: boolean) => {}),
+    setNearTop: vi.fn((_value: boolean) => {}),
     surfaceActiveRef: { current: true },
     restoreInProgressRef: { current: false },
-    requestAnimationFrame: (callback: FrameRequestCallback) => {
-      frames.set(++frameId, callback);
-      return frameId;
-    },
-    cancelAnimationFrame: (id: number) => frames.delete(id),
-    console,
+    window: browserWindow,
+    requestAnimationFrame: browserWindow.requestAnimationFrame,
+    cancelAnimationFrame: browserWindow.cancelAnimationFrame,
+    console: { ...console, warn: vi.fn() },
   };
+  context.setLoadingOlder.mockImplementation((value) => {
+    context.loadingOlder = value;
+  });
+  context.setHasOlder.mockImplementation((value) => {
+    context.hasOlder = value;
+  });
+  context.setNearTop.mockImplementation((value) => {
+    context.nearTop = value;
+  });
   const runtime = vm.createContext(context);
   vm.runInContext(code, runtime);
   const loadOlder = runtime.loadOlder as () => Promise<void>;
   const probe = runtime.probe as () => Promise<void>;
+  const autoPage = runtime.autoPage as () => void;
+  const watchNearTop = runtime.watchNearTop as () => () => void;
+  const managePageEpoch = runtime.managePageEpoch as () => () => void;
   const flushFrames = () => {
     const pending = [...frames.values()];
     frames.clear();
@@ -177,9 +234,16 @@ function setup(agentId = "claude") {
     frames,
     loadOlder,
     probe,
+    autoPage,
+    watchNearTop,
+    managePageEpoch,
     flushFrames,
   };
 }
+
+// VM promises cross the test realm. Flush their continuations before driving
+// the next render's actual auto-paging effect.
+const flushPageEffects = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 describe.each(["claude", "codex", "cursor"])(
   "%s transcript paging",
@@ -372,6 +436,125 @@ describe("transcript page ownership", () => {
     expect(test.context.setLoadingOlder).toHaveBeenLastCalledWith(false);
     expect(test.context.setNearTop).toHaveBeenLastCalledWith(false);
     await duplicate;
+  });
+});
+
+describe("transcript page failures", () => {
+  it("preserves the Window receiver for native frame request and cancellation", async () => {
+    const test = setup("claude", true);
+    const pending = test.loadOlder();
+    test.requests[0].resolve([user("older")]);
+    await pending;
+    expect(test.context.console.warn).not.toHaveBeenCalled();
+    expect(test.store.sessions.chat.messages[0].id).toBe("older");
+    expect(test.frames.size).toBe(1);
+    test.scrollEl.dispatchEvent(new Event("wheel"));
+    expect(test.frames.size).toBe(0);
+    expect(test.context.olderPageRequestRef.current).toBeNull();
+  });
+
+  it("stops automatic retries and duplicate warnings after an older-page failure", async () => {
+    const test = setup();
+    const current = test.store.sessions.chat;
+    test.autoPage();
+    test.requests[0].reject(new TypeError("Illegal invocation"));
+    await flushPageEffects();
+    for (let render = 0; render < 25; render++) {
+      const previousReads = test.requests.length;
+      test.autoPage();
+      if (test.requests.length > previousReads) {
+        test.requests.at(-1)!.reject(new TypeError("Illegal invocation"));
+      }
+      await flushPageEffects();
+    }
+    expect(test.requests).toHaveLength(1);
+    expect(test.context.console.warn).toHaveBeenCalledTimes(1);
+    expect(test.context.loadingOlder).toBe(false);
+    expect(test.context.olderPageRequestRef.current).toBeNull();
+    expect(test.store.sessions.chat).toBe(current);
+  });
+
+  it("keeps a failed cursor blocked through live appends and near-top scrolls", async () => {
+    const test = setup();
+    const unwatch = test.watchNearTop();
+    const pending = test.loadOlder();
+    test.requests[0].reject(new Error("History read unavailable"));
+    await pending;
+    test.store.patchSession("chat", {
+      messages: [...test.store.sessions.chat.messages, user("live-tail")],
+    });
+    test.scrollEl.scrollTop = 100;
+    test.scrollEl.dispatchEvent(new Event("scroll"));
+    test.autoPage();
+    expect(test.requests).toHaveLength(1);
+    unwatch();
+  });
+
+  it("rearms a failed page when the reader leaves and returns to the near-top band", async () => {
+    const test = setup();
+    const unwatch = test.watchNearTop();
+    const pending = test.loadOlder();
+    test.requests[0].reject(new Error("History read unavailable"));
+    await pending;
+    test.scrollEl.scrollTop = 800;
+    test.scrollEl.dispatchEvent(new Event("scroll"));
+    test.autoPage();
+    expect(test.requests).toHaveLength(1);
+    test.scrollEl.scrollTop = 100;
+    test.scrollEl.dispatchEvent(new Event("scroll"));
+    test.autoPage();
+    expect(test.requests).toHaveLength(2);
+    test.requests[1].resolve([]);
+    await flushPageEffects();
+    expect(test.context.hasOlder).toBe(false);
+    unwatch();
+  });
+
+  it("allows a different oldest cursor after a failed read", async () => {
+    const test = setup();
+    const pending = test.loadOlder();
+    test.requests[0].reject(new Error("History read unavailable"));
+    await pending;
+    test.store.patchSession("chat", { messages: [user("new-cursor")] });
+    test.autoPage();
+    expect(test.requests).toHaveLength(2);
+    expect(test.context.ipcWindowOlderMessages).toHaveBeenLastCalledWith(
+      "chat", 200, "new-cursor",
+    );
+    test.requests[1].resolve([]);
+    await flushPageEffects();
+  });
+
+  it("rearms the same cursor only in a new surface epoch", async () => {
+    const test = setup();
+    const retire = test.managePageEpoch();
+    const pending = test.loadOlder();
+    test.requests[0].reject(new Error("History read unavailable"));
+    await pending;
+    retire();
+    test.managePageEpoch();
+    test.autoPage();
+    expect(test.requests).toHaveLength(2);
+    test.requests[1].resolve([]);
+    await flushPageEffects();
+  });
+
+  it("does not warn or block a replacement owner when its retired read rejects", async () => {
+    const test = setup();
+    const pending = test.loadOlder();
+    test.context.olderPageEpochRef.current++;
+    test.context.olderPageRequestRef.current = null;
+    test.context.loadingOlder = false;
+    test.store.patchSession("chat", {
+      executionId: "replacement", sessionId: "replacement",
+    });
+    test.requests[0].reject(new Error("Retired history read"));
+    await pending;
+    expect(test.context.console.warn).not.toHaveBeenCalled();
+    test.autoPage();
+    expect(test.requests).toHaveLength(2);
+    test.requests[1].resolve([]);
+    await flushPageEffects();
   });
 });
 

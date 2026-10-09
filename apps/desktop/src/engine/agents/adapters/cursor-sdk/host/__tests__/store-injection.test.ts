@@ -345,7 +345,7 @@ describe("cursor host — local agent store injection", () => {
     expect(res.agentId).toBe("create:store1@/state-root/w/alpha");
   });
 
-  it("seeds and exclusively uses the ZSR private provider-state root", async () => {
+  it("seeds and exclusively uses the explicit provider-state root", async () => {
     const temporary = await mkdtemp(
       path.join(os.tmpdir(), "zeros-cursor-host-state-"),
     );

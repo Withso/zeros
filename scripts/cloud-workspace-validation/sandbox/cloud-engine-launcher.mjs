@@ -22,16 +22,20 @@ import {
 import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CloudEngineCgroup } from "./cloud-engine-cgroup.mjs";
+import { CloudEngineCgroup, CloudRuntimeCgroup } from "./cloud-engine-cgroup.mjs";
 import {
   cloudEngineViewArguments,
   cloudEngineViewEnvironment,
   cloudEngineWorkspacePaths,
+  cloudEngineWorkerProjection,
 } from "./cloud-engine-view.mjs";
 import { readCloudHostRuntimeProfile } from "./cloud-runtime-profile.mjs";
 import { resolveCloudRuntime, cloudActiveRuntimeDescriptor } from "./cloud-runtime-root.mjs";
 import { readCloudComputerWorkspaceAdmission } from "./cloud-computer-checkout.mjs";
+import { validCloudResourceBudgetProjection } from "./cloud-resource-admission.mjs";
+import { CLOUD_ROOT_CUSTODY_DIRECTORY, cloudRootProcessBirth, readCloudRootControllerRecord } from "./publish-cloud-workload-custody.mjs";
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
+import { CLOUD_ENGINE_MUTABLE_LAYOUT } from "./prepare-cloud-image-files.mjs";
 
 function rootPath(file, directory = false) {
   if (realpathSync(file) !== file)
@@ -58,7 +62,7 @@ export function assertCloudEngineFilesProjection(runtime, {
   verifyRoot(root, true);
   const names = readdirSync(root);
   const allowed = ["workspace", "attachment-staging", "state", "home", "managed-settings",
-    "repos", ".zeros-setup"];
+    "repos", ".zeros-setup", ".zeros-engine-setup"];
   if (names.some(name => !allowed.includes(name)))
     throw new Error("Unexpected cloud engine file projection");
   if (names.includes("repos")) {
@@ -174,6 +178,17 @@ function publishViewFile(file, source, uid, gid, mode) {
   }
 }
 
+/** The original prepared root scope owns this budget. The readonly projection
+ * contains only its admitted SKU and truthful observations, never credentials. */
+export function publishCloudEngineResourceProjection(viewDirectory, document, {
+  publish = publishViewFile, verify = rootPath,
+} = {}) {
+  if (!/^\/run\/zeros\/view\/runtime-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(viewDirectory) ||
+      !validCloudResourceBudgetProjection(document)) throw new Error("Cloud root resource projection is invalid");
+  verify(`${viewDirectory}/etc`, true);
+  publish(`${viewDirectory}/etc/cloud-resource-contract.json`, JSON.stringify(document), 0, 0, 0o444);
+}
+
 /** Ubuntu's optional restriction requires an explicit application profile.
  * Never disable the global sysctl: only this root-owned launcher may grant
  * nested namespaces to its already confined engine and descendants. */
@@ -207,8 +222,7 @@ export function prepareCloudEngineAppArmor({
     throw new Error("Unsupported cloud kernel identity map");
   if (mappings[0][1] !== 0 || mappings[0][2] !== 4294967295) {
     // The provider owns outer namespace policy; a container cannot replace
-    // that host policy. The full engine/worker/capture admission below must
-    // still demonstrate the nested namespaces and all containment checks.
+    // that host policy. The engine admission below must still demonstrate its own deployment identity.
     return;
   }
   const parser = "/usr/sbin/apparmor_parser";
@@ -249,14 +263,14 @@ function verifyComputerRepositoryProjection(directory) {
         throw new Error("Unexpected cloud computer repository projection");
       const repository = path.join(ownerDirectory, name);
       const metadata = lstatSync(repository);
-      if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== 10001 || metadata.gid !== 10001 ||
+      if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== 10003 || metadata.gid !== 10003 ||
         realpathSync(repository) !== repository)
         throw new Error("Unsafe cloud computer repository projection");
     }
   }
 }
 
-export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source = process.env, operation = "serve") {
+export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source = process.env, operation = "serve", custody, placement, resourceProjection) {
   const profile = readCloudHostRuntimeProfile();
   if (profile.version !== 4 || runtime.profile !== "v4")
     throw new Error("Isolated cloud engine profile required");
@@ -281,13 +295,13 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(residentHostId ?? ""))
       throw new Error("Invalid resident service identity");
     privateDirectory("/run/zeros/resident-workloads", 0, 0, 0o700);
-    privateDirectory(`/run/zeros/resident-workloads/${residentHostId}`, 10003, 10001, 0o750);
+    privateDirectory(`/run/zeros/resident-workloads/${residentHostId}`, 10003, 10003, 0o750);
     rootPath("/opt/zeros-infra", true);
   }
   for (const file of [
     "/usr/bin/bwrap",
-    "/usr/bin/setpriv",
-    "/usr/bin/rg",
+    `${runtime.workerRoot}/binaries/rg`,
+    `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`,
     runtime.node,
     runtime.engineNamespace,
     `${runtime.workerRoot}/dist-engine/cli.js`,
@@ -300,12 +314,15 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
   rootPath(runtime.root, true);
   prepareCloudEngineAppArmor({runtime});
   privateDirectory("/run/zeros/view", 0, 0, 0o700);
-  privateDirectory("/run/zeros/view/settings", 10003, 10001, 0o750);
+  privateDirectory("/run/zeros/view/settings", 10003, 10003, 0o750);
   privateDirectory(profile.runtimeDirectory, 10003, 10003, 0o700);
   privateDirectory("/srv/zeros/state", 10003, 10003, 0o700);
   rootPath(runtimeLayout.engineFilesRoot, true);
   privateDirectory(runtimeLayout.attachmentTemporaryRoot, 10003, 10003, 0o700);
-  privateDirectory(path.join(runtimeLayout.engineFilesRoot, ".zeros-setup"), 0, 10001, 0o710);
+  privateDirectory(CLOUD_ENGINE_MUTABLE_LAYOUT.legacyStagingParent, 0, 10001, 0o710);
+  privateDirectory(CLOUD_ENGINE_MUTABLE_LAYOUT.stagingParent, 0, 10003, 0o710);
+  privateDirectory(CLOUD_ENGINE_MUTABLE_LAYOUT.agentHome, 10003, 10003, 0o755);
+  privateDirectory(CLOUD_ENGINE_MUTABLE_LAYOUT.captureHome, 10003, 10003, 0o700);
   assertCloudEngineFilesProjection(runtime);
   if (readdirSync(runtimeLayout.engineFilesRoot).includes("repos"))
     verifyComputerRepositoryProjection(path.join(runtimeLayout.engineFilesRoot, "repos"));
@@ -323,7 +340,7 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
     try { mkdirSync(target, { mode: 0o755 }); } catch (error) { if (error?.code !== "EEXIST") throw error; }
     const metadata = lstatSync(target);
     if (!metadata.isDirectory() || metadata.isSymbolicLink() || realpathSync(target) !== target ||
-      ![0, 10001].includes(metadata.uid) || readdirSync(target).length)
+      ![0, 10003].includes(metadata.uid) || readdirSync(target).length)
       throw new Error("Unsafe cloud primary mount target");
   }
   for (const kind of ["uid", "gid"]) {
@@ -343,13 +360,15 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
       "/run/zeros/view/settings/settings.managed.toml",
       managed,
       10003,
-      10001,
+      10003,
       0o640,
     );
   } finally {
     managed.fill(0);
   }
   const viewDirectory = `/run/zeros/view/runtime-${randomUUID()}`;
+  let rootContextFile;
+  let rootRecordFile;
   privateDirectory(viewDirectory, 0, 0, 0o700);
   try {
     privateDirectory(`${viewDirectory}/etc`, 0, 0, 0o755);
@@ -359,11 +378,23 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
     publishViewFile(`${viewDirectory}/active-runtime.json`, JSON.stringify(descriptor), 0, 0, 0o444);
     if (computer) publishViewFile(`${viewDirectory}/etc/cloud-workspace-paths.json`,
       JSON.stringify(cloudEngineWorkspacePaths(computer.repositoryDirectory)), 0, 0, 0o444);
-    publishViewFile(`${viewDirectory}/etc/cloud-worker.json`, JSON.stringify({
-      version: 4, backend: "cloud-worker", profile: "zeros-cloud-worker-v4", uid: 10001, gid: 10001,
-      toolchain: { node: runtime.node, supervisor: `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs`,
-        bwrap: "/usr/bin/bwrap", setpriv: "/usr/bin/setpriv" },
-    }), 0, 0, 0o444);
+    publishViewFile(`${viewDirectory}/etc/cloud-worker.json`, JSON.stringify(cloudEngineWorkerProjection(runtime)), 0, 0, 0o444);
+    publishCloudEngineResourceProjection(viewDirectory, resourceProjection);
+    if (custody) {
+      if (custody.common?.directory !== `${runtime.cgroupRoot}/engine-runtime` || !placement?.startsWith(`${custody.common.directory}/`))
+        throw new Error("Invalid original cloud workload custody");
+      privateDirectory("/run/zeros/workload-custody", 0, 0, 0o700);
+      publishViewFile(`${viewDirectory}/etc/cloud-workload-custody.json`, JSON.stringify(custody), 0, 0, 0o444);
+      const original = cloudRootProcessBirth(process.pid, readPhysical(`/proc/${process.pid}/stat`, 8192, null).toString("utf8"));
+      const [directory, encoded] = placement.split("@");
+      const [dev, ino] = encoded.split(":");
+      rootContextFile = `${CLOUD_ROOT_CUSTODY_DIRECTORY}/${path.basename(directory)}.launch.json`;
+      rootRecordFile = `${CLOUD_ROOT_CUSTODY_DIRECTORY}/${path.basename(directory)}.json`;
+      const context = { version: 1, episode: randomUUID(),
+        runtime: { runtimeId: runtime.runtimeId, bootId: runtime.bootId, supervisorSessionId: runtime.supervisorSessionId },
+        scope: { directory, dev, ino }, owner: { pid: original.pid, startToken: original.startToken } };
+      publishViewFile(rootContextFile, JSON.stringify(context), 0, 0, 0o444);
+    }
     for (const [name, target] of Object.entries({ current: `../zeros-infra/${runtime.runtimeId}`, bin: "current/bin",
       worker: "current/worker", "manifest.json": "current/manifest.json", logs: "/srv/zeros/log", state: "/srv/zeros/state" }))
       symlinkSync(target, `${viewDirectory}/facade/${name}`);
@@ -373,32 +404,62 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
     publishViewFile(`${viewDirectory}/facade/disk-epoch`, epoch, 0, 0, 0o444);
     return {...profile, runtime, viewDirectory, residentHostId,
       ...(computer ? { primaryRepository: computer.repositoryDirectory } : {}),
-      releaseView: () => rmSync(viewDirectory, {recursive:true,force:true})};
+      releaseView: () => {
+        rmSync(viewDirectory, {recursive:true,force:true});
+        if (rootContextFile) rmSync(rootContextFile, {force:true});
+        if (rootRecordFile) rmSync(rootRecordFile, {force:true});
+      }};
   } catch (error) {
     rmSync(viewDirectory, {recursive:true,force:true});
+    if (rootContextFile) rmSync(rootContextFile, {force:true});
     throw error;
   }
 }
 
-/** The child cannot enter the general engine until the host has positively
- * placed it in its finite cgroup. Closing a failed barrier is never used to
- * cancel launch: the child is killed first and the complete scope is drained. */
+function assertCloudRootOutside(runtime) {
+  if (process.getuid?.() !== 0 || process.geteuid?.() !== 0 || process.getgid?.() !== 0 ||
+      readPhysical("/proc/self/cgroup", 8192, null).toString("utf8").trim() !== `0::${runtime.cgroupRoot.slice("/sys/fs/cgroup".length)}/host`)
+    throw new Error("Cloud root monitor placement was refused");
+}
+
+/** @param {string} file
+ * @param {string[]} args
+ * @param {import('node:child_process').SpawnOptions} options
+ * @returns {import('node:child_process').ChildProcess} */
+function spawnCloudEngine(file, args, options) {
+  return spawn(file, args, options);
+}
+
+/** @type {import('node:events').EventEmitter} */
+const cloudEngineSignals = process;
+
+/** The root wrapper remains outside delegation. Its fixed C transition
+ * verifies and places only the unreaped, blocked, fully dropped direct child.
+ * The outside root owner alone survives final whole-tree retirement.
+ * @param {{operation?: string, source?: NodeJS.ProcessEnv, runtime?: any,
+ * scope?: any, prepare?: typeof prepareCloudEngineView,
+ * spawnProcess?: typeof spawnCloudEngine,
+ * signals?: import('node:events').EventEmitter,
+ * assertOutside?: typeof assertCloudRootOutside,
+ * retireRuntime?: () => Promise<unknown>, publish?: (report: unknown) => void}} options */
 export async function launchCloudEngine({
   operation = "serve",
   source = process.env,
   runtime = resolveCloudRuntime(),
   scope,
   prepare = prepareCloudEngineView,
-  spawnProcess = spawn,
-  signals = process,
+  spawnProcess = spawnCloudEngine,
+  signals = cloudEngineSignals,
+  assertOutside = assertCloudRootOutside,
+  retireRuntime = () => new CloudRuntimeCgroup({ runtime }).retire(),
+  publish = report => process.stdout.write(JSON.stringify(report) + "\n"),
 } = {}) {
   if (runtime.profile !== "v4") throw new Error("Isolated cloud engine profile required");
-  const profile=prepare(runtime, source, operation);
-  runtime = profile?.runtime ?? runtime;
+  assertOutside(runtime);
+  let profile;
   let args, environment;
+  let prepared = false;
   try {
-    args = cloudEngineViewArguments(operation,profile?.version,runtime,profile?.viewDirectory,profile?.primaryRepository,profile?.residentHostId);
-    environment = cloudEngineViewEnvironment(source, operation,runtime);
     if (!scope) {
       let instanceId;
       {
@@ -411,8 +472,35 @@ export async function launchCloudEngine({
       scope = new CloudEngineCgroup({runtime, instanceId, kind: operation === "resident" ? "workload" : "engine"});
     }
     scope.prepare();
+    prepared = true;
+    let infrastructure = [];
+    if (operation === "serve" && source.ZEROS_ROOT_RESIDENT_CUSTODY_B64 !== undefined) {
+      let expected;
+      try {
+        const encoded = source.ZEROS_ROOT_RESIDENT_CUSTODY_B64;
+        if (typeof encoded !== "string" || encoded.length > 32768) throw new Error();
+        expected = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+      } catch { throw new Error("Resident original custody unavailable"); }
+      const current = readCloudRootControllerRecord({ runtime: expected.runtime, scope: expected.scope, owner: expected.owner, episode: expected.episode });
+      const seed = scope.custodySeed();
+      if (JSON.stringify(expected) !== JSON.stringify(current) || current.birth.kind !== "resident" ||
+          current.common.directory !== seed.common.directory || current.common.dev !== seed.common.dev || current.common.ino !== seed.common.ino ||
+          current.workload.directory !== seed.workload.directory || current.workload.dev !== seed.workload.dev || current.workload.ino !== seed.workload.ino)
+        throw new Error("Resident original custody changed");
+      infrastructure = [current.birth];
+    }
+    const custody = scope.custodySeed(infrastructure);
+    const placement = scope.placement;
+    profile = prepare(runtime, source, operation, custody, placement, scope.resourceProjection);
+    runtime = profile?.runtime ?? runtime;
+    args = cloudEngineViewArguments(operation,profile?.version,runtime,profile?.viewDirectory,profile?.primaryRepository,profile?.residentHostId,placement);
+    environment = cloudEngineViewEnvironment(source, operation,runtime);
   } catch (error) {
-    profile?.releaseView?.();
+    try {
+      // Only successful original admission grants cleanup custody. A refused
+      // or unexpectedly populated scope belongs to no new launch.
+      if (prepared) await scope.retire();
+    } finally { profile?.releaseView?.(); }
     throw error;
   }
   let child;
@@ -421,6 +509,10 @@ export async function launchCloudEngine({
   let stopping = false;
   let stopTimer;
   let settleCancellation;
+  let qualification = "";
+  let qualificationInvalid = false;
+  let qualificationDone;
+  let wholeTreeRetired = false;
   const cancelled = new Promise((resolve) => {
     settleCancellation = resolve;
   });
@@ -447,19 +539,32 @@ export async function launchCloudEngine({
   try {
     child = spawnProcess(
       runtime.engineNamespace,
-      ["--await-scope", ...args],
+      ["--await-launch", ...args],
       {
         cwd: "/",
         env: environment,
         // The resident entry receives only the supervisor's private control
         // pipe. Its lifetime never depends on an engine attachment socket.
-        stdio: [operation === "resident" ? "inherit" : "ignore", "inherit", "inherit", "pipe"],
+        stdio: [operation === "resident" ? "inherit" : "ignore", operation === "qualify" ? "pipe" : "inherit", "inherit", "pipe"],
       },
     );
     exit = new Promise((resolve) => {
       child.on("error", () => resolve({ code: null, failed: true }));
       child.once("exit", (code) => resolve({ code, failed: false }));
     });
+    if (operation === "qualify") {
+      if (!child.stdout) throw new Error("Cloud qualification output is unavailable");
+      child.stdout.setEncoding("utf8");
+      qualificationDone = new Promise(resolve => {
+        child.stdout.once("end", resolve); child.stdout.once("error", resolve); child.stdout.once("close", resolve);
+      });
+      child.stdout.on("error", () => { qualificationInvalid = true; });
+      child.stdout.on("data", chunk => {
+        if (qualificationInvalid) return;
+        qualification += chunk;
+        if (Buffer.byteLength(qualification) > 256 * 1024) { qualificationInvalid = true; qualification = ""; forward("SIGKILL"); }
+      });
+    }
     await new Promise((resolve, reject) => {
       const onError = () => {
         child.off("spawn", onSpawn);
@@ -474,7 +579,6 @@ export async function launchCloudEngine({
     });
     if (stopping || child.exitCode !== null || child.signalCode !== null)
       throw new Error("Cloud engine launch was cancelled");
-    scope.attach(child.pid);
     const barrier = child.stdio[3];
     if (!barrier) throw new Error("Cloud engine launch barrier is unavailable");
     await new Promise((resolve, reject) => {
@@ -490,6 +594,26 @@ export async function launchCloudEngine({
     });
     admitted = true;
     const outcome = await Promise.race([exit, cancelled]);
+    if (operation === "qualify") {
+      const receipt = await retireRuntime();
+      wholeTreeRetired = true;
+      if (!receipt || receipt.populated !== 0 || receipt.pruned !== true)
+        throw new Error("Cloud qualification whole-tree retirement was unconfirmed");
+      let outputTimer;
+      try { await Promise.race([qualificationDone, new Promise(resolve => { outputTimer = setTimeout(() => { qualificationInvalid = true; resolve(); }, 5000); })]); }
+      finally { clearTimeout(outputTimer); }
+      let inner;
+      try {
+        if (qualificationInvalid || !/^\{[^\n]*\}\n?$/.test(qualification)) throw new Error();
+        inner = JSON.parse(qualification);
+        if (outcome.failed || outcome.code !== 0 || inner?.version !== 2 || inner.boundary !== "workspace-vm" ||
+            inner.qualified !== false || inner.engineChecksPassed !== true || inner.execution?.vmWorkloadDrain !== false) throw new Error();
+      } catch { throw new Error("Cloud inner qualification was refused"); }
+      const report = { ...inner };
+      delete report.engineChecksPassed;
+      publish({ ...report, qualified: true, execution: { ...report.execution, vmWorkloadDrain: true } });
+      return 0;
+    }
     if (outcome.failed || !Number.isInteger(outcome.code)) return 125;
     return outcome.code;
   } finally {
@@ -498,7 +622,8 @@ export async function launchCloudEngine({
     clearTimeout(stopTimer);
     if (!admitted) forward("SIGKILL");
     try {
-      await scope.retire();
+      if (operation === "qualify") { if (!wholeTreeRetired) await retireRuntime(); }
+      else await scope.retire();
     } finally {
       profile?.releaseView?.();
       child?.stdio[3]?.destroy();
@@ -519,6 +644,8 @@ if (
         ? "qualify"
         : args.length === 1 && args[0] === "--resident"
           ? "resident"
+        : args.length === 1 && args[0] === "--probe-cursor"
+          ? "probe-cursor"
         : null;
   if (!operation) process.exitCode = 125;
   else

@@ -74,8 +74,8 @@ The old boot cannot silently rebind to the new owner.
 
 ### Warm conversations and Stop
 
-Warm reuse keeps the exact eligible conversation's native host, UID-10001 domain,
-private HOME, history lock and admitted context across successful turns. It does
+Warm reuse keeps the exact eligible conversation's native host, owned process
+group, physical HOME, history lock and admitted context across successful turns. It does
 not share a HOME or process across conversations or actors. A new turn gets a
 new command, claim and original first-write reservation even when its native
 execution ID stays the same. Changed native auth, actor, model or MCP/context
@@ -192,10 +192,10 @@ are explicitly best-effort against current disk state.
 
 Human language access requires a current edit-capable workspace actor. Each
 connection owns its servers; one device closing them does not close another's.
-Human servers run behind the C process supervisor with a read-only worktree,
-private PID/proc/network namespaces, empty environment, UID/GID 10001 and 64MiB
-scratch. Agent language tools run inside that execution's credential-free
-workload and its Code/Design policy, under the same live paid-agent lease as
+Human servers run as engine-owned process groups with a bounded server
+environment and the real worktree. Language tools use the same non-root
+`zeros-engine` identity (10003) as the engine, without an agent sandbox. Agent language
+tools follow that execution policy under the same live paid-agent lease as
 other agent tools in legacy mode, or the admitted boot-session lifetime in
 new mode. Personal credentials never enter either language server.
 
@@ -256,19 +256,19 @@ separate cutover/qualification follow-up.
 
 ## Device connection lifetime
 
-Owner-to-self connections can explicitly consent to all current and future
-provider models (`allModels: true`). New cloud connection dialogs select this
-option by default. Migration 0133 leaves every existing list restrictive;
-configuring an older connection keeps that restriction until its owner chooses
-**Allow all models**. The API and database prohibit all-model grants to another
-member. Grant renewal preserves the selected policy and the existing expiry,
-actor and compute trust checks.
+Credential owners can use every supported provider model through their own
+cloud connections, including older self-grants with `allModels: false` or a
+one-model list. This read behavior does not rewrite stored model lists, flags
+or write receipts. Owner-to-member delegations admit only the models explicitly
+listed in that grant and supported by the provider catalog. The API and database
+prohibit `allModels: true` grants to another member. Grant renewal retains expiry,
+actor and compute trust checks and rechecks the current member model list.
 
-All-model discovery and admission use the control plane's curated provider
+Model discovery and admission use the control plane's curated provider
 catalog. `agent-models.test.ts` checks the standalone server mirror against
 `catalogs/models-v1.json`; update both when curating provider models. All-model
-consent cannot authorize unknown or cross-provider IDs. Explicit lists retain
-their existing exact-ID semantics, including legacy IDs. Runtime/credential
+consent cannot authorize unknown or cross-provider IDs. Member lists retain
+exact-ID consent only within that catalog. Runtime/credential
 qualification is still required; catalog inclusion is not a paid-turn proof.
 The Dev connection broker preserves the same flag through its separate additive
 0004 migration, renewal and metadata restore. Canary consent remains separate.
@@ -329,15 +329,21 @@ the adapters use that immutable cwd for creation, resume, tools and configuratio
 Renderer cwd values cannot choose another checkout, and a valid managed root
 does not require `.git` metadata. A cloud refusal never falls back to Local.
 
-Each execution mounts an ephemeral private HOME over the worker's normal HOME
-and exactly one locked conversation history directory. Existing histories are
-adopted under that lock when worker identity changes. The provider and its
-native commands share the active account's trust. Engine state, other
-conversations and other accounts remain outside their view. The original
-Code/Design filesystem policy, unprivileged worker identity and process domain
-still apply. Stop/revocation must prove descendant retirement before releasing
-history or removing HOME. Local launch descriptors retain their version and
-behavior; only native cloud launches use the private HOME overlay.
+Each cloud conversation has physical HOME/XDG/provider configuration directories
+and one locked history directory owned by `zeros-engine` (10003). These provide
+state separation, not a security boundary between agents. Agents, their tools and
+cloud terminals use the real checkout with normal VM egress and no agent sandbox.
+Ordinary same-user filesystem access can reach other agents' working state or
+credentials. Agents can read engine data, including the owner credential vault,
+VM credential and other conversations: there is one trust domain per workspace.
+Mode 0700 does not hide this state from same-user agents. History adoption
+retains its original lock and compatibility markers. A per-conversation Stop
+proves only its original process group, not escaped or detached descendants.
+The original broker's complete engine-runtime tree census governs VM idle,
+including engine and new siblings, with only exact infrastructure births exempt.
+Final VM drain closes launches and completes checkpoint/seal before the outside
+root broker's whole-tree `cgroup.kill` and final `populated=0` receipt.
+Local launch descriptors retain their version and ordinary Host behavior.
 
 ### Repository instructions and configuration
 

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { cpSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -21,16 +22,23 @@ async function fixture() {
   await mkdir(path.join(cwd, ".cursor"), { recursive: true });
   const marker = path.join(home, "unadmitted-marker");
   const server = { command: process.execPath, args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)},"started")`] };
-  const run = (options: unknown, immutable = false) => {
-    const launcher = immutable ? ["bwrap", "--unshare-user", "--uid", "10001", "--gid", "10001", "--unshare-net", "--die-with-parent",
-      "--ro-bind", "/", "/", "--dev", "/dev", "--bind", home, home,
-      "--ro-bind", path.join(root, "cursor-config"), path.join(home, ".cursor"),
-      "--bind", path.join(root, "history"), path.join(home, ".cursor/zeros-store"),
-      "--ro-bind", path.join(root, "skills"), path.join(home, ".cursor/skills"),
-      "--cap-drop", "ALL", "--"] : ["unshare", "--user", "--map-root-user", "--net", "--"];
-    const child = spawnSync("/usr/bin/setpriv", ["--inh-caps=-all", "--ambient-caps=-all", ...launcher,
-      process.execPath, probe, sdk, JSON.stringify(options), ...(immutable ? ["immutable"] : [])], { env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", HOME: home, CURSOR_RIPGREP_PATH: ripgrep },
-      encoding: "utf8", timeout: 15000, maxBuffer: 64 * 1024 });
+  const run = (options: unknown, engineHome = false) => {
+    let selectedHome = home;
+    if (engineHome) {
+      selectedHome = path.join(root, "engine-home");
+      mkdirSync(selectedHome, { mode: 0o700 });
+      cpSync(path.join(root, "cursor-config"), path.join(selectedHome, ".cursor"), { recursive: true });
+      cpSync(path.join(root, "skills"), path.join(selectedHome, ".cursor/skills"), { recursive: true });
+    }
+    // Only the credential-free fixture uses a network namespace. Preserve the
+    // engine's actual UID/GID; no agent mount, worker mapping or readonly HOME.
+    const child = spawnSync("/usr/bin/setpriv", ["--inh-caps=-all", "--ambient-caps=-all",
+      "unshare", "--user", "--map-current-user", "--net", "--",
+      process.execPath, probe, sdk, JSON.stringify(options), engineHome ? "engine-home" : "ordinary",
+      String(process.getuid!()), String(process.getgid!())], {
+      env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", HOME: selectedHome, CURSOR_RIPGREP_PATH: ripgrep },
+      encoding: "utf8", timeout: 15000, maxBuffer: 64 * 1024,
+    });
     expect(child.status).toBe(0); expect(child.stdout).toMatch(/native_prewarm_ok$/);
     return child.stdout + child.stderr;
   };
@@ -38,6 +46,18 @@ async function fixture() {
 }
 
 describe.skipIf(process.platform !== "linux")("pinned Cursor native MCP discovery", () => {
+  it("shares engine identity and initializes an ordinary writable provider HOME", async () => {
+    const f = await fixture();
+    try {
+      await prepareCloudCursorConfigView(f.root);
+      await mkdir(path.join(f.root, "history"));
+      await mkdir(path.join(f.root, "skills"));
+      const output = f.run({ cwd: f.cwd, local: { cwd: f.cwd, settingSources: ["user"] }, mcpServers: {} }, true);
+      expect(output).toContain('"sameEngineIdentity":true');
+      expect(output).toContain('"stateWritable":true');
+    } finally { await rm(f.root, { recursive: true, force: true }); }
+  });
+
   it.each(["project", "user", "none"])("records repo instruction sentinels with the %s source", async source => {
     const f = await fixture();
     try {
@@ -51,14 +71,14 @@ describe.skipIf(process.platform !== "linux")("pinned Cursor native MCP discover
       expect(output).toContain(`"repoRuleRead":${source === "project"}`);
     } finally { await rm(f.root, { recursive: true, force: true }); }
   });
-  it.each(["empty", "admitted"])("preserves the immutable user config view with the %s MCP snapshot", async snapshot => {
+  it.each(["empty", "admitted"])("initializes engine-owned user config with the %s MCP snapshot", async snapshot => {
     const f = await fixture();
     try {
       await prepareCloudCursorConfigView(f.root);
       await mkdir(path.join(f.root, "history"));
       await materializeCloudSkills(f.root, [{ name: "admitted-skill", description: "Engine-admitted fixture skill", content: "Use only for the synthetic fixture." }]);
       await writeFile(path.join(f.home, ".cursor/mcp.json"), JSON.stringify({ mcpServers: { excluded: f.server } }));
-      const admittedMarker = path.join(f.home, "admitted-immutable-marker");
+      const admittedMarker = path.join(f.home, "admitted-engine-home-marker");
       const admitted = { command: process.execPath, cwd: f.cwd,
         args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(admittedMarker)},"started")`] };
       const stdout = f.run({ cwd: f.cwd, local: { cwd: f.cwd, settingSources: ["user"] }, mcpServers: snapshot === "admitted" ? { admitted } : {} }, true);

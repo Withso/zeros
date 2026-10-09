@@ -7,33 +7,6 @@ import { describe, expect, it, vi } from "vitest";
 import type { DesignWorkspaceSnapshotWire } from "../../../renderer/platform/bridge/design-bridge";
 import type { DesignFrameDocument } from "../../design/document-model";
 
-const privileged = process.geteuid?.() === 0;
-let canSwitchUid = false;
-if (process.platform === "linux") {
-  try {
-    const args = [
-      "--reuid=10001",
-      "--regid=10001",
-      "--clear-groups",
-      "/usr/bin/id",
-      "-u",
-    ];
-    canSwitchUid =
-      execFileSync(
-        privileged ? "/usr/bin/setpriv" : "sudo",
-        privileged ? args : ["-n", "/usr/bin/setpriv", ...args],
-        {
-          encoding: "utf8",
-          timeout: 5_000,
-          stdio: ["ignore", "pipe", "ignore"],
-          env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8" },
-        },
-      ).trim() === "10001";
-  } catch {
-    /* skip below names the required UID switching capability */
-  }
-}
-
 vi.mock("../../agents/containment/cloud-worker-config", async (original) => {
   const actual =
     await original<
@@ -41,53 +14,15 @@ vi.mock("../../agents/containment/cloud-worker-config", async (original) => {
     >();
   return {
     ...actual,
-    loadCloudWorkerConfiguration: () =>
-      privileged
-        ? {
-            version: 4,
-            backend: "cloud-worker",
-            profile: "zeros-cloud-worker-v4",
-            uid: 10001,
-            gid: 10001,
-          }
-        : null,
+    loadCloudWorkerConfiguration: () => ({version: 4, backend: 'cloud-worker', profile: 'zeros-cloud-worker-v4',
+      uid: process.geteuid?.(), gid: process.getegid?.()}),
   };
 });
 
-describe.skipIf(!canSwitchUid)(
-  "Design Linux UID acceptance (requires root/setpriv; skipped when UID switching is unavailable)",
+describe.runIf(process.platform === "linux")(
+  "Design API and Git share the engine identity",
   () => {
-    it("initializes visible Design source, creates/reads an exact frame and diffs content across engine/Git UIDs", async () => {
-      if (!privileged) {
-        const output = execFileSync(
-          "sudo",
-          [
-            "-n",
-            process.execPath,
-            path.resolve("node_modules/vitest/vitest.mjs"),
-            "run",
-            "--config",
-            "vitest.config.ts",
-            path.relative(process.cwd(), __filename),
-            "--maxWorkers=1",
-          ],
-          {
-            cwd: process.cwd(),
-            encoding: "utf8",
-            timeout: 60_000,
-            maxBuffer: 512_000,
-            env: {
-              PATH: process.env.PATH ?? "/usr/bin:/bin",
-              HOME: tmpdir(),
-              LANG: "C.UTF-8",
-            },
-            stdio: ["ignore", "pipe", "pipe"],
-          },
-        );
-        expect(output).toContain("1 passed");
-        return;
-      }
-
+    it("initializes visible Design source, creates/reads an exact frame and diffs content as the engine user", async () => {
       const ownership = await import("../../files/cloud-workspace-ownership");
       const { WorkspaceService } = await import("../service");
       const { ensureCloudPrimaryWorkspace } =
@@ -98,48 +33,25 @@ describe.skipIf(!canSwitchUid)(
         await import("../../design/design-api");
       const { forgetDesignDirectoryName } =
         await import("../../design/directory-registry");
-      const { parseCloudWorkerConfiguration } =
-        await import("../../agents/containment/cloud-worker-config");
       const temporary = fs.mkdtempSync(
         path.join(tmpdir(), "zeros-design-uid-"),
       );
-      fs.chownSync(temporary, 10001, 10001);
       const root = path.join(temporary, "workspace");
       fs.mkdirSync(root, { mode: 0o700 });
-      fs.chownSync(root, 10001, 10001);
       const home = path.join(temporary, "engine-home");
       fs.mkdirSync(home, { mode: 0o700 });
       const publisher = new ownership.CloudWorkspaceOwnership(root, {
-        uid: 10001,
-        gid: 10001,
+        uid: process.geteuid!(),
+        gid: process.getegid!(),
       });
-      const marker = JSON.parse(
-        fs.readFileSync(
-          path.join(
-            __dirname,
-            "../../../../../../scripts/cloud-workspace-validation/sandbox/cloud-worker.json",
-          ),
-          "utf8",
-        ),
-      );
-      const profile = parseCloudWorkerConfiguration(
-        JSON.stringify({
-          ...marker,
-          version: 4,
-          profile: "zeros-cloud-worker-v4",
-        }),
-      );
+      const profile = {version: 4 as const, uid: process.geteuid!(), gid: process.getegid!()};
       const oldHome = process.env.HOME;
       const oldMask = process.umask(0o077);
       process.env.HOME = home;
-      const workerGit = (...args: string[]) =>
+      const engineGit = (...args: string[]) =>
         execFileSync(
-          "/usr/bin/setpriv",
+          "/usr/bin/git",
           [
-            "--reuid=10001",
-            "--regid=10001",
-            "--clear-groups",
-            "/usr/bin/git",
             "-c",
             "user.name=Fixture",
             "-c",
@@ -163,8 +75,8 @@ describe.skipIf(!canSwitchUid)(
             },
           },
         );
-      // Only map publication to this disposable checkout. Exercise the actual
-      // v4 gate, descriptor checks, parent publication and filesystem ownership.
+      // Map publication only to this disposable checkout; descriptors and
+      // original engine ownership still flow through the real publisher.
       const engineWrites: string[] = [];
       vi.spyOn(ownership, "publishCloudWorkspacePath").mockImplementation(
         (target, fd) => {
@@ -175,8 +87,8 @@ describe.skipIf(!canSwitchUid)(
         },
       );
       try {
-        workerGit("init", "-q", "-b", "main");
-        workerGit(
+        engineGit("init", "-q", "-b", "main");
+        engineGit(
           "remote",
           "add",
           "origin",
@@ -185,10 +97,9 @@ describe.skipIf(!canSwitchUid)(
         fs.writeFileSync(path.join(root, "README.md"), "fixture\n", {
           mode: 0o600,
         });
-        fs.chownSync(path.join(root, "README.md"), 10001, 10001);
-        workerGit("add", "--", "README.md");
-        workerGit("commit", "-qm", "Initial fixture");
-        const head = workerGit("rev-parse", "HEAD").trim();
+        engineGit("add", "--", "README.md");
+        engineGit("commit", "-qm", "Initial fixture");
+        const head = engineGit("rev-parse", "HEAD").trim();
         const index = fs.readFileSync(path.join(root, ".git", "index"));
         setStateRootForTesting(path.join(temporary, "state"));
         await ensureCloudPrimaryWorkspace(root, {
@@ -213,19 +124,6 @@ describe.skipIf(!canSwitchUid)(
               cloudFileActor: { role: "owner", authorized: () => true },
             },
           );
-        // A genuine worker-UID config failure must retain its safe category
-        // before any Design write. This also proves managed Git drops engine UID.
-        const config = path.join(root, ".git", "config");
-        fs.chownSync(config, 0, 0);
-        fs.chmodSync(config, 0o600);
-        try {
-          await expect(request("design.initialize")).rejects.toMatchObject({
-            code: "GIT_COMMAND_FAILED",
-            message: "Managed Git policy_config failed (permission_denied).",
-          });
-        } finally {
-          fs.chownSync(config, 10001, 10001);
-        }
         const { snapshot: initialized } = (await request(
           "design.initialize",
         )) as { snapshot: DesignWorkspaceSnapshotWire };
@@ -238,7 +136,7 @@ describe.skipIf(!canSwitchUid)(
         expect(listing.files).toContain(`${directory}/meta/design.toml`);
         expect(listing.files).toContain(`${directory}/rules.md`);
         const created = (await request("design.frame.create", {
-          title: "UID acceptance",
+          title: "Engine identity acceptance",
         })) as {
           frame: { file: string };
           snapshot: DesignWorkspaceSnapshotWire;
@@ -252,7 +150,7 @@ describe.skipIf(!canSwitchUid)(
             ?.sourceVersion,
         ).toBe(frame.sourceVersion);
         expect(frame.sourceVersion).toMatch(/^[a-f0-9]{24}$/);
-        expect(frame.srcDoc).toContain("UID acceptance");
+        expect(frame.srcDoc).toContain("Engine identity acceptance");
         const source = `${directory}/${frame.file}`;
         const frameListing = (await request("file.tree", {
           includeDesignDirectories: true,
@@ -267,26 +165,26 @@ describe.skipIf(!canSwitchUid)(
           ".gitignore",
         ]) {
           const info = fs.statSync(path.join(root, target));
-          expect(info.uid).toBe(10001);
-          expect(info.gid).toBe(10001);
+          expect(info.uid).toBe(process.geteuid!());
+          expect(info.gid).toBe(process.getegid!());
           expect(info.mode & 0o077).toBe(0);
         }
         expect(engineWrites.length).toBeGreaterThan(0);
         // Creation is ordinary uncommitted source. Check it did not stage or
         // commit, then explicitly stage this new file to ask Git for its patch.
-        expect(workerGit("rev-parse", "HEAD").trim()).toBe(head);
+        expect(engineGit("rev-parse", "HEAD").trim()).toBe(head);
         expect(fs.readFileSync(path.join(root, ".git", "index"))).toEqual(
           index,
         );
-        workerGit("add", "--", source, ".gitignore");
+        engineGit("add", "--", source, ".gitignore");
         const patch = await request("git.diff", {
           filePath: source,
           mode: "index-vs-head",
         });
-        expect(JSON.stringify(patch)).toContain("UID acceptance");
-        expect(workerGit("diff", "--stat", "HEAD")).toContain(".gitignore");
-        expect(workerGit("rev-parse", "HEAD").trim()).toBe(head);
-        expect(process.geteuid!()).toBe(0);
+        expect(JSON.stringify(patch)).toContain("Engine identity acceptance");
+        expect(engineGit("diff", "--stat", "HEAD")).toContain(".gitignore");
+        expect(engineGit("rev-parse", "HEAD").trim()).toBe(head);
+        expect(process.geteuid!()).toBe(profile.uid);
       } finally {
         vi.restoreAllMocks();
         resetWorkspaceDesignApisForTests();

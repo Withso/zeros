@@ -8,7 +8,6 @@ import type {
 } from "@zeros/protocol/containment";
 
 import type { AgentFilesystemTerritory } from "../types";
-import type { CloudNativeHomeView } from "./cloud-native-view.mjs";
 
 /** Cancellation is not a containment failure: it means the owning UI/session
  * disappeared while preparation was still at a safe checkpoint. */
@@ -26,6 +25,8 @@ export type TerritoryGeneration = string & {
   readonly __territoryGeneration: unique symbol;
 };
 
+/** Admission and reuse metadata. Retained territory/port fields do not install
+ * a filesystem or network sandbox in the current Host/cloud runtime. */
 export interface BoundaryRequest {
   executionId: string;
   actor: ExecutionBoundaryActor;
@@ -37,8 +38,7 @@ export interface BoundaryRequest {
   cwd: string;
   workspaceRoot: string;
   territory?: AgentFilesystemTerritory;
-  /** User-authorized roots from the equivalent normal workspace posture.
-   * The policy builder subtracts protected authority after adding these. */
+  /** User-authorized roots from the equivalent normal workspace posture. */
   additionalReadWriteRoots?: readonly string[];
   /** Explicit read-only context roots for this actor. */
   additionalReadOnlyRoots?: readonly string[];
@@ -49,35 +49,24 @@ export interface BoundaryRequest {
     workspaceRoot: string;
     protectedDesignDirectories: readonly string[];
   }[];
-  /** Stable parent directories that contain Zeros-managed worktrees. Code
-   * actors receive these as read-only collections, then reopen only their
-   * current workspace and explicitly authorized islands. This protects a
-   * sibling before its checkout or Design marker exists, so creating it does
-   * not require rebuilding unrelated live boundaries. */
+  /** Stable managed-worktree collections retained for authority/reuse keys. */
   protectedWorkspaceDirectories?: readonly string[];
   /** Existing managed workspaces covered by a broader user-authorized root.
    * These exact islands preserve `/add-dir` semantics without reopening future
    * siblings that were not present when this immutable boundary was admitted. */
   protectedWorkspaceWriteDirectories?: readonly string[];
-  /** App-wide physical repository owners whose code territory a Design actor
-   * must not write. Registered owners are deny-only: this never grants a
-   * sibling checkout to a code actor or makes it an attached directory. */
+  /** Registered Code owners retained for Design authority/reconciliation.
+   * These inputs do not create native write restrictions. */
   protectedCodeDirectories?: readonly string[];
-  /** Canonical registered repository owners where a code actor may ask the
-   * trusted engine to perform a tree-level Git integration. This never grants
-   * a path-naming checkout/restore; those stay inside the actor fence. */
+  /** Canonical registered owners for trusted engine Git integrations. */
   gitIntegrationRoots?: readonly string[];
-  /** Trusted loopback services intentionally projected to this execution
-   * (for example the scoped Zeros MCP gateway). All other Zeros control ports
-   * remain denied even when local binding is enabled for dev servers. */
+  /** Trusted loopback service metadata, including the scoped Zeros MCP gateway.
+   * Current cloud execution preserves normal VM egress. */
   allowedLocalPorts?: readonly number[];
-  /** Engine-minted, method-scoped loopback façades such as the dedicated MCP
-   * gateway. Only these may carve a port out of Zeros' reserved control range. */
+  /** Engine-minted, method-scoped loopback façades such as the MCP gateway. */
   trustedLocalPorts?: readonly number[];
   /** The equivalent normal workspace exposes a Docker/Podman CLI or endpoint.
-   * Kernel-isolated boundaries report that workflow as unavailable rather
-   * than silently pointing the CLI at an engine-owned VM or dead socket.
-   * Lightweight host boundaries preserve the ambient workflow unchanged. */
+   * Host boundaries preserve the ambient workflow unchanged. */
   containerWorkflowExpected?: boolean;
   /** Canonical Git workspace owners nested in user-authorized writable roots
    * whose Design territory is part of this generation. Tree-level integrations
@@ -93,9 +82,6 @@ export interface BoundarySpawnRequest {
   /** Complete child environment. Implementations must never ambient-merge. */
   env: Readonly<Record<string, string>>;
   stdio?: "pipe" | "inherit";
-  /** Engine-minted private HOME/history projection for native cloud providers.
-   * Never accepted from renderer input, repository settings or provider RPC. */
-  cloudNativeHome?: CloudNativeHomeView;
 }
 
 /** Trusted description used to prepare one repository-controlled command.
@@ -141,7 +127,7 @@ export interface BoundaryAuthoritySnapshot {
 /** Synchronous spawn descriptor used by provider APIs (notably Claude's SDK)
  * whose custom-process callback cannot await. The selected actor boundary is
  * admitted before this point: a native lifecycle owner for Code, or an
- * installed kernel policy and supervisor for Design/cloud. */
+ * installed lifecycle supervisor for cloud execution. */
 export interface BoundaryLaunchSpec extends BoundarySpawnRequest {
   stdio: "pipe" | "inherit";
   /** Index of an argv value that a trusted intermediate launcher must replace
@@ -166,7 +152,8 @@ export interface BoundaryProcess {
   readonly stderr: Readable | null;
   wait(): Promise<BoundaryProcessExit>;
   signal(signal: NodeJS.Signals): Promise<void>;
-  /** Terminate the complete supervised process domain and prove it is empty. */
+  /** Terminate the original supervised process group and prove it empty.
+   * Independently detached cloud descendants remain in the VM workload census. */
   stopAndProve(): Promise<void>;
 }
 
@@ -228,9 +215,8 @@ export interface BoundaryProbeResult {
   reasons: readonly string[];
 }
 
-/** Dedicated identity for a trusted Linux cloud worker. The root supervisor
- * may use privilege only while Bubblewrap constructs namespaces and mounts;
- * untrusted bytes must execute as this non-root uid/gid. */
+/** Current engine identity. Old persisted worker markers remain readable, but
+ * new cloud processes share the engine's effective uid/gid. */
 export interface CloudWorkerIdentity {
   readonly uid: number;
   readonly gid: number;
@@ -244,16 +230,15 @@ export type CloudWorkerRuntimeConfiguration = CloudWorkerIdentity;
 export interface CloudWorkerToolchain {
   readonly node: string;
   readonly supervisor: string;
-  readonly bwrap: string;
-  readonly setpriv: string;
+  /** Legacy deployment readers only; never selected for a new cloud launch. */
+  readonly bwrap?: string;
+  readonly setpriv?: string;
 }
 
 export interface PreparedBoundary {
   readonly generation: TerritoryGeneration;
-  /** Behavioral proof for this exact actor boundary. Native Code resolves its
-   * lifecycle proof directly. For ZSR, the kernel policy is installed before
-   * `prepare()` returns and a live canary may finish in the background;
-   * rejection revokes and proves the exact process tree stopped. */
+  /** Readiness for this exact original lifecycle scope. Current Host/cloud
+   * preparation does not install a per-agent kernel policy or run a canary. */
   readonly attestation: Promise<void>;
   readonly status: ExecutionBoundaryStatus;
   /** Cwd-independent identity of the registered Design write subtraction used
@@ -263,9 +248,8 @@ export interface PreparedBoundary {
    * are stable deny regions, so only these explicitly writable slices need to
    * participate in pointer-change invalidation. */
   readonly territoryContributions?: readonly BoundaryTerritoryContributionSnapshot[];
-  /** The effective HOME this session's provider actually runs with — the same
-   * path the boundary injects as `HOME` at spawn. Local desktop host-parity
-   * and cloud host-parity boundaries both return the deployment's real HOME. */
+  /** Effective provider HOME. Local retains its actual HOME; a prepared cloud
+   * native execution exposes its original physical per-conversation HOME. */
   readonly providerHomePath?: string;
   wrapSpawn(request: BoundarySpawnRequest): BoundaryLaunchSpec;
   /** Only after the spawning API proves that no child was created (no PID).
@@ -278,8 +262,8 @@ export interface PreparedBoundary {
     pid: number,
     options?: {
       /** True only after the PTY host observed the original group leader exit.
-       * Before that event the freshly spawned PID is still an exact ownership
-       * token even if macOS policy installation has not become observable. */
+       * Before that event the freshly spawned PID remains an ownership token
+       * while the supervisor's durable record becomes observable. */
       readonly leaderExited?: () => boolean;
     },
   ): BoundaryProcess;
@@ -293,7 +277,8 @@ export interface PreparedBoundary {
   portDiscoveryStatus(): PortDiscoveryStatus;
   onPortsChanged(listener: (ports: readonly PortMapping[]) => void): () => void;
   revoke(): Promise<void>;
-  /** Resolve only after every descendant is dead and every lease is revoked. */
+  /** Resolve after the original supervised groups retire and leases revoke.
+   * This is not a whole-VM or arbitrary detached-descendant retirement proof. */
   stopAndProve(): Promise<void>;
 }
 
@@ -333,10 +318,8 @@ export interface AdmissionControl {
    * proveFailedPreparationStopped(). Default callers rely on backend cleanup
    * and automatic recovery without retaining this extra ownership record. */
   readonly retainFailedPreparationProof?: boolean;
-  /** `blocking` is the conservative default for Run, Setup, utilities, and
-   * pre-warmed boundaries. Interactive agent create/resume may use
-   * `background`; a ZSR kernel policy is still established before return while
-   * its live behavioral canary completes concurrently. */
+  /** Retained readiness scheduling input. Current Host/cloud preparation has
+   * no per-agent kernel policy or asynchronous behavioral canary. */
   readonly attestation?: "blocking" | "background";
 }
 

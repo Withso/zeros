@@ -39,7 +39,11 @@ error semantics. Its adapter may then translate that operation to each
 provider's native protocol.
 
 Cloud uses these same adapters after durable actor/model/key/cwd admission and
-the private UID-10001 native boundary. Repository config cannot replace provider
+an engine-owned process-group lifetime. The cloud engine, providers and tools run
+as one non-root `zeros-engine` user (10003) in the real checkout, without an agent
+sandbox. Agents can read engine data and other-conversation state on their VM;
+per-conversation directories separate state, not authority between agents.
+Repository config cannot replace provider
 authority or the protected launch environment; admitted MCP is exclusive even
 at startup. Bounded engine-read instruction/config projections preserve native
 tools while raw project/plugin sources stay restricted. Cloud approvals are

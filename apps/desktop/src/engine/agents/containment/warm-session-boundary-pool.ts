@@ -3,11 +3,8 @@
 // ──────────────────────────────────────────────────────────
 //
 // A spare can make the next byte-identical admission instant, but preparing it
-// is not free: it creates another process domain, broker, session directory,
-// and behavioral canary. Live traces showed that speculative work competing
-// with the first real provider turn cost seconds while saving only tens to a
-// few hundred milliseconds on the next boundary. It is therefore OFF by
-// default and retained as an explicit diagnostics/benchmark switch only.
+// is not free: it retains another lifecycle scope and its state. This pool is
+// OFF by default and retained as an explicit diagnostics/benchmark switch.
 //
 // The safety argument, stated plainly:
 //
@@ -19,9 +16,8 @@
 //     may be adopted. Anything that would have changed the policy changes the
 //     key and misses.
 //  2. THE BOUNDARY WAS NEVER USED. Unlike the utility pool (which reuses a
-//     boundary between one-shots), a warm entry has hosted nothing but its own
-//     admission canary. Adoption hands a session exactly what a cold admission
-//     would have handed it, minted earlier.
+//     boundary between one-shots), a warm entry has hosted no provider work.
+//     Adoption hands a session the same preparation contract as cold admission.
 //  3. TRANSITIONS RETIRE IT. Design-territory suspensions and disposals route
 //     through the same gateway methods that close the utility pool, and the
 //     entry's contribution snapshot participates in the engine's
@@ -47,11 +43,11 @@ import type {
 
 /** How long a warm boundary is kept before it is proven torn down. Long
  * enough to cover "close a chat, open the next one", short enough that a
- * forgotten workspace does not hold a process domain and Git broker open. */
+ * forgotten workspace does not retain an unused lifecycle scope. */
 export const WARM_SESSION_BOUNDARY_IDLE_MS_DEFAULT = 300_000;
 
 /** At most this many distinct warm shapes at once (LRU-evicted). Each entry
- * holds a live process domain, broker socket, and session directory. */
+ * retains an original prepared lifecycle scope. */
 const MAX_WARM_SESSION_BOUNDARIES = 3;
 
 /** Cooldown after a failed background admission, so a persistently failing
@@ -59,6 +55,7 @@ const MAX_WARM_SESSION_BOUNDARIES = 3;
  * a background retry storm. */
 const REPLENISH_FAILURE_COOLDOWN_MS = 60_000;
 
+// Existing deployment/diagnostic keys remain readable for compatibility.
 function warmSessionBoundaryIdleMs(): number {
   const configured = Number.parseInt(
     process.env.ZEROS_ZSR_WARM_SESSION_IDLE_MS ?? "",
@@ -88,8 +85,7 @@ interface WarmEntry {
 }
 
 export interface WarmSessionBoundaryPoolOptions {
-  /** Admit a boundary for this exact request (the same admission path a cold
-   * session uses, canary included). */
+  /** Admit a boundary through the same path used by a cold session. */
   readonly prepare: (request: BoundaryRequest) => Promise<PreparedBoundary>;
   /** Prove the boundary stopped and clean up its session directory. Failures
    * must latch exactly as a session teardown failure would. */
@@ -147,12 +143,9 @@ export class WarmSessionBoundaryPool {
     const cooldownUntil = this.failureCooldowns.get(key) ?? 0;
     if (Date.now() < cooldownUntil) return;
     const requestedEpoch = this.lifecycleEpoch;
-    // The warm boundary's on-disk artifacts (policy tree, session dir) are
-    // named by THIS id. After adoption the gateway tracks the boundary under
-    // the session's own id, but teardown still removes the `warm-…` dir because
-    // ZSR stopAndProve cleans its own request.executionId. That coupling is
-    // load-bearing: a teardown that cleaned the gateway-passed id instead would
-    // orphan every adopted boundary's `warm-…` directory.
+    // The original scope and its on-disk records belong to THIS id. Adoption
+    // changes the gateway's session id, so retirement must retain the original
+    // preparation id rather than address a different scope.
     const executionId = `warm-${randomUUID()}`;
     this.pendingKeys.add(key);
     let unownedBoundary: PreparedBoundary | null = null;
@@ -247,9 +240,8 @@ export class WarmSessionBoundaryPool {
       // must not skip that. Fail-closed is preserved by the retire callback,
       // which records the exact entry in the gateway's
       // failedBoundaryRetirements while its recovery loop retries the proof.
-      // A warm boundary hosts no provider process (only its exited
-      // admission canary), so a failed proof here is an fs-cleanup failure, not
-      // a live escape.
+      // An unused spare has no provider work, but a rejected retirement is
+      // still an unresolved proof owned by that exact callback and record.
     }
   }
 

@@ -1,27 +1,22 @@
 import {resolveCloudRuntime} from "../agents/containment/cloud-runtime-root.mjs";
-import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstatSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
 import path from 'node:path';
-import { Duplex } from 'node:stream';
+import { Duplex, PassThrough } from 'node:stream';
+import {createCloudSshSession} from './cloud-ssh-session.mjs';
+import {CloudHumanWorkloads} from './cloud-human-workloads';
+import type { CloudExecutionBoundary } from '../agents/containment/cloud-execution-boundary';
 import type { CloudWorkerConfiguration } from '../agents/containment/cloud-worker-config';
 import { isCloudDeploymentOwner } from '../agents/containment/cloud-deployment-authority.mjs';
 import type { CloudRuntimeServiceAccess } from '../cloud-runtime-registration';
 import type { CloudRuntimeServiceStream } from './cloud-service-gateway';
 
 export function cloudSshWorkerLaunch(worker: CloudWorkerConfiguration): { command: string; args: string[]; script: string } {
-  if (worker.uid !== 10001 || worker.gid !== 10001 || !path.isAbsolute(worker.toolchain.node) ||
-      !path.isAbsolute(worker.toolchain.setpriv) || !path.isAbsolute(worker.toolchain.bwrap) || !path.isAbsolute(worker.toolchain.supervisor)) throw new Error('Cloud SSH identity is unavailable');
-  const script = path.resolve(path.dirname(worker.toolchain.supervisor), '../../transport/cloud-ssh-session.mjs');
-  // A fresh devpts mount belongs to this admitted namespace. Inheriting the
-  // outer engine's device mount prevents an unprivileged worker from opening
-  // terminals, even though ordinary pipe-based commands still work.
-  return { command: worker.toolchain.bwrap, args: [
-    '--unshare-pid', '--die-with-parent', '--new-session', '--bind', '/', '/', '--proc', '/proc', '--dev', '/dev',
-    '--cap-drop', 'ALL', '--cap-add', 'CAP_SETUID', '--cap-add', 'CAP_SETGID', '--', worker.toolchain.setpriv,
-    '--reuid=10001', '--regid=10001', '--clear-groups', '--no-new-privs', '--', worker.toolchain.node, script,
-  ], script };
+  const runtime = resolveCloudRuntime();
+  if (worker.toolchain.node !== runtime.node || !path.isAbsolute(runtime.node)) throw new Error('Cloud SSH identity is unavailable');
+  const script = path.join(runtime.workerRoot, 'apps/desktop/src/engine/transport/cloud-ssh-session.mjs');
+  return { command: runtime.node, script, args: [script] };
 }
 
 export function parseCloudSshIntro(source: string): Extract<CloudRuntimeServiceStream['intro'], { kind: 'ssh' }> {
@@ -39,8 +34,8 @@ export function parseCloudSshIntro(source: string): Extract<CloudRuntimeServiceS
   return { version: 1, kind: 'ssh', publicKey: `ssh-ed25519 ${matched[1]}`, hostKeySha256: data.hostKeySha256 };
 }
 
-/** Called only for an admitted cloud worker. SSH parsing runs after setpriv;
- * all child environment values are explicit and contain no admission secret. */
+/** Called only for an authenticated cloud engine. It owns SSH parsing and
+ * supervises each same-user channel through the original workload registry. */
 export class CloudRuntimeHumanServices {
   private paused = false;
   private readonly workers = new Set<{ close(): void; retired: Promise<void> }>();
@@ -61,11 +56,11 @@ export class CloudRuntimeHumanServices {
     }
   }
   constructor(private readonly worker: CloudWorkerConfiguration, private readonly forbiddenPorts: () => readonly number[],
-    private readonly now: () => number = () => performance.now()) {}
+    private readonly now: () => number = () => performance.now(),
+    private readonly boundary?: Pick<CloudExecutionBoundary, "prepareOwned">, private readonly failed: () => void = () => {}) {}
 
-  /** Kernel PID namespaces include detached descendants. Closing the worker
-   * and awaiting its namespace supervisor makes final checkpoints wait for
-   * human shell writers as well as the engine's normal PTY registry. */
+  /** Pause owns every in-flight launch and waits for its Host process-group
+   * retirement proof before allowing final checkpoint capture. */
   async pause(): Promise<void> {
     this.paused = true;
     const active = [...this.workers];
@@ -112,50 +107,38 @@ export class CloudRuntimeHumanServices {
     const launch = cloudSshWorkerLaunch(this.worker);
     const info = lstatSync(launch.script);
     if (!info.isFile() || info.isSymbolicLink() || !isCloudDeploymentOwner(launch.script, info.uid) || (info.mode & 0o022) !== 0) throw new Error('Cloud SSH worker is unavailable');
-    const child = spawn(launch.command, launch.args, { cwd: '/', env: {
-      HOME: '/srv/zeros/home/agent', PATH: `${resolveCloudRuntime().binRoot}:/usr/bin:/bin`, LANG: 'C.UTF-8',
-    }, stdio: ['pipe','pipe','pipe'] });
-    child.stdin.on('error', () => {}); child.stdout.on('error', () => {}); child.stderr.resume();
+    if (!this.boundary) throw new Error('Cloud SSH lifecycle is unavailable');
+    const owned = new CloudHumanWorkloads(this.boundary, '/srv/zeros/workspace', this.failed);
+    const incoming = new PassThrough(), outgoing = new PassThrough();
+    const stream = Duplex.from({readable:outgoing,writable:incoming});
+    const peer = Duplex.from({readable:incoming,writable:outgoing});
+    const session = createCloudSshSession(peer, {cwd:'/srv/zeros/workspace',sftpServer:'/usr/lib/openssh/sftp-server',
+      env:{HOME:'/srv/zeros/home/agent',PATH:`${resolveCloudRuntime().binRoot}:/usr/local/bin:/usr/bin:/bin`,
+        LANG:'C.UTF-8',USER:'zeros-engine',LOGNAME:'zeros-engine',SHELL:'/bin/bash'},
+      spawnProcess:(command,args,options)=>owned.spawnProcess(command,args,options),
+      spawnPty:(command,args,options)=>owned.spawnPty(command,args,options),
+    });
     let closed = false;
+    let retirement: Promise<void> | null = null;
     const close = () => {
-      if (closed) return; closed = true;
-      child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill('SIGTERM');
-        const timer = setTimeout(() => child.kill('SIGKILL'), 2_000); timer.unref();
-        child.once('exit', () => clearTimeout(timer));
-      }
+      if (retirement) return;
+      retirement = Promise.resolve().then(() => owned.close()).then(() => {
+        this.workers.delete(worker);
+      }, error => { retirement = null; this.failed(); throw error; });
+      void retirement.catch(() => {});
+      if (!closed) {closed = true;session.close();stream.destroy();}
     };
-    const worker = { close, retired: new Promise<void>(resolve => child.once('close', () => resolve())) };
+    const worker = {close, get retired(): Promise<void> {
+      if (!retirement) throw new Error("Cloud SSH retirement has not started");
+      return retirement;
+    }};
     this.workers.add(worker);
-    void worker.retired.then(() => this.workers.delete(worker));
+    stream.once('close',close);stream.on('error',close);
     try {
-      const intro = await new Promise<Extract<CloudRuntimeServiceStream['intro'], { kind: 'ssh' }>>((resolve, reject) => {
-        let pending = Buffer.alloc(0), settled = false;
-        const finish = (error?: Error, source?: string, remainder?: Buffer) => {
-          if (settled) return; settled = true;
-          clearTimeout(timer); child.stdout.off('data', data); child.off('error', failed); child.off('exit', failed);
-          child.stdout.pause();
-          if (error) { reject(error); return; }
-          try { if (remainder?.length) child.stdout.unshift(remainder); resolve(parseCloudSshIntro(source!)); }
-          catch { reject(new Error('Cloud SSH worker introduction is invalid')); }
-        };
-        const failed = () => finish(new Error('Cloud SSH worker is unavailable'));
-        const data = (chunk: Buffer) => {
-          pending = Buffer.concat([pending, chunk]);
-          const newline = pending.indexOf(10);
-          if (newline > 1024 || (newline < 0 && pending.length > 1024)) { failed(); return; }
-          if (newline >= 0) finish(undefined, pending.subarray(0,newline).toString('utf8'), pending.subarray(newline+1));
-        };
-        const timer = setTimeout(failed, 10_000); timer.unref();
-        child.once('error', failed); child.once('exit', failed); child.stdout.on('data', data);
-      });
-      const stream = Duplex.from({ readable: child.stdout, writable: child.stdin });
-      child.on('error', () => stream.destroy());
-      child.once('exit', () => stream.destroy());
-      stream.once('close', close); stream.on('error', close);
-      if (this.paused) { close(); throw new Error('Cloud human services are paused'); }
-      return { stream, intro, close };
-    } catch (error) { close(); throw error; }
+      if (this.paused) throw new Error('Cloud human services are paused');
+      const intro = parseCloudSshIntro(JSON.stringify({version:1,kind:'ssh',publicKey:session.publicKey,hostKeySha256:session.hostKeySha256}));
+      session.start();stream.pause();
+      return {stream,intro,close};
+    } catch(error) {close();await worker.retired;throw error;}
   }
 }

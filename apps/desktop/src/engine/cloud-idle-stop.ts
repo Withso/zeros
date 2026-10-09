@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import type {CloudOwnedWorkloadInspection} from "./agents/containment/cloud-owned-workloads";
 import type { CloudDurabilityAuthority } from "./cloud-durability-runtime";
 import { CloudWorkspacePresenceSchema } from "@zeros/protocol/cloud-actors";
 import type { TransportClient } from "./transport/types";
@@ -77,7 +77,6 @@ export class CloudIdleStopScheduler {
   private revision = 0;
   private active: Promise<void> | null = null;
   private inspection: Promise<void> | null = null;
-  private inspectionRevision = 0;
   private closed = false;
   private wasBusy = false;
   private nextObservation = 0;
@@ -93,10 +92,9 @@ export class CloudIdleStopScheduler {
     /** Kernel workload reads run once per observation, independently of client
      * polling. A failed inspection is busy and completion starts a quiet interval. */
     inspectWorkload?(): Promise<boolean>;
-    /** Engine-owned ORIGINAL complete idle-only warm inventory may postpone
-     * observational PID reads. Stop still drains exact hosts and proves kernel
-     * emptiness. This exception never grants read-only quiet attestation. */
-    deferWorkloadInspection?(): boolean;
+    /** Periodic observer only. Retires an exact eligible original idle host
+     * before the fresh census; passive quiet/activity reads never invoke it. */
+    retireIdleWorkloads?(): Promise<void>;
     stop(authority: CloudDurabilityAuthority, stillIdle: () => boolean): Promise<void | boolean>;
     observed?(state: { busy: boolean; quietSeconds: number }): void;
     failed?(): void;
@@ -127,28 +125,17 @@ export class CloudIdleStopScheduler {
     if (this.closed || this.active || this.completed) return;
     const busy = this.options.busy();
     if (busy || !this.options.inspectWorkload) { this.considerObserved(authority, busy); return; }
-    if (this.workloadInspectionDeferred()) {
-      // An earlier PID read may have seen this now-proven idle host. It cannot
-      // reset the quiet clock after a newer trusted observation supersedes it.
-      this.inspectionRevision++;
-      this.considerObserved(authority, false); return;
-    }
     if (this.inspection) return;
-    const revision = this.revision, inspectionRevision = this.inspectionRevision;
-    this.inspection = Promise.resolve().then(() => this.options.inspectWorkload!()).catch(() => true).then(workload => {
-      if (!this.closed && this.revision === revision && this.inspectionRevision === inspectionRevision)
+    const revision = this.revision;
+    this.inspection = Promise.resolve().then(async () => {
+      if (this.closed || this.revision !== revision || this.options.busy()) return true;
+      if (this.options.retireIdleWorkloads) await this.options.retireIdleWorkloads();
+      if (this.closed || this.revision !== revision || this.options.busy()) return true;
+      return this.options.inspectWorkload!();
+    }).catch(() => true).then(workload => {
+      if (!this.closed && this.revision === revision)
         this.considerObserved(authority, workload || this.options.busy());
     }).finally(() => { this.inspection = null; });
-  }
-  private workloadInspectionDeferred(): boolean {
-    try {
-      const result: unknown = this.options.deferWorkloadInspection?.();
-      if (result === true) return true;
-      // A malformed asynchronous hook is never authority; contain rejection
-      // without awaiting it or changing inspection/Stop scheduling.
-      if (result && (typeof result === "object" || typeof result === "function")) void Promise.resolve(result).catch(() => undefined);
-    } catch { /* Unknown inventory preserves conservative kernel inspection. */ }
-    return false;
   }
   private considerObserved(authority: CloudDurabilityAuthority, busy: boolean): void {
     if (this.closed || this.active || this.completed) return;
@@ -183,68 +170,17 @@ export class CloudIdleStopScheduler {
   async close(): Promise<void> { this.closed = true; if (this.timer) clearInterval(this.timer); this.timer = null; this.authority = null; await this.settled(); }
 }
 
-/** The qualified worker maps these UIDs for human tools, capture, and native
- * providers. Count sleeping/stopped processes too: inactivity must not kill a
- * background command. Only an exited PID or zombie is harmless. Inspection
- * failure is busy, never evidence that no work exists. No argv is read/logged. */
+/** Only the original shared lifecycle registry supplies workload membership.
+ * Unknown/pending/failed proof is busy. No UID, argv or process-name scan. */
 export async function hasCloudUserProcesses(options: {
-  list?: () => Promise<string[]>;
-  read?: (path: string) => Promise<string>;
-  idleTerminalPids?: readonly number[];
-  /** Engine-owned read-only language services are restartable infrastructure.
-   * Their live supervised roots, never names/argv, identify this exception. */
-  infrastructurePids?: readonly number[];
-  /** Live handoff only: derived from the admitted immutable runtime's cgroup
-   * root and healthy root-enrolled resident host. Kernel membership survives
-   * reparenting; process names, argv and numeric ancestry cannot authorize it. */
-  residentScope?: string;
+  inspect?: () => Promise<CloudOwnedWorkloadInspection>;
 } = {}): Promise<boolean> {
-  if (process.platform !== "linux" && !options.list) return true;
-  const read = options.read ?? (path => readFile(path, "utf8"));
+  if (!options.inspect) return true;
   try {
-    if (options.residentScope !== undefined && (!/^\/(?:[A-Za-z0-9_.@-]+\/)*zeros-host\.service\/engine-workload-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(options.residentScope) ||
-      options.residentScope.split("/").some(part => part === "." || part === ".."))) return true;
-    const names = await (options.list ?? (() => readdir("/proc")))();
-    const pids = names.filter(name => /^[1-9][0-9]{0,9}$/.test(name));
-    if (pids.length > 8192) return true;
-    const infrastructure = new Set(options.infrastructurePids), statuses = new Map<string, string>();
-    for (const pid of pids) {
-      let status: string;
-      try { status = await read(`/proc/${pid}/status`); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; return true; }
-      if (status.length > 16_384) return true;
-      const uid = /^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/m.exec(status);
-      const state = /^State:\s+(\S)/m.exec(status)?.[1];
-      if (!uid || !state) return true;
-      if (state !== "Z" && uid.slice(1).some(value => ["10001", "10002", "10004"].includes(value))) {
-        if (options.residentScope && await read(`/proc/${pid}/cgroup`) === `0::${options.residentScope}\n`) continue;
-        if (infrastructure.size) {
-          let ancestor = pid, source = status, restartable = false;
-          for (let depth = 0; depth < 64; depth++) {
-            if (infrastructure.has(Number(ancestor))) { restartable = true; break; }
-            const parent = /^PPid:\s+([1-9][0-9]{0,9})$/m.exec(source)?.[1];
-            if (!parent || parent === ancestor) break;
-            ancestor = parent;
-            if (infrastructure.has(Number(parent))) { restartable = true; break; }
-            source = statuses.get(parent) ?? await read(`/proc/${parent}/status`);
-            if (source.length > 16_384) return true;
-            statuses.set(parent, source);
-          }
-          if (restartable) continue;
-        }
-        // Only known shared interactive shell roots can be idle. Foreground
-        // groups, detached children and stopped commands still count. stat has
-        // kernel IDs/state only; never read argv or process environments.
-        if (state === "S" && options.idleTerminalPids?.includes(Number(pid))) {
-          const stat = await read(`/proc/${pid}/stat`);
-          if (stat.length > 16_384) return true;
-          const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
-          if (stat.startsWith(`${pid} (`) && fields[0] === "S" && /^[1-9][0-9]*$/.test(fields[2] ?? "") &&
-              /^-?[0-9]+$/.test(fields[4] ?? "") && Number(fields[4]) !== 0 && fields[2] === fields[5]) continue;
-        }
-        return true;
-      }
-    }
-    return false;
+    const view = await options.inspect();
+    if (view.complete !== true || view.pendingLaunches !== 0 || view.failedRetirements !== 0 ||
+        !Array.isArray(view.workloadPids) || !Array.isArray(view.infrastructurePids) ||
+        [...view.workloadPids,...view.infrastructurePids].some(pid => !Number.isSafeInteger(pid) || pid <= 0)) return true;
+    return view.workloadPids.length > 0;
   } catch { return true; }
 }

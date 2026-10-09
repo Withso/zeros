@@ -3,49 +3,49 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { verifyNodeForgePatch } from "./check-node-forge-patch.mjs";
-
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 function verifyAuditGraph() {
   const cwd = process.cwd();
-  if (cwd === ROOT) {
-    verifyNodeForgePatch();
-    return;
-  }
-  if (cwd !== join(ROOT, "apps/control-plane")) {
+  const isRoot = cwd === ROOT;
+  if (!isRoot && cwd !== join(ROOT, "apps/control-plane")) {
     throw new Error("Unsupported audit working directory");
   }
+  const boundary = isRoot ? "Root" : "Control-plane";
   if (
-    !["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"].every((filename) =>
-      existsSync(join(cwd, filename)),
+    !["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"].every(
+      (filename) => existsSync(join(cwd, filename)),
     )
   ) {
-    throw new Error("Control-plane audit boundary files are missing");
+    throw new Error(`${boundary} audit boundary files are missing`);
   }
   let manifest;
   try {
     manifest = JSON.parse(readFileSync(join(cwd, "package.json"), "utf8"));
   } catch {
-    throw new Error("Control-plane audit boundary manifest is invalid");
+    throw new Error(`${boundary} audit boundary manifest is invalid`);
   }
-  if (manifest?.name !== "@zeros/control-plane") {
-    throw new Error("Control-plane audit boundary manifest identity changed");
+  if (manifest?.name !== (isRoot ? "zeros" : "@zeros/control-plane")) {
+    throw new Error(`${boundary} audit boundary manifest identity changed`);
   }
   let config;
   try {
-    const output = execFileSync("pnpm", ["config", "get", "auditConfig", "--json"], {
-      cwd,
-      encoding: "utf8",
-      timeout: 10_000,
-      maxBuffer: 64 * 1024,
-    });
+    const output = execFileSync(
+      "pnpm",
+      ["config", "get", "auditConfig", "--json"],
+      {
+        cwd,
+        encoding: "utf8",
+        timeout: 10_000,
+        maxBuffer: 64 * 1024,
+      },
+    );
     config = output.trim() ? JSON.parse(output) : {};
   } catch {
-    throw new Error("Control-plane audit configuration could not be read");
+    throw new Error(`${boundary} audit configuration could not be read`);
   }
   if (!config || typeof config !== "object" || Array.isArray(config)) {
-    throw new Error("Control-plane audit configuration must be an object");
+    throw new Error(`${boundary} audit configuration must be an object`);
   }
   for (const [field, advisory] of [
     ["ignoreGhsas", "GHSA-86w9-cpqp-85rv"],
@@ -56,12 +56,16 @@ function verifyAuditGraph() {
       !Array.isArray(exceptions) ||
       exceptions.some((value) => typeof value !== "string")
     ) {
-      throw new Error(`Control-plane audit configuration ${field} must be an array of strings`);
+      throw new Error(
+        `${boundary} audit configuration ${field} must be an array of strings`,
+      );
     }
     if (
-      exceptions.some((value) => value.trim().toUpperCase() === advisory.toUpperCase())
+      exceptions.some(
+        (value) => value.trim().toUpperCase() === advisory.toUpperCase(),
+      )
     ) {
-      throw new Error("Control-plane audit cannot ignore the Forge advisory");
+      throw new Error(`${boundary} audit cannot ignore the Forge advisory`);
     }
   }
 }

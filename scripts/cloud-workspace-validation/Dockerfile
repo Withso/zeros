@@ -26,33 +26,24 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ZEROS_REPO_DIR=/srv/zeros/files/workspace \
     ZEROS_ENGINE_LOG=/srv/zeros/log/engine.log \
     HOME=/srv/zeros/home/agent \
-    USER=zeros-agent \
-    LOGNAME=zeros-agent \
+    USER=zeros-engine \
+    LOGNAME=zeros-engine \
     SHELL=/bin/bash \
     ZEROS_PTY_HOST_RUNTIME=/opt/zeros-runtime/bin/node \
     ZEROS_PTY_HOST_SCRIPT=/opt/zeros/apps/desktop/src/engine/pty/pty-host.cjs \
     ZEROS_CURSOR_HOST_SCRIPT=/opt/zeros/apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs
 
-# 1. OS toolchain and ZSR helpers.
+# 1. OS toolchain and common deployment tools.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      acl apparmor bubblewrap busybox-static ca-certificates crun curl file g++ git git-lfs gnupg \
-      inotify-tools make openssh-client openssh-sftp-server podman procps python3 ripgrep \
-      slirp4netns socat uidmap unzip util-linux xz-utils \
+      apparmor bubblewrap ca-certificates curl file g++ git git-lfs gnupg \
+      inotify-tools make openssh-client openssh-sftp-server procps python3 ripgrep \
+      socat unzip util-linux xz-utils \
  && rm -rf /var/lib/apt/lists/* \
- && groupadd --gid 10001 zeros-agent \
  && install -d -o root -g root -m 0755 /srv/zeros /srv/zeros/home \
- && useradd --uid 10001 --gid 10001 --create-home \
-      --home-dir /srv/zeros/home/agent --shell /bin/bash zeros-agent \
- && usermod --add-subuids 100000-165535 --add-subgids 100000-165535 zeros-agent \
- && groupadd --gid 10002 zeros-capture \
- && useradd --uid 10002 --gid 10002 --create-home \
-      --home-dir /srv/zeros/home/capture --shell /usr/sbin/nologin zeros-capture \
- && chmod 0700 /srv/zeros/home/capture \
  && groupadd --gid 10003 zeros-engine \
- && useradd --uid 10003 --gid 10003 --no-create-home --shell /usr/sbin/nologin zeros-engine \
- && groupadd --gid 10004 zeros-coordinator \
- && useradd --uid 10004 --gid 10004 --no-create-home --shell /usr/sbin/nologin zeros-coordinator \
+ && useradd --uid 10003 --gid 10003 --create-home --home-dir /srv/zeros/home/agent --shell /bin/bash zeros-engine \
+ && install -d -o 10003 -g 10003 -m 0700 /srv/zeros/home/capture \
  && install -D -o root -g root -m 0755 /usr/local/bin/node /opt/zeros-runtime/bin/node
 
 # 2. Exact pnpm; no curl-piped installer or unattested optional runtime.
@@ -75,29 +66,24 @@ RUN if [ -n "$ZEROS_REPO_COMMIT" ]; then \
     fi
 WORKDIR /opt/zeros
 RUN pnpm install --frozen-lockfile \
- && pnpm build:zsr-supervisor \
+ && pnpm build:ripgrep \
  && pnpm build:engine \
- && cc -std=c11 -O2 -Wall -Wextra -Werror apps/desktop/src/engine/agents/containment/cloud-process-supervisor.c -o /opt/zeros-runtime/cloud-process-supervisor \
- && chmod 0555 /opt/zeros-runtime/cloud-process-supervisor \
  && PLAYWRIGHT_BROWSERS_PATH=/opt/zeros/design-browsers pnpm exec playwright-core install --with-deps chromium \
  && pnpm rebuild better-sqlite3 \
  && chmod -R go-w /opt/zeros \
  && install -d -o root -g root -m 0755 /srv/zeros/files \
  && git clone --no-hardlinks /opt/zeros /srv/zeros/files/workspace \
  && git -C /srv/zeros/files/workspace remote set-url origin "$ZEROS_REPO_URL" \
- && chown -R 10001:10001 /srv/zeros/files/workspace \
- && find /srv/zeros/files/workspace -type d -exec setfacl \
-      -m u:zeros-agent:rwx,d:u:zeros-agent:rwx,d:m:rwx {} + \
- && find /srv/zeros/files/workspace -type f -exec setfacl -m u:zeros-agent:rw- {} + \
+ && chown -R 10003:10003 /srv/zeros/files/workspace \
  && node scripts/cloud-workspace-validation/sandbox/prepare-cloud-image-files.mjs \
  && mkdir -p /srv/zeros/state/workspaces /srv/zeros/log /etc/zeros \
  && chown -R 10003:10003 /srv/zeros/state \
  && chmod 0700 /srv/zeros/state /srv/zeros/state/workspaces \
- && chown root:10001 /srv/zeros/log \
+ && chown root:10003 /srv/zeros/log \
  && chmod 0750 /srv/zeros/log \
  && install -d -o root -g root -m 0700 /srv/zeros/setup \
- && install -d -o root -g 10001 -m 0750 /srv/zeros/managed-settings \
- && install -o root -g 10001 -m 0640 /dev/null /srv/zeros/managed-settings/settings.managed.toml
+ && install -d -o root -g 10003 -m 0750 /srv/zeros/managed-settings \
+ && install -o root -g 10003 -m 0640 /dev/null /srv/zeros/managed-settings/settings.managed.toml
 
 # 5. In-box launcher + egress probe.
 COPY sandbox/start-engine.sh /opt/zeros-runtime/bin/start-engine.sh

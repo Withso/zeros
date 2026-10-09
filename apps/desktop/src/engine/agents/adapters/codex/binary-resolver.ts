@@ -46,8 +46,8 @@ export interface CodexBinarySource {
   readonly path: string;
   /** Where this resolution came from — useful for diagnostics + log lines. */
   readonly source: "bundled" | "override" | "fallback";
-  /** Native target directory that Codex may re-execute. Design-agent ZSR
-   * admission includes it in the executable's read projection. */
+  /** Native target directory that Codex may re-execute. The property spelling
+   * remains for existing callers; it identifies the provider runtime bundle. */
   readonly sandboxRuntimeRoot?: string;
 }
 
@@ -164,9 +164,8 @@ export async function resolveCloudCodexBinaryFromImage(
 }
 
 /** Resolve one executable from a trusted PATH snapshot and return its physical
- * absolute path. ZSR intentionally refuses relative commands: resolving here
- * preserves the normal global-CLI fallback without letting the sandbox choose
- * a different executable after admission. */
+ * absolute path. This preserves normal global-CLI fallback and pins the
+ * selected executable before the runtime launches it. */
 export async function resolveExecutableFromPath(
   binary: string,
   searchPath: string,
@@ -295,9 +294,8 @@ export async function resolveCodexBinary(
   }
 
   // 4. System PATH fallback. Resolve from the same sanitized login-shell PATH
-  //    that the runtime supplies to the child, before the immutable ZSR policy
-  //    is issued. Passing the literal "codex" would make the sandbox choose an
-  //    executable after admission and is therefore rejected by wrapSpawn.
+  //    that the runtime supplies to the child, preserving an absolute physical
+  //    executable instead of repeating PATH selection after admission.
   //    NOTE this is a genuinely DIFFERENT CLI from the pinned bundled one —
   //    `check:codex-pin` guards the bundled version, not this. Say so, because a
   //    silent arrival here is what made packaged Codex drift from dev.

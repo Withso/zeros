@@ -399,7 +399,7 @@ const PROMPT_INACTIVITY_TIMEOUT_MS = 30 * 60_000;
 /** Absolute per-turn backstop, independent of the inactivity reset above. The
  *  inactivity watchdog is disarmed by ANY streamed chunk, so a transport that
  *  half-opens mid-turn (a completion dropped under the request's `timeoutMs: 0`,
- *  or a sandbox proxy idle-reset that never surfaces as a socket `close`) could
+ *  or a remote transport idle-reset that never surfaces as a socket `close`) could
  *  otherwise hold the prompt promise — and the `sendingChatsRef` lock it gates,
  *  which blocks EVERY later send for the chat via drainNextQueued — forever. This
  *  fires ONCE from turn start regardless of activity, so the promise (hence the
@@ -2285,7 +2285,7 @@ export function AgentSessionsProvider({
         // calm recoverable state so the next send can re-adopt the winner.
         if (
           bindWasSuperseded &&
-          ensureInFlightRef.current.get(chatId) === work
+          Object.is(ensureInFlightRef.current.get(chatId), work)
         ) {
           getStore().patchSession(chatId, {
             status: "reconnecting",
@@ -2298,7 +2298,7 @@ export function AgentSessionsProvider({
         // its own deferred here while this ensure was running owns the entry
         // now, and clearing it would close the dedupe window early — letting a
         // concurrent ensureSession mint a second session mid-adoption.
-        if (ensureInFlightRef.current.get(chatId) === work) {
+        if (Object.is(ensureInFlightRef.current.get(chatId), work)) {
           ensureInFlightRef.current.delete(chatId);
         }
         evictUnretainedTranscripts();
@@ -4253,7 +4253,7 @@ export function AgentSessionsProvider({
         // single-flight slot immediately. The old continuation is generation-
         // cancelled and identity-checked, so an immediate next Send can safely
         // install a fresh admission without waiting for (or being erased by)
-        // the cancelled ZSR/provider preparation.
+        // the cancelled provider preparation.
         detachAdmissionFlight(
           chatId,
           ensureInFlightRef.current,
@@ -6153,7 +6153,7 @@ export function AgentSessionsProvider({
       try {
         return await work;
       } finally {
-        if (capabilityRefreshInFlightRef.current.get(chatId) === work) {
+        if (Object.is(capabilityRefreshInFlightRef.current.get(chatId), work)) {
           capabilityRefreshInFlightRef.current.delete(chatId);
         }
       }

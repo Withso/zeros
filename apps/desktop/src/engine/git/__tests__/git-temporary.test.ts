@@ -11,11 +11,13 @@ vi.mock("../../agents/containment/cloud-worker-config", () => ({
 
 describe("Git temporary storage", () => {
   const directories: string[] = [];
+  let previousMask: number | undefined;
   beforeEach(() => {
     vi.resetModules();
     configuration.mockReset().mockReturnValue(null);
   });
   afterEach(async () => {
+    if(previousMask!==undefined){process.umask(previousMask);previousMask=undefined;}
     await Promise.all(directories.splice(0).map(directory =>
       rm(directory, { recursive: true, force: true })));
   });
@@ -67,15 +69,14 @@ describe("Git temporary storage", () => {
     await expect(lstat(destination)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  // The deployment gate runs this with separate engine/worker identities.
-  // Ordinary developer machines retain the same-user tests above.
-  it.skipIf(process.platform !== "linux" || process.getuid?.() !== 0)(
-    "lets the cloud worker create, copy, and reuse indexes under umask 077",
+  it.skipIf(process.platform !== "linux")(
+    "lets same-engine cloud Git create, copy, and reuse indexes under umask 077 without chown",
     async () => {
-      configuration.mockReturnValue({ uid: 10001, gid: 10001 });
+      previousMask=process.umask(0o077);
+      configuration.mockReturnValue({ version:4, uid: 10001, gid: 10001 }); // Archived account fields never select the launch identity.
       const { directory, copyGitTemporaryFile, writeGitTemporaryFile } = await scratch();
       const git = (args: string[], env: NodeJS.ProcessEnv = {}) => execFileSync("git", args, {
-        cwd: directory, uid: 10001, gid: 10001,
+        cwd: directory,
         env: { PATH: process.env.PATH, HOME: directory, ...env }, encoding: "utf8",
       });
       git(["init", "-q"]);
@@ -87,22 +88,19 @@ describe("Git temporary storage", () => {
       await writeGitTemporaryFile(cached, await readFile(index));
       for (const file of [index, copy, cached]) {
         expect(git(["write-tree"], { GIT_INDEX_FILE: file }).trim()).toMatch(/^[a-f0-9]{40}$/);
-        expect((await lstat(file)).uid).toBe(10001);
+        expect((await lstat(file)).uid).toBe(process.geteuid!());
         expect((await lstat(file)).mode & 0o077).toBe(0);
       }
-      // Engine-owned authority stays private even though workspace scratch is shared.
+      // Same-user engine state has no secrecy boundary; source path checks
+      // still refuse aliases and keep exclusive destination writes.
       const privateDir = path.join(directory, "engine-private");
       await mkdir(privateDir, { mode: 0o700 });
       await writeFile(path.join(privateDir, "authority"), "private", { mode: 0o600 });
-      await expect(copyGitTemporaryFile(path.join(privateDir, "authority"), path.join(directory, "leak")))
-        .rejects.toThrow("Git snapshot source is not owned by the workspace");
       await symlink(path.join(privateDir, "authority"), path.join(directory, "index-link"));
       await expect(copyGitTemporaryFile(path.join(directory, "index-link"), path.join(directory, "leak")))
         .rejects.toMatchObject({ code: "ELOOP" });
       await expect(lstat(path.join(directory, "leak"))).rejects.toMatchObject({ code: "ENOENT" });
-      expect(() => execFileSync("cat", [path.join(privateDir, "authority")], {
-        uid: 10001, gid: 10001, stdio: "pipe",
-      })).toThrow();
+
     },
   );
 });

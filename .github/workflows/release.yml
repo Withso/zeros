@@ -241,9 +241,6 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Qualify ZSR on the shipping kernel
-        run: pnpm check:zsr
-
       - name: Build engine sidecar (bun → binaries/zeros-engine-*)
         run: pnpm build:sidecar
 

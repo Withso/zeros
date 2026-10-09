@@ -190,8 +190,8 @@ d.each(["legacy","pro"] as const)("actor-aware cloud runtime admission (%s)",fun
       SELECT runtime_id,base_compatibility_id,'claude-api-key',profile,enabled,mcp_qualified,evidence,qualified_at
       FROM cloud_runtime_qualifications WHERE credential_kind='claude-setup-token'`);
     await credentials.put({ownerUserId:guest.id,credentialId,operationId:randomUUID(),expectedRevision:0,displayName:"Guest-owned credential",material:{kind:"claude-api-key",apiKey:"synthetic-guest-claude-key"}});
-    await credentials.delegate(guest.id,{id:delegationId,credentialId,expectedRevision:1,workspaceId:fixture.workspaceId,granteeUserId:guest.id,models:["haiku"],expiresAt:new Date(Date.now()+3600_000).toISOString()});
-    await executions.admit(engine(),{executionId:action.action.executionId,delegationId,provider:"claude",model:"haiku",source:{kind:"session",actorSessionId:a.actorSessionId}},false,undefined,undefined,undefined,1);
+    await credentials.delegate(guest.id,{id:delegationId,credentialId,expectedRevision:1,workspaceId:fixture.workspaceId,granteeUserId:guest.id,models:["claude-haiku-4-5"],expiresAt:new Date(Date.now()+3600_000).toISOString()});
+    await executions.admit(engine(),{executionId:action.action.executionId,delegationId,provider:"claude",model:"claude-haiku-4-5",source:{kind:"session",actorSessionId:a.actorSessionId}},false,undefined,undefined,undefined,1);
     await commands.mutate(a,input);await actions.request(a,action);
     await expect(commands.mutate(a,input)).resolves.toMatchObject({replayed:true});
     await expect(actions.request(a,action)).resolves.toMatchObject({replayed:true});

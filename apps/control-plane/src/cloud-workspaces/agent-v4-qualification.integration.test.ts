@@ -10,6 +10,7 @@ import { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { withSystemTx } from "../db.js";
 import { markAdminWorkspace } from "./computer-admin-workspaces.js";
 import { RUNTIME_QUALIFICATION_KINDS } from "./runtime-qualification.js";
+import { cloudAgentModels } from "./agent-models.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 d("v4 smoke agent discovery and admission", () => {
@@ -92,6 +93,7 @@ d("v4 smoke agent discovery and admission", () => {
 
   it("discovers and admits all five smoke-qualified credential kinds", async () => {
     for (const kind of RUNTIME_QUALIFICATION_KINDS) {
+      const model = cloudAgentModels(kind)[0]!;
       await pool.query(`INSERT INTO cloud_runtime_qualifications(runtime_id,base_compatibility_id,credential_kind,profile,enabled,mcp_qualified,native_capabilities,evidence,qualified_at)
         SELECT runtime_id,base_compatibility_id,$1,profile,enabled,mcp_qualified,native_capabilities,evidence,qualified_at
         FROM cloud_runtime_qualifications WHERE credential_kind='cursor-api-key' ON CONFLICT DO NOTHING`, [kind]);
@@ -100,10 +102,10 @@ d("v4 smoke agent discovery and admission", () => {
         kind === "claude-setup-token" ? { kind, accessToken: "synthetic-claude-access" } : { kind, apiKey: "synthetic-provider-key" };
       await credentials.put({ ownerUserId: f.owner.id, credentialId, operationId: randomUUID(), expectedRevision: 0, displayName: "Fixture", material });
       await credentials.delegate(f.owner.id, { id: delegationId, credentialId, expectedRevision: 1, workspaceId: f.fixture.workspaceId,
-        granteeUserId: f.owner.id, models: ["fixture-model"], expiresAt: new Date(Date.now()+3600_000).toISOString() });
+        granteeUserId: f.owner.id, models: [model], expiresAt: new Date(Date.now()+3600_000).toISOString() });
       expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations.find(grant => grant.id === delegationId))
         .toMatchObject({ kind, runtimeQualified: true, mcpQualified: false });
-      const lease = await executions.admit(f.scope, { ...input(), delegationId, provider: kind.split("-")[0], model: "fixture-model",
+      const lease = await executions.admit(f.scope, { ...input(), delegationId, provider: kind.split("-")[0], model,
         customization: { version: 3, repositoryServers: [] } }, false, 1, undefined, undefined, 1);
       expect(CloudAgentExecutionAuthoritySchema.safeParse(lease).success).toBe(true);
       expect(lease.credentialKind).toBe(kind);

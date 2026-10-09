@@ -108,7 +108,7 @@ describe("buildDesignAgentNotice", () => {
     expect(out).toContain("pageId");
     expect(out).toContain("several pages");
   });
-  it("makes filesystem and Git read-only while naming the semantic mutation path", () => {
+  it("retains legacy read-only authoring intent and the semantic mutation path", () => {
     const out = buildDesignAgentNotice("/workspace/Zeros Design");
     expect(out).toContain("Design agent");
     expect(out).toContain("/workspace/Zeros Design");
@@ -118,6 +118,14 @@ describe("buildDesignAgentNotice", () => {
     expect(out).toContain("must not stage, commit, pull, merge, or push");
     expect(out).toContain("remains uncommitted");
     expect(out).toContain("revision conflict");
+  });
+  it("describes the legacy Design role as authoring policy rather than OS authority", () => {
+    const out = buildDesignAgentNotice("/workspace/Zeros Design");
+    expect(out).toContain("legacy authoring policy");
+    expect(out).not.toContain("read-only from your process");
+    expect(out).toContain("design_document_open");
+    expect(out).toContain("design_transaction_apply");
+    expect(out).toContain("Never print, persist, or disclose the Design capability credential");
   });
 });
 

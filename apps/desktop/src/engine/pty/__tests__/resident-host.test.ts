@@ -1,13 +1,17 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fork, type ChildProcess } from "node:child_process";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createServer, type Server } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ResidentPtyHost } from "../resident-host";
 import { ResidentPtyClient } from "../resident-client";
 import type { ResidentEngineAuthority } from "../resident-protocol";
+import { HostExecutionBoundary } from "../../agents/containment/host-boundary";
+import { sessionsRoot } from "../../agents/session-paths";
+import type { PreparedBoundary } from "../../agents/containment/types";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -15,6 +19,7 @@ const roots: string[] = [];
 const hosts: ResidentPtyHost[] = [];
 const clients: ResidentPtyClient[] = [];
 const children: ChildProcess[] = [];
+const readinessServers: Server[] = [];
 const authority = (fence: number, generation = fence): ResidentEngineAuthority => ({
   organizationId, workspaceId, engineId: randomUUID(), generation, fence,
   token: randomBytes(32).toString("base64url"),
@@ -26,8 +31,7 @@ async function setup(additionalRoots: string[] = []) {
   const socketPath = path.join(root, "host.sock");
   const host = new ResidentPtyHost({
     root, socketPath, organizationId, workspaceId, additionalRoots,
-    // These tests run as the sandbox user; production uses the attested
-    // human-workload identity in its own resident namespace.
+    // Both tests and production inherit their original engine identity.
     shell: "/bin/bash", identity: { uid: process.getuid!(), gid: process.getgid!() },
   });
   hosts.push(host);
@@ -43,14 +47,193 @@ async function setup(additionalRoots: string[] = []) {
   return { root, socketPath, host, initial, connect };
 }
 
+async function interruptedSupervisorFixture() {
+  const root = await mkdtemp(path.join(tmpdir(), "zeros-resident-claim-"));
+  roots.push(root);
+  const ready = path.join(root, "claimed");
+  const script = path.join(root, "host-process-supervisor.mjs");
+  const supervisor = await readFile(new URL("../../agents/containment/host-process-supervisor.mjs", import.meta.url), "utf8");
+  const handoff = "renameSync(pendingPath, claimPath);";
+  expect(supervisor.split(handoff)).toHaveLength(2);
+  // Hold the real supervisor after its atomic claim, before domain publication.
+  await writeFile(script, supervisor.replace(handoff,
+    `${handoff}\nwriteFileSync(${JSON.stringify(ready)}, 'ready');\nAtomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60_000);`));
+  return { root, ready, script };
+}
+
+async function localInterruptedLaunch() {
+  const f = await interruptedSupervisorFixture();
+  const executionId = `local-claim-${randomUUID()}`;
+  const prepared = await new HostExecutionBoundary({ supervisorScript: f.script }).prepare({
+    executionId, actor: "agent-code", cwd: f.root, workspaceRoot: f.root,
+  });
+  const process = await prepared.spawn({ command: "/bin/bash", args: ["-c", "read -r value"], cwd: f.root, env: {} });
+  if (process.child) children.push(process.child);
+  await expect.poll(() => readFile(f.ready, "utf8").catch(() => "")).toBe("ready");
+  const claimsRoot = path.join(sessionsRoot(), executionId, "boundary", prepared.generation, "claims");
+  const entries = await readdir(claimsRoot);
+  expect(entries).toHaveLength(1);
+  return { prepared, process, claim: path.join(claimsRoot, entries[0]) };
+}
+
 afterEach(async () => {
-  for (const child of children.splice(0)) child.kill("SIGKILL");
+  for (const child of children.splice(0)) {
+    if (!child.pid || child.exitCode !== null || child.signalCode !== null) continue;
+    const exited = new Promise<void>(resolve => child.once("exit", () => resolve()));
+    child.kill("SIGKILL");
+    await exited;
+  }
   for (const client of clients.splice(0)) client.disconnect();
   for (const host of hosts.splice(0)) await host.stop();
+  for (const server of readinessServers.splice(0)) await new Promise<void>((resolve, reject) =>
+    server.close(error => error ? reject(error) : resolve()));
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
+describe.runIf(process.platform === "linux")("Local Host interrupted launches", () => {
+  it("retires the exact original claim after its process group is proven empty", async () => {
+    const f = await localInterruptedLaunch();
+    try {
+      await f.prepared.stopAndProve();
+      expect(() => process.kill(f.process.pid, 0)).toThrow();
+      await expect(readFile(f.claim)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await f.process.stopAndProve();
+    }
+  });
+
+  it.each(["token", "generation", "ownerPid", "createdAt", "extraField"] as const)(
+    "preserves an interrupted claim with changed %s despite original group emptiness", async field => {
+      const f = await localInterruptedLaunch();
+      await f.process.stopAndProve();
+      const record = JSON.parse(await readFile(f.claim, "utf8"));
+      record[field] = field === "ownerPid" || field === "createdAt" ? record[field] + 1 : "foreign";
+      const changed = JSON.stringify(record);
+      await writeFile(f.claim, changed);
+      try {
+        await expect(f.prepared.stopAndProve()).rejects.toThrow();
+        expect(await readFile(f.claim, "utf8")).toBe(changed);
+      } finally {
+        // Remove only this deliberately corrupted fixture after refusal proof.
+        await rm(f.claim, { force: true });
+        await f.prepared.stopAndProve();
+      }
+    },
+  );
+
+  it("preserves a valid claim that has no original tracked launch", async () => {
+    const f = await localInterruptedLaunch();
+    await f.process.stopAndProve();
+    const token = randomUUID();
+    const foreign = path.join(path.dirname(f.claim), `${token}.json`);
+    const record = { ...JSON.parse(await readFile(f.claim, "utf8")), token };
+    const bytes = JSON.stringify(record);
+    await writeFile(foreign, bytes, { mode: 0o600 });
+    try {
+      await expect(f.prepared.stopAndProve()).rejects.toThrow();
+      expect(await readFile(foreign, "utf8")).toBe(bytes);
+    } finally {
+      await rm(foreign, { force: true });
+      await f.prepared.stopAndProve();
+    }
+  });
+
+  it("preserves the exact claim when original group-emptiness proof fails", async () => {
+    const f = await localInterruptedLaunch();
+    const bytes = await readFile(f.claim, "utf8");
+    const refusal = new Error("synthetic original group proof refusal");
+    const proving = vi.spyOn(f.process, "stopAndProve").mockRejectedValue(refusal);
+    try {
+      await expect(f.prepared.stopAndProve()).rejects.toBe(refusal);
+      expect(await readFile(f.claim, "utf8")).toBe(bytes);
+    } finally {
+      proving.mockRestore();
+      await f.prepared.stopAndProve();
+    }
+  });
+});
+
 describe.runIf(process.platform === "linux")("resident cloud terminals", () => {
+  it("refuses a different Unix identity even if a caller supplies a valid resident scope", () => {
+    expect(() => new ResidentPtyHost({root: '/tmp', socketPath: '/tmp/unused.sock', organizationId, workspaceId,
+      shell: '/bin/bash', identity: {uid: process.getuid!() + 1, gid: process.getgid!()}})).toThrow('request_rejected');
+  });
+  it("runs resident terminal commands as the exact engine identity", async () => {
+    const f = await setup(), client = await f.connect();
+    await client.create({sessionId: 'engine-identity', cwd: f.root, cols: 80, rows: 24,
+      env: {PATH: '/usr/bin:/bin'}, command: "printf 'uid=%s gid=%s\\n' \"$(id -u)\" \"$(id -g)\""});
+    await expect.poll(async () => (await client.list())[0].exited).toBe(true);
+    const output = (await client.snapshot('engine-identity')).data.replaceAll('\r', '');
+    expect(output).toContain(`uid=${process.getuid!()} gid=${process.getgid!()}`);
+  });
+  it('reports original resident groups, including foreground commands, without changing session custody',async()=>{
+    const f=await setup(),client=await f.connect();
+    expect(await client.inspectWorkloads()).toEqual({version:1,complete:true,busy:false});
+    const session=await client.create({sessionId:'observed-work',cwd:f.root,cols:80,rows:24,env:{PATH:'/usr/bin:/bin'},command:'sleep 60 & wait'});
+    await expect.poll(async()=>await client.inspectWorkloads()).toEqual({version:1,complete:true,busy:true});
+    const nextAuthority=authority(2);f.host.authorize(nextAuthority);const next=await f.connect(nextAuthority);
+    expect((await next.list())[0].pid).toBe(session.pid);expect((await next.inspectWorkloads()).busy).toBe(true);
+    await next.close(session.sessionId);expect(await next.inspectWorkloads()).toEqual({version:1,complete:true,busy:false});
+  });
+  it("rechecks session ownership after concurrent original preparation", async () => {
+    const f = await setup(), client = await f.connect();
+    const prepare = f.host["workloads"].prepare.bind(f.host["workloads"]);
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const preparing = vi.spyOn(f.host["workloads"], "prepare").mockImplementation(async (...args) => {
+      const scope = await prepare(...args); await held; return scope;
+    });
+    const launch = {sessionId: "same-original-session", cwd: f.root, cols: 80, rows: 24,
+      env: {PATH: "/usr/bin:/bin"}, command: "exec sleep 60"};
+    const first = client.create(launch), second = client.create(launch);
+    try {
+      await expect.poll(() => preparing.mock.calls.length).toBe(2);
+      expect(await client.inspectWorkloads()).toMatchObject({busy: true});
+    } finally { release(); }
+    const [a, b] = await Promise.all([first, second]);
+    expect(b.pid).toBe(a.pid);
+    expect(await client.list()).toEqual([a]);
+    await client.close(a.sessionId);
+    expect(await client.inspectWorkloads()).toEqual({version: 1, complete: true, busy: false});
+  });
+  it("distinguishes the original idle login shell from its background job", async () => {
+    const f = await setup(), client = await f.connect();
+    const session = await client.create({sessionId: "idle-login", cwd: f.root, cols: 80, rows: 24,
+      env: {PATH: "/usr/bin:/bin", HOME: f.root}});
+    await expect.poll(async () => client.inspectWorkloads()).toEqual({version: 1, complete: true, busy: false});
+    await client.write(session.sessionId, {producerId: randomUUID(), sequence: 1, data: "sleep 60 &\n"});
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now + 11 * 60_000);
+    try {
+      await expect.poll(async () => client.inspectWorkloads()).toEqual({version: 1, complete: true, busy: true});
+    } finally { clock.mockRestore(); }
+    await client.close(session.sessionId);
+    expect(await client.inspectWorkloads()).toEqual({version: 1, complete: true, busy: false});
+  });
+ it("keeps an active builtin loop busy even with no exec or child process",async()=>{
+  const f=await setup(),client=await f.connect();
+  const session=await client.create({sessionId:"busy-original-shell",cwd:f.root,cols:80,rows:24,env:{PATH:"/usr/bin:/bin",HOME:f.root}});
+  await expect.poll(()=>client.inspectWorkloads()).toEqual({version:1,complete:true,busy:false});
+  await client.write(session.sessionId,{producerId:randomUUID(),sequence:1,data:"printf 'BUILTIN_%s\\n' READY; while :; do :; done\n"});
+  await expect.poll(async()=>(await client.snapshot(session.sessionId)).data).toContain("BUILTIN_READY");
+  const clock=vi.spyOn(Date,"now").mockReturnValue(Date.now()+11*60_000);
+  try {expect(await client.inspectWorkloads()).toEqual({version:1,complete:true,busy:true});}
+  finally {clock.mockRestore();}
+ });
+
+  it("keeps a foreground command that exec-replaced the terminal shell busy", async () => {
+    const f = await setup(), client = await f.connect();
+    const session = await client.create({sessionId: "exec-foreground", cwd: f.root, cols: 80, rows: 24,
+      env: {PATH: "/usr/bin:/bin", HOME: f.root}});
+    await expect.poll(async () => client.inspectWorkloads()).toEqual({version: 1, complete: true, busy: false});
+    await client.write(session.sessionId, {producerId: randomUUID(), sequence: 1, data: "exec sleep 60\n"});
+    await expect.poll(async () => (await client.snapshot(session.sessionId)).data).toContain("exec sleep 60");
+    const now = Date.now(), clock = vi.spyOn(Date, "now").mockReturnValue(now + 11 * 60_000);
+    try {
+      await expect.poll(async () => client.inspectWorkloads()).toEqual({version: 1, complete: true, busy: true});
+    } finally {clock.mockRestore();}
+    await client.close(session.sessionId);
+  });
   it("retains exit status across replacement without changing legacy snapshots", async () => {
     const f = await setup(), client = await f.connect();
     const sessionId = "exit-while-detached";
@@ -86,13 +269,31 @@ describe.runIf(process.platform === "linux")("resident cloud terminals", () => {
   it("keeps a real shell and background server alive across engine death and rollback", async () => {
     const f = await setup();
     const serverFile = path.join(f.root, "server.cjs");
-    const serverInfo = path.join(f.root, "server.json");
+    const readinessSocket = path.join(f.root, "server-ready.sock");
+    let server: { pid: number; port: number } | undefined;
+    const readiness = createServer(connection => {
+      connection.setEncoding("utf8");
+      let message = "";
+      connection.on("data", chunk => { message += chunk; });
+      connection.on("end", () => {
+        const value = JSON.parse(message) as { pid: number; port: number };
+        if (Number.isSafeInteger(value.pid) && value.pid > 0 && Number.isSafeInteger(value.port) && value.port > 0 && value.port < 65536)
+          server = value;
+      });
+    });
+    readinessServers.push(readiness);
+    await new Promise<void>((resolve, reject) => {
+      readiness.once("error", reject);
+      readiness.listen(readinessSocket, resolve);
+    });
     await writeFile(serverFile, `const http = require('node:http');
-const fs = require('node:fs');
+const net = require('node:net');
 let n = 0;
 const server = http.createServer((_req, res) => res.end(String(++n)));
-server.listen(0, '127.0.0.1', () => fs.writeFileSync(${JSON.stringify(serverInfo)},
-  JSON.stringify({pid: process.pid, port: server.address().port})));
+server.listen(0, '127.0.0.1', () => {
+  const ready = net.createConnection(${JSON.stringify(readinessSocket)});
+  ready.on('connect', () => ready.end(JSON.stringify({pid: process.pid, port: server.address().port})));
+});
 `);
     const sessionId = randomUUID();
     const engine = fork(fileURLToPath(new URL("./fixtures/resident-engine.ts", import.meta.url)), [], {
@@ -112,11 +313,7 @@ server.listen(0, '127.0.0.1', () => fs.writeFileSync(${JSON.stringify(serverInfo
     engine.send({ socketPath: f.socketPath, authority: f.initial, sessionId, cwd: f.root,
       command: `stty -echo; setsid '${process.execPath}' '${serverFile}' &\nprintf 'BEFORE\\n'; while IFS= read -r value; do printf 'VALUE:%s\\n' "$value"; done` });
     const { pid } = await created;
-    let server: { pid: number; port: number } | undefined;
-    await expect.poll(async () => {
-      try { server = JSON.parse(await readFile(serverInfo, "utf8")); return true; }
-      catch { return false; }
-    }).toBe(true);
+    await expect.poll(() => Boolean(server)).toBe(true);
     const url = `http://127.0.0.1:${server!.port}`;
     expect(await (await fetch(url)).text()).toBe("1");
     const died = new Promise<void>(resolve => engine.once("exit", () => resolve()));
@@ -213,6 +410,69 @@ server.listen(0, '127.0.0.1', () => fs.writeFileSync(${JSON.stringify(serverInfo
     await expect(client.create({ ...launch, actorUserId: "different-actor" })).rejects.toThrow(/authority/);
     expect((await client.create(launch)).pid).toBe(original.pid);
     expect((await client.list())[0].actorUserId).toBe("original-actor");
+  });
+
+  it("retires an original terminal whose supervisor is interrupted after claiming its launch", async () => {
+    const fixture = await interruptedSupervisorFixture();
+    vi.stubEnv("ZEROS_HOST_SUPERVISOR_SCRIPT", fixture.script);
+    try {
+      const f = await setup(), client = await f.connect();
+      const terminal = await client.create({ sessionId: randomUUID(), cwd: f.root, cols: 80, rows: 24,
+        env: {}, command: "read -r value" });
+      await expect.poll(() => readFile(fixture.ready, "utf8").catch(() => "")).toBe("ready");
+      await f.host.stop();
+      expect(() => process.kill(terminal.pid, 0)).toThrow();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("retains failed automatic retirement for explicit stop callers without an unhandled rejection", async () => {
+    const f = await setup(), client = await f.connect();
+    const prepare = f.host["executionBoundary"].prepare.bind(f.host["executionBoundary"]);
+    let prepared: PreparedBoundary | undefined;
+    const preparing = vi.spyOn(f.host["executionBoundary"], "prepare").mockImplementation(async (...args) => {
+      prepared = await prepare(...args);
+      return prepared;
+    });
+    const terminal = await client.create({ sessionId: randomUUID(), cwd: f.root, cols: 80, rows: 24,
+      env: {}, command: "printf 'READY\\n'; read -r value" });
+    await expect.poll(async () => (await client.snapshot(terminal.sessionId)).data).toContain("READY");
+    if (!prepared) throw new Error("fixture has no original preparation");
+    const originalRetire = prepared.stopAndProve.bind(prepared);
+    const failure = new Error("synthetic original retirement refusal");
+    const retiring = vi.spyOn(prepared, "stopAndProve").mockImplementation(async () => {
+      await originalRetire();
+      throw failure;
+    });
+    const stop = f.host.stop.bind(f.host);
+    let markStopped!: () => void;
+    const stopped = new Promise<void>(resolve => { markStopped = resolve; });
+    const stopping = vi.spyOn(f.host, "stop").mockImplementation(() => {
+      const receipt = stop();
+      // Observe the original receipt; the old event callback still leaks its
+      // separate adopted rejection, which the test runner reports as RED.
+      void receipt.catch(() => undefined);
+      markStopped();
+      return receipt;
+    });
+    try {
+      await client.write(terminal.sessionId, { producerId: randomUUID(), sequence: 1, data: "go\n" });
+      await stopped;
+      const receipt = f.host.stop();
+      await expect(receipt).rejects.toBe(failure);
+      expect(f.host.stop()).toBe(receipt);
+      expect(f.host["stopping"]).toBe(true);
+      await expect(client.list()).rejects.toThrow(/unavailable/);
+    } finally {
+      preparing.mockRestore();
+      retiring.mockRestore();
+      stopping.mockRestore();
+      await originalRetire();
+      await f.host["workloads"].drain(f.host["workloads"].fence());
+      for (const session of f.host["sessions"].values()) session.mirror.dispose();
+      hosts.splice(hosts.indexOf(f.host), 1);
+    }
   });
 
   it("retains bounded terminal state while disconnected and redacts before replay", async () => {

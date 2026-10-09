@@ -30,14 +30,17 @@ export const RUNTIME_HELPERS = [
     "runtime-layout.json",
     "cgroup-resources.mjs",
     "cloud-resource-admission.mjs",
+    "cloud-resource-budget.mjs",
     "image-build-contract.mjs",
     "cloud-runtime-profile.mjs",
     "cloud-engine-cgroup.mjs",
     "cloud-setup-process.mjs",
     "cloud-setup-timings.mjs",
     "cloud-computer-checkout.mjs",
+    "prepare-cloud-image-files.mjs",
     "cloud-engine-view.mjs",
     "cloud-engine-launcher.mjs",
+    "publish-cloud-workload-custody.mjs",
     "write-image-build-metadata.mjs",
     "attest-cloud-worker.mjs",
     "consume-cloud-admission.mjs",
@@ -47,6 +50,7 @@ export const RUNTIME_HELPERS = [
     "cloud-git-askpass.mjs",
     "cloud-worker-supervisor.mjs",
     "cloud-resident-workload.mjs",
+    "cloud-resident-control.mjs",
     "ensure-cloud-worker-supervisor.mjs",
     "setup-cloud-workspace.mjs",
     "zeros-cloud-engine.apparmor",
@@ -78,9 +82,13 @@ export const SOURCE_SLICES = [
   "catalogs",
   `${SANDBOX}`,
   "scripts/cloud-workspace-validation/lib",
-  "scripts/zsr-qualification",
   "third_party",
 ];
+const CLOUD_HOST_MODULES = [
+  "host-process-supervisor.mjs",
+  "cloud-host-workload-entry.mjs",
+  "cloud-workload-cgroup.mjs",
+].map(name => `apps/desktop/src/engine/agents/containment/${name}`);
 export const ROOT_METADATA = [
   "package.json",
   "pnpm-lock.yaml",
@@ -217,13 +225,6 @@ function omitPackageFile(name: string, relative: string): boolean {
     return true;
   // PuTTY Pageant bridge; ssh2's Linux agent transport uses Unix sockets.
   if (name === "ssh2" && relative === "util/pagent.exe") return true;
-  // SRT's npm package embeds helpers for other targets; keep Linux x64 plus
-  // shared source, Java assets and all notices. No unrelated dependency trimming.
-  if (
-    name === "@anthropic-ai/sandbox-runtime" &&
-    (relative === "vendor/seccomp/arm64" || relative === "vendor/srt-win")
-  )
-    return true;
   return false;
 }
 
@@ -413,6 +414,10 @@ export async function stageSources(
   source: string,
   runtime: string,
 ): Promise<void> {
+  // Cloud's fixed supervisor import must survive source staging as a regular
+  // module; following a source alias would hide a missing entry dependency.
+  for (const relative of CLOUD_HOST_MODULES)
+    check((await lstat(path.join(source, relative))).isFile(), "host_assets");
   const worker = path.join(runtime, "worker");
   for (const relative of SOURCE_SLICES) {
     await copyPayload(

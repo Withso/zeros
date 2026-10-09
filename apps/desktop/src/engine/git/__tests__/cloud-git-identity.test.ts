@@ -71,7 +71,7 @@ describe("cloud managed Git identity", () => {
       runGit(directory, ["status"], {
         identity: { uid: worker.uid + 1, gid: worker.gid },
       }),
-    ).rejects.toThrow(/worker identity/i);
+    ).rejects.toThrow(/engine identity/i);
     expect(spawn).not.toHaveBeenCalled();
   });
 

@@ -72,6 +72,68 @@ async function addTrackedNestedFile(root: string): Promise<string> {
 }
 
 describe("cloud checkpoint repository program isolation", () => {
+  checkpointIt("retains a final receipt only after the exact CP commit is acknowledged", async () => {
+    const root = await checkpointRepository();
+    const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let commitEntered!: () => void;
+    const entered = new Promise<void>(resolve => { commitEntered = resolve; });
+    let submitted: Record<string, unknown> | undefined;
+    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: (async (input, init) => {
+      if (new URL(String(input)).pathname.endsWith("/checkpoints/commit")) {
+        submitted = JSON.parse(String(init?.body));
+        commitEntered();
+        await gate;
+      }
+      return harness.fetch(input, init);
+    }) as typeof fetch });
+    const directive = { id: randomUUID(), reason: "before_stop" as const, deadlineAtMs: Date.now() + 60_000 };
+    expect(runtime.readFinalCheckpoint(authority)).toBeNull();
+    const capture = runtime.checkpoint(directive, authority);
+    try {
+      await Promise.race([entered, capture.then(() => {
+        throw new Error("capture completed before the deferred commit");
+      })]);
+      expect(runtime.readFinalCheckpoint(authority)).toBeNull();
+    } finally { release(); await capture; }
+    const receipt = runtime.readFinalCheckpoint(authority)!;
+    expect(receipt).toEqual({
+      scope: { organizationId: authority.organizationId, workspaceId: authority.workspaceId,
+        generation: authority.generation, engineInstanceId: authority.engineInstanceId },
+      checkpoint: { requestId: directive.id, checkpointId: "88888888-8888-4888-8888-888888888888",
+        contentRevision: submitted!.contentRevision, manifestSha256: submitted!.integritySha256, reason: directive.reason },
+    });
+    expect(Object.isFrozen(receipt)).toBe(true);
+    expect(Object.isFrozen(receipt.checkpoint)).toBe(true);
+    expect(runtime.readFinalCheckpoint({ ...authority, generation: 2 })).toBeNull();
+  });
+
+  checkpointIt("does not reuse an earlier final receipt after a lost commit acknowledgement", async () => {
+    const root = await checkpointRepository();
+    const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
+    let lost = false;
+    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: (async (input, init) => {
+      const response = await harness.fetch(input, init);
+      if (lost && new URL(String(input)).pathname.endsWith("/checkpoints/commit")) throw new Error("commit ACK lost");
+      return response;
+    }) as typeof fetch });
+    const directive = { id: randomUUID(), reason: "before_stop" as const, deadlineAtMs: Date.now() + 60_000 };
+    await runtime.checkpoint(directive, authority);
+    expect(runtime.readFinalCheckpoint(authority)).not.toBeNull();
+    lost = true;
+    await expect(runtime.checkpoint({ ...directive, id: randomUUID() }, authority)).rejects.toThrow("commit ACK lost");
+    expect(runtime.readFinalCheckpoint(authority)).toBeNull();
+  });
+
+  checkpointIt.each(["periodic", "manual", "before_fork"] as const)("never presents a %s capture as final completion", async reason => {
+    const root = await checkpointRepository();
+    const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
+    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: harness.fetch });
+    await runtime.checkpoint({ id: randomUUID(), reason, deadlineAtMs: Date.now() + 60_000 }, authority);
+    expect(runtime.readFinalCheckpoint(authority)).toBeNull();
+  });
+
   checkpointIt("cancels an idle capture when presence returns during upload, before committing stop", async () => {
     const root = await checkpointRepository();
     const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });

@@ -5,15 +5,74 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ResidentPtyHost } from "../resident-host";
 import { ResidentTerminalService } from "../resident-service";
+import { ResidentPtyError } from "../resident-protocol";
 
 const cleanup: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 
 describe.runIf(process.platform === "linux")("cloud resident engine adapter", () => {
+  async function attached() {
+    const service = new ResidentTerminalService({hostId: randomUUID(), socketPath: "/unused",
+      authority: {organizationId: randomUUID(), workspaceId: randomUUID(), engineId: randomUUID(), generation: 1,
+        fence: 1, token: randomBytes(32).toString("base64url")}});
+    vi.spyOn(service["client"], "isConnected").mockReturnValue(true);
+    vi.spyOn(service["client"], "connect").mockResolvedValue();
+    vi.spyOn(service["client"], "list").mockResolvedValue([]);
+    await service.connect(); cleanup.push(async () => service.disconnect());
+    return service;
+  }
+  it("keeps an unsupported legacy resident unknown even with a fresh empty session list", async () => {
+    const service = await attached();
+    vi.spyOn(service["client"], "inspectWorkloads").mockRejectedValue(new ResidentPtyError("request_rejected"));
+    expect(await service.inspectWorkloads()).toBe(true);
+    expect(service["client"].list).toHaveBeenCalledTimes(2);
+  });
+  it("accepts a complete fresh original-owner inspection without using cached session rows", async () => {
+    const service = await attached();
+    vi.spyOn(service["client"], "inspectWorkloads").mockResolvedValue({version: 1, complete: true, busy: false});
+    expect(await service.inspectWorkloads()).toBe(false);
+    expect(service["client"].list).toHaveBeenCalledOnce();
+  });
+  it("keeps a live legacy terminal busy even when it has no recent input", async () => {
+    const service = await attached();
+    vi.spyOn(service["client"], "inspectWorkloads").mockRejectedValue(new ResidentPtyError("request_rejected"));
+    vi.mocked(service["client"].list).mockResolvedValue([{sessionId: "live-old", pid: 123, cwd: "/tmp", cols: 80, rows: 24,
+      createdAt: 1, exited: false, actorUserId: null, registryWorkspaceId: null, environmentOwnerId: null,
+      brokerId: null, githubShared: false, lastInputAtMs: 0}]);
+    expect(await service.inspectWorkloads()).toBe(true);
+    expect(service["client"].list).toHaveBeenCalledTimes(2);
+  });
+  it("keeps a nonempty legacy exited list busy without original descendant retirement proof", async () => {
+    const service = await attached();
+    vi.spyOn(service["client"], "inspectWorkloads").mockRejectedValue(new ResidentPtyError("request_rejected"));
+    vi.mocked(service["client"].list).mockResolvedValue([{sessionId: "exited-old", pid: 123, cwd: "/tmp", cols: 80, rows: 24,
+      createdAt: 1, exited: true, actorUserId: null, registryWorkspaceId: null, environmentOwnerId: null,
+      brokerId: null, githubShared: false, lastInputAtMs: 0}]);
+    expect(await service.inspectWorkloads()).toBe(true);
+    expect(service["client"].list).toHaveBeenCalledTimes(2);
+  });
+  it("rejects a legacy empty list read across an authority replacement", async () => {
+    const service = await attached();
+    vi.spyOn(service["client"], "inspectWorkloads").mockRejectedValue(new ResidentPtyError("request_rejected"));
+    let finish!: () => void;
+    vi.mocked(service["client"].list).mockImplementation(() => new Promise(resolve => {finish = () => resolve([]);}));
+    const inspection = service.inspectWorkloads();
+    await expect.poll(() => typeof finish).toBe("function");
+    service.disconnect(); finish(); expect(await inspection).toBe(true);
+  });
+  it.each(["host_unavailable", "authority_rejected"] as const)("does not use the legacy fallback for %s", async code => {
+    const service = await attached();
+    vi.spyOn(service["client"], "inspectWorkloads").mockRejectedValue(new ResidentPtyError(code));
+    expect(await service.inspectWorkloads()).toBe(true);
+    expect(service["client"].list).toHaveBeenCalledOnce();
+  });
+  it("keeps an incomplete original-owner inspection busy", async () => {
+    const service = await attached();
+    vi.spyOn(service["client"], "inspectWorkloads").mockResolvedValue({version: 1, complete: false, busy: false});
+    expect(await service.inspectWorkloads()).toBe(true);
+  });
   it("returns the exited state when a shell exits before create is acknowledged", async () => {
-    const service = new ResidentTerminalService({ hostId: randomUUID(), socketPath: "/unused",
-      authority: { organizationId: randomUUID(), workspaceId: randomUUID(), engineId: randomUUID(), generation: 1,
-        fence: 1, token: randomBytes(32).toString("base64url") } });
+    const service = await attached();
     vi.spyOn(service["client"], "create").mockImplementation(async launch => {
       service["receive"]({ kind: "exit", sessionId: launch.sessionId, exitCode: 7, signal: null });
       return { ...launch, pid: 123, createdAt: 1, exited: false, actorUserId: null,

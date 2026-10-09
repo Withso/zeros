@@ -19,7 +19,10 @@ const engine = path.join(process.cwd(), "apps/desktop/src/engine");
 const qualification = ts.createSourceFile("qualify-cloud-human-services.ts", readFileSync(new URL(
   "../cloud-workspace-validation/sandbox/qualify-cloud-human-services.ts", import.meta.url,
 ), "utf8"), ts.ScriptTarget.Latest, true);
-const main = qualification.statements.find((node): node is ts.FunctionDeclaration =>
+const humanServices = qualification.statements.find((node): node is ts.FunctionDeclaration =>
+  ts.isFunctionDeclaration(node) && node.name?.text === "qualifyCloudHumanServices");
+assert(humanServices?.body);
+const main = humanServices.body.statements.find((node): node is ts.FunctionDeclaration =>
   ts.isFunctionDeclaration(node) && node.name?.text === "main");
 assert(main?.body);
 const statements = [...main.body.statements];
@@ -76,11 +79,11 @@ it.each([false, true])("qualifies atomic human attachment publication with a com
       exec: async (command: string) => {
         expect(command.startsWith("cat " + staging + "/")).toBe(true);
         expect((await fs.stat(path.dirname(physical(command.slice(4))))).mode & 0o777).toBe(0o700);
-        return { code: 1 };
+        return { code: 0, stdout: await fs.readFile(physical(command.slice(4)), "utf8") };
       },
     }, { timeout: 1000 });
     expect(published).toBe(true);
-    expect(checks).toEqual(["private-attachment-staging", "same-mount-atomic-attachment-publication"]);
+    expect(checks).toEqual(["shared-engine-attachment-staging", "same-mount-atomic-attachment-publication"]);
     expect(await fs.readdir(physical(staging))).toEqual([]);
     expect(await fs.readdir(physical(workspace))).toEqual([]);
   } finally {
@@ -93,7 +96,7 @@ it.each([false, true])("qualifies atomic human attachment publication with a com
 const nativeNamespaces = process.platform === "linux" && spawnSync("sudo", [
   "-n", "/usr/bin/bwrap", "--ro-bind", "/", "/", "--unshare-pid", "--proc", "/proc", "--", "/usr/bin/true",
 ], { stdio: "ignore" }).status === 0;
-// Run the production allocator, transfer, policy builder and sandbox runtime
+// Run the production allocator and transfer
 // inside real bind mounts. No mount-ID or filesystem mocks are involved.
 const probe = `
 import assert from 'node:assert/strict';
@@ -103,11 +106,9 @@ import { randomUUID } from 'node:crypto';
 import { createAttachmentTemporaryDirectory } from ${JSON.stringify(path.join(engine, "files/attachment-temporary-directory.ts"))};
 import { transferContextAttachment } from ${JSON.stringify(path.join(engine, "files/attachment-transfer.ts"))};
 import { stageContextGraphAttachment } from ${JSON.stringify(path.join(engine, "files/context-graph.ts"))};
-import { prepareZsrPolicy } from ${JSON.stringify(path.join(engine, "agents/containment/policy.ts"))};
 import { loadCloudWorkspacePaths } from ${JSON.stringify(path.join(engine, "agents/containment/cloud-workspace-paths.ts"))};
 import { cloudWorkspacePublicationPath } from ${JSON.stringify(path.join(engine, "agents/containment/cloud-workspace-paths.ts"))};
 import { rmSync } from 'node:fs';
-import { wrapCommandWithSandboxLinux } from ${JSON.stringify(require.resolve("@anthropic-ai/sandbox-runtime/dist/sandbox/linux-sandbox-utils.js"))};
 const workspace = '/srv/zeros/workspace', alias = '/srv/zeros/repos/example/primary';
 await fs.mkdir('/tmp/home', { recursive: true });
 const mountId = async directory => {
@@ -137,13 +138,11 @@ if (process.argv[2] === 'invalid') {
   const { writeFile, readFile, rename } = fs;
   const transfer = workspace + '/qualified.txt', checks = [];
   let phase;
-  const exec = async command => ({ code: spawnSync('/usr/bin/setpriv',
-    ['--reuid', '10001', '--regid', '10001', '--clear-groups', '--', '/usr/bin/cat', command.slice(4)],
-    { stdio: 'ignore' }).status });
+  const exec = async command => { const child=spawnSync('/usr/bin/cat',[command.slice(4)],{encoding:'utf8'}); return {code:child.status,stdout:child.stdout}; };
   let qualificationTemporary;
   try {
     await (async () => { let temporary; ${attachmentQualification.replace("temporary = await createAttachmentTemporaryDirectory", "temporary = qualificationTemporary = await createAttachmentTemporaryDirectory")} })();
-    assert.deepEqual(checks, ['private-attachment-staging', 'same-mount-atomic-attachment-publication']);
+    assert.deepEqual(checks, ['shared-engine-attachment-staging', 'same-mount-atomic-attachment-publication']);
   } finally { await qualificationTemporary?.dispose(); }
   const common = { attachmentId: 'chunked', filename: 'upload.txt', mimeType: 'text/plain', uploadId: 'upload', totalBytes: 6 };
   assert.equal((await transferContextAttachment(workspace, { ...common, offset: 0, base64: Buffer.from('abc').toString('base64') })).pending, true);
@@ -155,51 +154,8 @@ if (process.argv[2] === 'invalid') {
   assert.equal(await fs.readFile(inline.absolutePath, 'utf8'), 'inline');
   assert.deepEqual(await fs.readdir('/srv/zeros/attachment-staging'), []);
   console.log('attachments published');
-} else {
-  process.env.ZEROS_DATA_DIR = workspace + '/private-engine';
-  await fs.mkdir(process.env.ZEROS_DATA_DIR);
-  await fs.writeFile(process.env.ZEROS_DATA_DIR + '/secret', 'engine-only');
-  const prepared = await prepareZsrPolicy({ executionId: 'template-policy', actor: 'agent-code', cwd: workspace, workspaceRoot: workspace,
-    territory: { agentRole: 'code', workspaceRoot: workspace, designDirectory: workspace + '/Design', protectedDesignDirectories: [workspace + '/Design'],
-      designRecognitionPaths: [], writeCapabilities: { workspace: 'write', deniedPaths: [workspace + '/Design'] } },
-    additionalReadOnlyRoots: [workspace + '/read-only', alias + '/reverse-read-only'],
-    protectedWorkspaceDirectories: [workspace + '/restricted'], protectedWorkspaceWriteDirectories: [workspace + '/restricted/island'],
-  }, randomUUID(), { cloudWorker: { uid: 10001, gid: 10001 } });
-  const policy = prepared.document.filesystem;
-  const check = \`
-    const fs = require('node:fs');
-    const results = {};
-    for (const root of ['/srv/zeros/workspace', '/srv/zeros/repos/example/primary']) {
-      for (const suffix of ['/Design/changed', '/read-only/changed', '/reverse-read-only/changed', '/restricted/changed']) {
-        try { fs.writeFileSync(root + suffix, 'forbidden'); results[root + suffix] = 'writable'; }
-        catch { results[root + suffix] = 'denied'; }
-      }
-      for (const suffix of ['/code.txt', '/restricted/island/code.txt']) {
-        try { fs.writeFileSync(root + suffix, 'allowed'); results[root + suffix] = 'writable'; }
-        catch { results[root + suffix] = 'denied'; }
-      }
-      try { results[root + '/private-engine/secret'] = fs.readFileSync(root + '/private-engine/secret', 'utf8'); }
-      catch { results[root + '/private-engine/secret'] = 'denied'; }
-    }
-    try { fs.writeFileSync('/srv/zeros/repos/example/secondary/Design/code.txt', 'allowed'); results.secondary = 'writable'; }
-    catch { results.secondary = 'denied'; }
-    process.stdout.write(JSON.stringify(results));
-  \`;
-  const quote = word => "'" + word.replaceAll("'", "'\\\\''") + "'";
-  const command = await wrapCommandWithSandboxLinux({
-    command: [process.execPath, '-e', check].map(quote).join(' '), needsNetworkRestriction: false,
-    hostParity: true, allowAllUnixSockets: true, disableMandatoryWriteProtection: true, bwrapPath: '/usr/bin/bwrap', binShell: '/bin/bash',
-    readConfig: { denyOnly: policy.denyRead, allowWithinDeny: policy.allowRead },
-    writeConfig: { allowOnly: policy.allowWrite, denyWithinAllow: policy.denyWrite,
-      allowWithinDeny: policy.allowWrite.filter(candidate => policy.denyWrite.some(denied => candidate.startsWith(denied + '/'))) },
-  });
-  const result = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' });
-  assert.equal(result.status, 0, result.stderr);
-  const observed = JSON.parse(result.stdout);
-  for (const [name, value] of Object.entries(observed))
-    assert.equal(value, /(?:Design|read-only|restricted)\\/changed$|private-engine\\/secret$/.test(name) ? 'denied' : 'writable', name);
-  console.log('primary restrictions enforced; secondary writable');
 }
+
 `;
 
 describe("Cloud Computer engine bind aliases", () => {
@@ -233,7 +189,7 @@ describe("Cloud Computer engine bind aliases", () => {
       for (const directory of ["/usr", "/home", "/opt", "/vercel", "/nix"])
         if (existsSync(directory)) args.push("--ro-bind", directory, directory);
       for (const name of ["bin", "sbin", "lib", "lib64"]) args.push("--symlink", `usr/${name}`, `/${name}`);
-      // Node's sandbox shell lookup invokes which; keep distro alternatives
+      // The fixture shell lookup invokes which; keep distro alternatives
       // symlinks independent of this probe's private /etc projection.
       args.push("--ro-bind", realpathSync("/usr/bin/which"), "/probe-bin/which");
       args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
@@ -257,9 +213,6 @@ describe("Cloud Computer engine bind aliases", () => {
 
   it.skipIf(!nativeNamespaces).each([false, true])("allocates and publishes attachments on actual mounts (template: %s)", async template => {
     expect(await run("attachments", template)).toContain("attachments published");
-  });
-  it.skipIf(!nativeNamespaces)("enforces Code restrictions through both primary paths while keeping secondary repositories writable", async () => {
-    expect(await run("policy", true)).toContain("primary restrictions enforced; secondary writable");
   });
   it.skipIf(!nativeNamespaces).each(["different clone", "path escape", "writable marker"] as const)("refuses invalid alias admission: %s", async invalid => {
     expect(await run("invalid", true, invalid)).toContain("invalid admission rejected");

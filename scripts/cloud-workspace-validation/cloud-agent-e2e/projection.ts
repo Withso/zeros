@@ -2,6 +2,44 @@ import { closeSync, constants, cpSync, fstatSync, openSync, readFileSync, realpa
 import { execFileSync } from "node:child_process";
 import { HarnessFailure } from "./assertions";
 
+/** One non-root identity shared by the engine and its owned work. */
+export const FIXTURE_ENGINE_ID_MAP = Object.freeze([
+  Object.freeze([10003, 10003, 1] as const),
+] as const);
+const EMPTY_CAPABILITIES = Object.freeze({ inheritable: 0, permitted: 0, effective: 0, bounding: 0, ambient: 0 } as const);
+
+export interface FixtureEngineIdentity {
+  readonly identityObserved: true;
+  /** IDs observed from this fixture's parent (VM) view, not inside the engine. */
+  readonly engineUid: 10003;
+  readonly engineGid: 10003;
+  readonly uidMap: typeof FIXTURE_ENGINE_ID_MAP;
+  readonly gidMap: typeof FIXTURE_ENGINE_ID_MAP;
+  readonly capabilities: typeof EMPTY_CAPABILITIES;
+  readonly noNewPrivileges: true;
+  readonly seccomp: 2;
+}
+
+/** Require numeric kernel observations; archived root/worker maps remain
+ * readable in old evidence but cannot qualify the current runtime. */
+export function requireFixtureEngineIdentity(value: unknown): FixtureEngineIdentity {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    throw new HarnessFailure("engine_identity_missing");
+  const observed = value as Record<string, unknown>;
+  const exactMap = (input: unknown) => Array.isArray(input) && input.length === FIXTURE_ENGINE_ID_MAP.length &&
+    FIXTURE_ENGINE_ID_MAP.every((row, index) => Array.isArray(input[index]) && input[index].length === row.length &&
+      row.every((id, column) => input[index][column] === id));
+  if (observed.identityObserved !== true || observed.engineUid !== 10003 || observed.engineGid !== 10003 ||
+    !exactMap(observed.uidMap) || !exactMap(observed.gidMap) ||
+    observed.capabilities === null || typeof observed.capabilities !== "object" || Array.isArray(observed.capabilities) ||
+    !Object.keys(EMPTY_CAPABILITIES).every(name => (observed.capabilities as Record<string, unknown>)[name] === 0) ||
+    observed.noNewPrivileges !== true || observed.seccomp !== 2)
+    throw new HarnessFailure("engine_identity_missing");
+  return Object.freeze({ identityObserved: true, engineUid: 10003, engineGid: 10003,
+    uidMap: FIXTURE_ENGINE_ID_MAP, gidMap: FIXTURE_ENGINE_ID_MAP,
+    capabilities: EMPTY_CAPABILITIES, noNewPrivileges: true, seccomp: 2 });
+}
+
 /** Snapshot a public installed tool before the private etc overlay hides its
  * alternatives link. Caller writes only inside its guarded private OS view. */
 export function snapshotSystemExecutable(file: string): Buffer {

@@ -7,10 +7,25 @@ import { ZerosEngine } from "../../zeros-engine";
 import { ResidentPtyHost } from "../resident-host";
 import { ResidentTerminalService } from "../resident-service";
 import type { TransportClient } from "../../transport/types";
+import { CloudOwnedWorkloadRegistry } from "../../agents/containment/cloud-owned-workloads";
+import { createCloudWorkloadCustody } from "../../agents/containment/cloud-workload-custody";
+import { cloudWorkloadKernelFixture } from "../../agents/containment/__tests__/helpers/cloud-workload-kernel";
+
+// Real PTY/Host/replay behavior with explicit fake kernel custody; this fixture
+// does not qualify a deployed namespace or original root controller placement.
+const configuration = vi.hoisted(() => ({ version: 4 as const, backend: "cloud-worker" as const,
+  profile: "zeros-cloud-worker-v4" as const, uid: 10003, gid: 10003,
+  toolchain: { node: process.execPath, supervisor: "/unused/pinned-supervisor.mjs" } }));
+vi.mock("../../agents/containment/cloud-worker-config", async original => ({ ...await original<object>(),
+  isCloudWorkerConfiguration: (value: unknown) => value === configuration,
+}));
+vi.mock("../../agents/containment/cloud-runtime-root.mjs", async original => ({ ...await original<object>(),
+  resolveCloudRuntime: () => ({ cgroupRoot: "/sys/fs/cgroup/system.slice/zeros-host.service" }),
+}));
 
 it.runIf(process.platform === "linux")("reattaches the real engine terminal path with unchanged PID, redacted replay and a stable Git shim", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "zeros-engine-resident-"));
-  const hostId = randomUUID(), organizationId = randomUUID(), workspaceId = randomUUID();
+  const hostId = "22222222-2222-4222-8222-222222222222", organizationId = randomUUID(), workspaceId = randomUUID();
   const socketPath = path.join(root, "host.sock");
   const host = new ResidentPtyHost({ root, socketPath, organizationId, workspaceId, shell: "/bin/bash",
     identity: { uid: process.getuid!(), gid: process.getgid!() } });
@@ -24,6 +39,9 @@ it.runIf(process.platform === "linux")("reattaches the real engine terminal path
     host.authorize(authority);
     const resident = new ResidentTerminalService({ hostId, socketPath, authority });
     const engine = new ZerosEngine({ root, port: 0 }); engines.push(engine);
+    const kernel = cloudWorkloadKernelFixture();
+    const custody = createCloudWorkloadCustody(configuration, { io: kernel.io });
+    Object.defineProperty(engine, "cloudWorkloads", { value: new CloudOwnedWorkloadRegistry({ custody }) });
     Object.defineProperty(engine, "residentTerminals", { value: resident });
     Object.defineProperty(engine, "residentConfiguration", { value: { servicesRoot: root } });
     Object.defineProperty(engine, "cloudWorker", { value: { version: 4, uid: process.getuid!(), gid: process.getgid!(),

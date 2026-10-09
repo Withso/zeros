@@ -383,11 +383,11 @@ export async function readCurrentCloudAgentBootBinding(tx: Tx, supplied: unknown
 import { CloudAgentBootCredentialRequestSchema, CloudAgentBootCredentialResponseSchema, CloudAgentBootIdentitySchema,
   CloudAgentBootSyncRequestSchema, CloudAgentBootActivateRequestSchema, CloudAgentBootActivateResponseSchema,
   CloudAgentBootRefreshRequestSchema, CloudAgentActorConfirmRequestSchema, CloudAgentWarmActorRequestSchema,
-  CloudAgentBootRefreshResponseSchema, CloudAgentBootProviderReadySchema, type CloudAgentBootProviderReady, type CloudAgentBootCredentialResponse } from "./agent-boot-contract.js";
+  CloudAgentBootRefreshResponseSchema, CloudAgentBootProviderReadySchema, type CloudAgentBootCredentialResponse } from "./agent-boot-contract.js";
 import { assertCurrentCloudEngineAuthority, assertCloudEngineAuthorityDeadline } from "./engine-authority.js";
 import { reserveLocalCloudCommandWriter, activateLocalCloudCommandWriter } from "./commands.js";
 import { readCloudAgentComputeTrust } from "./agent-compute-trust.js";
-import { runtimeCredentialQualificationJoin, runtimeNativeCapabilities } from "./runtime-selection.js";
+import { runtimeCredentialQualificationJoin, runtimeQualifiedNativeCapabilities } from "./runtime-selection.js";
 import { cloudRuntimeQualificationMode } from "./runtime-config.js";
 import { cloudAgentModels } from "./agent-models.js";
 import { recordCloudAgentFundingConsents, readCloudAgentFundingConsent } from "./agent-funding-consent.js";
@@ -676,7 +676,7 @@ export class DatabaseCloudAgentBootService {
           if(!source||source.material_mode!=="local"||!source.kind.startsWith(`${provider}-`))slot=unavailable(provider,"cloud_runtime_upgrade_required");
           else if(source.material_expires_at&&source.material_expires_at.getTime()<=Date.now()+30_000)slot=unavailable(provider,"cloud_agent_credential_expired");
           else {
-            const caps=runtimeNativeCapabilities(source.native_capabilities),models=source.all_models?[...cloudAgentModels(provider)]:source.models.filter(model=>cloudAgentModels(provider).includes(model));
+            const caps=runtimeQualifiedNativeCapabilities(source.native_capabilities),models=[...cloudAgentModels(provider)];
             if(!caps||!models.length)slot=unavailable(provider,"cloud_agent_model_not_authorized");
             else {
               material=projectCloudAgentBootAccess(openCloudAgentCredential({nonce:source.nonce,ciphertext:source.ciphertext,authTag:source.auth_tag},

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, symlink, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,36 +7,42 @@ import { executionMcpServers, type CloudProviderExecution } from "../cloud-provi
 import { cloudClaudeTools } from "../adapters/claude-sdk/cloud-tools";
 import { cloudCursorRequest } from "../adapters/cursor-sdk/host/cloud-policy";
 import { cloudCodexRequest } from "../adapters/codex/cloud-policy";
+import { createCloudNativeHome } from "../containment/cloud-native-home";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 async function fixture() { const root = await mkdtemp(path.join(os.tmpdir(), "cloud-mcp-")); roots.push(root); return root; }
 const servers = [{ name: "repo-tool", transport: "stdio" as const, command: "node", args: ["tool.mjs"], env: { EXAMPLE: "test-only" } },
   { name: "remote-tool", transport: "http" as const, url: "https://mcp.example.test/mcp", headers: { Authorization: "Bearer test-only" } }];
-const execution = () => ({ cwd:"/srv/zeros/workspace", lease: { assertLive: vi.fn(), admission: { model: "model" } },
-  coordinator: { environment: () => ({ CURSOR_API_KEY: "test-only" }) }, productServers: [{ name: "design-draft", transport: "http", url: "http://127.0.0.1:8000/mcp" }],
-  userServers: structuredClone(servers) }) as unknown as CloudProviderExecution;
+const execution = async (provider: "claude" | "codex" | "cursor" = "claude") => {
+  const nativeHome = await createCloudNativeHome({ dataRoot: await realpath(await fixture()),
+    conversationId: "conversation", provider, executionId: "execution" });
+  return { cwd:"/srv/zeros/workspace", lease: { assertLive: vi.fn(), admission: { model: "model" } },
+    coordinator: { nativeHome, environment: () => ({ ...nativeHome.environment(), CURSOR_API_KEY: "test-only" }) },
+    productServers: [{ name: "design-draft", transport: "http", url: "http://127.0.0.1:8000/mcp" }],
+    userServers: structuredClone(servers) } as unknown as CloudProviderExecution;
+};
 
 describe("cloud repository and admitted MCP", () => {
   it.runIf(process.platform==="linux")("does not fail optional repository loading when a nonfatal notice sink fails",async()=>{
     const root=await fixture();await writeFile(path.join(root,".mcp.json"),'{"mcpServers":{"good":{"command":"node"},"bad":{"oauth":true}}}');
     await expect(readCloudRepositoryMcp(root,"claude",()=>{throw new Error("unavailable notice transport");})).resolves.toEqual([{name:"good",transport:"stdio",command:"node"}]);
   });
-  it("composes product and admitted user servers without mutable registry replacement", () => {
-    const context = execution();
+  it("composes product and admitted user servers without mutable registry replacement", async () => {
+    const context = await execution();
     const result = executionMcpServers(context, [{ name: "injected", transport: "stdio", command: "false" }])!;
     expect(result.map(s => s.name)).toEqual(["design-draft", "repo-tool", "remote-tool"]);
     result[1]!.name = "changed";
     expect(executionMcpServers(context, [])![1]!.name).toBe("repo-tool");
   });
-  it("Claude and Cursor receive the admitted stdio and authenticated remote snapshot", () => {
-    const claude = cloudClaudeTools(execution());
+  it("Claude and Cursor receive the admitted stdio and authenticated remote snapshot", async () => {
+    const claude = cloudClaudeTools(await execution());
     expect(claude.mcpServers).toMatchObject({ "repo-tool": { command: "node" }, "remote-tool": { headers: servers[1]!.headers }, "design-draft": {} });
-    const cursor = cloudCursorRequest(execution(), "agent.create", { mcpServers: { injected: {} }, local: { settingSources: ["team"] } });
+    const cursor = cloudCursorRequest(await execution("cursor"), "agent.create", { mcpServers: { injected: {} }, local: { settingSources: ["team"] } });
     expect(cursor).toMatchObject({ mcpServers: { "repo-tool": { command: "node" }, "remote-tool": { headers: servers[1]!.headers } }, local: { settingSources: [] } });
   });
-  it("Codex cannot disable or replace admitted names through thread configuration", () => {
-    const result = cloudCodexRequest(execution(), "env", "thread/start", { config: { "mcp_servers.repo-tool.enabled": false, mcp_servers: { "repo-tool": { enabled: false, command: "injected" } } } }) as { config: Record<string, unknown> };
+  it("Codex cannot disable or replace admitted names through thread configuration", async () => {
+    const result = cloudCodexRequest(await execution("codex"), "env", "thread/start", { config: { "mcp_servers.repo-tool.enabled": false, mcp_servers: { "repo-tool": { enabled: false, command: "injected" } } } }) as { config: Record<string, unknown> };
     expect(result.config["mcp_servers.repo-tool.enabled"]).not.toBe(false);
     expect(result.config.mcp_servers).toMatchObject({ "repo-tool": { command: "node", enabled: true } });
   });

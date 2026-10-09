@@ -18,7 +18,7 @@ import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution
 import { cloudCommandFailureFromCode, decodeCloudCommandFailure, CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
 import { createHash, randomBytes, randomUUID, scrypt } from "node:crypto";
 import { homedir } from "node:os";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 import {
   sessionToolGroups,
   type SessionToolInventoryEntry,
@@ -70,7 +70,7 @@ import {
 } from "./host/host-client";
 import { wrapSdkWithLocalStore, type RawCursorSdk } from "./local-store";
 import type { PreparedBoundary } from "../../containment/types";
-import { cloudCursorStateRoot, durableCursorStateRoot } from "./state-overlay";
+import { durableCursorStateRoot } from "./state-overlay";
 import { configurationProvenanceFor } from "../../provider-diagnostics";
 import { cloudCursorInstructions } from "./cloud-instructions";
 
@@ -139,7 +139,7 @@ const CURSOR_USAGE_READ_BUDGET_MS = 500;
 
 /** A turn whose first streamed item takes longer than this is reported with its
  *  measured latency. Chosen to sit above ordinary model time-to-first-token and
- *  well below the stall this exists to make visible — a contained host's FIRST
+ *  well below the stall this exists to make visible — a cold host's FIRST
  *  turn has been measured at 77s while later turns in the same host take ~4s.
  *  Mirrors SLOW_FIRST_ITEM_MS in host/cursor-host.cjs, which reports the same
  *  window broken down by outbound request and child process. */
@@ -866,7 +866,7 @@ export interface CursorSdkModule {
   };
   /** Build this workspace's local executor ahead of the first `send()` —
    *  @cursor/sdk 1.0.26's `platform.prewarmLocalWorkspace`, proxied to the
-   *  contained host. Resolving a workspace (rules, skills, MCP, ignore
+   *  session host. Resolving a workspace (rules, skills, MCP, ignore
    *  mappings, and the backend auth/config round-trips behind them) is the bulk
    *  of a cold first turn, and none of it depends on the user's message.
    *
@@ -898,8 +898,8 @@ export interface CursorSdkModule {
   };
 }
 
-/** Select the SDK's ripgrep executable from already-qualified deployment
- * configuration. Packaged Zeros stages one binary for ZSR and Cursor; the
+/** Select the SDK's ripgrep executable from deployment configuration.
+ * Packaged Zeros stages its product-owned search binary; the
  * compiled engine cannot resolve the source package, so ignoring that staged
  * path produced a burst of "Ripgrep path not configured" errors per session. */
 export function cursorRipgrepPathFromEnvironment(
@@ -907,7 +907,8 @@ export function cursorRipgrepPathFromEnvironment(
 ): string | null {
   const explicit = env.CURSOR_RIPGREP_PATH?.trim();
   if (explicit) return explicit;
-  const staged = env.ZEROS_ZSR_RIPGREP_PATH?.trim();
+  // Old desktops can still courier the previous environment name.
+  const staged = env.ZEROS_RIPGREP_PATH?.trim() || env.ZEROS_ZSR_RIPGREP_PATH?.trim();
   return staged && isAbsolute(staged) ? staged : null;
 }
 
@@ -1178,7 +1179,7 @@ export class CursorSdkAdapter implements AgentAdapter {
           },
         },
         // Model pill writes CURSOR_MODEL; newSession reads it. modelsDynamic
-        // tells the gateway to re-read initialize after a real contained
+        // tells the gateway to re-read initialize after a real provider
         // session populates `models`. Initialization itself never starts
         // SDK/provider work merely because the engine inherited CURSOR_API_KEY.
         _meta: { modelEnvVar: "CURSOR_MODEL", modelsDynamic: true },
@@ -1315,9 +1316,8 @@ export class CursorSdkAdapter implements AgentAdapter {
 
   /** Start catalog discovery without putting it on the session critical path.
    *
-   * Discovery is a real network round-trip — and under ZSR it is the FIRST one
-   * this session's contained host makes, so it also pays the host's cold Node
-   * start, the SDK require, and the proxy's first CONNECT. It used to be awaited
+   * Discovery is a real network round-trip; a session's first request also
+   * pays for its cold Node host and SDK import. It used to be awaited
    * outright before `Agent.create`, bounded only by the host's 30 s control-request
    * timeout: on a slow or wedged network that is 30 s of "Cursor is stuck" before
    * a single byte of the user's prompt moves.
@@ -1359,18 +1359,19 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (!opts.executionBoundary) return { sdk: await loadSdk() };
     if (!opts.env) {
       throw new Error(
-        "a contained Cursor host requires a complete environment",
+        "a Cursor session host requires a complete environment",
       );
     }
     const env = { ...opts.env };
     if (process.env.CURSOR_RIPGREP_PATH && !env.CURSOR_RIPGREP_PATH) {
       env.CURSOR_RIPGREP_PATH = process.env.CURSOR_RIPGREP_PATH;
     }
-    // Cloud history belongs to the worker's persistent home. Creating its
-    // directory here would give it the engine's owner/mode; defer that to the
-    // contained host. Local stores retain their serialized location.
-    const localState = opts.executionBoundary.status.backend === "cloud-worker"
-      ? cloudCursorStateRoot(opts.cwd, opts.executionBoundary.providerHomePath)
+    // Cloud uses its admitted physical HOME; Local stores retain their exact
+    // serialized location. Placement comes from the original factory object,
+    // never a readable old backend value.
+    const cloud = cloudProviderExecution(opts.executionBoundary);
+    const localState = cloud
+      ? join(cloud.coordinator.nativeHome.paths.cursorHome, "zeros-store")
       : await durableCursorStateRoot(opts.cwd);
     env.ZEROS_CURSOR_STATE_ROOT = localState;
     const runtime = createCursorHostRuntime({
@@ -1390,13 +1391,9 @@ export class CursorSdkAdapter implements AgentAdapter {
   /** Start building this session's workspace executor the moment its host
    *  exists, instead of letting the user's first message pay for it.
    *
-   *  A cold contained turn spends its time on work that has nothing to do with
-   *  the message: a serial staircase of fresh connections to the Cursor backend
-   *  (repeated API-key exchanges, server config, feature gates) plus the
-   *  workspace scan — measured at 21.8s to first token, ~72% of it network,
-   *  against ~4s uncontained. Meanwhile the host sits idle for ~9s between boot
-   *  and the prompt while admission, model discovery and `Agent.create` finish.
-   *  This fills that window.
+   *  A cold turn resolves API-key exchanges, server config, feature gates and
+   *  the workspace scan before processing the message. Start that work while
+   *  admission, model discovery and `Agent.create` finish.
    *
    *  Deliberately NOT awaited. It is a pure optimization, so session start must
    *  not wait on it, and it must not fail a session: the host dispatches
@@ -2185,7 +2182,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       // Time to the turn's first MODEL OUTPUT, measured end-to-end (host bridge
       // included) rather than inside the host. Deliberately not the first
       // streamed item: the SDK acknowledges a run with `request`/`status`
-      // frames within ~10ms of send, and a contained host has been measured
+      // frames within ~10ms of send, and a cold host has been measured
       // delivering those on time and then taking 77s to produce a first token
       // (against ~4s for later turns in the same host). Reported whenever it is
       // slow, into the engine log the user already has, next to the

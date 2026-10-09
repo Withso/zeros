@@ -98,7 +98,7 @@ describe("v4 attester to setup admission", () => {
     expect(record.mock.calls[0][0]).toEqual({ execution: true, report: true, profile: true, qualified: true,
       metadata: true, helpers: true, resources: true, runtime: true });
     expect(record.mock.calls[0][1]).toMatchObject({ identity: true, workload: true, capture: true,
-      humanServices: true, setup: { secure: true, unprivileged: true, detachedDescendantsRetired: true, timeoutRetired: true } });
+      humanServices: true, setup: { hostUid: 10003, hostGid: 10003, detachedDescendantsRetired: true, timeoutRetired: true } });
   });
 
   it("rejects the attester's actual closed failure without legacy inventory diagnostics", async () => {
@@ -177,14 +177,14 @@ describe("v4 attester to setup admission", () => {
   });
 
   it.each([
-    ["report", (report: Record<string, any>) => { report.version = 2; }],
+    ["report", (report: Record<string, any>) => { report.version = 1; }],
     ["profile", (report: Record<string, any>) => { report.profile = "zeros-cloud-worker-v3"; }],
     ["qualified", (report: Record<string, any>) => { report.qualified = false; }],
     ["helpers", (report: Record<string, any>) => { report.helpers.deploymentTrusted.setupHelper = false; }],
-    ["helpers", (report: Record<string, any>) => { report.helpers.deploymentTrusted.workerSupervisor = false; }],
+    ["helpers", (report: Record<string, any>) => { report.helpers.deploymentTrusted.hostProcessSupervisor = false; }],
     ["resources", (report: Record<string, any>) => { report.resources.finite = false; }],
     ["resources", (report: Record<string, any>) => { report.resources.allocation.cpuMillicores = 1000; }],
-    ["runtime", (report: Record<string, any>) => { report.qualification.secure = false; }],
+    ["runtime", (report: Record<string, any>) => { report.qualification.execution.ownedProcessGroups = false; }],
   ] as const)("retains the %s admission gate", async (gate, corrupt) => {
     const { attestImage } = await import("../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs");
     const result = attesterOutput(), record = vi.fn();

@@ -6,7 +6,6 @@ import {
   type ComponentType,
 } from "react";
 import { Button, Input } from "../../shared/ui";
-import { Checkbox } from "../../shared/ui/primitives/checkbox";
 import { toast } from "../../shared/ui/primitives/elements";
 import { useTeams } from "../team/team-store";
 import { modelsForAgent } from "../agent/model-catalog";
@@ -143,10 +142,6 @@ function CloudProviderConnection({
       ),
     [agent.id],
   );
-  const [allModels, setAllModels] = useState(true);
-  const [allowedModels, setAllowedModels] = useState(() =>
-    models.slice(0, 32).map((row) => row.value),
-  );
   const createIntent = useRef<{
     token: string;
     displayName: string;
@@ -201,7 +196,7 @@ function CloudProviderConnection({
   };
   const connect = () =>
     run(async () => {
-      if ((!allModels && !allowedModels.length) || !snapshot.data) return;
+      if (!snapshot.data) return;
       let chosen = selected;
       if (!chosen) {
         const name =
@@ -252,8 +247,8 @@ function CloudProviderConnection({
         expectedRevision: connection?.revision ?? 0,
         credentialId: chosen.id,
         credentialRevision: chosen.revision,
-        models: allModels ? models.slice(0, 32).map(row => row.value) : allowedModels,
-        allModels,
+        models: models.slice(0, 32).map((row) => row.value),
+        allModels: true,
         consent: "zeros-managed",
       });
       if (mounted.current) {
@@ -282,14 +277,6 @@ function CloudProviderConnection({
         credential.kind === "codex-chatgpt"
         ? "account"
         : "apiKey",
-    );
-    setAllModels(credential && connection?.credentialId === credential.id ? connection.allModels === true : true);
-    setAllowedModels(
-      credential &&
-        connection?.credentialId === credential.id &&
-        connection.models.length
-        ? connection.models
-        : models.slice(0, 32).map((row) => row.value),
     );
     setOpen(true);
   };
@@ -492,45 +479,9 @@ function CloudProviderConnection({
           </div>
         )}
         <p className="text-fg2 text-xs">
-          Connecting stores this account encrypted in the cloud and authorizes
-          your selected models for your sessions on Zeros-managed computers in this
-          organization, until you disconnect.
+          Connecting stores this account encrypted in the cloud for your sessions
+          on Zeros-managed computers in this organization, until you disconnect.
         </p>
-        <label className="text-fg1 flex items-center gap-2 text-xs">
-          <Checkbox checked={allModels} disabled={busy} onChange={() => setAllModels(value => !value)} />
-          Allow all models
-        </label>
-        <p className="text-fg2 text-xs">Includes future models supported by this provider. Applies only to your own sessions.</p>
-        {!allModels && <details open>
-          <summary className="text-fg2 cursor-pointer text-xs">
-            Allowed models ({allowedModels.length})
-          </summary>
-          <div className="mt-3 flex max-h-48 flex-col gap-2 overflow-y-auto">
-            {models.map((model) => (
-              <label
-                key={model.value}
-                className="text-fg1 flex items-center gap-2 text-xs"
-              >
-                <Checkbox
-                  checked={allowedModels.includes(model.value)}
-                  disabled={
-                    busy ||
-                    (!allowedModels.includes(model.value) &&
-                      allowedModels.length >= 32)
-                  }
-                  onChange={() =>
-                    setAllowedModels((values) =>
-                      values.includes(model.value)
-                        ? values.filter((value) => value !== model.value)
-                        : [...values, model.value],
-                    )
-                  }
-                />
-                {model.label}
-              </label>
-            ))}
-          </div>
-        </details>}
         <div className="flex justify-end gap-2">
           {busy && authStatus && (
             <Button variant="secondary" onClick={() => signIn.current?.abort()}>
@@ -541,14 +492,13 @@ function CloudProviderConnection({
             disabled={
               busy ||
               !snapshot.data ||
-              (!allModels && !allowedModels.length) ||
               (!selected &&
                 !token.trim() &&
                 (method === "apiKey" || agent.id === "claude"))
             }
             onClick={() => void connect()}
           >
-            {busy ? "Connecting…" : "Connect account"}
+            {busy ? "Connecting…" : "Connect"}
           </Button>
         </div>
       </ProviderConnectionDialog>

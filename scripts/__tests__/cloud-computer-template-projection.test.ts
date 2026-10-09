@@ -67,6 +67,12 @@ describe("computer template repository projection", () => {
       error: "Unsafe cloud computer repository projection",
     },
     {
+      name: "unadopted legacy checkout owner",
+      repositoryCount: 2,
+      alteration: "fs.chownSync('/srv/zeros/files/repos/fixture/repo0',10001,10001)",
+      error: "Unsafe cloud computer repository projection",
+    },
+    {
       name: "symlinked repository root",
       repositoryCount: 2,
       alteration:
@@ -80,7 +86,7 @@ describe("computer template repository projection", () => {
       error: "Unexpected cloud engine file projection",
     },
   ])(
-    "checks $name through the real v4 qualification launcher",
+    "checks $name through the real v4 engine view",
     ({ repositoryCount, alteration, error }) => {
       const tree = cloudRuntimeFixture({ mapAbsoluteLinks: false });
       const runtime = createCloudRuntimeResolver({
@@ -93,9 +99,13 @@ describe("computer template repository projection", () => {
           "cloud-engine-view.mjs",
           "cloud-computer-checkout.mjs",
           "cloud-engine-cgroup.mjs",
+          "cgroup-resources.mjs",
+          "cloud-resource-admission.mjs",
+          "publish-cloud-workload-custody.mjs",
           "cloud-runtime-profile.mjs",
           "cloud-runtime-root.mjs",
           "runtime-layout.json",
+          "prepare-cloud-image-files.mjs",
         ])
           tree.write(
             `${runtime.libRoot}/${name}`,
@@ -120,8 +130,8 @@ describe("computer template repository projection", () => {
           { stdio: "pipe" },
         );
         chmodSync(tree.physical(runtime.engineNamespace), 0o500);
-        // The same scratch/mount layout the credential-free runtime self-test
-        // supplies before invoking the launcher. Its populated workspace stays
+        // The scratch/mount layout supplied before preparing the engine view.
+        // Its populated workspace stays
         // the only Files/managed-Git root; the selected clones are siblings.
         for (const directory of [
           "/srv/zeros/files/workspace",
@@ -141,6 +151,7 @@ describe("computer template repository projection", () => {
           "",
           0o640,
         );
+        chmodSync(tree.physical("/srv/zeros/managed-settings"),0o750);
         for (const name of ["policy.json", "registries.conf"])
           tree.write(`/etc/containers/${name}`, "{}");
         tree.write(
@@ -149,6 +160,8 @@ describe("computer template repository projection", () => {
           0o555,
         );
         tree.write("/usr/bin/rg", "fixture executable", 0o555);
+        tree.write(`${runtime.workerRoot}/binaries/rg`, "fixture executable", 0o555);
+        tree.write(`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`, "// pinned Host fixture", 0o444);
         tree.write("/origin/file", "repository data", 0o644);
         execFileSync("git", ["init", "--quiet", tree.physical("/origin")]);
         execFileSync("git", ["-C", tree.physical("/origin"), "add", "."]);
@@ -194,7 +207,7 @@ app.clone_repos({"schema":"zeros.computer-repositories-input/v1", "buildId":"111
 spec=importlib.util.spec_from_file_location("computer_build", "/opt/zeros-bootstrap/computer-build.py")
 module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 args=module.SystemHost().install_command("11111111-1111-4111-8111-111111111111", 5)
-script="test \\\"$PWD\\\" = /srv/zeros/repos\\n"
+script="test \\"$PWD\\" = /srv/zeros/repos\\n"
 for index in range(${repositoryCount}):
     script+="cd /srv/zeros/repos/fixture/repo"+str(index)+"\\npwd > install-path\\n"
 result=subprocess.run(args[args.index("/usr/bin/unshare"):], input=script.encode(), env=module.ENVIRONMENT,
@@ -209,45 +222,89 @@ assert os.path.exists("/srv/zeros/files/repos") == bool(${repositoryCount})
 `,
         );
         tree.write(
-          `${runtime.workerRoot}/scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs`,
+          `${runtime.workerRoot}/projection-check.mjs`,
           `
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {spawnSync} from 'node:child_process';
+assert.equal(process.getuid(), 10003);
+assert.equal(process.getgid(), 10003);
+// Node includes the effective GID; procfs records supplementary groups.
+assert.deepEqual(process.getgroups(), [10003]);
+const status=fs.readFileSync('/proc/self/status','utf8');
+assert.match(status,/^Groups:[\\t ]*$/m);
+assert.match(status,/^NoNewPrivs:[\\t ]+1$/m);
+for (const field of ['CapInh','CapPrm','CapEff','CapBnd','CapAmb'])
+  assert.match(status,new RegExp('^'+field+':[\\t ]+0+$','m'));
 assert.equal(process.cwd(), '/srv/zeros/workspace');
 assert.equal(fs.readFileSync('/srv/zeros/workspace/primary','utf8'), 'primary data');
 for (const file of ['/home/user','/srv/zeros/setup','/srv/zeros/broker','/opt/zeros-bootstrap']) assert(!fs.existsSync(file));
 assert(!fs.existsSync('/srv/zeros/.zeros-setup/seed/private'));
+assert(!fs.existsSync('/srv/zeros/.zeros-engine-setup/seed/private'));
 assert(!fs.existsSync('/srv/zeros/files/repos'));
+for (const home of ['/srv/zeros/home/agent','/srv/zeros/home/capture']) {
+  const metadata=fs.lstatSync(home);
+  assert.equal(metadata.uid,10003);
+  assert.equal(metadata.gid,10003);
+}
 for (let index=0; index<${repositoryCount}; index++) {
   const source="const fs=require('node:fs'); const p='/srv/zeros/repos/fixture/repo"+index+"'; " +
-    "if(fs.readFileSync(p+'/file','utf8')!=='repository data'||fs.readFileSync(p+'/install-path','utf8').trim()!==p)process.exit(1); fs.writeFileSync(p+'/agent-write','ok')";
-  const child=spawnSync('/usr/bin/setpriv',['--reuid=10001','--regid=10001','--clear-groups','--bounding-set=-all',
-    '--inh-caps=-all','--ambient-caps=-all','--no-new-privs','--',${JSON.stringify(runtime.node)},'-e',source],
+    "const metadata=fs.lstatSync(p); if(process.getuid()!==10003||process.getgid()!==10003||metadata.uid!==10003||metadata.gid!==10003||fs.readFileSync(p+'/file','utf8')!=='repository data'||fs.readFileSync(p+'/install-path','utf8').trim()!==p)process.exit(1); fs.writeFileSync(p+'/agent-write','ok'); const written=fs.lstatSync(p+'/agent-write'); if(written.uid!==10003||written.gid!==10003)process.exit(1)";
+  const child=spawnSync(${JSON.stringify(runtime.node)},['-e',source],
     {encoding:'utf8',env:{PATH:'/usr/bin:/bin'}});
   assert.equal(child.status,0,'workspace identity cannot use secondary repository');
 }
 if (${repositoryCount} === 0) assert(!fs.existsSync('/srv/zeros/repos'));
-process.stdout.write('template projection qualified');
+process.stdout.write('template projection checked');
 `,
         );
         tree.write(
           "/qualify.mjs",
           `
-import {launchCloudEngine} from '${runtime.libRoot}/cloud-engine-launcher.mjs';
+import {launchCloudEngine,prepareCloudEngineView} from '${runtime.libRoot}/cloud-engine-launcher.mjs';
+import {cloudEngineViewArguments,cloudEngineViewEnvironment} from '${runtime.libRoot}/cloud-engine-view.mjs';
+import {resolveCloudRuntime} from '${runtime.libRoot}/cloud-runtime-root.mjs';
+import {adoptCloudEngineTree} from '${runtime.libRoot}/prepare-cloud-image-files.mjs';
 import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 const installed=spawnSync('/usr/bin/python3',['-B','/install.py'],{encoding:'utf8',env:{PATH:'/usr/bin:/bin'},timeout:15000});
 if(installed.status!==0)throw new Error(installed.stderr);
+const runtime=resolveCloudRuntime();
+// This isolated fixture owns no delegated kernel scope. Keep the launcher's
+// real outside-root refusal; do not manufacture placement or drain evidence.
+await assert.rejects(launchCloudEngine({operation:'qualify',runtime,source:{},
+  scope:{prepare(){throw new Error('unadmitted scope prepared');}}}),
+  {message:'Cloud root monitor placement was refused'});
+// The frozen computer-build helper still emits legacy-owned clones. Exercise
+// the actual ownership adoption primitive on this fixture's unused files.
+adoptCloudEngineTree('/srv/zeros/files/workspace');
+if(fs.existsSync('/srv/zeros/files/repos'))adoptCloudEngineTree('/srv/zeros/files/repos');
 ${alteration}
-// Cgroup placement is separately tested. Exercise the actual prepare function,
-// launcher barrier, bwrap view and native identity transition here.
-const run=()=>launchCloudEngine({operation:'qualify',source:{},scope:{prepare(){},attach(){},async retire(){}}});
+const resourceProjection={version:1,resources:null,memoryBudget:{nominalMemoryBytes:null,
+  measuredMemoryBytes:null,hostMemoryMax:'268435456',source:'fallback',capped:false}};
+const prepare=()=>prepareCloudEngineView(runtime,{},'qualify',undefined,undefined,resourceProjection);
 if (${JSON.stringify(error)}) {
-  await assert.rejects(run,{message:${JSON.stringify(error)}});
+  assert.throws(prepare,{message:${JSON.stringify(error)}});
   process.stdout.write('unsafe projection rejected');
-} else process.exitCode=await run();
+} else {
+  const profile=prepare();
+  try {
+    const args=cloudEngineViewArguments('qualify',profile.version,runtime,profile.viewDirectory);
+    const entry=args.indexOf('--');
+    assert.equal(args[entry+1],runtime.engineNamespace);
+    // Check the production mounts with a fixture-only non-root reader. The
+    // actual C entry requires original kernel custody, covered separately.
+    const result=spawnSync('/usr/bin/bwrap',[...args.slice(0,entry),'--',
+      '/usr/bin/setpriv','--reuid','10003','--regid','10003','--clear-groups',
+      '--no-new-privs','--inh-caps','-all','--ambient-caps','-all','--bounding-set','-all',
+      runtime.node,'${runtime.workerRoot}/projection-check.mjs'],
+      {encoding:'utf8',env:cloudEngineViewEnvironment({},'qualify',runtime),timeout:15000});
+    assert.equal(result.stderr,'');
+    assert.equal(result.status,0);
+    process.stdout.write(result.stdout);
+  } finally {profile.releaseView();}
+}
 `,
         );
         execFileSync("sudo", [
@@ -262,6 +319,7 @@ if (${JSON.stringify(error)}) {
           "/usr/bin/chown",
           "0:10001",
           tree.physical("/srv/zeros/files/.zeros-setup"),
+          tree.physical("/srv/zeros/managed-settings"),
         ]);
         execFileSync(
           "sudo",
@@ -367,7 +425,7 @@ if (${JSON.stringify(error)}) {
         expect(result.stdout).toBe(
           error
             ? "unsafe projection rejected"
-            : "template projection qualified",
+            : "template projection checked",
         );
       } finally {
         execFileSync("sudo", [

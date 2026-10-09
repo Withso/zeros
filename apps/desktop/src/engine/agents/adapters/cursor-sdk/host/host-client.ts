@@ -695,7 +695,7 @@ export class CursorHostClient {
       },
       platform: {
         // Building the workspace executor can outlast the ordinary control
-        // budget on a cold contained host — that IS the cost being moved off
+        // budget on a cold host — that IS the cost being moved off
         // the turn — and nothing waits on the reply, so it opts out of the
         // 30s timeout the way `run.wait` does.
         prewarm: (opts) =>
@@ -830,15 +830,6 @@ export function spawnSubprocessTransport(
     : preserveAmbientConfigRoots({
         ...(process.env as Record<string, string>),
       });
-  if (options && options.executionBoundary.status.backend !== "none") {
-    // Cursor's SDK uses global fetch plus Node's HTTP/1 transport during
-    // Agent.create. A contained host must route the configured proxy before a
-    // kernel fence sees the socket. Native Code inherits the user's setting
-    // verbatim instead of Zeros changing process-wide Node transport behavior.
-    // Electron 43 embeds Node 24, whose built-in proxy support covers fetch,
-    // http.request and https.request when enabled at process startup.
-    env.NODE_USE_ENV_PROXY = "1";
-  }
   if (runtime.electron) env.ELECTRON_RUN_AS_NODE = "1";
   // A cloud host resolves its SDK beside the verified source script.
   if (cloudRuntime) delete env.ZEROS_CURSOR_SDK_ENTRY;

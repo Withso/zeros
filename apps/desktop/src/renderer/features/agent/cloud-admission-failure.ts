@@ -37,7 +37,7 @@ export function classifyCloudAdmissionFailure(input: {
       return { kind: "runtime-upgrade-required", message: "This workspace gets the new cloud runtime the next time it wakes", action: "none" };
     case "cloud_agent_model_not_authorized": {
       const model = input.agentId && input.model ? modelsForAgent(input.agentId, null).find(row => row.value === input.model)?.label ?? input.model : "The selected model";
-      return { kind: "model-not-authorized", message: `${model} isn't enabled for this workspace`, action: "choose-model" };
+      return { kind: "model-not-authorized", message: `${model} isn't available for this agent`, action: "none" };
     }
     case "cloud_agent_credential_required":
       return { kind: "credential-required", message: `Connect ${provider} to use agents in this workspace`, action: "reconnect" };

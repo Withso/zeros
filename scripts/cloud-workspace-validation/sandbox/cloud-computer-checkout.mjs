@@ -5,6 +5,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
+import { adoptCloudEngineTree } from "./prepare-cloud-image-files.mjs";
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -25,6 +26,14 @@ export function isCloudComputerRepositoryDirectory(value) {
 const canonical = value => JSON.stringify(value, (_key, item) => object(item)
   ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item);
 
+function invalidRefCharacters(value) {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= 32 || code === 127) return true;
+  }
+  return /[~^:?*[\\]/.test(value);
+}
+
 export function parseCloudComputerSetup(value, repository) {
   const template = value?.template;
   if (!keys(value, ["template", "primaryRepositoryId", "requestedRevision", ...(value?.checkoutSource === undefined ? [] : ["checkoutSource"])]) ||
@@ -39,7 +48,7 @@ export function parseCloudComputerSetup(value, repository) {
     new Set(template.repositoryManifest.map(repo => repo.id)).size !== template.repositoryManifest.length ||
     new Set(template.repositoryManifest.map(repo => `${repo.owner}/${repo.name}`)).size !== template.repositoryManifest.length ||
     typeof value.requestedRevision !== "string" || value.requestedRevision.length < 1 || value.requestedRevision.length > 512 ||
-    /[\x00-\x20\x7f~^:?*\[\\]/.test(value.requestedRevision) || value.requestedRevision.startsWith("-") ||
+    invalidRefCharacters(value.requestedRevision) || value.requestedRevision.startsWith("-") ||
     value.requestedRevision.endsWith(".") || value.requestedRevision.includes("..") || value.requestedRevision.includes("@{") ||
     value.requestedRevision.split("/").some(part => !part || part.startsWith(".") || part.endsWith(".lock"))) throw invalid();
   const primary = template.repositoryManifest.find(repo => repo.id === value.primaryRepositoryId);
@@ -54,7 +63,7 @@ export function parseCloudComputerSetup(value, repository) {
 // document is display/checkout metadata and never carries GitHub authority.
 function parseCheckoutSource(value, repository) {
   const branch = ref => typeof ref === "string" && ref.length > 0 && ref.length <= 512 && ref !== "@" &&
-    !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(ref) && !/[\x00-\x20\x7f~^:?*\[\\]/.test(ref) &&
+    !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(ref) && !invalidRefCharacters(ref) &&
     !ref.startsWith("-") && !ref.endsWith(".") && !ref.includes("..") && !ref.includes("@{") &&
     !ref.split("/").some(part => !part || part.startsWith(".") || part.endsWith(".lock"));
   if (!keys(value, ["kind", "revision", "headBranch", "targetBranch", "pullRequest"]) ||
@@ -71,7 +80,7 @@ function parseCheckoutSource(value, repository) {
 function settings(options = {}) {
   return { filesRoot: "/srv/zeros/files", templateFile: "/srv/zeros/computer-template.json", rootUid: 0,
     admissionFile: CLOUD_COMPUTER_WORKSPACE_ADMISSION,
-    workerUid: 10001, readMountInfo: () => readFileSync("/proc/self/mountinfo", "utf8"), ...options };
+    workerUid: 10003, readMountInfo: () => readFileSync("/proc/self/mountinfo", "utf8"), ...options };
 }
 
 function directory(file, uid, protectedDirectory = false) {
@@ -93,9 +102,10 @@ function mountPoints(options) {
 }
 
 function gitDirectory(checkout, options) {
-  directory(checkout, options.workerUid);
+  const admittedUid = options.adoptLegacy && lstatSync(checkout).uid === 10001 ? 10001 : options.workerUid;
+  directory(checkout, admittedUid);
   const git = path.join(checkout, ".git");
-  directory(git, options.workerUid);
+  directory(git, admittedUid);
   // A cached worktree cannot borrow objects or Git authority outside its own
   // clone. Even an internal symlink in Git metadata is unnecessary here.
   const forbidden = new Set(["commondir", "gitdir", "objects/info/alternates", "objects/info/http-alternates", "config.worktree"]);
@@ -119,7 +129,7 @@ function gitDirectory(checkout, options) {
         throw error;
       }
       if (++count > 250000 || Buffer.byteLength(file) > 4096 || forbidden.has(path.relative(git, file)) ||
-        stat.isSymbolicLink() || !(stat.isDirectory() || stat.isFile()) || stat.uid !== options.workerUid ||
+        stat.isSymbolicLink() || !(stat.isDirectory() || stat.isFile()) || stat.uid !== admittedUid ||
         (stat.mode & 0o6000) || (stat.isFile() && stat.nlink !== 1)) throw invalid();
       if (stat.isDirectory()) walk(file, depth + 1);
     }
@@ -160,6 +170,17 @@ export function verifyCloudComputerTemplate(computer, repository, overrides = {}
   if (mountPoints(options).some(mount => mount.path.startsWith(`${options.filesRoot}/`))) throw invalid();
   const primary = computer.template.repositoryManifest.find(repo => repo.id === computer.primaryRepositoryId);
   return path.join(repos, primary.owner, primary.name);
+}
+
+/** Root setup holds the launch fence and has positively drained every legacy
+ * engine/resident/setup scope before invoking this checked migration. */
+export function adoptCloudComputerTemplateOwnership(computer, repository, overrides = {}) {
+  if (process.geteuid?.() !== 0) throw invalid();
+  verifyCloudComputerTemplate(computer, repository, { ...overrides, adoptLegacy: true });
+  const options = settings(overrides);
+  for (const repo of computer.template.repositoryManifest)
+    adoptCloudEngineTree(path.join(options.filesRoot, "repos", repo.owner, repo.name));
+  return verifyCloudComputerTemplate(computer, repository, overrides);
 }
 
 const runtimeIdentity = runtime => Object.fromEntries(["runtimeId", "manifestSha256", "baseCompatibilityId", "bootId", "supervisorSessionId"]
@@ -221,7 +242,7 @@ export async function verifyCloudComputerRepositoryOrigin(repository, repository
   let response;
   try {
     response = await fetchImpl(`https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`, {
-      method: "GET", redirect: "error", cache: "no-store", signal: AbortSignal.timeout(15000), headers: {
+      method: "GET", redirect: "error", cache: "no-store", signal: globalThis.AbortSignal.timeout(15000), headers: {
         accept: "application/vnd.github+json", authorization: `Bearer ${repository.credential.token}`,
         "user-agent": "zeros-cloud-workspace-setup", "x-github-api-version": "2026-03-10",
       },
@@ -261,6 +282,8 @@ function resetReadConfig(checkout, repository, options) {
   const descriptor = openSync(file, constants.O_WRONLY | constants.O_NOFOLLOW);
   try {
     const stat = fstatSync(descriptor);
+    // Sanitation runs after ownership adoption; the read token must never
+    // reach a config still owned by the archived worker identity.
     if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== options.workerUid) throw invalid();
     // Do not trust inherited include/filter/credential/hook/worktree settings
     // while an installation read token is live. C3 uses this same small config.

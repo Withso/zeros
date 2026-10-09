@@ -9,7 +9,6 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,7 +16,6 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const rootRequire = createRequire(import.meta.url);
 
 describe("shared audit CLI independent graph boundary", () => {
   let fixtureRoot: string;
@@ -33,9 +31,6 @@ describe("shared audit CLI independent graph boundary", () => {
       "pnpm-lock.yaml",
       "pnpm-workspace.yaml",
       "scripts/check-audit.mjs",
-      "scripts/check-node-forge-patch.mjs",
-      "scripts/node-forge-patch.json",
-      "patches/node-forge@1.4.0.patch",
       "apps/control-plane/package.json",
       "apps/control-plane/pnpm-lock.yaml",
       "apps/control-plane/pnpm-workspace.yaml",
@@ -107,7 +102,7 @@ if (JSON.stringify(args) === JSON.stringify(["config", "get", "auditConfig", "--
       .map((line) => JSON.parse(line));
   }
 
-  it("audits the isolated control-plane install without resolving root Forge", () => {
+  it("audits the isolated control-plane install without resolving desktop dependencies", () => {
     expect(existsSync(join(fixtureRoot, "node_modules"))).toBe(false);
     expect(existsSync(join(controlPlane, "node_modules"))).toBe(true);
     const result = invoke(controlPlane);
@@ -118,27 +113,42 @@ if (JSON.stringify(args) === JSON.stringify(["config", "get", "auditConfig", "--
     ]);
   });
 
-  it("never skips the root guard just because desktop dependencies are missing", () => {
-    mkdirSync(join(fixtureRoot, "node_modules"));
-    symlinkSync(
-      dirname(rootRequire.resolve("js-yaml/package.json")),
-      join(fixtureRoot, "node_modules/js-yaml"),
-      "dir",
-    );
+  it("audits the root graph without an obsolete SRT/Forge install", () => {
+    expect(existsSync(join(fixtureRoot, "node_modules"))).toBe(false);
     const result = invoke(fixtureRoot);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("MODULE_NOT_FOUND");
-    expect(result.stderr).toContain("@anthropic-ai/sandbox-runtime");
-    expect(receipts()).toEqual([]);
+    expect(result.status).toBe(0);
+    expect(receipts()).toEqual([
+      { cwd: fixtureRoot, args: ["audit", "--prod", "--audit-level=high"] },
+    ]);
   });
 
-  it("fails closed when the explicit root verifier tooling is not installed", () => {
-    const result = invoke(fixtureRoot);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("MODULE_NOT_FOUND");
-    expect(result.stderr).toContain("js-yaml");
-    expect(receipts()).toEqual([]);
-  });
+  it.each(["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"])(
+    "rejects a missing root graph boundary file %s before the registry",
+    (filename) => {
+      rmSync(join(fixtureRoot, filename));
+      const result = invoke(fixtureRoot);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Root audit boundary");
+      expect(receipts()).toEqual([]);
+    },
+  );
+
+  it.each(["root", "control-plane"])(
+    "rejects a malformed or foreign %s graph manifest",
+    (boundary) => {
+      const directory = boundary === "root" ? fixtureRoot : controlPlane;
+      for (const manifest of [
+        "not-json",
+        JSON.stringify({ name: "unrelated" }),
+      ]) {
+        writeFileSync(join(directory, "package.json"), manifest);
+        const result = invoke(directory);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("audit boundary manifest");
+        expect(receipts()).toEqual([]);
+      }
+    },
+  );
 
   it.each(["apps/marketing", "packages/protocol", "nested/apps/control-plane"])(
     "rejects unknown/wrong audit boundary %s before registry execution",
@@ -152,16 +162,43 @@ if (JSON.stringify(args) === JSON.stringify(["config", "get", "auditConfig", "--
     },
   );
 
-  it.each([
-    ["GHSA", { ignoreGhsas: ["GHSA-86w9-cpqp-85rv"] }],
-    ["CVE", { ignoreCves: ["CVE-2026-85393"] }],
-  ])("rejects an unguarded standalone Forge %s exception", (_name, config) => {
-    writeFileSync(join(fixtureRoot, "audit-config.json"), JSON.stringify(config));
-    const result = invoke(controlPlane);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("Control-plane audit cannot ignore the Forge advisory");
-    expect(receipts()).toEqual([]);
-  });
+  describe.each(["root", "control-plane"])(
+    "%s effective audit exceptions",
+    (boundary) => {
+      it.each([
+        ["GHSA", { ignoreGhsas: ["GHSA-86w9-cpqp-85rv"] }],
+        ["CVE", { ignoreCves: ["CVE-2026-85393"] }],
+      ])("rejects an unguarded Forge %s exception", (_name, config) => {
+        writeFileSync(
+          join(fixtureRoot, "audit-config.json"),
+          JSON.stringify(config),
+        );
+        const result = invoke(boundary === "root" ? fixtureRoot : controlPlane);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(
+          `${boundary === "root" ? "Root" : "Control-plane"} audit cannot ignore the Forge advisory`,
+        );
+        expect(receipts()).toEqual([]);
+      });
+
+      it.each([
+        "not-json",
+        '"not-an-object"',
+        "null",
+        "[]",
+        '{"ignoreGhsas":"GHSA-86w9-cpqp-85rv"}',
+        '{"ignoreCves":[42]}',
+      ])("fails closed on unreadable/malformed configuration %s", (config) => {
+        writeFileSync(join(fixtureRoot, "audit-config.json"), config);
+        const result = invoke(boundary === "root" ? fixtureRoot : controlPlane);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(
+          `${boundary === "root" ? "Root" : "Control-plane"} audit configuration`,
+        );
+        expect(receipts()).toEqual([]);
+      });
+    },
+  );
 
   it("retains unrelated standalone advisory configuration and the actual audit", () => {
     writeFileSync(
@@ -191,35 +228,21 @@ if (JSON.stringify(args) === JSON.stringify(["config", "get", "auditConfig", "--
     },
   );
 
-  it.each([
-    "not-json",
-    '"not-an-object"',
-    "null",
-    "[]",
-    '{"ignoreGhsas":"GHSA-86w9-cpqp-85rv"}',
-    '{"ignoreCves":[42]}',
-  ])(
-    "fails closed on unreadable/malformed audit configuration %s",
-    (config) => {
-      writeFileSync(join(fixtureRoot, "audit-config.json"), config);
-      const result = invoke(controlPlane);
+  it.each(["root", "control-plane"])(
+    "preserves a real %s finding without retrying a mixed transport message",
+    (boundary) => {
+      writeFileSync(
+        join(fixtureRoot, "audit-result.json"),
+        JSON.stringify({
+          exitCode: 1,
+          output:
+            "HTTP 503 retry metadata\nGHSA-86w9-cpqp-85rv\nfound 1 high severity vulnerability",
+        }),
+      );
+      const result = invoke(boundary === "root" ? fixtureRoot : controlPlane);
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain("Control-plane audit configuration");
-      expect(receipts()).toEqual([]);
+      expect(result.stdout).toContain("GHSA-86w9-cpqp-85rv");
+      expect(receipts()).toHaveLength(1);
     },
   );
-
-  it("preserves a real standalone finding without retrying a mixed transport message", () => {
-    writeFileSync(
-      join(fixtureRoot, "audit-result.json"),
-      JSON.stringify({
-        exitCode: 1,
-        output: "HTTP 503 retry metadata\nGHSA-86w9-cpqp-85rv\nfound 1 high severity vulnerability",
-      }),
-    );
-    const result = invoke(controlPlane);
-    expect(result.status).toBe(1);
-    expect(result.stdout).toContain("GHSA-86w9-cpqp-85rv");
-    expect(receipts()).toHaveLength(1);
-  });
 });

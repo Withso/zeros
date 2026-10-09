@@ -1,11 +1,12 @@
 import { createServer } from 'node:net';
+import {spawn} from 'node:child_process';
 import { createRequire } from 'node:module';
 import { mkdtemp,rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Duplex, PassThrough } from 'node:stream';
 import { afterEach,describe,expect,it,vi } from 'vitest';
-import { assertCloudSshWorkerIdentity,createCloudSshSession } from '../cloud-ssh-session.mjs';
+import { assertCloudSshEngineIdentity,createCloudSshSession } from '../cloud-ssh-session.mjs';
 const {Client}=createRequire(import.meta.url)('ssh2');
 
 describe('cloud SSH workload session',()=>{
@@ -49,16 +50,21 @@ describe('cloud SSH workload session',()=>{
   });
  });
  it.each([
-  {uid:0,gid:10001,groups:[],status:'NoNewPrivs:\t1\nCapEff:\t0000000000000000'},
-  {uid:10001,gid:0,groups:[],status:'NoNewPrivs:\t1\nCapEff:\t0000000000000000'},
-  {uid:10001,gid:10001,groups:[0],status:'NoNewPrivs:\t1\nCapEff:\t0000000000000000'},
-  {uid:10001,gid:10001,groups:[],status:'NoNewPrivs:\t0\nCapEff:\t0000000000000000'},
-  {uid:10001,gid:10001,groups:[],status:'NoNewPrivs:\t1\nCapEff:\t0000000000000001'},
- ])('rejects a privileged or elevation-capable worker %j',({status,...identity})=>{
-  expect(()=>assertCloudSshWorkerIdentity(status,{...identity,platform:'linux'})).toThrow('unprivileged cloud worker');
+  {platform:'darwin',uid:10003,gid:10003},
+  {platform:'linux',uid:0,gid:0},
+  {platform:'linux',uid:10001,gid:10001},
+  {platform:'linux',uid:10001,gid:10003},
+  {platform:'linux',uid:10003,gid:10001},
+ ])('rejects a standalone helper outside the non-root engine %j',identity=>{
+  expect(()=>assertCloudSshEngineIdentity(identity)).toThrow('engine identity');
  });
- it('accepts only the fixed Linux workload identity',()=>{
-  expect(()=>assertCloudSshWorkerIdentity('NoNewPrivs:\t1\nCapEff:\t0000000000000000',{platform:'linux',uid:10001,gid:10001,groups:[10001]})).not.toThrow();
+ it('accepts only the non-root engine identity',()=>{
+  expect(()=>assertCloudSshEngineIdentity({platform:'linux',uid:10003,gid:10003})).not.toThrow();
+ });
+ it('preserves injected Local command and PTY child identity',async()=>{
+  const f=await fixture();await f.ready;
+  expect(await exec(f.client,'id -u')).toMatchObject({stdout:String(process.getuid?.())+'\n',code:0});
+  expect((await exec(f.client,'id -u',{pty:{cols:80,rows:24,term:'xterm'}})).stdout.trim()).toBe(String(process.getuid?.()));
  });
  it('executes commands with independent stderr and exit status',async()=>{
   const f=await fixture();await f.ready;
@@ -94,5 +100,26 @@ describe('cloud SSH workload session',()=>{
   channel.write(Buffer.from([0xa9]));
   await vi.waitFor(()=>expect(writes).toHaveLength(2));
   expect(Buffer.concat(writes)).toEqual(Buffer.from('é'));
+ });
+});
+
+
+describe('SSH original asynchronous workload launch',()=>{
+ it('waits for the original prepared process before wiring its streams',async()=>{
+  const input=new PassThrough(),output=new PassThrough();
+  const session=createCloudSshSession(Duplex.from({readable:input,writable:output}),{
+   cwd:tmpdir(),env:{PATH:'/usr/bin:/bin'},
+   spawnProcess:async(command:string,args:string[],options:any)=>{
+    await new Promise(resolve=>setTimeout(resolve,20));return spawn(command,args,options);
+   },
+  });
+  const client=new Client();
+  try {
+   session.start(); const ready=new Promise<void>((resolve,reject)=>{client.once('ready',resolve);client.once('error',reject);});
+   client.connect({sock:Duplex.from({readable:output,writable:input}),username:'zeros',authHandler:['none'],readyTimeout:3000});await ready;
+   const result=await new Promise<string>((resolve,reject)=>client.exec("printf owned",(error:Error|null,channel:any)=>{
+    if(error)return reject(error);let data='';channel.on('data',(value:Buffer)=>{data+=value;});channel.on('error',reject);channel.on('close',()=>resolve(data));
+   }));expect(result).toBe('owned');
+  } finally {client.destroy();session.close();}
  });
 });

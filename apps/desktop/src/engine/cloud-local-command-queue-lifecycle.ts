@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import type Sqlite from "better-sqlite3";
 import { isDeepStrictEqual } from "node:util";
-import { canonicalCloudLocalCommandHistoryJson, CloudLocalCommandWriterSealSchema, CloudLocalCommandWriterSealAckSchema,
+import { canonicalCloudLocalCommandHistoryJson, canonicalCloudLocalCommandWriterSealDescriptor, CloudLocalCommandWriterSealSchema, CloudLocalCommandWriterSealAckSchema,
   cloudLocalCommandWriterSealAckMatchesSeal, type CloudLocalCommandWriterSeal, type CloudLocalCommandWriterSealAck } from "@zeros/protocol/cloud-local-mirror";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
 import { isCloudLocalCommandQueue, type CloudLocalCommandQueue } from "./cloud-local-command-queue";
@@ -41,6 +41,55 @@ export class CloudLocalCommandWriterLifecycle {
   }
   get acknowledged(): boolean {
     this.assertLive(); return !!this.db.prepare("SELECT 1 FROM local_command_writer_seals WHERE writer_epoch=? AND ack IS NOT NULL").get(this.options.queue.scope.writerEpoch);
+  }
+  /** Passive current proof for final-completion reads. A stored scalar seal
+   * and ACK cannot establish the original successful NORMAL freeze. */
+  readAcknowledgedSeal(): CloudLocalCommandWriterSeal | null {
+    try {
+      this.assertLive();
+      const read = () => this.db.prepare("SELECT document,ack FROM local_command_writer_seals WHERE writer_epoch=?")
+        .get(this.options.queue.scope.writerEpoch) as { document: string; ack: string | null } | undefined;
+      const row = read();
+      if (!row || row.ack === null) return null;
+      let seal: CloudLocalCommandWriterSeal, ack: CloudLocalCommandWriterSealAck;
+      try {
+        if (typeof row.document !== "string" || typeof row.ack !== "string" ||
+            Buffer.byteLength(row.document) > 16 * 1024 || Buffer.byteLength(row.ack) > 16 * 1024) throw new Error();
+        seal = CloudLocalCommandWriterSealSchema.parse(JSON.parse(row.document));
+        ack = CloudLocalCommandWriterSealAckSchema.parse(JSON.parse(row.ack));
+      } catch { throw new CloudCommandRuntimeError("command_response_invalid"); }
+      if (!cloudLocalCommandWriterSealAckMatchesSeal(ack, seal) ||
+          createHash("sha256").update(canonicalCloudLocalCommandWriterSealDescriptor(seal)).digest("hex") !== seal.sha256)
+        throw new CloudCommandRuntimeError("command_response_invalid");
+      if (!isDeepStrictEqual(seal.scope, this.options.queue.scope) || this.frozenSealHash !== seal.sha256 ||
+          this.options.queue.accepting || !this.options.queue.mirrorDrained() ||
+          this.exists("local_command_mirror_batches", "writer_epoch=?", seal.scope.writerEpoch))
+        throw new CloudCommandRuntimeError("command_conflict");
+      this.assertFrozenHead(seal);
+      const values = this.db.prepare("SELECT key,value FROM local_command_metadata WHERE key IN ('journalHead','mirrorHead','sealedWriter')")
+        .all() as { key: string; value: string }[];
+      const sequence = (key: string) => {
+        const value = values.find(value => value.key === key)?.value ?? "0", number = Number(value);
+        if (typeof value !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(value) || !Number.isSafeInteger(number) || number < 0)
+          throw new CloudCommandRuntimeError("command_storage_unavailable");
+        return number;
+      };
+      const stream = this.db.prepare("SELECT head FROM local_command_streams WHERE stream_id=? AND writer_epoch=?")
+        .get(seal.scope.engineInstanceId, seal.scope.writerEpoch) as { head: number } | undefined;
+      if (values.find(value => value.key === "sealedWriter")?.value !== seal.scope.writerEpoch ||
+          sequence("journalHead") !== seal.sequence || sequence("mirrorHead") !== seal.sequence ||
+          stream?.head !== seal.eventSequence || cloudLocalCommandSealInventory(this.db, {
+            scope: seal.scope, sequence: seal.sequence, recordSequence: seal.recordSequence, eventSequence: seal.eventSequence,
+          }) !== seal.inventorySha256)
+        throw new CloudCommandRuntimeError("command_conflict");
+      this.assertLive();
+      const current = read();
+      if (current?.document !== row.document || current?.ack !== row.ack) throw new CloudCommandRuntimeError("command_conflict");
+      return seal;
+    } catch (error) {
+      if (error instanceof CloudCommandRuntimeError) throw error;
+      throw new CloudCommandRuntimeError("command_storage_unavailable");
+    }
   }
   private exists(table: string, predicate: string, ...parameters: string[]): boolean {
     if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) return false;

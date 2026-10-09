@@ -40,14 +40,33 @@ import {
 } from "../cloud-workspace-validation/template-setup-probe.mjs";
 import { CloudProviderError } from "../../apps/control-plane/src/cloud-workspaces/provider";
 import { attestationFixture, proofPath } from "./cloud-worker-attestation-fixture";
+import { CLOUD_ENGINE_MUTABLE_LAYOUT } from "../cloud-workspace-validation/sandbox/prepare-cloud-image-files.mjs";
 import { setupTimingsSchema } from "../../packages/protocol/src/cloud-runtime-bundle";
 
 const templateId = "bx_3456789a",
   childId = "bx_23456789";
 const deletionId = `bdop_${"d".repeat(32)}`;
 const billingOrg = `team_${randomUUID()}`;
+it("reports v2 engine lifecycle observations without inventing sandbox predicates",()=>{
+ const value={version:2,boundary:"workspace-vm",qualified:true,identity:{qualified:true,hostUid:10003,namespaceUid:10003,noNewPrivs:1,seccompMode:2,capabilities:{effective:0,permitted:0,inheritable:0,bounding:0,ambient:0}},
+ execution:{sameEngineIdentity:true,noSandbox:true,ownedProcessGroups:true,originalProcessGroupsRetired:true,timeoutRetired:true,workloadCgroup:true,vmWorkloadDrain:true},capture:{sameEngineIdentity:true,chromiumSandbox:true}};
+ const report=summarizeQualification(value);
+ expect(report).toMatchObject(value);expect(JSON.stringify(report)).not.toMatch(/secure|unprivileged/);
+});
+it("keeps inner checks separate from final qualification and drops unknown v2 fields", () => {
+  const value = { version: 2, boundary: "workspace-vm", qualified: false, engineChecksPassed: true,
+    identity: { qualified: true, hostUid: 10003, namespaceUid: 10003, noNewPrivs: 1, seccompMode: 2,
+      capabilities: { effective: 0, permitted: 1, inheritable: 0, bounding: 0, ambient: 0, private: "provider prose" },
+      unknown: "provider prose" }, execution: { sameEngineIdentity: true, vmWorkloadDrain: false, private: "provider prose" } };
+  const result = summarizeQualification(value);
+  expect(result).toMatchObject({ qualified: false, engineChecksPassed: true,
+    identity: { capabilities: { effective: 0, permitted: 1, inheritable: 0, bounding: 0, ambient: 0 } },
+    execution: { vmWorkloadDrain: false } });
+  expect(JSON.stringify(result)).not.toMatch(/private|provider prose/);
+});
 function fixture() {
-  const journal = newTemplateSetupJournal(randomUUID(), 1, templateId);
+  const journal: Omit<ReturnType<typeof newTemplateSetupJournal>, "childId"> & { childId: string | null } =
+    newTemplateSetupJournal(randomUUID(), 1, templateId);
   const material = {
     templateId,
     billingOrg,
@@ -62,7 +81,7 @@ function fixture() {
     },
   };
   let deleted = false;
-  const request = vi.fn(async (pathname: string, input: any = {}) => {
+  const request = vi.fn(async (pathname: string, input: any = {}): Promise<Record<string, unknown>> => {
     if (pathname.endsWith("/fork"))
       return { sandboxId: childId, sourceSandboxId: templateId };
     if (pathname.startsWith("/deletion-operations/"))
@@ -144,6 +163,12 @@ function fixture() {
 }
 
 describe("operator template setup reproduction", () => {
+  it("retains observed current setup identity without inventing old sandbox predicates",()=>{
+    expect(setupProbeResult({status:0,stdout:JSON.stringify({hostUid:10003,hostGid:10003,
+      detachedDescendantsRetired:true,timeoutRetired:true})},7,30000).report).toEqual({
+      hostUid:10003,hostGid:10003,detachedDescendantsRetired:true,timeoutRetired:true,
+    });
+  });
   it("retains the original setup exit and distinguishes false checks from a missing report", () => {
     const result = setupProbeResult({ status: 125, signal: null, stdout: JSON.stringify({
       secure: false, unprivileged: true, detachedDescendantsRetired: false, timeoutRetired: true,
@@ -225,7 +250,7 @@ try { worker(); } catch {
       const stages: string[] = [];
       const completions: unknown[] = [];
       try {
-        tree.setupQualification.secure = secure;
+        tree.setupQualification.timeoutRetired = secure;
         const baseline = tree.execute();
         const observed = tree.execute("attest-cloud-worker.mjs", undefined, {
           transform: instrumentSetupDiagnosticSource,
@@ -280,6 +305,7 @@ try { worker(); } catch {
           resolveCloudRuntimeChild: () => ({ profile: "v4", binRoot: "/opt/runtime/bin", runtimeId: "fixture" }),
         };
         if (name === "./cloud-computer-checkout.mjs") return { cloudComputerHostRepository: () => { throw new Error("image_contract_invalid"); } };
+        if (name === "./prepare-cloud-image-files.mjs") return { CLOUD_ENGINE_MUTABLE_LAYOUT };
         if (name === "./cloud-engine-cgroup.mjs" || name === "./runtime-layout.json") return {};
         return createRequire(import.meta.url)(name);
       },
@@ -583,7 +609,8 @@ else {
   it("uses B4's sudo Python transport over the commands API with a bounded response", async () => {
     const f = fixture(),
       report = await f.dependencies.probe();
-    const request = vi.fn(async () => ({
+    const request = vi.fn(async (): Promise<{ success: boolean; exitCode: number; stdout: string;
+      timedOut: boolean; stdoutTruncated: boolean; stderr?: string }> => ({
       success: true,
       exitCode: 0,
       stdout: JSON.stringify(report),
@@ -736,7 +763,7 @@ print(json.dumps(module.summarize(json.loads(sys.stdin.read()))))
       workload: { secure: false },
       capture: null,
     });
-    expect(summary.workload.error.length).toBeLessThanOrEqual(2000);
+    expect(summary?.workload?.error?.length).toBeLessThanOrEqual(2000);
     expect(JSON.stringify(summary)).not.toContain(token);
     expect(JSON.stringify(summary)).not.toContain("://");
     expect(JSON.stringify(summary)).not.toContain("private file contents");
@@ -820,7 +847,7 @@ print(json.dumps(module.summarize(json.loads(sys.stdin.read()))))
       now: () => 0,
       deadlineMs: 400000,
     });
-    expect(result.launchDetail.launcherError.message).toBe(
+    expect(result?.launchDetail?.launcherError?.message).toBe(
       "Unexpected cloud engine mount contents",
     );
     expect(execute.mock.calls.map(([, args]) => args.at(-2))).toEqual([
@@ -877,7 +904,7 @@ print(json.dumps({'network':all(c[0][:3]==['/usr/bin/unshare','--net','--'] for 
         execute,
         now: () => 0,
         deadlineMs: 400000,
-      }).report.identity.secure,
+      })?.report?.identity?.secure,
     ).toBe(false);
     expect(execute).toHaveBeenCalledOnce();
   });
@@ -911,7 +938,7 @@ print(json.dumps({'network':all(c[0][:3]==['/usr/bin/unshare','--net','--'] for 
     expect(directories).toHaveLength(14);
     expect(listed).toEqual(["/run/zeros"]);
     expect(filesystem.readFileSync).not.toHaveBeenCalled();
-    const listing = directories.find((item) => item.path === "/run/zeros");
+    const listing = directories.find((item) => item.path === "/run/zeros")!;
     expect(listing).toMatchObject({
       truncated: true,
       entries: expect.any(Array),
@@ -979,10 +1006,10 @@ print(json.dumps({'network':all(c[0][:3]==['/usr/bin/unshare','--net','--'] for 
     const report = JSON.parse(output);
     expect(Buffer.byteLength(output)).toBeLessThanOrEqual(65536);
     expect(report.directories).toHaveLength(14);
-    expect(report.directories.every((item) => item.entries.length <= 64)).toBe(
+    expect(report.directories.every((item: { entries: unknown[] }) => item.entries.length <= 64)).toBe(
       true,
     );
-    expect(report.directories.some((item) => item.truncated)).toBe(true);
+    expect(report.directories.some((item: { truncated?: boolean }) => item.truncated)).toBe(true);
     expect(report.checks[0].sites[0]).toMatchObject({
       function: "runV4Probe",
       line: 886,
@@ -1186,10 +1213,13 @@ print(json.dumps({'network':all(c[0][:3]==['/usr/bin/unshare','--net','--'] for 
         { input: script, encoding: "utf8" },
       );
       const result = JSON.parse(output);
+      const sourceLines = readFileSync(new URL("../cloud-workspace-validation/sandbox/cloud-computer-checkout.mjs", import.meta.url), "utf8").split("\n");
+      const rejectedLine = sourceLines.findIndex(line => line.includes("(stat.mode & 0o6000)") && line.includes("throw invalid()")) + 1;
+      expect(rejectedLine).toBeGreaterThan(0);
       expect(result.sites).toContainEqual({
         source: "cloud-computer-checkout.mjs",
         function: "walk",
-        line: 123,
+        line: rejectedLine,
       });
       expect(result.observed).toMatchObject({
         type: "symlink",

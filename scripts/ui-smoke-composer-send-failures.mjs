@@ -46,6 +46,7 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   const editor = composer.locator('[contenteditable="true"]');
   const send = composer.getByRole("button", { name: "Send message", exact: true });
   const toasts = page.locator("[data-sonner-toast]");
+  const failureCards = page.locator("[data-turn-failure-card]:visible");
   const dismiss = async () => {
     await page.getByRole("button", { name: "Dismiss", exact: true }).click();
     await page.clock.runFor(500);
@@ -55,22 +56,25 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   await page.goto(`${harnessBase}/harness-composer-send-failures.html`);
   await expect(editor).toBeVisible();
   for (const [code, copy, action] of [
-    ["cloud_agent_model_not_authorized", "GPT-6.1 Sol isn't enabled for this workspace", "Agent settings"],
-    ["cloud_agent_credential_required", "Connect Codex to send messages", "Reconnect"],
-    ["cloud_agent_credential_expired", "Reconnect Codex to send messages", "Reconnect"],
-    ["cloud_agent_credential_revoked", "Reconnect Codex to send messages", "Reconnect"],
+    ["cloud_agent_model_not_authorized", "GPT-6.1 Sol isn't available for this agent", null],
+    ["cloud_agent_credential_required", "Connect Codex to use agents in this workspace", "Reconnect"],
+    ["cloud_agent_credential_expired", "Your Codex connection expired. Reconnect to continue", "Reconnect"],
+    ["cloud_agent_credential_revoked", "Your Codex connection was disconnected. Reconnect to continue", "Reconnect"],
     ["cloud_agent_credential_refresh_required", "Your Codex connection needs to be renewed", "Reconnect"],
-    ["cloud_runtime_upgrade_required", "This workspace is on an older runtime", "Restart workspace"],
+    ["cloud_runtime_upgrade_required", "This workspace gets the new cloud runtime the next time it wakes", null],
   ]) {
     await page.evaluate(code => window.composerSendFailureFixture.setFailure(code), code);
     await editor.fill("Keep this draft after refusal");
     await send.click();
     await page.clock.runFor(200);
-    await expect(toasts).toHaveCount(1);
-    await expect(toasts).toContainText(copy);
-    if (action) await expect(toasts.getByRole("button", { name: action, exact: true })).toBeVisible();
-    else await expect(toasts.getByRole("button")).toHaveCount(1);
-    await expect(toasts.getByRole("button")).toHaveCount(action ? 2 : 1); // Relevant action and Dismiss.
+    await expect(failureCards).toHaveCount(1);
+    await expect(failureCards).toContainText(copy);
+    await expect(toasts).toHaveCount(0);
+    if (action) await expect(failureCards.getByRole("button", { name: action, exact: true })).toBeVisible();
+    await expect(failureCards.getByRole("button")).toHaveCount(action ? 1 : 0);
+    await expect(failureCards).not.toContainText("Enable models");
+    await expect(failureCards).not.toContainText("Or choose an allowed model.");
+    await expect(failureCards).not.toContainText("Retry in new chat");
     await expect(editor).toHaveText("Keep this draft after refusal");
     await expect(composer).not.toContainText(copy);
     await expect(composer.locator('[role="status"], [role="alert"]')).toHaveCount(0);
@@ -82,21 +86,20 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
       }
     }
     if (code === "cloud_runtime_upgrade_required") {
-      await expect(toasts).not.toContainText("couldn't be completed");
-      await expect(toasts).toContainText("Restart this workspace to update its cloud runtime.");
-      await expect(toasts).not.toContainText("next time");
+      await expect(failureCards).not.toContainText("couldn't be completed");
       for (const theme of ["dark", "light"]) {
         await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
         await capture(`runtime-refused-send-${theme}`);
       }
     }
-    await dismiss();
     await page.getByRole("button", { name: "Remount chat", exact: true }).click();
     await page.evaluate(() => window.composerSendFailureFixture.refresh());
     await expect(editor).toHaveText("Keep this draft after refusal");
     await expect(toasts).toHaveCount(0);
+    await expect(failureCards).toHaveCount(1);
+    await expect(failureCards).toContainText(copy);
   }
-  check("Refused cloud sends restore drafts, show one cause-specific toast and keep the composer clean across remount/refresh", true);
+  check("Refused cloud sends restore drafts and retain one failure banner without a duplicate toast across remount/refresh", true);
 
   await page.evaluate(() => window.composerSendFailureFixture.setFailure("command_dispatch_rejected"));
   await send.click();
@@ -112,6 +115,34 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   await page.getByRole("button", { name: "Remount chat", exact: true }).click();
   await expect(toasts).toHaveCount(0);
   check("Ambiguous dispatch shows one review toast and preserves the transcript without restoring a possibly delivered draft", true);
+
+  // Production queued refusals retain their editable FIFO prompt outside the
+  // transcript. That absence must not hide the chat's active failure banner.
+  await page.goto(`${harnessBase}/harness-composer-send-failures.html`);
+  await expect(editor).toBeVisible();
+  await page.evaluate(async () => {
+    const { useSessionsStore } = await import("/apps/desktop/src/renderer/features/agent/sessions-store.ts");
+    useSessionsStore.getState().patchSession("composer-chat-0", {
+      messages: [{ id: "queued-refusal", kind: "text", role: "user", text: "Keep this queued prompt", createdAt: Date.now(), queued: true, queuedEditable: true }],
+      status: "ready", queuePaused: true, cloudSendWait: { state: "failed" },
+      cloudAdmissionFailure: { code: "cloud_agent_credential_expired", turnId: "queued-refusal", agentId: "codex", model: "gpt-6.1-sol",
+        kind: "credential-required", message: "Your Codex connection expired. Reconnect to continue", action: "reconnect" },
+    });
+  });
+  await expect(failureCards).toHaveCount(1);
+  await expect(failureCards).toContainText("Your Codex connection expired. Reconnect to continue");
+  await expect(failureCards.getByRole("button", { name: "Reconnect", exact: true })).toBeVisible();
+  await expect(toasts).toHaveCount(0);
+  await page.getByRole("button", { name: "Remount chat", exact: true }).click();
+  await expect(failureCards).toHaveCount(1);
+  for (const label of ["Local", "Organization local"]) {
+    await page.getByRole("button", { name: label, exact: true }).click();
+    await expect(failureCards).toHaveCount(0);
+  }
+  await page.getByRole("button", { name: "Cloud", exact: true }).click();
+  await expect(failureCards).toHaveCount(1);
+  await expect(toasts).toHaveCount(0);
+  check("A queued cloud refusal keeps one banner through remount and placement switching", true);
 
   await page.goto(`${harnessBase}/harness-composer-send-failures.html?blocked=1`);
   await expect(editor).toBeVisible();

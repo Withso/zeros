@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -6,12 +6,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CursorSdkAdapter, type CursorSdkSendOptions } from "../adapter";
 import type { AgentAdapterContext } from "../../../types";
 import type { PreparedBoundary } from "../../../containment/types";
+import { createCloudNativeHome, isCloudNativeHome } from "../../../containment/cloud-native-home";
+import { cloudNativeProviderEnvironment } from "../../../containment/cloud-native-boundary";
+import { CloudExecutionBoundary, isCloudPreparedBoundary } from "../../../containment/cloud-execution-boundary";
+import * as workerConfiguration from "../../../containment/cloud-worker-config";
+import { portableCloudWorkloads } from "../../../containment/__tests__/helpers/portable-cloud-custody";
 import { cloudProviderExecution, cloudBootTurnReservation, type CloudBootNativeAuthority } from "../../../cloud-provider-execution";
-import { testExecutionBoundary } from "../../../__tests__/helpers/test-execution-boundary";
 import { testCloudBootFixture } from "../../../__tests__/helpers/test-cloud-boot";
 
 const native = vi.hoisted(() => ({ prepareBoot: vi.fn(), runtime: vi.fn(), create: vi.fn(), resume: vi.fn(), send: vi.fn() }));
-vi.mock("../../../containment/cloud-native-boundary", () => ({ CloudNativeBoundary: { prepare: vi.fn(), prepareBoot: native.prepareBoot } }));
+vi.mock("../../../containment/cloud-native-boundary", async original => ({
+  ...await original<typeof import("../../../containment/cloud-native-boundary")>(),
+  CloudNativeBoundary: { prepare: vi.fn(), prepareBoot: native.prepareBoot },
+}));
+vi.mock("../../../containment/cloud-worker-config", async original => ({
+  ...await original<typeof import("../../../containment/cloud-worker-config")>(),
+  loadCloudWorkerConfiguration: vi.fn(),
+}));
 vi.mock("../../../containment/cloud-runtime-root.mjs", async original => ({
   ...await original<typeof import("../../../containment/cloud-runtime-root.mjs")>(),
   resolveCloudRuntime: (await import("../../../__tests__/helpers/test-cloud-runtime")).testCloudRuntime,
@@ -30,13 +41,32 @@ beforeEach(() => {
 });
 async function setup(operation: "new" | "load" = "new") {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "zeros-cursor-boot-"))); cleanups.push(() => rm(root, { recursive: true, force: true }));
+  // Genuine Host scopes and physical HOME; deployment/cgroup admission is an
+  // explicit portable fixture, not a native kernel qualification.
+  const configuration = { version: 4 as const, backend: "cloud-worker" as const, profile: "zeros-cloud-worker-v4" as const,
+    uid: process.geteuid?.() ?? 0, gid: process.getegid?.() ?? 0,
+    toolchain: { node: process.execPath, supervisor: path.resolve("apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs") } };
+  vi.mocked(workerConfiguration.loadCloudWorkerConfiguration).mockReturnValue(configuration);
+  const guard = vi.spyOn(workerConfiguration, "isCloudWorkerConfiguration").mockImplementation(
+    (value: unknown): value is workerConfiguration.CloudWorkerConfiguration => value === configuration);
+  let workloads: ReturnType<typeof portableCloudWorkloads>;
+  let boundary: CloudExecutionBoundary;
+  try {
+    workloads = portableCloudWorkloads(configuration);
+    boundary = new CloudExecutionBoundary({ projectRoot: root, configuration, workloads });
+  } finally { guard.mockRestore(); }
+  cleanups.push(async () => { await workloads.drain(workloads.fence()); });
   const f = await testCloudBootFixture(root); cleanups.push(f.close);
   native.prepareBoot.mockImplementation(async (authority: CloudBootNativeAuthority, domain: PreparedBoundary) => {
-    const coordinator = { ...domain, providerHomePath: "/srv/zeros/home/agent", hasBackgroundServers: async () => false,
-      environment: () => ({ HOME: "/srv/zeros/home/agent", CURSOR_API_KEY: "synthetic-cursor-private-key", CURSOR_MODEL: "test-model", ZEROS_EXACT_MODEL: "1" }) };
+    authority.lifetime.assertLive();
+    const nativeHome = await createCloudNativeHome({ dataRoot: root, conversationId: f.input.conversationId,
+      provider: "cursor", executionId: f.selection.executionId });
+    const material = authority.takeMaterial();
+    const coordinator = { ...domain, nativeHome, providerHomePath: nativeHome.paths.home, hasBackgroundServers: async () => false,
+      environment: () => cloudNativeProviderEnvironment(material, authority.model, undefined, authority.environment?.values, nativeHome) };
     authority.lifetime.attach(coordinator); return coordinator;
   });
-  const domain = await f.factory.launchBootSelection(f.selection, () => testExecutionBoundary().prepare({ executionId: f.selection.executionId, actor: "agent-code", cwd: root, workspaceRoot: root }));
+  const domain = await f.factory.launchBootSelection(f.selection, () => boundary.prepare({ executionId: f.selection.executionId, actor: "agent-code", cwd: root, workspaceRoot: root }));
   const result = await f.factory.prepareBoot({ selection: f.selection, workload: domain, signal: new AbortController().signal });
   const execution = cloudProviderExecution(result.boundary)!;
   const reservation = f.factory.reserveBootTurn(execution, f.selection);
@@ -50,12 +80,18 @@ async function setup(operation: "new" | "load" = "new") {
     opts.beforeNativeWrite?.(); writes(); opts.onNativePromptStage?.("native_write");
     return { id: "native-run", stream: async function* () {}, wait: async () => ({ status: "finished" }), cancel: async () => {} };
   });
-  return { ...f, adapter, execution, reservation, writes, sessionId: f.selection.executionId };
+  return { ...f, root, domain, adapter, execution, reservation, writes, sessionId: f.selection.executionId };
 }
 const blocks = [{ type: "text" as const, text: "Synthetic" }];
 describe("Cursor original boot reservation across native preparation", () => {
   it.each(["new", "load"] as const)("%s marks actual native handoff and keeps passive observation separate", async operation => {
     const f = await setup(operation), observer = vi.fn();
+    expect(isCloudPreparedBoundary(f.domain)).toBe(true);
+    const nativeHome = f.execution.coordinator.nativeHome;
+    expect(isCloudNativeHome(nativeHome)).toBe(true);
+    expect((await stat(nativeHome.paths.home)).uid).toBe(process.geteuid?.());
+    expect((await stat(nativeHome.paths.home)).mode & 0o777).toBe(0o700);
+    expect(nativeHome.paths.home).toContain(path.join(f.root, "native-agent-homes") + path.sep);
     await f.adapter.prompt({ sessionId: f.sessionId, prompt: blocks, onNativePromptStage: observer });
     expect(native.send.mock.calls[0]![1].beforeNativeWrite).toBeTypeOf("function");
     expect(f.factory.bootScopeActivity([{ provider: "cursor", credentialId: f.selection.credentialRun.credentialId }]).foreground).toBe(1);

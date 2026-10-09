@@ -167,8 +167,8 @@ describe.each([false, true])(
         expect(serialized).not.toContain("private output");
         expect(cause).not.toHaveProperty("cause", expect.anything());
         const options = state.calls.at(-1)!.options;
-        expect(options.uid).toBe(cloud ? 10001 : undefined);
-        expect(options.gid).toBe(cloud ? 10001 : undefined);
+        expect(options.uid).toBe(cloud ? process.geteuid?.() : undefined);
+        expect(options.gid).toBe(cloud ? process.geteuid?.() : undefined);
       },
     );
 

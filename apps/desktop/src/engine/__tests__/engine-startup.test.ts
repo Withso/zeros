@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DesignCaptureService } from "../design/capture-service";
 
@@ -33,6 +36,7 @@ vi.mock("../git/cleanup", async original => ({ ...await original<object>(), prun
 vi.mock("../git/turn-recovery", () => ({ settleOrphanRunningTurns: async () => 0, repairUnattributedFinishedTurns: async () => 0 }));
 
 import { ZerosEngine } from "../zeros-engine";
+import { RoutingExecutionBoundary } from "../agents/containment/routing-boundary";
 
 function fixture(cloud = true) {
   const local = { start: vi.fn(), stop: vi.fn(), actualPort: 39393 };
@@ -64,6 +68,48 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("engine startup readiness", () => {
+  it.each(["Personal", "organization"])("starts %s Local with valid and malformed legacy process records", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "zeros-startup-legacy-"));
+    const previousDataDir = process.env.ZEROS_DATA_DIR;
+    process.env.ZEROS_DATA_DIR = dataRoot;
+    const engine = fixture(false);
+    try {
+      const generation = path.join(dataRoot, "sessions", "valid", "boundary", "generation");
+      const valid = path.join(generation, "commands", "process-domain.json");
+      await mkdir(path.dirname(valid), { recursive: true });
+      const descriptor = JSON.stringify({
+        version: 1, platform: "darwin", generation: "generation",
+        markerPath: path.join(generation, "tools", "process-domain.marker"),
+        policyPath: path.join(generation, "policy.json"), ownerUid: process.getuid?.() ?? 0,
+        engine: { version: 1, pid: process.pid, uid: process.getuid?.() ?? 0, startSec: "1", startUsec: "0" },
+        createdAt: 1,
+      });
+      await writeFile(valid, descriptor, { mode: 0o600 });
+      const malformed = path.join(dataRoot, "sessions", "malformed", "boundary", "generation", "commands", "process-domain.json");
+      await mkdir(path.dirname(malformed), { recursive: true });
+      await writeFile(malformed, "not JSON", { mode: 0o600 });
+      const host = {
+        backend: "none" as const, probe: vi.fn(), prepare: vi.fn(),
+        recoverStaleProcesses: vi.fn(async () => ({ discovered: 0, recovered: 0, active: 0, preserved: 0 })),
+      };
+      engine.executionBoundary = new RoutingExecutionBoundary({ host });
+
+      await expect(engine.start()).resolves.toBeUndefined();
+      expect(host.recoverStaleProcesses).toHaveBeenCalledOnce();
+      expect(engine.local.start).toHaveBeenCalledOnce();
+      expect(engine.running).toBe(true);
+      expect(console.warn).toHaveBeenCalled();
+      expect(await readFile(valid, "utf8")).toBe(descriptor);
+      expect(capture.start).not.toHaveBeenCalled();
+      expect(ownershipRecovery).not.toHaveBeenCalled();
+      await engine.stop();
+    } finally {
+      if (previousDataDir === undefined) delete process.env.ZEROS_DATA_DIR;
+      else process.env.ZEROS_DATA_DIR = previousDataDir;
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
+
   it("repairs v4 checkout ownership before restoring tenant processes or opening transports", async () => {
     const engine = fixture();
     engine.cloudWorker = { version: 4, uid: 10001, gid: 10001 };

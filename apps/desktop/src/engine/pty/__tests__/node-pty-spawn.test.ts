@@ -12,21 +12,11 @@ const base = {
 const launch = { command: "/bin/bash", args: ["-l"] };
 
 describe("cloud PTY identity", () => {
-  it("drops an ordinary human terminal to the workspace user", () => {
-    expect(cloudHumanPtyLaunch(base, launch)).toEqual({
-      command: "/usr/bin/setpriv",
-      args: [
-        "--reuid=10001",
-        "--regid=10001",
-        "--clear-groups",
-        "--",
-        "/bin/bash",
-        "-l",
-      ],
-    });
+  it("inherits the engine identity without selecting a legacy worker", () => {
+    expect(cloudHumanPtyLaunch(base, launch)).toEqual(launch);
   });
 
-  it("keeps the trusted outer identity only long enough to launch ZSR", () => {
+  it("preserves the original owned-process wrapper", () => {
     expect(
       cloudHumanPtyLaunch(
         {
@@ -36,5 +26,14 @@ describe("cloud PTY identity", () => {
         launch,
       ),
     ).toEqual(launch);
+  });
+
+  it("keeps Local terminal shell and login arguments unchanged", () => {
+    expect(cloudHumanPtyLaunch({}, launch)).toEqual(launch);
+  });
+
+  it("does not execute a historical privilege-drop helper", () => {
+    expect(cloudHumanPtyLaunch({ cloudWorkerIdentity: base.cloudWorkerIdentity }, launch)).toEqual(launch);
+    expect(cloudHumanPtyLaunch({ ...base, cloudWorkerSetprivPath: "/srv/zeros/workspace/setpriv" }, launch)).toEqual(launch);
   });
 });
