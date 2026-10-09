@@ -1,0 +1,34 @@
+{
+  "schema": "zeros.ci-failure/v1",
+  "signature": "0984364f59495ed9c048bc8489d270aad9e08693612a099b0bff49eba4fb7fea",
+  "signature_version": 1,
+  "repository": "Withso/zeros",
+  "incident_kind": "postmerge_full_ci",
+  "base_branch": "main",
+  "branch": "ci-fix/0984364f59495ed9c048bc8489d270aad9e08693612a099b0bff49eba4fb7fea",
+  "first_failure": {
+    "sha": "cb56ce58b5bfda84d1c493afa1aafcb530a5a763",
+    "run_id": "37882332811",
+    "attempt": 1
+  },
+  "source": {
+    "sha": "cb56ce58b5bfda84d1c493afa1aafcb530a5a763",
+    "run_id": "37882332811",
+    "attempt": 1
+  },
+  "required_lanes": [
+    "control-plane-db",
+    "unknown",
+    "vitest"
+  ],
+  "required_ci_additions": [
+    "ci:control-plane-db"
+  ],
+  "controller_evidence": {
+    "run_id": "37883006541",
+    "attempt": 1,
+    "artifact_id": "11594488889",
+    "artifact_digest": "sha256:c6d932f327c31d01059e5f5e1c571a671f632c28c7e5a4314b21f62a7b9247c6",
+    "payload_sha256": "4b01bf440581425d89f31433b19485f669274b88726d37992613e491b50f179d"
+  }
+}
