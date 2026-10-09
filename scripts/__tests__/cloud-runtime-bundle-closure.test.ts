@@ -641,6 +641,11 @@ const root = process.argv[2];
       const spy = vi
         .spyOn(toolchain, "runTool")
         .mockImplementation((command, args, options, failure) => {
+          // This fixture proves the root-only resolver. The normal payload
+          // regression and real archive case separately execute Cursor as UID10001.
+          if (args.at(-1) === "cursor") return Promise.resolve(
+            `${JSON.stringify({ checks: ["cursor_load"] })}\n${JSON.stringify({ component: "bundle", ok: true, failedChecks: [] })}`,
+          );
           const replaced = [...args];
           const mount = replaced.indexOf("/probe.cjs");
           expect(replaced[mount - 2]).toBe("--ro-bind");
@@ -649,7 +654,7 @@ const root = process.argv[2];
         });
       try {
         await expect(runClosureProbes(runtime)).resolves.toMatchObject({
-          checks: ["runtime_root"],
+          checks: ["runtime_root", "cursor_load"],
           isolation: "mount_namespace_no_network",
         });
       } finally {
