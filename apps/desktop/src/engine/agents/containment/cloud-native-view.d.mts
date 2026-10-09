@@ -2,6 +2,7 @@ export interface CloudNativeHomeView {
   readonly directory: string;
   readonly skills?: true;
   readonly codexConfig?: true;
+  readonly cursorConfig?: true;
   readonly history: { readonly provider: "claude" | "cursor" | "codex"; readonly directory: string };
 }
 export const CLOUD_NATIVE_HOME: "/srv/zeros/home/agent";

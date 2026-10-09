@@ -3,7 +3,9 @@ import type { CloudProviderExecution } from "../../../cloud-provider-execution";
 import { bindCloudCodexThread, cloudCodexCapabilities, cloudCodexConfig, cloudCodexRequest } from "../cloud-policy";
 
 function execution(apps = false) {
-  return { lease: { assertLive: vi.fn(), nativeCapabilities: {version:1,goals:true,nativeReview:true,nativeFork:true,multiAgent:true,connectedApps:true}, admission: { model: "qualified-model" }, codexAuth: () => apps ? { material: { accountId: "selected-account" } } : null } } as unknown as CloudProviderExecution;
+  const lease={assertLive:vi.fn(),codexAuth:()=>apps?{material:{accountId:"selected-account"}}:null};
+  return {cwd:"/srv/zeros/workspace",lease,lifetime:lease,auth:lease,model:"qualified-model",
+    nativeCapabilities:{version:1,goals:true,nativeReview:true,nativeFork:true,multiAgent:true,connectedApps:true},environment:null} as unknown as CloudProviderExecution;
 }
 describe("admitted Codex cloud extensions", () => {
   it("admits goal set/get/clear for the execution's exact native conversation", () => {
@@ -46,7 +48,7 @@ describe("admitted Codex cloud extensions", () => {
   });
   it("does not infer feature qualification from a basic provider lease", () => {
     const owner=execution(true);
-    Object.assign(owner.lease,{nativeCapabilities:null});
+    Object.assign(owner,{nativeCapabilities:null});
     bindCloudCodexThread(owner,"thread");
     expect(cloudCodexCapabilities(owner)).toMatchObject({goals:false,nativeFork:false,nativeReview:false,connectedApps:false,multiAgent:false});
     expect(()=>cloudCodexRequest(owner,"env","thread/goal/get",{threadId:"thread"})).toThrow(/not admitted/);

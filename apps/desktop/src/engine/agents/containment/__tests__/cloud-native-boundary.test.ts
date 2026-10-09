@@ -42,6 +42,17 @@ async function fixture() {
 }
 
 describe("native provider process ownership", () => {
+  it.each(["sdk-ts","cli","invalid","sdk-ts\n"])("allowlists the pinned SDK entrypoint only (%j)",async entrypoint=>{
+    const {boundary,lease,workload}=await fixture();
+    try{
+      const launch=boundary.wrapSpawn({command:"/opt/zeros-runtime/bin/node",args:["native-host"],cwd:"/srv/zeros/workspace",env:{CLAUDE_CODE_ENTRYPOINT:entrypoint,CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS:"1",HOME:"/untrusted",CURSOR_API_KEY:"override"}});
+      boundary.cancelUnstartedLaunch(launch);
+      const env=vi.mocked(workload.wrapSpawn).mock.calls[0]![0].env;
+      expect(env.CLAUDE_CODE_ENTRYPOINT).toBe(entrypoint==="sdk-ts"?"sdk-ts":undefined);
+      expect(env.HOME).toBe(CLOUD_NATIVE_HOME);expect(env.CURSOR_API_KEY).toBe("synthetic-cursor-key");
+      expect(env.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS).toBe("1");
+    }finally{await lease.close();}
+  });
   it("preserves admitted literals when translating managed native-home paths", () => {
     const values = { APP_PATH: `${CLOUD_COORDINATOR_HOME}/app`, ORG_SECRET: `${CLOUD_COORDINATOR_HOME}/synthetic-private-value` };
     const env = cloudNativeProviderEnvironment({ kind: "cursor-api-key", apiKey: "synthetic-cursor-key" }, "qualified-model", undefined, values);

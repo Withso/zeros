@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ attest: vi.fn(), mkdir: vi.fn(), release: vi.fn(), rm: vi.fn() }));
+const mocks = vi.hoisted(() => ({ attest: vi.fn(), mkdir: vi.fn(), chmod:vi.fn(),release: vi.fn(), rm: vi.fn() }));
 vi.mock("node:fs/promises", async original => ({ ...await original<typeof import("node:fs/promises")>(),
-  mkdir: mocks.mkdir, writeFile: vi.fn(), chown: vi.fn(), rm: mocks.rm,
+  mkdir: mocks.mkdir, chmod:mocks.chmod,writeFile: vi.fn(), chown: vi.fn(), rm: mocks.rm,
   lstat: async () => ({ isDirectory: () => true, isSymbolicLink: () => false, uid: 0, mode: 0o700 }),
   realpath: async () => "/run/zeros/coordinators", readlink: async () => "pid:[fixture]",
 }));
@@ -18,6 +18,16 @@ import type { CloudAgentLease } from "../../cloud-agent-lease";
 import type { PreparedBoundary } from "../types";
 
 describe("closed native containment failures", () => {
+  it.each(["workload","canary"].flatMap(phase=>["cloud_validation_rate_limited","cloud_validation_lease_expired","cloud_agent_credential_revoked"].map(code=>({phase,code}))))("preserves typed authority cause through %j",async({phase,code})=>{
+    vi.clearAllMocks();mocks.attest.mockReset();
+    const error=Object.assign(new Error("private containment diagnostic"),{code});
+    const lease={admission:{provider:"cursor",model:"test-model"},assertLive:vi.fn(),attach:vi.fn(),signal:new AbortController().signal,
+      takeMaterial:()=>({kind:"cursor-api-key",apiKey:"synthetic-key"}),close:vi.fn(async()=>{}),launch:async(launch:()=>unknown)=>launch(),validate:vi.fn()};
+    const workload={generation:"fixture",status:{backend:"cloud-worker"},attestation:phase==="workload"?Promise.reject(error):Promise.resolve(),spawn:vi.fn(async()=>({stderr:{resume(){}}}))};
+    mocks.attest.mockRejectedValueOnce(error);
+    await expect(CloudNativeBoundary.prepare(lease as unknown as CloudAgentLease,workload as unknown as PreparedBoundary,"conversation")).rejects.toMatchObject({code,message:expect.not.stringContaining("private")});
+    if(phase==="canary")expect(lease.close).toHaveBeenCalledOnce();
+  });
   it.each(["attestation_failed", "canary_failed"] as const)("distinguishes %s and preserves cleanup", async category => {
     vi.clearAllMocks();
     mocks.attest.mockReset();

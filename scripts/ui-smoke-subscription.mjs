@@ -550,8 +550,9 @@ export async function runCloudAgentAccessSmoke({ page, check }) {
   const runtimeAvailability = "https://api.example.test/v1/**/runtime-upgrade";
   await page.route(preparation, async route => {
     const required = await page.evaluate(() => window.composerSendFailureFixture.runtimeRequired);
+    // The harness session's accountId; cloud sends select only the sender's own grant.
     return route.fulfill({ json: { delegations: [{ id: "33333333-3333-4333-8333-333333333333", kind: "codex-chatgpt",
-      models: ["gpt-6.1-sol"], expiresAt: "2099-01-01T00:00:00Z", runtimeQualified: !required, runtimeUpgradeRequired: required }] } });
+      ownerUserId: "11111111-1111-4111-8111-111111111111", models: ["gpt-6.1-sol"], expiresAt: "2099-01-01T00:00:00Z", runtimeQualified: !required, runtimeUpgradeRequired: required }] } });
   });
   await page.route(runtimeAvailability, async route => {
     expect(route.request().method()).toBe("GET");

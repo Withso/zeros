@@ -3,6 +3,94 @@ import { CloudIdleStopScheduler, hasCloudUserProcesses, isCloudIdleMaintenance }
 import type { CloudDurabilityAuthority } from "../cloud-durability-runtime";
 const authority = {} as CloudDurabilityAuthority;
 describe("cloud idle stop", () => {
+  it("retains an idle warm host through ten quiet minutes then invokes the real stop callback", async () => {
+    let now = 0;
+    const inspectWorkload = vi.fn(async () => true), deferWorkloadInspection = vi.fn(() => true), stop = vi.fn(async () => true);
+    const scheduler = new CloudIdleStopScheduler({ now: () => now, busy: () => false, inspectWorkload, deferWorkloadInspection, stop });
+    try {
+      scheduler.consider(authority); await scheduler.settled(); now = 599_999;
+      scheduler.consider(authority); await scheduler.settled(); expect(stop).not.toHaveBeenCalled();
+      expect(scheduler.readActivity()).toMatchObject({ revision: 0, quietForMs: 599_999 });
+      now++; scheduler.consider(authority); await scheduler.settled();
+      expect(stop).toHaveBeenCalledOnce(); expect(inspectWorkload).not.toHaveBeenCalled();
+      expect(stop).toHaveBeenCalledWith(authority, expect.any(Function));
+    } finally { await scheduler.close(); }
+  });
+  it("drains an exact idle host but still refuses Stop until unrelated kernel work is empty", async () => {
+    let now = 600_000, warm = true, unrelated = true;
+    const retire = vi.fn(async () => { warm = false; }), committed = vi.fn(), inspectWorkload = vi.fn(async () => true);
+    const read = async () => "State:\tS (sleeping)\nUid:\t10001\t10001\t10001\t10001\nPPid:\t1\n";
+    const stop = vi.fn(async (_authority: CloudDurabilityAuthority, stillIdle: () => boolean) => {
+      await retire();
+      if (!stillIdle() || await hasCloudUserProcesses({ list: async () => [...(warm ? ["12"] : []), ...(unrelated ? ["13"] : [])], read }) || !stillIdle()) return false;
+      committed(); return true;
+    });
+    const scheduler = new CloudIdleStopScheduler({ now: () => now, busy: () => false, inspectWorkload, deferWorkloadInspection: () => true, stop });
+    try {
+      now += 600_000; scheduler.consider(authority); await scheduler.settled();
+      expect(retire).toHaveBeenCalledOnce(); expect(committed).not.toHaveBeenCalled();
+      unrelated = false; now += 15_000; scheduler.consider(authority); await scheduler.settled();
+      expect(committed).toHaveBeenCalledOnce(); expect(stop).toHaveBeenCalledTimes(2);
+    } finally { await scheduler.close(); }
+  });
+  it.each(["background", "unknown", "legacy"])("keeps real observational inspection for %s inventory", async kind => {
+    let now = 0;
+    const inspectWorkload = vi.fn(async () => true), stop = vi.fn(async () => true);
+    const scheduler = new CloudIdleStopScheduler({ now: () => now, busy: () => false, inspectWorkload, stop,
+      ...(kind === "legacy" ? {} : { deferWorkloadInspection: () => false }) });
+    try {
+      now = 600_000; scheduler.consider(authority); await scheduler.settled();
+      expect(inspectWorkload).toHaveBeenCalledOnce(); expect(stop).not.toHaveBeenCalled();
+      expect(scheduler.readActivity().quietForMs).toBe(0);
+    } finally { await scheduler.close(); }
+  });
+  it("never consults the warm exception while foreground work is busy or during activity reads", async () => {
+    let now = 600_000;
+    const deferWorkloadInspection = vi.fn(() => true), stop = vi.fn(async () => true);
+    const scheduler = new CloudIdleStopScheduler({ now: () => now, busy: () => true, deferWorkloadInspection, inspectWorkload: async () => true, stop });
+    try {
+      scheduler.readActivity(); scheduler.readActivity(); expect(deferWorkloadInspection).not.toHaveBeenCalled();
+      now += 600_000; scheduler.consider(authority); await scheduler.settled();
+      expect(deferWorkloadInspection).not.toHaveBeenCalled(); expect(stop).not.toHaveBeenCalled();
+    } finally { await scheduler.close(); }
+  });
+  it.each(["throws", "promise"])("retains conservative inspection and contains a %s warm hook", async kind => {
+    let now = 0;
+    const inspectWorkload = vi.fn(async () => true), stop = vi.fn(async () => true);
+    const options = { now: () => now, busy: () => false, inspectWorkload, stop, deferWorkloadInspection: () => false };
+    // Exercise malformed runtime callbacks without granting an asynchronous
+    // authority API or trusting Promise truthiness.
+    Object.assign(options, { deferWorkloadInspection: kind === "throws" ? () => { throw new Error("Unknown inventory"); }
+      : async () => { throw new Error("Synthetic rejected callback"); } });
+    const scheduler = new CloudIdleStopScheduler(options);
+    try {
+      now = 600_000; scheduler.consider(authority); await scheduler.settled(); await new Promise<void>(resolve => setImmediate(resolve));
+      expect(inspectWorkload).toHaveBeenCalledOnce(); expect(stop).not.toHaveBeenCalled();
+    } finally { await scheduler.close(); }
+  });
+  it("does not let a superseded warm PID inspection reset the quiet interval", async () => {
+    let now = 0, defer = false, finish!: (busy: boolean) => void;
+    const gate = new Promise<boolean>(resolve => { finish = resolve; }), stop = vi.fn(async () => true);
+    const scheduler = new CloudIdleStopScheduler({ now: () => now, busy: () => false,
+      inspectWorkload: () => gate, deferWorkloadInspection: () => defer, stop });
+    try {
+      now = 590_000; scheduler.consider(authority); await Promise.resolve();
+      defer = true; scheduler.consider(authority); finish(true); await scheduler.settled();
+      expect(scheduler.readActivity()).toMatchObject({ revision: 0, quietForMs: 590_000 });
+      now = 600_000; scheduler.consider(authority); await scheduler.settled(); expect(stop).toHaveBeenCalledOnce();
+    } finally { await scheduler.close(); }
+  });
+  it("keeps new activity authoritative while exact warm hosts are being drained", async () => {
+    let now = 0, enter!: () => void, drain!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; }), drained = new Promise<void>(resolve => { drain = resolve; }), committed = vi.fn();
+    const scheduler = new CloudIdleStopScheduler({ now: () => now, busy: () => false, inspectWorkload: async () => true,
+      deferWorkloadInspection: () => true, stop: async (_authority, stillIdle) => { enter(); await drained;
+        if (!stillIdle()) return false; committed(); return true; } });
+    try {
+      now = 600_000; scheduler.consider(authority); await entered; scheduler.activity(); drain(); await scheduler.settled();
+      expect(committed).not.toHaveBeenCalled();
+    } finally { drain(); await scheduler.close(); }
+  });
   it("excludes only the exact root-owned resident workload scope during a live handoff", async () => {
     const residentScope = "/zeros-host.service/engine-workload-11111111-1111-4111-8111-111111111111";
     let membership = `0::${residentScope}\n`;

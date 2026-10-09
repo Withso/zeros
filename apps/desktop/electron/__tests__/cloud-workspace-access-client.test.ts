@@ -80,6 +80,36 @@ describe("CloudWorkspaceAccessClient", () => {
     expect(JSON.stringify(error)).not.toContain("must-not-surface");
   });
 
+  it("negotiates direct publication and retains the exact boot binding for fresh CP fallback", async () => {
+    const proof = { deviceId: DEVICE_ID, keyVersion: 1, timestampMs: NOW, nonce: "n".repeat(32), signature: "s".repeat(86) };
+    const bootScope = { organizationId: ORGANIZATION_ID, workspaceId: WORKSPACE_ID, generation: 7,
+      engineInstanceId: ENGINE_INSTANCE_ID, bootId: GRANT_ID, writerEpoch: DEVICE_ID,
+      fundingOwnerUserId: TUNNEL_SESSION_ID, fundingOwnerEpoch: 1 };
+    const response = { version: 2, audience: "zeros-cloud-workspace-engine-client-admission-v2", ...bootScope,
+      authorityEpoch: 11, remotePort: 47891, grantToken: `zwa_${"a".repeat(43)}`,
+      expiresAt: new Date(NOW + 120000).toISOString(), bridgeUrl: "wss://api.zeros.test/v1/cloud-workspaces/bridge" };
+    const { bootId: _boot, writerEpoch: _writer, fundingOwnerUserId: _funder, fundingOwnerEpoch: _epoch, ...parent } = response;
+    const direct = { ...parent, bootScope, directProvider: { version: 1, provider: "boat", url: "wss://runtime-47891.on.boat.dev/ws" } };
+    const fetchImpl = vi.fn<typeof fetch>(async () => json(direct, 201));
+    const client = new CloudWorkspaceAccessClient({ baseUrl: "https://api.zeros.test", fetch: fetchImpl, now: () => NOW,
+      signEngineAdmission: async () => proof });
+    const input = { organizationId: ORGANIZATION_ID, workspaceId: WORKSPACE_ID, directProviderVersion: 1 as const };
+    await expect(client.issueEngineAdmission("account-access-token", input)).resolves.toEqual(direct);
+    expect(JSON.parse(fetchImpl.mock.calls[0]![1]!.body as string)).toEqual({ actorProtocolVersion: 2, directProviderVersion: 1 });
+    const fallback = { ...parent, bootScope };
+    fetchImpl.mockResolvedValueOnce(json(fallback, 201));
+    await expect(client.issueEngineAdmission("account-access-token", { ...input, connectionChannel: "control-plane-websocket" }))
+      .resolves.toEqual(fallback);
+    expect(JSON.parse(fetchImpl.mock.calls[1]![1]!.body as string))
+      .toEqual({ actorProtocolVersion: 2, directProviderVersion: 1, connectionChannel: "control-plane-websocket" });
+    for (const change of [ { bootScope: { ...bootScope, generation: 8 } },
+      { directProvider: { version: 1, provider: "boat", url: "wss://attacker.test/ws" } },
+      { bridgeUrl: "wss://attacker.test/v1/cloud-workspaces/bridge" } ]) {
+      fetchImpl.mockResolvedValueOnce(json({ ...direct, ...change }, 201));
+      await expect(client.issueEngineAdmission("account-access-token", input)).rejects.toMatchObject({ code: "bad_response" });
+    }
+  });
+
   it("issues SSH access with main-owned auth and validates the exact hosted endpoint", async () => {
     const fetchImpl = vi.fn(async () =>
       json(

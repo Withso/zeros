@@ -19,6 +19,8 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { gunzipSync, gzipSync } from "node:zlib";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import {
   canonicalJson,
   createManifest,
@@ -50,6 +52,41 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 const temporary: string[] = [];
+
+describe("Cursor platform payload closure", () => {
+  it.skipIf(process.platform !== "linux")("executes the shipped platform binaries instead of accepting an import-only package", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-cursor-payload-"));
+    temporary.push(root);
+    const worker = path.join(root, "worker");
+    const sdk = path.join(worker, "node_modules/@cursor/sdk");
+    const platform = path.join(worker, "node_modules/@cursor/sdk-linux-x64");
+    await mkdir(sdk, { recursive: true }); await mkdir(path.join(platform, "bin"), { recursive: true });
+    await mkdir(path.join(root, "lib/zeros"), { recursive: true });
+    await writeFile(path.join(worker, "package.json"), "{}");
+    await writeFile(path.join(sdk, "index.js"), "module.exports={Agent:{}};");
+    await writeFile(path.join(platform, "package.json"), '{"name":"@cursor/sdk-linux-x64"}');
+    const require = createRequire(import.meta.url);
+    const shipped = path.dirname(createRequire(require.resolve("@cursor/sdk")).resolve("@cursor/sdk-linux-x64/package.json"));
+    const { copyFile } = await import("node:fs/promises");
+    for (const binary of ["rg", "cursorsandbox"]) {
+      await copyFile(path.join(shipped, "bin", binary), path.join(platform, "bin", binary));
+      await chmod(path.join(platform, "bin", binary), 0o555);
+    }
+    for (const file of ["runtime-self-test.mjs", "runtime-layout.json"]) await copyFile(
+      path.join("scripts/cloud-workspace-validation/sandbox", file), path.join(root, "lib/zeros", file));
+    const probe = require(fileURLToPath(new URL("../cloud-workspace-validation/runtime-bundle/probe.cjs", import.meta.url))) as {
+      probeCursorPayload(root: string, node: string): void;
+    };
+    expect(() => probe.probeCursorPayload(root, process.execPath)).not.toThrow();
+    // Import still succeeds when packaging drops an executable bit/file; the
+    // closure gate must fail rather than qualifying that import-only payload.
+    await chmod(path.join(platform, "bin/rg"), 0o444);
+    expect(() => probe.probeCursorPayload(root, process.execPath)).toThrow();
+    await chmod(path.join(platform, "bin/rg"), 0o555);
+    await rm(path.join(platform, "bin/cursorsandbox"));
+    expect(() => probe.probeCursorPayload(root, process.execPath)).toThrow();
+  });
+});
 
 describe("Linux toolchain contract", () => {
   it("compares numeric GLIBC versions and inspects needs instead of definitions", () => {

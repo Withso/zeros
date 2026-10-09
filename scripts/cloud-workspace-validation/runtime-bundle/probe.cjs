@@ -6,6 +6,25 @@ const path = require("node:path");
 const { createRequire } = require("node:module");
 const { execFileSync } = require("node:child_process");
 
+function probeCursorPayload(root, node) {
+  // The outer closure probe uses namespace root for engine-only imports. A
+  // nested private user namespace maps the builder to the worker identity for
+  // Cursor's shipped payload; it inherits the outer network/mount isolation.
+  const helper = path.join(root, "lib/zeros/runtime-self-test.mjs");
+  const output = execFileSync("/usr/bin/setpriv", ["--inh-caps=-all", "--ambient-caps=-all", "bwrap",
+    "--unshare-user", "--uid", "10001", "--gid", "10001", "--unshare-net", "--die-with-parent", "--new-session",
+    "--ro-bind", "/", "/", "--dev", "/dev", "--tmpfs", "/tmp", "--ro-bind", root, root,
+    "--dir", "/tmp/cursor-payload-home", "--cap-drop", "ALL",
+    "--clearenv", "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "HOME", "/tmp/cursor-payload-home",
+    "--setenv", "LANG", "C.UTF-8", "--", node, "--input-type=module", "-e",
+    `import(${JSON.stringify(helper)}).then(m => { if (m.probeCursorPlatformPayload(${JSON.stringify(root)})) process.stdout.write("cursor_payload_ok"); }).catch(() => process.exit(1));`], {
+    cwd: "/", env: { PATH: "/usr/bin:/bin" }, encoding: "utf8", timeout: 20_000,
+    maxBuffer: 64 * 1024, stdio: ["ignore", "pipe", "pipe"],
+  });
+  assert.equal(output, "cursor_payload_ok");
+}
+
+function main() {
 const root = process.argv[2];
 const worker = path.join(root, "worker");
 const node = path.join(root, "bin/node");
@@ -102,6 +121,7 @@ const checks = {
     const sdk = internal(fromWorker.resolve("@cursor/sdk"));
     internal(createRequire(sdk).resolve("@cursor/sdk-linux-x64/package.json"));
     assert(Object.keys(fromWorker("@cursor/sdk")).length > 0);
+    probeCursorPayload(root, node);
   },
   external_modules() {
     for (const name of [
@@ -213,3 +233,6 @@ process.stdout.write(
   }) + "\n",
 );
 process.exit(failedChecks.length ? 1 : 0);
+}
+module.exports = { probeCursorPayload };
+if (require.main === module) main();

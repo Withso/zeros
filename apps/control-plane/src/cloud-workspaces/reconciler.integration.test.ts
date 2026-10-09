@@ -22,7 +22,13 @@ import {
   seedCanonicalCloudWorkspaceAuthority,
   seedCanonicalCloudWorkspacePrerequisites,
   seedCanonicalWorkspaceSettingsVersion,
+  seedReadyCloudWorkspace,
+  withCloudFixtureOwnerTx,
 } from "./test-fixtures.js";
+import {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
+import {DatabaseCloudAgentCredentialService} from "./agent-credentials.js";
+import {CloudAgentBootCredentialResponseSchema} from "./agent-boot-contract.js";
+import {retireCloudWorkspaceRuntimeAccess} from "./runtime-access.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -344,6 +350,77 @@ d("cloud workspace reconciliation", () => {
     });
     return { workspaceId, intentId, providerConnectionId };
   };
+
+  it.each([
+    {scenario:"removal",failure:false},{scenario:"removal",failure:true},
+    {scenario:"publication",failure:false},{scenario:"publication",failure:true},
+    {scenario:"cancel",failure:false},{scenario:"cancel",failure:true},
+  ] as const)("retires a local writer and converges $scenario only after positive provider stop (failure=$failure)",async({scenario,failure})=>{
+    const fixture=await seedReadyCloudWorkspace(pool);
+    await pool.query("UPDATE cloud_workspace_engine_instances SET cloud_local_commands_version=1 WHERE id=$1",[fixture.engineInstanceId]);
+    const keys={currentKeyVersion:1,keys:{1:randomBytes(32).toString("base64url")}},credentialId=randomUUID();
+    await withCloudFixtureOwnerTx(pool,async tx=>{await tx.query("SET LOCAL session_replication_role=replica");
+      await tx.query("UPDATE cloud_runtime_qualifications SET native_capabilities=$1::jsonb WHERE credential_kind='cursor-api-key'",[JSON.stringify({version:1,goals:false,nativeFork:false,transcriptFork:false,nativeReview:false,connectedApps:false,multiAgent:false})]);});
+    const credentials=new DatabaseCloudAgentCredentialService(pool,keys),operationId=randomUUID();
+    await credentials.put({credentialId,ownerUserId:fixture.userId,organizationId:fixture.organizationId,operationId:randomUUID(),expectedRevision:0,
+      displayName:"Lifecycle key",material:{kind:"cursor-api-key",apiKey:"synthetic-lifecycle-cursor-key"}});
+    await credentials.setOrganizationConnection(fixture.userId,fixture.organizationId,"cursor",{expectedRevision:0,credentialId,credentialRevision:1,models:["grok-4.6"],consent:"zeros-managed"});
+    const execution=new DatabaseCloudAgentExecutionService(pool,keys,false);
+    const scope={organizationId:fixture.organizationId,workspaceId:fixture.workspaceId,generation:1,engineInstanceId:fixture.engineInstanceId};
+    const engine={...scope,heartbeatToken:fixture.heartbeatToken};
+    const boot=CloudAgentBootCredentialResponseSchema.parse(await execution.boot(engine,"bootstrap",{...scope,version:1,mode:"boot-owner-v1"}));
+    expect(boot.providers.find(value=>value.provider==="cursor")).toMatchObject({status:"ready"});
+    await execution.boot(engine,"activate",{...scope,version:1,mode:"boot-owner-v1",bootId:boot.bootId,writerEpoch:boot.writerEpoch,expectedCacheRevision:boot.cacheRevision});
+    const replacement={credentialId,ownerUserId:fixture.userId,operationId,expectedRevision:1,
+      displayName:"Lifecycle replacement",material:{kind:"cursor-api-key",apiKey:"synthetic-lifecycle-replacement-key"}};
+    if(scenario==="publication")await expect(credentials.put(replacement)).rejects.toMatchObject({status:503});
+    else{
+      const pending=await credentials.prepareRemoval(fixture.userId,{version:1,operationId,target:{kind:"revoke-credential",credentialId,expectedCredentialRevision:1}});
+      expect(pending).toMatchObject({state:"pending",phase:"preparing"});
+      if(scenario==="cancel")await credentials.decideRemoval(fixture.userId,operationId,"cancel",{version:1,requestId:randomUUID(),expectedRevision:pending.revision});
+    }
+    const resource=(await pool.query("SELECT provider_resource_id FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=1",[fixture.workspaceId])).rows[0].provider_resource_id;
+    const provider=new FakeProvider();provider.resources.set(resource,provider.make({workspaceId:fixture.workspaceId,generation:1},"running",resource));
+    if(failure)provider.stopFailure=new CloudProviderError("fixture_stop_unconfirmed","Synthetic stop unconfirmed",true);
+    await withSystemTx(pool,async tx=>{
+      await tx.query("UPDATE cloud_workspaces SET desired_state='stopped',status='stopping' WHERE id=$1",[fixture.workspaceId]);
+      await retireCloudWorkspaceRuntimeAccess(tx,{...scope,reason:"workspace_stop_requested"});
+      await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,org_id,generation,requested_by,operation,idempotency_key,request_sha256)
+        VALUES($1,$2,$3,1,$4,'stop',$5,$6)`,[randomUUID(),fixture.workspaceId,fixture.organizationId,fixture.userId,randomUUID(),randomBytes(32)]);
+    });
+    const writer=()=>pool.query("SELECT state,sealed_sequence FROM cloud_workspace_local_command_writers WHERE writer_epoch=$1",[boot.writerEpoch]);
+    expect((await writer()).rows[0]).toEqual({state:"active",sealed_sequence:null});
+    await new CloudWorkspaceReconciler({pool,provider,intervalMs:1000}).runOnce();
+    expect(provider.stopCount).toBe(1);
+    expect((await writer()).rows[0]).toEqual({state:failure?"active":"retired",sealed_sequence:null});
+    expect((await pool.query("SELECT retired_at IS NOT NULL AS retired FROM cloud_agent_boot_bindings WHERE engine_instance_id=$1",[fixture.engineInstanceId])).rows[0]).toEqual({retired:!failure});
+    expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_boot_credentials")).rows[0]).toEqual({count:failure?3:0});
+    if(failure){
+      if(scenario==="publication")await expect(credentials.put(replacement)).rejects.toMatchObject({status:503});
+      else expect(await credentials.readRemoval(fixture.userId,operationId)).toMatchObject({state:"pending",phase:scenario==="cancel"?"cancelling":"preparing"});
+      expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_credential_source_retirements")).rows[0]).toEqual({count:0});
+    }
+    else if(scenario==="publication"){
+      await credentials.put(replacement);
+      expect((await pool.query("SELECT state FROM cloud_agent_credential_mutations WHERE id=$1",[operationId])).rows[0]).toEqual({state:"published"});
+      expect((await pool.query("SELECT revision::int,revoked_at FROM cloud_agent_credentials WHERE id=$1",[credentialId])).rows[0]).toEqual({revision:2,revoked_at:null});
+    }
+    else if(scenario==="cancel"){
+      expect(await credentials.readRemoval(fixture.userId,operationId)).toMatchObject({state:"cancelled"});
+      expect((await pool.query("SELECT revoked_at FROM cloud_agent_credentials WHERE id=$1",[credentialId])).rows[0]).toEqual({revoked_at:null});
+    }else{
+      await credentials.readRemoval(fixture.userId,operationId);
+      expect(await credentials.readRemoval(fixture.userId,operationId)).toMatchObject({state:"removed"});
+      expect((await pool.query("SELECT revoked_at IS NOT NULL AS revoked FROM cloud_agent_credentials WHERE id=$1",[credentialId])).rows[0]).toEqual({revoked:true});
+      expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_credential_controls WHERE acknowledgement IS NOT NULL")).rows[0]).toEqual({count:0});
+    }
+    if(!failure){
+      const proofs=(await pool.query("SELECT control_id,proof_kind,proof_id FROM cloud_agent_credential_source_retirements")).rows;
+      expect(proofs).toHaveLength(2);expect(proofs.every(value=>value.proof_kind==="provider-lifecycle")).toBe(true);
+      expect(new Set(proofs.map(value=>value.proof_id)).size).toBe(1);
+      await expect(pool.query("UPDATE cloud_agent_credential_source_retirements SET proof_id=$2 WHERE control_id=$1",[proofs[0]!.control_id,randomUUID()])).rejects.toMatchObject({code:"23514"});
+    }
+  });
 
   it.each(["create", "wake"] as const)("refuses retired %s before provider inspection or compute allocation", async operation => {
     const seeded = await seedWorkspace({ supportedGeneration: false, operation, status: operation === "wake" ? "waking" : "requested" });

@@ -3,6 +3,7 @@ import type { BridgeMessage } from "@zeros/protocol/messages";
 import { CLOUD_REPLAY_EVENT_TYPES, CloudEventAppendResultSchema, CloudEventReplayResultSchema,
   type CloudEventCursor, type CloudEventEngineRequest, type CloudStreamEvent } from "@zeros/protocol/cloud-events";
 import { CloudEventRuntimeError } from "./cloud-event-client";
+import { isCloudLocalCommandEventStore, type CloudLocalCommandEventStore } from "./cloud-local-command-queue-events";
 
 const MAX_FRAME = 256 * 1024, MAX_BATCH = 1000000, MAX_PENDING = 8 * 1024 * 1024;
 type Pending = { event: CloudStreamEvent; bytes: number };
@@ -22,6 +23,7 @@ export class CloudEventRuntime {
   private closed = false;
   private started = false;
   private failure: CloudEventRuntimeError | null = null;
+  private localStore: CloudLocalCommandEventStore | null = null;
   private readonly waiters = new Set<{ target: number; resolve: () => void; reject: (error: unknown) => void }>();
   constructor(readonly streamId: string, private readonly dependencies: {
     request(request: CloudEventEngineRequest): Promise<unknown>;
@@ -29,6 +31,19 @@ export class CloudEventRuntime {
   }) {}
 
   start(): void { this.assertHealthy(); this.started = true; this.schedule(0); }
+  get cursor(): CloudEventCursor { this.assertHealthy(); return { streamId: this.streamId, sequence: this.sequence }; }
+
+  async installLocalStore(store: CloudLocalCommandEventStore): Promise<void> {
+    this.assertHealthy();
+    if (!isCloudLocalCommandEventStore(store) || store.streamId !== this.streamId || this.localStore && this.localStore !== store)
+      throw new CloudEventRuntimeError("event_stream_changed");
+    if (this.localStore === store) return;
+    await this.flush(); this.assertHealthy();
+    if (this.pending.length || this.batch) throw new CloudEventRuntimeError("event_conflict");
+    store.adoptSequence(this.sequence);
+    this.sequence = store.head; this.committed = this.sequence; this.localStore = store;
+    if (this.timer) clearTimeout(this.timer); this.timer = null;
+  }
 
   capture(message: BridgeMessage): BridgeMessage {
     if (!CLOUD_REPLAY_EVENT_TYPES.has(message.type)) return message;
@@ -48,6 +63,14 @@ export class CloudEventRuntime {
       kinds: ["messages", "chats"], cloudStream: frame.cloudStream,
     } : frame;
     const bytes = Buffer.byteLength(JSON.stringify(retained));
+    if (this.localStore) {
+      try { this.localStore.append(retained); }
+      catch (error) {
+        this.fail(error instanceof CloudEventRuntimeError ? error.code : "event_storage_unavailable"); throw this.failure!;
+      }
+      this.sequence = next; this.committed = next;
+      return frame;
+    }
     if (bytes + this.bytes > MAX_PENDING || this.pending.length >= 8192) {
       this.fail("event_buffer_exhausted"); throw this.failure!;
     }
@@ -73,7 +96,8 @@ export class CloudEventRuntime {
     if (cursor.streamId !== this.streamId) throw new CloudEventRuntimeError("event_stream_changed");
     if (cursor.sequence > this.sequence) throw new CloudEventRuntimeError("event_conflict");
     await this.flush(this.sequence);
-    const result = CloudEventReplayResultSchema.parse(await this.dependencies.request({ kind: "replay", streamId: this.streamId, after: cursor.sequence }));
+    const result = CloudEventReplayResultSchema.parse(this.localStore ? this.localStore.replay(cursor)
+      : await this.dependencies.request({ kind: "replay", streamId: this.streamId, after: cursor.sequence }));
     if (result.streamId !== this.streamId || result.head < cursor.sequence || result.cursor > result.head ||
       (result.head > cursor.sequence && result.events.length === 0) ||
       result.events.some((event, i) => event.sequence !== cursor.sequence + i + 1) ||
@@ -94,7 +118,7 @@ export class CloudEventRuntime {
   }
 
   private schedule(delay: number) {
-    if (!this.started || this.closed || this.failure || this.flight) return;
+    if (!this.started || this.closed || this.failure || this.flight || this.localStore) return;
     if (this.timer) { if (delay !== 0) return; clearTimeout(this.timer); }
     this.timer = setTimeout(() => { this.timer = null; this.drain(); }, delay); this.timer.unref?.();
   }

@@ -25,6 +25,7 @@ import {
   seedCanonicalCloudWorkspaceAuthority,
   seedCanonicalCloudWorkspacePrerequisites,
   seedCanonicalWorkspaceSettingsVersion,
+  withCloudFixtureOwnerTx,
 } from "./test-fixtures.js";
 import type { CloudWorkspaceSetupExecution } from "./setup-worker.js";
 import { runtimeBase, runtimeWitness, seedRuntimeGeneration } from "./runtime-test-fixtures.js";
@@ -1039,6 +1040,26 @@ d("cloud workspace setup material redemption", () => {
     expect((await pool.query("SELECT lease_expires_at<now() AS expired FROM cloud_workspace_engine_instances WHERE id=$1", [materials.engine.instanceId])).rows[0].expired).toBe(true);
   });
 
+  it("persists local-command opt-in only with an attested supported registration",async()=>{
+    const material=await service.redeem({...redemptionInput(),materialVersion:2,runtime:runtimeWitness});
+    const registered=await service.registerEngine({token:material.engine.registration.token,...material.execution,
+      engineInstanceId:material.engine.instanceId,protocolVersion:CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,actorProtocolVersion:2,
+      agentRuntime:{...runtimeWitness,profile:"zeros-cloud-worker-v4"},agentCustomizationVersion:3,cloudLocalCommandsVersion:1});
+    expect(registered).toMatchObject({cloudLocalCommandsVersion:1,durableRecordConnected:true,agentJournalMode:"legacy"});
+    expect(registered).not.toHaveProperty("agentSourceWriterEpoch");
+    expect((await pool.query("SELECT cloud_local_commands_version FROM cloud_workspace_engine_instances WHERE id=$1",[material.engine.instanceId])).rows[0])
+      .toEqual({cloud_local_commands_version:1});
+  });
+  it("refuses a local journal with a missing boot pointer before issuing registration material",async()=>{
+    const material=await service.redeem({...redemptionInput(),materialVersion:2,runtime:runtimeWitness});
+    await withCloudFixtureOwnerTx(pool,async tx=>{await tx.query("SET LOCAL session_replication_role=replica");
+      await tx.query("UPDATE cloud_workspaces SET agent_command_mode='boot-owner-v1',agent_boot_id=NULL WHERE id=$1",[material.execution.workspaceId]);});
+    await expect(service.registerEngine({token:material.engine.registration.token,...material.execution,
+      engineInstanceId:material.engine.instanceId,protocolVersion:CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,actorProtocolVersion:2,
+      agentRuntime:{...runtimeWitness,profile:"zeros-cloud-worker-v4"},agentCustomizationVersion:3,cloudLocalCommandsVersion:1})).rejects.toMatchObject({code:"engine_registration_rejected"});
+    expect((await pool.query("SELECT state,registered_at FROM cloud_workspace_engine_instances WHERE id=$1",[material.engine.instanceId])).rows[0]).toEqual({state:"starting",registered_at:null});
+    expect((await pool.query("SELECT consumed_at FROM cloud_workspace_endpoint_grants WHERE id=(SELECT registration_grant_id FROM cloud_workspace_engine_instances WHERE id=$1)",[material.engine.instanceId])).rows[0]).toEqual({consumed_at:null});
+  });
   it("registers the exact engine once, persists its heartbeat lease, and retires it with runtime access", async () => {
     const materials = await service.redeem(redemptionInput());
     const registration = await service.registerEngine({

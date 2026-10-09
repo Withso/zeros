@@ -13,6 +13,71 @@ function fixture(){
 }
 afterEach(()=>vi.useRealTimers());
 describe("private agent execution lifetime",()=>{
+  it.each([null,{model:"foreign-model"}])("keeps malformed admission authority typed (%j)",async change=>{
+    const f=fixture();f.request.mockResolvedValueOnce(change?{...f.grant,...change}:null);
+    await expect(CloudAgentLease.admit(admission,f.request,new AbortController().signal,{onRetirementFailure:vi.fn()},f.time)).rejects.toMatchObject({code:"cloud_admission_authority_response_invalid"});
+  });
+  it("gives an unavailable admission authority a safe typed cause",async()=>{
+    const f=fixture();f.request.mockRejectedValueOnce(new Error("private transport details"));
+    await expect(CloudAgentLease.admit(admission,f.request,new AbortController().signal,{onRetirementFailure:vi.fn()},f.time)).rejects.toMatchObject({code:"cloud_admission_authority_unavailable",message:"Cloud agent admission failed"});
+  });
+  it("keeps required customization and changed repository echo typed",async()=>{
+    const f=fixture(),requested={...admission,customization:{version:1 as const,repositoryServers:[]}};
+    await expect(CloudAgentLease.admit(requested,f.request,new AbortController().signal,{onRetirementFailure:vi.fn()},f.time)).rejects.toMatchObject({code:"cloud_admission_customization_changed"});
+    const content={version:1 as const,repositoryDigest:"b".repeat(64),servers:[{scope:"repository" as const,secretRef:null,revision:0,server:{name:"foreign",transport:"stdio" as const,command:"node"}}],skills:[],cursorTeamSettings:"disabled" as const};
+    f.request.mockResolvedValueOnce({...f.grant,customization:{...content,digest:cloudMcpDigest(content)}});
+    await expect(CloudAgentLease.admit(requested,f.request,new AbortController().signal,{onRetirementFailure:vi.fn()},f.time)).rejects.toMatchObject({code:"cloud_admission_customization_changed"});
+    const empty={...content,servers:[]};f.request.mockResolvedValueOnce({...f.grant,customization:{...empty,digest:"0".repeat(64)}});
+    await expect(CloudAgentLease.admit(requested,f.request,new AbortController().signal,{onRetirementFailure:vi.fn()},f.time)).rejects.toMatchObject({code:"cloud_admission_authority_response_invalid"});
+  });
+  it.each(["true",1,false])("rejects a non-boolean release proof (%j) and retries",async released=>{
+    vi.useFakeTimers();const f=fixture(),lease=await CloudAgentLease.admit(admission,f.request,new AbortController().signal,{onRetirementFailure:vi.fn()},f.time);
+    f.request.mockResolvedValueOnce({released});
+    await expect(lease.close()).rejects.toMatchObject({code:"cloud_validation_authority_response_invalid"});
+    await lease.close();expect(f.request.mock.calls.filter(([input])=>input.kind==="release")).toHaveLength(2);
+  });
+  it("keeps the safe typed retirement cause when repeated failures escalate",async()=>{
+    vi.useFakeTimers();const f=fixture(),fatal=vi.fn(),lease=await CloudAgentLease.admit(admission,f.request,new AbortController().signal,{onRetirementFailure:fatal},f.time);
+    lease.attach({stopAndProve:async()=>{throw Object.assign(new Error("private proof details"),{code:"cloud_containment_canary_failed"});}});
+    await expect(lease.close()).rejects.toMatchObject({code:"cloud_containment_canary_failed"});
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(fatal).toHaveBeenCalledWith(expect.objectContaining({code:"cloud_containment_canary_failed"}));
+    expect(fatal.mock.calls[0]![0].message).not.toContain("private");
+  });
+  it("keeps a typed release failure and does not claim capacity was released before retry succeeds",async()=>{
+    vi.useFakeTimers();const f=fixture(),lease=await CloudAgentLease.admit(admission,f.request,new AbortController().signal,{onRetirementFailure:vi.fn()},f.time);
+    f.request.mockRejectedValueOnce(Object.assign(new Error("private release error"),{code:"cloud_validation_authority_http_5xx"}));
+    await expect(lease.close()).rejects.toMatchObject({code:"cloud_validation_authority_http_5xx"});
+    expect(lease.signal.aborted).toBe(true);
+    await lease.close();expect(f.request.mock.calls.filter(([input])=>input.kind==="release")).toHaveLength(2);
+  });
+  it.each([false,true])("preserves typed validation causes during cleanup (renew=%s)",async renew=>{
+    vi.useFakeTimers();
+    for(const code of ["cloud_validation_authority_unavailable","cloud_validation_authority_timeout","cloud_validation_authority_http_4xx","cloud_validation_authority_http_5xx","cloud_validation_rate_limited","cloud_provider_start_credential_refresh_rejected","cloud_agent_credential_revoked","cloud_agent_credential_expired"]){
+      const f=fixture(),fatal=vi.fn(),lease=await CloudAgentLease.admit(admission,f.request,new AbortController().signal,{onRetirementFailure:fatal},f.time);
+      const domain={stopAndProve:vi.fn().mockRejectedValue(new Error("private retirement diagnostic"))};lease.attach(domain);
+      f.request.mockRejectedValueOnce(Object.assign(new Error("private authority diagnostic"),{code}));
+      await expect(lease.validate(renew)).rejects.toMatchObject({code});
+      expect(lease.signal.aborted).toBe(true);expect(domain.stopAndProve).toHaveBeenCalledOnce();
+      expect(()=>lease.assertLive()).toThrow(expect.objectContaining({code}));
+      await vi.advanceTimersByTimeAsync(2000);expect(fatal).toHaveBeenCalledOnce();
+    }
+  });
+  it("reports an expired monotonic lease explicitly and never renews it",async()=>{
+    vi.useFakeTimers();const f=fixture(),lease=await CloudAgentLease.admit(admission,f.request,new AbortController().signal,{onRetirementFailure:vi.fn()},f.time);
+    f.advance(44_000);
+    expect(()=>lease.assertLive()).toThrow(expect.objectContaining({code:"cloud_validation_lease_expired"}));
+    await expect(lease.validate(true)).rejects.toMatchObject({code:"cloud_validation_lease_expired"});
+    expect(f.request.mock.calls.some(([input])=>input.kind==="validate")).toBe(false);
+    await lease.close();
+  });
+  it("keeps a renewal expiry failure typed after retiring its domain",async()=>{
+    vi.useFakeTimers();const f=fixture(),lease=await CloudAgentLease.admit(admission,f.request,new AbortController().signal,{onRetirementFailure:vi.fn()},f.time);
+    const domain={stopAndProve:vi.fn().mockResolvedValue(undefined)};lease.attach(domain);
+    f.request.mockResolvedValueOnce({leaseId:f.grant.leaseId,expiresAt:new Date(f.time.wall()-1).toISOString(),credentialVersion:1});
+    await expect(lease.validate(true)).rejects.toMatchObject({code:"cloud_validation_lease_expired"});
+    expect(domain.stopAndProve).toHaveBeenCalledOnce();
+  });
   it("accepts a basic turn only when customization was explicitly optional", async () => {
     vi.useFakeTimers(); const f = fixture();
     const lease = await CloudAgentLease.admit({ ...admission, customization: { version: 3, repositoryServers: [] } },
@@ -76,7 +141,7 @@ describe("private agent execution lifetime",()=>{
     const coordinator={stopAndProve:vi.fn().mockResolvedValue(undefined)},workload={stopAndProve:vi.fn().mockResolvedValue(undefined)};
     lease.attach(coordinator);lease.attach(workload);expect(lease.takeMaterial()).toEqual(f.grant.material);expect(()=>lease.takeMaterial()).toThrow(/already consumed/);
     f.request.mockRejectedValueOnce(new Error("raw credential failure"));await expect(lease.validate()).rejects.toThrow("authority changed");
-    expect(lease.signal.aborted).toBe(true);expect(coordinator.stopAndProve).toHaveBeenCalledOnce();expect(workload.stopAndProve).toHaveBeenCalledOnce();expect(()=>lease.assertLive()).toThrow(/retired/);
+    expect(lease.signal.aborted).toBe(true);expect(coordinator.stopAndProve).toHaveBeenCalledOnce();expect(workload.stopAndProve).toHaveBeenCalledOnce();expect(()=>lease.assertLive()).toThrow(expect.objectContaining({code:"cloud_validation_authority_unavailable"}));
   });
   it("cancels a hung renewal at the monotonic deadline and never revives it",async()=>{
     vi.useFakeTimers();const f=fixture(),lease=await CloudAgentLease.admit(admission,f.request,new AbortController().signal,{onRetirementFailure:vi.fn()},f.time),domain={stopAndProve:vi.fn().mockResolvedValue(undefined)};

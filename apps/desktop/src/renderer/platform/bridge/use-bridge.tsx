@@ -33,6 +33,7 @@ import { nativeListen, useNativeRuntime } from "../runtime";
 import { WorkspaceRuntimeClient } from "./workspace-runtime-client";
 import { openCloudRuntime } from "./open-cloud-runtime";
 import { readCloudWorkspaceHistory } from "../cloud-history";
+import { onCloudHistoryRestoreHead } from "../cloud-transcript-cache";
 import { canReadCloudWorkspace, cloudCatalogGeneration, cloudWorkspaceCatalogConfirmed, cloudWorkspaceDocument, cloudWorkspaceOperation, cloudWorkspaceStopVersion, getCloudWorkspaceRows, isCloudWorkspaceLifecyclePending } from "../../state/cloud-workspace-catalog";
 import { wireWorkbenchConnectionRejection } from "../../state/workbench-availability";
 
@@ -71,6 +72,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
         manage: cloudWorkspaceOperation,
         readHistory: readCloudWorkspaceHistory,
         checkpointHistory: true,
+        onHistoryRestoreHead: onCloudHistoryRestoreHead,
         prepareGithubWrite: prepareCloudGithubWrite,
       }),
   );

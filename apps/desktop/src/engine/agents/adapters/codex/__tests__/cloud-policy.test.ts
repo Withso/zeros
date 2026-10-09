@@ -1,11 +1,54 @@
 import {describe,expect,it,vi} from "vitest";
-import type {CloudProviderExecution} from "../../../cloud-provider-execution";
-import {cloudCodexConfig,cloudCodexImage,cloudCodexRequest,cloudCodexToolCall,CLOUD_CODEX_CONFIG} from "../cloud-policy";
-const context=()=>({lease:{assertLive:vi.fn(),admission:{model:"qualified-model"}},tools:{inputSchema:{type:"object"},call:vi.fn()}}) as unknown as CloudProviderExecution;
+import type {CloudLegacyProviderExecution as CloudProviderExecution} from "../../../cloud-provider-execution";
+import {bindCloudCodexThread,cloudCodexConfig,cloudCodexImage,cloudCodexRequest,cloudCodexToolCall,CLOUD_CODEX_CONFIG} from "../cloud-policy";
+const context=(cwd="/srv/zeros/workspace")=>{
+  const lease={assertLive:vi.fn(),admission:{model:"qualified-model"},codexAuth:()=>null};
+  return {cwd,lease,lifetime:lease,auth:lease,model:"qualified-model",nativeCapabilities:null,environment:null,
+    tools:{inputSchema:{type:"object"},call:vi.fn()}} as unknown as CloudProviderExecution;
+};
 describe("Codex cloud native authority",()=>{
+  it("uses captured common model/capabilities/auth instead of contradictory legacy fields", () => {
+    const execution=context();
+    const assertLive=vi.fn();
+    Object.assign(execution,{lifetime:{assertLive},model:"captured-model",nativeCapabilities:{version:1,goals:true,connectedApps:true},
+      auth:{codexAuth:()=>({material:{accountId:"captured-account"}})}});
+    Object.assign(execution.lease,{admission:{model:"retired-model"},nativeCapabilities:null,codexAuth:()=>null,
+      assertLive:()=>{throw new Error("retired legacy common read");}});
+    expect(cloudCodexRequest(execution,"env","thread/start",{model:"captured-model"})).toMatchObject({model:"captured-model"});
+    expect(cloudCodexConfig(execution)["features.apps"]).toBe(true);
+    expect(assertLive).toHaveBeenCalled();
+  });
+  it("inherits only captured sender environment and common lifetime signal", async () => {
+    const execution=context(), signal=new AbortController().signal, assertLive=vi.fn();
+    Object.assign(execution,{lifetime:{assertLive,signal},environment:{values:{SENDER_ENV:"synthetic-member"}}});
+    Object.assign(execution.lease,{environment:{values:{RETIRED_ENV:"synthetic-retired"}}});
+    const config=cloudCodexConfig(execution);
+    expect(config["shell_environment_policy.include_only"]).toContain("SENDER_ENV");
+    expect(config["shell_environment_policy.include_only"]).not.toContain("RETIRED_ENV");
+    const arguments_={operation:"lsp",request:{kind:"start",language:"python"}};
+    vi.mocked(execution.tools.call).mockResolvedValue({ok:true,data:{state:"running"}});
+    await cloudCodexToolCall(execution,{threadId:"thread",turnId:"turn",callId:"call",namespace:null,tool:"zeros_workspace",arguments:arguments_});
+    expect(execution.tools.call).toHaveBeenCalledWith(arguments_,signal);
+  });
+  it.each(["/srv/zeros/workspace", "/srv/zeros/workspace/packages/app", "/srv/zeros/worktrees/managed-checkout"])("uses the factory-minted checkout %s across native requests", cwd => {
+    const execution=context(cwd);
+    Object.assign(execution,{nativeCapabilities:{nativeFork:true}});
+    bindCloudCodexThread(execution,"native");
+    const hostile={threadId:"native",cwd:"/private/caller",cwds:["/private/caller"],environments:[{environmentId:"foreign",cwd:"/private/caller"}],
+      runtimeWorkspaceRoots:["/private/caller"],sandboxPolicy:{type:"workspaceWrite",writableRoots:["/private/caller"]}};
+    for(const method of ["thread/start","thread/resume","thread/fork","turn/start"]){
+      const result=cloudCodexRequest(execution,"admitted-env",method,hostile);
+      expect(result).toMatchObject({cwd,runtimeWorkspaceRoots:[cwd]});
+      expect(JSON.stringify(result)).not.toContain("/private/caller");
+      if(method==="thread/start"||method==="turn/start")expect(result).toMatchObject({environments:[{environmentId:"admitted-env",cwd,runtimeWorkspaceRoots:[cwd]}]});
+      if(method==="turn/start")expect(result).toMatchObject({sandboxPolicy:{type:"workspaceWrite",writableRoots:[cwd]}});
+    }
+    expect(cloudCodexRequest(execution,"env","config/read",hostile)).toEqual({cwd});
+    expect(cloudCodexRequest(execution,"env","skills/list",{...hostile,forceReload:true})).toEqual({cwds:[cwd],forceReload:true});
+  });
   it("limits shell inheritance to admitted names and managed paths, including an empty org environment",()=>{
     for(const values of [{},{ORG_SECRET:"synthetic-env-value",OPENAI_API_KEY:"synthetic-provider-value"}]){
-      const execution=context();Object.assign(execution.lease,{environment:{values}});
+      const execution=context();Object.assign(execution,{environment:{values}});
       const config=cloudCodexConfig(execution);
       expect(config).toMatchObject({"shell_environment_policy.inherit":"all","shell_environment_policy.ignore_default_excludes":true,
         "shell_environment_policy.include_only":["HOME","PATH","LANG","SHELL","TMPDIR","USER","LOGNAME",...(values.ORG_SECRET?["ORG_SECRET"]:[])]});

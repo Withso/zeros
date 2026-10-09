@@ -4,6 +4,10 @@ import { cloudBrowserUnavailable, resolveCloudBrowserCapability, CLOUD_NATIVE_PR
 
 const scope = { version: 1, provider: "codex", runtimeProfile: "zeros-cloud-worker-v3", credentialKind: "codex-chatgpt" } as const;
 describe("versioned cloud native browser diagnostic", () => {
+  it.each(["claude","cursor"] as const)("reports restricted native settings/extensions for %s",provider=>{
+    expect(CLOUD_NATIVE_PROVIDER_RESTRICTIONS[provider]).toContain("provider-native-extensions-restricted");
+    if(provider==="claude")expect(CLOUD_NATIVE_PROVIDER_RESTRICTIONS[provider]).toContain("plugins-disabled");
+  });
   it("does not infer browser readiness from older workers or generic native qualification", () => {
     expect(resolveCloudBrowserCapability("codex", undefined)).toMatchObject({ state: "unavailable", reason: "not-reported", credentialKind: "unknown" });
     const old = { version: 1, goals: true, nativeFork: true, transcriptFork: true, nativeReview: true, connectedApps: true, multiAgent: true };

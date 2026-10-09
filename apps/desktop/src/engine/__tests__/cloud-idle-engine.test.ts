@@ -18,7 +18,7 @@ function fixture() {
     cloudIdleReservation: (() => true) as (() => boolean) | null, cloudIdleCheckpoint: null,
     cloudRuntimeRegistration: { idleStopRequest: vi.fn(async () => directive) },
     cloudUserPresence: { active: () => false },
-    cloudCommands: { hasActiveWork: () => false }, cloudGoals: { active: () => false },
+    cloudCommands: { hasActiveWork: () => false, pauseClaims: vi.fn(), resumeClaims: vi.fn() }, cloudGoals: { active: () => false },
     activePrompts: new Set(), sessionLoadResponses: new Map(), sessionAgent: new Map(), pty: { list: () => [], hasRecentInput: () => false },
     cloudDurabilityRuntime: { checkpoint: vi.fn(async () => undefined) }, cloudRecordRuntime: { synchronize: vi.fn(async () => undefined), flush: vi.fn(async () => undefined) },
     cloudHumanServices: { pause: vi.fn(async () => undefined), resume: vi.fn(), hasActiveWork: () => false },

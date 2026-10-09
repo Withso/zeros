@@ -441,6 +441,105 @@ describe("ZSR execution boundary", () => {
     }
   });
 
+  it.each([
+    ["ZSR supervisor is missing", "supervisor_missing"],
+    ["ZSR supervisor runtime is missing", "supervisor_runtime_missing"],
+    ["ZSR ripgrep runtime is missing", "ripgrep_missing"],
+    ["cloud container-worker launcher is unavailable", "container_launcher_unavailable"],
+    ["cloud Podman runtime is unavailable", "podman_unavailable"],
+    ["unsupported platform win32", "unsupported_platform"],
+    ["ZSR macOS process-domain helper is unavailable", "process_domain_unavailable"],
+    ["fixture-sensitive /private/path bearer-sentinel", "probe_rejected"],
+  ])("preserves a closed cloud preflight cause for %s", async (reason, diagnostic) => {
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      cloudWorker: { uid: 10001, gid: 10001 },
+    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const probe = vi.spyOn(boundary, "probe").mockResolvedValue({
+      backend: "cloud-worker", available: false, secureNestedIsolation: false,
+      reasons: [reason],
+    });
+    const internals = boundary as unknown as {
+      admitLocalHostParity(...args: unknown[]): Promise<PreparedBoundary>;
+    };
+    const allocation = vi.spyOn(internals, "admitLocalHostParity");
+    try {
+      const preflight = {
+        code: "cloud_containment_environment_setup_failed", reasons: [diagnostic],
+      };
+      await expect(boundary.prepare({
+        executionId: "cloud-preflight-rejected", actor: "agent-code",
+        cwd: workspace, workspaceRoot: workspace,
+      }, { retainFailedPreparationProof: true })).rejects.toMatchObject({
+        code: preflight.code, message: preflight.code, preflight,
+      });
+      expect(logged).toHaveBeenCalledExactlyOnceWith(
+        `[zsr] cloud preflight rejected ${JSON.stringify(preflight)}`,
+      );
+      expect(allocation).not.toHaveBeenCalled();
+      await expect(boundary.proveFailedPreparationStopped("cloud-preflight-rejected")).resolves.toBeUndefined();
+    } finally {
+      logged.mockRestore(); probe.mockRestore(); allocation.mockRestore();
+    }
+  });
+
+  it("bounds and redacts closed cloud preflight diagnostics for an insecure probe", async () => {
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root, cloudWorker: { uid: 10001, gid: 10001 },
+    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const probe = vi.spyOn(boundary, "probe").mockResolvedValue({
+      backend: "cloud-worker", available: true, secureNestedIsolation: false,
+      reasons: Array.from({ length: 1024 }, () => "fixture-sensitive /private/path bearer-sentinel"),
+    });
+    try {
+      await expect(boundary.prepare({
+        executionId: "cloud-insecure-preflight", actor: "agent-code",
+        cwd: workspace, workspaceRoot: workspace,
+      })).rejects.toMatchObject({
+        code: "cloud_containment_environment_setup_failed",
+        preflight: { code: "cloud_containment_environment_setup_failed", reasons: ["probe_rejected"] },
+      });
+      const text = logged.mock.calls.flat().join(" ");
+      expect(text.length).toBeLessThan(512);
+      expect(text).not.toMatch(/fixture-sensitive|private\/path|bearer-sentinel/);
+    } finally { logged.mockRestore(); probe.mockRestore(); }
+  });
+
+  it("exposes closed diagnostics from the actual cloud preflight probe", async () => {
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root, supervisorScript: path.join(root, "missing-supervisor.mjs"),
+      supervisorRuntime: process.execPath, cloudWorker: { uid: 10001, gid: 10001 },
+    });
+    expect(await boundary.probe({
+      executionId: "cloud-actual-preflight", actor: "agent-code",
+      cwd: workspace, workspaceRoot: workspace,
+    })).toMatchObject({
+      backend: "cloud-worker", available: false, secureNestedIsolation: false,
+      preflight: {
+        code: "cloud_containment_environment_setup_failed",
+        reasons: expect.arrayContaining(["supervisor_missing", "container_launcher_unavailable"]),
+      },
+    });
+  });
+
+  it.each(["agent-code", "design-agent"] as const)("keeps Local %s preflight errors unchanged", async actor => {
+    const boundary = new ZsrExecutionBoundary({ projectRoot: root });
+    const reasons = ["ZSR supervisor is missing", "fixture Local reason"];
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const probe = vi.spyOn(boundary, "probe").mockResolvedValue({
+      backend: "zeros-srt", available: false, secureNestedIsolation: false, reasons,
+    });
+    try {
+      await expect(boundary.prepare({
+        executionId: "local-preflight-unchanged", actor,
+        cwd: workspace, workspaceRoot: workspace,
+      })).rejects.toMatchObject({ message: reasons.join("; ") });
+      expect(logged).not.toHaveBeenCalled();
+    } finally { logged.mockRestore(); probe.mockRestore(); }
+  });
+
   it.each(["utility", "repo-task"] as const)(
     "does not retain fully cleaned failed %s preparation bookkeeping",
     async (operation) => {

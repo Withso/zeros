@@ -13,6 +13,11 @@ import {rememberCodexRefreshSeed} from "./codex-auth-renewal.js";
 import {cloudAgentModels} from "./agent-models.js";
 import {cloudRuntimeQualificationMode} from "./runtime-config.js";
 import {runtimeCredentialQualificationJoin,runtimeNativeCapabilities} from "./runtime-selection.js";
+import { prepareCloudAgentCredentialRemoval, readCloudAgentCredentialRemoval, decideCloudAgentCredentialRemoval,
+  assertLegacyCloudAgentCredentialMutationAllowed, prepareCloudAgentCredentialPublication,
+  commitCloudAgentCredentialPublication, serializeCloudAgentCredentialSourceMutation,
+  pendingCloudAgentCredentialRemoteRemoval,acknowledgeCloudAgentCredentialRemoteRemoval,
+  type CloudAgentCredentialRemovalOutcome } from "./agent-credential-mutations.js";
 
 // Keep the shared schema/projection import acyclic; disabled paths do not load
 // the Dev adapter or read its authority configuration.
@@ -63,6 +68,28 @@ export function cloudAgentCredentialKeys(config:CloudAgentCredentialConfig|null)
  * provider account owner. Personal credentials never enter workspace settings. */
 export class DatabaseCloudAgentCredentialService {
   constructor(private readonly pool:pg.Pool,private readonly encryption:CloudAgentCredentialKeys){}
+
+  async prepareRemoval(userId:string,value:unknown) {
+    return this.drainRemoteRemoval(userId,await withSystemTx(this.pool,tx=>prepareCloudAgentCredentialRemoval(tx,userId,value)));
+  }
+  async readRemoval(userId:string,operationId:string) {
+    return this.drainRemoteRemoval(userId,await withSystemTx(this.pool,tx=>readCloudAgentCredentialRemoval(tx,userId,operationId)));
+  }
+  async decideRemoval(userId:string,operationId:string,action:"confirm"|"cancel",value:unknown) {
+    return this.drainRemoteRemoval(userId,await withSystemTx(this.pool,tx=>decideCloudAgentCredentialRemoval(tx,userId,operationId,action,value)));
+  }
+  private async drainRemoteRemoval(userId:string,outcome:CloudAgentCredentialRemovalOutcome){
+    if(outcome.state!=="pending"||outcome.phase!=="removing")return outcome;
+    const source=await withSystemTx(this.pool,tx=>pendingCloudAgentCredentialRemoteRemoval(tx,userId,outcome.operationId));
+    if(!source)return outcome;
+    const dev=await devConnectionRuntime(this.pool,this.encryption);
+    if(!dev)throw new HttpError(503,"cloud_agent_credential_busy","cloud_agent_credential_busy");
+    let receipt;
+    try {receipt=await dev.requestConditionalRemoval(userId,outcome.operationId,source);}
+    catch(error){if((error instanceof HttpError)&&error.status<500)throw error;
+      throw new HttpError(503,"cloud_agent_credential_busy","cloud_agent_credential_busy");}
+    return withSystemTx(this.pool,tx=>acknowledgeCloudAgentCredentialRemoteRemoval(tx,userId,outcome.operationId,receipt));
+  }
 
   private async owner(tx:Tx,userId:string,requirePro=false):Promise<void>{
     if(!uuid.safeParse(userId).success)unavailable();
@@ -157,19 +184,37 @@ export class DatabaseCloudAgentCredentialService {
         return {revision:input.expectedRevision+1,replayed:false};
       }
     }
+    const models=input.credentialId?[...new Set(input.models)].sort():[];
+    const allModels=input.credentialId!==null&&input.allModels===true;
+    const preparation=await withSystemTx(this.pool,async tx=>{
+      await this.owner(tx,ownerUserId,input.credentialId!==null);
+      await serializeCloudAgentCredentialSourceMutation(tx,ownerUserId);
+      const fingerprint=await this.organizationConsent(tx,ownerUserId,organizationId);
+      const hash=createHash("sha256").update(JSON.stringify([input.credentialId,input.credentialId?input.credentialRevision:null,models,fingerprint,...(allModels?["all-models"]:[])])).digest();
+      // The released selection API has no operation ID. A deterministic private
+      // ID gives exact same-request retries one durable fence without widening it.
+      const idBytes=createHash("sha256").update(JSON.stringify([ownerUserId,organizationId,provider,input.expectedRevision,hash.toString("hex")])).digest().subarray(0,16);
+      idBytes[6]=(idBytes[6]!&15)|64;idBytes[8]=(idBytes[8]!&63)|128;
+      const hex=idBytes.toString("hex"),operationId=`${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+      const target={kind:"publish-connection" as const,organizationId,provider:provider as "claude"|"codex"|"cursor",
+        expectedRevision:input.expectedRevision,credentialId:input.credentialId,requestDigest:hash.toString("hex")};
+      const state=await prepareCloudAgentCredentialPublication(tx,ownerUserId,operationId,target);
+      return {operationId,target,state};
+    });
+    if(preparation.state==="pending")throw new HttpError(503,"cloud_agent_credential_busy","cloud_agent_credential_busy");
     return withSystemTx(this.pool,async tx=>{
       await this.owner(tx,ownerUserId,input.credentialId!==null);
       await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412))",[ownerUserId]);
       const fingerprint=await this.organizationConsent(tx,ownerUserId,organizationId);
       await this.reconcileLegacyOrganizations(tx,ownerUserId,organizationId);
-      const models=input.credentialId?[...new Set(input.models)].sort():[];
-      const allModels=input.credentialId!==null&&input.allModels===true;
       // Preserve released request hashes when the additive flag is absent/false.
       const hash=createHash("sha256").update(JSON.stringify([input.credentialId,input.credentialId?input.credentialRevision:null,models,fingerprint,...(allModels?["all-models"]:[])])).digest();
       const previous=(await tx.query<OrganizationConnection>(`SELECT * FROM cloud_agent_organization_connections
         WHERE org_id=$1 AND owner_user_id=$2 AND provider=$3 FOR UPDATE`,[organizationId,ownerUserId,provider])).rows[0];
-      if(previous&&Number(previous.revision)===input.expectedRevision+1&&previous.request_sha256.equals(hash))
+      if(previous&&Number(previous.revision)===input.expectedRevision+1&&previous.request_sha256.equals(hash)){
+        if(preparation.state!=="legacy")await commitCloudAgentCredentialPublication(tx,ownerUserId,preparation.operationId,preparation.target);
         return {revision:Number(previous.revision),replayed:true};
+      }
       if((Number(previous?.revision) || 0)!==input.expectedRevision||input.expectedRevision>=Number.MAX_SAFE_INTEGER-1)
         throw new HttpError(409,"agent_connection_conflict","Agent connection changed. Refresh and try again.");
       if(input.credentialId){
@@ -188,12 +233,14 @@ export class DatabaseCloudAgentCredentialService {
       [organizationId,ownerUserId,provider,next,input.credentialId,input.credentialId?input.credentialRevision:null,models,fingerprint,hash,allModels]);
       await tx.query(`UPDATE cloud_agent_credential_delegations SET revoked_at=coalesce(revoked_at,now())
         WHERE org_id=$1 AND owner_user_id=$2 AND organization_provider=$3 AND revoked_at IS NULL`,[organizationId,ownerUserId,provider]);
+      if(preparation.state!=="legacy")await commitCloudAgentCredentialPublication(tx,ownerUserId,preparation.operationId,preparation.target);
       return {revision:next,replayed:false};
     });
   }
 
   async removeOrganizationCredential(ownerUserId:string,organizationId:string,credentialId:string){
     if(!uuid.safeParse(credentialId).success)invalid();
+    await withSystemTx(this.pool,tx=>assertLegacyCloudAgentCredentialMutationAllowed(tx,ownerUserId,{credentialId,organizationId}));
     const dev=await devConnectionRuntime(this.pool,this.encryption);
     if(dev){
       const reference=await withSystemTx(this.pool,tx=>tx.query("SELECT 1 FROM dev_connection_references WHERE binding_id=$1 AND owner_user_id=$2 AND org_id=$3",[credentialId,ownerUserId,organizationId]));
@@ -203,6 +250,7 @@ export class DatabaseCloudAgentCredentialService {
       await this.owner(tx,ownerUserId);
       await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412))",[ownerUserId]);
       await this.organizationConsent(tx,ownerUserId,organizationId);
+      await assertLegacyCloudAgentCredentialMutationAllowed(tx,ownerUserId,{credentialId,organizationId});
       await tx.query(`UPDATE cloud_agent_credential_delegations SET revoked_at=coalesce(revoked_at,now())
         WHERE org_id=$1 AND owner_user_id=$2 AND credential_id=$3 AND revoked_at IS NULL`,[organizationId,ownerUserId,credentialId]);
       await tx.query(`UPDATE cloud_agent_organization_connections SET credential_id=NULL,credential_revision=NULL,models='{}',revision=revision+1,request_sha256=digest(request_sha256,'sha256'),updated_at=now()
@@ -272,6 +320,12 @@ export class DatabaseCloudAgentCredentialService {
     const displayName=input.displayName.trim(),hashValues:unknown[]=nativeCache?[displayName,material,nativeCache]:[displayName,material];
     if(input.organizationId)hashValues.push(input.organizationId.toLowerCase());
     const hash=createHash("sha256").update(JSON.stringify(hashValues)).digest();
+    const publication={kind:"publish-credential" as const,credentialId:input.credentialId,
+      expectedRevision:input.expectedRevision,requestDigest:hash.toString("hex")};
+    // Commit the start-fence outbox separately: a refused Settings request must
+    // leave the background control pending rather than roll it back.
+    const publicationState=await withSystemTx(this.pool,tx=>prepareCloudAgentCredentialPublication(tx,input.ownerUserId,input.operationId,publication));
+    if(publicationState==="pending")throw new HttpError(503,"cloud_agent_credential_busy","cloud_agent_credential_busy");
     return withSystemTx(this.pool,async tx=>{
       await this.owner(tx,input.ownerUserId,true);
       if(input.organizationId)await this.organizationConsent(tx,input.ownerUserId,input.organizationId);
@@ -285,6 +339,7 @@ export class DatabaseCloudAgentCredentialService {
           if(!previous.last_request_sha256.equals(hash)||Number(previous.revision)!==input.expectedRevision+1||previous.revoked_at)
             throw new HttpError(409,"agent_credential_conflict","Agent credential changed");
           if(input.organizationId)await this.associateOrganization(tx,input.ownerUserId,input.organizationId,previous.id);
+          if(publicationState!=="legacy")await commitCloudAgentCredentialPublication(tx,input.ownerUserId,input.operationId,publication);
           return {credential:metadata(previous),replayed:true};
         }
         if(previous.revoked_at||Number(previous.revision)!==input.expectedRevision||previous.kind!==material.kind)
@@ -324,11 +379,14 @@ export class DatabaseCloudAgentCredentialService {
       }
       await tx.query("UPDATE cloud_agent_credential_delegations SET revoked_at=coalesce(revoked_at,now()) WHERE credential_id=$1 AND revoked_at IS NULL",[row.id]);
       if(input.organizationId)await this.associateOrganization(tx,input.ownerUserId,input.organizationId,row.id);
+      if(publicationState!=="legacy")await commitCloudAgentCredentialPublication(tx,input.ownerUserId,input.operationId,publication);
       return {credential:metadata(row),replayed:false};
     });
   }
 
   async removeDevConnection(ownerUserId:string,organizationId:string,id:string,scope:"local"|"organization"|"global") {
+    await withSystemTx(this.pool,tx=>assertLegacyCloudAgentCredentialMutationAllowed(tx,ownerUserId,
+      {credentialId:id,...(scope==="global"?{}:{organizationId})}));
     const dev=await devConnectionRuntime(this.pool,this.encryption);if(!dev)unavailable();
     return dev.remove(ownerUserId,organizationId,id,scope);
   }
@@ -338,6 +396,7 @@ export class DatabaseCloudAgentCredentialService {
   }
   async revoke(ownerUserId:string,credentialId:string){
     if(!uuid.safeParse(credentialId).success)invalid();
+    await withSystemTx(this.pool,tx=>assertLegacyCloudAgentCredentialMutationAllowed(tx,ownerUserId,{credentialId}));
     const dev=await devConnectionRuntime(this.pool,this.encryption);
     if(dev){
       const reference=await withSystemTx(this.pool,async tx=>(await tx.query<{org_id:string}>("SELECT org_id FROM dev_connection_references WHERE binding_id=$1 AND owner_user_id=$2",[credentialId,ownerUserId])).rows[0]);
@@ -345,8 +404,10 @@ export class DatabaseCloudAgentCredentialService {
     }
     return withSystemTx(this.pool,async tx=>{
       await this.owner(tx,ownerUserId);
+      await serializeCloudAgentCredentialSourceMutation(tx,ownerUserId);
       const row=(await tx.query<Credential>("SELECT * FROM cloud_agent_credentials WHERE id=$1 AND owner_user_id=$2 FOR UPDATE",[credentialId,ownerUserId])).rows[0];
       if(!row)unavailable();
+      await assertLegacyCloudAgentCredentialMutationAllowed(tx,ownerUserId,{credentialId});
       if(!row.revoked_at)await tx.query("UPDATE cloud_agent_credentials SET revoked_at=now(),revision=revision+1,updated_at=now() WHERE id=$1",[credentialId]);
       await tx.query("DELETE FROM cloud_agent_credential_versions WHERE credential_id=$1",[credentialId]);
       await tx.query("DELETE FROM cloud_codex_auth_caches WHERE credential_id=$1",[credentialId]);

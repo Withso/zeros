@@ -9,12 +9,17 @@ import {
 } from "./bridge/cloud-workspace-key";
 import type { WireRecord } from "./bridge/cloud-runtime-wire";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
-import { captureCloudTranscriptConfirmation, forgetCloudTranscriptChat } from "./cloud-transcript-cache";
+import { captureCloudTranscriptConfirmation, forgetCloudTranscriptChat, installCloudHistoryRestoreMetadata,
+  captureCloudHistoryRestoreRead, assertCloudHistoryRestoreResult } from "./cloud-transcript-cache";
+import { CloudHistoryProjectionSchema, CloudHistoryRestoreHeadSchema, CloudHistoryRestoreMetadataSchema,
+  type CloudHistoryRestoreMetadata } from "./cloud-transcript-cache-contract";
 
 const baseSchema = {
   workspaceId: z.string().uuid(),
   organizationId: z.string().uuid(),
   revision: z.number().int().safe().nonnegative(),
+  projection: CloudHistoryProjectionSchema.optional(),
+  historyHeads: z.array(CloudHistoryRestoreHeadSchema).max(512).optional(),
 };
 const chatsSchema = z.object({
   ...baseSchema,
@@ -54,6 +59,37 @@ function assertScope(
     throw new Error("Cloud history returned a different workspace");
 }
 
+function restoreMetadata(target: CloudWorkspaceTarget, value: WireRecord, conversationId?: string): CloudHistoryRestoreMetadata | null {
+  if (value.projection === undefined && value.historyHeads === undefined) return null;
+  const metadata = CloudHistoryRestoreMetadataSchema.parse({ projection: value.projection, historyHeads: value.historyHeads });
+  assertScope(target, metadata.projection);
+  if (conversationId !== undefined && (metadata.historyHeads.some(head => head.conversationId !== conversationId) ||
+      metadata.projection.complete && metadata.historyHeads.length !== 1)) throw new Error("Cloud restore head belongs to another conversation");
+  return metadata;
+}
+function appendMetadata(previous: CloudHistoryRestoreMetadata | null, next: CloudHistoryRestoreMetadata | null): CloudHistoryRestoreMetadata | null {
+  if (!previous) return next;
+  if (!next) throw new Error("Cloud history changed its writer mode while loading");
+  const { complete: aComplete, ...a } = previous.projection, { complete: bComplete, ...b } = next.projection;
+  if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error("Cloud history changed its writer binding while loading");
+  const heads = new Map(previous.historyHeads.map(head => [head.conversationId, head]));
+  for (const head of next.historyHeads) {
+    const known = heads.get(head.conversationId);
+    if (known && JSON.stringify(known) !== JSON.stringify(head)) throw new Error("Cloud history changed its restore head while loading");
+    heads.set(head.conversationId, head);
+  }
+  return CloudHistoryRestoreMetadataSchema.parse({ projection: { ...previous.projection, complete: aComplete && bComplete }, historyHeads: [...heads.values()] });
+}
+function hasCurrentRows(metadata: CloudHistoryRestoreMetadata | null, conversationId: string): boolean {
+  if (!metadata) return true;
+  const head = metadata.historyHeads.find(head => head.conversationId === conversationId);
+  return !!head && !head.deleted && head.incompleteReason === null;
+}
+function assertCompletePage(metadata: CloudHistoryRestoreMetadata | null, conversations: readonly string[]): void {
+  if (metadata?.projection.complete && conversations.some(id => !metadata.historyHeads.some(head => head.conversationId === id)))
+    throw new Error("Cloud history omitted a current restore head");
+}
+
 /** One cloud-owned read path for the existing transcript UI. No native runtime
  * or provider connection is opened to retrieve saved conversation data. */
 export async function readCloudWorkspaceHistory(
@@ -62,6 +98,7 @@ export async function readCloudWorkspaceHistory(
   params: WireRecord,
 ): Promise<WireRecord> {
   const generation = getOrganizationStoreGeneration();
+  const restoreRead = captureCloudHistoryRestoreRead(target);
   const assertAccount = () => {
     if (generation !== getOrganizationStoreGeneration())
       throw new Error("Cloud account changed while loading history");
@@ -86,7 +123,7 @@ export async function readCloudWorkspaceHistory(
     }
     for (let attempt = 0; ; attempt++) {
       const hits: WireRecord[] = [], seen = new Set<string>();
-      let cursor: string | null = null, revision: number | undefined, bytes = 0;
+      let cursor: string | null = null, revision: number | undefined, bytes = 0, metadata: CloudHistoryRestoreMetadata | null = null;
       try {
         do {
           query.set("limit", String(limit - hits.length));
@@ -94,13 +131,20 @@ export async function readCloudWorkspaceHistory(
           if (revision !== undefined) query.set("revision", String(revision)); else query.delete("revision");
           const page = await cloudAccountRequest(`${root}/search?${query}`, searchSchema);
           assertAccount(); assertScope(target, page);
+          const pageMetadata = restoreMetadata(target, page, query.get("chatId") ?? undefined);
+          assertCompletePage(pageMetadata, page.hits.map(row => row.chatId));
+          const conversations = page.hits.map(row => row.chatId);
+          if (query.has("chatId")) conversations.push(query.get("chatId")!);
+          if (pageMetadata) await installCloudHistoryRestoreMetadata(target, pageMetadata, conversations, restoreRead);
+          assertAccount(); assertCloudHistoryRestoreResult(restoreRead, pageMetadata, conversations);
+          metadata = appendMetadata(metadata, pageMetadata);
           bytes += JSON.stringify(page).length * 2;
           if (bytes > 8 * 1024 * 1024 || hits.length + page.hits.length > limit)
             throw new Error("Cloud search exceeded its result limit");
           if (revision !== undefined && revision !== page.revision)
             throw new Error("Cloud history changed while searching");
           revision = page.revision;
-          hits.push(...page.hits.map(row => {
+          hits.push(...page.hits.filter(row => hasCurrentRows(pageMetadata, row.chatId)).map(row => {
             if (query.has("chatId") && row.chatId !== query.get("chatId"))
               throw new Error("Cloud search returned a different conversation");
             return { ...row, chatId: cloudScopedId(target, row.chatId) };
@@ -110,7 +154,8 @@ export async function readCloudWorkspaceHistory(
             throw new Error("Cloud search exceeded its page limit; narrow the query");
           if (cursor) seen.add(cursor);
         } while (cursor && hits.length < limit);
-        return { hits };
+        assertCloudHistoryRestoreResult(restoreRead, metadata, hits.map(row => parseCloudScopedId(row.chatId)!.id));
+        return { hits, ...(metadata ?? {}) };
       } catch (error) {
         assertAccount();
         if (attempt === 0 && (error as { code?: string }).code === "cloud_history_changed") continue;
@@ -128,6 +173,7 @@ export async function readCloudWorkspaceHistory(
         let cursor: string | null = null,
           revision: number | undefined,
           bytes = 0;
+        let metadata: CloudHistoryRestoreMetadata | null = null;
         const seen = new Set<string>();
         do {
           const query = new URLSearchParams({ limit: "100" });
@@ -139,6 +185,12 @@ export async function readCloudWorkspaceHistory(
           );
           assertAccount();
           assertScope(target, page);
+          const pageMetadata = restoreMetadata(target, page);
+          assertCompletePage(pageMetadata, [...page.chats.map(row => row.id), ...page.chatDeletions]);
+          const conversations = [...page.chats.map(row => row.id), ...page.chatDeletions];
+          if (pageMetadata) await installCloudHistoryRestoreMetadata(target, pageMetadata, conversations, restoreRead);
+          assertAccount(); assertCloudHistoryRestoreResult(restoreRead, pageMetadata, conversations);
+          metadata = appendMetadata(metadata, pageMetadata);
           bytes += JSON.stringify(page).length * 2;
           if (bytes > 8 * 1024 * 1024)
             throw new Error("Cloud history exceeded its metadata limit");
@@ -146,6 +198,7 @@ export async function readCloudWorkspaceHistory(
             throw new Error("Cloud history changed while loading");
           revision = page.revision;
           for (const row of page.chats) {
+            if (pageMetadata?.historyHeads.find(head => head.conversationId === row.id)?.deleted) continue;
             if (
               row.folder !== "." &&
               (!row.folder ||
@@ -172,6 +225,7 @@ export async function readCloudWorkspaceHistory(
           }
           chatDeletions.push(
             ...page.chatDeletions.map((value) => cloudScopedId(target, value)),
+            ...(pageMetadata?.historyHeads.filter(head => head.deleted).map(head => cloudScopedId(target, head.conversationId)) ?? []),
           );
           cursor = page.nextCursor;
           if (
@@ -184,8 +238,10 @@ export async function readCloudWorkspaceHistory(
         // Messages can change without a chat title changing. Preserve the
         // database revision so quiet metadata polls remain distinguishable
         // from a real history update, including while the worker is stopped.
-        for (const chatId of chatDeletions) forgetCloudTranscriptChat(chatId);
-        return { chats, chatDeletions, revision };
+        assertCloudHistoryRestoreResult(restoreRead, metadata,
+          [...chats.map(row => parseCloudScopedId(row.id)!.id), ...chatDeletions.map(id => parseCloudScopedId(id)!.id)]);
+        if (!metadata) for (const chatId of chatDeletions) forgetCloudTranscriptChat(chatId);
+        return { chats, chatDeletions: [...new Set(chatDeletions)], revision, ...(metadata ?? {}) };
       } catch (error) {
         assertAccount();
         if (
@@ -223,11 +279,18 @@ export async function readCloudWorkspaceHistory(
   );
   assertAccount();
   assertScope(target, page);
+  const metadata = restoreMetadata(target, page, chat.id);
+  if (metadata) await installCloudHistoryRestoreMetadata(target, metadata, [chat.id], restoreRead);
+  assertAccount(); assertCloudHistoryRestoreResult(restoreRead, metadata, [chat.id]);
+  const messages = hasCurrentRows(metadata, chat.id) ? page.messages : [];
   if (op === "messages.window" && params.before === undefined) {
-    confirm?.({
-      recordEpoch: null, revision: page.revision, cursor: page.messages.at(-1)?.msgId ?? null, messages: page.messages,
+    const confirmed = metadata ? captureCloudTranscriptConfirmation(cloudScopedId(target, chat.id)) : confirm;
+    if (hasCurrentRows(metadata, chat.id)) confirmed?.({
+      recordEpoch: null, revision: page.revision, cursor: messages.at(-1)?.msgId ?? null, messages,
+      ...(metadata ? { restoreHead: { projection: metadata.projection, conversationId: chat.id,
+        head: metadata.historyHeads.find(head => head.conversationId === chat.id)! } } : {}),
     });
-    return { messages: page.messages, revision: page.revision };
+    return { messages, revision: page.revision, ...(metadata ?? {}) };
   }
-  return { messages: page.messages };
+  return { messages, ...(metadata ?? {}) };
 }

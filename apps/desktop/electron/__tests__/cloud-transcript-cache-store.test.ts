@@ -8,6 +8,16 @@ const roots: string[] = [];
 const owner = { accountId: "account-a", organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222", chatId: "chat-a" };
 const message = (id: string, text = id) => ({ msgId: id, kind: "text", createdAt: 100, payload: JSON.stringify({ id, kind: "text", role: "agent", text, createdAt: 100 }) });
 const window = (revision = 1, text = "confirmed") => ({ revision, recordEpoch: null, cursor: "m-1", messages: [message("m-1", text)] });
+const projection = { organizationId: owner.organizationId, workspaceId: owner.workspaceId, generation: 2,
+  engineInstanceId: "33333333-3333-4333-8333-333333333333", bootId: "44444444-4444-4444-8444-444444444444",
+  writerEpoch: "55555555-5555-4555-8555-555555555555", fundingOwnerUserId: "66666666-6666-4666-8666-666666666666",
+  fundingOwnerEpoch: 1, version: 1 as const, mode: "boot-owner-v1" as const, fundingScope: "workspace-roles-v1" as const,
+  mirroredSequence: 20, sealedSequence: 20, complete: true };
+const restoreHead = (restoreRevision: number, incomplete = false, deleted = false) => ({ projection,
+  conversationId: owner.chatId, head: { conversationId: owner.chatId, originWriterEpoch: projection.writerEpoch,
+    source: { kind: "mutation" as const, mutationId: "77777777-7777-4777-8777-777777777777", operation: deleted ? "delete" as const : "repair" as const },
+    restoreRevision, deleted, recordSequence: incomplete ? null : 10, eventSequence: 9,
+    manifestSha256: incomplete ? null : "a".repeat(64), incompleteReason: incomplete ? "history_limit" as const : null } });
 async function fixture(options: { maxEntries?: number; maxBytes?: number } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "zeros-transcripts-"));
   roots.push(root);
@@ -17,6 +27,43 @@ async function fixture(options: { maxEntries?: number; maxBytes?: number } = {})
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 
 describe("durable desktop cloud transcript windows", () => {
+  it.each(["incomplete", "deleted"] as const)("keeps an exact %s restore fence through disk reopen and late writes", async kind => {
+    const { directory, store } = await fixture();
+    const old = store.readReceipt(owner);
+    store.write(owner, { ...window(1000), restoreHead: restoreHead(4) }, old.historyEpoch);
+    const sibling = { ...owner, chatId: "chat-b" }; store.write(sibling, window(2));
+    const fence = restoreHead(5, kind === "incomplete", kind === "deleted");
+    store.prune({ ...owner, restoreHead: fence });
+    store.write(owner, { ...window(1_000_000, "late old response"), restoreHead: restoreHead(4) }, old.historyEpoch);
+    const restored = new CloudTranscriptCacheStore(directory);
+    expect(restored.read(owner)).toBeNull();
+    expect(restored.readReceipt(owner).restoreHead).toEqual(fence);
+    expect(restored.read(sibling)?.revision).toBe(2);
+    const receipt = restored.readReceipt(owner);
+    restored.write(owner, window(1_000_001, "headless old response"), receipt.historyEpoch);
+    expect(restored.read(owner)).toBeNull();
+    const repair = restoreHead(6);
+    restored.prune({ ...owner, restoreHead: repair });
+    restored.write(owner, { ...window(1, "verified repair"), restoreHead: repair }, restored.readReceipt(owner).historyEpoch);
+    expect(new CloudTranscriptCacheStore(directory).read(owner)?.messages[0]?.payload).toContain("verified repair");
+  });
+  it("does not let an evicted pre-fence write recreate a retired conversation", async () => {
+    const { store } = await fixture({ maxEntries: 1 });
+    const old = store.readReceipt(owner);
+    store.prune({ ...owner, restoreHead: restoreHead(5, true) });
+    store.write({ ...owner, chatId: "other" }, window(2));
+    store.write(owner, { ...window(1000), restoreHead: restoreHead(4) }, old.historyEpoch);
+    expect(store.read(owner)).toBeNull();
+  });
+  it("refuses a foreign restore fence and equal-revision source conflicts without damaging the current window", async () => {
+    const { store } = await fixture();
+    const current = restoreHead(5);
+    store.prune({ ...owner, restoreHead: current });
+    store.write(owner, { ...window(), restoreHead: current }, store.readReceipt(owner).historyEpoch);
+    expect(() => store.prune({ ...owner, restoreHead: { ...current, projection: { ...projection, workspaceId: owner.organizationId } } })).toThrow();
+    expect(() => store.prune({ ...owner, restoreHead: { ...current, head: { ...current.head, source: { ...current.head.source, operation: "edit" } } } })).toThrow();
+    expect(store.read(owner)).not.toBeNull();
+  });
   it("does not allocate a cache on a passive miss", async () => {
     const { directory, store } = await fixture();
     expect(store.read(owner)).toBeNull();

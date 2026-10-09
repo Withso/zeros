@@ -13,7 +13,7 @@ import {CloudCodexExecServer} from "../cloud-exec-server";
 import {CLOUD_CODEX_CONFIG,cloudCodexConfig} from "../cloud-policy";
 import {codexAppServerFeatureArgs} from "../app-server";
 import {createInterface} from "node:readline";
-import type {CloudProviderExecution} from "../../../cloud-provider-execution";
+import type {CloudLegacyProviderExecution as CloudProviderExecution} from "../../../cloud-provider-execution";
 import type {BoundaryProcess,BoundarySpawnRequest} from "../../../containment/types";
 vi.mock("../../../containment/cloud-runtime-root.mjs", async original => ({
   ...await original<typeof import("../../../containment/cloud-runtime-root.mjs")>(),
@@ -47,6 +47,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
     const close=()=>{abort.abort();return closing??=Promise.resolve().then(()=>Promise.all([...domains].map(domain=>domain.stopAndProve()))).then(()=>{});};
     const child={stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),wait:()=>Promise.resolve({code:1,signal:null}),stopAndProve:async()=>{}} as unknown as BoundaryProcess;
     const execution={lease:{assertLive(){if(abort.signal.aborted)throw new Error("retired");},signal:abort.signal,attach:(domain:{stopAndProve():Promise<void>})=>domains.add(domain),launch:async()=>child,close},coordinator:{workload:{spawn:vi.fn()}}} as unknown as CloudProviderExecution;
+    Object.assign(execution,{lifetime:execution.lease,environment:null});
     try {
       await expect(CloudCodexExecServer.start(execution,path.join(process.cwd(),"pinned/bin/codex"))).rejects.toThrow("retired");
       await close();
@@ -72,16 +73,18 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
       abort.abort();return closing??=(async()=>{await Promise.all([...domains].map(domain=>domain.stopAndProve()));})();
     });
     const workloadSpawn=vi.fn(async(request:BoundarySpawnRequest)=>{
+      expect(request.cwd).toBe(root);
       expect(request.env).toMatchObject({ORG_VALUE:values.ORG_VALUE,REPO_VALUE:values.REPO_VALUE,PERSONAL_VALUE:actor});
-      const child=spawn(process.execPath,[helper,nativeBinary],{cwd:root,env:{...request.env},stdio:["pipe","pipe","pipe"],detached:true});
+      const child=spawn(process.execPath,[helper,nativeBinary],{cwd:request.cwd,env:{...request.env},stdio:["pipe","pipe","pipe"],detached:true});
       const exited=new Promise<{code:number|null;signal:string|null}>(resolve=>child.once("close",(code,signal)=>resolve({code,signal})));
       let stopped:Promise<void>|undefined;
       const domain:BoundaryProcess={pid:child.pid!,child,stdin:child.stdin,stdout:child.stdout,stderr:child.stderr,
         wait:()=>exited,signal:async signal=>{child.kill(signal);},stopAndProve:()=>stopped??=(async()=>{child.stdin.end();const timer=setTimeout(()=>{try{process.kill(-child.pid!,"SIGKILL");}catch{}},250);try{await exited;}finally{clearTimeout(timer);}})()};
       domains.add(domain);return domain;
     });
-    const execution={lease:{environment:{values},assertLive(){if(abort.signal.aborted)throw new Error("retired");},signal:abort.signal,attach:(domain:{stopAndProve():Promise<void>})=>domains.add(domain),
+    const execution={cwd:root,lease:{environment:{values},assertLive(){if(abort.signal.aborted)throw new Error("retired");},signal:abort.signal,attach:(domain:{stopAndProve():Promise<void>})=>domains.add(domain),
       launch:async(callback:()=>Promise<BoundaryProcess>)=>callback(),close},coordinator:{workload:{spawn:workloadSpawn}}} as unknown as CloudProviderExecution;
+    Object.assign(execution,{lifetime:execution.lease,environment:{values},nativeCapabilities:null,auth:{codexAuth:()=>null}});
     let socket:WebSocket|undefined,uncooperative:Socket|undefined,proofTimer:ReturnType<typeof setTimeout>|undefined;
     try{
       const bridge=await CloudCodexExecServer.start(execution,nativeBinary);

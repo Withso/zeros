@@ -22,6 +22,8 @@ import {
   type ExecutionBoundaryGitState,
   type ExecutionBoundaryStatus,
 } from "@zeros/protocol/containment";
+import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
+import { CloudCommandFailureError, decodeCloudCommandFailure } from "@zeros/protocol/cloud-commands";
 
 import {
   nextCommandDescriptorPath,
@@ -96,6 +98,54 @@ const MAX_AUTO_PORT_LEASES = 64;
 const COMMAND_DESCRIPTOR_VERSION = 6 as const;
 const CLOUD_CONTAINER_ENGINE = "/usr/bin/podman";
 const CLOUD_CONTAINER_WORKER_FILENAME = "cloud-container-worker.mjs";
+
+const CLOUD_WORKLOAD_PREFLIGHT_CODE = "cloud_containment_environment_setup_failed" as const;
+export type CloudWorkloadPreflightReason =
+  | "supervisor_missing"
+  | "supervisor_runtime_missing"
+  | "ripgrep_missing"
+  | "container_launcher_unavailable"
+  | "podman_unavailable"
+  | "process_domain_unavailable"
+  | "unsupported_platform"
+  | "probe_rejected";
+const cloudPreflightReasons = new Map<string, CloudWorkloadPreflightReason>([
+  ["ZSR supervisor is missing", "supervisor_missing"],
+  ["ZSR supervisor runtime is missing", "supervisor_runtime_missing"],
+  ["ZSR ripgrep runtime is missing", "ripgrep_missing"],
+  ["cloud container-worker launcher is unavailable", "container_launcher_unavailable"],
+  ["cloud Podman runtime is unavailable", "podman_unavailable"],
+  ["ZSR macOS process-domain helper is unavailable", "process_domain_unavailable"],
+]);
+export interface CloudWorkloadPreflightDiagnostic {
+  readonly code: typeof CLOUD_WORKLOAD_PREFLIGHT_CODE;
+  readonly reasons: readonly CloudWorkloadPreflightReason[];
+}
+export interface CloudWorkloadProbeResult extends BoundaryProbeResult {
+  readonly preflight?: CloudWorkloadPreflightDiagnostic;
+}
+
+/** These are fixed prerequisite ids, never excerpts of a probe's reason text.
+ * Bounds also apply to overridden probes used by qualification fixtures. */
+function cloudWorkloadPreflight(reasons: readonly unknown[]): CloudWorkloadPreflightDiagnostic {
+  const diagnostics = new Set<CloudWorkloadPreflightDiagnostic["reasons"][number]>();
+  for (const reason of reasons.slice(0, 16)) {
+    const known = typeof reason === "string" ? cloudPreflightReasons.get(reason) : undefined;
+    diagnostics.add(known ?? (typeof reason === "string" && reason.startsWith("unsupported platform ")
+      ? "unsupported_platform" : "probe_rejected"));
+  }
+  if (diagnostics.size === 0) diagnostics.add("probe_rejected");
+  return Object.freeze({ code: CLOUD_WORKLOAD_PREFLIGHT_CODE, reasons: Object.freeze([...diagnostics]) });
+}
+
+export class CloudWorkloadPreflightError extends CloudCommandFailureError {
+  readonly preflight: CloudWorkloadPreflightDiagnostic;
+  constructor(reasons: readonly unknown[]) {
+    super({ stage: "containment", category: "environment_setup_failed" });
+    this.name = "CloudWorkloadPreflightError";
+    this.preflight = cloudWorkloadPreflight(reasons);
+  }
+}
 
 function finalSupervisorDiagnostic(
   stderr: string,
@@ -571,7 +621,7 @@ async function prepareCloudWorkerPrivateState(
 
 interface CachedProbe {
   readonly checkedAt: number;
-  readonly result: BoundaryProbeResult;
+  readonly result: CloudWorkloadProbeResult;
 }
 
 function processGroupExists(pid: number): boolean {
@@ -1850,6 +1900,9 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
         available: reasons.length === 0,
         secureNestedIsolation: reasons.length === 0,
         reasons,
+        ...(this.options.cloudWorker && reasons.length > 0
+          ? { preflight: cloudWorkloadPreflight(reasons) }
+          : {}),
       },
     };
   }
@@ -1987,7 +2040,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     };
   }
 
-  private async cachedCapabilityProbe(): Promise<BoundaryProbeResult> {
+  private async cachedCapabilityProbe(): Promise<CloudWorkloadProbeResult> {
     const now = Date.now();
     const cached = this.capabilityProbeResult;
     if (cached) {
@@ -2314,7 +2367,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     }
   }
 
-  async probe(_request: BoundaryRequest): Promise<BoundaryProbeResult> {
+  async probe(_request: BoundaryRequest): Promise<CloudWorkloadProbeResult> {
     return this.cachedCapabilityProbe();
   }
 
@@ -2513,6 +2566,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       () => this.clearRetirementFailure(generation),
     );
     const attestation = (async (): Promise<void> => {
+      let canaryAccepted = false;
       try {
         const reasons = await this.runHostParityAdmissionCanary(
           boundary,
@@ -2521,6 +2575,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
         );
         stage("canary");
         if (reasons.length > 0) throw new Error(reasons.join("; "));
+        canaryAccepted = true;
         // A cancelled background admission may already have started provider
         // bytes inside the immutable kernel fence. Treat it exactly like a
         // failed proof: revoke that one boundary and prove its tree empty.
@@ -2549,6 +2604,21 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
             "host-parity admission failed and teardown could not be proven",
           );
         }
+        if (
+          this.options.cloudWorker &&
+          !canaryAccepted &&
+          !(error instanceof AdmissionCancelledError)
+        ) {
+          // Classify only a refused canary, and only after its exact boundary
+          // has been retired. Cancellation, teardown failures and more precise
+          // inner authority causes retain their existing precedence.
+          if (error instanceof CloudCommandFailureError) throw error;
+          const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+          const diagnosis = decodeCloudCommandFailure(code);
+          if (diagnosis) throw new CloudCommandFailureError(diagnosis);
+          if (isCloudAgentAdmissionCode(code)) throw Object.assign(new Error(code), { code });
+          throw new CloudCommandFailureError({ stage: "containment", category: "canary_failed" });
+        }
         throw error;
       }
     })();
@@ -2574,6 +2644,11 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     try {
       const probe = await this.probe(initialRequest);
       if (!probe.available || !probe.secureNestedIsolation) {
+        if (this.options.cloudWorker) {
+          const failure = new CloudWorkloadPreflightError(probe.reasons);
+          console.error(`[zsr] cloud preflight rejected ${JSON.stringify(failure.preflight)}`);
+          throw failure;
+        }
         throw new Error(probe.reasons.join("; ") || "ZSR is unavailable");
       }
       allocationStarted = true;

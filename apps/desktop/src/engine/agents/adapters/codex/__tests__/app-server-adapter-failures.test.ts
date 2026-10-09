@@ -21,6 +21,7 @@ import { classifyThreadFailure, STALE_THREAD_RX } from "../app-server-adapter";
 import { SESSION_EXPIRED_KEYWORDS } from "../../shared/session-expiry";
 import { SESSION_EXPIRED_RX } from "../../../../../renderer/platform/bridge/failure";
 import { AgentFailureError } from "../../../types";
+import { CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
 
 /** Real codex stderr / RPC error strings observed in the wild +
  *  the user-facing wording the adapter itself produces. */
@@ -127,6 +128,10 @@ describe("session-expired regex source parity", () => {
 });
 
 describe("classifyThreadFailure", () => {
+  it.each(["newSession", "loadSession", "forkSession", "prompt"] as const)("retains a typed cloud diagnosis through adapter classification at %s", stage => {
+    const original = new CloudCommandFailureError({ stage: "validation", category: "authority_timeout" });
+    expect(classifyThreadFailure(original, stage)).toBe(original);
+  });
   it.each([
     [{ codexErrorInfo: "rateLimitExceeded", message: "Authentication request rejected." }, "rate-limited"],
     [{ codexErrorInfo: "unauthorized", message: "Credentials expired." }, "auth-required"],

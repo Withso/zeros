@@ -70,6 +70,37 @@ afterEach(() => {
 });
 
 describe("actor runtime socket lifecycle", () => {
+  it("latches a forwarded native revocation without issuing another admission", async () => {
+    setup(); const refresh = vi.fn(async current => ({ ...current, connectionSequence: current.connectionSequence + 1 }));
+    client = new RuntimeClient(target(), { refreshCloudConnectionTarget: refresh });
+    await client.connect(); const socket = Socket.instances[0]; socket.open(); await Promise.resolve();
+    socket.close(); socket.onclose?.({ code: 1008, reason: "client authority revoked" });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(refresh).not.toHaveBeenCalled(); expect(client.lastRejection).toMatchObject({ reason: "cloud-revoked", code: "cloud_workspace_access_revoked" });
+    expect(client.executionIdentity.kind).toBe("cloud");
+    await client.forceReconnect();
+    expect(refresh).not.toHaveBeenCalled(); expect(Socket.instances).toHaveLength(1);
+  });
+  it("bounds repeated abnormal upgrade failures even when minting each admission succeeds", async () => {
+    setup(); const refresh = vi.fn(async current => ({ ...current, connectionSequence: current.connectionSequence + 1, expiresAt: Date.now() + 120_000 }));
+    client = new RuntimeClient(target(), { refreshCloudConnectionTarget: refresh }); await client.connect();
+    for (let i = 0; i < 8; i++) { const socket = Socket.instances.at(-1)!; socket.close(); socket.onclose?.({ code: 1006, reason: "" }); await vi.advanceTimersByTimeAsync(15_000); }
+    expect(Socket.instances.length).toBeLessThanOrEqual(5); expect(client.lastRejection).toMatchObject({ reason: "cloud-transient" });
+  });
+  it.each(["cloud_workspace_access_superseded", "cloud_actor_admission_rejected", "cloud_workspace_client_update_required", "cloud_workspace_v2_required"])("latches typed %s refresh failures instead of reconnecting forever", async code => {
+    setup(); const refresh = vi.fn(async () => { throw Object.assign(new Error("private-native-detail"), { code, status: 409 }); });
+    client = new RuntimeClient(target(), { refreshCloudConnectionTarget: refresh }); vi.setSystemTime(now + 120_001);
+    await client.connect(); await vi.advanceTimersByTimeAsync(120_000);
+    expect(refresh).toHaveBeenCalledOnce(); expect(Socket.instances).toHaveLength(0);
+    expect(client.lastRejection).toMatchObject({ code }); expect(client.lastRejection?.message).not.toContain("private-native-detail");
+    expect(client.executionIdentity.kind).toBe("cloud");
+  });
+  it("bounds transient refresh failures and keeps their category", async () => {
+    setup(); const refresh = vi.fn(async () => { throw Object.assign(new Error("offline"), { code: "cloud_actor_runtime_unavailable", status: 503 }); });
+    client = new RuntimeClient(target(), { refreshCloudConnectionTarget: refresh }); vi.setSystemTime(now + 120_001);
+    await client.connect(); await vi.advanceTimersByTimeAsync(120_000);
+    expect(refresh.mock.calls.length).toBeLessThanOrEqual(5); expect(client.lastRejection).toMatchObject({ reason: "cloud-transient" });
+  });
   it("bounds timeout logs and classifies arbitrary request operations without retaining their content", async () => {
     setup();
     const log = vi.spyOn(console, "warn").mockImplementation(() => {});

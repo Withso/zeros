@@ -91,6 +91,7 @@
     "check:codex-coverage": "node scripts/codex-protocol-coverage.mjs",
     "check:codex-pin": "node scripts/check-codex-pin.mjs && node scripts/codex-protocol-coverage.mjs",
     "check:runtime-pins": "node scripts/check-runtime-pins.mjs",
+    "cloud:agent:e2e": "tsx scripts/cloud-workspace-validation/cloud-agent-e2e/run.mts",
     "cloud:runtime-bundle:build": "tsx scripts/cloud-workspace-validation/runtime-bundle/build.ts",
     "cloud:runtime-bundle:verify": "tsx scripts/cloud-workspace-validation/runtime-bundle/verify.ts",
     "zsr:qualify": "pnpm build:zsr-supervisor && node scripts/zsr-qualification/run.mjs",

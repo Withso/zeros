@@ -60,7 +60,9 @@ describe("cloud native state across retirement",()=>{
       // The real gateway event callback observes the native acknowledgement
       // before Stop/failure revokes the provider and its lease.
       engine.agents.events.onSessionUpdate("codex",{sessionId:claim.executionId,update:{sessionUpdate:"goal_update",goal:next}});
-      receiver.send(outcome==="cancelled"?{type:"AGENT_PROMPT_COMPLETE",stopReason:"cancelled"}:{type:"AGENT_PROMPT_FAILED"});
+      const identity = { agentId: "codex", requestId: claim.commandId, executionId: claim.executionId, sessionId: claim.executionId };
+      receiver.send(outcome==="cancelled"?{ ...identity, type:"AGENT_PROMPT_COMPLETE",stopReason:"cancelled",response:{stopReason:"cancelled",userMessageId:claim.payload.userMessageId}}
+        :{ ...identity, type:"AGENT_PROMPT_FAILED",error:"Native protocol failure",failure:{kind:"protocol-error",stage:"prompt",message:"Native protocol failure"}});
     };
     const result=await engine.dispatchCloudCommand(claim);
     expect(result.state).toBe(outcome);

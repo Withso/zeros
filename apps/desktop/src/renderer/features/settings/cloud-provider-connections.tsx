@@ -15,6 +15,8 @@ import { NativeBrowserAvailability } from "../agent/native-browser-availability"
 import { invalidateCloudOrganizationAgentRegistry } from "../agent/workspace-agent-registry";
 import { useCachedRead } from "../../state/use-cached-read";
 import { ProviderConnectionDialog } from "./provider-connection-dialog";
+import { CloudCredentialRemovalDialog } from "./cloud-credential-removal-dialog";
+import { useCloudCredentialRemoval } from "./use-cloud-credential-removal";
 import type { ConnectionMethod } from "./connection-methods";
 import {
   readScopedSettingsSelection,
@@ -30,7 +32,8 @@ import type { CloudProviderAuthStatus } from "@zeros/protocol/provider-auth";
 import {
   cloudOrganizationConnectionsCache,
   readCloudOrganizationConnections,
-  removeCloudOrganizationCredential,
+  cloudOrganizationCredentialRemovalTarget,
+  cloudProviderDisconnectTarget,
   saveCloudProviderCredential,
   selectCloudOrganizationCredential,
   type CloudProviderCredential,
@@ -124,7 +127,7 @@ function CloudProviderConnection({
   const [method, setMethod] = useState<ConnectionMethod>("account");
   const [displayName, setDisplayName] = useState("");
   const [token, setToken] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [connectionBusy, setBusy] = useState(false);
   const inFlight = useRef(false),
     mounted = useRef(true);
   const signIn = useRef<AbortController | null>(null);
@@ -173,8 +176,10 @@ function CloudProviderConnection({
     invalidateCloudOrganizationAgentRegistry(organizationId);
     if (mounted.current) await snapshot.refresh();
   };
+  const removal = useCloudCredentialRemoval({ userId, organizationId, active: surfaceActive, onRemoved: refresh });
+  const busy = connectionBusy || removal.pending || !surfaceActive;
   const run = async (action: () => Promise<void>) => {
-    if (inFlight.current) return;
+    if (inFlight.current || removal.isPending() || !surfaceActive || !removal.current()) return;
     inFlight.current = true;
     setBusy(true);
     try {
@@ -256,13 +261,14 @@ function CloudProviderConnection({
         toast.success(`${agent.name} connected`);
       }
     });
-  const disconnect = () =>
-    run(async () => {
-      await selectCloudOrganizationCredential(organizationId, agent.id, {
-        expectedRevision: connection?.revision ?? 0,
-        credentialId: null,
-      });
-    });
+  const disconnect = async () => {
+    if (busy || inFlight.current || !connection) return;
+    await removal.start(cloudProviderDisconnectTarget(organizationId, agent.id, connection));
+  };
+  const remove = async (credential: CloudProviderCredential) => {
+    if (busy || inFlight.current) return;
+    await removal.start(cloudOrganizationCredentialRemovalTarget(organizationId, credential));
+  };
   const configure = (credential: CloudProviderCredential | null) => {
     setSelected(credential);
     setToken("");
@@ -358,14 +364,7 @@ function CloudProviderConnection({
                 <Button
                   variant="ghost"
                   disabled={busy}
-                  onClick={() =>
-                    void run(async () => {
-                      await removeCloudOrganizationCredential(
-                        organizationId,
-                        credential.id,
-                      );
-                    })
-                  }
+                  onClick={() => void remove(credential)}
                 >
                   Remove
                 </Button>
@@ -377,6 +376,8 @@ function CloudProviderConnection({
           </div>
         );
       })}
+      <CloudCredentialRemovalDialog state={removal.state} active={surfaceActive && removal.current()}
+        busy={removal.busy} onDecision={action => { void removal.decide(action); }} />
       <ProviderConnectionDialog
         provider={agent.id}
         name={agent.name}

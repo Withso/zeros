@@ -570,7 +570,16 @@ export class CloudTransport implements Transport {
                     startedAt + this.clientAuthorityLeaseMs;
                   armExpiry();
                 },
-                () => client.close(1008, "client authority unavailable"),
+                (error: unknown) => {
+                  if (finalized || !client.authorized()) return;
+                  const failure = error && typeof error === "object" ? error as { code?: unknown; status?: unknown } : {};
+                  // Only a typed transient may use the remaining confirmed
+                  // lease. It never renews the deadline; expiry still fences
+                  // incoming/outgoing handlers even if this request stalls.
+                  if (failure.code === "cloud_client_authority_transient") return;
+                  client.close(1008, typeof failure.status === "number" && failure.status >= 400 && failure.status < 500
+                    ? "client authority revoked" : "client authority unavailable");
+                },
               )
               .finally(() => {
                 renewalInFlight = false;

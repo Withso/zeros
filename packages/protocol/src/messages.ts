@@ -45,6 +45,9 @@ import type {
 } from "./containment";
 
 import type { CloudGithubNativeGrantRequest } from "./github-auth";
+import type { CloudConversationSnapshot } from "./cloud-events";
+import type { CloudAgentBootConversation } from "./cloud-agent-bootstrap";
+import type { CloudAgentCredentialActualUse } from "./cloud-events";
 
 export type MessageSource = "browser" | "engine";
 
@@ -237,6 +240,12 @@ export interface EngineReadyMessage extends BaseMessage {
   minProtocolVersion?: number;
   /** Additive cloud backend contracts available over the workspace bridge. */
   capabilities?: string[];
+  /** Exact activated engine-local writer, emitted only to a confirmed actor. */
+  cloudLocalCommands?: CloudAgentBootConversation;
+}
+export interface CloudAgentCredentialUsedMessage extends BaseMessage {
+  type: "CLOUD_AGENT_CREDENTIAL_USED";
+  use: CloudAgentCredentialActualUse;
 }
 
 /** Engine → clients broadcast: a list-changing write hit the engine DB. Clients
@@ -265,6 +274,8 @@ export interface DbChangedMessage extends BaseMessage {
    *  one. Omitted for list-only changes (chats/projects); clients pull those
    *  named lists. */
   chatIds?: string[];
+  /** Negotiated local writer only; never a substitute for client authority. */
+  cloudHistoryRestore?: import("./cloud-events").CloudAgentHistoryRestoreMetadata;
 }
 
 /** Host → engine (local Electron or an attested cloud-workspace owner):
@@ -542,6 +553,8 @@ export interface AgentCancelMessage extends BaseMessage {
   agentId: string;
   sessionId: string;
   executionId?: ExecutionId;
+  /** Cloud attachment owner; Local cancel messages keep their existing shape. */
+  chatId?: ConversationId;
 }
 
 /** Stop one active background task without cancelling the parent turn or any
@@ -620,6 +633,9 @@ export interface AgentSessionClosedMessage extends BaseMessage {
 
 export interface AgentPermissionResponseMessage extends BaseMessage {
   type: "AGENT_PERMISSION_RESPONSE";
+  /** Required for cloud replies; Local retains its resolver/transport owner. */
+  chatId?: ConversationId;
+  executionId?: ExecutionId;
   permissionId: string;
   response: RequestPermissionResponse;
 }
@@ -628,6 +644,8 @@ export interface AgentPermissionResponseMessage extends BaseMessage {
  *  Routes back to the engine resolver keyed by questionId. */
 export interface AgentQuestionResponseMessage extends BaseMessage {
   type: "AGENT_QUESTION_RESPONSE";
+  chatId?: ConversationId;
+  executionId?: ExecutionId;
   questionId: string;
   response: QuestionResponse;
   /** Vendor correlation id off the original QuestionRequest — the adapters'
@@ -910,6 +928,7 @@ export interface AgentSessionLoadedMessage extends BaseMessage {
   /** Correlation id for the still-running prompt, when `promptActive` is true.
    * Optional for compatibility with older engines/clients. */
   promptId?: string;
+  cloudSnapshot?: CloudConversationSnapshot;
 }
 
 export interface AgentAgentsListMessage extends BaseMessage {
@@ -924,6 +943,8 @@ export interface AgentSessionCreatedMessage extends BaseMessage {
   agentId: string;
   session: NewSessionResponse;
   initialize: InitializeResponse;
+  /** Synthetic cloud attachment publication, including retired executions. */
+  cloudSnapshot?: CloudConversationSnapshot;
 }
 
 export interface AgentAuthCompletedMessage extends BaseMessage {
@@ -996,6 +1017,7 @@ export interface AgentPermissionRequestMessage extends BaseMessage {
   agentId: string;
   permissionId: string;
   request: RequestPermissionRequest;
+  chatId?: ConversationId;
 }
 
 /** A permission resolver settled engine-side (response, timeout, or abort).
@@ -1007,6 +1029,7 @@ export interface AgentPermissionSettledMessage extends BaseMessage {
   permissionId: string;
   sessionId: string;
   executionId?: ExecutionId;
+  chatId?: ConversationId;
 }
 
 /** A blocking user-input question from the agent (twin of
@@ -1033,6 +1056,7 @@ export interface AgentQuestionSettledMessage extends BaseMessage {
   agentId: string;
   questionId: string;
   outcome: QuestionOutcome;
+  chatId?: ConversationId;
 }
 
 export interface AgentPromptCompleteMessage extends BaseMessage {
@@ -1332,6 +1356,7 @@ export type BridgeMessage =
   | OwnerSignedOutMessage
   | HeartbeatMessage
   | EngineReadyMessage
+  | CloudAgentCredentialUsedMessage
   | DbChangedMessage
   | GithubTokenSetMessage
   | GithubTokenChangedMessage

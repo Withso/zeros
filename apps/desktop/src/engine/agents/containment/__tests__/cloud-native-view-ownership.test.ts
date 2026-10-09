@@ -36,3 +36,12 @@ it.each([{ mode: 0o100664 }, { mode: 0o100606 }, { mode: 0o100600, nlink: 2 }])(
   layout(installation);
   expect(() => assertOwnedCloudNativeHome(view, { uid: 10001, gid: 10001 })).toThrow(/installation state/);
 });
+
+it.each([0,10001])("requires an engine-owned Cursor config root (uid=%s)",uid=>{
+  const cursorHistory=history.replace(/codex$/,"cursor"),cursor={directory,history:{provider:"cursor",directory:cursorHistory},cursorConfig:true};
+  layout({mode:0o100644});
+  entries.set(cursorHistory,{directory:true,uid:10001,mode:0o700});
+  entries.set(`${directory}/cursor-config`,{directory:true,uid,mode:0o755});
+  if(uid===0)expect(()=>assertOwnedCloudNativeHome(cursor,{uid:10001,gid:10001})).not.toThrow();
+  else expect(()=>assertOwnedCloudNativeHome(cursor,{uid:10001,gid:10001})).toThrow(/Cursor configuration/);
+});

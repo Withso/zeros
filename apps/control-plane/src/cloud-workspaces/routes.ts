@@ -1,5 +1,6 @@
 import { loadQuota, loadUsage, assertGenerationReplacementQuota, createCloudRecoveryTransition, requireCloudRecoveryPoint, cloudRecoveryPointLosslessSql, type QuotaRow, type UsageRow } from "./automatic-recovery.js";
 import { CloudAgentPreviewTargetSchema } from "./preview-target.js";
+import { CloudAgentBootScopeSchema, CloudAgentInitialAdoptionsSchema } from "./agent-boot-contract.js";
 import { createCloudComputerRoutes } from "./computer-routes.js";
 import { createCloudComputerV2Routes } from "./computer-v2-routes.js";
 import type { CloudComputerV2AdminWorkspaceRequest } from "./computer-v2-contract.js";
@@ -215,7 +216,9 @@ const PreviewAccessSchema = z
     native: z.literal(true).optional(),
   })
   .strict();
-const EngineClientAdmissionSchema = z.object({actorProtocolVersion:z.literal(2).optional()}).strict();
+const EngineClientAdmissionSchema = z.object({actorProtocolVersion:z.literal(2).optional(),directProviderVersion:z.literal(1).optional(),
+  connectionChannel:z.literal("control-plane-websocket").optional()}).strict().refine(value=>(value.directProviderVersion===undefined||value.actorProtocolVersion===2)&&
+    (value.connectionChannel===undefined||value.directProviderVersion===1));
 const ForkEntrySchema = z.discriminatedUnion("operation", [
   z
     .object({
@@ -320,6 +323,10 @@ type WorkspaceRow = CloudRuntimePinRow & {
   created_by: string;
   created_by_display_name: string | null;
   owner_user_id: string;
+  agent_command_mode: "legacy" | "boot-owner-v1";
+  agent_boot_pointer: string | null;
+  agent_has_activated_writer: boolean;
+  agent_credentials: unknown;
   sharing_mode: "private" | "organization";
   access_revision: string | number;
   display_name: string;
@@ -406,6 +413,27 @@ type ForkIntentRow = {
 
 const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
   SELECT ${actorSql} AS actor_role,cw.id, cw.org_id, cw.team_id, cw.created_by, cw.owner_user_id,
+         cw.agent_command_mode,cw.agent_boot_id AS agent_boot_pointer,
+         EXISTS(SELECT 1 FROM cloud_workspace_local_command_writers writer
+           WHERE writer.workspace_id=cw.id AND writer.org_id=cw.org_id AND writer.state IN ('active','retired')) AS agent_has_activated_writer,
+         CASE WHEN cw.agent_command_mode='boot-owner-v1' THEN (
+           SELECT jsonb_build_object('mode',binding.mode,'fundingScope',binding.funding_scope,
+             'bootId',binding.boot_id,'writerEpoch',binding.writer_epoch,'fundingOwnerUserId',binding.funding_owner_user_id,
+             'fundingOwnerEpoch',binding.funding_owner_epoch,'generation',binding.generation,'engineInstanceId',binding.engine_instance_id,
+             'status',CASE WHEN cw.owner_user_id=binding.funding_owner_user_id AND cw.agent_funding_owner_epoch=binding.funding_owner_epoch
+               THEN 'current' ELSE 'owner-changed' END,'initialAdoptions',binding.initial_adoptions)
+           FROM cloud_agent_boot_bindings binding
+           JOIN cloud_workspace_local_command_writers writer ON writer.workspace_id=binding.workspace_id
+             AND writer.org_id=binding.org_id AND writer.writer_epoch=binding.writer_epoch
+             AND writer.engine_instance_id=binding.engine_instance_id AND writer.generation=binding.generation
+             AND writer.boot_id=binding.boot_id AND writer.funding_owner_user_id=binding.funding_owner_user_id
+             AND writer.funding_owner_epoch=binding.funding_owner_epoch AND writer.state IN ('active','retired')
+           JOIN cloud_workspace_engine_instances engine ON engine.id=binding.engine_instance_id
+             AND engine.workspace_id=binding.workspace_id AND engine.org_id=binding.org_id AND engine.generation=binding.generation
+             AND engine.runtime_boot_id=binding.boot_id
+           WHERE binding.id=cw.agent_boot_id AND binding.workspace_id=cw.id AND binding.org_id=cw.org_id
+             AND binding.credentials_initialized
+         ) END AS agent_credentials,
          (SELECT left(creator.display_name,240) FROM users creator
           WHERE creator.id=cw.created_by AND creator.deleted_at IS NULL) AS created_by_display_name,
          (SELECT creator_user_id FROM cloud_computer_admin_workspaces admin
@@ -542,6 +570,24 @@ function iso(value: Date | string | null): string | null {
   return Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : null;
 }
 
+const agentCredentialsDocumentSchema = CloudAgentBootScopeSchema.omit({ organizationId: true, workspaceId: true }).extend({
+  mode: z.literal("boot-owner-v1"), fundingScope: z.literal("workspace-roles-v1"),
+  status: z.enum(["current", "owner-changed"]), initialAdoptions: CloudAgentInitialAdoptionsSchema,
+}).strict();
+function agentCredentialsDocument(row: WorkspaceRow) {
+  // The exact activated pointer is authoritative even while stopped. A
+  // missing/corrupt local binding must never silently present a legacy mode.
+  if (row.agent_command_mode === "legacy") {
+    if (row.agent_boot_pointer !== null || row.agent_has_activated_writer !== false)
+      throw new HttpError(403, "cloud_validation_access_denied", "cloud_validation_access_denied");
+    return {};
+  }
+  const parsed = agentCredentialsDocumentSchema.safeParse(row.agent_credentials);
+  if (row.agent_command_mode !== "boot-owner-v1" || !row.agent_boot_pointer || !parsed.success)
+    throw new HttpError(403, "cloud_validation_access_denied", "cloud_validation_access_denied");
+  return { agentCredentials: parsed.data };
+}
+
 function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|null) {
   const supported = isSupportedCloudWorkspaceProviderBinding({ provider: row.provider, credentialSource: row.credential_source, sandboxClass: row.sandbox_class });
   const executable=supported&&row.supported_generation;
@@ -561,6 +607,7 @@ function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|
     createdBy: row.created_by,
     createdByDisplayName: cloudWorkspaceDisplayLabel(row.created_by_display_name),
     ownerUserId: row.owner_user_id,
+    ...agentCredentialsDocument(row),
     ...(row.admin_creator_user_id ? { adminWorkspace: { creatorUserId: row.admin_creator_user_id } } : {}),
     actorRole: row.actor_role,
     sharingMode: row.sharing_mode,
@@ -1792,7 +1839,8 @@ export function createCloudWorkspaceRoutes(
           ...(c.req.header("x-zeros-device-id") ? { proof: deviceProof(c) } : {}),
       };
       const admission=body.actorProtocolVersion===2
-        ?await engineClientAdmissionService.issueActor({...input,authenticatedUser:c.get("user")})
+        ?await engineClientAdmissionService.issueActor({...input,authenticatedUser:c.get("user"),
+          ...(body.directProviderVersion?{directProviderVersion:body.directProviderVersion}:{}),...(body.connectionChannel?{connectionChannel:body.connectionChannel}:{})})
         :await engineClientAdmissionService.issue(input);
       return c.json(admission,201);
     } catch (error) {

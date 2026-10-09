@@ -4,7 +4,7 @@ import {createServer,type Server} from "node:http";
 import {timingSafeEqual} from "node:crypto";
 import type {Socket} from "node:net";
 import {WebSocketServer,type WebSocket} from "ws";
-import type {CloudProviderExecution} from "../../cloud-provider-execution";
+import {cloudExecutionLifetime,type CloudProviderExecution,type CloudAgentExecutionLifetime} from "../../cloud-provider-execution";
 import type {BoundaryProcess} from "../../containment/types";
 import {cloudComputerProcessEnvironment} from "../../cloud-computer-environment";
 
@@ -26,7 +26,9 @@ export class CloudCodexExecServer {
   private buffer=Buffer.alloc(0);
   private closing:Promise<void>|null=null;
   private listening:Promise<void>|null=null;
-  private constructor(private readonly execution:CloudProviderExecution){
+  private readonly lifetime:CloudAgentExecutionLifetime;
+  private constructor(execution:CloudProviderExecution){
+    this.lifetime=cloudExecutionLifetime(execution);
     this.server=createServer({maxHeaderSize:8192},(_request,response)=>{response.writeHead(404);response.end();});
     this.server.maxConnections=8;
     this.server.on("connection",socket=>{
@@ -37,7 +39,7 @@ export class CloudCodexExecServer {
     this.sockets=new WebSocketServer({noServer:true,maxPayload:MAX_FRAME,perMessageDeflate:false});
     this.server.on("upgrade",(request,socket,head)=>{
       const supplied=Buffer.from(request.url??""),expected=Buffer.from(this.capability);
-      if(this.stopped||this.execution.lease.signal.aborted||this.socket||request.headers.origin||supplied.length!==expected.length||!timingSafeEqual(supplied,expected)){
+      if(this.stopped||this.lifetime.signal.aborted||this.socket||request.headers.origin||supplied.length!==expected.length||!timingSafeEqual(supplied,expected)){
         socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
         const deadline=setTimeout(()=>socket.destroy(),250);deadline.unref();socket.once("close",()=>clearTimeout(deadline));return;
       }
@@ -45,48 +47,48 @@ export class CloudCodexExecServer {
     });
   }
   static async start(execution:CloudProviderExecution,binary:string):Promise<CloudCodexExecServer>{
-    execution.lease.assertLive();
+    const lifetime=cloudExecutionLifetime(execution); lifetime.assertLive();
     const runtime=resolveCloudRuntime();
     if(!binary.startsWith(`${runtime.workerRoot}/`)||binary.endsWith(".js"))throw new Error("Cloud Codex requires the pinned native executable");
-    const bridge=new CloudCodexExecServer(execution);execution.lease.attach(bridge);
+    const bridge=new CloudCodexExecServer(execution);lifetime.attach(bridge);
     try{
       // Install the listening promise before yielding. Retirement must wait
       // for a pending bind before closing it, including an immediate child exit.
-      execution.lease.assertLive();
+      lifetime.assertLive();
       if(bridge.stopped)throw new Error("Cloud executor is retired");
       bridge.listening=new Promise<void>((resolve,reject)=>{
         bridge.server.once("error",reject);bridge.server.listen(0,"127.0.0.1",()=>{bridge.server.off("error",reject);resolve();});
       });
       await bridge.listening;
-      execution.lease.assertLive();
+      lifetime.assertLive();
       let timer:ReturnType<typeof setTimeout>|undefined;
       try{
-        bridge.child=await Promise.race([execution.lease.launch(()=>execution.coordinator.workload.spawn({
-          command:runtime.node,args:[`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-codex-executor.mjs`,binary],cwd:"/srv/zeros/workspace",
-          env:cloudComputerProcessEnvironment({HOME:"/srv/zeros/home/agent",PATH:`${runtime.binRoot}:/usr/bin:/bin`,LANG:"C.UTF-8"},execution.lease.environment?.values,"agent"),stdio:"pipe",
+        bridge.child=await Promise.race([lifetime.launch(()=>execution.coordinator.workload.spawn({
+          command:runtime.node,args:[`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-codex-executor.mjs`,binary],cwd:execution.cwd,
+          env:cloudComputerProcessEnvironment({HOME:"/srv/zeros/home/agent",PATH:`${runtime.binRoot}:/usr/bin:/bin`,LANG:"C.UTF-8"},execution.environment?.values,"agent"),stdio:"pipe",
         })),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error("Cloud executor launch timed out")),5000);})]);
       }finally{if(timer)clearTimeout(timer);}
-      execution.lease.assertLive();
+      lifetime.assertLive();
       const child=bridge.child;if(!child.stdin||!child.stdout)throw new Error("Cloud executor pipes are unavailable");
       child.stdin.on("error",()=>bridge.fail());child.stdout.on("error",()=>bridge.fail());child.stderr?.resume();
       child.stdout.on("data",(bytes:Buffer)=>bridge.read(bytes));
       void child.wait().then(()=>bridge.fail(),()=>bridge.fail());
       // Observe an already exited executor before publishing its capability.
       await Promise.resolve();
-      execution.lease.assertLive();return bridge;
-    }catch(error){void execution.lease.close().catch(()=>{});throw error;}
+      lifetime.assertLive();return bridge;
+    }catch(error){void lifetime.close().catch(()=>{});throw error;}
   }
   get url():string{
-    this.execution.lease.assertLive();const address=this.server.address();
+    this.lifetime.assertLive();const address=this.server.address();
     if(this.stopped||!address||typeof address==="string")throw new Error("Cloud executor is unavailable");
     return `ws://127.0.0.1:${address.port}${this.capability}`;
   }
-  private fail(){if(!this.stopped)void this.execution.lease.close().catch(()=>{});}
+  private fail(){if(!this.stopped)void this.lifetime.close().catch(()=>{});}
   private connect(socket:WebSocket){
     this.socket=socket;
     socket.on("error",()=>this.fail());socket.on("close",()=>this.fail());
     socket.on("message",(raw,isBinary)=>{
-      if(this.stopped||this.execution.lease.signal.aborted||isBinary||!this.child?.stdin?.writable){this.fail();return;}
+      if(this.stopped||this.lifetime.signal.aborted||isBinary||!this.child?.stdin?.writable){this.fail();return;}
       const bytes=Buffer.isBuffer(raw)?raw:Buffer.from(raw as ArrayBuffer);
       if(bytes.includes(10)||bytes.includes(13)||bytes.length>MAX_FRAME||this.child.stdin.writableLength>MAX_BUFFER){this.fail();return;}
       // Framing is pinned JSON, never an executable shell/string transport.

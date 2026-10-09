@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { RUNTIME_SELF_TEST_CHECKS, selfTestDiagnostic, parseSelfTestDiagnostic, supervisorIsIdle,
   verifySelfTestIdentity, versionMatches, containmentSmokePassed, runSelfTestChecks } from "../cloud-workspace-validation/sandbox/runtime-self-test.mjs";
 import { RUNTIME_SMOKE_CHECKS } from "../../apps/control-plane/src/cloud-workspaces/cloud-builder-commands";
+import * as selfTest from "../cloud-workspace-validation/sandbox/runtime-self-test.mjs";
 
 const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 const fixture = () => {
@@ -15,6 +16,9 @@ const fixture = () => {
     manifestSha256: hash(manifest), installerReceiptSha256: hash(receipt), bootId: "11111111-1111-4111-8111-111111111111" } };
 };
 describe("credential-free installed runtime self-test", () => {
+  it("rejects Cursor payload probing under the engine identity", () => {
+    expect(() => selfTest.probeCursorPlatformPayload("/unadmitted-runtime")).toThrow(/worker identity/);
+  });
   it("keeps the worker's successful check inventory identical to the executed checks", () => {
     expect(RUNTIME_SELF_TEST_CHECKS).toEqual(RUNTIME_SMOKE_CHECKS);
     expect(selfTestDiagnostic(Object.fromEntries(RUNTIME_SELF_TEST_CHECKS.map(name => [name, true])))).toEqual({

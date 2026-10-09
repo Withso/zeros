@@ -22,8 +22,9 @@ const quote = value => `'${String(value).replaceAll("'", `'"'"'`)}'`;
  * the admitted worker filesystem. Workspace, Design and engine-state mounts
  * continue to come from the original actor policy. */
 export function cloudNativeHomeMounts(view) {
-  if (!keys(view, ["directory", "history", ...(view?.skills === true ? ["skills"] : []), ...(view?.codexConfig === true ? ["codexConfig"] : [])]) ||
+  if (!keys(view, ["directory", "history", ...(view?.skills === true ? ["skills"] : []), ...(view?.codexConfig === true ? ["codexConfig"] : []), ...(view?.cursorConfig === true ? ["cursorConfig"] : [])]) ||
       (view.codexConfig === true && view.history?.provider !== "codex") ||
+      (view.cursorConfig === true && view.history?.provider !== "cursor") ||
       typeof view.directory !== "string" || !/^\/run\/zeros\/coordinators\/[a-f0-9]{32}$/.test(view.directory) ||
       !keys(view.history, ["provider", "directory"]) || typeof view.history.provider !== "string" || !Object.hasOwn(stores, view.history.provider) ||
       typeof view.history.directory !== "string" ||
@@ -37,6 +38,7 @@ export function cloudNativeHomeMounts(view) {
       "--bind", `${view.directory}/codex-installation-id`, `${CLOUD_NATIVE_HOME}/.codex/installation_id`,
       ...CLOUD_CODEX_STATE_DIRECTORIES.flatMap(name => ["--perms", "1777", "--tmpfs", `${CLOUD_NATIVE_HOME}/.codex/${name}`]),
     ] : []),
+    ...(view.cursorConfig===true?["--ro-bind",`${view.directory}/cursor-config`,`${CLOUD_NATIVE_HOME}/.cursor`]:[]),
     "--bind", view.history.directory, `${CLOUD_NATIVE_HOME}/${stores[view.history.provider]}`,
     ...(view.skills === true ? CLOUD_NATIVE_SKILL_HOMES.filter(home => view.codexConfig !== true || home !== ".codex").flatMap(home =>
       ["--ro-bind", `${view.directory}/skills`, `${CLOUD_NATIVE_HOME}/${home}/skills`]) : [])];
@@ -64,6 +66,11 @@ export function assertOwnedCloudNativeHome(view, worker) {
     const installation = lstatSync(`${view.directory}/codex-installation-id`);
     if (!installation.isFile() || installation.nlink !== 1 || installation.uid !== worker.uid || (installation.mode & 0o022) !== 0)
       throw new Error("Cloud Codex installation state is not privately owned");
+  }
+  if(view.cursorConfig===true){
+    const directory=`${view.directory}/cursor-config`,stat=lstatSync(directory);
+    if(!stat.isDirectory()||stat.isSymbolicLink()||stat.uid!==0||(stat.mode&0o022)||realpathSync(directory)!==directory)
+      throw new Error("Cloud Cursor configuration is not engine-owned");
   }
   if (view.skills === true) {
     const directory = `${view.directory}/skills`, stat = lstatSync(directory);

@@ -105,6 +105,30 @@ function command(executable, args, environment, timeout = 20_000, maxBuffer = MA
   return child.stdout;
 }
 
+/** Importability does not prove the platform payload survived bundling. Run
+ * its actual ELF entry points as the agent worker, with no provider key. */
+export function probeCursorPlatformPayload(root) {
+  assert(process.getuid?.() === 10001 && process.geteuid?.() === 10001 &&
+    process.getgid?.() === 10001 && process.getegid?.() === 10001, "Cursor payload requires worker identity");
+  assert.equal(path.resolve(root), root);
+  const fromWorker = createRequire(`${root}/worker/package.json`);
+  const internal = filename => {
+    const actual = realpathSync(filename);
+    assert(actual.startsWith(`${root}/`));
+    return actual;
+  };
+  const sdk = internal(fromWorker.resolve("@cursor/sdk"));
+  assert(Object.keys(fromWorker("@cursor/sdk")).length > 0);
+  const platform = internal(createRequire(sdk).resolve("@cursor/sdk-linux-x64/package.json"));
+  const binary = name => internal(path.join(path.dirname(platform), "bin", name));
+  const environment = { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", HOME: process.env.HOME, TMPDIR: process.env.HOME };
+  assert.match(command(binary("rg"), ["--version"], environment), /^ripgrep /);
+  // This payload exists on the pinned Linux x64 runtime. --help exercises its
+  // loader/ABI without attempting another sandbox or a provider operation.
+  assert.match(command(binary("cursorsandbox"), ["--help"], environment), /Usage: cursorsandbox/);
+  return true;
+}
+
 function prepareSelfTestLayout() {
   // B4 sanitizes files to an empty root-owned parent; qualification installation
   // deliberately skips workspace setup. Never import/move a legacy workspace.
@@ -214,6 +238,10 @@ async function offlineChecks(environment) {
       const sdk = internal(fromWorker.resolve("@cursor/sdk"));
       internal(createRequire(sdk).resolve("@cursor/sdk-linux-x64/package.json"));
       assert(Object.keys(fromWorker("@cursor/sdk")).length > 0);
+      const output = command("/usr/bin/setpriv", ["--reuid=10001", "--regid=10001", "--clear-groups",
+        "--bounding-set=-all", "--inh-caps=-all", "--ambient-caps=-all", "--no-new-privs", "--", runtime.node,
+        "--input-type=module", "-e", `import(${JSON.stringify(SCRIPT)}).then(m => { if (m.probeCursorPlatformPayload(${JSON.stringify(runtime.root)})) process.stdout.write("cursor_payload_ok"); }).catch(() => process.exit(1));`], environment);
+      assert.equal(output, "cursor_payload_ok");
       return true;
     },
     engine_load() {

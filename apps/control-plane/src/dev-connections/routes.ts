@@ -12,6 +12,7 @@ import {
 import { DevConnectionBroker } from "./broker.js";
 import type { DevConnectionsConfig } from "./config.js";
 import { DevConnectionStore } from "./store.js";
+import {ConditionalRemovalRequestSchema} from "./client.js";
 import {
   denied,
   GenerationSchema,
@@ -99,6 +100,8 @@ export function createDevConnectionsRoutes(options: {
     if (material.kind === "github-app") await options.verifyGithub(material);
     return c.json(await store.connect(ctx, body));
   });
+  app.post("/v1/connections/removals",async c=>c.json(await store.removeConditionally(await member(c.req.raw),
+    parse(ConditionalRemovalRequestSchema,await c.req.json()))));
   app.put("/v1/connections/:id/consent", async (c) => {
     const ctx = await member(c.req.raw);
     await store.consent(

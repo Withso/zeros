@@ -76,10 +76,13 @@ complimentary Pro with no monthly machine-hour cap; compute remains user-owned
 and subject to ordinary infrastructure safety limits. Alpha cloud execution is
 enabled for backend and desktop qualification; Beta and Production remain
 disabled. See [qualification status](qualification-status.md) for the live test boundary.
-The workspace owner sponsors compute. Editing
-and agent execution require Write, while invitations and credential
-administration require workspace owner/manager authority.
-Personal model credentials require explicit delegation, including to other admins.
+The workspace owner sponsors compute. Agent execution requires `canWrite`;
+editing separately requires `canEdit`. Invitations and credential administration
+require their current server capabilities. In negotiated `boot-owner-v1`,
+granting Prompter/Developer access is consent to owner-funded agent work:
+members' agents can use and read the owner's active provider keys. The share
+dialog stays unchanged. Legacy cloud retains explicit model delegations.
+See [boot funding, next-run cards and removal](agent-authentication-and-language-tools.md#negotiated-boot-funding).
 A client detach never stops another participant's active execution.
 
 The first supported release should provide:
@@ -111,6 +114,13 @@ and externally documented API routes are compatibility contracts. Rename them
 only with an explicit migration and mixed-version tests. A newer client must
 fail clearly when the remote engine protocol is unsupported; it must never
 guess around a version mismatch.
+
+New queue/funding/transport behavior requires explicit boot-mode negotiation,
+activation and matching readiness; a missing binding is not permission to use
+legacy authority. New desktops keep the legacy path for old-mode engines.
+Old desktops on an activated new-mode workspace receive the existing
+upgrade-required refusal. Personal Local and organization-local keep their
+existing native accounts, queue and reconnect behavior.
 
 ## Non-goals
 

@@ -1,11 +1,17 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
-import { CloudCommandError, CloudCommandRequestSchema, legacyCloudCommandResponse, type DatabaseCloudWorkspaceCommandService } from "./commands.js";
+import { CloudCommandError, CloudCommandRequestSchema, CloudLocalCommandMirrorBatchSchema, CloudLocalCommandWriterSealSchema, legacyCloudCommandResponse, type DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { CloudWorkspaceEngineAuthorityError } from "./engine-authority.js";
 import { HttpError } from "../authz.js";
 
 export const CLOUD_COMMAND_PATH = "/internal/v1/cloud-workspaces/engine/commands";
+export const CLOUD_COMMAND_MIRROR_PATH = "/internal/v2/cloud-workspaces/engine/commands/mirror";
+export const CLOUD_COMMAND_SEAL_PATH = "/internal/v2/cloud-workspaces/engine/commands/seal";
+const mirrorBodySchema = z.object({ workspaceId: z.string().uuid(), organizationId: z.string().uuid(),
+  generation: z.number().int().safe().positive(), engineInstanceId: z.string().uuid(), batch: CloudLocalCommandMirrorBatchSchema }).strict();
+const sealBodySchema = z.object({ workspaceId: z.string().uuid(), organizationId: z.string().uuid(),
+  generation: z.number().int().safe().positive(), engineInstanceId: z.string().uuid(), seal: CloudLocalCommandWriterSealSchema }).strict();
 const bodySchema = z.object({
   workspaceId: z.string().uuid(), organizationId: z.string().uuid(),
   generation: z.number().int().safe().positive(), engineInstanceId: z.string().uuid(),
@@ -17,9 +23,50 @@ const bodySchema = z.object({
  * rechecks the live engine, workspace, organization and execution fence. */
 export function createCloudCommandRoutes(service: DatabaseCloudWorkspaceCommandService): Hono {
   const routes = new Hono();
+  routes.use(CLOUD_COMMAND_SEAL_PATH, bodyLimit({ maxSize: 16 * 1024 }));
+  routes.post(CLOUD_COMMAND_SEAL_PATH, async c => {
+    c.header("Cache-Control", "no-store");
+    const token = /^Bearer (zwh_[A-Za-z0-9_-]{43})$/.exec(c.req.header("authorization") ?? "")?.[1];
+    if (!token) return c.json({ error: "engine_authority_rejected" }, 401);
+    if (c.req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json")
+      return c.json({ error: "invalid_command" }, 422);
+    const parsed = sealBodySchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "invalid_command" }, 422);
+    const { seal, ...scope } = parsed.data;
+    try { return c.json({ result: await service.seal({ ...scope, heartbeatToken: token }, seal) }); }
+    catch (error) {
+      if (error instanceof CloudWorkspaceEngineAuthorityError) return c.json({ error: "engine_authority_rejected" }, 401);
+      if (error instanceof CloudCommandError) return c.json({ error: error.code },
+        ["command_conflict", "command_context_changed"].includes(error.code) ? 409 : 422);
+      if (error instanceof HttpError && error.status === 409) return c.json({ error: "command_conflict" }, 409);
+      if (error instanceof HttpError && error.status === 403) return c.json({ error: "cloud_actor_authority_rejected" }, 403);
+      return c.json({ error: "command_service_unavailable" }, 503);
+    }
+  });
+  routes.use(CLOUD_COMMAND_MIRROR_PATH, bodyLimit({ maxSize: 1024 * 1024 }));
+  routes.post(CLOUD_COMMAND_MIRROR_PATH, async c => {
+    c.header("Cache-Control", "no-store");
+    const token = /^Bearer (zwh_[A-Za-z0-9_-]{43})$/.exec(c.req.header("authorization") ?? "")?.[1];
+    if (!token) return c.json({ error: "engine_authority_rejected" }, 401);
+    if (c.req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json")
+      return c.json({ error: "invalid_command" }, 422);
+    const parsed = mirrorBodySchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "invalid_command" }, 422);
+    const { batch, ...scope } = parsed.data;
+    try { return c.json({ result: await service.mirror({ ...scope, heartbeatToken: token }, batch) }); }
+    catch (error) {
+      if (error instanceof CloudWorkspaceEngineAuthorityError) return c.json({ error: "engine_authority_rejected" }, 401);
+      if (error instanceof CloudCommandError) return c.json({ error: error.code },
+        ["command_conflict", "command_context_changed"].includes(error.code) ? 409 : error.code === "command_not_found" ? 404 : 422);
+      if (error instanceof HttpError && error.status === 409) return c.json({ error: "command_conflict" }, 409);
+      if (error instanceof HttpError && error.status === 403) return c.json({ error: "cloud_actor_authority_rejected" }, 403);
+      return c.json({ error: "command_service_unavailable" }, 503);
+    }
+  });
   routes.use(CLOUD_COMMAND_PATH, bodyLimit({ maxSize: 256 * 1024 }));
   routes.post(CLOUD_COMMAND_PATH, async c => {
     c.header("Cache-Control", "no-store");
+    c.header("x-zeros-cloud-turn-protocol", "1");
     const token = /^Bearer (zwh_[A-Za-z0-9_-]{43})$/.exec(c.req.header("authorization") ?? "")?.[1];
     if (!token) return c.json({ error: "engine_authority_rejected" }, 401);
     if (c.req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json")
@@ -29,6 +76,7 @@ export function createCloudCommandRoutes(service: DatabaseCloudWorkspaceCommandS
     const { request, actorSessionId, ...binding } = parsed.data;
     const scope = { ...binding, heartbeatToken: token,...(actorSessionId?{actorSessionId}:{}) };
     const native=c.req.header("x-zeros-native-commands")==="1";
+    const turnProtocol=native&&c.req.header("x-zeros-cloud-turn-protocol")==="1";
     if(!native&&request.kind==="confirm-goal")return c.json({error:"invalid_command"},422);
     if(!native&&request.kind==="mutate"&&"payload" in request.mutation.action&&request.mutation.action.payload.operation)
       return c.json({error:"invalid_command"},422);
@@ -43,7 +91,7 @@ export function createCloudCommandRoutes(service: DatabaseCloudWorkspaceCommandS
         case "settle": result = await service.settle(scope, request.result); break;
         case "confirm-goal": result = await service.confirmGoal(scope,request); break;
       }
-      return c.json({ result:native?result:legacyCloudCommandResponse(result) });
+      return c.json({ result:turnProtocol?result:legacyCloudCommandResponse(result,native?1:undefined) });
     } catch (error) {
       if (error instanceof CloudWorkspaceEngineAuthorityError) return c.json({ error: "engine_authority_rejected" }, 401);
       if (error instanceof HttpError) return c.json({error:"cloud_actor_authority_rejected"},403);

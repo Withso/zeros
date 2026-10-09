@@ -4,6 +4,11 @@ vi.mock('../cloud-provider-execution',async original=>({...await original<any>()
 import {CloudCustomizationRedactor} from '../cloud-customization-redaction';
 import {AgentGateway} from '../gateway';
 
+const legacyExecution=(provider:'claude'|'codex',redactor:CloudCustomizationRedactor)=>{
+ const lease={signal:new AbortController().signal,admission:{provider},validate:vi.fn(async()=>{}),close:vi.fn(async()=>{})};
+ return {mode:'actor-grant-v1' as const,provider,lease,lifetime:lease,redactor};
+};
+
 it('preserves schema-owned ToolCallLocation keys for common MCP values',()=>{
  const r=new CloudCustomizationRedactor(['path','line']);
  const n=r.notification({sessionId:'s',update:{sessionUpdate:'tool_call_update',toolCallId:'t',status:'completed',locations:[{path:'/workspace/file.ts',line:7}]}});
@@ -41,7 +46,7 @@ it.each(['end_turn','cancelled','failure'])('public prompt completion retains as
  const secret='v7b-synthetic-opaque-private-value';
  const events={onSessionUpdate:vi.fn(),onPermissionRequest:vi.fn(),onQuestionRequest:vi.fn(),onAgentStderr:vi.fn(),onAgentExit:vi.fn()};
  const gateway=new AgentGateway({projectRoot:'/tmp',events,cloudAgentExecutionFactory:{prepare:vi.fn()}}),g=gateway as any;
- state.execution={lease:{signal:new AbortController().signal,admission:{provider:'codex'},validate:vi.fn(async()=>{})},redactor:new CloudCustomizationRedactor([secret])};
+ state.execution=legacyExecution('codex',new CloudCustomizationRedactor([secret]));
  g.executionBoundaries.set('s',{});
  g.adapterForSession=()=>({agentId:'codex',prompt:vi.fn(async()=>{
   for(const text of ['Complete ordinary answer. v7b-','synthetic-','opaque-private-value','! Last ',secret.slice(0,-1)])
@@ -62,7 +67,7 @@ it('public gateway rejects with a scrubbed truncated provider diagnostic',async(
  const secret='v7b-synthetic-opaque-private-value',prefix=secret.slice(0,-1);
  const events={onSessionUpdate:vi.fn(),onPermissionRequest:vi.fn(),onQuestionRequest:vi.fn(),onAgentStderr:vi.fn(),onAgentExit:vi.fn()};
  const gateway=new AgentGateway({projectRoot:'/tmp',events,cloudAgentExecutionFactory:{prepare:vi.fn()}}),g=gateway as any;
- state.execution={lease:{signal:new AbortController().signal,admission:{provider:'codex'},validate:vi.fn(async()=>{})},redactor:new CloudCustomizationRedactor([secret])};g.executionBoundaries.set('s',{});
+ state.execution=legacyExecution('codex',new CloudCustomizationRedactor([secret]));g.executionBoundaries.set('s',{});
  g.adapterForSession=()=>({agentId:'codex',prompt:vi.fn(async()=>{throw new Error('MCP exited: '+prefix);})});
  try{const error=await gateway.prompt('codex','s',[{type:'text',text:'Hello'}]).catch(e=>e);expect(error).toMatchObject({code:'cloud_provider_prompt_rejected',failure:{kind:'protocol-error',stage:'prompt',message:expect.stringContaining('Review the conversation')}});expect([error.message,error.stack,JSON.stringify(error.failure)].join('\n')).not.toContain(prefix);}finally{state.execution=null;g.executionBoundaries.clear();}
 });
@@ -86,8 +91,10 @@ it('public gateway retries interrupted owner changes without resuming the prior 
  const prior={version:1 as const,kind:'native' as const,providerId:'claude',resumeId:'prior-owner-native-binding'};
  const adapter={agentId:'claude',newSession:vi.fn(async(_input:unknown)=>({session:{providerBinding:{...prior,resumeId:'fresh-binding'}},initialize:{}})),loadSession:vi.fn(async()=>({providerBinding:prior})),disposeSession:vi.fn(async()=>{}),dispose:vi.fn(async()=>{})};
  (gateway as any).adapters.set('claude',adapter);
- state.execution={lease:{signal:new AbortController().signal,admission:{provider:'claude'},close:vi.fn(async()=>{})},redactor:retry.redactor,coordinator:{requiresFreshHistory:retry.fresh}};
  try{
+  const redactor=retry.redactor;
+  if(!(redactor instanceof CloudCustomizationRedactor))throw new Error('The customization history fixture must provide its redactor');
+  state.execution={...legacyExecution('claude',redactor),coordinator:{requiresFreshHistory:retry.fresh}};
   await gateway.loadSession('claude',prior,{cwd:root,conversationId:'c',cloudExecution:{delegationId:randomUUID(),model:'test-model',source:{kind:'session',actorSessionId:randomUUID()}}});
   expect(adapter.loadSession).not.toHaveBeenCalled();expect(adapter.newSession).toHaveBeenCalledOnce();
   expect(adapter.newSession.mock.calls[0]?.[0]).not.toHaveProperty('providerBinding');

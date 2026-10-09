@@ -52,6 +52,20 @@ async function connect(transport: CloudTransport, token: string) {
 }
 
 describe("cloud engine client authority leases", () => {
+  it("keeps a transient renewal failure only until the last confirmed lease expires", async () => {
+    const renew = vi.fn(async () => { throw Object.assign(new Error("private upstream error"), { code: "cloud_client_authority_transient", status: 503 }); });
+    const transport = await start(renew), socket = await connect(transport, firstToken);
+    await vi.waitFor(() => expect(renew).toHaveBeenCalledOnce(), { interval: 5 });
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+    const [code, reason] = await once(socket, "close");
+    expect(code).toBe(1008); expect(reason.toString()).toBe("client authority expired");
+    expect(renew).toHaveBeenCalledTimes(1);
+  });
+  it("closes an explicit rejected renewal immediately with the revoked category", async () => {
+    const transport = await start(async () => { throw Object.assign(new Error("private"), { status: 403 }); });
+    const socket = await connect(transport, firstToken), [code, reason] = await once(socket, "close");
+    expect(code).toBe(1008); expect(reason.toString()).toBe("client authority revoked");
+  });
   it("closes one revoked device while renewing another device independently", async () => {
     let revoked = false;
     const renew = vi.fn(async (token: string) =>

@@ -4,13 +4,18 @@ import { configureNativeGithubTransport } from "./git/github-native-client";
 import { requestCloudGithubWrite, type CloudGithubWriteRequest } from "./cloud-github-write-client";
 import { requestCloudGithubRead } from "./cloud-github-read-client";
 import type { CloudCommandEngineRequest } from "@zeros/protocol/cloud-commands";
+import { CloudAgentBootScopeSchema } from "@zeros/protocol/cloud-agent-bootstrap";
 import { CloudActorAdmissionResponseSchema, type CloudActorContext } from "@zeros/protocol/cloud-actors";
 import type { CloudEventEngineRequest } from "@zeros/protocol/cloud-events";
 import type { CloudActionEngineRequest } from "@zeros/protocol/cloud-actions";
 import type {CloudAgentExecutionRequest} from "@zeros/protocol/cloud-agent-execution";
-import {requestCloudAgentExecution,CloudAgentExecutionError} from "./cloud-agent-execution-client";
+import {requestCloudAgentExecution,requestCloudAgentBoot,CloudAgentExecutionError,type CloudAgentBootOperation,type CloudAgentBootResponses} from "./cloud-agent-execution-client";
 import { requestCloudEvent, CloudEventRuntimeError } from "./cloud-event-client";
 import { CloudCommandRuntimeError, requestCloudCommand, requestCloudAction } from "./cloud-command-client";
+import { requestCloudCredentialControls } from "./cloud-local-command-queue-control-client";
+import type { CloudAgentCredentialControlExchangeRequest } from "./cloud-local-command-queue-start-fences";
+import { requestCloudLocalCommandMirror, requestCloudLocalCommandSeal } from "./cloud-local-command-mirror";
+import type { CloudLocalCommandMirrorBatch, CloudLocalCommandWriterSeal } from "@zeros/protocol/cloud-local-mirror";
 
 const RUNTIME_AUDIENCE = "zeros-cloud-engine-runtime-v1" as const;
 const REGISTRATION_AUDIENCE =
@@ -114,12 +119,15 @@ export type CloudRuntimeServiceAccess = {
 
 export type CloudDurableRecordSyncContext = {
   initial: boolean;
+  agentJournalMode?: "local" | "legacy";
 };
 
 type FetchLike = typeof fetch;
 
 export type CloudRuntimeRegistrationDependencies = {
   agentRuntime: CloudAgentRuntimeAttestation;
+  /** Explicit supported wire opt-in; a committed CP ACK is still required. */
+  negotiateLocalCommands?: true;
   fetch?: FetchLike;
   now?: () => number;
   onAuthorityLost: () => void;
@@ -163,10 +171,15 @@ class CloudRuntimeRequestError extends Error {
   constructor(
     message: string,
     readonly terminal: boolean,
+    readonly status?: number,
   ) {
     super(message);
     this.name = "CloudRuntimeRequestError";
   }
+}
+export class CloudClientAuthorityTransientError extends Error {
+  readonly code = "cloud_client_authority_transient";
+  constructor() { super("Cloud client authority is temporarily unavailable"); this.name = "CloudClientAuthorityTransientError"; }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -402,6 +415,11 @@ export class CloudRuntimeRegistration {
   private recordHandoffFlushed = false;
   private recordHandoffFlight: Promise<void> | null = null;
   private checkpointInFlight: string | null = null;
+  private readonly negotiateLocalCommands: boolean;
+  private localCommandsAcknowledged = false;
+  private agentJournalMode: "local" | "legacy" | undefined;
+  private sourceWriterEpoch: string | null = null;
+  private activatedLocalWriter: Readonly<{ bootId: string; writerEpoch: string }> | null = null;
 
   constructor(
     readonly config: CloudRuntimeConfig,
@@ -411,6 +429,7 @@ export class CloudRuntimeRegistration {
       throw new Error("cloud engine runtime attestation is required");
     }
     this.agentRuntime = Object.freeze({ ...dependencies.agentRuntime });
+    this.negotiateLocalCommands = dependencies.negotiateLocalCommands === true;
     this.fetch = dependencies.fetch ?? globalThis.fetch;
     this.now = dependencies.now ?? Date.now;
     this.onAuthorityLost = dependencies.onAuthorityLost;
@@ -452,6 +471,7 @@ export class CloudRuntimeRegistration {
     if (this.config.registration.expiresAtMs - this.now() < 5_000) {
       throw new Error("cloud engine registration capability expired");
     }
+    let localCommandsAcknowledged = false;
     const raw = await this.post(
       this.config.registration.endpoint,
       this.config.registration.token,
@@ -467,6 +487,12 @@ export class CloudRuntimeRegistration {
         agentRuntime: this.agentRuntime,
         agentCustomizationVersion: 3,
       },
+      this.negotiateLocalCommands ? { localCommandsVersion: 1,
+        acknowledgement: (acknowledged, journalMode, sourceWriterEpoch) => {
+          localCommandsAcknowledged = acknowledged;
+          this.agentJournalMode = acknowledged ? journalMode : undefined;
+          this.sourceWriterEpoch = acknowledged && journalMode === "local" ? sourceWriterEpoch ?? null : null;
+        } } : undefined,
     );
     const document = this.parseRegistration(raw);
     this.document = document;
@@ -474,6 +500,7 @@ export class CloudRuntimeRegistration {
     try {
       await this.synchronizeDurableRecord(document, { initial: true });
       this.initialRecordConnected = this.document === document && !this.authorityLost && !this.stopped;
+      this.localCommandsAcknowledged = this.initialRecordConnected && localCommandsAcknowledged;
     } catch (error) {
       if (this.timer) clearTimeout(this.timer);
       this.timer = null;
@@ -481,6 +508,78 @@ export class CloudRuntimeRegistration {
       this.durableRecordConnected = false;
       throw error;
     }
+  }
+
+  /** Negotiation is not activation or actor/provider authority. */
+  localCommandsNegotiated(): boolean {
+    return this.localCommandsAcknowledged && this.document !== null &&
+      this.initialRecordConnected && !this.recordHandoffPaused && this.hasControlAuthority(this.document);
+  }
+  get runtimeBootId(): string { return this.agentRuntime.bootId; }
+  /** Authenticated history provenance, never execution or retirement authority. */
+  get agentSourceWriterEpoch(): string | null { return this.sourceWriterEpoch; }
+
+  async agentBootRequest<Operation extends CloudAgentBootOperation>(operation: Operation,
+    request: Parameters<typeof requestCloudAgentBoot<Operation>>[2], signal: AbortSignal,
+  ): Promise<CloudAgentBootResponses[Operation]> {
+    const document = this.document;
+    if (!document || !this.localCommandsNegotiated())
+      throw new CloudCommandRuntimeError("cloud_workspace_client_update_required");
+    const result = await requestCloudAgentBoot(this.authority(document), operation, request,
+      AbortSignal.any([signal, this.abortController.signal]), this.fetch);
+    if (document !== this.document || !this.localCommandsNegotiated()) throw new CloudAgentExecutionError();
+    const rawIdentity = "provenance" in result ? result.provenance.scope : result;
+    const identity = CloudAgentBootScopeSchema.parse(Object.fromEntries(Object.entries(rawIdentity)
+      .filter(([key]) => key in CloudAgentBootScopeSchema.shape)));
+    const bootId = identity.bootId;
+    if (bootId !== this.agentRuntime.bootId) throw new CloudAgentExecutionError("authority_response_invalid");
+    if (this.activatedLocalWriter && (identity.bootId !== this.activatedLocalWriter.bootId || identity.writerEpoch !== this.activatedLocalWriter.writerEpoch))
+      throw new CloudAgentExecutionError("authority_response_invalid");
+    if (operation === "activate") {
+      this.activatedLocalWriter = Object.freeze({ bootId, writerEpoch: identity.writerEpoch });
+      this.agentJournalMode = "local";
+    }
+    return result;
+  }
+
+  private localWriterCurrent(bootId: string, writerEpoch: string, allowRecordPause = false): boolean {
+    const negotiated = allowRecordPause ? this.localCommandsAcknowledged && this.initialRecordConnected &&
+      this.document !== null && this.hasControlAuthority(this.document) : this.localCommandsNegotiated();
+    return negotiated && this.activatedLocalWriter?.bootId === bootId &&
+      this.activatedLocalWriter.writerEpoch === writerEpoch;
+  }
+  async localCommandSealRequest(seal: CloudLocalCommandWriterSeal, signal: AbortSignal) {
+    const document = this.document;
+    if (!document || !this.localWriterCurrent(seal.scope.bootId,seal.scope.writerEpoch,true)) throw new CloudCommandRuntimeError("engine_authority_rejected");
+    try {
+      const result = await requestCloudLocalCommandSeal(this.authority(document),seal,AbortSignal.any([signal,this.abortController.signal]),this.fetch);
+      if (document !== this.document || !this.localWriterCurrent(seal.scope.bootId,seal.scope.writerEpoch,true)) throw new CloudCommandRuntimeError("engine_authority_rejected");
+      return result;
+    } catch (error) {
+      if (document !== this.document || !this.localWriterCurrent(seal.scope.bootId,seal.scope.writerEpoch,true)) throw new CloudCommandRuntimeError("engine_authority_rejected");
+      throw error;
+    }
+  }
+  async credentialControlsRequest(request: CloudAgentCredentialControlExchangeRequest, signal: AbortSignal) {
+    const document = this.document;
+    if (!document || !this.localWriterCurrent(request.bootId, request.writerEpoch)) throw new CloudCommandRuntimeError("engine_authority_rejected");
+    try {
+      const result = await requestCloudCredentialControls(this.authority(document), request,
+        AbortSignal.any([signal, this.abortController.signal]), this.fetch);
+      if (document !== this.document || !this.localWriterCurrent(request.bootId, request.writerEpoch)) throw new CloudCommandRuntimeError("engine_authority_rejected");
+      return result;
+    } catch (error) {
+      if (document !== this.document || !this.localWriterCurrent(request.bootId, request.writerEpoch)) throw new CloudCommandRuntimeError("engine_authority_rejected");
+      throw error;
+    }
+  }
+  async localCommandMirrorRequest(batch: CloudLocalCommandMirrorBatch, signal: AbortSignal) {
+    const document = this.document;
+    if (!document || !this.localWriterCurrent(batch.bootId, batch.writerEpoch,true)) throw new CloudCommandRuntimeError("engine_authority_rejected");
+    const result = await requestCloudLocalCommandMirror(this.authority(document), batch,
+      AbortSignal.any([signal, this.abortController.signal]), this.fetch);
+    if (document !== this.document || !this.localWriterCurrent(batch.bootId, batch.writerEpoch,true)) throw new CloudCommandRuntimeError("engine_authority_rejected");
+    return result;
   }
 
   async commandRequest(request: CloudCommandEngineRequest,actorSessionId?:string): Promise<unknown> {
@@ -660,7 +759,10 @@ export class CloudRuntimeRegistration {
       const admitted = parsed.data;
       return {accountUserId:admitted.accountUserId,authorityEpoch:admitted.authorityEpoch,
         actor:{sessionId:admitted.actorSessionId,deviceId:admitted.deviceId,role:admitted.role,fingerprint:admitted.fingerprint}};
-    } catch {
+    } catch (error) {
+      if (renew && this.document === document && this.hasControlAuthority(document) && error instanceof CloudRuntimeRequestError &&
+          (!error.terminal || error.status === 408 || error.status === 429))
+        throw new CloudClientAuthorityTransientError();
       return null;
     }
   }
@@ -1089,7 +1191,8 @@ export class CloudRuntimeRegistration {
   ): Promise<void> {
     if (this.durableRecordSyncInFlight) return this.durableRecordSyncInFlight;
     const task = Promise.resolve()
-      .then(() => this.onDurableRecordSync(this.authority(document), context))
+      .then(() => this.onDurableRecordSync(this.authority(document), { ...context,
+        ...(this.agentJournalMode ? { agentJournalMode: this.agentJournalMode } : {}) }))
       .then(() => {
         if (
           this.document === document &&
@@ -1117,6 +1220,7 @@ export class CloudRuntimeRegistration {
     endpoint: string,
     token: string,
     body: Record<string, unknown>,
+    negotiation?: { localCommandsVersion: 1; acknowledgement(acknowledged: boolean, journalMode?: "local" | "legacy", sourceWriterEpoch?: string): void },
   ): Promise<unknown> {
     let response: Response;
     try {
@@ -1132,6 +1236,7 @@ export class CloudRuntimeRegistration {
           authorization: `Bearer ${token}`,
           "content-type": "application/json",
           "user-agent": "zeros-cloud-engine",
+          ...(negotiation ? { "x-zeros-cloud-local-commands": "1" } : {}),
         },
         body: JSON.stringify(body),
       });
@@ -1146,6 +1251,7 @@ export class CloudRuntimeRegistration {
       throw new CloudRuntimeRequestError(
         "cloud engine registration request rejected",
         response.status >= 400 && response.status < 500,
+        response.status,
       );
     }
     if (
@@ -1158,6 +1264,17 @@ export class CloudRuntimeRegistration {
         true,
       );
     }
-    return boundedResponseJson(response);
+    const result = await boundedResponseJson(response);
+    const journalMode = response.headers.get("x-zeros-cloud-agent-journal");
+    if (negotiation && journalMode !== null && journalMode !== "local" && journalMode !== "legacy")
+      throw new CloudRuntimeRequestError("cloud engine journal mode response is invalid", true);
+    const acknowledged = response.headers.get("x-zeros-cloud-local-commands") === "1";
+    const sourceWriter = response.headers.get("x-zeros-cloud-agent-source-writer");
+    if (negotiation && journalMode === "local" && (!acknowledged || !sourceWriter || !UUID_PATTERN.test(sourceWriter)))
+      throw new CloudRuntimeRequestError("cloud engine history source response is invalid", true);
+    negotiation?.acknowledgement(acknowledged,
+      journalMode === "local" || journalMode === "legacy" ? journalMode : undefined,
+      acknowledged && journalMode === "local" && sourceWriter !== null ? sourceWriter : undefined);
+    return result;
   }
 }

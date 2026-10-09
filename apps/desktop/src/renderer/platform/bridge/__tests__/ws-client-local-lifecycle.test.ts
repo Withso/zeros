@@ -70,6 +70,21 @@ afterEach(() => {
 });
 
 describe("local sidecar transport after the cloud handshake changes", () => {
+  it.each(["/local/personal", "/local/organization"])("reconnects %s explicitly after a terminal rejection and a sidecar replacement", async cwd => {
+    await client.connect();
+    const previous = LocalSocket.instances[0]; previous.open();
+    previous.onmessage?.({ data: JSON.stringify({ id: "rejected", source: "engine", timestamp: Date.now(), type: "CONNECTION_REJECTED", reason: "desktop-unbound", message: "Bind the replacement desktop" }) });
+    expect(client.lastRejection).toMatchObject({ reason: "desktop-unbound" });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(LocalSocket.instances).toHaveLength(1);
+    await client.forceReconnect();
+    expect(LocalSocket.instances).toHaveLength(2);
+    const replacement = LocalSocket.instances[1]; replacement.open();
+    expect(client.status).toBe("connected"); expect(client.lastRejection).toBeNull();
+    const reading = client.request({ type: "WORKSPACE_REQUEST", op: "git.status", params: { cwd } });
+    expect(replacement.sent[1]).toMatchObject({ type: "WORKSPACE_REQUEST", op: "git.status", params: { cwd } });
+    replacement.answer(replacement.sent[1]); await reading;
+  });
   it("sends CONNECTED before synchronous listeners and becomes ready without a probe", async () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     setAuthAccessToken("local-account-fixture");

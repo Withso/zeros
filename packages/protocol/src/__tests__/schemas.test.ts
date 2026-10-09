@@ -1,14 +1,32 @@
+import { randomUUID } from "node:crypto";
 import { describe, it, expect } from "vitest";
 import {
   parseBridgeMessage,
   safeParseBridgeMessage,
   KNOWN_MESSAGE_TYPES,
+  safeParseClientBridgeMessage,
 } from "../schemas";
 import { CloudWorkspacePresenceSchema } from "../cloud-actors";
+import { CloudAgentCredentialActualUseSchema } from "../cloud-events";
 
 const base = { id: "1", timestamp: 0 } as const;
 
 describe("parseBridgeMessage — trust-boundary validation", () => {
+  it("round-trips the engine's exact cloud credential-use envelope", () => {
+    const scope = { version: 1, mode: "boot-owner-v1", fundingScope: "workspace-roles-v1", authorityEpoch: 1,
+      organizationId: randomUUID(), workspaceId: randomUUID(), generation: 1, engineInstanceId: randomUUID(),
+      bootId: randomUUID(), writerEpoch: randomUUID(), fundingOwnerUserId: randomUUID(), fundingOwnerEpoch: 1 };
+    const use = CloudAgentCredentialActualUseSchema.parse({ version: 1, scope, conversationId: "chat", commandId: randomUUID(),
+      turnId: "turn", executionId: "native", nativeStage: "native_write", firstUseSequence: 2, eventSequence: 4,
+      credentialRun: { version: 1, bootId: scope.bootId, writerEpoch: scope.writerEpoch, fundingOwnerUserId: scope.fundingOwnerUserId,
+        fundingOwnerEpoch: scope.fundingOwnerEpoch, cacheRevision: 1, provider: "cursor", credentialId: randomUUID(),
+        credentialRevision: 1, connectionRevision: 1, adoptionId: randomUUID(), materialVersion: 1, displayName: "Synthetic" } });
+    const frame = { ...base, source: "engine", type: "CLOUD_AGENT_CREDENTIAL_USED", use };
+    expect(parseBridgeMessage(frame)).toEqual(frame);
+    expect(safeParseBridgeMessage(frame)).toEqual(frame);
+    expect(KNOWN_MESSAGE_TYPES).toContain("CLOUD_AGENT_CREDENTIAL_USED");
+    expect(safeParseClientBridgeMessage(frame)).toBeNull();
+  });
   it("keeps local workspace envelopes unchanged while validating cloud presence separately", () => {
     const local = { ...base, source: "browser", type: "WORKSPACE_REQUEST", op: "file.read",
       params: { workspaceId: "ws_local", path: "README.md" } };

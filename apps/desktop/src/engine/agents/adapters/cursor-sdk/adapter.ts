@@ -14,6 +14,8 @@ import { CursorUsageReconciler, cursorTokenUsage, sumCursorUsage } from "./usage
 // ──────────────────────────────────────────────────────────
 
 import type { SteerOutcome } from "@zeros/protocol/messages";
+import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
+import { cloudCommandFailureFromCode, decodeCloudCommandFailure, CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
 import { createHash, randomBytes, randomUUID, scrypt } from "node:crypto";
 import { homedir } from "node:os";
 import { isAbsolute } from "node:path";
@@ -28,7 +30,8 @@ import { isDevRuntime } from "../../../runtime";
 import modelCatalogJson from "../../../../../../../catalogs/models-v1.json";
 
 import { AgentFailureError } from "../../types";
-import { cloudProviderExecution, executionMcpServers } from "../../cloud-provider-execution";
+import { cloudProviderExecution, executionMcpServers, cloudBootTurnReservation,
+  assertCloudBootNativeHandoff, markCloudBootNativeHandoff, type CloudProviderExecution } from "../../cloud-provider-execution";
 import { mcpWorkingDirectory } from "../../mcp-working-directory";
 import { materializeMcpServerRegistrations } from "../../mcp-registration";
 import { scanCursorMcpServers } from "../../mcp-scan";
@@ -48,6 +51,8 @@ import type {
   LoadSessionResponse,
   McpServerRegistration,
   NewSessionResponse,
+  NativePromptStage,
+  NativePromptOutputKind,
   PromptResponse,
   SessionMode,
   StopReason,
@@ -67,6 +72,7 @@ import { wrapSdkWithLocalStore, type RawCursorSdk } from "./local-store";
 import type { PreparedBoundary } from "../../containment/types";
 import { cloudCursorStateRoot, durableCursorStateRoot } from "./state-overlay";
 import { configurationProvenanceFor } from "../../provider-diagnostics";
+import { cloudCursorInstructions } from "./cloud-instructions";
 
 const AGENT_ID = "cursor";
 /** Cursor LOCAL SDK agents (we always run `local: { cwd }`) require an
@@ -389,6 +395,10 @@ export interface CursorSdkSendOptions {
   idempotencyKey?: string;
   onStep?: (args: { step: unknown }) => void | Promise<void>;
   onDelta?: (args: { update: unknown }) => void | Promise<void>;
+  onNativePromptStage?: (stage: NativePromptStage) => void;
+  /** Engine-owned authority check/mark, synchronous before the irreversible
+   * host write. Unlike observation callbacks, exceptions MUST reject send. */
+  beforeNativeWrite?: () => void;
 }
 
 export interface SdkAgent {
@@ -979,7 +989,7 @@ function cursorSettingSources(
   boundary?: PreparedBoundary,
 ): CursorSettingSources {
   const cloud = cloudProviderExecution(boundary);
-  if (cloud) return cloud.lease.customization ? ["user"] : [];
+  if (cloud) return cloud.customization ? ["user"] : [];
   return nativeMcpPassthroughEnabled(undefined, boundary)
     ? NATIVE_CURSOR_SETTING_SOURCES
     : [];
@@ -1000,6 +1010,9 @@ interface Session {
   /** Per-session SDK transport. Production always points at a dedicated
    * Cursor host below this session's prepared execution boundary. */
   sdk: CursorSdkModule;
+  /** Original private execution identity; warm turns capture their reservation
+   * before configuration awaits instead of looking up a later current token. */
+  cloudExecution?: CloudProviderExecution;
   disposeRuntime?: () => Promise<void>;
   /** The HOME this session's Cursor host actually runs with, and where the SDK
    * writes `.cursor/projects/<slug>/agent-transcripts` — so every engine-side read
@@ -1021,6 +1034,9 @@ interface Session {
   env?: Record<string, string>;
   mcpServers?: McpServerRegistration[];
   settingSources: CursorSettingSources;
+  /** Bounded engine-read guidance captured at admission, including resume.
+   * Native configuration remains off; mode rebuilds reuse this exact text. */
+  repositoryInstructions?: string;
   /** The autoReview value currently baked into `agent` (set at create/resume).
    *  A mode change flips the DESIRED value (autoReviewFor(modeId)); when it
    *  diverges, the next prompt rebuilds the agent to reconcile. */
@@ -1720,6 +1736,8 @@ export class CursorSdkAdapter implements AgentAdapter {
     const initialMode: CursorSdkModeId = opts.env?.ZEROS_PERMISSION_MODE === "plan" ? "plan" : opts.env?.ZEROS_PERMISSION_MODE === "agent" ? "agent" : CURSOR_DEFAULT_MODE;
     const apiKey = this.resolveApiKey(opts.env);
     const settingSources = cursorSettingSources(opts.executionBoundary);
+    const cloud = cloudProviderExecution(opts.executionBoundary);
+    const repositoryInstructions = cloudCursorInstructions(cloud);
     const runtime = await this.createSessionRuntime(opts);
     const mcpSource = executionMcpServers(cloudProviderExecution(opts.executionBoundary), opts.mcpServers);
     const catalog = this.mcpCatalog(mcpSource);
@@ -1791,6 +1809,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       modeId: initialMode,
       agent,
       sdk,
+      ...(cloud ? { cloudExecution: cloud } : {}),
       ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
       ...(runtime.providerHome ? { providerHome: runtime.providerHome } : {}),
       activeRun: null,
@@ -1798,6 +1817,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       env: opts.env,
       mcpServers: mcpSource,
       settingSources,
+      repositoryInstructions,
       appliedAutoReview: autoReviewFor(initialMode),
       prewarmedAutoReview: new Set([autoReviewFor(initialMode)]),
       appliedMcpCatalog: catalog.key,
@@ -1831,6 +1851,8 @@ export class CursorSdkAdapter implements AgentAdapter {
     const initialMode: CursorSdkModeId = opts.env?.ZEROS_PERMISSION_MODE === "plan" ? "plan" : opts.env?.ZEROS_PERMISSION_MODE === "agent" ? "agent" : CURSOR_DEFAULT_MODE;
     const apiKey = this.resolveApiKey(opts.env);
     const settingSources = cursorSettingSources(opts.executionBoundary);
+    const cloud = cloudProviderExecution(opts.executionBoundary);
+    const repositoryInstructions = cloudCursorInstructions(cloud);
     const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
     const providerResumeId = opts.providerBinding?.resumeId ?? opts.sessionId;
     if (!providerResumeId) {
@@ -1980,6 +2002,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       modeId: initialMode,
       agent,
       sdk,
+      ...(cloud ? { cloudExecution: cloud } : {}),
       ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
       ...(runtime.providerHome ? { providerHome: runtime.providerHome } : {}),
       activeRun: null,
@@ -1987,6 +2010,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       env: opts.env,
       mcpServers: mcpSource,
       settingSources,
+      repositoryInstructions,
       appliedAutoReview: autoReviewFor(initialMode),
       prewarmedAutoReview: new Set([autoReviewFor(initialMode)]),
       appliedMcpCatalog: catalog.key,
@@ -2052,6 +2076,8 @@ export class CursorSdkAdapter implements AgentAdapter {
     sessionId: string;
     turnId?: string;
     prompt: ContentBlock[];
+    onNativePromptStage?: (stage: NativePromptStage) => void;
+    onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void;
   }): Promise<{ stopReason: StopReason; response: PromptResponse }> {
     const session = this.sessions.get(opts.sessionId);
     if (!session) {
@@ -2069,7 +2095,11 @@ export class CursorSdkAdapter implements AgentAdapter {
       });
     }
 
-    const message = buildUserMessage(opts.prompt);
+    const cloud = session.cloudExecution;
+    const reservation = cloud?.mode === "boot-owner-v1" ? cloudBootTurnReservation(cloud) : null;
+    if (cloud?.mode === "boot-owner-v1" && !reservation)
+      throw this.classify(new CloudCommandFailureError({ stage: "validation", category: "access_denied" }), "prompt");
+    const message = buildUserMessage(opts.prompt, session.repositoryInstructions);
     session.cancelRequested = false;
 
     // Configuration refresh is preparation, not a submitted prompt. Stop must
@@ -2182,6 +2212,18 @@ export class CursorSdkAdapter implements AgentAdapter {
           mode: sdkModeFor(session.modeId),
           model: this.modelSelection(modelId, session.modelState, session.env),
           local: { force: true },
+          ...(cloud?.mode === "boot-owner-v1" ? { beforeNativeWrite: () => {
+            if (!ownsUpdates() || !reservation)
+              throw new CloudCommandFailureError({ stage: "validation", category: "lifecycle_superseded" });
+            assertCloudBootNativeHandoff(cloud, reservation);
+            // Mark BEFORE the irreversible write. A thrown write may still
+            // have submitted bytes; passive observers never authorize replay.
+            markCloudBootNativeHandoff(cloud, reservation);
+          } } : {}),
+          ...(opts.onNativePromptStage ? { onNativePromptStage: (stage: NativePromptStage) => {
+            if (!ownsUpdates()) return;
+            try { void Promise.resolve(opts.onNativePromptStage!(stage)).catch(() => {}); } catch { /* observation is inert */ }
+          } } : {}),
           // The engine-owned turn id survives renderer reconnect/resend. Hash
           // it before crossing the harness boundary so provider logs never
           // receive Zeros' durable identity verbatim. A model-gate fallback is
@@ -2192,6 +2234,18 @@ export class CursorSdkAdapter implements AgentAdapter {
               : `${idempotencyKey}-retry-${attempt}`,
           onDelta: ({ update }) => {
             if (!ownsUpdates()) return;
+            // The host routes this callback by its engine-generated native
+            // runId. Never observe a generic session/subagent stream or a
+            // transcript/step fallback as output from the current prompt.
+            if (opts.onNativeOutput && isRecord(update)) {
+              const kind = update.type === "text-delta" && typeof update.text === "string" && update.text.length > 0 ? "text" :
+                ["tool-call-started", "partial-tool-call", "tool-call-completed"].includes(String(update.type)) &&
+                  typeof update.callId === "string" && update.callId.trim().length > 0 && isRecord(update.toolCall) &&
+                  typeof update.toolCall.type === "string" && update.toolCall.type.trim().length > 0 ? "tool" : undefined;
+              if (kind) {
+                try { void Promise.resolve(opts.onNativeOutput(kind)).catch(() => {}); } catch { /* observation is inert */ }
+              }
+            }
             if (isRecord(update) && typeof update.type === "string" && /^(?:text-|thinking-|tool-call-|partial-tool-call)/.test(update.type)) sawModelOutput = true;
             if (isRecord(update) && update.type === "turn-ended") {
               callbackUsage = sumCursorUsage(callbackUsage, cursorTokenUsage(update.usage));
@@ -2821,6 +2875,14 @@ export function classifyCursorSdkError(
   stage: "newSession" | "loadSession" | "prompt",
 ): AgentFailureError {
   if (err instanceof AgentFailureError) return err;
+  const code = err && typeof err === "object" && "code" in err ? err.code : undefined;
+  if (decodeCloudCommandFailure(code)) {
+    const failure = err && typeof err === "object" && "failure" in err
+      ? (err as { failure: AgentFailureError["failure"] }).failure : cloudCommandFailureFromCode(code, "cursor")!;
+    return Object.assign(new AgentFailureError(failure), { code });
+  }
+  if (isCloudAgentAdmissionCode(code)) return Object.assign(new AgentFailureError({ kind: "cloud-credentials-unavailable", stage,
+    agentId: "cursor", message: "Cloud credentials are unavailable. Review the provider connection before retrying." }), { code });
   const native = normalizeProviderError("cursor", err);
   const message = native.message;
   // 0. An UNEXPECTED Cursor host death (tagged by host-client.onExit). The
@@ -2904,11 +2966,11 @@ export function classifyCursorSdkError(
 
 /** ContentBlock[] → the SDK's `{ text, images }` user message. Text
  *  blocks concatenate; image blocks map to SDKImage (base64 or url). */
-function buildUserMessage(blocks: ContentBlock[]): {
+function buildUserMessage(blocks: ContentBlock[], repositoryInstructions?: string): {
   text: string;
   images?: Array<{ data: string; mimeType: string } | { url: string }>;
 } {
-  const texts: string[] = [];
+  const texts: string[] = repositoryInstructions ? [repositoryInstructions] : [];
   const images: Array<{ data: string; mimeType: string } | { url: string }> =
     [];
   for (const raw of blocks) {

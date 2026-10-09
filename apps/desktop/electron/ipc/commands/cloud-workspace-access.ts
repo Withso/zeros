@@ -1,6 +1,7 @@
 import type { CommandHandler } from "../router";
 import { getCloudWorkspaceAccessBroker, getCloudWorkspacePortForwarding, revokeCloudWorkspaceNativeAccess, setCloudWorkspacePortForwardingPreferences } from "../../cloud-workspace-access-runtime";
 import { cloudWorkspaceDesktopCapabilityEnabled } from "../../../src/engine/cloud-workspace-capability";
+import { cloudRuntimeAccessErrorEnvelope } from "../../../src/renderer/platform/bridge/cloud-runtime-access-error";
 
 export const cloudWorkspaceCapability: CommandHandler = () => ({ enabled: cloudWorkspaceDesktopCapabilityEnabled() });
 
@@ -124,18 +125,21 @@ export const cloudWorkspacePortForwardingForget: CommandHandler = args => {
   getCloudWorkspacePortForwarding().removeWorkspace(target(args));
 };
 
-export const cloudWorkspaceRuntimeOpen: CommandHandler = (args) =>
-  getCloudWorkspaceAccessBroker().openRuntime(target(args));
+export const cloudWorkspaceRuntimeOpen: CommandHandler = async args => {
+  try { return await getCloudWorkspaceAccessBroker().openRuntime(target(args)); }
+  catch (error) { return cloudRuntimeAccessErrorEnvelope(error); }
+};
 
-export const cloudWorkspaceRuntimeRefresh: CommandHandler = (args) =>
-  getCloudWorkspaceAccessBroker().refreshRuntime({
+export const cloudWorkspaceRuntimeRefresh: CommandHandler = async args => {
+  try { return await getCloudWorkspaceAccessBroker().refreshRuntime({
     ...target(args),
     runtimeId: requiredString(args, "runtimeId"),
     generation: positiveInteger(args, "generation"),
     authorityEpoch: positiveInteger(args, "authorityEpoch"),
     engineInstanceId: requiredString(args, "engineInstanceId"),
     connectionSequence: positiveInteger(args, "connectionSequence"),
-  });
+  }); } catch (error) { return cloudRuntimeAccessErrorEnvelope(error); }
+};
 
 export const cloudWorkspaceRuntimeClose: CommandHandler = (args) =>
   getCloudWorkspaceAccessBroker().closeRuntime(

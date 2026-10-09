@@ -1,4 +1,5 @@
 import { DatabaseCloudRuntimeTransitionService } from "./runtime-transfer.js";
+import { readCurrentCloudAgentBootBinding } from "./agent-boot-credentials.js";
 import type { CloudWorkspaceCheckoutSource } from "./computer-v2-contract.js";
 import { readCloudWorkspaceResumePlan, type CloudWorkspaceResumePlan } from "./setup-resume.js";
 import {
@@ -166,6 +167,7 @@ export type CloudWorkspaceEngineRegistrationInput = {
   protocolVersion: number;
   actorProtocolVersion?: 2;
   agentCustomizationVersion?: 3;
+  cloudLocalCommandsVersion?: 1;
   agentRuntime?: CloudAgentRuntime;
 };
 
@@ -1466,13 +1468,24 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         !await loadPinnedCloudRuntime(tx, pin, cloudRuntimeQualificationMode())) {
         throw materialError("engine_registration_rejected", false);
       }
+      const localCommandsSupported = input.cloudLocalCommandsVersion === 1 && input.agentCustomizationVersion === 3;
+      const journal = await readCurrentCloudAgentBootBinding(tx, {
+        workspaceId: input.workspaceId, organizationId: input.organizationId,
+      }).catch(error => {
+        if (error instanceof HttpError) throw materialError("engine_registration_rejected", false);
+        throw error;
+      });
+      if (journal.mode === "boot-owner-v1" && !localCommandsSupported) {
+        throw materialError("engine_registration_rejected", false);
+      }
+      const agentJournalMode = journal.mode === "boot-owner-v1" ? "local" : "legacy";
       const updated = await tx.query<{ lease_expires_at: Date }>(
         `UPDATE cloud_workspace_engine_instances
          SET state = 'ready', heartbeat_token_hash = $2,
              registered_at = now(), last_heartbeat_at = now(),
              lease_expires_at = now() + ($3::bigint * interval '1 millisecond'),
              updated_at = now(), actor_protocol_version = $4,
-             agent_runtime_profile=$5, agent_runtime_contract_sha256=$6, agent_customization_version=$7
+             agent_runtime_profile=$5, agent_runtime_contract_sha256=$6, agent_customization_version=$7,cloud_local_commands_version=$8
          WHERE id = $1 AND state = 'starting'
          RETURNING lease_expires_at`,
         [
@@ -1483,6 +1496,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           null,
           null,
           input.agentCustomizationVersion ?? null,
+          localCommandsSupported ? 1 : null,
         ],
       );
       if ((updated.rowCount ?? 0) !== 1) {
@@ -1507,6 +1521,8 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         audience: ENGINE_REGISTRATION_AUDIENCE,
         engineInstanceId: input.engineInstanceId,
         durableRecordConnected: true as const,
+        ...(localCommandsSupported ? { cloudLocalCommandsVersion: 1 as const, agentJournalMode,
+          ...(journal.mode === "boot-owner-v1" ? { agentSourceWriterEpoch: journal.binding.writerEpoch } : {}) } : {}),
         leaseExpiresAtMs: updated.rows[0]!.lease_expires_at.getTime(),
         heartbeat: {
           endpoint: this.engineHeartbeatAudience,

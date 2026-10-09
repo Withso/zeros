@@ -92,6 +92,69 @@ describe("cloud workspace internal setup routes", () => {
     expect(rejected.status).toBe(422);
     expect(service.redeem).toHaveBeenCalledOnce();
   });
+  it("acknowledges the negotiated local mode only after genuine registration persistence",async()=>{
+    const registerEngine=vi.fn<CloudWorkspaceInternalSetupService["registerEngine"]>(async()=>({version:1,durableRecordConnected:true,cloudLocalCommandsVersion:1,agentJournalMode:"legacy"}));
+    const {app}=harness({registerEngine});const {expected:_expected,...binding}=body;
+    const payload={...binding,engineInstanceId:"44444444-4444-4444-8444-444444444444",protocolVersion:CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+      actorProtocolVersion:2,agentCustomizationVersion:3,agentRuntime:{...runtimeWitness,profile:"zeros-cloud-worker-v4"}};
+    const response=await app.request(CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,{method:"POST",headers:{authorization:`Bearer ${SETUP_TOKEN}`,
+      "content-type":"application/json","x-zeros-cloud-local-commands":"1"},body:JSON.stringify(payload)});
+    expect(response.headers.get("x-zeros-cloud-local-commands")).toBe("1");
+    expect(response.headers.get("x-zeros-cloud-agent-journal")).toBe("legacy");
+    expect(registerEngine.mock.calls[0]![0]).toMatchObject({cloudLocalCommandsVersion:1});
+    expect(await response.json()).toEqual({version:1,durableRecordConnected:true});
+  });
+  it.each([
+    [CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,"local"],[CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,"legacy"],
+    [CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH,"local"],[CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH,"legacy"],
+  ] as const)("publishes authenticated journal mode from %s as %s without widening strict JSON",async(path,mode)=>{
+    const sourceWriterEpoch="55555555-5555-4555-8555-555555555555";
+    const registered={version:1,durableRecordConnected:true,cloudLocalCommandsVersion:1,agentJournalMode:mode,agentSourceWriterEpoch:sourceWriterEpoch};
+    const {app}=harness({registerEngine:vi.fn(async()=>registered),registerTransitionEngine:vi.fn(async()=>registered)});
+    const {expected:_expected,...binding}=body;
+    const response=await app.request(path,{method:"POST",headers:{authorization:`Bearer ${SETUP_TOKEN}`,"content-type":"application/json",
+      "x-zeros-cloud-local-commands":"1","x-zeros-cloud-agent-journal":mode==="local"?"legacy":"local",
+      "x-zeros-cloud-agent-source-writer":"66666666-6666-4666-8666-666666666666"},
+      body:JSON.stringify({...binding,engineInstanceId:"44444444-4444-4444-8444-444444444444",protocolVersion:CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+        actorProtocolVersion:2,agentCustomizationVersion:3,agentRuntime:{...runtimeWitness,profile:"zeros-cloud-worker-v4"}})});
+    expect(response.status).toBe(200);expect(response.headers.get("x-zeros-cloud-agent-journal")).toBe(mode);
+    expect(response.headers.get("x-zeros-cloud-agent-source-writer")).toBe(mode==="local"?sourceWriterEpoch:null);
+    expect(await response.json()).toEqual({version:1,durableRecordConnected:true});
+  });
+  it.each([CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH].flatMap(path=>
+    [undefined,null,"not-a-writer"].map(writer=>({path,writer}))))("refuses a local journal without its closed source writer at $path ($writer)",async({path,writer})=>{
+    const registered={version:1,durableRecordConnected:true,cloudLocalCommandsVersion:1,agentJournalMode:"local",agentSourceWriterEpoch:writer};
+    const {app}=harness({registerEngine:vi.fn(async()=>registered),registerTransitionEngine:vi.fn(async()=>registered)});
+    const {expected:_expected,...binding}=body;
+    const response=await app.request(path,{method:"POST",headers:{authorization:`Bearer ${SETUP_TOKEN}`,"content-type":"application/json",
+      "x-zeros-cloud-local-commands":"1","x-zeros-cloud-agent-source-writer":"66666666-6666-4666-8666-666666666666"},
+      body:JSON.stringify({...binding,engineInstanceId:"44444444-4444-4444-8444-444444444444",protocolVersion:CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+        actorProtocolVersion:2,agentCustomizationVersion:3,agentRuntime:{...runtimeWitness,profile:"zeros-cloud-worker-v4"}})});
+    expect(response.status).toBe(403);
+    for(const header of ["x-zeros-cloud-local-commands","x-zeros-cloud-agent-journal","x-zeros-cloud-agent-source-writer"])
+      expect(response.headers.get(header)).toBeNull();
+    expect(await response.json()).toEqual({error:{code:"engine_registration_rejected",retryable:false}});
+  });
+  it.each([CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,CLOUD_WORKSPACE_RUNTIME_REGISTRATION_PATH])("refuses negotiated registration without a closed journal proof at %s",async path=>{
+    const registered={version:1,durableRecordConnected:true,cloudLocalCommandsVersion:1,agentJournalMode:"unknown"};
+    const {app}=harness({registerEngine:vi.fn(async()=>registered),registerTransitionEngine:vi.fn(async()=>registered)});
+    const {expected:_expected,...binding}=body;
+    const response=await app.request(path,{method:"POST",headers:{authorization:`Bearer ${SETUP_TOKEN}`,"content-type":"application/json","x-zeros-cloud-local-commands":"1"},
+      body:JSON.stringify({...binding,engineInstanceId:"44444444-4444-4444-8444-444444444444",protocolVersion:CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+        actorProtocolVersion:2,agentCustomizationVersion:3,agentRuntime:{...runtimeWitness,profile:"zeros-cloud-worker-v4"}})});
+    expect(response.status).toBe(403);expect(response.headers.get("x-zeros-cloud-local-commands")).toBeNull();
+    expect(response.headers.get("x-zeros-cloud-agent-journal")).toBeNull();
+    expect(await response.text()).not.toContain("unknown");
+  });
+  it("does not advertise local mode for absent support or an unnegotiated legacy registration",async()=>{
+    const {app}=harness();const {expected:_expected,...binding}=body;
+    const payload={...binding,engineInstanceId:"44444444-4444-4444-8444-444444444444",protocolVersion:CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION};
+    const response=await app.request(CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,{method:"POST",headers:{authorization:`Bearer ${SETUP_TOKEN}`,
+      "content-type":"application/json","x-zeros-cloud-local-commands":"1"},body:JSON.stringify(payload)});
+    expect(response.headers.get("x-zeros-cloud-local-commands")).toBeNull();
+    expect(response.headers.get("x-zeros-cloud-agent-source-writer")).toBeNull();
+    expect(await response.json()).toEqual({version:1,registered:true});
+  });
   it("uses a separate non-cacheable enrollment endpoint with closed diagnostics",async()=>{
     const registerTransitionEngine=vi.fn(async()=>({version:1,registered:true}));
     const {app,service}=harness({registerTransitionEngine});

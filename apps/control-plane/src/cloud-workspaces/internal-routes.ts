@@ -627,9 +627,26 @@ export function createCloudWorkspaceInternalRoutes(
     if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
     try {
       const {actorProtocolVersion,agentRuntime,agentCustomizationVersion,...binding}=input;
-      return c.json(await service.registerEngine({ ...binding, token,
+      const localMode=c.req.header("x-zeros-cloud-local-commands")==="1"&&actorProtocolVersion===2&&agentCustomizationVersion===3&&agentRuntime?.profile==="zeros-cloud-worker-v4";
+      const registered=await service.registerEngine({ ...binding, token,
+        ...(localMode?{cloudLocalCommandsVersion:1 as const}:{}),
         ...(agentCustomizationVersion===undefined?{}:{agentCustomizationVersion}),
-        ...(actorProtocolVersion===undefined?{}:{actorProtocolVersion}),...(agentRuntime===undefined?{}:{agentRuntime}) }));
+        ...(actorProtocolVersion===undefined?{}:{actorProtocolVersion}),...(agentRuntime===undefined?{}:{agentRuntime}) });
+      const confirmed=z.object({cloudLocalCommandsVersion:z.literal(1),durableRecordConnected:z.literal(true)}).passthrough().safeParse(registered);
+      if(localMode&&confirmed.success){
+        const journal=z.enum(["local","legacy"]).safeParse(confirmed.data.agentJournalMode);
+        if(!journal.success)return c.json({error:{code:"engine_registration_rejected",retryable:false}},403);
+        if(journal.data==="local"){
+          const sourceWriter=UUID.safeParse(confirmed.data.agentSourceWriterEpoch);
+          if(!sourceWriter.success)return c.json({error:{code:"engine_registration_rejected",retryable:false}},403);
+          c.header("x-zeros-cloud-agent-source-writer",sourceWriter.data);
+        }
+        c.header("x-zeros-cloud-local-commands","1");
+        c.header("x-zeros-cloud-agent-journal",journal.data);
+      }
+      const metadata=z.record(z.unknown()).safeParse(registered);
+      if(metadata.success){const {cloudLocalCommandsVersion:_version,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;return c.json(legacy);}
+      return c.json(registered);
     } catch (error) {
       if (!(error instanceof CloudWorkspaceSetupMaterialError)) throw error;
       return c.json(
@@ -647,9 +664,26 @@ export function createCloudWorkspaceInternalRoutes(
     if (!service.registerTransitionEngine) return c.json({error:{code:"engine_registration_rejected"}},403);
     try {
       const {actorProtocolVersion,agentRuntime,agentCustomizationVersion,...binding}=input;
-      return c.json(await service.registerTransitionEngine({...binding,token,
+      const localMode=c.req.header("x-zeros-cloud-local-commands")==="1"&&actorProtocolVersion===2&&agentCustomizationVersion===3&&agentRuntime?.profile==="zeros-cloud-worker-v4";
+      const registered=await service.registerTransitionEngine({...binding,token,
+        ...(localMode?{cloudLocalCommandsVersion:1 as const}:{}),
         ...(actorProtocolVersion===undefined?{}:{actorProtocolVersion}),...(agentRuntime===undefined?{}:{agentRuntime}),
-        ...(agentCustomizationVersion===undefined?{}:{agentCustomizationVersion})}));
+        ...(agentCustomizationVersion===undefined?{}:{agentCustomizationVersion})});
+      const confirmed=z.object({cloudLocalCommandsVersion:z.literal(1),durableRecordConnected:z.literal(true)}).passthrough().safeParse(registered);
+      if(localMode&&confirmed.success){
+        const journal=z.enum(["local","legacy"]).safeParse(confirmed.data.agentJournalMode);
+        if(!journal.success)return c.json({error:{code:"engine_registration_rejected",retryable:false}},403);
+        if(journal.data==="local"){
+          const sourceWriter=UUID.safeParse(confirmed.data.agentSourceWriterEpoch);
+          if(!sourceWriter.success)return c.json({error:{code:"engine_registration_rejected",retryable:false}},403);
+          c.header("x-zeros-cloud-agent-source-writer",sourceWriter.data);
+        }
+        c.header("x-zeros-cloud-local-commands","1");
+        c.header("x-zeros-cloud-agent-journal",journal.data);
+      }
+      const metadata=z.record(z.unknown()).safeParse(registered);
+      if(metadata.success){const {cloudLocalCommandsVersion:_version,agentJournalMode:_journal,agentSourceWriterEpoch:_writer,...legacy}=metadata.data;return c.json(legacy);}
+      return c.json(registered);
     } catch {
       return c.json({error:{code:"engine_registration_rejected",retryable:false}},403);
     }

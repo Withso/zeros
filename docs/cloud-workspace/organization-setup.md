@@ -20,19 +20,29 @@ setup-token accounts and API keys; Codex supports native device authorization
 and API keys; Cursor supports its native browser authorization and API keys.
 The organization UI offers Account and API, without the Local CLI connection.
 
-Credentials belong to the signed-in human. Associating a credential with an
-organization does not make it available to another member. The selected account
+Credentials belong to the signed-in human. Association with an organization
+alone does not grant another member access. The selected account
 and explicit model consent are stored by organization, human and provider.
 Connecting authorizes that person's sessions on Zeros-managed compute until
-disconnect or an authority/consent change. Before a workspace session starts,
+disconnect or an authority/consent change. In legacy cloud, before a workspace session starts,
 `POST /v1/cloud-workspaces/:workspace/agent-credentials/prepare` rechecks that
 consent and creates bounded, exact-workspace self-delegations. It never grants
 another member access or silently authorizes customer-managed compute.
 
+Negotiated boot mode instead binds the workspace owner's selected accounts.
+Prompter/Developer invitations or run-capable General access grants are consent
+to shared funding: members' agents can use and read the owner's active provider
+keys. Viewer access does not grant execution. The share dialog remains unchanged;
+CP records the actual role/grant revision. Account changes apply on the next run
+through background publication. See
+[funding, cards and fenced removal](agent-authentication-and-language-tools.md#negotiated-boot-funding).
+
 `GET /v1/organizations/:organization/agent-connections` returns metadata;
 `PUT .../agent-connections/:provider` selects or disconnects with an expected
-revision. `DELETE .../agent-connections/accounts/:credential` removes the
-association. Credential material remains encrypted by the credential service.
+revision. `DELETE .../agent-connections/accounts/:credential` is the legacy
+association-removal path. Active boot-funded sources require the durable
+prepare/confirm/cancel removal flow; legacy writes cannot bypass its fence.
+Credential material remains encrypted by the credential service.
 An account edit, membership authority change, or revocation requires renewed
 consent. Cursor account expiry is enforced by the backend.
 

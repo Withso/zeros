@@ -3,6 +3,7 @@ import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
 import { denied, type ConnectionReference } from "./types.js";
 import { ReferenceSchema, type RestoreMapping, type RestorePort } from "./client.js";
+import {serializeCloudAgentCredentialSourceMutation,assertLegacyCloudAgentCredentialMutationAllowed} from "../cloud-workspaces/agent-credential-mutations.js";
 
 /** Same consent fingerprint as the released credential service. Member and
  * identity locks fence a network restore against local authorization changes. */
@@ -51,7 +52,7 @@ export class DatabaseDevConnectionRestore implements RestorePort {
     const refs=references.map(r=>ReferenceSchema.parse(r));
     if(refs.some(r=>r.generationId!==generation||r.organization!==mapping.workosOrganizationId||Date.parse(r.expiresAt)<=Date.now())||new Set(refs.map(r=>r.bindingId)).size!==refs.length)denied();
     await withSystemTx(this.pool,async tx=>{
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412))",[mapping.localUserId]);
+      await serializeCloudAgentCredentialSourceMutation(tx,mapping.localUserId);
       const fingerprint=await currentMapping(tx,mapping);
       const missing=(await tx.query<{binding_id:string}>(`SELECT binding_id FROM dev_connection_references
         WHERE owner_user_id=$1 AND org_id=$2 AND generation_id=$3 AND NOT(binding_id=ANY($4::uuid[])) FOR UPDATE`,
@@ -59,9 +60,12 @@ export class DatabaseDevConnectionRestore implements RestorePort {
       await invalidateReferences(tx,generation,missing);
       await tx.query("UPDATE cloud_agent_credentials SET revoked_at=coalesce(revoked_at,now()) WHERE id=ANY($1::uuid[])",[missing]);
       for(const ref of refs) {
-        const previous=(await tx.query<{owner_user_id:string;org_id:string;generation_id:string;reference:ConnectionReference;removed_at:Date|null}>("SELECT * FROM dev_connection_references WHERE binding_id=$1 FOR UPDATE",[ref.bindingId])).rows[0];
+        const previous=(await tx.query<{owner_user_id:string;org_id:string;generation_id:string;reference:ConnectionReference;removed_at:Date|null;invalidated_at:Date|null;fingerprint:string}>("SELECT * FROM dev_connection_references WHERE binding_id=$1 FOR UPDATE",[ref.bindingId])).rows[0];
         if(previous&&(previous.owner_user_id!==mapping.localUserId||previous.org_id!==mapping.localOrganizationId||previous.generation_id!==generation))denied();
         if(previous?.removed_at && ref.bindingId!==reattachId)continue;
+        if(previous && (previous.removed_at || previous.invalidated_at || previous.fingerprint!==fingerprint ||
+          previous.reference.revision!==ref.revision || previous.reference.consentRevision!==ref.consentRevision))
+          await assertLegacyCloudAgentCredentialMutationAllowed(tx,mapping.localUserId,{credentialId:ref.bindingId,organizationId:mapping.localOrganizationId});
         if(previous?.removed_at)await tx.query("UPDATE dev_connection_references SET removed_at=NULL WHERE binding_id=$1",[ref.bindingId]);
         const existing=(await tx.query<{owner_user_id:string;kind:string;material_mode:string|null}>(`SELECT c.owner_user_id,c.kind,v.material_mode
           FROM cloud_agent_credentials c LEFT JOIN cloud_agent_credential_versions v ON v.credential_id=c.id AND v.version=c.current_version

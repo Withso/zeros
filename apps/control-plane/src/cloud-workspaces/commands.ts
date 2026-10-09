@@ -3,7 +3,11 @@ import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { z } from "zod";
 import { withSystemTx, type Tx } from "../db.js";
-import { assertCurrentCloudEngineAuthority } from "./engine-authority.js";
+import { assertCurrentCloudEngineAuthority, assertCloudEngineAuthorityDeadline } from "./engine-authority.js";
+import { CloudActorProvenanceSchema, CloudAgentCredentialRunInfoSchema, CloudAgentBootScopeSchema } from "./agent-boot-contract.js";
+import { CloudCompactControlEventSchema } from "./event-streams.js";
+import { canonicalCloudHistoryJson as canonicalCloudLocalCommandHistoryJson, CloudLocalHistoryPartSchema as CloudLocalCommandHistoryPartSchema,
+  CloudLocalHistoryWatermarkSchema as CloudLocalCommandHistorySchema, CloudMirroredHistoryHeadSchema as CloudLocalCommandHistoryHeadSchema } from "./history-local-contract.js";
 import { HttpError } from "../authz.js";
 import { assertCloudRequestActor, assertRecordedCloudActor, type CloudRecordedActor } from "./actor-sessions.js";
 import { isAutomaticRuntimeWakeGeneration } from "./generation-transitions.js";
@@ -20,6 +24,9 @@ export const CLOUD_COMMAND_FAILURE_CATEGORIES = [
   "authority_response_invalid", "canary_failed", "attestation_failed", "timeout", "auth_required", "verification_required",
   "cloud_credential_error", "subprocess_exited", "protocol_error", "transport_closed", "lifecycle_superseded", "rate_limited",
   "design_protection_failed", "session_expired",
+  "executor_start_failed", "provider_login_failed", "environment_setup_failed", "environment_identity_mismatch", "environment_not_ready",
+  "credential_refresh_invalid", "credential_refresh_timeout", "credential_refresh_unchanged", "credential_refresh_rejected", "lock_busy", "execution_limit",
+  "customization_changed", "access_denied", "environment_revoked", "environment_runtime_required", "environment_unavailable", "lease_expired",
 ] as const;
 const cloudFailureCodes = new Set(CLOUD_COMMAND_FAILURE_STAGES.flatMap(stage =>
   CLOUD_COMMAND_FAILURE_CATEGORIES.map(category => `cloud_${stage}_${category}`)));
@@ -33,7 +40,25 @@ export const CloudNativeOperationSchema = z.discriminatedUnion("kind", [
     strategy: z.enum(["native", "transcript"]) }).strict(),
   z.object({ version: z.literal(1), kind: z.literal("goal"), action: z.enum(["get", "set", "clear"]), update: CloudGoalUpdateSchema.optional() }).strict(),
 ]).refine(value => value.kind !== "goal" || (value.action === "set") === (value.update !== undefined));
+// Standalone Zod 3 mirror of protocol/cloud-events CloudTurnOutcomeSchema.
+// command-failure.test.ts verifies accept/reject and terminal-field parity.
+const terminalAmount=z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const terminalStopReason=z.enum(["end_turn","max_tokens","max_turn_requests","refusal","cancelled","budget_exhausted","blocking_limit","prompt_too_long"]);
+const terminalUsage=z.object({accountingVersion:z.literal(1).optional(),revision:terminalAmount.int().optional(),costKind:z.enum(["estimated","reported"]).optional(),
+  inputTokens:terminalAmount.optional(),outputTokens:terminalAmount.optional(),cacheReadTokens:terminalAmount.optional(),cacheWriteTokens:terminalAmount.optional(),
+  reasoningTokens:terminalAmount.optional(),totalCostUsd:terminalAmount.optional(),perModel:z.array(z.object({model:z.string().min(1).max(256),
+    inputTokens:terminalAmount.optional(),outputTokens:terminalAmount.optional(),cacheReadTokens:terminalAmount.optional(),cacheWriteTokens:terminalAmount.optional(),costUsd:terminalAmount.optional()}).strict()).max(32).optional()}).strict();
+const cloudTurnOutcome=z.object({commandId:uuid.optional(),conversationId:identity,executionId:identity.nullable(),turnId:identity,agentId:z.string().min(1).max(64),
+  status:z.enum(["completed","failed","cancelled"]),stopReason:terminalStopReason.nullable(),startedAt:terminalAmount.optional(),endedAt:terminalAmount.nullable().optional(),
+  response:z.object({stopReason:terminalStopReason.optional(),usage:terminalUsage.optional(),effectiveModel:z.string().min(1).max(256).optional(),userMessageId:identity.optional()}).strict().optional(),
+  error:z.string().max(8000).optional(),failure:z.object({
+    kind:z.enum(["timeout","auth-required","verification-required","cloud-credentials-unavailable","subprocess-exited","protocol-error","transport-closed","lifecycle-superseded","rate-limited","design-protection-failed","session-expired"]),
+    message:z.string().max(8000),agentId:z.string().max(64).optional(),advice:z.string().max(8000).optional(),
+    stage:z.enum(["initialize","newSession","loadSession","forkSession","prompt","cancel","stopBackgroundTask","setMode"]).optional(),
+    exit:z.object({code:z.number().int().safe().nullable(),signal:z.string().max(64).nullable(),stderrTail:z.string().max(8000)}).strict().optional(),
+  }).strict().optional()}).strict();
 export const CloudNativeResultSchema = z.object({ version: z.literal(1),
+  terminal:cloudTurnOutcome.optional(),
   capabilities: z.object({version:z.literal(1),goals:z.boolean(),nativeFork:z.boolean(),transcriptFork:z.boolean(),
     nativeReview:z.boolean(),connectedApps:z.boolean(),multiAgent:z.boolean()}).strict().optional(),model:z.string().min(1).max(256).optional(),
   goal: z.object({ objective: z.string().max(32_768),
@@ -86,6 +111,153 @@ export const CloudCommandMutationSchema = z.object({
   if ((action.kind === "enqueue" || action.kind === "edit") && action.payload.operation?.kind === "fork")
     context.addIssue({code:"custom",message:"Forks require the fork action"});
 });
+// Standalone mirrors for the explicitly negotiated engine-local writer. These
+// parsers grant no authority and do not alter the legacy admitted queue above.
+const permissionModes: Record<string, readonly string[]> = {
+  claude: ["default", "accept-edits", "plan", "auto", "bypass"],
+  codex: ["ask", "auto-edit", "full-access", "read-only"], cursor: ["plan", "auto", "agent"],
+};
+export const CloudBootCommandPayloadSchema = z.object({
+  agentId: z.enum(["claude", "cursor", "codex"]), userMessageId: identity,
+  prompt: z.array(z.record(z.unknown())).min(1).max(128), bubble: z.record(z.unknown()).optional(),
+  modeRevision: revision, permissionMode: z.string().min(1).max(32).optional(),
+  model: z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/),
+  effort: z.enum(["low", "medium", "high", "xhigh", "max", "ultracode"]).optional(),
+  fast: z.boolean().optional(), operation: CloudNativeOperationSchema.optional(),
+}).strict().superRefine((value, context) => {
+  if (value.permissionMode !== undefined && !permissionModes[value.agentId]?.includes(value.permissionMode))
+    context.addIssue({ code: "custom", message: "Invalid provider permission mode" });
+  if (value.operation && ((value.operation.kind !== "fork" && value.agentId !== "codex") ||
+      (value.operation.kind === "fork" && value.operation.strategy === "native" && value.agentId !== "codex")))
+    context.addIssue({ code: "custom", message: "Native operation requires an explicit qualified provider" });
+});
+export const CloudBootCommandEntrySchema = z.object({
+  commandId: uuid, position: revision, state: z.enum(["queued", "dispatching", "succeeded", "failed", "cancelled", "uncertain"]),
+  payload: CloudBootCommandPayloadSchema.nullable(), executionId: identity.nullable(), generation: revision,
+  resultCode: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).nullable(),
+  createdAt: z.string().datetime(), updatedAt: z.string().datetime(), result: CloudNativeResultSchema.nullable().optional(),
+}).strict();
+export const CloudBootCommandSnapshotSchema = z.object({
+  version: z.literal(1), conversationId: identity, revision, paused: z.boolean(),
+  pending: z.array(CloudBootCommandEntrySchema).max(32), receipts: z.array(CloudBootCommandEntrySchema).max(50),
+  replayed: z.boolean().optional(), nativeGoal: z.object({ version: z.literal(1), conversationId: identity, revision,
+    goal: CloudNativeResultSchema.shape.goal.unwrap() }).strict().optional(),
+}).strict();
+export type CloudBootCommandPayload = z.infer<typeof CloudBootCommandPayloadSchema>;
+export type CloudBootCommandEntry = z.infer<typeof CloudBootCommandEntrySchema>;
+export type CloudBootCommandSnapshot = z.infer<typeof CloudBootCommandSnapshotSchema>;
+// Standalone mirror ingress contract. This does not enable local dispatch or
+// import the desktop package; retained parity tests bind it to the shared wire.
+const positiveSequence = revision.refine(value => value > 0);
+const sequence = revision;
+const intent = z.object({ userMessageId: identity, agentId: z.string().min(1).max(64) }).strict();
+const digest = z.string().regex(/^[a-f0-9]{64}$/);
+const CloudMirrorGoalSchema = CloudBootCommandSnapshotSchema.shape.nativeGoal.unwrap();
+const CLOUD_LOCAL_COMMAND_MIRROR_MAX_BYTES = 1024 * 1024;
+export const CloudLocalCommandMirrorChangeSchema = z.object({
+  sequence: positiveSequence, conversationId: identity, revision: sequence, paused: z.boolean(),
+  entry: CloudBootCommandEntrySchema.optional(), nativeGoal: CloudMirrorGoalSchema.optional(),
+  originWriterEpoch: uuid.optional(), actor: CloudActorProvenanceSchema.optional(),
+  // Retained after payload removal, even when terminal is the first mirror.
+  intent: intent.optional(),
+  credentialRun: CloudAgentCredentialRunInfoSchema.optional(),
+  event: CloudCompactControlEventSchema.optional(),
+  historyPart: CloudLocalCommandHistoryPartSchema.optional(),
+  /** recordSequence=headRev() of the LOCAL record runtime; eventSequence is
+   * the local live journal head. Outbox waits for confirmedLocalHead and
+   * confirmed local event head. These are never CP global revisions. */
+  history: CloudLocalCommandHistorySchema.optional(),
+  historyHead: CloudLocalCommandHistoryHeadSchema.optional(),
+}).strict().superRefine((value, context) => {
+  if (value.nativeGoal && value.nativeGoal.conversationId !== value.conversationId)
+    context.addIssue({ code: "custom", message: "Mirrored goal conversation is inconsistent" });
+  if (value.event && "chatId" in value.event.frame && value.event.frame.chatId !== undefined &&
+      value.event.frame.chatId !== value.conversationId)
+    context.addIssue({ code: "custom", message: "Compact control conversation is inconsistent" });
+  if (value.entry) {
+    if (!value.originWriterEpoch || !value.intent)
+      context.addIssue({ code: "custom", message: "Mirrored entry requires origin writer and durable intent" });
+    const pending = value.entry.state === "queued" || value.entry.state === "dispatching";
+    if (pending && (!value.entry.payload || !value.actor))
+      context.addIssue({ code: "custom", message: "Mirrored pending entry requires payload and verified provenance" });
+    if (value.entry.payload && (value.entry.payload.userMessageId !== value.intent?.userMessageId ||
+        value.entry.payload.agentId !== value.intent?.agentId))
+      context.addIssue({ code: "custom", message: "Mirrored prompt intent is inconsistent" });
+    if (!pending && (value.entry.payload !== null || !value.history))
+      context.addIssue({ code: "custom", message: "Mirrored terminal requires payload removal and history watermark" });
+    if (value.actor && value.actor.scope.writerEpoch !== value.originWriterEpoch)
+      context.addIssue({ code: "custom", message: "Mirrored actor origin is inconsistent" });
+    if (value.credentialRun && (value.entry.state === "queued" || value.credentialRun.provider !== value.intent?.agentId ||
+        value.credentialRun.writerEpoch !== value.originWriterEpoch ||
+        (value.actor && (value.credentialRun.bootId !== value.actor.scope.bootId ||
+          value.credentialRun.fundingOwnerUserId !== value.actor.scope.fundingOwnerUserId ||
+          value.credentialRun.fundingOwnerEpoch !== value.actor.scope.fundingOwnerEpoch))))
+      context.addIssue({ code: "custom", message: "Mirrored credential dispatch binding is inconsistent" });
+    const terminal = value.entry.result?.terminal;
+    if (terminal && (terminal.commandId !== value.entry.commandId || terminal.conversationId !== value.conversationId ||
+        terminal.executionId !== value.entry.executionId || terminal.turnId !== value.intent?.userMessageId ||
+        terminal.agentId !== value.intent?.agentId))
+      context.addIssue({ code: "custom", message: "Mirrored terminal identity is inconsistent" });
+    if (value.event && (value.event.executionId !== value.entry.executionId ||
+        (value.event.commandId !== undefined && value.event.commandId !== value.entry.commandId) ||
+        (value.event.turnId !== undefined && value.event.turnId !== value.intent?.userMessageId) ||
+        value.event.frame.agentId !== value.intent?.agentId))
+      context.addIssue({ code: "custom", message: "Mirrored control intent is inconsistent" });
+    const head = value.historyHead;
+    if (head?.source.kind === "command" && (head.originWriterEpoch !== value.originWriterEpoch ||
+        head.source.commandId !== value.entry.commandId || head.source.executionId !== value.entry.executionId ||
+        head.source.intent.userMessageId !== value.intent?.userMessageId || head.source.intent.agentId !== value.intent?.agentId ||
+        (value.history && canonicalCloudLocalCommandHistoryJson(head.history) !== canonicalCloudLocalCommandHistoryJson(value.history))))
+      context.addIssue({ code: "custom", message: "Current command history head is inconsistent" });
+  } else if (value.credentialRun || value.intent) {
+    context.addIssue({ code: "custom", message: "Mirrored credential run and intent require an entry" });
+  }
+  if (!value.entry && value.history)
+    context.addIssue({ code: "custom", message: "Current history without a receipt requires an explicit head" });
+  if (!value.entry && value.originWriterEpoch && value.historyHead && value.originWriterEpoch !== value.historyHead.originWriterEpoch)
+    context.addIssue({ code: "custom", message: "Current history origin is inconsistent" });
+});
+export type CloudLocalCommandMirrorChange = z.infer<typeof CloudLocalCommandMirrorChangeSchema>;
+
+export const CloudLocalCommandMirrorBatchSchema = z.object({
+  version: z.literal(1), bootId: uuid, writerEpoch: uuid, batchId: uuid,
+  after: sequence, through: sequence, changes: z.array(CloudLocalCommandMirrorChangeSchema).min(1).max(32),
+}).strict().superRefine((value, context) => {
+  if (value.through !== value.after + value.changes.length ||
+      value.changes.some((change, index) => change.sequence !== value.after + index + 1))
+    context.addIssue({ code: "custom", message: "Mirror sequence is not contiguous" });
+  if (new TextEncoder().encode(JSON.stringify(value)).byteLength > CLOUD_LOCAL_COMMAND_MIRROR_MAX_BYTES)
+    context.addIssue({ code: "custom", message: "Mirror batch exceeds byte limit" });
+  if (value.changes.some(change => change.entry &&
+      (change.entry.state === "queued" || change.entry.state === "dispatching") &&
+      (change.originWriterEpoch !== value.writerEpoch || change.actor?.scope.bootId !== value.bootId)))
+    context.addIssue({ code: "custom", message: "Pending intent must belong to the active writer" });
+});
+export type CloudLocalCommandMirrorBatch = z.infer<typeof CloudLocalCommandMirrorBatchSchema>;
+export const CloudLocalCommandMirrorAckSchema = z.object({
+  version: z.literal(1), writerEpoch: uuid, batchId: uuid, through: sequence,
+  /** Closed feedback for document parts supplied in this exact flight.
+   * Receipts keep their original audit history; a limit publishes a separate
+   * incomplete current head in the producer's FULL transaction. */
+  historyLimits: z.array(z.object({ conversationId: identity, sha256: digest }).strict()).max(32)
+    .refine(values => new Set(values.map(value => `${value.conversationId}\0${value.sha256}`)).size === values.length).optional(),
+}).strict();
+export type CloudLocalCommandMirrorAck = z.infer<typeof CloudLocalCommandMirrorAckSchema>;
+
+// Independent CP seal mirror. The inventory digest belongs to the producer's
+// private FULL ledger; this descriptor does not assert native/source retirement.
+export const CloudLocalCommandWriterSealSchema = z.object({
+  version: z.literal(1), scope: CloudAgentBootScopeSchema, sealId: uuid, sequence,
+  recordSequence: sequence, eventSequence: sequence, inventorySha256: digest, sha256: digest,
+}).strict();
+export const CloudLocalCommandWriterSealAckSchema = z.object({
+  version: z.literal(1), sealId: uuid, writerEpoch: uuid, sequence,
+  recordSequence: sequence, eventSequence: sequence, inventorySha256: digest, sha256: digest,
+}).strict();
+export type CloudLocalCommandWriterSeal = z.infer<typeof CloudLocalCommandWriterSealSchema>;
+export type CloudLocalCommandWriterSealAck = z.infer<typeof CloudLocalCommandWriterSealAckSchema>;
+
+
 export const CloudCommandSettleSchema = z.object({
   commandId: uuid, claimId: uuid, state: z.enum(["succeeded", "failed", "cancelled"]),
   resultCode: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).refine(code =>
@@ -105,11 +277,19 @@ export const CloudCommandRequestSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("settle"), result: CloudCommandSettleSchema }).strict(),
   CloudGoalConfirmationSchema,
 ]);
-export function legacyCloudCommandResponse(value:unknown):unknown {
+export function legacyCloudCommandResponse(value:unknown,nativeCommandsVersion?:1):unknown {
   if(!value||typeof value!=="object"||Array.isArray(value))return value;
-  const {nativeGoal:_goal,...row}=value as Record<string,unknown>;
+  const native=nativeCommandsVersion===1;
+  const {nativeGoal:_goal,...legacy}=value as Record<string,unknown>;
+  const row=native?value as Record<string,unknown>:legacy;
   const entry=(value:unknown)=>{
     if(!value||typeof value!=="object"||Array.isArray(value))return value;
+    if(native){
+      const row=value as Record<string,unknown>,result=row.result;
+      if(!result||typeof result!=="object"||Array.isArray(result)||!("terminal" in result))return value;
+      const {terminal:_terminal,...legacyResult}=result as Record<string,unknown>;
+      return {...row,result:legacyResult};
+    }
     const {result:_result,...rest}=value as Record<string,unknown>;
     return rest.payload&&typeof rest.payload==="object"&&"operation" in rest.payload?{...rest,payload:null}:rest;
   };
@@ -183,14 +363,285 @@ function sameOperationActor(row:OperationActor,actor:CloudRecordedActor|null):bo
   return row.actor_user_id===(actor?.actorUserId??null) && row.actor_device_id===(actor?.deviceId??null);
 }
 
+/** A complete immutable receipt audit does not own the current restore head.
+ * The FULL producer pairs its terminal with a fresh staging fence in the
+ * immediate next change of the same durable flight. */
+function hasPairedMirrorStagingHead(receipt: CloudLocalCommandMirrorChange, next: CloudLocalCommandMirrorChange | undefined): boolean {
+  const entry = receipt.entry, audit = receipt.history, head = next?.historyHead;
+  if (!entry || !audit || !("manifestSha256" in audit) || !next || !head || head.source.kind !== "command" ||
+      next.sequence !== receipt.sequence + 1 || next.conversationId !== receipt.conversationId || next.revision !== receipt.revision || next.paused !== receipt.paused ||
+      next.entry || next.history || next.historyPart || next.event || next.nativeGoal || next.actor || next.intent || next.credentialRun || next.originWriterEpoch ||
+      head.originWriterEpoch !== receipt.originWriterEpoch || head.deleted || !("incompleteReason" in head.history) ||
+      head.history.incompleteReason !== "capture_unavailable" || head.history.restoreRevision + 1 !== audit.restoreRevision ||
+      head.history.recordSequence !== audit.recordSequence || head.history.eventSequence !== audit.eventSequence) return false;
+  const source = { kind: "command", commandId: entry.commandId, intent: receipt.intent!, executionId: entry.executionId,
+    nativeResultSha256: entry.result == null ? null : createHash("sha256").update(canonicalCloudLocalCommandHistoryJson(entry.result)).digest("hex") };
+  return canonicalCloudLocalCommandHistoryJson(head.source) === canonicalCloudLocalCommandHistoryJson(source);
+}
+
 /** All methods take the live engine fence and lock workspace → engine → queue.
  * Client disconnects do not own queue state; old engines cannot claim or settle.
  * There is deliberately no timed lease that could replay a dispatched prompt. */
 export class DatabaseCloudWorkspaceCommandService {
   constructor(private readonly options: { pool: pg.Pool; workosEnabled?: boolean }) {}
 
-  private async authorize(tx: Tx, scope: CloudCommandEngineScope) {
-    return assertCurrentCloudEngineAuthority(tx, { ...scope, workosEnabled: this.options.workosEnabled === true });
+  /** Record the current writer's immutable drained descriptor independently
+   * of lifecycle retirement. CP checks its projection, never private inventory
+   * custody or process-domain proof; the existing stop path owns retirement. */
+  async seal(scope: CloudCommandEngineScope, supplied: unknown): Promise<CloudLocalCommandWriterSealAck> {
+    const parsed = CloudLocalCommandWriterSealSchema.safeParse(supplied);
+    if (!parsed.success) throw new CloudCommandError("invalid_command", "Invalid cloud writer seal");
+    const seal = parsed.data, { sha256, ...descriptor } = seal;
+    if (createHash("sha256").update(canonicalCloudLocalCommandHistoryJson(descriptor)).digest("hex") !== sha256)
+      throw new CloudCommandError("command_conflict", "Cloud writer seal binding changed");
+    return withSystemTx(this.options.pool, async tx => {
+      await this.authorize(tx, scope, false);
+      const { readCurrentCloudAgentBootBinding } = await import("./agent-boot-credentials.js");
+      const current = await readCurrentCloudAgentBootBinding(tx, { organizationId: scope.organizationId, workspaceId: scope.workspaceId });
+      if (current.mode !== "boot-owner-v1" || current.binding.writerState !== "active")
+        throw new CloudCommandError("command_context_changed", "Cloud seal writer is no longer active");
+      const activeScope = { organizationId: scope.organizationId, workspaceId: scope.workspaceId,
+        generation: scope.generation, engineInstanceId: scope.engineInstanceId, bootId: current.binding.bootId,
+        writerEpoch: current.binding.writerEpoch, fundingOwnerUserId: current.binding.fundingOwnerUserId,
+        fundingOwnerEpoch: current.binding.fundingOwnerEpoch };
+      if (current.binding.generation !== scope.generation || current.binding.engineInstanceId !== scope.engineInstanceId ||
+          canonicalCloudLocalCommandHistoryJson(activeScope) !== canonicalCloudLocalCommandHistoryJson(seal.scope))
+        throw new CloudCommandError("command_context_changed", "Cloud seal scope changed");
+      const writer = (await tx.query<{ mirrored_sequence: string; sealed_sequence: string | null;
+        seal_record_sequence: string | null; seal_event_sequence: string | null; seal: unknown; seal_ack: unknown }>(
+        `SELECT mirrored_sequence,sealed_sequence,seal_record_sequence,seal_event_sequence,seal,seal_ack
+          FROM cloud_workspace_local_command_writers WHERE workspace_id=$1 AND org_id=$2 AND writer_epoch=$3 AND state='active' FOR UPDATE`,
+        [scope.workspaceId, scope.organizationId, seal.scope.writerEpoch])).rows[0];
+      if (!writer) throw new CloudCommandError("command_context_changed", "Cloud seal writer is unavailable");
+      const ack = CloudLocalCommandWriterSealAckSchema.parse({ version: 1, sealId: seal.sealId, writerEpoch: seal.scope.writerEpoch,
+        sequence: seal.sequence, recordSequence: seal.recordSequence, eventSequence: seal.eventSequence,
+        inventorySha256: seal.inventorySha256, sha256: seal.sha256 });
+      if (writer.sealed_sequence !== null || writer.seal !== null || writer.seal_ack !== null) {
+        const previous = CloudLocalCommandWriterSealSchema.safeParse(writer.seal), previousAck = CloudLocalCommandWriterSealAckSchema.safeParse(writer.seal_ack);
+        if (!previous.success || !previousAck.success ||
+            canonicalCloudLocalCommandHistoryJson(previous.data) !== canonicalCloudLocalCommandHistoryJson(seal) ||
+            canonicalCloudLocalCommandHistoryJson(previousAck.data) !== canonicalCloudLocalCommandHistoryJson(ack) ||
+            safeInteger(writer.mirrored_sequence) !== seal.sequence || writer.sealed_sequence !== String(seal.sequence) ||
+            writer.seal_record_sequence !== String(seal.recordSequence) || writer.seal_event_sequence !== String(seal.eventSequence))
+          throw new CloudCommandError("command_conflict", "Cloud writer seal retry changed");
+        await assertCloudEngineAuthorityDeadline(tx, scope.engineInstanceId, this.options.workosEnabled === true);
+        return previousAck.data;
+      }
+      if (safeInteger(writer.mirrored_sequence) !== seal.sequence)
+        throw new CloudCommandError("command_conflict", "Cloud writer seal is not drained");
+      const projection = (await tx.query<{ pending: boolean; record_sequence: string; event_sequence: string }>(
+        `SELECT EXISTS(SELECT 1 FROM cloud_workspace_local_commands WHERE workspace_id=$1 AND org_id=$2 AND projection_epoch=$3
+            AND state IN ('queued','dispatching')) AS pending,
+          coalesce(max(record_sequence),0)::text AS record_sequence,coalesce(max(event_sequence),0)::text AS event_sequence
+          FROM (SELECT history_record_sequence AS record_sequence,history_event_sequence AS event_sequence
+            FROM cloud_workspace_local_commands WHERE workspace_id=$1 AND org_id=$2 AND projection_epoch=$3
+            UNION ALL SELECT record_sequence,event_sequence FROM cloud_workspace_local_command_history_heads
+              WHERE workspace_id=$1 AND org_id=$2 AND projection_epoch=$3
+            UNION ALL SELECT NULL::bigint,local_sequence FROM cloud_workspace_local_agent_controls
+              WHERE workspace_id=$1 AND org_id=$2 AND projection_epoch=$3) projected`,
+        [scope.workspaceId, scope.organizationId, seal.scope.writerEpoch])).rows[0];
+      if (!projection || projection.pending || safeInteger(projection.record_sequence) > seal.recordSequence || safeInteger(projection.event_sequence) > seal.eventSequence)
+        throw new CloudCommandError("command_conflict", "Cloud writer seal projection is incomplete");
+      await assertCloudEngineAuthorityDeadline(tx, scope.engineInstanceId, this.options.workosEnabled === true);
+      await tx.query(`UPDATE cloud_workspace_local_command_writers SET sealed_sequence=$4,seal_record_sequence=$5,seal_event_sequence=$6,seal=$7,seal_ack=$8
+        WHERE workspace_id=$1 AND org_id=$2 AND writer_epoch=$3`,
+      [scope.workspaceId, scope.organizationId, seal.scope.writerEpoch, seal.sequence, seal.recordSequence, seal.eventSequence, JSON.stringify(seal), JSON.stringify(ack)]);
+      return ack;
+    });
+  }
+
+  /** Independent asynchronous projection of the authenticated FULL local
+   * writer. This method cannot claim, admit or redispatch native work. Original
+   * receipt audit and current restore authority commit in one private tx. */
+  async mirror(scope: CloudCommandEngineScope, supplied: unknown): Promise<CloudLocalCommandMirrorAck> {
+    const parsed = CloudLocalCommandMirrorBatchSchema.safeParse(supplied);
+    if (!parsed.success) throw new CloudCommandError("invalid_command", "Invalid cloud mirror batch");
+    const batch = parsed.data;
+    let body: string;
+    try { body = canonicalCloudLocalCommandHistoryJson(batch); }
+    catch { throw new CloudCommandError("invalid_command", "Cloud mirror body is not bounded JSON"); }
+    const requestHash = createHash("sha256").update(body).digest();
+    return withSystemTx(this.options.pool, async tx => {
+      await this.authorize(tx, scope, false);
+      const { readCurrentCloudAgentBootBinding } = await import("./agent-boot-credentials.js");
+      const current = await readCurrentCloudAgentBootBinding(tx, { organizationId: scope.organizationId, workspaceId: scope.workspaceId });
+      if (current.mode !== "boot-owner-v1" || current.binding.writerState !== "active" ||
+          current.binding.bootId !== batch.bootId || current.binding.writerEpoch !== batch.writerEpoch ||
+          current.binding.generation !== scope.generation || current.binding.engineInstanceId !== scope.engineInstanceId)
+        throw new CloudCommandError("command_context_changed", "Cloud mirror writer is no longer active");
+      const writer = (await tx.query<{ mirrored_sequence: string; sealed_sequence: string | null }>(`SELECT mirrored_sequence,sealed_sequence FROM cloud_workspace_local_command_writers
+        WHERE workspace_id=$1 AND org_id=$2 AND writer_epoch=$3 AND state='active' FOR UPDATE`,
+      [scope.workspaceId, scope.organizationId, batch.writerEpoch])).rows[0];
+      if (!writer || writer.sealed_sequence !== null) throw new CloudCommandError("command_context_changed", "Cloud mirror writer is unavailable");
+      const prior = (await tx.query<{ request_sha256: Buffer; after_sequence: string; through_sequence: string; ack: unknown }>(
+        `SELECT request_sha256,after_sequence,through_sequence,ack FROM cloud_workspace_local_command_mirror_batches
+          WHERE workspace_id=$1 AND org_id=$2 AND writer_epoch=$3 AND batch_id=$4`,
+        [scope.workspaceId, scope.organizationId, batch.writerEpoch, batch.batchId])).rows[0];
+      if (prior) {
+        const ack = CloudLocalCommandMirrorAckSchema.safeParse(prior.ack);
+        if (!prior.request_sha256.equals(requestHash) || Number(prior.after_sequence) !== batch.after || Number(prior.through_sequence) !== batch.through ||
+            !ack.success || ack.data.writerEpoch !== batch.writerEpoch || ack.data.batchId !== batch.batchId || ack.data.through !== batch.through ||
+            (ack.data.historyLimits ?? []).some(pair => !batch.changes.some(change => change.conversationId === pair.conversationId && change.historyPart?.sha256 === pair.sha256)))
+          throw new CloudCommandError("command_conflict", "Cloud mirror retry changed its immutable flight");
+        await assertCloudEngineAuthorityDeadline(tx, scope.engineInstanceId, this.options.workosEnabled === true);
+        return ack.data;
+      }
+      if (safeInteger(writer.mirrored_sequence) !== batch.after)
+        throw new CloudCommandError("command_conflict", "Cloud mirror cursor is not contiguous");
+      const { applyMirroredCloudAgentHistory } = await import("./history.js");
+      const { applyCompactCloudAgentEvent, CloudEventError } = await import("./event-streams.js");
+      const historyLimits: NonNullable<CloudLocalCommandMirrorAck["historyLimits"]> = [];
+      const limited = new Set<string>();
+      for (let changeIndex = 0; changeIndex < batch.changes.length; changeIndex++) {
+        const change = batch.changes[changeIndex]!;
+        const control = (await tx.query<{ revision: string; paused: boolean; native_goal: unknown }>(`SELECT revision,paused,native_goal
+          FROM cloud_workspace_local_command_controls WHERE workspace_id=$1 AND org_id=$2 AND writer_epoch=$3 AND conversation_id=$4 FOR UPDATE`,
+        [scope.workspaceId, scope.organizationId, batch.writerEpoch, change.conversationId])).rows[0];
+        if (control && (Number(control.revision) > change.revision || (Number(control.revision) === change.revision &&
+            (control.paused !== change.paused || (change.nativeGoal !== undefined &&
+              canonicalCloudLocalCommandHistoryJson(control.native_goal) !== canonicalCloudLocalCommandHistoryJson(change.nativeGoal))))))
+          throw new CloudCommandError("command_conflict", "Cloud mirror conversation revision changed");
+        await tx.query(`INSERT INTO cloud_workspace_local_command_controls(workspace_id,org_id,writer_epoch,conversation_id,revision,paused,native_goal)
+          VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(workspace_id,writer_epoch,conversation_id) DO UPDATE SET
+            revision=EXCLUDED.revision,paused=EXCLUDED.paused,native_goal=coalesce(EXCLUDED.native_goal,cloud_workspace_local_command_controls.native_goal),updated_at=now()`,
+        [scope.workspaceId, scope.organizationId, batch.writerEpoch, change.conversationId, change.revision, change.paused,
+          change.nativeGoal === undefined ? null : JSON.stringify(change.nativeGoal)]);
+        if (change.entry) await this.stageMirroredEntry(tx, scope, batch, change);
+        if (change.event) {
+          let commandId = change.entry?.commandId ?? change.event.commandId;
+          if (!commandId) {
+            const candidates = (await tx.query<{ id: string }>(`SELECT id FROM cloud_workspace_local_commands
+              WHERE workspace_id=$1 AND org_id=$2 AND projection_epoch=$3 AND conversation_id=$4 AND execution_id=$5
+                AND ($6::text IS NULL OR user_message_id=$6) LIMIT 2`,
+            [scope.workspaceId, scope.organizationId, batch.writerEpoch, change.conversationId, change.event.executionId, change.event.turnId ?? null])).rows;
+            if (candidates.length !== 1) throw new CloudCommandError("command_conflict", "Compact control has no exact command owner");
+            commandId = candidates[0]!.id;
+          }
+          try { await applyCompactCloudAgentEvent(tx, { organizationId: scope.organizationId, workspaceId: scope.workspaceId,
+            writerEpoch: batch.writerEpoch, outboxSequence: change.sequence, conversationId: change.conversationId, commandId }, change.event); }
+          catch (error) {
+            if (error instanceof CloudEventError) throw new CloudCommandError(error.code === "invalid_event" ? "invalid_command" : "command_conflict", "Compact control projection was refused");
+            throw error;
+          }
+        }
+        if (change.historyPart) {
+          const result = await applyMirroredCloudAgentHistory(tx, { organizationId: scope.organizationId, workspaceId: scope.workspaceId,
+            writerEpoch: batch.writerEpoch, outboxSequence: change.sequence }, { conversationId: change.conversationId, historyPart: change.historyPart });
+          if (result.historyLimit) {
+            const pair = { conversationId: change.conversationId, sha256: change.historyPart.sha256 };
+            if (!historyLimits.some(item => item.conversationId === pair.conversationId && item.sha256 === pair.sha256)) historyLimits.push(pair);
+            limited.add(change.conversationId);
+          }
+        }
+        let head = change.historyHead;
+        if (!head && change.entry && change.history) {
+          if ("manifestSha256" in change.history) {
+            if (!hasPairedMirrorStagingHead(change, batch.changes[changeIndex + 1]))
+              throw new CloudCommandError("command_conflict", "Complete mirror audit has no exact current-head pair");
+            // The next original change publishes the explicit R-1 fence.
+            // Its audit R stays immutable and cannot occupy current revision R
+            // before the later canonical parts and verified complete head.
+          } else head = { originWriterEpoch: change.originWriterEpoch!, deleted: false,
+            source: { kind: "command", commandId: change.entry.commandId, intent: change.intent!, executionId: change.entry.executionId,
+              nativeResultSha256: change.entry.result == null ? null : createHash("sha256").update(canonicalCloudLocalCommandHistoryJson(change.entry.result)).digest("hex") },
+            history: change.history };
+        }
+        if (head) {
+          if (limited.has(change.conversationId) && "manifestSha256" in head.history) head = { ...head, history: {
+            restoreRevision: head.history.restoreRevision, recordSequence: head.history.recordSequence,
+            eventSequence: head.history.eventSequence, incompleteReason: "history_limit" } };
+          await applyMirroredCloudAgentHistory(tx, { organizationId: scope.organizationId, workspaceId: scope.workspaceId,
+            writerEpoch: batch.writerEpoch, outboxSequence: change.sequence }, { conversationId: change.conversationId, historyHead: head });
+        }
+      }
+      const ack = CloudLocalCommandMirrorAckSchema.parse({ version: 1, writerEpoch: batch.writerEpoch, batchId: batch.batchId,
+        through: batch.through, ...(historyLimits.length ? { historyLimits } : {}) });
+      await assertCloudEngineAuthorityDeadline(tx, scope.engineInstanceId, this.options.workosEnabled === true);
+      await tx.query(`INSERT INTO cloud_workspace_local_command_mirror_batches(workspace_id,org_id,writer_epoch,batch_id,
+        request_sha256,after_sequence,through_sequence,ack) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [scope.workspaceId, scope.organizationId, batch.writerEpoch, batch.batchId, requestHash, batch.after, batch.through, JSON.stringify(ack)]);
+      await tx.query(`UPDATE cloud_workspace_local_command_writers SET mirrored_sequence=$4
+        WHERE workspace_id=$1 AND org_id=$2 AND writer_epoch=$3`, [scope.workspaceId, scope.organizationId, batch.writerEpoch, batch.through]);
+      return ack;
+    });
+  }
+
+  private async stageMirroredEntry(tx: Tx, scope: CloudCommandEngineScope, batch: CloudLocalCommandMirrorBatch, change: CloudLocalCommandMirrorChange): Promise<void> {
+    const entry = change.entry!, origin = (await tx.query<{ generation: number; engine_instance_id: string; boot_id: string;
+      writer_epoch: string; funding_owner_user_id: string; funding_owner_epoch: string; state: string }>(`SELECT generation,engine_instance_id,boot_id,
+        writer_epoch,funding_owner_user_id,funding_owner_epoch,state FROM cloud_workspace_local_command_writers
+      WHERE workspace_id=$1 AND org_id=$2 AND writer_epoch=$3 FOR SHARE`,
+    [scope.workspaceId, scope.organizationId, change.originWriterEpoch])).rows[0];
+    const conflict = () => new CloudCommandError("command_conflict", "Cloud mirrored command identity changed");
+    if (!origin || entry.generation !== origin.generation ||
+        (origin.writer_epoch === batch.writerEpoch ? origin.state !== "active" : origin.state !== "retired")) throw conflict();
+    const expectedScope = { organizationId: scope.organizationId, workspaceId: scope.workspaceId, generation: origin.generation,
+      engineInstanceId: origin.engine_instance_id, bootId: origin.boot_id, writerEpoch: origin.writer_epoch,
+      fundingOwnerUserId: origin.funding_owner_user_id, fundingOwnerEpoch: Number(origin.funding_owner_epoch) };
+    if (change.actor && (canonicalCloudLocalCommandHistoryJson(change.actor.scope) !== canonicalCloudLocalCommandHistoryJson(expectedScope) ||
+        change.actor.actor.role === "viewer" || change.actor.fundingConsentVersion !== 1 || !change.actor.fundingGrant)) throw conflict();
+    const previous = (await tx.query<{ conversation_id: string; writer_epoch: string; user_message_id: string; agent_id: string; position: string;
+      state: CloudCommandState; execution_id: string | null; generation: number; payload: unknown; actor_provenance: unknown;
+      result_code: string | null; result: unknown; credential_run_info: unknown; created_at: Date; updated_at: Date;
+      history_record_sequence: string | null; history_event_sequence: string | null; history_restore_revision: string | null;
+      history_manifest_sha256: Buffer | null; history_incomplete_reason: string | null }>(
+      "SELECT * FROM cloud_workspace_local_commands WHERE workspace_id=$1 AND org_id=$2 AND id=$3 FOR UPDATE",
+      [scope.workspaceId, scope.organizationId, entry.commandId])).rows[0];
+    if (previous && (previous.conversation_id !== change.conversationId || previous.writer_epoch !== change.originWriterEpoch ||
+        previous.user_message_id !== change.intent!.userMessageId || previous.agent_id !== change.intent!.agentId ||
+        Number(previous.position) !== entry.position || previous.generation !== entry.generation ||
+        previous.created_at.getTime() !== Date.parse(entry.createdAt) || (previous.execution_id !== null && previous.execution_id !== entry.executionId) ||
+        (["succeeded", "failed", "cancelled", "uncertain"].includes(previous.state) &&
+          (previous.state !== entry.state || previous.result_code !== entry.resultCode ||
+            canonicalCloudLocalCommandHistoryJson(previous.result) !== canonicalCloudLocalCommandHistoryJson(entry.result ?? null) ||
+            Number(previous.history_restore_revision) !== change.history?.restoreRevision ||
+            previous.history_record_sequence !== (change.history?.recordSequence == null ? null : String(change.history.recordSequence)) ||
+            previous.history_event_sequence !== (change.history?.eventSequence == null ? null : String(change.history.eventSequence)) ||
+            previous.history_manifest_sha256?.toString("hex") !== (change.history && "manifestSha256" in change.history ? change.history.manifestSha256 : undefined) ||
+            previous.history_incomplete_reason !== (change.history && "incompleteReason" in change.history ? change.history.incompleteReason : null))))) throw conflict();
+    const provenance = change.actor ?? previous?.actor_provenance ?? null;
+    if (entry.executionId !== null && !CloudActorProvenanceSchema.safeParse(provenance).success) throw conflict();
+    if (previous?.execution_id !== null && previous?.execution_id !== undefined && change.actor &&
+        canonicalCloudLocalCommandHistoryJson(previous.actor_provenance) !== canonicalCloudLocalCommandHistoryJson(change.actor)) throw conflict();
+    if (previous && previous.state !== "queued" && entry.state === "queued") throw conflict();
+    const terminal = entry.result?.terminal;
+    if (terminal && ((entry.state === "succeeded" && terminal.status !== "completed") ||
+        (entry.state === "failed" && terminal.status !== "failed") || (entry.state === "cancelled" && terminal.status !== "cancelled"))) throw conflict();
+    if (change.credentialRun && (change.credentialRun.bootId !== origin.boot_id || change.credentialRun.fundingOwnerUserId !== origin.funding_owner_user_id ||
+        change.credentialRun.fundingOwnerEpoch !== Number(origin.funding_owner_epoch))) throw conflict();
+    if (previous?.credential_run_info && change.credentialRun && canonicalCloudLocalCommandHistoryJson(previous.credential_run_info) !== canonicalCloudLocalCommandHistoryJson(change.credentialRun)) throw conflict();
+    const history = change.history;
+    // Terminal-first rows are still private to this transaction. Do not invent
+    // a pending prompt to satisfy CHECKs; failed helper/ACK rolls everything back.
+    await tx.query(`INSERT INTO cloud_workspace_local_commands(workspace_id,org_id,id,conversation_id,writer_epoch,projection_epoch,
+      user_message_id,agent_id,position,state,payload,actor_provenance,generation,execution_id,result_code,result,credential_run_info,
+      history_record_sequence,history_event_sequence,history_restore_revision,history_manifest_sha256,history_incomplete_reason,
+      mirror_sequence,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+      ON CONFLICT(workspace_id,id) DO UPDATE SET projection_epoch=EXCLUDED.projection_epoch,state=EXCLUDED.state,payload=EXCLUDED.payload,
+        actor_provenance=EXCLUDED.actor_provenance,execution_id=EXCLUDED.execution_id,result_code=EXCLUDED.result_code,result=EXCLUDED.result,
+        credential_run_info=coalesce(EXCLUDED.credential_run_info,cloud_workspace_local_commands.credential_run_info),
+        history_record_sequence=EXCLUDED.history_record_sequence,history_event_sequence=EXCLUDED.history_event_sequence,
+        history_restore_revision=EXCLUDED.history_restore_revision,history_manifest_sha256=EXCLUDED.history_manifest_sha256,
+        history_incomplete_reason=EXCLUDED.history_incomplete_reason,mirror_sequence=EXCLUDED.mirror_sequence,updated_at=EXCLUDED.updated_at`,
+    [scope.workspaceId, scope.organizationId, entry.commandId, change.conversationId, change.originWriterEpoch, batch.writerEpoch,
+      change.intent!.userMessageId, change.intent!.agentId, entry.position, entry.state, entry.payload === null ? null : JSON.stringify(entry.payload),
+      provenance === null ? null : JSON.stringify(provenance), entry.generation, entry.executionId, entry.resultCode, entry.result == null ? null : JSON.stringify(entry.result),
+      change.credentialRun === undefined ? null : JSON.stringify(change.credentialRun), history?.recordSequence ?? null, history?.eventSequence ?? null,
+      history?.restoreRevision ?? null, history && "manifestSha256" in history ? Buffer.from(history.manifestSha256, "hex") : null,
+      history && "incompleteReason" in history ? history.incompleteReason : null, change.sequence, entry.createdAt, entry.updatedAt]);
+  }
+
+  private async authorize(tx: Tx, scope: CloudCommandEngineScope, mutable = true) {
+    const authority = await assertCurrentCloudEngineAuthority(tx, { ...scope, workosEnabled: this.options.workosEnabled === true });
+    if (mutable) {
+      const local = await tx.query<{ mode: string; activated: boolean }>(`SELECT workspace.agent_command_mode AS mode,
+        EXISTS(SELECT 1 FROM cloud_workspace_local_command_writers writer
+          WHERE writer.workspace_id=workspace.id AND writer.org_id=workspace.org_id AND writer.state='active') AS activated
+        FROM cloud_workspaces workspace WHERE workspace.id=$1 AND workspace.org_id=$2`, [scope.workspaceId, scope.organizationId]);
+      if (local.rows[0]?.mode !== "legacy" || local.rows[0].activated)
+        throw new CloudCommandError("command_conflict", "The cloud command writer has changed");
+    }
+    return authority;
   }
   private async dispatchAuthority(tx:Tx,scope:CloudCommandEngineScope,row:Command) {
     try {
@@ -266,7 +717,7 @@ export class DatabaseCloudWorkspaceCommandService {
   }
   async snapshot(scope: CloudCommandEngineScope, conversationId: string) {
     return withSystemTx(this.options.pool, async tx => {
-      await this.authorize(tx, scope); await assertCloudRequestActor(tx,scope,"read");
+      await this.authorize(tx, scope, false); await assertCloudRequestActor(tx,scope,"read");
       await this.control(tx, scope, conversationId);
       await this.recover(tx, scope, conversationId);
       return this.view(tx, scope, conversationId);
@@ -277,7 +728,7 @@ export class DatabaseCloudWorkspaceCommandService {
   async read(scope: CloudCommandEngineScope, commandId: string) {
     if (!uuid.safeParse(commandId).success) throw new CloudCommandError("invalid_command", "Invalid command identity");
     return withSystemTx(this.options.pool, async tx => {
-      await this.authorize(tx, scope);
+      await this.authorize(tx, scope, false);
       await assertCloudRequestActor(tx,scope,"read");
       const row = (await tx.query<Command & { conversation_id: string }>(`SELECT * FROM cloud_workspace_commands
         WHERE workspace_id=$1 AND id=$2`, [scope.workspaceId, commandId])).rows[0];
@@ -492,4 +943,78 @@ export class DatabaseCloudWorkspaceCommandService {
       return { ...(await this.view(tx, scope, row.conversation_id)), replayed: false };
     });
   }
+}
+
+type LocalWriterScope = CloudCommandEngineScope & { workosEnabled?: boolean };
+type LocalWriter = {
+  writer_epoch: string; boot_id: string; generation: number; engine_instance_id: string;
+  funding_owner_user_id: string; funding_owner_epoch: string; state: "reserved" | "active" | "retired";
+};
+
+/** Called only inside the authenticated bootstrap transaction. Reservation is
+ * metadata, never native permission or advertisement of an active dispatcher. */
+export async function reserveLocalCloudCommandWriter(
+  tx: Tx, scope: LocalWriterScope, bootId: string, fundingOwnerUserId: string, fundingOwnerEpoch: number,
+): Promise<string> {
+  if (!uuid.safeParse(bootId).success || !uuid.safeParse(fundingOwnerUserId).success ||
+      !Number.isSafeInteger(fundingOwnerEpoch) || fundingOwnerEpoch < 1)
+    throw new CloudCommandError("command_conflict", "Invalid cloud command boot binding");
+  await assertCurrentCloudEngineAuthority(tx, { ...scope, workosEnabled: scope.workosEnabled === true });
+  const binding = (await tx.query<{ owner_user_id: string | null; agent_funding_owner_epoch: string; runtime_boot_id: string | null }>(
+    `SELECT workspace.owner_user_id,workspace.agent_funding_owner_epoch,engine.runtime_boot_id
+      FROM cloud_workspaces workspace JOIN cloud_workspace_engine_instances engine
+        ON engine.workspace_id=workspace.id AND engine.org_id=workspace.org_id AND engine.generation=workspace.current_generation
+      WHERE workspace.id=$1 AND workspace.org_id=$2 AND engine.id=$3 AND engine.generation=$4`,
+    [scope.workspaceId, scope.organizationId, scope.engineInstanceId, scope.generation])).rows[0];
+  if (!binding || binding.owner_user_id !== fundingOwnerUserId || binding.runtime_boot_id !== bootId ||
+      binding.agent_funding_owner_epoch !== String(fundingOwnerEpoch))
+    throw new CloudCommandError("command_conflict", "Cloud command boot binding is no longer current");
+  const existing = await tx.query<LocalWriter>(`SELECT writer_epoch,boot_id,generation,engine_instance_id,
+    funding_owner_user_id,funding_owner_epoch,state FROM cloud_workspace_local_command_writers
+    WHERE workspace_id=$1 AND org_id=$2 AND engine_instance_id=$3 FOR UPDATE`,
+  [scope.workspaceId, scope.organizationId, scope.engineInstanceId]);
+  if (existing.rows.length) {
+    const writer = existing.rows[0]!;
+    if (existing.rows.length !== 1 || writer.boot_id !== bootId || writer.generation !== scope.generation ||
+        writer.funding_owner_user_id !== fundingOwnerUserId || writer.funding_owner_epoch !== String(fundingOwnerEpoch) || writer.state === "retired")
+      throw new CloudCommandError("command_conflict", "Cloud command writer identity is immutable");
+    return writer.writer_epoch;
+  }
+  const epoch = randomUUID();
+  await tx.query(`INSERT INTO cloud_workspace_local_command_writers
+    (workspace_id,org_id,generation,engine_instance_id,boot_id,writer_epoch,funding_owner_user_id,funding_owner_epoch)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+  [scope.workspaceId, scope.organizationId, scope.generation, scope.engineInstanceId, bootId, epoch, fundingOwnerUserId, fundingOwnerEpoch]);
+  return epoch;
+}
+
+/** Private ledger cutover only. Its caller separately proves cache/local-ledger
+ * readiness and native/source retirement before exposing the new mode. A
+ * retired/missing predecessor is never inferred from lease expiry or a new
+ * engine. The exact workspace pointer and mode commit in this SAME transaction. */
+export async function activateLocalCloudCommandWriter(
+  tx: Tx, scope: LocalWriterScope, binding: { bootId: string; writerEpoch: string },
+): Promise<void> {
+  if (!uuid.safeParse(binding.bootId).success || !uuid.safeParse(binding.writerEpoch).success)
+    throw new CloudCommandError("command_conflict", "Invalid cloud command writer binding");
+  await assertCurrentCloudEngineAuthority(tx, { ...scope, workosEnabled: scope.workosEnabled === true });
+  const writer = (await tx.query<LocalWriter>(`SELECT writer_epoch,boot_id,generation,engine_instance_id,
+    funding_owner_user_id,funding_owner_epoch,state FROM cloud_workspace_local_command_writers
+    WHERE workspace_id=$1 AND org_id=$2 AND writer_epoch=$3 FOR UPDATE`,
+  [scope.workspaceId, scope.organizationId, binding.writerEpoch])).rows[0];
+  if (!writer || writer.boot_id !== binding.bootId || writer.engine_instance_id !== scope.engineInstanceId ||
+      writer.generation !== scope.generation || writer.state === "retired")
+    throw new CloudCommandError("command_conflict", "Cloud command writer is unavailable");
+  // Recheck the actual current funding owner/epoch and persisted boot witness.
+  await reserveLocalCloudCommandWriter(tx, scope, binding.bootId, writer.funding_owner_user_id, safeInteger(writer.funding_owner_epoch));
+  const predecessor = await tx.query(`SELECT 1 FROM cloud_workspace_local_command_writers
+    WHERE workspace_id=$1 AND org_id=$2 AND state='active' AND writer_epoch<>$3 LIMIT 1`,
+  [scope.workspaceId, scope.organizationId, binding.writerEpoch]);
+  const legacy = await tx.query(`SELECT 1 FROM cloud_workspace_commands
+    WHERE workspace_id=$1 AND org_id=$2 AND state IN ('queued','dispatching') LIMIT 1`,
+  [scope.workspaceId, scope.organizationId]);
+  if (predecessor.rowCount || legacy.rowCount)
+    throw new CloudCommandError("command_conflict", "Cloud command writer retirement is pending");
+  if (writer.state === "reserved") await tx.query(`UPDATE cloud_workspace_local_command_writers SET state='active',activated_at=now()
+    WHERE workspace_id=$1 AND writer_epoch=$2`, [scope.workspaceId, binding.writerEpoch]);
 }
