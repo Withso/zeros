@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { CloudCommandClientRequestSchema, CloudCommandEntrySchema, CloudCommandSnapshotSchema } from "@zeros/protocol/cloud-commands";
 import { CloudEventCursorSchema, CloudEventReplayResultSchema } from "@zeros/protocol/cloud-events";
 import type { BridgeClient, BridgeMessage } from "../lib/bridge-client";
@@ -33,6 +34,43 @@ export function readCommand(value: unknown, owner: { conversationId: string; com
   const entry = ReadCommandSchema.parse(value);
   if (entry.conversationId !== owner.conversationId || entry.commandId !== owner.commandId) throw new HarnessFailure("receipt_mismatch");
   return entry;
+}
+/** Only authenticated VM replay supplies evidence. Fixture inspection is a
+ * cross-check and cannot fill a missing bridge event. Shared by the manual
+ * wire driver and the actual renderer measurement driver. */
+export async function collectAuthenticatedReplay(client: Pick<BridgeClient, "request">, input: {
+  conversationId: string; floor: { streamId: string; sequence: number }; evidence: TurnEvidence;
+  inspected?(): readonly { sequence: number; frame: Record<string, unknown> }[];
+}): Promise<void> {
+  const floor = CloudEventCursorSchema.parse(input.floor);
+  const state = await client.request("cloudEvents.request", {
+    request: { kind: "snapshot", conversationId: input.conversationId } }) as { cursor: unknown };
+  const head = CloudEventCursorSchema.parse(state.cursor);
+  if (head.streamId !== floor.streamId || head.sequence < floor.sequence) throw new HarnessFailure("replay_content_mismatch");
+  let sequence = floor.sequence, pages = 0;
+  for (;;) {
+    const replay = CloudEventReplayResultSchema.parse(await client.request("cloudEvents.request", {
+      request: { kind: "replay", cursor: { streamId: floor.streamId, sequence } },
+    }));
+    if (replay.streamId !== floor.streamId || replay.cursor > replay.head || replay.head < sequence ||
+      replay.events.some((event, index) => event.sequence !== sequence + index + 1) ||
+      replay.cursor !== (replay.events.at(-1)?.sequence ?? sequence) || ++pages > 100)
+      throw new HarnessFailure("missing_replay");
+    if (replay.head > sequence && !replay.events.length) throw new HarnessFailure("missing_replay");
+    // Native replay flushes pending journal rows before returning. Sample the
+    // independent CP inspection afterwards, never a pre-await array snapshot.
+    const inspected = input.inspected?.();
+    for (const event of replay.events) {
+      const stream = event.frame.cloudStream as { streamId?: unknown; sequence?: unknown; requiresSnapshot?: unknown } | undefined;
+      if (stream?.streamId !== replay.streamId || stream.sequence !== event.sequence || stream.requiresSnapshot === true)
+        throw new HarnessFailure("replay_content_mismatch");
+      if (inspected && !inspected.some(item => item.sequence === event.sequence && isDeepStrictEqual(item.frame, event.frame)))
+        throw new HarnessFailure("receipt_mismatch");
+      input.evidence.observe(event.frame, "replay");
+    }
+    sequence = replay.cursor;
+    if (sequence === replay.head) break;
+  }
 }
 export async function cancelAfterToolStart(probe: () => Promise<boolean>, stop: () => Promise<unknown>, timeoutMs = 10_000, intervalMs = 50): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -104,34 +142,7 @@ export async function driveTurn(client: Client, input: Omit<Enqueue, "revision" 
       if (["succeeded", "failed", "cancelled", "uncertain"].includes(entry.state)) {
         settled = true;
         await stopping;
-        // Exercise the same authenticated replay operation as CloudEventReader.
-        const state = await client.request("cloudEvents.request", { request: { kind: "snapshot", conversationId: input.conversationId } }) as { cursor: unknown };
-        const head = CloudEventCursorSchema.parse(state.cursor);
-        if (head.streamId !== floor.streamId || head.sequence < floor.sequence) throw new HarnessFailure("replay_content_mismatch");
-        let sequence = floor.sequence, pages = 0;
-        const inspected = input.replayEvents?.();
-        for (;;) {
-          const replay = CloudEventReplayResultSchema.parse(await client.request("cloudEvents.request", {
-            request: { kind: "replay", cursor: { streamId: floor.streamId, sequence } },
-          }));
-          if (replay.streamId !== floor.streamId || replay.cursor > replay.head || replay.head < sequence ||
-            replay.events.some((event, index) => event.sequence !== sequence + index + 1) ||
-            replay.cursor !== (replay.events.at(-1)?.sequence ?? sequence) || ++pages > 100)
-            throw new HarnessFailure("missing_replay");
-          if (replay.head > sequence && !replay.events.length) throw new HarnessFailure("missing_replay");
-          for (const event of replay.events) {
-            const stream = event.frame.cloudStream as { streamId?: unknown; sequence?: unknown; requiresSnapshot?: unknown } | undefined;
-            if (stream?.streamId !== replay.streamId || stream.sequence !== event.sequence || stream.requiresSnapshot === true)
-              throw new HarnessFailure("replay_content_mismatch");
-            // Fixture inspection is only a consistency cross-check. It can
-            // never replace an event absent from authenticated bridge replay.
-            if (inspected && !inspected.some(item => item.sequence === event.sequence && JSON.stringify(item.frame) === JSON.stringify(event.frame)))
-              throw new HarnessFailure("receipt_mismatch");
-            evidence.observe(event.frame, "replay");
-          }
-          sequence = replay.cursor;
-          if (sequence === replay.head) break;
-        }
+        await collectAuthenticatedReplay(client, { conversationId: input.conversationId, floor, evidence, inspected: input.replayEvents });
         return { commandId: input.commandId, state: entry.state, resultCode: entry.resultCode, toolCalls: evidence.toolCalls,
           toolKinds: [...evidence.toolKinds],
           ...evidence.finish(entry, input.expected) };

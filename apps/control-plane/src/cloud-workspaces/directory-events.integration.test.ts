@@ -76,10 +76,10 @@ d("cloud workspace directory live updates",()=>{
     expect(await listSecurityEvents(pool,guest,snapshot.cursor)).toEqual([expect.objectContaining({organizationId:null,workspaceId:null,payload:{reason:"workspace_directory_changed"}})]);
   });
   it("scrubs purged identities from an undrained directory row",async()=>{
-    const fixture=await seedReadyCloudWorkspace(pool),first=randomUUID(),second=randomUUID();
+    const fixture=await seedReadyCloudWorkspace(pool),first=(await user(randomUUID())).id,second=(await user(randomUUID())).id;
     await pool.query("UPDATE cloud_workspace_directory_outbox SET guest_user_ids=$2::uuid[] WHERE workspace_id=$1",[fixture.workspaceId,[first,second]]);
-    await withSystemTx(pool,tx=>eraseCloudWorkspaceCollaborationIdentity(tx,first));
-    await withSystemTx(pool,tx=>eraseCloudWorkspaceCollaborationIdentity(tx,fixture.userId));
+    for(const id of [first,first,fixture.userId,fixture.userId])
+      await withSystemTx(pool,tx=>eraseCloudWorkspaceCollaborationIdentity(tx,id));
     expect((await pool.query("SELECT owner_user_id,guest_user_ids FROM cloud_workspace_directory_outbox WHERE workspace_id=$1",[fixture.workspaceId])).rows).toEqual([{owner_user_id:null,guest_user_ids:[second]}]);
   });
   it("retains a removal notice while its recipient is being purged",async()=>{

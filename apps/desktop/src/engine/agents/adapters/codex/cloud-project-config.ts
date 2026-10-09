@@ -3,7 +3,7 @@ import { open, realpath, readlink, opendir } from "node:fs/promises";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
-import type { CloudProviderExecution } from "../../cloud-provider-execution";
+import { cloudExecutionLifetime, type CloudProviderExecution } from "../../cloud-provider-execution";
 import type { AvailableCommand } from "@zeros/protocol/agent-events";
 
 // Native repository configuration stays disabled. These data-only settings
@@ -55,12 +55,12 @@ export async function readCloudCodexProjectConfig(cwd: string): Promise<ProjectS
 export async function captureCloudCodexProjectConfig(execution: CloudProviderExecution, cwd: string): Promise<ProjectSnapshot> {
   const existing = snapshots.get(execution);
   if (existing) return existing;
-  execution.lease.assertLive();
+  cloudExecutionLifetime(execution).assertLive();
   const settings = await readCloudCodexProjectConfig(cwd);
   const instructions = await readCloudCodexInstructions(cwd, settings.settings);
   const snapshot:ProjectSnapshot={settings:Object.freeze({...settings.settings,
     ...(instructions.text?{developer_instructions:instructions.text}:{})}),excluded:settings.excluded||instructions.excluded};
-  execution.lease.assertLive();
+  cloudExecutionLifetime(execution).assertLive();
   snapshots.set(execution, snapshot);
   return snapshot;
 }
@@ -100,7 +100,7 @@ export function cloudCodexProjectSettings(execution: CloudProviderExecution): Re
  * never from the engine's HOME. Bodies remain instruction data, as in Local
  * discovery; this does not enable native plugins or project configuration. */
 export async function discoverCloudCodexCommands(execution:CloudProviderExecution):Promise<AvailableCommand[]>{
-  execution.lease.assertLive();const commands:AvailableCommand[]=[];
+  cloudExecutionLifetime(execution).assertLive();const commands:AvailableCommand[]=[];
   try{
     const root=await realpath(execution.cwd),directory=path.join(root,".codex/prompts");
     if(await realpath(path.join(root,".codex"))!==path.join(root,".codex")||await realpath(directory)!==directory)return [];
@@ -123,5 +123,5 @@ export async function discoverCloudCodexCommands(execution:CloudProviderExecutio
       }catch{/* Optional command metadata never blocks a turn. */}finally{await file?.close();}
     }
   }catch{/* Missing optional repository commands are normal. */}
-  execution.lease.assertLive();return commands.sort((a,b)=>a.name.localeCompare(b.name));
+  cloudExecutionLifetime(execution).assertLive();return commands.sort((a,b)=>a.name.localeCompare(b.name));
 }

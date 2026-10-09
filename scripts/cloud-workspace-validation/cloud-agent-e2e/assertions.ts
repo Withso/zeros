@@ -17,7 +17,13 @@ const CODES = new Set(["empty_success", "missing_live_delta", "delta_after_termi
   "cloud_actor_authority_rejected", "command_response_invalid", "command_service_unavailable", "invalid_command", "command_conflict",
   "command_context_changed", "command_not_found", "command_limit", "engine_authority_rejected",
   "ubuntu_checksum_invalid", "ubuntu_archive_invalid", "ubuntu_download_failed", "ubuntu_package_install_failed", "engine_identity_missing", "replay_content_mismatch",
-  "fixture_terminal_missing", "fixture_terminal_conflict", "fixture_receipt_not_terminal", "fixture_settlement_conflict"]);
+  "fixture_terminal_missing", "fixture_terminal_conflict", "fixture_receipt_not_terminal", "fixture_settlement_conflict",
+  "renderer_grant_origin_invalid", "renderer_grant_identity_invalid", "renderer_grant_request_invalid", "renderer_grant_invalid",
+  "renderer_runtime_unqualified", "renderer_prepare_denied", "renderer_prepare_response_invalid", "renderer_prepare_transport_failed",
+  "renderer_prepare_timeout", "renderer_prepare_cancelled", "timing_packet_invalid", "timing_scope_mismatch", "timing_coverage_incomplete",
+  "timing_turn_mismatch", "timing_stage_missing", "timing_duplicate_stage", "timing_stage_order_invalid", "timing_calibration_invalid",
+  "timing_capability_missing", "renderer_command_invalid", "renderer_command_missing",
+  "fixture_measurement_invalid", "ingress_calibration_invalid", "ingress_interval_outside_window", "ingress_details_incomplete"]);
 export class HarnessFailure extends Error {
   constructor(readonly code: string) { super(code); this.name = "HarnessFailure"; }
 }
@@ -60,24 +66,33 @@ export function selectProviders(values: readonly string[]): Provider[] {
   return PROVIDERS.filter(value => values.includes(value));
 }
 export function safeTrace(input: Record<string, unknown>): Record<string, unknown> {
-  if (!(STAGES as readonly unknown[]).includes(input.stage) || !["passed", "failed", "pending", "observed"].includes(String(input.status)))
-    throw new HarnessFailure("invalid_trace");
-  const result: Record<string, unknown> = { stage: input.stage, status: input.status };
-  if (input.provider !== undefined) {
-    if (!(PROVIDERS as readonly unknown[]).includes(input.provider)) throw new HarnessFailure("invalid_trace");
-    result.provider = input.provider;
-  }
-  if (input.code !== undefined) {
-    if (!knownCode(input.code)) throw new HarnessFailure("invalid_trace");
-    result.code = input.code;
-  }
-  for (const key of ["elapsedMs", "liveDeltaBytes", "replayDeltaBytes", "frames", "count"]) {
-    if (input[key] === undefined) continue;
-    if (!Number.isSafeInteger(input[key]) || (input[key] as number) < 0 || (input[key] as number) > 1_000_000_000)
+  try {
+    // Validate and retain the same primitive sample; no coercible object or
+    // changing getter can substitute an unvalidated value into the trace.
+    const { stage, status, provider, code } = input;
+    if (!(STAGES as readonly unknown[]).includes(stage) || typeof status !== "string" ||
+        !["passed", "failed", "pending", "observed"].includes(status))
       throw new HarnessFailure("invalid_trace");
-    result[key] = input[key];
+    const result: Record<string, unknown> = { stage, status };
+    if (provider !== undefined) {
+      if (!(PROVIDERS as readonly unknown[]).includes(provider)) throw new HarnessFailure("invalid_trace");
+      result.provider = provider;
+    }
+    if (code !== undefined) {
+      if (!knownCode(code)) throw new HarnessFailure("invalid_trace");
+      result.code = code;
+    }
+    for (const key of ["elapsedMs", "liveDeltaBytes", "replayDeltaBytes", "frames", "count"]) {
+      const value = input[key];
+      if (value === undefined) continue;
+      if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > 1_000_000_000)
+        throw new HarnessFailure("invalid_trace");
+      result[key] = value;
+    }
+    return result;
+  } catch {
+    throw new HarnessFailure("invalid_trace");
   }
-  return result;
 }
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
@@ -243,13 +258,15 @@ export async function runWithDeadline<T>(work: (signal: AbortSignal) => Promise<
   const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => {
     controller.abort(); reject(new HarnessFailure("turn_timeout"));
   }, timeoutMs); });
-  try { return await Promise.race([work(controller.signal), timeout]); }
-  finally {
-    clearTimeout(timer); controller.abort();
-    let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
-    try { await Promise.race([cleanup(), new Promise<never>((_, reject) => {
-      cleanupTimer = setTimeout(() => reject(new HarnessFailure("cleanup_unconfirmed")), cleanupMs);
-    })]); } catch { throw new HarnessFailure("cleanup_unconfirmed"); }
-    finally { clearTimeout(cleanupTimer); }
-  }
+  let outcome: { succeeded: true; value: T } | { succeeded: false; error: unknown };
+  try { outcome = { succeeded: true, value: await Promise.race([work(controller.signal), timeout]) }; }
+  catch (error) { outcome = { succeeded: false, error }; }
+  finally { clearTimeout(timer); controller.abort(); }
+  let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+  try { await Promise.race([cleanup(), new Promise<never>((_, reject) => {
+    cleanupTimer = setTimeout(() => reject(new HarnessFailure("cleanup_unconfirmed")), cleanupMs);
+  })]); } catch { throw new HarnessFailure("cleanup_unconfirmed"); }
+  finally { clearTimeout(cleanupTimer); }
+  if (!outcome.succeeded) throw outcome.error;
+  return outcome.value;
 }

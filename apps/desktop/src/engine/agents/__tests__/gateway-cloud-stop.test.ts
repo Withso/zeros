@@ -4,10 +4,13 @@ import type {AgentAdapter} from "../types";
 import type {PreparedBoundary} from "../containment/types";
 import {testExecutionBoundary} from "./helpers/test-execution-boundary";
 const cloud=vi.hoisted(()=>({lookup:vi.fn()}));
-vi.mock("../cloud-provider-execution",()=>({cloudProviderExecution:cloud.lookup}));
+vi.mock("../cloud-provider-execution",async original=>({
+  ...await original<typeof import("../cloud-provider-execution")>(),cloudProviderExecution:cloud.lookup,
+}));
 describe("cloud Stop authority",()=>{
   it("acknowledges proven retirement even if native cancellation never resolves",async()=>{
-    cloud.lookup.mockReturnValue({lease:{close:vi.fn(async()=>{})}});
+    const lease={close:vi.fn(async()=>{})};
+    cloud.lookup.mockReturnValue({mode:"actor-grant-v1",provider:"cursor",lease,lifetime:lease});
     const gateway=new AgentGateway({projectRoot:"/w",executionBoundary:testExecutionBoundary(),events:{onSessionUpdate(){},onPermissionRequest(){},onQuestionRequest(){},onAgentStderr(){},onAgentExit(){}}});
     const state=gateway as unknown as {adapters:Map<string,AgentAdapter>;executionToAgent:Map<string,string>;executionBoundaries:Map<string,PreparedBoundary>};
     state.adapters.set("cursor",{agentId:"cursor",cancel:()=>new Promise(()=>{})} as unknown as AgentAdapter);state.executionToAgent.set("run","cursor");state.executionBoundaries.set("run",{} as PreparedBoundary);
@@ -17,7 +20,8 @@ describe("cloud Stop authority",()=>{
   });
   it("fences the lease before native cancellation and waits for background retirement proof",async()=>{
     let finish!:(()=>void);const proof=new Promise<void>(resolve=>{finish=resolve;});let fenced=false;
-    const close=vi.fn(()=>{fenced=true;return proof;});cloud.lookup.mockReturnValue({lease:{close}});
+    const close=vi.fn(()=>{fenced=true;return proof;});const lease={close};
+    cloud.lookup.mockReturnValue({mode:"actor-grant-v1",provider:"cursor",lease,lifetime:lease});
     const cancel=vi.fn(async()=>{expect(fenced).toBe(true);});
     const gateway=new AgentGateway({projectRoot:"/w",executionBoundary:testExecutionBoundary(),events:{onSessionUpdate(){},onPermissionRequest(){},onQuestionRequest(){},onAgentStderr(){},onAgentExit(){}}});
     const state=gateway as unknown as {adapters:Map<string,AgentAdapter>;executionToAgent:Map<string,string>;executionBoundaries:Map<string,PreparedBoundary>};

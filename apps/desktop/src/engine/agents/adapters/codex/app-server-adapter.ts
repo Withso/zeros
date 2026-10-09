@@ -1,5 +1,5 @@
 import type { SteerOutcome } from "@zeros/protocol/messages";
-import {cloudProviderExecution} from "../../cloud-provider-execution";
+import {cloudExecutionLifetime,cloudProviderExecution} from "../../cloud-provider-execution";
 import {cloudCodexImage} from "./cloud-policy";
 import { normalizeProviderError, providerErrorFailure } from "../shared/provider-error";
 import { FallbackModelSelection } from "../shared/fallback-model-selection";
@@ -75,6 +75,8 @@ import type {
   LoadSessionResponse,
   McpServerRegistration,
   NewSessionResponse,
+  NativePromptStage,
+  NativePromptOutputKind,
   PromptResponse,
   QuestionAnswer,
   QuestionRequest,
@@ -1070,7 +1072,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         if (session.runtime.cloudFailure) throw session.runtime.cloudFailure;
         if (this.sessions.get(session.zerosSessionId) !== session || session.cancelRequested)
           throw new CloudCommandFailureError({ stage: "provider_start", category: "lifecycle_superseded" });
-        try { cloud.lease.assertLive(); }
+        try { cloudExecutionLifetime(cloud).assertLive(); }
         catch (error) {
           // Native exit closes a live lease with a default lifecycle cause.
           // A precise earlier authority/credential failure keeps precedence.
@@ -1301,6 +1303,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     sessionId: string;
     turnId?: string;
     prompt: ContentBlock[];
+    onNativePromptStage?: (stage: NativePromptStage) => void;
+    onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void;
   }): Promise<{ stopReason: StopReason; response: PromptResponse }> {
     // A prompt can race a session teardown: the engine supersedes a chat's
     // prior session when a rebuild creates a new one (index.ts), so an
@@ -1402,6 +1406,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // settle through turn/completed. Capture the id immediately so the
       // existing Stop path can interrupt either one, including the ack race.
       const turnOptions = {
+        ...(opts.onNativePromptStage ? { onNativePromptStage: opts.onNativePromptStage } : {}),
+        ...(opts.onNativeOutput ? { onNativeOutput: (kind: NativePromptOutputKind, receivedAtMs?: number) => {
+          if (!session.cancelRequested && this.sessions.get(opts.sessionId) === session) return opts.onNativeOutput?.(kind, receivedAtMs);
+        } } : {}),
         onTurnStarted: (turnId: string) => {
           session.activeTurnId = turnId;
           if (nativeWorkingTreeReview) session.notifications.bindRootReviewTurn(turnId);

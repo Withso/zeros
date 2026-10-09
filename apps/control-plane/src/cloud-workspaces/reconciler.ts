@@ -35,6 +35,7 @@ import {
 } from "./runtime-access.js";
 import { DatabaseCloudWorkspacePaidAuthorityReconciler } from "./paid-authority.js";
 import { CloudWorkspaceComputeLeaseCoordinator, type ManagedComputePolicy } from "./compute-leases.js";
+import {retireCloudAgentBootSources} from "./agent-boot-credentials.js";
 
 type LifecycleOperation = "create" | "stop" | "wake" | "archive" | "delete";
 type DesiredState = "running" | "stopped" | "archived" | "deleted";
@@ -955,6 +956,9 @@ export class CloudWorkspaceReconciler {
           [intent.id, resultState],
         );
       }
+      if(resultState==="succeeded"&&providerAccessRevocationProven&&["stop","archive","delete"].includes(intent.operation))
+        await retireCloudAgentBootSources(tx,{workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},
+          {kind:"provider-lifecycle",intentId:intent.id});
       await audit(
         tx,
         intent.orgId,

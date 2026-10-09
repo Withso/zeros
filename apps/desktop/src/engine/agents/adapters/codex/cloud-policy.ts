@@ -1,4 +1,4 @@
-import {executionMcpServers,type CloudProviderExecution} from "../../cloud-provider-execution";
+import {cloudExecutionLifetime,executionMcpServers,type CloudProviderExecution} from "../../cloud-provider-execution";
 import type {DynamicToolCallParams} from "./generated/v2/DynamicToolCallParams";
 import type {DynamicToolCallResponse} from "./generated/v2/DynamicToolCallResponse";
 import { z } from "zod";
@@ -13,9 +13,9 @@ const controls=new Set(["turn/steer","thread/name/set","thread/compact/start","t
 const pick=(params:Record<string,unknown>,names:readonly string[])=>Object.fromEntries(names.filter(name=>params[name]!==undefined).map(name=>[name,params[name]]));
 export async function cloudCodexToolCall(execution:CloudProviderExecution,input:DynamicToolCallParams):Promise<DynamicToolCallResponse>{
   try{
-    execution.lease.assertLive();
+    const lifetime=cloudExecutionLifetime(execution); lifetime.assertLive();
     if(input.namespace!==null||input.tool!=="zeros_workspace")throw new Error("Unregistered cloud tool");
-    const result=await execution.tools.call(input.arguments,execution.lease.signal);execution.lease.assertLive();
+    const result=await execution.tools.call(input.arguments,lifetime.signal);lifetime.assertLive();
     return {success:result.ok,contentItems:[{type:"inputText",text:JSON.stringify(result)}]};
   }catch{return {success:false,contentItems:[{type:"inputText",text:"Cloud workspace tool is unavailable."}]};}
 }
@@ -53,24 +53,24 @@ const nativeThreads = new WeakMap<CloudProviderExecution, string>();
 /** Called only after native start/resume, or by the admitted fork adapter.
  * A renderer-provided thread id never creates this binding. */
 export function bindCloudCodexThread(execution: CloudProviderExecution, threadId: string): void {
-  execution.lease.assertLive();
+  cloudExecutionLifetime(execution).assertLive();
   if (!threadId || threadId.length > 256) throw new Error("Invalid native conversation");
   const previous = nativeThreads.get(execution);
   if (previous && previous !== threadId) throw new Error("Cloud native conversation changed");
   nativeThreads.set(execution, threadId);
 }
 export function cloudCodexCapabilities(execution: CloudProviderExecution) {
-  execution.lease.assertLive();
-  const admitted=execution.lease.nativeCapabilities;
+  cloudExecutionLifetime(execution).assertLive();
+  const admitted=execution.nativeCapabilities;
   return { version: 1 as const, goals: admitted?.goals===true, nativeReview: admitted?.nativeReview===true, nativeFork: admitted?.nativeFork===true,
-    connectedApps: admitted?.connectedApps===true && !!execution.lease.codexAuth?.(), multiAgent: admitted?.multiAgent===true };
+    connectedApps: admitted?.connectedApps===true && !!execution.auth.codexAuth(), multiAgent: admitted?.multiAgent===true };
 }
 export function cloudCodexConfig(execution: CloudProviderExecution): Record<string, unknown> {
   const config: Record<string, unknown> = {...cloudCodexProjectSettings(execution), ...CLOUD_CODEX_CONFIG};
-  if(execution.lease.environment){
+  if(execution.environment){
     // These config entries also reach app-server argv: pass names only. The
     // executor inherits values from its private, credential-free launch env.
-    const names=Object.keys(cloudComputerProcessEnvironment({},execution.lease.environment.values,"agent"));
+    const names=Object.keys(cloudComputerProcessEnvironment({},execution.environment.values,"agent"));
     config["shell_environment_policy.inherit"]="all";
     config["shell_environment_policy.ignore_default_excludes"]=true;
     config["shell_environment_policy.include_only"]=["HOME","PATH","LANG","SHELL","TMPDIR","USER","LOGNAME",...names];
@@ -91,7 +91,7 @@ function ownThread(execution: CloudProviderExecution, value: unknown): string {
 /** No caller can clear the remote environment or change admitted model/auth.
  * Host process/fs/config mutation RPCs have no cloud-facing route. */
 export function cloudCodexRequest(execution:CloudProviderExecution,environmentId:string,method:string,input:unknown):unknown{
-  execution.lease.assertLive();const params=record(input),model=execution.lease.admission.model,cwd=execution.cwd;
+  cloudExecutionLifetime(execution).assertLive();const params=record(input),model=execution.model,cwd=execution.cwd;
   if(params.model!==undefined&&params.model!==null&&params.model!==model)throw new Error("Cloud model changes require a new credential admission");
   const environments=[{environmentId,cwd,runtimeWorkspaceRoots:[cwd]}];
   const servers=executionMcpServers(execution,[])??[];

@@ -95,13 +95,14 @@ suite("persistent Dev connection authority (real PostgreSQL)", () => {
       },
     };
   });
-  async function connect(kind: "codex" | "github" = "codex") {
+  async function connect(kind: "codex" | "github" = "codex",refresh?:string) {
     const material =
       kind === "codex"
         ? {
             kind: "codex-chatgpt",
             nativeCache: syntheticCodexCache({
               expiresAt: Math.floor(Date.now() / 1000) + 30,
+              ...(refresh?{refresh}:{}),
             }),
           }
         : {
@@ -138,6 +139,35 @@ suite("persistent Dev connection authority (real PostgreSQL)", () => {
     model: "test-model",
     action: "agent" as const,
   };
+  it("conditionally removes the exact organization consent with durable same-request replay",async()=>{
+    const {ar}=await connect(),request={version:1 as const,operationId:randomUUID(),connectionId:ar.connectionId,
+      bindingId:ar.bindingId,expectedRevision:ar.revision,expectedConsentRevision:ar.consentRevision,scope:"organization" as const};
+    const result=await store.removeConditionally(a,request);
+    expect(result).toEqual({version:1,operationId:request.operationId,connectionId:ar.connectionId,scope:"organization",removed:true});
+    expect(await store.removeConditionally(a,request)).toEqual(result);
+    expect((await store.restore(a))).toEqual([]);
+    expect((await pool.query("SELECT revoked_at FROM dev_connections.connections WHERE id=$1",[ar.connectionId])).rows[0]!.revoked_at).toBeNull();
+    await expect(store.removeConditionally(a,{...request,scope:"global"})).rejects.toMatchObject({status:409});
+  });
+  it("refuses changed connection or consent revisions without revoking the replacement",async()=>{
+    const {ar}=await connect(),request={version:1 as const,operationId:randomUUID(),connectionId:ar.connectionId,
+      bindingId:ar.bindingId,expectedRevision:ar.revision,expectedConsentRevision:ar.consentRevision,scope:"global" as const};
+    await store.consent(a,ar.connectionId,{models:["another-model"],repositories:[],scopes:["agent"]});
+    await expect(store.removeConditionally(a,request)).rejects.toMatchObject({status:409});
+    expect((await pool.query("SELECT revoked_at FROM dev_connections.connections WHERE id=$1",[ar.connectionId])).rows[0]!.revoked_at).toBeNull();
+  });
+  it("replays a conditional global removal without deleting a subsequently associated replacement",async()=>{
+    const {ar}=await connect(),request={version:1 as const,operationId:randomUUID(),connectionId:ar.connectionId,
+      bindingId:ar.bindingId,expectedRevision:ar.revision,expectedConsentRevision:ar.consentRevision,scope:"global" as const};
+    const result=await store.removeConditionally(a,request);
+    const replacement=await connect("codex",`synthetic-replacement-refresh-${randomUUID()}`);
+    expect(await store.removeConditionally(a,request)).toEqual(result);
+    expect((await pool.query("SELECT revoked_at FROM dev_connections.connections WHERE id=$1",[ar.connectionId])).rows[0]!.revoked_at).not.toBeNull();
+    expect((await store.restore(a)).map(value=>value.bindingId)).toContain(replacement.ar.bindingId);
+    expect((await pool.query("SELECT revoked_at FROM dev_connections.connections WHERE id=$1",[replacement.ar.connectionId])).rows[0]!.revoked_at).toBeNull();
+    const other={...a,member:{...a.member,subject:"another-owner"}};
+    await expect(store.removeConditionally(other,request)).rejects.toMatchObject({status:403});
+  });
   const rotated = () =>
     syntheticCodexCache({ refresh: `synthetic-rotated-${randomUUID()}` });
   const broker = (renew: any) =>

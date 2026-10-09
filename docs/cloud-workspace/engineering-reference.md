@@ -17,6 +17,10 @@ Paths in this table are relative to the stated directory.
 | Runtime selection, transfer and staging | Same directory: `runtime-selection.ts`, `runtime-transition.ts`, `runtime-transfer.ts`, `runtime-staging.ts`, `runtime-resident-update.ts` |
 | Durable commands, receipts, records and history | Same directory: `commands.ts`, `action-receipts.ts`, `durable-record.ts`, `history.ts` |
 | Agent grant, typed admission and renewal | Same directory: `agent-credential-routes.ts`, `agent-executions.ts`; engine `cloud-agent-execution-client.ts`, `agents/cloud-agent-lease.ts`; protocol `cloud-commands.ts` |
+| Boot funding, vault, role consent and fenced removal | Same directory: `agent-boot-credentials.ts`, `agent-boot-contract.ts`, `agent-funding-consent.ts`, `agent-credential-mutations.ts`; protocol `cloud-agent-bootstrap.ts` |
+| VM-local queue, warm native pump and mirror | Engine `cloud-local-command-queue.ts`, `cloud-local-command-queue-boot.ts`, `cloud-local-command-native-pump.ts`, `cloud-local-command-mirror.ts`; protocol `cloud-local-mirror.ts` |
+| Canonical capture and passive stopped history | Engine `cloud-local-command-queue-history.ts`; CP `history.ts`, `history-local-contract.ts`, `history-routes.ts`, `event-streams.ts` |
+| Captured credentials and session authority | Engine `agents/cloud-agent-credential-cache.ts`, `agents/cloud-actor-authority.ts`, `agents/cloud-agent-session-lifetime.ts` |
 | Actor/device authority and native services | Same directory: `actor-sessions.ts`, `engine-client-admission.ts`, `access.ts`, `runtime-access.ts` |
 | GitHub read and per-operation write authority | Same directory: `github-read-routes.ts`, `github-read-proxy.ts`, `github-write-grants.ts`, `github-native-grants.ts` |
 | Funding, usage and durable storage | Same directory: `paid-authority.ts`, `compute-funding.ts`, `compute-leases.ts`, `object-store.ts`, `object-maintenance.ts` |
@@ -26,12 +30,14 @@ Paths in this table are relative to the stated directory.
 | Bounded native instructions/config and MCP | Engine `agents/adapters/claude-sdk/cloud-instructions.ts`, `agents/adapters/codex/cloud-project-config.ts`, `agents/adapters/cursor-sdk/cloud-instructions.ts`, `agents/cloud-mcp.ts`, `agents/cloud-skills.ts` |
 | Actor-owned reference images | Engine `files/cloud-attachment-transfer.ts`, `workspace/service.ts`, `cloud-actor-policy.ts`; protocol `attachment-policy.ts` |
 | Exact desktop routing and receipt recovery | `apps/desktop/src/renderer/platform/bridge/workspace-runtime-client.ts`, `cloud-agent-connection.ts`, `open-cloud-runtime.ts` |
+| Actual-use cards and removal decisions | Renderer `features/agent/cloud-agent-credential-selectors.ts`, `cloud-agent-credential-cards.tsx`; `features/settings/cloud-credential-removal.ts`, `cloud-credential-removal-dialog.tsx` |
+| Direct provider connection | Protocol `cloud-runtime-connection.ts`; Electron `cloud-workspace-access-client.ts`, `cloud-workspace-access-broker.ts`; renderer `platform/bridge/ws-client.ts` |
 | Create, catalog, wake/restart | `apps/desktop/src/renderer/state/cloud-workspace-create.ts`, `cloud-workspace-catalog.ts`, `cloud-workspace-wake.ts`, `cloud-workspace-restart.ts` |
 | Native access and replica lifetime | `apps/desktop/electron/cloud-workspace-access-broker.ts`, `cloud-workspace-ssh-runtime.ts`, `cloud-workspace-port-forwarding.ts`; engine `cloud-replica-broker.ts` |
 | Desktop transcript presentation cache | `apps/desktop/electron/cloud-transcript-cache-store.ts`, `ipc/commands/cloud-transcript-cache.ts`; renderer `state/cloud-transcript-cache.ts` |
 | Source-mode native agent harness | `scripts/cloud-workspace-validation/cloud-agent-e2e/`, including fixture control plane; `scripts/__tests__/cloud-agent-e2e*.test.ts` |
 
-The agent factory retains the existing containment, history locks, lease and
+The agent factory retains the existing containment, history locks, legacy lease and
 retirement layers; it does not run providers as the engine. The legacy workload
 bridge/coordinator retains production factory/adapter wiring and qualification
 callers. Human LSP/file/process helpers are unchanged. Owning contracts:
@@ -233,10 +239,13 @@ DB for control-plane integration. Repository verification and platform-specific
 gates are in `AGENTS.md`; release/qualification procedures are in
 [qualification status](qualification-status.md), [release worker qualification](release-worker-qualification.md),
 [runtime skew](runtime-skew-gate.md) and [native access](native-access-acceptance.md).
-Shared protocol changes use `PROTOCOL_VERSION` and the mixed-version guard;
+Shared protocol changes use the mixed-version guard. Phase 3 keeps
+`PROTOCOL_VERSION` unchanged and gates additive contracts by explicit boot-mode
+and transport negotiation; a missing required binding refuses before work.
 `LocalTransport` stays loopback-only and cloud work never relaxes its defenses.
 
-Keep provider SDKs, provisioning and tenant authorization in the control plane;
+Keep provisioning and tenant authorization in the control plane, native provider
+SDKs behind the engine adapters,
 device absolute paths, cache, SSH files and tunnel processes in desktop-owned
 storage; and live workspace operation ordering in the engine. Update this source
 map and `REPOSITORY-ARCHITECTURE.md` when those boundaries change.

@@ -31,6 +31,64 @@ function fixture(headless?:{prepare(claim:CloudCommandClaim):Promise<void>;retir
   return { claim, snapshot, completion, dependencies, runtime, send, stop, read };
 }
 describe("engine-owned cloud command dispatch", () => {
+  it("observes terminal commit only after the exact durable receipt is confirmed, containing observer failure", async () => {
+    const f = fixture(), durable = deferred<unknown>(), settled = vi.fn(() => { throw new Error("synthetic observer failure"); });
+    Object.assign(f.dependencies, { settled });
+    const request = f.dependencies.request.getMockImplementation()!;
+    f.dependencies.request.mockImplementation(async input => input.kind === "settle" ? durable.promise : request(input));
+    const entry = { commandId: f.claim.commandId, position: 1, state: "succeeded" as const, payload: null,
+      executionId: f.claim.executionId, generation: 1, resultCode: null,
+      createdAt: new Date(0).toISOString(), updatedAt: new Date(1).toISOString() };
+    try {
+      await f.send(); await vi.waitFor(() => expect(f.dependencies.dispatch).toHaveBeenCalledOnce());
+      f.completion.resolve({ state: "succeeded", resultCode: null });
+      await vi.waitFor(() => expect(f.dependencies.request.mock.calls.some(([input]) => input.kind === "settle")).toBe(true));
+      expect(settled).not.toHaveBeenCalled();
+      durable.resolve({ ...f.snapshot(), receipts: [entry] });
+      await vi.waitFor(() => expect(settled).toHaveBeenCalledExactlyOnceWith({ commandId: f.claim.commandId,
+        claimId: f.claim.claimId, conversationId: f.claim.conversationId, executionId: f.claim.executionId,
+        turnId: f.claim.payload.userMessageId, provider: f.claim.payload.agentId }, entry));
+      await vi.waitFor(() => expect(f.runtime.hasActiveWork()).toBe(false));
+    } finally { durable.resolve(f.snapshot()); f.runtime.close(); }
+  });
+  it("marks a lost terminal acknowledgement only after same-claim recovery, without redispatch", async () => {
+    const f = fixture(), settled = vi.fn(); Object.assign(f.dependencies, { settled });
+    const request = f.dependencies.request.getMockImplementation()!; let attempts = 0;
+    const entry = { commandId: f.claim.commandId, position: 1, state: "failed" as const, payload: null,
+      executionId: f.claim.executionId, generation: 1, resultCode: "cloud_provider_prompt_protocol_error",
+      createdAt: new Date(0).toISOString(), updatedAt: new Date(1).toISOString() };
+    f.dependencies.request.mockImplementation(async input => {
+      if (input.kind !== "settle") return request(input);
+      if (++attempts === 1) throw new Error("lost published receipt");
+      return { ...f.snapshot(), receipts: [entry] };
+    });
+    try {
+      await f.send(); await vi.waitFor(() => expect(f.dependencies.dispatch).toHaveBeenCalledOnce());
+      f.completion.resolve({ state: "failed", resultCode: entry.resultCode });
+      await vi.waitFor(() => expect(attempts).toBe(1));
+      expect(settled).not.toHaveBeenCalled();
+      await new Promise(resolve => setImmediate(resolve)); f.runtime.kick("chat");
+      await vi.waitFor(() => expect(settled).toHaveBeenCalledExactlyOnceWith({ commandId: f.claim.commandId,
+        claimId: f.claim.claimId, conversationId: f.claim.conversationId, executionId: f.claim.executionId,
+        turnId: f.claim.payload.userMessageId, provider: f.claim.payload.agentId }, entry));
+      expect(f.dependencies.dispatch).toHaveBeenCalledOnce();
+    } finally { f.runtime.close(); }
+  });
+  it.each(["execution", "state", "command"] as const)("never marks a foreign %s terminal response", async cause => {
+    const f = fixture(), settled = vi.fn(); Object.assign(f.dependencies, { settled });
+    const request = f.dependencies.request.getMockImplementation()!;
+    const entry = { commandId: cause === "command" ? randomUUID() : f.claim.commandId, position: 1,
+      state: cause === "state" ? "failed" : "succeeded", payload: null,
+      executionId: cause === "execution" ? "foreign-execution" : f.claim.executionId, generation: 1, resultCode: null,
+      createdAt: new Date(0).toISOString(), updatedAt: new Date(1).toISOString() };
+    f.dependencies.request.mockImplementation(async input => input.kind === "settle" ? { ...f.snapshot(), receipts: [entry] } : request(input));
+    try {
+      await f.send(); await vi.waitFor(() => expect(f.dependencies.dispatch).toHaveBeenCalledOnce());
+      f.completion.resolve({ state: "succeeded", resultCode: null });
+      await vi.waitFor(() => expect(f.runtime.hasActiveWork()).toBe(false));
+      expect(settled).not.toHaveBeenCalled();
+    } finally { f.runtime.close(); }
+  });
   it("persists bounded pre-provider terminal identity without retaining the prompt payload", async () => {
     const prepare = vi.fn(async () => { throw new CloudCommandFailureError({ stage: "provider_start", category: "auth_required" }); });
     const f = fixture({ prepare, retire: vi.fn(async () => {}) });

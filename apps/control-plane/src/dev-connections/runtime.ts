@@ -7,6 +7,7 @@ import { DevConnectionClient, devConnectionClientFromEnvironment, ReferenceSchem
 import { devConnectionsEnabled } from "./config.js";
 import { DatabaseDevConnectionRestore, currentMapping, invalidateReferences } from "./restore.js";
 import { denied, parseMaterial, uuid, type ConnectionReference, type GithubMaterial, type GrantScope } from "./types.js";
+import {serializeCloudAgentCredentialSourceMutation,assertLegacyCloudAgentCredentialMutationAllowed} from "../cloud-workspaces/agent-credential-mutations.js";
 
 type Stored = {owner_user_id:string;org_id:string;issuer:string;subject:string;workos_org_id:string;generation_id:string;reference:ConnectionReference;fingerprint:string};
 const mapping=(r:Stored):RestoreMapping=>({issuer:r.issuer,subject:r.subject,workosOrganizationId:r.workos_org_id,
@@ -178,12 +179,16 @@ export class DevConnectionRuntime {
     return withSystemTx(this.pool,async tx=>({revision:Number((await tx.query<{revision:string}>("SELECT revision FROM cloud_agent_organization_connections WHERE org_id=$1 AND owner_user_id=$2 AND provider=$3",[org,user,row.reference.kind.split('-')[0]])).rows[0]!.revision),replayed:false}));
   }
   async remove(user:string,org:string,id:string,scope:"local"|"organization"|"global") {
-    const row=await withSystemTx(this.pool,tx=>this.reference(tx,id,user,org));
-    if(scope!=='local'){
-      const token=await withSystemTx(this.pool,tx=>this.token(tx,row));
-      await this.client.revoke(token,row.reference.connectionId,scope);
-    }
     await withSystemTx(this.pool,async tx=>{
+      await serializeCloudAgentCredentialSourceMutation(tx,user);
+      const row=await this.reference(tx,id,user,org);
+      const aliases=scope==="local"?[{binding_id:id}]:(await tx.query<{binding_id:string}>(`SELECT binding_id FROM dev_connection_references
+        WHERE owner_user_id=$1 AND generation_id=$2 AND reference->>'connectionId'=$3 AND ($4::uuid IS NULL OR org_id=$4)`,
+        [user,this.client.generationId,row.reference.connectionId,scope==="global"?null:org])).rows;
+      for(const alias of aliases)await assertLegacyCloudAgentCredentialMutationAllowed(tx,user,{credentialId:alias.binding_id,...(scope==="global"?{}:{organizationId:org})});
+      // Keep the first-holder lock through this legacy remote write. New mode
+      // holders require the separate durable conditional removal API below.
+      if(scope!=="local")await this.client.revoke(await this.token(tx,row),row.reference.connectionId,scope);
       await currentMapping(tx,mapping(row));
       await invalidateReferences(tx,this.client.generationId,[id]);
       if(scope==='local')await tx.query("UPDATE dev_connection_references SET removed_at=now() WHERE binding_id=$1",[id]);
@@ -192,6 +197,15 @@ export class DevConnectionRuntime {
         request_sha256=digest(request_sha256,'sha256'),updated_at=now() WHERE org_id=$1 AND owner_user_id=$2 AND credential_id=$3`,[org,user,id]);
     });
     return {removed:true};
+  }
+  async requestConditionalRemoval(user:string,operationId:string,source:{referenceId:string;organizationId:string;connectionId:string;generationId:string;
+    referenceRevision:number;consentRevision:number;fingerprint:string;scope:"organization"|"global"}){
+    if(source.generationId!==this.client.generationId)denied();
+    // A durable accepted removal uses current member authority, not a newly
+    // usable credential. Its own outbox may have retired the original binding.
+    const {token}=await this.ownerSession(user,source.organizationId);
+    return this.client.removeConditionally(token,{version:1,operationId,connectionId:source.connectionId,bindingId:source.referenceId,
+      expectedRevision:source.referenceRevision,expectedConsentRevision:source.consentRevision,scope:source.scope});
   }
   async reattach(user:string,org:string,id:string) {
     uuid.parse(id);

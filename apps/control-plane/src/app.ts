@@ -77,7 +77,7 @@ import type { CloudWorkspaceHealth } from "./cloud-workspaces/health.js";
 import type { MigrationStatus } from "./migrate.js";
 import type { DatabaseCloudRuntimeServiceAccess } from "./cloud-workspaces/runtime-services.js";
 import { createCloudRuntimeServiceAuthorityRoutes, createCloudRuntimeServiceRoutes } from "./cloud-workspaces/runtime-service-routes.js";
-import { DEFAULT_SLOW_REQUEST_LOG_MS, requestTiming } from "./request-timing.js";
+import { DEFAULT_SLOW_REQUEST_LOG_MS, requestTiming, type RequestCostObserverStatus, type RequestDatabaseCost } from "./request-timing.js";
 import {
   DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
   engineLifecycleRequestsPerMinute,
@@ -88,6 +88,7 @@ import { cloudAgentCredentialKeys } from "./cloud-workspaces/agent-credentials.j
 import { createRuntimePublicationRoutes, createRuntimeStaffRoutes, RUNTIME_STAFF_PATH, type RuntimePublicationDependencies } from "./cloud-workspaces/runtime-publication-routes.js";
 
 export type CreateAppDependencies = {
+  requestCostObserver?: (cost: RequestDatabaseCost) => void | Promise<void>;
   runtimePublication?: RuntimePublicationDependencies;
   releaseCanaries?: DatabaseReleaseCanaryService;
   releaseCanaryDesignations?: DatabaseReleaseCanaryDesignationService;
@@ -106,6 +107,10 @@ export type CreateAppDependencies = {
   securityEventBroker?: PostgresSecurityEventBroker;
   workosProvider?: RailwayWorkOSProvider;
   migrationStatus?: MigrationStatus;
+};
+
+export type ControlPlaneApp = Hono & {
+  readonly requestCostObserverStatus?: () => RequestCostObserverStatus;
 };
 
 function isCloudWorkspaceApiPath(requestPath: string): boolean {
@@ -141,9 +146,14 @@ export function createApp(
   pool: pg.Pool,
   emailConfig: EmailConfig,
   dependencies: CreateAppDependencies = {},
-): Hono {
-  const app = new Hono();
-  app.use("*", requestTiming({ slowMs: config.slowRequestLogMs ?? DEFAULT_SLOW_REQUEST_LOG_MS }));
+): ControlPlaneApp {
+  const app: ControlPlaneApp = new Hono();
+  const timing = requestTiming({ slowMs: config.slowRequestLogMs ?? DEFAULT_SLOW_REQUEST_LOG_MS,
+    ...(dependencies.requestCostObserver ? { costObserver: dependencies.requestCostObserver, databasePool: pool } : {}) });
+  app.use("*", timing);
+  if (dependencies.requestCostObserver) {
+    Object.defineProperty(app, "requestCostObserverStatus", { value: timing.costObserverStatus });
+  }
   // Readiness stays public even during maintenance; /healthz remains liveness.
   app.route("/", createReleaseIdentityRoutes(config, pool, dependencies));
   if (config.databaseMaintenanceMode) {

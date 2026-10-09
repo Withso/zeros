@@ -1,3 +1,4 @@
+import { CloudAgentCredentialCards } from "./cloud-agent-credential-cards";
 import { cloudAdmissionForTurn } from "./cloud-admission-failure";
 import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-send-failure-toast";
 // ──────────────────────────────────────────────────────────
@@ -5075,6 +5076,7 @@ export function AgentChat({
           the message bubbles at every width. */}
         {readOnly ? composerReplacement : (
         <div className="mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-0.5 border-t-0 bg-transparent px-7 pt-0 pb-4">
+          <CloudAgentCredentialCards folder={chatThread?.folder} chatId={chatId} active={interactive} />
           {/* Inline composer errors use the shared toast surface: the
             "Error: <label>" surfaces as a toast.error from a useEffect
             higher up. The composer remains enabled when isErrorState is set:

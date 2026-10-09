@@ -18,8 +18,8 @@ const receipt = (state = "succeeded", resultCode: string | null = null) => ({ co
   executionId: "fixture-execution", state, resultCode });
 
 describe("source-mode cloud agent evidence", () => {
-  it.each(["fixture_terminal_missing", "fixture_terminal_conflict", "fixture_receipt_not_terminal", "fixture_settlement_conflict"])
-    ("retains closed fixture verification failure %s without raw error text", code => {
+  it.each(["fixture_terminal_missing", "fixture_terminal_conflict", "fixture_receipt_not_terminal", "fixture_settlement_conflict"])(
+    "retains closed fixture verification failure %s without raw error text", code => {
       expect(diagnoseHarnessFailure(new Error(code))).toEqual({ code });
       expect(diagnoseHarnessFailure(new Error(`${code}: private provider text`))).toEqual({ code });
     });
@@ -346,6 +346,43 @@ describe("renderer-shaped durable command driver", () => {
     await expect(driveTurn(client, { workspaceId: randomUUID(), ...owner, model: "claude-sonnet-4-6", grantId: randomUUID(),
       permissionMode: "default", prompt: "fixture", expected: "success", replayEvents: () => [{ sequence: 1, frame: delta() }, { sequence: 2, frame: terminal() }] }))
       .rejects.toThrow("missing_replay");
+  });
+  it.each(['fresh', 'reordered', 'missing', 'changed', 'array-changed'] as const)('cross-checks %s inspection after the authenticated replay has flushed pending events', async mode => {
+    let listener: (frame: Record<string, unknown> & { type: string }) => void = () => {};
+    const frames = [delta(), terminal()];
+    const late = { type: 'DB_CHANGED', source: 'engine', id: 'fixture-db-change', timestamp: 1, kinds: ['messages', 'chats'],
+      cloudStream: { streamId: fixtureStreamId, sequence: 3 } };
+    let journal: Array<{ sequence: number; frame: Record<string, unknown> }> =
+      frames.map((frame, i) => ({ sequence: i + 1, frame }));
+    let enqueued = false; const order: string[] = [];
+    const entry = { ...receipt(), conversationId: owner.conversationId, position: 0, payload: null, generation: 1,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const client = { onMessage: (callback: typeof listener) => { listener = callback; return vi.fn(); }, connect: async () => {}, close: vi.fn(),
+      request: async (op: string, params: Record<string, unknown> = {}) => {
+        if (op === 'cloudCommands.conversation') return { modeRevision: 0 };
+        if (op === 'cloudCommands.createConversation') return {};
+        const request = params.request as { kind: string };
+        if (op === 'cloudEvents.request') {
+          if (request.kind === 'snapshot') return { cursor: { streamId: fixtureStreamId, sequence: enqueued ? 2 : 0 } };
+          order.push('replay');
+          if (mode !== 'missing') journal = [...journal, { sequence: 3,
+            frame: mode === 'changed' ? { ...late, kinds: ['files'] } : mode === 'array-changed' ? { ...late, kinds: ['chats', 'messages'] } :
+              mode === 'reordered' ? { id: late.id, source: late.source, timestamp: late.timestamp, type: late.type,
+                cloudStream: { sequence: 3, streamId: fixtureStreamId }, kinds: late.kinds } : late }];
+          return { streamId: fixtureStreamId, head: 3, firstRetained: 1, cursor: 3,
+            events: [...frames, late].map((frame, i) => ({ sequence: i + 1, frame })) };
+        }
+        if (request.kind === 'snapshot') return { version: 1, conversationId: owner.conversationId, revision: 0, paused: false, pending: [], receipts: [] };
+        if (request.kind === 'mutate') { enqueued = true; for (const frame of frames) listener(frame); return {}; }
+        if (request.kind === 'read') return entry;
+        return {};
+      } };
+    const flight = driveTurn(client, { workspaceId: randomUUID(), ...owner, model: 'claude-sonnet-4-6', grantId: randomUUID(),
+      prompt: 'fixture', expected: 'success', replayEvents: () => { order.push('inspect'); return journal; } });
+    if (mode === 'fresh' || mode === 'reordered') {
+      await expect(flight).resolves.toMatchObject({ outcome: 'passed', liveDeltaBytes: 5, replayDeltaBytes: 5 });
+      expect(order).toEqual(['replay', 'inspect']);
+    } else await expect(flight).rejects.toThrow('receipt_mismatch');
   });
   it("subscribes before connect so an early ENGINE_READY is observed, then proves account readiness with an RPC", async () => {
     let listener: (frame: Record<string, unknown> & { type: string }) => void = () => {}; const order: string[] = [];

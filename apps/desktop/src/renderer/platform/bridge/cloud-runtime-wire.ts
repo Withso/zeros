@@ -328,6 +328,16 @@ export function cloudIncoming(
     for (const key of ["chatDeletions", "messageResets"])
       if (Array.isArray(result[key]))
         result[key] = result[key].map((id) => cloudScopedId(scope, String(id)));
+    if (message.type === "WORKSPACE_RESPONSE" && message.op === "messages.search" && Array.isArray(result.hits))
+      result.hits = result.hits.map((value) => {
+        const hit = record(value);
+        if (typeof hit.chatId !== "string" || !hit.chatId || parseCloudWorkspaceKey(hit.chatId))
+          throw new Error("Invalid cloud search result identity");
+        // Check typed ownership before scoping the hit for page-head validation.
+        // Native message IDs, payload bytes and provider data stay opaque.
+        const chatId = nativeValue(scope, hit.chatId);
+        return { ...hit, ...mapFields(scope, { chatId }, "in") };
+      });
     if (Array.isArray(result.messages) && message.op === "db.pull")
       result.messages = result.messages.map((row) =>
         mapFields(scope, record(row), "in"),

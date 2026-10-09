@@ -8,6 +8,17 @@ function fixture(){
   return {lease,auth:new CloudCodexAuth(lease)};
 }
 describe("private native Codex refresh callback",()=>{
+  it("checks captured lifetime before exposing positive login access",()=>{
+    const {auth,lease}=fixture();
+    lease.assertLive.mockImplementation(()=>{throw Object.assign(new Error("closed lifetime"),{code:"cloud_validation_lease_expired"});});
+    expect(()=>auth.login()).toThrow("closed lifetime"); expect(lease.codexAuth).not.toHaveBeenCalled();
+  });
+  it("checks captured lifetime before asking for a newer native access epoch",async()=>{
+    const {auth,lease}=fixture(); auth.login();
+    lease.assertLive.mockImplementation(()=>{throw Object.assign(new Error("private-expired-proof"),{code:"cloud_validation_access_denied"});});
+    await expect(auth.refresh({reason:"unauthorized"})).rejects.toMatchObject({code:"cloud_validation_access_denied"});
+    expect(lease.refreshCodex).not.toHaveBeenCalled(); expect(lease.close).toHaveBeenCalledOnce();
+  });
   it("tracks the native access epoch and returns an explicit nullable plan without replaying any model operation",async()=>{
     const {auth,lease}=fixture();expect(auth.login()).toMatchObject({type:"chatgptAuthTokens",chatgptAccountId:"synthetic-account"});
     expect(await auth.refresh({reason:"unauthorized",previousAccountId:"synthetic-account"})).toEqual({accessToken:"synthetic-rotated-access-token",chatgptAccountId:"synthetic-account",chatgptPlanType:null});

@@ -2,6 +2,8 @@ import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution
 import {
   CloudCommandSnapshotSchema,
   CloudCommandEntrySchema,
+  CloudBootCommandSnapshotSchema,
+  CloudBootCommandEntrySchema,
   CLOUD_AGENT_PERMISSION_MODES,
   cloudPermissionMode,
   type CloudCommandSnapshot,
@@ -11,6 +13,7 @@ import {
   cloudCommandFailureFromCode,
 } from "@zeros/protocol/cloud-commands";
 import type { RuntimeClient } from "./ws-client";
+import { CloudAgentBootConversationSchema, type CloudAgentBootConversation } from "@zeros/protocol/cloud-agent-bootstrap";
 import type { BackgroundTasksUpdate } from "@zeros/protocol/agent-events";
 import type { BridgeMessage } from "./messages";
 import { record, type WireRecord } from "./cloud-runtime-wire";
@@ -118,6 +121,7 @@ export class CloudAgentConnection {
   private closed = false;
   private nativeCommandsVersion=0;
   private cloudTurnProtocolVersion=0;
+  private localCommandsBinding?: CloudAgentBootConversation;
   private readonly attaching = new Map<string, number>();
   private listeners = new Map<string, Set<(message: BridgeMessage) => void>>();
 
@@ -127,6 +131,33 @@ export class CloudAgentConnection {
     private readonly grant: (agentId: string, model: string) => Promise<string>,
     private readonly events?: CloudEventReader,
   ) {}
+
+  private localCommandsRefusal(): Error {
+    return Object.assign(new Error("Update Zeros to use this cloud runtime"), { code: "cloud_workspace_client_update_required" });
+  }
+
+  private confirmLocalCommands(value: unknown): void {
+    const capable = this.client.supportsEngineCapability?.("cloud.localCommands.v1") === true;
+    if (value === undefined && !capable && !this.localCommandsBinding) return;
+    const parsed = CloudAgentBootConversationSchema.safeParse(value), peer = this.client.executionIdentity;
+    if (!capable || !parsed.success || peer?.kind !== "cloud" ||
+        ["organizationId", "workspaceId", "generation", "engineInstanceId", "authorityEpoch"].some(key =>
+          parsed.data[key as keyof CloudAgentBootConversation] !== peer[key as keyof typeof peer]) ||
+        this.localCommandsBinding && ["bootId", "writerEpoch", "fundingOwnerUserId", "fundingOwnerEpoch"].some(key =>
+          parsed.data[key as keyof CloudAgentBootConversation] !== this.localCommandsBinding![key as keyof CloudAgentBootConversation]))
+      throw this.localCommandsRefusal();
+    this.localCommandsBinding = parsed.data;
+  }
+
+  private parseQueue(value: unknown): CloudCommandSnapshot {
+    return (this.localCommandsBinding ? CloudBootCommandSnapshotSchema : CloudCommandSnapshotSchema).parse(value);
+  }
+
+  private parseReceipt(value: unknown) {
+    return (this.localCommandsBinding ? CloudBootCommandEntrySchema.extend({
+      conversationId: CloudCommandSnapshotSchema.shape.conversationId,
+    }) : commandReceiptSchema).parse(value);
+  }
 
   on(type: string, listener: (message: BridgeMessage) => void): () => void {
     const listeners = this.listeners.get(type) ?? new Set();
@@ -143,6 +174,14 @@ export class CloudAgentConnection {
       effort: owner.effort, fast: owner.fast, modeRevision: owner.modeRevision,
       localDirectories: owner.localDirectories, permissionMode: owner.permissionMode,
     }));
+  }
+
+  hasCurrentExecution(conversationId: string, executionId: string): boolean {
+    const native = this.conversations.get(conversationId)?.execution;
+    // The renderer receives the stable conversation alias. Prove it through
+    // the original native mapping; an unbound alias is not a live execution.
+    return !this.closed && native !== undefined && this.executionOwners.get(native) === conversationId &&
+      (executionId === native || executionId === routeId(conversationId));
   }
 
   restoreAttachments(attachments: readonly CloudConversationAttachment[]): void {
@@ -306,7 +345,7 @@ export class CloudAgentConnection {
     }
     const [events,commands]=await Promise.all([this.op("cloudEvents.request",{request:{kind:"snapshot",conversationId:owner.id}}),
       this.op("cloudCommands.request",{request:{kind:"snapshot",conversationId:owner.id}})]);
-    const queue=CloudCommandSnapshotSchema.parse(commands);
+    const queue=this.parseQueue(commands);
     if(queue.conversationId!==owner.id)throw new Error("Cloud state belongs to another conversation");
     const state = { owner, snapshot: record(events.snapshot), cursor: events.cursor, restoration, revision, execution, backgroundRevision };
     if (state.snapshot.conversationId !== owner.id) throw new Error("Cloud state belongs to another conversation");
@@ -345,6 +384,8 @@ export class CloudAgentConnection {
         { type: "WORKSPACE_REQUEST", op, params:op==="cloudCommands.request"?{...params,
           ...(this.nativeCommandsVersion===1?{nativeCommandsVersion:1}:{}),
           ...(this.cloudTurnProtocolVersion===1?{cloudTurnProtocolVersion:1}:{}),
+          ...(this.localCommandsBinding ? { cloudLocalCommandsVersion: 1,
+            bootId: this.localCommandsBinding.bootId, writerEpoch: this.localCommandsBinding.writerEpoch } : {}),
         }:params },
         submission ? { timeoutMs: Math.min(30_000, remaining), signal: submission.signal } : 30_000,
       );
@@ -369,6 +410,7 @@ export class CloudAgentConnection {
       }
       const result=record((response as unknown as WireRecord).result);
       if(op==="cloudCommands.conversation"||op==="cloudCommands.createConversation") {
+        this.confirmLocalCommands(result.cloudLocalCommands);
         this.nativeCommandsVersion=Number(result.nativeCommandsVersion??0);
         this.cloudTurnProtocolVersion=Number(result.cloudTurnProtocolVersion??0);
       }
@@ -614,7 +656,7 @@ export class CloudAgentConnection {
       const submission = { owner, deadline: Date.now() + 60_000, intentCurrent };
       for (let attempt = 0; ; attempt++) {
         try {
-          const result = CloudCommandSnapshotSchema.parse(await this.op("cloudCommands.request", {
+          const result = this.parseQueue(await this.op("cloudCommands.request", {
             request: { kind: "stop", conversationId: owner.id, operationId },
           }, submission));
           if (result.conversationId !== owner.id || !result.paused) throw new Error("Cloud Stop acknowledgement does not match this conversation");
@@ -696,17 +738,17 @@ export class CloudAgentConnection {
     const {agentId,model,effort,fast}=owner;
     const permissionMode=owner.permissionMode??cloudPermissionMode(agentId);
     if(!model)throw new Error("Choose a model before using this cloud operation");
-    const [grant,conversation,snapshot]=await Promise.all([this.grant(agentId,model),
+    const [grant,conversation,snapshot]=await Promise.all([this.localCommandsBinding ? Promise.resolve(undefined) : this.grant(agentId,model),
       this.op("cloudCommands.conversation",{conversationId:owner.id}),
       this.op("cloudCommands.request",{request:{kind:"snapshot",conversationId:owner.id}})]);
     if(conversation.nativeCommandsVersion!==1)throw new CloudRuntimeCompatibilityError(conversation.nativeCommandsVersion);
     signal?.throwIfAborted();
-    const queue=CloudCommandSnapshotSchema.parse(snapshot);
+    const queue=this.parseQueue(snapshot);
     if(![...queue.pending,...queue.receipts].some(row=>row.commandId===commandId)) {
       if(queue.paused && operation.kind!=="goal")throw new Error("Resume this conversation before changing its native state");
       await this.op("cloudCommands.request",{request:{kind:"mutate",mutation:{conversationId:owner.id,operationId:commandId,
         expectedRevision:queue.revision,action:{kind:operation.kind==="fork"?"fork":"enqueue",commandId,payload:{agentId,model,
-          agentCredentialGrantId:grant,userMessageId:commandId,modeRevision:Number(conversation.modeRevision),permissionMode,
+          ...(grant ? { agentCredentialGrantId:grant } : {}),userMessageId:commandId,modeRevision:Number(conversation.modeRevision),permissionMode,
           ...(effort?{effort}:{}),fast,prompt:[{type:"text",text:""}],operation}}}}});
     }
     // Read the same receipt after reconnect/unknown acknowledgement. An
@@ -714,7 +756,7 @@ export class CloudAgentConnection {
     const deadline=Date.now()+120_000;
     while(!this.closed && Date.now()<deadline) {
       signal?.throwIfAborted();
-      const entry=commandReceiptSchema.parse(await this.op("cloudCommands.request",{request:{kind:"read",commandId}}));
+      const entry=this.parseReceipt(await this.op("cloudCommands.request",{request:{kind:"read",commandId}}));
       if(entry.conversationId!==owner.id || entry.commandId!==commandId)throw new Error("Cloud command receipt belongs to another conversation");
       if(entry.state==="succeeded")return entry;
       if(["failed","cancelled","uncertain"].includes(entry.state))throw new Error(`Cloud operation ${entry.state}. Reopen the conversation to inspect its saved state.`);
@@ -748,14 +790,14 @@ export class CloudAgentConnection {
     // These independently authenticated reads do not depend on the credential
     // grant. Await all three before any queue mutation or execution admission.
     const [grant, conversation, snapshot] = await Promise.all([
-      this.grant(agentId, model),
+      this.localCommandsBinding ? Promise.resolve(undefined) : this.grant(agentId, model),
       this.op("cloudCommands.conversation", { conversationId: owner.id }),
       this.op("cloudCommands.request", {
         request: { kind: "snapshot", conversationId: owner.id },
       }),
     ]);
     owner.modeRevision = Number(conversation.modeRevision);
-    let queue = CloudCommandSnapshotSchema.parse(snapshot);
+    let queue = this.parseQueue(snapshot);
     if (signal?.aborted)
       throw new Error("Cloud prompt was cancelled before submission");
     // The optimistic user-message identity survives retry/reload. Hash it into
@@ -796,7 +838,7 @@ export class CloudAgentConnection {
             const operationId = crypto.randomUUID();
             for (let attempt = 0; ; attempt++) {
               try {
-                queue = CloudCommandSnapshotSchema.parse(await this.op("cloudCommands.request", {
+                queue = this.parseQueue(await this.op("cloudCommands.request", {
                   request: {
                     kind: "mutate",
                     mutation: {
@@ -811,7 +853,7 @@ export class CloudAgentConnection {
               } catch (error) {
                 if (!(error instanceof Error) || error.message !== "command_conflict" || attempt >= 2 || signal?.aborted)
                   throw error;
-                const current = CloudCommandSnapshotSchema.parse(await this.op("cloudCommands.request", {
+                const current = this.parseQueue(await this.op("cloudCommands.request", {
                   request: { kind: "snapshot", conversationId: owner.id },
                 }));
                 if (!observation.live) return terminal!;
@@ -839,7 +881,7 @@ export class CloudAgentConnection {
                     prompt: message.prompt,
                     ...(message.bubble ? { bubble: message.bubble } : {}),
                     modeRevision: Number(conversation.modeRevision),
-                    agentCredentialGrantId: grant,
+                    ...(grant ? { agentCredentialGrantId: grant } : {}),
                     model,
                     ...(["low", "medium", "high", "xhigh", "max", "ultracode"].includes(
                       effort ?? "",
@@ -861,7 +903,7 @@ export class CloudAgentConnection {
             catch (error) {
               if (!(error instanceof Error) || error.message !== "command_conflict" || attempt >= 2 || signal?.aborted)
                 throw error;
-              const current = CloudCommandSnapshotSchema.parse(await this.op("cloudCommands.request", {
+              const current = this.parseQueue(await this.op("cloudCommands.request", {
                 request: { kind: "snapshot", conversationId: owner.id },
               }));
               if (!observation.live) return terminal!;
@@ -883,7 +925,7 @@ export class CloudAgentConnection {
             );
           let entry;
           try {
-            entry = commandReceiptSchema.parse(
+            entry = this.parseReceipt(
               await this.op("cloudCommands.request", {
                 request: { kind: "read", commandId },
               }),
@@ -959,7 +1001,7 @@ export class CloudAgentConnection {
         // its denial before responding, so even an early generic terminal event
         // can recover this exact command's code without retrying the prompt.
         try {
-          const receipt = commandReceiptSchema.parse(await this.op("cloudCommands.request", {
+          const receipt = this.parseReceipt(await this.op("cloudCommands.request", {
             request: { kind: "read", commandId },
           }));
           if (receipt.commandId === commandId && receipt.conversationId === owner.id &&

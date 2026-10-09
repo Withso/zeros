@@ -4,7 +4,7 @@ import {finished} from "node:stream/promises";
 
 /** Timeout rejects independently of wait/kill. Retire the owning lease on any
  * failure so hung children reach bounded retries and worker quarantine. */
-export async function attestCloudCoordinator(lease:CloudAgentLease,canary:BoundaryProcess,
+export async function attestCloudCoordinator(lease:Pick<CloudAgentLease,"signal"|"retire"|"assertLive"|"close">,canary:BoundaryProcess,
   expected: "zeros-private-coordinator-v3" | "zeros-native-provider-v1" = "zeros-private-coordinator-v3"):Promise<void>{
   let output="",timer:ReturnType<typeof setTimeout>|undefined;
   const onData=(chunk:Buffer|string)=>{if(output.length<=256)output+=String(chunk);};

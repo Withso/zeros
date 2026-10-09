@@ -84,7 +84,7 @@ describe.skipIf(process.platform !== "linux")("pinned Cursor native MCP discover
       await writeFile(path.join(f.cwd, ".cursor/mcp.json"), JSON.stringify({ mcpServers: { excluded: f.server } }));
       const admittedMarker = path.join(f.root, "admitted-marker"), tools = path.join(f.cwd, "tools");
       await mkdir(tools);
-      const execution = { cwd: f.cwd, lease: { assertLive: vi.fn(), admission: { model: "qualified-model" } },
+      const execution = { cwd: f.cwd, model: "qualified-model", lease: { assertLive: vi.fn(), admission: { model: "qualified-model" } },
         coordinator: { environment: () => ({ CURSOR_API_KEY: "synthetic-admitted-key" }) }, productServers: [],
         userServers: [{ name: "admitted", transport: "stdio", cwd: tools, command: process.execPath,
           args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(admittedMarker)},process.cwd())`] }] } as unknown as CloudProviderExecution;

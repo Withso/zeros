@@ -15,6 +15,14 @@ const owner = { accountId: "account-a", organizationId: "11111111-1111-4111-8111
 const window = { recordEpoch: null, revision: 2, cursor: "m-1", messages: [{ msgId: "m-1", kind: "text", createdAt: 10,
   payload: JSON.stringify({ id: "m-1", kind: "text", role: "agent", text: "confirmed", createdAt: 10 }) }] };
 const event = {} as Parameters<typeof cloudTranscriptCacheRead>[1];
+const binding = { organizationId: owner.organizationId, workspaceId: owner.workspaceId, generation: 2,
+  engineInstanceId: "33333333-3333-4333-8333-333333333333", bootId: "44444444-4444-4444-8444-444444444444",
+  writerEpoch: "55555555-5555-4555-8555-555555555555", fundingOwnerUserId: "66666666-6666-4666-8666-666666666666",
+  fundingOwnerEpoch: 1, version: 1 as const, mode: "boot-owner-v1" as const, fundingScope: "workspace-roles-v1" as const,
+  mirroredSequence: 20, sealedSequence: null, complete: false };
+const restoreHead = { projection: binding, conversationId: owner.chatId, head: { conversationId: owner.chatId,
+  originWriterEpoch: binding.writerEpoch, source: { kind: "mutation", mutationId: "77777777-7777-4777-8777-777777777777", operation: "repair" },
+  restoreRevision: 5, deleted: false, recordSequence: null, eventSequence: 9, manifestSha256: null, incompleteReason: "history_limit" } };
 beforeEach(async () => {
   h.directory = await mkdtemp(path.join(tmpdir(), "zeros-cache-ipc-"));
   h.user = { accountId: owner.accountId, sub: "workos-a", provider: "workos", sessionId: h.directory };
@@ -24,6 +32,31 @@ beforeEach(async () => {
 afterEach(async () => { await rm(h.directory, { recursive: true, force: true }); });
 
 describe("account-owned transcript cache IPC", () => {
+  it("fences delayed writes using the exact per-chat receipt without retiring a sibling", () => {
+    const { cacheEpoch, historyEpoch } = cloudTranscriptCacheRead(owner, event) as { cacheEpoch: string; historyEpoch: string };
+    const old = { cacheEpoch, historyEpoch };
+    expect(old.historyEpoch).toMatch(/^[a-f0-9-]{36}$/u);
+    const sibling = { ...owner, chatId: "sibling" };
+    const otherReceipt = cloudTranscriptCacheRead(sibling, event) as typeof old;
+    const other = { cacheEpoch: otherReceipt.cacheEpoch, historyEpoch: otherReceipt.historyEpoch };
+    cloudTranscriptCacheWrite({ ...owner, ...old, window }, event);
+    cloudTranscriptCacheWrite({ ...sibling, ...other, window }, event);
+    const installed = cloudTranscriptCachePrune({ ...owner, ...old, restoreHead }, event) as typeof old & { restoreHead: unknown; window: null };
+    expect(installed).toMatchObject({ window: null, restoreHead });
+    expect(installed.historyEpoch).not.toBe(old.historyEpoch);
+    cloudTranscriptCacheWrite({ ...owner, ...old, window: { ...window, revision: 999 } }, event);
+    expect(cloudTranscriptCacheRead(owner, event)).toMatchObject({ window: null, restoreHead });
+    expect(cloudTranscriptCacheRead(sibling, event)).toMatchObject({ window: { revision: 2 } });
+  });
+  it("requires a current main-owned account and chat receipt for restore-head changes", () => {
+    const { cacheEpoch, historyEpoch } = cloudTranscriptCacheRead(owner, event) as { cacheEpoch: string; historyEpoch: string };
+    const old = { cacheEpoch, historyEpoch };
+    expect(() => cloudTranscriptCachePrune({ ...owner, restoreHead }, event)).toThrow();
+    expect(() => cloudTranscriptCachePrune({ ...owner, ...old, restoreHead: { ...restoreHead,
+      projection: { ...binding, workspaceId: owner.organizationId } } }, event)).toThrow();
+    h.user = { ...h.user!, sessionId: "replacement-session" };
+    expect(() => cloudTranscriptCachePrune({ ...owner, ...old, restoreHead }, event)).toThrow(/owner changed/u);
+  });
   it("reads/writes only the current main-owned account without refreshing auth or waking compute", () => {
     const receipt = cloudTranscriptCacheRead(owner, event) as { cacheEpoch: string; window: null };
     expect(receipt.window).toBeNull();

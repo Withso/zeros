@@ -4,7 +4,10 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudProviderExecution } from "../../../cloud-provider-execution";
 const harness=vi.hoisted(()=>({execution:null as CloudProviderExecution|null}));
-vi.mock("../../../cloud-provider-execution",()=>({cloudProviderExecution:()=>harness.execution,executionMcpServers:()=>[]}));
+vi.mock("../../../cloud-provider-execution",async importOriginal=>({
+  ...await importOriginal<typeof import("../../../cloud-provider-execution")>(),
+  cloudProviderExecution:()=>harness.execution,executionMcpServers:()=>[],
+}));
 import { CodexAppServerAdapter, type CodexSession } from "../app-server-adapter";
 const refresh=(CodexAppServerAdapter.prototype as unknown as {refreshCommands(this:unknown,session:CodexSession):Promise<void>}).refreshCommands;
 let root:string,repo:string,home:string;
@@ -14,7 +17,8 @@ beforeEach(async()=>{
   await writeFile(path.join(repo,".codex/prompts/project.md"),"---\ndescription: Repository command sentinel\n---\nDo the project task.");
   await writeFile(path.join(home,".codex/prompts/engine-private.md"),"Engine private command sentinel");
   vi.spyOn(os,"homedir").mockReturnValue(home);vi.stubEnv("CODEX_HOME",path.join(home,".codex"));
-  harness.execution={cwd:repo,lease:{assertLive:vi.fn()}} as unknown as CloudProviderExecution;
+  const lifetime={assertLive:vi.fn()};
+  harness.execution={mode:"actor-grant-v1",cwd:repo,lease:lifetime,lifetime} as unknown as CloudProviderExecution;
 });
 afterEach(async()=>{vi.restoreAllMocks();vi.unstubAllEnvs();await rm(root,{recursive:true,force:true});});
 async function commands(cwd:string){

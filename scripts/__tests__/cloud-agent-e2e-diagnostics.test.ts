@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { cloudPreflightDiagnostic, zsrAdmissionDiagnostic } from "../cloud-workspace-validation/cloud-agent-e2e/diagnostics";
+import { diagnoseHarnessFailure } from "../cloud-workspace-validation/cloud-agent-e2e/assertions";
+describe("closed ingress evidence diagnostics", () => {
+  it.each(["fixture_measurement_invalid", "ingress_calibration_invalid", "ingress_interval_outside_window", "ingress_details_incomplete"])(
+    "retains the exact bounded refusal %s", code => {
+      expect(diagnoseHarnessFailure(Object.assign(new Error("private-sentinel"), { code }))).toEqual({ code });
+    });
+});
 describe("closed production preflight diagnostics", () => {
   it("distinguishes missing captured suffix from fixed container validation without exposing it", () => {
     expect(zsrAdmissionDiagnostic("[zsr] admission failed for claude: host-parity canary exited 125\n"))

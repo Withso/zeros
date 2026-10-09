@@ -24,6 +24,7 @@ vi.mock("../../shared/login-shell-path", () => ({ buildSpawnEnvWithLoginPath: vi
 vi.mock("../../../containment/cloud-runtime-root.mjs", () => ({ resolveCloudRuntime: () => ({ workerRoot: "/pinned/runtime" }) }));
 vi.mock("../../../cloud-provider-execution", () => ({
   cloudProviderExecution: () => harness.execution,
+  cloudExecutionLifetime: (execution: CloudProviderExecution) => execution.lifetime,
   executionMcpServers: () => [],
 }));
 vi.mock("../cloud-exec-server", () => ({ CloudCodexExecServer: { start: harness.executor } }));
@@ -82,8 +83,8 @@ function installProcess(replies: Record<string, unknown> = {}, rejectMethod?: st
   return {
     frames, stop, child,
     send: (frame: unknown) => child.stdout.write(JSON.stringify(frame) + "\n"),
-    waitFor: (method: string): Promise<RpcFrame> => {
-      const existing = frames.find(frame => frame.id !== undefined && frame.method === method);
+    waitFor: (method: string, ordinal = 0): Promise<RpcFrame> => {
+      const existing = frames.filter(frame => frame.id !== undefined && frame.method === method)[ordinal];
       if (existing) return Promise.resolve(existing);
       return new Promise(resolve => {
         const waiting = requestWaiters.get(method) ?? [];
@@ -102,7 +103,8 @@ function installCloud(cwd="/srv/zeros/workspace", credentialKind: "codex-chatgpt
     close: vi.fn(async () => { await harness.proc?.stop(); }), nativeCapabilities: undefined,
     refreshCodex: vi.fn(async () => { throw new Error("private-refresh-token-sentinel"); }),
   };
-  harness.execution = { cwd, lease, coordinator: { environment: () => ({}) } } as unknown as CloudProviderExecution;
+  harness.execution = { mode:"actor-grant-v1",cwd,lease,lifetime:lease,auth:lease,model:lease.admission.model,
+    credentialKind,nativeCapabilities:null,environment:null,coordinator: { environment: () => ({}) } } as unknown as CloudProviderExecution;
   return lease;
 }
 const boot = () => bootCodexAppServerRuntime({ cwd: "/srv/zeros/workspace", clientInfo: { name: "Zeros-test", version: "1" } });
@@ -135,7 +137,9 @@ async function installRealCloud(attachProcess = true) {
     { onRetirementFailure: vi.fn() }, { wall: () => origin + elapsed, monotonic: () => elapsed });
   if (attachProcess) lease.attach({ stopAndProve: async () => { await harness.proc?.stop(); } });
   realLeases.push(lease);
-  harness.execution = { cwd: "/srv/zeros/workspace", lease, coordinator: { environment: () => ({}) } } as unknown as CloudProviderExecution;
+  harness.execution = { mode:"actor-grant-v1",cwd: "/srv/zeros/workspace",lease,lifetime:lease,auth:lease,model:lease.admission.model,
+    credentialKind:lease.credentialKind,nativeCapabilities:lease.nativeCapabilities,environment:lease.environment,
+    coordinator: { environment: () => ({}) } } as unknown as CloudProviderExecution;
   return { lease, request, advance: (ms: number) => { elapsed += ms; } };
 }
 function installAdapter() {
@@ -149,6 +153,20 @@ function installAdapter() {
   adapters.push(adapter);
   return { adapter, emit };
 }
+function installOriginalLifetime(native: ReturnType<typeof installProcess>, credentialKind: "codex-chatgpt" | "codex-api-key" = "codex-api-key") {
+  const auth = installCloud("/srv/zeros/workspace", credentialKind);
+  const original = new AbortController();
+  const lifetime = {
+    signal: original.signal,
+    assertLive: vi.fn(() => { if (original.signal.aborted) throw original.signal.reason; }),
+    close: vi.fn(async () => {
+      if (!original.signal.aborted) original.abort(new CloudCommandFailureError({ stage: "validation", category: "lifecycle_superseded" }));
+      await native.stop();
+    }),
+  };
+  Object.assign(harness.execution!, { mode: "boot-owner-v1", lifetime, auth });
+  return { original, lifetime };
+}
 beforeEach(() => { harness.execution = null; harness.proc = null; harness.executor.mockReset();
   vi.mocked(removeSessionDir).mockClear();
   harness.executor.mockResolvedValue({ environmentId: "synthetic-env", url: "ws://127.0.0.1/synthetic-capability" }); });
@@ -158,7 +176,374 @@ afterEach(async () => {
   await harness.proc?.stop(); vi.clearAllTimers(); vi.useRealTimers();
 });
 
+describe("Codex real native prompt observation", () => {
+  it.each([false, true])("separates stdin write from awaited turn ACK (cloud=%s)", async cloud => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" });
+    if (cloud) installCloud("/srv/zeros/workspace", "codex-api-key");
+    const runtime = await boot(), stages: string[] = [];
+    const result = runtime.runTurn({ threadId: "native-thread", input: [{ type: "text", text: "fixture", text_elements: [] }] }, {
+      onNativePromptStage: stage => {
+        expect(native.frames.some(frame => frame.method === "turn/start")).toBe(true);
+        stages.push(stage);
+      },
+    });
+    // The RED assertion may precede the held ACK; teardown still owns and
+    // settles this request without an unhandled rejection.
+    void result.catch(() => {});
+    const frame = await native.waitFor("turn/start");
+    expect(stages).toEqual(["native_write"]);
+    native.send({ jsonrpc: "2.0", id: frame.id, result: { turn: { id: "native-turn", status: "completed" } } });
+    await expect(result).resolves.toMatchObject({ status: "completed" });
+    expect(stages).toEqual(["native_write", "native_acceptance_ack"]);
+    await runtime.dispose();
+  });
+
+  it("records a refused native turn write without fabricating acceptance", async () => {
+    installProcess(startupReplies, "turn/start"); installCloud("/srv/zeros/workspace", "codex-api-key");
+    const runtime = await boot(), observe = vi.fn();
+    await expect(runtime.runTurn({ threadId: "native-thread", input: [{ type: "text", text: "fixture", text_elements: [] }] },
+      { onNativePromptStage: observe })).rejects.toMatchObject({ code: -32603, method: "turn/start" });
+    expect(observe.mock.calls).toEqual([["native_write"]]); await runtime.dispose();
+  });
+
+  it.each([undefined, "", "native\nturn", 123])("does not label an unusable turn id as native acceptance (%s)", async id => {
+    installProcess({ ...startupReplies, "turn/start": { turn: { id, status: "completed" } } });
+    const runtime = await boot(), observe = vi.fn();
+    await runtime.runTurn({ threadId: "native-thread", input: [{ type: "text", text: "fixture", text_elements: [] }] }, { onNativePromptStage: observe });
+    expect(observe.mock.calls).toEqual([["native_write"]]); await runtime.dispose();
+  });
+
+  it("does not label a different RPC response as this prompt's native acknowledgement", async () => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" }), runtime = await boot(), observe = vi.fn();
+    const result = runtime.runTurn({ threadId: "native-thread", input: [{ type: "text", text: "fixture", text_elements: [] }] }, { onNativePromptStage: observe });
+    void result.catch(() => {});
+    const frame = await native.waitFor("turn/start");
+    native.send({ jsonrpc: "2.0", id: (frame.id ?? 0) + 100, result: { turn: { id: "native-turn", status: "completed" } } });
+    await Promise.resolve(); expect(observe.mock.calls).toEqual([["native_write"]]);
+    native.send({ jsonrpc: "2.0", id: frame.id, result: { turn: { id: "native-turn", status: "completed" } } });
+    await result; expect(observe.mock.calls).toEqual([["native_write"], ["native_acceptance_ack"]]); await runtime.dispose();
+  });
+
+  it("preserves the lease preflight before any native-write observation", async () => {
+    const native = installProcess(startupReplies), lease = installCloud();
+    const runtime = await boot(), observe = vi.fn();
+    lease.validate.mockRejectedValueOnce(new CloudCommandFailureError({ stage: "validation", category: "access_denied" }));
+    await expect(runtime.runTurn({ threadId: "native-thread", input: [{ type: "text", text: "fixture", text_elements: [] }] },
+      { onNativePromptStage: observe })).rejects.toMatchObject({ code: "cloud_validation_access_denied" });
+    expect(observe).not.toHaveBeenCalled();
+    expect(native.frames.some(frame => frame.method === "turn/start")).toBe(false); await runtime.dispose();
+  });
+
+  it("contains observation errors and preserves native completion", async () => {
+    installProcess(startupReplies); installCloud("/srv/zeros/workspace", "codex-api-key");
+    const runtime = await boot(), observe = vi.fn(() => { throw new Error("synthetic-observer-refusal"); });
+    await expect(runtime.runTurn({ threadId: "native-thread", input: [{ type: "text", text: "fixture", text_elements: [] }] },
+      { onNativePromptStage: observe })).resolves.toMatchObject({ status: "completed" });
+    expect(observe.mock.calls).toEqual([["native_write"], ["native_acceptance_ack"]]); await runtime.dispose();
+  });
+
+  it("contains asynchronous native-stage observation rejection", async () => {
+    installProcess(startupReplies); const runtime=await boot();
+    await expect(runtime.runTurn({threadId:"native-thread",input:[{type:"text",text:"fixture",text_elements:[]}]},
+      {onNativePromptStage:async()=>{throw new Error("synthetic async stage observer refusal");}})).resolves.toMatchObject({status:"completed"});
+    await new Promise(resolve=>setTimeout(resolve,0)); await runtime.dispose();
+  });
+
+  it("observes inline review at its real review/start transport boundary", async () => {
+    installProcess({ ...startupReplies, "review/start": { turn: { id: "native-review", status: "completed" } } });
+    const runtime = await boot(), observe = vi.fn();
+    await expect(runtime.runReview({ threadId: "native-thread", target: { type: "uncommittedChanges" }, delivery: "inline" },
+      { onNativePromptStage: observe })).resolves.toMatchObject({ turnId: "native-review", status: "completed" });
+    expect(observe.mock.calls).toEqual([["native_write"], ["native_acceptance_ack"]]); await runtime.dispose();
+  });
+
+  it("passes the adapter's trusted callback to native turn transport without observing startup metadata", async () => {
+    installProcess(startupReplies); installCloud("/srv/zeros/workspace", "codex-api-key");
+    const { adapter } = installAdapter(), observe = vi.fn();
+    await adapter.newSession({ executionId: "observed-execution", cwd: "/srv/zeros/workspace" });
+    await adapter.prompt({ sessionId: "observed-execution", prompt: [{ type: "text", text: "fixture" }], onNativePromptStage: observe });
+    expect(observe.mock.calls).toEqual([["native_write"], ["native_acceptance_ack"]]);
+  });
+});
+
+describe("Codex original native turn output", () => {
+  const input = { threadId: "native-thread", input: [{ type: "text" as const, text: "fixture", text_elements: [] }] };
+  const begin = async (native: ReturnType<typeof installProcess>, runtime: Awaited<ReturnType<typeof boot>>, output: (kind: "text" | "tool") => void, ordinal = 0) => {
+    let bind!: (id: string) => void;
+    const started = new Promise<string>(resolve => { bind = resolve; });
+    const options = { onTurnStarted: bind, onNativeOutput: output };
+    const result = runtime.runTurn(input, options);
+    void result.catch(() => {});
+    const frame = await native.waitFor("turn/start", ordinal);
+    return { result, started, ack: (id = "native-turn") => native.send({ jsonrpc: "2.0", id: frame.id,
+      result: { turn: { id, status: "inProgress" } } }), frame };
+  };
+  const text = (native: ReturnType<typeof installProcess>, turnId = "native-turn", threadId = "native-thread", delta = "native text") =>
+    native.send({ jsonrpc: "2.0", method: "item/agentMessage/delta", params: { threadId, turnId, itemId: "native-item", delta } });
+  const complete = (native: ReturnType<typeof installProcess>, turnId = "native-turn") =>
+    native.send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: "native-thread", turn: { id: turnId, status: "completed" } } });
+
+  it.each([false, true])("observes only the ACK-owned native thread/turn text (cloud=%s)", async cloud => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" });
+    if (cloud) installCloud("/srv/zeros/workspace", "codex-api-key");
+    const runtime = await boot(), output = vi.fn(), turn = await begin(native, runtime, output);
+    turn.ack(); await turn.started;
+    text(native, "other-turn"); text(native, "native-turn", "other-thread"); text(native);
+    complete(native); await turn.result;
+    expect(output.mock.calls.map(([kind])=>[kind])).toEqual([["text"]]); await runtime.dispose();
+  });
+
+  it("waits for exact matched ACK before attributing an early frame", async () => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" }), runtime = await boot(), output = vi.fn();
+    const turn = await begin(native, runtime, output);
+    text(native, "old-turn"); text(native);
+    expect(output).not.toHaveBeenCalled();
+    turn.ack(); await turn.started;
+    expect(output.mock.calls.map(([kind])=>[kind])).toEqual([["text"]]); complete(native); await turn.result; await runtime.dispose();
+  });
+
+  it("preserves native arrival40ms through ownership ACK200ms", async () => {
+    const native=installProcess(startupReplies,undefined,{holdMethod:"turn/start"}),runtime=await boot(),output=vi.fn();
+    const turn=await begin(native,runtime,output), clock=vi.spyOn(performance,"now");
+    try {
+      clock.mockReturnValue(40); text(native); expect(output).not.toHaveBeenCalled();
+      clock.mockReturnValue(200); turn.ack(); await turn.started;
+      expect(output.mock.calls).toEqual([["text",40]]); complete(native); await turn.result;
+    } finally {clock.mockRestore(); await runtime.dispose();}
+  });
+
+  it("observes real tool items, excluding thoughts, guidance, empty text and generic session updates", async () => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" }), runtime = await boot(), output = vi.fn();
+    const turn = await begin(native, runtime, output); turn.ack(); await turn.started;
+    text(native, "native-turn", "native-thread", "");
+    for (const type of ["reasoning", "userMessage", "unknown"])
+      native.send({ jsonrpc: "2.0", method: "item/started", params: { threadId: "native-thread", turnId: "native-turn", item: { id: "native-item", type } } });
+    native.send({ jsonrpc: "2.0", method: "session/update", params: { text: "guidance" } });
+    native.send({ jsonrpc: "2.0", method: "item/agentMessage/delta", params: { delta: "unowned" } });
+    expect(output).not.toHaveBeenCalled();
+    native.send({ jsonrpc: "2.0", method: "item/started", params: { threadId: "native-thread", turnId: "native-turn", item: { id: "tool-item", type: "commandExecution" } } });
+    text(native); text(native); complete(native); await turn.result;
+    expect(output.mock.calls.map(([kind])=>[kind])).toEqual([["tool"], ["text"]]); await runtime.dispose();
+  });
+
+  it("never assigns held old warm-turn output to a later send on the same native thread", async () => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" }), runtime = await boot();
+    const firstOutput = vi.fn(), first = await begin(native, runtime, firstOutput);
+    first.ack("native-first"); await first.started; text(native, "native-first"); complete(native, "native-first"); await first.result;
+    const secondOutput = vi.fn(), second = await begin(native, runtime, secondOutput, 1);
+    text(native, "native-first"); second.ack("native-second"); await second.started;
+    text(native, "native-first"); text(native, "native-second"); complete(native, "native-second"); await second.result;
+    expect(firstOutput.mock.calls.map(([kind])=>[kind])).toEqual([["text"]]); expect(secondOutput.mock.calls.map(([kind])=>[kind])).toEqual([["text"]]); await runtime.dispose();
+  });
+
+  it("excludes late frames after native terminal even when terminal precedes ACK", async () => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" }), runtime = await boot(), output = vi.fn();
+    const turn = await begin(native, runtime, output);
+    complete(native); text(native); turn.ack(); await turn.result;
+    expect(output).not.toHaveBeenCalled(); text(native); expect(output).not.toHaveBeenCalled(); await runtime.dispose();
+  });
+
+  it("does not fabricate output ownership from a refused or unusable ACK", async () => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" }), runtime = await boot(), output = vi.fn();
+    const turn = await begin(native, runtime, output); text(native);
+    native.send({ jsonrpc: "2.0", id: turn.frame.id, error: { code: -32603, message: "synthetic native refusal" } });
+    await expect(turn.result).rejects.toMatchObject({ code: -32603 });
+    expect(output).not.toHaveBeenCalled(); text(native); expect(output).not.toHaveBeenCalled(); await runtime.dispose();
+  });
+
+  it("keeps malformed ACK status inert without throwing from the passive observer", async () => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" }), runtime = await boot(), output = vi.fn();
+    const turn = await begin(native, runtime, output); text(native); complete(native);
+    native.send({ jsonrpc: "2.0", id: turn.frame.id, result: { turn: { id: "native-turn", status: { toString: null } } } });
+    await expect(turn.result).resolves.toMatchObject({ status: "completed" });
+    expect(output).not.toHaveBeenCalled(); await runtime.dispose();
+  });
+
+  it("does not reopen native output after an unscoped terminal error precedes ACK", async () => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" }), runtime = await boot(), output = vi.fn();
+    const result = runtime.runTurn(input, { onNativeOutput: output, onTurnStarted: () => text(native) });
+    void result.catch(() => {});
+    const frame = await native.waitFor("turn/start");
+    native.send({ jsonrpc: "2.0", method: "error", params: { willRetry: false, error: { message: "synthetic terminal refusal" } } });
+    native.send({ jsonrpc: "2.0", id: frame.id, result: { turn: { id: "native-turn", status: "inProgress" } } });
+    await expect(result).resolves.toMatchObject({ status: "failed" });
+    expect(output).not.toHaveBeenCalled(); await runtime.dispose();
+  });
+
+  it("contains synchronous and asynchronous observer failures", async () => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" }), runtime = await boot();
+    const turn = await begin(native, runtime, () => { throw new Error("synthetic observer refusal"); });
+    turn.ack(); await turn.started; text(native); complete(native); await turn.result;
+    const next = await begin(native, runtime, async () => { throw new Error("synthetic async observer refusal"); }, 1);
+    next.ack("native-next"); await next.started; text(native, "native-next"); complete(native, "native-next");
+    await expect(next.result).resolves.toMatchObject({ status: "completed" }); await runtime.dispose();
+  });
+
+  it("bounds early foreign-turn candidates and still permits later exact output", async () => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" }), runtime = await boot(), output = vi.fn();
+    const turn = await begin(native, runtime, output);
+    for (let index = 0; index < 128; index++) text(native, `foreign-${index}`);
+    turn.ack(); await turn.started; expect(output).not.toHaveBeenCalled();
+    text(native); complete(native); await turn.result; expect(output.mock.calls.map(([kind])=>[kind])).toEqual([["text"]]); await runtime.dispose();
+  });
+
+  it("passes the original adapter callback to the native turn without synthetic startup/session evidence", async () => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" }); installCloud("/srv/zeros/workspace", "codex-api-key");
+    const { adapter } = installAdapter(), output = vi.fn();
+    await adapter.newSession({ executionId: "output-execution", cwd: "/srv/zeros/workspace" });
+    expect(output).not.toHaveBeenCalled();
+    const options = { sessionId: "output-execution", prompt: [{ type: "text" as const, text: "fixture" }], onNativeOutput: output };
+    const result = adapter.prompt(options); void result.catch(() => {});
+    const frame = await native.waitFor("turn/start");
+    native.send({ jsonrpc: "2.0", id: frame.id, result: { turn: { id: "native-turn", status: "inProgress" } } });
+    text(native); complete(native); await result;
+    expect(output.mock.calls.map(([kind])=>[kind])).toEqual([["text"]]);
+  });
+
+  it("contains a rejecting observer through the adapter forwarding layer", async () => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" }); installCloud("/srv/zeros/workspace", "codex-api-key");
+    const { adapter } = installAdapter();
+    await adapter.newSession({ executionId: "rejecting-output", cwd: "/srv/zeros/workspace" });
+    const options = { sessionId: "rejecting-output", prompt: [{ type: "text" as const, text: "fixture" }],
+      onNativeOutput: async () => { throw new Error("synthetic adapter observer refusal"); } };
+    const result = adapter.prompt(options); void result.catch(() => {});
+    const frame = await native.waitFor("turn/start");
+    native.send({ jsonrpc: "2.0", id: frame.id, result: { turn: { id: "native-turn", status: "inProgress" } } });
+    text(native); complete(native);
+    await expect(result).resolves.toMatchObject({ stopReason: "end_turn" });
+    await new Promise(resolve => setTimeout(resolve, 0));
+  });
+});
+
+describe("Codex original cloud lifetime retirement cause", () => {
+  const turnInput = { threadId: "native-thread", input: [{ type: "text" as const, text: "fixture", text_elements: [] }] };
+  const expiry = () => Object.assign(new Error("private-original-expiry-prose-sentinel"), { code: "cloud_validation_session_expired" });
+  const beginPrompt = async (native: ReturnType<typeof installProcess>) => {
+    const { adapter } = installAdapter();
+    await adapter.newSession({ executionId: "original-execution", cwd: "/srv/zeros/workspace" });
+    const prompt = adapter.prompt({ sessionId: "original-execution", prompt: [{ type: "text", text: "fixture" }] });
+    void prompt.catch(() => {});
+    await native.waitFor("turn/start");
+    return { adapter, prompt };
+  };
+
+  it.each([false, true])("retains original expiry through native retirement (ACK received=%s)", async acknowledged => {
+    const native = installProcess({ ...startupReplies, "turn/start": { turn: { id: "native-turn", status: "inProgress" } } },
+      undefined, acknowledged ? {} : { holdMethod: "turn/start" });
+    const { original } = installOriginalLifetime(native);
+    const { prompt } = await beginPrompt(native);
+    // Let the matched ACK install its waiter; the other case is a held
+    // required RPC. Both are production retirement orderings.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    original.abort(expiry()); await native.stop();
+    const error = await prompt.catch(error => error);
+    expect(error).toMatchObject({ code: "cloud_validation_session_expired" });
+    expect(error.message).not.toContain("private-original");
+  });
+
+  it("captures expiry before EOF rejects the required RPC and before proc.exited runs", async () => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" });
+    const { original } = installOriginalLifetime(native), runtime = await boot();
+    const result = runtime.runTurn(turnInput).catch(error => error);
+    await native.waitFor("turn/start"); original.abort(expiry());
+    native.child.stdout.emit("end");
+    await result;
+    expect(runtime.cloudFailure).toMatchObject({ code: "cloud_validation_session_expired" });
+    expect(runtime.cloudFailure?.message).not.toContain("private-original");
+    await runtime.dispose();
+  });
+
+  it.each(["cloud_validation_environment_revoked", "cloud_agent_credential_revoked"])("retains only closed original authority metadata: %s", async code => {
+    const native = installProcess(startupReplies, undefined, { holdMethod: "turn/start" });
+    const { original } = installOriginalLifetime(native), { prompt } = await beginPrompt(native);
+    original.abort(Object.assign(new Error("private-original-authority-sentinel"), { code })); await native.stop();
+    const error = await prompt.catch(error => error);
+    expect(error).toMatchObject({ code }); expect(error.message).not.toContain("private-original");
+  });
+
+  it("keeps a prior fatal native auth refusal ahead of the retirement cause it creates", async () => {
+    const native = installProcess(startupReplies, "turn/start", {
+      refusal: { code: -32603, message: "native-auth-refusal-sentinel", data: { codexErrorInfo: "unauthorized" } },
+    });
+    const { original } = installOriginalLifetime(native), runtime = await boot();
+    const error = await runtime.runTurn(turnInput).catch(error => error);
+    expect(runtime.cloudFailure).toBe(error);
+    expect(error).toMatchObject({ code: -32603, method: "turn/start" });
+    expect(original.signal.reason).toMatchObject({ code: "cloud_validation_lifecycle_superseded" });
+    await runtime.dispose();
+  });
+
+  it("keeps an earlier native credential-refresh failure ahead of its generic lifetime close", async () => {
+    const native = installProcess({ ...startupReplies, "turn/start": { turn: { id: "native-turn", status: "inProgress" } } });
+    const { original } = installOriginalLifetime(native, "codex-chatgpt"), runtime = await boot();
+    const result = runtime.runTurn(turnInput).catch(error => error);
+    await native.waitFor("turn/start"); await new Promise(resolve => setTimeout(resolve, 0));
+    native.send({ jsonrpc: "2.0", id: "original-refresh", method: "account/chatgptAuthTokens/refresh",
+      params: { reason: "unauthorized", previousAccountId: "synthetic-account" } });
+    const error = await result;
+    expect(error).toMatchObject({ code: "cloud_provider_prompt_credential_refresh_rejected" });
+    expect(runtime.cloudFailure).toBe(error);
+    expect(original.signal.reason).toMatchObject({ code: "cloud_validation_lifecycle_superseded" });
+    await runtime.dispose();
+  });
+
+  it("does not mint an expiry from the generic close caused by a spontaneous native exit", async () => {
+    const native = installProcess({ ...startupReplies, "turn/start": { turn: { id: "native-turn", status: "inProgress" } } });
+    const { original } = installOriginalLifetime(native), { prompt } = await beginPrompt(native);
+    await new Promise(resolve => setTimeout(resolve, 0)); await native.stop();
+    await expect(prompt).rejects.toMatchObject({ failure: { kind: "transport-closed", stage: "prompt" } });
+    expect(original.signal.reason).toMatchObject({ code: "cloud_validation_lifecycle_superseded" });
+  });
+
+  it("does not turn an unclassified original abort into an expiry or expose its prose", async () => {
+    const native = installProcess({ ...startupReplies, "turn/start": { turn: { id: "native-turn", status: "inProgress" } } });
+    const { original } = installOriginalLifetime(native), { prompt } = await beginPrompt(native);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    original.abort(new Error("private-unclassified-original-sentinel")); await native.stop();
+    const error = await prompt.catch(error => error);
+    expect(error).toMatchObject({ failure: { kind: "transport-closed" } });
+    expect(error.message).not.toContain("private-unclassified");
+  });
+
+  it("keeps explicit cancel ahead of original expiry and the process exit it causes", async () => {
+    const native = installProcess({ ...startupReplies, "turn/start": { turn: { id: "native-turn", status: "inProgress" } } });
+    const { original } = installOriginalLifetime(native), { adapter, prompt } = await beginPrompt(native);
+    await new Promise(resolve => setTimeout(resolve, 0)); await adapter.cancel({ sessionId: "original-execution" });
+    original.abort(expiry()); await native.stop();
+    await expect(prompt).resolves.toMatchObject({ stopReason: "cancelled" });
+  });
+
+  it("removes the original abort observer before dispose closes the lifetime", async () => {
+    const native = installProcess(startupReplies), { original } = installOriginalLifetime(native);
+    const remove = vi.spyOn(original.signal, "removeEventListener"), runtime = await boot();
+    await runtime.dispose();
+    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+    expect(runtime.cloudFailure).toBeNull();
+  });
+
+  it.each(["Local Personal", "organization-local"])("keeps spontaneous %s exit as transport-closed", async () => {
+    const native = installProcess({ ...startupReplies, "turn/start": { turn: { id: "native-turn", status: "inProgress" } } });
+    const { prompt } = await beginPrompt(native);
+    await new Promise(resolve => setTimeout(resolve, 0)); await native.stop();
+    await expect(prompt).rejects.toMatchObject({ failure: { kind: "transport-closed", stage: "prompt" } });
+    expect(harness.executor).not.toHaveBeenCalled();
+  });
+});
+
 describe("Codex admitted native failure boundaries", () => {
+  it("uses the captured common lifetime and auth while retaining genuine legacy validation", async () => {
+    const native=installProcess(startupReplies), lease=installCloud();
+    const assertLive=vi.fn(), close=vi.fn(async()=>{await native.stop();});
+    const auth={codexAuth:vi.fn(()=>({credentialVersion:7,material:{kind:"codex-chatgpt",accessToken:"synthetic-captured-access",accountId:"captured-account"}})),
+      refreshCodex:vi.fn(async()=>({credentialVersion:8,material:{kind:"codex-chatgpt",accessToken:"synthetic-captured-next",accountId:"captured-account"}}))};
+    Object.assign(harness.execution!,{lifetime:{assertLive,close},auth,model:lease.admission.model,nativeCapabilities:null,environment:null});
+    lease.assertLive.mockImplementation(()=>{throw new Error("retired legacy common read");});
+    const runtime=await boot();
+    expect(native.frames.find(frame=>frame.method==="account/login/start")?.params).toMatchObject({accessToken:"synthetic-captured-access",chatgptAccountId:"captured-account"});
+    await expect(runtime.runTurn({threadId:"native-thread",input:[{type:"text",text:"fixture",text_elements:[]}]})).resolves.toMatchObject({status:"completed"});
+    expect(lease.validate).toHaveBeenCalled(); expect(assertLive).toHaveBeenCalled();
+    expect(lease.codexAuth).not.toHaveBeenCalled(); await runtime.dispose(); expect(close).toHaveBeenCalled();
+  });
   it.each(["/srv/zeros/workspace", "/srv/zeros/workspace/packages/app", "/srv/zeros/worktrees/managed-checkout", "/srv/zeros/worktrees/checkout #1"])("boots in trusted %s despite a hostile caller cwd", async cwd => {
     installProcess({"environment/info":{cwd:pathToFileURL(cwd).href}});installCloud(cwd);
     const runtime=await bootCodexAppServerRuntime({cwd:"/private/caller",clientInfo:{name:"Zeros-test",version:"1"}});

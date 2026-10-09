@@ -2,8 +2,10 @@ import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { CloudAgentAccessMaterialSchema, CloudAgentExecutionAdmissionSchema, CloudAgentExecutionAuthoritySchema, CloudAgentExecutionLeaseSchema,
   CloudBackgroundSnapshotSchema, CloudBackgroundStateSchema, CloudComputerExecutionEnvironmentSchema,
+  CloudNativeCapabilitiesSchema,
   type CloudAgentAccessMaterial, type CloudAgentExecutionAuthority, type CloudAgentExecutionAdmission } from "@zeros/protocol/cloud-agent-execution";
 import { CloudCustomizationSnapshotSchema } from "@zeros/protocol/cloud-customization";
+import { cloudAgentModels } from "../../../../apps/control-plane/src/cloud-workspaces/agent-models";
 import { canonical, clone, FixtureRefusal, parse, ScopeSchema, sha256 } from "./contracts";
 import type { FixtureCommands } from "./commands";
 
@@ -27,6 +29,8 @@ export const ExecutionBodySchema = ScopeSchema.extend({ request: RequestSchema }
 type Provider = CloudAgentExecutionAdmission["provider"];
 type Lease = { admission: CloudAgentExecutionAdmission; response: CloudAgentExecutionAuthority; released: boolean; conversationId: string | null };
 const denied = (): never => { throw new FixtureRefusal("cloud_agent_authority_rejected", 403); };
+const nativeCapabilities = CloudNativeCapabilitiesSchema.parse({ version: 1, goals: false, nativeFork: false,
+  transcriptFork: false, nativeReview: false, connectedApps: false, multiAgent: false });
 
 // Exactly the CP/engine public digest algorithm: env/header key names are
 // included; their private literal values are intentionally omitted.
@@ -42,6 +46,7 @@ export class FixtureExecutions {
   constructor(private readonly dependencies: {
     now(): number; workspaceId: string; organizationId: string; commands: FixtureCommands;
     requireActor(sessionId: string): void; requireRecordedActor(sessionId: string): void; actorUserId: string; delegationId(provider: Provider): string;
+    delegationExpiresAtMs: number;
     credentials?: { mode: "synthetic" | "environment"; env?: Record<string, string | undefined> };
     allowedModels?: Partial<Record<Provider, readonly string[]>>; leaseMs?: number;
   }) {
@@ -62,6 +67,17 @@ export class FixtureExecutions {
     }
   }
 
+  rendererDelegations(runtimeQualified: boolean, mcpQualified: boolean) {
+    const expiresAtMs = this.dependencies.delegationExpiresAtMs;
+    if (expiresAtMs <= this.dependencies.now()) return [];
+    return [...this.materials].map(([provider, material]) => ({
+      id: this.dependencies.delegationId(provider), ownerUserId: this.dependencies.actorUserId, kind: material.kind,
+      models: [...(this.dependencies.allowedModels?.[provider] ?? cloudAgentModels(provider))], allModels: false,
+      expiresAt: new Date(expiresAtMs).toISOString(), runtimeQualified, runtimeUpgradeRequired: false, mcpQualified,
+      nativeCapabilities: clone(nativeCapabilities),
+    }));
+  }
+
   private source(admission: CloudAgentExecutionAdmission, retained = false): string | null {
     if (admission.source.kind === "session") {
       if (retained) this.dependencies.requireRecordedActor(admission.source.actorSessionId);
@@ -78,7 +94,17 @@ export class FixtureExecutions {
     const lease = this.leases.get(leaseId);
     if (!lease || lease.released || Date.parse(lease.response.expiresAt) <= this.dependencies.now()) return denied();
     this.source(lease.admission, true);
+    this.requireDelegationLive();
     return lease;
+  }
+  private requireDelegationLive(): void {
+    // The real CP binding requires strictly more than five seconds left in
+    // the same delegation exposed to the renderer. Retries cannot mint a new
+    // deadline, and a renewable execution lease cannot outlive that grant.
+    if (this.dependencies.delegationExpiresAtMs <= this.dependencies.now() + 5000) denied();
+  }
+  private leaseDeadline(): string {
+    return new Date(Math.min(this.dependencies.now() + this.leaseMs, this.dependencies.delegationExpiresAtMs)).toISOString();
   }
   private refusal(admission: CloudAgentExecutionAdmission, code: string): never {
     if (admission.source.kind === "command") this.dependencies.commands.recordDenial(admission.source.commandId, code);
@@ -98,6 +124,7 @@ export class FixtureExecutions {
         if (admission.delegationId !== this.dependencies.delegationId(admission.provider)) this.refusal(admission, "cloud_agent_credential_required");
         const material = this.materials.get(admission.provider);
         if (!material) this.refusal(admission, "cloud_agent_credential_required");
+        this.requireDelegationLive();
         const models = this.dependencies.allowedModels?.[admission.provider];
         if (models && !models.includes(admission.model)) this.refusal(admission, "cloud_agent_model_not_authorized");
         if (request.environmentVersion !== 1) throw new FixtureRefusal("computer_environment_runtime_required", 409);
@@ -117,18 +144,18 @@ export class FixtureExecutions {
           customization = CloudCustomizationSnapshotSchema.parse({ ...content, digest: customizationDigest(content) });
         }
         const response = CloudAgentExecutionAuthoritySchema.parse({ leaseId, authorityId: sha256(canonical([admission, leaseId, environment.revision, customization?.digest ?? null])),
-          expiresAt: new Date(this.dependencies.now() + this.leaseMs).toISOString(), credentialVersion: 1,
+          expiresAt: this.leaseDeadline(), credentialVersion: 1,
           credentialKind: material.kind, material: clone(material), provider: admission.provider, model: admission.model, environment,
           ...(customization ? { customization } : {}), ...(request.includeGitAuthor ? { gitAuthor: null } : {}),
           ...(request.backgroundTasksVersion === 1 ? { backgroundTasksVersion: 1 } : {}),
-          ...(request.nativeCapabilitiesVersion === 1 ? { nativeCapabilities: { version: 1, goals: false, nativeFork: false, transcriptFork: false, nativeReview: false, connectedApps: false, multiAgent: false } } : {}) });
+          ...(request.nativeCapabilitiesVersion === 1 ? { nativeCapabilities: clone(nativeCapabilities) } : {}) });
         this.leases.set(leaseId, { admission: clone(admission), response: clone(response), released: false, conversationId });
         return response;
       }
       case "validate": {
         const lease = this.live(request.leaseId);
         if (request.credentialVersion !== undefined && request.credentialVersion !== lease.response.credentialVersion) denied();
-        if (request.renew) lease.response.expiresAt = new Date(this.dependencies.now() + this.leaseMs).toISOString();
+        if (request.renew) lease.response.expiresAt = this.leaseDeadline();
         return CloudAgentExecutionLeaseSchema.parse({ leaseId: request.leaseId, expiresAt: lease.response.expiresAt, credentialVersion: lease.response.credentialVersion,
           environmentRevision: lease.response.environment?.revision,
           ...(request.nativeCapabilitiesVersion === 1 && lease.response.nativeCapabilities ? { nativeCapabilities: lease.response.nativeCapabilities } : {}) });

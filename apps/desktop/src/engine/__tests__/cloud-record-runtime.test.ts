@@ -279,6 +279,35 @@ afterEach(async () => {
 });
 
 describe("cloud durable record runtime", () => {
+  it("keeps canonical local-mode history authoritative instead of restoring or tombstoning legacy agent rows", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-local-mode-")); roots.push(root);
+    setZerosDbPathForTesting(":memory:");
+    upsertChat(localChat("chat-1", root, "Verified canonical repair"));
+    const server = createRecordServer([...remoteConversation("completed"), remoteMessage("chat-1", "old-message")]);
+    const oldRows = structuredClone([...server.remote.values()]);
+    const runtime = new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch });
+    await runtime.synchronize(authority, { agentJournalMode: "local" });
+    expect(listChats()[0]?.title).toBe("Verified canonical repair");
+    expect(windowChatMessages("chat-1", 100)).toEqual([]); expect(getTurn("chat-1", "turn-1")).toBeNull();
+    expect([...server.remote.values()]).toEqual(oldRows);
+    expect(server.appendBodies.flatMap(body => body.mutations)).toEqual([]);
+  });
+  it("publishes workspace and review metadata while 100 native deltas stay in the local journal", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-local-deltas-")); roots.push(root);
+    setZerosDbPathForTesting(":memory:"); insertWorkspace(cloudReviewOwner(root));
+    upsertChat(localChat("local-chat", root, "Native streaming"));
+    const server = createRecordServer(), runtime = new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch });
+    await runtime.synchronize(authority, { agentJournalMode: "local" });
+    for (let index = 0; index < 100; index++) upsertChatMessage("local-chat", { msgId: `message-${index}`, kind: "text", payload: JSON.stringify({ text: `delta-${index}` }), createdAt: NOW });
+    const input = { workspaceId: "local-main", requestId: "local-review", anchor: { path: "example.ts", side: "new" as const, startLine: 1, endLine: 1, revision: "fixture-current-revision" }, body: "Review metadata" };
+    codeReviewStore.create(input, reviewHuman);
+    await runtime.flush(authority);
+    const mutations = server.appendBodies.flatMap(body => body.mutations);
+    expect(mutations.length).toBeGreaterThan(1);
+    expect(mutations.every(mutation => mutation.entityKind === "metadata")).toBe(true);
+    expect(windowChatMessages("local-chat", 1000)).toHaveLength(100);
+    await expect(runtime.synchronize(authority, { agentJournalMode: "legacy" })).rejects.toThrow("cloud record journal mode changed");
+  });
   it("revalidates an acknowledged projection without rereading every history page", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-page-cache-")); roots.push(root);
     setZerosDbPathForTesting(":memory:");

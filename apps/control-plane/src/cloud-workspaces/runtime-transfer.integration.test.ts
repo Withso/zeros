@@ -4,7 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it,vi } from "vitest
 import { withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { seedRuntimeBundle, runtimeWitness } from "./runtime-test-fixtures.js";
-import { seedProviderLossAttestation, seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
+import { seedProviderLossAttestation, seedReadyCloudWorkspace, withCloudFixtureOwnerTx, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
 import { bindCloudAllocationProvider } from "./allocation-provider.js";
 import type { CloudWorkspaceProvider } from "./provider.js";
 import { CloudWorkspaceComputeLeaseCoordinator } from "./compute-leases.js";
@@ -23,6 +23,8 @@ import { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { ensureUser } from "../auth.js";
 import { DatabaseCloudWorkspaceActorSessionService } from "./actor-sessions.js";
 import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
+import {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
+import {CloudAgentBootCredentialResponseSchema} from "./agent-boot-contract.js";
 
 (process.env.TEST_DATABASE_URL ? describe : describe.skip)("retained cloud runtime transitions", () => {
   let pool: pg.Pool;
@@ -97,6 +99,15 @@ import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
   }
 
   describe("resident handoff journal", () => {
+    async function sourceLocalBoot(){
+      await pool.query("UPDATE cloud_workspace_engine_instances SET cloud_local_commands_version=1 WHERE id=$1",[fixture.engineInstanceId]);
+      const execution=new DatabaseCloudAgentExecutionService(pool,{currentKeyVersion:1,keys:{1:randomBytes(32).toString("base64url")}},false);
+      const scope={organizationId:fixture.organizationId,workspaceId:fixture.workspaceId,generation:1,engineInstanceId:fixture.engineInstanceId};
+      const engine={...scope,heartbeatToken:fixture.heartbeatToken};
+      const boot=CloudAgentBootCredentialResponseSchema.parse(await execution.boot(engine,"bootstrap",{...scope,version:1,mode:"boot-owner-v1"}));
+      await execution.boot(engine,"activate",{...scope,version:1,mode:"boot-owner-v1",bootId:boot.bootId,writerEpoch:boot.writerEpoch,expectedCacheRevision:boot.cacheRevision});
+      return boot;
+    }
     async function prepared() {
       const claim = await claimed(); await qualifyTransfer(); await service.staged(claim);
       const handoff = { challenge: randomUUID(), organizationId: fixture.organizationId, workspaceId: fixture.workspaceId,
@@ -151,6 +162,52 @@ import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
       expect(await journal(f.claim.transitionId)).toBe("source_retired");
       expect(await sourceState()).toBe("revoked");
       expect(await service.retireResidentSource(f.claim)).toBe(true);
+    });
+    it("retires the exact old local writer only after positively consumed resident proof, preserving unsealed history",async()=>{
+      const boot=await sourceLocalBoot(),f=await prepared();
+      await service.authorizeResidentConsumption(f.claim,f);
+      expect(await service.retireResidentSource(f.claim)).toBe(false);
+      const writer=()=>pool.query("SELECT state,sealed_sequence FROM cloud_workspace_local_command_writers WHERE writer_epoch=$1",[boot.writerEpoch]);
+      expect((await writer()).rows[0]).toEqual({state:"active",sealed_sequence:null});
+      await service.recordResidentConsumption(f.claim,{handoff:f.handoff,resident:{...f.resident,fence:2,engineId:null,generation:null}});
+      expect((await writer()).rows[0].state).toBe("active");
+      expect(await service.retireResidentSource(f.claim)).toBe(true);
+      expect((await writer()).rows[0]).toEqual({state:"retired",sealed_sequence:null});
+      expect((await pool.query("SELECT retired_at IS NOT NULL AS retired FROM cloud_agent_boot_bindings WHERE engine_instance_id=$1",[fixture.engineInstanceId])).rows[0]).toEqual({retired:true});
+      expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_boot_credentials")).rows[0]).toEqual({count:0});
+      expect((await pool.query("SELECT agent_command_mode,agent_boot_id IS NOT NULL AS pointer FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId])).rows[0]).toEqual({agent_command_mode:"boot-owner-v1",pointer:true});
+      expect(await service.retireResidentSource(f.claim)).toBe(true);
+    });
+    it("does not retire a local writer on uncertain consumption, source revocation or an expired claim",async()=>{
+      const boot=await sourceLocalBoot(),f=await prepared();await service.authorizeResidentConsumption(f.claim,f);
+      await pool.query("UPDATE cloud_workspace_runtime_handoffs SET deadline_at=clock_timestamp()-interval '1 second' WHERE transition_id=$1",[f.claim.transitionId]);
+      expect(await service.reconcile(f.claim)).toBe("recovery_required");
+      expect(await sourceState()).toBe("revoked");
+      expect((await pool.query("SELECT state FROM cloud_workspace_local_command_writers WHERE writer_epoch=$1",[boot.writerEpoch])).rows[0]).toEqual({state:"active"});
+      expect((await pool.query("SELECT retired_at FROM cloud_agent_boot_bindings WHERE engine_instance_id=$1",[fixture.engineInstanceId])).rows[0]).toEqual({retired_at:null});
+    });
+    it.each(["local","missing-pointer","unnegotiated"] as const)("preserves or refuses the persisted local journal through successor enrollment (%s)",async kind=>{
+      const boot=await sourceLocalBoot(),f=await prepared();
+      await service.authorizeResidentConsumption(f.claim,f);
+      const detached={...f.resident,fence:2,engineId:null,generation:null};
+      await service.recordResidentConsumption(f.claim,{handoff:f.handoff,resident:detached});
+      expect(await service.retireResidentSource(f.claim)).toBe(true);
+      const active=targetActive(),enrollment=await service.enroll(f.claim,{active,controller:sourceActive(),report:report(active),rollback:false,resident:detached});
+      if(!enrollment)throw new Error("Expected successor enrollment");
+      if(kind==="missing-pointer")await withCloudFixtureOwnerTx(pool,async tx=>{await tx.query("SET LOCAL session_replication_role=replica");
+        await tx.query("UPDATE cloud_workspaces SET agent_boot_id=NULL WHERE id=$1",[fixture.workspaceId]);});
+      const registration=service.register({...f.claim,generation:2,setupRunId:enrollment.id,executionFence:enrollment.executionFence,
+        engineInstanceId:enrollment.engineInstanceId,token:enrollment.token,protocolVersion:CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+        actorProtocolVersion:2,agentCustomizationVersion:3,...(kind==="unnegotiated"?{}:{cloudLocalCommandsVersion:1 as const}),agentRuntime:{...report(active).runtime as object,profile:"zeros-cloud-worker-v4"}});
+      if(kind!=="local"){
+        await expect(registration).rejects.toThrow("Runtime transition registration rejected");
+        expect((await pool.query("SELECT consumed_at FROM cloud_workspace_runtime_enrollments WHERE id=$1",[enrollment.id])).rows[0]).toEqual({consumed_at:null});
+        expect((await pool.query("SELECT state,registered_at FROM cloud_workspace_engine_instances WHERE id=$1",[enrollment.engineInstanceId])).rows[0]).toEqual({state:"starting",registered_at:null});
+        return;
+      }
+      const registered=await registration;
+      expect(registered).toMatchObject({cloudLocalCommandsVersion:1,agentJournalMode:"local",agentSourceWriterEpoch:boot.writerEpoch});
+      expect((await pool.query("SELECT generation FROM cloud_agent_boot_bindings WHERE id=(SELECT agent_boot_id FROM cloud_workspaces WHERE id=$1)",[fixture.workspaceId])).rows[0]).toEqual({generation:1});
     });
     it("never cancels an ambiguous authorized consumption or takes the ordinary activation path", async () => {
       const f = await prepared();

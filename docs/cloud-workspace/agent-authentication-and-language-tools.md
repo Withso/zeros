@@ -1,6 +1,6 @@
 # Native agent authentication and language tools
 
-A workspace grants access to its code, not to another person's agent account.
+A workspace's run authority and its provider funding authority are separate.
 Each credential has an account owner and a consent revision. In the native
 execution profile, that account's active access material is available to its
 native provider and commands inside the VM, as on a local machine. This is a
@@ -21,10 +21,91 @@ Organization settings can connect these accounts before a workspace exists.
 See [organization setup](organization-setup.md) for native sign-in, private
 account selection, explicit compute/model consent, and automatic self-delegations.
 
-The default grant uses the sending user's control-plane account UUID. An identity
+The legacy default grant uses the sending user's control-plane account UUID. An identity
 provider subject is not that UUID, and selecting another member's credential
 requires an explicit delegation. Account and organization switches fence pending
 grant responses; Local workspaces never enter this cloud admission path.
+
+## Negotiated boot funding
+
+`boot-owner-v1` is an explicitly activated mode with an exact generation,
+engine, boot, writer and funding-owner epoch. Prompter/Developer invitations and
+General access role grants are the owner's consent to workspace-role funding;
+the unchanged share dialog needs no extra note, toggle or confirmation. CP
+records that consent. The sending member's verified actor/device authority,
+Git attribution, private customization and conversation scope remain independent
+of the funding owner. Viewers cannot run. Member, role, account and device
+revocation still take effect immediately.
+
+This mode currently requires `zeros-managed` compute. Non-Zeros-managed compute
+is refused before provider material is selected or delivered. Legacy explicit
+delegation remains unchanged; alternate-compute support for this mode is deferred.
+
+**Members' agents can use and read the owner's active provider keys.** The key
+is delivered to the native provider and its commands, not hidden behind a
+credential proxy. Granting a run-capable role therefore trusts that member's
+agents and repository code with the owner's connected account. Provider model
+consent governs Zeros admission; it cannot constrain arbitrary uses of a raw
+key once delivered. CP, provisioning and refresh credentials remain outside
+the worker. The share dialog is unchanged.
+
+### Next-run adoption and cards
+
+Background refresh installs the next provider selection; Send does not issue
+a new grant, validation or credential fetch in this mode. Each run captures its
+original selection and first-write reservation. Pending publication parks new
+starts rather than fetching or using obsolete material on Send. A running turn
+keeps its captured account; the next run adopts the acknowledged replacement.
+Codex access renewal happens through CP near expiry in the background; refresh
+and ID tokens never enter the VM. Legacy cloud keeps its real per-execution
+leases. Both Local placements keep native device accounts.
+
+The information notice follows actual native use, never selection or a receipt
+commit. It compares the opaque account/key adoption identity with the last used
+identity per provider; token, label and model-only changes are silent. An initial
+unknown identity establishes a silent baseline; explicit missing-to-ready or a
+different trusted initial identity shows the notice. Original first-use order is
+retained independently of later ACK delivery and bounded recovery snapshots.
+The above-composer information card reads `Using <account> for <provider>.`
+Only an owner transfer shows **Agent credentials changed · Restart workspace**,
+bound to the current boot and current server management capability. It uses the
+existing restart confirmation; a key/account change alone never requests restart.
+The old boot cannot silently rebind to the new owner.
+
+### Warm conversations and Stop
+
+Warm reuse keeps the exact eligible conversation's native host, UID-10001 domain,
+private HOME, history lock and admitted context across successful turns. It does
+not share a HOME or process across conversations or actors. A new turn gets a
+new command, claim and original first-write reservation even when its native
+execution ID stays the same. Changed native auth, actor, model or MCP/context
+eligibility requires fresh preparation; an unrelated label or cache revision
+alone does not recycle an otherwise eligible host.
+
+Stop immediately fences that conversation, then proves whole-scope descendant
+retirement, including late allocations and background children. Sibling
+conversations and the boot cache survive. The next Send needs a fresh scope;
+it cannot revive the stopped native execution. Closing a tab or connection
+does not issue Stop.
+
+### Removing a connection
+
+Organization Remove and global revoke first fence all affected future starts
+and obtain positive live inventory, including reserved starts and old credential
+epochs. Organization Remove affects that organization's funded workspaces;
+global revoke covers every organization using the connection. Disconnect and
+Dev-reference local/organization/global removals retain their own exact scopes.
+Only agents funded by that source are stopped.
+
+**All running agents will be stopped** is shown only when CP confirms running
+funded scopes. With positive idle proof, removal needs no dialog. No preserves
+the key; Yes stops affected agents and removes the source after positive
+retirement. Later runs receive typed missing-provider guidance. Durable decisions
+are first-wins and replayable, with explicit removed/cancelled/expired or pending
+outcomes. A submitted Yes or unknown decision ACK is not cancelled on unmount.
+An unreachable engine remains pending proof, never evidence of idle or removal.
+These changes require the matching CP, engine and desktop negotiation; source
+tests do not establish deployed activation or provider-success qualification.
 
 ## Codex subscription renewal
 
@@ -115,7 +196,8 @@ Human servers run behind the C process supervisor with a read-only worktree,
 private PID/proc/network namespaces, empty environment, UID/GID 10001 and 64MiB
 scratch. Agent language tools run inside that execution's credential-free
 workload and its Code/Design policy, under the same live paid-agent lease as
-other agent tools. Personal credentials never enter either language server.
+other agent tools in legacy mode, or the admitted boot-session lifetime in
+new mode. Personal credentials never enter either language server.
 
 Pinned servers are typescript-language-server 5.1.3 and Pyright 1.1.414, using
 the image's pinned TypeScript compiler. There are at most four servers per
@@ -213,7 +295,8 @@ to the preparation queue. Local provider authentication and transcripts do not
 use this classification.
 
 The native access client signs actor admission with its enrolled device and
-uses the configured control-plane WSS origin. It never sends a WorkOS bearer
+uses the verified runtime target described in
+[portable ingress](client-runtime-contract.md#portable-runtime-ingress). It never sends a WorkOS bearer
 to the sandbox. The short admission deadline applies to the one-use upgrade;
 a connected stream is governed by the server's renewable actor lease. A failed
 upgrade or disconnect obtains a fresh admission. Retired sockets cannot deliver
@@ -238,7 +321,9 @@ handler remains for persisted threads created by the old core profile. Resume
 retains their history; it does not rewrite provider logs or silently reset a
 conversation to remove a persisted tool declaration.
 
-The durable control-plane command is the sole prompt dispatcher. Admission binds
+The accepted durable command is the sole prompt dispatcher: the CP queue in
+legacy mode, or the [VM-local FULL queue](data-and-sync.md#negotiated-local-queue-and-compact-history)
+in `boot-owner-v1`. Admission binds
 the actor/device, provider, exact model/key and factory-verified managed cwd;
 the adapters use that immutable cwd for creation, resume, tools and configuration.
 Renderer cwd values cannot choose another checkout, and a valid managed root

@@ -8,7 +8,7 @@ import {afterEach,describe,expect,it,vi} from "vitest";
 import {CLOUD_NATIVE_PROVIDER_RESTRICTIONS,type ExecutionBoundaryStatus} from "@zeros/protocol/containment";
 import {CloudNativeBoundary} from "../containment/cloud-native-boundary";
 import type {PreparedBoundary} from "../containment/types";
-import {adminWorkspaceSystemInstruction,cloudProviderExecution,createCloudAgentExecutionFactory} from "../cloud-provider-execution";
+import {adminWorkspaceSystemInstruction,cloudProviderExecution,cloudExecutionLifetime,createCloudAgentExecutionFactory} from "../cloud-provider-execution";
 import {CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE} from "@zeros/protocol/system-instructions";
 import {resolveCloudRuntime} from "../containment/cloud-runtime-root.mjs";
 import {AgentGateway} from "../gateway";
@@ -52,7 +52,47 @@ function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="c
     source:{kind:"session" as const,actorSessionId:randomUUID()}},conversationId:randomUUID(),workload,cwd:"/srv/zeros/workspace",signal:controller.signal};
   return {factory,input,workload,coordinator,controller,request};
 }
+function legacyExecution(boundary:PreparedBoundary){
+  const execution=cloudProviderExecution(boundary);
+  if(!execution||execution.mode!=="actor-grant-v1")throw new Error("Expected genuine legacy admission");
+  return execution;
+}
 describe("admitted native cloud diagnostic",()=>{
+  it.each(["claude", "cursor", "codex"] as const)("publishes immutable common %s metadata and its genuine legacy lifetime/auth owner", async provider => {
+    const { factory, input } = fixture(provider, `${provider}-api-key`);
+    const result = await factory.prepare(input);
+    try {
+      const execution = legacyExecution(result.boundary);
+      expect(execution).toMatchObject({ mode: "actor-grant-v1", provider, model: input.admission.model,
+        executionId: input.admission.executionId, conversationId: input.conversationId, cwd: input.cwd,
+        credentialKind: `${provider}-api-key`, customization: null, environment: null, gitAuthor: null,
+        nativeCapabilities: null, backgroundTasksVersion: null, computerToolsVersion: null });
+      expect(execution.lifetime).toBe(execution.lease);
+      expect(execution.auth).toBe(execution.lease);
+      expect(cloudExecutionLifetime(execution)).toBe(execution.lease);
+      expect(Object.isFrozen(execution)).toBe(true);
+      expect(execution.lease.admission).toEqual(input.admission);
+      expect(cloudProviderExecution(input.workload)).toBeNull();
+    } finally { await result.boundary.stopAndProve(); }
+  });
+  it("passes optional authority flight observations and internal request metadata through the real lease", async () => {
+    const { input, request } = fixture();
+    const authority = await request({ kind: "admit" }); request.mockClear();
+    if (!("leaseId" in authority)) throw new Error("Expected admission authority fixture");
+    const leaseId = authority.leaseId;
+    const authorityObservation = { created: vi.fn(), wait: vi.fn(), settled: vi.fn() };
+    const factory = createCloudAgentExecutionFactory({ request, supervisor: { onRetirementFailure: vi.fn() }, authorityObservation });
+    request.mockResolvedValueOnce(authority);
+    const result = await factory.prepare(input);
+    try {
+      request.mockClear();
+      request.mockResolvedValueOnce({ leaseId, credentialVersion: 1, expiresAt: new Date(Date.now() + 45_000).toISOString() } as typeof authority);
+      await legacyExecution(result.boundary).lease.validate();
+      expect(authorityObservation.created).toHaveBeenCalledWith({ flightId: expect.any(String), operation: "validate", producer: "caller" });
+      const flightId = authorityObservation.created.mock.calls[0]![0].flightId;
+      expect(request).toHaveBeenCalledWith({ kind: "validate", leaseId, renew: false, credentialVersion: 1 }, expect.any(AbortSignal), { flightId });
+    } finally { await result.boundary.stopAndProve(); }
+  });
   it.each(["", "nested", ".zeros/worktrees/feature"].flatMap(suffix=>[undefined,".","tools"].map(relative=>({suffix,relative}))))("runs repository MCP in the admitted checkout with %j, retaining wire echo identity",async({suffix,relative})=>{
     const root=await mkdtemp(path.join(os.tmpdir(),"cloud-mcp-cwd-")),cwd=path.join(root,suffix);
     await mkdir(path.join(cwd,"tools"),{recursive:true});
@@ -73,7 +113,7 @@ describe("admitted native cloud diagnostic",()=>{
     try{
       const result=await factory.prepare({...input,cwd,customization:true});
       try{
-        const execution=cloudProviderExecution(result.boundary)!;
+        const execution=legacyExecution(result.boundary);
         if(relative===undefined)expect(execution.userServers![0]).not.toHaveProperty("cwd");
         else expect(execution.userServers![0]).toMatchObject({cwd:relative==="tools"?path.join(cwd,"tools"):cwd});
         expect(execution.lease.customization!.servers[0]!.server).toEqual(CpRepositoryMcpSchema.parse(execution.lease.admission.customization!.repositoryServers)[0]);
@@ -112,7 +152,7 @@ describe("admitted native cloud diagnostic",()=>{
     try{
       const result=await factory.prepare({...input,cwd:root,customization:true});
       try{
-        const execution=cloudProviderExecution(result.boundary)!;
+        const execution=legacyExecution(result.boundary);
         expect(execution.cwd).toBe(root);
         expect(execution.userServers!.map(server=>server.name)).toEqual(["0canvas","valid"]);
         expect(execution.lease.admission.customization!.repositoryServers).toEqual(execution.userServers);
@@ -137,7 +177,7 @@ describe("admitted native cloud diagnostic",()=>{
     const { factory, input } = fixture();
     const result = await factory.prepare({ ...input, customization: true });
     try {
-      const execution = cloudProviderExecution(result.boundary)!;
+      const execution = legacyExecution(result.boundary);
       expect(execution.lease.admission.customization?.version).toBe(3);
       expect(execution.userServers).toEqual([]);
       expect(result.boundary.status.parity.restrictions).toContain("user-mcp-disabled");
@@ -149,7 +189,7 @@ describe("admitted native cloud diagnostic",()=>{
     const result=await factory.prepare({...input,productTools:{env:{DESIGN_AUTH:"Bearer synthetic-design-capability"},servers:[{
       name:"design-draft",transport:"http",url:"http://127.0.0.1:1234/mcp",headersFromEnv:{Authorization:"DESIGN_AUTH"},
     }]}});
-    const execution=cloudProviderExecution(result.boundary)!;
+    const execution=legacyExecution(result.boundary);
     expect(adminWorkspaceSystemInstruction(result.boundary,"Existing workspace orientation"))
       .toBe(`Existing workspace orientation\n\n${CLOUD_COMPUTER_ADMIN_WORKSPACE_NOTICE}`);
     expect(adminWorkspaceSystemInstruction(input.workload,"Ordinary workspace orientation"))
@@ -168,7 +208,7 @@ describe("admitted native cloud diagnostic",()=>{
     const {factory,input}=fixture();
     const result=await factory.prepare(input);
     expect(adminWorkspaceSystemInstruction(result.boundary)).toBeUndefined();
-    expect(cloudProviderExecution(result.boundary)!.productServers.some(server=>server.name==="cloud-computer")).toBe(false);
+    expect(legacyExecution(result.boundary).productServers.some(server=>server.name==="cloud-computer")).toBe(false);
     await result.boundary.stopAndProve();
     const another=fixture();
     await expect(another.factory.prepare({...another.input,productTools:{env:{},servers:[{
@@ -186,7 +226,7 @@ describe("admitted native cloud diagnostic",()=>{
     vi.mocked(resolveCloudRuntime).mockReturnValue({...resolveCloudRuntime(),profile:"v4"} as ReturnType<typeof resolveCloudRuntime>);
     const {factory,input}=fixture("cursor","cursor-api-key",1);
     const result=await factory.prepare(input);
-    const execution=cloudProviderExecution(result.boundary)!;
+    const execution=legacyExecution(result.boundary);
     const computer=execution.productServers[0]!;
     if(computer.transport!=="http")throw new Error("Expected HTTP product transport");
     const gateway=new AgentGateway({projectRoot:"/w",executionBoundary:testExecutionBoundary(),

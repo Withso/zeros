@@ -1,4 +1,4 @@
-import {executionMcpServers,type CloudProviderExecution} from "../../../cloud-provider-execution";
+import {cloudExecutionLifetime,executionMcpServers,type CloudProviderExecution} from "../../../cloud-provider-execution";
 import type {McpServerConfig as CursorMcpConfig} from "@cursor/sdk";
 import path from "node:path";
 const record=(value:unknown):Record<string,unknown>=>value&&typeof value==="object"&&!Array.isArray(value)?value as Record<string,unknown>:{};
@@ -7,21 +7,21 @@ const record=(value:unknown):Record<string,unknown>=>value&&typeof value==="obje
  * prewarm and metadata probes. The normal SDK toolset runs on the VM;
  * callers cannot replace the admitted credential, host, or model. */
 export function cloudCursorRequest(execution:CloudProviderExecution,operation:string,raw:unknown):unknown{
-  execution.lease.assertLive();const args=record(raw);
+  cloudExecutionLifetime(execution).assertLive();const args=record(raw);
   const cwd=execution.cwd;
   if(!cwd||!path.isAbsolute(cwd)||path.resolve(cwd)!==cwd||cwd.includes("\0"))
     throw new Error("Cloud Cursor admitted workspace root is invalid");
   const apiKey=execution.coordinator.environment().CURSOR_API_KEY;
   if(!apiKey)throw Object.assign(new Error("Cloud Cursor credential is unavailable"),{code:"cloud_agent_credential_required"});
   const model=(value:unknown)=>{
-    if(value===undefined)return {id:execution.lease.admission.model};
+    if(value===undefined)return {id:execution.model};
     const selected=record(value);
-    if(selected.id!==execution.lease.admission.model)throw new Error("Cloud model changes require a new credential admission");
+    if(selected.id!==execution.model)throw new Error("Cloud model changes require a new credential admission");
     if(selected.params!==undefined&&(!Array.isArray(selected.params)||selected.params.length>16||selected.params.some(value=>{
       const parameter=record(value);
       return typeof parameter.id!=="string"||parameter.id.length>128||typeof parameter.value!=="string"||parameter.value.length>256;
     })))throw new Error("Cloud model parameters are invalid");
-    return {id:execution.lease.admission.model,...(Array.isArray(selected.params)?{params:selected.params.map(value=>({id:record(value).id,value:record(value).value}))}: {})};
+    return {id:execution.model,...(Array.isArray(selected.params)?{params:selected.params.map(value=>({id:record(value).id,value:record(value).value}))}: {})};
   };
   const mode=(value:unknown)=>{
     if(value===undefined)return {};
@@ -36,7 +36,7 @@ export function cloudCursorRequest(execution:CloudProviderExecution,operation:st
         {...(server.transport==="sse"?{type:"sse" as const}:{}),url:server.url,...(server.headers?{headers:server.headers}:{})};
     }
     return {apiKey,model:model(original.model),cwd,
-      local:{cwd,settingSources:execution.lease.customization?["user"]:[],enableAgentRetries:false,
+      local:{cwd,settingSources:execution.customization?["user"]:[],enableAgentRetries:false,
         autoReview:record(original.local).autoReview===true},
       ...mode(original.mode),mcpServers};
   };

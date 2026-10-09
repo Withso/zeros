@@ -85,6 +85,187 @@ afterEach(() => {
 });
 
 describe("cloud runtime registration", () => {
+  it.each(["local", "legacy"])("passes the authenticated %s journal mode before the initial record restore", async agentJournalMode => {
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const fetcher = vi.fn().mockResolvedValue(Response.json(registrationResponse(), {
+      headers: { "x-zeros-cloud-local-commands": "1", "x-zeros-cloud-agent-journal": agentJournalMode,
+        ...(agentJournalMode === "local" ? { "x-zeros-cloud-agent-source-writer": V4_ATTESTATION.bootId } : {}) },
+    }));
+    const sync = vi.fn(async () => {});
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, negotiateLocalCommands: true, onAuthorityLost: vi.fn(), onDurableRecordSync: sync });
+    try {
+      await registration.start();
+      expect(sync).toHaveBeenCalledWith(expect.anything(), { initial: true, agentJournalMode });
+      expect(registration.agentSourceWriterEpoch).toBe(agentJournalMode === "local" ? V4_ATTESTATION.bootId : null);
+    } finally { await registration.stop(); }
+  });
+  it.each([null, "", "not-a-writer", `${V4_ATTESTATION.bootId},${V4_ATTESTATION.bootId}`])(
+    "refuses negotiated local history before restore when source writer is invalid (%s)", async sourceWriter => {
+      const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+      const sync = completedDurableRecordSync();
+      const fetcher = vi.fn().mockResolvedValue(Response.json(registrationResponse(), { headers: {
+        "x-zeros-cloud-local-commands": "1", "x-zeros-cloud-agent-journal": "local",
+        ...(sourceWriter === null ? {} : { "x-zeros-cloud-agent-source-writer": sourceWriter }),
+      } }));
+      const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+        now: () => NOW, negotiateLocalCommands: true, onAuthorityLost: vi.fn(), onDurableRecordSync: sync });
+      try {
+        await expect(registration.start()).rejects.toThrow();
+        expect(sync).not.toHaveBeenCalled(); expect(registration.localCommandsNegotiated()).toBe(false);
+      } finally { await registration.stop(); }
+    });
+  it.each(["legacy", "unnegotiated"])("does not grant source selection from %s response headers", async mode => {
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const sync = completedDurableRecordSync();
+    const fetcher = vi.fn().mockResolvedValue(Response.json(registrationResponse(), { headers: {
+      "x-zeros-cloud-agent-journal": mode === "legacy" ? "legacy" : "local",
+      "x-zeros-cloud-agent-source-writer": "untrusted-invalid-header",
+      ...(mode === "legacy" ? { "x-zeros-cloud-local-commands": "1" } : {}),
+    } }));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, negotiateLocalCommands: mode === "legacy" ? true : undefined,
+      onAuthorityLost: vi.fn(), onDurableRecordSync: sync });
+    try {
+      await registration.start(); expect(registration.agentSourceWriterEpoch).toBe(null);
+      expect(sync).toHaveBeenCalledOnce();
+    } finally { await registration.stop(); }
+  });
+  it.each([true, false])("negotiates local commands only with a committed CP header ACK (ack=%s)", async acknowledged => {
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const fetcher = vi.fn().mockResolvedValue(Response.json(registrationResponse(), {
+      headers: acknowledged ? { "x-zeros-cloud-local-commands": "1" } : {},
+    }));
+    let release!: () => void;
+    const connected = new Promise<void>(resolve => { release = resolve; });
+    const registration = new CloudRuntimeRegistration(runtime, {
+      agentRuntime: V4_ATTESTATION, fetch: fetcher, now: () => NOW, negotiateLocalCommands: true,
+      onAuthorityLost: vi.fn(), onDurableRecordSync: () => connected,
+    });
+    try {
+      const starting = registration.start();
+      await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+      expect(registration.localCommandsNegotiated()).toBe(false);
+      expect(fetcher.mock.calls[0]![1].headers["x-zeros-cloud-local-commands"]).toBe("1");
+      expect(JSON.parse(fetcher.mock.calls[0]![1].body)).not.toHaveProperty("cloudLocalCommandsVersion");
+      release(); await starting;
+      expect(registration.localCommandsNegotiated()).toBe(acknowledged);
+      await registration.stop();
+      expect(registration.localCommandsNegotiated()).toBe(false);
+    } finally { release(); await registration.stop(); }
+  });
+
+  it("ignores an unsolicited new-mode header on a legacy registration", async () => {
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const fetcher = vi.fn().mockResolvedValue(Response.json(registrationResponse(), {
+      headers: { "x-zeros-cloud-local-commands": "1" },
+    }));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    try {
+      await registration.start();
+      expect(fetcher.mock.calls[0]![1].headers).not.toHaveProperty("x-zeros-cloud-local-commands");
+      expect(registration.localCommandsNegotiated()).toBe(false);
+      await expect(registration.agentBootRequest("bootstrap", { version: 1, mode: "boot-owner-v1",
+        ...runtime.execution, engineInstanceId: runtime.engine.instanceId }, new AbortController().signal))
+        .rejects.toMatchObject({ code: "cloud_workspace_client_update_required" });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    } finally { await registration.stop(); }
+  });
+
+  it.each([true, false])("binds background bootstrap to the attested runtime boot (same=%s)", async same => {
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const scope = { organizationId: runtime.execution.organizationId, workspaceId: runtime.execution.workspaceId,
+      generation: runtime.execution.generation, engineInstanceId: runtime.engine.instanceId,
+      bootId: same ? V4_ATTESTATION.bootId : "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      writerEpoch: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", fundingOwnerUserId: ACCOUNT_USER_ID, fundingOwnerEpoch: 1 };
+    const result = { ...scope, version: 1, mode: "boot-owner-v1", fundingScope: "workspace-roles-v1",
+      authorityEpoch: 1, cacheRevision: 1, desiredCacheRevision: 1,
+      initialAdoptions: ["claude", "codex", "cursor"].map(provider => ({ provider, status: "unknown" })),
+      providers: ["claude", "codex", "cursor"].map(provider => ({ provider, status: "unavailable", code: "cloud_agent_credential_required" })) };
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json(registrationResponse(), {
+      headers: { "x-zeros-cloud-local-commands": "1" },
+    })).mockResolvedValueOnce(Response.json({ result }));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => NOW, negotiateLocalCommands: true, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    try {
+      await registration.start();
+      const bootstrap = registration.agentBootRequest("bootstrap", { version: 1, mode: "boot-owner-v1",
+        organizationId: scope.organizationId, workspaceId: scope.workspaceId, generation: scope.generation,
+        engineInstanceId: scope.engineInstanceId }, new AbortController().signal);
+      if (same) await expect(bootstrap).resolves.toEqual(result);
+      else await expect(bootstrap).rejects.toMatchObject({ code: "cloud_admission_authority_response_invalid" });
+      expect(String(fetcher.mock.calls[1]![0])).toBe("https://control.example.test/internal/v2/cloud-workspaces/engine/agent-boot/bootstrap");
+      expect(fetcher.mock.calls[1]![1].headers.authorization).toBe(`Bearer ${registrationResponse().heartbeat.token}`);
+      expect(JSON.parse(fetcher.mock.calls[1]![1].body)).not.toHaveProperty("fundingOwnerUserId");
+    } finally { await registration.stop(); }
+  });
+  it("requires the exact acknowledged activation for private controls and mirrors and rejects late replies", async () => {
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const identity = { version: 1 as const, mode: "boot-owner-v1" as const, fundingScope: "workspace-roles-v1" as const,
+      organizationId: runtime.execution.organizationId, workspaceId: runtime.execution.workspaceId,
+      generation: runtime.execution.generation, engineInstanceId: runtime.engine.instanceId,
+      bootId: V4_ATTESTATION.bootId, writerEpoch: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      fundingOwnerUserId: ACCOUNT_USER_ID, fundingOwnerEpoch: 1, authorityEpoch: 1 };
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/register")) return Response.json(registrationResponse(), { headers: { "x-zeros-cloud-local-commands": "1" } });
+      if (url.pathname.endsWith("/activate")) return Response.json({ result: { ...identity, cacheRevision: 1, activated: true } });
+      return Response.json({ result: { version: 1, mode: "boot-owner-v1", controls: [] } });
+    });
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher, now: () => NOW,
+      negotiateLocalCommands: true, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    const { fundingScope: _funding, fundingOwnerUserId: _user, fundingOwnerEpoch: _ownerEpoch, authorityEpoch: _authority, ...reference } = identity;
+    const control = { ...reference, acknowledgements: [] };
+    try {
+      await registration.start();
+      await expect(registration.credentialControlsRequest(control, new AbortController().signal)).rejects.toMatchObject({ code: "engine_authority_rejected" });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      await registration.agentBootRequest("activate", { ...reference, expectedCacheRevision: 1 }, new AbortController().signal);
+      await expect(registration.credentialControlsRequest({ ...control, writerEpoch: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" }, new AbortController().signal))
+        .rejects.toMatchObject({ code: "engine_authority_rejected" });
+      await expect(registration.credentialControlsRequest(control, new AbortController().signal)).resolves.toEqual({ version: 1, mode: "boot-owner-v1", controls: [] });
+      expect(String(fetcher.mock.calls.at(-1)![0])).toContain("/agent-credential-controls");
+      let finish!: (value: Response) => void;
+      fetcher.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+      const late = registration.credentialControlsRequest(control, new AbortController().signal);
+      await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+      await registration.stop(); finish(Response.json({ result: { version: 1, mode: "boot-owner-v1", controls: [] } }));
+      await expect(late).rejects.toMatchObject({ code: "engine_authority_rejected" });
+    } finally { await registration.stop(); }
+  });
+  it("fences final seals to the exact activated writer and refuses a retired response", async () => {
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const scope = { organizationId: runtime.execution.organizationId, workspaceId: runtime.execution.workspaceId,
+      generation: runtime.execution.generation, engineInstanceId: runtime.engine.instanceId, bootId: V4_ATTESTATION.bootId,
+      writerEpoch: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", fundingOwnerUserId: ACCOUNT_USER_ID, fundingOwnerEpoch: 1 };
+    const identity = { ...scope, version: 1 as const, mode: "boot-owner-v1" as const, fundingScope: "workspace-roles-v1" as const, authorityEpoch: 1 };
+    const fetcher = vi.fn<typeof fetch>(async input => new URL(String(input)).pathname.endsWith("/register") ?
+      Response.json(registrationResponse(), { headers: { "x-zeros-cloud-local-commands": "1" } }) :
+      Response.json({ result: { ...identity, cacheRevision: 1, activated: true } }));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher, now: () => NOW,
+      negotiateLocalCommands: true, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    const descriptor = { version: 1 as const, scope, sealId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", sequence: 0,
+      recordSequence: 1, eventSequence: 0, inventorySha256: "a".repeat(64) };
+    const { createHash } = await import("node:crypto");
+    const { canonicalCloudLocalCommandWriterSealDescriptor } = await import("@zeros/protocol/cloud-local-mirror");
+    const seal = { ...descriptor, sha256: createHash("sha256").update(canonicalCloudLocalCommandWriterSealDescriptor(descriptor)).digest("hex") };
+    try {
+      await registration.start();
+      await expect(registration.localCommandSealRequest(seal, new AbortController().signal)).rejects.toMatchObject({ code: "engine_authority_rejected" });
+      const { fundingOwnerUserId: _owner, fundingOwnerEpoch: _epoch, ...reference } = scope;
+      await registration.agentBootRequest("activate", { ...reference, version: 1, mode: "boot-owner-v1", expectedCacheRevision: 1 }, new AbortController().signal);
+      await expect(registration.localCommandSealRequest({ ...seal, scope: { ...scope, writerEpoch: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" } }, new AbortController().signal))
+        .rejects.toMatchObject({ code: "engine_authority_rejected" });
+      const { scope: _scope, ...fields } = seal, ack = { ...fields, writerEpoch: scope.writerEpoch };
+      fetcher.mockResolvedValueOnce(Response.json({ result: ack }));
+      expect(await registration.localCommandSealRequest(seal, new AbortController().signal)).toEqual(ack);
+      let finish!: (response: Response) => void; fetcher.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+      const late = registration.localCommandSealRequest(seal, new AbortController().signal);
+      await vi.waitFor(() => expect(finish).toBeTypeOf("function")); await registration.stop(); finish(Response.json({ result: ack }));
+      await expect(late).rejects.toMatchObject({ code: "engine_authority_rejected" });
+    } finally { await registration.stop(); }
+  });
   it.each(["zeros-cloud-worker-v1", "zeros-cloud-worker-v2", "zeros-cloud-worker-v3"])("refuses %s before registration", profile => {
     const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
     const fetcher = vi.fn();

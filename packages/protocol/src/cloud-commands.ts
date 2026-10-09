@@ -154,7 +154,10 @@ export const CloudNativeResultSchema = z.object({ version: z.literal(1),
 export const CloudConversationCreateSchema = z.object({ conversationId: identity, workspaceId: identity,
   sourceConversationId: identity.optional(),
   agentId: identity, model: z.string().max(256).optional(), effort: z.string().max(64).optional(), title: z.string().max(1024).optional() }).strict();
-export const CloudConversationReadSchema = z.object({ conversationId: identity }).strict();
+export const CloudConversationReadSchema = z.object({
+  conversationId: identity,
+  agentTurnTimingsVersion: z.literal(1).optional(),
+}).strict();
 export const CloudConversationModeSchema = z.object({ conversationId: identity, mode: z.enum(["code", "design"]), expectedRevision: revision }).strict();
 const annotations = z.object({ audience: z.array(z.enum(["user", "assistant"])).max(2).optional(),
   lastModified: z.string().max(128).optional(), priority: z.number().min(0).max(1).optional() }).strict().optional();
@@ -243,6 +246,71 @@ export type CloudCommandClientRequest = z.infer<typeof CloudCommandClientRequest
 export type CloudCommandSnapshot = z.infer<typeof CloudCommandSnapshotSchema>;
 export type CloudCommandClaim = z.infer<typeof CloudCommandClaimSchema>;
 export type CloudNativeOperation = z.infer<typeof CloudNativeOperationSchema>;
+
+// Append to cloud-commands.ts after retained R15 RED. Explicit negotiated
+// selection at the owning local queue is required; these schemas grant no
+// actor or credential authority and never relax the legacy CP queue parser.
+const { agentCredentialGrantId: _legacyBootGrant, ...bootPayloadShape } = CloudQueuedPromptSchema.shape;
+export const CloudBootCommandPayloadSchema = z.object({ ...bootPayloadShape,
+  agentId: z.enum(["claude", "cursor", "codex"]), model: CloudQueuedPromptSchema.shape.model.unwrap(),
+}).strict().superRefine((value, context) => {
+  if (value.permissionMode !== undefined && !(CLOUD_AGENT_PERMISSION_MODES[value.agentId] as readonly string[]).includes(value.permissionMode))
+    context.addIssue({ code: "custom", message: "Invalid provider permission mode" });
+  if (value.operation && ((value.operation.kind !== "fork" && value.agentId !== "codex") ||
+      (value.operation.kind === "fork" && value.operation.strategy === "native" && value.agentId !== "codex")))
+    context.addIssue({ code: "custom", message: "Native operation requires an explicit qualified provider" });
+});
+export type CloudBootCommandPayload = z.infer<typeof CloudBootCommandPayloadSchema>;
+export const CloudBootCommandMutationSchema = z.object({
+  conversationId: identity, operationId: z.uuid(), expectedRevision: revision,
+  action: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("enqueue"), commandId: z.uuid(), payload: CloudBootCommandPayloadSchema }).strict(),
+    z.object({ kind: z.literal("fork"), commandId: z.uuid(), payload: CloudBootCommandPayloadSchema }).strict(),
+    z.object({ kind: z.literal("edit"), commandId: z.uuid(), payload: CloudBootCommandPayloadSchema }).strict(),
+    z.object({ kind: z.literal("remove"), commandId: z.uuid() }).strict(),
+    z.object({ kind: z.literal("pause") }).strict(), z.object({ kind: z.literal("resume") }).strict(),
+  ]),
+}).strict().superRefine((value, context) => {
+  const action = value.action;
+  if (action.kind === "fork" && (action.payload.operation?.kind !== "fork" ||
+      action.payload.operation.sourceConversationId === value.conversationId))
+    context.addIssue({ code: "custom", message: "Fork requires distinct source and destination conversations" });
+  if ((action.kind === "enqueue" || action.kind === "edit") && action.payload.operation?.kind === "fork")
+    context.addIssue({ code: "custom", message: "Forks require the fork action" });
+});
+export type CloudBootCommandMutation = z.infer<typeof CloudBootCommandMutationSchema>;
+export const CloudBootCommandClientRequestSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("snapshot"), conversationId: identity }).strict(),
+  z.object({ kind: z.literal("read"), commandId: z.uuid() }).strict(),
+  z.object({ kind: z.literal("mutate"), mutation: CloudBootCommandMutationSchema }).strict(),
+  z.object({ kind: z.literal("stop"), conversationId: identity, operationId: z.uuid() }).strict(),
+]);
+export type CloudBootCommandClientRequest = z.infer<typeof CloudBootCommandClientRequestSchema>;
+export const CloudBootCommandEntrySchema = CloudCommandEntrySchema.extend({ payload: CloudBootCommandPayloadSchema.nullable() });
+export type CloudBootCommandEntry = z.infer<typeof CloudBootCommandEntrySchema>;
+export const CloudBootCommandSnapshotSchema = CloudCommandSnapshotSchema.extend({
+  pending: z.array(CloudBootCommandEntrySchema).max(32), receipts: z.array(CloudBootCommandEntrySchema).max(50),
+});
+export type CloudBootCommandSnapshot = z.infer<typeof CloudBootCommandSnapshotSchema>;
+export const CloudBootCommandClaimSchema = CloudCommandClaimSchema.safeExtend({ payload: CloudBootCommandPayloadSchema });
+export type CloudBootCommandClaim = z.infer<typeof CloudBootCommandClaimSchema>;
+/** Private engine operations use the same shapes with boot-only payloads.
+ * Client RPC cannot claim/settle work or manufacture actor dispatch authority. */
+export const CloudBootCommandEngineRequestSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("snapshot"), conversationId: identity }).strict(),
+  z.object({ kind: z.literal("read"), commandId: z.uuid() }).strict(),
+  z.object({ kind: z.literal("stop"), conversationId: identity, operationId: z.uuid() }).strict(),
+  z.object({ kind: z.literal("mutate"), mutation: CloudBootCommandMutationSchema,
+    admissionError: z.enum(["command_context_changed", "command_not_found"]).nullable() }).strict(),
+  z.object({ kind: z.literal("claim"), conversationId: identity, executionId: identity, claimId: z.uuid().optional() }).strict(),
+  z.object({ kind: z.literal("confirm-goal"), commandId: z.uuid(), claimId: z.uuid(),
+    sequence: revision.positive(), goal: CloudGoalSnapshotSchema.shape.goal }).strict(),
+  z.object({ kind: z.literal("settle"), result: z.object({ commandId: z.uuid(), claimId: z.uuid(),
+    state: z.enum(["succeeded", "failed", "cancelled"]), resultCode: CloudCommandEntrySchema.shape.resultCode,
+    result: CloudNativeResultSchema.optional() }).strict() }).strict(),
+]);
+export type CloudBootCommandEngineRequest = z.infer<typeof CloudBootCommandEngineRequestSchema>;
+
 
 /** Older attachments can still observe/cancel their prompt queue. Native v1
  * preserves utilities but needs separate opt-in for terminal-bearing results.

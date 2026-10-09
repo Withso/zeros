@@ -1,5 +1,11 @@
 export type NativeCheckpointBlob = { blobId: string; contentSha256: string; sizeBytes: number };
-export type NativeCheckpointRoots = { repository: string; logicalRepository?: string; agentHome?: string; data?: string };
+export const CLOUD_LOCAL_COMMAND_CHECKPOINT_SCOPE: "local-command-checkpoint";
+export type NativeCheckpointRoots = {
+  repository: string; logicalRepository?: string; agentHome?: string;
+  /** Engine-owned data root. Sealed command snapshots are derived here,
+   * never from repository paths, and restore with privateIdentity. */
+  data?: string;
+};
 export type NativeCheckpointGitBase = "remote" | "none";
 type NativeCheckpointFiles = {
   totalBytes: number; chunks: NativeCheckpointBlob[];

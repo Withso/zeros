@@ -46,6 +46,8 @@ import type {
 
 import type { CloudGithubNativeGrantRequest } from "./github-auth";
 import type { CloudConversationSnapshot } from "./cloud-events";
+import type { CloudAgentBootConversation } from "./cloud-agent-bootstrap";
+import type { CloudAgentCredentialActualUse } from "./cloud-events";
 
 export type MessageSource = "browser" | "engine";
 
@@ -238,6 +240,12 @@ export interface EngineReadyMessage extends BaseMessage {
   minProtocolVersion?: number;
   /** Additive cloud backend contracts available over the workspace bridge. */
   capabilities?: string[];
+  /** Exact activated engine-local writer, emitted only to a confirmed actor. */
+  cloudLocalCommands?: CloudAgentBootConversation;
+}
+export interface CloudAgentCredentialUsedMessage extends BaseMessage {
+  type: "CLOUD_AGENT_CREDENTIAL_USED";
+  use: CloudAgentCredentialActualUse;
 }
 
 /** Engine → clients broadcast: a list-changing write hit the engine DB. Clients
@@ -266,6 +274,8 @@ export interface DbChangedMessage extends BaseMessage {
    *  one. Omitted for list-only changes (chats/projects); clients pull those
    *  named lists. */
   chatIds?: string[];
+  /** Negotiated local writer only; never a substitute for client authority. */
+  cloudHistoryRestore?: import("./cloud-events").CloudAgentHistoryRestoreMetadata;
 }
 
 /** Host → engine (local Electron or an attested cloud-workspace owner):
@@ -1346,6 +1356,7 @@ export type BridgeMessage =
   | OwnerSignedOutMessage
   | HeartbeatMessage
   | EngineReadyMessage
+  | CloudAgentCredentialUsedMessage
   | DbChangedMessage
   | GithubTokenSetMessage
   | GithubTokenChangedMessage

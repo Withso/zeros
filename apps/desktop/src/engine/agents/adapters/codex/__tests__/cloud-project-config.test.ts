@@ -6,7 +6,10 @@ import type { CloudProviderExecution } from "../../../cloud-provider-execution";
 import { captureCloudCodexProjectConfig, readCloudCodexProjectConfig, cloudCodexProjectSettings } from "../cloud-project-config";
 import { cloudCodexRequest } from "../cloud-policy";
 let root:string;
-const execution=()=>({cwd:root,lease:{assertLive:vi.fn(),admission:{model:"admitted-model"}}}) as unknown as CloudProviderExecution;
+const execution=()=>{
+  const lease={assertLive:vi.fn(),admission:{model:"admitted-model"},codexAuth:()=>null};
+  return {cwd:root,lease,lifetime:lease,auth:lease,model:"admitted-model",nativeCapabilities:null,environment:null} as unknown as CloudProviderExecution;
+};
 beforeEach(async()=>{root=await mkdtemp(path.join(os.tmpdir(),"zeros-safe-codex-config-"));await mkdir(path.join(root,".codex"));});
 afterEach(async()=>{await rm(root,{recursive:true,force:true});});
 const put=(value:string)=>writeFile(path.join(root,".codex/config.toml"),value);

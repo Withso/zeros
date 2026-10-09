@@ -14,14 +14,24 @@ import type {AgentSessionCreatedMessage} from "../messages";
 
 const chat = "11111111-1111-4111-8111-111111111111";
 const grant = "22222222-2222-4222-8222-222222222222";
-function fixture(receiptIdentity: Record<string, unknown> = {}, cloudTurnProtocolVersion = 1) {
+const peer = { kind: "cloud" as const, organizationId: "33333333-3333-4333-8333-333333333333",
+  workspaceId: "44444444-4444-4444-8444-444444444444", generation: 1, authorityEpoch: 1,
+  engineInstanceId: "55555555-5555-4555-8555-555555555555" };
+const { kind: _peerKind, ...peerScope } = peer;
+const boot = { ...peerScope, version: 1, mode: "boot-owner-v1", fundingScope: "workspace-roles-v1",
+  bootId: "66666666-6666-4666-8666-666666666666", writerEpoch: "77777777-7777-4777-8777-777777777777",
+  fundingOwnerUserId: "88888888-8888-4888-8888-888888888888", fundingOwnerEpoch: 1,
+  cacheRevision: 1, desiredCacheRevision: 1,
+  initialAdoptions: ["claude", "codex", "cursor"].map(provider => ({ provider, status: "unknown" })) };
+function fixture(receiptIdentity: Record<string, unknown> = {}, cloudTurnProtocolVersion = 1,
+  metadata?: Record<string, unknown>, capable = true) {
   let enqueued: WireRecord | undefined;
   let state = "succeeded";
   const request = vi.fn(async (message: WireRecord) => {
     const params = message.params as WireRecord;
     const input = params.request as WireRecord;
     let result: unknown = { conversationId: chat, modeRevision: 0, permissionModeVersion: 1, nativeCommandsVersion: 1,
-      ...(cloudTurnProtocolVersion ? { cloudTurnProtocolVersion } : {}) };
+      ...(cloudTurnProtocolVersion ? { cloudTurnProtocolVersion } : {}), ...(metadata ? { cloudLocalCommands: metadata } : {}) };
     if (message.op === "cloudCommands.request") {
       if (input.kind === "snapshot")
         result = {
@@ -82,7 +92,8 @@ function fixture(receiptIdentity: Record<string, unknown> = {}, cloudTurnProtoco
   });
   const authorize = vi.fn(async () => grant);
   const connection = new CloudAgentConnection(
-    { request, status: "connected" } as unknown as RuntimeClient,
+    { request, status: "connected", executionIdentity: peer,
+      supportsEngineCapability: (feature: string) => capable && !!metadata && feature === "cloud.localCommands.v1" } as unknown as RuntimeClient,
     "local-main",
     authorize,
   );
@@ -99,6 +110,26 @@ function fixture(receiptIdentity: Record<string, unknown> = {}, cloudTurnProtoco
 afterEach(() => vi.restoreAllMocks());
 
 describe("cloud snapshot and replay installation", () => {
+  it("skips the renderer credential grant only on the exact negotiated boot peer", async () => {
+    const f = fixture({}, 1, boot);
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "test-model" } });
+    await f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "turn", prompt: [] });
+    expect(f.authorize).not.toHaveBeenCalled();
+    expect(f.getEnqueued()).toMatchObject({ payload: { agentId: "codex", model: "test-model" } });
+    expect(f.getEnqueued()!.payload).not.toHaveProperty("agentCredentialGrantId");
+    for (const [message] of f.request.mock.calls.filter(([message]) => message.op === "cloudCommands.request"))
+      expect(message.params).toMatchObject({ cloudLocalCommandsVersion: 1, bootId: boot.bootId, writerEpoch: boot.writerEpoch });
+    f.connection.dispose();
+  });
+  it.each([
+    [boot, false], [{ ...boot, engineInstanceId: chat }, true], [{ ...boot, authorityEpoch: 2 }, true],
+    [{ ...boot, providers: [] }, true],
+  ])("refuses partial or foreign boot advertisement before requesting a grant or enqueueing", async (metadata, capable) => {
+    const f = fixture({}, 1, metadata as Record<string, unknown>, capable as boolean);
+    await expect(f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex",
+      env: { OPENAI_MODEL: "test-model" } })).rejects.toMatchObject({ code: "cloud_workspace_client_update_required" });
+    expect(f.authorize).not.toHaveBeenCalled(); expect(f.getEnqueued()).toBeUndefined(); f.connection.dispose();
+  });
   it.each([0, 1])("negotiates new command fields only after runtime advertisement (turn protocol %s)", async version => {
     const f = fixture({}, version);
     await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "test-model" } });

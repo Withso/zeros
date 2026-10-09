@@ -209,7 +209,13 @@ the worker; those remain external or narrowly scoped as described above.
 
 An admitted native provider, its shell, MCP children and enabled repository hooks
 share the active account's trust. Hooks retain native Plan semantics; Plan is
-not a credential boundary. Other actors' provider HOME and engine authority stay
+not a credential boundary. In `boot-owner-v1`, run-capable workspace roles
+authorize shared funding: **members' agents can use and read the owner's active
+provider keys**. Provider model consent does not constrain arbitrary uses of
+the raw key after native delivery. Role revocation immediately removes that
+member's run authority; credential removal uses the fenced stop protocol.
+See [boot funding and removal](agent-authentication-and-language-tools.md#negotiated-boot-funding).
+Other actors' provider HOME and engine authority stay
 outside that worker domain. Repository config cannot choose auth, endpoint,
 provider/model or protected launch environment. Raw project/plugin sources remain
 disabled unless native precedence is proved; current instruction/configuration
@@ -227,10 +233,12 @@ persisted but do not authorize supported compute operations.
 
 Agent and compute usage records snapshot actor, billing owner, billing epoch,
 provider/agent connection, and idempotency identity. Reassignment does not
-change those bindings. Ownership transfer revokes old owner-scoped grants and
-requires replacement provider/agent/secret bindings before accepting new paid
-work. When the provider account changes, checkpoint and reprovision; a database
-owner update is not a security boundary.
+change those bindings. Agent account/key changes apply through acknowledged
+background publication to the next run; entered runs keep their original
+selection. Funding-owner transfer requires restart to establish a new boot
+binding, while compute/provider lifecycle authority retains its own fences.
+A database owner update cannot retarget an already entered run or substitute
+for a runtime security boundary.
 
 ## Secret binding verification and key rotation
 

@@ -9,10 +9,16 @@ import type {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
 import {CloudComputerToolExecutionRequestSchema} from "./computer-tools-contract.js";
 import {ComputerToolConflictError} from "./computer-tools.js";
 import {CloudWorkspaceEngineAuthorityError} from "./engine-authority.js";
+import { CloudAgentCredentialRemovalPrepareSchema, CloudAgentCredentialRemovalDecisionSchema, CloudAgentCredentialRemovalOutcomeSchema,
+  CloudAgentCredentialControlExchangeRequestSchema, CloudAgentCredentialControlExchangeResponseSchema } from "./agent-credential-mutations.js";
 import { CloudCustomizationOperationSchema } from "./customization-workspace.js";
 import {CloudBackgroundOperationSchema} from "./agent-background-tasks.js";
 import { CLOUD_COMMAND_FAILURE_CATEGORIES, CLOUD_COMMAND_FAILURE_STAGES } from "./commands.js";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { CloudAgentBootCredentialRequestSchema, CloudAgentBootCredentialResponseSchema, CloudAgentBootSyncRequestSchema,
+  CloudAgentBootSyncResponseSchema, CloudAgentBootActivateRequestSchema, CloudAgentBootActivateResponseSchema,
+  CloudAgentBootRefreshRequestSchema, CloudAgentBootRefreshResponseSchema, CloudAgentActorConfirmRequestSchema,
+  CloudAgentActorConfirmResponseSchema, CloudAgentWarmActorRequestSchema, CloudAgentWarmActorResponseSchema } from "./agent-boot-contract.js";
 
 const executionRefusalCategories: Readonly<Record<string, string>> = {
   cloud_agent_credential_busy: "lock_busy",
@@ -64,6 +70,37 @@ export function createCloudAgentCredentialRoutes(service:DatabaseCloudAgentCrede
     app.use(path,rateLimit("cloud-agent-credentials",30,60_000));
     app.use(path,async(c,next)=>{c.header("Cache-Control","no-store");await next();});
   }
+  const removalBase=`${base}/removals`;
+  const removalError=(error:unknown)=>{
+    if(error instanceof HttpError&&error.code==="agent_credential_conflict")return {body:{error:error.code},status:409 as const};
+    if(error instanceof HttpError&&error.status<500)return {body:{error:"cloud_validation_access_denied"},status:403 as const};
+    return {body:{error:"cloud_agent_credential_busy"},status:503 as const};
+  };
+  app.post(`${removalBase}/prepare`,async c=>{
+    const parsed=CloudAgentCredentialRemovalPrepareSchema.safeParse(await c.req.json().catch(()=>null));
+    if(!parsed.success)return c.json({error:"invalid_agent_credential_request"},422);
+    try{
+      const result=CloudAgentCredentialRemovalOutcomeSchema.safeParse(await service.prepareRemoval(c.get("user").id,parsed.data));
+      if(!result.success||result.data.operationId!==parsed.data.operationId)return c.json({error:"cloud_agent_credential_busy"},503);
+      return c.json(result.data);
+    }catch(error){const refusal=removalError(error);return c.json(refusal.body,refusal.status);}
+  });
+  app.get(`${removalBase}/:operationId`,async c=>{
+    try{
+      const result=CloudAgentCredentialRemovalOutcomeSchema.safeParse(await service.readRemoval(c.get("user").id,c.req.param("operationId")));
+      if(!result.success||result.data.operationId!==c.req.param("operationId"))return c.json({error:"cloud_agent_credential_busy"},503);
+      return c.json(result.data);
+    }catch(error){const refusal=removalError(error);return c.json(refusal.body,refusal.status);}
+  });
+  for(const action of ["confirm","cancel"] as const)app.post(`${removalBase}/:operationId/${action}`,async c=>{
+    const parsed=CloudAgentCredentialRemovalDecisionSchema.safeParse(await c.req.json().catch(()=>null));
+    if(!parsed.success)return c.json({error:"invalid_agent_credential_request"},422);
+    try{
+      const result=CloudAgentCredentialRemovalOutcomeSchema.safeParse(await service.decideRemoval(c.get("user").id,c.req.param("operationId"),action,parsed.data));
+      if(!result.success||result.data.operationId!==c.req.param("operationId"))return c.json({error:"cloud_agent_credential_busy"},503);
+      return c.json(result.data);
+    }catch(error){const refusal=removalError(error);return c.json(refusal.body,refusal.status);}
+  });
   app.delete(`${base}/:credential/dev-reference`,async c=>{
     const input=z.object({organizationId:z.string().uuid(),scope:z.enum(["local","organization","global"])}).strict().safeParse(await c.req.json().catch(()=>null));
     if(!input.success)throw new HttpError(422,"invalid_agent_credential_request","Invalid Dev disconnect scope");
@@ -130,6 +167,55 @@ const privateRequest=z.object({workspaceId:z.string().uuid(),organizationId:z.st
   ])}).strict();
 export function createCloudAgentExecutionRoutes(service:DatabaseCloudAgentExecutionService):Hono{
   const app=new Hono();app.use(CLOUD_AGENT_EXECUTION_PATH,bodyLimit({maxSize:256*1024}));
+  const bootOperations={bootstrap:[CloudAgentBootCredentialRequestSchema,CloudAgentBootCredentialResponseSchema],
+    sync:[CloudAgentBootSyncRequestSchema,CloudAgentBootSyncResponseSchema],activate:[CloudAgentBootActivateRequestSchema,CloudAgentBootActivateResponseSchema],
+    refresh:[CloudAgentBootRefreshRequestSchema,CloudAgentBootRefreshResponseSchema],
+    "actor-confirm":[CloudAgentActorConfirmRequestSchema,CloudAgentActorConfirmResponseSchema],
+    "warm-context":[CloudAgentWarmActorRequestSchema,CloudAgentWarmActorResponseSchema]} as const;
+  for(const operation of Object.keys(bootOperations) as Array<keyof typeof bootOperations>) {
+    const path=`/internal/v2/cloud-workspaces/engine/agent-boot/${operation}`;
+    app.use(path,bodyLimit({maxSize:256*1024}));
+    app.post(path,async c=>{
+      c.header("Cache-Control","no-store");
+      if(c.req.header("content-type")?.split(";",1)[0]?.trim().toLowerCase()!=="application/json")return c.json({error:"invalid_agent_execution"},415);
+      const heartbeatToken=/^Bearer (zwh_[A-Za-z0-9_-]{43})$/.exec(c.req.header("authorization")??"")?.[1];
+      if(!heartbeatToken)return c.json({error:"engine_authority_rejected"},401);
+      const [requestSchema,responseSchema]=bootOperations[operation],request=requestSchema.safeParse(await c.req.json().catch(()=>null));
+      if(!request.success)return c.json({error:"invalid_agent_execution"},422);
+      const {organizationId,workspaceId,generation,engineInstanceId}=request.data;
+      try {
+        const result=responseSchema.safeParse(await service.boot({organizationId,workspaceId,generation,engineInstanceId,heartbeatToken},operation,request.data));
+        if(!result.success)return c.json({error:"cloud_validation_authority_unavailable"},503);
+        const identity="provenance" in result.data?result.data.provenance.scope:result.data;
+        for(const key of ["organizationId","workspaceId","generation","engineInstanceId","bootId","writerEpoch"] as const)
+          if(key in request.data && identity[key]!==request.data[key as keyof typeof request.data])return c.json({error:"cloud_validation_authority_unavailable"},503);
+        return c.json({result:result.data});
+      }catch(error){
+        if(error instanceof CloudWorkspaceEngineAuthorityError)return c.json({error:"engine_authority_rejected"},401);
+        const refusal=executionRefusal(error,operation==="bootstrap"?"admit":"validate");return c.json({error:refusal.error},refusal.status);
+      }
+    });
+  }
+  const controlsPath="/internal/v2/cloud-workspaces/engine/agent-credential-controls";
+  app.use(controlsPath,bodyLimit({maxSize:256*1024}));
+  app.post(controlsPath,async c=>{
+    c.header("Cache-Control","no-store");
+    if(c.req.header("content-type")?.split(";",1)[0]?.trim().toLowerCase()!=="application/json")return c.json({error:"invalid_agent_execution"},415);
+    const heartbeatToken=/^Bearer (zwh_[A-Za-z0-9_-]{43})$/.exec(c.req.header("authorization")??"")?.[1];
+    if(!heartbeatToken)return c.json({error:"engine_authority_rejected"},401);
+    const parsed=CloudAgentCredentialControlExchangeRequestSchema.safeParse(await c.req.json().catch(()=>null));
+    if(!parsed.success)return c.json({error:"invalid_agent_execution"},422);
+    const {organizationId,workspaceId,generation,engineInstanceId}=parsed.data;
+    try{
+      const result=CloudAgentCredentialControlExchangeResponseSchema.safeParse(await service.credentialControls(
+        {organizationId,workspaceId,generation,engineInstanceId,heartbeatToken},parsed.data));
+      if(!result.success)return c.json({error:"cloud_validation_authority_unavailable"},503);
+      return c.json({result:result.data});
+    }catch(error){
+      if(error instanceof CloudWorkspaceEngineAuthorityError)return c.json({error:"engine_authority_rejected"},401);
+      const refusal=executionRefusal(error,"validate");return c.json({error:refusal.error},refusal.status);
+    }
+  });
   app.post(CLOUD_AGENT_EXECUTION_PATH,async c=>{
     c.header("Cache-Control","no-store");
     if(c.req.header("content-type")?.split(";",1)[0]?.trim().toLowerCase()!=="application/json")return c.json({error:"invalid_agent_execution"},415);

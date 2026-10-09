@@ -19,6 +19,7 @@ import {AgentGateway} from "../agents/gateway";
 import type {AgentAdapter} from "../agents/types";
 import type {PreparedBoundary} from "../agents/containment/types";
 import {testExecutionBoundary} from "../agents/__tests__/helpers/test-execution-boundary";
+import {testCloudBootFixture} from "../agents/__tests__/helpers/test-cloud-boot";
 
 type Start=AgentNewSessionMessage|AgentLoadSessionMessage;
 type Spawn={cloudExecution?:CloudAgentSelection;cloudExecutionId?:string;env?:Record<string,string>;cwd?:string};
@@ -53,7 +54,8 @@ function fixture(){
   const engine={root:path.join(root,"workspace"),cloudWorker:{version:3},cloudCommandAdmissions:new WeakMap(),cloudCommandSessions:new Map(),
     cloudGoals:new CloudGoalRecorder(async(claim,_sequence,goal)=>({version:1,conversationId:claim.conversationId,revision:1,goal})),
     conversationExecution:new Map<string,string>(),sessionAgent:new Map<string,string>(),activePromptContexts:new Map(),retiringCloudExecutions:new Set<string>(),
-    agents:{cloudNativeCapabilities:vi.fn(()=>undefined),endSession:vi.fn(async(_agentId:string,_executionId:string,_options?:{failClosed?:boolean})=>{}),cancel:vi.fn(async()=>{})},broadcast:vi.fn(),handleCloudRuntimeAuthorityLoss:vi.fn(),
+    agents:{cloudNativeCapabilities:vi.fn(()=>undefined),pinCloudHistoryRedactor:vi.fn(()=>null),endSession:vi.fn(async(_agentId:string,_executionId:string,_options?:{failClosed?:boolean})=>{}),cancel:vi.fn(async()=>{})},broadcast:vi.fn(),handleCloudRuntimeAuthorityLoss:vi.fn(),
+    cloudHistoryRedactors:new Map(),
     validateCloudCommand:methods.validateCloudCommand,workspace:{workspaceIdForCwd:()=>"workspace"},
     assertRemoteWorkspaceOperable:vi.fn(()=>path.join(root,"workspace")),invalidateConversationBind:vi.fn(),markCancelIntent:vi.fn(),
     clearAgentExecutionRoute:vi.fn((id:string)=>{engine.sessionAgent.delete(id);if(engine.conversationExecution.get("conversation")===id)engine.conversationExecution.delete("conversation");}),
@@ -77,6 +79,29 @@ function failingRetirement(engine:ReturnType<typeof fixture>["engine"],execution
   return proof;
 }
 describe("cloud engine credential admission",()=>{
+  it("delegates grant-free boot admission and original selection without entering legacy delegation", async () => {
+    const { claim, engine } = fixture(), boot = await testCloudBootFixture(engine.root);
+    const { agentCredentialGrantId: _grant, ...payload } = claim.payload;
+    const local = { ...claim, executionId: boot.selection.executionId, actor: boot.provenance.actor, payload: { ...payload, model: boot.selection.model } };
+    const pump = { prepare: vi.fn(async () => {}), admissionSelection: vi.fn(() => boot.selection),
+      retire: vi.fn(async () => {}), cancel: vi.fn(async () => {}) };
+    Object.assign(engine, { cloudLocalNativePump: pump, cloudAgentBoot: { active: true } });
+    try {
+      await methods.prepareCloudCommand.call(engine, local);
+      expect(pump.prepare).toHaveBeenCalledWith(local); expect(engine.cloudCommandSessions.size).toBe(0);
+      expect(engine.agents.pinCloudHistoryRedactor).toHaveBeenCalledWith(local.payload.agentId,local.executionId);
+      const receiver: TransportClient = { id: "boot-receiver", kind: "cloud", send: () => {}, close: () => {} };
+      engine.cloudCommandAdmissions.set(receiver, local);
+      const options = await methods.agentSpawnOpts.call(engine,
+        { type: "AGENT_NEW_SESSION", agentId: "cursor", chatId: local.conversationId, workspaceId: "workspace" } as Start, receiver, "newSession");
+      expect(options.cloudExecution).toBe(boot.selection); expect(options.cloudExecutionId).toBe(local.executionId);
+      expect(options.cloudExecution).not.toHaveProperty("delegationId");
+      await methods.cancelCloudCommandConversation.call(engine, local.conversationId);
+      expect(pump.cancel).toHaveBeenCalledWith(local.conversationId);
+      await methods.retireCloudCommand.call(engine, local, false);
+      expect(pump.retire).toHaveBeenCalledWith(local, { state: "failed" });
+    } finally { await boot.close(); }
+  });
   it("retains exact command/turn terminal stop reason, usage and effective model", async () => {
     const { claim, engine } = fixture(); await methods.prepareCloudCommand.call(engine, claim);
     engine.handleAgentMessage.mockImplementationOnce(async (_message, client) => {

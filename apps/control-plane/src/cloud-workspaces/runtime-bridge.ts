@@ -1,4 +1,5 @@
 import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
+import { randomUUID } from "node:crypto";
 import type { Duplex } from "node:stream";
 import WebSocket, {
   WebSocketServer,
@@ -115,6 +116,26 @@ export type CloudRuntimeRelayStats = {
   inboundReservedBytes: number;
   peakInboundReservedBytes: number;
 };
+
+type MessageDirection = "client_to_engine" | "engine_to_client";
+type MessagePhase = "received" | "forwarded" | "failed";
+type MessageTotals = {
+  receivedMessages: number; receivedBytes: number;
+  forwardedMessages: number; forwardedBytes: number;
+  failedMessages: number; failedBytes: number;
+};
+/** Complete-message metadata from this relay process. It does not inspect
+ * content or imply command ownership, delivery to a renderer, or native use. */
+export type CloudRuntimeRelayMessageObservation = Readonly<{
+  version: 1; clockId: string; sequence: number; atMs: number;
+  direction: MessageDirection; phase: MessagePhase; payloadBytes: number; binary: boolean;
+  scope: Readonly<{ organizationId: string; workspaceId: string; generation: number; engineInstanceId: string }>;
+  activeSubscribers: number; correlation: "unknown";
+}>;
+
+function messageTotals(): MessageTotals {
+  return { receivedMessages: 0, receivedBytes: 0, forwardedMessages: 0, forwardedBytes: 0, failedMessages: 0, failedBytes: 0 };
+}
 
 type Destination = CloudEngineRelayGrant & {
   endpoint: CloudProviderEngineEndpoint;
@@ -283,6 +304,18 @@ export class CloudRuntimeBridgeRelay {
   };
   private readonly summaryTimer: ReturnType<typeof setInterval>;
   private readonly log: (line: string, level: "info" | "warn") => void;
+  private readonly observationClockId = randomUUID();
+  private readonly maxObservedMessages: number;
+  private messageSequence = 0;
+  private observedMessages = 0;
+  private omittedMessages = 0;
+  private pendingForwards = 0;
+  private observerFailures = 0;
+  private pendingObservations = 0;
+  private observationOverflow = false;
+  private readonly messageDirections = {
+    client_to_engine: messageTotals(), engine_to_client: messageTotals(),
+  };
   constructor(
     private readonly options: {
       resolve: (token: string) => Promise<Destination | null>;
@@ -300,9 +333,13 @@ export class CloudRuntimeBridgeRelay {
       authorityCheckMs?: number;
       /** Receives operational lines; defaults to the console. */
       log?: (line: string, level: "info" | "warn") => void;
+      /** Optional bounded measurements only; disabled unless explicitly wired. */
+      observeMessage?: (event: CloudRuntimeRelayMessageObservation) => void;
+      maxObservedMessages?: number;
     },
   ) {
     this.maxPending = limit(options.maxPending, 32, 1, 32);
+    this.maxObservedMessages = limit(options.maxObservedMessages, 256, 1, 4096);
     this.limits = cloudRuntimeRelayLimits({
       maxConnections: options.maxConnections,
       maxConnectionsPerWorkspace: options.maxConnectionsPerWorkspace,
@@ -346,6 +383,73 @@ export class CloudRuntimeBridgeRelay {
       peakOutboundQueuedBytes: this.peakOutbound,
       inboundReservedBytes: this.inboundCharged,
       peakInboundReservedBytes: this.peakInbound,
+    };
+  }
+
+  messageObservationCoverage() {
+    return {
+      enabled: !!this.options.observeMessage,
+      clockId: this.options.observeMessage ? this.observationClockId : null,
+      sampledAtMs: performance.now(), observedMessages: this.observedMessages,
+      omittedMessages: this.omittedMessages, pendingForwards: this.pendingForwards,
+      observerFailures: this.observerFailures, overflow: this.observationOverflow,
+      pendingObservations: this.pendingObservations,
+      complete: !!this.options.observeMessage && !this.observationOverflow && this.omittedMessages === 0 &&
+        this.pendingForwards === 0 && this.pendingObservations === 0 && this.observerFailures === 0,
+      directions: { client_to_engine: { ...this.messageDirections.client_to_engine },
+        engine_to_client: { ...this.messageDirections.engine_to_client } },
+    };
+  }
+
+  private addObserved(left: number, right: number): number {
+    if (left > Number.MAX_SAFE_INTEGER - right) { this.observationOverflow = true; return Number.MAX_SAFE_INTEGER; }
+    return left + right;
+  }
+
+  private observeCompleteMessage(pair: Pair, direction: MessageDirection, payloadBytes: number, binary: boolean):
+    ((forwarded: boolean) => void) | undefined {
+    const observer = this.options.observeMessage, grant = pair.grant;
+    if (!observer || !grant) return undefined;
+    this.messageSequence = this.addObserved(this.messageSequence, 1);
+    const sequence = this.messageSequence, details = sequence <= this.maxObservedMessages;
+    if (details) this.observedMessages++;
+    else this.omittedMessages = this.addObserved(this.omittedMessages, 1);
+    this.pendingForwards = this.addObserved(this.pendingForwards, 1);
+    const scope = Object.freeze({ organizationId: grant.organizationId, workspaceId: grant.workspaceId,
+      generation: grant.generation, engineInstanceId: grant.engineInstanceId });
+    const count = (phase: MessagePhase) => {
+      const totals = this.messageDirections[direction];
+      totals[`${phase}Messages`] = this.addObserved(totals[`${phase}Messages`], 1);
+      totals[`${phase}Bytes`] = this.addObserved(totals[`${phase}Bytes`], payloadBytes);
+    };
+    const emit = (phase: MessagePhase) => {
+      if (!details) return;
+      let activeSubscribers = 0;
+      for (const peer of this.pairs) if (!peer.retiring && peer.grant?.organizationId === scope.organizationId &&
+        peer.grant.workspaceId === scope.workspaceId && peer.grant.generation === scope.generation &&
+        peer.grant.engineInstanceId === scope.engineInstanceId && peer.client?.readyState === WebSocket.OPEN &&
+        peer.upstream?.readyState === WebSocket.OPEN) activeSubscribers++;
+      const event: CloudRuntimeRelayMessageObservation = Object.freeze({ version: 1, clockId: this.observationClockId,
+        sequence, atMs: performance.now(), direction, phase, payloadBytes, binary, scope, activeSubscribers, correlation: "unknown" });
+      const failed = () => { this.observerFailures = this.addObserved(this.observerFailures, 1); };
+      try {
+        const delivery: unknown = observer(event);
+        if (delivery && (typeof delivery === "object" || typeof delivery === "function") &&
+            typeof (delivery as { then?: unknown }).then === "function") {
+          this.pendingObservations = this.addObserved(this.pendingObservations, 1);
+          void Promise.resolve(delivery).then(() => { this.pendingObservations--; }, () => {
+            this.pendingObservations--; failed();
+          });
+        }
+      } catch { failed(); }
+    };
+    count("received"); emit("received");
+    let finished = false;
+    return forwarded => {
+      if (finished) return;
+      finished = true; this.pendingForwards--;
+      const phase = forwarded ? "forwarded" : "failed";
+      count(phase); emit(phase);
     };
   }
 
@@ -559,24 +663,28 @@ export class CloudRuntimeBridgeRelay {
               target: WebSocket,
               size: number,
               write: (callback: (error?: Error) => void) => void,
+              observed?: (forwarded: boolean) => void,
             ) => {
-              if (retired) return;
+              if (retired) { observed?.(false); return; }
               const closedPeer =
                 target === client ? "client_closed" : "upstream_closed";
               if (target.readyState !== WebSocket.OPEN) {
+                observed?.(false);
                 pair.retire(closedPeer);
                 return;
               }
               if (size > MAX_FRAME_BYTES) {
+                observed?.(false);
                 pair.retire("message_limit");
                 return;
               }
               if (target.bufferedAmount + size > MAX_FRAME_BYTES) {
+                observed?.(false);
                 pair.retire("target_buffer");
                 return;
               }
               const reservation = cloudRuntimeRelayOutboundBytes(size);
-              if (!this.reserveOutbound(pair, reservation)) return;
+              if (!this.reserveOutbound(pair, reservation)) { observed?.(false); return; }
               pair.queued += reservation;
               this.outboundQueued += reservation;
               this.peakOutbound = Math.max(
@@ -587,22 +695,29 @@ export class CloudRuntimeBridgeRelay {
                 this.windowPeakOutbound,
                 this.outboundQueued,
               );
-              write((error) => {
+              const completed = (error?: Error) => {
+                observed?.(!error);
                 if (!retired) {
                   pair.queued -= reservation;
                   this.outboundQueued -= reservation;
                 }
                 if (error) pair.retire(closedPeer);
-              });
+              };
+              try { write(completed); } catch (error) { observed?.(false); throw error; }
             };
             const forward = (
               target: WebSocket,
               data: RawData,
               binary: boolean,
-            ) =>
-              queueOutput(target, bytes(data), (callback) =>
+            ) => {
+              if (retired) return;
+              const size = bytes(data), observed = this.observeCompleteMessage(pair,
+                target === client ? "engine_to_client" : "client_to_engine", size, binary);
+              queueOutput(target, size, (callback) =>
                 target.send(data, { binary, compress: false }, callback),
+                observed,
               );
+            };
             remote.on("message", (data, binary) =>
               forward(client, data, binary),
             );

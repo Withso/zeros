@@ -12,6 +12,7 @@ import { freshNativeArtifacts } from "./artifacts";
 import { copyRuntimeFixture, initializeFixtureCheckout, snapshotSystemExecutable } from "./projection";
 import { cloudPreflightDiagnostic, zsrAdmissionDiagnostic } from "./diagnostics";
 import { observedRuntimeEngine } from "./identity";
+import { readPrivateFixtureMirrorProof } from "./namespace-mirror-proof";
 
 type Config = { outerMountNamespace: string; outerPidNamespace: string; scope: "strict" | "cpu-private-pid-fixture"; stage: string; ca: string; scratch: string;
   sourceFixtureLinux?: "host" | "ubuntu-24.04";
@@ -59,7 +60,7 @@ const diagnoses = [
   ["account_binding", /account binding|account JWT|account.*configured|OWNER_SUB/],
   ["module_missing", /MODULE_NOT_FOUND|Cannot find module|ERR_MODULE_NOT_FOUND/],
   ...["ws", "tinyglobby", "chokidar", "postcss", "node-pty", "better-sqlite3", "@anthropic-ai/claude-agent-sdk", "@xterm/headless", "@xterm/addon-serialize", "isomorphic-git", "diff", "parse5", "smol-toml", "zod", "@cursor/sdk", "./cloud-native-view.mjs", "./cloud-coordinator-view.mjs"].map((name, index) => [
-    `module_${index}`, new RegExp(`Cannot find module ['\"]${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}['\"]`),
+    `module_${index}`, new RegExp(`Cannot find module ['"]${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}['"]`),
   ] as const),
   ["sqlite_binding", /better_sqlite3|NODE_MODULE_VERSION|bindings file/],
   ["registration", /registration.*fail|registration.*reject|runtime registration/i],
@@ -191,6 +192,11 @@ try {
   reader.on("line", line => {
     try { const command = JSON.parse(line);
       if (command.op === "inspect") emit({ type: "inspection", id: command.id, ...inspect() });
+      else if (command.op === "mirror-proof") {
+        const proof = readPrivateFixtureMirrorProof({ outerMountNamespace: config.outerMountNamespace, outerPidNamespace: config.outerPidNamespace,
+          scope: command.scope, commandId: command.commandId, conversationId: command.conversationId });
+        emit({ type: "inspection", id: command.id, proof });
+      }
       else if (command.op === "identity") {
         observedRuntimeEngine(config.descriptor.active.root, config.outerPidNamespace);
         emit({ type: "inspection", id: command.id, engineUid: 10003, engineGid: 10003,

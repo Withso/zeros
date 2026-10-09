@@ -12,7 +12,7 @@ describe("cloud gateway secret delivery", () => {
     const events = { onSessionUpdate: vi.fn(), onPermissionRequest: vi.fn(), onQuestionRequest: vi.fn(), onAgentStderr: vi.fn(), onAgentExit: vi.fn() };
     const gateway = new AgentGateway({ projectRoot: "/tmp", events, cloudAgentExecutionFactory: { prepare: vi.fn() } });
     const internal = gateway as unknown as { events: AgentGatewayOptions["events"]; executionBoundaries: Map<string, unknown> };
-    state.execution = { lease: { signal: new AbortController().signal, admission: { provider: "claude" } }, redactor: new CloudCustomizationRedactor(["synthetic-private"]) };
+    state.execution = { mode: "actor-grant-v1", provider: "claude", lease: { signal: new AbortController().signal, admission: { provider: "claude" } }, redactor: new CloudCustomizationRedactor(["synthetic-private"]) };
     internal.executionBoundaries.set("test", {});
     try {
       internal.events.onSessionUpdate("claude", { sessionId: "test", update: { sessionUpdate: "agent_message_chunk", messageId: "first", parentToolId: "subagent", content: { type: "text", text: "syn" } } });
@@ -26,7 +26,7 @@ describe("cloud gateway secret delivery", () => {
     const events = { onSessionUpdate: vi.fn(), onPermissionRequest: vi.fn(), onQuestionRequest: vi.fn(), onAgentStderr: vi.fn(), onAgentExit: vi.fn() };
     const gateway = new AgentGateway({ projectRoot: "/tmp", events, cloudAgentExecutionFactory: { prepare: vi.fn() } });
     const internal = gateway as unknown as { events: AgentGatewayOptions["events"]; executionBoundaries: Map<string, unknown> };
-    state.execution = { lease: { signal: new AbortController().signal, admission: { provider: "claude" } }, redactor: new CloudCustomizationRedactor(["synthetic-mcp-private"]) };
+    state.execution = { mode: "actor-grant-v1", provider: "claude", lease: { signal: new AbortController().signal, admission: { provider: "claude" } }, redactor: new CloudCustomizationRedactor(["synthetic-mcp-private"]) };
     internal.executionBoundaries.set("test", {});
     try {
       for (const text of ["Tool result: synthetic-mcp-", "private!"]) internal.events.onSessionUpdate("claude", {
@@ -56,7 +56,7 @@ it.each(["newSession", "loadSession"] as const)("filters %s failures, diagnostic
   failure.cause = new Error(`Cause: ${literal}\nPartial diagnostic: ${diagnostic}`);
   const adapter = { agentId: "claude", newSession: vi.fn(async () => { throw failure; }), loadSession: vi.fn(async () => { throw failure; }), disposeSession: vi.fn(async () => {}), dispose: vi.fn(async () => {}) };
   (gateway as unknown as { adapters: Map<string, unknown> }).adapters.set("claude", adapter);
-  state.execution = { lease: { signal: new AbortController().signal, admission: { provider: "claude" }, close: vi.fn(async () => {}) }, redactor: new CloudCustomizationRedactor([literal]) };
+  state.execution = { mode: "actor-grant-v1", provider: "claude", lease: { signal: new AbortController().signal, admission: { provider: "claude" }, close: vi.fn(async () => {}) }, redactor: new CloudCustomizationRedactor([literal]) };
   const options = { cwd: root, conversationId: "conversation", cloudExecution: { delegationId: randomUUID(), model: "test-model", source: { kind: "session" as const, actorSessionId: randomUUID() } } };
   try {
     const result = await (stage === "newSession" ? gateway.newSession("claude", options) : gateway.loadSession("claude", { version: 1, kind: "native", providerId: "claude", resumeId: "native" }, options)).catch(error => error);
@@ -79,7 +79,7 @@ it.each([true, false])("uses a fresh provider binding and one scrubbed owner han
   const adapter = { agentId: "claude", newSession: vi.fn(async (input: {executionId:string}) => ({ session: {executionId:input.executionId,sessionId:input.executionId,...(hasInitialBinding ? {providerBinding:binding} : {})}, initialize:{} })),
     loadSession: vi.fn(), prompt: vi.fn(async () => ({stopReason:"end_turn"})), disposeSession: vi.fn(async () => {}), dispose: vi.fn(async () => {}) };
   (gateway as unknown as { adapters: Map<string, unknown> }).adapters.set("claude", adapter);
-  state.execution = { lease: { signal: new AbortController().signal, admission: { provider: "claude" }, close: vi.fn(async () => {}), validate: vi.fn(async () => {}) }, redactor: new CloudCustomizationRedactor([]),
+  state.execution = { mode: "actor-grant-v1", provider: "claude", lease: { signal: new AbortController().signal, admission: { provider: "claude" }, close: vi.fn(async () => {}), validate: vi.fn(async () => {}) }, redactor: new CloudCustomizationRedactor([]),
     coordinator: {requiresFreshHistory:true,takeHistoryHandoff:vi.fn().mockReturnValueOnce('Earlier safe answer [redacted].')} };
   const options = { cwd: root, conversationId: "conversation", cloudExecution: { delegationId: randomUUID(), model: "test-model", source: { kind: "session" as const, actorSessionId: randomUUID() } } };
   try {

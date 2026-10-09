@@ -10,14 +10,17 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ClaudeSdkAdapter } from "../adapter";
 import * as cloudExecutions from "../../../cloud-provider-execution";
 import * as claudeRuntime from "../binary-resolver";
+import * as containedProcess from "../contained-process";
 import * as cloudRuntimeRoot from "../../../containment/cloud-runtime-root.mjs";
 import { cloudRuntimeFixture } from "../../../containment/__tests__/cloud-runtime-fixture";
 import { testCloudRuntime } from "../../../__tests__/helpers/test-cloud-runtime";
+import { bootClaudeExecutionFixture } from "./helpers/boot-execution";
 import {
   AgentFailureError,
   type AgentAdapterContext,
@@ -84,7 +87,8 @@ describe("Claude private cloud coordinator policy",()=>{
   it.each([false, true])("reports an unexpected idle exit but not completed cloud retirement (retired=%s)", async retired => {
     const boundary = { status: { actor: "agent-code", backend: "cloud-worker" } } as never;
     const lease = new AbortController();
-    const execution = { lease: { signal: lease.signal, assertLive: vi.fn(), admission: { model: "claude-haiku-4-5" } },
+    const lifetime = { signal: lease.signal, assertLive: vi.fn() };
+    const execution = { mode: "actor-grant-v1", model: "claude-haiku-4-5", customization: null, lifetime, lease: { ...lifetime, admission: { model: "claude-haiku-4-5" } },
       tools: { call: vi.fn() }, productServers: [] } as unknown as cloudExecutions.CloudProviderExecution;
     const original = cloudExecutions.cloudProviderExecution;
     const authority = vi.spyOn(cloudExecutions, "cloudProviderExecution").mockImplementation(value => value === boundary ? execution : original(value));
@@ -112,8 +116,10 @@ describe("Claude private cloud coordinator policy",()=>{
   it("keeps native workspace tools and fences external credential/model overrides",async()=>{
     const boundary={status:{actor:"agent-code",backend:"zeros-srt"}} as never;
     const lease=new AbortController(),assertLive=vi.fn();
-    const execution={cwd:"/srv/zeros/workspace",lease:{signal:lease.signal,assertLive,admission:{model:"claude-haiku-4-5"}},tools:{call:vi.fn()},
+    const execution={mode:"actor-grant-v1",model:"claude-haiku-4-5",customization:null,lifetime:{signal:lease.signal,assertLive},
+      cwd:"/srv/zeros/workspace",tools:{call:vi.fn()},
       productServers:[{name:"zeros_design",transport:"http",url:"http://127.0.0.1:42000/mcp",headers:{Authorization:"Bearer synthetic-scoped-tool"}}]} as unknown as cloudExecutions.CloudProviderExecution;
+    Object.defineProperty(execution,"lease",{get:()=>{throw new Error("Common Claude policy accessed legacy lease");}});
     const original=cloudExecutions.cloudProviderExecution;
     const authority=vi.spyOn(cloudExecutions,"cloudProviderExecution").mockImplementation(value=>value===boundary?execution:original(value));
     const runtime=admittedClaudeRuntimeFixture();
@@ -141,10 +147,127 @@ describe("Claude private cloud coordinator policy",()=>{
   });
 });
 
+describe("Claude genuine boot foreground handoff", () => {
+  async function fixture(idleTimeoutMs = 30_000) {
+    const runtime = admittedClaudeRuntimeFixture(), boot = await bootClaudeExecutionFixture(), live = makePushableQuery(), lives=[live];
+    const callbacks: Parameters<typeof containedProcess.spawnContainedClaudeProcess>[1][] = [];
+    const spawn = vi.spyOn(containedProcess,"spawnContainedClaudeProcess").mockImplementation((_options, hooks) => {
+      callbacks.push(hooks); return {} as never;
+    });
+    const queryFn = (params: Parameters<typeof import("@anthropic-ai/claude-agent-sdk").query>[0]) => {
+      params.options?.spawnClaudeCodeProcess?.({ command:"synthetic-cli",args:[],env:{},signal:new AbortController().signal });
+      const current=lives[callbacks.length-1]??(lives[callbacks.length-1]=makePushableQuery());
+      return (current.queryFn as typeof import("@anthropic-ai/claude-agent-sdk").query)(params);
+    };
+    const adapter = new ClaudeSdkAdapter(makeCtx([],[]),{queryFn,idleTimeoutMs});
+    const reservation = boot.factory.reserveBootTurn(boot.execution,boot.selection);
+    const {session} = await adapter.newSession({executionId:boot.execution.executionId,cwd:"/untrusted",env:boot.env,executionBoundary:boot.boundary});
+    return {boot,live,lives,callbacks,adapter,reservation,session,
+      dispose:async()=>{try{await adapter.dispose();}finally{spawn.mockRestore();await boot.dispose();runtime.dispose();}}};
+  }
+  it("guards an original cold and warm turn even when passive observers are disabled", async () => {
+    const f=await fixture();
+    try{
+      const first=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]});
+      const firstOutcome=first.catch(error=>error);
+      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(1));
+      expect(f.callbacks[0]!.beforeUserMessageWrite).toBeTypeOf("function");
+      f.callbacks[0]!.beforeUserMessageWrite!(String(f.live.inputsSeen[0]!.uuid));
+      expect(f.boot.factory.bootScopeActivity([]).foreground).toBe(1);
+      f.live.push(initMsg("warm-boot"),{...resultOk("warm-boot"),user_message_uuid:f.live.inputsSeen[0]!.uuid});
+      expect(await firstOutcome).toMatchObject({stopReason:"end_turn"});
+      await f.boot.factory.settleBootTurn(f.boot.execution,f.reservation);
+      const selected=f.boot.factory.selectBoot(f.boot.input),next=f.boot.factory.reserveBootTurn(f.boot.execution,selected);
+      const second=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("Second")]});
+      const secondOutcome=second.catch(error=>error);
+      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(2));
+      f.callbacks[0]!.beforeUserMessageWrite!(String(f.live.inputsSeen[1]!.uuid));
+      f.live.push({...resultOk("warm-boot"),user_message_uuid:f.live.inputsSeen[1]!.uuid});
+      expect(await secondOutcome).toMatchObject({stopReason:"end_turn"});
+      await f.boot.factory.settleBootTurn(f.boot.execution,next);
+      expect(f.callbacks).toHaveLength(1);expect(f.live.captured).toHaveLength(1);
+      expect(f.boot.request.sync).not.toHaveBeenCalled();
+    }finally{await f.dispose();}
+  });
+  it("preserves the exact original refusal when the pinned SDK wraps a transport throw", async () => {
+    const f=await fixture();
+    try{
+      const outcome=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]}).catch(error=>error);
+      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(1));
+      f.boot.canStart.mockReturnValue(false);
+      expect(f.callbacks[0]!.beforeUserMessageWrite).toBeTypeOf("function");
+      expect(()=>f.callbacks[0]!.beforeUserMessageWrite!(String(f.live.inputsSeen[0]!.uuid)))
+        .toThrow(expect.objectContaining({code:"cloud_validation_access_denied"}));
+      f.live.fail(new Error("Failed to write to process stdin: synthetic SDK wrapper"));
+      expect(await outcome).toMatchObject({code:"cloud_validation_access_denied"});
+      expect(f.boot.factory.bootScopeActivity([]).foreground).toBe(0);
+    }finally{await f.dispose();}
+  });
+  it("keeps the genuine boot query warm through the ordinary idle timeout", async () => {
+    const f=await fixture(1);
+    try{
+      const outcome=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]}).catch(error=>error);
+      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(1));
+      expect(f.callbacks[0]!.beforeUserMessageWrite).toBeTypeOf("function");
+      f.callbacks[0]!.beforeUserMessageWrite!(String(f.live.inputsSeen[0]!.uuid));
+      f.live.push(initMsg("warm-boot"),{...resultOk("warm-boot"),user_message_uuid:f.live.inputsSeen[0]!.uuid});await outcome;
+      await f.boot.factory.settleBootTurn(f.boot.execution,f.reservation);
+      await new Promise(resolve=>setTimeout(resolve,20));
+      expect(f.live.control.closes).toBe(0);expect(f.boot.execution.lifetime.signal.aborted).toBe(false);
+    }finally{await f.dispose();}
+  });
+  it("refuses foreground SDK input without an original factory turn reservation", async () => {
+    const f=await fixture();
+    try{
+      f.boot.factory.markNativeHandoff(f.boot.execution,f.reservation);
+      await f.boot.factory.settleBootTurn(f.boot.execution,f.reservation);
+      const outcome=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("Unowned")]}).catch(error=>error);
+      await tick();f.live.fail(new Error("Synthetic input without a reservation"));
+      expect(await outcome).toMatchObject({code:"cloud_validation_access_denied"});
+      expect(f.live.inputsSeen).toHaveLength(0);
+    }finally{await f.dispose();}
+  });
+  it("keeps entered steering on captured authority but never hands the same steering UUID off twice",async()=>{
+    const f=await fixture();
+    try{
+      const outcome=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]}).catch(error=>error);
+      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(1));
+      f.callbacks[0]!.beforeUserMessageWrite!(String(f.live.inputsSeen[0]!.uuid));
+      f.boot.canStart.mockReturnValue(false);
+      const steering=f.adapter.steer({sessionId:f.session.executionId,prompt:[textBlock("Continue entered turn")]}).catch(error=>error);
+      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(2));
+      const uuid=String(f.live.inputsSeen[1]!.uuid);
+      expect(()=>f.callbacks[0]!.beforeUserMessageWrite!(uuid)).not.toThrow();
+      expect(()=>f.callbacks[0]!.beforeUserMessageWrite!(uuid)).toThrow(expect.objectContaining({code:"cloud_validation_access_denied"}));
+      await f.adapter.cancel({sessionId:f.session.executionId});await steering;await outcome;
+    }finally{await f.dispose();}
+  });
+  it("rejects a held prior query write without rejecting the newer warm turn",async()=>{
+    const f=await fixture();
+    try{
+      const first=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]}).catch(error=>error);
+      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(1));
+      const oldUuid=String(f.live.inputsSeen[0]!.uuid),oldWrite=f.callbacks[0]!.beforeUserMessageWrite!;
+      oldWrite(oldUuid);f.live.push(initMsg("warm-boot"),{...resultOk("warm-boot"),user_message_uuid:oldUuid});await first;
+      await f.boot.factory.settleBootTurn(f.boot.execution,f.reservation);
+      await f.adapter.updateConfig({sessionId:f.session.executionId,env:{ZEROS_THINKING_EFFORT:"max"}});
+      const selected=f.boot.factory.selectBoot(f.boot.input),reservation=f.boot.factory.reserveBootTurn(f.boot.execution,selected);
+      let settled=false;
+      const second=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("Second")]}).then(value=>{settled=true;return value;},error=>{settled=true;return error;});
+      await vi.waitFor(()=>expect(f.lives[1]?.inputsSeen).toHaveLength(1));
+      expect(()=>oldWrite(oldUuid)).toThrow(expect.objectContaining({code:"cloud_validation_access_denied"}));
+      await tick();expect(settled).toBe(false);
+      const uuid=String(f.lives[1]!.inputsSeen[0]!.uuid);
+      f.callbacks[1]!.beforeUserMessageWrite!(uuid);f.lives[1]!.push({...resultOk("warm-boot"),user_message_uuid:uuid});
+      expect(await second).toMatchObject({stopReason:"end_turn"});await f.boot.factory.settleBootTurn(f.boot.execution,reservation);
+    }finally{await f.dispose();}
+  });
+});
+
 describe("Claude explicit approval hints", () => {
   it("offers cloud approvals only for this chat and preserves another actor's explicit Plan",async()=>{
     const boundary={status:{actor:"agent-code",backend:"cloud-worker"}} as never;
-    const execution={cwd:"/srv/zeros/workspace",lease:{signal:new AbortController().signal,assertLive:vi.fn(),admission:{model:"claude-haiku-4-5"}},productServers:[]} as unknown as cloudExecutions.CloudProviderExecution;
+    const execution={mode:"actor-grant-v1",model:"claude-haiku-4-5",customization:null,cwd:"/srv/zeros/workspace",lifetime:{signal:new AbortController().signal,assertLive:vi.fn()},productServers:[]} as unknown as cloudExecutions.CloudProviderExecution;
     const original=cloudExecutions.cloudProviderExecution;
     const authority=vi.spyOn(cloudExecutions,"cloudProviderExecution").mockImplementation(value=>value===boundary?execution:original(value));
     const runtime=admittedClaudeRuntimeFixture();
@@ -486,6 +609,245 @@ interface PermissionSettleCapture {
   permissionId: string;
   sessionId: string;
 }
+
+describe("Claude native prompt stage observation", () => {
+  it("wires contained stdin observations to the exact live foreground UUID without treating spawn as a write", async () => {
+    const live = makePushableQuery(), onNativePromptStage = vi.fn();
+    let observeWrite: ((uuid: string) => void) | undefined;
+    const spawn = vi.spyOn(containedProcess, "spawnContainedClaudeProcess").mockImplementation((_options, callbacks) => {
+      observeWrite = callbacks.onUserMessageWrite; return {} as never;
+    });
+    const queryFn = (params: Parameters<typeof import("@anthropic-ai/claude-agent-sdk").query>[0]) => {
+      const spawnNative = params.options?.spawnClaudeCodeProcess;
+      if (!spawnNative) throw new Error("Synthetic contained spawn seam missing");
+      spawnNative({ command: "synthetic-cli", args: [], env: {}, signal: new AbortController().signal });
+      return (live.queryFn as typeof import("@anthropic-ai/claude-agent-sdk").query)(params);
+    };
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp", executionBoundary: { status: { actor: "agent-code", backend: "zeros-srt" } } as never });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Synthetic prompt")], onNativePromptStage });
+      await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1));
+      const uuid = live.inputsSeen[0]!.uuid;
+      if (typeof uuid !== "string") throw new Error("Synthetic foreground input UUID missing");
+      expect(spawn).toHaveBeenCalledOnce(); expect(onNativePromptStage).not.toHaveBeenCalled();
+      observeWrite?.("foreign"); expect(onNativePromptStage).not.toHaveBeenCalled();
+      observeWrite?.(uuid); observeWrite?.(uuid);
+      expect(onNativePromptStage).toHaveBeenCalledExactlyOnceWith("native_write");
+      live.push({ ...resultOk("native-observation"), user_message_uuid: uuid }); await turn;
+      observeWrite?.(uuid); expect(onNativePromptStage).toHaveBeenCalledOnce();
+    } finally { await adapter.dispose(); spawn.mockRestore(); }
+  });
+  it("waits for the exact native command receipt rather than SDK enqueue or startup", async () => {
+    const live = makePushableQuery(), onNativePromptStage = vi.fn();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Synthetic prompt")], onNativePromptStage });
+      await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1));
+      const uuid = live.inputsSeen[0]!.uuid;
+      live.push(initMsg("native-observation")); await flushMicrotasks();
+      expect(onNativePromptStage).not.toHaveBeenCalled();
+      live.push({ type: "command_lifecycle", command_uuid: uuid, state: "started" });
+      await vi.waitFor(() => expect(onNativePromptStage).toHaveBeenCalledWith("native_acceptance_ack"));
+      live.push({ type: "command_lifecycle", command_uuid: uuid, state: "completed" });
+      live.push({ ...resultOk("native-observation"), user_message_uuid: uuid }); await turn;
+      expect(onNativePromptStage).toHaveBeenCalledTimes(1);
+    } finally { await adapter.dispose(); }
+  });
+  it.each(["foreign", "subagent", "queued", "refused"])("does not claim acceptance from a %s frame", async kind => {
+    const live = makePushableQuery(), onNativePromptStage = vi.fn();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Synthetic prompt")], onNativePromptStage });
+      await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1)); const uuid = live.inputsSeen[0]!.uuid;
+      live.push({ type: "command_lifecycle", command_uuid: kind === "foreign" ? "foreign" : uuid,
+        state: kind === "queued" || kind === "refused" ? kind : "started", ...(kind === "subagent" ? { parent_tool_use_id: "child" } : {}) });
+      await flushMicrotasks(); expect(onNativePromptStage).not.toHaveBeenCalled();
+      live.push({ ...resultOk("native-observation"), user_message_uuid: uuid }); await turn;
+    } finally { await adapter.dispose(); }
+  });
+  it("contains observer exceptions and makes late old-turn receipts inert", async () => {
+    const live = makePushableQuery(), onNativePromptStage = vi.fn(() => { throw new Error("synthetic observer refusal"); });
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Synthetic prompt")], onNativePromptStage });
+      await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1)); const uuid = live.inputsSeen[0]!.uuid;
+      live.push({ type: "command_lifecycle", command_uuid: uuid, state: "started" });
+      live.push({ ...resultOk("native-observation"), user_message_uuid: uuid }); await expect(turn).resolves.toMatchObject({ stopReason: "end_turn" });
+      expect(onNativePromptStage).toHaveBeenCalledOnce();
+      live.push({ type: "command_lifecycle", command_uuid: uuid, state: "completed" }); await flushMicrotasks();
+      expect(onNativePromptStage).toHaveBeenCalledOnce();
+    } finally { await adapter.dispose(); }
+  });
+  it("cannot attribute a prior-turn receipt to the next prompt on a warm query", async () => {
+    const live = makePushableQuery(), firstObserver = vi.fn(), nextObserver = vi.fn();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const first = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Synthetic first prompt")], onNativePromptStage: firstObserver });
+      await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1)); const firstUuid = live.inputsSeen[0]!.uuid;
+      live.push({ ...resultOk("native-observation"), user_message_uuid: firstUuid }); await first;
+      const next = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Synthetic next prompt")], onNativePromptStage: nextObserver });
+      await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(2)); const nextUuid = live.inputsSeen[1]!.uuid;
+      live.push({ type: "command_lifecycle", command_uuid: firstUuid, state: "started" }); await flushMicrotasks();
+      expect(firstObserver).not.toHaveBeenCalled(); expect(nextObserver).not.toHaveBeenCalled();
+      live.push({ type: "command_lifecycle", command_uuid: nextUuid, state: "started" });
+      await vi.waitFor(() => expect(nextObserver).toHaveBeenCalledExactlyOnceWith("native_acceptance_ack"));
+      live.push({ ...resultOk("native-observation"), user_message_uuid: nextUuid }); await next;
+    } finally { await adapter.dispose(); }
+  });
+  it("contains rejected async stage callbacks without changing native receipt or settlement", async () => {
+    const live = makePushableQuery(), unhandled: unknown[] = [], capture = (reason: unknown) => { unhandled.push(reason); };
+    process.on("unhandledRejection", capture);
+    const onNativePromptStage = vi.fn(async () => { throw new Error("synthetic stage rejection"); });
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Synthetic prompt")], onNativePromptStage });
+      await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1)); const uuid = live.inputsSeen[0]!.uuid;
+      live.push({ type: "command_lifecycle", command_uuid: uuid, state: "started" }, { ...resultOk("native-observation"), user_message_uuid: uuid });
+      await expect(turn).resolves.toMatchObject({ stopReason: "end_turn" });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(onNativePromptStage).toHaveBeenCalledExactlyOnceWith("native_acceptance_ack"); expect(unhandled).toEqual([]);
+    } finally { process.off("unhandledRejection", capture); await adapter.dispose(); }
+  });
+});
+
+describe("Claude exact native foreground output observation", () => {
+  it("retains the original engine-process arrival before translation or a later native ACK", async () => {
+    const live = makePushableQuery(), onNativeOutput = vi.fn();
+    let now = 40;
+    const sampled = vi.spyOn(performance, "now").mockImplementation(() => now);
+    const context = makeCtx([], []), emit = context.emit.onSessionUpdate;
+    context.emit.onSessionUpdate = (agent, notification) => {
+      if (notification.update.sessionUpdate === "agent_message_chunk") now = 200;
+      emit(agent, notification);
+    };
+    const adapter = new ClaudeSdkAdapter(context, { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Synthetic prompt")], onNativeOutput });
+      await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1)); const uuid = live.inputsSeen[0]!.uuid;
+      now = 40;
+      live.push({ type: "assistant", uuid: randomUUID(), user_message_uuid: uuid,
+        message: { id: "native-timing-reply", role: "assistant", content: [{ type: "text", text: "Native reply" }] } });
+      await vi.waitFor(() => expect(onNativeOutput).toHaveBeenCalledExactlyOnceWith("text", 40));
+      expect(now).toBe(200);
+      live.push({ type: "command_lifecycle", command_uuid: uuid, state: "started" }, { ...resultOk("native-timing"), user_message_uuid: uuid });
+      await turn; expect(onNativeOutput).toHaveBeenCalledOnce();
+    } finally { await adapter.dispose(); sampled.mockRestore(); }
+  });
+  it.each(["text", "tool"] as const)("observes an owned %s stream before an acceptance ACK and deduplicates that kind", async kind => {
+    const live = makePushableQuery(), onNativeOutput = vi.fn(), onNativePromptStage = vi.fn();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Synthetic prompt")], onNativeOutput, onNativePromptStage });
+      await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1)); const uuid = live.inputsSeen[0]!.uuid;
+      live.push({ type: "stream_event", user_message_uuid: uuid, event: { type: "message_start", message: { id: "native-owned", role: "assistant", content: [] } } });
+      live.push({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: kind === "text" ? { type: "text", text: "" } : { type: "tool_use", id: "native-tool", name: "Read", input: {} } } });
+      live.push({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: kind === "text" ? { type: "text_delta", text: "Hello" } : { type: "input_json_delta", partial_json: "{}" } } });
+      await vi.waitFor(() => expect(onNativeOutput).toHaveBeenCalledExactlyOnceWith(kind, expect.any(Number)));
+      expect(onNativePromptStage).not.toHaveBeenCalled();
+      live.push({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: kind === "text" ? { type: "text_delta", text: " again" } : { type: "input_json_delta", partial_json: " " } } });
+      live.push({ ...resultOk("native-output"), user_message_uuid: uuid }); await turn;
+      expect(onNativeOutput).toHaveBeenCalledOnce();
+    } finally { await adapter.dispose(); }
+  });
+  it("carries exact assistant message ownership from a thinking block to a later text block", async () => {
+    const live = makePushableQuery(), onNativeOutput = vi.fn();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Synthetic prompt")], onNativeOutput });
+      await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1)); const uuid = live.inputsSeen[0]!.uuid;
+      live.push({ type: "assistant", uuid: randomUUID(), user_message_uuids: ["other-folded-input", uuid], message: { id: "native-assistant", role: "assistant", content: [{ type: "thinking", thinking: "Checking" }] } });
+      await flushMicrotasks(); expect(onNativeOutput).not.toHaveBeenCalled();
+      live.push({ type: "assistant", uuid: randomUUID(), message: { id: "native-assistant", role: "assistant", content: [{ type: "text", text: "Answer" }] } });
+      await vi.waitFor(() => expect(onNativeOutput).toHaveBeenCalledExactlyOnceWith("text", expect.any(Number)));
+      live.push({ ...resultOk("native-output"), user_message_uuid: uuid }); await turn;
+    } finally { await adapter.dispose(); }
+  });
+  it("does not attribute a held prior-turn stream on the same warm query to the new prompt", async () => {
+    const live = makePushableQuery(), oldOutput = vi.fn(), currentOutput = vi.fn();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const first = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("First")], onNativeOutput: oldOutput });
+      await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1)); const firstUuid = live.inputsSeen[0]!.uuid;
+      live.push({ ...resultOk("native-output"), user_message_uuid: firstUuid }); await first;
+      const next = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Next")], onNativeOutput: currentOutput });
+      await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(2)); const nextUuid = live.inputsSeen[1]!.uuid;
+      live.push({ type: "stream_event", user_message_uuid: firstUuid, event: { type: "message_start", message: { id: "old-native-message", content: [] } } },
+        { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "Old held reply" } } });
+      await flushMicrotasks(); expect(oldOutput).not.toHaveBeenCalled(); expect(currentOutput).not.toHaveBeenCalled();
+      live.push({ type: "assistant", user_message_uuid: nextUuid, message: { id: "current-native-message", role: "assistant", content: [{ type: "text", text: "Current reply" }] } });
+      await vi.waitFor(() => expect(currentOutput).toHaveBeenCalledExactlyOnceWith("text", expect.any(Number)));
+      live.push({ ...resultOk("native-output"), user_message_uuid: nextUuid }); await next;
+    } finally { await adapter.dispose(); }
+  });
+  it("keeps uncorrelated packets unavailable even after an exact lifecycle receipt", async () => {
+    const live = makePushableQuery(), onNativeOutput = vi.fn();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Synthetic prompt")], onNativeOutput });
+      await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1)); const uuid = live.inputsSeen[0]!.uuid;
+      live.push({ type: "command_lifecycle", command_uuid: uuid, state: "started" }, assistantText("Unowned reply"));
+      await flushMicrotasks(); expect(onNativeOutput).not.toHaveBeenCalled();
+      live.push({ ...resultOk("native-output"), user_message_uuid: uuid }); await turn;
+    } finally { await adapter.dispose(); }
+  });
+  it.each(["empty", "thought", "guidance", "auth", "synthetic", "subagent", "foreign", "after-stop"])("excludes %s traffic from native first-output evidence", async kind => {
+    const live = makePushableQuery(), onNativeOutput = vi.fn();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Synthetic prompt")], onNativeOutput });
+      await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1)); const uuid = live.inputsSeen[0]!.uuid;
+      if (kind === "after-stop") await adapter.cancel({ sessionId: session.sessionId });
+      live.push({ type: kind === "guidance" ? "system" : "assistant", subtype: kind === "guidance" ? "guidance" : undefined,
+        user_message_uuid: kind === "foreign" ? "foreign-input" : uuid,
+        ...(kind === "auth" ? { error: "authentication_failed" } : {}), ...(kind === "synthetic" ? { isSynthetic: true } : {}),
+        ...(kind === "subagent" ? { parent_tool_use_id: "child" } : {}),
+        message: { id: "excluded-native", model: kind === "auth" ? "<synthetic>" : "qualified-model", role: "assistant", content: [{ type: kind === "thought" ? "thinking" : "text", text: kind === "empty" ? "" : "Synthetic notice", thinking: "Checking" }] } });
+      await flushMicrotasks(); expect(onNativeOutput).not.toHaveBeenCalled();
+      live.push({ ...resultOk("native-output"), user_message_uuid: uuid }); await turn;
+    } finally { await adapter.dispose(); }
+  });
+  it("contains synchronous and async output observer failures without changing prompt settlement", async () => {
+    for (const callback of [() => { throw new Error("synthetic observation failure"); }, async () => { throw new Error("synthetic observation rejection"); }]) {
+      const unhandled: unknown[] = [], capture = (reason: unknown) => { unhandled.push(reason); };
+      process.on("unhandledRejection", capture);
+      const live = makePushableQuery(), onNativeOutput = vi.fn(callback);
+      const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+      try {
+        const { session } = await adapter.newSession({ cwd: "/tmp" });
+        const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Synthetic prompt")], onNativeOutput });
+        await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1)); const uuid = live.inputsSeen[0]!.uuid;
+        live.push({ type: "assistant", uuid: randomUUID(), user_message_uuid: uuid, message: { id: "current-native-reply", role: "assistant", content: [{ type: "text", text: "Current native reply" }] } }, { ...resultOk("native-output"), user_message_uuid: uuid });
+        await expect(turn).resolves.toMatchObject({ stopReason: "end_turn" });
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(onNativeOutput).toHaveBeenCalledExactlyOnceWith("text", expect.any(Number)); expect(unhandled).toEqual([]);
+      } finally { process.off("unhandledRejection", capture); await adapter.dispose(); }
+    }
+  });
+  it("never waits for a pending passive output callback to settle a prompt", async () => {
+    const live = makePushableQuery(), onNativeOutput = vi.fn(() => new Promise<void>(() => {}));
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Synthetic prompt")], onNativeOutput });
+      await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1)); const uuid = live.inputsSeen[0]!.uuid;
+      live.push({ type: "assistant", uuid: randomUUID(), user_message_uuid: uuid, message: { id: "pending-observer-native", role: "assistant", content: [{ type: "text", text: "Native reply" }] } },
+        { ...resultOk("native-output"), user_message_uuid: uuid });
+      await expect(turn).resolves.toMatchObject({ stopReason: "end_turn" }); expect(onNativeOutput).toHaveBeenCalledExactlyOnceWith("text", expect.any(Number));
+    } finally { await adapter.dispose(); }
+  });
+});
 
 function makeCtx(
   emitted: SessionNotification[],

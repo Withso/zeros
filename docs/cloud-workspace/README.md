@@ -5,9 +5,12 @@ source**, a qualified **v4 worker runtime pin**, and **actor protocol 2**.
 Personal workspaces remain Local. Organization-owned Local workspaces use the
 local engine; organization ownership alone never selects cloud execution.
 
-The control plane owns authorization, lifecycle/allocation journals, one durable
-command queue, receipts and normalized history. The Boat engine owns live
-workspace ordering, native agents, Git, Files and Design. Desktop routes by the
+The control plane owns authorization, lifecycle/allocation journals and durable
+history projections. Legacy cloud uses its CP command queue. Negotiated
+`boot-owner-v1` uses a VM-local durable queue, owner-funded agents, warm native
+sessions and an asynchronous compact mirror; members' agents can use and read
+the owner's active provider keys. The Boat engine owns live workspace ordering,
+native agents, Git, Files and Design. Desktop routes by the
 exact `cloud://` workspace identity and retains confirmed views during refresh.
 Electron main owns native access, receive-only replicas and the bounded cloud
 transcript presentation cache. See [architecture](architecture.md).
@@ -32,9 +35,15 @@ migration, publication, adoption and acceptance gates.
 - [Qualification status](qualification-status.md): implementation versus release evidence.
 - [Source-mode agent harness](qualification-status.md#source-mode-agent-harness):
   `cloud:agent:e2e`, strict versus explicit PARTIAL scope, and pending provider proof.
+- [Boot funding and credential changes](agent-authentication-and-language-tools.md#negotiated-boot-funding):
+  role consent, trust in the owner's keys, next-run cards, removal and warm-session Stop.
+- [Local queue and stopped history](data-and-sync.md#negotiated-local-queue-and-compact-history):
+  at-most-once dispatch, compact journal, current-head fences and the 16 MiB cap.
+- [Direct ingress](client-runtime-contract.md#portable-runtime-ingress) and
+  [measured legacy controls](qualification-status.md#measured-legacy-controls).
 - [Wake performance](wake-performance.md): readiness, preparation reuse and measurement.
 - [Warm pool and reliability follow-ups](warm-pool.md): accounted prebooted capacity,
-  VM durable outbox, outbound VM transport, one multiplexed client↔backend channel,
+  broader inbox/outbox recovery, outbound VM transport, one multiplexed client↔backend channel,
   incremental transcript feeds and Mac send outbox with acks.
 
 ## Behavior guides

@@ -1,14 +1,30 @@
 import {describe,expect,it,vi} from "vitest";
-import type {CloudProviderExecution} from "../../../../cloud-provider-execution";
+import type {CloudLegacyProviderExecution} from "../../../../cloud-provider-execution";
 import {cloudCursorRequest} from "../cloud-policy";
 
 function execution(cwd="/srv/zeros/workspace"){
-  return {cwd,lease:{assertLive:vi.fn(),admission:{model:"qualified-model"}},
+  const lease = {assertLive:vi.fn(),admission:{model:"qualified-model"}};
+  return {mode:"actor-grant-v1",cwd,model:"qualified-model",lifetime:lease,lease,
     coordinator:{environment:()=>({CURSOR_API_KEY:"synthetic-private-key"})},
     productServers:[{name:"design",transport:"http",url:"http://127.0.0.1:7000/scoped",headers:{Authorization:"Bearer synthetic-capability"}}],
-    tools:{inputSchema:{type:"object"}}} as unknown as CloudProviderExecution;
+    tools:{inputSchema:{type:"object"}}} as unknown as CloudLegacyProviderExecution;
 }
 describe("Cursor cloud request authority",()=>{
+  it("reads immutable common model/customization metadata rather than legacy lease fields", () => {
+    const admitted = execution();
+    Object.assign(admitted, { customization: { version: 1, digest: "a".repeat(64), repositoryDigest: "b".repeat(64),
+      servers: [], skills: [], cursorTeamSettings: "disabled" } });
+    Object.assign(admitted.lease.admission, { model: "stale-lease-model" });
+    const actual = cloudCursorRequest(admitted, "agent.create", { model: { id: "qualified-model" } });
+    expect(actual).toMatchObject({ model: { id: "qualified-model" }, local: { settingSources: ["user"] } });
+  });
+  it("enforces the common session lifetime before every native request", () => {
+    const admitted = execution();
+    const closed = Object.assign(new Error("Synthetic closed session lifetime"), { code: "cloud_validation_lease_expired" });
+    Object.assign(admitted, { lifetime: { assertLive: vi.fn(() => { throw closed; }) } });
+    expect(() => cloudCursorRequest(admitted, "agent.send", { message: "continue" })).toThrow(closed);
+    expect(admitted.lease.assertLive).not.toHaveBeenCalled();
+  });
   it.each(["/srv/zeros/workspace","/srv/zeros/state/workspaces/managed-worktree","/srv/zeros/workspace/packages/app"])("binds every workspace operation to the admitted root %s",cwd=>{
     const admitted=execution(cwd);
     for(const operation of ["agent.create","platform.prewarm","agent.resume","agent.list","store.open"]){

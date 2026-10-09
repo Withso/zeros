@@ -4,15 +4,19 @@ import path from "node:path";
 import { z } from "zod";
 import { CLOUD_TRANSCRIPT_CACHE_BYTES, CLOUD_TRANSCRIPT_CACHE_ENTRIES, CLOUD_TRANSCRIPT_WINDOW_BYTES,
   CloudTranscriptOwnerSchema, CloudTranscriptPruneSchema, CachedTranscriptWindowSchema,
+  CloudHistoryRestoreFenceSchema, cloudHistoryFenceCanAdvance, cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch,
   prepareCachedTranscriptWindow, type CachedTranscriptWindow, type CloudTranscriptOwner, type CloudTranscriptPrune,
+  type CloudHistoryRestoreFence,
 } from "../src/renderer/platform/cloud-transcript-cache-contract";
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const storedOwner = CloudTranscriptOwnerSchema.omit({ accountId: true }).extend({ accountHash: z.string().regex(/^[a-f0-9]{64}$/u) }).strict();
-const entrySchema = storedOwner.extend({ bytes: z.number().int().positive().max(CLOUD_TRANSCRIPT_WINDOW_BYTES), revision: z.number().int().safe().nonnegative(), recordEpoch: z.string().max(255).nullable() }).strict();
+const entrySchema = storedOwner.extend({ bytes: z.number().int().positive().max(CLOUD_TRANSCRIPT_WINDOW_BYTES), revision: z.number().int().safe().nonnegative(), recordEpoch: z.string().max(255).nullable(),
+  restoreHead: CloudHistoryRestoreFenceSchema.optional() }).strict();
 type Entry = z.infer<typeof entrySchema>;
 const entryKey = (value: z.infer<typeof storedOwner>) => digest(JSON.stringify([value.accountHash, value.organizationId, value.workspaceId, value.chatId]));
-const storedWindow = z.object({ version: z.literal(1), owner: storedOwner, window: CachedTranscriptWindowSchema }).strict();
+const storedWindow = z.object({ version: z.literal(1), owner: storedOwner, window: CachedTranscriptWindowSchema.nullable(),
+  restoreHead: CloudHistoryRestoreFenceSchema.optional() }).strict();
 const INDEX_BYTES = 512 * 1024;
 
 /** Desktop userData, separate from the single-writer engine DB and purgeable
@@ -23,6 +27,7 @@ export class CloudTranscriptCacheStore {
   private readonly maxEntries: number;
   private readonly maxBytes: number;
   private validDirectory = true;
+  private readonly historyEpochs = new Map<string, { owner: ReturnType<CloudTranscriptCacheStore["identity"]>; epoch: string }>();
 
   constructor(private readonly directory: string, options: { maxEntries?: number; maxBytes?: number } = {}) {
     this.maxEntries = options.maxEntries ?? CLOUD_TRANSCRIPT_CACHE_ENTRIES;
@@ -56,38 +61,66 @@ export class CloudTranscriptCacheStore {
       return readFileSync(fd, "utf8");
     } finally { closeSync(fd); }
   }
+  readReceipt(owner: CloudTranscriptOwner): { historyEpoch: string; restoreHead?: CloudHistoryRestoreFence; window: CachedTranscriptWindow | null } {
+    const identity = this.identity(owner), key = entryKey(identity);
+    let receipt = this.historyEpochs.get(key);
+    if (!receipt) {
+      receipt = { owner: identity, epoch: randomUUID() }; this.historyEpochs.set(key, receipt);
+      while (this.historyEpochs.size > this.maxEntries * 2) this.historyEpochs.delete(this.historyEpochs.keys().next().value!);
+    }
+    const window = this.read(owner), head = this.entries.get(key)?.restoreHead;
+    return { historyEpoch: receipt.epoch, ...(head ? { restoreHead: head } : {}), window };
+  }
   read(owner: CloudTranscriptOwner): CachedTranscriptWindow | null {
     const identity = this.identity(owner), key = entryKey(identity), entry = this.entries.get(key);
     if (!entry || !this.validDirectory) return null;
     try {
       const raw = this.readFile(`${key}.json`, Math.min(CLOUD_TRANSCRIPT_WINDOW_BYTES, this.maxBytes));
       const record = storedWindow.parse(JSON.parse(raw));
-      if (entryKey(record.owner) !== key || record.window.revision !== entry.revision || record.window.recordEpoch !== entry.recordEpoch || Buffer.byteLength(raw) !== entry.bytes) throw new Error("Transcript cache changed.");
+      if (entryKey(record.owner) !== key || (record.window && (record.window.revision !== entry.revision || record.window.recordEpoch !== entry.recordEpoch)) ||
+          JSON.stringify(record.restoreHead) !== JSON.stringify(entry.restoreHead) || Buffer.byteLength(raw) !== entry.bytes ||
+          record.window && (entry.restoreHead ? !record.window.restoreHead || !cloudHistoryFencesMatch(entry.restoreHead, record.window.restoreHead)
+            : record.window.restoreHead !== undefined)) throw new Error("Transcript cache changed.");
       // Disk is untrusted too. Reapply field selection before exposing a window.
-      const window = prepareCachedTranscriptWindow(record.window);
+      const window = record.window && (!entry.restoreHead || cloudHistoryFenceHasTranscript(entry.restoreHead))
+        ? prepareCachedTranscriptWindow(record.window) : null;
       this.entries.delete(key); this.entries.set(key, entry);
       this.saveIndex();
       return window;
     } catch {
-      this.entries.delete(key); this.removeWindow(key);
+      this.entries.delete(key); this.historyEpochs.delete(key); this.removeWindow(key);
+      if (entry.restoreHead) this.storeRecord(identity, null, entry.restoreHead);
       this.saveIndex();
       return null;
     }
   }
-  write(owner: CloudTranscriptOwner, input: unknown): void {
+  write(owner: CloudTranscriptOwner, input: unknown, expectedHistoryEpoch?: string): void {
     const identity = this.identity(owner), key = entryKey(identity);
     const window = prepareCachedTranscriptWindow(input), previous = this.entries.get(key);
+    if (expectedHistoryEpoch !== undefined && this.historyEpochs.get(key)?.epoch !== expectedHistoryEpoch) return;
+    if (window.restoreHead && (window.restoreHead.conversationId !== identity.chatId ||
+        window.restoreHead.projection.organizationId !== identity.organizationId || window.restoreHead.projection.workspaceId !== identity.workspaceId))
+      throw new Error("Cloud restore head belongs to another owner.");
+    if (previous?.restoreHead && (!window.restoreHead || !cloudHistoryFencesMatch(previous.restoreHead, window.restoreHead))) return;
+    if (window.restoreHead && (expectedHistoryEpoch === undefined || !cloudHistoryFenceHasTranscript(window.restoreHead))) return;
     // A record epoch is comparable only when actually supplied by the server.
-    if (previous && previous.recordEpoch === window.recordEpoch && previous.revision >= window.revision) return;
-    let raw = JSON.stringify({ version: 1, owner: identity, window });
-    while (window.messages.length && Buffer.byteLength(raw) > Math.min(CLOUD_TRANSCRIPT_WINDOW_BYTES, this.maxBytes)) {
-      window.messages.shift(); raw = JSON.stringify({ version: 1, owner: identity, window });
+    if (previous && (!window.restoreHead && !previous.restoreHead || window.restoreHead && previous.restoreHead &&
+        cloudHistoryFencesMatch(window.restoreHead, previous.restoreHead)) && previous.recordEpoch === window.recordEpoch && previous.revision >= window.revision) return;
+    this.storeRecord(identity, window, window.restoreHead);
+  }
+  private storeRecord(identity: ReturnType<CloudTranscriptCacheStore["identity"]>, window: CachedTranscriptWindow | null,
+    restoreHead?: CloudHistoryRestoreFence): void {
+    const key = entryKey(identity);
+    let raw = JSON.stringify({ version: 1, owner: identity, window, ...(restoreHead ? { restoreHead } : {}) });
+    while (window?.messages.length && Buffer.byteLength(raw) > Math.min(CLOUD_TRANSCRIPT_WINDOW_BYTES, this.maxBytes)) {
+      window.messages.shift(); raw = JSON.stringify({ version: 1, owner: identity, window, ...(restoreHead ? { restoreHead } : {}) });
     }
     if (Buffer.byteLength(raw) > this.maxBytes) return;
     this.ensureDirectory();
     // Evict before writing, so the on-disk cache never grows by another window.
     this.entries.delete(key);
-    const entry: Entry = { ...identity, bytes: Buffer.byteLength(raw), revision: window.revision, recordEpoch: window.recordEpoch };
+    const entry: Entry = { ...identity, bytes: Buffer.byteLength(raw), revision: window?.revision ?? 0, recordEpoch: window?.recordEpoch ?? null,
+      ...(restoreHead ? { restoreHead } : {}) };
     this.entries.set(key, entry); this.evict();
     if (!this.entries.has(key)) { this.saveIndex(); return; }
     this.atomicWrite(`${key}.json`, raw);
@@ -95,13 +128,28 @@ export class CloudTranscriptCacheStore {
   }
   prune(input: CloudTranscriptPrune): void {
     const scope = CloudTranscriptPruneSchema.parse(input), accountHash = digest(scope.accountId);
+    if (scope.restoreHead) {
+      const identity = this.identity({ accountId: scope.accountId, organizationId: scope.restoreHead.projection.organizationId,
+        workspaceId: scope.restoreHead.projection.workspaceId, chatId: scope.restoreHead.conversationId });
+      const key = entryKey(identity), previous = this.entries.get(key)?.restoreHead;
+      if (scope.historyEpoch !== undefined && this.historyEpochs.get(key)?.epoch !== scope.historyEpoch) return;
+      if (previous && !cloudHistoryFenceCanAdvance(previous, scope.restoreHead)) return;
+      if (previous && cloudHistoryFencesMatch(previous, scope.restoreHead)) return;
+      this.historyEpochs.set(key, { owner: identity, epoch: randomUUID() });
+      this.storeRecord(identity, null, scope.restoreHead);
+      return;
+    }
     if (scope.retainedWorkspaces) { this.retainWorkspaces(scope.accountId, scope.retainedWorkspaces); return; }
     let changed = false;
     for (const [key, entry] of this.entries) {
       if (entry.accountHash !== accountHash || scope.organizationId && entry.organizationId !== scope.organizationId ||
           scope.workspaceId && entry.workspaceId !== scope.workspaceId || scope.chatId && entry.chatId !== scope.chatId) continue;
-      this.removeWindow(key); this.entries.delete(key); changed = true;
+      this.removeWindow(key); this.entries.delete(key); this.historyEpochs.delete(key); changed = true;
     }
+    for (const [key, receipt] of this.historyEpochs) if (receipt.owner.accountHash === accountHash &&
+        (!scope.organizationId || receipt.owner.organizationId === scope.organizationId) &&
+        (!scope.workspaceId || receipt.owner.workspaceId === scope.workspaceId) && (!scope.chatId || receipt.owner.chatId === scope.chatId))
+      this.historyEpochs.delete(key);
     if (changed) this.saveIndex();
   }
   retainWorkspaces(accountId: string, targets: Array<{ organizationId: string; workspaceId: string }>): void {
@@ -109,7 +157,7 @@ export class CloudTranscriptCacheStore {
     const hash = digest(scope.accountId), retained = new Set(targets.map(target => JSON.stringify([target.organizationId, target.workspaceId])));
     let changed = false;
     for (const [key, entry] of this.entries) if (entry.accountHash === hash && !retained.has(JSON.stringify([entry.organizationId, entry.workspaceId]))) {
-      this.removeWindow(key); this.entries.delete(key); changed = true;
+      this.removeWindow(key); this.entries.delete(key); this.historyEpochs.delete(key); changed = true;
     }
     if (changed) this.saveIndex();
   }
@@ -117,7 +165,7 @@ export class CloudTranscriptCacheStore {
     const hash = accountId === null ? null : digest(accountId);
     let changed = false;
     for (const [key, entry] of this.entries) if (entry.accountHash !== hash) {
-      this.removeWindow(key); this.entries.delete(key); changed = true;
+      this.removeWindow(key); this.entries.delete(key); this.historyEpochs.delete(key); changed = true;
     }
     if (changed) this.saveIndex();
   }
@@ -144,7 +192,7 @@ export class CloudTranscriptCacheStore {
     let bytes = [...this.entries.values()].reduce((sum, entry) => sum + entry.bytes, 0);
     while (this.entries.size && (this.entries.size > this.maxEntries || bytes + Buffer.byteLength(this.index()) > this.maxBytes)) {
       const key = this.entries.keys().next().value!;
-      bytes -= this.entries.get(key)!.bytes; this.entries.delete(key); this.removeWindow(key);
+      bytes -= this.entries.get(key)!.bytes; this.entries.delete(key); this.historyEpochs.delete(key); this.removeWindow(key);
     }
   }
   private removeOrphans(): void {

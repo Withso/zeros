@@ -14,6 +14,16 @@ import { CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
 import { CloudCustomizationRedactor } from "../cloud-customization-redaction";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
+function admittedCloudFixture(provider: "claude" | "codex" | "cursor", overrides: {
+  validate?: () => Promise<void>;
+  assertLive?: () => void;
+} = {}) {
+  const lease = { admission: { provider }, credentialKind: `${provider}-api-key`,
+    signal: new AbortController().signal, validate: async () => {}, assertLive() {}, close: async () => {}, ...overrides };
+  return Object.freeze({ mode: "actor-grant-v1", provider, model: "test-model", credentialKind: lease.credentialKind,
+    lease, lifetime: lease, auth: lease, redactor: new CloudCustomizationRedactor(["synthetic-private"]) });
+}
+
 async function cloudTerminationFixture() {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "zeros-cloud-termination-")));
   let leaseFailure: Error | null = null;
@@ -38,10 +48,10 @@ async function cloudTerminationFixture() {
     agentId: "codex", newSession: start, prompt, cancel: async () => {},
     disposeSession: async () => {}, dispose: async () => {},
   } as unknown as AgentAdapter);
-  state.cloud = { lease: { admission: { provider: "codex" }, credentialKind: "codex-api-key", signal: new AbortController().signal,
+  state.cloud = admittedCloudFixture("codex", {
     validate: async () => { if (leaseFailure) throw leaseFailure; },
-    assertLive: () => { if (leaseFailure) throw leaseFailure; }, close: async () => {} },
-    redactor: new CloudCustomizationRedactor(["synthetic-private"]) };
+    assertLive: () => { if (leaseFailure) throw leaseFailure; },
+  });
   const begin = (executionId: string = randomUUID()) => gateway.newSession("codex", { cwd: root, conversationId: "conversation",
     cloudExecutionId: executionId, cloudExecution: { delegationId: randomUUID(), model: "test-model",
       source: { kind: "session", actorSessionId: randomUUID() } } });
@@ -170,8 +180,7 @@ describe("cloud provider failure causes", () => {
       agentId: "codex", newSession: native, loadSession: native, prompt,
       disposeSession: async () => {}, dispose: async () => {},
     } as unknown as AgentAdapter);
-    state.cloud = { lease: { admission: { provider: "codex" }, credentialKind: "codex-api-key", signal: new AbortController().signal,
-      validate: async () => {} }, redactor: new CloudCustomizationRedactor(["synthetic-private"]) };
+    state.cloud = admittedCloudFixture("codex");
     const options = { cwd: root, conversationId: "conversation", cloudExecutionId: executionId,
       cloudExecution: { delegationId: randomUUID(), model: "test-model", source: { kind: "session" as const, actorSessionId: randomUUID() } } };
     const starting = (operation === "newSession" ? gateway.newSession("codex", options)
@@ -259,8 +268,7 @@ describe("cloud provider failure causes", () => {
     (gateway as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set("cursor", { agentId: "cursor",
       newSession: stage === "newSession" ? rejected : started, loadSession: rejected, prompt: rejected,
       disposeSession: async () => {}, dispose: async () => {} } as unknown as AgentAdapter);
-    state.cloud = { lease: { admission: { provider: "cursor" }, credentialKind: "cursor-api-key", signal: new AbortController().signal,
-      validate: async () => {} }, redactor: new CloudCustomizationRedactor(["synthetic-private"]) };
+    state.cloud = admittedCloudFixture("cursor");
     const options = { cwd: root, conversationId: "conversation", cloudExecution: { delegationId: randomUUID(),
       model: "test-model", source: { kind: "session" as const, actorSessionId: randomUUID() } } };
     const run = () => stage === "newSession" ? gateway.newSession("cursor", options)
@@ -287,8 +295,7 @@ describe("cloud provider failure causes", () => {
     (gateway as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set("claude", { agentId: "claude",
       newSession: stage === "newSession" ? rejected : started, loadSession: rejected, prompt: rejected,
       disposeSession: async () => {}, dispose: async () => {} } as unknown as AgentAdapter);
-    state.cloud = { lease: { admission: { provider: "claude" }, credentialKind: "claude-api-key", signal: new AbortController().signal,
-      validate: async () => {} }, redactor: new CloudCustomizationRedactor(["synthetic-private"]) };
+    state.cloud = admittedCloudFixture("claude");
     const options = { cwd: root, conversationId: "conversation", cloudExecution: { delegationId: randomUUID(),
       model: "test-model", source: { kind: "session" as const, actorSessionId: randomUUID() } } };
     try {

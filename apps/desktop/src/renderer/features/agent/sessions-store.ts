@@ -1,3 +1,4 @@
+import { cloudAgentCredentialEntry, cloudAgentCredentialEntryUse, cloudAgentCredentialSnapshot, sameCloudAgentBootBinding, type CloudAgentCredentialEntry } from "./cloud-agent-credential-selectors";
 import { trackAgentTurnUsage } from "@/renderer/platform/observability/analytics/agent-events";
 import { turnRowCache, turnRowKey } from "@/renderer/state/read-caches";
 // ──────────────────────────────────────────────────────────
@@ -75,7 +76,9 @@ import { sameProviderBinding } from "@zeros/protocol/identities";
 import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
 import type { AgentGoal } from "@zeros/protocol/agent-events";
 import type { CloudConversationSnapshot } from "@zeros/protocol/cloud-events";
-import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { CloudHistoryRestoreFenceSchema, cloudHistoryFenceCanAdvance, cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch,
+  type CloudHistoryRestoreFence } from "../../platform/cloud-transcript-cache-contract";
 
 const MAX_STDERR_LINES = 200;
 const MAX_BACKGROUND_TASKS_PER_CHAT = 100;
@@ -288,6 +291,11 @@ export const BLANK: AgentSessionState = {
 
 export interface SessionsStoreState {
   sessions: Record<string, AgentSessionState>;
+  cloudHistoryRestoreHeads: Record<string, CloudHistoryRestoreFence>;
+  cloudAgentCredentials: Record<string, CloudAgentCredentialEntry>;
+  installCloudAgentBootBinding(chatId: string, binding: unknown): boolean;
+  applyCloudAgentCredentialUse(chatId: string, message: unknown, binding: unknown): boolean;
+  installCloudAgentCredentialUses(chatId: string, binding: unknown, uses: unknown): boolean;
   warmAgentIds: Set<string>;
   /** executionId → chatId reverse index. Updated atomically with `sessions`
    *  so bridge dispatch stays O(1) and never reads a half-applied state. */
@@ -396,6 +404,9 @@ export interface SessionsStoreState {
    *  feeds into the messages reducer (`applyUpdate`). */
   applyBridgeUpdate: (notification: SessionNotification) => void;
   installCloudSnapshot: (chatId: string, snapshot: CloudConversationSnapshot, metadata?: Partial<AgentSessionState>) => void;
+  /** CP restore state only; a separately proved live/native snapshot keeps its
+   * own transcript lineage. This does not settle or cancel any native turn. */
+  applyCloudHistoryRestoreHead: (chatId: string, fence: CloudHistoryRestoreFence, preserveNativeSnapshot?: boolean) => void;
 
   /** Permission requests are routed through the request's sessionId. */
   applyBridgePermissionRequest: (
@@ -482,6 +493,34 @@ export interface SessionsStoreState {
 
 export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   sessions: {},
+  cloudHistoryRestoreHeads: {},
+  cloudAgentCredentials: {},
+  installCloudAgentBootBinding: (chatId, binding) => {
+    const previous = get().cloudAgentCredentials[chatId];
+    if (!previous && Object.keys(get().cloudAgentCredentials).length >= 512) return false;
+    const entry = cloudAgentCredentialEntry(chatId, binding, previous);
+    if (!entry) return false;
+    if (entry !== previous) set(state => ({ cloudAgentCredentials: { ...state.cloudAgentCredentials, [chatId]: entry } }));
+    return true;
+  },
+  applyCloudAgentCredentialUse: (chatId, message, binding) => {
+    const previous = get().cloudAgentCredentials[chatId];
+    if (!previous) return false;
+    const current = cloudAgentCredentialEntry(chatId, binding);
+    if (!current || !sameCloudAgentBootBinding(previous.binding, current.binding)) return false;
+    const entry = cloudAgentCredentialEntryUse(previous, (message as { use?: unknown } | null)?.use);
+    if (entry === previous) return false;
+    set(state => ({ cloudAgentCredentials: { ...state.cloudAgentCredentials, [chatId]: entry } }));
+    return true;
+  },
+  installCloudAgentCredentialUses: (chatId, binding, uses) => {
+    const previous = get().cloudAgentCredentials[chatId];
+    if (!previous && Object.keys(get().cloudAgentCredentials).length >= 512) return false;
+    const entry = cloudAgentCredentialSnapshot(chatId, binding, uses, previous);
+    if (!entry) return false;
+    if (entry !== previous) set(state => ({ cloudAgentCredentials: { ...state.cloudAgentCredentials, [chatId]: entry } }));
+    return true;
+  },
   warmAgentIds: new Set(),
   executionToChatId: {},
   scrollPositions: {},
@@ -763,7 +802,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       scrollPersistTimers.delete(chatId);
     }
     set((state) => {
-      if (!(chatId in state.sessions)) return state;
+      if (!(chatId in state.sessions) && !(chatId in state.cloudAgentCredentials)) return state;
       const next = { ...state.sessions };
       delete next[chatId];
       const nextScroll = { ...state.scrollPositions };
@@ -773,8 +812,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         : state.cancellingChats;
       return {
         sessions: next,
+        cloudAgentCredentials: Object.fromEntries(Object.entries(state.cloudAgentCredentials).filter(([id]) => id !== chatId)),
         executionToChatId: rebuildIndex(next),
         scrollPositions: nextScroll,
+        cloudHistoryRestoreHeads: Object.fromEntries(Object.entries(state.cloudHistoryRestoreHeads).filter(([id]) => id !== chatId)),
         cancellingChats: nextCancelling,
         pendingLocalTurns: withoutPendingLocalTurn(
           state.pendingLocalTurns,
@@ -798,6 +839,8 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   clearAll: () => {
     set({
       sessions: {},
+      cloudHistoryRestoreHeads: {},
+      cloudAgentCredentials: {},
       warmAgentIds: new Set(),
       executionToChatId: {},
       scrollPositions: {},
@@ -1251,6 +1294,32 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           },
         },
       };
+    });
+  },
+
+  applyCloudHistoryRestoreHead: (chatId, input, preserveNativeSnapshot = false) => {
+    const chat = parseCloudScopedId(chatId), parsed = CloudHistoryRestoreFenceSchema.safeParse(input);
+    if (!chat || !parsed.success) return;
+    const fence = parsed.data;
+    if (chat.id !== fence.conversationId || chat.organizationId !== fence.projection.organizationId ||
+        chat.workspaceId !== fence.projection.workspaceId) return;
+    set(state => {
+      const slot = state.sessions[chatId], cwd = parseCloudWorkspaceKey(slot?.cwd);
+      if (!slot || slot.cwd && (!cwd || cwd.organizationId !== chat.organizationId || cwd.workspaceId !== chat.workspaceId)) return state;
+      const previous = state.cloudHistoryRestoreHeads[chatId];
+      if (previous && !cloudHistoryFenceCanAdvance(previous, fence)) return state;
+      const unchanged = !!previous && cloudHistoryFencesMatch(previous, fence);
+      if (unchanged && preserveNativeSnapshot) return state;
+      const heads = { ...state.cloudHistoryRestoreHeads, [chatId]: fence };
+      if (preserveNativeSnapshot) return { cloudHistoryRestoreHeads: heads };
+      const pending = state.pendingLocalTurns[chatId];
+      const messages = slot.messages.filter(message => message.id === pending || message.kind === "text" && message.queued);
+      const deleted = fence.head?.deleted === true;
+      if (unchanged && messages.length === slot.messages.length && slot.transcriptState === (deleted ? "resident" : "loading")) return state;
+      return { cloudHistoryRestoreHeads: heads, sessions: { ...state.sessions, [chatId]: { ...slot, messages,
+        historyExpanded: false, transcriptState: deleted ? "resident" : "loading",
+        transcriptDirty: false, hasTranscript: deleted ? hasDurableMessages(messages) : !cloudHistoryFenceHasTranscript(fence) || hasDurableMessages(messages),
+      } } };
     });
   },
 

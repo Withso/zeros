@@ -1,4 +1,5 @@
 import { CloudActorRuntimeGrantSchema, type CloudActorRuntimeGrant } from "@zeros/protocol/cloud-actors";
+import { CloudActorConnectionGrantSchema, type CloudActorConnectionGrant } from "@zeros/protocol/cloud-runtime-connection";
 import type { CloudReplicaDeviceProof } from "../src/engine/cloud-replica-device";
 import { cloudDetectedPortsSchema, type CloudDetectedPorts } from "./cloud-workspace-detected-ports";
 import { isCloudAgentPreviewTarget, type CloudAgentPreviewTarget } from "@zeros/protocol/containment";
@@ -130,7 +131,7 @@ export type CloudWorkspaceLegacyEngineAdmission = {
   expiresAt: string;
 };
 
-export type CloudWorkspaceEngineAdmission = CloudWorkspaceLegacyEngineAdmission | CloudActorRuntimeGrant;
+export type CloudWorkspaceEngineAdmission = CloudWorkspaceLegacyEngineAdmission | CloudActorConnectionGrant;
 type EngineAdmissionSigner = (accessToken: string, input: { organizationId: string; workspaceId: string }) => Promise<CloudReplicaDeviceProof>;
 
 type Fetch = typeof fetch;
@@ -850,16 +851,20 @@ export class CloudWorkspaceAccessClient {
     };
   }
 
-  async issueEngineAdmission(accessToken:string,input:{organizationId:string;workspaceId:string}):Promise<CloudActorRuntimeGrant> {
+  async issueEngineAdmission(accessToken:string,input:{organizationId:string;workspaceId:string;directProviderVersion?:1;connectionChannel?:"control-plane-websocket"}):Promise<CloudActorConnectionGrant> {
     const requestPath=this.runtimePath(input.organizationId,input.workspaceId),now=this.now();
+    if(input.directProviderVersion!==undefined&&input.directProviderVersion!==1||
+      input.connectionChannel!==undefined&&(input.connectionChannel!=="control-plane-websocket"||input.directProviderVersion!==1))
+      throw new CloudWorkspaceAccessClientError(0,"invalid_request","Cloud workspace admission preference is invalid");
     if(!this.signEngineAdmission)throw new CloudWorkspaceAccessClientError(0,"device_proof_required","A trusted device is required for cloud workspace access");
-    const proof=await this.signEngineAdmission(accessToken,input);
+    const proof=await this.signEngineAdmission(accessToken,{organizationId:input.organizationId,workspaceId:input.workspaceId});
     if(!UUID_PATTERN.test(proof.deviceId)||!Number.isSafeInteger(proof.keyVersion)||proof.keyVersion<1||
       !Number.isSafeInteger(proof.timestampMs)||Math.abs(proof.timestampMs-this.now())>60000||
       !/^[A-Za-z0-9_-]{16,128}$/.test(proof.nonce)||!/^[A-Za-z0-9_-]{86}$/.test(proof.signature))
       throw new CloudWorkspaceAccessClientError(0,"device_proof_required","The cloud workspace device proof is invalid");
-    const body=await this.request(accessToken,{method:"POST",path:requestPath,expectedStatus:201,body:{actorProtocolVersion:2},deviceProof:proof});
-    const parsed=CloudActorRuntimeGrantSchema.safeParse(body);
+    const body=await this.request(accessToken,{method:"POST",path:requestPath,expectedStatus:201,body:{actorProtocolVersion:2,
+      ...(input.directProviderVersion===1?{directProviderVersion:1}:{}),...(input.connectionChannel?{connectionChannel:input.connectionChannel}:{})},deviceProof:proof});
+    const parsed=input.directProviderVersion===1?CloudActorConnectionGrantSchema.safeParse(body):CloudActorRuntimeGrantSchema.safeParse(body);
     const bridge=new URL("/v1/cloud-workspaces/bridge",this.baseUrl);bridge.protocol=bridge.protocol==="https:"?"wss:":"ws:";
     if(!parsed.success||parsed.data.organizationId!==input.organizationId||parsed.data.workspaceId!==input.workspaceId||
       parsed.data.bridgeUrl!==bridge.toString()||!validExpiry(parsed.data.expiresAt,now,2))

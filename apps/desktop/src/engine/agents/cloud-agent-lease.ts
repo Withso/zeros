@@ -15,9 +15,23 @@ import { encodeCloudCommandFailure, decodeCloudCommandFailure, cloudCommandFailu
 import type { CloudCustomizationSnapshot } from "@zeros/protocol/cloud-customization";
 import { cloudMcpDigest, freezeCloudSnapshot } from "./cloud-mcp";
 import { isDeepStrictEqual } from "node:util";
+import { randomUUID } from "node:crypto";
 import { CloudComputerToolConflictSchema, CloudComputerToolExecutionRequestSchema, CloudComputerToolResultSchemas, type CloudComputerToolRequest } from "@zeros/protocol/cloud-computer-tools";
+export { CloudActorAuthorityRegistry, isCloudAuthorizedActor, type CloudAuthorizedActor } from "./cloud-actor-authority";
 
-type Request = (request: CloudAgentExecutionRequest, signal: AbortSignal) => Promise<unknown>;
+export type CloudAuthorityOperation = "validate" | "renew" | "refresh-codex" | "cache-publication";
+export type CloudAuthorityConsumer = "validate" | "refresh-codex" | "dispatch-ready";
+export type CloudAuthorityOrigin = "caller" | "scheduled";
+/** Passive engine observations. They grant no authority and carry no native
+ * payload. Producer origin and each caller's actual dependency are separate. */
+export type CloudAuthorityFlightObservation = {
+  created(event: { flightId: string; operation: CloudAuthorityOperation; producer: CloudAuthorityOrigin }): void;
+  wait(event: { waitId: string; flightId: string | null; consumer: CloudAuthorityConsumer; phase: "waiting" | "unblocked" }): void;
+  settled(event: { flightId: string; outcome: "settled" | "failed" }): void;
+};
+/** Internal callback metadata only: never part of the strict request JSON. */
+export type CloudAuthorityRequestObservation = { flightId: string };
+type Request = (request: CloudAgentExecutionRequest, signal: AbortSignal, observation?: CloudAuthorityRequestObservation) => Promise<unknown>;
 type Clock = { wall(): number; monotonic(): number };
 type ProcessDomain = { stopAndProve(): Promise<void> };
 export type CloudAgentLeaseSupervisor = {
@@ -62,6 +76,8 @@ export class CloudAgentLease {
   private codexMaterial: Extract<CloudAgentAccessMaterial,{kind:"codex-chatgpt"}> | null;
   private materialVersion: number;
   private validationTail: Promise<unknown> = Promise.resolve();
+  private validationTailFlight: string | null = null;
+  private readonly validationFlights = new WeakMap<Promise<void>, string>();
   private pendingValidations = 0;
   private backgroundDeadline = Infinity;
   private constructor(
@@ -75,11 +91,13 @@ export class CloudAgentLease {
     readonly backgroundTasksVersion: 1 | null,
     readonly computerToolsVersion: 1 | null,
     readonly environment: CloudComputerExecutionEnvironment | null,
+    private readonly observation?: CloudAuthorityFlightObservation,
   ) { this.credentialKind = material.kind; this.material = material; this.materialVersion = credentialVersion; this.codexMaterial = material.kind === "codex-chatgpt" ? {...material} : null; }
 
   static async admit(
     admission: CloudAgentExecutionAdmission, request: Request, signal: AbortSignal,
     supervisor: CloudAgentLeaseSupervisor, time: Clock = clock,
+    observation?: CloudAuthorityFlightObservation,
   ): Promise<CloudAgentLease> {
     const start = time.monotonic();
     let raw:unknown;
@@ -101,7 +119,7 @@ export class CloudAgentLease {
       freezeCloudSnapshot(structuredClone(admission)), value.material, request, supervisor, time, value.gitAuthor ? Object.freeze({ ...value.gitAuthor }) : null,
       value.customization ? freezeCloudSnapshot(value.customization) : null,
       value.nativeCapabilities ? Object.freeze({...value.nativeCapabilities}) : null,value.backgroundTasksVersion??null,value.computerToolsVersion??null,
-      value.environment ? freezeCloudSnapshot(value.environment) : null);
+      value.environment ? freezeCloudSnapshot(value.environment) : null, observation);
     try {
       lease.acceptExpiry(value.expiresAt, start,"admission");
       if (signal.aborted) throw new Error("Cloud agent admission cancelled");
@@ -120,7 +138,8 @@ export class CloudAgentLease {
       (previousAccountId!=null&&previousAccountId!==this.codexMaterial.accountId)){
       const failure=leaseFailure("credential_refresh_invalid");this.retirementCause??=failure;void this.close().catch(()=>{});throw failure;
     }
-    await this.check(true,credentialVersion);
+    const operation = this.check(true, credentialVersion);
+    await this.observeWait(operation, this.validationFlights.get(operation) ?? null, "refresh-codex");
     this.assertLive();const current=this.codexAuth();
     if(!current||current.credentialVersion<=credentialVersion)throw leaseFailure("credential_refresh_unchanged");
     return current;
@@ -173,18 +192,39 @@ export class CloudAgentLease {
   }
   private schedule(): void {
     if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => { this.timer = null; void this.validate(true).catch(() => {}); },
+    this.timer = setTimeout(() => { this.timer = null; void this.validateScheduled().catch(() => {}); },
       Math.max(250, Math.min(20_000, (this.deadline - this.time.monotonic()) * 0.6)));
     this.timer.unref?.();
   }
   async validate(renew = false): Promise<void> {
+    return this.validateFlight(renew, "caller");
+  }
+  private async validateScheduled(): Promise<void> {
+    return this.validateFlight(true, "scheduled");
+  }
+  private validateFlight(renew: boolean, producer: CloudAuthorityOrigin): Promise<void> {
     this.assertLive();
-    if (renew && this.renewing) return this.renewing;
-    const operation = this.check(renew);
+    if (renew && this.renewing) return this.observeWait(this.renewing, this.validationFlights.get(this.renewing) ?? null, "validate");
+    const operation = this.check(renew, undefined, producer);
     if (renew) {
       this.renewing = operation;
       void operation.finally(() => { if (this.renewing === operation) this.renewing = null; }).catch(() => {});
     }
+    return this.observeWait(operation, this.validationFlights.get(operation) ?? null, "validate");
+  }
+  private observe(callback: () => unknown): void {
+    try {
+      // A void callback may still be async. Observe its rejection without
+      // awaiting it or coupling passive coverage to authority scheduling.
+      void Promise.resolve(callback()).catch(() => {});
+    } catch { /* Missing observation coverage is not authority. */ }
+  }
+  private observeWait<T>(operation: Promise<T>, flightId: string | null, consumer: CloudAuthorityConsumer): Promise<T> {
+    const observer = this.observation;
+    if (!observer) return operation;
+    const event = Object.freeze({ waitId: randomUUID(), flightId, consumer, phase: "waiting" as const });
+    this.observe(() => observer.wait(event));
+    void operation.finally(() => this.observe(() => observer.wait(Object.freeze({ ...event, phase: "unblocked" })))).catch(() => {});
     return operation;
   }
   async background(operation:CloudBackgroundOperation){
@@ -216,16 +256,22 @@ export class CloudAgentLease {
   }
   /** Serialize adoption so an older HTTP response cannot roll back material
    * or authority. Concurrent callers remain bounded by the tool/host queues. */
-  private check(renew:boolean,refreshVersion?:number):Promise<void>{
+  private check(renew:boolean,refreshVersion?:number,producer:CloudAuthorityOrigin="caller"):Promise<void>{
     if(this.pendingValidations>=16){const failure=leaseFailure("execution_limit","Cloud agent validation capacity exceeded");this.retirementCause??=failure;void this.close().catch(()=>{});return Promise.reject(failure);}
+    const predecessor = this.validationTail;
+    const observer = this.observation, flightId = observer ? randomUUID() : null;
+    if (observer && flightId) this.observe(() => observer.created(Object.freeze({ flightId, operation: refreshVersion === undefined ? renew ? "renew" : "validate" : "refresh-codex", producer })));
+    // Capture the actual predecessor before publishing this operation's tail.
+    // A flight created before Send can still gate this caller's native handoff.
+    if (this.pendingValidations > 0) this.observeWait(predecessor, this.validationTailFlight, refreshVersion === undefined ? "validate" : "refresh-codex");
     this.pendingValidations++;
-    const operation=this.validationTail.then(async()=>{
+    const operation=predecessor.then(async()=>{
       this.assertLive();const start=this.time.monotonic();
       try{
         const request:CloudAgentExecutionRequest=refreshVersion===undefined?
           {kind:"validate",leaseId:this.leaseId,renew,credentialVersion:this.materialVersion,...(this.nativeCapabilities?{nativeCapabilitiesVersion:1 as const}:{})}:
           {kind:"refresh-codex",leaseId:this.leaseId,credentialVersion:refreshVersion,...(this.nativeCapabilities?{nativeCapabilitiesVersion:1 as const}:{})};
-        const parsed=CloudAgentExecutionLeaseSchema.safeParse(await this.request(request,this.signal));
+        const parsed=CloudAgentExecutionLeaseSchema.safeParse(await (flightId ? this.request(request,this.signal,Object.freeze({flightId})) : this.request(request,this.signal)));
         this.assertLive();
         if(!parsed.success||parsed.data.leaseId!==this.leaseId||parsed.data.credentialVersion<this.materialVersion)throw leaseFailure("authority_response_invalid");
         const response=parsed.data,rotation=response.rotation;
@@ -244,6 +290,14 @@ export class CloudAgentLease {
       }catch(error){const failure=safeLeaseFailure(error);this.retirementCause??=failure;await this.close().catch(()=>{});throw failure;}
     });
     this.validationTail=operation.catch(()=>{});
+    this.validationTailFlight=flightId;
+    if (observer && flightId) {
+      this.validationFlights.set(operation, flightId);
+      void operation.then(
+        () => this.observe(() => observer.settled(Object.freeze({ flightId, outcome: "settled" }))),
+        () => this.observe(() => observer.settled(Object.freeze({ flightId, outcome: "failed" }))),
+      );
+    }
     void operation.finally(()=>{this.pendingValidations--;}).catch(()=>{});
     return operation;
   }

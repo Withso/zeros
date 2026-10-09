@@ -79,7 +79,10 @@ import {
   type UserDialogResult,
 } from "@anthropic-ai/claude-agent-sdk";
 import { isClaudeParentProgress } from "../claude/event-feedback";
-import {cloudProviderExecution} from "../../cloud-provider-execution";
+import {assertCloudBootNativeContinuation,assertCloudBootNativeHandoff,cloudBootTurnReservation,cloudExecutionLifetime,
+  cloudProviderExecution,isCloudBootProviderExecution,markCloudBootNativeHandoff,
+  type CloudBootProviderExecution,type CloudBootTurnReservation} from "../../cloud-provider-execution";
+import {CloudCommandFailureError} from "@zeros/protocol/cloud-commands";
 import {cloudClaudeTools,CLAUDE_INSTRUCTION_FILES} from "./cloud-tools";
 
 import type {
@@ -103,6 +106,8 @@ import {
   type LoadSessionResponse,
   type ListSessionsResponse,
   type McpServerRegistration,
+  type NativePromptStage,
+  type NativePromptOutputKind,
   type NewSessionResponse,
   type PromptResponse,
   type QuestionAnswer,
@@ -203,7 +208,7 @@ type ClaudeSettingSources = NonNullable<Options["settingSources"]>;
  *  their admitted configuration. */
 function claudeSettingSources(boundary?: PreparedBoundary): ClaudeSettingSources {
   const cloud = cloudProviderExecution(boundary);
-  if (cloud) return cloud.lease.customization ? ["user"] : [];
+  if (cloud) return cloud.customization ? ["user"] : [];
   return isNativeCodeActor(boundary) ? ["user", "project", "local"] : [];
 }
 
@@ -769,6 +774,24 @@ interface SdkSession {
   /** The in-flight turn's deferred, settled when the consumer sees `result`
    *  (or the query errors). Null when idle. */
   turn: Deferred<{ stopReason: StopReason; usage?: TurnUsage }> | null;
+  /** Passive exact foreground observation. Query+turn+UUID fence late native
+   * writes/receipts; enqueue and startup never stand in for transport receipt. */
+  nativePromptObservation?: {
+    query: Query;
+    turn: Deferred<{ stopReason: StopReason; usage?: TurnUsage }>;
+    uuid: string;
+    callback?: (stage: NativePromptStage) => void;
+    outputCallback?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void;
+    seen: Set<NativePromptStage>;
+    seenOutput: Set<NativePromptOutputKind>;
+    assistantIds: Set<string>;
+    stream: { id: string; blocks: Map<number, "text" | "tool"> } | null;
+  };
+  /** Original foreground authority, independent of optional timing hooks. */
+  nativeBootHandoff?:{
+    execution:CloudBootProviderExecution;reservation:CloudBootTurnReservation;query:Query;
+    turn:Deferred<{stopReason:StopReason;usage?:TurnUsage}>;uuid:string;entered:boolean;writtenUuids:Set<string>;
+  };
   usageLedger: TurnUsageLedger;
   usageOwnerTurnId?: string;
   pendingUsageTurnId?: string;
@@ -1472,6 +1495,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
    * keep the process alive. A conversation needs a resumable SDK id; an empty
    * control connection opened by Tools can be discarded without losing input. */
   private canDetachIdleQuery(state: SdkSession): boolean {
+    const cloud=cloudProviderExecution(state.executionBoundary);
+    if(isCloudBootProviderExecution(cloud)&&!cloud.lifetime.signal.aborted)return false;
     return Boolean(
       !state.disposed &&
       state.query &&
@@ -1566,6 +1591,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     sessionId: string;
     turnId?: string;
     prompt: ContentBlock[];
+    onNativePromptStage?: (stage: NativePromptStage) => void;
+    onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void;
   }): Promise<{ stopReason: StopReason; response: PromptResponse }> {
     let state = this.mustState(opts.sessionId);
     if (state.exactModelFailure) throw state.exactModelFailure;
@@ -1577,6 +1604,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         agentId: this.agentId,
       });
     }
+    const entryCloud=cloudProviderExecution(state.executionBoundary);
+    const bootExecution=isCloudBootProviderExecution(entryCloud)?entryCloud:null;
+    const bootReservation=bootExecution?cloudBootTurnReservation(bootExecution):null;
+    if(entryCloud?.mode==="boot-owner-v1"&&(!bootExecution||!bootReservation))
+      throw new CloudCommandFailureError({stage:"validation",category:"access_denied"});
+    if(bootExecution&&bootReservation)assertCloudBootNativeHandoff(bootExecution,bootReservation);
     // Captured before the first await: from here on, a cancel belongs to THIS
     // turn (the engine has already accepted it), so the stale-flag reset below
     // must not erase it. See cancelSeq.
@@ -1645,6 +1678,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         };
       }
       this.ensureQuery(state);
+      if(bootExecution&&cloudProviderExecution(state.executionBoundary)!==bootExecution)
+        throw new CloudCommandFailureError({stage:"validation",category:"access_denied"});
 
       while (state.pendingModelReapply && state.query) {
         const pending = state.pendingModelReapply;
@@ -1679,6 +1714,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       const userMessageUuid = randomUUID();
       state.turnMessageUuids.clear();
       state.turnMessageUuids.add(userMessageUuid);
+      if(bootExecution&&bootReservation&&state.query)state.nativeBootHandoff={execution:bootExecution,reservation:bootReservation,
+        query:state.query,turn,uuid:userMessageUuid,entered:false,writtenUuids:new Set()};
+      state.nativePromptObservation = (opts.onNativePromptStage || opts.onNativeOutput) && state.query ? {
+        query: state.query, turn, uuid: userMessageUuid,
+        ...(opts.onNativePromptStage ? { callback: opts.onNativePromptStage } : {}),
+        ...(opts.onNativeOutput ? { outputCallback: opts.onNativeOutput } : {}),
+        seen: new Set(), seenOutput: new Set(), assistantIds: new Set(), stream: null,
+      } : undefined;
       state.pendingUsageTurnId = opts.turnId;
       if (opts.turnId) {
         state.usageTurnIds.set(userMessageUuid, opts.turnId);
@@ -1722,6 +1765,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           } as PromptResponse,
         };
       } finally {
+        if(state.nativeBootHandoff?.turn===turn)state.nativeBootHandoff=undefined;
+        if (state.nativePromptObservation?.turn === turn) state.nativePromptObservation = undefined;
         // A turn that produced nothing (error, cancel) must not hand its
         // pending measurement to whichever turn runs next.
         state.firstToken.endTurn();
@@ -2017,6 +2062,83 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       this.settleSteer(state, uuid, outcome);
   }
 
+  private observeNativePromptStage(state: SdkSession, query: Query | null, uuid: string, stage: NativePromptStage): void {
+    const observation = state.nativePromptObservation;
+    if (!observation?.callback || state.disposed || state.cancelRequested || state.cancelOperation ||
+      observation.query !== query || state.query !== query || observation.turn !== state.turn ||
+      observation.uuid !== uuid || observation.seen.has(stage)) return;
+    observation.seen.add(stage);
+    try { void Promise.resolve(observation.callback(stage)).catch(() => {}); } catch { /* Timing never owns transport or turn settlement. */ }
+  }
+
+  private observeNativePromptOutput(state: SdkSession, query: Query, value: unknown, accepted: boolean, receivedAtMs?: number): void {
+    const observation = state.nativePromptObservation;
+    if (!observation?.outputCallback || state.disposed || state.cancelRequested || state.cancelOperation ||
+      observation.query !== query || state.query !== query || observation.turn !== state.turn ||
+      !value || typeof value !== "object" || Array.isArray(value)) return;
+    const record = (item: unknown): Record<string, unknown> | null => item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : null;
+    const frame = value as Record<string, unknown>, event = record(frame.event), message = record(frame.message);
+    if (frame.parent_tool_use_id) return;
+    const correlated = typeof frame.user_message_uuid === "string" || Array.isArray(frame.user_message_uuids);
+    const own = frame.user_message_uuid === observation.uuid || (Array.isArray(frame.user_message_uuids) &&
+      frame.user_message_uuids.length <= 64 && frame.user_message_uuids.includes(observation.uuid));
+    if (correlated && !own) { observation.stream = null; return; }
+    if (frame.error || frame.isSynthetic || frame.is_synthetic || message?.model === "<synthetic>") return;
+    const emit = (kind: NativePromptOutputKind) => {
+      if (observation.seenOutput.has(kind)) return;
+      observation.seenOutput.add(kind);
+      try { void Promise.resolve(observation.outputCallback!(kind, receivedAtMs)).catch(() => {}); } catch { /* Observation never owns the native run. */ }
+    };
+    const nonempty = (text: unknown): text is string => typeof text === "string" && text.length > 0;
+    const remember = (id: unknown): id is string => {
+      if (typeof id !== "string" || id.length === 0 || id.length > 512 || observation.assistantIds.size >= 16) return false;
+      observation.assistantIds.add(id); return true;
+    };
+    if (frame.type === "assistant") {
+      if (!accepted || !message || (own && !remember(message.id)) || !observation.assistantIds.has(String(message.id))) return;
+      if (!Array.isArray(message.content) || message.content.length > 4096) return;
+      for (const raw of message.content) {
+        const block = record(raw);
+        if (block?.type === "text" && nonempty(block.text)) emit("text");
+        else if ((block?.type === "tool_use" || block?.type === "server_tool_use") && nonempty(block.id) && nonempty(block.name)) emit("tool");
+      }
+      return;
+    }
+    if (frame.type !== "stream_event" || !event) return;
+    if (event.type === "message_stop") { observation.stream = null; return; }
+    if (event.type === "message_start") {
+      const start = record(event.message);
+      observation.stream = accepted && own && start?.model !== "<synthetic>" && remember(start?.id)
+        ? { id: start!.id as string, blocks: new Map() } : null;
+      return;
+    }
+    const stream = observation.stream, index = event.index;
+    if (!stream || !Number.isSafeInteger(index) || (index as number) < 0 || (index as number) > 4095) return;
+    if (event.type === "content_block_stop") { stream.blocks.delete(index as number); return; }
+    if (!accepted) return;
+    if (event.type === "content_block_start") {
+      const block = record(event.content_block);
+      if (stream.blocks.size >= 64) return;
+      if (block?.type === "text") {
+        stream.blocks.set(index as number, "text"); if (nonempty(block.text)) emit("text");
+      } else if ((block?.type === "tool_use" || block?.type === "server_tool_use") && nonempty(block.id) && nonempty(block.name)) {
+        stream.blocks.set(index as number, "tool"); emit("tool");
+      }
+    } else if (event.type === "content_block_delta") {
+      const delta = record(event.delta), kind = stream.blocks.get(index as number);
+      if (kind === "text" && delta?.type === "text_delta" && nonempty(delta.text)) emit("text");
+      else if (kind === "tool" && delta?.type === "input_json_delta" && nonempty(delta.partial_json)) emit("tool");
+    }
+  }
+
+  private observeNativePromptReceipt(state: SdkSession, query: Query, message: unknown): void {
+    if (!message || typeof message !== "object") return;
+    const frame = message as { type?: unknown; state?: unknown; command_uuid?: unknown; parent_tool_use_id?: unknown };
+    if (frame.type === "command_lifecycle" && !frame.parent_tool_use_id && typeof frame.command_uuid === "string" &&
+      (frame.state === "started" || frame.state === "completed"))
+      this.observeNativePromptStage(state, query, frame.command_uuid, "native_acceptance_ack");
+  }
+
   private observeSteering(state: SdkSession, message: unknown): void {
     const m = message as {
       type?: string;
@@ -2083,6 +2205,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     };
     try {
       for await (const msg of q as AsyncIterable<SDKMessage>) {
+        // Engine-process arrival, sampled before translation/subscribers can
+        // defer delivery. Native packet clocks are never observation authority.
+        const receivedAtMs = state.nativePromptObservation?.outputCallback ? performance.now() : undefined;
         if (state.disposed) break;
         // Generation guard: if a restart (pendingRestart) installed a fresh
         // query, THIS loop is still draining the wound-down old one — abort()
@@ -2091,6 +2216,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         // re-pointed shared state. Stop the instant we're no longer the active
         // query (the catch/finally below carry the same guard).
         if (state.query !== q) break;
+        this.observeNativePromptReceipt(state, q, msg);
         this.observeSteering(state, msg);
         const m = msg as unknown as {
           type?: string;
@@ -2177,14 +2303,17 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         // translator already understands (system/assistant/user/result).
         const hadProcessWork = state.translator.hasProcessWork;
         let accepted = true;
+        let translated = false;
         try {
           accepted = state.translator.feed(msg);
+          translated = true;
         } catch (err) {
           console.warn(`[agents] claude-sdk translate failed: ${String(err)}`);
         }
         if (hadProcessWork !== state.translator.hasProcessWork) {
           this.refreshIdleTeardown(state);
         }
+        this.observeNativePromptOutput(state, q, msg, translated && accepted, receivedAtMs);
 
         // Replayed native completions cannot settle a later send or revive
         // idle activity. Stream replay controls were still consumed so their
@@ -2439,7 +2568,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         // `disposed` is still false. Keep genuine unfinished/background work
         // visible; only the expected idle shutdown loses its transport notice.
         const retiredIdleCloud = !lostBackgroundWork && !actionFailure &&
-          cloudProviderExecution(state.executionBoundary)?.lease.signal.aborted === true;
+          cloudProviderExecution(state.executionBoundary)?.lifetime.signal.aborted === true;
         // A clean iterator return is still a disconnect when the current send
         // never received its result. Detach before settling so a continuation
         // cannot enqueue its next prompt into this spent query.
@@ -3013,7 +3142,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     const state = this.sessions.get(opts.sessionId);
     if (!state || !opts.model.trim()) return;
     const cloud=cloudProviderExecution(state.executionBoundary);
-    if(cloud&&opts.model.trim()!==cloud.lease.admission.model)throw new Error("Cloud model changes require a new credential admission");
+    if(cloud&&opts.model.trim()!==cloud.model)throw new Error("Cloud model changes require a new credential admission");
     state.model = opts.model.trim();
     state.modelSelection.select(state.model);
     state.pendingModelReapply = { model: state.model };
@@ -3044,9 +3173,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     this.assertBackgroundReuse(opts);
     const cloud=cloudProviderExecution(state.executionBoundary);
     if(cloud){
-      cloud.lease.assertLive();
+      cloudExecutionLifetime(cloud).assertLive();
       if(Object.keys(opts.env).some(name=>!["ANTHROPIC_MODEL","ZEROS_THINKING_EFFORT","ZEROS_FAST_MODE","CLAUDE_MAX_TURNS"].includes(name))||
-        (opts.env.ANTHROPIC_MODEL!==undefined&&opts.env.ANTHROPIC_MODEL!==cloud.lease.admission.model))
+        (opts.env.ANTHROPIC_MODEL!==undefined&&opts.env.ANTHROPIC_MODEL!==cloud.model))
         throw new Error("Cloud provider configuration requires a new credential admission");
     }
     const prevEnv = state.env ?? {};
@@ -4251,8 +4380,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   private buildOptions(state: SdkSession): Options {
     const env = state.env;
     const cloud=cloudProviderExecution(state.executionBoundary);
-    cloud?.lease.assertLive();
-    if(cloud&&(state.model??env?.ANTHROPIC_MODEL)!==cloud.lease.admission.model)
+    if(cloud)cloudExecutionLifetime(cloud).assertLive();
+    if(cloud&&(state.model??env?.ANTHROPIC_MODEL)!==cloud.model)
       throw new Error("Cloud provider model authority changed");
     const exact = requireExplicitModel(env, "ANTHROPIC_MODEL");
     const queryAbort = state.abort;
@@ -4355,6 +4484,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       type: "preset", preset: "claude_code", snapshot: false,
       ...(systemAppend ? { append: systemAppend } : {}),
     };
+    const observationInput = state.input, observationAbort = state.abort;
     const options: ClaudeOptionsWithOAuthRefresh = {
       cwd: state.cwd,
       // The SDK REPLACES the subprocess env entirely when `env` is set, so
@@ -4375,6 +4505,38 @@ export class ClaudeSdkAdapter implements AgentAdapter {
                 spawnOptions,
                 {
                   onSpawn: (tracked) => state.containedProcesses.add(tracked),
+                  ...(isCloudBootProviderExecution(cloud)?{beforeUserMessageWrite:(uuid:string)=>{
+                    const handoff=state.nativeBootHandoff;
+                    const ownsQuery=!!handoff&&state.input===observationInput&&state.abort===observationAbort&&handoff.query===state.query&&
+                      handoff.turn===state.turn&&!state.disposed&&!state.cancelRequested&&!state.cancelOperation;
+                    try{
+                      if(!ownsQuery||!handoff||handoff.execution!==cloud)throw new CloudCommandFailureError({stage:"validation",category:"access_denied"});
+                      if(handoff.writtenUuids.has(uuid))throw new CloudCommandFailureError({stage:"validation",category:"access_denied"});
+                      if(handoff.writtenUuids.size>=1024)throw new CloudCommandFailureError({stage:"validation",category:"execution_limit"});
+                      if(!handoff.entered){
+                        if(uuid!==handoff.uuid)throw new CloudCommandFailureError({stage:"validation",category:"access_denied"});
+                        assertCloudBootNativeHandoff(cloud,handoff.reservation);
+                        markCloudBootNativeHandoff(cloud,handoff.reservation);
+                        handoff.entered=true;
+                      }else{
+                        if(uuid===handoff.uuid||!state.turnMessageUuids.has(uuid))throw new CloudCommandFailureError({stage:"validation",category:"access_denied"});
+                        assertCloudBootNativeContinuation(cloud,handoff.reservation);
+                      }
+                      handoff.writtenUuids.add(uuid);
+                    }catch(error){
+                      // The pinned transport wraps stdin errors. Preserve the
+                      // original typed cause for this exact turn before that
+                      // wrapper, without rejecting a newer query/turn.
+                      if(ownsQuery)handoff?.turn.reject(error);
+                      throw error;
+                    }
+                  }}:{}),
+                  onUserMessageWrite: uuid => {
+                    if (state.input === observationInput && state.abort === observationAbort)
+                      this.observeNativePromptStage(state, state.query, uuid, "native_write");
+                  },
+                  isUserMessageObservationActive: () => state.input === observationInput && state.abort === observationAbort &&
+                    !!state.nativePromptObservation && !state.disposed && !state.cancelRequested && !state.cancelOperation,
                   onStderr: (data) => {
                     const line = data.trimEnd();
                     if (line) this.ctx.emit.onAgentStderr(this.agentId, line);

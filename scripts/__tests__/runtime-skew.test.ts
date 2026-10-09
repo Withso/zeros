@@ -90,6 +90,17 @@ describe("source-pinned cloud runtime skew gate", () => {
     expect(result.stderr).not.toContain("command_dispatch_rejected");
   }, 60_000);
 
+  it("captures the actual legacy CP schema dependency closure when negotiated boot schemas precede it", async () => {
+    const current = await loadContractSource();
+    expect(current.controlCommands.CloudCommandRequestSchema.safeParse({
+      kind: "snapshot", conversationId: "legacy-conversation",
+    }).success).toBe(true);
+    expect(current.controlCommands.CloudCommandSettleSchema.safeParse({
+      commandId: "11111111-1111-4111-8111-111111111111",
+      claimId: "22222222-2222-4222-8222-222222222222",
+      state: "succeeded", resultCode: null,
+    }).success).toBe(true);
+  }, 30_000);
   it("keeps terminal settlements compatible with the strict Alpha control plane until acknowledgement", async () => {
     const pins = JSON.parse(await readFile(new URL("../runtime-skew/pins.json", import.meta.url), "utf8"));
     const [current, previous] = await Promise.all([loadContractSource(), loadContractSource(pins.previousRuntime)]);

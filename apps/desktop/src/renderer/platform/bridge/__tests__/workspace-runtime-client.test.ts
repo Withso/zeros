@@ -47,14 +47,17 @@ function fakePeer(target: CloudWorkspaceTarget) {
   const request = vi.fn(
     async (
       message: Record<string, unknown>,
-    ): Promise<Record<string, unknown>> => ({
-      type: "WORKSPACE_RESPONSE",
-      op: message.op,
-      result:
+    ): Promise<Record<string, unknown>> => {
+      const binding = client.activatedCloudAgentBootBinding;
+      const metadata = binding ? { projection: {
+        ...Object.fromEntries((["organizationId", "workspaceId", "generation", "engineInstanceId", "bootId", "writerEpoch",
+          "fundingOwnerUserId", "fundingOwnerEpoch", "version", "mode", "fundingScope"] as const).map(key => [key, binding[key]])),
+        mirroredSequence: 0, sealedSequence: null, complete: false }, historyHeads: [] } : {};
+      return { type: "WORKSPACE_RESPONSE", op: message.op, result:
         message.op === "chats.list"
-          ? { chats: [], chatDeletions: [] }
-          : { target: target.workspaceId },
-    }),
+          ? { chats: [], chatDeletions: [], ...metadata }
+          : { target: target.workspaceId } };
+    },
   );
   const send = vi.fn();
   const release = vi.fn();
@@ -91,6 +94,38 @@ function fakePeer(target: CloudWorkspaceTarget) {
 }
 afterEach(() => vi.restoreAllMocks());
 
+describe("cached activated cloud binding", () => {
+  const binding = { version: 1 as const, mode: "boot-owner-v1" as const, fundingScope: "workspace-roles-v1" as const,
+    ...a, generation: 7, engineInstanceId: "44444444-4444-4444-8444-444444444444", authorityEpoch: 2,
+    bootId: "55555555-5555-4555-8555-555555555555", writerEpoch: "66666666-6666-4666-8666-666666666666",
+    fundingOwnerUserId: "77777777-7777-4777-8777-777777777777", fundingOwnerEpoch: 1,
+    cacheRevision: 1, desiredCacheRevision: 1,
+    initialAdoptions: [{ provider: "claude", status: "unknown" }, { provider: "codex", status: "unknown" }, { provider: "cursor", status: "unknown" }] };
+  it("reads only the admitted exact current peer without opening/waking and clears on retirement", async () => {
+    const peer = fakePeer(a), open = vi.fn(async () => peer.peer);
+    Object.defineProperty(peer.peer.client, "activatedCloudAgentBootBinding", { get: () => binding });
+    Object.defineProperty(peer.peer.client, "executionIdentity", { get: () => ({ kind: "cloud", ...a, generation: 7,
+      engineInstanceId: binding.engineInstanceId, authorityEpoch: 2, bootScope: binding }) });
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+    expect(client.cloudAgentBootBinding(cloudWorkspaceKey(a))).toBeNull(); expect(open).not.toHaveBeenCalled();
+    await client.warmWorkspace(a); expect(client.cloudAgentBootBinding(cloudWorkspaceKey(a))).toBe(binding);
+    expect(client.cloudAgentBootBinding(cloudWorkspaceKey(b))).toBeNull();
+    expect(client.cloudAgentBootBinding("/local/personal")).toBeNull();
+    client.clearCloudConnections(); expect(client.cloudAgentBootBinding(cloudWorkspaceKey(a))).toBeNull(); client.dispose();
+  });
+  it("rejects forged Local actual-use events and foreign peer event scopes", async () => {
+    const peer = fakePeer(a), client = new WorkspaceRuntimeClient({ open: async () => peer.peer, workspaces: () => [] });
+    Object.defineProperty(peer.peer.client, "activatedCloudAgentBootBinding", { get: () => binding });
+    Object.defineProperty(peer.peer.client, "executionIdentity", { get: () => ({ kind: "cloud", ...a, generation: 7,
+      engineInstanceId: binding.engineInstanceId, authorityEpoch: 2, bootScope: binding }) });
+    const seen = vi.fn(); client.on("CLOUD_AGENT_CREDENTIAL_USED", seen); await client.warmWorkspace(a);
+    const event = { type: "CLOUD_AGENT_CREDENTIAL_USED", use: { scope: { ...binding, workspaceId: b.workspaceId } } };
+    // Local handler ingress must not be able to impersonate an admitted cloud peer.
+    (client as unknown as { handleIncoming(message: unknown): void }).handleIncoming(event);
+    peer.emit(event.type, event); expect(seen).not.toHaveBeenCalled(); client.dispose();
+  });
+});
+
 // Exercise BridgeProvider's actual routing options, including its cloud-only
 // wake ownership callback, without mounting unrelated native lifecycle effects.
 function providerRouting(open: WorkspaceRuntimeOptions["open"]) {
@@ -106,7 +141,7 @@ function providerRouting(open: WorkspaceRuntimeOptions["open"]) {
     openCloudRuntime: open, getCloudWorkspaceRows: () => [], cloudWorkspaceCatalogConfirmed: () => false,
     canReadCloudWorkspace: (doc: unknown) => !!doc, cloudWorkspaceDocument: document, cloudCatalogGeneration: () => 1,
     cloudWorkspaceStopVersion: () => 0, isCloudWorkspaceLifecyclePending: () => false, cloudWorkspaceOperation: vi.fn(), readCloudWorkspaceHistory: vi.fn(async () => ({ chats: [], chatDeletions: [] })),
-    prepareCloudGithubWrite: vi.fn() };
+    prepareCloudGithubWrite: vi.fn(), onCloudHistoryRestoreHead: () => () => {} };
   vm.runInNewContext(ts.transpileModule(expression.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
   return { routing: context.routing as WorkspaceRuntimeOptions, document };
 }

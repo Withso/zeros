@@ -2,6 +2,7 @@ import { CloudAgentAdmissionError } from "./bridge/cloud-agent-errors";
 import { z } from "zod";
 import { CloudComputerAdminWorkspaceSchema } from "@zeros/protocol/cloud-computer-v2";
 import { CloudNativeCapabilitiesSchema } from "@zeros/protocol/cloud-agent-execution";
+import { CloudAgentInitialAdoptionsSchema } from "@zeros/protocol/cloud-agent-bootstrap";
 import { CloudRuntimeUpgradeAvailabilitySchema, type CloudRuntimeUpgradeAvailability } from "@zeros/protocol/cloud-runtime-lifecycle";
 import { getSession } from "../features/auth/auth-store";
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
@@ -19,6 +20,22 @@ import { forgetCloudWorkspacePortForwarding } from "./cloud-workspace-access";
 export const CloudWorkspaceActorRoleSchema = z.enum(["viewer", "prompter", "developer", "manager", "owner"]);
 export type CloudWorkspaceActorRole = z.infer<typeof CloudWorkspaceActorRoleSchema>;
 
+/** Nonsecret state from an explicitly bound cloud boot. Credential refreshes
+ * do not change this owner-transfer state or its immutable initial baseline. */
+export const CloudWorkspaceAgentCredentialsSchema = z.object({
+  mode: z.literal("boot-owner-v1"),
+  fundingScope: z.literal("workspace-roles-v1"),
+  bootId: z.string().uuid(),
+  writerEpoch: z.string().uuid(),
+  fundingOwnerUserId: z.string().uuid(),
+  fundingOwnerEpoch: z.number().int().positive().safe(),
+  generation: z.number().int().positive().safe(),
+  engineInstanceId: z.string().uuid(),
+  status: z.enum(["current", "owner-changed"]),
+  initialAdoptions: CloudAgentInitialAdoptionsSchema.optional(),
+}).strict();
+export type CloudWorkspaceAgentCredentials = z.infer<typeof CloudWorkspaceAgentCredentialsSchema>;
+
 export const CloudWorkspaceDocumentSchema = z.object({
   id: z.string().uuid(),
   organizationId: z.string().uuid(),
@@ -27,6 +44,7 @@ export const CloudWorkspaceDocumentSchema = z.object({
   createdBy: z.string().uuid(),
   createdByDisplayName: z.string().min(1).max(120).nullable().optional(),
   ownerUserId: z.string().uuid().optional(),
+  agentCredentials: CloudWorkspaceAgentCredentialsSchema.optional(),
   adminWorkspace: CloudComputerAdminWorkspaceSchema.optional(),
   actorRole: CloudWorkspaceActorRoleSchema.nullable().optional(),
   sharingMode: z.enum(["private", "organization"]).optional(),

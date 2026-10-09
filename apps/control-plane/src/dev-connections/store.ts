@@ -6,6 +6,8 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import type pg from "pg";
+import {ConditionalRemovalRequestSchema,ConditionalRemovalResponseSchema,type ConditionalRemovalRequest} from "./client.js";
+import {HttpError} from "../authz.js";
 import { cloudAgentCredentialConnectionMethod } from "../cloud-workspaces/agent-credentials.js";
 import type { CloudAgentCredentialKeys } from "../cloud-workspaces/agent-credential-envelope.js";
 import { codexRefreshFingerprint } from "../cloud-workspaces/codex-auth-cache.js";
@@ -886,6 +888,40 @@ export class DevConnectionStore {
       const { memberId } = await this.identity(tx, ctx);
       await this.revokeOwnedConnection(tx, id, memberId);
     }, true);
+  }
+  async removeConditionally(ctx:Context,value:ConditionalRemovalRequest){
+    const input=parse(ConditionalRemovalRequestSchema,value),requestHash=digest(JSON.stringify(input));
+    return this.tx(async tx=>{
+      const {memberId}=await this.identity(tx,ctx);
+      const prior=(await tx.query<{request_sha256:Buffer;response:unknown}>(`SELECT request_sha256,response FROM dev_connections.removal_receipts
+        WHERE generation_id=$1 AND member_id=$2 AND organization=$3 AND operation_id=$4`,[ctx.generation.id,memberId,ctx.member.organization,input.operationId])).rows[0];
+      if(prior){if(!safeEqual(prior.request_sha256,requestHash))throw new HttpError(409,"dev_connection_conflict","dev_connection_conflict");
+        return parse(ConditionalRemovalResponseSchema,prior.response);}
+      const current=(await tx.query<{revision:number;consent_revision:number;binding_revision:number;binding_consent_revision:number;connection_revoked:Date|null;consent_revoked:Date|null;binding_revoked:Date|null}>(
+        `SELECT connection.revision,consent.revision AS consent_revision,binding.connection_revision AS binding_revision,binding.consent_revision AS binding_consent_revision,
+          connection.revoked_at AS connection_revoked,consent.revoked_at AS consent_revoked,binding.revoked_at AS binding_revoked
+        FROM dev_connections.connections connection JOIN dev_connections.organization_consents consent ON consent.connection_id=connection.id AND consent.organization=$4
+        JOIN dev_connections.bindings binding ON binding.connection_id=connection.id AND binding.member_id=connection.member_id
+        WHERE connection.id=$1 AND connection.member_id=$2 AND binding.id=$3 AND binding.generation_id=$5
+        FOR UPDATE OF connection,consent,binding`,[input.connectionId,memberId,input.bindingId,ctx.member.organization,ctx.generation.id])).rows[0];
+      if(!current)denied();
+      if(current.connection_revoked||current.consent_revoked||current.binding_revoked||current.revision!==input.expectedRevision||
+        current.binding_revision!==input.expectedRevision||current.consent_revision!==input.expectedConsentRevision||current.binding_consent_revision!==input.expectedConsentRevision)
+        throw new HttpError(409,"dev_connection_conflict","dev_connection_conflict");
+      const count=(await tx.query<{n:number}>("SELECT count(*)::int AS n FROM dev_connections.removal_receipts WHERE generation_id=$1 AND member_id=$2",[ctx.generation.id,memberId])).rows[0]!.n;
+      if(count>=128)throw new HttpError(429,"dev_connection_limit","dev_connection_limit");
+      if(input.scope==="global")await this.revokeOwnedConnection(tx,input.connectionId,memberId);
+      else {
+        await tx.query("UPDATE dev_connections.organization_consents SET revoked_at=clock_timestamp(),revision=revision+1 WHERE connection_id=$1 AND organization=$2",[input.connectionId,ctx.member.organization]);
+        await tx.query(`WITH revoked AS (UPDATE dev_connections.bindings binding SET revoked_at=clock_timestamp() FROM dev_connections.generations generation
+          WHERE binding.connection_id=$1 AND generation.id=binding.generation_id AND generation.organization=$2 RETURNING binding.id,binding.generation_id)
+          INSERT INTO dev_connections.revocation_outbox(generation_id,binding_id,reason) SELECT generation_id,id,'consent' FROM revoked`,[input.connectionId,ctx.member.organization]);
+      }
+      const response=parse(ConditionalRemovalResponseSchema,{version:1,operationId:input.operationId,connectionId:input.connectionId,scope:input.scope,removed:true});
+      await tx.query("INSERT INTO dev_connections.removal_receipts(generation_id,member_id,organization,operation_id,request_sha256,response) VALUES($1,$2,$3,$4,$5,$6)",
+        [ctx.generation.id,memberId,ctx.member.organization,input.operationId,requestHash,response]);
+      return response;
+    },true);
   }
   /** Caller holds the common outbox writer lock before member/connection locks. */
   private async revokeOwnedConnection(tx:Tx,id:string,memberId:string) {

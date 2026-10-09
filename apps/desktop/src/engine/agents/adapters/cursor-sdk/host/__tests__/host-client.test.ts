@@ -125,7 +125,7 @@ describe("CursorHostClient proxy", () => {
   it("retires cloud authority if a native send outlives its response deadline",async()=>{
     vi.useFakeTimers();
     const close=vi.fn(async()=>{}),fake=new FakeTransport();
-    const cloud={cwd:"/srv/zeros/workspace",lease:{assertLive:()=>{},close,admission:{model:"qualified-model"}},
+    const cloud={cwd:"/srv/zeros/workspace",model:"qualified-model",lease:{assertLive:()=>{},close,admission:{model:"qualified-model"}},
       coordinator:{environment:()=>({CURSOR_API_KEY:"synthetic"})}} as unknown as CloudProviderExecution;
     const client=new CursorHostClient(()=>fake,cloud);
     try{
@@ -148,7 +148,7 @@ describe("CursorHostClient proxy", () => {
     const leaseAbort=new AbortController();let toolSignal:AbortSignal|undefined;let finishTool!:(value:unknown)=>void;
     const call=vi.fn((_input:unknown,signal:AbortSignal)=>{toolSignal=signal;return new Promise(resolve=>{finishTool=resolve;});});
     const close=vi.fn(async()=>{});
-    const cloud={cwd:"/srv/zeros/workspace",lease:{assertLive:()=>{},admission:{model:"qualified-model"},signal:leaseAbort.signal,close},
+    const cloud={cwd:"/srv/zeros/workspace",model:"qualified-model",lease:{assertLive:()=>{},admission:{model:"qualified-model"},signal:leaseAbort.signal,close},
       tools:{call},coordinator:{environment:()=>({CURSOR_API_KEY:"synthetic"})}} as unknown as CloudProviderExecution;
     const old=new FakeTransport(),fresh=new FakeTransport();let next=old;
     const client=new CursorHostClient(()=>next,cloud);

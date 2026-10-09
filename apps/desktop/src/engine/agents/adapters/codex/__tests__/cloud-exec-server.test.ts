@@ -13,7 +13,7 @@ import {CloudCodexExecServer} from "../cloud-exec-server";
 import {CLOUD_CODEX_CONFIG,cloudCodexConfig} from "../cloud-policy";
 import {codexAppServerFeatureArgs} from "../app-server";
 import {createInterface} from "node:readline";
-import type {CloudProviderExecution} from "../../../cloud-provider-execution";
+import type {CloudLegacyProviderExecution as CloudProviderExecution} from "../../../cloud-provider-execution";
 import type {BoundaryProcess,BoundarySpawnRequest} from "../../../containment/types";
 vi.mock("../../../containment/cloud-runtime-root.mjs", async original => ({
   ...await original<typeof import("../../../containment/cloud-runtime-root.mjs")>(),
@@ -47,6 +47,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
     const close=()=>{abort.abort();return closing??=Promise.resolve().then(()=>Promise.all([...domains].map(domain=>domain.stopAndProve()))).then(()=>{});};
     const child={stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),wait:()=>Promise.resolve({code:1,signal:null}),stopAndProve:async()=>{}} as unknown as BoundaryProcess;
     const execution={lease:{assertLive(){if(abort.signal.aborted)throw new Error("retired");},signal:abort.signal,attach:(domain:{stopAndProve():Promise<void>})=>domains.add(domain),launch:async()=>child,close},coordinator:{workload:{spawn:vi.fn()}}} as unknown as CloudProviderExecution;
+    Object.assign(execution,{lifetime:execution.lease,environment:null});
     try {
       await expect(CloudCodexExecServer.start(execution,path.join(process.cwd(),"pinned/bin/codex"))).rejects.toThrow("retired");
       await close();
@@ -83,6 +84,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
     });
     const execution={cwd:root,lease:{environment:{values},assertLive(){if(abort.signal.aborted)throw new Error("retired");},signal:abort.signal,attach:(domain:{stopAndProve():Promise<void>})=>domains.add(domain),
       launch:async(callback:()=>Promise<BoundaryProcess>)=>callback(),close},coordinator:{workload:{spawn:workloadSpawn}}} as unknown as CloudProviderExecution;
+    Object.assign(execution,{lifetime:execution.lease,environment:{values},nativeCapabilities:null,auth:{codexAuth:()=>null}});
     let socket:WebSocket|undefined,uncooperative:Socket|undefined,proofTimer:ReturnType<typeof setTimeout>|undefined;
     try{
       const bridge=await CloudCodexExecServer.start(execution,nativeBinary);

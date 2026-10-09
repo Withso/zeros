@@ -365,8 +365,11 @@ and require an explicit new user decision before continuing work.
 ### Agent authentication boundary
 
 Cloud UI attachments do not issue direct `AGENT_NEW_SESSION` provider execution.
-The admitted command worker supplies the selected provider's delegated model
-credential to its execution environment.
+The admitted command worker supplies the selected provider's exact model
+credential to its execution environment. Legacy mode uses the acting member's
+delegation; negotiated `boot-owner-v1` uses the captured owner-funded selection
+with independently confirmed actor/device/role consent. See the
+[funding and change contract](agent-authentication-and-language-tools.md#negotiated-boot-funding).
 The cloud environment filter rejects host-authority and process-injection
 variables. It does not hide an admitted model key from that tenant's agent.
 Credentials are not durable prompt fields, replay events, checkpoint content,
@@ -392,7 +395,8 @@ key with different semantics is a conflict. Record the accepting execution/turn
 and reconcile retries; a lost acknowledgement is not permission to repeat an
 external side effect.
 
-Follow-up queues, Stop state and pending decisions are backend-owned. Stop pauses
+Follow-up queues, Stop state and pending decisions are engine-owned in negotiated
+local mode and CP-owned in legacy mode. Stop pauses
 dispatch and preserves pending order. Editing a queued message or receiving an
 old completion does not resume it. Preserve the existing explicit-send ordering.
 
@@ -413,6 +417,20 @@ Design authoring does not relax cloud API authoring or lifecycle-owned
 registration. Missing cloud tool admission never enables native fallback.
 
 ### Implemented command transport
+
+`cloud.localCommands.v1` and `cloudLocalCommands` select the local queue only
+after genuine CP activation, durable ledger/cache readiness and current actor
+confirmation. The desktop verifies the full boot identity and authority against
+its admitted target before publishing Connected or flushing queued work. Missing
+or mismatched new-mode readiness refuses; it cannot silently choose legacy.
+The optional metadata never authorizes a command by itself. Actual credential-use
+records retain original command/turn/execution and immutable first-use order;
+selection/audit receipts cannot generate a next-run account notice.
+The boot command schemas are separate grant-free contracts; they do not relax
+the legacy payload's required grant. A ready, authorized warm Send performs no
+per-send grant or per-turn CP admit/validate. Background actor renewal,
+credential publication and mirroring continue, with finite authority deadlines.
+This removes foreground dependencies; it does not promise zero total CP traffic.
 
 The shared engine protocol advertises `cloud.commands.v1` on `ENGINE_READY` only when the
 engine is registered with the control plane. The authenticated workspace bridge
@@ -447,10 +465,12 @@ marks any dispatched outcome uncertain. Inspecting an uncertain command returns
 its retained payload; no timer automatically replays it. Lost settlement
 responses retry only the same receipt, never the provider prompt. Historical
 mutation retries resolve before checking today's authoring mode. New stale-mode
-requests are rejected. A terminal receipt waits for a fresh durable transcript
-sync; joining an older in-flight heartbeat sync is insufficient.
+requests are rejected. A legacy terminal receipt waits for a fresh durable
+transcript sync; joining an older in-flight heartbeat sync is insufficient.
+New-mode terminal publication uses the atomic local history/outbox contract in
+[data and sync](data-and-sync.md#negotiated-local-queue-and-compact-history).
 
-The engine creates a claim UUID before sending a claim. If the reply is lost,
+In legacy mode the engine creates a claim UUID before sending a CP claim. If the reply is lost,
 it retries that same UUID and execution binding before dispatching anything.
 A terminal replay returns no new command. Pending claims and terminal receipts
 share a bounded dispatch capacity, including repeated reads of empty conversations
@@ -697,17 +717,19 @@ their independent exact-key reads and
 revisions; revalidate them on attach and on their invalidations. Older transcript
 pages remain available through the existing message-window API.
 
-The producer flushes batches every 100 ms, at most 128 events / 1 MiB, with one
+The legacy producer flushes batches every 100 ms, at most 128 events / 1 MiB, with one
 in-flight batch and exact-batch retry after lost acknowledgements. A command's
 terminal receipt also waits for event flush. Direct live frames are provisional
 until flush; a snapshot/replay response covers committed data. Control-plane
 retention is bounded to 10,000 events and 16 MiB of encoded frames per workspace.
 The live engine's in-memory pending journal is bounded to 8,192 events / 8 MiB. Exhausting that
 pending bound fences execution instead of silently losing mandatory events.
-The CP event journal is durable; pending VM batches currently retry only within
-the live process. Persist-before-send VM outbox/inbox, a resident outbound uplink,
-one multiplexed device/backend channel and Mac send acknowledgements remain
-[separate follow-ups](warm-pool.md). They must reuse the existing command queue.
+The legacy CP event journal is durable; its pending VM event batches retry only
+within the live process. New mode uses the durable local replay journal and
+FULL mirror outbox described in
+[data and sync](data-and-sync.md#negotiated-local-queue-and-compact-history).
+A resident outbound uplink, multiplexed device/backend channel and general Mac
+send acknowledgements remain [follow-ups](warm-pool.md).
 
 Frames above 256 KiB remain available live and in normalized state. Their journal
 entry marks `requiresSnapshot`, and replay returns `event_snapshot_required`.
@@ -783,6 +805,24 @@ legacy untouched owner-only runtimes retain `zws_` compatibility. Carry the gran
 `zeros-cloud-token.<base64url(grant)>`. Query-string credentials are rejected.
 The exact engine consumes admission; the coordinator relay only authenticates
 and forwards frames. Provider preview secrets stay in the coordinator.
+
+Step 1 direct ingress opts in with `actorProtocolVersion: 2` and
+`directProviderVersion: 1`. CP publishes a verified Boat WSS engine target from
+the actual resource and server-owned port, then rechecks current authority. The
+target carries the exact boot scope and the existing one-use actor grant. There
+is no caller URL, query bearer or reused grant. Electron freezes the descriptor;
+the renderer requires both authenticated actor confirmation and matching
+`ENGINE_READY.cloudLocalCommands` before sending queued work.
+
+A transport-only failure may request a fresh admission with
+`connectionChannel: "control-plane-websocket"`. CP fallback must retain every
+boot/owner field and authority epoch while rotating the admission token and
+connection sequence. Authority/protocol refusal is terminal; neither broker nor
+renderer redispatches an accepted operation after an unknown outcome. Existing
+SSH and legacy CP paths keep their own semantics; direct failure does not
+automatically downgrade to SSH. URL validation and source
+tests do not qualify the provider WSS endpoint; disposable-VM qualification is
+separate release work.
 
 Portable admission requires a trusted registered device and a one-use Ed25519
 proof for `engine.connect`, signing `{ organizationId, workspaceId }` with the

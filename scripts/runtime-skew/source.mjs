@@ -108,7 +108,11 @@ export async function loadContractSource(pin = null) {
     platform: "node",
     format: "esm",
     target: "node22",
-    external: ["ws"],
+    // Keep CommonJS Node dependencies outside the ESM source bundle. The
+    // current pump imports the qualified local queue guard, but this legacy
+    // gate never constructs a queue or opens a SQLite database. Bundling its
+    // package rewrites builtin requires into an unsupported ESM shim.
+    external: ["ws", "better-sqlite3"],
     logLevel: "silent",
     plugins: [
       {
@@ -127,14 +131,32 @@ export async function loadContractSource(pin = null) {
               const variables = source.statements.filter(ts.isVariableStatement);
               const request = variables.find(node => node.declarationList.declarations.some(declaration =>
                 declaration.name.getText(source) === "CloudCommandRequestSchema"));
-              for (const name of ["CloudCommandRequestSchema", "CloudCommandSettleSchema", "CloudNativeResultSchema"])
-                if (!variables.some(node => node.end <= request?.end && node.declarationList.declarations.some(declaration =>
-                  declaration.name.getText(source) === name))) throw new Error("runtime_skew_source_unavailable");
+              const declarations = new Map();
+              for (const node of variables.filter(node => node.end <= request?.end))
+                for (const declaration of node.declarationList.declarations)
+                  if (ts.isIdentifier(declaration.name)) declarations.set(declaration.name.text, node);
+              const selected = new Set();
+              const capture = name => {
+                const node = declarations.get(name);
+                if (!node) throw new Error("runtime_skew_source_unavailable");
+                if (selected.has(node)) return;
+                selected.add(node);
+                const visit = child => {
+                  if (ts.isIdentifier(child) && declarations.has(child.text)) capture(child.text);
+                  ts.forEachChild(child, visit);
+                };
+                for (const declaration of node.declarationList.declarations)
+                  if (declaration.initializer) visit(declaration.initializer);
+              };
+              for (const name of ["CloudCommandRequestSchema", "CloudCommandSettleSchema", "CloudNativeResultSchema"]) capture(name);
               // The standalone CP schema uses Zod 3. Capture its actual schema
-              // declarations, excluding database/provider service imports.
+              // dependency closure in source order. Negotiated boot/mirror
+              // declarations have separate dependencies and are not part of
+              // this legacy contract slice. Every selected declaration still
+              // comes from the exact current or frozen source cohort.
               return { loader: "ts", resolveDir: path.join(root, "apps/control-plane"), contents: `
                 import { z } from "zod";
-                ${variables.filter(node => node.end <= request.end).map(node => node.getText(source)).join("\n")}
+                ${variables.filter(node => selected.has(node)).map(node => node.getText(source)).join("\n")}
               ` };
             }
             const engine = args.path === "runtime-skew:engine-replies";

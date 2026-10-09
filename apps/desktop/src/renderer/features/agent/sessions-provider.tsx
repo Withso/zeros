@@ -1,3 +1,4 @@
+import { wireCloudAgentCredentialState } from "./cloud-agent-credential-selectors";
 import { PermissionModeChanges } from "./permission-mode-change";
 import { awaitComposerMode } from "./composer-mode";
 import { backfillLocalPromptTranscript, LocalPromptRecoveryError, requestLocalPrompt } from "./local-prompt-recovery";
@@ -66,6 +67,8 @@ import { TranscriptHydrationRetries } from "./transcript-hydration-retries";
 import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { cloudReplyOwnership } from "../../platform/bridge/cloud-runtime-wire";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
+import { cloudHistoryRestoreHead, onCloudHistoryRestoreHead, type CloudHistoryRestoreOrigin } from "../../platform/cloud-transcript-cache";
+import { cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch, type CloudHistoryRestoreFence } from "../../platform/cloud-transcript-cache-contract";
 import { hasCloudWorkspaceAccountAccess, useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import { cloudCatalogGeneration, cloudWorkspaceDocument, cloudWorkspaceStopVersion, canBackgroundSyncCloudWorkspace, canReadCloudWorkspace, isCloudWorkspaceLifecyclePending, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
 import { CloudWorkspaceWakeEndedError } from "../../state/cloud-workspace-wake";
@@ -372,6 +375,9 @@ async function reconcilePermissionModeAtBind(
  *  Older messages stay on disk and load on scroll-up. 200 covers a
  *  multi-hour session without scrolling. */
 const HYDRATE_WINDOW = 200;
+function cloudHasNativeTranscript(bridge: ReturnType<typeof useBridge>, chatId: string, executionId?: string | null): boolean {
+  return bridge instanceof WorkspaceRuntimeClient && bridge.hasCloudNativeTranscript(chatId, executionId, HYDRATE_WINDOW);
+}
 
 // (MAX_MESSAGES_PER_CHAT no longer re-exported — Track 4.C: Vite Fast
 // Refresh requires this file to export only React components / hooks
@@ -477,6 +483,7 @@ export function AgentSessionsProvider({
   // Helper: snapshot the store. Used inside async actions to bypass
   // React's closure capture problem (state read pre-await is stale).
   const getStore = useSessionsStore.getState;
+  useEffect(() => bridge ? wireCloudAgentCredentialState(bridge, getStore) : undefined, [bridge, getStore]);
 
   // Turn-state pushes can settle a prompt that began before this renderer was
   // loaded. The local send promise/finally does not exist in that case, so the
@@ -554,6 +561,18 @@ export function AgentSessionsProvider({
   // intentionally published by a passive effect in ChatDeck, never by
   // an abandoned concurrent render.
   const retainedChatIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const installCloudRestoreHead = useCallback((chatId: string, fence: CloudHistoryRestoreFence, origin: CloudHistoryRestoreOrigin) => {
+    const store = getStore(), before = store.sessions[chatId];
+    if (!before) return;
+    const replacement = origin === "native" && fence.head?.source.kind === "mutation" &&
+      ["delete", "prune", "repair"].includes(fence.head.source.operation);
+    store.applyCloudHistoryRestoreHead(chatId, fence, !replacement && cloudHasNativeTranscript(bridge, chatId, before.executionId));
+    const after = getStore().sessions[chatId];
+    if (after?.messages !== before.messages) persistedMessageRefsRef.current.delete(chatId);
+    if (after?.transcriptState === "loading") pendingHydratesRef.current.add(chatId);
+    else if (fence.head?.deleted) pendingHydratesRef.current.delete(chatId);
+  }, [bridge, getStore]);
+  useEffect(() => onCloudHistoryRestoreHead(installCloudRestoreHead, true), [installCloudRestoreHead]);
 
   // Atomic guard against concurrent sendPrompt calls. The Zustand
   // `status === "streaming"` check is a read-then-act
@@ -5212,6 +5231,7 @@ export function AgentSessionsProvider({
       const existingRequest = reconcileInFlightRef.current.get(chatId);
       if (existingRequest) return existingRequest;
       let retryAfterChange = false;
+      let retryAfterRestore = false;
       // Assigned immediately after declaration; `let` is required because the
       // request's post-await race guard compares against its own identity.
       let request!: Promise<void>;
@@ -5219,6 +5239,7 @@ export function AgentSessionsProvider({
       request = (async () => {
         const store = getStore();
         const slot = store.sessions[chatId];
+        const restoreBefore = cloud ? cloudHistoryRestoreHead(chatId) : undefined;
         if (!slot) return; // not open here → hydrates fresh when opened
         if (slot.transcriptState !== "resident") {
           // A DB_CHANGED nudge for an evicted chat must not pull its payload
@@ -5251,14 +5272,24 @@ export function AgentSessionsProvider({
             return;
           }
           const fresh = getStore().sessions[chatId];
-          if (fresh && fresh.transcriptState !== "resident") {
+          const head = cloud ? cloudHistoryRestoreHead(chatId) : undefined;
+          const native = cloud && cloudHasNativeTranscript(bridge, chatId, fresh?.executionId);
+          if (head && !native && !cloudHistoryFenceHasTranscript(head)) return;
+          if (head && (!restoreBefore || !cloudHistoryFencesMatch(restoreBefore, head))) {
+            retryAfterRestore = true;
+            getStore().applyCloudHistoryRestoreHead(chatId, head);
+            return;
+          }
+          const restoring = !!(fresh && fresh.transcriptState === "loading" && head && cloudHistoryFenceHasTranscript(head) &&
+            fresh.status !== "streaming" && fresh.executionId === slot.executionId && fresh.sessionId === slot.sessionId);
+          if (fresh && fresh.transcriptState !== "resident" && !restoring) {
             getStore().patchSession(chatId, {
               transcriptDirty: true,
               hasTranscript: true,
             });
             return;
           }
-          if (!fresh || !canApplyTranscriptRead(slot, fresh)) {
+          if (!fresh || !restoring && !canApplyTranscriptRead(slot, fresh)) {
             retryAfterChange = Boolean(fresh && fresh.transcriptState === "resident" && fresh.status !== "streaming");
             return;
           }
@@ -5291,6 +5322,7 @@ export function AgentSessionsProvider({
       })().finally(() => {
         const current = isCurrentTranscriptRequest(reconcileInFlightRef.current, chatId, request);
         releaseTranscriptRequest(reconcileInFlightRef.current, chatId, request);
+        if (current && retryAfterRestore) return hydrateCloudSendRef.current?.(chatId);
         // A DB nudge during the stale read shared that in-flight request. Keep
         // its waiters attached to the fresh read, so reconnect recovery cannot
         // release queued work before the missing transcript is applied.
@@ -5299,7 +5331,7 @@ export function AgentSessionsProvider({
       reconcileInFlightRef.current.set(chatId, request);
       return request;
     },
-    [getStore],
+    [bridge, getStore],
   );
   reconcileChatMessagesRef.current = reconcileChatMessages;
 
@@ -5309,8 +5341,10 @@ export function AgentSessionsProvider({
       if (existingRequest) return existingRequest;
       // Same self-identity guard as reconcileChatMessages above.
       let request!: Promise<void>;
+      let retryAfterRestore = false;
       // eslint-disable-next-line prefer-const
       request = (async () => {
+        const restoreBefore = parseCloudScopedId(chatId) ? cloudHistoryRestoreHead(chatId) : undefined;
         // Fix #2 — refresh the device-local policy slice alongside message
         // hydration. The store mutator preserves its reference when unchanged.
         void getStore().hydrateChatPolicies(chatId);
@@ -5351,6 +5385,8 @@ export function AgentSessionsProvider({
           const messages = await persistWindowMessages(chatId, HYDRATE_WINDOW, undefined,
             parseCloudScopedId(chatId) ? cached => {
               if (!isCurrentTranscriptRequest(hydrateInFlightRef.current, chatId, request)) return;
+              const head = cloudHistoryRestoreHead(chatId);
+              if (cached.length && head && !cloudHistoryFenceHasTranscript(head)) return;
               const fresh = getStore().sessions[chatId];
               if (!fresh || fresh.transcriptState !== "loading" || fresh.status === "streaming" || fresh.transcriptDirty) return;
               const deduped = reconcileHistoryMessages(cached);
@@ -5360,7 +5396,7 @@ export function AgentSessionsProvider({
                 messages: [...deduped, ...fresh.messages.filter(message => message.kind === "text" && message.queued && !deduped.some(saved => saved.id === message.id))],
                 transcriptState: "loading",
                 transcriptDirty: false,
-                hasTranscript: deduped.length > 0,
+                hasTranscript: head && !cloudHistoryFenceHasTranscript(head) ? head.head?.deleted !== true : deduped.length > 0,
               });
             } : undefined);
           if (
@@ -5370,6 +5406,21 @@ export function AgentSessionsProvider({
               request,
             )
           ) {
+            return;
+          }
+          const head = parseCloudScopedId(chatId) ? cloudHistoryRestoreHead(chatId) : undefined;
+          const currentSlot = getStore().sessions[chatId];
+          if (head && !cloudHistoryFenceHasTranscript(head) && !cloudHasNativeTranscript(bridge, chatId, currentSlot?.executionId)) {
+            getStore().applyCloudHistoryRestoreHead(chatId, head);
+            if (head.head?.deleted) pendingHydratesRef.current.delete(chatId);
+            else pendingHydratesRef.current.add(chatId);
+            return;
+          }
+          if (head && (!restoreBefore || !cloudHistoryFencesMatch(restoreBefore, head))) {
+            // Message[] no longer carries the bridge response's source. Retire
+            // this exact outer read rather than label A's rows with new head B.
+            getStore().applyCloudHistoryRestoreHead(chatId, head);
+            retryAfterRestore = true;
             return;
           }
           pendingHydratesRef.current.delete(chatId);
@@ -5433,7 +5484,9 @@ export function AgentSessionsProvider({
           console.warn("[Zeros agent-history] hydrate failed:", err);
         }
       })().finally(() => {
+        const current = isCurrentTranscriptRequest(hydrateInFlightRef.current, chatId, request);
         releaseTranscriptRequest(hydrateInFlightRef.current, chatId, request);
+        if (current && retryAfterRestore) return hydrateCloudSendRef.current?.(chatId);
       });
       hydrateInFlightRef.current.set(chatId, request);
       return request;

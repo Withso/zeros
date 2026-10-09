@@ -1,3 +1,4 @@
+import { DatabaseCloudAgentBootService, type CloudAgentBootOperation } from "./agent-boot-credentials.js";
 import { cloudAgentModels, cloudAgentModelAllowed } from "./agent-models.js";
 import type { CloudAgentAdmissionCode } from "./agent-admission-errors.js";
 import { devConnectionRuntime } from "../dev-connections/runtime.js";
@@ -23,6 +24,7 @@ import {openCloudAgentCredential,type CloudAgentCredentialKind,type CloudAgentCr
 import {CloudBackgroundOperationSchema,readCloudBackgroundTasks,writeCloudBackgroundTasks} from "./agent-background-tasks.js";
 import {cloudRuntimeQualificationMode} from "./runtime-config.js";
 import {runtimeCredentialQualificationJoin,runtimeNativeCapabilities} from "./runtime-selection.js";
+import { CloudAgentCredentialControlExchangeRequestSchema, exchangeCloudAgentCredentialControls } from "./agent-credential-mutations.js";
 import {adminComputerToolsVersion,computerToolsRejected} from "./computer-admin-workspaces.js";
 import {CloudComputerToolExecutionRequestSchema} from "./computer-tools-contract.js";
 import {ComputerToolConflictError,executeComputerTool,type ComputerToolsDependencies} from "./computer-tools.js";
@@ -213,6 +215,19 @@ export class DatabaseCloudAgentExecutionService {
   constructor(private readonly pool:pg.Pool,private readonly encryption:CloudAgentCredentialKeys,private readonly workosEnabled:boolean,
     private readonly codexRenewal=new DatabaseCodexAuthRenewal(pool,encryption),
     private readonly computerTools?:ComputerToolsDependencies,private readonly settingsEncryption:SecretEncryptionConfiguration={}){}
+
+  boot(scope:EngineScope,operation:CloudAgentBootOperation,value:unknown) {
+    return new DatabaseCloudAgentBootService(this.pool,this.encryption,this.workosEnabled,this.settingsEncryption,this.codexRenewal).execute(scope,operation,value);
+  }
+
+  credentialControls(scope:EngineScope,value:unknown) {
+    const request=CloudAgentCredentialControlExchangeRequestSchema.safeParse(value);
+    if(!request.success)throw new HttpError(422,"invalid_agent_execution","invalid_agent_execution");
+    for(const key of ["organizationId","workspaceId","generation","engineInstanceId"] as const)
+      if(request.data[key]!==scope[key])throw new HttpError(403,"cloud_validation_access_denied","cloud_validation_access_denied");
+    return withSystemTx(this.pool,tx=>exchangeCloudAgentCredentialControls(tx,{...scope,
+      bootId:request.data.bootId,writerEpoch:request.data.writerEpoch,workosEnabled:this.workosEnabled},request.data));
+  }
 
   private transaction<T>(operation:(tx:Tx)=>Promise<T>){
     return withCloudAgentCredentialRetry(()=>withSystemTx(this.pool,operation));

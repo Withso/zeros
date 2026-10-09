@@ -39,7 +39,7 @@ describe("Cursor delegated credential delivery", () => {
   it("fails with a typed missing credential instead of falling back to caller env", async () => {
     const lease = await CloudAgentLease.admit(admission(), async input => input.kind === "release" ? { released: true } : grant(), new AbortController().signal, { onRetirementFailure: vi.fn() });
     try {
-      const execution = { cwd: "/srv/zeros/workspace", lease, coordinator: { environment: () => ({}) }, productServers: [] } as unknown as executions.CloudProviderExecution;
+      const execution = { cwd: "/srv/zeros/workspace", lease, model: lease.admission.model, lifetime: lease, customization: lease.customization, coordinator: { environment: () => ({}) }, productServers: [] } as unknown as executions.CloudProviderExecution;
       expect(() => cloudCursorRequest(execution, "agent.create", { apiKey: "synthetic-caller-key" }))
         .toThrow(expect.objectContaining({ code: "cloud_agent_credential_required" }));
     } finally { await lease.close(); }
@@ -124,7 +124,7 @@ describe("Cursor delegated credential delivery", () => {
       const Constructor = CloudNativeBoundary as unknown as new (...args: unknown[]) => CloudNativeBoundary;
       const boundary = new Constructor(lease, workload, { directory: path.join(temporary, "native-view") }, env, { release: async () => {} });
       lease.attach(boundary);
-      const execution = { cwd: "/srv/zeros/state/workspaces/managed-worktree", lease, coordinator: boundary, productServers: [] } as unknown as executions.CloudProviderExecution;
+      const execution = { cwd: "/srv/zeros/state/workspaces/managed-worktree", lease, model: lease.admission.model, lifetime: lease, customization: lease.customization, coordinator: boundary, productServers: [] } as unknown as executions.CloudProviderExecution;
       vi.spyOn(executions, "cloudProviderExecution").mockImplementation(input => input === boundary ? execution : null);
       host = createCursorHostRuntime({ executionBoundary: boundary, cwd: temporary,
         env: { CURSOR_API_KEY: "synthetic-caller-key", OPENAI_API_KEY: "synthetic-other-provider-key",

@@ -34,7 +34,12 @@ interface PendingRequest {
   resolve: (result: unknown) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  envelope?: boolean;
+  cleanup?: () => void;
 }
+
+export type BridgeConnectionStatus = "connected" | "disconnected";
+export interface BridgeRequestOptions { timeoutMs?: number; signal?: AbortSignal }
 
 export interface BridgeClientOpts {
   /** Clean ws(s)://…/ws URL built by config.bridgeWsUrl. */
@@ -46,6 +51,13 @@ export interface BridgeClientOpts {
   accountToken?: string;
   /** Per-request timeout (ms). */
   requestTimeoutMs?: number;
+  /** Bounded harness handshake timeout; production-like default is 10s. */
+  connectTimeoutMs?: number;
+  /** Trusted private-TLS fixture routing, never loaded from operator env/CLI. */
+  webSocketFactory?: (url: string, protocols?: string[]) => WebSocket;
+  /** Optional trusted target-binding gate, checked before CONNECTED and
+   * diagnostic dispatch. Rejection closes this socket with a fixed error. */
+  verifyEngineReady?: (message: BridgeMessage) => boolean;
 }
 
 export class BridgeClient {
@@ -66,6 +78,8 @@ export class BridgeClient {
   private readyReject: ((error: Error) => void) | null = null;
   private readyTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly reqTimeout: number;
+  private connectionStatus: BridgeConnectionStatus = "disconnected";
+  private readonly statusListeners = new Set<(status: BridgeConnectionStatus) => void>();
 
   engineRoot = "";
   engineVersion = "";
@@ -79,6 +93,10 @@ export class BridgeClient {
       this.reqTimeout > 10 * 60_000
     ) {
       throw new Error("bridge request timeout is invalid");
+    }
+    if (opts.connectTimeoutMs !== undefined && (!Number.isSafeInteger(opts.connectTimeoutMs) ||
+        opts.connectTimeoutMs < 100 || opts.connectTimeoutMs > 30_000)) {
+      throw new Error("bridge connect timeout is invalid");
     }
     if (
       opts.cloudToken !== undefined &&
@@ -105,15 +123,15 @@ export class BridgeClient {
             `zeros-cloud-token.${Buffer.from(this.opts.cloudToken, "utf8").toString("base64url")}`,
           ]
         : undefined;
-      const clientOptions = undefined;
-      const ws = protocols
+      const clientOptions = { followRedirects: false };
+      const ws = this.opts.webSocketFactory ? this.opts.webSocketFactory(this.opts.url, protocols) : protocols
         ? new WebSocket(this.opts.url, protocols, clientOptions)
         : new WebSocket(this.opts.url, clientOptions);
       this.ws = ws;
 
       this.readyTimer = setTimeout(
-        () => this.failAll("ws ENGINE_READY timed out (10s)"),
-        10_000,
+        () => this.failAll("ws ENGINE_READY timed out"),
+        this.opts.connectTimeoutMs ?? 10_000,
       );
       this.readyTimer.unref?.();
       ws.on("error", (err) =>
@@ -138,6 +156,15 @@ export class BridgeClient {
   }
 
   private dispatch(msg: BridgeMessage): void {
+    if (msg.type === "ENGINE_READY" && this.opts.verifyEngineReady) {
+      let verified = false;
+      try { verified = this.opts.verifyEngineReady(msg) === true; } catch { /* Fixed refusal below. */ }
+      if (!verified) {
+        this.failAll("bridge ENGINE_READY rejected");
+        this.close();
+        return;
+      }
+    }
     for (const listener of this.messageListeners) {
       try {
         listener(msg);
@@ -161,6 +188,7 @@ export class BridgeClient {
               ? { authToken: this.opts.accountToken }
               : {}),
           });
+          this.publishStatus("connected");
           if (this.readyTimer) clearTimeout(this.readyTimer);
           this.readyTimer = null;
           this.readyResolve?.({
@@ -188,7 +216,8 @@ export class BridgeClient {
         if (p) {
           clearTimeout(p.timer);
           this.pending.delete(String(msg.requestId));
-          p.resolve(msg.result);
+          p.cleanup?.();
+          p.resolve(p.envelope ? msg : msg.result);
         }
         break;
       }
@@ -197,7 +226,9 @@ export class BridgeClient {
         if (p) {
           clearTimeout(p.timer);
           this.pending.delete(String(msg.requestId));
-          p.reject(new Error(`${String(msg.code)}: ${String(msg.message)}`));
+          p.cleanup?.();
+          if (p.envelope) p.resolve(msg);
+          else p.reject(new Error(`${String(msg.code)}: ${String(msg.message)}`));
         }
         break;
       }
@@ -230,10 +261,15 @@ export class BridgeClient {
    * primitive for live provider qualification; callers still receive every
    * inbound frame through the schema-validating engine. */
   sendMessage(fields: ClientBridgeMessage): string {
+    const id = randomUUID();
+    this.writeMessage(fields, id);
+    return id;
+  }
+
+  private writeMessage(fields: ClientBridgeMessage, id: string): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error("bridge WebSocket is not open");
     }
-    const id = randomUUID();
     // `browser` is the single canonical client-origin discriminator in the
     // shared protocol. Force it here so an operator call site cannot recreate
     // the historical non-canonical source discriminator that the engine
@@ -245,7 +281,21 @@ export class BridgeClient {
       timestamp: Date.now(),
     };
     this.ws.send(JSON.stringify(envelope));
-    return id;
+  }
+
+  get status(): BridgeConnectionStatus { return this.connectionStatus; }
+
+  onStatusChange(listener: (status: BridgeConnectionStatus) => void): () => void {
+    this.statusListeners.add(listener);
+    return () => { this.statusListeners.delete(listener); };
+  }
+
+  private publishStatus(status: BridgeConnectionStatus): void {
+    if (this.connectionStatus === status) return;
+    this.connectionStatus = status;
+    for (const listener of this.statusListeners) {
+      try { listener(status); } catch { /* Observers cannot disrupt protocol cleanup. */ }
+    }
   }
 
   /** Observe sanitized protocol frames for operator-only qualification logic.
@@ -257,18 +307,37 @@ export class BridgeClient {
 
   /** WORKSPACE_REQUEST → result (e.g. op="file.tree", params={workspaceId:"local-main"}). */
   request(op: string, params: Record<string, unknown> = {}): Promise<unknown> {
+    return this.workspaceRequest(op, params, false);
+  }
+
+  /** Preserve the engine's exact response/error for the real renderer adapter.
+   * Cancellation ends this observer; it never cancels or resends VM work. */
+  requestEnvelope(op: string, params: Record<string, unknown> = {}, options: BridgeRequestOptions = {}): Promise<BridgeMessage> {
+    return this.workspaceRequest(op, params, true, options) as Promise<BridgeMessage>;
+  }
+
+  private workspaceRequest(op: string, params: Record<string, unknown>, envelope: boolean,
+    options: BridgeRequestOptions = {}): Promise<unknown> {
     return new Promise((resolve, reject) => {
-      const id = this.sendMessage({
-        type: "WORKSPACE_REQUEST",
-        source: "browser",
-        op,
-        params,
-      });
+      const timeoutMs = options.timeoutMs ?? this.reqTimeout;
+      if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10 * 60_000)
+        return reject(new Error("bridge request timeout is invalid"));
+      if (options.signal?.aborted) return reject(new Error("bridge request aborted"));
+      const id = randomUUID();
+      const fail = (error: Error) => {
+        if (!this.pending.delete(id)) return;
+        cleanup(); reject(error);
+      };
+      const aborted = () => fail(new Error("bridge request aborted"));
       const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`request "${op}" timed out (${this.reqTimeout}ms)`));
-      }, this.reqTimeout);
-      this.pending.set(id, { resolve, reject, timer });
+        fail(new Error(`request "${op}" timed out (${timeoutMs}ms)`));
+      }, timeoutMs);
+      const cleanup = () => { clearTimeout(timer); options.signal?.removeEventListener("abort", aborted); };
+      this.pending.set(id, { resolve, reject, timer, envelope, cleanup });
+      options.signal?.addEventListener("abort", aborted, { once: true });
+      if (options.signal?.aborted) { aborted(); return; }
+      try { this.writeMessage({ type: "WORKSPACE_REQUEST", source: "browser", op, params }, id); }
+      catch (error) { fail(error instanceof Error ? error : new Error("bridge request failed")); }
     });
   }
 
@@ -326,6 +395,7 @@ export class BridgeClient {
   }
 
   private failAll(reason: string): void {
+    this.publishStatus("disconnected");
     if (this.readyTimer) clearTimeout(this.readyTimer);
     this.readyTimer = null;
     const error = new Error(reason);
@@ -334,6 +404,7 @@ export class BridgeClient {
     this.readyReject = null;
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
+      p.cleanup?.();
       p.reject(error);
     }
     this.pending.clear();

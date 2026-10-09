@@ -10,7 +10,7 @@ conversation; they are not conversation IDs or live route keys.
 | ----------------- | -------------------------- | -------------------------- | ------------------------------ | ------------------------------------------------------------------------------ |
 | `workspaceId`     | Zeros                      | Workspace lifecycle        | Yes                            | Repository/worktree ownership and process policy                               |
 | `conversationId`  | Zeros                      | Chat lifecycle             | Yes (`chats.id`)               | Transcript, title, settings, archive/pin, and sync owner                       |
-| `executionId`     | Zeros engine               | One live adapter execution | No                             | IPC routing, stream ownership, cancellation, permissions, and in-memory caches |
+| `executionId`     | Zeros engine               | One live adapter execution | Cloud receipt audit only; not chat rows | IPC routing, stream ownership, cancellation, permissions, and in-memory caches |
 | `providerBinding` | Provider, wrapped by Zeros | Provider resume lifecycle  | Yes (`chats.provider_binding`) | Opaque input to the selected adapter's resume operation                        |
 
 `providerMetadata` is descriptive provider state stored separately in
@@ -89,6 +89,20 @@ executions; only an actually live turn is projected as running.
 No live execution survives. The gateway mints a different `executionId` and
 passes the same provider binding to the adapter. Transcript and conversation
 identity remain unchanged.
+
+### Negotiated cloud warm execution
+
+`boot-owner-v1` can retain the exact eligible native execution across successful
+foreground turns. Every turn still has a distinct command, turn, claim and
+original native-handoff reservation; late frames cannot borrow the newer turn's
+identity. Reuse checks actor, provider/model, managed cwd, live source and admitted
+context. It never shares a HOME/history scope across chats or actors.
+
+Stop retires the whole conversation scope with positive proof, including late
+children. A later Send creates a fresh execution. Cloud queue receipts may retain
+execution IDs as immutable audit evidence; restored rows never reactivate that
+live route. Funding-owner identity is separate from the sending member and Git
+author. See [funding and warm-session lifetime](cloud-workspace/agent-authentication-and-language-tools.md#negotiated-boot-funding).
 
 ### Provider binding refinement
 

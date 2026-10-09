@@ -3,6 +3,15 @@ import type { CloudProviderExecution } from "../../../cloud-provider-execution";
 import { cloudClaudeTools } from "../cloud-tools";
 
 describe("Claude native cloud tools", () => {
+  it("reads the normalized lifetime and admitted metadata without a legacy lease", () => {
+    const assertLive = vi.fn();
+    const execution = Object.defineProperty({ mode: "actor-grant-v1", lifetime: { assertLive }, customization: null, productServers: [] },
+      "lease", { get: () => { throw new Error("Common native policy accessed the legacy lease"); } }) as unknown as CloudProviderExecution;
+    const options = cloudClaudeTools(execution);
+    expect(assertLive).toHaveBeenCalledOnce();
+    expect(options.strictMcpConfig).toBe(true);
+    expect(options.settingSources).toBeUndefined();
+  });
   it("keeps no-chrome and strict admitted MCP in the final cloud override",()=>{
     const options=cloudClaudeTools({lease:{assertLive:vi.fn()},productServers:[]} as unknown as CloudProviderExecution);
     expect(options.extraArgs).toEqual({"no-chrome":null,"thinking-display":"summarized"});

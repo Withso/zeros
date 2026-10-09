@@ -83,3 +83,62 @@ export function publicCustomization(document: CloudCustomizationDocument, bindin
       return { ...config, id: id!, secretRef: envKeys.length || headerKeys.length ? id! : null, envKeys, headerKeys };
     }) };
 }
+
+const bootUuid = z.string().uuid(), bootRevision = z.number().int().positive().safe(), bootDigest = z.string().regex(/^[a-f0-9]{64}$/);
+export const CloudBootCustomizationBindingSchema = z.object({
+  contextId: bootUuid, organizationId: bootUuid, workspaceId: bootUuid, generation: bootRevision,
+  engineInstanceId: bootUuid, bootId: bootUuid, writerEpoch: bootUuid, fundingOwnerUserId: bootUuid, fundingOwnerEpoch: bootRevision,
+  actorSessionId: bootUuid, actorUserId: bootUuid, actorDeviceId: bootUuid, actorDeviceKeyVersion: bootRevision,
+  actorFingerprint: bootDigest, authorityEpoch: bootRevision,
+  fundingGrant: z.discriminatedUnion("kind", [z.object({ kind: z.literal("owner") }).strict(),
+    z.object({ kind: z.literal("share"), grantId: bootUuid, grantRevision: bootRevision }).strict(),
+    z.object({ kind: z.literal("general-access"), grantId: bootUuid, grantRevision: bootRevision }).strict()]),
+  provider: z.enum(["claude", "cursor", "codex"]), conversationId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
+  model: z.string().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/),
+  cwd: z.string().min(1).max(2048).refine(value => /^\/(?:[^/\0]+(?:\/[^/\0]+)*)?$/.test(value) && !value.split("/").some(part => part === "." || part === "..")),
+}).strict().refine(value => value.fundingGrant.kind !== "owner" || value.actorUserId === value.fundingOwnerUserId);
+export type CloudBootCustomizationBinding = z.infer<typeof CloudBootCustomizationBindingSchema>;
+const bootHistory = z.object({ owner: bootDigest, currentKeyVersion: bootRevision,
+  keys: z.record(z.string().regex(/^\d+$/), z.string().regex(/^[A-Za-z0-9_-]{43}$/)) }).strict();
+export const CloudBootCustomizationSnapshotSchema = z.object({ version: z.literal(1), digest: bootDigest, repositoryDigest: bootDigest,
+  history: bootHistory.optional(),
+  servers: z.array(z.object({ server: z.discriminatedUnion("transport", [
+    CloudMcpServerSchema.options[0].omit({ id: true }), CloudMcpServerSchema.options[1].omit({ id: true }), CloudMcpServerSchema.options[2].omit({ id: true }),
+  ]),
+    scope: z.enum(["organization", "member", "repository"]), secretRef: bootUuid.nullable(), revision: z.number().int().nonnegative().safe() }).strict()).max(64),
+  skills: z.array(CloudSkillSchema).max(64), cursorTeamSettings: z.literal("disabled") }).strict();
+export type CloudBootCustomizationSnapshot = z.infer<typeof CloudBootCustomizationSnapshotSchema>;
+
+const bootPurpose = "zeros-cloud-boot-customization-v1";
+function bootCipherBinding(value: CloudBootCustomizationBinding, keyVersion: number, keys: CloudAgentCredentialKeys) {
+  const binding = CloudBootCustomizationBindingSchema.parse(value);
+  if (!Number.isSafeInteger(keyVersion) || keyVersion < 1) throw new Error("Customization encryption unavailable");
+  const encoded = keys.keys[keyVersion], root = Buffer.from(encoded ?? "", "base64url");
+  if (root.length !== 32 || root.toString("base64url") !== encoded) { root.fill(0); throw new Error("Customization encryption unavailable"); }
+  try { return { key: Buffer.from(hkdfSync("sha256", root, Buffer.alloc(0), bootPurpose, 32)),
+    aad: Buffer.from(JSON.stringify([bootPurpose, binding, keyVersion])) }; }
+  finally { root.fill(0); }
+}
+export function sealBootCustomization(value: CloudBootCustomizationSnapshot, binding: CloudBootCustomizationBinding, keys: CloudAgentCredentialKeys): CloudAgentCredentialEnvelope {
+  const snapshot = CloudBootCustomizationSnapshotSchema.parse(value);
+  const { key, aad } = bootCipherBinding(binding, keys.currentKeyVersion, keys), bytes = Buffer.from(JSON.stringify(snapshot));
+  try {
+    if (bytes.byteLength > 768 * 1024) throw new Error("Customization encryption unavailable");
+    return sealCredentialBytes(bytes, aad, key);
+  } finally { key.fill(0); bytes.fill(0); }
+}
+export function openBootCustomization(envelope: CloudAgentCredentialEnvelope, binding: CloudBootCustomizationBinding, keyVersion: number, keys: CloudAgentCredentialKeys): CloudBootCustomizationSnapshot {
+  const { key, aad } = bootCipherBinding(binding, keyVersion, keys); let bytes: Buffer | undefined;
+  try {
+    if (!Buffer.isBuffer(envelope.nonce) || envelope.nonce.length !== 12 || !Buffer.isBuffer(envelope.authTag) || envelope.authTag.length !== 16 ||
+        !Buffer.isBuffer(envelope.ciphertext) || envelope.ciphertext.byteLength > 768 * 1024) throw new Error("Customization encryption unavailable");
+    bytes = openCredentialBytes(envelope, aad, key);
+    return CloudBootCustomizationSnapshotSchema.parse(JSON.parse(bytes.toString("utf8")));
+  } catch { throw new Error("Customization encryption unavailable"); }
+  finally { key.fill(0); bytes?.fill(0); }
+}
+export function repositoryBootCustomizationDigest(value: CloudMcpServer[], binding: CloudBootCustomizationBinding, keyVersion: number, keys: CloudAgentCredentialKeys): string {
+  const repository = CloudRepositoryMcpSchema.parse(value), { key, aad } = bootCipherBinding(binding, keyVersion, keys);
+  try { return createHmac("sha256", key).update(aad).update("\0repository\0").update(JSON.stringify(repository)).digest("hex"); }
+  finally { key.fill(0); }
+}

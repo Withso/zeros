@@ -6,7 +6,8 @@ const state = vi.hoisted(() => ({ role: "platform_owner" as string | null, featu
   designation: { designationId: "0", credentialRevision: 1, enabled: false, models: [] as string[], lastUsedAt: null as string | null },
   reads: [] as { key: string | null; enabled: boolean }[] }));
 vi.mock("../../team/team-store", () => ({ useTeams: () => ({ me: { user: { id: "11111111-1111-4111-8111-111111111111", staffRole: state.role } } }),
-  getTeamStoreState: () => ({ me: { user: { id: "11111111-1111-4111-8111-111111111111", staffRole: state.role } } }) }));
+  getTeamStoreState: () => ({ me: { user: { id: "11111111-1111-4111-8111-111111111111", staffRole: state.role } } }),
+  getOrganizationStoreGeneration: () => 1 }));
 vi.mock("../internal-features", () => ({ useInternalFeatureActive: () => state.feature && state.role === "platform_owner" }));
 vi.mock("../../../state/use-cached-read", () => ({ useCachedRead: (_cache: unknown, key: string | null, _read: unknown, options: { enabled: boolean }) => {
   state.reads.push({ key, enabled: options.enabled });

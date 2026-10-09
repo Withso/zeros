@@ -67,7 +67,7 @@ describe("Cursor cloud product tools", () => {
     await writeFile(path.join(cwd, ".cursor/rules/always.mdc"), "---\nalwaysApply: true\n---\nADMITTED_RULE_SENTINEL");
     await writeFile(path.join(cwd, ".cursor/mcp.json"), '{"mcpServers":{"unadmitted":{}}}');
     await writeFile(path.join(root, "AGENTS.md"), "CALLER_ROOT_SENTINEL");
-    vi.spyOn(cloudExecution, "cloudProviderExecution").mockReturnValue({ cwd, productServers: [minted], lease: { customization: {} } } as unknown as cloudExecution.CloudProviderExecution);
+    vi.spyOn(cloudExecution, "cloudProviderExecution").mockReturnValue({ cwd, productServers: [minted], customization: {}, lease: { customization: {} } } as unknown as cloudExecution.CloudProviderExecution);
     const adapter = new CursorSdkAdapter(ctx());
     try {
       const options = { ...sessionOptions(), executionId: "cloud-projection-fixture", env: { CURSOR_API_KEY: "key", CURSOR_MODEL: "grok-4.6", ZEROS_PERMISSION_MODE: "plan" } };
@@ -114,7 +114,7 @@ describe("Cursor cloud product tools", () => {
   });
 
   it("loads only the user layer for a customized cloud lease", async () => {
-    vi.spyOn(cloudExecution, "cloudProviderExecution").mockReturnValue({ productServers: [minted], lease: { customization: {} } } as unknown as cloudExecution.CloudProviderExecution);
+    vi.spyOn(cloudExecution, "cloudProviderExecution").mockReturnValue({ productServers: [minted], customization: {}, lease: { customization: {} } } as unknown as cloudExecution.CloudProviderExecution);
     const adapter = new CursorSdkAdapter(ctx());
     try {
       await adapter.newSession(sessionOptions());

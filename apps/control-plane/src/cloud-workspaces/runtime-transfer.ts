@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import type pg from "pg";
 import type { RuntimeUpdateResult } from "./runtime-update-runner.js";
 import { audit } from "../audit.js";
-import { requireOrganizationCreationCapability, type StaffRole } from "../authz.js";
+import { HttpError, requireOrganizationCreationCapability, type StaffRole } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { CloudActiveRuntimeSchema, CloudAgentRuntimeSchema, type CloudActiveRuntime } from "./runtime-contract.js";
 import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
@@ -14,6 +14,7 @@ import { cloudRuntimePinValues, loadPinnedCloudRuntime } from "./runtime-selecti
 import { verifyRuntimeTransferReport } from "./runtime-transfer-proof.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
+import {readCurrentCloudAgentBootBinding,retireCloudAgentBootSources} from "./agent-boot-credentials.js";
 import { CloudResidentWitnessSchema, CloudRuntimeHandoffRequestSchema, CloudRuntimeHandoffReceiptSchema,
   detachedResident, sameHandoff, sameResidentHost, type CloudResidentWitness, type CloudRuntimeHandoffRequest,
   type CloudRuntimeHandoffReceipt } from "./runtime-handoff-contract.js";
@@ -142,7 +143,7 @@ export class DatabaseCloudRuntimeTransitionService {
   async register(input: {
     workspaceId: string; organizationId: string; generation: number; setupRunId: string; executionFence: number;
     engineInstanceId: string; token: string; protocolVersion: number; actorProtocolVersion?: number;
-    agentRuntime?: unknown; agentCustomizationVersion?: number;
+    agentRuntime?: unknown; agentCustomizationVersion?: number; cloudLocalCommandsVersion?:1;
   }) {
     const identity = CloudAgentRuntimeSchema.safeParse(input.agentRuntime);
     const reject = () => new Error("Runtime transition registration rejected");
@@ -175,21 +176,31 @@ export class DatabaseCloudRuntimeTransitionService {
         witness.baseCompatibilityId!==enrollment.active.baseCompatibilityId || witness.bootId!==enrollment.active.bootId ||
         witness.installerReceiptSha256!==enrollment.active.installerReceiptSha256 || witness.supervisorSessionId!==enrollment.active.supervisorSessionId) throw reject();
       if (!await this.qualified(tx,enrollment.transition_id,enrollment.direction==='rollback')) throw reject();
+      const localCommandsSupported = input.cloudLocalCommandsVersion === 1 && input.agentCustomizationVersion === 3;
+      const journal = await readCurrentCloudAgentBootBinding(tx, {
+        workspaceId: input.workspaceId, organizationId: input.organizationId,
+      }).catch(error => {
+        if (error instanceof HttpError) throw reject();
+        throw error;
+      });
+      if (journal.mode === "boot-owner-v1" && !localCommandsSupported) throw reject();
+      const agentJournalMode = journal.mode === "boot-owner-v1" ? "local" : "legacy";
       await this.transfer(tx,{...input,transitionId:enrollment.transition_id});
       await tx.query(`UPDATE cloud_workspace_runtime_enrollments SET consumed_at=clock_timestamp() WHERE id=$1`,[input.setupRunId]);
       const heartbeatToken=capability("zwh_");
       const updated=(await tx.query<{lease_expires_at: Date}>(`UPDATE cloud_workspace_engine_instances SET state='ready',
         heartbeat_token_hash=$2,registered_at=clock_timestamp(),last_heartbeat_at=clock_timestamp(),
-        lease_expires_at=clock_timestamp()+interval '90 seconds',actor_protocol_version=2,agent_customization_version=$3,
+        lease_expires_at=clock_timestamp()+interval '90 seconds',actor_protocol_version=2,agent_customization_version=$3,cloud_local_commands_version=$4,
         updated_at=clock_timestamp() WHERE id=$1 AND state='starting' RETURNING lease_expires_at`,
-      [input.engineInstanceId,hash(heartbeatToken),input.agentCustomizationVersion??null])).rows[0];
+      [input.engineInstanceId,hash(heartbeatToken),input.agentCustomizationVersion??null,localCommandsSupported?1:null])).rows[0];
       if (!updated) throw reject();
       await tx.query(`UPDATE cloud_workspace_runtime_transitions SET phase=$2,updated_at=clock_timestamp() WHERE transition_id=$1`,
       [enrollment.transition_id,enrollment.direction==='rollback'?'rollback_checking':'checking']);
       await audit(tx,input.organizationId,null,"cloud_workspace.runtime_transfer_registered",{
         workspaceId:input.workspaceId,transitionId:enrollment.transition_id,generation:input.generation,engineInstanceId:input.engineInstanceId });
       return {version:1 as const,audience:"zeros-cloud-workspace-engine-registration-v1",engineInstanceId:input.engineInstanceId,
-        durableRecordConnected:true as const,leaseExpiresAtMs:updated.lease_expires_at.getTime(),
+        durableRecordConnected:true as const,...(localCommandsSupported?{cloudLocalCommandsVersion:1 as const,agentJournalMode,
+          ...(journal.mode==="boot-owner-v1"?{agentSourceWriterEpoch:journal.binding.writerEpoch}:{})}:{}),leaseExpiresAtMs:updated.lease_expires_at.getTime(),
         heartbeat:{endpoint:this.options.heartbeatEndpoint!,token:heartbeatToken,intervalMs:30_000}};
     });
   }
@@ -361,6 +372,8 @@ export class DatabaseCloudRuntimeTransitionService {
         if (journal.phase !== "uncertain" && journal.deadline_at > now) {
           if (journal.phase === "consumed") {
             await this.retireSource(tx, claim, row.source_generation);
+            await retireCloudAgentBootSources(tx,{...claim,generation:row.source_generation},
+              {kind:"resident-consumed",transitionId:claim.transitionId,engineInstanceId:row.source_engine_instance_id});
             await tx.query(`UPDATE cloud_workspace_runtime_handoffs SET phase='source_retired',source_retired_at=clock_timestamp()
               WHERE transition_id=$1`, [claim.transitionId]);
           }
@@ -565,6 +578,8 @@ export class DatabaseCloudRuntimeTransitionService {
       if (row.phase !== "staged" || journal.phase !== "consumed") return false;
       if (!(await tx.query("SELECT 1 WHERE $1::timestamptz>clock_timestamp()", [journal.deadline_at])).rowCount) return false;
       await this.retireSource(tx, claim, row.source_generation);
+      await retireCloudAgentBootSources(tx,{...claim,generation:row.source_generation},
+        {kind:"resident-consumed",transitionId:claim.transitionId,engineInstanceId:row.source_engine_instance_id});
       await tx.query(`UPDATE cloud_workspace_runtime_handoffs SET phase='source_retired',source_retired_at=clock_timestamp()
         WHERE transition_id=$1`, [claim.transitionId]);
       return true;

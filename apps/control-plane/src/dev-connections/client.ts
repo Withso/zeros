@@ -38,6 +38,12 @@ export const ReferenceSchema = z
     expiresAt: z.string().datetime(),
   })
   .strict();
+export const ConditionalRemovalRequestSchema=z.object({version:z.literal(1),operationId:uuid,connectionId:uuid,bindingId:uuid,
+  expectedRevision:z.number().int().positive().safe(),expectedConsentRevision:z.number().int().positive().safe(),
+  scope:z.enum(["organization","global"])}).strict();
+export const ConditionalRemovalResponseSchema=z.object({version:z.literal(1),operationId:uuid,connectionId:uuid,
+  scope:z.enum(["organization","global"]),removed:z.literal(true)}).strict();
+export type ConditionalRemovalRequest=z.infer<typeof ConditionalRemovalRequestSchema>;
 export type RestoreMapping = {
   issuer: string;
   subject: string;
@@ -147,6 +153,13 @@ export class DevConnectionClient {
     return this.request(`/v1/connections/${connectionId}${scope === "organization" ? "/consent" : ""}`, token,
       scope === "organization" ? null : undefined,
       scope === "organization" ? "PUT" : "DELETE");
+  }
+  async removeConditionally(token:string,value:ConditionalRemovalRequest){
+    const request=ConditionalRemovalRequestSchema.parse(value);
+    const response=ConditionalRemovalResponseSchema.parse(await this.request("/v1/connections/removals",token,request));
+    if(response.operationId!==request.operationId||response.connectionId!==request.connectionId||response.scope!==request.scope)
+      throw new HttpError(503,"dev_connection_unavailable","dev_connection_unavailable");
+    return response;
   }
   async consent(token:string,id:string,consent:ConnectionReference["consent"]) {
     return this.request(`/v1/connections/${uuid.parse(id)}/consent`,token,ConsentSchema.parse(consent),"PUT");

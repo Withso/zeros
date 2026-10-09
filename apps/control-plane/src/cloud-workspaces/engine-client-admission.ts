@@ -1,6 +1,6 @@
 import type pg from "pg";
 import type {AuthedUser} from "../auth.js";
-import { CLOUD_ACTOR_TOKEN_PATTERN, DatabaseCloudWorkspaceActorSessionService } from "./actor-sessions.js";
+import { CLOUD_ACTOR_TOKEN_PATTERN, DatabaseCloudWorkspaceActorSessionService,type CloudDirectProviderEndpointLookup } from "./actor-sessions.js";
 import { normalizeCloudWorkspaceGrantAudience } from "./grants.js";
 import type { CloudWorkspaceDeviceProof } from "./replicas.js";
 
@@ -59,6 +59,7 @@ export type DatabaseCloudWorkspaceEngineClientAdmissionServiceOptions = {
   ttlSeconds?: number;
   workosEnabled?: boolean;
   relayEnabled?: boolean;
+  directProviderEndpoint?:CloudDirectProviderEndpointLookup;
 };
 
 /** Actor protocol 2 is the sole executable desktop admission. Historical v1
@@ -79,10 +80,11 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
       : null;
     this.actors = bridgeUrl ? new DatabaseCloudWorkspaceActorSessionService({
       pool: options.pool, enginePort: options.enginePort, bridgeUrl, workosEnabled: options.workosEnabled === true,
+      ...(options.directProviderEndpoint?{directProviderEndpoint:options.directProviderEndpoint}:{}),
     }) : null;
   }
 
-  async issueActor(input:{organizationId:string;workspaceId:string;actorUserId:string;proof?:CloudWorkspaceDeviceProof;authenticatedUser:AuthedUser}) {
+  async issueActor(input:{organizationId:string;workspaceId:string;actorUserId:string;proof?:CloudWorkspaceDeviceProof;authenticatedUser:AuthedUser;directProviderVersion?:1;connectionChannel?:"control-plane-websocket"}) {
     if (!this.actors || !input.proof) throw new CloudWorkspaceEngineClientAdmissionError("engine_client_admission_invalid","A trusted device is required for actor admission");
     return this.actors.issue({...input,proof:input.proof});
   }

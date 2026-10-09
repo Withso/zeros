@@ -1,4 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { CloudActorAuthorityRegistry } from "../agents/cloud-actor-authority";
+import type { CloudActionDeliveryGuard } from "../cloud-action-runtime";
 import type { EngineMessage } from "../types";
 import { ZerosEngine } from "../zeros-engine";
 import type { TransportClient } from "../transport/types";
@@ -7,7 +10,30 @@ const prototype = ZerosEngine.prototype as unknown as {
   handleAgentMessage(this: unknown, message: EngineMessage, client: TransportClient): Promise<void>;
   isHostRelayClient(this: unknown, client: TransportClient): boolean;
   handleLegacyCloudAction(this: unknown, message: EngineMessage, client: TransportClient): Promise<void>;
+  authorizeCloudAgentAction(this: unknown, executionId: string, actorSessionId?: string): Promise<void | CloudActionDeliveryGuard>;
 };
+
+function bootAuthorityFixture(foreignUser = false, afterAuthorize?: () => void) {
+  const scope = { organizationId: randomUUID(), workspaceId: randomUUID(), generation: 1, engineInstanceId: randomUUID(),
+    bootId: randomUUID(), writerEpoch: randomUUID(), fundingOwnerUserId: randomUUID(), fundingOwnerEpoch: 1 };
+  const actorSessionId = randomUUID(), controller = new AbortController();
+  const actors = new CloudActorAuthorityRegistry({ scope, engineLive: () => true, time: { wall: () => 1_000_000, monotonic: () => 0 } });
+  actors.confirm({ scope, actorSessionId, authorityEpoch: 1, confirmedUntilMs: 1_009_000, fundingConsentVersion: 1,
+    fundingGrant: foreignUser ? { kind: "share", grantId: randomUUID(), grantRevision: 1 } : { kind: "owner" },
+    actor: { userId: foreignUser ? randomUUID() : scope.fundingOwnerUserId, deviceId: randomUUID(), deviceKeyVersion: 1,
+      fingerprint: "a".repeat(64), role: foreignUser ? "developer" : "owner" } });
+  const original = { executionId: "execution", actor: { userId: scope.fundingOwnerUserId } }, record = { claim: original, controller };
+  let scheduled = false;
+  const request = vi.fn(), authorizeActor = vi.fn((id: string, capability: "read" | "run") => {
+    const actor = actors.authorizeCurrent(id, capability);
+    if (!scheduled) { scheduled = true; if (afterAuthorize) queueMicrotask(afterAuthorize); }
+    return actor;
+  });
+  const engine = { cloudAgentBoot: { active: true, authorizeActor },
+    cloudLocalNativePump: { claimForExecution: () => original, record: () => record }, cancelRequested: new Set<string>(),
+    cloudRuntimeRegistration: { agentExecutionRequest: request }, authorizeCloudAgentAction: prototype.authorizeCloudAgentAction };
+  return { actors, actorSessionId, engine, controller, request };
+}
 
 function fixture(cloud = true) {
   const engine = {
@@ -28,6 +54,39 @@ function fixture(cloud = true) {
 }
 
 describe("cloud decisions across devices", () => {
+  it.each(["allowed", "foreign-user", "revoked", "stopped"])("authorizes an original boot control locally (%s)", async scenario => {
+    const f = bootAuthorityFixture(scenario === "foreign-user");
+    try {
+      if (scenario === "revoked") f.actors.revoke(f.actorSessionId);
+      if (scenario === "stopped") f.controller.abort();
+      const result = prototype.authorizeCloudAgentAction.call(f.engine, "execution", f.actorSessionId);
+      if (scenario === "allowed") {
+        const guard = await result; expect(guard).toBeTypeOf("function");
+        expect(() => guard?.()).not.toThrow();
+      } else await expect(result).rejects.toMatchObject({ code: "cloud_actor_authority_rejected" });
+      expect(f.request).not.toHaveBeenCalled();
+    } finally { f.actors.dispose(); }
+  });
+  it.each(["AGENT_SET_MODE", "AGENT_SET_MODEL", "AGENT_UPDATE_CONFIG", "AGENT_COMPACT", "AGENT_GOAL_SET", "AGENT_GOAL_CLEAR", "AGENT_RETRY_SAFETY_REVIEW"] as const)(
+    "rechecks original actor and Stop authority immediately before %s handoff", async type => {
+      for (const cause of ["revocation", "stop", "current"] as const) {
+        const f = bootAuthorityFixture(false, () => {
+          if (cause === "revocation") f.actors.revoke(f.actorSessionId);
+          if (cause === "stop") f.controller.abort();
+        });
+        try {
+          const { engine, client, dispatch } = fixture(), native = vi.fn(async () => null);
+          Object.assign(engine, f.engine, { remoteMayNotActOnSession: () => false, sessionLoadResponses: new Map(),
+            cloudGoalClaim: () => null, scrubRelayUpdateConfigEnv: (env: unknown) => env });
+          Object.assign(engine.agents, { setMode: native, setModel: native, updateConfig: native, compactContext: native,
+            setGoal: native, clearGoal: native, retryDeniedAction: native });
+          Object.assign(client, { cloudActor: { sessionId: f.actorSessionId, role: "owner" }, authorized: () => true });
+          await dispatch({ type, agentId: "claude", sessionId: "execution", modeId: "plan", model: "model", env: {}, update: {}, retryId: "retry" });
+          expect(native).toHaveBeenCalledTimes(cause === "current" ? 1 : 0);
+          expect(f.request).not.toHaveBeenCalled();
+        } finally { f.actors.dispose(); }
+      }
+    });
   it.each(["AGENT_PERMISSION_RESPONSE", "AGENT_QUESTION_RESPONSE"])("keeps old unnegotiated %s compatible while requiring ownership after negotiation", async type => {
     const { engine, client } = fixture();
     const handle = vi.fn(async (input: { kind: string }) => input.kind === "read" ? null : { outcome: "delivered" });

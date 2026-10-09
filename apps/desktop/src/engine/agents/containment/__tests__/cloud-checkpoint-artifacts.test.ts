@@ -39,6 +39,107 @@ async function fixture() {
   return { root, roots, repository, base, chunks, putChunk, deadlineAtMs: Date.now() + 30_000 };
 }
 
+const localCheckpointRoot = (data: string, logicalRepository: string) => path.join(data, "cloud-local-command-checkpoints",
+  createHash("sha256").update(path.resolve(logicalRepository)).digest("hex"));
+async function sealedCheckpointFixture() {
+  const f = await fixture(), logicalRepository = "/srv/zeros/workspace";
+  const root = localCheckpointRoot(f.roots.data, logicalRepository);
+  const files = new Map([
+    ["manifest.json", Buffer.from('{"version":1,"sealedSnapshot":"engine-owned"}')],
+    ["ledger/000000.part", Buffer.from("immutable FULL ledger snapshot")],
+    ["normal/000000.part", Buffer.from("frozen NORMAL checkpoint")],
+  ]);
+  for (const [file, bytes] of files) {
+    await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true, mode: 0o700 });
+    await fs.writeFile(path.join(root, file), bytes, { mode: 0o600 });
+  }
+  return { ...f, roots: { ...f.roots, logicalRepository }, checkpointRoot: root, files };
+}
+
+describe.runIf(process.platform === "linux")("sealed local command checkpoint archive scope", () => {
+  it("archives only the engine-owned logical-root manifest and bounded snapshot parts", async () => {
+    const f = await sealedCheckpointFixture();
+    for (const file of ["live.sqlite", "live.sqlite-wal", "live.sqlite-shm", "config.json", ".env", "ledger/000000.sqlite",
+      "ledger/00000.part", "normal/0000000.part", "normal/nested/000000.part", "other/000000.part"]) {
+      await fs.mkdir(path.dirname(path.join(f.checkpointRoot, file)), { recursive: true });
+      await fs.writeFile(path.join(f.checkpointRoot, file), "must stay private");
+    }
+    const unrelated = localCheckpointRoot(f.roots.data, path.join(f.root, "other-repository"));
+    await fs.mkdir(unrelated, { recursive: true }); await fs.writeFile(path.join(unrelated, "manifest.json"), "other checkout");
+    const repositoryCopy = localCheckpointRoot(f.repository, f.roots.logicalRepository);
+    await fs.mkdir(repositoryCopy, { recursive: true }); await fs.writeFile(path.join(repositoryCopy, "manifest.json"), "repository-controlled");
+    const archive = await captureCloudNativeCheckpoint(f);
+    expect(archive.files.filter(file => file.scope === "local-command-checkpoint").map(file => file.path).sort()).toEqual([...f.files.keys()].sort());
+    expect(Buffer.concat([...f.chunks.values()]).toString()).not.toMatch(/must stay private|other checkout|repository-controlled/);
+    expect(validateCloudNativeCheckpoint(archive)).toBe(archive);
+    const repository = path.join(f.root, "restored"), data = path.join(f.root, "restored-state");
+    await fs.mkdir(repository); git(repository, "init", "-q"); await fs.mkdir(data, { mode: 0o700 });
+    await restoreCloudNativeCheckpoint({ archive, roots: { ...f.roots, repository, data }, deadlineAtMs: f.deadlineAtMs,
+      getChunk: async id => f.chunks.get(id)! });
+    const restoredRoot = localCheckpointRoot(data, f.roots.logicalRepository);
+    for (const [file, bytes] of f.files) expect(await fs.readFile(path.join(restoredRoot, file))).toEqual(bytes);
+    await expect(fs.stat(path.join(restoredRoot, "live.sqlite"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+  it("includes frozen snapshot bytes in the native fingerprint without enrolling a live queue", async () => {
+    const f = await sealedCheckpointFixture(), first = await fingerprintCloudNativeCheckpoint(f);
+    await fs.writeFile(path.join(f.checkpointRoot, "ledger/000000.part"), "a different sealed snapshot");
+    expect(await fingerprintCloudNativeCheckpoint(f)).not.toBe(first);
+  });
+  it.each(["manifest.json", "ledger/000000.part", "normal/000000.part"])("refuses an oversized %s before any upload", async file => {
+    const f = await sealedCheckpointFixture(), target = await fs.open(path.join(f.checkpointRoot, file), "r+");
+    try { await target.truncate((file === "manifest.json" ? 256 * 1024 : 16 * 1024 * 1024) + 1); } finally { await target.close(); }
+    const putChunk = vi.fn(f.putChunk);
+    await expect(captureCloudNativeCheckpoint({ ...f, putChunk })).rejects.toThrow(/unsafe|invalid/);
+    expect(putChunk).not.toHaveBeenCalled();
+  });
+  it.each(["root-link", "part-link", "part-hardlink"])("refuses %s without reading/uploading its target", async kind => {
+    const f = await sealedCheckpointFixture(), privateFile = path.join(f.root, "private-authority");
+    await fs.writeFile(privateFile, "must not be uploaded");
+    if (kind === "root-link") {
+      await fs.rm(f.checkpointRoot, { recursive: true }); await fs.symlink(f.root, f.checkpointRoot);
+    } else {
+      const target = path.join(f.checkpointRoot, "ledger/000000.part"); await fs.unlink(target);
+      if (kind === "part-link") await fs.symlink(privateFile, target); else await fs.link(privateFile, target);
+    }
+    const putChunk = vi.fn(f.putChunk);
+    await expect(captureCloudNativeCheckpoint({ ...f, putChunk })).rejects.toThrow(/unsafe|invalid/);
+    expect(putChunk).not.toHaveBeenCalled();
+  });
+  it("refuses forged live-database, traversal and malformed part paths before publication", async () => {
+    const f = await sealedCheckpointFixture(), archive = await captureCloudNativeCheckpoint(f);
+    const index = archive.files.findIndex(file => file.scope === "local-command-checkpoint"); expect(index).toBeGreaterThanOrEqual(0);
+    for (const file of ["../manifest.json", "live.sqlite", "live.sqlite-wal", "ledger/00000.part", "normal/0000000.part", "ledger/nested/000000.part", "other/000000.part"]) {
+      const invalid = structuredClone(archive); invalid.files[index]!.path = file;
+      expect(() => validateCloudNativeCheckpoint(invalid)).toThrow(/unsafe|invalid/);
+    }
+    const repository = path.join(f.root, "restored"); await fs.mkdir(repository); git(repository, "init", "-q");
+    const getChunk = vi.fn(async (id: string) => f.chunks.get(id)!);
+    await expect(restoreCloudNativeCheckpoint({ archive, roots: { repository }, deadlineAtMs: f.deadlineAtMs, getChunk })).rejects.toThrow(/unsafe|invalid/);
+    expect(getChunk).not.toHaveBeenCalled();
+  });
+  it.runIf(process.getuid?.() === 0)("restores the ledger, NORMAL parts and manifest with private engine identity", async () => {
+    const f = await sealedCheckpointFixture(), archive = await captureCloudNativeCheckpoint(f);
+    const repository = path.join(f.root, "restored"), data = path.join(f.root, "restored-state");
+    await fs.chmod(f.root, 0o755); await fs.mkdir(repository); git(repository, "init", "-q");
+    execFileSync("/usr/bin/chown", ["-R", "10001:10001", repository]); await fs.mkdir(data, { mode: 0o700 });
+    await restoreCloudNativeCheckpoint({ archive, roots: { ...f.roots, repository, data }, identity: { uid: 10001, gid: 10001 },
+      privateIdentity: { uid: 0, gid: 0 }, deadlineAtMs: f.deadlineAtMs, getChunk: async id => f.chunks.get(id)! });
+    const root = localCheckpointRoot(data, f.roots.logicalRepository);
+    expect((await fs.stat(path.join(repository, ".git/HEAD"))).uid).toBe(10001);
+    for (const directory of [root, path.join(root, "ledger"), path.join(root, "normal")]) {
+      const stat = await fs.stat(directory); expect(stat.uid).toBe(0); expect(stat.mode & 0o777).toBe(0o700);
+    }
+    for (const file of f.files.keys()) {
+      const stat = await fs.stat(path.join(root, file)); expect(stat.uid).toBe(0); expect(stat.mode & 0o777).toBe(0o600);
+    }
+  });
+  it("keeps legacy capture unchanged when no private checkpoint root is installed", async () => {
+    const f = await fixture(), archive = await captureCloudNativeCheckpoint(f);
+    expect(archive.files.some(file => file.scope === "local-command-checkpoint")).toBe(false);
+    expect(validateCloudNativeCheckpoint(archive)).toBe(archive);
+  });
+});
+
 describe.runIf(process.platform === "linux")("native cloud checkpoint artifacts", () => {
   it("preserves native deletion fences in a fresh checkpoint generation",async()=>{
     const f=await fixture(),conversationId="deleted-conversation";

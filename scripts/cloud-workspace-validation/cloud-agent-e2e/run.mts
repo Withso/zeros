@@ -1,6 +1,6 @@
-import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, readlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -11,8 +11,13 @@ import { authenticateEngine, driveTurn, selectEngineWorkspace, keepActorAlive } 
 import { fixtureCredentialEnv, fixtureOuterArguments, fixtureTransportToken } from "./runtime-contract";
 import { buildSourceRuntime, createFixtureTls } from "./runtime";
 import { awaitRetirement, summarizeRetirement, type NamespaceOutcome, type RetirementEvidence } from "./retirement";
-import { freshNativeArtifacts, fixtureFileMatches } from "./artifacts";
+import { fixtureFileMatches } from "./artifacts";
 import { prepareUbuntuRootfs, UbuntuFixtureFailure } from "./ubuntu-rootfs";
+import { measureCurrentTurn } from "./baseline";
+import { measureBootOwnerConversation } from "./conversation-measurement";
+import { selectMeasurementOptions } from "./operator-options";
+import { configureFixtureMeasurement, createMeasurementReadyGate } from "./operator-boot";
+import { harnessFailureSite } from "./failure-site";
 
 const sourceRoot = process.cwd();
 const args = process.argv.slice(2);
@@ -20,6 +25,7 @@ function option(name: string, fallback: string) { const index = args.indexOf(nam
 const providers = selectProviders(option("--providers", "claude,codex,cursor").split(","));
 const mode = option("--credentials", "invalid");
 if (!["invalid", "environment"].includes(mode)) throw new HarnessFailure("operator_input_invalid");
+const measurement = selectMeasurementOptions(args, mode);
 const credentialEnv = fixtureCredentialEnv(mode as "invalid" | "environment", process.env, args.includes("--owner-authorized-provider-turns"));
 const scope = option("--scope", "strict");
 if (!["strict", "cpu-private-pid-fixture"].includes(scope)) throw new HarnessFailure("operator_input_invalid");
@@ -36,6 +42,7 @@ let cp: ReturnType<typeof createFixtureControlPlane> | undefined;
 let closed = false;
 let activeStage = "build";
 let failureDiagnosis: ReturnType<typeof diagnoseHarnessFailure> | undefined;
+let failureSite: ReturnType<typeof harnessFailureSite>;
 let linuxFixture: Awaited<ReturnType<typeof prepareUbuntuRootfs>> | undefined;
 let ubuntuBootstrapFailure: UbuntuFixtureFailure["bootstrap"] | undefined;
 let childClosed: Promise<NamespaceOutcome> | undefined;
@@ -89,10 +96,12 @@ try {
   activeStage = "control_plane";
   const tls = await createFixtureTls(scratch);
   cp = createFixtureControlPlane({ tls, credentials: { mode: "environment", env: credentialEnv },
+    requestDelay: measurement.requestDelay,
     allowedModels: Object.fromEntries(providers.map(provider => [provider, [models[provider]]])) });
-  const { root: _root, schema: _schema, cgroupRoot: _scope, ...attestation } = runtime.descriptor.active;
-  cp.configureRuntime({ profile: "zeros-cloud-worker-v4", ...attestation });
-  await cp.start();
+  configureFixtureMeasurement(cp, measurement.measurement);
+  const { runtimeId, manifestSha256, baseCompatibilityId, installerReceiptSha256, bootId, supervisorSessionId } = runtime.descriptor.active;
+  cp.configureRuntime({ profile: "zeros-cloud-worker-v4", runtimeId, manifestSha256, baseCompatibilityId, installerReceiptSha256, bootId, supervisorSessionId });
+  const { baseUrl } = await cp.start();
   stage({ stage: "control_plane", status: "passed" });
   const { publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const config = { outerMountNamespace: await readlink("/proc/self/ns/mnt"), outerPidNamespace: await readlink("/proc/self/ns/pid"), scope,
@@ -143,7 +152,9 @@ try {
   }
   if (Date.now() >= deadline) throw new HarnessFailure("engine_ready_timeout");
   activeStage = "authentication";
-  client = new BridgeClient({ url: `ws://127.0.0.1:${port}/ws`, cloudToken: cp.actorGrantToken, requestTimeoutMs: 20_000 });
+  const readyGate = createMeasurementReadyGate(cp, measurement.measurement);
+  client = new BridgeClient({ url: `ws://127.0.0.1:${port}/ws`, cloudToken: cp.actorGrantToken, requestTimeoutMs: 20_000,
+    ...(measurement.measurement === "boot-owner" ? { verifyEngineReady: readyGate.verify } : {}) });
   await authenticateEngine(client, () => {});
   stopHeartbeat = keepActorAlive(client);
   stage({ stage: "authentication", status: "passed" });
@@ -153,6 +164,29 @@ try {
   const engineWorkspaceId = selectEngineWorkspace(await client.request("workspace.list"), cp.identity);
   for (const provider of providers) {
     activeStage = "receipt";
+    if (measurement.measurement === "boot-owner") {
+      await measureBootOwnerConversation(client, { fixture: cp, engineReady: readyGate.ready(),
+        localProof: async (commandId, conversationId) => (await inspect("mirror-proof", { commandId, conversationId, scope: cp!.activeBootScope() })).proof,
+        engineWorkspaceId, provider, model: models[provider], conversationId: randomUUID(), userMessageId: randomUUID(),
+        permissionMode: provider === "claude" ? "bypass" : provider === "codex" ? "full-access" : "agent",
+        prompt: "Reply with the exact text fixture stream 73491.", expected: "auth-failure", timeoutMs: 120_000 },
+      ({ conversationId, turnKind, turnOrdinal, measurement: baseline }) => {
+        results.push({ provider, case: "boot_owner_invalid_auth_measurement", conversationId, turnKind, turnOrdinal, ...baseline });
+        stage({ stage: "receipt", status: "passed", provider, ...(baseline.turn.resultCode ? { code: baseline.turn.resultCode } : {}),
+          liveDeltaBytes: baseline.turn.liveDeltaBytes, replayDeltaBytes: baseline.turn.replayDeltaBytes, count: baseline.sendWindow.ingressCount });
+      });
+      continue;
+    }
+    if (measurement.measurement === "current") {
+      const baseline = await measureCurrentTurn(client, { fixture: cp, baseUrl, ca: await readFile(tls.ca),
+        engineWorkspaceId, provider, model: models[provider], conversationId: randomUUID(), userMessageId: randomUUID(),
+        permissionMode: provider === "claude" ? "bypass" : provider === "codex" ? "full-access" : "agent",
+        prompt: "Reply with the exact text fixture stream 73491.", expected: "auth-failure", timeoutMs: 120_000 });
+      results.push({ provider, case: "current_invalid_auth_measurement", ...baseline });
+      stage({ stage: "receipt", status: "passed", provider, ...(baseline.turn.resultCode ? { code: baseline.turn.resultCode } : {}),
+        liveDeltaBytes: baseline.turn.liveDeltaBytes, replayDeltaBytes: baseline.turn.replayDeltaBytes, count: baseline.sendWindow.ingressCount });
+      continue;
+    }
     const common = { workspaceId: engineWorkspaceId, provider, model: models[provider], requireCloudTurnProtocol: true,
       permissionMode: provider === "claude" ? "bypass" : provider === "codex" ? "full-access" : "agent", replayEvents: () => cp!.readEvents(), timeoutMs: 120_000 };
     const denied = await driveTurn(client, { ...common, conversationId: `fixture-${provider}-denied-${randomUUID()}`, commandId: randomUUID(),
@@ -189,6 +223,7 @@ try {
   }
 } catch (error) {
   failureDiagnosis = diagnoseHarnessFailure(error);
+  failureSite = harnessFailureSite(error);
   if (error instanceof UbuntuFixtureFailure) ubuntuBootstrapFailure = error.bootstrap;
   stage({ stage: activeStage, status: "failed", code: failureDiagnosis.code });
   process.exitCode = 1;
@@ -203,11 +238,12 @@ try {
     pidNamespaceRetired: retirementSummary.pidNamespaceRetired,
     cgroupResourceQualified: false,
     outcome: process.exitCode ? "failed" : mode === "invalid" ? "pre_auth_only" : "response_cases_passed_matrix_pending", providers, results,
+    measurement: measurement.measurement, fixtureRequestDelayMs: measurement.requestDelayMs,
     pending: mode === "invalid" ? pending : ["spawn_failure", "mcp_0canvas_success", "excluded_project_plugin_mcp_launch_markers"], trace,
     ...(namespaceFailure ? { namespace: { code: namespaceFailure.code, diagnostics: namespaceFailure.diagnostics, errno: namespaceFailure.errno, step: namespaceFailure.step, rootChecks: namespaceFailure.rootChecks } } : {}),
     fixture: fixtureLedger, ...(procIdentity ? { procIdentity } : {}), ...(engineIdentity ? { engineIdentity: { engineUid: engineIdentity.engineUid, engineGid: engineIdentity.engineGid,
       uidMap: engineIdentity.uidMap, gidMap: engineIdentity.gidMap, identityObserved: true } } : {}), ...(failureDiagnosis ? { failure: failureDiagnosis } : {}),
-    ...(ubuntuBootstrapFailure ? { ubuntuBootstrapFailure } : {}) };
+    ...(ubuntuBootstrapFailure ? { ubuntuBootstrapFailure } : {}), ...(failureSite ? { failureSite } : {}) };
   if (namespaceExit) Object.assign(report, { namespaceExit });
   if (namespaceFailures.length) Object.assign(report, { namespaceFailures });
   await writeFile(path.join(scratch, "evidence.json"), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });

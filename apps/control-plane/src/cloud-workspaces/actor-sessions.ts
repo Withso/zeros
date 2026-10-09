@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
+import {z} from "zod";
 import type {AuthedUser} from "../auth.js";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
@@ -8,12 +9,28 @@ import { assertCurrentCloudEngineAuthority } from "./engine-authority.js";
 import { consumeCloudWorkspaceDeviceProof, type CloudWorkspaceDeviceProof } from "./replicas.js";
 import type { CloudEngineRelayGrant } from "./engine-client-admission.js";
 import { requireSupportedCloudWorkspaceGeneration } from "./supported-generation.js";
+import {readCurrentCloudAgentBootBinding} from "./agent-boot-credentials.js";
+import {CloudAgentBootScopeSchema,type CloudAgentBootScope} from "./agent-boot-contract.js";
 
 export const CLOUD_ACTOR_ADMISSION_PATH = "/internal/v2/cloud-workspaces/engine/client-admission";
 export const CLOUD_ACTOR_ADMISSION_AUDIENCE = "zeros-cloud-workspace-engine-client-admission-v2";
 export const CLOUD_ACTOR_TOKEN_PATTERN = /^zwa_[A-Za-z0-9_-]{43}$/;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const hash = (token:string) => createHash("sha256").update(token).digest();
+const actorGrantSchema=z.object({version:z.literal(2),audience:z.literal(CLOUD_ACTOR_ADMISSION_AUDIENCE),workspaceId:z.string().uuid(),organizationId:z.string().uuid(),
+  generation:z.number().int().positive().safe(),authorityEpoch:z.number().int().positive().safe(),engineInstanceId:z.string().uuid(),
+  remotePort:z.number().int().min(1024).max(65535),grantToken:z.string().regex(CLOUD_ACTOR_TOKEN_PATTERN),expiresAt:z.string().datetime(),bridgeUrl:z.string().url()}).strict();
+export const CloudActorConnectionGrantSchema=actorGrantSchema.extend({bootScope:CloudAgentBootScopeSchema.optional(),directProvider:z.object({
+  version:z.literal(1),provider:z.literal("boat"),url:z.string().max(2048),}).strict().optional()}).strict().superRefine((value,context)=>{
+  if(value.bootScope&&(["organizationId","workspaceId","generation","engineInstanceId"] as const).some(field=>value.bootScope![field]!==value[field])||
+    value.directProvider&&(!value.bootScope||!directUrl(value.directProvider.url,value.remotePort)))context.addIssue({code:"custom",message:"Direct provider binding is inconsistent"});
+});
+function directUrl(value:string,port:number):boolean {
+  try{const url=new URL(value);return value.length<=2048&&url.toString()===value&&url.protocol==="wss:"&&!url.port&&!url.username&&!url.password&&!url.search&&!url.hash&&url.pathname==="/ws"&&
+    new RegExp(`^[a-z0-9](?:[a-z0-9-]{0,51}[a-z0-9])?-${port}\\.on\\.boat\\.dev$`).test(url.hostname)&&port>=1024&&port<=65535&&port!==22222;}catch{return false;}
+}
+export type CloudDirectProviderLookupScope={organizationId:string;workspaceId:string;generation:number;engineInstanceId:string;resourceId:string;remotePort:number};
+export type CloudDirectProviderEndpointLookup=(scope:CloudDirectProviderLookupScope)=>Promise<{url:string;headerName?:string;headerValue?:string}>;
 function rejected():never { throw new HttpError(401,"cloud_actor_admission_rejected","Workspace actor admission was rejected"); }
 function clientUpdateRequired():never { throw new HttpError(409,"cloud_workspace_client_update_required","Update Zeros to connect to cloud workspaces."); }
 
@@ -54,6 +71,26 @@ async function recordedActorAuthority(
   return authority;
 }
 
+/** Background confirmation of an already consumed actor. Disconnect does not
+ * erase accepted work; current account/auth/device/access proof still does. */
+export async function confirmDetachedCloudActor(tx:Tx,scope:Omit<CloudActorEngineScope,"heartbeatToken">,
+  actorSessionId:string):Promise<CloudRecordedActor & {role:CloudWorkspaceActorRole;confirmedUntilMs:number}> {
+  if(!uuid.test(actorSessionId))rejected();
+  const row=(await tx.query<Session & {confirmed_until:Date}>(`SELECT session.*,least(clock_timestamp()+interval '10 seconds',engine.lease_expires_at,
+      auth.last_token_expires_at) AS confirmed_until
+    FROM cloud_workspace_actor_sessions session JOIN cloud_workspace_engine_instances engine ON engine.id=session.engine_instance_id
+    JOIN auth_sessions auth ON auth.provider_session_id=session.auth_session_id AND auth.user_id=session.actor_user_id
+    WHERE session.id=$1 AND session.workspace_id=$2 AND session.org_id=$3 AND session.generation=$4 AND session.engine_instance_id=$5
+      AND session.consumed_at IS NOT NULL AND auth.status='active' AND auth.last_token_expires_at>clock_timestamp()
+      AND engine.revoked_at IS NULL AND engine.state='ready' AND engine.lease_expires_at>clock_timestamp() FOR SHARE OF session,auth`,
+      [actorSessionId,scope.workspaceId,scope.organizationId,scope.generation,scope.engineInstanceId])).rows[0];
+  if(!row)rejected();
+  const actor=recordedActor(row),authority=await assertRecordedCloudActor(tx,{...scope,actorUserId:actor.actorUserId,actor,capability:"read"});
+  const confirmedUntilMs=row.confirmed_until.getTime();
+  if(!Number.isSafeInteger(confirmedUntilMs)||confirmedUntilMs<=Date.now())rejected();
+  return {...actor,role:authority.role,confirmedUntilMs};
+}
+
 export async function assertCloudActorSession(
   tx:Tx,scope:Omit<CloudActorEngineScope,"heartbeatToken">,
   actorSessionId:string,capability:CloudWorkspaceCapability,
@@ -84,7 +121,7 @@ export async function assertCloudRequestActor(
 }
 
 export class DatabaseCloudWorkspaceActorSessionService {
-  constructor(private readonly options:{pool:pg.Pool;enginePort:number;bridgeUrl:string;workosEnabled:boolean}) {}
+  constructor(private readonly options:{pool:pg.Pool;enginePort:number;bridgeUrl:string;workosEnabled:boolean;directProviderEndpoint?:CloudDirectProviderEndpointLookup}) {}
 
   /** Closing a device connection does not revoke another device or cancel
    * durable queued intent. No provider-wide SSH credential is involved. */
@@ -97,9 +134,9 @@ export class DatabaseCloudWorkspaceActorSessionService {
     });
   }
 
-  async issue(input:CloudWorkspaceActorScope & {proof:CloudWorkspaceDeviceProof;authenticatedUser:AuthedUser}) {
+  async issue(input:CloudWorkspaceActorScope & {proof:CloudWorkspaceDeviceProof;authenticatedUser:AuthedUser;directProviderVersion?:1;connectionChannel?:"control-plane-websocket"}) {
     if (![input.workspaceId,input.organizationId,input.actorUserId].every(value=>uuid.test(value))) rejected();
-    return withSystemTx(this.options.pool,async tx=>{
+    const grant=await withSystemTx<z.infer<typeof actorGrantSchema>>(this.options.pool,async tx=>{
       await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE",[input.organizationId]);
       const workspace=(await tx.query<{current_generation:number}>("SELECT current_generation FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE",[input.workspaceId,input.organizationId])).rows[0];
       const user=input.authenticatedUser;
@@ -146,6 +183,44 @@ export class DatabaseCloudWorkspaceActorSessionService {
         organizationId:input.organizationId,generation:engine.generation,authorityEpoch:Number(engine.authority_epoch),
         engineInstanceId:engine.id,remotePort:this.options.enginePort,grantToken:token,expiresAt:row.admission_expires_at.toISOString(),bridgeUrl:this.options.bridgeUrl};
     });
+    if(input.directProviderVersion!==1)return grant;
+    try {
+      const admitted=await this.authorizeRelay(grant.grantToken);
+      if(!admitted)rejected();
+      const before=await withSystemTx(this.options.pool,tx=>this.directBootScope(tx,grant,admitted));
+      // Legacy generations remain on their unchanged transport. Unknown or
+      // corrupt activated bindings are refusals, never guessed legacy state.
+      if(!before)return grant;
+      let directProvider:{version:1;provider:"boat";url:string}|undefined;
+      if(input.connectionChannel!=="control-plane-websocket") {
+        if(!this.options.directProviderEndpoint)throw new HttpError(503,"cloud_actor_runtime_unavailable","Cloud runtime endpoint is unavailable");
+        const endpoint=await this.options.directProviderEndpoint({workspaceId:grant.workspaceId,organizationId:grant.organizationId,generation:grant.generation,
+          engineInstanceId:grant.engineInstanceId,resourceId:admitted.resourceId,remotePort:this.options.enginePort});
+        let url:URL;try{url=new URL(endpoint.url);}catch{rejected();}
+        if(endpoint.headerName!==undefined||endpoint.headerValue!==undefined||url.protocol!=="https:"||url.pathname!=="/"||url.toString()!==endpoint.url||url.search||url.hash||url.username||url.password)rejected();
+        url.protocol="wss:";url.pathname="/ws";
+        if(!directUrl(url.toString(),this.options.enginePort))rejected();
+        directProvider={version:1,provider:"boat",url:url.toString()};
+      }
+      // Provider I/O owns no DB locks. Reauthorize the exact original one-use
+      // actor grant and boot/writer after that asynchronous boundary.
+      return await withSystemTx(this.options.pool,async tx=>{
+        await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE",[grant.workspaceId,grant.organizationId]);
+        await tx.query("SELECT id FROM cloud_workspace_engine_instances WHERE id=$1 FOR SHARE",[grant.engineInstanceId]);
+        const current=await this.authorizeRelayInTx(tx,grant.grantToken,{});
+        if(!current||Object.entries(admitted).some(([field,value])=>current[field as keyof CloudEngineRelayGrant]!==value))rejected();
+        const bootScope=await this.directBootScope(tx,grant,current);
+        if(!bootScope||Object.entries(before).some(([field,value])=>bootScope[field as keyof CloudAgentBootScope]!==value))rejected();
+        if(!await this.authorizeRelayInTx(tx,grant.grantToken,{}))rejected();
+        return CloudActorConnectionGrantSchema.parse({...grant,bootScope,...(directProvider?{directProvider}:{})});
+      });
+    }catch(error){await this.revoke({...input,token:grant.grantToken}).catch(()=>{});throw error;}
+  }
+  private async directBootScope(tx:Tx,grant:z.infer<typeof actorGrantSchema>,authority:CloudEngineRelayGrant):Promise<CloudAgentBootScope|null> {
+    const current=await readCurrentCloudAgentBootBinding(tx,{organizationId:grant.organizationId,workspaceId:grant.workspaceId});
+    if(current.mode==="legacy")return null;
+    if(current.binding.writerState!=="active"||current.binding.generation!==authority.generation||current.binding.engineInstanceId!==authority.engineInstanceId)rejected();
+    return CloudAgentBootScopeSchema.parse(Object.fromEntries(Object.keys(CloudAgentBootScopeSchema.shape).map(field=>[field,current.binding[field as keyof typeof current.binding]])));
   }
 
   async consume(input:CloudActorEngineScope & {token:string;renew?:boolean}) {
@@ -182,7 +257,9 @@ export class DatabaseCloudWorkspaceActorSessionService {
 
   async authorizeRelay(token:string,options:{connected?:boolean}={}):Promise<CloudEngineRelayGrant|null> {
     if (!CLOUD_ACTOR_TOKEN_PATTERN.test(token)) return null;
-    return withSystemTx(this.options.pool,async tx=>{
+    return withSystemTx(this.options.pool,tx=>this.authorizeRelayInTx(tx,token,options));
+  }
+  private async authorizeRelayInTx(tx:Tx,token:string,options:{connected?:boolean}):Promise<CloudEngineRelayGrant|null> {
       const row = (await tx.query<Session & {provider_resource_id:string}>(`SELECT session.*,binding.provider_resource_id
         FROM cloud_workspace_actor_sessions session
         JOIN cloud_workspaces workspace ON workspace.id=session.workspace_id AND workspace.org_id=session.org_id
@@ -210,6 +287,5 @@ export class DatabaseCloudWorkspaceActorSessionService {
       return {workspaceId:row.workspace_id,organizationId:row.org_id,generation:row.generation,
         authorityEpoch:Number(row.authority_epoch),engineInstanceId:row.engine_instance_id,resourceId:row.provider_resource_id,
         readOnly:role==="viewer"};
-    });
   }
 }

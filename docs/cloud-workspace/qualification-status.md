@@ -12,7 +12,8 @@ operational records, not this guide.
 | --- | --- | --- |
 | Execution floor | Boat-only; immutable saved v2 Computer source, complete qualified v4 pin, actor2. Retired rows retain metadata/history/cleanup and refuse new execution. | Exact released worker/base pair, intentional old-profile/actor-v1 refusals and supported-cohort skew. |
 | Computer/create | Current organization members see v2 settings; admins manage builds/repository setup. Source/CAS/role/funding checks precede allocation. Renderer pending creation binds the confirmed UUID atomically. | Signed Mac create/failure/account-switch flows and exact template qualification. |
-| Commands/native agents | One durable queue; immutable actor/model/key/cwd admission, typed failures, exact terminal receipts, atomic per-chat recovery and owned decision replies. | Actual Claude/Codex/Cursor turns, native tools, resume, Stop/approval, lost events/reconnect and deployed admission. Synthetic startup handshakes are insufficient. |
+| Commands/native agents | One dispatcher per mode: legacy CP queue or negotiated VM-local queue; immutable actor/model/key/cwd admission, typed failures, exact terminal receipts, atomic per-chat recovery and owned decision replies. | Actual Claude/Codex/Cursor successful turns, native tools, resume, Stop/approval, lost events/reconnect and deployed admission. Synthetic startup handshakes are insufficient. |
+| Negotiated fast path | Boot-owner selection/cache/lifetime, exact local queue/writer, bounded canonical capture/materializer/stopped readers, native-use notice and fenced removal contracts; legacy mode remains separate. | Integrated activation/epoch/retirement, FULL CAS/outbox/mirror/recovery and deployed rollout; source slices alone cannot qualify the complete path. |
 | Native customization | Exclusive admitted MCP/skills; tolerant per-provider repo MCP with bounded notices; bounded Claude/Codex/Cursor instruction projections. Raw project/plugin authority remains disabled. | Exact worker/base native MCP and skill markers, auth/model/env traps, explicit Plan and actor-scoped permission isolation; safe additional native features only after proof. |
 | Reference images | Chunked actor-owned VM publication and opaque prompt references; large PNG bytes tested through all three adapter paths, without increasing the queue cap. | Real-provider image reading and signed-client attachment/reattachment flows. |
 | Git/Files/Design | Checked engine publication and required startup ownership recovery; finite Git diagnostics; direct PR commits net pending Code+Design. | Worker read/diff/commit, Design creation/Files refresh/capture, named targets, real GitHub installation/courier and conflicts on the adopted pin. |
@@ -26,7 +27,8 @@ Source/test anchors are in [engineering reference](engineering-reference.md).
 Basic v4 credential runtime qualification and MCP qualification are distinct;
 MCP/native Computer operations require their additional current evidence.
 WorkOS membership alone does not grant paid authority or another person's agent
-credentials. Personal stays Local; org-Local stays on the sidecar.
+credentials. Boot-mode sharing separately records run-capable role consent to
+owner funding. Personal stays Local; org-Local stays on the sidecar.
 
 ## Source-mode agent harness
 
@@ -75,47 +77,83 @@ cannot replace replay. Retirement requires final child close, successful exit,
 positive domain proof and no late cleanup failure. These implemented assertions
 are separate from an actual passing provider run.
 
-Current PARTIAL source-mode evidence reaches build, TLS, resolver, launcher,
-engine registration, SQLite durable head/append, internal readiness and an
-actor-admitted `CloudTransport` `workspace.list` request against the fixture.
-Queued command/event delivery also reaches a typed pre-credential boundary
-refusal. The recorded Amazon Linux fixture fails closed with
-`cloud_containment_environment_setup_failed` and fixed reason
-`podman_unavailable`, matching its command receipt and failure event with zero
-execution admissions. A newer SHA-verified Ubuntu 24.04 private fixture with
-160 real apt packages, including Podman, proves the engine UID/GID maps,
-authenticated snapshot/replay and successful private-PID/own-CPU retirement.
-Native preparation reaches preflight and activation. Its final recorded canary
-exits 1 with `permission_denied`, before any provider admission; the earlier
-missing sandbox-tool prerequisites are cleared. The integrated provider path
-remains under test.
+Current PARTIAL source controls use a SHA-verified private Ubuntu fixture and
+prove the real v4 engine maps, registration/readiness, SQLite head/append,
+actor-admitted transport and renderer Send through all three pinned providers'
+typed invalid-auth results. Authenticated live/replay/receipts agree, leases
+release and private PID/CPU retirement succeeds. The
+[legacy measurements](#measured-legacy-controls) retain reached stages and counts;
+they do not qualify provider success, resources or integrated new-mode behavior.
 First delta, native tools, images, resume and mid-tool Stop require real provider
 runs. Integrated excluded-project/plugin MCP markers, spawn faults and strict
 resource qualification remain pending. Pinned native unit probes establish
 configuration/startup behavior only. Never mark the success matrix passed from
 invalid auth, synthetic fixtures or an all-skipped run.
 
+## Measured legacy controls
+
+The Phase 3 CURRENT controls exercise the real renderer Send and pinned native
+providers with synthetic invalid credentials in a SOURCE/PARTIAL fixture.
+All three retain matching authenticated live/replay, typed receipts, released
+leases and positive private-PID retirement. These are single negative-auth
+samples, not first-output latency or successful agent turns.
+
+| Provider | CP arrivals during Send/result, 0 / 100 ms injected delay | Renderer Send→result seconds, 0 / 100 ms |
+| --- | --- | --- |
+| Claude | 17 / 22 | 1.881 / 2.839 |
+| Codex | 49 / 57 | 15.679 / 16.685 |
+| Cursor | 13 / 15 | 1.265 / 2.139 |
+
+Claude/Codex return `cloud_provider_prompt_auth_required`; Cursor returns
+`cloud_provider_start_auth_required`. Counts include overlapping background
+requests in the declared window; they are not causal foreground-only counts.
+The two runs use different source hashes, so their difference is not a measured
+speedup or controlled estimate of CP delay. SQL, relay cost and first text/tool
+timing are unavailable in this memory/direct fixture. The new-mode native
+comparison remains pending integrated activation.
+
+A separate real PostgreSQL/CP-service synthetic legacy workload—one user
+message, 100 deltas, one permission request/settlement and terminal—measures
+**8 committed transactions, 108 inserted tuples and 9 updated tuples**, with no
+rollback. It excludes credential/actor/runtime setup and the production durable
+action lifecycle. The [cost integration test](../../apps/control-plane/src/cloud-workspaces/agent-turn-cost.integration.test.ts)
+also measures **47,212 forwarded payload bytes** in a local relay fixture;
+identical direct delivery adds **0 CP-relayed bytes**. This is selected-service
+and transport-fixture evidence, not production/provider-WSS qualification.
+Statements, encoded persistence bytes and warm new-mode turn cost remain
+unavailable until actually measured.
+
 ## Rollout order
 
 1. Back up/drain as required and apply forward migrations, including
-   `0138_cloud_workspace_ui_metadata.sql`, through the protected migration path.
+   `0138_cloud_workspace_ui_metadata.sql`, `0139_cloud_local_command_queue.sql`
+   and `0140_cloud_agent_boot_credentials.sql`, through the protected migration path.
    Keep application/migration roles separate. See
    [database qualification](database-qualification.md) and
    [operations](infrastructure-and-operations.md).
-2. Deploy the control plane with the source/v4/actor2 floor and new readers before
-   the desktop/worker consumers. Unsupported execution is intentionally refused;
+   Deploy the separate Dev broker's `0005_conditional_removals.sql` before
+   enabling its conditional reference-removal caller.
+2. Deploy the control plane with boot vault/actor/context/removal endpoints,
+   compact mirror and stopped readers before desktop/worker consumers. Preserve
+   the source/v4/actor2 floor and legacy path. Unsupported execution is intentionally refused;
    historical metadata/management/cleanup must remain available.
 3. Build, qualify and publish the exact v4 runtime and compatible base through
    the supported bundle consumers (`release-alpha.yml`, `alpha-publication.yml`).
    Source fixes on the server/Mac do not replace a VM's accepted runtime.
-4. Publish a compatible desktop and qualify the negotiated cloud compatibility
-   boundary before activation: advertised client opt-in, legacy projection and
-   CP acknowledgement before terminal writes. A maximum protocol bump alone
-   is insufficient. Keep Local compatibility unchanged.
+4. Publish a compatible desktop and qualify explicit negotiation before
+   activation: registration request/ACK, ready cache and FULL ledger, genuine
+   boot activation, current actor confirmation and exact `ENGINE_READY` binding.
+   Direct transport additionally opts into `directProviderVersion: 1` beside
+   actor protocol2. Optional capabilities keep the protocol version unchanged;
+   they cannot bypass the legacy strict contract. Old desktops on new-mode
+   workspaces receive the existing upgrade-required refusal. Local is unchanged.
 5. Adopt a qualified same-base runtime through the existing stopped next-wake or
    explicit fenced upgrade. Retain source/template/settings, Git/index/edits,
    Design and durable chats. Never patch base bytes under an old compatibility ID
-   or rewrite historical pins. Ordinary resume of an unchanged pin is not adoption.
+   or rewrite historical pins. Drain legacy pending/dispatching commands and
+   unreleased executions before local-writer activation; an unknown ACK or
+   missing binding refuses rather than selecting legacy. Ordinary resume of an
+   unchanged pin is not adoption.
 
 Finish the signed Mac and authorized disposable Alpha acceptance matrix on the
 adopted pair. The implemented negotiation still needs source and released-binary
@@ -175,8 +213,9 @@ and always needs fresh final attestation/launch/registration. See
 No new live latency distribution or ≤2-second stopped wake/usable create result
 is established by this overhaul's repository tests. The historical five setup
 runs and unmatched probe limits remain in [wake performance](wake-performance.md).
-Warm capacity, qualification reuse, VM durable delivery, outbound/multiplexed
-transport, forward transcript feeds and Mac acknowledged send-outbox work remain
+Warm allocation capacity, qualification reuse, broader VM inbox/restore recovery,
+outbound/multiplexed transport, forward transcript feeds and a general Mac
+acknowledged send outbox remain
 explicit [follow-ups](warm-pool.md). Seamless live handoff, mobile clients,
 active ownership transfer, CRDT/bidirectional replicas, registered primary hosts
 and customer-managed Railway template publication remain gated future scope.

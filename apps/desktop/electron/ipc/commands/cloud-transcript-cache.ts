@@ -63,16 +63,22 @@ function assertOwner(accountId: string, expectedEpoch?: string): void {
 export const cloudTranscriptCacheRead: CommandHandler = args => {
   const owner = CloudTranscriptOwnerSchema.parse(args);
   assertOwner(owner.accountId);
-  return { cacheEpoch, window: cacheStore().read(owner) };
+  return { cacheEpoch, ...cacheStore().readReceipt(owner) };
 };
 export const cloudTranscriptCacheWrite: CommandHandler = args => {
-  const parsed = CloudTranscriptOwnerSchema.extend({ cacheEpoch: z.string().uuid(), window: CachedTranscriptWindowSchema }).strict().parse(args);
-  const { cacheEpoch: expectedEpoch, window, ...owner } = parsed;
+  const parsed = CloudTranscriptOwnerSchema.extend({ cacheEpoch: z.string().uuid(), historyEpoch: z.string().uuid().optional(),
+    window: CachedTranscriptWindowSchema }).strict().parse(args);
+  const { cacheEpoch: expectedEpoch, historyEpoch, window, ...owner } = parsed;
   assertOwner(owner.accountId, expectedEpoch);
-  cacheStore().write(owner, window);
+  if (window.restoreHead && !historyEpoch) throw new Error("Cloud restore receipt is required.");
+  cacheStore().write(owner, window, historyEpoch);
 };
 export const cloudTranscriptCachePrune: CommandHandler = args => {
   const scope = CloudTranscriptPruneSchema.parse(args);
-  assertOwner(scope.accountId);
+  if (scope.restoreHead && (!scope.cacheEpoch || !scope.historyEpoch)) throw new Error("Cloud restore receipt is required.");
+  assertOwner(scope.accountId, scope.cacheEpoch);
   cacheStore().prune(scope);
+  if (scope.restoreHead) return { cacheEpoch, ...cacheStore().readReceipt({ accountId: scope.accountId,
+    organizationId: scope.restoreHead.projection.organizationId, workspaceId: scope.restoreHead.projection.workspaceId,
+    chatId: scope.restoreHead.conversationId }) };
 };

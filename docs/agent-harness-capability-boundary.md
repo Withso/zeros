@@ -45,6 +45,11 @@ at startup. Bounded engine-read instruction/config projections preserve native
 tools while raw project/plugin sources stay restricted. Cloud approvals are
 session-only unless engine-owned actor-scoped persistence is proved; explicit
 Ask/Plan wins. Local Personal and organization-local retain their native path.
+Legacy cloud validates its real execution lease; activated boot mode captures
+the owner's selection and independently confirmed actor/context under a local
+session lifetime. Exact warm reuse and native-write reservations are engine
+authority, never adapter telemetry or receipt inference. See
+[boot funding and trust](cloud-workspace/agent-authentication-and-language-tools.md#negotiated-boot-funding).
 See [cloud native configuration](cloud-workspace/agent-authentication-and-language-tools.md#repository-instructions-and-configuration)
 and [qualification limits](cloud-workspace/qualification-status.md#source-mode-agent-harness).
 

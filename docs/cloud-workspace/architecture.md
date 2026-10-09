@@ -8,8 +8,8 @@ Desktop: exact cloud:// selection, retained views, bounded transcript cache
   v
 Control plane: organization/actor/device authority
   immutable Computer source + runtime generation pins; allocation journal
-  one durable command queue + receipts; ordered events + normalized history
-  | current: authenticated bridge relay + engine outbound HTTP
+  legacy queue/journal OR boot credential vault + compact mirrored history
+  | verified direct WSS or authenticated relay; engine background HTTP
   v
 Boat VM: protected bootstrap -> pinned engine + existing SQLite
   contained worker: repository, native provider CLIs, scoped Git operations
@@ -73,17 +73,20 @@ remain fresh. See [wake performance](wake-performance.md),
 
 ## Commands and durable history
 
-Desktop sends a stable command identity to the control plane's existing durable
-queue. The engine receives admitted work and reports ordered event batches;
-receipts describe accepted/running/terminal/uncertain outcomes. A succeeded
-receipt still requires transcript catch-up before presentation settles. An
-ambiguous dispatch or missing terminal event cannot fabricate success or justify
-automatically replaying a native turn. Delivery ACKs alone cannot establish
-exactly-once external tool effects.
+Legacy cloud sends stable command identities to the CP queue and journals event
+batches there. Activated `boot-owner-v1` accepts them in the VM's WAL/FULL queue,
+commits claims before native handoff, and serves local live/reconnect replay.
+The CP asynchronously mirrors compact controls, final conversation records and
+receipts for stopped reads. No mirror row is another dispatcher. Both modes
+preserve uncertain outcomes; an ACK never proves exactly-once external effects.
+See [queue and canonical history](data-and-sync.md#negotiated-local-queue-and-compact-history).
 
-Native agents use the shared Local gateway/adapters after cloud admission:
-actor-bound grant → execution lease → UID-10001 native boundary → provider.
-The factory pins cwd, model/key, private HOME and MCP/skill snapshots. Cloud-only
+Native agents use the shared Local gateway/adapters after cloud admission.
+Legacy uses an actor-bound grant and real execution lease. Boot mode captures
+the owner's background-published selection plus independently confirmed actor
+authority, then enters its UID-10001 session lifetime. Warm turns retain only
+the exact eligible conversation scope. The factory pins cwd, model/key, private
+HOME and MCP/skill snapshots. Cloud-only
 authority checks stay outside the adapters' ordinary tool/transcript path;
 refusal never bypasses containment or dispatches through the live bridge.
 See [native configuration and restrictions](agent-authentication-and-language-tools.md#native-execution-and-compatibility).
@@ -97,12 +100,15 @@ follow-up. See [client/runtime contract](client-runtime-contract.md).
 
 ## Connections and native services
 
-`CloudRuntimeBridgeRelay` currently carries authenticated frames through the
-provider-mediated engine connection for each desktop attachment. It bounds
-connections, bytes and admissions and rechecks actor/device/generation authority.
-The engine also sends outbound registration, heartbeats and durable HTTP
-requests. This is the current topology; a resident VM outbound stream and one
-multiplexed client↔backend channel remain separate proposed changes.
+Step 1 direct transport publishes a verified Boat WSS target with a one-use
+actor grant. The renderer verifies exact activated boot readiness before work.
+Transport failure can obtain a fresh same-boot CP relay admission; it cannot
+replay work or downgrade on authority refusal. Existing SSH remains a separately
+selected transport. `CloudRuntimeBridgeRelay` still bounds/revalidates relayed
+connections. Engine registration, authority renewal, credential refresh and
+mirroring continue in background HTTP. VM-verified signed tickets and a resident
+multiplexed uplink remain follow-ups. See
+[portable ingress](client-runtime-contract.md#portable-runtime-ingress).
 
 The exact-execution connection registry can retain a cloud peer beside the Local
 sidecar used by a Local terminal or replica. Passive stopped-workspace reads do
@@ -120,9 +126,9 @@ editor launch remains hidden pending multi-connection SSH qualification. See
 
 | Responsibility | Source boundary |
 | --- | --- |
-| Lifecycle, policy, durable queue/history, provider operations | `apps/control-plane/src/cloud-workspaces/` |
+| Lifecycle, policy, legacy queue, compact history and provider operations | `apps/control-plane/src/cloud-workspaces/` |
 | Shared wire schemas, crypto and redaction | `packages/protocol/` |
-| Live workspace, native agents, Files/Git/Design and publication | `apps/desktop/src/engine/` |
+| Live workspace, local queue/outbox, native agents, Files/Git/Design and publication | `apps/desktop/src/engine/` |
 | Exact workspace routing and retained views | `apps/desktop/src/renderer/platform/bridge/`, `apps/desktop/src/renderer/state/` |
 | Native access, transcript cache and replica processes | `apps/desktop/electron/` |
 | Protected runtime builds and qualification | `scripts/cloud-workspace-validation/`, release workflows |
@@ -142,15 +148,16 @@ do not prove physical deletion. Local selection and other exact workspace views
 retain their own confirmed state throughout these failures.
 
 Release order is forward migration → control plane → qualified runtime/base
-publication → compatible explicit/next-wake pin adoption → desktop. This overhaul
+publication → compatible desktop → explicit/next-wake adoption and negotiated
+activation. This overhaul
 has repository evidence, not new live Alpha or signed macOS qualification. Flat
 OCI publication and the shared Dev image kit remain separate from the qualified
 v4 workspace artifact. The opt-in v3 release-worker promotion lane is retired;
 default-disabled releases, historical receipts and cleanup remain available. See
 [qualification status](qualification-status.md).
 
-The [follow-up design](warm-pool.md) owns accounted warm capacity, a persisted
-VM event outbox/inbox, resident outbound transport, a multiplexed backend device
+The [follow-up design](warm-pool.md) owns accounted warm capacity, broader
+VM inbox/restore recovery, resident outbound transport, a multiplexed backend device
 stream, incremental durable transcript feeds and a Mac composer outbox with
 explicit acknowledgements. Each must preserve the existing queue, identity,
 uncertain-outcome, funding and revocation contracts.

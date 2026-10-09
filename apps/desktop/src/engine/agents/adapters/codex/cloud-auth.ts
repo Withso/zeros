@@ -1,4 +1,4 @@
-import type {CloudAgentLease} from "../../cloud-agent-lease";
+import type {CloudAgentExecutionAuth,CloudAgentExecutionLifetime} from "../../cloud-provider-execution";
 import type {ChatgptAuthTokensRefreshParams} from "./generated/v2/ChatgptAuthTokensRefreshParams";
 import type {ChatgptAuthTokensRefreshResponse} from "./generated/v2/ChatgptAuthTokensRefreshResponse";
 import { CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
@@ -12,8 +12,9 @@ export class CloudCodexAuth {
   private usedAccessToken:string|null=null;
   private retiredFailure: CloudCommandFailureError | null = null;
   get failure(): CloudCommandFailureError | null { return this.retiredFailure; }
-  constructor(private readonly lease:Pick<CloudAgentLease,"codexAuth"|"refreshCodex"|"close"|"assertLive">){}
+  constructor(private readonly lease:Pick<CloudAgentExecutionAuth,"codexAuth"|"refreshCodex">&Pick<CloudAgentExecutionLifetime,"close"|"assertLive">){}
   login(){
+    this.lease.assertLive();
     const current=this.lease.codexAuth();if(!current)return null;
     this.usedVersion=current.credentialVersion;this.usedAccessToken=current.material.accessToken;
     return {type:"chatgptAuthTokens" as const,accessToken:current.material.accessToken,chatgptAccountId:current.material.accountId};
@@ -21,6 +22,7 @@ export class CloudCodexAuth {
   async refresh(params:ChatgptAuthTokensRefreshParams):Promise<ChatgptAuthTokensRefreshResponse>{
     let timer:ReturnType<typeof setTimeout>|undefined;
     try{
+      this.lease.assertLive();
       if(!this.usedVersion||!params||params.reason!=="unauthorized"||
           (params.previousAccountId!=null&&typeof params.previousAccountId!=="string"))
         throw new CloudCommandFailureError({stage:"provider_prompt",category:"credential_refresh_invalid"});

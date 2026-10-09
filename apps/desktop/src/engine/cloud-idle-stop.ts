@@ -77,6 +77,7 @@ export class CloudIdleStopScheduler {
   private revision = 0;
   private active: Promise<void> | null = null;
   private inspection: Promise<void> | null = null;
+  private inspectionRevision = 0;
   private closed = false;
   private wasBusy = false;
   private nextObservation = 0;
@@ -92,6 +93,10 @@ export class CloudIdleStopScheduler {
     /** Kernel workload reads run once per observation, independently of client
      * polling. A failed inspection is busy and completion starts a quiet interval. */
     inspectWorkload?(): Promise<boolean>;
+    /** Engine-owned ORIGINAL complete idle-only warm inventory may postpone
+     * observational PID reads. Stop still drains exact hosts and proves kernel
+     * emptiness. This exception never grants read-only quiet attestation. */
+    deferWorkloadInspection?(): boolean;
     stop(authority: CloudDurabilityAuthority, stillIdle: () => boolean): Promise<void | boolean>;
     observed?(state: { busy: boolean; quietSeconds: number }): void;
     failed?(): void;
@@ -122,11 +127,28 @@ export class CloudIdleStopScheduler {
     if (this.closed || this.active || this.completed) return;
     const busy = this.options.busy();
     if (busy || !this.options.inspectWorkload) { this.considerObserved(authority, busy); return; }
+    if (this.workloadInspectionDeferred()) {
+      // An earlier PID read may have seen this now-proven idle host. It cannot
+      // reset the quiet clock after a newer trusted observation supersedes it.
+      this.inspectionRevision++;
+      this.considerObserved(authority, false); return;
+    }
     if (this.inspection) return;
-    const revision = this.revision;
+    const revision = this.revision, inspectionRevision = this.inspectionRevision;
     this.inspection = Promise.resolve().then(() => this.options.inspectWorkload!()).catch(() => true).then(workload => {
-      if (!this.closed && this.revision === revision) this.considerObserved(authority, workload || this.options.busy());
+      if (!this.closed && this.revision === revision && this.inspectionRevision === inspectionRevision)
+        this.considerObserved(authority, workload || this.options.busy());
     }).finally(() => { this.inspection = null; });
+  }
+  private workloadInspectionDeferred(): boolean {
+    try {
+      const result: unknown = this.options.deferWorkloadInspection?.();
+      if (result === true) return true;
+      // A malformed asynchronous hook is never authority; contain rejection
+      // without awaiting it or changing inspection/Stop scheduling.
+      if (result && (typeof result === "object" || typeof result === "function")) void Promise.resolve(result).catch(() => undefined);
+    } catch { /* Unknown inventory preserves conservative kernel inspection. */ }
+    return false;
   }
   private considerObserved(authority: CloudDurabilityAuthority, busy: boolean): void {
     if (this.closed || this.active || this.completed) return;

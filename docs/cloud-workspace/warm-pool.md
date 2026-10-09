@@ -4,6 +4,12 @@ Status: proposed, disabled by default. The current overhaul implements faster
 handoffs and optimistic creation; it does not allocate a pool. See
 [wake performance](wake-performance.md) for evidence and endpoint definitions.
 
+The negotiated VM-local queue/FULL mirror outbox and exact warm conversations
+are separate implemented contracts, described in
+[data and sync](data-and-sync.md#negotiated-local-queue-and-compact-history) and
+[warm conversations](agent-authentication-and-language-tools.md#warm-conversations-and-stop).
+They do not allocate prebooted unassigned VMs or qualify the pool proposed here.
+
 Conductor's observed create path claims an already booted VM with the repository,
 toolchain and agent binaries present. Zeros could prepare equivalent unassigned
 slots from immutable Cloud Computer builds. This targets cold create, not true
@@ -69,6 +75,10 @@ not satisfy send/completion or establish a running engine. Native streams and
 confirmed reads supersede it. Completion/chat-departure checkpoints use existing
 passive history, at most once per semantic key/30 seconds, without a timer or
 VM wake. See [client/runtime contract](client-runtime-contract.md).
+New-mode current-head metadata additionally fences older visible/memory/disk
+windows on deletion, repair or incomplete coverage; an error cannot keep an old
+transcript presented as current. The generic Local transient-error cache remains
+unchanged.
 
 Conductor's observed VM session state persists indexed notification batches
 before send, removes them on backend acknowledgement and deduplicates inbox IDs.
@@ -78,7 +88,7 @@ separate proposals; they do not establish that Zeros has the same transport.
 
 | Follow-up | Required boundary and acceptance |
 | --- | --- |
-| **VM durable outbox/inbox** | Persist bounded event batches and cursor before send in existing private VM state; remove only on authenticated ACK. Bind stream/generation/engine identity, preserve inbox command IDs and handoff/settled evidence. Test crash-before-send, lost ACK, replay and retirement. Reuse the CP command queue. |
+| **VM durable outbox/inbox — broader recovery** | New mode already has a FULL local queue and immutable mirror outbox with exact ACK before pruning. Extend cross-allocation recovery only with authenticated writer/seal/native-retirement proof; inherited uncertain work never becomes another dispatcher or automatic replay. Legacy event outbox and broader inbox coverage remain separate. |
 | **Resident outbound VM transport** | Replace measured relay/provider hops only after an authenticated reconnect/resume design. Scope engine/control/event and PTY/preview/capture lanes separately; preserve device/actor revocation, bounds and exact pin authority. Current engine outbound HTTP and per-attachment relay remain the baseline. |
 | **One multiplexed client↔backend channel** | Fan workspace/chat topics over one device connection with authenticated topic admission, ordered resumable cursors, per-topic/connection budgets and independent revocation. Keep it distinct from the VM uplink; do not add a second command queue. |
 | **Incremental durable transcript feed** | Existing history exposes revision plus bounded tail/older windows, not a forward after-offset feed. Add an approved cursor/watermark/tombstone contract and coherent rows/cursor persistence before claiming restart-safe incremental catch-up. Cache text is never runtime authority. |

@@ -75,7 +75,7 @@ describe("AgentGateway Zeros browser ownership", () => {
     const prompt = vi.fn(async () => ({ response: { stopReason: "end_turn" } }));
     const statusChanged = vi.fn();
     const factory = { prepare: vi.fn(async ({ workload }: { workload: PreparedBoundary }) => {
-      cloudLookup.mockReturnValue({ lease: { validate: vi.fn(async () => {}), credentialKind: "claude-setup-token" } } as unknown as CloudProviderExecution);
+      cloudLookup.mockReturnValue({ credentialKind: "claude-setup-token", lease: { validate: vi.fn(async () => {}), credentialKind: "claude-setup-token" } } as unknown as CloudProviderExecution);
       return { boundary: workload, env: {}, authorityId: "a".repeat(64) };
     }) };
     const newSession = vi.fn(async (opts: { executionId: string }) => ({ session: { executionId: opts.executionId, sessionId: opts.executionId }, initialize: {} }));
