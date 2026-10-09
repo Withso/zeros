@@ -48,6 +48,11 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
   const noToast = () =>
     expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
   await page.clock.install();
+  // Freeze fake time across each 10 s connection threshold: with the clock
+  // running, CI latency between steps crossed its 100 ms assertion margin.
+  // pauseAt refuses past targets, so jump 1 s past the page's current time.
+  const pauseClock = async () =>
+    page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
   // Every tab retains its exact-key pixels through short and prolonged gaps.
   // Observe the DOM during the interval too: a banner/icon that flashes and
   // clears before an assertion is still a regression.
@@ -208,6 +213,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     }
 
     // Readiness starts a cold connection interval with no initial flash.
+    await pauseClock();
     await page.evaluate(() => window.workbenchStatusFixture.state("ready"));
     await expect(banner()).toHaveCount(0);
     await page.clock.fastForward(9_900);
@@ -217,6 +223,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await expect(empty()).toHaveText(pendingCopy[type]);
     await noToast();
     await screenshot(type, "connecting");
+    await page.clock.resume();
 
     await page.evaluate(() => {
       const fixture = window.workbenchStatusFixture;
@@ -228,6 +235,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
       1,
     );
     // A cold exact target under a lost connection exercises the quiet centre.
+    await pauseClock();
     await page.evaluate((type) => {
       const fixture = window.workbenchStatusFixture;
       fixture.connection("disconnected");
@@ -245,6 +253,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
         : pendingCopy[type],
     );
     await screenshot(type, "reconnecting");
+    await page.clock.resume();
     await page.clock.fastForward(35_000);
     await expect(banner()).toContainText("Can't reach the workspace.");
     await expect(empty()).toHaveText(copy[type][2]);
