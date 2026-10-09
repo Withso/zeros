@@ -7,6 +7,7 @@ const messages: Record<string, string> = {
   cloud_runtime_unavailable: "The pinned cloud runtime is unavailable. Request an explicit runtime upgrade to continue.",
   cloud_computer_capacity_reached: "Image capacity reached. Retire an unreferenced custom or Dev image, or try again when another build finishes.",
   not_found: "Cloud workspace not found",
+  cloud_conversation_not_found: "Cloud conversation not found",
   cloud_workspace_not_found: "Cloud workspace access is unavailable",
   cloud_account_entitlement_required: "An active Pro subscription is required",
   cloud_workspace_capability_required:

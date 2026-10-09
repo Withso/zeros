@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type pg from "pg";
-import { withSystemTx } from "../db.js";
+import { withRetryableSystemTx } from "../db-retry.js";
 import { audit } from "../audit.js";
 import { cloudStopReason, diagnosticCode } from "./cloud-diagnostics.js";
 import { findInitiatingCloudStopTx, tryRetainCloudDiagnosticTx } from "./cloud-diagnostic-store.js";
@@ -26,7 +26,7 @@ export async function requestManagedComputeStop(
 ): Promise<void> {
   if (!/^[a-z][a-z0-9_]{0,127}$/.test(input.reason))
     throw new Error("Invalid compute stop reason");
-  await withSystemTx(pool, async (tx) => {
+  await withRetryableSystemTx(pool, async (tx) => {
     const scope = (
       await tx.query<{
         workspace_id: string;

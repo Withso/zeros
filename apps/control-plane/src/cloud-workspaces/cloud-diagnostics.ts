@@ -11,11 +11,26 @@ const imageChecks = z.object({ metadata: z.boolean().optional(), source: z.boole
   build: z.boolean().optional(), helpers: z.boolean().optional(), resources: z.boolean().optional(), runtime: z.boolean().optional(),
 }).strict();
 const digestPair = z.object({ expected: z.string().regex(/^[a-f0-9]{64}$/), observed: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+// Mirrors the private engine producer's closed vocabulary. Keep it local to
+// the CP deployment; parity tests prevent the two trust boundaries drifting.
+const engineStartup = z.object({
+  phase: z.enum(["startup", "registration", "history_restore", "boot_owner"]),
+  name: z.enum(["Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "TimeoutError", "ZodError", "SqliteError",
+    "CloudCommandRuntimeError", "CloudRuntimeRequestError", "CloudAgentExecutionError", "CloudAgentAdmissionError",
+    "CloudRuntimeUpgradeRequiredError", "unknown"]),
+  code: z.enum(["ENOENT", "ENOTDIR", "EISDIR", "EACCES", "EPERM", "EIO", "EROFS", "ENOSPC", "EDQUOT", "EMFILE", "ENFILE",
+    "EEXIST", "ELOOP", "EBUSY", "ETIMEDOUT", "ECONNREFUSED", "ECONNRESET",
+    "SQLITE_CORRUPT", "SQLITE_NOTADB", "SQLITE_CANTOPEN", "SQLITE_BUSY", "SQLITE_IOERR", "SQLITE_READONLY", "SQLITE_FULL",
+    "command_storage_unavailable", "command_conflict", "cloud_command_writer_retired", "engine_authority_rejected",
+    "cloud_commands_unavailable", "cloud_actor_authority_rejected", "cloud_runtime_upgrade_required", "unknown"]),
+  errno: z.number().int().refine(value => [-1, -2, -5, -13, -16, -17, -20, -21, -23, -24, -28, -30, -40, -104, -110, -111, -122].includes(value)).nullable(),
+}).strict();
 export const setupDiagnosticSchema = z.object({ version: z.literal(1), phase: z.enum(diagnosticPhases), checks: imageChecks.optional(),
   digests: z.object({ osRelease: digestPair.optional(), packageInventory: digestPair.optional(), node: digestPair.optional() }).strict().optional(),
   files: z.object({ node: z.boolean(), supervisor: z.boolean(), setup: z.boolean(), engine: z.boolean() }).strict().optional(),
   exit: z.enum(["nonzero", "timeout", "signal", "overflow", "unknown"]).optional(),
   installer: ClosedDiagnosticSchema.refine(value => value.component === "installer").optional(),
+  engineStartup: engineStartup.optional(),
 }).strict();
 export type SetupDiagnostic = z.infer<typeof setupDiagnosticSchema>;
 export function parseSetupDiagnostic(value: unknown): SetupDiagnostic | null {

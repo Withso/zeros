@@ -113,11 +113,13 @@ export const cloudWorkspacePortForwardingSet: CommandHandler = args => {
 
 export const cloudWorkspacePortForwardingRuntime: CommandHandler = args => {
   if (typeof args.connected !== "boolean") throw new Error("cloud workspace access: invalid connected state");
-  getCloudWorkspacePortForwarding().publishRuntime({
+  const runtime = {
     ...target(args), runtimeId: requiredString(args, "runtimeId"), generation: positiveInteger(args, "generation"),
     authorityEpoch: positiveInteger(args, "authorityEpoch"), engineInstanceId: requiredString(args, "engineInstanceId"),
     connectionSequence: positiveInteger(args, "connectionSequence"), connected: args.connected,
-  });
+  };
+  getCloudWorkspacePortForwarding().publishRuntime(runtime);
+  return getCloudWorkspaceAccessBroker().publishRuntimeConnection(runtime);
 };
 
 export const cloudWorkspacePortForwardingForget: CommandHandler = args => {

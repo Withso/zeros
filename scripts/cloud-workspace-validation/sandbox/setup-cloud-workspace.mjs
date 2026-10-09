@@ -108,6 +108,7 @@ const GITHUB_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}$/;
 const CHECKPOINT_HELPER_URL = fileURLToPath(import.meta.url) === RUNTIME.helpers.setup
   ? pathToFileURL(path.join(RUNTIME.workerRoot, "apps/desktop/src/engine/agents/containment/cloud-checkpoint-artifacts.mjs"))
   : new URL("../../../apps/desktop/src/engine/agents/containment/cloud-checkpoint-artifacts.mjs", import.meta.url);
+const STARTUP_FAILURE_HELPER_URL = new URL("cloud-engine-startup-failure.mjs", CHECKPOINT_HELPER_URL);
 
 export const CLOUD_WORKSPACE_UNPRIVILEGED_SET_PRIV_ARGS = Object.freeze([
   "--no-new-privs",
@@ -2534,7 +2535,7 @@ export function parseCloudWorkspaceEngineReadiness(raw, material) {
   return raw.engine;
 }
 
-async function waitForReadiness(material) {
+async function waitForReadiness(material, profile) {
   const deadline = Date.now() + READINESS_DEADLINE_MS;
   const endpoint = `http://127.0.0.1:${material.engine.port}/internal/readiness`;
   while (Date.now() < deadline) {
@@ -2577,7 +2578,14 @@ async function waitForReadiness(material) {
       setTimeout(resolve, Math.min(125, remaining));
     });
   }
-  throw failure("engine_readiness_failed");
+  const error = failure("engine_readiness_failed");
+  try {
+    const { readCloudEngineStartupFailure } = await import(STARTUP_FAILURE_HELPER_URL.href);
+    const engineStartup = await readCloudEngineStartupFailure({ dataRoot: runtimeLayout.data,
+      engineInstanceId: material.engine.instanceId, expectedUid: profile.engineUid });
+    if (engineStartup) error.diagnostic = { version: 1, phase: "engine_readiness", engineStartup };
+  } catch { /* Evidence is optional and cannot replace the readiness predicate. */ }
+  throw error;
 }
 
 async function revokeGithubToken(token, { required = false, fetchImpl = fetch } = {}) {
@@ -2683,7 +2691,7 @@ export async function prepareAndLaunchCloudWorkspace(material, profile, session,
   record("engine-launch");
   await start(material, session);
   record("engine-readiness");
-  const engine = await ready(material);
+  const engine = await ready(material, profile);
   saveCompleted(material, profile);
   return readyResult(material, commit, engine);
 }
@@ -2762,6 +2770,7 @@ async function executeSetup(encoded) {
     if (timing) normalized.timings = snapshotTimings();
     normalized.diagnostic = {
       version: 1, phase: diagnostic.stage.replaceAll("-", "_"),
+      ...(normalized.diagnostic?.engineStartup ? { engineStartup: normalized.diagnostic.engineStartup } : {}),
       ...(diagnostic.checks ? { checks: diagnostic.checks } : {}),
       ...(diagnostic.digests ? { digests: diagnostic.digests } : {}),
       files: {

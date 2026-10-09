@@ -5,6 +5,7 @@ import { readCloudAgentRuntimeAttestation } from "./cloud-runtime-attestation";
 import { CloudIdleStopScheduler, CloudUserPresence, hasCloudUserProcesses, isCloudIdleMaintenance } from "./cloud-idle-stop";
 import { CloudRuntimeQuietState } from "./cloud-runtime-quiet-state";
 import { resolveCloudRuntime } from "./agents/containment/cloud-runtime-root.mjs";
+import { writeCloudEngineStartupFailure, type CloudEngineStartupPhase } from "./agents/containment/cloud-engine-startup-failure.mjs";
 import { conversationModePort } from "./design/conversation-mode";
 import { startCloudDesignCapture } from "./design/capture-cloud";
 import { setDesignCaptureConfig } from "./design/capture-client";
@@ -2743,7 +2744,18 @@ export class ZerosEngine {
    */
   private designCaptureService: DesignCaptureService | undefined;
   private cloudCaptureStartup: object | undefined;
+  private cloudStartupPhase: CloudEngineStartupPhase = "startup";
   async start(): Promise<void> {
+    try { await this.startRuntime(); }
+    catch (error) {
+      const engineInstanceId = this.cloudRuntimeConfig?.engine?.instanceId;
+      if (engineInstanceId) await writeCloudEngineStartupFailure({ dataRoot: zerosDataDir(), engineInstanceId,
+        phase: this.cloudStartupPhase, error }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async startRuntime(): Promise<void> {
     if (this.running) return;
 
     const startTime = Date.now();
@@ -3230,6 +3242,7 @@ export class ZerosEngine {
 
     this.running = true;
     try {
+      this.cloudStartupPhase = "registration";
       await this.cloudRuntimeRegistration?.start();
       this.cloudEvents?.start();
       await this.initializeCloudAgentBoot();
@@ -3851,7 +3864,9 @@ export class ZerosEngine {
   private async initializeCloudAgentBoot(): Promise<void> {
     const registration = this.cloudRuntimeRegistration, config = this.cloudRuntimeConfig, legacy = this.cloudAgentLegacyFactory;
     if (!this.cloudWorker || !registration || !config || !legacy || !registration.localCommandsNegotiated()) return;
+    this.cloudStartupPhase = "history_restore";
     await this.restoreCloudLocalHistory();
+    this.cloudStartupPhase = "boot_owner";
     this.cloudAgentBoot ??= new CloudLocalAgentBootRuntime({
       file: path.join(engineRuntimeDir(this.root), "cloud-local-commands.sqlite"),
       runtimeBootId: registration.runtimeBootId, registration, legacy,

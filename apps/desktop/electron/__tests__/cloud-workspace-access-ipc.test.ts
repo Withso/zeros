@@ -8,6 +8,7 @@ const broker = vi.hoisted(() => ({
   openSshIde: vi.fn(),
   startTunnel: vi.fn(),
   revoke: vi.fn(),
+  publishRuntimeConnection: vi.fn(async () => {}),
 }));
 const forwarding = vi.hoisted(() => ({ readPreferences: vi.fn(), setPreferences: vi.fn(), publishRuntime: vi.fn(), removeWorkspace: vi.fn() }));
 vi.mock("../cloud-workspace-access-runtime", () => ({
@@ -126,6 +127,7 @@ describe("native cloud access IPC", () => {
     const runtime = { ...target, runtimeId: context.authorityId, generation: 1, authorityEpoch: 2, engineInstanceId: context.deviceId, connectionSequence: 3, connected: true };
     cloudWorkspacePortForwardingRuntime({ ...runtime, cloudToken: "unexpected", url: "wss://unexpected.test" }, event);
     expect(forwarding.publishRuntime).toHaveBeenCalledWith(runtime);
+    expect(broker.publishRuntimeConnection).toHaveBeenCalledWith(runtime);
     expect(() => cloudWorkspacePortForwardingRuntime({ ...runtime, connected: "true" }, event)).toThrow(/invalid/);
     cloudWorkspacePortForwardingForget(target, event);
     expect(forwarding.removeWorkspace).toHaveBeenCalledWith(target);

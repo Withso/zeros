@@ -1,0 +1,13 @@
+export const CLOUD_ENGINE_STARTUP_FAILURE_FILE: "cloud-engine-startup-failure.json";
+export type CloudEngineStartupPhase = "startup" | "registration" | "history_restore" | "boot_owner";
+export type CloudEngineStartupFailure = { phase: CloudEngineStartupPhase; name: string; code: string; errno: number | null };
+export const CLOUD_ENGINE_STARTUP_PHASES: readonly CloudEngineStartupPhase[];
+export const CLOUD_ENGINE_STARTUP_NAMES: readonly string[];
+export const CLOUD_ENGINE_STARTUP_CODES: readonly string[];
+export const CLOUD_ENGINE_STARTUP_ERRNOS: readonly number[];
+export function classifyCloudEngineStartupFailure(error: unknown, phase: CloudEngineStartupPhase): CloudEngineStartupFailure;
+export function parseCloudEngineStartupFailure(value: unknown): CloudEngineStartupFailure | null;
+export function writeCloudEngineStartupFailure(input: { dataRoot: string; engineInstanceId: string;
+  phase: CloudEngineStartupPhase; error: unknown }): Promise<boolean>;
+export function readCloudEngineStartupFailure(input: { dataRoot: string; engineInstanceId: string;
+  expectedUid: number }): Promise<CloudEngineStartupFailure | null>;
