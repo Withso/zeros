@@ -1,10 +1,17 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach,beforeEach,describe, expect, it, vi } from "vitest";
+import {mkdtemp,rm} from "node:fs/promises";
+import {tmpdir} from "node:os";
+import path from "node:path";
+import {createCloudNativeHome,type CloudNativeHome} from "../../../containment/cloud-native-home";
+let dataRoot:string, nativeHome:CloudNativeHome;
+beforeEach(async()=>{dataRoot=await mkdtemp(path.join(tmpdir(),"zeros-codex-parity-"));nativeHome=await createCloudNativeHome({dataRoot,conversationId:"original-conversation",provider:"codex",executionId:"original-execution"});});
+afterEach(async()=>{await rm(dataRoot,{recursive:true,force:true});});
 import type { CloudProviderExecution } from "../../../cloud-provider-execution";
 import { bindCloudCodexThread, cloudCodexCapabilities, cloudCodexConfig, cloudCodexRequest } from "../cloud-policy";
 
 function execution(apps = false) {
   const lease={assertLive:vi.fn(),codexAuth:()=>apps?{material:{accountId:"selected-account"}}:null};
-  return {cwd:"/srv/zeros/workspace",lease,lifetime:lease,auth:lease,model:"qualified-model",
+  return {cwd:"/srv/zeros/workspace",coordinator:{nativeHome},lease,lifetime:lease,auth:lease,model:"qualified-model",
     nativeCapabilities:{version:1,goals:true,nativeReview:true,nativeFork:true,multiAgent:true,connectedApps:true},environment:null} as unknown as CloudProviderExecution;
 }
 describe("admitted Codex cloud extensions", () => {
@@ -16,10 +23,10 @@ describe("admitted Codex cloud extensions", () => {
       expect(() => cloudCodexRequest(owner, "env", method, { ...input, threadId: "foreign-thread" })).toThrow();
     }
   });
-  it("keeps native state in the locked conversation mount and pins multi-agent configuration", () => {
-    expect(cloudCodexConfig(execution())).toMatchObject({ sqlite_home: "/srv/zeros/home/agent/.codex/sessions/.zeros-state", "features.multi_agent": true });
+  it("keeps native state in the physical conversation HOME and pins multi-agent configuration", () => {
+    expect(cloudCodexConfig(execution())).toMatchObject({ sqlite_home: path.join(nativeHome.paths.codexHome,"sessions",".zeros-state"), "features.multi_agent": true });
     const result = cloudCodexRequest(execution(), "env", "thread/start", { config: { sqlite_home: "/private", "features.hooks": true, "features.multi_agent": false } }) as { config: Record<string, unknown> };
-    expect(result.config.sqlite_home).toBe("/srv/zeros/home/agent/.codex/sessions/.zeros-state");
+    expect(result.config.sqlite_home).toBe(path.join(nativeHome.paths.codexHome,"sessions",".zeros-state"));
     expect(result.config["features.multi_agent"]).toBe(true);
     expect(result.config).not.toHaveProperty("features.hooks");
   });

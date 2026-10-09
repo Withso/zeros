@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CursorSdkAdapter, type CursorSdkSendOptions } from "../adapter";
 import type { AgentAdapterContext } from "../../../types";
 import type { PreparedBoundary } from "../../../containment/types";
+import { createCloudNativeHome } from "../../../containment/cloud-native-home";
 import { cloudProviderExecution, cloudBootTurnReservation, type CloudBootNativeAuthority } from "../../../cloud-provider-execution";
 import { testExecutionBoundary } from "../../../__tests__/helpers/test-execution-boundary";
 import { testCloudBootFixture } from "../../../__tests__/helpers/test-cloud-boot";
@@ -32,8 +33,10 @@ async function setup(operation: "new" | "load" = "new") {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "zeros-cursor-boot-"))); cleanups.push(() => rm(root, { recursive: true, force: true }));
   const f = await testCloudBootFixture(root); cleanups.push(f.close);
   native.prepareBoot.mockImplementation(async (authority: CloudBootNativeAuthority, domain: PreparedBoundary) => {
-    const coordinator = { ...domain, providerHomePath: "/srv/zeros/home/agent", hasBackgroundServers: async () => false,
-      environment: () => ({ HOME: "/srv/zeros/home/agent", CURSOR_API_KEY: "synthetic-cursor-private-key", CURSOR_MODEL: "test-model", ZEROS_EXACT_MODEL: "1" }) };
+    const nativeHome = await createCloudNativeHome({ dataRoot: root, conversationId: f.input.conversationId,
+      provider: "cursor", executionId: f.selection.executionId });
+    const coordinator = { ...domain, nativeHome, providerHomePath: nativeHome.paths.home, hasBackgroundServers: async () => false,
+      environment: () => ({ ...nativeHome.environment(), CURSOR_API_KEY: "synthetic-cursor-private-key", CURSOR_MODEL: "test-model", ZEROS_EXACT_MODEL: "1" }) };
     authority.lifetime.attach(coordinator); return coordinator;
   });
   const domain = await f.factory.launchBootSelection(f.selection, () => testExecutionBoundary().prepare({ executionId: f.selection.executionId, actor: "agent-code", cwd: root, workspaceRoot: root }));

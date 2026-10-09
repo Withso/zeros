@@ -3,7 +3,7 @@
 // ──────────────────────────────────────────────────────────
 //
 // Every session spawn still costs provider startup and an owned execution
-// boundary (native Code is cheap; Design ZSR may attest its policy).
+// scope with its process lifecycle and selected provider state.
 // That is worth paying while the user is typing into a chat they mean to use.
 // It is pure waste when they are only
 // stepping through the agent picker on a chat that has never been used: the

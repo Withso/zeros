@@ -1,25 +1,25 @@
 import {resolveCloudRuntimeChild} from "../agents/containment/cloud-runtime-root.mjs";
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { Duplex } from 'node:stream';
 import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
 const require = createRequire(import.meta.url);
 const MAX_SESSIONS = 4;
 const MAX_COMMAND_BYTES = 64 * 1024;
 const MAX_OUTPUT_BYTES = 256 * 1024 * 1024;
 
-export function assertCloudSshWorkerIdentity(status, identity) {
-  if (identity.platform !== 'linux' || identity.uid !== 10001 || identity.gid !== 10001 ||
-      identity.groups.some(group => group !== 10001) ||
-      !/^NoNewPrivs:\s+1$/m.test(status) || !/^CapEff:\s+0+$/m.test(status)) {
-    throw new Error('SSH requires the unprivileged cloud worker');
+export function assertCloudSshEngineIdentity(identity) {
+  if (identity.platform !== 'linux' || identity.uid !== 10003 || identity.gid !== 10003) {
+    throw new Error('SSH requires the non-root engine identity');
   }
 }
 
-/** SSH protocol parsing and every shell run under the workload identity. This
+/** The standalone helper runs as the non-root engine. Engine-integrated protocol
+ * parsing delegates each target to its original owned launch. This
  * accepts an already authorized byte stream; it never opens a TCP listener.
  * The parent owns the short Zeros access lease and closes stdin on revocation.
  * No provider credential or control-plane capability enters this process. */
@@ -106,7 +106,7 @@ export function createCloudSshSession(stream, options) {
             accept?.();
           } catch { reject?.(); }
         });
-        const start = (accept, reject, command, subsystem = false) => {
+        const start = async (accept, reject, command, subsystem = false) => {
           if (closed || disposed || running || (command !== null &&
               (typeof command !== 'string' || Buffer.byteLength(command) > MAX_COMMAND_BYTES || command.includes('\0')))) { reject?.(); return; }
           if (subsystem && (!options.sftpServer || dimensions)) { reject?.(); return; }
@@ -122,9 +122,10 @@ export function createCloudSshSession(stream, options) {
           try {
             if (dimensions) {
               const pty = options.spawnPty ?? require('node-pty').spawn;
-              terminal = pty('/bin/bash', command === null ? ['-l'] : ['-lc', command], {
+              terminal = await pty('/bin/bash', command === null ? ['-l'] : ['-lc', command], {
                 cwd: options.cwd, env: { ...options.env, TERM: dimensions.name }, ...dimensions,
               });
+              if (closed || disposed) {terminal.kill();return;}
               terminal.onData(data => {
                 if (!outputAllowed(data)) return;
                 const bytes = Buffer.byteLength(data);
@@ -141,9 +142,10 @@ export function createCloudSshSession(stream, options) {
             } else {
               const executable = subsystem ? options.sftpServer : '/bin/bash';
               const args = subsystem ? ['-d', options.cwd, '-u', '0022'] : command === null ? ['-l'] : ['-lc', command];
-              process = (options.spawnProcess ?? spawn)(executable, args, {
+              process = await (options.spawnProcess ?? spawn)(executable, args, {
                 cwd: options.cwd, env: options.env, stdio: ['pipe', 'pipe', 'pipe'],
               });
+              if (closed || disposed) {process.kill('SIGKILL');return;}
               process.once('error', () => { if (!disposed) { channel.exit(127); channel.end(); } });
               process.stdout.on('data', data => outputAllowed(data));
               process.stderr.on('data', data => outputAllowed(data));
@@ -176,11 +178,10 @@ export function createCloudSshSession(stream, options) {
   };
 }
 
-if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && path.basename(process.argv[1]) === 'cloud-ssh-session.mjs' && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    assertCloudSshWorkerIdentity(readFileSync('/proc/self/status', 'utf8'), {
-      platform: process.platform, uid: process.getuid(), gid: process.getgid(), groups: process.getgroups(),
-    });
+    if (process.argv.length !== 2) throw new Error('SSH engine identity is unavailable');
+    assertCloudSshEngineIdentity({platform: process.platform, uid: process.geteuid(), gid: process.getegid()});
     const cwd = '/srv/zeros/workspace';
     if (realpathSync(cwd) !== cwd) throw new Error('SSH workspace is unavailable');
     const stream = Duplex.from({ readable: process.stdin, writable: process.stdout });
@@ -188,7 +189,7 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
       cwd,
       sftpServer: '/usr/lib/openssh/sftp-server',
       env: { HOME: '/srv/zeros/home/agent', PATH: `${resolveCloudRuntimeChild().binRoot}:/usr/local/bin:/usr/bin:/bin`,
-        LANG: 'C.UTF-8', USER: 'zeros-worker', LOGNAME: 'zeros-worker', SHELL: '/bin/bash' },
+        LANG: 'C.UTF-8', USER: 'zeros-engine', LOGNAME: 'zeros-engine', SHELL: '/bin/bash' },
     });
     process.stdout.write(JSON.stringify({ version: 1, kind: 'ssh', publicKey: session.publicKey, hostKeySha256: session.hostKeySha256 }) + '\n', () => session.start());
     for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => { session.close(); process.exit(0); });

@@ -5,11 +5,12 @@ import { CloudActorAuthorityRegistry } from "../../../../cloud-actor-authority";
 import { CloudAgentCredentialCache } from "../../../../cloud-agent-credential-cache";
 import { CloudAgentContextCache, cloudProviderExecution, createCloudBootAgentExecutionFactory } from "../../../../cloud-provider-execution";
 import { CloudNativeBoundary, cloudNativeProviderEnvironment } from "../../../../containment/cloud-native-boundary";
-import type { PreparedBoundary } from "../../../../containment/types";
+import { prepareClaudeCloudWorkload } from "./legacy-execution";
 import * as repositoryMcp from "../../../../cloud-mcp";
 
-/** Real private cache/registry/context/factory identities; only native
- * filesystem/process preparation is mocked. No provider or namespace starts. */
+/** Real private cache/registry/context/factory identities, physical HOME and
+ * original Host-backed scope. Only provider/coordinator transport is mocked;
+ * no provider CLI or namespace starts. */
 export async function bootClaudeExecutionFixture() {
   const scope = { organizationId: randomUUID(), workspaceId: randomUUID(), generation: 7, engineInstanceId: randomUUID(),
     bootId: randomUUID(), writerEpoch: randomUUID(), fundingOwnerUserId: randomUUID(), fundingOwnerEpoch: 2 };
@@ -47,18 +48,15 @@ export async function bootClaudeExecutionFixture() {
   const input = { ...base, context, executionId: randomUUID() }, canStart = vi.fn(() => true);
   const factory = createCloudBootAgentExecutionFactory({ credentials, registry, contexts, engineLive: () => true, canStart,
     legacy: { prepare: vi.fn(async () => { throw new Error("Legacy path was selected"); }) }, supervisor: { onRetirementFailure: vi.fn() } });
-  const stop = vi.fn(async () => {});
-  const workload = { generation: "fixture", status: { version: 1, actor: "agent-code", backend: "cloud-worker", state: "ready",
-    designProtection: { required: true, enforced: true, protectedDirectoryCount: 1 }, parity: { level: "restricted", restrictions: [] }, checkedAt: Date.now() },
-    attestation: Promise.resolve(), stopAndProve: stop, revoke: stop,
-    activePorts: () => [], onPortsChanged: () => () => {}, portDiscoveryStatus: () => ({ state: "idle" }) } as unknown as PreparedBoundary;
-  const native = vi.spyOn(CloudNativeBoundary, "prepareBoot").mockImplementation(async authority => ({ ...workload,
-    environment: () => cloudNativeProviderEnvironment(authority.takeMaterial(), authority.model, undefined, authority.environment?.values),
-    providerHomePath: "/srv/zeros/home/agent", hasBackgroundServers: async () => false,
+  const physical = await prepareClaudeCloudWorkload({ ...input, dataRoot: process.env.ZEROS_DATA_DIR });
+  const { workload, nativeHome } = physical;
+  const native = vi.spyOn(CloudNativeBoundary, "prepareBoot").mockImplementation(async authority => ({ ...workload, nativeHome,
+    environment: () => cloudNativeProviderEnvironment(authority.takeMaterial(), authority.model, undefined, authority.environment?.values, nativeHome),
+    providerHomePath: nativeHome.paths.home, hasBackgroundServers: async () => false,
   }) as unknown as CloudNativeBoundary);
   const selection = factory.selectBoot(input); await factory.launchBootSelection(selection, async () => workload);
   const result = await factory.prepareBoot({ selection, workload, signal: new AbortController().signal });
   const execution = cloudProviderExecution(result.boundary)!;
   return { input, factory, selection, execution, boundary: result.boundary, env: result.env, request, canStart,
-    dispose: async () => { try { await factory.disposeBoot(); } finally { native.mockRestore(); mcp.mockRestore(); contexts.dispose(); credentials.dispose(); registry.dispose(); } } };
+    dispose: async () => { try { await factory.disposeBoot(); await physical.dispose(); } finally { native.mockRestore(); mcp.mockRestore(); contexts.dispose(); credentials.dispose(); registry.dispose(); } } };
 }

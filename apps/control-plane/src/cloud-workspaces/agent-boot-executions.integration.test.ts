@@ -11,6 +11,7 @@ import {resetMigratedTestDatabase} from "../test-database.js";
 import {seedReadyCloudWorkspace,withCloudFixtureOwnerTx,ensureCloudPilotUser} from "./test-fixtures.js";
 import {DatabaseCloudAgentCredentialService} from "./agent-credentials.js";
 import {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
+import {cloudAgentModels} from "./agent-models.js";
 import {CloudAgentBootCredentialResponseSchema,CloudAgentActorConfirmResponseSchema,CloudAgentWarmActorResponseSchema,type CloudAgentBootCredentialResponse} from "./agent-boot-contract.js";
 import {interceptQueries,withAuthorityDeadlineBarrier} from "./authority-deadline-test-utils.js";
 import {assertNativeGithubActor} from "./github-native-grants.js";
@@ -59,6 +60,31 @@ suite("genuine private boot credential execution",()=>{
     const stored=(await pool.query("SELECT * FROM cloud_agent_boot_credentials")).rows;
     expect(stored).toHaveLength(3);expect(JSON.stringify(stored)).not.toContain(secret);
     expect((await pool.query("SELECT * FROM cloud_agent_execution_leases")).rowCount).toBe(0);
+  });
+  it("readies every supported model from a legacy one-model connection and warms another supported model",async()=>{
+    const saved=(await pool.query("SELECT models,all_models FROM cloud_agent_organization_connections WHERE org_id=$1 AND provider='cursor'",[fixture.organizationId])).rows[0];
+    expect(saved).toEqual({models:["grok-4.6"],all_models:false});
+    const bound=await boot();
+    expect(bound.providers.find(slot=>slot.provider==="cursor")).toMatchObject({status:"ready",credentialId,models:cloudAgentModels("cursor")});
+    const sender=await actor(),input={...request(),bootId:bound.bootId,writerEpoch:bound.writerEpoch,actorSessionId:sender.actorSessionId,
+      provider:"cursor",model:"grok-4.7",conversationId:randomUUID(),cwd:"/srv/zeros/workspace",repositoryServers:[]};
+    await expect(service.boot(engine(),"warm-context",input)).resolves.toMatchObject({model:"grok-4.7",provider:"cursor"});
+    await expect(service.boot(engine(),"warm-context",{...input,model:"unsupported-model"})).rejects.toThrow();
+    expect((await pool.query("SELECT models,all_models FROM cloud_agent_organization_connections WHERE org_id=$1 AND provider='cursor'",[fixture.organizationId])).rows[0]).toEqual(saved);
+    expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_execution_leases")).rows[0]).toEqual({count:0});
+  });
+  it("reads a smoke-only runtime qualification as no extended native capability, not a model refusal",async()=>{
+    // The Alpha smoke qualifier stores the column default {}: it proves no extended native feature.
+    const qualify=async(capabilities:string)=>withCloudFixtureOwnerTx(pool,async tx=>{
+      await tx.query("SET LOCAL session_replication_role=replica");
+      await tx.query("UPDATE cloud_runtime_qualifications SET native_capabilities=$1::jsonb WHERE credential_kind='cursor-api-key'",[capabilities]);
+    });
+    await qualify("{}");
+    expect((await boot()).providers.find(slot=>slot.provider==="cursor")).toMatchObject({status:"ready",credentialId,models:cloudAgentModels("cursor"),
+      nativeCapabilities:{version:1,goals:false,nativeFork:false,transcriptFork:false,nativeReview:false,connectedApps:false,multiAgent:false}});
+    // An unknown capability format is still not admitted.
+    await qualify(JSON.stringify({version:2}));
+    expect((await boot()).providers.find(slot=>slot.provider==="cursor")).toMatchObject({status:"unavailable"});
   });
   it("reconciles concurrent bootstrap retries against the same writer and current-only vault",async()=>{
     const [first,second]=await Promise.all([boot(),boot()]);expect(second).toEqual(first);
@@ -110,7 +136,7 @@ suite("genuine private boot credential execution",()=>{
     const exchange=async(acknowledgements:unknown[]=[])=>service.credentialControls(engine(),{...request(),bootId:bound.bootId,writerEpoch:bound.writerEpoch,acknowledgements});
     const pause=(await exchange()).controls[0]!;
     await exchange([{...pause,operation:undefined,selectors:undefined,controlRevision:1,phase:"fenced",mutationFenced:true,startsFenced:true,
-      readyCacheRevision:1,proofId:null,activity:{complete:true,foreground:0,reservedLaunches:0,background:0,idleHosts:0,scopes:[]}}].map(({operation,selectors,...ack})=>ack));
+      readyCacheRevision:1,proofId:null,activity:{complete:true,foreground:0,reservedLaunches:0,background:0,idleHosts:0,scopes:[]}}].map(({operation:_operation,selectors:_selectors,...ack})=>ack));
     await credentials.put(replacement);
     const synced=CloudAgentBootCredentialResponseSchema.parse(await service.boot(engine(),"sync",syncRequest(bound)));
     expect(synced.cacheRevision).toBe(2);expect(synced.providers.find(value=>value.provider==="cursor")).toMatchObject({status:"ready",credentialRevision:2,connectionRevision:2,material:{apiKey:replacement.material.apiKey}});

@@ -106,7 +106,7 @@ try {
  * Node's built-in environment-proxy support covers fetch/http/https, but not
  * node:http2. Cursor uses both: API-key exchange/model discovery ride fetch,
  * while the local agent protocol rides @connectrpc/connect-node → http2.
- * ZSR host parity does not install a proxy. This shim matters only when the
+ * This shim matters only when the
  * deployment itself sets NODE_USE_ENV_PROXY and HTTP(S)_PROXY; without it the
  * two Cursor transports would disagree about that ordinary host configuration.
  *
@@ -190,12 +190,9 @@ function installEnvironmentProxyTransports() {
     const hostname = normalizedHostname(target.hostname);
     const port = target.port ? Number(target.port) : 443;
     const authority = `${net.isIP(hostname) === 6 ? `[${hostname}]` : hostname}:${port}`;
-    // Phase timing for the one hop Zeros owns end to end. A contained session
-    // pays ~2.6s to open a connection that costs ~0.55s from the same machine
-    // unproxied, and the provider opens several of them SERIALLY before a turn
-    // can start — which is most of a cold turn's latency. "A connection is
-    // slow" is not actionable; each of these phases points somewhere different:
-    //   dial    — reaching the sandbox's proxy listener (local; a slow dial
+    // Phase timing for a user-configured proxy connection. Several serial
+    // connections can dominate cold startup; distinguish each phase:
+    //   dial    — reaching the configured proxy listener (local; a slow dial
     //             means the bridge in front of it, not the network)
     //   connect — CONNECT sent → 200 received: the proxy's own upstream dial,
     //             DNS and policy check
@@ -482,13 +479,9 @@ function installEnvironmentProxyTransports() {
 // the settings layers named by `local.settingSources` (user/project/team/mdm/
 // plugins), walks the workspace for rules/skills/ignore files, bootstraps its
 // feature-gate client, and opens the backend connection — and none of it emits
-// a single line. Measured against this host's own run store, the FIRST run in a
-// fresh contained host spent 77s in that window while every later run in the
-// same process spent ~4s; uncontained hosts start at ~4s cold. 77 seconds of
-// total silence is not a diagnosable state, and the gap is exactly where a
-// containment boundary changes the cost of ordinary work (every outbound
-// request is proxied, every spawn is sandbox-wrapped, HOME is a fresh
-// projection), so the missing information is always "which operation blocked".
+// a single line. Cold workspace startup can dominate the first turn; time
+// provider requests, child startup and state initialization so attribution
+// identifies which operation blocked.
 //
 // So: time every outbound request and every child spawn, and attribute the
 // pre-first-item window to the ones that overlapped it. Recording is a closure
@@ -498,7 +491,7 @@ function installEnvironmentProxyTransports() {
 // operation regardless of duration.
 //
 // Diagnostics go to stderr (stdout is the protocol) and the engine forwards
-// them, so the attribution lands in the same log as the `[zsr] admitted` line.
+// them alongside the original provider session diagnostics.
 
 /** An operation slower than this is reported on its own as it completes. */
 const SLOW_OP_MS = Number(process.env.ZEROS_CURSOR_SLOW_OP_MS) || 3_000;
@@ -693,7 +686,7 @@ function reportFirstItemLatency(runId, from, to, extra) {
   // The dominant case is worth naming rather than leaving as a row in a table:
   // an MCP server the provider spawned, killed at its connect budget, having
   // consumed most of the window. A stdio MCP server that has to authorize
-  // interactively can never finish in a headless contained session, so it costs
+  // interactively can never finish in a headless session, so it costs
   // this on EVERY session until its credentials are valid on disk — and the only
   // visible symptom is the user's first message being slow.
   const dominant = candidates[0];
@@ -756,8 +749,7 @@ function installFirstTurnTracer() {
 
   // A socket's operation ends at the first terminal event. `connect` for a
   // plain socket, `secureConnect` for TLS; `error`/`close` cover the failures,
-  // which is the case that matters — an outbound socket the sandbox never lets
-  // reach anything is precisely the shape of stall this exists to name.
+  // which is the case that matters — an outbound socket that never reaches its endpoint is precisely the shape of stall this exists to name.
   //
   // A TLSSocket emits `connect` too — at TCP-established, BEFORE the
   // handshake — so a `tls` op almost always ends there. Say `tcp-connected`
@@ -989,9 +981,9 @@ try {
 
 /** A gateway session gets a Zeros-owned, workspace/provider-scoped store.
  * Seed it once from Cursor's normal store so existing conversations resume;
- * all later writes use the durable explicit path under either the native or
- * kernel execution boundary. */
-function initializeContainedStateRoot() {
+ * all later writes use the durable explicit path. Cloud directories separate
+ * conversation state, not same-user access. */
+function initializeCursorStateRoot() {
   const target = process.env.ZEROS_CURSOR_STATE_ROOT;
   if (!target) return null;
   if (!path.isAbsolute(target)) {
@@ -1030,15 +1022,15 @@ function initializeContainedStateRoot() {
   return target;
 }
 
-let containedStateRoot = null;
+let providerStateRoot = null;
 try {
-  containedStateRoot = initializeContainedStateRoot();
+  providerStateRoot = initializeCursorStateRoot();
 } catch (error) {
   try {
     process.stdout.write(
       JSON.stringify({
         k: "fatal",
-        message: `contained Cursor state initialization failed: ${
+        message: `Cursor provider state initialization failed: ${
           error && error.message ? error.message : String(error)
         }`,
       }) + "\n",
@@ -1154,7 +1146,7 @@ function storeRefFor(cwd) {
 }
 
 function localStoreFor(cwd) {
-  if (containedStateRoot) return jsonlStoreAt(containedStateRoot);
+  if (providerStateRoot) return jsonlStoreAt(providerStateRoot);
   if (!getDefaultSdkStateRoot) return null;
   try {
     return jsonlStoreAt(getDefaultSdkStateRoot(storeRefFor(cwd)));
@@ -1238,7 +1230,7 @@ function withListStore(opts) {
 // inside it. The SDK's own words: resolving a workspace "is the slowest part of
 // a local agent's first turn, and on a large repo it dominates it."
 //
-// It is exactly the shape of the measured problem. A contained first turn spends
+// It is the shape of the measured problem. A cold first turn spends
 // its time on a SERIAL staircase of fresh connections to api2.cursor.sh (five
 // `exchange_user_api_key` calls, `GetServerConfig`, statsig) plus a workspace
 // scan — ~72% network, ~28% in-process — and none of it depends on the user's
@@ -1264,8 +1256,8 @@ function getPlatform() {
     platformPromise = (async () => {
       if (typeof sdk.createAgentPlatform !== "function") return null;
       return sdk.createAgentPlatform(
-        containedStateRoot
-          ? { localStore: jsonlStoreAt(containedStateRoot) }
+        providerStateRoot
+          ? { localStore: jsonlStoreAt(providerStateRoot) }
           : {},
       );
     })().catch(() => null);
@@ -1650,8 +1642,8 @@ async function handle(m) {
       // opened the SDK's `SqliteLocalAgentStore`; 1.0.26 stopped exporting that
       // symbol altogether, which silently turned every store.open into
       // {storeId: null} and left the adapter's terminal-error recovery dead.
-      const store = containedStateRoot
-        ? jsonlStoreAt(containedStateRoot)
+      const store = providerStateRoot
+        ? jsonlStoreAt(providerStateRoot)
         : args.stateRoot
           ? jsonlStoreAt(args.stateRoot)
           : localStoreFor(args.workspaceRef);

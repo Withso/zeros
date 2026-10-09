@@ -703,10 +703,10 @@ an available provider browser, never assume `iab` or use a `file://` workaround.
 | Human Code workflow      | Normal native files and Git            | Shared source editing and explicit Git operations                      | Native host                        |
 | Shared Code/Design agent | Normal provider tools and permissions  | Native file tools and optional API in either local context | Native host process lifecycle      |
 | Human Design surface     | Read-only Code context                 | Semantic Design API transactions                                      | Trusted application process        |
-| Cloud worker agent       | Worker-owned provider and cloud policy | Design API in Design mode; native Design writes unavailable           | Qualified cloud execution boundary |
+| Cloud worker agent       | Normal VM provider tools and cloud policy | Design API authoring policy; not OS-enforced | Same non-root `zeros-engine` (10003), no agent sandbox |
 | External terminal/editor | Normal same-user authority             | Normal same-user authority                                            | Outside the Zeros actor guarantee  |
 
-Native Code deliberately has no ZSR, VM, OrbStack machine, local container,
+Native Code deliberately has no per-agent sandbox, VM, OrbStack machine, local container,
 Zeros ACL, Design sparse shape, alternate checkout, or Code-to-sandbox fallback.
 `HostExecutionBoundary` adds owned process-group lifecycle, bounded identity,
 graceful/forced teardown, and stale-process recovery while preserving normal
@@ -715,7 +715,8 @@ provider and host behavior.
 Agents receive recognized roots and default task intent. Local native tools and
 the shared Files editor can edit Code and Design in either context; explicit
 requests override the default intent. Managed Git includes both. Cloud workers
-retain their API-only Design policy. Provider permissions and same-user host
+retain their API-only Design policy. Cloud retains API authoring for now; that
+policy does not prevent same-user shell edits. Provider permissions and same-user host
 authority remain independent of the composer tag.
 
 View identity never selects execution posture. Local Design directory changes
@@ -1542,7 +1543,7 @@ mints a new bearer. Authorization is checked again at the journal admission
 boundary; a transaction already durably admitted finishes recovery. Cancellation
 therefore requires status reconciliation when it races a commit.
 
-Request/proposal records live in engine-private Design storage, bounded to 512
+Request/proposal records live in engine-managed Design storage, bounded to 512
 records and 4 MiB per directory. Resolved receipts are retained for **up to** seven
 days within those limits; a persisted timestamp cutoff prevents replay of evicted
 requests. Started/indeterminate records are not automatically evicted or replayed.
@@ -1612,15 +1613,27 @@ port or change the application theme. [Electron debugger API](https://www.electr
 [Chromium media emulation](https://chromedevtools.github.io/devtools-protocol/tot/Emulation/#method-setEmulatedMedia).
 
 Cloud capture runs a pinned Playwright/Chromium install from immutable image
-paths as dedicated UID 10002 with an allowlisted environment containing no
+paths as the same non-root engine user (UID 10003) with an allowlisted environment containing no
 provider/capture credentials. Chromium sandboxing is explicitly enabled. The
-coordinator owns admission until the process closes, terminates the process
-group on cancellation, and escalates to a kill after one second. There is no
+coordinator owns admission until the original capture process group is retired;
+cancellation does not prove escaped or detached descendants retired. Capture
+enters one shared workload cgroup through the original broker before exec, with
+engine/control processes outside it. Idle requires a fresh complete census of the
+entire engine-runtime tree, including the engine leaf and any new sibling; only
+exact infrastructure births and the C3 quiet populated-shell exception may be
+exempt. Unknown means busy with bounded recovery. VM drain closes launches;
+checkpoint and seal complete before kill. The outside root broker then uses
+whole-tree `cgroup.kill` and owns the final `populated=0` receipt, including engine
+retirement. Local Host process-group behavior is unchanged. There is no
 unsandboxed fallback. Failed preflight omits capture while source tools remain
 usable. [Playwright launch options](https://playwright.dev/docs/api/class-browsertype#browser-type-launch).
 
 For v4, `boat-image/templates/v4/build.sh` supplies Chromium's Ubuntu 24.04
-native libraries/fonts, UID 10002 and the AppArmor user-namespace profile.
+native libraries/fonts and the AppArmor user-namespace profile. The capture
+process uses the same non-root engine identity (10003), with an exact length-1
+identity map and empty capability sets. The immutable base account entries remain
+archived compatibility records. Chromium's own sandbox
+remains a separate browser-content control.
 `runtime-bundle/build.ts` supplies pinned Chromium under `worker/design-browsers`
 and the capture worker/CLI. The dependency comparison in
 `scripts/__tests__/design-cloud-preview-runtime.test.ts` checks the base recipe
@@ -1873,26 +1886,27 @@ preview endpoints never become portable scene metadata.
 
 ### Cloud, packaging, and compatibility
 
-Cloud execution is a separate qualified deployment boundary. A cloud image may
-force every actor through its worker policy and may provide a root-owned,
-generation-private container service. That source/cloud-image helper is not a
-desktop VM path and must not be staged into desktop resources.
+The workspace VM is the cloud isolation boundary. Agents, tools and cloud
+terminals run as the same non-root `zeros-engine` user (10003), without an agent
+sandbox, in the real checkout with normal VM egress. Agents can read engine data
+and other-conversation state on their VM; capture uses the same identity. Physical
+conversation configuration/history directories separate state, not authority between agents.
+Cloud API checks retain their own actor and document grants.
 
-Desktop packages retain only active execution assets: the native host process
-supervisor plus the pinned ZSR supervisor/runtime tools and process-domain
-helpers still used by supported contained execution paths. Composer Design
-mode does not select those assets or make them a new release dependency. They must not include the
-retired local container worker, OrbStack relay/host, cloud-init asset,
-controller, machine bundle, or sidecar variables that locate them.
+Desktop packages retain the native Host process supervisor, provider runtimes
+and product-owned pinned ripgrep. Composer Design mode does not select another
+execution backend. They exclude retired sandbox supervisors/process-domain
+helpers, local container workers, OrbStack hosts, cloud-init assets and machine
+bundles.
 
 Older builds wrote Design ACLs, Design sparse shapes, local projection state,
 Cursor overlays, and local OrbStack/container recovery descriptors. Startup may
 recognize, recover, or remove those exact artifacts so upgrades do not strand
 user state or permissions. Persisted `ZSR` names, backend/status enum values,
 session roots, and old OrbStack cleanup filenames remain compatibility
-contracts where externally observable. An ambient OrbStack Docker socket may
-remain on a ZSR denylist solely as an escape endpoint; it is not runtime
-discovery or an active dependency.
+contracts where externally observable, including `__zsr_cap` preview capability
+URLs. Compatibility readers do not launch old isolation or claim new sandbox
+success. There is no OrbStack dependency or discovery path.
 
 Do not rename serialized compatibility identifiers merely to make the source
 look current. Do remove unreferenced local VM/container implementation code and
@@ -2656,22 +2670,22 @@ pnpm test:ui-smoke
 pnpm check:protocol
 pnpm check:preload
 pnpm check:design-containment
-pnpm check:zsr:contracts
-pnpm check:zsr:runtime
 pnpm check:packaging-paths
 pnpm check:licenses
 ```
 
-`pnpm smoke:engine` is macOS-only. `check:zsr:runtime` requires a host where the
-real kernel sandbox can initialize. A namespace- or Seatbelt-incompatible host
-is an unqualified/fail-closed result, not substitute evidence.
+`pnpm smoke:engine` is macOS-only. Offline bundle closure tests use read-only
+archive namespaces to prove shipped dependencies. Those namespaces do not
+qualify provider isolation or replace real engine lifecycle tests.
 
 A release report records the source commit and dirty state, OS/architecture,
-source versus packaged build, pinned Sandbox Runtime provenance and licenses,
+source versus packaged build, pinned provider/runtime provenance and licenses,
 all commands/outcomes, platform-only checks not run, latency samples, and cloud
 image/deployment identity when applicable. Source tests do not qualify a
 packaged app, one architecture does not qualify another, and Design API tests
-do not substitute for a live kernel-boundary test.
+do not substitute for native provider and original lifecycle custody tests:
+original process groups for conversation Stop, and the shared workload census
+and original broker VM drain for cloud.
 
 Acceptance must prove, independently:
 
@@ -2683,9 +2697,11 @@ Acceptance must prove, independently:
   include Design, and branch-wide rewrites protect live drafts;
 - scoped Design tools reject stale identity/revision/authority and are revoked
   when their owning execution or document identity is retired;
-- contained cloud admission has no native fallback; native and contained
-  execution teardown retain their respective process-lifecycle guarantees;
-- desktop packaging includes active native/ZSR assets and excludes every
+- cloud authority refusal has no Local fallback; Local retains original Host
+  process-group teardown, cloud conversation Stop proves its original group only,
+  and final VM drain closes launches and completes checkpoint/seal before the
+  outside root broker's whole-tree kill/empty receipt;
+- desktop packaging includes active native/provider/ripgrep assets and excludes every
   retired local VM/OrbStack/container asset.
 
 Every new interaction extends the relevant `scripts/ui-smoke-design-*.mjs`
@@ -2721,7 +2737,7 @@ source bytes and normal inline/flex layout.
 | ------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Authored frame/text editing     | Existing sandboxed iframe runtime                                      | Keep bounded live frames, exact generation messages and active-only work.                                                                                                                         |
 | Desktop authored evidence       | On-demand hidden Electron capture window                               | Private nonpersistent session, sandbox/context isolation, no Node, denied permissions/downloads/network, sanitized source and CSP preventing authored scripts. Destroy the window after each job. |
-| Cloud authored evidence         | Disposable Chromium worker under dedicated UID 10002                   | Chromium sandbox required. No provider or capture credentials in the worker environment. One admitted capture per engine; retire the process group on cancellation.                               |
+| Cloud authored evidence         | Disposable Chromium worker under the non-root engine identity (UID 10003) | Chromium sandbox required. No provider or capture credentials in the worker environment. One admitted capture per engine; cancellation proves its original process group only. Shared census and VM drain remain separate. |
 | Future live browser surface     | Separately owned native session/view, subject to product qualification | A DOM iframe shares its owning session. Native rectangles need explicit overlay/focus handling and cannot promise arbitrary CSS transforms or web parity.                                         |
 | Future general executable tools | Independently stoppable worker/process                                 | A responsive host timer is not an OS CPU/GPU quota. DOM/WebGL workloads need their own host qualification.                                                                                        |
 
@@ -2835,7 +2851,9 @@ experiment enables arbitrary executable surface kinds or proves an OS quota.
 
 #### Historical cloud capture fixture (2026-09-16)
 
-The production worker implementation ran on the reference Linux VM under its dedicated nonroot UID,
+Historical capture evidence below used the retired separate nonroot identity.
+It does not qualify the current shared-identity execution path. The production
+worker implementation ran on the reference Linux VM under that earlier identity,
 with sandboxing enabled and the pinned browser. Eight checks passed: exact PNG
 dimensions, denied network, no surviving worker/browser, single admission,
 cancellation cleanup, recovery, and headless proposal/result evidence with

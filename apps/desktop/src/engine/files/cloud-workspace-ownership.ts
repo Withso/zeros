@@ -1,10 +1,10 @@
-import { closeSync, constants, fchownSync, fstatSync, lstatSync, opendirSync, openSync, realpathSync, type Stats } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, opendirSync, openSync, realpathSync, type Stats } from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { loadCloudWorkerConfiguration, type CloudWorkerConfiguration } from "../agents/containment/cloud-worker-config";
 import { expandCloudWorkspacePaths, loadCloudWorkspacePaths } from "../agents/containment/cloud-workspace-paths";
 
-// Fixed by the isolated image layout, outside the engine's private
+// Fixed by the existing VM layout, outside the engine's private
 // state/home roots.
 const WORKSPACE_ROOT = "/srv/zeros/workspace";
 type Identity = { uid: number; gid: number };
@@ -27,7 +27,8 @@ export interface CloudOwnershipRecoveryResult {
 const emptyRecovery = (): CloudOwnershipRecoveryResult => ({ visited: 0, published: 0, skipped: 0, failed: 0, bounded: false });
 const inside = (candidate: string, root: string) => candidate === root || candidate.startsWith(root + path.sep);
 // Match QualifiedCloudFilePolicy's engine/provider storage exclusions. Recovery
-// has no actor credential and must never grant access to these private bytes.
+// has no actor credential and must not expose these bytes through Files APIs.
+// Same-user agents share the VM trust domain outside these API checks.
 const privateSegments = new Set([".git", ".zeros", ".appdata", ".conductor", ".ssh", ".aws", ".gnupg", ".gpg", ".kube"]);
 const privateNames = new Set(["zeros-dev-env.json", ".zeros-canvas.json"]);
 function privateCheckoutPath(relative: string): boolean {
@@ -36,15 +37,16 @@ function privateCheckoutPath(relative: string): boolean {
     /(?:^|\/)(?:\.codex\/auth\.json|\.claude\/\.credentials\.json|\.cursor\/(?:auth|credentials)\.json)$/i.test(relative);
 }
 
-/** Publish engine-authored checkout bytes to the tenant identity. Descriptor
- * checks prevent symlink/hardlink aliases from transferring private authority.
- * Modes are preserved; the engine retains namespace authority over the tenant. */
+/** Validate engine-authored checkout bytes without transferring ownership.
+ * Descriptor checks retain Files API path safety and preserve source modes. */
 export class CloudWorkspaceOwnership {
   constructor(
     private readonly root: string,
-    private readonly worker: Identity,
-    private readonly changeOwner = fchownSync,
-  ) {}
+    private readonly engine: Identity = { uid: process.geteuid!(), gid: process.getegid!() },
+  ) {
+    if (engine.uid !== process.geteuid!() || engine.gid !== process.getegid!())
+      throw new Error("Cloud checkout requires the engine identity");
+  }
 
   private inspect(target: string, fd: number): Stats {
     const info = fstatSync(fd);
@@ -72,9 +74,7 @@ export class CloudWorkspaceOwnership {
       const fd = provided ?? openSync(candidate, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       try {
         const info = this.inspect(candidate, fd);
-        if (info.uid === process.geteuid!())
-          this.changeOwner(fd, this.worker.uid, this.worker.gid);
-        else if (info.uid !== this.worker.uid)
+        if (info.uid !== this.engine.uid)
           throw new Error("Unexpected cloud checkout file owner");
       } finally {
         if (provided === undefined) closeSync(fd);
@@ -158,8 +158,7 @@ export class CloudWorkspaceOwnership {
     if (realpathSync(this.root) !== this.root) throw new Error("Cloud checkout ownership root changed");
     const inspect = (target: string, fd: number) => this.inspect(target, fd);
     const primaryRoot = this.root;
-    const worker = this.worker;
-    const changeOwner = this.changeOwner;
+    const engine = this.engine;
     const walk = function* (directory: string, fd: number, depth: number): Generator<CloudOwnershipRecoveryResult, void> {
       inspect(directory, fd);
       const entries = opendirSync(`/proc/self/fd/${fd}`, { bufferSize: 32 });
@@ -200,11 +199,7 @@ export class CloudWorkspaceOwnership {
                 if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
               }
             }
-            if (info.uid !== worker.uid) {
-              if (info.uid !== process.geteuid!()) { result.skipped++; continue; }
-              changeOwner(child, worker.uid, worker.gid);
-              result.published++;
-            }
+            if (info.uid !== engine.uid) { result.skipped++; continue; }
             if (info.isDirectory()) yield* walk(candidate, child, depth + 1);
           } catch { result.failed++; }
           finally { if (child !== undefined) closeSync(child); }
@@ -218,9 +213,8 @@ export class CloudWorkspaceOwnership {
   }
 }
 
-/** The active isolated worker runs the tenant as its own identity, so
- * engine-authored checkout files must be published to it. Local and retired
- * profiles never gain publication authority. */
+/** Retained cloud placement helper. New writes keep the engine identity;
+ * Local and retired profiles never gain cloud publication authority. */
 export function publishesCloudWorkspaceOwnership(
   worker: { readonly version: number } | null | undefined,
 ): boolean {
@@ -235,7 +229,7 @@ export function publishCloudWorkspacePath(target: string, descriptor?: number): 
     const worker = loadCloudWorkerConfiguration();
     if (worker && publishesCloudWorkspaceOwnership(worker)) {
       const mapping = loadCloudWorkspacePaths();
-      ownership = [WORKSPACE_ROOT, ...mapping ? [mapping.repositoryAlias] : []].map(root => new CloudWorkspaceOwnership(root, worker));
+      ownership = [WORKSPACE_ROOT, ...mapping ? [mapping.repositoryAlias] : []].map(root => new CloudWorkspaceOwnership(root));
     } else ownership = null;
   }
   for (const publisher of ownership ?? []) publisher.publish(resolved, descriptor);
@@ -247,7 +241,7 @@ export async function recoverCloudWorkspaceOwnership(
 ): Promise<CloudOwnershipRecoveryResult> {
   if (worker?.version !== 4) return emptyRecovery();
   const mapping = loadCloudWorkspacePaths();
-  return new CloudWorkspaceOwnership(WORKSPACE_ROOT, worker).recoverCompletely({
+  return new CloudWorkspaceOwnership(WORKSPACE_ROOT).recoverCompletely({
     ...options,
     privateRoots: expandCloudWorkspacePaths(options?.privateRoots ?? [], mapping),
     ownerRoots: expandCloudWorkspacePaths(options?.ownerRoots ?? [], mapping),

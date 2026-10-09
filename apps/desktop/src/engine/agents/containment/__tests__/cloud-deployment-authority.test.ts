@@ -6,8 +6,34 @@ import {
   cloudEngineIdMapVersion,
   isReadOnlyCloudMount,
 } from "../cloud-deployment-authority.mjs";
+import { isCloudEngineSecurityStatus } from "../cloud-runtime-root.mjs";
 
 describe("cloud engine namespace authority", () => {
+  it("recognizes only the exact new non-root map while keeping archived maps readable", () => {
+    expect(cloudEngineIdMapVersion("     10003      10003          1\n")).toBe(5);
+    expect(isCloudEngineIdMap("10003 10003 1\n")).toBe(true);
+    for (const source of ["10003 10003 2\n", "10003 0 1\n", "0 10003 1\n10003 10003 1\n",
+      "10003 10003 1\n10001 10001 2\n", "10003 10003 1 trailing\n", "10003 10003 1\0"])
+      expect(cloudEngineIdMapVersion(source)).toBeNull();
+  });
+
+  it("requires all five capability sets empty, NoNewPrivs and seccomp in current evidence", () => {
+    const status = ["Name:\tengine", ...["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"].map(key => `${key}:\t0000000000000000`),
+      "NoNewPrivs:\t1", "Seccomp:\t2", ""].join("\n");
+    const check = isCloudEngineSecurityStatus;
+    expect(check(status)).toBe(true);
+    for (const key of ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"])
+      expect(check(status.replace(`${key}:\t0000000000000000`, `${key}:\t0000000000000001`))).toBe(false);
+    for (const source of [status.replace("NoNewPrivs:\t1", "NoNewPrivs:\t0"), status.replace("Seccomp:\t2", "Seccomp:\t0"),
+      status.replace("CapAmb:\t0000000000000000\n", ""), status + "CapEff:\t0000000000000000\n", null, " ".repeat(65537)])
+      expect(check(source)).toBe(false);
+  });
+  it("recognizes the engine-only map without mapping any worker identity", () => {
+    expect(cloudEngineIdMapVersion("0 10003 1\n")).toBe(4);
+    expect(isCloudEngineIdMap("0 10003 1\n")).toBe(true);
+    for (const invalid of ["0 10003 2\n", "0 0 1\n", "0 10003 1\n10002 10002 1\n"])
+      expect(cloudEngineIdMapVersion(invalid)).toBeNull();
+  });
   it("adds only the private provider identity in the separate v3 map",()=>{
     const v2="0 10003 1\n10001 10001 2\n",v3=v2+"10004 10004 1\n";
     expect(cloudEngineIdMapVersion(v2)).toBe(2);expect(cloudEngineIdMapVersion(v3)).toBe(3);
@@ -23,7 +49,6 @@ describe("cloud engine namespace authority", () => {
     ).toBe(true);
     for (const value of [
       "0 0 4294967295\n",
-      "0 10003 1\n",
       "0 10003 1\n10001 10001 3\n",
       "0 10003 1\n10001 0 2\n",
       "0 10003 1\n10001 10001 2\n65534 65534 1\n",

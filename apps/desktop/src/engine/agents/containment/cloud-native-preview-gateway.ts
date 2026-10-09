@@ -5,15 +5,15 @@ import {
 import type {
   BoundaryPreviewGateway,
   BoundaryPreviewGatewayFactory,
-  ZsrPreviewTarget,
-} from "./zsr-preview-gateway";
+  PreviewTarget,
+} from "./preview-gateway";
 
 /** v4 uses the authenticated runtime HTTP/HMR gateway. This factory publishes
  * only an opaque admission target; it neither exposes an application port nor
  * allocates a signed-link pool or another public listener. */
 export class CloudNativePreviewGatewayFactory implements BoundaryPreviewGatewayFactory {
   async open(
-    target: ZsrPreviewTarget,
+    target: PreviewTarget,
     identity?: CloudAgentPreviewTarget,
   ): Promise<BoundaryPreviewGateway> {
     if (

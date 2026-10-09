@@ -8,6 +8,7 @@ import { seedComputerToolsFixture } from "./computer-tools-test-fixture.js";
 import { DatabaseCloudAgentCredentialService } from "./agent-credentials.js";
 import { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { DatabaseCloudAgentExecutionService } from "./agent-executions.js";
+import { cloudAgentModels } from "./agent-models.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 d("explicit provider-wide self consent", () => {
@@ -43,16 +44,50 @@ d("explicit provider-wide self consent", () => {
     for (const model of ["gpt-6.1-sol", "unknown-future-model"])
       await expect(executions.admit(f.scope, admission(request.id, model), false, undefined, undefined, undefined, 1)).rejects.toMatchObject({ code: "cloud_agent_model_not_authorized" });
   });
-  it("preserves existing and explicitly restricted lists without widening them", async () => {
+  it("admits supported provider models from legacy false or absent flags without rewriting saved consent", async () => {
     for (const flag of [undefined, false]) {
       const request = delegate(flag); await credentials.delegate(f.owner.id, request);
       expect((await credentials.forWorkspace(f.owner.id, f.fixture.workspaceId)).delegations.find(row => row.id === request.id))
-        .toMatchObject({ allModels: false, models: ["grok-4.6"] });
-      await expect(executions.admit(f.scope, admission(request.id, "grok-4.7"), false, undefined, undefined, undefined, 1)).rejects.toMatchObject({ code: "cloud_agent_model_not_authorized" });
+        .toMatchObject({ allModels: false, models: cloudAgentModels("cursor") });
+      const lease=await executions.admit(f.scope, admission(request.id, "grok-4.7"), false, undefined, undefined, undefined, 1);
+      expect(lease.model).toBe("grok-4.7");
+      await expect(executions.validate(f.scope,lease.leaseId,true)).resolves.toHaveProperty("leaseId",lease.leaseId);
       expect((await executions.admit(f.scope, admission(request.id, "grok-4.6"), false, undefined, undefined, undefined, 1)).model).toBe("grok-4.6");
+      for(const model of ["gpt-6.1-sol","unknown-future-model"])
+        await expect(executions.admit(f.scope,admission(request.id,model),false,undefined,undefined,undefined,1)).rejects.toMatchObject({code:"cloud_agent_model_not_authorized"});
+      expect((await pool.query("SELECT models,all_models FROM cloud_agent_credential_delegations WHERE id=$1",[request.id])).rows[0])
+        .toEqual({models:["grok-4.6"],all_models:false});
     }
   });
-  it("rejects provider-wide grants to another member while preserving their explicit model consent", async () => {
+  it("lists all supported models for an original owner's legacy delegation without changing its write receipt",async()=>{
+    const request=delegate(false),written=await credentials.delegate(f.owner.id,request);
+    expect(written.delegation).toMatchObject({models:["grok-4.6"],allModels:false});
+    expect((await credentials.listDelegations(f.owner.id,request.credentialId)).delegations.find(row=>row.id===request.id))
+      .toMatchObject({id:request.id,models:cloudAgentModels("cursor"),allModels:false});
+    expect(await credentials.delegate(f.owner.id,request)).toEqual({...written,replayed:true});
+    expect((await pool.query("SELECT models,all_models FROM cloud_agent_credential_delegations WHERE id=$1",[request.id])).rows[0])
+      .toEqual({models:["grok-4.6"],all_models:false});
+  });
+  it("keeps computer tools available to another supported model from a legacy one-model grant",async()=>{
+    await resetMigratedTestDatabase(pool);
+    f=await seedComputerToolsFixture(pool,true,{mode:"smoke",mcpQualified:true});
+    credentials=new DatabaseCloudAgentCredentialService(pool,f.encryption);
+    executions=new DatabaseCloudAgentExecutionService(pool,f.encryption,false,undefined,{computer:f.computer});
+    const request=delegate(false);await credentials.delegate(f.owner.id,request);
+    const lease=await executions.admit(f.scope,admission(request.id,"grok-4.7"),false,undefined,undefined,1,1);
+    const tool={kind:"computer-tool",leaseId:lease.leaseId,toolCallId:randomUUID(),tool:{name:"GetComputerConfiguration",arguments:{computerId:f.fixture.organizationId}}};
+    await expect(executions.computerTool(f.scope,tool)).resolves.toMatchObject({computerId:f.fixture.organizationId});
+    await pool.query("UPDATE cloud_agent_credential_delegations SET revoked_at=now() WHERE id=$1",[request.id]);
+    await expect(executions.computerTool(f.scope,{...tool,toolCallId:randomUUID()})).rejects.toMatchObject({status:403});
+  });
+  it("refuses an unsupported model even when a legacy saved list explicitly contains it",async()=>{
+    const model="unknown-future-model",request={...delegate(false),models:[model]};
+    await credentials.delegate(f.owner.id,request);
+    await expect(executions.admit(f.scope,admission(request.id,model),false,undefined,undefined,undefined,1))
+      .rejects.toMatchObject({code:"cloud_agent_model_not_authorized"});
+    expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_execution_leases WHERE delegation_id=$1",[request.id])).rows[0]).toEqual({count:0});
+  });
+  it("keeps the legacy self-only flag constraint and exact member consent while listing supported provider models", async () => {
     const otherFixture = await seedReadyCloudWorkspace(pool);
     const other = await f.actor(otherFixture.userId);
     await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [f.fixture.organizationId, other.id]);
@@ -64,7 +99,7 @@ d("explicit provider-wide self consent", () => {
     await expect(credentials.delegate(f.owner.id, delegate(true, other.id))).rejects.toMatchObject({ status: 422 });
     await expect(pool.query("UPDATE cloud_agent_credential_delegations SET all_models=true WHERE id=$1", [restricted.id])).rejects.toMatchObject({ code: "23514" });
     expect((await credentials.forWorkspace(other.id, f.fixture.workspaceId)).delegations.find(row => row.id === restricted.id))
-      .toMatchObject({ allModels: false, models: ["grok-4.6"] });
+      .toMatchObject({ allModels: false, models: cloudAgentModels("cursor") });
   });
   it("carries explicit organization consent into renewed self-grants and distinguishes idempotency", async () => {
     await credentials.organizationConnections(f.owner.id, f.fixture.organizationId);
@@ -88,7 +123,7 @@ d("explicit provider-wide self consent", () => {
     ["material", "cloud_agent_credential_expired"],
   ])("keeps the closed %s refusal in the command receipt after old-engine settlement", async (cause, code) => {
     const grant = delegate(false); await credentials.delegate(f.owner.id, grant);
-    const commandId = randomUUID(), executionId = randomUUID(), model = cause === "model" ? "grok-4.7" : "grok-4.6";
+    const commandId = randomUUID(), executionId = randomUUID(), model = cause === "model" ? "unknown-future-model" : "grok-4.6";
     const commands = new DatabaseCloudWorkspaceCommandService({ pool });
     await commands.mutate({ ...f.scope, actorSessionId: f.initiating.actorSessionId }, {
       conversationId: "consent-refusal", operationId: randomUUID(), expectedRevision: 0,

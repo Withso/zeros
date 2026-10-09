@@ -1270,7 +1270,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         existing.modelState !== modelState
       ) {
         // Authority is creation-time state. Never retarget a live query that
-        // may own scheduled/background work under the old sandbox.
+        // may own scheduled/background work under the old execution scope.
         this.sessions.delete(executionId);
         await this.teardown(existing);
       } else {
@@ -4119,7 +4119,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // request, so we keep an empty (never-fed) input open so no turn runs,
     // then close it. NOTE: that accountInfo() resolves on a pre-turn query is
     // verified only on a Mac with the claude CLI signed in — not in the
-    // cloud sandbox; on failure this degrades to null (panel shows "—").
+    // Linux cloud VM; on failure this degrades to null (panel shows "—").
     const input = new InputQueue<SDKUserMessage>();
     let q: Query | null = null;
     const containedProcesses = new Set<ContainedClaudeProcess>();
@@ -4490,7 +4490,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // The SDK REPLACES the subprocess env entirely when `env` is set, so
       // we MUST spread process.env (PATH/HOME/keychain access depend on it).
       env: state.executionBoundary
-        ? stripEngineAuthorityEnv({ ...(env ?? {}), CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1", CLAUDE_CODE_STARTUP_FAILURE_RESULTS: "1" })
+        ? stripEngineAuthorityEnv({ ...(env ?? {}), ...(cloud?.coordinator.nativeHome.environment() ?? {}), CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1", CLAUDE_CODE_STARTUP_FAILURE_RESULTS: "1" })
         : preserveAmbientConfigRoots({
             ...(process.env as Record<string, string>),
             ...env,
@@ -4552,7 +4552,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
             // The pinned CLI emits this control request only when it needs an
             // OAuth refresh. The trusted engine serializes the rotating
             // Keychain token and returns only the access token; neither the
-            // refresh token nor Keychain Mach service enters the sandbox.
+            // refresh token nor Keychain access is handed to the provider.
             getOAuthToken: ({ signal }: { signal: AbortSignal }) =>
               this.oauthTokenProvider!({ forceRefresh: true, signal }),
           }

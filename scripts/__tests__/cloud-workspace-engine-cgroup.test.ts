@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import {
-  CLOUD_ENGINE_LIMITS,
+  CLOUD_RUNTIME_LIMITS,
   CloudDelegatedCgroups,
   CloudEngineCgroup,
   cloudCgroupDirectory,
@@ -9,6 +9,10 @@ import {
 import { createCloudRuntimeResolver } from "../../apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
 import { testCloudRuntime } from "../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime";
 import { cloudRuntimeFixture } from "../../apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-fixture";
+
+const unavailable = () => { throw new Error("Unexpected cgroup fixture IO"); };
+const unusedDelegatedIo = { create: unavailable, readAbsolute: unavailable, delegate: unavailable,
+  processIdentity: unavailable, identity: unavailable, remove: unavailable, read: unavailable };
 
 function fixture() {
   let clock = 0;
@@ -33,6 +37,7 @@ function fixture() {
   const scope = new CloudEngineCgroup({
     io,
     runtime: testCloudRuntime(),
+    directory: `${testCloudRuntime().cgroupRoot}/engine-32345678-1234-4234-8234-123456789abc`,
     instanceId: "32345678-1234-4234-8234-123456789abc",
     now: () => clock,
     pause: async (milliseconds: number) => {
@@ -42,7 +47,27 @@ function fixture() {
   return { scope, io, controls };
 }
 
-describe("cloud engine cgroup lifecycle", () => {
+describe("archived direct cloud engine cgroup lifecycle and adoption", () => {
+  it("requires positive kernel retirement before legacy state ownership adoption", () => {
+    const runtime = testCloudRuntime();
+    const leaf = `engine-${"32345678-1234-4234-8234-123456789abc"}`;
+    let evidence = "populated 0";
+    const io = { ...unusedDelegatedIo, exists: () => true, children: () => ["host", leaf], read: vi.fn(() => evidence), write: vi.fn() };
+    const scopes = new CloudDelegatedCgroups({ runtime, io });
+    expect(() => scopes.assertRetired()).not.toThrow();
+    for (const value of ["populated 1", "", "populated 0\npopulated 1"]) {
+      evidence = value; expect(() => scopes.assertRetired()).toThrow();
+    }
+    expect(io.write).not.toHaveBeenCalled();
+  });
+  it("refuses legacy adoption with an empty engine but a preserved live resident", () => {
+    const runtime = testCloudRuntime();
+    const resident = "engine-workload-32345678-1234-4234-8234-123456789abc";
+    const io = { ...unusedDelegatedIo, exists: () => true, children: () => ["host", "engine-42345678-1234-4234-8234-123456789abc", resident],
+      read: (directory: string) => `populated ${directory.endsWith(resident) ? 1 : 0}`, write: vi.fn() };
+    expect(() => new CloudDelegatedCgroups({ runtime, io }).assertRetired()).toThrow(/not retired/);
+    expect(io.write).not.toHaveBeenCalled();
+  });
   it("uses a separate leaf accepted by the unchanged protected base's stop verifier", () => {
     const tree = cloudRuntimeFixture();
     try {
@@ -70,10 +95,11 @@ with tempfile.TemporaryDirectory(prefix='zeros-resident-base-') as directory:
       const runtime = createCloudRuntimeResolver({ filesystem: tree.filesystem }).resolve();
       const residentId = "32345678-1234-4234-8234-123456789abc";
       const sourceId = "42345678-1234-4234-8234-123456789abc";
-      const resident = cloudCgroupDirectory(runtime, "workload", residentId);
-      const engine = cloudCgroupDirectory(runtime, "engine", sourceId);
+      const resident = `${runtime.cgroupRoot}/engine-workload-${residentId}`;
+      const engine = `${runtime.cgroupRoot}/engine-${sourceId}`;
       const children = new Set(["host", "setup", pathLeaf(resident), pathLeaf(engine)]);
       const io = {
+        ...unusedDelegatedIo,
         exists: () => true,
         children: () => [...children],
         read: () => "populated 0",
@@ -96,7 +122,7 @@ with tempfile.TemporaryDirectory(prefix='zeros-resident-base-') as directory:
     const tree = cloudRuntimeFixture();
     try {
       const runtime = createCloudRuntimeResolver({ filesystem: tree.filesystem }).resolve();
-      const io = { exists: () => true, children: () => ["host", "setup"], write: vi.fn() };
+      const io = { ...unusedDelegatedIo, exists: () => true, children: () => ["host", "setup"], write: vi.fn() };
       const scopes = new CloudDelegatedCgroups({ runtime, io });
       for (const preserveWorkload of ["../host", "", "32345678-1234-4234-8234-123456789abc"])
         await expect(scopes.retire({ preserveWorkload })).rejects.toThrow(/workload/);
@@ -135,7 +161,7 @@ with tempfile.TemporaryDirectory(prefix='zeros-resident-base-') as directory:
   it("sets and confirms finite CPU, memory and process limits before placement", () => {
     const { scope, io, controls } = fixture();
     scope.prepare();
-    for (const [name, value] of Object.entries(CLOUD_ENGINE_LIMITS))
+    for (const [name, value] of Object.entries(CLOUD_RUNTIME_LIMITS))
       expect(controls.get(name)).toBe(value);
     scope.attach(123);
     expect(controls.get("cgroup.procs")).toBe("123");

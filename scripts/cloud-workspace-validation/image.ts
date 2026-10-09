@@ -13,10 +13,10 @@
 //
 // What's baked:           Why:
 //  • digest-pinned Node     real Node (engine + PTY/Cursor hosts; bun can't run those)
-//  • bubblewrap + brokers   the qualified Linux ZSR backend
+//  • bubblewrap + brokers   the common engine deployment view
 //  • git/GPG/LFS/toolchain  normal cloud-workspace development baseline
 //  • immutable engine       root-owned at SANDBOX_ENGINE_DIR
-//  • writable checkout      zeros-agent-owned at SANDBOX_REPO_DIR
+//  • writable checkout      zeros-engine-owned at SANDBOX_REPO_DIR
 // ──────────────────────────────────────────────────────────
 
 import {
@@ -75,8 +75,8 @@ export function buildEngineImage(options: {sourceCommit?:string} = {}): { docker
         ZEROS_REPO_DIR: SANDBOX_REPO_DIR,
         ZEROS_ENGINE_LOG: SANDBOX_ENGINE_LOG,
         HOME: SANDBOX_AGENT_HOME,
-        USER: "zeros-agent",
-        LOGNAME: "zeros-agent",
+        USER: "zeros-engine",
+        LOGNAME: "zeros-engine",
         SHELL: "/bin/bash",
         // Runtime roots must come from the immutable engine installation, not
         // the agent-writable checkout being served.
@@ -87,24 +87,17 @@ export function buildEngineImage(options: {sourceCommit?:string} = {}): { docker
       };
   lines.push(...Object.entries(environment).map(([key, value]) => `ENV ${key}=${JSON.stringify(value)}`));
   lines.push(...[
-// 1. OS toolchain and the exact helper families required by the ZSR
+// 1. OS toolchain and the common deployment and development tools required by the engine
         //    admission canary. The baked attestation records resolved package
         //    versions; the snapshot digest is the deployment identity.
         "apt-get update",
-"apt-get install -y --no-install-recommends acl apparmor bubblewrap busybox-static ca-certificates crun curl file g++ git git-lfs gnupg inotify-tools make openssh-client openssh-sftp-server podman procps python3 ripgrep slirp4netns socat uidmap unzip util-linux xz-utils",
+"apt-get install -y --no-install-recommends apparmor bubblewrap ca-certificates curl file g++ git git-lfs gnupg inotify-tools make openssh-client openssh-sftp-server procps python3 ripgrep socat unzip util-linux xz-utils",
 "rm -rf /var/lib/apt/lists/*",
-`groupadd --gid ${SANDBOX_AGENT_GID} zeros-agent`,
 "install -d -o root -g root -m 0755 /srv/zeros /srv/zeros/home",
-`useradd --uid ${SANDBOX_AGENT_UID} --gid ${SANDBOX_AGENT_GID} --create-home --home-dir ${SANDBOX_AGENT_HOME} --shell /bin/bash zeros-agent`,
-"groupadd --gid 10002 zeros-capture",
-`useradd --uid 10002 --gid 10002 --create-home --home-dir ${SANDBOX_CAPTURE_HOME} --shell /usr/sbin/nologin zeros-capture`,
-`chmod 0700 ${SANDBOX_CAPTURE_HOME}`,
 "groupadd --gid 10003 zeros-engine",
-"useradd --uid 10003 --gid 10003 --no-create-home --shell /usr/sbin/nologin zeros-engine",
-"groupadd --gid 10004 zeros-coordinator",
-"useradd --uid 10004 --gid 10004 --no-create-home --shell /usr/sbin/nologin zeros-coordinator",
+`useradd --uid 10003 --gid 10003 --create-home --home-dir ${SANDBOX_AGENT_HOME} --shell /bin/bash zeros-engine`,
+`install -d -o 10003 -g 10003 -m 0700 ${SANDBOX_CAPTURE_HOME}`,
 "install -D -o root -g root -m 0755 /usr/local/bin/node /opt/zeros-runtime/bin/node",
-"usermod --add-subuids 100000-165535 --add-subgids 100000-165535 zeros-agent",
 // 2. Exact pnpm version (matches packageManager). No curl-piped
         //    installer or unattested optional runtime enters the image.
         `npm install -g pnpm@${PNPM_VERSION}`,
@@ -121,12 +114,10 @@ export function buildEngineImage(options: {sourceCommit?:string} = {}): { docker
               `git clone --depth 1 --branch ${repositoryRef} -- ${repositoryUrl} ${engineDirectory}`,
             ]),
 `cd ${engineDirectory} && pnpm install --frozen-lockfile`,
-`cd ${engineDirectory} && pnpm build:zsr-supervisor`,
+`cd ${engineDirectory} && pnpm build:ripgrep`,
 `cd ${engineDirectory} && pnpm build:engine`,
-`cc -std=c11 -O2 -Wall -Wextra -Werror ${engineDirectory}/apps/desktop/src/engine/agents/containment/cloud-process-supervisor.c -o /opt/zeros-runtime/cloud-process-supervisor`,
-"chmod 0555 /opt/zeros-runtime/cloud-process-supervisor",
 // Pinned Playwright browser revision, installed read-only outside every
-        // writable workspace. Capture runs as its own UID with Chromium sandboxing.
+        // writable workspace. Capture shares UID10003 and Chromium sandboxing.
         `cd ${engineDirectory} && PLAYWRIGHT_BROWSERS_PATH=/opt/zeros/design-browsers pnpm exec playwright-core install --with-deps chromium`,
 // Ensure the SQLite binding matches the box Node. A failed rebuild is a
         // broken engine image, so image creation must stop here.
@@ -139,16 +130,14 @@ export function buildEngineImage(options: {sourceCommit?:string} = {}): { docker
 `git clone --no-hardlinks ${engineDirectory} ${workspaceDirectory}`,
 `git -C ${workspaceDirectory} remote set-url origin ${repositoryUrl}`,
 `chown -R ${SANDBOX_AGENT_UID}:${SANDBOX_AGENT_GID} ${workspaceDirectory}`,
-`find ${workspaceDirectory} -type d -exec setfacl -m u:zeros-agent:rwx,d:u:zeros-agent:rwx,d:m:rwx {} +`,
-`find ${workspaceDirectory} -type f -exec setfacl -m u:zeros-agent:rw- {} +`,
 `cd ${engineDirectory} && node scripts/cloud-workspace-validation/sandbox/prepare-cloud-image-files.mjs`,
 `mkdir -p ${SANDBOX_DATA_DIR}/workspaces /srv/zeros/log /etc/zeros`,
 `chown -R 10003:10003 ${SANDBOX_DATA_DIR}`,
 `chmod 0700 ${SANDBOX_DATA_DIR} ${SANDBOX_DATA_DIR}/workspaces`,
-"chown root:10001 /srv/zeros/log && chmod 0750 /srv/zeros/log",
+"chown root:10003 /srv/zeros/log && chmod 0750 /srv/zeros/log",
 "install -d -o root -g root -m 0700 /srv/zeros/setup",
-"install -d -o root -g 10001 -m 0750 /srv/zeros/managed-settings",
-"install -o root -g 10001 -m 0640 /dev/null /srv/zeros/managed-settings/settings.managed.toml"
+"install -d -o root -g 10003 -m 0750 /srv/zeros/managed-settings",
+"install -o root -g 10003 -m 0640 /dev/null /srv/zeros/managed-settings/settings.managed.toml"
   ].map(command => `RUN ${command}`));
   {
     const sourcePath = path.join(here, "sandbox", "start-engine.sh");

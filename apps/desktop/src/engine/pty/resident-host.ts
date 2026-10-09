@@ -1,16 +1,22 @@
 import { chmod, lstat, realpath, unlink } from "node:fs/promises";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import net from "node:net";
 import path from "node:path";
 import { spawn, type IPty } from "node-pty";
 import { TerminalMirror } from "./mirror";
 import { closeResidentPty } from "./resident-processes";
+import {HostExecutionBoundary} from "../agents/containment/host-boundary";
+import {CloudOwnedWorkloadRegistry, type CloudWorkloadFence} from "../agents/containment/cloud-owned-workloads";
+import {cloudWorkloadCustodyConfiguration, type CloudWorkloadCustody} from "../agents/containment/cloud-workload-custody";
+import type {PreparedBoundary} from "../agents/containment/types";
 import { CloudCustomizationRedactor } from "../agents/cloud-customization-redaction";
 import {
   RESIDENT_FRAME_BYTES, RESIDENT_MAX_SESSIONS, ResidentEngineAuthoritySchema,
-  ResidentPtyError, ResidentPtyRequestSchema, ResidentPtySnapshotSchema,
+  ResidentPtyError, ResidentPtyRequestSchema, ResidentPtySnapshotSchema, ResidentWorkloadClassificationSchema,
+  ResidentWorkloadFenceStatusSchema,
   type ResidentEngineAuthority, type ResidentPtyCreate, type ResidentPtyFrame,
   type ResidentPtyInput, type ResidentPtyRequest, type ResidentPtySession,
+  type ResidentWorkloadFenceRequest, type ResidentWorkloadFenceStatus,
 } from "./resident-protocol";
 
 type Session = {
@@ -18,9 +24,14 @@ type Session = {
   redactor: CloudCustomizationRedactor; sequence: number; tail: Promise<unknown>;
   queuedBytes: number; paused: boolean; closed: boolean;
   exited: Promise<void>; exit: { exitCode: number; signal: number | null } | null;
+  boundary:PreparedBoundary;
   inputs: Map<string, { sequence: number; digest: string }>;
 };
 type Connection = { socket: net.Socket; authority: ResidentEngineAuthority | null; requests: number };
+type FenceOperation = "fence-workloads" | "join-workloads" | "drain-workloads" | "resume-workloads";
+type WorkloadFence = { authority: ResidentEngineAuthority; request: ResidentWorkloadFenceRequest; ticket: CloudWorkloadFence;
+  phase: ResidentWorkloadFenceStatus["phase"]; receipts: Partial<Record<FenceOperation, ResidentWorkloadFenceStatus>>;
+  flight?: { op: FenceOperation; result: Promise<ResidentWorkloadFenceStatus> } };
 
 /** Resident owner: engine sockets are replaceable attachments. Only the
  * supervisor, through this object's private control channel, changes authority
@@ -31,18 +42,37 @@ export class ResidentPtyHost {
   private engine: Connection | null = null;
   private fence = 0;
   private lastEngineId: string | null = null;
+  private lastAuthority: ResidentEngineAuthority | null = null;
   private stopping = false;
   private stopFlight: Promise<void> | null = null;
   private readonly sessions = new Map<string, Session>();
   private readonly connections = new Set<Connection>();
+  private pendingCreates = 0;
+  private readonly pendingCreateFlights = new Set<Promise<ResidentPtySession>>();
+  // Released receipts are bounded tombstones: delayed retries never rearm an
+  // old ticket or transfer a proof to another attachment.
+  private readonly workloadFences = new Map<string, WorkloadFence>();
+  private readonly workloads:CloudOwnedWorkloadRegistry;
+  private readonly executionBoundary:HostExecutionBoundary;
 
   constructor(private readonly options: {
     socketPath: string; root: string; additionalRoots?: readonly string[]; organizationId: string; workspaceId: string;
+    projectRoot?:string;supervisorRuntime?:string;supervisorScript?:string;
+    custody?:CloudWorkloadCustody;
     shell: string; identity: { uid: number; gid: number };
   }) {
     if (process.platform !== "linux" || !path.isAbsolute(options.shell) ||
-      ![options.identity.uid, options.identity.gid].every(n => Number.isSafeInteger(n) && n > 0))
+      ![options.identity.uid, options.identity.gid].every(n => Number.isSafeInteger(n) && n >= 0) ||
+      options.identity.uid !== process.geteuid?.() || options.identity.gid !== process.getegid?.())
       throw new ResidentPtyError("request_rejected");
+    const configuration=options.custody ? cloudWorkloadCustodyConfiguration(options.custody) : null;
+    if(options.custody?.controller.kind!==undefined&&options.custody.controller.kind!=="resident")
+      throw new ResidentPtyError("request_rejected");
+    this.workloads=new CloudOwnedWorkloadRegistry(options.custody ? {custody:options.custody} : {});
+    this.executionBoundary=new HostExecutionBoundary({projectRoot:options.projectRoot ?? process.cwd(),
+      supervisorRuntime:configuration?.toolchain.node ?? options.supervisorRuntime,
+      supervisorScript:configuration?.toolchain.supervisor ?? options.supervisorScript,
+      ...(options.custody ? {cloudWorkloadCustody:options.custody} : {})});
   }
 
   async start(): Promise<void> {
@@ -69,8 +99,19 @@ export class ResidentPtyHost {
       parsed.data.workspaceId !== this.options.workspaceId || parsed.data.fence <= this.fence ||
       parsed.data.engineId === this.lastEngineId)
       throw new ResidentPtyError("authority_rejected");
+    const retained = [...this.workloadFences.values()].filter(fence => fence.phase !== "released");
+    if (retained.some(fence => fence.authority !== this.lastAuthority || fence.request.mode !== "preserve" ||
+      fence.phase !== "joined" || fence.flight)) throw new ResidentPtyError("authority_rejected");
+    // Only the private root channel can advance authority. A host-committed
+    // joined preserve proof survives a lost engine response or socket revoke.
+    for (const fence of retained) {
+      this.workloads.resume(fence.ticket);
+      fence.phase = "released";
+      fence.receipts["resume-workloads"] = this.fenceStatus(fence, "released");
+    }
     this.fence = parsed.data.fence;
     this.active = parsed.data;
+    this.lastAuthority = this.active;
     this.lastEngineId = parsed.data.engineId;
     this.engine?.socket.destroy(); this.engine = null;
   }
@@ -86,6 +127,61 @@ export class ResidentPtyHost {
   private requireAuthority(connection: Connection): void {
     if (this.stopping || !this.active || connection !== this.engine || connection.authority !== this.active ||
       connection.socket.destroyed) throw new ResidentPtyError("authority_rejected");
+  }
+  private requireWorkloadAdmission(): void {
+    if (this.stopping || [...this.workloadFences.values()].some(fence => fence.phase !== "released"))
+      throw new ResidentPtyError("host_unavailable");
+  }
+  private fenceStatus(fence: WorkloadFence, phase: ResidentWorkloadFenceStatus["phase"]): ResidentWorkloadFenceStatus {
+    const owner = fence.authority;
+    const authority = Object.freeze({ organizationId: owner.organizationId, workspaceId: owner.workspaceId,
+      engineId: owner.engineId, generation: owner.generation, fence: owner.fence });
+    return Object.freeze(ResidentWorkloadFenceStatusSchema.parse({ ...fence.request, authority,
+      scope: "owner-process-groups", phase }));
+  }
+  private async applyWorkloadFence(connection: Connection, op: FenceOperation,
+    request: ResidentWorkloadFenceRequest): Promise<ResidentWorkloadFenceStatus> {
+    if (!this.workloads.custody || !connection.authority) throw new ResidentPtyError("request_rejected");
+    let fence = this.workloadFences.get(request.requestId);
+    if (fence && (fence.authority !== connection.authority || fence.request.mode !== request.mode))
+      throw new ResidentPtyError("request_rejected");
+    if (op === "fence-workloads") {
+      if (!fence) {
+        if (this.workloadFences.size >= 256) throw new ResidentPtyError("host_unavailable");
+        fence = { authority: connection.authority, request: Object.freeze({ ...request }),
+          ticket: this.workloads.fence({ preserveActive: request.mode === "preserve" }), phase: "fenced", receipts: {} };
+        this.workloadFences.set(request.requestId, fence);
+        fence.receipts[op] = this.fenceStatus(fence, "fenced");
+      }
+      return fence.receipts[op]!;
+    }
+    if (!fence || (op === "join-workloads" && request.mode !== "preserve") ||
+      (op === "drain-workloads" && request.mode !== "drain")) throw new ResidentPtyError("request_rejected");
+    if (fence.receipts[op]) return fence.receipts[op]!;
+    if (fence.flight) {
+      if (fence.flight.op !== op) throw new ResidentPtyError("request_rejected");
+      return fence.flight.result;
+    }
+    if (fence.phase === "released" || (op === "resume-workloads" && fence.phase !== "joined" && fence.phase !== "drained"))
+      throw new ResidentPtyError("request_rejected");
+    const original = fence;
+    const result = (async () => {
+      if (op === "join-workloads" || op === "drain-workloads") {
+        await Promise.allSettled([...this.pendingCreateFlights]);
+        if (this.pendingCreates) throw new ResidentPtyError("host_unavailable");
+        if (op === "join-workloads") await this.workloads.joinPending(original.ticket);
+        else await this.workloads.drainOwned(original.ticket);
+        original.phase = op === "join-workloads" ? "joined" : "drained";
+      } else {
+        if (original.request.mode === "preserve") this.workloads.resume(original.ticket);
+        else this.workloads.resumeOwned(original.ticket);
+        original.phase = "released";
+      }
+      // Commit before dispatch's final connection check or response delivery.
+      return original.receipts[op] = this.fenceStatus(original, original.phase);
+    })();
+    original.flight = { op, result };
+    try { return await result; } finally { original.flight = undefined; }
   }
 
   private send(connection: Connection, frame: ResidentPtyFrame): void {
@@ -153,8 +249,32 @@ export class ResidentPtyHost {
   }
 
   private async apply(connection: Connection, request: Exclude<ResidentPtyRequest, { op: "attach" }>): Promise<unknown> {
+    if (request.op === "fence-workloads" || request.op === "join-workloads" ||
+      request.op === "drain-workloads" || request.op === "resume-workloads")
+      return this.applyWorkloadFence(connection, request.op, request.fence);
+    if (request.op === "classify-workloads") {
+      if(!this.workloads.custody)throw new ResidentPtyError("request_rejected");
+      const authority=connection.authority!;
+      const result=this.workloads.classifyWorkloads(request.census,{organizationId:authority.organizationId,
+        workspaceId:authority.workspaceId,engineId:authority.engineId,generation:authority.generation,fence:authority.fence});
+      return ResidentWorkloadClassificationSchema.parse({...result,
+        complete:result.complete&&this.pendingCreates===0,pendingLaunches:result.pendingLaunches+this.pendingCreates,
+        quietTerminals:this.pendingCreates ? [] : result.quietTerminals});
+    }
+    if(request.op==="inspect-workloads"){
+      const view=await this.workloads.inspect();
+      return {version:1,complete:view.complete&&this.pendingCreates===0,
+        busy:this.pendingCreates>0||view.pendingLaunches>0||view.failedRetirements>0||view.workloadPids.length>0};
+    }
     if (request.op === "list") return [...this.sessions.values()].map(session => ({ ...session.info }));
-    if (request.op === "create") return this.create(connection, request.launch);
+    if (request.op === "create") {
+      this.requireWorkloadAdmission();
+      this.pendingCreates++;
+      const flight = this.create(connection, request.launch);
+      this.pendingCreateFlights.add(flight);
+      try { return await flight; }
+      finally { this.pendingCreates--; this.pendingCreateFlights.delete(flight); }
+    }
     const session = this.sessions.get(request.sessionId);
     if (!session) throw new ResidentPtyError("session_not_found");
     return this.serialize(session, async () => {
@@ -179,12 +299,14 @@ export class ResidentPtyHost {
             })]);
           } finally { clearTimeout(timer); }
         }
+        await session.boundary.stopAndProve();
         await this.publishExit(session);
         session.closed = true; this.sessions.delete(request.sessionId);
         session.mirror.dispose();
         return true;
       }
       if (session.info.exited) throw new ResidentPtyError("session_exited");
+      this.requireWorkloadAdmission();
       if (request.op === "write") return this.write(session, request.input);
       session.proc.resize(request.cols, request.rows);
       session.mirror.resize(request.cols, request.rows);
@@ -205,33 +327,51 @@ export class ResidentPtyHost {
     }
     if (!allowed) throw new ResidentPtyError("cwd_rejected");
     this.requireAuthority(connection); // Enrollment may change during realpath.
-    const previous = this.sessions.get(launch.sessionId);
-    if (previous) {
+    this.requireWorkloadAdmission();
+    const existing = (previous: Session): ResidentPtySession => {
       if (previous.info.actorUserId !== (launch.actorUserId ?? null) || previous.info.cwd !== cwd ||
         previous.info.registryWorkspaceId !== (launch.registryWorkspaceId ?? null) ||
         previous.info.environmentOwnerId !== (launch.environmentOwnerId ?? null) ||
         previous.info.brokerId !== (launch.brokerId ?? null))
         throw new ResidentPtyError("authority_rejected");
       return { ...previous.info };
-    }
+    };
+    const previous = this.sessions.get(launch.sessionId);
+    if (previous) return existing(previous);
     if (this.sessions.size >= RESIDENT_MAX_SESSIONS) throw new ResidentPtyError("session_limit");
-    // Human terminals retain the existing cloud login-shell behavior. The
-    // explicit command mode is for the contained acceptance workload only.
+    // Human terminals retain cloud login-shell behavior; the explicit command
+    // mode is used by the resident acceptance workload.
     const args = launch.command === undefined ? ["-l"] : ["--noprofile", "--norc", "-c", launch.command];
     const identity = this.options.identity;
-    // node-pty drops uid/gid in its native fork before exec applies the user
-    // environment. A dynamically linked privilege-drop helper would load
-    // LD_PRELOAD before dropping authority. The qualified namespace launcher
-    // must already have cleared supplementary groups, since node-pty does not.
-    const alreadyHuman = process.getuid!() === identity.uid && process.getgid!() === identity.gid;
-    if (!alreadyHuman && (process.getuid!() !== 0 || process.getgroups!().length !== 0))
+    if (process.geteuid!() !== identity.uid || process.getegid!() !== identity.gid)
       throw new ResidentPtyError("spawn_failed");
+    const owner: {session?: Session} = {};
+    const control={kind:'terminal' as const,role:'workload' as const,
+      terminalIdle:()=>Boolean(owner.session&&!owner.session.closed&&!owner.session.info.exited&&
+        (!owner.session.info.lastInputAtMs||Date.now()-owner.session.info.lastInputAtMs>=10*60_000))};
+    const boundary=await this.workloads.prepare(this.executionBoundary,{executionId:`resident-${randomUUID()}`,
+      actor:'repo-code-task',providerId:'human-terminal',cwd,workspaceRoot:this.options.root},undefined,control);
     let proc: IPty;
     const mirror = new TerminalMirror(launch.cols, launch.rows);
     try {
-      proc = spawn(this.options.shell, args, { cwd, env: { ...launch.env },
-        uid: identity.uid, gid: identity.gid, cols: launch.cols, rows: launch.rows, name: "xterm-256color" });
-    } catch { mirror.dispose(); throw new ResidentPtyError("spawn_failed"); }
+      this.requireAuthority(connection);
+      this.requireWorkloadAdmission();
+      const published = this.sessions.get(launch.sessionId);
+      if (published) {
+        await boundary.stopAndProve();
+        this.requireAuthority(connection);
+        if (this.sessions.get(launch.sessionId) !== published || published.closed)
+          throw new ResidentPtyError("session_not_found");
+        mirror.dispose();
+        return existing(published);
+      }
+      if (this.sessions.size >= RESIDENT_MAX_SESSIONS) throw new ResidentPtyError("session_limit");
+      const original=boundary.wrapSpawn({command:this.options.shell,args,cwd,env:launch.env,stdio:'inherit'});
+      try{proc=spawn(original.command,[...original.args],{cwd:original.cwd,env:{...original.env},
+        cols:launch.cols,rows:launch.rows,name:'xterm-256color'});}
+      catch(error){boundary.cancelUnstartedLaunch?.(original);throw error;}
+      boundary.trackProcessGroup(proc.pid);
+    } catch(error) {mirror.dispose();await boundary.stopAndProve();throw error;}
     let markExited!: () => void;
     const exited = new Promise<void>(resolve => { markExited = resolve; });
     const session: Session = {
@@ -239,10 +379,11 @@ export class ResidentPtyHost {
         createdAt: Date.now(), actorUserId: launch.actorUserId ?? null, exited: false,
         registryWorkspaceId: launch.registryWorkspaceId ?? null, environmentOwnerId: launch.environmentOwnerId ?? null,
         brokerId: launch.brokerId ?? null, githubShared: false, lastInputAtMs: 0 },
-      proc, mirror, exited, exit: null,
+      proc, mirror, exited, exit: null,boundary,
       redactor: new CloudCustomizationRedactor(launch.redactValues ?? []),
       sequence: 0, tail: Promise.resolve(), inputs: new Map(), queuedBytes: 0, paused: false, closed: false,
     };
+    owner.session=session;
     this.sessions.set(launch.sessionId, session);
     proc.onData(data => {
       const bytes = Buffer.byteLength(data);
@@ -261,6 +402,7 @@ export class ResidentPtyHost {
       session.exit = { exitCode, signal: signal ?? null }; markExited();
       void this.serialize(session, async () => {
         if (session.closed) return;
+        await session.boundary.stopAndProve();
         await this.publishExit(session);
       }).catch(() => this.stop());
     });
@@ -298,6 +440,7 @@ export class ResidentPtyHost {
   }
 
   private write(session: Session, input: ResidentPtyInput): "applied" | "duplicate" {
+    this.requireWorkloadAdmission();
     if (session.info.environmentOwnerId && session.info.environmentOwnerId !== input.actorUserId)
       throw new ResidentPtyError("authority_rejected");
     const digest = createHash("sha256").update(input.data).digest("hex");
@@ -320,10 +463,14 @@ export class ResidentPtyHost {
   }
 
   private async stopAll(): Promise<void> {
+    const ticket=this.workloads.fence();
     this.stopping = true; this.active = null; this.engine = null;
     for (const connection of this.connections) connection.socket.destroy();
     const server = this.server; this.server = null;
     const closed = server ? new Promise<void>(resolve => server.close(() => resolve())) : Promise.resolve();
+    await Promise.allSettled([...this.pendingCreateFlights]);
+    if (this.workloads.custody) await this.workloads.drainOwned(ticket);
+    else await this.workloads.drain(ticket);
     for (const session of this.sessions.values()) {
       session.closed = true;
       if (!session.info.exited) closeResidentPty(session.proc);

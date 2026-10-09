@@ -100,14 +100,12 @@ exports.default = async function beforePack(context) {
     { cwd: projectDir, env: process.env, stdio: "inherit" },
   );
 
-  // Bundle the exact-pinned, patched ZSR supervisor and its JavaScript
-  // dependency closure into one ordinary Resources file. The engine itself is
-  // a Bun single-file executable and has no production node_modules resolver;
-  // shipping source alone would make every containment preflight fail only in
-  // packaged builds.
+  // Cursor search uses the product-owned pinned ripgrep asset. Stage it for
+  // every packaging entrypoint, including release workflows that bypass the
+  // local electron:build wrapper.
   execFileSync(
     process.execPath,
-    [path.join(projectDir, "scripts", "build-zsr-supervisor.mjs")],
+    [path.join(projectDir, "scripts", "stage-ripgrep.mjs")],
     { cwd: projectDir, env: process.env, stdio: "inherit" },
   );
 };

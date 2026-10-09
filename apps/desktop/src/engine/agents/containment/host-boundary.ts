@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   constants as fsConstants,
+  readFileSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -48,6 +50,7 @@ import type {
   PreparedBoundary,
   TerritoryGeneration,
 } from "./types";
+import { cloudWorkloadHostEntry, isCloudWorkloadCustody, type CloudWorkloadCustody } from "./cloud-workload-custody";
 
 const execFileAsync = promisify(execFile);
 const PROCESS_POLL_MS = 20;
@@ -57,6 +60,42 @@ const HOST_LIFECYCLE_VERSION = 1 as const;
 const MAX_RECOVERY_DESCRIPTOR_BYTES = 64 * 1024;
 const CLAIM_SETTLE_MS = 500;
 const HOST_SUPERVISOR_INTERNAL_PREFIX = "ZEROS_HOST_SUPERVISOR_";
+
+export interface HostOwnedLifecycleSnapshot {
+  readonly pendingLaunches: number;
+  readonly groups: readonly { pid: number; startTicks: string | null;
+    targetExecutable: { readonly dev: string; readonly ino: string } | null }[];
+}
+const originalPreparedLifecycles = new WeakMap<PreparedBoundary, () => HostOwnedLifecycleSnapshot>();
+const originalPendingFences = new WeakMap<PreparedBoundary, () => Promise<void>>();
+const originalCloudHosts = new WeakMap<HostExecutionBoundary, CloudWorkloadCustody>();
+export function hostCloudWorkloadCustody(host: HostExecutionBoundary): CloudWorkloadCustody | null {
+  return originalCloudHosts.get(host) ?? null;
+}
+export function hostFenceUnstartedLaunches(boundary: PreparedBoundary): Promise<void> {
+  const fence = originalPendingFences.get(boundary);
+  if (!fence) return Promise.reject(new Error("host launch fence requires its original prepared scope"));
+  return fence();
+}
+/** Only an original Host preparation can supply process-group ownership. */
+export function hostOwnedLifecycleSnapshot(boundary: PreparedBoundary): HostOwnedLifecycleSnapshot | null {
+  return originalPreparedLifecycles.get(boundary)?.() ?? null;
+}
+function currentProcessStartTicks(pid: number): string | null {
+  if (process.platform !== "linux") return null;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const value = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/)[19];
+    return value && /^\d+$/.test(value) ? value : null;
+  } catch { return null; }
+}
+function launchExecutable(command: string): { dev: string; ino: string } | null {
+  if (!path.isAbsolute(command)) return null;
+  try {
+    const executable = statSync(command, { bigint: true });
+    return executable.isFile() ? { dev: String(executable.dev), ino: String(executable.ino) } : null;
+  } catch { return null; }
+}
 
 interface HostGenerationRecord {
   readonly version: typeof HOST_LIFECYCLE_VERSION;
@@ -93,6 +132,8 @@ export interface HostExecutionBoundaryOptions {
   readonly supervisorRuntime?: string;
   /** Test seam for simulating an engine that died while its child remains. */
   readonly ownerProcessId?: number;
+  /** Only cloud controllers supply an ORIGINAL root-verified kernel client. */
+  readonly cloudWorkloadCustody?: CloudWorkloadCustody;
 }
 
 function abortIfRequested(control?: AdmissionControl): void {
@@ -727,6 +768,11 @@ export class HostExecutionBoundary implements ExecutionBoundary {
   private readonly failedPreparationProofs = new Map<string, Promise<void>>();
 
   constructor(options: HostExecutionBoundaryOptions = {}) {
+    if (options.cloudWorkloadCustody !== undefined) {
+      if (!isCloudWorkloadCustody(options.cloudWorkloadCustody)) throw new Error("cloud Host launch requires original custody");
+      options.cloudWorkloadCustody.assertLive();
+      originalCloudHosts.set(this, options.cloudWorkloadCustody);
+    }
     this.projectRoot = path.resolve(options.projectRoot ?? process.cwd());
     this.supervisorScript =
       options.supervisorScript ??
@@ -901,11 +947,15 @@ export class HostExecutionBoundary implements ExecutionBoundary {
       throw error;
     }
     const processes = new Map<number, BoundaryProcess>();
+    const startTicks = new Map<number, string | null>();
+    const targetExecutables = new Map<number, { dev: string; ino: string } | null>();
+    const originalLaunches = new WeakMap<object, string>();
     const pendingLaunches = new Set<string>();
     const untrackedLaunches: Array<{
       token: string;
       createdAt: number;
       pendingPath: string;
+      targetExecutable: { dev: string; ino: string } | null;
     }> = [];
     const leases = new Map<string, PortLease>();
     const ports = new Map<string, PortMapping>();
@@ -984,6 +1034,8 @@ export class HostExecutionBoundary implements ExecutionBoundary {
       }
       const tracked = trackedHostProcess(pid, child);
       processes.set(pid, tracked);
+      startTicks.set(pid, currentProcessStartTicks(pid));
+      targetExecutables.set(pid, launch?.targetExecutable ?? null);
       if (revoked) void tracked.stopAndProve().catch(() => undefined);
       return tracked;
     };
@@ -1016,6 +1068,9 @@ export class HostExecutionBoundary implements ExecutionBoundary {
       providerHomePath: request.providerStateEnv?.HOME ?? homedir(),
       wrapSpawn: (spawnRequest: BoundarySpawnRequest) => {
         if (revoked) throw new Error("host execution boundary is revoked");
+        const custody = originalCloudHosts.get(this);
+        custody?.assertLive();
+        const cloudEntry = custody ? cloudWorkloadHostEntry(custody) : null;
         const token = randomUUID();
         const pendingPath = path.join(commandsRoot, `${token}.json`);
         const claimPath = path.join(claimsRoot, `${token}.json`);
@@ -1036,19 +1091,21 @@ export class HostExecutionBoundary implements ExecutionBoundary {
         );
         chmodSync(pendingPath, 0o600);
         pendingLaunches.add(pendingPath);
-        untrackedLaunches.push({ token, createdAt, pendingPath });
+        untrackedLaunches.push({ token, createdAt, pendingPath, targetExecutable: launchExecutable(spawnRequest.command) });
         const originalSupervisorEnvironment = Object.fromEntries(
           Object.entries(spawnRequest.env).filter(
             ([name]) =>
-              name === "ELECTRON_RUN_AS_NODE" ||
+              cloudEntry || name === "ELECTRON_RUN_AS_NODE" ||
               name.startsWith(HOST_SUPERVISOR_INTERNAL_PREFIX),
           ),
         );
         const env = {
-          ...spawnRequest.env,
+          ...(cloudEntry ? {} : spawnRequest.env),
           [`${HOST_SUPERVISOR_INTERNAL_PREFIX}ORIGINAL_ENV`]: Buffer.from(
             JSON.stringify(originalSupervisorEnvironment),
           ).toString("base64url"),
+          ...(cloudEntry ? { [`${HOST_SUPERVISOR_INTERNAL_PREFIX}WORKLOAD_ENTRY`]:
+            Buffer.from(JSON.stringify(cloudEntry)).toString("base64url") } : {}),
           ...(process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON === "1"
             ? { ELECTRON_RUN_AS_NODE: "1" }
             : {}),
@@ -1069,18 +1126,33 @@ export class HostExecutionBoundary implements ExecutionBoundary {
           String(process.pid),
           "--parent-pid",
           String(process.pid),
+          ...(cloudEntry ? ["--cloud-workload"] : []),
           "--",
           spawnRequest.command,
           ...spawnRequest.args,
         ];
-        return {
+        const launch = {
           command: supervisor.runtime,
           args,
           cwd: spawnRequest.cwd,
           env,
-          stdio: spawnRequest.stdio ?? "pipe",
+          stdio: spawnRequest.stdio ?? "pipe" as "pipe" | "inherit",
           immediateParentPidArgIndex: args.indexOf("--parent-pid") + 1,
         };
+        originalLaunches.set(launch, pendingPath);
+        return launch;
+      },
+      cancelUnstartedLaunch: (launch) => {
+        const pendingPath = originalLaunches.get(launch);
+        if (!pendingPath) throw new Error("host launch cancellation requires its original descriptor");
+        const index = untrackedLaunches.findIndex((value) => value.pendingPath === pendingPath);
+        if (index < 0) throw new Error("host launch is already submitted or cancelled");
+        // Called only after the spawning API positively reported no child PID.
+        try { unlinkSync(pendingPath); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        untrackedLaunches.splice(index, 1);
+        pendingLaunches.delete(pendingPath);
+        originalLaunches.delete(launch);
       },
       trackProcess: (child) => {
         if (!child.pid) {
@@ -1178,6 +1250,8 @@ export class HostExecutionBoundary implements ExecutionBoundary {
           }
           pendingLaunches.clear();
           processes.clear();
+          startTicks.clear();
+          targetExecutables.clear();
           await removeSessionDir(request.executionId);
           this.preparationOwnership.delete(generation);
         })();
@@ -1189,6 +1263,27 @@ export class HostExecutionBoundary implements ExecutionBoundary {
         return wrapped;
       },
     };
+    originalPreparedLifecycles.set(prepared, () => ({
+      pendingLaunches: untrackedLaunches.length,
+      groups: [...processes.keys()].map((pid) => ({ pid, startTicks: startTicks.get(pid) ?? null,
+        targetExecutable: targetExecutables.get(pid) ?? null })),
+    }));
+    originalPendingFences.set(prepared, async () => {
+      // Rename arbitrates with the supervisor's ORIGINAL pending→claim step.
+      // A claimed launch remains pending until its actual PID is tracked;
+      // it cannot be turned into an empty admission receipt by this method.
+      for (const launch of [...untrackedLaunches]) {
+        const cancelled = path.join(generationRoot, `.cancelled-${randomUUID()}`);
+        try { await rename(launch.pendingPath, cancelled); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+        await unlink(cancelled);
+        const index = untrackedLaunches.indexOf(launch);
+        if (index >= 0) untrackedLaunches.splice(index, 1);
+        pendingLaunches.delete(launch.pendingPath);
+      }
+      if (!(await waitForClaimsToSettle(generationRoot)) || untrackedLaunches.length)
+        throw new Error("host admission fence has unresolved launches");
+    });
     return prepared;
   }
 }

@@ -1,24 +1,30 @@
-// Root-only, private mount namespace supervisor. This entry is bundled into
-// scratch before sudo; it never mounts or creates host paths before the guard.
-import { createHash } from "node:crypto";
+// Root supervisor for a private SOURCE fixture or an installed test VM. The
+// installed path requires original /host custody and keeps runtime/base bytes.
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { chmodSync, chownSync, cpSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, rmdirSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { pathToFileURL } from "node:url";
-import { assertPrivateNamespace, assertPrivateRoot, fixtureFacade, fixtureMountPlan, hostActiveFileOptions, preparePrivateProcView } from "./runtime-contract";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { assertInstalledHarnessRuntimeCurrent, assertPrivateNamespace, assertPrivateRoot, FIXTURE_MUTABLE_LAYOUT,
+  fixtureBaseOwnership, fixtureFacade, fixtureMountPlan, fixtureMutableOwnership, hostActiveFileOptions, installedHarnessPaths,
+  preparePrivateProcView, readHarnessEntryConfiguration, readInstalledHarnessRuntime, readRootHarnessFile, requireInstalledCommonIdentity, retireInstalledHarnessTree,
+  type InstalledCgroupIdentity, type InstalledHarnessHandover } from "./runtime-contract";
 import { CpuPrivatePidFixtureScope, assertPrivatePidNamespace } from "./fixture-scope";
-import { freshNativeArtifacts } from "./artifacts";
-import { copyRuntimeFixture, initializeFixtureCheckout, snapshotSystemExecutable } from "./projection";
+import { freshNativeArtifacts, readFixtureNativeFile } from "./artifacts";
+import { copyRuntimeFixture, initializeFixtureCheckout, requireFixtureEngineIdentity, snapshotSystemExecutable } from "./projection";
 import { cloudPreflightDiagnostic, zsrAdmissionDiagnostic } from "./diagnostics";
-import { observedRuntimeEngine } from "./identity";
-import { readPrivateFixtureMirrorProof } from "./namespace-mirror-proof";
+import { observedInstalledCgroupIdentity, observedInstalledRootIdentity, observedInstalledRuntimeEngineIdentity,
+  observedRuntimeEngineIdentity, type RuntimeEngineIdentity } from "./identity";
+import { readInstalledFixtureMirrorProof, readPrivateFixtureMirrorProof } from "./namespace-mirror-proof";
+import { HarnessFailure } from "./assertions";
+import type { NamespaceOutcome } from "./retirement";
 
 type Config = { outerMountNamespace: string; outerPidNamespace: string; scope: "strict" | "cpu-private-pid-fixture"; stage: string; ca: string; scratch: string;
+  mode?: "source";
   sourceFixtureLinux?: "host" | "ubuntu-24.04";
   descriptor: { active: { root: string; runtimeId: string; cgroupRoot: string }; marker: unknown };
   source: Record<string, string>; mcp: string };
-const config = JSON.parse(readFileSync(process.argv[2], "utf8")) as Config;
+async function runSourceFixture(config: Config) {
 assertPrivateNamespace({ outer: config.outerMountNamespace, current: readlinkSync("/proc/self/ns/mnt"), uid: process.getuid!() });
 assertPrivatePidNamespace(config.outerPidNamespace, readlinkSync("/proc/self/ns/pid"), process.pid);
 assertPrivateRoot(statfsSync("/").type);
@@ -33,6 +39,13 @@ const ca = readFileSync(config.ca);
 const publicRoots = readFileSync(config.sourceFixtureLinux === "ubuntu-24.04"
   ? "/etc/ssl/certs/ca-certificates.crt" : "/etc/pki/tls/certs/ca-bundle.crt");
 let engine: ChildProcess | undefined;
+let originalEngineIdentity: RuntimeEngineIdentity | undefined;
+function observeEngine() {
+  if (!engine?.pid) throw new Error("engine_identity_missing");
+  const observed = observedRuntimeEngineIdentity(config.descriptor.active.root, config.outerPidNamespace, engine.pid, originalEngineIdentity);
+  originalEngineIdentity ??= observed;
+  return observed;
+}
 let logs = "";
 let status: "starting" | "running" | "exited" = "starting";
 let launcher: Promise<number> | undefined;
@@ -59,7 +72,7 @@ const diagnoses = [
   ["cgroup_admission", /cgroup|resource limit/],
   ["account_binding", /account binding|account JWT|account.*configured|OWNER_SUB/],
   ["module_missing", /MODULE_NOT_FOUND|Cannot find module|ERR_MODULE_NOT_FOUND/],
-  ...["ws", "tinyglobby", "chokidar", "postcss", "node-pty", "better-sqlite3", "@anthropic-ai/claude-agent-sdk", "@xterm/headless", "@xterm/addon-serialize", "isomorphic-git", "diff", "parse5", "smol-toml", "zod", "@cursor/sdk", "./cloud-native-view.mjs", "./cloud-coordinator-view.mjs"].map((name, index) => [
+  ...["ws", "tinyglobby", "chokidar", "postcss", "node-pty", "better-sqlite3", "@anthropic-ai/claude-agent-sdk", "@xterm/headless", "@xterm/addon-serialize", "isomorphic-git", "diff", "parse5", "smol-toml", "zod", "@cursor/sdk"].map((name, index) => [
     `module_${index}`, new RegExp(`Cannot find module ['"]${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}['"]`),
   ] as const),
   ["sqlite_binding", /better_sqlite3|NODE_MODULE_VERSION|bindings file/],
@@ -79,8 +92,7 @@ function inspect() {
   const files: Record<string, unknown> = {};
   for (const name of ["tool-input.txt", "tool-output.txt", "shell-uid.txt", "stop-started.txt", "stop-finished.txt",
     "excluded-mcp.marker", "project-mcp.marker", "plugin-mcp.marker"]) {
-    try { const bytes = readFileSync(`/srv/zeros/files/workspace/${name}`); files[name] = { bytes: bytes.length,
-      sha256: createHash("sha256").update(bytes).digest("hex") }; }
+    try { files[name] = readFixtureNativeFile(`/srv/zeros/files/workspace/${name}`); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; files[name] = null; }
   }
   return { status, files, diagnostics: diagnostics(), preflight: cloudPreflightDiagnostic(logs), nativeAdmission: zsrAdmissionDiagnostic(logs) };
@@ -88,9 +100,9 @@ function inspect() {
 function stop(): Promise<void> {
   if (status === "exited") return Promise.resolve();
   if (!stopping) stopping = (async () => {
-    // Signal the uniquely observed own engine, allowing the real CLI shutdown
+    // Reconfirm the original engine birth, allowing the real CLI shutdown
     // handler to return zero. Killing bwrap first abandons it via PDEATHSIG.
-    try { process.kill(observedRuntimeEngine(config.descriptor.active.root, config.outerPidNamespace), "SIGTERM"); }
+    try { process.kill(observeEngine().pid, "SIGTERM"); }
     catch { engine?.kill("SIGTERM"); }
     if (launcher) await launcher;
   })();
@@ -112,12 +124,12 @@ try {
   }
   progress("system_view");
   // /usr/bin/rg may be absent on Amazon Linux. A private overlay preserves all
-  // system binaries while adding the existing sandbox rg under its v4 name.
+  // system binaries while adding the pinned product-owned ripgrep payload.
   mkdir("/run/zeros/bin-lower"); mkdir("/run/zeros/bin-upper"); mkdir("/run/zeros/bin-work");
   mount("--bind", "/usr/bin", "/run/zeros/bin-lower");
   mount("-t", "overlay", "overlay", "-o", "lowerdir=/run/zeros/bin-lower,upperdir=/run/zeros/bin-upper,workdir=/run/zeros/bin-work", "/usr/bin");
-  cpSync(`${config.stage}/worker/binaries/zsr-rg`, "/usr/bin/rg");
-  // cp preserves the sandbox source UID. This new private-overlay inode must
+  cpSync(`${config.stage}/worker/binaries/rg`, "/usr/bin/rg");
+  // cp preserves the source UID. This new private-overlay inode must
   // satisfy the real launcher's root-ancestry check before launch.
   chownSync("/usr/bin/rg", 0, 0); chmodSync("/usr/bin/rg", 0o555);
   if (ubuntuWhich) {
@@ -146,15 +158,16 @@ try {
   progress("checkout");
   for (const directory of ["/srv/zeros/files", "/srv/zeros/files/home", "/srv/zeros/files/home/agent", "/srv/zeros/files/home/capture",
     "/srv/zeros/files/state", "/srv/zeros/files/managed-settings", "/srv/zeros/home", "/srv/zeros/log", "/srv/zeros/setup"]) mkdir(directory);
-  mkdir("/srv/zeros/files/workspace", 0o755, 10001);
-  mkdir("/srv/zeros/home/agent", 0o700, 10001); mkdir("/srv/zeros/home/capture", 0o700, 10002);
-  mkdir("/srv/zeros/state", 0o700, 10003); mkdir("/srv/zeros/managed-settings", 0o755);
-  writeFileSync("/srv/zeros/managed-settings/settings.managed.toml", "# SOURCE-MODE fixture managed settings\n", { mode: 0o644 });
+  for (const directory of fixtureBaseOwnership()) mkdir(directory.target, directory.mode, directory.uid, directory.gid);
+  for (const directory of fixtureMutableOwnership()) mkdir(directory.target, directory.mode, directory.uid, directory.gid);
+  writeFileSync("/srv/zeros/managed-settings/settings.managed.toml", "# SOURCE-MODE fixture managed settings\n", { mode: 0o640 });
+  chownSync("/srv/zeros/managed-settings/settings.managed.toml", 0, 10001);
+  writeFileSync("/srv/zeros/log/engine.log", "", { mode: 0o640 }); chownSync("/srv/zeros/log/engine.log", 0, 10001);
   writeFileSync("/srv/zeros/files/workspace/tool-input.txt", "fixture native read 73491\n");
   writeFileSync("/srv/zeros/files/workspace/.mcp.json", config.mcp);
-  for (const name of ["tool-input.txt", ".mcp.json"]) chownSync(`/srv/zeros/files/workspace/${name}`, 10001, 10001);
-  initializeFixtureCheckout("/srv/zeros/files/workspace", args => { execFileSync("/usr/bin/setpriv", ["--reuid=10001", "--regid=10001", "--clear-groups", "/usr/bin/git", ...args],
-    { stdio: "pipe", env: { PATH: "/usr/bin:/bin", HOME: "/srv/zeros/home/agent", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } }); });
+  for (const name of ["tool-input.txt", ".mcp.json"]) chownSync(`/srv/zeros/files/workspace/${name}`, 10003, 10003);
+  initializeFixtureCheckout("/srv/zeros/files/workspace", args => { execFileSync("/usr/bin/setpriv", ["--reuid=10003", "--regid=10003", "--clear-groups", "/usr/bin/git", ...args],
+    { stdio: "pipe", env: { PATH: "/usr/bin:/bin", HOME: FIXTURE_MUTABLE_LAYOUT.agentHome, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } }); });
   progress("cgroup");
   // All real controller writes happen after the mount guard. Only this
   // disposable child scope receives processes; shared processes never move.
@@ -198,16 +211,13 @@ try {
         emit({ type: "inspection", id: command.id, proof });
       }
       else if (command.op === "identity") {
-        observedRuntimeEngine(config.descriptor.active.root, config.outerPidNamespace);
-        emit({ type: "inspection", id: command.id, engineUid: 10003, engineGid: 10003,
-          uidMap: [[0, 10003, 1], [10001, 10001, 2], [10004, 10004, 1]],
-          gidMap: [[0, 10003, 1], [10001, 10001, 2], [10004, 10004, 1]], identityObserved: true });
+        emit({ type: "inspection", id: command.id, ...requireFixtureEngineIdentity(observeEngine()) });
       }
       else if (command.op === "prepare-native" && typeof command.nonce === "string" && /^[a-f0-9-]{36}$/.test(command.nonce)) {
         for (const name of ["tool-output.txt", "shell-uid.txt", "stop-started.txt", "stop-finished.txt"]) rmSync(`/srv/zeros/files/workspace/${name}`, { force: true });
         const artifacts = freshNativeArtifacts(command.nonce);
         writeFileSync("/srv/zeros/files/workspace/tool-input.txt", artifacts.input);
-        chownSync("/srv/zeros/files/workspace/tool-input.txt", 10001, 10001);
+        chownSync("/srv/zeros/files/workspace/tool-input.txt", 10003, 10003);
         emit({ type: "inspection", id: command.id, nonce: artifacts.nonce, outputHash: artifacts.outputHash,
           startHash: artifacts.startHash, shellHash: artifacts.shellHash, ...inspect() });
       }
@@ -250,4 +260,162 @@ try {
   if (cleanupConfirmed && launcher && process.exitCode === 0) emit({ type: "retired", engineScopeEmpty: true, namespacePrivate: true,
     ...(config.scope === "strict" ? { cgroupRemoved: true, scopeKind: "strict" } : { cgroupRemoved: false,
       scopeKind: "cpu-private-pid-fixture", pidNamespaceProcessesEmpty: true, ownCpuCgroupRemoved: true }) });
+}
+}
+
+type InstalledConfig = { mode: "installed"; handover: InstalledHarnessHandover; ca: string; source: Record<string, string> };
+async function runInstalledFixture(config: InstalledConfig) {
+  const emit = (value: Record<string, unknown>) => process.stdout.write(`${JSON.stringify(value)}\n`);
+  const installed = await readInstalledHarnessRuntime(config.handover), { runtime, active } = installed;
+  const paths = installedHarnessPaths(active), originalRoot = observedInstalledRootIdentity(active);
+  const assertOutside = () => {
+    assertInstalledHarnessRuntimeCurrent(config.handover, installed.activeRecordSha256);
+    observedInstalledRootIdentity(active, originalRoot);
+  };
+  const exists = (directory: string) => {
+    try { lstatSync(directory); return true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+  };
+  const assertCommonAbsent = () => {
+    assertOutside();
+    if (exists(paths.common)) throw new HarnessFailure("cleanup_unconfirmed");
+  };
+  assertOutside();
+  assertCommonAbsent();
+  const launcherModule = await import(pathToFileURL(runtime.helpers.launcher).href);
+  const cgroups = await import(pathToFileURL(`${runtime.libRoot}/cloud-engine-cgroup.mjs`).href);
+  const layoutModule = await import(pathToFileURL(`${runtime.libRoot}/prepare-cloud-image-files.mjs`).href);
+  const stagingParent = layoutModule.CLOUD_ENGINE_MUTABLE_LAYOUT.stagingParent as string;
+  const staging = lstatSync(stagingParent);
+  if (stagingParent !== FIXTURE_MUTABLE_LAYOUT.stagingParent || !staging.isDirectory() || staging.isSymbolicLink() ||
+    staging.uid !== 0 || staging.gid !== 10003 || (staging.mode & 0o7777) !== 0o710)
+    throw new HarnessFailure("fixture_contract_invalid");
+  const ca = "/etc/zeros/fixture-ca.pem";
+  let originalCommon: InstalledCgroupIdentity | undefined;
+  let engine: ChildProcess | undefined, engineClosed: Promise<NamespaceOutcome> | undefined;
+  let originalEngine: RuntimeEngineIdentity | undefined;
+  let launcher: Promise<number> | undefined, stopping: Promise<void> | undefined;
+  let reader: ReturnType<typeof createInterface> | undefined;
+  let logs = "", status = "starting", code = 1;
+  const capture = (bytes: Buffer) => { logs = (logs + bytes.toString("utf8")).slice(-256 * 1024); };
+  const engineInstanceId = JSON.parse(Buffer.from(config.source.ZEROS_CLOUD_RUNTIME_B64, "base64url").toString("utf8")).engine.instanceId;
+  const scope = new cgroups.CloudEngineCgroup({ runtime, instanceId: engineInstanceId });
+  const prepareScope = scope.prepare.bind(scope);
+  scope.prepare = () => {
+    assertOutside();
+    prepareScope();
+    originalCommon = requireInstalledCommonIdentity(observedInstalledCgroupIdentity(paths.common));
+    emit({ type: "prepared", common: originalCommon });
+  };
+  const observeEngine = () => {
+    assertOutside();
+    if (!engine?.pid || engine.exitCode !== null || engine.signalCode !== null) throw new HarnessFailure("engine_identity_missing");
+    const observed = observedInstalledRuntimeEngineIdentity(active, originalRoot, engine.pid, scope.directory, originalEngine);
+    originalEngine ??= observed;
+    return observed;
+  };
+  const stop = () => {
+    stopping ??= (async () => {
+      assertOutside();
+      if (engine?.exitCode === null && engine.signalCode === null) {
+        process.kill(observeEngine().pid, "SIGTERM");
+      }
+      if (launcher) await launcher;
+    })();
+    return stopping;
+  };
+  const stopFromInput = () => { void stop().catch(() => { emit({ type: "failure", code: "cleanup_unconfirmed" }); process.exitCode = 1; }); };
+  try {
+    emit({ type: "installed-root", root: originalRoot });
+    emit({ type: "namespace", status: "observed", runtimeId: runtime.runtimeId });
+    launcher = launcherModule.launchCloudEngine({ runtime, source: config.source, scope,
+      prepare: (...args: unknown[]) => {
+        assertOutside();
+        const custody = args[3] as { common: InstalledCgroupIdentity };
+        const common = requireInstalledCommonIdentity(custody.common);
+        if (!originalCommon || JSON.stringify(common) !== JSON.stringify(originalCommon)) throw new HarnessFailure("fixture_contract_invalid");
+        const profile = launcherModule.prepareCloudEngineView(...args);
+        try {
+          assertOutside();
+          // The actual view masks both setup stores. Publish only the public
+          // CA into its existing readonly /etc/zeros projection before exec.
+          const publicCa = `${profile.viewDirectory}/etc/fixture-ca.pem`;
+          writeFileSync(publicCa, readRootHarnessFile(config.ca, 64 * 1024, undefined),
+            { mode: 0o444, flag: "wx" });
+          chmodSync(publicCa, 0o444);
+          return profile;
+        } catch (error) { profile.releaseView?.(); throw error; }
+      },
+      spawnProcess: (file: string, args: string[], options: Record<string, unknown>) => {
+        assertOutside();
+        engine = spawn(file, args, { ...options, env: { ...(options.env as object),
+          NODE_EXTRA_CA_CERTS: ca, ZEROS_ACCOUNT_JWT_PUBLIC_KEY: config.source.ZEROS_ACCOUNT_JWT_PUBLIC_KEY },
+          stdio: ["ignore", "pipe", "pipe", "pipe"] });
+        // A spawn/stream error is not stdio retirement. Only the actual close
+        // event releases this gate, after common-tree retirement below.
+        engineClosed = new Promise(resolve => { engine!.once("error", () => {});
+          engine!.once("close", (code, signal) => resolve({ code, signal })); });
+        engine.stdout!.on("data", capture); engine.stderr!.on("data", capture); status = "running";
+        return engine;
+      },
+    });
+    reader = createInterface({ input: process.stdin });
+    reader.on("line", line => {
+      try {
+        const command = JSON.parse(line); assertOutside();
+        if (command.op === "identity") {
+          const observed = observeEngine();
+          emit({ type: "inspection", id: command.id, ...requireFixtureEngineIdentity(observed),
+            pid: observed.pid, startTimeTicks: observed.startTimeTicks });
+        } else if (command.op === "mirror-proof") {
+          const proof = readInstalledFixtureMirrorProof({ active, originalRoot, handover: config.handover,
+            activeRecordSha256: installed.activeRecordSha256, scope: command.scope, commandId: command.commandId,
+            conversationId: command.conversationId });
+          emit({ type: "inspection", id: command.id, proof });
+        } else if (command.op === "inspect") {
+          emit({ type: "inspection", id: command.id, status, preflight: cloudPreflightDiagnostic(logs), nativeAdmission: zsrAdmissionDiagnostic(logs) });
+        } else if (command.op === "shutdown") stopFromInput();
+        else throw new HarnessFailure("fixture_inspection_failed");
+      } catch { emit({ type: "failure", code: "fixture_inspection_failed" }); }
+    });
+    reader.once("close", stopFromInput);
+    if (!launcher) throw new HarnessFailure("namespace_launch_failed");
+    code = await launcher;
+    status = "exited";
+    emit({ type: "exit", code, preflight: cloudPreflightDiagnostic(logs), nativeAdmission: zsrAdmissionDiagnostic(logs),
+      capturedBytes: Buffer.byteLength(logs) });
+    process.exitCode = code;
+  } catch {
+    emit({ type: "failure", code: "namespace_launch_failed" }); process.exitCode = 1;
+  } finally {
+    reader?.removeAllListeners("close"); reader?.close();
+    try {
+      if (originalCommon) {
+        const completion: Promise<NamespaceOutcome> = launcher
+          ? launcher.then(code => ({ code, signal: null }), () => ({ code: null, signal: null }))
+          : Promise.resolve({ code, signal: null });
+        const retired = await retireInstalledHarnessTree(originalCommon, completion, {
+          assertOutside, identity: observedInstalledCgroupIdentity,
+          exists,
+          retire: () => new cgroups.CloudRuntimeCgroup({ runtime }).retire(),
+          drain: async () => { if (engineClosed) await engineClosed; },
+          assertPreserved: () => { observedInstalledRootIdentity(active, originalRoot); },
+        });
+        // Verify the same installed payload/receipt again after every target is
+        // gone. A changed descriptor or image cannot supply successful cleanup.
+        await readInstalledHarnessRuntime(config.handover);
+        emit({ type: "retired", installed: retired, root: observedInstalledRootIdentity(active, originalRoot) });
+      } else assertCommonAbsent();
+    } catch { emit({ type: "failure", code: "cleanup_unconfirmed" }); process.exitCode = 1; }
+  }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    const input = readHarnessEntryConfiguration(process.argv.slice(2));
+    if (input.mode === "installed") await runInstalledFixture(input.config as InstalledConfig);
+    else await runSourceFixture(input.config as Config);
+  } catch {
+    process.stdout.write(`${JSON.stringify({ type: "failure", code: "fixture_contract_invalid" })}\n`); process.exitCode = 1;
+  }
 }

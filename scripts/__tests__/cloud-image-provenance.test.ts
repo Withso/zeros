@@ -28,7 +28,7 @@ function fixture() {
   const files = [
     "package.json",
     "pnpm-lock.yaml",
-    "scripts/zsr-qualification/pin.json",
+    "scripts/stage-ripgrep.mjs",
     "scripts/cloud-workspace-validation/sandbox/cloud-worker.json",
     "scripts/cloud-workspace-validation/sandbox/runtime-layout.json",
   ];
@@ -50,7 +50,8 @@ function fixture() {
   for (const file of [
     "dist-engine/cli.js",
     "dist-engine/design-capture-worker.js",
-    "binaries/zsr-supervisor.mjs",
+    "apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs",
+    "binaries/rg",
   ]) {
     mkdirSync(path.dirname(path.join(engine, file)), { recursive: true });
     writeFileSync(path.join(engine, file), "export {};\n");

@@ -96,6 +96,7 @@ describe("computer template repository projection", () => {
           "cloud-runtime-profile.mjs",
           "cloud-runtime-root.mjs",
           "runtime-layout.json",
+          "prepare-cloud-image-files.mjs",
         ])
           tree.write(
             `${runtime.libRoot}/${name}`,
@@ -141,6 +142,7 @@ describe("computer template repository projection", () => {
           "",
           0o640,
         );
+        chmodSync(tree.physical("/srv/zeros/managed-settings"),0o750);
         for (const name of ["policy.json", "registries.conf"])
           tree.write(`/etc/containers/${name}`, "{}");
         tree.write(
@@ -149,6 +151,8 @@ describe("computer template repository projection", () => {
           0o555,
         );
         tree.write("/usr/bin/rg", "fixture executable", 0o555);
+        tree.write(`${runtime.workerRoot}/binaries/rg`, "fixture executable", 0o555);
+        tree.write(`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`, "// pinned Host fixture", 0o444);
         tree.write("/origin/file", "repository data", 0o644);
         execFileSync("git", ["init", "--quiet", tree.physical("/origin")]);
         execFileSync("git", ["-C", tree.physical("/origin"), "add", "."]);
@@ -222,8 +226,7 @@ assert(!fs.existsSync('/srv/zeros/files/repos'));
 for (let index=0; index<${repositoryCount}; index++) {
   const source="const fs=require('node:fs'); const p='/srv/zeros/repos/fixture/repo"+index+"'; " +
     "if(fs.readFileSync(p+'/file','utf8')!=='repository data'||fs.readFileSync(p+'/install-path','utf8').trim()!==p)process.exit(1); fs.writeFileSync(p+'/agent-write','ok')";
-  const child=spawnSync('/usr/bin/setpriv',['--reuid=10001','--regid=10001','--clear-groups','--bounding-set=-all',
-    '--inh-caps=-all','--ambient-caps=-all','--no-new-privs','--',${JSON.stringify(runtime.node)},'-e',source],
+  const child=spawnSync(${JSON.stringify(runtime.node)},['-e',source],
     {encoding:'utf8',env:{PATH:'/usr/bin:/bin'}});
   assert.equal(child.status,0,'workspace identity cannot use secondary repository');
 }
@@ -262,6 +265,7 @@ if (${JSON.stringify(error)}) {
           "/usr/bin/chown",
           "0:10001",
           tree.physical("/srv/zeros/files/.zeros-setup"),
+          tree.physical("/srv/zeros/managed-settings"),
         ]);
         execFileSync(
           "sudo",

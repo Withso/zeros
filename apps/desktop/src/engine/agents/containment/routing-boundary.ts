@@ -7,6 +7,8 @@ import type {
   PreparedBoundary,
   TerritoryGeneration,
 } from "./types";
+import { isCloudExecutionBoundary } from "./cloud-execution-boundary";
+import { recoverLegacyExecutionProcesses, recoverLegacyMutableState } from "./legacy-execution-recovery";
 
 const EMPTY_RECOVERY: ExecutionBoundaryRecoveryResult = {
   discovered: 0,
@@ -16,10 +18,8 @@ const EMPTY_RECOVERY: ExecutionBoundaryRecoveryResult = {
 };
 export interface RoutingExecutionBoundaryOptions {
   host: ExecutionBoundary;
-  sandbox: ExecutionBoundary;
-  /** Cloud images retain their qualified worker boundary regardless of a
-   * desktop preference accidentally couriered into the environment. */
-  forceSandbox?: boolean;
+  /** Only an original cloud boundary selects cloud placement. */
+  cloud?: ExecutionBoundary;
 }
 
 /** Chooses execution posture per request. The router itself advertises
@@ -31,30 +31,22 @@ export class RoutingExecutionBoundary implements ExecutionBoundary {
   private readonly failedPreparationOwners = new Map<string, ExecutionBoundary>();
 
   constructor(private readonly options: RoutingExecutionBoundaryOptions) {
-    this.backend = options.forceSandbox ? options.sandbox.backend : "none";
+    if (options.cloud && !isCloudExecutionBoundary(options.cloud))
+      throw new Error("cloud routing requires the original cloud execution boundary");
+    this.backend = options.cloud?.backend ?? "none";
   }
 
-  private async select(request: BoundaryRequest): Promise<ExecutionBoundary> {
-    if (this.options.forceSandbox) return this.options.sandbox;
-    // Local routing is actor-scoped, never workspace-shape-scoped. A damaged
-    // or absent Design identity is repaired/reported by its owning subsystem;
-    // it must not silently change the provider execution backend.
-    // Conversely, a Design agent never falls back to the unrestricted host.
-    if (request.actor === "design-agent") return this.options.sandbox;
-    return this.options.host;
+  private async select(_request: BoundaryRequest): Promise<ExecutionBoundary> {
+    return this.options.cloud ?? this.options.host;
   }
 
   async recoverStaleProcesses(): Promise<ExecutionBoundaryRecoveryResult> {
-    // Always drain both generations before local authority is published. A
-    // user may switch in either direction after a crash: the legacy sandbox
-    // may own a kernel process domain, while the native path may own an
-    // unrestricted provider group. Attempt both even if one recovery fails so
-    // independent stale authority is not needlessly left behind.
+    // Retain ambiguous old holds without invoking their removed helper.
+    // Attempt independent Host recovery even when a legacy hold rejects.
     const recoveries = await Promise.allSettled([
-      this.options.host.recoverStaleProcesses?.() ??
+      (this.options.cloud ?? this.options.host).recoverStaleProcesses?.() ??
         Promise.resolve(EMPTY_RECOVERY),
-      this.options.sandbox.recoverStaleProcesses?.() ??
-        Promise.resolve(EMPTY_RECOVERY),
+      recoverLegacyExecutionProcesses(),
     ]);
     const failures = recoveries.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : [],
@@ -81,10 +73,7 @@ export class RoutingExecutionBoundary implements ExecutionBoundary {
   }
 
   async recoverStaleMutableState(): Promise<ExecutionBoundaryRecoveryResult> {
-    return (
-      (await this.options.sandbox.recoverStaleMutableState?.()) ??
-      EMPTY_RECOVERY
-    );
+    return recoverLegacyMutableState();
   }
 
   async probe(request: BoundaryRequest): Promise<BoundaryProbeResult> {
@@ -120,6 +109,6 @@ export class RoutingExecutionBoundary implements ExecutionBoundary {
 
   clearRetirementFailure(generation: TerritoryGeneration): void {
     this.options.host.clearRetirementFailure?.(generation);
-    this.options.sandbox.clearRetirementFailure?.(generation);
+    this.options.cloud?.clearRetirementFailure?.(generation);
   }
 }

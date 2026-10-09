@@ -170,7 +170,7 @@ describe("CI and Preflight job parity", () => {
         "Install JS dependencies",
         "Rebuild and verify native PTY binding",
         "Install control-plane contract dependencies",
-        "Install contained-execution runtime",
+        "Install offline runtime closure tools",
         "Install Playwright Chromium headless shell",
         "Run vitest suite",
       ]);
@@ -183,7 +183,7 @@ describe("CI and Preflight job parity", () => {
         steps
           .filter((step) => step.if === "matrix.part == 2")
           .map((step) => step.name),
-      ).toEqual(["Code + Design containment matrix"]);
+      ).toEqual(["Code + Design authoring contracts"]);
       expect(
         steps.every(
           (step) => !step.if || /^matrix\.part == [12]$/.test(step.if),

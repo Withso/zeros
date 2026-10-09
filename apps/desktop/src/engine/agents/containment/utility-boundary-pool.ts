@@ -4,10 +4,8 @@
 //
 // Engine-owned one-shots — provider auth/version probes,
 // save-time key validation, `listSessions` — are real provider code and inherit
-// the same routed execution contract as sessions. Each one used to prepare its
-// OWN boundary and then prove it torn down: cheap for native execution, but a
-// full policy/canary/teardown cycle for a sandboxed actor or cloud worker. In
-// the 2026-08-17 boot log roughly a third of all admissions were exactly this.
+// the same routed execution contract as sessions. Reusing an identical
+// lifecycle scope avoids repeated preparation and proven group retirement.
 //
 // This pool keeps ONE such boundary alive per identical request and hands it to
 // each one-shot in turn.
@@ -22,8 +20,7 @@
 //  2. IT IS NOT A NEW TRUST LEVEL. One prepared boundary already hosts many
 //     provider child processes for a live agent session; that is its whole job.
 //     Serving N background one-shots from one boundary is the same shape, with
-//     the same generation, the same canary-proved fence, and the same proven
-//     teardown at the end.
+//     the same original generation and the same proven teardown at the end.
 //  3. ONE OPERATION AT A TIME. Leases are strictly serialized per key. Nothing
 //     in here has to reason about concurrent one-shots in the same process
 //     domain, because that never happens.
@@ -261,10 +258,9 @@ export class UtilityBoundaryPool {
     void pendingAdmission.catch(() => undefined);
     this.pendingAdmissions.set(key, pendingAdmission);
     // The FIRST caller's executionId becomes the pooled boundary's id. It only
-    // forms paths and log labels (the security identity is `generation`), so
-    // reusing it is safe — and it keeps `[zsr] admitted …` lines and session
-    // directories named after the work that actually created the boundary
-    // (`probe-codex-…`, `title-…`) instead of an opaque pool handle.
+    // forms paths and log labels; the original `generation` binds lifecycle
+    // ownership. Reuse keeps session directories named after the work that
+    // actually created the boundary (`probe-codex-…`, `title-…`).
     const executionId = request.executionId;
     let admissionFailed = false;
     let unownedBoundary: PreparedBoundary | null = null;

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -7,8 +7,10 @@ import { CloudActorAuthorityRegistry } from "../agents/cloud-actor-authority";
 import { CloudLocalCommandQueue } from "../cloud-local-command-queue";
 import { CloudLocalCommandEventStore } from "../cloud-local-command-queue-events";
 import { CloudLocalCommandWriterLifecycle } from "../cloud-local-command-queue-lifecycle";
+import { CloudCommandRuntimeError } from "../cloud-command-client";
 import { openSqlite } from "../db/sqlite";
 import { createMessage } from "@zeros/protocol/messages";
+import { canonicalCloudLocalCommandHistoryJson, canonicalCloudLocalCommandWriterSealDescriptor } from "@zeros/protocol/cloud-local-mirror";
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
@@ -166,5 +168,91 @@ describe("FULL writer drain and immutable seal", () => {
     expect(() => f.lifecycle.createSeal()).toThrow("command_conflict");
     f.lifecycleOptions.heads = original; const seal = f.lifecycle.createSeal();
     expect(seal.inventorySha256).toMatch(/^[a-f0-9]{64}$/); expect(seal.sha256).not.toBe(seal.inventorySha256);
+  });
+});
+
+describe("passive acknowledged seal read", () => {
+  const freeze = async (f: ReturnType<typeof fixture>) => {
+    await f.lifecycle.drainAndSeal({ mirror: { flush: async () => f.drain() }, retireNative: async () => {},
+      waitForWork: async () => {}, freezeNormal: () => f.normal.close(), request: async seal => f.acknowledgement(seal) });
+    return f.lifecycle.seal!;
+  };
+  const ledger = (f: ReturnType<typeof fixture>) => {
+    const db = openSqlite(f.file, { fileMustExist: true }); cleanup.push(() => db.close()); return db;
+  };
+
+  it("returns null before a seal and before its ACK without establishing a NORMAL proof", () => {
+    const f = fixture(), normalDb = vi.spyOn(f.lifecycleOptions, "normalDb");
+    expect(f.lifecycle.readAcknowledgedSeal()).toBeNull(); expect(normalDb).not.toHaveBeenCalled();
+    f.lifecycle.begin(); f.lifecycle.createSeal(); normalDb.mockClear(); f.quiescent.mockClear();
+    expect(f.lifecycle.readAcknowledgedSeal()).toBeNull(); expect(normalDb).not.toHaveBeenCalled();
+    expect(f.quiescent).not.toHaveBeenCalled(); expect(f.lifecycle.acknowledged).toBe(false);
+  });
+  it("refuses a directly stored ACK that never completed the original NORMAL freeze", () => {
+    const f = fixture(); f.lifecycle.begin(); f.lifecycle.createSeal(); f.lifecycle.acknowledge(f.acknowledgement());
+    expect(f.lifecycle.acknowledged).toBe(true);
+    expect(() => f.lifecycle.readAcknowledgedSeal()).toThrow("command_conflict");
+  });
+  it("returns the exact current seal using read-only NORMAL with no capture, checkpoint or ledger writes", async () => {
+    const f = fixture(), seal = await freeze(f), normalDb = vi.spyOn(f.lifecycleOptions, "normalDb");
+    const heads = vi.spyOn(f.lifecycleOptions, "heads"), capture = vi.spyOn(f.lifecycle, "captureCheckpoint");
+    const changes = () => f.lifecycle["db"].prepare("SELECT total_changes() AS count").get();
+    const before = changes(), pragma = vi.spyOn(f.lifecycle["db"], "pragma"), exec = vi.spyOn(f.lifecycle["db"], "exec");
+    expect(f.lifecycle.readAcknowledgedSeal()).toEqual(seal);
+    expect(f.lifecycle.readAcknowledgedSeal()).toEqual(seal);
+    expect(heads).toHaveBeenCalledTimes(2); expect(heads.mock.calls.every(([source]) => source?.readonly === true)).toBe(true);
+    expect(normalDb).not.toHaveBeenCalled(); expect(capture).not.toHaveBeenCalled();
+    expect(pragma).not.toHaveBeenCalled(); expect(exec).not.toHaveBeenCalled(); expect(changes()).toEqual(before);
+    expect(f.queue.mirrorDrained()).toBe(true); expect(f.queue.accepting).toBe(false);
+  });
+  it("refuses a NORMAL head changed after an earlier positive passive read", async () => {
+    const f = fixture(), seal = await freeze(f);
+    expect(f.lifecycle.readAcknowledgedSeal()).toEqual(seal);
+    const normal = openSqlite(path.join(path.dirname(f.file), "normal.sqlite"), { fileMustExist: true });
+    cleanup.push(() => normal.close()); normal.prepare("UPDATE source_head SET value=8").run();
+    expect(() => f.lifecycle.readAcknowledgedSeal()).toThrow("command_conflict");
+    expect(f.lifecycle.seal).toEqual(seal);
+  });
+  it.each(["json", "mismatched-ack", "changed-pair", "rehashed-pair", "oversized-ack"])("refuses %s stored proof", async kind => {
+    const f = fixture(), seal = await freeze(f), db = ledger(f);
+    if (kind === "json") db.prepare("UPDATE local_command_writer_seals SET document=?").run("{");
+    else if (kind === "mismatched-ack") db.prepare("UPDATE local_command_writer_seals SET ack=?")
+      .run(canonicalCloudLocalCommandHistoryJson({ ...f.acknowledgement(seal), sealId: randomUUID() }));
+    else if (kind === "oversized-ack") db.prepare("UPDATE local_command_writer_seals SET ack=?").run(" ".repeat(16 * 1024 + 1));
+    else {
+      const changed = { ...seal, sealId: randomUUID() };
+      if (kind === "rehashed-pair") changed.sha256 = createHash("sha256").update(canonicalCloudLocalCommandWriterSealDescriptor(changed)).digest("hex");
+      db.prepare("UPDATE local_command_writer_seals SET document=?,ack=?")
+        .run(canonicalCloudLocalCommandHistoryJson(changed), canonicalCloudLocalCommandHistoryJson(f.acknowledgement(changed)));
+    }
+    expect(() => f.lifecycle.readAcknowledgedSeal()).toThrow(kind === "rehashed-pair" ? "command_conflict" : "command_response_invalid");
+  });
+  it("refuses changed FULL inventory despite unchanged seal, ACK and watermarks", async () => {
+    const f = fixture(); f.enqueue(); const seal = await freeze(f);
+    ledger(f).prepare("UPDATE local_commands SET result_code='command_context_changed'").run();
+    expect(f.queue.mirrorDrained()).toBe(true); expect(f.lifecycle.seal).toEqual(seal);
+    expect(() => f.lifecycle.readAcknowledgedSeal()).toThrow("command_conflict");
+  });
+  it.each(["dirty", "flight", "journal", "mirror", "sealed-writer"])("refuses current %s ledger drift", async kind => {
+    const f = fixture(); if (kind === "dirty") f.enqueue();
+    const seal = await freeze(f), db = ledger(f);
+    if (kind === "dirty") db.prepare("UPDATE local_commands SET mirror_dirty=1").run();
+    else if (kind === "flight") db.prepare("INSERT INTO local_command_mirror_batches VALUES(?,?,?,?,?)")
+      .run(f.scope.writerEpoch, randomUUID(), seal.sequence, seal.sequence + 1, "{}");
+    else if (kind === "sealed-writer") db.prepare("DELETE FROM local_command_metadata WHERE key='sealedWriter'").run();
+    else db.prepare("INSERT OR REPLACE INTO local_command_metadata VALUES(?,?)").run(kind === "journal" ? "journalHead" : "mirrorHead", String(seal.sequence + 1));
+    expect(() => f.lifecycle.readAcknowledgedSeal()).toThrow("command_conflict");
+  });
+  it.each(["journalHead", "mirrorHead"])("refuses a BLOB %s instead of normalizing it into a valid cursor", async key => {
+    const f = fixture(), seal = await freeze(f);
+    ledger(f).prepare("INSERT OR REPLACE INTO local_command_metadata VALUES(?,?)").run(key, Buffer.from(String(seal.sequence)));
+    expect(() => f.lifecycle.readAcknowledgedSeal()).toThrow("command_storage_unavailable");
+  });
+  it.each(["authority", "closed", "quiescence"])("refuses lost %s at read time", async kind => {
+    const f = fixture(); await freeze(f);
+    if (kind === "authority") f.options.engineLive = () => false;
+    else if (kind === "closed") f.lifecycle.close();
+    else f.quiescent.mockImplementation(() => { throw new CloudCommandRuntimeError("command_conflict"); });
+    expect(() => f.lifecycle.readAcknowledgedSeal()).toThrow(kind === "quiescence" ? "command_conflict" : "engine_authority_rejected");
   });
 });

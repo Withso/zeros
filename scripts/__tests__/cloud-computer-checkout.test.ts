@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const manifestRace = vi.hoisted(() => ({ file: "", replacement: "", descriptor: undefined as number | undefined, vanish: "" }));
+const manifestRace = vi.hoisted(() => ({ file: "", replacement: "", descriptor: undefined as number | undefined, vanish: "", foreignConfig: "" }));
 vi.mock("node:fs", async original => {
   const actual = await original<typeof import("node:fs")>();
   const replace = () => { actual.renameSync(manifestRace.replacement, manifestRace.file); manifestRace.file = ""; };
@@ -18,6 +18,12 @@ vi.mock("node:fs", async original => {
     },
     fstatSync: (descriptor: number) => {
       const stat = actual.fstatSync(descriptor);
+      if (manifestRace.foreignConfig) {
+        const config = actual.lstatSync(manifestRace.foreignConfig);
+        // Explicit fake descriptor ownership: the template check saw the
+        // admitted owner, but the file opened for sanitation changed owner.
+        if (stat.dev === config.dev && stat.ino === config.ino) stat.uid++;
+      }
       if (manifestRace.file) {
         const target = actual.lstatSync(manifestRace.file);
         if (stat.dev === target.dev && stat.ino === target.ino) {
@@ -47,6 +53,7 @@ afterEach(() => {
   manifestRace.file = "";
   manifestRace.descriptor = undefined;
   manifestRace.vanish = "";
+  manifestRace.foreignConfig = "";
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 function fixture() {
@@ -223,6 +230,19 @@ describe("Cloud Computer fork checkout", () => {
     await expect(checkoutCloudComputerPrimary(f.computer, f.repository, { ...f.options, git, verifyOrigin: async () => {} }))
       .resolves.toBe(f.repository.revision);
     expect(manifestRace.vanish).toBe("");
+  });
+
+  it("refuses a config whose opened owner differs from the admitted post-adoption worker", async () => {
+    const f = fixture();
+    const config = path.join(f.source, ".git/config"), before = readFileSync(config, "utf8");
+    manifestRace.foreignConfig = config;
+    const git = vi.fn(async (directory: string, args: string[]) => args[0] === "fetch" ? "" : f.git(directory, args));
+    const verifyOrigin = vi.fn(async () => {});
+    await expect(checkoutCloudComputerPrimary(f.computer, f.repository, { ...f.options, git, verifyOrigin }))
+      .rejects.toThrow("image_contract_invalid");
+    expect(verifyOrigin).not.toHaveBeenCalled();
+    expect(git.mock.calls.some(([, args]) => args[0] === "fetch")).toBe(false);
+    expect(readFileSync(config, "utf8")).toBe(before);
   });
 
   it("refuses a checkout whose HEAD differs from the accepted commit", async () => {

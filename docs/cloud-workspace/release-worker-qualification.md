@@ -1,5 +1,8 @@
 # Release worker retirement and cleanup
 
+Execution follows the [normal VM agent execution model](security.md#agent-execution-model).
+The workspace VM provides isolation; ordinary conversation directories do not.
+
 The opt-in **v3 image-kit worker-promotion lane is retired**. When
 `ZEROS_WORKER_PROMOTION=enabled`, release workflows and producer, canary,
 readiness and publication entrypoints refuse before allocation, build or

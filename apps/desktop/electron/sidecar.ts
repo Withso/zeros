@@ -39,6 +39,7 @@ import { emitEvent } from "./ipc/events";
 import { IS_DEV, IS_PACKAGED, IS_LOCAL_DEVELOPMENT } from "./runtime-mode";
 import { engineTurnIsActive } from "./dev-main-restart";
 import { ownedEngineResponsive } from "./engine-health-probe";
+import { resolveProductRipgrepPath } from "./ripgrep-runtime-asset";
 import { createEngineWatchdogTick, sameEngineTarget } from "./engine-watchdog";
 import { engineBasePort, ENGINE_PORT_SPAN } from "../src/engine/runtime";
 import {
@@ -359,33 +360,8 @@ function resolveCursorHostPaths(): {
   return { script, sdkEntry };
 }
 
-/** Resolve the product-owned ZSR supervisor. It always runs under Electron's
- * Node mode, never under the Bun-compiled engine, because the exact-pinned SRT
- * component and its per-session module globals require an isolated Node
- * process. */
-function resolveZsrSupervisorPath(): string | null {
-  if (IS_PACKAGED) {
-    const packaged = path.join(process.resourcesPath, "zsr-supervisor.mjs");
-    return existsSync(packaged) ? packaged : null;
-  }
-  const dev = path.resolve(
-    __dirname,
-    "..",
-    "apps",
-    "desktop",
-    "src",
-    "engine",
-    "agents",
-    "containment",
-    "zsr-supervisor.mjs",
-  );
-  return existsSync(dev) ? dev : null;
-}
-
-/** Resolve the unrestricted native lifecycle supervisor. It applies no ZSR
- * policy; it only keeps provider descendants in a crash-recoverable process
- * group. Like the ZSR supervisor, it needs Electron's Node mode because the
- * packaged engine is a Bun-compiled executable rather than a script runtime. */
+/** Resolve the provider lifecycle supervisor. It keeps exact owned process
+ * groups recoverable and runs in Electron Node mode beside the compiled engine. */
 function resolveHostProcessSupervisorPath(): string | null {
   if (IS_PACKAGED) {
     const packaged = path.join(
@@ -406,48 +382,6 @@ function resolveHostProcessSupervisorPath(): string | null {
     "host-process-supervisor.mjs",
   );
   return existsSync(development) ? development : null;
-}
-
-/** Resolve SRT's required ripgrep helper without relying on the launcher's
- * PATH. Packaged builds execute the staged Resources copy; development first
- * accepts that same build output, then resolves the pinned optional package. */
-function resolveZsrRipgrepPath(): string | null {
-  const explicit = process.env.ZEROS_ZSR_RIPGREP_PATH?.trim();
-  if (explicit) return existsSync(explicit) ? explicit : null;
-
-  const staged = IS_PACKAGED
-    ? path.join(process.resourcesPath, "zsr-rg")
-    : path.resolve(__dirname, "..", "binaries", "zsr-rg");
-  if (existsSync(staged)) return staged;
-  if (IS_PACKAGED) return null;
-
-  try {
-    const packageName = "@vscode/ripgrep";
-    const packageEntry = require.resolve(packageName);
-    const fromPackage = createRequire(packageEntry);
-    const binary = process.platform === "win32" ? "rg.exe" : "rg";
-    const platformPackage = `@vscode/ripgrep-${process.platform}-${process.arch}`;
-    const resolved = fromPackage.resolve(`${platformPackage}/bin/${binary}`);
-    return existsSync(resolved) ? resolved : null;
-  } catch {
-    return null;
-  }
-}
-
-function resolveZsrMacosProcessDomainHelperPath(): string | null {
-  if (process.platform !== "darwin") return null;
-  const candidate = IS_PACKAGED
-    ? path.join(process.resourcesPath, "zsr-macos-process-domain")
-    : path.resolve(__dirname, "..", "binaries", "zsr-macos-process-domain");
-  return existsSync(candidate) ? candidate : null;
-}
-
-function resolveZsrGitDispatchBinaryPath(): string | null {
-  if (process.platform !== "darwin") return null;
-  const candidate = IS_PACKAGED
-    ? path.join(process.resourcesPath, "zsr-git-dispatch")
-    : path.resolve(__dirname, "..", "binaries", "zsr-git-dispatch");
-  return existsSync(candidate) ? candidate : null;
 }
 
 /** Resolve the Claude Code CLI the engine should hand the Agent SDK as
@@ -884,10 +818,9 @@ async function killCurrentChild(): Promise<void> {
   // permission promises in undefined states.
   //
   // 2026-08-17: bumped from 5 s → 15 s to stay above the engine's own 12 s
-  // shutdown cap (apps/desktop/src/cli.ts). ZSR session teardown promotes
-  // provider-HOME/shadow-Git state and retires process-domain descriptors;
-  // SIGKILLing through that is what turned every dev restart into a
-  // "recovered N crashed process domain(s)" boot. A clean exit still
+  // shutdown cap (apps/desktop/src/cli.ts). Provider teardown retires owned
+  // process groups and flushes provider state; killing during that work leaves
+  // crash-recovery records for the next startup. A clean exit still
   // resolves this wait immediately, so fast restarts stay fast.
   await new Promise<void>((resolve) => {
     let done = false;
@@ -1408,19 +1341,12 @@ async function doSpawnEngine(
   if (hostProcessSupervisor) {
     extraEnv.ZEROS_HOST_SUPERVISOR_SCRIPT = hostProcessSupervisor;
   }
-  extraEnv.ZEROS_ZSR_SUPERVISOR_RUNTIME = process.execPath;
-  const zsrSupervisor = resolveZsrSupervisorPath();
-  if (zsrSupervisor) extraEnv.ZEROS_ZSR_SUPERVISOR_SCRIPT = zsrSupervisor;
-  const zsrRipgrep = resolveZsrRipgrepPath();
-  if (zsrRipgrep) extraEnv.ZEROS_ZSR_RIPGREP_PATH = zsrRipgrep;
-  const zsrMacosProcessDomain = resolveZsrMacosProcessDomainHelperPath();
-  if (zsrMacosProcessDomain) {
-    extraEnv.ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER = zsrMacosProcessDomain;
-  }
-  const zsrGitDispatch = resolveZsrGitDispatchBinaryPath();
-  if (zsrGitDispatch) {
-    extraEnv.ZEROS_ZSR_GIT_DISPATCH_BINARY = zsrGitDispatch;
-  }
+  const ripgrep = resolveProductRipgrepPath({
+    packaged: IS_PACKAGED, resourcesPath: process.resourcesPath,
+    repoRoot: path.resolve(__dirname, ".."), env: process.env,
+    platform: process.platform, arch: process.arch,
+  });
+  if (ripgrep) extraEnv.ZEROS_RIPGREP_PATH = ripgrep;
 
   // Parent-death watchdog opt-in: the engine self-exits (bounded graceful
   // stop) when THIS Electron process dies without cleanly stopping it —

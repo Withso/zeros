@@ -60,15 +60,9 @@ async function runServe(
 
   const shutdown = async () => {
     console.log("\n[Zeros] Shutting down...");
-    // Bound the dispose, but leave room for ZSR teardown to finish. Stopping
-    // a session promotes its private provider-HOME and shadow-Git state and
-    // retires the process-domain descriptor; abandoning that mid-write is why
-    // every dev restart used to boot into "recovered N crashed process
-    // domain(s)" + conflict-preservation sweeps. A clean dispose with live
-    // sessions runs seconds, not milliseconds, under ZSR. A genuinely wedged
-    // dispose (e.g. the Codex app-server JSON-RPC round-trip) is still
-    // abandoned at the cap, and the parent's SIGKILL ceiling
-    // (apps/desktop/electron/sidecar.ts killCurrentChild) must stay above it.
+    // Leave enough time to retire owned provider process groups and flush
+    // durable state before exiting. A wedged provider round-trip remains
+    // bounded; Electron's parent SIGKILL ceiling stays above this cap.
     await Promise.race([
       engine.stop().catch(() => {}),
       new Promise<void>((resolve) => setTimeout(resolve, 12_000)),

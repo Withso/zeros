@@ -3,19 +3,60 @@ import { execFile } from "node:child_process";
 import { chmod, mkdir, readFile, readlink, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { build } from "tsup";
-import engineConfiguration from "../../../tsup.config";
-import { stageSources, copyPayload } from "../runtime-bundle/closure";
 import { HarnessFailure } from "./assertions";
-import { fixtureDescriptor } from "./runtime-contract";
+import { fixtureDescriptor, parseInstalledHarnessOperatorInventory } from "./runtime-contract";
 
 const execute = promisify(execFile);
+
+/** Compile private qualification operators only from the master's clean
+ * snapshot, matching the strict candidate's exact source commit. This does
+ * not build, copy or publish an installed runtime. Call only in the build lane. */
+export async function buildInstalledHarnessOperators(sourceRoot: string, output: string, sourceCommit: string) {
+  sourceRoot = await realpath(sourceRoot);
+  output = path.resolve(output);
+  output = path.join(await realpath(path.dirname(output)), path.basename(output));
+  const contains = (parent: string, child: string) => {
+    const relative = path.relative(parent, child);
+    return relative === "" || relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  };
+  if (!/^[a-f0-9]{40}$/.test(sourceCommit) || contains(sourceRoot, output) || contains(output, sourceRoot))
+    throw new HarnessFailure("operator_input_invalid");
+  const gitOptions = { cwd: sourceRoot, env: { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", GIT_OPTIONAL_LOCKS: "0" }, maxBuffer: 64 * 1024 };
+  const assertSnapshot = async () => {
+    const root = (await execute("git", ["rev-parse", "--show-toplevel"], gitOptions)).stdout.trim();
+    const commit = (await execute("git", ["rev-parse", "HEAD"], gitOptions)).stdout.trim();
+    const dirty = (await execute("git", ["status", "--porcelain", "--untracked-files=normal"], gitOptions)).stdout;
+    if (root !== sourceRoot || commit !== sourceCommit || dirty) throw new HarnessFailure("fixture_contract_invalid");
+  };
+  await assertSnapshot();
+  await mkdir(output, { mode: 0o700 });
+  const { build } = await import("tsup");
+  await build({ config: false, entry: {
+    run: path.join(sourceRoot, "scripts/cloud-workspace-validation/cloud-agent-e2e/run.mts"),
+    "namespace-entry": path.join(sourceRoot, "scripts/cloud-workspace-validation/cloud-agent-e2e/namespace-entry.ts"),
+  }, outDir: output, format: ["esm"], outExtension: () => ({ js: ".mjs" }), platform: "node", target: "node24", splitting: false,
+    noExternal: ["@zeros/protocol", "zod", "ws"], external: [/^node:/, "better-sqlite3", "tsup"], silent: true });
+  await assertSnapshot();
+  const files = await Promise.all((["run.mjs", "namespace-entry.mjs"] as const).map(async file => {
+    const bytes = await readFile(path.join(output, file));
+    await chmod(path.join(output, file), 0o500);
+    return { path: file, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+  }));
+  const inventory = parseInstalledHarnessOperatorInventory({ schema: "zeros.installed-agent-e2e-operator/v1", sourceCommit, files }, sourceCommit);
+  await writeFile(path.join(output, "operator-inventory.json"), `${JSON.stringify(inventory)}\n`, { mode: 0o444, flag: "wx" });
+  return { output, inventory };
+}
+
 export async function buildSourceRuntime(sourceRoot: string, scratch: string) {
   sourceRoot = await realpath(sourceRoot);
   scratch = path.resolve(scratch);
   const relative = path.relative(path.join(sourceRoot, ".context/agents-fix/scratch/W5"), scratch);
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new HarnessFailure("operator_input_invalid");
   await mkdir(scratch, { recursive: true, mode: 0o700 });
+  // The installed operator never loads a source builder or tsup configuration.
+  const [{ build }, { default: engineConfiguration }, { stageSources, copyPayload }, { stageRipgrep }] = await Promise.all([
+    import("tsup"), import("../../../tsup.config"), import("../runtime-bundle/closure"), import("../../stage-ripgrep.mjs"),
+  ]);
   const stage = path.join(scratch, "runtime");
   await mkdir(stage, { mode: 0o755 });
   const dist = path.join(scratch, "dist-engine");
@@ -35,13 +76,10 @@ export async function buildSourceRuntime(sourceRoot: string, scratch: string) {
   const packages = JSON.parse(staged.stdout) as { packageCount: number };
   await copyPayload(dist, path.join(stage, "worker/dist-engine"));
   await mkdir(path.join(stage, "worker/binaries"), { recursive: true });
-  await copyPayload(path.join(sourceRoot, "apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs"), path.join(stage, "worker/binaries/zsr-supervisor.mjs"));
-  const rg = (await execute("which", ["rg"])).stdout.trim();
-  await copyPayload(await realpath(rg), path.join(stage, "worker/binaries/zsr-rg"));
+  await stageRipgrep({output:path.join(stage,"worker/binaries/rg")});
   await copyPayload(await realpath(process.execPath), path.join(stage, "bin/node"));
   for (const [name, source, mode] of [
     ["cloud-engine-namespace", "scripts/cloud-workspace-validation/sandbox/cloud-engine-namespace.c", 0o500],
-    ["cloud-process-supervisor", "apps/desktop/src/engine/agents/containment/cloud-process-supervisor.c", 0o555],
   ] as const) {
     await execute("cc", ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", path.join(sourceRoot, source), "-o", path.join(stage, "bin", name)],
       { maxBuffer: 64 * 1024 });

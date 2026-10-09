@@ -6,6 +6,7 @@ import {CLOUD_NATIVE_EXECUTION_PROFILE,cloudNativeProviderRestrictions,cloudBrow
 import {CloudAgentLease,type CloudAgentLeaseSupervisor,type CloudAuthorityFlightObservation,type CloudAuthorityRequestObservation} from "./cloud-agent-lease";
 import {CloudWorkloadTools} from "./cloud-workload-tools";
 import {CloudNativeBoundary} from "./containment/cloud-native-boundary";
+import {assertCloudPreparedBoundaryLive} from "./containment/cloud-execution-boundary";
 import {resolveCloudRuntime} from "./containment/cloud-runtime-root.mjs";
 import type {PreparedBoundary} from "./containment/types";
 import type {McpServerRegistration} from "./types";
@@ -111,8 +112,8 @@ export function createCloudAgentExecutionFactory(options:{
         Object.values(server.transport==="stdio"?server.env??{}:server.headers??{}))]);
       stage = "containment";
       lease.attach(workload);
-      const tools=new CloudWorkloadTools(lease,workload,cwd);
       const coordinator=await CloudNativeBoundary.prepare(lease,workload,conversationId,providerSettings);
+      const tools=new CloudWorkloadTools(lease,workload,cwd,coordinator.nativeHome);
       signal.throwIfAborted();
       lease.assertLive();
       const productServers=materializeMcpServerRegistrations(productTools?.servers??[],productTools?.env??{});
@@ -476,6 +477,12 @@ export interface CloudBootAgentExecutionFactory extends CloudAgentExecutionFacto
   /** Call after the original native turn is settled; preserves its owned host.
    * Engine settlement/history fences remain separate from this local lifetime. */
   settleBootTurn(execution:CloudProviderExecution,reservation:CloudBootTurnReservation):Promise<void>;
+  /** Periodic cleanup is separate from read-only idle census. Returned
+   * identities remain original; this snapshot never reserves retirement. */
+  idleBootExecutions():readonly CloudBootProviderExecution[];
+  /** Atomically fence this exact eligible idle host before the first await.
+   * A selected/reserved/entered next turn or retained background blocks it. */
+  retireIdleBootExecution(execution:CloudProviderExecution):Promise<boolean>;
   bootScopeActivity(selectors:readonly CloudBootCredentialSelector[]):CloudBootScopeActivity;
   retireBootCredentials(selectors:readonly CloudBootCredentialSelector[]):Promise<void>;
   disposeBoot():Promise<void>;
@@ -628,6 +635,13 @@ export function createCloudBootAgentExecutionFactory(options:{
     new Set(selectors.map(value=>JSON.stringify([value.provider,value.credentialId]))).size===selectors.length;
   const matches=(record:BootScopeRecord,selectors:readonly CloudBootCredentialSelector[])=>!selectors.length||selectors.some(value=>
     record.capture.runInfo.provider===value.provider&&record.capture.runInfo.credentialId===value.credentialId);
+  const idleEligible=(record:BootScopeRecord):boolean=>{
+    if(record.closed||record.proved||record.parent||!record.execution||!record.workload||!record.turnUsed||
+      record.phase!=="idle"||record.reservation||record.backgroundTurn||
+      [...active].some(next=>next!==record&&!next.proved&&(next.reuseOnly===record||next.parent===record)))return false;
+    try{assertRecord(record);assertCloudPreparedBoundaryLive(record.workload);return true;}
+    catch{return false;}
+  };
   factory={
     prepare:input=>options.legacy.prepare(input),
     bootDispatchReadiness(input){
@@ -710,7 +724,7 @@ export function createCloudBootAgentExecutionFactory(options:{
         factory.assertBootStart(selection);
         return spawnWorkload(record.lifetime.signal);
       }).then(domain=>{
-        record.workload=domain;return domain;
+        record.workload=domain;assertCloudPreparedBoundaryLive(domain);return domain;
       }).catch(async error=>{await closeRecord(record);throw contextCause(error);});
       record.allocation=allocation;
       return allocation;
@@ -724,8 +738,8 @@ export function createCloudBootAgentExecutionFactory(options:{
           if(signal.aborted)throw contextFailure("lifecycle_superseded");
           factory.assertBootStart(selection);
           if(resolveCloudRuntime().profile!=="v4")throw contextFailure("environment_runtime_required","containment");
-          const tools=new CloudWorkloadTools(record.authority,workload,selection.cwd);
           const coordinator=await record.lifetime.launch(()=>CloudNativeBoundary.prepareBoot(record.authority,workload,selection.conversationId,providerSettings));
+          const tools=new CloudWorkloadTools(record.authority,workload,selection.cwd,coordinator.nativeHome);
           if(signal.aborted)throw contextFailure("lifecycle_superseded");
           factory.assertBootStart(selection);
           const productServers=materializeMcpServerRegistrations(productTools?.servers??[],productTools?.env??{});
@@ -780,6 +794,7 @@ export function createCloudBootAgentExecutionFactory(options:{
         const owner=[...active].find(record=>record.selection.executionId===input.executionId&&record.execution&&!record.parent);
         if(!owner||owner.closed||owner.phase!=="idle"||owner.reservation||owner.backgroundTurn)return false;
         assertRecord(owner);
+        assertCloudPreparedBoundaryLive(owner.workload!);
         if(owner.selection.actor!==input.actor||owner.selection.context!==input.context||owner.selection.provider!==input.provider||
           owner.selection.model!==input.model||owner.selection.cwd!==input.cwd||owner.selection.conversationId!==input.conversationId)return false;
         capture=options.credentials.capture(input.provider,input.model);
@@ -794,6 +809,7 @@ export function createCloudBootAgentExecutionFactory(options:{
     canReuseBootExecution(execution,selection){
       try{
         const owner=executionRecord(execution),next=original(selection);factory.assertBootStart(selection);
+        assertCloudPreparedBoundaryLive(owner.workload!);
         if(owner.reservation||owner.phase!=="idle"||next.parent||next.workload||next.execution)return false;
         return owner.selection.executionId===selection.executionId&&next.reuseOnly===owner&&
           owner.selection.actor===selection.actor&&owner.selection.context===selection.context&&
@@ -805,6 +821,7 @@ export function createCloudBootAgentExecutionFactory(options:{
     },
     reserveBootTurn(execution,selection){
       const owner=executionRecord(execution),next=original(selection);factory.assertBootStart(selection);
+      assertCloudPreparedBoundaryLive(owner.workload!);
       if(owner.reservation||next.reservation||next.parent||next.turnUsed||
         (owner!==next&&!factory.canReuseBootExecution(execution,selection)))throw contextFailure("access_denied");
       next.turnUsed=true;
@@ -817,6 +834,7 @@ export function createCloudBootAgentExecutionFactory(options:{
       const turn=turnRecord(execution,reservation);
       if(turn.entered)throw contextFailure("access_denied");
       factory.assertBootStart(turn.selection.selection);
+      assertCloudPreparedBoundaryLive(turn.owner.workload!);
     },
     markNativeHandoff(execution,reservation){
       factory.assertNativeHandoff(execution,reservation);
@@ -834,6 +852,19 @@ export function createCloudBootAgentExecutionFactory(options:{
         // a terminal foreground result is not an empty descendant proof.
         turn.owner.backgroundTurn=turn;turn.selection.phase="background";
       }else if(turn.selection!==turn.owner){turn.selection.reservation=null;await closeRecord(turn.selection);}
+    },
+    idleBootExecutions(){
+      assertEngine();
+      return Object.freeze([...active].filter(idleEligible).map(record=>record.execution!));
+    },
+    retireIdleBootExecution(execution){
+      const record=bootExecutions.get(execution);
+      if(!record||record.factory!==factory||record.execution!==execution)return Promise.reject(contextFailure("access_denied"));
+      if(!idleEligible(record))return Promise.resolve(false);
+      // closeRecord sets closed and aborts its original lifetime synchronously.
+      // A concurrent next selection cannot revive or reserve this old host.
+      // Failed positive group proof propagates and remains in the inventory.
+      return closeRecord(record).then(()=>true);
     },
     bootScopeActivity(selectors){
       if(!validSelectors(selectors))return {complete:false,foreground:0,reservedLaunches:0,background:0,idleHosts:0,scopes:[]};

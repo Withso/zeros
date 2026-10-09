@@ -17,15 +17,16 @@ import {
 } from "./cloud-engine-cgroup.mjs";
 import { resolveCloudRuntime, resolveCloudRuntimeChild } from "./cloud-runtime-root.mjs";
 import { cloudComputerHostRepository, isCloudComputerRepositoryDirectory } from "./cloud-computer-checkout.mjs";
+import { CLOUD_ENGINE_MUTABLE_LAYOUT } from "./prepare-cloud-image-files.mjs";
 
 const MAX_DOCUMENT_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const FIXED_ENV = {
-  HOME: "/srv/zeros/home/agent",
+  HOME: CLOUD_ENGINE_MUTABLE_LAYOUT.agentHome,
   PATH: "",
   LANG: "C.UTF-8",
-  LOGNAME: "zeros-agent",
-  USER: "zeros-agent",
+  LOGNAME: "zeros-engine",
+  USER: "zeros-engine",
   SHELL: "/bin/bash",
 };
 function invalid() {
@@ -176,7 +177,7 @@ function worker() {
   const privileged = process.argv[2] === "--worker";
   if (
     process.platform !== "linux" ||
-    process.getuid?.() !== (privileged ? 0 : 10001) ||
+    process.getuid?.() !== (privileged ? 0 : 10003) ||
     process.argv.length !== 3 ||
     (!privileged && process.argv[2] !== "--unprivileged")
   )
@@ -221,8 +222,8 @@ function worker() {
           "--inh-caps=-all",
           "--ambient-caps=-all",
           "--pdeathsig=SIGKILL",
-          "--reuid=10001",
-          "--regid=10001",
+          "--reuid=10003",
+          "--regid=10003",
           "--clear-groups",
           runtime.node,
           runtime.helpers.setupProcess,
@@ -259,7 +260,7 @@ export async function qualifyCloudSetupProcess() {
   const runtime = resolveCloudRuntime();
   const setupCgroup = cloudCgroupDirectory(runtime,"setup");
   const directory = mkdtempSync("/tmp/zeros-setup-qualification-");
-  chownSync(directory, 10001, 10001);
+  chownSync(directory, 10003, 10003);
   const marker = path.join(directory, "child.json");
   const counter = path.join(directory, "counter");
   const workerSource = `import pathlib,json,os,time\npathlib.Path(${JSON.stringify(marker)}).write_text(json.dumps({'uid':os.getuid(),'scope':pathlib.Path('/proc/self/cgroup').read_text(),'privileges':pathlib.Path('/proc/self/status').read_text()}))\ni=0\nwhile True:\n pathlib.Path(${JSON.stringify(counter)}).write_text(str(i));i+=1;time.sleep(0.02)\n`;
@@ -277,8 +278,8 @@ export async function qualifyCloudSetupProcess() {
     const retired =
       !existsSync(setupCgroup) &&
       readFileSync(counter, "utf8") === before;
-    const unprivileged =
-      identity.uid === 10001 &&
+    const sameEngineIdentity =
+      identity.uid === 10003 &&
       identity.scope.trim() === `0::${setupCgroup.slice("/sys/fs/cgroup".length)}` &&
       /^NoNewPrivs:\s+1$/m.test(identity.privileges) &&
       /^CapEff:\s+0+$/m.test(identity.privileges);
@@ -291,17 +292,10 @@ export async function qualifyCloudSetupProcess() {
     const timeoutRetired =
       !existsSync(setupCgroup) &&
       (timeout.timedOut || timeout.code !== 0);
-    return {
-      secure:
-        result.code === 0 &&
-        result.stdout.trim() === "ready" &&
-        retired &&
-        unprivileged &&
-        timeoutRetired,
-      unprivileged,
-      detachedDescendantsRetired: retired,
-      timeoutRetired,
-    };
+    if (result.code !== 0 || result.stdout.trim() !== "ready" || !sameEngineIdentity || !retired || !timeoutRetired)
+      throw invalid();
+    return { hostUid: 10003, hostGid: 10003, detachedDescendantsRetired: retired, timeoutRetired };
+
   } finally {
     await new CloudEngineCgroup({runtime,kind:"setup"}).retire();
     rmSync(directory, { recursive: true, force: true });
@@ -316,7 +310,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     ) {
       const report = await qualifyCloudSetupProcess();
       process.stdout.write(JSON.stringify(report) + "\n");
-      process.exitCode = report.secure ? 0 : 125;
+      process.exitCode = report.hostUid === 10003 && report.detachedDescendantsRetired && report.timeoutRetired ? 0 : 125;
     } else worker();
   } catch {
     process.stderr.write("Cloud setup process could not be admitted\n");

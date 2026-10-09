@@ -18,6 +18,16 @@ const toolchain = {
 };
 
 describe("cloud worker deployment configuration", () => {
+  it("accepts the non-root same-user projection with only the pinned Host supervisor", () => {
+    const marker = {
+      version: 4, backend: "cloud-worker", profile: "zeros-cloud-worker-v4", uid: 10003, gid: 10003,
+      toolchain: { node: toolchain.node, supervisor: toolchain.supervisor.replace("zsr-supervisor", "host-process-supervisor") },
+    };
+    expect(parseCloudWorkerConfiguration(JSON.stringify(marker))).toEqual(marker);
+    for (const changed of [{ uid: 10001 }, { gid: 10001 }, { uid: 0 }, { gid: 0 }, { toolchain },
+      { toolchain: { ...marker.toolchain, setpriv: "/usr/bin/setpriv" } }])
+      expect(() => parseCloudWorkerConfiguration(JSON.stringify({ ...marker, ...changed }))).toThrow(/unsupported contract/);
+  });
   afterEach(async () => {
     vi.restoreAllMocks();
     await Promise.all(
@@ -125,7 +135,7 @@ describe("cloud worker deployment configuration", () => {
     vi.spyOn(
       process as unknown as { geteuid: () => number },
       "geteuid",
-    ).mockReturnValue(0);
+    ).mockReturnValue(10003);
 
     expect(() => loadCloudWorkerConfiguration(marker)).toThrow(
       /not root-controlled/,

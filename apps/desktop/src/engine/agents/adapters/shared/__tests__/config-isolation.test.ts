@@ -86,6 +86,10 @@ describe("preserveAmbientConfigRoots", () => {
 });
 
 describe("stripEngineAuthorityEnv", () => {
+  it("strips the neutral ripgrep courier without changing the provider's actual search path", () => {
+    expect(stripEngineAuthorityEnv({ ZEROS_RIPGREP_PATH: "/pinned/rg", CURSOR_RIPGREP_PATH: "/pinned/rg" }))
+      .toEqual({ CURSOR_RIPGREP_PATH: "/pinned/rg" });
+  });
   it("never gives agent/tool children ambient or injected Local admission", async () => {
     vi.stubEnv("ZEROS_LOCAL_DEVELOPMENT", "1");
     const env = await buildSpawnEnvWithLoginPath(completeAgentSpawnEnv({ZEROS_LOCAL_DEVELOPMENT:"1"}));

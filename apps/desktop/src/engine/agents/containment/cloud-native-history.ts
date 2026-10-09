@@ -1,7 +1,7 @@
 import {spawn} from "node:child_process";
-import {createHash} from "node:crypto";
+import {createHash, randomUUID} from "node:crypto";
 import {constants} from "node:fs";
-import {lstat,mkdir,open,readdir,realpath,rm,type FileHandle} from "node:fs/promises";
+import {lstat,mkdir,open,readdir,realpath,rename,rm,type FileHandle} from "node:fs/promises";
 import path from "node:path";
 import {prepareHistoryCustomization,readHistoryCustomization,writeHistoryCustomization,type HistoryCustomization} from "./cloud-customization-history";
 
@@ -11,8 +11,57 @@ export type CloudNativeHistoryMount={provider:CloudNativeProvider;directory:stri
 const providers=new Set(["claude","cursor","codex"]);
 const identity=/^[A-Za-z0-9._:-]{1,128}$/;
 
+/** Copy transcript bytes, never authentication/config, through no-follow
+ * descriptors. Both roots must already be physical engine-owned directories. */
+async function copyPhysicalNativeHistory(source: string, target: string): Promise<void> {
+  for (const root of [source, target]) {
+    const stat = await lstat(root);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || await realpath(root) !== root || stat.uid !== process.geteuid?.())
+      throw new Error("Cloud native history contains an unsafe root");
+  }
+  let entries = 0, bytes = 0;
+  async function copy(directory: FileHandle, destination: string): Promise<void> {
+    for (const name of await readdir(`/proc/self/fd/${directory.fd}`)) {
+      if (++entries > 25000) throw new Error("Cloud native history exceeds its limit");
+      const entry = `/proc/self/fd/${directory.fd}/${name}`, linked = await lstat(entry);
+      if (linked.isSymbolicLink() || (!linked.isFile() && !linked.isDirectory()) || linked.isFile() && linked.nlink !== 1)
+        throw new Error("Cloud native history contains an unsafe entry");
+      const handle = await open(entry, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK | (linked.isDirectory() ? constants.O_DIRECTORY : 0));
+      try {
+        const actual = await handle.stat();
+        if (actual.dev !== linked.dev || actual.ino !== linked.ino || actual.isDirectory() !== linked.isDirectory() ||
+          !actual.isDirectory() && (!actual.isFile() || actual.nlink !== 1)) throw new Error("Cloud native history contains an unsafe entry");
+        const outputPath = path.join(destination, name);
+        if (actual.isDirectory()) { await mkdir(outputPath, { mode: 0o700 }); await copy(handle, outputPath); }
+        else {
+          if (actual.size > 128 * 1024 * 1024 || (bytes += actual.size) > 2 * 1024 * 1024 * 1024)
+            throw new Error("Cloud native history exceeds its limit");
+          const output = await open(outputPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+          try {
+            const buffer = Buffer.alloc(64 * 1024); let offset = 0;
+            while (offset < actual.size) {
+              const chunk = await handle.read(buffer, 0, Math.min(buffer.length, actual.size - offset), offset);
+              if (!chunk.bytesRead) throw new Error("Cloud native history changed during capture");
+              let written = 0;
+              while (written < chunk.bytesRead) written += (await output.write(buffer, written, chunk.bytesRead - written)).bytesWritten;
+              offset += chunk.bytesRead;
+            }
+            const after = await handle.stat();
+            if (after.size !== actual.size || after.mtimeMs !== actual.mtimeMs) throw new Error("Cloud native history changed during capture");
+            await output.sync();
+          } finally { await output.close(); }
+        }
+      } finally { await handle.close(); }
+    }
+  }
+  const handle = await open(source, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try { await copy(handle, target); } finally { await handle.close(); }
+  const output = await open(target, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try { await output.sync(); } finally { await output.close(); }
+}
+
 /** The root and lock are engine-owned. Only this conversation's transcript
- * directory enters its private coordinator; no authentication HOME is durable.
+ * bytes enter its physical native HOME; authentication HOME is not durable.
  * A kernel lock prevents simultaneous SDK writers, including engine restarts. */
 async function lockConversation(input:{root:string;conversationId:string}):Promise<{owner:string;lock:FileHandle}>{
   if(!identity.test(input.conversationId)||!path.isAbsolute(input.root)||path.resolve(input.root)!==input.root)
@@ -44,9 +93,17 @@ export async function acquireCloudNativeHistory(input:{root:string;conversationI
 }
 async function acquireHistory(input:{root:string;conversationId:string;provider:CloudNativeProvider;uid:number;gid:number;customization?:HistoryCustomization},copyOnly:boolean) {
   if(!providers.has(input.provider))throw new Error("Cloud native history provider is invalid");
+  if (input.uid !== process.geteuid?.() || input.gid !== process.getegid?.())
+    throw new Error("Cloud native history requires the engine identity");
   const {owner,lock}=await lockConversation(input);
   try{
     await lstat(path.join(owner,".deleted")).then(()=>{throw new Error("Cloud conversation was deleted");},error=>{if(error.code!=="ENOENT")throw error;});
+    // A crash between the two directory renames leaves an ambiguous stage or
+    // backup. Preserve it under the lock rather than creating empty history or
+    // guessing which transcript was committed. Recovery needs explicit custody.
+    const retained = await readdir(owner);
+    if (retained.length > 25000 || retained.some(name => name.startsWith(`.capture-${input.provider}-`)))
+      throw new Error("Cloud native history requires recovery");
     const directory=path.join(owner,input.provider);await mkdir(directory,{mode:0o700}).catch(error=>{if(error.code!=="EEXIST")throw error;});
     if (!input.customization && !copyOnly && await readHistoryCustomization(owner,input.provider))
       throw new Error("Native history requires its customization authority");
@@ -74,25 +131,57 @@ async function acquireHistory(input:{root:string;conversationId:string;provider:
           if(actual.isFile()&&(actual.size>128*1024*1024||(bytes+=actual.size)>2*1024*1024*1024))
             throw new Error("Cloud native history exceeds its limit");
           if(actual.isDirectory())await adopt(child);
-          await child.chown(input.uid,input.gid);
         }finally{await child.close();}
       }
-      await handle.chown(input.uid,input.gid);
     }
     const handle=await open(directory,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
     try{await adopt(handle);}finally{await handle.close();}
     let releasePromise: Promise<void> | undefined;
     let writes = Promise.resolve();
+    const enqueue = (operation: () => Promise<void>): Promise<void> => {
+      if (releasePromise) return Promise.reject(new Error("Cloud native history is released"));
+      const pending = writes.then(operation);
+      // The caller owns each operation's failure. Keep subsequent retries and
+      // release serialized even after a failed copy, without unlocking early.
+      writes = pending.catch(() => {});
+      return pending;
+    };
     return {mount:{provider:input.provider,directory},redactor:customization?.redactor,fresh:customization?.fresh??false,handoff:customization?.handoff,
       record:customization?.record,
+      materialize(target: string) {
+        return enqueue(async () => {
+          if ((await readdir(target)).length) throw new Error("Cloud native transcript target must be empty");
+          await copyPhysicalNativeHistory(directory, target);
+        });
+      },
+      capture(source: string) {
+        return enqueue(async () => {
+        const stage = path.join(owner, `.capture-${input.provider}-${randomUUID()}`);
+        const backup = `${stage}.previous`;
+        await mkdir(stage, { mode: 0o700 });
+        let replaced = false;
+        try {
+          await copyPhysicalNativeHistory(source, stage);
+          await rename(directory, backup);
+          try { await rename(stage, directory); replaced = true; }
+          catch (error) { await rename(backup, directory); throw error; }
+          const parent = await open(owner, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+          try { await parent.sync(); } finally { await parent.close(); }
+          await rm(backup, { recursive: true, force: true });
+          const committed = await open(owner, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+          try { await committed.sync(); } finally { await committed.close(); }
+        } finally {
+          if (!replaced) await rm(stage, { recursive: true, force: true });
+        }
+        });
+      },
       confirmBinding() {
         if (releasePromise) return Promise.resolve();
-        writes = writes.then(() => customization?.confirmBinding());
-        return writes;
+        return enqueue(async () => { await customization?.confirmBinding(); });
       },
       release() {
-        // Complete acknowledged writes before unlocking. A late confirmation
-        // must never overwrite the next owner's metadata after retirement.
+        // Complete all admitted copies and acknowledged writes before unlocking.
+        // A late operation must never overwrite the next owner's transcript.
         return releasePromise ??= (async () => {
           try { await writes; await customization?.save(); } finally { await lock.close(); }
         })();

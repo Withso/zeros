@@ -26,6 +26,7 @@ import type { TransportClient } from "../types";
 import type { CloudRuntimeClientAdmission } from "../../cloud-runtime-registration";
 import type { CloudRuntimeQuietSnapshot } from "@zeros/protocol/cloud-runtime-lifecycle";
 import type { CloudRuntimeHandoffCommand, CloudRuntimeHandoffReply } from "../../cloud-runtime-quiet-state";
+import type { CloudEngineFinalCompletion } from "../../cloud-final-completion";
 
 const TOKEN = "worker-minted-conn-token";
 const ACCOUNT_USER_ID = "11111111-1111-4111-8111-111111111111";
@@ -59,6 +60,7 @@ async function startTransport(
     maxTotalBufferedBytes?: number;
     internalReadiness?: {
       token: string;
+      readFinalCompletion?: (challenge: string) => Promise<CloudEngineFinalCompletion | null>;
       readQuiet?: (challenge: string) => Promise<CloudRuntimeQuietSnapshot | null>;
       handoff?: (command: CloudRuntimeHandoffCommand) => Promise<CloudRuntimeHandoffReply | null>;
       read: () => {
@@ -1240,6 +1242,78 @@ describe("CloudTransport — /health is ungated", () => {
 });
 
 describe("CloudTransport — image-helper readiness", () => {
+  it("keeps final lifecycle proof readable when fresh-view fencing denies new client readiness", async () => {
+    const probeToken = `zwr_${"R".repeat(43)}`, challenge = "55555555-5555-4555-8555-555555555555";
+    const readFinalCompletion = vi.fn(async (): Promise<CloudEngineFinalCompletion> => ({
+      version: 1, challenge, phase: "committed", mode: "legacy", seal: null,
+      scope: { organizationId: ACCOUNT_USER_ID, workspaceId: ACCOUNT_USER_ID, generation: 1, engineInstanceId: ACCOUNT_USER_ID },
+      checkpoint: { requestId: challenge, checkpointId: ACCOUNT_USER_ID, contentRevision: 7,
+        manifestSha256: "a".repeat(64), reason: "before_stop" },
+    }));
+    const { port } = await startTransport({ token: TOKEN,
+      internalReadiness: { token: probeToken, read: () => null, readFinalCompletion } });
+    const headers = { "x-zeros-readiness-token": probeToken, "x-zeros-final-challenge": challenge };
+    expect((await httpRequest(port, { path: "/internal/readiness", headers })).status).toBe(503);
+    const response = await httpRequest(port, { path: "/internal/final-completion", headers });
+    expect(response.status).toBe(200); expect(JSON.parse(response.body)).toMatchObject({ challenge, phase: "committed" });
+    expect(readFinalCompletion).toHaveBeenCalledExactlyOnceWith(challenge);
+  });
+
+  it("serves only an authenticated, matched, passive final-completion receipt", async () => {
+    const probeToken = `zwr_${"R".repeat(43)}`;
+    const challenge = "55555555-5555-4555-8555-555555555555";
+    const readiness = { version: 1 as const, instanceId: ACCOUNT_USER_ID, protocolVersion: PROTOCOL_VERSION,
+      health: "ready" as const, durableRecordConnected: true as const };
+    const readFinalCompletion = vi.fn(async (nonce: string): Promise<CloudEngineFinalCompletion> => ({
+      version: 1, challenge: nonce, phase: "committed",
+      scope: { organizationId: ACCOUNT_USER_ID, workspaceId: ACCOUNT_USER_ID, generation: 1, engineInstanceId: readiness.instanceId },
+      mode: "legacy", checkpoint: { requestId: challenge, checkpointId: ACCOUNT_USER_ID, contentRevision: 7,
+        manifestSha256: "a".repeat(64), reason: "before_stop" }, seal: null,
+    }));
+    const { port } = await startTransport({ token: TOKEN,
+      internalReadiness: { token: probeToken, read: () => readiness, readFinalCompletion } });
+    const headers = { "x-zeros-readiness-token": probeToken, "x-zeros-final-challenge": challenge };
+    for (const request of [
+      { headers: {} }, { headers: { ...headers, "x-zeros-readiness-token": TOKEN } },
+      { headers: { ...headers, "x-zeros-final-challenge": "invalid" } },
+      { headers, host: "provider.example.test" }, { headers, method: "POST" },
+    ]) expect((await httpRequest(port, { path: "/internal/final-completion", ...request })).status).toBe(404);
+    expect((await httpRequest(port, { path: "/internal/final-completion?scope=other", headers })).status).toBe(404);
+    expect(readFinalCompletion).not.toHaveBeenCalled();
+    const accepted = await httpRequest(port, { path: "/internal/final-completion", headers });
+    expect(accepted.status).toBe(200);
+    expect(JSON.parse(accepted.body)).toMatchObject({ challenge, checkpoint: { contentRevision: 7 }, seal: null });
+    expect(readFinalCompletion).toHaveBeenCalledExactlyOnceWith(challenge);
+  });
+
+  it("refuses stale, malformed, absent and authority-changing final completion", async () => {
+    const probeToken = `zwr_${"R".repeat(43)}`;
+    const challenge = "55555555-5555-4555-8555-555555555555";
+    const instanceId = ACCOUNT_USER_ID;
+    let currentInstanceId = instanceId;
+    const receipt: CloudEngineFinalCompletion = { version: 1, challenge, phase: "committed",
+      scope: { organizationId: ACCOUNT_USER_ID, workspaceId: ACCOUNT_USER_ID, generation: 1, engineInstanceId: instanceId },
+      mode: "legacy", checkpoint: { requestId: challenge, checkpointId: ACCOUNT_USER_ID, contentRevision: 7,
+        manifestSha256: "a".repeat(64), reason: "before_stop" }, seal: null };
+    const readFinalCompletion = vi.fn(async (): Promise<CloudEngineFinalCompletion | null> => receipt);
+    const { port } = await startTransport({ token: TOKEN, internalReadiness: { token: probeToken,
+      read: () => ({ version: 1, instanceId: currentInstanceId, protocolVersion: PROTOCOL_VERSION,
+        health: "ready", durableRecordConnected: true }), readFinalCompletion } });
+    const headers = { "x-zeros-readiness-token": probeToken, "x-zeros-final-challenge": challenge };
+    for (const value of [null, { ...receipt, challenge: ACCOUNT_USER_ID }, { ...receipt, privateToken: "excluded" },
+      { ...receipt, mode: "boot-owner-v1" as const, seal: null },
+      { ...receipt, checkpoint: { ...receipt.checkpoint, reason: "manual" } },
+    ]) {
+      readFinalCompletion.mockImplementation(async () => value as CloudEngineFinalCompletion | null);
+      const rejected = await httpRequest(port, { path: "/internal/final-completion", headers });
+      expect(rejected.status).toBe(503); expect(rejected.body).toBe("unavailable");
+    }
+    readFinalCompletion.mockImplementation(async () => { currentInstanceId = challenge; return receipt; });
+    expect((await httpRequest(port, { path: "/internal/final-completion", headers })).status).toBe(503);
+    const local = await startTransport();
+    expect((await httpRequest(local.port, { path: "/internal/final-completion", headers })).status).toBe(404);
+  });
+
   it("accepts bounded handoff commands only on the separate authenticated loopback POST path", async () => {
     const probeToken = `zwr_${"R".repeat(43)}`;
     const handoff = vi.fn(async (command: CloudRuntimeHandoffCommand): Promise<CloudRuntimeHandoffReply> =>

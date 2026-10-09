@@ -12,6 +12,20 @@ const useWorkspaceFileDiffSnapshot = vi.hoisted(() =>
   })),
 );
 
+// Server rendering reads Zustand's initial snapshot. These markup checks
+// exercise the current session snapshot, as the mounted chat does.
+vi.mock("../sessions-store", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../sessions-store")>();
+  return {
+    ...original,
+    useSessionsStore: Object.assign(
+      (selector: (state: ReturnType<typeof original.useSessionsStore.getState>) => unknown) =>
+        selector(original.useSessionsStore.getState()),
+      original.useSessionsStore,
+    ),
+  };
+});
+
 vi.mock(
   "@/renderer/shell/workspace-file-data-cache",
   async (importOriginal) => ({
@@ -452,7 +466,39 @@ describe("turn footer first paint after a reopen", () => {
     expect(html).not.toContain("AGENT STOPPED");
     expect(html).not.toContain("0s");
     expect(html).not.toContain(code);
-    expect(html).toContain("data-cloud-admission-status");
+    expect(html.match(/data-turn-failure-card/g)).toHaveLength(1);
+    expect(html).not.toContain("data-cloud-admission-status");
+    expect(html).not.toContain("Enable models");
+    expect(html).not.toContain("Or choose an allowed model.");
+    expect(html).not.toContain("Retry in new chat");
+  });
+  it("shows the active rejected admission once in the banner instead of hiding it", () => {
+    const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    useSessionsStore.setState({ sessions: { "chat-1": { ...BLANK, cwd: folder, agentId: "codex", cloudAdmissionFailure: {
+      kind: "credential-required", message: "Your Codex connection expired. Reconnect to continue", action: "reconnect",
+      code: "cloud_agent_credential_expired", turnId: "user-1", agentId: "codex", model: null,
+    } } } });
+    const html = renderFooter({ folder, agentId: "codex", isLastTurn: true, onRetry: vi.fn(), onRetryNewChat: vi.fn() });
+    expect(html.match(/data-turn-failure-card/g)).toHaveLength(1);
+    expect(html).toContain("Your Codex connection expired. Reconnect to continue");
+    expect(html).toContain("Reconnect");
+    expect(html).not.toContain("Retry in new chat");
+    expect(html).not.toContain("data-cloud-admission-status");
+  });
+  it("leaves waiting admissions to queue status without an error or stopped pill", () => {
+    const html = renderFooter({ folder: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222",
+      recoveryFailure: { kind: "cloud-admission", message: "cloud_workspace_not_ready" }, isLastTurn: true });
+    expect(html).toBe("");
+  });
+  it("does not show another cloud workspace's current admission for the same turn id", () => {
+    const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    useSessionsStore.setState({ sessions: { "chat-1": { ...BLANK, cwd: folder, agentId: "codex", cloudAdmissionFailure: {
+      kind: "credential-required", message: "Your Codex connection expired. Reconnect to continue", action: "reconnect",
+      code: "cloud_agent_credential_expired", turnId: "user-1", agentId: "codex", model: null,
+    } } } });
+    const html = renderFooter({ folder: folder.replace("22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"), agentId: "codex", isLastTurn: false });
+    expect(html).not.toContain("data-turn-failure-card");
+    expect(html).not.toContain("connection expired");
   });
   it.each(["/personal/local", "/organization/local"])("leaves stopped-turn behavior unchanged in %s", cwd => {
     useSessionsStore.setState({ sessions: { "chat-1": { ...BLANK, cwd, agentId: "codex" } } });

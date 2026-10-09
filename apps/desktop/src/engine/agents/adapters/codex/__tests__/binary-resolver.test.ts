@@ -61,7 +61,7 @@ describe("resolveCodexBinary", () => {
     });
   });
 
-  it("canonicalizes a PATH fallback before it reaches ZSR", async () => {
+  it("canonicalizes a PATH fallback before runtime launch", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "codex-path-fallback-"));
     roots.push(root);
     const native = path.join(root, "codex-native");

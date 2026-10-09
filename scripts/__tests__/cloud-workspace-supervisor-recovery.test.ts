@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { ChildProcess, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -59,7 +59,7 @@ describe("cloud runtime activation", () => {
       const prepared = await f.supervisor.apply({ operation: "prepare" });
       expect(await f.supervisor.apply({ operation: "select-runtime", session: "stale",
         active: f.active })).toMatchObject({ outcome: "rejected" });
-      f.supervisor.child = { exitCode: null, signalCode: null };
+      f.supervisor.child = new ChildProcess();
       expect(await f.supervisor.apply({ operation: "select-runtime", session: prepared.session,
         active: f.active })).toMatchObject({ outcome: "rejected" });
       expect(f.verifySelectedRuntime).not.toHaveBeenCalled();
@@ -107,7 +107,7 @@ describe("cloud runtime activation", () => {
     ["baseCompatibilityId", `bc1-${"e".repeat(64)}`],
     ["bootId", "42345678-1234-4234-8234-123456789abc"],
     ["cgroupRoot", "/sys/fs/cgroup/other.slice/zeros-host.service"],
-  ])("rejects a forged matching request when the verified %s differs", async (key, value) => {
+  ] as const)("rejects a forged matching request when the verified %s differs", async (key, value) => {
     const f = fixture();
     try {
       const prepared = await f.supervisor.apply({ operation: "prepare" });
@@ -220,17 +220,22 @@ describe("cloud broker resume and ownership", () => {
       const source = `
       import {mkdtempSync,lstatSync,rmSync} from 'node:fs';
       import {CloudWorkerSupervisor} from ${JSON.stringify(module)};
+      import {CloudLegacyResidentControl} from ${JSON.stringify(pathToFileURL(resolve("scripts/cloud-workspace-validation/sandbox/cloud-resident-control.mjs")).href)};
       const directory=mkdtempSync('/tmp/zeros-broker-lock-');
       const socketPath=directory+'/broker.sock';
       const runtime=${JSON.stringify(testCloudRuntime())};
-      const first=new CloudWorkerSupervisor({socketPath,runtime});
-      const second=new CloudWorkerSupervisor({socketPath,runtime});
+      const createLegacyControl=async options=>{
+        const control=new CloudLegacyResidentControl(options);
+        return {listen:()=>control.listen({socketPath:socketPath+'.resident'}),close:()=>control.close()};
+      };
+      const first=new CloudWorkerSupervisor({socketPath,runtime,createLegacyControl});
+      const second=new CloudWorkerSupervisor({socketPath,runtime,createLegacyControl});
       try {
         await first.start(); const inode=lstatSync(socketPath).ino;
         let rejected=false; try {await second.start();} catch {rejected=true;}
         if (!rejected || lstatSync(socketPath).ino!==inode) throw new Error('live broker endpoint replaced');
         await first.stop();
-        const recovered=new CloudWorkerSupervisor({socketPath,runtime});
+        const recovered=new CloudWorkerSupervisor({socketPath,runtime,createLegacyControl});
         await recovered.start(); await recovered.stop();
       } finally { await first.stop(); await second.stop(); rmSync(directory,{recursive:true,force:true}); }
     `;

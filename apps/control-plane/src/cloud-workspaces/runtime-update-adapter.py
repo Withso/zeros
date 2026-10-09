@@ -651,7 +651,9 @@ class SystemRuntime:
         lines = output.splitlines()
         require(len(lines) == 2)
         report, diagnostic = [self.b.strict_json(line, "input_schema") for line in lines]
-        require(report.get("profile") == "zeros-cloud-worker-v4" and report.get("qualified") is True)
+        require(type(report.get("version")) is int and
+                (report["version"] == 1 or report["version"] == 2 and report.get("boundary") == "workspace-vm") and
+                report.get("profile") == "zeros-cloud-worker-v4" and report.get("qualified") is True)
         require(diagnostic.get("schema") == "zeros.diagnostic/v1" and diagnostic.get("component") == "attester" and
                 diagnostic.get("ok") is True and diagnostic.get("stage") == "done" and
                 diagnostic.get("exitCode") == 0 and diagnostic.get("failedChecks") == [])

@@ -1,16 +1,17 @@
 import type { ChildProcess } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
-import { chmod, chown, lstat, mkdir, readlink, realpath, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, cp, mkdir, rm, writeFile } from "node:fs/promises";
 import {isCloudAgentAdmissionCode,type CloudAgentAccessMaterial} from "@zeros/protocol/cloud-agent-execution";
 import {CloudCommandFailureError,decodeCloudCommandFailure,type CloudCommandFailureCause} from "@zeros/protocol/cloud-commands";
 import type { CloudAgentLease } from "../cloud-agent-lease";
 import { assertCloudBootNativeLaunch, assertCloudBootNativePreparation, isCloudBootNativeAuthority, type CloudBootNativeAuthority,
   type CloudAgentExecutionLifetime, type CloudAgentExecutionAuth } from "../cloud-provider-execution";
 
-import { attestCloudCoordinator } from "./cloud-coordinator-attestation";
-import { cloudCoordinatorEnvironment, CLOUD_COORDINATOR_HOME } from "./cloud-coordinator-view.mjs";
+import { zerosDataDir } from "../../db/paths";
+import { CLOUD_CODEX_STATE_DIRECTORIES, CLOUD_NATIVE_SKILL_HOMES, createCloudNativeHome, type CloudNativeHome } from "./cloud-native-home";
+import { assertCloudPreparedBoundaryLive, cloudPreparedBoundaryRequest } from "./cloud-execution-boundary";
+import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
 import { acquireCloudNativeHistory, CLOUD_NATIVE_HISTORY_ROOT } from "./cloud-native-history";
-import { CLOUD_CODEX_STATE_DIRECTORIES, CLOUD_NATIVE_HOME, CLOUD_NATIVE_SKILL_HOMES, type CloudNativeHomeView } from "./cloud-native-view.mjs";
 import { loadCloudWorkerConfiguration } from "./cloud-worker-config";
 import type { BoundaryLaunchSpec, BoundaryProcess, BoundarySpawnRequest, PortRequest, PreparedBoundary } from "./types";
 import {hasCloudBackgroundServers} from "./cloud-background-processes";
@@ -32,8 +33,6 @@ function nativeOwner(authority:CloudAgentLease|CloudBootNativeAuthority):NativeO
   };
 }
 
-const ROOT = "/run/zeros/coordinators";
-const AUTH_ENV = new Set(["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CURSOR_API_KEY", "OPENAI_API_KEY"]);
 const STARTUP_ENV = new Set(["CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS", "CLAUDE_CODE_STARTUP_FAILURE_RESULTS", "NODE_USE_ENV_PROXY"]);
 const SDK_METADATA_ENV={CLAUDE_CODE_ENTRYPOINT:"sdk-ts"} as const;
 function containmentFailure(error:unknown,category:CloudCommandFailureCause["category"]):Error{
@@ -43,46 +42,35 @@ function containmentFailure(error:unknown,category:CloudCommandFailureCause["cat
   if(isCloudAgentAdmissionCode(code))return Object.assign(new Error("Cloud agent authority changed"),{code});
   return new CloudCommandFailureError({stage:"containment",category});
 }
-export const CLOUD_NATIVE_ADMISSION_CANARY = `const fs=require('node:fs');
-if(process.getuid()!==10001||process.getgid()!==10001||!/^CapEff:\\s+0+$/m.test(fs.readFileSync('/proc/self/status','utf8')))process.exit(91);
-if(fs.readlinkSync('/proc/self/ns/pid')===process.argv[1])process.exit(92);
-try{fs.readFileSync(process.argv[2]);process.exit(93);}catch(error){if(!['EACCES','EPERM','ENOENT'].includes(error.code))process.exit(94);}
-const file=process.env.HOME+'/.zeros-canary';fs.writeFileSync(file,'canary',{flag:'wx'});fs.unlinkSync(file);
-const root='/srv/zeros/workspace',cwd=fs.realpathSync(process.cwd());
-if(fs.realpathSync(root)!==root||(cwd!==root&&!cwd.startsWith(root+'/'))||!fs.statSync(cwd).isDirectory())process.exit(95);
-process.stdout.write('zeros-native-provider-v1');`;
-
-/** Runtime home translation applies to managed values, never to an org or
- * personal literal that happens to start with the same path. */
+/** Build only the captured provider environment. Plain per-conversation paths
+ * organize native state; processes still share the engine's VM identity. */
 export function cloudNativeProviderEnvironment(material: CloudAgentAccessMaterial, model: string,
-  settings: Record<string, string> | undefined, values: Record<string, string> | undefined): Record<string, string> {
-  const original = cloudCoordinatorEnvironment(material, model, settings);
-  const managed = Object.fromEntries(Object.entries(original).map(([name, value]) =>
-    [name, value === CLOUD_COORDINATOR_HOME || value.startsWith(`${CLOUD_COORDINATOR_HOME}/`)
-      ? `${CLOUD_NATIVE_HOME}${value.slice(CLOUD_COORDINATOR_HOME.length)}` : value]));
-  return cloudComputerProcessEnvironment(managed, values, "agent");
-}
-
-/** The provider and its native tools execute in the same admitted workspace
- * boundary. Only the active connection enters this private, disposable HOME;
- * engine authority and all other conversations remain outside its view.
- * Native tools share the active provider's trust, as on a local machine. */
-/** Immutable empty native user/system config namespaces. Mutable repository
- * config is disabled by the pinned process CLI override. The directory itself
- * is bound, so a child cannot rename its parent and replace config.toml
- * between native start/resume requests. Entries below are mount points only;
- * the pinned CLI's writable state is private per process (cloud-native-view). */
-export async function prepareCloudCodexConfigView(directory: string): Promise<void> {
-  for (const name of ["", "/sessions", ...CLOUD_CODEX_STATE_DIRECTORIES.map(name => `/${name}`)]) {
-    await mkdir(`${directory}/codex-config${name}`, { mode: 0o755 }); await chmod(`${directory}/codex-config${name}`, 0o755);
+  settings: Record<string, string> | undefined, values: Record<string, string> | undefined,
+  nativeHome: CloudNativeHome): Record<string, string> {
+  if (typeof model !== "string" || model.length > 256 || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/.test(model))
+    throw new Error("Invalid cloud provider model");
+  const runtime = resolveCloudRuntime();
+  const env: Record<string,string> = { PATH: `${runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,
+    LANG: "C.UTF-8", SHELL: "/bin/bash", ZEROS_REQUIRE_EXACT_MODEL: "1", ...nativeHome.environment() };
+  if (["low","medium","high","xhigh","max","ultracode"].includes(settings?.ZEROS_THINKING_EFFORT ?? "")) env.ZEROS_THINKING_EFFORT = settings!.ZEROS_THINKING_EFFORT!;
+  if (["auto","auto-edit","ask","default","accept-edits","plan","bypass","agent","full-access","read-only"].includes(settings?.ZEROS_PERMISSION_MODE ?? "")) env.ZEROS_PERMISSION_MODE = settings!.ZEROS_PERMISSION_MODE!;
+  if (settings?.ZEROS_FAST_MODE === "1" || settings?.ZEROS_FAST_MODE === "0") env.ZEROS_FAST_MODE = settings.ZEROS_FAST_MODE;
+  switch (material.kind) {
+    case "claude-api-key": env.ANTHROPIC_API_KEY = material.apiKey; break;
+    case "claude-setup-token": env.CLAUDE_CODE_OAUTH_TOKEN = material.accessToken; break;
+    case "cursor-api-key": env.CURSOR_API_KEY = material.apiKey; break;
+    case "codex-api-key": env.OPENAI_API_KEY = material.apiKey; break;
+    case "codex-chatgpt": break; // Native external login remains the sole account source.
+    default: throw new Error("Invalid cloud provider credential");
   }
-  await writeFile(`${directory}/codex-config/installation_id`, "", { flag: "wx", mode: 0o444 });
-  await writeFile(`${directory}/codex-installation-id`, randomUUID(), { flag: "wx", mode: 0o600 });
+  if (material.kind.startsWith("claude-")) { env.ANTHROPIC_MODEL = model; env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"; }
+  else if (material.kind.startsWith("cursor-")) { env.CURSOR_MODEL = model; env.ZEROS_CURSOR_STATE_ROOT = `${nativeHome.paths.cursorHome}/zeros-store`; }
+  else env.OPENAI_MODEL = model;
+  return cloudComputerProcessEnvironment(env, values, "agent");
 }
 
-/** Cursor loads user MCP during native workspace prewarm, before its explicit
- * per-run override. Pin the directory itself; a worker cannot replace it with
- * a new settings/MCP file. History and admitted skills mount into fixed slots. */
+/** Initialize empty physical Cursor config for native discovery fixtures.
+ * These directories are ordinary state, not immutable filesystem mounts. */
 export async function prepareCloudCursorConfigView(directory: string): Promise<void> {
   for(const name of ["","/zeros-store","/skills"]){
     await mkdir(`${directory}/cursor-config${name}`,{mode:0o755});
@@ -90,20 +78,24 @@ export async function prepareCloudCursorConfigView(directory: string): Promise<v
   }
 }
 
-/** Each provider home that receives the organization's skills belongs to the
- * worker, like the active provider's own home, so the skills stay readable. */
-export async function prepareCloudSkillHomes(directory: string, provider: string, uid: number, gid: number): Promise<void> {
+/** Populate ordinary provider discovery folders for organization skills. */
+export async function prepareCloudSkillHomes(directory: string, provider: string, _uid: number, _gid: number): Promise<void> {
   for (const home of CLOUD_NATIVE_SKILL_HOMES) {
     if (home === `.${provider}`) continue;
-    await mkdir(`${directory}/home/${home}`, { mode: 0o700 }); await chown(`${directory}/home/${home}`, uid, gid);
+    await mkdir(`${directory}/home/${home}`, { mode: 0o700, recursive: true });
   }
+}
+
+function nativeTranscriptDirectory(home: CloudNativeHome, provider: NativeOwner["provider"]): string {
+  return provider === "claude" ? `${home.paths.claudeConfigDir}/projects` :
+    provider === "cursor" ? `${home.paths.cursorHome}/zeros-store` : `${home.paths.codexHome}/sessions`;
 }
 
 export class CloudNativeBoundary implements PreparedBoundary {
   readonly generation;
   readonly status;
   readonly attestation;
-  readonly providerHomePath = CLOUD_NATIVE_HOME;
+  get providerHomePath() { return this.nativeHome.paths.home; }
   private readonly owner:NativeOwner;
   private retired = false;
   private closing: Promise<void> | null = null;
@@ -125,7 +117,7 @@ export class CloudNativeBoundary implements PreparedBoundary {
   private constructor(
     private readonly authority: CloudAgentLease|CloudBootNativeAuthority,
     readonly workload: PreparedBoundary,
-    private readonly view: CloudNativeHomeView,
+    readonly nativeHome: CloudNativeHome,
     private env: Record<string, string>,
     private readonly history: Awaited<ReturnType<typeof acquireCloudNativeHistory>>,
   ) {
@@ -149,18 +141,18 @@ export class CloudNativeBoundary implements PreparedBoundary {
     settings?:Record<string,string>):Promise<CloudNativeBoundary>{
     const owner=nativeOwner(authority),lease=owner.lifetime;
     const configuration = loadCloudWorkerConfiguration();
-    if ((configuration?.version !== 4) || workload.status.backend !== "cloud-worker")
-      throw new Error("Native cloud agents require a qualified cloud worker");
-    lease.assertLive();
+    if (configuration?.version !== 4 || configuration.uid !== process.geteuid?.() || configuration.gid !== process.getegid?.())
+      throw new Error("Native cloud agents require the current engine deployment");
+    assertCloudPreparedBoundaryLive(workload);
+    const admitted = cloudPreparedBoundaryRequest(workload);
+    const executionId = isCloudBootNativeAuthority(authority) ? authority.executionId : authority.admission.executionId;
+    if (executionId !== admitted.executionId) throw new Error("Native cloud execution identity does not match its workload");
+    const assertLive = () => { lease.assertLive(); assertCloudPreparedBoundaryLive(workload); };
+    assertLive();
     try { await workload.attestation; }
     catch(error) { throw containmentFailure(error,"attestation_failed"); }
-    lease.assertLive();
-    await mkdir(ROOT, { recursive: true, mode: 0o700 });
-    const root = await lstat(ROOT);
-    if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== 0 || (root.mode & 0o077) !== 0 || await realpath(ROOT) !== ROOT)
-      throw new Error("Native cloud provider root is not engine-owned");
-    const directory = `${ROOT}/${randomBytes(16).toString("hex")}`;
-    await mkdir(directory, { mode: 0o700 });
+    assertLive();
+    const nativeHome = await createCloudNativeHome({ dataRoot: zerosDataDir(), conversationId, provider: owner.provider, executionId });
     let history: Awaited<ReturnType<typeof acquireCloudNativeHistory>> | undefined;
     let boundary: CloudNativeBoundary | undefined;
     try {
@@ -168,52 +160,39 @@ export class CloudNativeBoundary implements PreparedBoundary {
       history = await acquireCloudNativeHistory({ root: CLOUD_NATIVE_HISTORY_ROOT, conversationId,
         provider: owner.provider, uid: configuration.uid, gid: configuration.gid,
         customization: cloudComputerExecutionHistory(owner) });
-      await mkdir(`${directory}/home`, { mode: 0o700 });
-      await chown(`${directory}/home`, configuration.uid, configuration.gid);
-      const providerHome = `${directory}/home/.${owner.provider}`;
-      await mkdir(providerHome, { mode: 0o700 });
-      await chown(providerHome, configuration.uid, configuration.gid);
-      if (owner.customization) {
-        await materializeCloudSkills(directory, owner.customization.skills);
-        await prepareCloudSkillHomes(directory, owner.provider, configuration.uid, configuration.gid);
-      }
+      assertLive();
+      const transcript = nativeTranscriptDirectory(nativeHome, owner.provider);
+      await mkdir(transcript, { mode: 0o700 });
+      await history.materialize(transcript);
       if (owner.provider === "codex") {
-        await prepareCloudCodexConfigView(directory);
-        await chown(`${directory}/codex-installation-id`, configuration.uid, configuration.gid);
+        for (const name of CLOUD_CODEX_STATE_DIRECTORIES) await mkdir(`${nativeHome.paths.codexHome}/${name}`, { mode: 0o700 });
+        await writeFile(`${nativeHome.paths.codexHome}/installation_id`, randomUUID(), { flag: "wx", mode: 0o600 });
       }
-      if(owner.provider==="cursor")await prepareCloudCursorConfigView(directory);
-      const env = cloudNativeProviderEnvironment(authority.takeMaterial(), owner.model, settings, owner.environment?.values);
-      env.USER = env.LOGNAME = "zeros-agent";
+      if (owner.customization) {
+        await materializeCloudSkills(nativeHome.paths.directory, owner.customization.skills);
+        await prepareCloudSkillHomes(nativeHome.paths.directory, owner.provider, configuration.uid, configuration.gid);
+        for (const home of CLOUD_NATIVE_SKILL_HOMES) if (home !== ".codex")
+          await cp(`${nativeHome.paths.directory}/skills`, `${nativeHome.paths.home}/${home}/skills`, { recursive: true, errorOnExist: true, force: false });
+      }
+      assertLive();
+      const env = cloudNativeProviderEnvironment(authority.takeMaterial(), owner.model, settings, owner.environment?.values, nativeHome);
       for (const key of Object.keys(env)) if (/^(GH_|GITHUB_)/.test(key)) delete env[key];
-      {
-        const github = await createNativeGithubBroker({ directory: `${directory}/home/.zeros-github`, visibleDirectory: `${CLOUD_NATIVE_HOME}/.zeros-github`,
-        cwd: isCloudBootNativeAuthority(authority)?authority.cwd:"/srv/zeros/workspace", path: env.PATH!, node: configuration.toolchain.node, identity: configuration,
-        source: isCloudBootNativeAuthority(authority)?{kind:"boot-agent",contextId:authority.contextId}:{kind:"agent",leaseId:authority.leaseId}, signal: lease.signal,
-        authorized: () => { try { lease.assertLive(); return true; } catch { return false; } } });
-        lease.attach(github);
-        Object.assign(env, github.env);
-      }
-      boundary = new CloudNativeBoundary(authority, workload, { directory, history: history.mount,
-        ...(owner.provider === "codex" ? { codexConfig: true as const } : {}),
-        ...(owner.provider === "cursor" ? { cursorConfig: true as const } : {}),
-        ...(owner.customization ? { skills: true as const } : {}) }, env, history);
+      const githubDirectory = `${nativeHome.paths.home}/.zeros-github`;
+      const github = await createNativeGithubBroker({ directory: githubDirectory, visibleDirectory: githubDirectory,
+        cwd: admitted.cwd, path: env.PATH!, node: configuration.toolchain.node, identity: configuration,
+        source: isCloudBootNativeAuthority(authority) ? {kind:"boot-agent",contextId:authority.contextId} : {kind:"agent",leaseId:authority.leaseId}, signal: lease.signal,
+        authorized: () => { try { assertLive(); return true; } catch { return false; } } });
+      lease.attach(github); Object.assign(env, github.env);
+      assertLive();
+      boundary = new CloudNativeBoundary(authority, workload, nativeHome, env, history);
       lease.attach(boundary);
-      const owned = boundary;
-      const authorityCanary = `${directory}/.authority-canary`;
-      await writeFile(authorityCanary, "engine-private", { flag: "wx", mode: 0o600 });
-      const parentNamespace = await readlink("/proc/self/ns/pid");
-      const canary = await lease.launch(() => workload.spawn(owned.request({ command: configuration.toolchain.node,
-        args: ["-e", CLOUD_NATIVE_ADMISSION_CANARY, parentNamespace, authorityCanary], cwd: "/srv/zeros/workspace", env: {}, stdio: "pipe" }, true)));
-      canary.stderr?.resume();
-      try { await attestCloudCoordinator(lease, canary, "zeros-native-provider-v1"); }
-      catch(error) { throw containmentFailure(error,"canary_failed"); }
       if(isCloudBootNativeAuthority(authority))assertCloudBootNativePreparation(authority,workload,conversationId);
       else await authority.validate();
-      lease.assertLive();
+      assertLive();
       return boundary;
     } catch (error) {
       void lease.close().catch(() => {});
-      if (!boundary) { await history?.release(); await rm(directory, { recursive: true, force: true }); }
+      if (!boundary) { await history?.release(); await rm(nativeHome.paths.directory, { recursive: true, force: true }); }
       throw error;
     }
   }
@@ -221,18 +200,19 @@ export class CloudNativeBoundary implements PreparedBoundary {
   private assertLive(): void {
     if (this.retired) throw new Error("Native cloud provider is retired");
     this.owner.lifetime.assertLive();
+    assertCloudPreparedBoundaryLive(this.workload);
   }
   environment(): Record<string, string> { this.assertLive(); return { ...this.env }; }
   codexExternalAuth(): Extract<CloudAgentAccessMaterial, { kind: "codex-chatgpt" }> | null {
     this.assertLive(); return this.owner.auth.codexAuth()?.material ?? null;
   }
-  private request(request: BoundarySpawnRequest, canary = false): BoundarySpawnRequest {
+  private request(request: BoundarySpawnRequest): BoundarySpawnRequest {
     this.assertLive();
-    const env = Object.fromEntries(Object.entries(this.env).filter(([name]) => !canary || !AUTH_ENV.has(name)));
+    const env = { ...this.env };
     for (const name of STARTUP_ENV) if (request.env[name] === "1") env[name] = "1";
     for(const [name,value] of Object.entries(SDK_METADATA_ENV))if(request.env[name]===value)env[name]=value;
     return { command: request.command, args: request.args, cwd: request.cwd,
-      env, stdio: request.stdio, cloudNativeHome: this.view };
+      env, stdio: request.stdio };
   }
   wrapSpawn(request: BoundarySpawnRequest): BoundaryLaunchSpec {
     this.assertLive();
@@ -288,11 +268,12 @@ export class CloudNativeBoundary implements PreparedBoundary {
     if (this.closing) return this.closing;
     const closing = (async () => {
       if (this.launches.size) throw new Error("Native cloud process retirement awaits a pending launch");
-      // HOME and history cannot be released while native children can still
-      // use them. The existing worker domain owns descendant retirement.
+      // Capture transcript bytes only after the original Host group proof.
+      // Plain HOME state is not an isolation boundary.
       await this.workload.stopAndProve();
+      await this.history.capture(nativeTranscriptDirectory(this.nativeHome, this.owner.provider));
       await this.history.release();
-      await rm(this.view.directory, { recursive: true, force: true });
+      await rm(this.nativeHome.paths.directory, { recursive: true, force: true });
     })();
     this.closing = closing;
     void closing.catch(() => { if (this.closing === closing) this.closing = null; });

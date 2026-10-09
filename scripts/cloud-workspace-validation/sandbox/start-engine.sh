@@ -94,25 +94,25 @@ unset CLOUD_SELECTION CLOUD_PATHS CLOUD_BOOT_ROOT CLOUD_BOOT_NODE CLOUD_START_SC
 REPO_DIR="${ZEROS_REPO_DIR:-/srv/zeros/workspace}"
 
 LOG="/srv/zeros/log/engine.log"
-WORKER_UID="10001"
-WORKER_GID="10001"
+ENGINE_UID="10003"
+ENGINE_GID="10003"
+# Physical settings and logs retain the frozen base's traversal group. The
+# launcher projects settings for the engine's separate execution identity.
+BASE_AGENT_GID="10001"
 
 # Deployment authority is fixed by the image and root-owned marker. Sandbox
 # create-time variables may configure the connection and provider credentials,
 # but can never redirect a privileged runtime into the writable checkout.
 export HOME="/srv/zeros/home/agent"
-export USER="zeros-agent"
-export LOGNAME="zeros-agent"
+export USER="zeros-engine"
+export LOGNAME="zeros-engine"
 export SHELL="/bin/bash"
 export ZEROS_DATA_DIR="/srv/zeros/state"
 export ZEROS_WORKSPACES_DIR="/srv/zeros/state/workspaces"
 export ZEROS_PTY_HOST_RUNTIME="$RUNTIME"
 export ZEROS_PTY_HOST_SCRIPT="$ENGINE_DIR/apps/desktop/src/engine/pty/pty-host.cjs"
 export ZEROS_CURSOR_HOST_SCRIPT="$ENGINE_DIR/apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs"
-export ZEROS_ZSR_SUPERVISOR_RUNTIME="$RUNTIME"
-export ZEROS_ZSR_SUPERVISOR_SCRIPT="$ENGINE_DIR/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs"
-export ZEROS_ZSR_BWRAP_PATH="/usr/bin/bwrap"
-export ZEROS_ZSR_SETPRIV_PATH="/usr/bin/setpriv"
+export ZEROS_RIPGREP_PATH="$ENGINE_DIR/binaries/rg"
 
 
 if [[ "$PROFILE_VERSION" != "4" ]]; then
@@ -140,11 +140,11 @@ if [[ "$SETUP_BOOT" == "1" ]]; then
     echo "[start-engine] FATAL: cloud worker supervisor is unavailable" >&2
     exit 1
   fi
-  if [[ ! -d "$SETTINGS_DIRECTORY" || -L "$SETTINGS_DIRECTORY" || "$(stat -c '%u:%g:%a' "$SETTINGS_DIRECTORY")" != "0:$WORKER_GID:750" ]]; then
+  if [[ ! -d "$SETTINGS_DIRECTORY" || -L "$SETTINGS_DIRECTORY" || "$(stat -c '%u:%g:%a' "$SETTINGS_DIRECTORY")" != "0:$BASE_AGENT_GID:750" ]]; then
     echo "[start-engine] FATAL: managed cloud settings directory is unsafe" >&2
     exit 1
   fi
-  if [[ ! -f ${SETTINGS_DIRECTORY}/settings.managed.toml || -L ${SETTINGS_DIRECTORY}/settings.managed.toml || "$(stat -c '%u:%g:%a:%h' ${SETTINGS_DIRECTORY}/settings.managed.toml)" != "0:$WORKER_GID:640:1" ]]; then
+  if [[ ! -f ${SETTINGS_DIRECTORY}/settings.managed.toml || -L ${SETTINGS_DIRECTORY}/settings.managed.toml || "$(stat -c '%u:%g:%a:%h' ${SETTINGS_DIRECTORY}/settings.managed.toml)" != "0:$BASE_AGENT_GID:640:1" ]]; then
     echo "[start-engine] FATAL: managed cloud settings are unsafe" >&2
     exit 1
   fi
@@ -200,22 +200,22 @@ if [[ "$(stat -c '%u:%a' "$ENGINE_DIR")" != 0:* || $((8#$(stat -c '%a' "$ENGINE_
   echo "[start-engine] FATAL: engine installation is not root-controlled" >&2
   exit 1
 fi
-if ! setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups test -w "$REPO_DIR"; then
-  echo "[start-engine] FATAL: writable checkout is unavailable to the worker" >&2
+if ! setpriv --reuid="$ENGINE_UID" --regid="$ENGINE_GID" --clear-groups test -w "$REPO_DIR"; then
+  echo "[start-engine] FATAL: writable checkout is unavailable to the agent" >&2
   exit 1
 fi
 
 # The attester creates a root-only, namespace/container-instance-bound proof.
 # Consumption is atomic and one-use, so a parallel or stale launcher cannot
-# start the privileged coordinator without completing the live ZSR harness.
+# start the privileged coordinator without completing the live engine lifecycle probes.
 "$RUNTIME" "$RUNTIME_LIB/consume-cloud-admission.mjs"
 
 cd "$REPO_DIR"
 umask 0002
 if [[ ! -e "$LOG" ]]; then
-  install -o root -g "$WORKER_GID" -m 0640 /dev/null "$LOG"
+  install -o root -g "$BASE_AGENT_GID" -m 0640 /dev/null "$LOG"
 elif [[ -f "$LOG" && ! -L "$LOG" ]]; then
-  chown root:"$WORKER_GID" "$LOG"
+  chown root:"$BASE_AGENT_GID" "$LOG"
   chmod 0640 "$LOG"
 else
   echo "[start-engine] FATAL: engine log is not a physical regular file" >&2
@@ -223,7 +223,7 @@ else
 fi
 
 echo "[start-engine] runtime=$RUNTIME cloud_port=$ZEROS_CLOUD_PORT data_dir=${ZEROS_DATA_DIR:-<default>} workspace=$REPO_DIR engine=$ENGINE_DIR"
-echo "[start-engine] backend=cloud-worker token_gate=on worker=$WORKER_UID:$WORKER_GID log=$LOG"
+echo "[start-engine] backend=cloud-worker token_gate=on agent=$ENGINE_UID:$ENGINE_GID log=$LOG"
 
 # `serve` binds LocalTransport (127.0.0.1, harmless) AND — because
 # ZEROS_CLOUD_PORT is set — CloudTransport on 0.0.0.0:$ZEROS_CLOUD_PORT. Keep

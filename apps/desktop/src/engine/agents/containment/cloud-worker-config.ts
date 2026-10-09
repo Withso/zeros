@@ -21,6 +21,10 @@ import type {
 
 export const CLOUD_WORKER_CONFIG_PATH = "/etc/zeros/cloud-worker.json";
 const MAX_CONFIG_BYTES = 4 * 1024;
+const originalConfigurations = new WeakSet<object>();
+export function isCloudWorkerConfiguration(value: unknown): value is CloudWorkerConfiguration {
+  return typeof value === "object" && value !== null && originalConfigurations.has(value);
+}
 
 export interface CloudWorkerConfiguration extends CloudWorkerRuntimeConfiguration {
   readonly version: 4;
@@ -29,10 +33,10 @@ export interface CloudWorkerConfiguration extends CloudWorkerRuntimeConfiguratio
   readonly toolchain: CloudWorkerToolchain;
 }
 
-function parseToolchain(value: unknown): CloudWorkerToolchain | null {
+function parseToolchain(value: unknown, legacy: boolean): CloudWorkerToolchain | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
-  const expectedKeys = ["bwrap", "node", "setpriv", "supervisor"];
+  const expectedKeys = legacy ? ["bwrap", "node", "setpriv", "supervisor"] : ["node", "supervisor"];
   if (Object.keys(record).sort().join("\0") !== expectedKeys.join("\0")) {
     return null;
   }
@@ -49,8 +53,7 @@ function parseToolchain(value: unknown): CloudWorkerToolchain | null {
   return {
     node: String(record.node),
     supervisor: String(record.supervisor),
-    bwrap: String(record.bwrap),
-    setpriv: String(record.setpriv),
+    ...(legacy ? { bwrap: String(record.bwrap), setpriv: String(record.setpriv) } : {}),
   };
 }
 
@@ -75,17 +78,19 @@ export function parseCloudWorkerConfiguration(
     "uid",
     "version",
   ];
-  const toolchain = parseToolchain(value.toolchain);
+  const legacy = value.uid === 10001 && value.gid === 10001;
+  const engine = value.uid === 10003 && value.gid === 10003 || value.uid === 0 && value.gid === 0;
+  const toolchain = parseToolchain(value.toolchain, legacy);
   if (
     Object.keys(value).sort().join("\0") !== expectedKeys.join("\0") ||
     (value.version !== 4 || value.profile !== "zeros-cloud-worker-v4") ||
     value.backend !== "cloud-worker" ||
-    (value.uid !== 10001 || value.gid !== 10001) ||
+    (!legacy && !engine) ||
     !Number.isInteger(value.uid) ||
-    Number(value.uid) <= 0 ||
+    Number(value.uid) < 0 ||
     Number(value.uid) > 2_147_483_647 ||
     !Number.isInteger(value.gid) ||
-    Number(value.gid) <= 0 ||
+    Number(value.gid) < 0 ||
     Number(value.gid) > 2_147_483_647 ||
     !toolchain
   ) {
@@ -130,10 +135,10 @@ export function assertRootControlledPath(
   }
 }
 
-/** Load the immutable deployment marker that is baked by the cloud image.
+/** Load the immutable deployment marker projected by the root launcher.
  * Merely setting ZEROS_CLOUD_PORT (or any child-visible variable) cannot
- * activate a privileged backend. An invalid marker fails startup instead of
- * silently downgrading to weaker nested isolation. */
+ * activate cloud placement. Archived markers parse for compatibility, but
+ * only the current non-root identity and pinned Host assets can activate. */
 export function loadCloudWorkerConfiguration(
   file = CLOUD_WORKER_CONFIG_PATH,
 ): CloudWorkerConfiguration | null {
@@ -153,10 +158,10 @@ export function loadCloudWorkerConfiguration(
     if (
       process.platform !== "linux" ||
       typeof process.geteuid !== "function" ||
-      process.geteuid() !== 0
+      process.geteuid() !== 10003
     ) {
       throw new Error(
-        "cloud-worker configuration requires a root Linux engine",
+        "cloud-worker configuration requires the non-root cloud engine",
       );
     }
     assertRootControlledPath(file);
@@ -184,19 +189,20 @@ export function loadCloudWorkerConfiguration(
   } finally {
     closeSync(descriptor);
   }
+  if (configuration.uid !== 10003 || configuration.gid !== 10003 ||
+      configuration.uid !== process.geteuid?.() || configuration.gid !== process.getegid?.() ||
+      configuration.toolchain.bwrap || configuration.toolchain.setpriv)
+    throw new Error("cloud execution requires the same-user runtime upgrade");
   for (const candidate of Object.values(configuration.toolchain)) {
     assertRootControlledPath(candidate);
   }
   validateCloudRuntimeMarker(configuration, true);
   const runtime = resolveCloudRuntime();
   if (runtime.profile !== "v4" || configuration.toolchain.node !== runtime.node ||
-      configuration.toolchain.supervisor !== `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs` ||
-      configuration.toolchain.bwrap !== "/usr/bin/bwrap" || configuration.toolchain.setpriv !== "/usr/bin/setpriv")
+      configuration.toolchain.supervisor !== `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`)
     throw new Error("cloud-worker toolchain does not match the active runtime");
   for (const candidate of [
     configuration.toolchain.node,
-    configuration.toolchain.bwrap,
-    configuration.toolchain.setpriv,
   ]) {
     if ((lstatSync(candidate).mode & 0o111) === 0) {
       throw new Error(
@@ -204,5 +210,8 @@ export function loadCloudWorkerConfiguration(
       );
     }
   }
+  Object.freeze(configuration.toolchain);
+  Object.freeze(configuration);
+  originalConfigurations.add(configuration);
   return configuration;
 }

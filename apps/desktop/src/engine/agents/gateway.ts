@@ -182,7 +182,6 @@ import {
 } from "./containment/types";
 import { HostExecutionBoundary } from "./containment/host-boundary";
 import { RoutingExecutionBoundary } from "./containment/routing-boundary";
-import { ZsrExecutionBoundary } from "./containment/zsr-boundary";
 import { UtilityBoundaryPool } from "./containment/utility-boundary-pool";
 import {
   WarmSessionBoundaryPool,
@@ -194,8 +193,8 @@ import {
   localPreviewGatewayFactory,
   type BoundaryPreviewGateway,
   type BoundaryPreviewGatewayFactory,
-  type ZsrPreviewTarget,
-} from "./containment/zsr-preview-gateway";
+  type PreviewTarget,
+} from "./containment/preview-gateway";
 
 /** Provider startup is a control-plane operation, not a model turn. Keep its
  * deadline below the renderer's admission ceiling so the gateway still
@@ -3479,7 +3478,7 @@ export class AgentGateway {
   async openBoundaryPort(
     executionId: string,
     portId: string,
-  ): Promise<import("./containment/zsr-preview-gateway").PreviewNavigation> {
+  ): Promise<import("./containment/preview-gateway").PreviewNavigation> {
     const boundary = this.executionBoundaries.get(executionId);
     if (!boundary) throw new Error("execution boundary is unavailable");
     const mapping = boundary
@@ -3494,7 +3493,7 @@ export class AgentGateway {
     if (mapping.host !== "127.0.0.1" && mapping.host !== "::1") {
       throw new Error("session preview target is not loopback");
     }
-    const target: ZsrPreviewTarget = {
+    const target: PreviewTarget = {
       targetHost: mapping.host,
       targetPort: mapping.port,
       displayPort: mapping.displayPort,
@@ -3970,7 +3969,6 @@ export class AgentGateway {
       opts.executionBoundary ??
       new RoutingExecutionBoundary({
         host: new HostExecutionBoundary({ projectRoot: opts.projectRoot }),
-        sandbox: new ZsrExecutionBoundary({ projectRoot: opts.projectRoot }),
       });
     this.previewGatewayFactory =
       opts.previewGatewayFactory ?? localPreviewGatewayFactory;

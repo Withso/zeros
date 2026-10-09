@@ -2,7 +2,8 @@
 // boundary where setup, run actions, terminals, and agent sessions are brought
 // to rest before a managed checkout can be moved or removed.
 
-import { chown, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { promises as fsPromises } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -297,27 +298,7 @@ function client(kind: "local" | "cloud" = "local"): TransportClient {
 }
 
 function qualifiedCloudWorker(): CloudWorkerConfiguration {
-  // Engine-side brokers chown their sockets to the worker. Use this process's
-  // identity so unprivileged CI can assign it, as in production ownership.
-  return { ...testCloudWorker(), uid: process.getuid?.() || 10_001, gid: process.getgid?.() || 10_001 };
-}
-
-async function canAssignCloudWorkerOwnership(
-  root: string,
-  worker: CloudWorkerConfiguration,
-): Promise<boolean> {
-  const probe = path.join(root, "cloud-worker-ownership-probe");
-  await writeFile(probe, "", { flag: "wx" });
-  try {
-    await chown(probe, worker.uid, worker.gid);
-    return true;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "EACCES" || code === "EPERM") return false;
-    throw error;
-  } finally {
-    await rm(probe, { force: true });
-  }
+  return { ...testCloudWorker(), uid: process.geteuid?.() ?? 0, gid: process.getegid?.() ?? 0 };
 }
 
 describe("workspace process reaper", () => {
@@ -937,16 +918,9 @@ describe("workspace terminal start barrier", () => {
     }
   });
 
-  it("makes the watcher preload readable after a cloud terminal drops to the human worker", async ({
-    skip,
-  }) => {
+  it("keeps cloud watcher artifacts private to the engine without reassigning ownership", async () => {
     const base = await mkdtemp(path.join(tmpdir(), "zeros-cloud-watch-"));
     const cloudWorker = qualifiedCloudWorker();
-    if (!(await canAssignCloudWorkerOwnership(base, cloudWorker))) {
-      await rm(base, { recursive: true, force: true });
-      skip("runner cannot assign the qualified cloud worker ownership");
-      return;
-    }
     const workspace = {
       id: "ws_cloud_terminal_watch",
       path: path.join(base, "worktree"),
@@ -983,6 +957,7 @@ describe("workspace terminal start barrier", () => {
       reattached: false,
     });
     let temporaryGuardRoot: string | null = null;
+    const chown = vi.spyOn(fsPromises, "chown");
 
     try {
       await state.handlePtyCreate(
@@ -1020,12 +995,16 @@ describe("workspace terminal start barrier", () => {
       ];
       expect(artifactPaths.every(Boolean)).toBe(true);
       for (const artifactPath of artifactPaths) {
-        expect((await stat(artifactPath!)).mode & 0o777).toBe(0o440);
+        const metadata = await stat(artifactPath!);
+        expect(metadata.mode & 0o777).toBe(0o600);
+        expect(metadata.uid).toBe(process.geteuid?.());
       }
-      expect((await stat(fingerprintRoot)).mode & 0o777).toBe(0o750);
-      expect((await stat(temporaryGuardRoot)).mode & 0o777).toBe(0o710);
+      expect((await stat(fingerprintRoot)).mode & 0o777).toBe(0o700);
+      expect((await stat(temporaryGuardRoot)).mode & 0o777).toBe(0o700);
+      expect(chown).not.toHaveBeenCalled();
     } finally {
       getWorkspace.mockRestore();
+      chown.mockRestore();
       if (temporaryGuardRoot) {
         await rm(temporaryGuardRoot, { recursive: true, force: true });
       }

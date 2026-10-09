@@ -15,6 +15,8 @@ import { cloudBootTurnReservation, cloudExecutionLifetime, cloudProviderExecutio
   type CloudBootAgentExecutionFactory, type CloudBootProviderExecution, type CloudBootAgentSelection,
   type CloudBootNativeAuthority, type CloudBootTurnReservation } from "../agents/cloud-provider-execution";
 import type { PreparedBoundary } from "../agents/containment/types";
+import { CloudExecutionBoundary } from "../agents/containment/cloud-execution-boundary";
+import { CloudOwnedWorkloadRegistry } from "../agents/containment/cloud-owned-workloads";
 import type { CloudRuntimeRegistration } from "../cloud-runtime-registration";
 import { testCloudBootFixture } from "../agents/__tests__/helpers/test-cloud-boot";
 import type { TransportClient } from "../transport/types";
@@ -29,6 +31,13 @@ const bootResponses: { [Operation in CloudAgentBootOperation]: { parse(value: un
 };
 
 const native = vi.hoisted(() => ({ prepare: vi.fn() }));
+const deployment = vi.hoisted(() => ({version: 4 as const, backend: "cloud-worker" as const,
+  profile: "zeros-cloud-worker-v4" as const, uid: process.geteuid?.() ?? 0, gid: process.getegid?.() ?? 0,
+  toolchain: {node: process.execPath, supervisor: `${process.cwd()}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`}}));
+vi.mock("../agents/containment/cloud-worker-config", async original => ({
+  ...await original<typeof import("../agents/containment/cloud-worker-config")>(),
+  isCloudWorkerConfiguration: (value: unknown) => value === deployment,
+}));
 vi.mock("../agents/containment/cloud-native-boundary", () => ({ CloudNativeBoundary: { prepareBoot: native.prepare } }));
 vi.mock("../agents/cloud-workload-tools", () => ({ CloudWorkloadTools: class {
   async stopAndProve() {}
@@ -52,6 +61,8 @@ async function fixture() {
   const directory = mkdtempSync(path.join(tmpdir(), "zeros-native-pump-"));
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
   const cwd = path.join(directory, "workspace"); mkdirSync(cwd);
+  const workloads = new CloudOwnedWorkloadRegistry(); cleanups.push(() => workloads.drain(workloads.fence()));
+  const boundary = new CloudExecutionBoundary({projectRoot: process.cwd(), configuration: deployment, workloads});
   const f = await testCloudBootFixture(cwd); cleanups.push(f.close);
   const { fundingOwnerUserId: _owner, fundingOwnerEpoch: _epoch, bootId: _boot, writerEpoch: _writer, ...scope } = f.scope;
   const request = vi.fn(async (operation: string, input: unknown) => {
@@ -120,10 +131,8 @@ async function fixture() {
   const handleAgentMessage = vi.fn(async (message: EngineMessage, receiver: TransportClient) => {
     const claim = bindings.get(receiver)!;
     const selection = pump.admissionSelection(claim);
-    const workload = { stopAndProve: vi.fn(async () => {}), generation: "synthetic-workload",
-      status: { backend: "cloud-worker", parity: { level: "restricted", restrictions: [] } },
-      activePorts: () => [], onPortsChanged: () => () => {}, attestation: Promise.resolve() } as unknown as PreparedBoundary;
-    await factory.launchBootSelection(selection, async () => workload);
+    const workload = await factory.launchBootSelection(selection, signal => boundary.prepare({executionId: claim.executionId,
+      actor: "agent-code", cwd, workspaceRoot: cwd, providerId: "cursor"}, {signal}));
     const prepared = await factory.prepareBoot({ selection, workload, signal: pump.record(claim)!.controller.signal });
     const execution = cloudProviderExecution(prepared.boundary)! as CloudBootProviderExecution;
     factory.reserveBootTurn(execution, selection); executions.set(claim.executionId, execution);

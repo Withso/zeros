@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fork, type ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
@@ -26,8 +26,7 @@ async function setup(additionalRoots: string[] = []) {
   const socketPath = path.join(root, "host.sock");
   const host = new ResidentPtyHost({
     root, socketPath, organizationId, workspaceId, additionalRoots,
-    // These tests run as the sandbox user; production uses the attested
-    // human-workload identity in its own resident namespace.
+    // Both tests and production inherit their original engine identity.
     shell: "/bin/bash", identity: { uid: process.getuid!(), gid: process.getgid!() },
   });
   hosts.push(host);
@@ -51,6 +50,86 @@ afterEach(async () => {
 });
 
 describe.runIf(process.platform === "linux")("resident cloud terminals", () => {
+  it("refuses a different Unix identity even if a caller supplies a valid resident scope", () => {
+    expect(() => new ResidentPtyHost({root: '/tmp', socketPath: '/tmp/unused.sock', organizationId, workspaceId,
+      shell: '/bin/bash', identity: {uid: process.getuid!() + 1, gid: process.getgid!()}})).toThrow('request_rejected');
+  });
+  it("runs resident terminal commands as the exact engine identity", async () => {
+    const f = await setup(), client = await f.connect();
+    await client.create({sessionId: 'engine-identity', cwd: f.root, cols: 80, rows: 24,
+      env: {PATH: '/usr/bin:/bin'}, command: "printf 'uid=%s gid=%s\\n' \"$(id -u)\" \"$(id -g)\""});
+    await expect.poll(async () => (await client.list())[0].exited).toBe(true);
+    const output = (await client.snapshot('engine-identity')).data.replaceAll('\r', '');
+    expect(output).toContain(`uid=${process.getuid!()} gid=${process.getgid!()}`);
+  });
+  it('reports original resident groups, including foreground commands, without changing session custody',async()=>{
+    const f=await setup(),client=await f.connect();
+    expect(await client.inspectWorkloads()).toEqual({version:1,complete:true,busy:false});
+    const session=await client.create({sessionId:'observed-work',cwd:f.root,cols:80,rows:24,env:{PATH:'/usr/bin:/bin'},command:'sleep 60 & wait'});
+    await expect.poll(async()=>await client.inspectWorkloads()).toEqual({version:1,complete:true,busy:true});
+    const nextAuthority=authority(2);f.host.authorize(nextAuthority);const next=await f.connect(nextAuthority);
+    expect((await next.list())[0].pid).toBe(session.pid);expect((await next.inspectWorkloads()).busy).toBe(true);
+    await next.close(session.sessionId);expect(await next.inspectWorkloads()).toEqual({version:1,complete:true,busy:false});
+  });
+  it("rechecks session ownership after concurrent original preparation", async () => {
+    const f = await setup(), client = await f.connect();
+    const prepare = f.host["workloads"].prepare.bind(f.host["workloads"]);
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const preparing = vi.spyOn(f.host["workloads"], "prepare").mockImplementation(async (...args) => {
+      const scope = await prepare(...args); await held; return scope;
+    });
+    const launch = {sessionId: "same-original-session", cwd: f.root, cols: 80, rows: 24,
+      env: {PATH: "/usr/bin:/bin"}, command: "exec sleep 60"};
+    const first = client.create(launch), second = client.create(launch);
+    try {
+      await expect.poll(() => preparing.mock.calls.length).toBe(2);
+      expect(await client.inspectWorkloads()).toMatchObject({busy: true});
+    } finally { release(); }
+    const [a, b] = await Promise.all([first, second]);
+    expect(b.pid).toBe(a.pid);
+    expect(await client.list()).toEqual([a]);
+    await client.close(a.sessionId);
+    expect(await client.inspectWorkloads()).toEqual({version: 1, complete: true, busy: false});
+  });
+  it("distinguishes the original idle login shell from its background job", async () => {
+    const f = await setup(), client = await f.connect();
+    const session = await client.create({sessionId: "idle-login", cwd: f.root, cols: 80, rows: 24,
+      env: {PATH: "/usr/bin:/bin", HOME: f.root}});
+    await expect.poll(async () => client.inspectWorkloads()).toEqual({version: 1, complete: true, busy: false});
+    await client.write(session.sessionId, {producerId: randomUUID(), sequence: 1, data: "sleep 60 &\n"});
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now + 11 * 60_000);
+    try {
+      await expect.poll(async () => client.inspectWorkloads()).toEqual({version: 1, complete: true, busy: true});
+    } finally { clock.mockRestore(); }
+    await client.close(session.sessionId);
+    expect(await client.inspectWorkloads()).toEqual({version: 1, complete: true, busy: false});
+  });
+ it("keeps an active builtin loop busy even with no exec or child process",async()=>{
+  const f=await setup(),client=await f.connect();
+  const session=await client.create({sessionId:"busy-original-shell",cwd:f.root,cols:80,rows:24,env:{PATH:"/usr/bin:/bin",HOME:f.root}});
+  await expect.poll(()=>client.inspectWorkloads()).toEqual({version:1,complete:true,busy:false});
+  await client.write(session.sessionId,{producerId:randomUUID(),sequence:1,data:"printf 'BUILTIN_%s\\n' READY; while :; do :; done\n"});
+  await expect.poll(async()=>(await client.snapshot(session.sessionId)).data).toContain("BUILTIN_READY");
+  const clock=vi.spyOn(Date,"now").mockReturnValue(Date.now()+11*60_000);
+  try {expect(await client.inspectWorkloads()).toEqual({version:1,complete:true,busy:true});}
+  finally {clock.mockRestore();}
+ });
+
+  it("keeps a foreground command that exec-replaced the terminal shell busy", async () => {
+    const f = await setup(), client = await f.connect();
+    const session = await client.create({sessionId: "exec-foreground", cwd: f.root, cols: 80, rows: 24,
+      env: {PATH: "/usr/bin:/bin", HOME: f.root}});
+    await expect.poll(async () => client.inspectWorkloads()).toEqual({version: 1, complete: true, busy: false});
+    await client.write(session.sessionId, {producerId: randomUUID(), sequence: 1, data: "exec sleep 60\n"});
+    await expect.poll(async () => (await client.snapshot(session.sessionId)).data).toContain("exec sleep 60");
+    const now = Date.now(), clock = vi.spyOn(Date, "now").mockReturnValue(now + 11 * 60_000);
+    try {
+      await expect.poll(async () => client.inspectWorkloads()).toEqual({version: 1, complete: true, busy: true});
+    } finally {clock.mockRestore();}
+    await client.close(session.sessionId);
+  });
   it("retains exit status across replacement without changing legacy snapshots", async () => {
     const f = await setup(), client = await f.connect();
     const sessionId = "exit-while-detached";

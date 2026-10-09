@@ -1,11 +1,10 @@
 import {randomUUID} from "node:crypto";
-import {mkdtemp,mkdir,writeFile,rm} from "node:fs/promises";
+import {mkdtemp,mkdir,writeFile,rm,realpath} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {execFile} from "node:child_process";
 import {promisify} from "node:util";
-import {afterEach,describe,expect,it,vi} from "vitest";
-import {CLOUD_NATIVE_PROVIDER_RESTRICTIONS,type ExecutionBoundaryStatus} from "@zeros/protocol/containment";
+import {afterEach,beforeEach,describe,expect,it,vi} from "vitest";
 import {CloudNativeBoundary} from "../containment/cloud-native-boundary";
 import type {PreparedBoundary} from "../containment/types";
 import {adminWorkspaceSystemInstruction,cloudProviderExecution,cloudExecutionLifetime,createCloudAgentExecutionFactory} from "../cloud-provider-execution";
@@ -21,6 +20,8 @@ import {admitCustomization} from "../../../../../control-plane/src/cloud-workspa
 import type {Tx} from "../../../../../control-plane/src/db";
 import type {CloudAgentExecutionAdmission} from "@zeros/protocol/cloud-agent-execution";
 import {cloudClaudeTools} from "../adapters/claude-sdk/cloud-tools";
+import {isCloudNativeHome} from "../containment/cloud-native-home";
+import {prepareClaudeCloudWorkload} from "../adapters/claude-sdk/__tests__/helpers/legacy-execution";
 
 vi.mock("../containment/cloud-native-boundary",()=>({CloudNativeBoundary:{prepare:vi.fn()}}));
 vi.mock("../cloud-mcp",async original=>{
@@ -32,14 +33,24 @@ vi.mock("../containment/cloud-runtime-root.mjs",async original=>{
   const {testCloudRuntime}=await import("./helpers/test-cloud-runtime");
   return {...actual,resolveCloudRuntime:vi.fn(testCloudRuntime)};
 });
-afterEach(()=>vi.resetAllMocks());
-function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="cursor-api-key", computerToolsVersion?:1,environment?:CloudComputerExecutionEnvironment){
-  const status:ExecutionBoundaryStatus={version:1,actor:"agent-code",state:"ready",backend:"cloud-worker",
-    designProtection:{required:true,enforced:true,protectedDirectoryCount:1},
-    parity:{level:"restricted",restrictions:[...CLOUD_NATIVE_PROVIDER_RESTRICTIONS.cursor]},checkedAt:Date.now()};
-  const workload={generation:"workload",status,attestation:Promise.resolve(),stopAndProve:vi.fn(async()=>{})} as unknown as PreparedBoundary;
+let dataRoot: string;
+const cleanups: (() => Promise<void>)[] = [];
+beforeEach(async () => {
+  dataRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), "zeros-provider-consumer-")));
+  vi.stubEnv("ZEROS_DATA_DIR", dataRoot);
+});
+afterEach(async()=>{
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  await rm(dataRoot, { recursive: true, force: true });
+  vi.unstubAllEnvs(); vi.resetAllMocks();
+});
+async function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="cursor-api-key", computerToolsVersion?:1,environment?:CloudComputerExecutionEnvironment){
+  const executionId = randomUUID(), conversationId = randomUUID();
+  const physical = await prepareClaudeCloudWorkload({ provider, executionId, conversationId, cwd: "/srv/zeros/workspace", dataRoot });
+  cleanups.push(physical.dispose);
+  const { workload, nativeHome } = physical;
   const controller=new AbortController();
-  const coordinator={...workload,environment:()=>({}),providerHomePath:"/private"};
+  const coordinator={...workload,nativeHome,environment:()=>nativeHome.environment(),providerHomePath:nativeHome.paths.home};
   vi.mocked(CloudNativeBoundary.prepare).mockResolvedValue(coordinator as unknown as CloudNativeBoundary);
   const leaseId=randomUUID();
   const request=vi.fn(async(input:{kind:string})=>input.kind==="release"?{released:true}:{leaseId,authorityId:"a".repeat(64),
@@ -48,8 +59,8 @@ function fixture(provider: "claude"|"codex"|"cursor"="cursor", credentialKind="c
       credentialKind==="codex-chatgpt"?{kind:credentialKind,accessToken:"synthetic-chatgpt-token",accountId:"synthetic-account",expiresAt:2_100_000_000}:
       {kind:credentialKind,apiKey:"synthetic-provider-key"}});
   const factory=createCloudAgentExecutionFactory({request,supervisor:{onRetirementFailure:vi.fn()}});
-  const input={admission:{executionId:randomUUID(),delegationId:randomUUID(),provider,model:"grok-4.6",
-    source:{kind:"session" as const,actorSessionId:randomUUID()}},conversationId:randomUUID(),workload,cwd:"/srv/zeros/workspace",signal:controller.signal};
+  const input={admission:{executionId,delegationId:randomUUID(),provider,model:"grok-4.6",
+    source:{kind:"session" as const,actorSessionId:randomUUID()}},conversationId,workload,cwd:"/srv/zeros/workspace",signal:controller.signal};
   return {factory,input,workload,coordinator,controller,request};
 }
 function legacyExecution(boundary:PreparedBoundary){
@@ -58,8 +69,20 @@ function legacyExecution(boundary:PreparedBoundary){
   return execution;
 }
 describe("admitted native cloud diagnostic",()=>{
+  it.each(["claude", "codex", "cursor"] as const)("binds the %s provider and tools to its original physical HOME without sandbox claims", async provider => {
+    const f = await fixture(provider, `${provider}-api-key`);
+    const result = await f.factory.prepare(f.input);
+    try {
+      const execution = legacyExecution(result.boundary), home = execution.coordinator.nativeHome;
+      expect(isCloudNativeHome(home)).toBe(true);
+      expect(result.env).toMatchObject(home.environment());
+      expect(result.boundary.providerHomePath).toBe(home.paths.home);
+      expect(result.boundary.status.designProtection.enforced).toBe(false);
+      expect(execution.lease.admission).toEqual(f.input.admission);
+    } finally { await result.boundary.stopAndProve(); }
+  });
   it.each(["claude", "cursor", "codex"] as const)("publishes immutable common %s metadata and its genuine legacy lifetime/auth owner", async provider => {
-    const { factory, input } = fixture(provider, `${provider}-api-key`);
+    const { factory, input } =await fixture(provider, `${provider}-api-key`);
     const result = await factory.prepare(input);
     try {
       const execution = legacyExecution(result.boundary);
@@ -76,7 +99,7 @@ describe("admitted native cloud diagnostic",()=>{
     } finally { await result.boundary.stopAndProve(); }
   });
   it("passes optional authority flight observations and internal request metadata through the real lease", async () => {
-    const { input, request } = fixture();
+    const { input, request } =await fixture();
     const authority = await request({ kind: "admit" }); request.mockClear();
     if (!("leaseId" in authority)) throw new Error("Expected admission authority fixture");
     const leaseId = authority.leaseId;
@@ -99,7 +122,7 @@ describe("admitted native cloud diagnostic",()=>{
     await writeFile(path.join(root,"MARKER"),"primary");
     await writeFile(path.join(cwd,"MARKER"),suffix||"primary");await writeFile(path.join(cwd,"tools/MARKER"),`${suffix||"primary"}-tools`);
     await writeFile(path.join(cwd,".mcp.json"),JSON.stringify({mcpServers:{escape:{command:"node",cwd:"../outside"},tool:{command:process.execPath,args:["-e","process.stdout.write(require('node:fs').readFileSync('MARKER','utf8'))"],...(relative===undefined?{}:{cwd:relative})}}}));
-    const {factory,input,request}=fixture("claude","claude-api-key");
+    const {factory,input,request}=await fixture("claude","claude-api-key");
     const authority=await request({kind:"admit"});request.mockClear();
     request.mockImplementationOnce(async raw=>{
       const requested=raw as unknown as {admission:CloudAgentExecutionAdmission};
@@ -123,7 +146,7 @@ describe("admitted native cloud diagnostic",()=>{
     }finally{await rm(root,{recursive:true,force:true});}
   });
   it("retains a typed canary cause when retirement itself also fails",async()=>{
-    const {factory,input,workload}=fixture();
+    const {factory,input,workload}=await fixture();
     vi.mocked(CloudNativeBoundary.prepare).mockRejectedValueOnce(Object.assign(new Error("canary failed"),{code:"cloud_containment_canary_failed"}));
     vi.mocked(workload.stopAndProve).mockRejectedValueOnce(new Error("private retirement diagnostic"));
     await expect(factory.prepare(input)).rejects.toMatchObject({code:"cloud_containment_canary_failed"});
@@ -135,7 +158,7 @@ describe("admitted native cloud diagnostic",()=>{
     await writeFile(path.join(root,".mcp.json"),provider==="claude"?'{"mcpServers":{"0canvas":{"type":"http","url":"http://localhost:24193/mcp"},"valid":{"command":"node"},"invalid":{"command":"node","env":{"TOKEN":"${env:SECRET}"}}}}':"malformed");
     await writeFile(path.join(root,".cursor/mcp.json"),provider==="cursor"?'{"mcpServers":{"0canvas":{"type":"http","url":"http://localhost:24193/mcp"},"valid":{"command":"node"},"invalid":{"command":"node","env":{"TOKEN":"${env:SECRET}"}}}}':"malformed");
     await writeFile(path.join(root,".codex/config.toml"),provider==="codex"?'[mcp_servers.0canvas]\ntype="http"\nurl="http://localhost:24193/mcp"\n[mcp_servers.valid]\ncommand="node"\n[mcp_servers.invalid]\ncommand="node"\nenv={TOKEN="${env:SECRET}"}\n':"malformed=[");
-    const {input,request}=fixture(provider,`${provider}-api-key`),onRepositoryMcpNotice=vi.fn();
+    const {input,request}=await fixture(provider,`${provider}-api-key`),onRepositoryMcpNotice=vi.fn();
     const authority=await request({kind:"admit"});request.mockClear();
     if(!("leaseId" in authority))throw new Error("Expected admission authority fixture");
     const grantedLeaseId=authority.leaseId;
@@ -163,7 +186,7 @@ describe("admitted native cloud diagnostic",()=>{
     }finally{await rm(root,{recursive:true,force:true});}
   });
   it.each(["validation", "admission", "containment"] as const)("keeps a safe %s preparation cause after cleanup", async stage => {
-    const { factory, input, request, workload } = fixture();
+    const { factory, input, request, workload } =await fixture();
     if (stage === "validation") vi.mocked(resolveCloudRuntime).mockReturnValue({ ...resolveCloudRuntime(), profile: "v3" } as unknown as ReturnType<typeof resolveCloudRuntime>);
     else if (stage === "admission") request.mockRejectedValueOnce(new Error("private admission diagnostic"));
     else vi.mocked(CloudNativeBoundary.prepare).mockRejectedValueOnce(new Error("private containment diagnostic"));
@@ -174,7 +197,7 @@ describe("admitted native cloud diagnostic",()=>{
   it("starts a v4 basic turn when optional customization is unqualified and reports the restriction", async () => {
     vi.mocked(resolveCloudRuntime).mockReturnValue({ ...resolveCloudRuntime(), profile: "v4" } as ReturnType<typeof resolveCloudRuntime>);
     vi.mocked(readCloudRepositoryMcp).mockResolvedValueOnce([]);
-    const { factory, input } = fixture();
+    const { factory, input } =await fixture();
     const result = await factory.prepare({ ...input, customization: true });
     try {
       const execution = legacyExecution(result.boundary);
@@ -185,7 +208,7 @@ describe("admitted native cloud diagnostic",()=>{
   });
   it.each(["claude","codex","cursor"] as const)("composes admitted computer and Design servers for %s and retires both with the execution",async provider=>{
     vi.mocked(resolveCloudRuntime).mockReturnValue({...resolveCloudRuntime(),profile:"v4"} as ReturnType<typeof resolveCloudRuntime>);
-    const {factory,input}=fixture(provider,`${provider}-api-key`,1);
+    const {factory,input}=await fixture(provider,`${provider}-api-key`,1);
     const result=await factory.prepare({...input,productTools:{env:{DESIGN_AUTH:"Bearer synthetic-design-capability"},servers:[{
       name:"design-draft",transport:"http",url:"http://127.0.0.1:1234/mcp",headersFromEnv:{Authorization:"DESIGN_AUTH"},
     }]}});
@@ -205,26 +228,26 @@ describe("admitted native cloud diagnostic",()=>{
     await expect(fetch(computer.url)).rejects.toThrow();
   });
   it("keeps computer tools absent without CP admission and rejects a caller-supplied namesake",async()=>{
-    const {factory,input}=fixture();
+    const {factory,input}=await fixture();
     const result=await factory.prepare(input);
     expect(adminWorkspaceSystemInstruction(result.boundary)).toBeUndefined();
     expect(legacyExecution(result.boundary).productServers.some(server=>server.name==="cloud-computer")).toBe(false);
     await result.boundary.stopAndProve();
-    const another=fixture();
+    const another=await fixture();
     await expect(another.factory.prepare({...another.input,productTools:{env:{},servers:[{
       name:"cloud-computer",transport:"http",url:"http://127.0.0.1:1234/mcp",
     }]}})).rejects.toThrow("private execution admission");
   });
   it.each(["v1","v2","v3"])("refuses %s before requesting agent credentials",async profile=>{
     vi.mocked(resolveCloudRuntime).mockReturnValue({...resolveCloudRuntime(),profile} as ReturnType<typeof resolveCloudRuntime>);
-    const {factory,input,workload,request}=fixture();
+    const {factory,input,workload,request}=await fixture();
     await expect(factory.prepare(input)).rejects.toThrow("qualified v4");
     expect(request).not.toHaveBeenCalled();
     expect(workload.stopAndProve).toHaveBeenCalled();
   });
   it("retires the computer endpoint through gateway Stop even if native cancellation hangs",async()=>{
     vi.mocked(resolveCloudRuntime).mockReturnValue({...resolveCloudRuntime(),profile:"v4"} as ReturnType<typeof resolveCloudRuntime>);
-    const {factory,input}=fixture("cursor","cursor-api-key",1);
+    const {factory,input}=await fixture("cursor","cursor-api-key",1);
     const result=await factory.prepare(input);
     const execution=legacyExecution(result.boundary);
     const computer=execution.productServers[0]!;
@@ -244,7 +267,7 @@ describe("admitted native cloud diagnostic",()=>{
   it("redacts org literals even when native process preparation fails before history opens", async () => {
     const environment:CloudComputerExecutionEnvironment={version:1,revision:"c".repeat(64),values:{ORG_KEY:"synthetic-org-value"},
       history:{owner:"a".repeat(64),currentKeyVersion:1,keys:{1:"b".repeat(43)}}};
-    const {factory,input,workload}=fixture("cursor","cursor-api-key",undefined,environment);
+    const {factory,input,workload}=await fixture("cursor","cursor-api-key",undefined,environment);
     vi.mocked(CloudNativeBoundary.prepare).mockImplementation(async lease=>{
       expect(lease.environment?.values).toEqual(environment.values);
       throw new Error("native failed: synthetic-org-value");
@@ -256,7 +279,7 @@ describe("admitted native cloud diagnostic",()=>{
   it("reports the verified v4 profile for execution and unavailable Browser",async()=>{
     const legacy=resolveCloudRuntime();
     vi.mocked(resolveCloudRuntime).mockReturnValue({...legacy,profile:"v4"} as ReturnType<typeof resolveCloudRuntime>);
-    const {factory,input}=fixture();
+    const {factory,input}=await fixture();
     const result=await factory.prepare(input);
     try {
       expect(result.boundary.status.cloudExecution?.runtimeProfile).toBe("zeros-cloud-worker-v4");
@@ -270,7 +293,7 @@ describe("admitted native cloud diagnostic",()=>{
     ["codex","codex-chatgpt","codex-runtime-unavailable"],
     ["cursor","cursor-api-key","provider-unsupported"],
   ] as const)("reports browser unavailability for %s with %s without blocking chat admission",async(provider,kind,reason)=>{
-    const {factory,input}=fixture(provider,kind);
+    const {factory,input}=await fixture(provider,kind);
     const result=await factory.prepare(input);
     try {
       expect(result.boundary.status).toHaveProperty("browser",{
@@ -280,7 +303,7 @@ describe("admitted native cloud diagnostic",()=>{
     } finally { await result.boundary.stopAndProve(); }
   });
   it.each([false,true])("separates successful private admission from actual Design registration (%s)",async design=>{
-    const {factory,input,workload}=fixture();
+    const {factory,input,workload}=await fixture();
     const result=await factory.prepare({...input,...(design?{productTools:{env:{},servers:[{name:"design-draft",transport:"http" as const,url:"http://127.0.0.1:1234/mcp"}]}}:{})});
     try{
       expect(result.boundary.status.cloudExecution).toEqual({version:1,profile:"zeros-cloud-native-v1",runtimeProfile:"zeros-cloud-worker-v4",provider:"cursor",designApi:design?"admitted":"unavailable"});
@@ -290,7 +313,7 @@ describe("admitted native cloud diagnostic",()=>{
     }finally{await result.boundary.stopAndProve();}
   });
   it.each(["failed canary","late aborted canary"])("does not publish a core diagnostic after %s",async reason=>{
-    const {factory,input,workload,coordinator,controller}=fixture();
+    const {factory,input,workload,coordinator,controller}=await fixture();
     vi.mocked(CloudNativeBoundary.prepare).mockImplementation(async()=>{
       if(reason==="failed canary")throw new Error("canary failed");
       controller.abort();return coordinator as unknown as CloudNativeBoundary;
@@ -300,7 +323,7 @@ describe("admitted native cloud diagnostic",()=>{
     expect(workload.status).not.toHaveProperty("cloudExecution");
   });
   it("does not publish admission after an untrusted product transport",async()=>{
-    const {factory,input,workload}=fixture();
+    const {factory,input,workload}=await fixture();
     await expect(factory.prepare({...input,productTools:{env:{},servers:[{name:"design-draft",transport:"stdio",command:"untrusted"}]}})).rejects.toThrow(/scoped remote/);
     expect(workload.stopAndProve).toHaveBeenCalled();expect(cloudProviderExecution(workload)).toBeNull();
   });

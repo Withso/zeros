@@ -10,13 +10,15 @@ let deploymentGitIdentity: Readonly<GitIdentity> | null | undefined;
 export function gitExecutionIdentity(explicit?: GitIdentity): GitIdentity | undefined {
   if (deploymentGitIdentity === undefined) {
     const worker = loadCloudWorkerConfiguration();
+    // The verified marker establishes cloud placement. New Git processes use
+    // the actual non-root engine identity, never archived worker accounts.
     deploymentGitIdentity = worker
-      ? Object.freeze({ uid: worker.uid, gid: worker.gid })
+      ? Object.freeze({ uid: process.geteuid!(), gid: process.getegid!() })
       : null;
   }
   if (!deploymentGitIdentity) return explicit;
   if (explicit && (explicit.uid !== deploymentGitIdentity.uid || explicit.gid !== deploymentGitIdentity.gid))
-    throw new Error("Managed cloud Git requires the qualified worker identity");
+    throw new Error("Managed cloud Git requires the engine identity");
   return deploymentGitIdentity;
 }
 

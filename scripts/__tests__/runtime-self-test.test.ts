@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RUNTIME_SELF_TEST_CHECKS, selfTestDiagnostic, parseSelfTestDiagnostic, supervisorIsIdle,
   verifySelfTestIdentity, versionMatches, containmentSmokePassed, runSelfTestChecks } from "../cloud-workspace-validation/sandbox/runtime-self-test.mjs";
 import { RUNTIME_SMOKE_CHECKS } from "../../apps/control-plane/src/cloud-workspaces/cloud-builder-commands";
@@ -16,8 +16,51 @@ const fixture = () => {
     manifestSha256: hash(manifest), installerReceiptSha256: hash(receipt), bootId: "11111111-1111-4111-8111-111111111111" } };
 };
 describe("credential-free installed runtime self-test", () => {
-  it("rejects Cursor payload probing under the engine identity", () => {
-    expect(() => selfTest.probeCursorPlatformPayload("/unadmitted-runtime")).toThrow(/worker identity/);
+  it("requires all four IDs to be the non-root engine before loading Cursor", () => {
+    const methods = ["getuid", "geteuid", "getgid", "getegid"] as const;
+    const spies = methods.map(name => vi.spyOn(process, name).mockReturnValue(10003));
+    try {
+      expect(() => selfTest.probeCursorPlatformPayload("/unadmitted-runtime")).toThrow(/Cannot find module|ENOENT/);
+      for (let index = 0; index < spies.length; index++) {
+        spies[index].mockReturnValue(0);
+        expect(() => selfTest.probeCursorPlatformPayload("/unadmitted-runtime")).toThrow(/non-root engine identity/);
+        spies[index].mockReturnValue(10003);
+      }
+    } finally { spies.forEach(spy => spy.mockRestore()); }
+  });
+  it("executes provider and owned-process checks without producing sandbox qualification", () => {
+    expect(RUNTIME_SELF_TEST_CHECKS).toContain("engine_lifecycle");
+    expect(RUNTIME_SELF_TEST_CHECKS).not.toContain("containment_smoke");
+    const value = selfTestDiagnostic(Object.fromEntries(RUNTIME_SELF_TEST_CHECKS.map(name => [name, true])));
+    expect(value).toMatchObject({ ok: true, failedChecks: [] });
+    // An archived v1 failure remains readable, never emitted by the new checks.
+    expect(parseSelfTestDiagnostic(JSON.stringify({ ...value, ok: false, exitCode: 1,
+      failedChecks: ["containment_smoke"] }), 1)).toMatchObject({ failedChecks: ["containment_smoke"] });
+  });
+  it("requires the shared non-root engine and sandboxed Chromium identities with positive retirement", () => {
+    const lifecycle = (selfTest as unknown as { engineLifecyclePassed: (value: string) => boolean }).engineLifecyclePassed;
+    const value = { version: 2, boundary: "workspace-vm", qualified: true, identity: { qualified:true, hostUid: 10003, namespaceUid: 10003, noNewPrivs:1,seccompMode:2,capabilities:{effective:0,permitted:0,inheritable:0,bounding:0,ambient:0} },
+      execution: { sameEngineIdentity: true, noSandbox: true, ownedProcessGroups: true, originalProcessGroupsRetired: true, timeoutRetired: true, workloadCgroup: true, vmWorkloadDrain: true },
+      capture: { sameEngineIdentity: true, chromiumSandbox: true },
+      humanServices: { sameEngineIdentity: true, noSandbox: true },
+      actorTools: { sameEngineIdentity: true, noSandbox: true } };
+    expect(lifecycle(JSON.stringify(value))).toBe(true);
+    expect(lifecycle(JSON.stringify({...value,qualified:false}))).toBe(false);
+    expect(lifecycle(JSON.stringify({...value,engineChecksPassed:true}))).toBe(false);
+    const { originalProcessGroupsRetired: _group, workloadCgroup: _custody, vmWorkloadDrain: _drain, ...oldExecution } = value.execution;
+    expect(lifecycle(JSON.stringify({...value,execution:{...oldExecution,detachedDescendantsRetired:true}}))).toBe(false);
+    expect(lifecycle(JSON.stringify({...value,identity:{...value.identity,qualified:false}}))).toBe(false);
+    for (const name of Object.keys(value.identity.capabilities))
+      expect(lifecycle(JSON.stringify({...value,identity:{...value.identity,capabilities:{...value.identity.capabilities,[name]:1}}}))).toBe(false);
+    expect(lifecycle(JSON.stringify({...value,identity:{...value.identity,namespaceUid:0}}))).toBe(false);
+    for (const name of Object.keys(value.execution))
+      expect(lifecycle(JSON.stringify({ ...value, execution: { ...value.execution, [name]: false } }))).toBe(false);
+    expect(lifecycle(JSON.stringify({ ...value, identity: { hostUid: 10001, namespaceUid: 0 } }))).toBe(false);
+    for (const section of ["capture", "humanServices", "actorTools"] as const) {
+      for (const name of Object.keys(value[section]))
+        expect(lifecycle(JSON.stringify({ ...value, [section]: { ...value[section], [name]: false } }))).toBe(false);
+    }
+    expect(lifecycle(JSON.stringify({ version: 1, secure: true }))).toBe(false);
   });
   it("keeps the worker's successful check inventory identical to the executed checks", () => {
     expect(RUNTIME_SELF_TEST_CHECKS).toEqual(RUNTIME_SMOKE_CHECKS);

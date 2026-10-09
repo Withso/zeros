@@ -49,7 +49,7 @@ try:
             active = next(value for value in (initial['source'], initial['target']) if argv[0] == value['root'] + '/bin/node')
             read, write = os.pipe()
             self.stdout = os.fdopen(read, 'rb')
-            report = {'profile': 'zeros-cloud-worker-v4', 'qualified': True, 'runtime': active}
+            report = {'version': 2, 'boundary': 'workspace-vm', 'profile': 'zeros-cloud-worker-v4', 'qualified': True, 'runtime': active}
             diagnostic = {'schema': 'zeros.diagnostic/v1', 'component': 'attester', 'ok': True,
                           'stage': 'done', 'exitCode': 0, 'failedChecks': []}
             os.write(write, (json.dumps(report) + '\\n' + json.dumps(diagnostic) + '\\n').encode())

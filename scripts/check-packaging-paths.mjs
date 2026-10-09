@@ -40,8 +40,16 @@ const channelReleaseWorkflows = [
   ["beta release workflow", ".github/workflows/release-beta.yml"],
 ].map(([label, file]) => {
   const parent = readFileSync(file, "utf8");
-  const publication = file.endsWith("release-alpha.yml") ? readFileSync(".github/workflows/alpha-publication.yml", "utf8") : parent;
-  return { label, file, parent, publication, text: publication === parent ? parent : `${parent}\n${publication}` };
+  const publication = file.endsWith("release-alpha.yml")
+    ? readFileSync(".github/workflows/alpha-publication.yml", "utf8")
+    : parent;
+  return {
+    label,
+    file,
+    parent,
+    publication,
+    text: publication === parent ? parent : `${parent}\n${publication}`,
+  };
 });
 const unquote = (s) => s.trim().replace(/^["']|["']$/g, "");
 
@@ -57,12 +65,7 @@ const CODEX_STAGED = [
   "binaries/codex-runtime",
   "binaries/codex-cli-version.txt",
 ];
-const ZSR_STAGED = [
-  "binaries/zsr-supervisor.mjs",
-  "binaries/zsr-rg",
-  "binaries/zsr-macos-process-domain",
-  "binaries/zsr-git-dispatch",
-];
+const RIPGREP_STAGED = ["binaries/rg"];
 const HOST_PROCESS_SUPERVISOR =
   "apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs";
 const LEGAL_RESOURCES = [
@@ -75,7 +78,7 @@ const beforePackSource = readFileSync(
   "scripts/electron-before-pack.cjs",
   "utf8",
 );
-const zsrBuildSource = readFileSync("scripts/build-zsr-supervisor.mjs", "utf8");
+const ripgrepStageSource = readFileSync("scripts/stage-ripgrep.mjs", "utf8");
 const sidecarSource = readFileSync("apps/desktop/electron/sidecar.ts", "utf8");
 
 const froms = [...yml.matchAll(/^\s*-?\s*from:\s*(.+)$/gm)].map((m) =>
@@ -133,7 +136,13 @@ requireWorkflowToken(
   "stable release workflow",
   '"release/Zeros-arm64.dmg"',
 );
-for (const { label, text, file, parent, publication } of channelReleaseWorkflows) {
+for (const {
+  label,
+  text,
+  file,
+  parent,
+  publication,
+} of channelReleaseWorkflows) {
   // `alpha` | `beta` — the rolling release tag AND the artifact basename. They
   // must agree, or the feed references assets that were never uploaded.
   const ch = /release-(\w+)\.yml$/.exec(file)?.[1];
@@ -169,47 +178,155 @@ for (const { label, text, file, parent, publication } of channelReleaseWorkflows
     // These job/step identities are read by the publication baseline client.
     // A green supersession skips the one callable transaction, including runtime.
     requireWorkflowToken(text, label, "name: Publish Alpha feed");
-    requireWorkflowToken(text, label, 'name: Publish rolling "alpha" prerelease');
-    requireWorkflowToken(parent, label, "ready: ${{ steps.barrier.outputs.ready }}");
-    requireWorkflowToken(parent, label, "if: github.event.repository.fork == false && needs.ci.outputs.ready == 'true'");
-    requireWorkflowToken(parent, label, "uses: ./.github/workflows/alpha-publication.yml");
+    requireWorkflowToken(
+      text,
+      label,
+      'name: Publish rolling "alpha" prerelease',
+    );
+    requireWorkflowToken(
+      parent,
+      label,
+      "ready: ${{ steps.barrier.outputs.ready }}",
+    );
+    requireWorkflowToken(
+      parent,
+      label,
+      "if: github.event.repository.fork == false && needs.ci.outputs.ready == 'true'",
+    );
+    requireWorkflowToken(
+      parent,
+      label,
+      "uses: ./.github/workflows/alpha-publication.yml",
+    );
     requireWorkflowToken(parent, label, "needs: [ci, metadata]");
     requireWorkflowToken(parent, label, "group: release-alpha");
     requireWorkflowToken(parent, label, "cancel-in-progress: false");
     requireWorkflowToken(publication, label, "workflow_call:");
     requireWorkflowToken(publication, label, "needs: entry");
     requireWorkflowToken(publication, label, "needs: [entry, hosted]", 2);
-    requireWorkflowToken(parent, label, "ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}");
-    requireWorkflowToken(parent, label, "ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}");
-    for (const [input, variable] of [["alpha_ci_fast_path", "ZEROS_ALPHA_CI_FAST_PATH"], ["alpha_forward_only", "ZEROS_ALPHA_FORWARD_ONLY"]]) {
+    requireWorkflowToken(
+      parent,
+      label,
+      "ZEROS_ALPHA_CI_FAST_PATH: ${{ vars.ZEROS_ALPHA_CI_FAST_PATH }}",
+    );
+    requireWorkflowToken(
+      parent,
+      label,
+      "ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}",
+    );
+    for (const [input, variable] of [
+      ["alpha_ci_fast_path", "ZEROS_ALPHA_CI_FAST_PATH"],
+      ["alpha_forward_only", "ZEROS_ALPHA_FORWARD_ONLY"],
+    ]) {
       requireWorkflowToken(parent, label, `${input}: \${{ vars.${variable} }}`);
-      requireWorkflowToken(publication, label, `${input}: \${{ inputs.${input} }}`);
-      requireWorkflowToken(publication, label, `${variable}: \${{ inputs.${input} }}`, 3);
+      requireWorkflowToken(
+        publication,
+        label,
+        `${input}: \${{ inputs.${input} }}`,
+      );
+      requireWorkflowToken(
+        publication,
+        label,
+        `${variable}: \${{ inputs.${input} }}`,
+        3,
+      );
     }
-    requireWorkflowToken(parent, label, "alpha_prepared_version: ${{ needs.metadata.outputs.version }}");
-    requireWorkflowToken(publication, label, "ALPHA_PREPARED_VERSION: ${{ inputs.alpha_prepared_version }}", 3);
-    requireWorkflowToken(publication, label, "alpha-build-cli.ts --wait desktop");
-    requireWorkflowToken(publication, label, "alpha-build-cli.ts --wait runtime");
-    requireWorkflowToken(publication, label, "alpha-build-cli.ts --verify-metadata");
-    requireWorkflowToken(publication, label, "alpha-build-cli.ts --verify-producer runtime");
+    requireWorkflowToken(
+      parent,
+      label,
+      "alpha_prepared_version: ${{ needs.metadata.outputs.version }}",
+    );
+    requireWorkflowToken(
+      publication,
+      label,
+      "ALPHA_PREPARED_VERSION: ${{ inputs.alpha_prepared_version }}",
+      3,
+    );
+    requireWorkflowToken(
+      publication,
+      label,
+      "alpha-build-cli.ts --wait desktop",
+    );
+    requireWorkflowToken(
+      publication,
+      label,
+      "alpha-build-cli.ts --wait runtime",
+    );
+    requireWorkflowToken(
+      publication,
+      label,
+      "alpha-build-cli.ts --verify-metadata",
+    );
+    requireWorkflowToken(
+      publication,
+      label,
+      "alpha-build-cli.ts --verify-producer runtime",
+    );
     requireWorkflowToken(text, label, "name: Save Alpha admission receipt");
-    requireWorkflowToken(text, label, "if: success() && steps.barrier.outputs.admission_issued == 'true'");
-    requireWorkflowToken(text, label, "name: alpha-admission-${{ github.sha }}");
-    requireWorkflowToken(text, label, "pnpm exec tsx scripts/release/ci-cli.ts --verify");
-    requireWorkflowToken(text, label, "pnpm exec tsx scripts/release/publication-cli.ts");
+    requireWorkflowToken(
+      text,
+      label,
+      "if: success() && steps.barrier.outputs.admission_issued == 'true'",
+    );
+    requireWorkflowToken(
+      text,
+      label,
+      "name: alpha-admission-${{ github.sha }}",
+    );
+    requireWorkflowToken(
+      text,
+      label,
+      "pnpm exec tsx scripts/release/ci-cli.ts --verify",
+    );
+    requireWorkflowToken(
+      text,
+      label,
+      "pnpm exec tsx scripts/release/publication-cli.ts",
+    );
   }
 }
 
 // Reusable defaults retain full CI and strict freshness. Only the automatic
 // Alpha parent supplies these inputs, including through the nested worker.
-const hostedPromotionWorkflow = readFileSync(".github/workflows/hosted-promotion.yml", "utf8");
-const workerPromotionWorkflow = readFileSync(".github/workflows/cloud-worker-promotion.yml", "utf8");
-for (const [input, variable] of [["alpha_ci_fast_path", "ZEROS_ALPHA_CI_FAST_PATH"], ["alpha_forward_only", "ZEROS_ALPHA_FORWARD_ONLY"], ["alpha_prepared_version", "ALPHA_PREPARED_VERSION"]]) {
-  requireWorkflowToken(hostedPromotionWorkflow, "hosted promotion workflow", `      ${input}:`);
-  requireWorkflowToken(hostedPromotionWorkflow, "hosted promotion workflow", `      ${input}: \${{ inputs.${input} }}`);
-  requireWorkflowToken(hostedPromotionWorkflow, "hosted promotion workflow", `      ${variable}: \${{ inputs.${input} }}`, 3);
-  requireWorkflowToken(workerPromotionWorkflow, "worker promotion workflow", `      ${input}:`);
-  requireWorkflowToken(workerPromotionWorkflow, "worker promotion workflow", `      ${variable}: \${{ inputs.${input} }}`);
+const hostedPromotionWorkflow = readFileSync(
+  ".github/workflows/hosted-promotion.yml",
+  "utf8",
+);
+const workerPromotionWorkflow = readFileSync(
+  ".github/workflows/cloud-worker-promotion.yml",
+  "utf8",
+);
+for (const [input, variable] of [
+  ["alpha_ci_fast_path", "ZEROS_ALPHA_CI_FAST_PATH"],
+  ["alpha_forward_only", "ZEROS_ALPHA_FORWARD_ONLY"],
+  ["alpha_prepared_version", "ALPHA_PREPARED_VERSION"],
+]) {
+  requireWorkflowToken(
+    hostedPromotionWorkflow,
+    "hosted promotion workflow",
+    `      ${input}:`,
+  );
+  requireWorkflowToken(
+    hostedPromotionWorkflow,
+    "hosted promotion workflow",
+    `      ${input}: \${{ inputs.${input} }}`,
+  );
+  requireWorkflowToken(
+    hostedPromotionWorkflow,
+    "hosted promotion workflow",
+    `      ${variable}: \${{ inputs.${input} }}`,
+    3,
+  );
+  requireWorkflowToken(
+    workerPromotionWorkflow,
+    "worker promotion workflow",
+    `      ${input}:`,
+  );
+  requireWorkflowToken(
+    workerPromotionWorkflow,
+    "worker promotion workflow",
+    `      ${variable}: \${{ inputs.${input} }}`,
+  );
 }
 
 for (const from of froms) {
@@ -226,7 +343,7 @@ for (const from of froms) {
   if (
     CLAUDE_STAGED.includes(from) ||
     CODEX_STAGED.includes(from) ||
-    ZSR_STAGED.includes(from)
+    RIPGREP_STAGED.includes(from)
   )
     continue;
   if (!existsSync(from))
@@ -285,49 +402,24 @@ if (!/stage-codex-cli\.mjs/.test(beforePackSource)) {
       "the packaged engine would silently fall back to an unpinned Codex on PATH",
   );
 }
-if (!/build-zsr-supervisor\.mjs/.test(beforePackSource)) {
-  errs.push(
-    "beforePack must build the ZSR supervisor so its generated extraResources input cannot be absent",
-  );
+if (!/stage-ripgrep\.mjs/.test(beforePackSource)) {
+  errs.push("beforePack must stage pinned ripgrep before packaging");
 }
-for (const staged of ZSR_STAGED) {
+for (const staged of RIPGREP_STAGED) {
   if (!froms.includes(staged)) {
-    errs.push(
-      `electron-builder.yml has no extraResources \`from: ${staged}\` — packaged agent containment would be unavailable`,
-    );
+    errs.push(`electron-builder.yml has no extraResources from: ${staged}`);
   }
 }
 if (
-  !/zsr-macos-process-domain\.c/.test(zsrBuildSource) ||
-  !/zsr-git-dispatch\.c/.test(zsrBuildSource) ||
-  !/\/usr\/bin\/xcrun/.test(zsrBuildSource)
+  !/@vscode\/ripgrep/.test(ripgrepStageSource) ||
+  !/0o755/.test(ripgrepStageSource)
 ) {
   errs.push(
-    "build-zsr-supervisor must compile the reviewed Darwin process-domain and Git-dispatch C sources with the Apple toolchain",
+    "stage-ripgrep must preserve the pinned executable with owner-write permissions",
   );
 }
-if (
-  !/@vscode\/ripgrep/.test(zsrBuildSource) ||
-  !/zsr-rg/.test(zsrBuildSource)
-) {
-  errs.push(
-    "build-zsr-supervisor must stage the pinned ripgrep binary required by SRT",
-  );
-}
-if (!/ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER/.test(sidecarSource)) {
-  errs.push(
-    "the Electron sidecar must pass the packaged macOS process-domain helper to the engine",
-  );
-}
-if (!/ZEROS_ZSR_GIT_DISPATCH_BINARY/.test(sidecarSource)) {
-  errs.push(
-    "the Electron sidecar must pass the packaged macOS Git dispatcher to the engine",
-  );
-}
-if (!/ZEROS_ZSR_RIPGREP_PATH/.test(sidecarSource)) {
-  errs.push(
-    "the Electron sidecar must pass the packaged ZSR ripgrep binary to the engine",
-  );
+if (!/ZEROS_RIPGREP_PATH/.test(sidecarSource)) {
+  errs.push("the Electron sidecar must pass packaged ripgrep to the engine");
 }
 if (!froms.includes(HOST_PROCESS_SUPERVISOR)) {
   errs.push(
@@ -341,7 +433,7 @@ if (!/ZEROS_HOST_SUPERVISOR_SCRIPT/.test(sidecarSource)) {
 }
 if (
   /ORBSTACK|zsr-container-worker/i.test(
-    `${yml}\n${sidecarSource}\n${zsrBuildSource}`,
+    `${yml}\n${sidecarSource}\n${ripgrepStageSource}`,
   )
 ) {
   errs.push(

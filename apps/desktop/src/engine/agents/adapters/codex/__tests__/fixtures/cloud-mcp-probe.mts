@@ -7,7 +7,8 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { testCloudRuntime } from '../../../../__tests__/helpers/test-cloud-runtime';
 import type { McpServerRegistration } from '../../../../types';
-import type { CloudProviderExecution } from '../../../../cloud-provider-execution';
+import type { CloudLegacyProviderExecution } from '../../../../cloud-provider-execution';
+import { createCloudNativeHome } from '../../../../containment/cloud-native-home';
 
 // This subprocess exercises the pinned CLI/MCP contract without an installed
 // host runtime. Inject the same explicit v4 authority as the consumer tests.
@@ -58,7 +59,8 @@ const { captureCloudCodexProjectConfig } = await import('../../cloud-project-con
 const { resolveCloudCodexBinaryFromImage } = await import('../../binary-resolver');
 const {path:binary}=await resolveCloudCodexBinaryFromImage(workerRoot);
 const root=await mkdtemp('/tmp/v7-native-codex-');
-const cwd=path.join(root,'repo'), home=path.join(root,'home');
+const nativeHome=await createCloudNativeHome({dataRoot:root,conversationId:'mcp-fixture',provider:'codex',executionId:'mcp-probe'});
+const cwd=path.join(root,'repo'), home=nativeHome.paths.home;
 await mkdir(path.join(cwd,'.codex'),{recursive:true});
 await mkdir(path.join(home,'.codex'),{recursive:true});
 execFileSync('git',['init','-q',cwd]);
@@ -66,7 +68,9 @@ await writeFile(path.join(home,'.codex/config.toml'),`[projects.${JSON.stringify
 
 async function probe(label:string,repoConfig:string,servers:McpServerRegistration[],mutate?:()=>Promise<void>,project=false){
   await writeFile(path.join(cwd,'.codex/config.toml'),repoConfig);
-  const execution={cwd,lease:{assertLive(){},admission:{model:'gpt-5.6-sol'}},productServers:[],userServers:servers} as unknown as CloudProviderExecution;
+  const lease={assertLive(){},signal:new AbortController().signal,codexAuth:()=>null,admission:{model:'gpt-5.6-sol'}};
+  const execution={mode:'actor-grant-v1',cwd,model:'gpt-5.6-sol',lease,lifetime:lease,auth:lease,
+    coordinator:{nativeHome},nativeCapabilities:null,environment:null,productServers:[],userServers:servers} as unknown as CloudLegacyProviderExecution;
   if(project)await captureCloudCodexProjectConfig(execution,cwd);
   const projectArgs=project?Object.entries(cloudCodexConfig(execution)).filter(([name])=>!name.startsWith('sqlite_home')).flatMap(([name,value])=>['-c',`${name}=${JSON.stringify(value)}`]):[];
   const child=spawn(binary,['app-server',...projectArgs,...buildMcpServerOverrides(servers.map(server => server.transport === "stdio" ? {...server, startupTimeoutSec: 1} : server),{cloudCwd:cwd})],{cwd,env:{HOME:home,CODEX_HOME:path.join(home,'.codex'),PATH:process.env.PATH!,RUST_LOG:'off'},stdio:['pipe','pipe','pipe'],detached:true});

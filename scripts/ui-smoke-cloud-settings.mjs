@@ -149,6 +149,7 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
       /\/agent-connections\/(claude|codex|cursor)$/.test(path) &&
       method === "PUT"
     ) {
+      expect(body).toMatchObject({ allModels: true, consent: "zeros-managed" });
       const provider = path.split("/").at(-1),
         revision = body.expectedRevision + 1;
       state.connections = state.connections.filter(
@@ -183,10 +184,18 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
   const connect = page.getByRole("button", { name: "Connect", exact: true });
   await connect.click();
   const dialog = page.getByRole("dialog", { name: "Claude Code", exact: true });
+  const expectOneStepConnection = async (connectionDialog) => {
+    await expect(connectionDialog.getByRole("button", { name: "Connect", exact: true })).toBeVisible();
+    await expect(connectionDialog.getByRole("checkbox")).toHaveCount(0);
+    await expect(connectionDialog.getByText("Allow all models", { exact: true })).toHaveCount(0);
+    await expect(connectionDialog.getByText(/^Allowed models/)).toHaveCount(0);
+    await expect(connectionDialog.getByText("Includes future models supported by this provider. Applies only to your own sessions.", { exact: true })).toHaveCount(0);
+    await expect(connectionDialog.getByText("Connecting stores this account encrypted in the cloud for your sessions on Zeros-managed computers in this organization, until you disconnect.", { exact: true })).toBeVisible();
+  };
   await expect(
     dialog.getByRole("button", { name: "CLI", exact: true }),
   ).toHaveCount(0);
-  await expect(dialog.getByRole("checkbox", { name: "Allow all models", exact: true })).toBeChecked();
+  await expectOneStepConnection(dialog);
   await dialog
     .getByLabel("Account name", { exact: true })
     .fill("First subscription");
@@ -194,7 +203,7 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
     .getByLabel("Cloud setup token", { exact: true })
     .fill("synthetic-cloud-setup-token");
   await dialog
-    .getByRole("button", { name: "Connect account", exact: true })
+    .getByRole("button", { name: "Connect", exact: true })
     .click();
   await expect(dialog).toHaveCount(0);
   await expect(
@@ -222,7 +231,7 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
     .getByLabel("Cloud API key", { exact: true })
     .fill("synthetic-cloud-api-key");
   await dialog
-    .getByRole("button", { name: "Connect account", exact: true })
+    .getByRole("button", { name: "Connect", exact: true })
     .click();
   await expect(dialog).toHaveCount(0);
   await expect(
@@ -231,26 +240,24 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
   await expect(page.getByText("Second API", { exact: true })).toBeVisible();
   await expect(page.getByRole("switch", { name: "Use for release checks", exact: true })).toHaveCount(0);
   expect(requests.some(row => row.path.endsWith("/release-canary"))).toBe(false);
-  // A released connection has an explicit list and no all-model flag.
-  const legacy = account(`${userA}:${orgA}`).connections.find(row => row.provider === "claude");
-  delete legacy.allModels; legacy.models = ["claude-haiku-4-5"];
-  await page.evaluate(async () => {
-    const { cloudOrganizationConnectionsCache } = await import("/apps/desktop/src/renderer/features/settings/cloud-provider-connection.ts");
-    cloudOrganizationConnectionsCache.invalidateAll();
-  });
-  await page.getByRole("button", { name: "Configure", exact: true }).click();
-  await expect(dialog.getByRole("checkbox", { name: "Allow all models", exact: true })).not.toBeChecked();
-  await expect(dialog.getByText("Allowed models (1)", { exact: true })).toBeVisible();
-  await dialog.getByRole("button", { name: "Connect account", exact: true }).click();
-  await expect(dialog).toHaveCount(0);
-  expect(requests.filter(row => row.path.endsWith("/agent-connections/claude") && row.method === "PUT").at(-1).body)
-    .toMatchObject({ allModels: false, models: ["claude-haiku-4-5"] });
-  await page.getByRole("button", { name: "Configure", exact: true }).click();
-  await dialog.getByText("Allow all models", { exact: true }).click();
-  await dialog.getByRole("button", { name: "Connect account", exact: true }).click();
-  await expect(dialog).toHaveCount(0);
-  expect(requests.filter(row => row.path.endsWith("/agent-connections/claude") && row.method === "PUT").at(-1).body.allModels).toBe(true);
-  check("New self connections default to all models; older explicit consent changes only after Allow all models is selected", true);
+  // Both archived missing flags and explicit restrictions reconnect in one step.
+  for (const allModels of [undefined, false]) {
+    const legacy = account(`${userA}:${orgA}`).connections.find(row => row.provider === "claude");
+    if (allModels === undefined) delete legacy.allModels;
+    else legacy.allModels = allModels;
+    legacy.models = ["claude-haiku-4-5"];
+    await page.evaluate(async () => {
+      const { cloudOrganizationConnectionsCache } = await import("/apps/desktop/src/renderer/features/settings/cloud-provider-connection.ts");
+      cloudOrganizationConnectionsCache.invalidateAll();
+    });
+    await page.getByRole("button", { name: "Configure", exact: true }).click();
+    await expectOneStepConnection(dialog);
+    await dialog.getByRole("button", { name: "Connect", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(requests.filter(row => row.path.endsWith("/agent-connections/claude") && row.method === "PUT").at(-1).body)
+      .toMatchObject({ allModels: true, models: grant.body.models });
+  }
+  check("New and saved cloud accounts connect all supported models in one step", true);
   ownerMode = true;
   await page.getByRole("button", { name: "Platform owner", exact: true }).click();
   const firstRow = page.locator("[data-release-canary-control]").locator("..").filter({ has: page.getByText("First subscription", { exact: true }) });
@@ -367,8 +374,9 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
   await page.getByRole("tab", { name: "Codex", exact: true }).click();
   await connect.click();
   const codex = page.getByRole("dialog", { name: "Codex", exact: true });
+  await expectOneStepConnection(codex);
   await codex
-    .getByRole("button", { name: "Connect account", exact: true })
+    .getByRole("button", { name: "Connect", exact: true })
     .click();
   await expect(codex.getByText("TEST-CODE", { exact: true })).toBeVisible();
   await page.keyboard.press("Escape");

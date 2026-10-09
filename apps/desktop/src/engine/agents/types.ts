@@ -44,7 +44,7 @@ import type {
   ExecutionBoundaryStatus,
 } from "@zeros/protocol/containment";
 import type { ExecutionBoundary, PreparedBoundary } from "./containment/types";
-import type { BoundaryPreviewGatewayFactory } from "./containment/zsr-preview-gateway";
+import type { BoundaryPreviewGatewayFactory } from "./containment/preview-gateway";
 
 // ── Failure taxonomy ─────────────────────────────────────
 //

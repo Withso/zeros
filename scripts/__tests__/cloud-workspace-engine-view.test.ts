@@ -5,6 +5,7 @@ import {
   cloudEngineViewArguments,
   cloudEngineViewEnvironment,
   cloudEngineWorkspacePaths,
+  cloudEngineWorkerProjection,
 } from "../cloud-workspace-validation/sandbox/cloud-engine-view.mjs";
 
 import { testCloudRuntime } from "../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime";
@@ -61,6 +62,11 @@ describe("fixed cloud engine mount and environment contract", () => {
       expect(args.join("\n")).toContain(
         "--tmpfs\n/srv/zeros/.zeros-setup\n--chmod\n0000\n/srv/zeros/.zeros-setup\n--remount-ro\n/srv/zeros/.zeros-setup",
       );
+      expect(args.join("\n")).toContain(
+        "--tmpfs\n/srv/zeros/.zeros-engine-setup\n--chmod\n0000\n/srv/zeros/.zeros-engine-setup\n--remount-ro\n/srv/zeros/.zeros-engine-setup",
+      );
+      expect(binds).toContainEqual(["/srv/zeros/home/engine", "/srv/zeros/home/agent"]);
+      expect(binds).toContainEqual(["/srv/zeros/home/engine-capture", "/srv/zeros/home/capture"]);
       expect(cloudEngineWorkspacePaths(primary)).toEqual({ schema: "zeros.cloud-workspace-paths/v1",
         workspaceRoot: "/srv/zeros/workspace", repositoryAlias: "/srv/zeros/repos/fixture/primary" });
       expect(binds.some(([, target]) => target === "/srv/zeros/files/workspace")).toBe(false);
@@ -106,11 +112,7 @@ describe("fixed cloud engine mount and environment contract", () => {
     ]);
     expect(mounts).toContainEqual(["--ro-bind", runtime.root, runtime.root]);
     expect(mounts).toContainEqual(["--ro-bind", `${view}/facade`, "/opt/zeros"]);
-    expect(mounts).toContainEqual([
-      "--ro-bind",
-      "/etc/containers/policy.json",
-      "/etc/containers/policy.json",
-    ]);
+    expect(mounts.some(([, source]) => source.startsWith("/etc/containers/"))).toBe(false);
     expect(mounts).toContainEqual(["--bind", "/proc", "/proc"]);
     expect(args.join("\n")).toContain(
       "--size\n536870912\n--tmpfs\n/dev/shm\n--chmod\n1777\n/dev/shm",
@@ -141,6 +143,20 @@ describe("fixed cloud engine mount and environment contract", () => {
       if (["--bind", "--ro-bind"].includes(args[index]))
         expect(args[index + 2].startsWith("/proc/")).toBe(false);
     }
+  });
+  it("runs Cursor closure through the fixed engine entry without serve credentials", () => {
+    expect(cloudEngineViewArguments("probe-cursor",4,runtime,view).at(-1)).toBe("--probe-cursor");
+    expect(cloudEngineViewEnvironment({ZEROS_CLOUD_TOKEN:"synthetic"},"probe-cursor",runtime)).not.toHaveProperty("ZEROS_CLOUD_TOKEN");
+  });
+  it("publishes the shared non-root engine marker with only the pinned Host launcher", () => {
+    expect(cloudEngineWorkerProjection(runtime)).toEqual({ version: 4, backend: "cloud-worker",
+      profile: "zeros-cloud-worker-v4", uid: 10003, gid: 10003,
+      toolchain: { node: runtime.node,
+        supervisor: `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs` } });
+    const env = cloudEngineViewEnvironment({}, "serve", runtime);
+    expect(env).toMatchObject({ USER: "zeros-engine", LOGNAME: "zeros-engine",
+      ZEROS_RIPGREP_PATH: `${runtime.workerRoot}/binaries/rg` });
+    expect(Object.keys(env).filter(key => key.startsWith("ZEROS_ZSR_"))).toEqual([]);
   });
   it("keeps connection authority out of argv and excludes inherited loader/provider credentials", () => {
     const source = {

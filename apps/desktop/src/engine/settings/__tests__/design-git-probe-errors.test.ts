@@ -95,8 +95,8 @@ describe.each([false, true])(
         expect(JSON.stringify(cause)).not.toContain("/private/");
         expect(JSON.stringify(cause)).not.toContain(root);
         const options = state.calls.at(-1)!.options;
-        expect(options.uid).toBe(cloud ? 10001 : undefined);
-        expect(options.gid).toBe(cloud ? 10001 : undefined);
+        expect(options.uid).toBe(cloud ? process.geteuid?.() : undefined);
+        expect(options.gid).toBe(cloud ? process.geteuid?.() : undefined);
       },
     );
 

@@ -30,7 +30,7 @@ pnpm electron:local
 ```
 
 Only the root dependency graph is needed. The initial run verifies dependencies,
-checks/rebuilds SQLite for Electron's ABI, builds ZSR, the engine and Electron
+checks/rebuilds SQLite for Electron's ABI, stages pinned ripgrep, builds the engine and Electron
 main/preload, then supervises Vite, both build watchers and the native app. Cold
 compilation is expected; subsequent native ABI checks reuse a correct binding.
 No backend deployment, database branch, Pages deployment or cloud worker
