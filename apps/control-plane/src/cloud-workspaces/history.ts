@@ -673,7 +673,7 @@ export class DatabaseCloudWorkspaceHistoryService {
               )
             ).rows[0];
       if (!chat)
-        throw new HttpError(404, "not_found", "Conversation not found");
+        throw new HttpError(404, "cloud_conversation_not_found", "Conversation not found");
       const result = (
         messages: Array<{
           msgId: string;
@@ -799,7 +799,7 @@ export class DatabaseCloudWorkspaceHistoryService {
     chatId: string; limit: number; beforeMsgId?: string | undefined; before?: number | undefined;
   }, local: LocalReadContext) {
     const candidates = await localCandidates(tx, input, local, { conversationId: input.chatId, limit: 1 });
-    if (!candidates.length) throw new HttpError(404, "not_found", "Conversation not found");
+    if (!candidates.length) throw new HttpError(404, "cloud_conversation_not_found", "Conversation not found");
     const manifests = await localManifests(tx, input, local, candidates), manifest = manifests.get(input.chatId);
     const result = (messages: Array<{ msgId: string; kind: string; payload: string; createdAt: number }>) => ({
       workspaceId: input.workspaceId, organizationId: input.organizationId, revision: local.mirroredSequence,

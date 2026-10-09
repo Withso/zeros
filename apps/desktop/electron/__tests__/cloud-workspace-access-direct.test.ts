@@ -18,14 +18,16 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); });
 function setup() {
   const issueEngineAdmission = vi.fn<CloudWorkspaceAccessBrokerApi["issueEngineAdmission"]>(async () => admission());
-  const revokeEngineAdmission = vi.fn(async () => {}), forbidden = vi.fn(async () => { throw new Error("Unexpected SSH/legacy fallback"); });
+  const revokeEngineAdmission = vi.fn<CloudWorkspaceAccessBrokerApi["revokeEngineAdmission"]>(async () => {}), forbidden = vi.fn(async () => { throw new Error("Unexpected SSH/legacy fallback"); });
   const api: CloudWorkspaceAccessBrokerApi = { issueEngineAdmission, revokeEngineAdmission,
     issueSsh: forbidden, issueTunnel: forbidden, activateTunnel: forbidden, issuePreview: forbidden, revoke: forbidden };
   let account = "account-A/session-A";
-  const broker = new CloudWorkspaceAccessBroker({ api, now: () => now, randomId: () => ids[6],
+  let clock = now, handle = 6;
+  const broker = new CloudWorkspaceAccessBroker({ api, now: () => clock, randomId: () => ids[handle++ % ids.length]!,
     getAccountSessionKey: () => account, getAccessToken: async () => "synthetic-account-token" });
   cleanups.push(() => broker.dispose());
-  return { broker, issueEngineAdmission, revokeEngineAdmission, forbidden, replaceAccount: () => { account = "account-B/session-B"; } };
+  return { broker, issueEngineAdmission, revokeEngineAdmission, forbidden,
+    advance: (ms: number) => { clock += ms; }, replaceAccount: () => { account = "account-B/session-B"; } };
 }
 describe("Electron direct provider connection ownership", () => {
   it("opts into the verified direct endpoint and publishes only its exact boot-bound target", async () => {
@@ -56,6 +58,115 @@ describe("Electron direct provider connection ownership", () => {
     const [a, b] = await Promise.all([f.broker.refreshRuntime(first), f.broker.refreshRuntime(first)]);
     expect(a).toEqual(b); expect(await f.broker.refreshRuntime(first)).toEqual(a);
     expect(f.issueEngineAdmission).toHaveBeenCalledTimes(2); expect(f.revokeEngineAdmission).toHaveBeenCalledOnce();
+  });
+  it("retires an acknowledged old admission before returning the break-first refresh", async () => {
+    const f = setup(), first = await f.broker.openRuntime(target);
+    await f.broker.publishRuntimeConnection({ ...first, connected: true });
+    f.issueEngineAdmission.mockResolvedValueOnce(relay());
+    const next = await f.broker.refreshRuntime(first);
+    expect(f.revokeEngineAdmission).toHaveBeenCalledExactlyOnceWith("synthetic-account-token", { ...target, grantToken: firstToken });
+    expect(() => f.broker.assertRuntime(first)).toThrow();
+    expect(() => f.broker.assertRuntime(next)).not.toThrow();
+    await f.broker.publishRuntimeConnection({ ...next, connected: true });
+    expect(f.revokeEngineAdmission).toHaveBeenCalledOnce();
+  });
+  it.each(["runtimeId", "organizationId", "workspaceId", "generation", "authorityEpoch", "engineInstanceId", "connectionSequence"] as const)(
+    "ignores a foreign %s route-health publication without caching or retiring an admission", async field => {
+      const f = setup(), first = await f.broker.openRuntime(target);
+      f.issueEngineAdmission.mockResolvedValueOnce(relay());
+      const fallback = await f.broker.refreshRuntime(first);
+      const foreign = { ...fallback, [field]: typeof fallback[field] === "number" ? Number(fallback[field]) + 1 : ids[8], connected: true };
+      await expect(f.broker.publishRuntimeConnection(foreign)).resolves.toBeUndefined();
+      expect(() => f.broker.assertRuntime(fallback)).not.toThrow();
+      expect(f.revokeEngineAdmission).toHaveBeenCalledOnce();
+      await f.broker.closeRuntime(first.runtimeId);
+      f.issueEngineAdmission.mockResolvedValueOnce({ ...admission(), grantToken: `zwa_${"c".repeat(43)}` });
+      expect((await f.broker.openRuntime(target)).channel).toBe("direct-provider-websocket");
+    });
+  it("keeps disconnected route publication observational and does not remember an unproved relay", async () => {
+    const f = setup(), first = await f.broker.openRuntime(target);
+    f.issueEngineAdmission.mockResolvedValueOnce(relay());
+    const fallback = await f.broker.refreshRuntime(first);
+    await f.broker.publishRuntimeConnection({ ...fallback, connected: false });
+    expect(() => f.broker.assertRuntime(fallback)).not.toThrow();
+    expect(f.revokeEngineAdmission).toHaveBeenCalledOnce();
+    await f.broker.closeRuntime(first.runtimeId);
+    f.issueEngineAdmission.mockResolvedValueOnce({ ...admission(), grantToken: `zwa_${"c".repeat(43)}` });
+    expect((await f.broker.openRuntime(target)).channel).toBe("direct-provider-websocket");
+  });
+  it("ignores a late connected publication after its handle closed", async () => {
+    const f = setup(), first = await f.broker.openRuntime(target);
+    f.issueEngineAdmission.mockResolvedValueOnce(relay());
+    const fallback = await f.broker.refreshRuntime(first);
+    await f.broker.closeRuntime(first.runtimeId);
+    await expect(f.broker.publishRuntimeConnection({ ...fallback, connected: true })).resolves.toBeUndefined();
+    f.issueEngineAdmission.mockResolvedValueOnce({ ...admission(), grantToken: `zwa_${"c".repeat(43)}` });
+    expect((await f.broker.openRuntime(target)).channel).toBe("direct-provider-websocket");
+  });
+  it("ignores route-health publication from a retired account without weakening runtime authority", async () => {
+    const f = setup(), first = await f.broker.openRuntime(target);
+    f.issueEngineAdmission.mockResolvedValueOnce(relay());
+    const fallback = await f.broker.refreshRuntime(first); f.replaceAccount();
+    await expect(f.broker.publishRuntimeConnection({ ...fallback, connected: true })).resolves.toBeUndefined();
+    expect(() => f.broker.assertRuntime(fallback)).toThrow();
+    await vi.waitFor(() => expect(f.revokeEngineAdmission).toHaveBeenCalledTimes(2));
+    expect(f.revokeEngineAdmission.mock.calls.map(call => call[1].grantToken)).toEqual([firstToken, nextToken]);
+    const current = setup();
+    expect((await current.broker.openRuntime(target)).channel).toBe("direct-provider-websocket");
+  });
+  it("uses a fresh CP grant on a new handle after the same exact boot fell back", async () => {
+    const f = setup(), first = await f.broker.openRuntime(target);
+    f.issueEngineAdmission.mockResolvedValueOnce(relay());
+    const fallback = await f.broker.refreshRuntime(first);
+    await f.broker.publishRuntimeConnection({ ...fallback, connected: true });
+    await f.broker.closeRuntime(first.runtimeId);
+    const freshToken = `zwa_${"c".repeat(43)}`;
+    f.issueEngineAdmission.mockResolvedValueOnce({ ...admission(), grantToken: freshToken });
+    const reopened = await f.broker.openRuntime(target);
+    expect(reopened).toMatchObject({ channel: "control-plane-websocket", connectionSequence: 1, cloudToken: freshToken });
+    expect(reopened.runtimeId).not.toBe(first.runtimeId);
+    expect(f.issueEngineAdmission).toHaveBeenCalledTimes(3);
+    expect(f.forbidden).not.toHaveBeenCalled();
+  });
+  it.each(["bootId", "writerEpoch", "engineInstanceId", "fundingOwnerUserId", "fundingOwnerEpoch", "authorityEpoch"] as const)(
+    "does not carry CP preference to a different %s", async field => {
+      const f = setup(), first = await f.broker.openRuntime(target);
+      f.issueEngineAdmission.mockResolvedValueOnce(relay());
+      const fallback = await f.broker.refreshRuntime(first);
+      await f.broker.publishRuntimeConnection({ ...fallback, connected: true });
+      await f.broker.closeRuntime(first.runtimeId);
+      const fresh = admission();
+      const changed = field === "authorityEpoch" ? { ...fresh, authorityEpoch: 4 } : {
+        ...fresh, ...(field === "engineInstanceId" ? { engineInstanceId: ids[8] } : {}),
+        bootScope: { ...bootScope, [field]: field === "fundingOwnerEpoch" ? 2 : ids[8] },
+      };
+      f.issueEngineAdmission.mockResolvedValueOnce(changed);
+      expect((await f.broker.openRuntime(target)).channel).toBe("direct-provider-websocket");
+    });
+  it("expires the CP route preference while still minting a fresh admission", async () => {
+    const f = setup(), first = await f.broker.openRuntime(target);
+    f.issueEngineAdmission.mockResolvedValueOnce(relay());
+    const fallback = await f.broker.refreshRuntime(first);
+    await f.broker.publishRuntimeConnection({ ...fallback, connected: true });
+    await f.broker.closeRuntime(first.runtimeId); f.advance(5 * 60_000 + 1);
+    f.issueEngineAdmission.mockResolvedValueOnce({ ...admission(), expiresAt: new Date(now + 6 * 60_000).toISOString() });
+    expect((await f.broker.openRuntime(target)).channel).toBe("direct-provider-websocket");
+  });
+  it("bounds remembered route health independently of one-use admissions", async () => {
+    const f = setup();
+    for (let index = 0; index < 65; index++) {
+      const grant = { ...admission(), authorityEpoch: index + 10 };
+      f.issueEngineAdmission.mockResolvedValueOnce(grant);
+      const first = await f.broker.openRuntime(target);
+      f.issueEngineAdmission.mockResolvedValueOnce({ ...relay(), authorityEpoch: grant.authorityEpoch });
+      const fallback = await f.broker.refreshRuntime(first);
+      await f.broker.publishRuntimeConnection({ ...fallback, connected: true });
+      await f.broker.closeRuntime(first.runtimeId);
+    }
+    f.issueEngineAdmission.mockResolvedValueOnce({ ...admission(), authorityEpoch: 10 });
+    expect((await f.broker.openRuntime(target)).channel).toBe("direct-provider-websocket");
+    f.issueEngineAdmission.mockResolvedValueOnce({ ...admission(), authorityEpoch: 74 });
+    expect((await f.broker.openRuntime(target)).channel).toBe("control-plane-websocket");
   });
   it.each(["organizationId", "workspaceId", "generation", "engineInstanceId", "bootId", "writerEpoch", "fundingOwnerUserId", "fundingOwnerEpoch"] as const)(
     "refuses a fallback for a different %s and revokes the unpublished grant", async field => {

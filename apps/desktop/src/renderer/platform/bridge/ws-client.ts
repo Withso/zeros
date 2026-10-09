@@ -71,6 +71,7 @@ const RECONNECT_LADDER = [1_000, 2_000, 4_000, 8_000, 15_000];
  *  the chat UI's 7s "Reconnecting…" indicator — the indicator may show while
  *  requests keep patiently buffering; they are separate concerns. */
 const RECONNECT_GRACE_MS = 20_000;
+const CLOUD_DIRECT_READY_MS = 5_000;
 
 /** Cap on the number of requests we'll queue during a disconnect so
  *  a runaway caller can't pin unbounded memory. The previous 32 was
@@ -236,7 +237,7 @@ const DIAGNOSTIC_OPERATIONS = new Set(["workspace.list", "workspace.get", "works
   "cloudEvents.request", "cloudCommands.request", "cloudCommands.conversation", "cloudCommands.createConversation", "cloudCommands.setMode",
   "cloudActions.request", "cloudLsp.request", "chats.list", "chats.replaceAll", "messages.window", "messages.windowOlder",
   "git.status", "git.diff", "git.log", "git.reviewHunks", "file.read", "file.list", "design.status"]);
-type CloudDiagnosticScope = Pick<CloudRuntimeConnectionTarget, "workspaceId" | "generation" | "connectionSequence">;
+type CloudDiagnosticScope = Pick<CloudRuntimeConnectionTarget, "workspaceId" | "generation" | "connectionSequence" | "channel">;
 type CloudDiagnosticEvent = "close" | "request_failed" | "reconnect" | "connect" | "ready" | "rejection";
 function requestDiagnostic(msg: Partial<BridgeMessage> & { type: string }) {
   const operation = "op" in msg ? msg.op : undefined;
@@ -543,6 +544,8 @@ export class RuntimeClient {
   private cloudTargetRefreshPromise: Promise<boolean> | null = null;
   private cloudRefreshFailures = 0;
   private cloudConnectFailures = 0;
+  private directReadyTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly readyWaiters = new Set<(error?: Error) => void>();
 
   constructor(
     target: RuntimeConnectionTarget = { kind: "local" },
@@ -563,6 +566,39 @@ export class RuntimeClient {
 
   get executionIdentity(): RuntimeExecutionIdentity {
     return runtimeExecutionIdentity(this.connectionTarget);
+  }
+
+  /** Socket construction is not readiness. Startup reads wait outside the RPC
+   * queue until the actor and exact boot handshake have both completed. */
+  waitUntilReady(options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<void> {
+    if (this._disposed) return Promise.reject(new Error("Client disposed"));
+    if (options.signal?.aborted) return Promise.reject(makeRequestAbortError("runtime readiness"));
+    if (this._rejected) return Promise.reject(new Error(this.lastRejection?.message || "Runtime connection rejected"));
+    if (this._status === "connected" && this.isOpen()) return Promise.resolve();
+    const identity = runtimeExecutionKey(this.executionIdentity);
+    return new Promise<void>((resolve, reject) => {
+      const finish = (error?: Error) => {
+        clearTimeout(timer);
+        this.readyWaiters.delete(finish);
+        offStatus(); offRejection(); offIdentity();
+        options.signal?.removeEventListener("abort", abort);
+        if (error) reject(error); else resolve();
+      };
+      const check = () => {
+        if (this._rejected) finish(new Error(this.lastRejection?.message || "Runtime connection rejected"));
+        else if (this._status === "connected" && this.isOpen()) finish();
+      };
+      const abort = () => finish(makeRequestAbortError("runtime readiness"));
+      const timer = setTimeout(() => finish(new CloudRuntimeAccessError({ code: "cloud_actor_runtime_unavailable", status: 503 })), options.timeoutMs ?? 30_000);
+      const offStatus = this.onStatusChange(check);
+      const offRejection = this.onConnectionRejected(check);
+      const offIdentity = this.onExecutionIdentityChange(next => {
+        if (runtimeExecutionKey(next) !== identity) finish(new Error("Runtime execution identity changed while connecting"));
+      });
+      this.readyWaiters.add(finish);
+      options.signal?.addEventListener("abort", abort, { once: true });
+      check();
+    });
   }
 
   private engineCapabilities = new Set<string>();
@@ -676,7 +712,19 @@ export class RuntimeClient {
       return;
     }
     this.pendingWs = ws;
-
+    if (this.connectionTarget.kind === "cloud" && this.connectionTarget.channel === "direct-provider-websocket") {
+      this.clearDirectReadyTimer();
+      this.directReadyTimer = setTimeout(() => {
+        this.directReadyTimer = null;
+        if (this._disposed || this._rejected || targetEpoch !== this.connectionTargetEpoch || this.handshakeReady ||
+            this.pendingWs !== ws && this.ws !== ws) return;
+        this.cloudDiagnostic("close", { class: "direct_ready_timeout", stage: this.pendingWs === ws ? "upgrade" : "handshake" });
+        if (this.pendingWs === ws) this.pendingWs = null;
+        if (this.ws === ws) this.ws = null;
+        try { ws.close(); } catch { /* already closed */ }
+        this.afterDisconnect();
+      }, CLOUD_DIRECT_READY_MS);
+    }
     ws.onopen = () => {
       // If we were disposed (or another socket beat us to it) while
       // pending, drop this one rather than promoting it.
@@ -715,6 +763,7 @@ export class RuntimeClient {
       const wasPending = this.pendingWs === ws;
       if (wasPending) this.pendingWs = null;
       if (this.ws !== ws && !wasPending) return;
+      this.clearDirectReadyTimer();
       this.cloudDiagnostic("close", { ...cloudBridgeCloseDiagnostic(event?.code, event?.reason),
         stage: wasPending ? "upgrade" : this.handshakeReady ? "ready" : "handshake" });
       if (this.ws === ws) this.ws = null;
@@ -990,6 +1039,7 @@ export class RuntimeClient {
     options: { refreshCloudTarget?: boolean } = {},
   ): Promise<void> {
     if (this._disposed) return;
+    this.clearDirectReadyTimer();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -1047,6 +1097,8 @@ export class RuntimeClient {
 
   dispose(): void {
     this._disposed = true;
+    this.clearDirectReadyTimer();
+    for (const finish of this.readyWaiters) finish(new Error("Client disposed"));
     if (this.connectionTargetExpiryTimer) {
       clearTimeout(this.connectionTargetExpiryTimer);
       this.connectionTargetExpiryTimer = null;
@@ -1091,7 +1143,7 @@ export class RuntimeClient {
   private diagnosticScope(): CloudDiagnosticScope | undefined {
     const target = this.connectionTarget;
     return target.kind === "cloud" ? { workspaceId: target.workspaceId, generation: target.generation,
-      connectionSequence: target.connectionSequence } : undefined;
+      connectionSequence: target.connectionSequence, channel: target.channel } : undefined;
   }
   private cloudDiagnostic(event: CloudDiagnosticEvent, data: Record<string, string | number | null | undefined>,
     scope = this.diagnosticScope()): void {
@@ -1156,6 +1208,7 @@ export class RuntimeClient {
       if (!actorConfirmed || cloudRuntimeBootScope(this.connectionTarget) && !this.activatedCloudBinding) return;
       if (this._disposed || this.ws !== socket || socket?.readyState !== WebSocket.OPEN || this._rejected) return;
       this.handshakeReady = true;
+      this.clearDirectReadyTimer();
       this.cloudConnectFailures = 0;
       this._engineConnected = true;
       this.reconnectAttempts = 0;
@@ -1228,6 +1281,7 @@ export class RuntimeClient {
     if (msg.type === "CONNECTION_REJECTED") {
       const m = msg as { reason?: string; message?: string };
       this._rejected = true;
+      this.clearDirectReadyTimer();
       this.lastRejection = {
         reason: m.reason ?? "unknown",
         message: m.message ?? "",
@@ -1272,6 +1326,7 @@ export class RuntimeClient {
    *  reject in-flight RPCs (soft-fail), schedule a reconnect, expire the
    *  queue. The caller has already cleared its transport slot. */
   private afterDisconnect(): void {
+    this.clearDirectReadyTimer();
     this.handshakeReady = false;
     this.setStatus("disconnected");
     this._engineConnected = false;
@@ -1462,6 +1517,7 @@ export class RuntimeClient {
   }
 
   private armConnectionTargetExpiry(): void {
+    this.clearDirectReadyTimer();
     this.connectionTargetEpoch += 1;
     this.expiredConnectionTargetEpoch = -1;
     if (this.connectionTargetExpiryTimer) {
@@ -1586,10 +1642,16 @@ export class RuntimeClient {
   }
   private rejectCloudConnection(failure: CloudRuntimeAccessError): void {
     this._rejected = true;
+    this.clearDirectReadyTimer();
     this.lastRejection = { reason: `cloud-${failure.category}`, message: failure.message, code: failure.code };
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.setStatus("disconnected");
     for (const listener of this.rejectionListeners) listener(this.lastRejection);
+  }
+
+  private clearDirectReadyTimer(): void {
+    if (this.directReadyTimer) clearTimeout(this.directReadyTimer);
+    this.directReadyTimer = null;
   }
 }

@@ -66,6 +66,77 @@ async function syncDirectory(file: string): Promise<void> {
   try { await handle.sync(); } finally { await handle.close(); }
 }
 
+async function moveRegular(source: string, destination: string, maxBytes: number): Promise<void> {
+  const { handle } = await readHandle(source, maxBytes);
+  try { await directory(path.dirname(destination)); await fs.rename(source, destination); }
+  finally { await handle.close(); }
+}
+
+/** Boat restore does not preserve children reliably when their directory is
+ * renamed. Keep the published directories in place, invalidate the manifest
+ * before replacing parts, and publish that regular file last. */
+async function publishCheckpoint(root: string, staging: string, manifest: CloudLocalCommandCheckpointManifest,
+  assertFrozen: () => void): Promise<void> {
+  const parent = path.dirname(root), backup = path.join(parent, `.previous-checkpoint-${randomUUID()}`);
+  for (const file of [root, path.join(root, "ledger"), path.join(root, "normal")]) {
+    await fs.mkdir(file, { recursive: true, mode: 0o700 }); await directory(file);
+  }
+  await syncDirectory(root); await syncDirectory(parent);
+  await fs.mkdir(backup, { mode: 0o700 });
+  const oldParts: string[] = [], newParts: string[] = [];
+  let oldManifest = false, newManifest = false, keepBackup = false;
+  try {
+    for (const kind of ["ledger", "normal"]) await fs.mkdir(path.join(backup, kind), { mode: 0o700 });
+    assertFrozen();
+    try {
+      await moveRegular(path.join(root, "manifest.json"), path.join(backup, "manifest.json"), MAX_MANIFEST_BYTES);
+      oldManifest = true;
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    await syncDirectory(root); await syncDirectory(backup);
+    for (const kind of ["ledger", "normal"]) {
+      for (const name of (await fs.readdir(path.join(root, kind))).sort()) {
+        if (!/^[0-9]{6}\.part$/.test(name)) invalid();
+        assertFrozen();
+        const relative = `${kind}/${name}`;
+        await moveRegular(path.join(root, relative), path.join(backup, relative), PART_BYTES);
+        oldParts.push(relative);
+      }
+      await syncDirectory(path.join(root, kind)); await syncDirectory(path.join(backup, kind));
+    }
+    for (const file of manifest.files) {
+      for (const part of file.parts) {
+        assertFrozen();
+        await moveRegular(path.join(staging, part.path), path.join(root, part.path), PART_BYTES);
+        newParts.push(part.path);
+      }
+      await syncDirectory(path.join(root, file.kind));
+    }
+    assertFrozen();
+    await moveRegular(path.join(staging, "manifest.json"), path.join(root, "manifest.json"), MAX_MANIFEST_BYTES);
+    newManifest = true;
+    await syncDirectory(root); await syncDirectory(parent);
+  } catch (error) {
+    try {
+      if (newManifest) await fs.unlink(path.join(root, "manifest.json"));
+      await syncDirectory(root);
+      for (const relative of newParts) await fs.unlink(path.join(root, relative));
+      for (const relative of oldParts) await moveRegular(path.join(backup, relative), path.join(root, relative), PART_BYTES);
+      for (const kind of ["ledger", "normal"]) await syncDirectory(path.join(root, kind));
+      if (oldManifest) await moveRegular(path.join(backup, "manifest.json"), path.join(root, "manifest.json"), MAX_MANIFEST_BYTES);
+      await syncDirectory(root); await syncDirectory(parent);
+    } catch {
+      // An incomplete rollback must not expose a mixed pair as a checkpoint.
+      // Retain the backup for diagnosis instead of deleting the predecessor.
+      keepBackup = true;
+      await fs.unlink(path.join(root, "manifest.json")).catch(() => undefined);
+      await syncDirectory(root).catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    if (!keepBackup) await fs.rm(backup, { recursive: true, force: true });
+  }
+}
+
 /** This digest is engine-private. It is not a CP claim that a wire descriptor
  * reconstructs the native scope or proves predecessor retirement. */
 export function cloudLocalCommandSealInventory(db: Sqlite.Database, seal: Pick<CloudLocalCommandWriterSeal,
@@ -171,19 +242,9 @@ export async function captureCloudLocalCommandCheckpoint(input: { root: string; 
     if (bytes.length > MAX_MANIFEST_BYTES) invalid();
     await writeDurable(path.join(staging, "manifest.json"), bytes); await syncDirectory(staging);
     input.assertFrozen();
-    const backup = path.join(parent, `.previous-checkpoint-${randomUUID()}`);
-    let moved = false;
-    try {
-      try { await directory(root); await fs.rename(root, backup); moved = true; }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-      await fs.rename(staging, root); await syncDirectory(parent);
-    } catch (error) {
-      if (moved) await fs.rename(backup, root).catch(() => {});
-      throw error;
-    }
-    if (moved) await fs.rm(backup, { recursive: true, force: true });
+    await publishCheckpoint(root, staging, manifest, input.assertFrozen);
     return manifest;
-  } catch (error) { await fs.rm(staging, { recursive: true, force: true }); throw error; }
+  } finally { await fs.rm(staging, { recursive: true, force: true }); }
 }
 
 /** Private restored candidates are never runnable writer authority. Return

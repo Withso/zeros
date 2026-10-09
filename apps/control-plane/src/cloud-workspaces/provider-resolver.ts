@@ -2,6 +2,7 @@ import type pg from "pg";
 
 import { bindCloudAllocationProvider } from "./allocation-provider.js";
 import { withSystemTx } from "../db.js";
+import { withRetryableSystemTx } from "../db-retry.js";
 import {
   CloudWorkspaceProviderRegistry,
   type CloudWorkspaceProviderPurpose,
@@ -118,7 +119,14 @@ export class DatabaseCloudWorkspaceProviderResolver implements CloudWorkspacePro
     generation: number;
     purpose: CloudWorkspaceProviderPurpose;
   }): Promise<CloudWorkspaceProviderResolution> {
-    const row = await withSystemTx(this.pool, async (tx) => {
+    const row = await withRetryableSystemTx(this.pool, async (tx) => {
+      // Joined row marks do not establish a parent-first acquisition order.
+      // Heartbeat owns W before updating G (including an empty ports census),
+      // so acquire O -> W explicitly before the generation/connection locks.
+      if (!(await tx.query("SELECT 1 FROM organizations WHERE id=$1 FOR SHARE", [input.organizationId])).rowCount)
+        return null;
+      if (!(await tx.query("SELECT 1 FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR SHARE",
+        [input.workspaceId, input.organizationId])).rowCount) return null;
       const result = await tx.query<ResolvedRow>(
         `SELECT connection.id AS connection_id, connection.org_id,
                 connection.provider, connection.owner_kind,

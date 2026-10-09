@@ -18,7 +18,7 @@ const target = () => ({ ...scope, kind: "cloud" as const, channel: "direct-provi
 const descriptor = () => { const { bootId: _boot, writerEpoch: _writer, fundingOwnerUserId: _owner, fundingOwnerEpoch: _epoch, ...value } = target(); return value; };
 class Socket {
   static OPEN = 1; static CONNECTING = 0; static CLOSED = 3; static instances: Socket[] = [];
-  readyState = 0; sent: Record<string, unknown>[] = [];
+  readyState = 0; sent: Record<string, unknown>[] = []; closeCount = 0;
   onopen: (() => void) | null = null; onclose: ((event: { code: number; reason: string }) => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null; onerror: (() => void) | null = null;
   constructor(readonly url: string, readonly protocols?: string[]) { Socket.instances.push(this); }
@@ -26,7 +26,7 @@ class Socket {
     if (message.type === "WORKSPACE_REQUEST" && message.op === "workspace.list") this.receive({ type: "WORKSPACE_RESPONSE", op: message.op, requestId: message.id, result: { workspaces: [] } }); }
   receive(value: Record<string, unknown>) { this.onmessage?.({ data: JSON.stringify({ id: uuid(99), source: "engine", timestamp: now, ...value }) }); }
   open() { this.readyState = 1; this.onopen?.(); }
-  close() { this.readyState = 3; }
+  close() { this.closeCount++; this.readyState = 3; }
 }
 let client: RuntimeClient | undefined;
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(now); vi.stubGlobal("window", globalThis); vi.stubGlobal("WebSocket", Socket);
@@ -80,6 +80,72 @@ describe("negotiated direct cloud connection", () => {
     await vi.advanceTimersByTimeAsync(1_000); expect(refresh).toHaveBeenCalledOnce();
     expect(Socket.instances[1]?.url).toBe("wss://api.zeros.test/v1/cloud-workspaces/bridge");
     expect(Socket.instances[1]?.protocols).not.toEqual(socket.protocols);
+  });
+  it.each([false, true])("falls back within five seconds when direct readiness stalls (socket open: %s)", async transportOpen => {
+    const first = descriptor(); const { remotePort: _port, ...relay } = first;
+    const refresh = vi.fn(async () => ({ ...relay, channel: "control-plane-websocket" as const,
+      url: "wss://api.zeros.test/v1/cloud-workspaces/bridge", cloudToken: `zwa_${"b".repeat(43)}`, connectionSequence: 2 }));
+    client = new RuntimeClient(first, { refreshCloudConnectionTarget: refresh }); await client.connect();
+    const direct = Socket.instances[0]!;
+    if (transportOpen) { direct.open(); await Promise.resolve(); }
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(refresh).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(first);
+    expect(direct.closeCount).toBe(1);
+    const fallback = Socket.instances[1]!;
+    expect(fallback.url).toBe("wss://api.zeros.test/v1/cloud-workspaces/bridge");
+    direct.open(); direct.receive({ type: "ENGINE_READY", capabilities: ["cloud.localCommands.v1"], cloudLocalCommands: binding });
+    expect(client!.status).not.toBe("connected");
+    fallback.open(); fallback.receive({ type: "ENGINE_READY", capabilities: ["cloud.localCommands.v1"], cloudLocalCommands: binding });
+    await Promise.resolve();
+    expect(client!.status).toBe("connected");
+  });
+  it("breaks the exact boot-scoped stream before refreshing and never replays its in-flight work", async () => {
+    const first = descriptor(); const { remotePort: _port, ...relay } = first;
+    const next = { ...relay, channel: "control-plane-websocket" as const,
+      url: "wss://api.zeros.test/v1/cloud-workspaces/bridge", cloudToken: `zwa_${"b".repeat(43)}`, connectionSequence: 2 };
+    let deliver!: (value: typeof next) => void;
+    const refresh = vi.fn(() => new Promise<typeof next>(resolve => { deliver = resolve; }));
+    client = new RuntimeClient(first, { refreshCloudConnectionTarget: refresh });
+    await client.connect(); const original = Socket.instances[0]!; original.open();
+    original.receive({ type: "ENGINE_READY", capabilities: ["cloud.localCommands.v1"], cloudLocalCommands: binding });
+    await Promise.resolve();
+    const pending = client.request({ type: "WORKSPACE_REQUEST", op: "file.write", params: { path: "a", content: "one" } });
+    void pending.catch(() => {});
+    const reconnecting = client.forceReconnect();
+    expect(original.closeCount).toBe(1);
+    await expect(pending).rejects.toMatchObject({ code: "ENGINE_SWAPPING" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(first); expect(Socket.instances).toHaveLength(1);
+    expect(client.status).not.toBe("connected");
+    deliver(next); await reconnecting;
+    const successor = Socket.instances[1]!; successor.open();
+    successor.receive({ type: "ENGINE_READY", capabilities: ["cloud.localCommands.v1"], cloudLocalCommands: binding });
+    await Promise.resolve();
+    original.onclose?.({ code: 1008, reason: "client authority revoked" });
+    expect(client.status).toBe("connected"); expect(client.lastRejection).toBeNull();
+    expect(successor.sent.some(message => message.op === "file.write")).toBe(false);
+  });
+  it("rejects readiness for the former execution identity and cancels its direct deadline", async () => {
+    const refresh = vi.fn(); client = new RuntimeClient(descriptor(), { refreshCloudConnectionTarget: refresh });
+    await client.connect(); const original = Socket.instances[0]!;
+    const waiting = client.waitUntilReady(); const refused = expect(waiting).rejects.toThrow(/identity changed/);
+    await client.setConnectionTarget({ kind: "local" }); await refused;
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(refresh).not.toHaveBeenCalled(); expect(original.readyState).toBe(Socket.CLOSED);
+  });
+  it("preserves explicit break-and-reconnect for legacy cloud targets without an activated boot scope", async () => {
+    const { bootScope: _boot, remotePort: _port, ...first } = descriptor();
+    const legacy = { ...first, channel: "control-plane-websocket" as const, url: "wss://api.zeros.test/v1/cloud-workspaces/bridge" };
+    const refresh = vi.fn(async () => ({ ...legacy, connectionSequence: 2, cloudToken: `zwa_${"b".repeat(43)}` }));
+    client = new RuntimeClient(legacy, { refreshCloudConnectionTarget: refresh });
+    await client.connect(); const original = Socket.instances[0]!; original.open(); await Promise.resolve();
+    const replacing = client.forceReconnect(); await vi.advanceTimersByTimeAsync(0);
+    expect(original.closeCount).toBe(1); await replacing;
+    expect(client.status).toBe("connecting"); expect(refresh).toHaveBeenCalledOnce();
+    const next = Socket.instances[1]!; next.open(); await Promise.resolve();
+    expect(client.status).toBe("connected"); expect(client.activatedCloudAgentBootBinding).toBeNull();
   });
   it("latches direct authority denial without a fallback admission", async () => {
     const refresh = vi.fn(); client = new RuntimeClient(descriptor(), { refreshCloudConnectionTarget: refresh }); await client.connect();

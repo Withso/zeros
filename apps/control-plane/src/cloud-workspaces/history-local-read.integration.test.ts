@@ -51,6 +51,12 @@ suite("passive current-head cloud history", () => {
     await pool.query("UPDATE cloud_workspaces SET agent_command_mode='boot-owner-v1',agent_boot_id=$2 WHERE id=$1", [workspace.workspaceId, bindingId]);
   });
   const scope = () => ({ workspaceId: workspace.workspaceId, organizationId: workspace.organizationId, accountUserId: workspace.userId });
+  it("distinguishes a missing current-head conversation while preserving workspace access refusal", async () => {
+    await expect(history.messages({ ...scope(), chatId: "missing", limit: 100 })).rejects.toMatchObject({ status: 404, code: "cloud_conversation_not_found" });
+    const other = await seedReadyCloudWorkspace(pool);
+    await expect(history.messages({ ...scope(), accountUserId: other.userId, chatId: "missing", limit: 100 })).rejects.toMatchObject({ status: 404, code: "cloud_workspace_not_found" });
+    await expect(history.messages({ ...scope(), workspaceId: randomUUID(), chatId: "missing", limit: 100 })).rejects.toMatchObject({ status: 404, code: "not_found" });
+  });
   const boot = () => ({ organizationId: workspace.organizationId, workspaceId: workspace.workspaceId, generation: 1,
     engineInstanceId: workspace.engineInstanceId, bootId, writerEpoch, fundingOwnerUserId: workspace.userId, fundingOwnerEpoch: 1 });
   const parent = (outboxSequence = 2) => ({ organizationId: workspace.organizationId, workspaceId: workspace.workspaceId, writerEpoch, outboxSequence });

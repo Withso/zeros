@@ -98,6 +98,8 @@ export async function openCloudRuntime(
   try {
     await client.connect();
     checkConnection();
+    await client.waitUntilReady({ signal: options?.signal });
+    checkConnection();
     listeners.push(installCloudGithubNative(client, { ...target, generation: descriptor.generation }));
     const workspaces = await bridgeWorkspaceList(client, {});
     checkConnection();
