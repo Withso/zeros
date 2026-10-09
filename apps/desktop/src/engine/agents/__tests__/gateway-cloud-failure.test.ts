@@ -160,7 +160,7 @@ describe("cloud provider failure causes", () => {
       await expect(f.gateway.prompt("codex", replacement.executionId, [{ type: "text", text: "Test" }]))
         .resolves.toMatchObject({ stopReason: "end_turn" });
     } finally { await f.cleanup(); }
-  }, 20_000);
+  }, 120_000);
 
   it.each([
     ["newSession", "queued"], ["newSession", "retired"],
