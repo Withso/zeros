@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
 
 const ROLES = [
   ["./cloud-qualification-runtime.ts", "createCloudQualificationRuntime"],
@@ -10,23 +9,29 @@ const ROLES = [
 
 /** Loads the fixed TypeScript role probes through the shipped tsx CommonJS
  * hook. The worker package is CommonJS, where tsx's ESM hook cannot load their
- * extensionless graphs. esbuild's transform service is a child of the original
- * controller that no role launched or retires, so it stops before any role
- * inspects custody; compiled modules keep working without it. */
+ * extensionless graphs. esbuild's default worker-thread service would leave a
+ * child of the original controller that no role launched or retires, and
+ * stopping it does not wait for its exit. One-shot mode reaps each transform's
+ * child before require returns; esbuild reads this setting when it loads. */
 export async function loadCloudQualificationRoles() {
-  const { register } = await import("tsx/cjs/api");
-  const api = register({ namespace: randomUUID() });
+  const prior = process.env.ESBUILD_WORKER_THREADS;
+  process.env.ESBUILD_WORKER_THREADS = "0";
   try {
-    const roles = Object.fromEntries(ROLES.map(([file, name]) => {
-      const role = api.require(file, import.meta.url)[name];
-      if (typeof role !== "function") throw new Error("Cloud qualification role is unavailable");
-      return [name, role];
-    }));
-    const tsx = createRequire(createRequire(import.meta.url).resolve("tsx/package.json"));
-    await tsx("esbuild").stop();
-    return { roles, unregister: () => api.unregister() };
-  } catch (error) {
-    api.unregister();
-    throw error;
+    const { register } = await import("tsx/cjs/api");
+    const api = register({ namespace: randomUUID() });
+    try {
+      const roles = Object.fromEntries(ROLES.map(([file, name]) => {
+        const role = api.require(file, import.meta.url)[name];
+        if (typeof role !== "function") throw new Error("Cloud qualification role is unavailable");
+        return [name, role];
+      }));
+      return { roles, unregister: () => api.unregister() };
+    } catch (error) {
+      api.unregister();
+      throw error;
+    }
+  } finally {
+    if (prior === undefined) delete process.env.ESBUILD_WORKER_THREADS;
+    else process.env.ESBUILD_WORKER_THREADS = prior;
   }
 }
