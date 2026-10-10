@@ -150,7 +150,7 @@ beforeEach(async () => {
   vm.execute.mockImplementation((executable: string, args: string[]) => {
     const success = { status: 0, signal: null, stdout: "", stderr: "" };
     if (executable === "/usr/bin/python3") return success;
-    if (args[0] === `${runtime.libRoot}/cloud-engine-launcher.mjs` && args[1] === "--qualify") {
+    if (args[0] === `${runtime.libRoot}/runtime-self-test.mjs` && args[1] === "--host-qualify") {
       const view = prepareCloudEngineView(runtime, {}, "qualify", undefined, undefined, resourceProjection);
       const releaseView = vi.fn(() => view.releaseView?.());
       const result = qualified().finally(releaseView);

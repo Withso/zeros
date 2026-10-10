@@ -4,12 +4,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { closeSync, constants, fchmodSync, fchownSync, lstatSync, mkdirSync, mkdtempSync, openSync,
-  readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { closeSync, constants, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync,
+  readFileSync, readdirSync, realpathSync, rmSync, statfsSync, writeSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { adoptCloudEngineState } from "./prepare-cloud-image-files.mjs";
+import { CLOUD_HOST_LIMITS, CloudDelegatedCgroups } from "./cloud-engine-cgroup.mjs";
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 
 export const RUNTIME_SELF_TEST_CHECKS = Object.freeze([
@@ -115,13 +116,129 @@ export async function runSelfTestChecks(checks) {
   return selfTestDiagnostic(results);
 }
 
-function command(executable, args, environment, timeout = 20_000, maxBuffer = MAX_OUTPUT) {
+function command(executable, args, environment, timeout = 20_000, maxBuffer = MAX_OUTPUT, lock) {
   const child = spawnSync(executable, args, { cwd: "/", env: environment, encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"], timeout, maxBuffer, killSignal: "SIGKILL" });
+    stdio: ["ignore", "pipe", "pipe", ...(lock === undefined ? [] : [lock])], timeout, maxBuffer, killSignal: "SIGKILL" });
   assert.equal(child.error, undefined);
   assert.equal(child.signal, null);
   assert.equal(child.status, 0);
   return child.stdout;
+}
+
+const SETUP_LOCK = "/run/zeros/setup.lock";
+const sameEntry = (left, right) => left.dev === right.dev && left.ino === right.ino &&
+  left.uid === right.uid && left.gid === right.gid && left.mode === right.mode && left.nlink === right.nlink;
+
+function setupLockStat(fd) {
+  for (let directory = path.dirname(SETUP_LOCK); ; directory = path.dirname(directory)) {
+    const stat = lstatSync(directory);
+    assert(stat.isDirectory() && !stat.isSymbolicLink() && stat.uid === 0 && stat.gid === 0 && !(stat.mode & 0o022));
+    assert.equal(realpathSync(directory), directory);
+    if (directory === "/") break;
+  }
+  const stat = fstatSync(fd);
+  // The original installer flock may precede umask077. Reuse safe original
+  // modes without changing the lock's bytes, inode, owner or mode.
+  assert(stat.isFile() && stat.uid === 0 && stat.gid === 0 && stat.nlink === 1 && stat.size === 0 &&
+    [0o600, 0o640, 0o644].includes(stat.mode & 0o7777));
+  assert(sameEntry(stat, lstatSync(SETUP_LOCK)));
+  assert.equal(realpathSync(SETUP_LOCK), SETUP_LOCK);
+  return stat;
+}
+
+function lockCommand(fd) {
+  const result = spawnSync("/usr/bin/flock", ["--exclusive", "--nonblock", "--conflict-exit-code", "73", "3"], {
+    cwd: "/", env: { PATH: "/usr/bin:/bin", LANG: "C" }, stdio: ["ignore", "pipe", "pipe", fd],
+    timeout: 5000, maxBuffer: 4096,
+  });
+  assert.equal(result.error, undefined); assert.equal(result.signal, null);
+  assert.equal(result.stdout.length, 0); assert.equal(result.stderr.length, 0);
+  return result.status;
+}
+
+/** The original root setup lock outlives every offline probe and root wrapper.
+ * No lock descriptor is delivered to a non-root engine child. */
+export function acquireSelfTestSetupLock() {
+  const fd = openSync(SETUP_LOCK, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+  try {
+    const original = setupLockStat(fd);
+    assert.equal(lockCommand(fd), 0);
+    assert(sameEntry(original, setupLockStat(fd)));
+    assertSelfTestSetupLock(fd);
+    return fd;
+  } catch (error) { closeSync(fd); throw error; }
+}
+
+export function assertSelfTestSetupLock(fd) {
+  const original = setupLockStat(fd);
+  const assertHeld = () => {
+    // fdinfo describes this open file description, so a different process's
+    // lock on the same inode cannot stand in for the inherited original lock.
+    const file = `/proc/self/fdinfo/${fd}`;
+    assert.equal(statfsSync(file).type, 0x9fa0);
+    const source = readFileSync(file, "utf8");
+    assert(source.length <= 4096);
+    const locks = source.split("\n").filter(line => line.startsWith("lock:"));
+    assert.equal(locks.length, 1);
+    const lock = /^lock:\s+[0-9]+:\s+FLOCK\s+ADVISORY\s+WRITE\s+-?[0-9]+\s+[a-f0-9]+:[a-f0-9]+:([0-9]+)\s+0\s+EOF$/.exec(locks[0]);
+    assert(lock && lock[1] === String(original.ino));
+  };
+  assertHeld();
+  const probe = openSync(SETUP_LOCK, constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    assert(sameEntry(original, setupLockStat(probe)));
+    assert.equal(lockCommand(probe), 73);
+    assert(sameEntry(original, setupLockStat(fd)));
+    assertHeld();
+  } finally { closeSync(probe); }
+}
+
+/** Only the small fixed root launch wrapper joins the original protected host.
+ * Keep the importing self-test orchestrator outside its 256 MiB budget. */
+export function enterSelfTestHost(runtime) {
+  assert(process.platform === "linux" && [process.getuid?.(), process.geteuid?.(), process.getgid?.(), process.getegid?.()]
+    .every(id => id === 0));
+  assert.equal(runtime.cgroupRoot, "/sys/fs/cgroup/system.slice/zeros-host.service");
+  const delegated = new CloudDelegatedCgroups({ runtime });
+  const host = `${runtime.cgroupRoot}/host`;
+  const expected = `0::${host.slice("/sys/fs/cgroup".length)}`;
+  const membership = delegated.readMembership().trim();
+  assert(/^0::\/[^\n\r\0]*$/.test(membership) && membership.length <= 8192);
+  assert(!membership.startsWith(`0::${runtime.cgroupRoot.slice("/sys/fs/cgroup".length)}/`) || membership === expected);
+  delegated.assertRetired();
+  assert(delegated.leaves().includes("host") && delegated.io.children(host).length === 0);
+  assert.equal(delegated.io.read(runtime.cgroupRoot, "cgroup.procs"), "");
+  const controllers = delegated.io.read(runtime.cgroupRoot, "cgroup.subtree_control").split(/\s+/);
+  assert(["cpu", "memory", "pids"].every(controller => controllers.includes(controller)));
+  for (const [name, value] of Object.entries(CLOUD_HOST_LIMITS)) assert.equal(delegated.io.read(host, name), value);
+  const original = [runtime.cgroupRoot, host].map(directory => {
+    const stat = lstatSync(directory);
+    assert(stat.isDirectory() && !stat.isSymbolicLink() && stat.uid === 0 && stat.gid === 0 && !(stat.mode & 0o022));
+    return stat;
+  });
+  const verifyDirectories = () => [runtime.cgroupRoot, host].forEach((directory, index) => {
+    assert.equal(realpathSync(directory), directory);
+    assert(sameEntry(original[index], lstatSync(directory)));
+  });
+  const control = `${host}/cgroup.procs`;
+  const fd = openSync(control, constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    assert(stat.isFile() && stat.uid === 0 && stat.gid === 0 && stat.nlink === 1 && !(stat.mode & 0o022));
+    assert.equal(statfsSync(`/proc/self/fd/${fd}`).type, 0x63677270);
+    assert(sameEntry(stat, lstatSync(control)));
+    verifyDirectories();
+    // Zero identifies this exact calling process, with no numeric PID adoption.
+    assert.equal(writeSync(fd, "0"), 1);
+    assert.equal(delegated.readMembership().trim(), expected);
+    verifyDirectories();
+    assert(sameEntry(stat, fstatSync(fd)) && sameEntry(stat, lstatSync(control)));
+  } finally { closeSync(fd); }
+}
+
+function selfTestLauncher(runtime, operation, environment, timeout = 30_000, maxBuffer = MAX_OUTPUT) {
+  return command(runtime.node, [`${runtime.root}/lib/zeros/runtime-self-test.mjs`, `--host-${operation}`],
+    environment, timeout, maxBuffer, 3);
 }
 
 /** Importability does not prove the platform payload survived bundling. Run
@@ -197,7 +314,7 @@ export function runtimeEngineLifecycleSmoke(runtime, environment) {
   // the v4 engine view, including direct non-root owned-process/service probes.
   // Manifest/receipt identity is checked separately; this neither consumes
   // workspace admission nor starts a model session.
-  const stdout = command(runtime.node, [`${runtime.root}/lib/zeros/cloud-engine-launcher.mjs`, "--qualify"], environment, 330_000, 8 * 1024 * 1024);
+  const stdout = selfTestLauncher(runtime, "qualify", environment, 330_000, 8 * 1024 * 1024);
   return engineLifecyclePassed(stdout);
 }
 
@@ -259,7 +376,7 @@ async function offlineChecks(environment) {
       internal(createRequire(sdk).resolve("@cursor/sdk-linux-x64/package.json"));
       assert(Object.keys(fromWorker("@cursor/sdk")).length > 0);
       prepareSelfTestLayout(runtime);
-      const output = command(runtime.node, [`${runtime.libRoot}/cloud-engine-launcher.mjs`, "--probe-cursor"], environment, 30_000);
+      const output = selfTestLauncher(runtime, "probe-cursor", environment);
       assert.equal(output, "cursor_payload_ok");
       return true;
     },
@@ -288,29 +405,51 @@ async function main() {
     if (probeCursorPlatformPayload(runtime.root)) process.stdout.write("cursor_payload_ok");
     return;
   }
+  if (process.argv.length === 3 && ["--host-probe-cursor", "--host-qualify"].includes(process.argv[2])) {
+    try {
+      const { runtime } = await installedRuntime();
+      assertSelfTestSetupLock(3);
+      enterSelfTestHost(runtime);
+      assertSelfTestSetupLock(3);
+      const { launchCloudEngine } = await import("./cloud-engine-launcher.mjs");
+      process.exitCode = await launchCloudEngine({ runtime, operation: process.argv[2].slice("--host-".length) });
+    } catch {
+      process.stderr.write("cloud self-test launch or retirement was not confirmed\n");
+      process.exitCode = 125;
+    }
+    return;
+  }
   let result = selfTestDiagnostic({});
   let directory;
+  let lock;
   try {
     assert.equal(process.platform, "linux"); assert.equal(process.getuid?.(), 0);
     assert.equal(process.geteuid?.(), 0);
     if (process.argv.length === 3 && process.argv[2] === "--offline-probes") {
       // The parent supplies an empty private HOME, never the VM root's HOME.
       // Its network namespace has no external interfaces/routes.
+      assertSelfTestSetupLock(3);
       result = await offlineChecks({ PATH: "/usr/bin:/bin", LANG: "C.UTF-8", HOME: process.env.HOME, TMPDIR: process.env.HOME });
     } else {
       assert.equal(process.argv.length, 2);
       const { runtime } = await installedRuntime();
+      lock = acquireSelfTestSetupLock();
+      assert(supervisorIsIdle(JSON.parse(command("/usr/bin/python3", ["-I", "/opt/zeros-bootstrap/bootstrap.py", "status"],
+        { PATH: "/usr/bin:/bin", LANG: "C.UTF-8" }, 30_000)), runtime));
+      new CloudDelegatedCgroups({ runtime }).assertRetired();
       directory = mkdtempSync("/run/zeros/runtime-smoke-");
       const child = spawnSync("/usr/bin/unshare", ["--net", "--", runtime.node, SCRIPT, "--offline-probes"], {
         cwd: "/", env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", HOME: directory, TMPDIR: directory },
-        stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", timeout: 540_000, maxBuffer: MAX_OUTPUT, killSignal: "SIGKILL",
+        stdio: ["ignore", "pipe", "pipe", lock], encoding: "utf8", timeout: 540_000, maxBuffer: MAX_OUTPUT, killSignal: "SIGKILL",
       });
+      assertSelfTestSetupLock(lock);
       if (!child.error && child.signal === null) result = parseSelfTestDiagnostic(child.stdout, child.status) ?? result;
       else result = selfTestDiagnostic({}, child.error?.code === "ETIMEDOUT");
     }
   } catch { /* No exception text, output, paths or environment reaches stdout. */ }
   finally {
     if (directory) try { rmSync(directory, { recursive: true, force: true }); } catch { result = selfTestDiagnostic({}); }
+    if (lock !== undefined) closeSync(lock);
   }
   process.stdout.write(`${JSON.stringify(result)}\n`);
   // Dependency imports may leave timers behind. This is a one-shot probe.

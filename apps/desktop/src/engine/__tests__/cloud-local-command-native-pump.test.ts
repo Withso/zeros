@@ -57,13 +57,13 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function fixture() {
+async function fixture(provider: "cursor" | "codex" | "claude" = "cursor") {
   const directory = mkdtempSync(path.join(tmpdir(), "zeros-native-pump-"));
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
   const cwd = path.join(directory, "workspace"); mkdirSync(cwd);
   const workloads = portableCloudWorkloads(deployment); cleanups.push(() => workloads.drain(workloads.fence()));
   const boundary = new CloudExecutionBoundary({projectRoot: process.cwd(), configuration: deployment, workloads});
-  const f = await testCloudBootFixture(cwd); cleanups.push(f.close);
+  const f = await testCloudBootFixture(cwd, provider); cleanups.push(f.close);
   const { fundingOwnerUserId: _owner, fundingOwnerEpoch: _epoch, bootId: _boot, writerEpoch: _writer, ...scope } = f.scope;
   const request = vi.fn(async (operation: string, input: unknown) => {
     if (operation === "bootstrap" || operation === "sync") return f.response;
@@ -77,7 +77,7 @@ async function fixture() {
   });
   let factory!: CloudBootAgentExecutionFactory;
   const conversations = new Map([[f.input.conversationId, { id: f.input.conversationId, folder: cwd,
-    agentId: "cursor", providerBinding: null, sessionId: null, permissionMode: "auto", lastModeId: null }]]);
+    agentId: provider, providerBinding: null, sessionId: null, permissionMode: "auto", lastModeId: null }]]);
   const registration = {
     localCommandsNegotiated: () => true,
     async agentBootRequest<Operation extends CloudAgentBootOperation>(operation: Operation,
@@ -92,7 +92,7 @@ async function fixture() {
     runtimeBootId: f.scope.bootId, registration,
     legacy: f.legacy, supervisor: { onRetirementFailure: vi.fn() }, engineLive: () => true,
     isAdmittedCwd: root => root === cwd, resolveConversation: conversationId => conversations.has(conversationId)
-      ? { provider: "cursor", model: f.input.model, cwd } : null,
+      ? { provider, model: f.input.model, cwd } : null,
     history: () => ({ recordSequence: 1, eventSequence: 1 }), beforeActivate: async () => {},
     install: value => { factory = value; }, changed: vi.fn(),
     executionFor: input => pump.executionFor(input) });
@@ -125,14 +125,15 @@ async function fixture() {
     cancel: vi.fn(async (_agent: string, id: string) => {
       const execution = executions.get(id); if (execution) await cloudExecutionLifetime(execution).close();
     }),
-    setMode: vi.fn(async () => {}), updateConfig: vi.fn(async () => {}),
+    setMode: vi.fn(async (_agent: string, _id: string, _mode: string) => {}),
+    updateConfig: vi.fn(async (_agent: string, _id: string, _env: Record<string, string>) => {}),
   };
   const broadcast = vi.fn(), bindings = new Map<object, CloudBootCommandClaim>(), retirementFailure = vi.fn();
   const handleAgentMessage = vi.fn(async (message: EngineMessage, receiver: TransportClient) => {
     const claim = bindings.get(receiver)!;
     const selection = pump.admissionSelection(claim);
     const workload = await factory.launchBootSelection(selection, signal => boundary.prepare({executionId: claim.executionId,
-      actor: "agent-code", cwd, workspaceRoot: cwd, providerId: "cursor"}, {signal}));
+      actor: "agent-code", cwd, workspaceRoot: cwd, providerId: provider}, {signal}));
     const prepared = await factory.prepareBoot({ selection, workload, signal: pump.record(claim)!.controller.signal });
     const execution = cloudProviderExecution(prepared.boundary)! as CloudBootProviderExecution;
     factory.reserveBootTurn(execution, selection); executions.set(claim.executionId, execution);
@@ -153,8 +154,8 @@ async function fixture() {
     const snapshot = CloudBootCommandSnapshotSchema.parse(boot.queue.handle({ kind: "snapshot", conversationId },
       { writerEpoch: f.scope.writerEpoch, actorSessionId: admission.actor.sessionId }));
     boot.queue.handle({ kind: "mutate", mutation: { conversationId, operationId: randomUUID(), expectedRevision: snapshot.revision,
-      action: { kind: "enqueue", commandId, payload: { agentId: "cursor", model: f.input.model,
-        permissionMode: "plan", effort: "high", fast: true, modeRevision: 0, userMessageId: randomUUID(),
+      action: { kind: "enqueue", commandId, payload: { agentId: provider, model: f.input.model,
+        permissionMode: provider === "codex" ? "read-only" : "plan", effort: "high", fast: true, modeRevision: 0, userMessageId: randomUUID(),
         prompt: [{ type: "text", text: "Synthetic turn" }] } } }, admissionError: null },
       { writerEpoch: f.scope.writerEpoch, actorSessionId: admission.actor.sessionId });
     return boot.queue.handle({ kind: "claim", conversationId, claimId: randomUUID(), executionId },
@@ -209,6 +210,28 @@ describe("VM-local native command pump", () => {
     expect(f.gateway.completeCloudForeground).toHaveBeenCalledTimes(1);
     f.pump.assertDispatch(second);
   });
+  it.each([["claude", "plan"], ["codex", "read-only"], ["cursor", "plan"]] as const)(
+    "keeps %s warm reuse on separate permission and configuration ports", async (provider, mode) => {
+      const f = await fixture(provider), first = f.claim(); await f.pump.prepare(first); await f.finish(first);
+      expect(f.handleAgentMessage.mock.calls[0]![0]).toMatchObject({
+        env: { ZEROS_PERMISSION_MODE: mode, ZEROS_FAST_MODE: "1", ZEROS_THINKING_EFFORT: "high" },
+      });
+      if (provider === "claude") f.gateway.updateConfig.mockImplementation(async (_agent, _id, env) => {
+        if ("ZEROS_PERMISSION_MODE" in env) throw new Error("Cloud provider configuration requires a new credential admission");
+      });
+      const second = f.claim(first.executionId);
+      await expect(f.pump.prepare(second)).resolves.toBeUndefined();
+      expect(f.gateway.setMode).toHaveBeenCalledWith(provider, second.executionId, mode);
+      expect(f.gateway.updateConfig).toHaveBeenCalledWith(provider, second.executionId,
+        { ZEROS_FAST_MODE: "1", ZEROS_THINKING_EFFORT: "high" });
+      expect(f.gateway.setMode.mock.invocationCallOrder[0]).toBeLessThan(f.gateway.updateConfig.mock.invocationCallOrder[0]!);
+      await f.finish(second);
+      expect(f.gateway.completeCloudForeground).toHaveBeenCalledTimes(2);
+      expect(f.handleAgentMessage).toHaveBeenCalledTimes(1);
+      expect(f.gateway.endSession).not.toHaveBeenCalled();
+      expect(f.request).not.toHaveBeenCalled();
+    },
+  );
   it("reserves warm authority before mode/configuration awaits and preserves explicit Plan", async () => {
     const f = await fixture(), first = f.claim(); await f.pump.prepare(first); await f.finish(first);
     const wait = deferred(); f.gateway.setMode.mockImplementation(async () => wait.promise);

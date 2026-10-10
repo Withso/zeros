@@ -141,9 +141,10 @@ export class CloudLocalCommandNativePump {
         // The exact token exists before setMode/updateConfig can await/rebuild.
         record.reservation = this.options.gateway.reserveCloudBootTurn(parsed.data.payload.agentId, previous, selected);
         record.ownsExecution = true;
-        await this.options.gateway.setMode(parsed.data.payload.agentId, previous, env.ZEROS_PERMISSION_MODE);
+        const { ZEROS_PERMISSION_MODE: mode, ...config } = env;
+        await this.options.gateway.setMode(parsed.data.payload.agentId, previous, mode);
         this.assertPreparing(record);
-        await this.options.gateway.updateConfig(parsed.data.payload.agentId, previous, env);
+        await this.options.gateway.updateConfig(parsed.data.payload.agentId, previous, config);
       } else {
         if (previous) {
           const host = this.hosts.get(claim.conversationId);
