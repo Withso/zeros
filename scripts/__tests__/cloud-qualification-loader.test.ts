@@ -1,23 +1,31 @@
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { expect, it } from "vitest";
 
 // Real Node and the shipped tsx hook, not Vitest's transform: the engine loads
 // these probes from the CommonJS worker package with its qualification entry
-// as the main module.
+// as the main module. A fresh TMPDIR gives tsx the cold transform cache of a
+// new engine view, so esbuild really compiles every module.
 const sandbox = path.resolve("scripts/cloud-workspace-validation/sandbox");
 function child(source: string) {
-  const result = spawnSync(process.execPath, ["--input-type=module", "-e", source, sandbox], { encoding: "utf8", timeout: 120_000 });
-  expect(result.status, result.stderr).toBe(0);
-  return result.stdout;
+  const scratch = mkdtempSync(path.join(os.tmpdir(), "zeros-qualification-loader-"));
+  try {
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", source, sandbox, scratch],
+      { encoding: "utf8", timeout: 120_000, env: { ...process.env, TMPDIR: scratch } });
+    expect(result.status, result.stderr).toBe(0);
+    return result.stdout;
+  } finally { rmSync(scratch, { recursive: true, force: true }); }
 }
 
-it("loads every role probe once, without a second entry run or a live transform service", () => {
+it("loads every role probe once, without a second entry run or any lingering transform service", () => {
   const stdout = child(`
     import { execFileSync } from "node:child_process";
-    import { readdirSync, readFileSync } from "node:fs";
+    import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+    import { createRequire } from "node:module";
     import { pathToFileURL } from "node:url";
-    const sandbox = process.argv[1];
+    const [sandbox, scratch] = process.argv.slice(1);
     const live = () => process.platform === "linux"
       ? readdirSync("/proc").filter(name => /^[0-9]+$/.test(name)).filter(name => {
           try { const stat = readFileSync("/proc/" + name + "/stat", "utf8"), [state, parent] = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
@@ -28,12 +36,20 @@ it("loads every role probe once, without a second entry run or a live transform 
     process.argv[1] = sandbox + "/qualify-cloud-engine.mjs";
     const { roles, unregister } = await loadCloudQualificationRoles();
     const children = live();
+    // A later lazy compile, as during qualification, must not start a
+    // lingering transform service either.
+    const from = sandbox + "/loader.cjs", later = createRequire(from)("tsx/cjs/api").register({ namespace: "later-compile" });
+    writeFileSync(scratch + "/later.ts", "export const compiled: number = " + process.pid + ";\\n");
+    later.require(scratch + "/later.ts", from);
+    const laterChildren = live();
+    later.unregister();
     await unregister();
     await new Promise(resolve => setTimeout(resolve, 250));
-    process.stdout.write(JSON.stringify({ roles: Object.fromEntries(Object.entries(roles).map(([name, role]) => [name, typeof role])), children }) + "\\n");
+    process.stdout.write(JSON.stringify({ roles: Object.fromEntries(Object.entries(roles).map(([name, role]) => [name, typeof role])),
+      children, laterChildren, setting: process.env.ESBUILD_WORKER_THREADS ?? null }) + "\\n");
   `);
   expect(stdout.trim().split("\n")).toHaveLength(1);
-  expect(JSON.parse(stdout)).toEqual({ children: [], roles: { createCloudQualificationRuntime: "function",
+  expect(JSON.parse(stdout)).toEqual({ children: [], laterChildren: [], setting: null, roles: { createCloudQualificationRuntime: "function",
     qualifyCloudActorTools: "function", qualifyCloudCapture: "function", qualifyCloudHumanServices: "function" } });
 }, 150_000);
 
