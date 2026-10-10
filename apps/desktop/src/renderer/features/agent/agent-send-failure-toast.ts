@@ -3,9 +3,10 @@ import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/
 import { cloudCatalogGeneration, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
 import { cloudWorkspaceRestartVisible, restartCloudWorkspace } from "../../state/cloud-workspace-restart";
 import { hasCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
-import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode } from "./cloud-admission-failure";
+import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode, cloudAdmissionForTurn } from "./cloud-admission-failure";
 import { openCloudAdmissionSettings } from "./cloud-admission-status";
 import { modelsForAgent } from "./model-catalog";
+import { useSessionsStore } from "./sessions-store";
 
 export const CLOUD_RUNTIME_UPGRADE_TOOLTIP = "Gets the new cloud runtime the next time this workspace wakes";
 
@@ -92,6 +93,17 @@ function runtimeRestartAction(input: AgentSendFailureInput) {
  * fails, never from a render/effect or history hydration. Returns whether a
  * toast was emitted. Waiting leaves the message identity unconsumed. */
 export function notifyAgentSendFailure(input: AgentSendFailureInput): boolean {
+  // Admission is persistent chat state, including when the accepted prompt is
+  // still queued or restored as a draft. Its banner is the sole error surface.
+  if (isCloudWorkspace(input.folder)) {
+    const slot = useSessionsStore.getState().sessions[input.chatId];
+    const admission = slot?.cloudAdmissionFailure;
+    if (slot?.cwd === input.folder && admission && admission.code === cloudAdmissionFailureCode(input.error) &&
+        (!input.agentId || admission.agentId === input.agentId) && (!input.model || admission.model === input.model)) {
+      const banner = cloudAdmissionForTurn({ folder: input.folder, turnId: admission.turnId, current: admission });
+      if (banner && banner.kind !== "waiting") return false;
+    }
+  }
   const reason = sendFailureReason(input);
   if (reason === null) return false;
   const key = JSON.stringify([input.folder ?? null, input.chatId, input.attemptId]);

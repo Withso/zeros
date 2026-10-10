@@ -6,7 +6,6 @@ import {
   type ComponentType,
 } from "react";
 import { Button, Input } from "../../shared/ui";
-import { Checkbox } from "../../shared/ui/primitives/checkbox";
 import { toast } from "../../shared/ui/primitives/elements";
 import { useTeams } from "../team/team-store";
 import { modelsForAgent } from "../agent/model-catalog";
@@ -15,6 +14,8 @@ import { NativeBrowserAvailability } from "../agent/native-browser-availability"
 import { invalidateCloudOrganizationAgentRegistry } from "../agent/workspace-agent-registry";
 import { useCachedRead } from "../../state/use-cached-read";
 import { ProviderConnectionDialog } from "./provider-connection-dialog";
+import { CloudCredentialRemovalDialog } from "./cloud-credential-removal-dialog";
+import { useCloudCredentialRemoval } from "./use-cloud-credential-removal";
 import type { ConnectionMethod } from "./connection-methods";
 import {
   readScopedSettingsSelection,
@@ -30,7 +31,8 @@ import type { CloudProviderAuthStatus } from "@zeros/protocol/provider-auth";
 import {
   cloudOrganizationConnectionsCache,
   readCloudOrganizationConnections,
-  removeCloudOrganizationCredential,
+  cloudOrganizationCredentialRemovalTarget,
+  cloudProviderDisconnectTarget,
   saveCloudProviderCredential,
   selectCloudOrganizationCredential,
   type CloudProviderCredential,
@@ -124,7 +126,7 @@ function CloudProviderConnection({
   const [method, setMethod] = useState<ConnectionMethod>("account");
   const [displayName, setDisplayName] = useState("");
   const [token, setToken] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [connectionBusy, setBusy] = useState(false);
   const inFlight = useRef(false),
     mounted = useRef(true);
   const signIn = useRef<AbortController | null>(null);
@@ -139,10 +141,6 @@ function CloudProviderConnection({
           /^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/.test(row.value),
       ),
     [agent.id],
-  );
-  const [allModels, setAllModels] = useState(true);
-  const [allowedModels, setAllowedModels] = useState(() =>
-    models.slice(0, 32).map((row) => row.value),
   );
   const createIntent = useRef<{
     token: string;
@@ -173,8 +171,10 @@ function CloudProviderConnection({
     invalidateCloudOrganizationAgentRegistry(organizationId);
     if (mounted.current) await snapshot.refresh();
   };
+  const removal = useCloudCredentialRemoval({ userId, organizationId, active: surfaceActive, onRemoved: refresh });
+  const busy = connectionBusy || removal.pending || !surfaceActive;
   const run = async (action: () => Promise<void>) => {
-    if (inFlight.current) return;
+    if (inFlight.current || removal.isPending() || !surfaceActive || !removal.current()) return;
     inFlight.current = true;
     setBusy(true);
     try {
@@ -196,7 +196,7 @@ function CloudProviderConnection({
   };
   const connect = () =>
     run(async () => {
-      if ((!allModels && !allowedModels.length) || !snapshot.data) return;
+      if (!snapshot.data) return;
       let chosen = selected;
       if (!chosen) {
         const name =
@@ -247,8 +247,8 @@ function CloudProviderConnection({
         expectedRevision: connection?.revision ?? 0,
         credentialId: chosen.id,
         credentialRevision: chosen.revision,
-        models: allModels ? models.slice(0, 32).map(row => row.value) : allowedModels,
-        allModels,
+        models: models.slice(0, 32).map((row) => row.value),
+        allModels: true,
         consent: "zeros-managed",
       });
       if (mounted.current) {
@@ -256,13 +256,14 @@ function CloudProviderConnection({
         toast.success(`${agent.name} connected`);
       }
     });
-  const disconnect = () =>
-    run(async () => {
-      await selectCloudOrganizationCredential(organizationId, agent.id, {
-        expectedRevision: connection?.revision ?? 0,
-        credentialId: null,
-      });
-    });
+  const disconnect = async () => {
+    if (busy || inFlight.current || !connection) return;
+    await removal.start(cloudProviderDisconnectTarget(organizationId, agent.id, connection));
+  };
+  const remove = async (credential: CloudProviderCredential) => {
+    if (busy || inFlight.current) return;
+    await removal.start(cloudOrganizationCredentialRemovalTarget(organizationId, credential));
+  };
   const configure = (credential: CloudProviderCredential | null) => {
     setSelected(credential);
     setToken("");
@@ -276,14 +277,6 @@ function CloudProviderConnection({
         credential.kind === "codex-chatgpt"
         ? "account"
         : "apiKey",
-    );
-    setAllModels(credential && connection?.credentialId === credential.id ? connection.allModels === true : true);
-    setAllowedModels(
-      credential &&
-        connection?.credentialId === credential.id &&
-        connection.models.length
-        ? connection.models
-        : models.slice(0, 32).map((row) => row.value),
     );
     setOpen(true);
   };
@@ -358,14 +351,7 @@ function CloudProviderConnection({
                 <Button
                   variant="ghost"
                   disabled={busy}
-                  onClick={() =>
-                    void run(async () => {
-                      await removeCloudOrganizationCredential(
-                        organizationId,
-                        credential.id,
-                      );
-                    })
-                  }
+                  onClick={() => void remove(credential)}
                 >
                   Remove
                 </Button>
@@ -377,6 +363,8 @@ function CloudProviderConnection({
           </div>
         );
       })}
+      <CloudCredentialRemovalDialog state={removal.state} active={surfaceActive && removal.current()}
+        busy={removal.busy} onDecision={action => { void removal.decide(action); }} />
       <ProviderConnectionDialog
         provider={agent.id}
         name={agent.name}
@@ -491,45 +479,9 @@ function CloudProviderConnection({
           </div>
         )}
         <p className="text-fg2 text-xs">
-          Connecting stores this account encrypted in the cloud and authorizes
-          your selected models for your sessions on Zeros-managed computers in this
-          organization, until you disconnect.
+          Connecting stores this account encrypted in the cloud for your sessions
+          on Zeros-managed computers in this organization, until you disconnect.
         </p>
-        <label className="text-fg1 flex items-center gap-2 text-xs">
-          <Checkbox checked={allModels} disabled={busy} onChange={() => setAllModels(value => !value)} />
-          Allow all models
-        </label>
-        <p className="text-fg2 text-xs">Includes future models supported by this provider. Applies only to your own sessions.</p>
-        {!allModels && <details open>
-          <summary className="text-fg2 cursor-pointer text-xs">
-            Allowed models ({allowedModels.length})
-          </summary>
-          <div className="mt-3 flex max-h-48 flex-col gap-2 overflow-y-auto">
-            {models.map((model) => (
-              <label
-                key={model.value}
-                className="text-fg1 flex items-center gap-2 text-xs"
-              >
-                <Checkbox
-                  checked={allowedModels.includes(model.value)}
-                  disabled={
-                    busy ||
-                    (!allowedModels.includes(model.value) &&
-                      allowedModels.length >= 32)
-                  }
-                  onChange={() =>
-                    setAllowedModels((values) =>
-                      values.includes(model.value)
-                        ? values.filter((value) => value !== model.value)
-                        : [...values, model.value],
-                    )
-                  }
-                />
-                {model.label}
-              </label>
-            ))}
-          </div>
-        </details>}
         <div className="flex justify-end gap-2">
           {busy && authStatus && (
             <Button variant="secondary" onClick={() => signIn.current?.abort()}>
@@ -540,14 +492,13 @@ function CloudProviderConnection({
             disabled={
               busy ||
               !snapshot.data ||
-              (!allModels && !allowedModels.length) ||
               (!selected &&
                 !token.trim() &&
                 (method === "apiKey" || agent.id === "claude"))
             }
             onClick={() => void connect()}
           >
-            {busy ? "Connecting…" : "Connect account"}
+            {busy ? "Connecting…" : "Connect"}
           </Button>
         </div>
       </ProviderConnectionDialog>

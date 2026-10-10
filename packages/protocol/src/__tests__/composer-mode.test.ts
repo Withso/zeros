@@ -32,13 +32,24 @@ describe("native Design authoring instructions", () => {
     expect(instruction).not.toContain("Design writes require Design mode");
     expect(instruction).toContain("Provider Plan and permission settings still apply");
   });
-  it("uses API authoring when the execution boundary forbids native Design writes", () => {
+  it("keeps the cloud API authoring workflow and exact revision", () => {
     const instruction = composerModeInstruction("design", 6, "api");
     expect(instruction).toContain("design_transaction_apply");
     expect(instruction).toContain("design_frame_create");
     expect(instruction).toContain("expectedRevision=6");
-    expect(instruction).toContain("Native file writes to Design are unavailable");
     expect(instruction).not.toContain("Use your normal Read, Write, Edit");
     expect(instruction).not.toContain("No Design API apply or publish");
+  });
+  it.each(["code", "design"] as const)("states cloud %s authoring policy without claiming OS write denial", mode => {
+    const instruction = composerModeInstruction(mode, 7, "api");
+    expect(instruction).toContain("Cloud retains API authoring for now as product policy");
+    expect(instruction).toContain("The workspace VM is the isolation boundary");
+    expect(instruction).toContain("no agent sandbox");
+    expect(instruction).toContain("share the non-root engine identity");
+    expect(instruction).toContain("can read engine and other-conversation state");
+    expect(instruction).not.toContain("engine data stays private");
+    expect(instruction).not.toContain("Native file writes to Design are unavailable");
+    expect(instruction).toContain("Provider Plan and permission settings still apply");
+    expect(instruction).toContain("expectedRevision=7");
   });
 });

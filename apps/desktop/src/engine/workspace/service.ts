@@ -85,7 +85,6 @@ import {
 // exports are handed directly to the desktop save surface.
 // ──────────────────────────────────────────────────────────
 
-import { createHash } from "node:crypto";
 import type { CloudCustomizationOperation } from "@zeros/protocol/cloud-customization";
 import {
   extensionQuerySchema,
@@ -251,6 +250,8 @@ import { listMentionPaths } from "../files/mention-paths";
 import { zerosStateRoot } from "../git/state";
 import { cloudActorCan, type CloudActorRole } from "@zeros/protocol/cloud-actors";
 import { transferContextAttachment } from "../files/attachment-transfer";
+import { transferCloudAttachment } from "../files/cloud-attachment-transfer";
+import { CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
 import {
   externalizeLegacyMessageImages,
   payloadNeedsLegacyImageMigration,
@@ -2212,7 +2213,7 @@ export class WorkspaceService {
     try {
       return await request;
     } finally {
-      if (this.designSnapshotFlights.get(key) === request) {
+      if (Object.is(this.designSnapshotFlights.get(key), request)) {
         this.designSnapshotFlights.delete(key);
       }
     }
@@ -2244,7 +2245,7 @@ export class WorkspaceService {
     try {
       return await request;
     } finally {
-      if (this.designSnapshotRequestFlights.get(key) === request) {
+      if (Object.is(this.designSnapshotRequestFlights.get(key), request)) {
         this.designSnapshotRequestFlights.delete(key);
       }
     }
@@ -2275,14 +2276,14 @@ export class WorkspaceService {
     // below the engine root: lifecycle cleanup must never cross that boundary.
     // The mapping itself chooses the longest matching workspace path.
     // Use the SAME folder→id mapping the
-    // chat redaction uses (under a workspace → its id; an unmanaged folder → an
-    // ext:<hash> token or the raw string, both → null).
+    // chat restrictions use for managed folders. Process/session inputs under no
+    // workspace return null without deriving an external-folder identity.
     // An unreadable state DB degrades to the containment answer below rather
     // than throwing — callers here are gates and cleanup paths, and the old
     // root-first order never surfaced a DB error to them.
     let mapped: string | null = null;
     try {
-      mapped = this.redactChatFolderForRemote(cwdOrId, listWorkspaces({}));
+      mapped = this.managedWorkspaceTokenForFolder(cwdOrId, listWorkspaces({}));
     } catch {
       mapped = null;
     }
@@ -2346,19 +2347,12 @@ export class WorkspaceService {
     return p.replace(/^\/private(\/(?:var|tmp|etc)\/)/, "$1");
   }
 
-  /** Map an absolute-host-path chat `folder` to the SAME opaque token the
-   *  redacted workspace list uses (`workspace.id`), so a remote client never sees
-   *  a host path yet its folder still joins to a workspace (the redacted
-   *  `path = id`) for the picker / spawn. The engine root → the synthetic
-   *  `local-main` id. A folder under no managed workspace (a foreign/legacy
-   *  path) maps to a stable, non-reversible `ext:<hash>` token — still opaque,
-   *  and equal for two chats in the same folder so they group. A folder that is
-   *  already a bare workspace id (a chat created by a remote client after redaction) or empty
-   *  is passed through unchanged. */
-  private redactChatFolderForRemote(
+  /** Resolve the workspace token for ownership and remote restrictions.
+   * Unmanaged paths return null; opaque IDs and empty folders pass through. */
+  private managedWorkspaceTokenForFolder(
     folder: string,
     workspaces: Workspace[],
-  ): string {
+  ): string | null {
     if (!folder) return folder;
     // Already an opaque id (no path separator) — a web-created chat's folder, or
     // the local-main sentinel. Leave it (it's not a host path).
@@ -2376,16 +2370,11 @@ export class WorkspaceService {
         ownerPathLength = wp.length;
       }
     }
-    if (owner) return owner.id;
-    // Unknown folder: emit a stable opaque token, never the raw path.
-    return `ext:${createHash("sha1").update(f).digest("hex").slice(0, 12)}`;
+    return owner?.id ?? null;
   }
 
-  /** Redact the absolute-path `folder` of every chat row for a remote client
-   *  (resolves the workspace list ONCE for the batch). The chat list is the
-   *  user's own data, but a chat's folder is often an absolute host path; map it
-   *  to the same opaque token the redacted workspace list carries so the web
-   *  still resolves the owning workspace without ever seeing a host path. */
+  /** Keep stored folders unchanged for trusted remote devices and hide chats
+   * whose managed workspace is restricted. Resolve workspaces once per batch. */
   private redactChatsForRemote<T extends { folder: string }>(rows: T[]): T[] {
     if (rows.length === 0) return rows;
     // Trusted-device model: keep the REAL chat folders (remote == local). Only
@@ -2395,16 +2384,16 @@ export class WorkspaceService {
     const restricted = listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace);
     if (restricted.size === 0) return rows;
     const workspaces = listWorkspaces({});
-    return rows.filter(
-      (r) =>
-        !restricted.has(this.redactChatFolderForRemote(r.folder, workspaces)),
-    );
+    return rows.filter((row) => {
+      const workspaceId = this.managedWorkspaceTokenForFolder(row.folder, workspaces);
+      return workspaceId === null || !restricted.has(workspaceId);
+    });
   }
 
   /** Whether the chat `chatId` lives in a workspace the owner restricted from
    *  remote — so a remote client must NOT be able to delete it or clear/truncate/
    *  overwrite its transcript. Resolves the chat's folder → workspace with the
-   *  SAME mapping the list redaction uses (no drift). Unknown chat / no
+   *  SAME managed-folder mapping as the list restriction filter. Unknown chat / no
    *  restrictions → false (allowed). Local clients never reach this. */
   private remoteChatRestricted(chatId: string): boolean {
     const chat = listChats().find((c) => c.id === chatId);
@@ -2415,9 +2404,8 @@ export class WorkspaceService {
   private remoteFolderRestricted(folder: string): boolean {
     const restricted = listRemoteRestrictedWorkspaceIds(this.options.primaryDesignWorkspace);
     if (restricted.size === 0) return false;
-    return restricted.has(
-      this.redactChatFolderForRemote(folder, listWorkspaces({})),
-    );
+    const workspaceId = this.managedWorkspaceTokenForFolder(folder, listWorkspaces({}));
+    return workspaceId !== null && restricted.has(workspaceId);
   }
 
   /** Resolve a writable, currently-live cwd for the one-time legacy image
@@ -4378,6 +4366,15 @@ export class WorkspaceService {
         return writeWorkspaceFile(cwd, rel, content, { remote, cloudPolicy: cloudFiles, expectedCloudTarget });
       }
       case "attachment.write": {
+        if (opts.cloudWorker === true) {
+          if (!remote || !this.options.primaryDesignWorkspace || !opts.cloudActorIdentity || !opts.cloudFileActor ||
+              params.workspaceId !== LOCAL_MAIN_WORKSPACE_ID || (params.repoRoot !== undefined && params.repoRoot !== this.root))
+            throw new CloudCommandFailureError({ stage: "validation", category: "access_denied" });
+          return transferCloudAttachment(this.root, params, {
+            userId: opts.cloudActorIdentity.userId, role: opts.cloudFileActor.role, authorized: opts.cloudFileActor.authorized,
+            ownerRoots: () => [...listWorkspaces({}).map(workspace => workspace.path), ...listKnownRepoRoots()],
+          });
+        }
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
         try {
           return await transferContextAttachment(cwd, params, { allowNativeSource: !remote && hostLocalResources });

@@ -382,8 +382,8 @@ jobs:
         working-directory: apps/control-plane
         run: pnpm install --frozen-lockfile
 
-      - name: Install contained-execution runtime
-        uses: ./.github/actions/contained-execution-runtime
+      - name: Install offline runtime closure tools
+        uses: ./.github/actions/runtime-closure-tools
 
       - name: Fetch origin/main (for the migration forward-only guard)
         # Compare with the main this commit was built on, not the current tip:
@@ -423,8 +423,8 @@ jobs:
         run: pnpm exec playwright install --with-deps --only-shell chromium
 
       - name: Run vitest suite
-        # Runtime-discovered integration tests exercise the same nested
-        # bubblewrap/seccomp path as the explicit containment matrix below.
+        # Offline artifact closure tests require a private read-only namespace.
+        # Provider processes themselves share the workspace VM identity.
         env:
           VITEST_PART: ${{ matrix.part }}
         run: bash scripts/ci/with-userns.sh pnpm test:git --shard="${VITEST_PART}/4"
@@ -433,15 +433,12 @@ jobs:
         if: matrix.part == 1
         run: pnpm check:runtime-skew
 
-      - name: Code + Design containment matrix
-        # Stable release gate for the promise shipped today: provider profiles,
-        # real Linux sandbox attacks (including ignored drafts), hard-link
-        # refusal, transactional Design writes, lifecycle
-        # reconciliation, and absence of a coding-agent Design API/MCP path.
+      - name: Code + Design authoring contracts
+        # Keep transactional Design API, Local native authoring, lifecycle
+        # and coding-agent capability contracts. Cloud API authoring is policy,
+        # not an OS filesystem restriction.
         if: matrix.part == 2
-        env:
-          ZEROS_REQUIRE_CONTAINMENT_RUNTIME: "1"
-        run: bash scripts/ci/with-userns.sh pnpm check:design-containment
+        run: pnpm check:design-containment
 
       - name: Verify model catalog (strict)
         # Structural validation + the CLI-version gate: a curated model whose
@@ -760,13 +757,6 @@ jobs:
         # Node runtime but not Electron's bundled runtime. None need credentials.
         run: pnpm agents:smoke:offline
 
-      - name: ZSR kernel, parity, and detached-lifecycle qualification
-        # Compiles the package-owned Darwin helper, exercises real Seatbelt/SRT
-        # policy, then proves setsid + double-fork teardown and next-engine
-        # recovery after an intentionally abrupt engine exit. Source contracts
-        # already ran in `test`; this target-architecture job owns runtime proof.
-        run: pnpm check:zsr:runtime
-
       - name: Packaged engine health + workspace lifecycle
         # Source-mode tests do not reproduce Bun --compile runtime failures.
         # Build the actual macOS sidecar, require sustained external /health,
@@ -781,13 +771,9 @@ jobs:
         # teardown, confirmed UI transitions, and the target-OS FSEvents watcher.
         run: pnpm test:workspace-lifecycle
 
-      - name: Design-directory guard on the shipping platform
-        # The same named gate as Linux, now on the shipping OS. This includes
-        # Codex's real Seatbelt profile, Claude's native sandbox matrix,
-        # territory resolution, immutable-session lifecycle, and
-        # provider process-tree teardown. No credentials are required.
-        env:
-          ZEROS_REQUIRE_CONTAINMENT_RUNTIME: "1"
+      - name: Design authoring contracts on the shipping platform
+        # Local native authoring and cloud API/lifecycle contracts run on the
+        # shipping OS too. No per-agent OS enforcement is asserted.
         run: pnpm check:design-containment
 
       - name: GitHub credential and review-provider contracts

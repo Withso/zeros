@@ -45,9 +45,73 @@ Current creation and the deferred registered-host option are:
 | Presence and transient UI state                                                                     | Active client/engine session        | Not durable unless explicitly promoted to a product preference                     |
 | Secrets                                                                                             | Narrow runtime credential boundary  | Approved server secret store or user OS credential store; never the transcript     |
 
-The execution environment is disposable. It may cache durable data, but it must
-not be the only location from which a user can recover workspace identity,
-history, or committed code.
+Cloud workspace identity, mirrored history and checkpointed or pushed code must
+remain recoverable independently of the disposable execution environment.
+In `boot-owner-v1`, accepted commands and history not yet mirrored can be lost
+if the VM disk is lost or rolled back, even after an acceptance ACK. A FULL
+commit provides local durability; remote durability requires the mirror ACK.
+Recovery must report incomplete coverage and quarantine uncertain work.
+
+### Negotiated local queue and compact history
+
+The `boot-owner-v1` contract makes the VM's separate WAL/FULL queue authoritative
+for accepted commands, exact native results and its durable mirror outbox.
+The ordinary transcript database stays NORMAL. Idle commands dispatch locally;
+busy commands wait in VM order. A stopped/booting VM leaves unaccepted intent on
+the Mac; an explicit Send wakes the existing workspace. Passive history or
+connection warming does not wake stopped compute. Legacy generations retain the
+CP queue; the new-mode CP mirror is a read-only projection, never another claimant.
+
+Acceptance commits the command identity, payload hash, actor provenance and
+writer epoch before ACK. A FULL dispatch claim and captured credential selection
+commit before native handoff. Repeated requests reconcile the same identity;
+changed intent conflicts. This is **at-most-once dispatch**, not exactly-once
+external tool effects: a crash can leave an uncertain result. Unknown ACK,
+rollback, restored dispatch state or writer replacement never permits automatic
+redispatch. Recovery quarantines inherited work, including apparently queued
+rows; a new explicit user decision is required. Stop pauses dispatch and preserves
+pending order until an explicit Resume.
+
+Streaming deltas and reconnect replay remain in the bounded VM journal. CP
+receives prompt/terminal state, permission/question requests and settlements, and
+canonical FULL conversation snapshots instead of one retained row per delta.
+Final text, tools, model, usage, native outcome and exact control ownership remain
+explicit. Controls are sent promptly; bulk history parts cannot hold another
+chat's approval behind a turn. Compact CP records are not a replacement
+`CloudStream` replay: the VM owns that cursor and live full frames. An expired
+local replay prefix requires a current snapshot, never resending the prompt.
+The VM record head and sparse live-event cursor are separate from CP's mirror
+sequence and compact row count.
+
+Capture reads a stable NORMAL source head, applies the original run's redactor,
+and produces immutable canonical records, a manifest and 128 KiB parts. The
+FULL queue publishes their CAS bytes, terminal, current restore head and outbox
+atomically; the mirror verifies all bytes/references before complete visibility.
+The limit is 16 MiB for the entire conversation, not each message. Capture or
+capacity failure preserves the known native outcome with an explicit incomplete
+head, without truncation or substituting an older complete transcript.
+The original native receipt/history audit stays immutable; a remote quota failure
+publishes a separate incomplete current head. Stable mirror batches retry the
+same body after lost ACK. Exact ACK and quota feedback commit before local
+pruning, so a crash cannot drop the restore fence or repeat native work.
+
+Clean-drain checkpoint recovery verifies the original FULL/NORMAL file pair,
+writer seal and authenticated ACK before rebuilding transcript data. The rebuild
+reads only each conversation's latest FULL head and verified immutable canonical
+bytes; it preserves original provenance and clears native session bindings.
+A newer incomplete or deleted head removes stale NORMAL messages and turns.
+Missing seal, lineage or bytes refuses restore, without selecting an older
+complete snapshot. Replacement is transactional and idempotent; it never
+recreates a native session, command claim or permission resolver.
+
+Stopped reads are passive and read-authorized. They select the exact persisted
+boot/writer binding and monotonic current restore head, including source identity,
+deletion and incomplete reason. Missing new-mode binding refuses; only an
+authoritative legacy discriminator selects legacy history. Completeness applies
+to the selected page plus its verified writer seal and history coverage. A newer
+edit/delete/incomplete head fences visible, memory and disk snapshots from older
+revisions. Unmirrored data is explicitly incomplete; source implementation does
+not prove fresh-allocation or deployed recovery qualification.
 
 ## User-facing model
 

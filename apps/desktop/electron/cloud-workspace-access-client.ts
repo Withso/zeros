@@ -1,7 +1,9 @@
 import { CloudActorRuntimeGrantSchema, type CloudActorRuntimeGrant } from "@zeros/protocol/cloud-actors";
+import { CloudActorConnectionGrantSchema, type CloudActorConnectionGrant } from "@zeros/protocol/cloud-runtime-connection";
 import type { CloudReplicaDeviceProof } from "../src/engine/cloud-replica-device";
 import { cloudDetectedPortsSchema, type CloudDetectedPorts } from "./cloud-workspace-detected-ports";
 import { isCloudAgentPreviewTarget, type CloudAgentPreviewTarget } from "@zeros/protocol/containment";
+import { CLOUD_RUNTIME_ACCESS_ERRORS } from "../src/renderer/platform/bridge/cloud-runtime-access-error";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -16,6 +18,7 @@ const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
 
 const SAFE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
+  ...Object.fromEntries(Object.entries(CLOUD_RUNTIME_ACCESS_ERRORS).filter(([code]) => code !== "request_failed").map(([code, value]) => [code, value.message])),
   cloud_workspace_client_update_required:
     "Update Zeros to connect to cloud workspaces.",
   cloud_workspace_v2_required:
@@ -128,7 +131,7 @@ export type CloudWorkspaceLegacyEngineAdmission = {
   expiresAt: string;
 };
 
-export type CloudWorkspaceEngineAdmission = CloudWorkspaceLegacyEngineAdmission | CloudActorRuntimeGrant;
+export type CloudWorkspaceEngineAdmission = CloudWorkspaceLegacyEngineAdmission | CloudActorConnectionGrant;
 type EngineAdmissionSigner = (accessToken: string, input: { organizationId: string; workspaceId: string }) => Promise<CloudReplicaDeviceProof>;
 
 type Fetch = typeof fetch;
@@ -848,16 +851,20 @@ export class CloudWorkspaceAccessClient {
     };
   }
 
-  async issueEngineAdmission(accessToken:string,input:{organizationId:string;workspaceId:string}):Promise<CloudActorRuntimeGrant> {
+  async issueEngineAdmission(accessToken:string,input:{organizationId:string;workspaceId:string;directProviderVersion?:1;connectionChannel?:"control-plane-websocket"}):Promise<CloudActorConnectionGrant> {
     const requestPath=this.runtimePath(input.organizationId,input.workspaceId),now=this.now();
+    if(input.directProviderVersion!==undefined&&input.directProviderVersion!==1||
+      input.connectionChannel!==undefined&&(input.connectionChannel!=="control-plane-websocket"||input.directProviderVersion!==1))
+      throw new CloudWorkspaceAccessClientError(0,"invalid_request","Cloud workspace admission preference is invalid");
     if(!this.signEngineAdmission)throw new CloudWorkspaceAccessClientError(0,"device_proof_required","A trusted device is required for cloud workspace access");
-    const proof=await this.signEngineAdmission(accessToken,input);
+    const proof=await this.signEngineAdmission(accessToken,{organizationId:input.organizationId,workspaceId:input.workspaceId});
     if(!UUID_PATTERN.test(proof.deviceId)||!Number.isSafeInteger(proof.keyVersion)||proof.keyVersion<1||
       !Number.isSafeInteger(proof.timestampMs)||Math.abs(proof.timestampMs-this.now())>60000||
       !/^[A-Za-z0-9_-]{16,128}$/.test(proof.nonce)||!/^[A-Za-z0-9_-]{86}$/.test(proof.signature))
       throw new CloudWorkspaceAccessClientError(0,"device_proof_required","The cloud workspace device proof is invalid");
-    const body=await this.request(accessToken,{method:"POST",path:requestPath,expectedStatus:201,body:{actorProtocolVersion:2},deviceProof:proof});
-    const parsed=CloudActorRuntimeGrantSchema.safeParse(body);
+    const body=await this.request(accessToken,{method:"POST",path:requestPath,expectedStatus:201,body:{actorProtocolVersion:2,
+      ...(input.directProviderVersion===1?{directProviderVersion:1}:{}),...(input.connectionChannel?{connectionChannel:input.connectionChannel}:{})},deviceProof:proof});
+    const parsed=input.directProviderVersion===1?CloudActorConnectionGrantSchema.safeParse(body):CloudActorRuntimeGrantSchema.safeParse(body);
     const bridge=new URL("/v1/cloud-workspaces/bridge",this.baseUrl);bridge.protocol=bridge.protocol==="https:"?"wss:":"ws:";
     if(!parsed.success||parsed.data.organizationId!==input.organizationId||parsed.data.workspaceId!==input.workspaceId||
       parsed.data.bridgeUrl!==bridge.toString()||!validExpiry(parsed.data.expiresAt,now,2))

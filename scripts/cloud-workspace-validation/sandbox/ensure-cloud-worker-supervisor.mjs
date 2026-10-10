@@ -12,6 +12,9 @@ import {
   CLOUD_WORKER_SUPERVISOR_SOCKET,
 } from "./cloud-worker-supervisor.mjs";
 
+/** @param {number} milliseconds @returns {Promise<void>} */
+async function waitForSupervisor(milliseconds) { await delay(milliseconds); }
+
 function rootPath(file, directory = false) {
   if (realpathSync(file) !== file) throw new Error("Unsafe cloud broker path");
   for (let current = file; ; current = path.dirname(current)) {
@@ -92,7 +95,7 @@ export async function ensureCloudWorkerSupervisor({
     child.once("error", () => undefined);
     child.unref();
   },
-  wait = delay,
+  wait = waitForSupervisor,
 } = {}) {
   if (runtime.profile === "v4") throw new Error("Cloud v4 supervisor requires systemd ownership");
   if (await probe()) return;

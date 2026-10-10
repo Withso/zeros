@@ -8,7 +8,8 @@ vi.mock("electron", () => ({ app: { getPath: () => "/synthetic/cache-test" } }))
 vi.mock("../ipc/commands/auth-session", () => ({ getSessionUserForMain: () => h.user,
   onMainAuthSessionChanged: (fn: () => void) => { h.listeners.push(fn); return () => {}; } }));
 vi.mock("../cloud-transcript-cache-store", () => ({ CloudTranscriptCacheStore: class {
-  retainAccount = h.retain; write = h.write; read = () => null;
+  retainAccount = h.retain; write = h.write;
+  readReceipt = () => ({ historyEpoch: "33333333-3333-4333-8333-333333333333", window: null });
 } }));
 const source = ts.createSourceFile("command-registry.ts", readFileSync(new URL("../ipc/commands/command-registry.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
 const registration = source.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === "registerAllCommands")!;

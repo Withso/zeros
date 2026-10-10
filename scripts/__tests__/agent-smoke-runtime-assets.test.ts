@@ -24,6 +24,11 @@ import {
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 
 describe("live agent smoke runtime assets", () => {
+  it("couriers the neutral pinned search asset with legacy path compatibility", () => {
+    expect(agentSmokeRuntimeEnvironment("/repo", "/runtime/node", { ZEROS_RIPGREP_PATH: "/product/rg" })).toMatchObject({ ZEROS_RIPGREP_PATH: "/product/rg" });
+    expect(agentSmokeRuntimeEnvironment("/repo", "/runtime/node", { ZEROS_ZSR_RIPGREP_PATH: "/old/zsr-rg" })).toMatchObject({ ZEROS_RIPGREP_PATH: "/old/zsr-rg" });
+  });
+
   it("hands the bundled Claude and Codex runtimes to the compiled smoke gateway", () => {
     const resolved = agentSmokeProviderRuntimeEnvironment(
       {},

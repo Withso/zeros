@@ -14,9 +14,11 @@ import { CursorUsageReconciler, cursorTokenUsage, sumCursorUsage } from "./usage
 // ──────────────────────────────────────────────────────────
 
 import type { SteerOutcome } from "@zeros/protocol/messages";
+import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
+import { cloudCommandFailureFromCode, decodeCloudCommandFailure, CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
 import { createHash, randomBytes, randomUUID, scrypt } from "node:crypto";
 import { homedir } from "node:os";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 import {
   sessionToolGroups,
   type SessionToolInventoryEntry,
@@ -28,7 +30,8 @@ import { isDevRuntime } from "../../../runtime";
 import modelCatalogJson from "../../../../../../../catalogs/models-v1.json";
 
 import { AgentFailureError } from "../../types";
-import { cloudProviderExecution, executionMcpServers } from "../../cloud-provider-execution";
+import { cloudProviderExecution, executionMcpServers, cloudBootTurnReservation,
+  assertCloudBootNativeHandoff, markCloudBootNativeHandoff, type CloudProviderExecution } from "../../cloud-provider-execution";
 import { mcpWorkingDirectory } from "../../mcp-working-directory";
 import { materializeMcpServerRegistrations } from "../../mcp-registration";
 import { scanCursorMcpServers } from "../../mcp-scan";
@@ -48,6 +51,8 @@ import type {
   LoadSessionResponse,
   McpServerRegistration,
   NewSessionResponse,
+  NativePromptStage,
+  NativePromptOutputKind,
   PromptResponse,
   SessionMode,
   StopReason,
@@ -65,8 +70,9 @@ import {
 } from "./host/host-client";
 import { wrapSdkWithLocalStore, type RawCursorSdk } from "./local-store";
 import type { PreparedBoundary } from "../../containment/types";
-import { cloudCursorStateRoot, durableCursorStateRoot } from "./state-overlay";
+import { durableCursorStateRoot } from "./state-overlay";
 import { configurationProvenanceFor } from "../../provider-diagnostics";
+import { cloudCursorInstructions } from "./cloud-instructions";
 
 const AGENT_ID = "cursor";
 /** Cursor LOCAL SDK agents (we always run `local: { cwd }`) require an
@@ -133,7 +139,7 @@ const CURSOR_USAGE_READ_BUDGET_MS = 500;
 
 /** A turn whose first streamed item takes longer than this is reported with its
  *  measured latency. Chosen to sit above ordinary model time-to-first-token and
- *  well below the stall this exists to make visible — a contained host's FIRST
+ *  well below the stall this exists to make visible — a cold host's FIRST
  *  turn has been measured at 77s while later turns in the same host take ~4s.
  *  Mirrors SLOW_FIRST_ITEM_MS in host/cursor-host.cjs, which reports the same
  *  window broken down by outbound request and child process. */
@@ -389,6 +395,10 @@ export interface CursorSdkSendOptions {
   idempotencyKey?: string;
   onStep?: (args: { step: unknown }) => void | Promise<void>;
   onDelta?: (args: { update: unknown }) => void | Promise<void>;
+  onNativePromptStage?: (stage: NativePromptStage) => void;
+  /** Engine-owned authority check/mark, synchronous before the irreversible
+   * host write. Unlike observation callbacks, exceptions MUST reject send. */
+  beforeNativeWrite?: () => void;
 }
 
 export interface SdkAgent {
@@ -856,7 +866,7 @@ export interface CursorSdkModule {
   };
   /** Build this workspace's local executor ahead of the first `send()` —
    *  @cursor/sdk 1.0.26's `platform.prewarmLocalWorkspace`, proxied to the
-   *  contained host. Resolving a workspace (rules, skills, MCP, ignore
+   *  session host. Resolving a workspace (rules, skills, MCP, ignore
    *  mappings, and the backend auth/config round-trips behind them) is the bulk
    *  of a cold first turn, and none of it depends on the user's message.
    *
@@ -888,8 +898,8 @@ export interface CursorSdkModule {
   };
 }
 
-/** Select the SDK's ripgrep executable from already-qualified deployment
- * configuration. Packaged Zeros stages one binary for ZSR and Cursor; the
+/** Select the SDK's ripgrep executable from deployment configuration.
+ * Packaged Zeros stages its product-owned search binary; the
  * compiled engine cannot resolve the source package, so ignoring that staged
  * path produced a burst of "Ripgrep path not configured" errors per session. */
 export function cursorRipgrepPathFromEnvironment(
@@ -897,7 +907,8 @@ export function cursorRipgrepPathFromEnvironment(
 ): string | null {
   const explicit = env.CURSOR_RIPGREP_PATH?.trim();
   if (explicit) return explicit;
-  const staged = env.ZEROS_ZSR_RIPGREP_PATH?.trim();
+  // Old desktops can still courier the previous environment name.
+  const staged = env.ZEROS_RIPGREP_PATH?.trim() || env.ZEROS_ZSR_RIPGREP_PATH?.trim();
   return staged && isAbsolute(staged) ? staged : null;
 }
 
@@ -979,7 +990,7 @@ function cursorSettingSources(
   boundary?: PreparedBoundary,
 ): CursorSettingSources {
   const cloud = cloudProviderExecution(boundary);
-  if (cloud) return cloud.lease.customization ? ["user"] : [];
+  if (cloud) return cloud.customization ? ["user"] : [];
   return nativeMcpPassthroughEnabled(undefined, boundary)
     ? NATIVE_CURSOR_SETTING_SOURCES
     : [];
@@ -1000,6 +1011,9 @@ interface Session {
   /** Per-session SDK transport. Production always points at a dedicated
    * Cursor host below this session's prepared execution boundary. */
   sdk: CursorSdkModule;
+  /** Original private execution identity; warm turns capture their reservation
+   * before configuration awaits instead of looking up a later current token. */
+  cloudExecution?: CloudProviderExecution;
   disposeRuntime?: () => Promise<void>;
   /** The HOME this session's Cursor host actually runs with, and where the SDK
    * writes `.cursor/projects/<slug>/agent-transcripts` — so every engine-side read
@@ -1021,6 +1035,9 @@ interface Session {
   env?: Record<string, string>;
   mcpServers?: McpServerRegistration[];
   settingSources: CursorSettingSources;
+  /** Bounded engine-read guidance captured at admission, including resume.
+   * Native configuration remains off; mode rebuilds reuse this exact text. */
+  repositoryInstructions?: string;
   /** The autoReview value currently baked into `agent` (set at create/resume).
    *  A mode change flips the DESIRED value (autoReviewFor(modeId)); when it
    *  diverges, the next prompt rebuilds the agent to reconcile. */
@@ -1162,7 +1179,7 @@ export class CursorSdkAdapter implements AgentAdapter {
           },
         },
         // Model pill writes CURSOR_MODEL; newSession reads it. modelsDynamic
-        // tells the gateway to re-read initialize after a real contained
+        // tells the gateway to re-read initialize after a real provider
         // session populates `models`. Initialization itself never starts
         // SDK/provider work merely because the engine inherited CURSOR_API_KEY.
         _meta: { modelEnvVar: "CURSOR_MODEL", modelsDynamic: true },
@@ -1299,9 +1316,8 @@ export class CursorSdkAdapter implements AgentAdapter {
 
   /** Start catalog discovery without putting it on the session critical path.
    *
-   * Discovery is a real network round-trip — and under ZSR it is the FIRST one
-   * this session's contained host makes, so it also pays the host's cold Node
-   * start, the SDK require, and the proxy's first CONNECT. It used to be awaited
+   * Discovery is a real network round-trip; a session's first request also
+   * pays for its cold Node host and SDK import. It used to be awaited
    * outright before `Agent.create`, bounded only by the host's 30 s control-request
    * timeout: on a slow or wedged network that is 30 s of "Cursor is stuck" before
    * a single byte of the user's prompt moves.
@@ -1343,18 +1359,19 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (!opts.executionBoundary) return { sdk: await loadSdk() };
     if (!opts.env) {
       throw new Error(
-        "a contained Cursor host requires a complete environment",
+        "a Cursor session host requires a complete environment",
       );
     }
     const env = { ...opts.env };
     if (process.env.CURSOR_RIPGREP_PATH && !env.CURSOR_RIPGREP_PATH) {
       env.CURSOR_RIPGREP_PATH = process.env.CURSOR_RIPGREP_PATH;
     }
-    // Cloud history belongs to the worker's persistent home. Creating its
-    // directory here would give it the engine's owner/mode; defer that to the
-    // contained host. Local stores retain their serialized location.
-    const localState = opts.executionBoundary.status.backend === "cloud-worker"
-      ? cloudCursorStateRoot(opts.cwd, opts.executionBoundary.providerHomePath)
+    // Cloud uses its admitted physical HOME; Local stores retain their exact
+    // serialized location. Placement comes from the original factory object,
+    // never a readable old backend value.
+    const cloud = cloudProviderExecution(opts.executionBoundary);
+    const localState = cloud
+      ? join(cloud.coordinator.nativeHome.paths.cursorHome, "zeros-store")
       : await durableCursorStateRoot(opts.cwd);
     env.ZEROS_CURSOR_STATE_ROOT = localState;
     const runtime = createCursorHostRuntime({
@@ -1374,13 +1391,9 @@ export class CursorSdkAdapter implements AgentAdapter {
   /** Start building this session's workspace executor the moment its host
    *  exists, instead of letting the user's first message pay for it.
    *
-   *  A cold contained turn spends its time on work that has nothing to do with
-   *  the message: a serial staircase of fresh connections to the Cursor backend
-   *  (repeated API-key exchanges, server config, feature gates) plus the
-   *  workspace scan — measured at 21.8s to first token, ~72% of it network,
-   *  against ~4s uncontained. Meanwhile the host sits idle for ~9s between boot
-   *  and the prompt while admission, model discovery and `Agent.create` finish.
-   *  This fills that window.
+   *  A cold turn resolves API-key exchanges, server config, feature gates and
+   *  the workspace scan before processing the message. Start that work while
+   *  admission, model discovery and `Agent.create` finish.
    *
    *  Deliberately NOT awaited. It is a pure optimization, so session start must
    *  not wait on it, and it must not fail a session: the host dispatches
@@ -1720,6 +1733,8 @@ export class CursorSdkAdapter implements AgentAdapter {
     const initialMode: CursorSdkModeId = opts.env?.ZEROS_PERMISSION_MODE === "plan" ? "plan" : opts.env?.ZEROS_PERMISSION_MODE === "agent" ? "agent" : CURSOR_DEFAULT_MODE;
     const apiKey = this.resolveApiKey(opts.env);
     const settingSources = cursorSettingSources(opts.executionBoundary);
+    const cloud = cloudProviderExecution(opts.executionBoundary);
+    const repositoryInstructions = cloudCursorInstructions(cloud);
     const runtime = await this.createSessionRuntime(opts);
     const mcpSource = executionMcpServers(cloudProviderExecution(opts.executionBoundary), opts.mcpServers);
     const catalog = this.mcpCatalog(mcpSource);
@@ -1791,6 +1806,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       modeId: initialMode,
       agent,
       sdk,
+      ...(cloud ? { cloudExecution: cloud } : {}),
       ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
       ...(runtime.providerHome ? { providerHome: runtime.providerHome } : {}),
       activeRun: null,
@@ -1798,6 +1814,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       env: opts.env,
       mcpServers: mcpSource,
       settingSources,
+      repositoryInstructions,
       appliedAutoReview: autoReviewFor(initialMode),
       prewarmedAutoReview: new Set([autoReviewFor(initialMode)]),
       appliedMcpCatalog: catalog.key,
@@ -1831,6 +1848,8 @@ export class CursorSdkAdapter implements AgentAdapter {
     const initialMode: CursorSdkModeId = opts.env?.ZEROS_PERMISSION_MODE === "plan" ? "plan" : opts.env?.ZEROS_PERMISSION_MODE === "agent" ? "agent" : CURSOR_DEFAULT_MODE;
     const apiKey = this.resolveApiKey(opts.env);
     const settingSources = cursorSettingSources(opts.executionBoundary);
+    const cloud = cloudProviderExecution(opts.executionBoundary);
+    const repositoryInstructions = cloudCursorInstructions(cloud);
     const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
     const providerResumeId = opts.providerBinding?.resumeId ?? opts.sessionId;
     if (!providerResumeId) {
@@ -1980,6 +1999,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       modeId: initialMode,
       agent,
       sdk,
+      ...(cloud ? { cloudExecution: cloud } : {}),
       ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
       ...(runtime.providerHome ? { providerHome: runtime.providerHome } : {}),
       activeRun: null,
@@ -1987,6 +2007,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       env: opts.env,
       mcpServers: mcpSource,
       settingSources,
+      repositoryInstructions,
       appliedAutoReview: autoReviewFor(initialMode),
       prewarmedAutoReview: new Set([autoReviewFor(initialMode)]),
       appliedMcpCatalog: catalog.key,
@@ -2052,6 +2073,8 @@ export class CursorSdkAdapter implements AgentAdapter {
     sessionId: string;
     turnId?: string;
     prompt: ContentBlock[];
+    onNativePromptStage?: (stage: NativePromptStage) => void;
+    onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void;
   }): Promise<{ stopReason: StopReason; response: PromptResponse }> {
     const session = this.sessions.get(opts.sessionId);
     if (!session) {
@@ -2069,7 +2092,11 @@ export class CursorSdkAdapter implements AgentAdapter {
       });
     }
 
-    const message = buildUserMessage(opts.prompt);
+    const cloud = session.cloudExecution;
+    const reservation = cloud?.mode === "boot-owner-v1" ? cloudBootTurnReservation(cloud) : null;
+    if (cloud?.mode === "boot-owner-v1" && !reservation)
+      throw this.classify(new CloudCommandFailureError({ stage: "validation", category: "access_denied" }), "prompt");
+    const message = buildUserMessage(opts.prompt, session.repositoryInstructions);
     session.cancelRequested = false;
 
     // Configuration refresh is preparation, not a submitted prompt. Stop must
@@ -2155,7 +2182,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       // Time to the turn's first MODEL OUTPUT, measured end-to-end (host bridge
       // included) rather than inside the host. Deliberately not the first
       // streamed item: the SDK acknowledges a run with `request`/`status`
-      // frames within ~10ms of send, and a contained host has been measured
+      // frames within ~10ms of send, and a cold host has been measured
       // delivering those on time and then taking 77s to produce a first token
       // (against ~4s for later turns in the same host). Reported whenever it is
       // slow, into the engine log the user already has, next to the
@@ -2182,6 +2209,18 @@ export class CursorSdkAdapter implements AgentAdapter {
           mode: sdkModeFor(session.modeId),
           model: this.modelSelection(modelId, session.modelState, session.env),
           local: { force: true },
+          ...(cloud?.mode === "boot-owner-v1" ? { beforeNativeWrite: () => {
+            if (!ownsUpdates() || !reservation)
+              throw new CloudCommandFailureError({ stage: "validation", category: "lifecycle_superseded" });
+            assertCloudBootNativeHandoff(cloud, reservation);
+            // Mark BEFORE the irreversible write. A thrown write may still
+            // have submitted bytes; passive observers never authorize replay.
+            markCloudBootNativeHandoff(cloud, reservation);
+          } } : {}),
+          ...(opts.onNativePromptStage ? { onNativePromptStage: (stage: NativePromptStage) => {
+            if (!ownsUpdates()) return;
+            try { void Promise.resolve(opts.onNativePromptStage!(stage)).catch(() => {}); } catch { /* observation is inert */ }
+          } } : {}),
           // The engine-owned turn id survives renderer reconnect/resend. Hash
           // it before crossing the harness boundary so provider logs never
           // receive Zeros' durable identity verbatim. A model-gate fallback is
@@ -2192,6 +2231,18 @@ export class CursorSdkAdapter implements AgentAdapter {
               : `${idempotencyKey}-retry-${attempt}`,
           onDelta: ({ update }) => {
             if (!ownsUpdates()) return;
+            // The host routes this callback by its engine-generated native
+            // runId. Never observe a generic session/subagent stream or a
+            // transcript/step fallback as output from the current prompt.
+            if (opts.onNativeOutput && isRecord(update)) {
+              const kind = update.type === "text-delta" && typeof update.text === "string" && update.text.length > 0 ? "text" :
+                ["tool-call-started", "partial-tool-call", "tool-call-completed"].includes(String(update.type)) &&
+                  typeof update.callId === "string" && update.callId.trim().length > 0 && isRecord(update.toolCall) &&
+                  typeof update.toolCall.type === "string" && update.toolCall.type.trim().length > 0 ? "tool" : undefined;
+              if (kind) {
+                try { void Promise.resolve(opts.onNativeOutput(kind)).catch(() => {}); } catch { /* observation is inert */ }
+              }
+            }
             if (isRecord(update) && typeof update.type === "string" && /^(?:text-|thinking-|tool-call-|partial-tool-call)/.test(update.type)) sawModelOutput = true;
             if (isRecord(update) && update.type === "turn-ended") {
               callbackUsage = sumCursorUsage(callbackUsage, cursorTokenUsage(update.usage));
@@ -2821,6 +2872,14 @@ export function classifyCursorSdkError(
   stage: "newSession" | "loadSession" | "prompt",
 ): AgentFailureError {
   if (err instanceof AgentFailureError) return err;
+  const code = err && typeof err === "object" && "code" in err ? err.code : undefined;
+  if (decodeCloudCommandFailure(code)) {
+    const failure = err && typeof err === "object" && "failure" in err
+      ? (err as { failure: AgentFailureError["failure"] }).failure : cloudCommandFailureFromCode(code, "cursor")!;
+    return Object.assign(new AgentFailureError(failure), { code });
+  }
+  if (isCloudAgentAdmissionCode(code)) return Object.assign(new AgentFailureError({ kind: "cloud-credentials-unavailable", stage,
+    agentId: "cursor", message: "Cloud credentials are unavailable. Review the provider connection before retrying." }), { code });
   const native = normalizeProviderError("cursor", err);
   const message = native.message;
   // 0. An UNEXPECTED Cursor host death (tagged by host-client.onExit). The
@@ -2904,11 +2963,11 @@ export function classifyCursorSdkError(
 
 /** ContentBlock[] → the SDK's `{ text, images }` user message. Text
  *  blocks concatenate; image blocks map to SDKImage (base64 or url). */
-function buildUserMessage(blocks: ContentBlock[]): {
+function buildUserMessage(blocks: ContentBlock[], repositoryInstructions?: string): {
   text: string;
   images?: Array<{ data: string; mimeType: string } | { url: string }>;
 } {
-  const texts: string[] = [];
+  const texts: string[] = repositoryInstructions ? [repositoryInstructions] : [];
   const images: Array<{ data: string; mimeType: string } | { url: string }> =
     [];
   for (const raw of blocks) {

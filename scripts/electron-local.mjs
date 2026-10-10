@@ -441,7 +441,7 @@ export async function runLocalDevelopment({
       excluded,
     });
     let env = localEnvironment({ identity, ...ports, environment });
-    // Exactly the existing real local build (ABI, ZSR, engine, main), with the
+    // Exactly the existing real local build (ABI, search assets, engine, main), with the
     // Local environment present BEFORE build-time defines are baked.
     const prepared = await run("pnpm", ["electron:dev:prep"], {
       cwd: root,

@@ -380,6 +380,12 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
         enginePort: setup.enginePort,
         workosEnabled: config.auth.provider === "workos",
         relayEnabled: true,
+        directProviderEndpoint:async scope=>{
+          const {provider}=await providerResolver.resolve({organizationId:scope.organizationId,workspaceId:scope.workspaceId,generation:scope.generation,purpose:"preview"});
+          if(provider.name!=="boat"||!provider.getEngineEndpoint||scope.remotePort!==setup.enginePort)
+            throw new Error("cloud_actor_runtime_unavailable");
+          return provider.getEngineEndpoint(scope.resourceId,setup.enginePort);
+        },
       });
     const clientAdmission = cloudWorkspaceEngineClientAdmissionService;
     const sameRelayAuthority = (

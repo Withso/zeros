@@ -3,6 +3,7 @@ vi.mock("../cloud-idle-stop", async importOriginal => ({ ...await importOriginal
 vi.mock("../pty/node-pty-spawn", () => ({ createNodePtyShell: vi.fn(), createTerminalMirror: vi.fn(), disposePtyHost: vi.fn() }));
 import { hasCloudUserProcesses } from "../cloud-idle-stop";
 import { ZerosEngine } from "../zeros-engine";
+import { CloudOwnedWorkloadRegistry } from "../agents/containment/cloud-owned-workloads";
 import type { CloudCheckpointDirective } from "../cloud-runtime-registration";
 import type { CloudDurabilityAuthority } from "../cloud-durability-runtime";
 import { CloudAgentConnection } from "../../renderer/platform/bridge/cloud-agent-connection";
@@ -12,13 +13,13 @@ const directive: CloudCheckpointDirective = { id: "idle-checkpoint", reason: "be
 const authority = {} as CloudDurabilityAuthority;
 function fixture() {
   const state = {
-    cloudWorker: {}, activePromptContexts: new Map(), promptSessions: new Set(), retiringCloudExecutions: new Set(),
+    cloudWorker: {}, cloudWorkloads: new CloudOwnedWorkloadRegistry(), activePromptContexts: new Map(), promptSessions: new Set(), retiringCloudExecutions: new Set(),
     pendingPermissionRequests: new Map(), pendingQuestionRequests: new Map(), cloudWorkspaceIdleMaintenance: new Set(),
     running: true, cloudRuntimeCheckpointQuiescing: true, cloudRuntimeAuthorityStopping: false,
     cloudIdleReservation: (() => true) as (() => boolean) | null, cloudIdleCheckpoint: null,
     cloudRuntimeRegistration: { idleStopRequest: vi.fn(async () => directive) },
     cloudUserPresence: { active: () => false },
-    cloudCommands: { hasActiveWork: () => false }, cloudGoals: { active: () => false },
+    cloudCommands: { hasActiveWork: () => false, pauseClaims: vi.fn(), resumeClaims: vi.fn() }, cloudGoals: { active: () => false },
     activePrompts: new Set(), sessionLoadResponses: new Map(), sessionAgent: new Map(), pty: { list: () => [], hasRecentInput: () => false },
     cloudDurabilityRuntime: { checkpoint: vi.fn(async () => undefined) }, cloudRecordRuntime: { synchronize: vi.fn(async () => undefined), flush: vi.fn(async () => undefined) },
     cloudHumanServices: { pause: vi.fn(async () => undefined), resume: vi.fn(), hasActiveWork: () => false },
@@ -273,5 +274,45 @@ describe("idle checkpoint execution", () => {
     await state.stopIdleCloudWorkspace(authority, () => idle);
     expect(state.cloudRuntimeRegistration.idleStopRequest).not.toHaveBeenCalled();
     expect(state.cloudRuntimeCheckpointQuiescing).toBe(false); expect(state.cloudLanguageServices.resume).toHaveBeenCalled();
+  });
+});
+
+describe("original outer idle ticket through checkpoint cancellation", () => {
+  function outer() {
+    const state = fixture();
+    state.cloudRuntimeCheckpointQuiescing = false;
+    state.cloudIdleReservation = null;
+    state.cloudDurabilityRuntime.checkpoint.mockRejectedValue(new Error("checkpoint cancelled"));
+    return state;
+  }
+  it("reopens original workload admission after an acknowledged idle-capture cancellation", async () => {
+    const state = outer();
+    await expect(state.stopIdleCloudWorkspace(authority, () => true)).rejects.toThrow("checkpoint cancelled");
+    expect(state.cloudRuntimeRegistration.idleStopRequest).toHaveBeenCalledWith({kind:"cancel",requestId:directive.id});
+    expect(state.cloudRuntimeCheckpointQuiescing).toBe(false);
+    expect(state.cloudWorkloads.snapshot().scopes).toEqual([]);
+    expect(() => state.cloudWorkloads.assertAccepting()).not.toThrow();
+  });
+  it("reopens after reconciliation acknowledges a previously lost cancellation reply", async () => {
+    const state = outer();
+    state.cloudRuntimeRegistration.idleStopRequest.mockResolvedValueOnce(directive).mockRejectedValueOnce(new Error("lost cancel reply")).mockResolvedValue(directive);
+    await expect(state.stopIdleCloudWorkspace(authority, () => true)).rejects.toThrow("checkpoint cancelled");
+    expect(() => state.cloudWorkloads.assertAccepting()).toThrow();
+    await expect(state.handleCloudCheckpointRequest(directive, authority)).rejects.toThrow("final checkpoint cancelled");
+    expect(state.cloudRuntimeCheckpointQuiescing).toBe(false);
+    expect(() => state.cloudWorkloads.assertAccepting()).not.toThrow();
+  });
+  it("keeps an unresolved checkpoint fenced when cancellation is not acknowledged", async () => {
+    const state = outer();
+    state.cloudRuntimeRegistration.idleStopRequest.mockResolvedValueOnce(directive).mockRejectedValue(new Error("already committed"));
+    await expect(state.stopIdleCloudWorkspace(authority, () => true)).rejects.toThrow("checkpoint cancelled");
+    expect(state.cloudRuntimeCheckpointQuiescing).toBe(true);
+    expect(() => state.cloudWorkloads.assertAccepting()).toThrow();
+  });
+  it("does not release an independent seal ticket on idle cancellation", async () => {
+    const state = outer(), seal = state.cloudWorkloads.fence();
+    await state.cloudWorkloads.drain(seal);
+    await expect(state.stopIdleCloudWorkspace(authority, () => true)).rejects.toThrow("checkpoint cancelled");
+    expect(() => state.cloudWorkloads.assertAccepting()).toThrow();
   });
 });

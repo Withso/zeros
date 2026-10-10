@@ -13,6 +13,15 @@
 `styles/Artifacts/Designs/`. This Markdown checklist is authoritative; the former
 consolidated private delivery ledger is not a dependency of this roadmap.
 
+**Cloud scope (2026-10-08):** checked native capabilities below do not by themselves
+qualify a cloud runtime. Cloud keeps actor-bound native execution and the shared
+adapters, with exclusive MCP, bounded repository instruction/config projections
+and explicit permission intent. Raw project/plugin sources, native browser and
+additional host directories remain restricted; cloud project approvals are
+session-only until safe actor-scoped persistence exists. See
+[cloud native configuration](cloud-workspace/agent-authentication-and-language-tools.md#repository-instructions-and-configuration)
+and [source-mode/provider qualification](cloud-workspace/qualification-status.md#source-mode-agent-harness).
+
 ---
 
 ## 1. Background tasks & waiting states
@@ -86,7 +95,7 @@ _If the agent saw it, the user should see it — while it happens, not after._
 - [ ] **Complete Codex app/plugin installation suggestions** — Codex reuses an empty MCP form for a two-stage browser installation flow, then verifies the installation before accepting. Zeros now recognizes that private envelope and cancels it explicitly instead of falsely reporting a normal form acceptance; a native-equivalent browser/return/verification surface remains to be designed. `Codex · P2 · 🎨`
 - [x] **Show Codex auto-review verdicts** — completed Guardian/auto-review decisions leave a sanitized audit row with decision, action type, risk, and rationale. A denied action can expose one Retry action backed by an opaque, exact-session, in-memory capability; retry is coalesced, revoked after success or bounded eviction, never persisted into the transcript, and cannot reveal or replay raw command/cwd/environment bytes in the renderer. `Codex · P2 · 🎨`
 - [ ] **Real per-tool approvals for Cursor** — blocked on an upstream host-interactive approval callback for built-in tools. Cursor's public SDK supports custom tools and auto-review, but the pinned and latest reviewed public stream does not let Zeros pause an arbitrary built-in tool before execution; pretending otherwise would show a prompt after the side effect. `Cursor · P2 · 🎨`
-- [x] **Keep infrastructure containment out of chat chrome** — ZSR preparation and health are not user-selectable modes and do not get a sandbox badge, readiness pill, or preparation message. Ordinary provider-owned permission requests remain ordinary permission cards; an asynchronous Design-protection failure stops only the affected execution and uses the stable turn footer. `All · P1 · 🎨`
+- [x] **Keep infrastructure readiness out of chat chrome** — cloud admission and provider startup are not user-selectable modes and do not get a sandbox badge, readiness pill, or preparation message. Ordinary provider-owned permission requests remain ordinary permission cards; an execution failure uses the stable turn footer. `All · P1 · 🎨`
 - [x] **Show Codex hook activity** — start/completion updates settle in one ordinary tool row with bounded provider copy; source paths and non-serializable native values never cross the adapter boundary. `Codex · P3 · 🔍`
 - [ ] **Show Claude hook activity** — when configured hooks run (start/progress/result, warnings that stop the turn), show quiet rows instead of nothing. `Claude · P3 · 🎨`
 
@@ -147,7 +156,7 @@ _If the agent saw it, the user should see it — while it happens, not after._
 - [ ] **Expand-all control** — a shortcut (and an "always expanded" preference) to open every collapsed tool row in a turn. `All · P2 · 🎨`
 - [ ] **Different icons for web search vs fetch** — both are a globe today. `All · P3 · 🎨`
 - [ ] **Jump pill niceties** — unread count and hover preview on the jump-to-latest pills. `All · P3 · 🎨`
-- [x] **Make first-message feedback immediate without warming chrome** — the submitted prompt and normal turn timer appear immediately while boundary attestation and provider startup continue behind the turn. There is no "starting agent…", ZSR, sandbox, or queued-first-prompt message. `All · P1 · 🎨`
+- [x] **Make first-message feedback immediate without warming chrome** — the submitted prompt and normal turn timer appear immediately while cloud admission and provider startup continue behind the turn. There is no "starting agent…", sandbox, or queued-first-prompt message. `All · P1 · 🎨`
 - [ ] **Queued messages say why they wait** — "waiting for the current reply to finish" on queued sends. `All · P3 · 🎨`
 - [ ] **Show a turn's total work time on the collapsed chip** — the "N tool calls, M messages" chip gains its duration. `All · P3 · 🎨`
 - [ ] **Unify the subagent card header** — route SubagentCard/CursorTaskCard through the standard row component so status/hover/keyboard behavior match every other tool row. `All · P3 · 🎨`

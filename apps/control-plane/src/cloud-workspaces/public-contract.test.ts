@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { isCustomerCloudPath, publicCloudError } from "./public-contract.js";
 
 describe("customer cloud response boundary", () => {
+  it("distinguishes an authorized absent conversation from an absent workspace", () => {
+    expect(publicCloudError("cloud_conversation_not_found")).toEqual({ code: "cloud_conversation_not_found", message: "Cloud conversation not found" });
+    expect(publicCloudError("not_found")).toEqual({ code: "not_found", message: "Cloud workspace not found" });
+    expect(publicCloudError("cloud_workspace_not_found").message).toBe("Cloud workspace access is unavailable");
+  });
   it.each([
     "boat_credit_limit",
     "provider_unavailable",

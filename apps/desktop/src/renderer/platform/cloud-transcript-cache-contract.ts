@@ -1,11 +1,63 @@
 import { z } from "zod";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
+import { CloudAgentBootScopeSchema } from "@zeros/protocol/cloud-agent-bootstrap";
+import { CloudLocalCommandHistorySourceSchema } from "@zeros/protocol/cloud-local-mirror";
 
 export const CLOUD_TRANSCRIPT_CACHE_BYTES = 64 * 1024 * 1024;
 export const CLOUD_TRANSCRIPT_WINDOW_BYTES = 512 * 1024;
 export const CLOUD_TRANSCRIPT_CACHE_ENTRIES = 512;
 export const CLOUD_TRANSCRIPT_WINDOW_MESSAGES = 200;
 const integer = z.number().int().safe().nonnegative();
+const historyIdentity = z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/u);
+export const CloudHistoryProjectionSchema = CloudAgentBootScopeSchema.extend({
+  version: z.literal(1), mode: z.literal("boot-owner-v1"), fundingScope: z.literal("workspace-roles-v1"),
+  mirroredSequence: integer, sealedSequence: integer.nullable(), complete: z.boolean(),
+}).strict().refine(value => !value.complete || value.sealedSequence !== null && value.mirroredSequence >= value.sealedSequence);
+export type CloudHistoryProjection = z.infer<typeof CloudHistoryProjectionSchema>;
+export const CloudHistoryRestoreHeadSchema = z.object({
+  conversationId: historyIdentity, originWriterEpoch: z.uuid(), source: CloudLocalCommandHistorySourceSchema,
+  restoreRevision: integer.positive(), deleted: z.boolean(), recordSequence: integer.nullable(), eventSequence: integer.nullable(),
+  manifestSha256: z.string().regex(/^[a-f0-9]{64}$/u).nullable(),
+  incompleteReason: z.enum(["capture_unavailable", "capture_conflict", "history_limit", "recovery_uncertain"]).nullable(),
+}).strict().refine(value => value.manifestSha256 !== null
+  ? value.recordSequence !== null && value.eventSequence !== null && value.incompleteReason === null : value.incompleteReason !== null);
+export type CloudHistoryRestoreHead = z.infer<typeof CloudHistoryRestoreHeadSchema>;
+export const CloudHistoryRestoreMetadataSchema = z.object({ projection: CloudHistoryProjectionSchema,
+  historyHeads: z.array(CloudHistoryRestoreHeadSchema).max(512),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.historyHeads.map(head => head.conversationId)).size !== value.historyHeads.length ||
+      new TextEncoder().encode(JSON.stringify(value)).byteLength > 512 * 1024 ||
+      value.projection.complete && value.historyHeads.some(head => head.incompleteReason !== null))
+    context.addIssue({ code: "custom", message: "Cloud restore authority is duplicate, incomplete or unbounded" });
+});
+export type CloudHistoryRestoreMetadata = z.infer<typeof CloudHistoryRestoreMetadataSchema>;
+export const CloudHistoryRestoreFenceSchema = z.object({ projection: CloudHistoryProjectionSchema,
+  conversationId: historyIdentity, head: CloudHistoryRestoreHeadSchema.nullable(),
+}).strict().refine(value => value.head === null || value.head.conversationId === value.conversationId);
+export type CloudHistoryRestoreFence = z.infer<typeof CloudHistoryRestoreFenceSchema>;
+export function cloudHistoryBindingKey(value: CloudHistoryProjection): string {
+  return JSON.stringify([value.organizationId, value.workspaceId, value.generation, value.engineInstanceId,
+    value.bootId, value.writerEpoch, value.fundingOwnerUserId, value.fundingOwnerEpoch]);
+}
+export function cloudHistoryFenceHasTranscript(value: CloudHistoryRestoreFence): boolean {
+  return value.head !== null && !value.head.deleted && value.head.incompleteReason === null;
+}
+export function cloudHistoryFencesMatch(a: CloudHistoryRestoreFence, b: CloudHistoryRestoreFence): boolean {
+  return cloudHistoryBindingKey(a.projection) === cloudHistoryBindingKey(b.projection) &&
+    a.conversationId === b.conversationId && JSON.stringify(a.head) === JSON.stringify(b.head);
+}
+/** Restore revisions are comparable only within the authenticated projection.
+ * A changed binding is installed using a captured per-conversation epoch. */
+export function cloudHistoryFenceCanAdvance(previous: CloudHistoryRestoreFence, next: CloudHistoryRestoreFence): boolean {
+  if (cloudHistoryBindingKey(previous.projection) !== cloudHistoryBindingKey(next.projection)) return true;
+  if (next.projection.mirroredSequence < previous.projection.mirroredSequence) return false;
+  if (previous.head && next.head) {
+    if (next.head.restoreRevision < previous.head.restoreRevision) return false;
+    if (next.head.restoreRevision === previous.head.restoreRevision && JSON.stringify(next.head) !== JSON.stringify(previous.head))
+      throw new Error("Cloud restore head conflicts with its immutable source.");
+  }
+  return true;
+}
 const printable = (value: string) => !Array.from(value).some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
 const id = z.string().min(1).max(255).refine(value => printable(value) && !value.includes("/") && !value.includes("\\"));
 export const CloudTranscriptOwnerSchema = z.object({
@@ -15,8 +67,11 @@ export const CloudTranscriptOwnerSchema = z.object({
 export type CloudTranscriptOwner = z.infer<typeof CloudTranscriptOwnerSchema>;
 export const CloudTranscriptPruneSchema = CloudTranscriptOwnerSchema.partial().required({ accountId: true }).extend({
   retainedWorkspaces: z.array(CloudTranscriptOwnerSchema.pick({ organizationId: true, workspaceId: true })).max(2000).optional(),
+  restoreHead: CloudHistoryRestoreFenceSchema.optional(), cacheEpoch: z.uuid().optional(), historyEpoch: z.uuid().optional(),
 }).refine(value => (!value.chatId || !!value.workspaceId && !!value.organizationId) &&
-  (!value.retainedWorkspaces || !value.organizationId && !value.workspaceId && !value.chatId));
+  (!value.retainedWorkspaces || !value.organizationId && !value.workspaceId && !value.chatId) &&
+  (!value.restoreHead || value.chatId === value.restoreHead.conversationId &&
+    value.organizationId === value.restoreHead.projection.organizationId && value.workspaceId === value.restoreHead.projection.workspaceId));
 export type CloudTranscriptPrune = z.infer<typeof CloudTranscriptPruneSchema>;
 
 // A cache is a presentation copy, never an auth/retry/tool-execution record.
@@ -65,6 +120,7 @@ export const CachedTranscriptWindowSchema = z.object({
   // but no epoch. Null means unknown; it must never be invented from a VM.
   recordEpoch: z.string().min(1).max(255).nullable(), revision: integer, cursor: id.nullable(),
   messages: z.array(CachedTranscriptMessageSchema).max(CLOUD_TRANSCRIPT_WINDOW_MESSAGES),
+  restoreHead: CloudHistoryRestoreFenceSchema.optional(),
 }).strict();
 export type CachedTranscriptWindow = z.infer<typeof CachedTranscriptWindowSchema>;
 
@@ -87,7 +143,7 @@ export function prepareCachedTranscriptWindow(input: unknown): CachedTranscriptW
     } catch { /* An unreadable row is not a confirmed presentation snapshot. */ }
   }
   const result: CachedTranscriptWindow = { recordEpoch: page.recordEpoch, revision: page.revision,
-    cursor: page.cursor, messages };
+    cursor: page.cursor, messages, ...(page.restoreHead ? { restoreHead: page.restoreHead } : {}) };
   const encoder = new TextEncoder();
   let bytes = encoder.encode(JSON.stringify({ ...result, messages: [] })).byteLength;
   let first = messages.length;

@@ -56,19 +56,18 @@ jobs:
           pnpm --version
           pnpm install --frozen-lockfile
           pnpm --dir apps/control-plane install --frozen-lockfile
-      - name: Install contained-execution runtime
-        uses: ./.github/actions/contained-execution-runtime
+      - name: Install offline runtime closure tools
+        uses: ./.github/actions/runtime-closure-tools
       - name: Verify hosted Chrome for preview qualification
         # The preview smoke launches /usr/bin/google-chrome explicitly. The
-        # sandbox contract/runtime suites do not need a downloaded browser;
+        # offline provider contracts do not need a downloaded browser;
         # Playwright 1.59.1 has no headless-shell artifact for Ubuntu 26.04.
         run: google-chrome --version
-      - name: Verify provider artifacts and sandbox enforcement
+      - name: Verify provider artifacts and preview browser contracts
         run: |
           pnpm check:runtime-pins
           pnpm agents:smoke:offline
-          bash scripts/ci/with-userns.sh pnpm check:zsr
-          bash scripts/ci/with-userns.sh pnpm check:zsr-preview-browser
+          pnpm check:preview-browser
       - name: Verify cloud workflow contracts and database connectivity
         run: |
           pnpm exec vitest run --config vitest.config.ts \

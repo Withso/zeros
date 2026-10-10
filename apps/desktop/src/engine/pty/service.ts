@@ -76,17 +76,16 @@ export interface PtySpawnRequest {
    *  script, whose whole point is a narrow allowlist. See buildOneShotArgs. */
   interactive?: boolean;
   /** Synchronous, already-prepared process-root wrapper. The PTY host spawns
-   * the returned supervisor command directly, so no repository-controlled
-   * shell or rc file runs at engine authority before containment. */
+   * the returned supervisor command directly, registering ownership before
+   * the repository shell or its startup files run. */
   wrapSpawn?: PtySpawnWrapper;
   /** Observe the actual wrapper pid so an execution boundary can own and
    * prove retirement of the PTY process group. */
   onSpawned?: (pid: number) => void;
-  /** Dedicated non-root identity for an explicitly human-controlled cloud
-   * terminal. Wrapped repo/agent tasks retain the coordinator identity only
-   * for the trusted ZSR supervisor, which performs its own mandatory drop. */
+  /** @deprecated Historical internal worker metadata. New cloud terminals
+   * inherit the engine identity through their original prepared Host scope. */
   cloudWorkerIdentity?: CloudWorkerIdentity;
-  /** Root-controlled util-linux helper paired with cloudWorkerIdentity. */
+  /** @deprecated Historical helper path; new launches never execute it. */
   cloudWorkerSetprivPath?: string;
 }
 
@@ -123,11 +122,15 @@ export interface PtyCreateOptions {
   outputFilter?: { write(data: string): string; finish(): string };
   /** Interactive one-shot shell (see PtySpawnRequest.interactive). */
   interactive?: boolean;
-  /** Prepared ZSR wrapper for repository-controlled commands. */
+  /** Prepared owned-process wrapper for repository-controlled commands. */
   wrapSpawn?: PtySpawnWrapper;
   /** Observe the actual wrapper pid reported by the asynchronous PTY host so
    * an execution boundary can adopt and retire the complete process group. */
   onSpawned?: (pid: number, leaderExited: () => boolean) => void;
+  /** Positive native no-child witness, distinct from a lost host. */
+  onSpawnFailed?: (reason: PtyExitReason) => void;
+  /** Captured original lifecycle owner, not a later session-id lookup. */
+  onExit?: () => void;
 }
 export interface PtyInfo {
   sessionId: string;
@@ -161,8 +164,8 @@ export type PtyMirrorFactory = (cols: number, rows: number) => PtyMirror;
 
 export interface PtyServiceOptions {
   now?: () => number;
-  /** Attested non-root identity allowed to traverse the repository-free CLI
-   * authentication cwd. Omitted on a desktop/relay engine. */
+  /** Authenticated cloud engine identity for the repository-free CLI cwd and
+   * cloud input accounting. Omitted on a desktop/relay engine. */
   agentAuthIdentity?: CloudWorkerIdentity;
 }
 
@@ -313,21 +316,16 @@ export class PtyService {
             ownerUid === undefined ||
             ownerGid === undefined ||
             !Number.isSafeInteger(identity.uid) ||
-            identity.uid <= 0 ||
+            identity.uid < 0 ||
             !Number.isSafeInteger(identity.gid) ||
-            identity.gid <= 0 ||
-            (ownerUid !== 0 &&
-              (identity.uid !== ownerUid ||
-                (identity.gid !== ownerGid &&
-                  !(process.getgroups?.() ?? []).includes(identity.gid))))
+            identity.gid < 0 || identity.uid !== ownerUid || identity.gid !== ownerGid
           ) {
             throw new Error("agent sign-in identity is invalid");
           }
-          // Root keeps ownership; the image's dedicated worker group receives
-          // read/traverse only. The CLI persists credentials under its worker
-          // HOME, not in this repository-free cwd.
-          fs.chownSync(authCwd, ownerUid, identity.gid);
-          fs.chmodSync(authCwd, 0o750);
+          // Same-user agents share this ordinary engine directory. Their
+          // selected HOME separates state; it is not an agent sandbox.
+          if (stat.uid !== ownerUid) throw new Error("agent sign-in owner is invalid");
+          fs.chmodSync(authCwd, 0o700);
         } else {
           fs.chmodSync(authCwd, 0o700);
         }
@@ -438,6 +436,10 @@ export class PtyService {
     proc.onData((data) => publish(opts.outputFilter ? opts.outputFilter.write(data) : data));
     proc.onExit((exitCode, signal, reason) => {
       leaderExited = true;
+      // Lifecycle owners retain their failed proof separately. A callback
+      // failure must not swallow the native exit witness or strand UI waiters.
+      try { if (!proc.pid && (reason === "spawn-failed" || reason === "host-unavailable")) opts.onSpawnFailed?.(reason); } catch { /* Owner retains the original pending launch. */ }
+      try { opts.onExit?.(); } catch { /* Owner retains the original retirement. */ }
       if (opts.outputFilter) publish(opts.outputFilter.finish());
       session.mirror?.dispose();
       this.sessions.delete(opts.sessionId);

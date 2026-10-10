@@ -92,6 +92,53 @@ function config(github: GithubBackendConfig | null): Config {
   };
 }
 
+it("opts the assembled app into scalar query-cost observation without exposing raw request data", async () => {
+  const observer = vi.fn();
+  const healthPool = { query: async () => ({ command: "SELECT", rowCount: 1, rows: [] }) } as unknown as pg.Pool;
+  const app = createApp({ ...config(null), slowRequestLogMs: 60_000 }, healthPool, emailConfig as never,
+    { requestCostObserver: observer });
+  const response = await app.request("/healthz?token=private-request-sentinel");
+  expect(response.status).toBe(200);
+  expect(observer).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ version: 1, scope: "application-query-port",
+    method: "GET", route: "/healthz", status: 200, queriesStarted: 1, queriesCompleted: 1,
+    sqlStatements: 1, sqlWriteStatements: 0, complete: true }));
+  expect(JSON.stringify(observer.mock.calls)).not.toContain("private-request-sentinel");
+  expect(app.requestCostObserverStatus?.()).toEqual({ enabled: true, pending: 0, dropped: 0, errors: 0 });
+});
+
+it("keeps an opted-in assembled-app observer failure outside the HTTP result", async () => {
+  const observer = vi.fn(() => { throw new Error("synthetic observer failure"); });
+  const healthPool = { query: async () => ({ command: "SELECT", rowCount: 1, rows: [] }) } as unknown as pg.Pool;
+  const app = createApp(config(null), healthPool, emailConfig as never, { requestCostObserver: observer });
+  expect((await app.request("/healthz")).status).toBe(200);
+  expect(observer).toHaveBeenCalledOnce();
+  expect(app.requestCostObserverStatus?.()).toEqual({ enabled: true, pending: 0, dropped: 0, errors: 1 });
+});
+
+it("exposes bounded pending/drop coverage to the opted-in app collector without awaiting it", async () => {
+  const pending: Array<() => void> = [];
+  const observer = () => new Promise<void>(resolve => { pending.push(resolve); });
+  const healthPool = { query: async () => ({ command: "SELECT", rowCount: 1, rows: [] }) } as unknown as pg.Pool;
+  const app = createApp(config(null), healthPool, emailConfig as never, { requestCostObserver: observer });
+  try {
+    for (let index = 0; index < 18; index++) expect((await app.request("/healthz")).status).toBe(200);
+    const status = app.requestCostObserverStatus?.();
+    expect(status).toEqual({ enabled: true, pending: 16, dropped: 2, errors: 0 });
+    expect(Object.isFrozen(status)).toBe(true);
+  } finally { for (const resolve of pending) resolve(); }
+  await Promise.resolve();
+  expect(app.requestCostObserverStatus?.()).toEqual({ enabled: true, pending: 0, dropped: 2, errors: 0 });
+});
+
+it("keeps collector inspection absent and pool identity unchanged when app observation is disabled", async () => {
+  const query = async () => ({ command: "SELECT", rowCount: 1, rows: [] });
+  const healthPool = { query } as unknown as pg.Pool;
+  const app = createApp(config(null), healthPool, emailConfig as never);
+  expect(app.requestCostObserverStatus).toBeUndefined();
+  expect((await app.request("/healthz")).status).toBe(200);
+  expect(healthPool.query).toBe(query);
+});
+
 function workosConfig(): Config {
   return {
     ...config(null),

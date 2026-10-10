@@ -1,4 +1,5 @@
-import type { CloudActorRuntimeGrant } from "@zeros/protocol/cloud-actors";
+import { CloudActorConnectionGrantSchema, CloudRuntimeConnectionTargetSchema,
+  type CloudActorConnectionGrant, type CloudRuntimeConnectionTarget } from "@zeros/protocol/cloud-runtime-connection";
 import { randomUUID } from "node:crypto";
 import type { CloudRuntimeServiceAccess, CloudRuntimeServiceApi } from "./cloud-runtime-service-client";
 import type { CloudServiceHandle, CloudServiceTunnel } from "./cloud-runtime-service-transport";
@@ -20,8 +21,8 @@ export interface CloudWorkspaceAccessBrokerApi {
   revokeEngineAdmission(accessToken:string,input:{organizationId:string;workspaceId:string;grantToken:string}):Promise<void>;
   issueEngineAdmission(
     accessToken: string,
-    input: { organizationId: string; workspaceId: string },
-  ): Promise<CloudWorkspaceEngineAdmission>;
+    input: { organizationId: string; workspaceId: string; directProviderVersion?: 1; connectionChannel?: "control-plane-websocket" },
+  ): Promise<CloudWorkspaceEngineAdmission | CloudActorConnectionGrant>;
   issueSsh(
     accessToken: string,
     input: {
@@ -98,6 +99,21 @@ export type CloudServiceReceipt = {
 export type CloudWorkspaceRuntimeIdentity = AccessTarget & {
   runtimeId: string; generation: number; authorityEpoch: number; engineInstanceId: string; connectionSequence: number;
 };
+function runtimeIdentity(value: CloudWorkspaceRuntimeIdentity): CloudWorkspaceRuntimeIdentity {
+  const { runtimeId, organizationId, workspaceId, generation, authorityEpoch, engineInstanceId, connectionSequence } = value;
+  return { runtimeId, organizationId, workspaceId, generation, authorityEpoch, engineInstanceId, connectionSequence };
+}
+function sameRuntimeIdentity(a: CloudWorkspaceRuntimeIdentity, b: CloudWorkspaceRuntimeIdentity): boolean {
+  return a.runtimeId === b.runtimeId && a.organizationId === b.organizationId && a.workspaceId === b.workspaceId &&
+    a.generation === b.generation && a.authorityEpoch === b.authorityEpoch && a.engineInstanceId === b.engineInstanceId && a.connectionSequence === b.connectionSequence;
+}
+const CONTROL_PLANE_PREFERENCE_MS = 5 * 60_000;
+const MAX_CONTROL_PLANE_PREFERENCES = 64;
+function actorBootRouteKey(target: CloudWorkspaceRuntimeConnectionTarget): string | null {
+  const scope = target.channel === "electron-ssh-tunnel" ? undefined : target.bootScope;
+  return scope ? JSON.stringify([target.organizationId, target.workspaceId, target.generation, target.authorityEpoch,
+    target.engineInstanceId, scope.bootId, scope.writerEpoch, scope.fundingOwnerUserId, scope.fundingOwnerEpoch]) : null;
+}
 type NativeServices = {
   api: CloudRuntimeServiceApi;
   readDeviceIdentity(): { deviceId: string; keyVersion: number } | null;
@@ -144,20 +160,7 @@ type AccessLease = AccessTarget & {
   runtime?: RuntimeLease;
 };
 
-export type CloudWorkspaceRuntimeConnectionTarget = {
-  kind: "cloud";
-  channel: "electron-ssh-tunnel" | "control-plane-websocket";
-  runtimeId: string;
-  organizationId: string;
-  workspaceId: string;
-  generation: number;
-  authorityEpoch: number;
-  engineInstanceId: string;
-  connectionSequence: number;
-  url: string;
-  cloudToken: string;
-  expiresAt: number;
-};
+export type CloudWorkspaceRuntimeConnectionTarget = CloudRuntimeConnectionTarget;
 
 type PreviewAuthorizer = (input: {
   frameName: string;
@@ -222,7 +225,14 @@ export class CloudWorkspaceAccessBroker {
   private readonly previewByFrame = new Map<string, string>();
   private readonly previewFrameTails = new Map<string, Promise<void>>();
   private readonly runtimeById = new Map<string, string>();
-  private readonly actorRuntimes = new Map<string,{target:CloudWorkspaceRuntimeConnectionTarget;grantToken:string;retainUntil:number;closing?:boolean}>();
+  private readonly actorRuntimes = new Map<string,{target:CloudWorkspaceRuntimeConnectionTarget;grantToken:string;retainUntil:number;closing?:boolean;preferControlPlane?:boolean}>();
+  // Route health only: every open still receives a fresh one-use admission.
+  // This broker itself belongs to one exact account session.
+  private readonly controlPlanePreferences = new Map<string, number>();
+  // One receipt per active handle reconciles an IPC response lost after publish.
+  // Reuse never renews the published admission or its expiry.
+  private readonly runtimeRefreshReceipts = new Map<string, { source: CloudWorkspaceRuntimeIdentity; target: CloudWorkspaceRuntimeConnectionTarget }>();
+  private readonly runtimeRefreshFlights = new Map<string, { source: CloudWorkspaceRuntimeIdentity; promise: Promise<CloudWorkspaceRuntimeConnectionTarget> }>();
   private pendingAccess = 0;
   // The auth store is cleared before its session-change listeners run. Keep
   // the most recent token that actually issued/revoked one of this broker's
@@ -299,6 +309,7 @@ export class CloudWorkspaceAccessBroker {
 
   private pruneExpired(): void {
     const now = this.now();
+    for (const [key, deadline] of this.controlPlanePreferences) if (deadline <= now) this.controlPlanePreferences.delete(key);
     for (const [id, lease] of this.nativeLeases) {
       if (Date.parse(lease.access.grant.expiresAt) > now) continue;
       this.nativeLeases.delete(id);
@@ -314,6 +325,8 @@ export class CloudWorkspaceAccessBroker {
       lease.previewAuthorizationCleanup?.();
       if (lease.tunnel) void lease.tunnel.stop().catch(() => undefined);
     }
+    for (const id of this.runtimeRefreshReceipts.keys())
+      if (!this.actorRuntimes.has(id) && !this.runtimeById.has(id)) this.runtimeRefreshReceipts.delete(id);
   }
 
   private forgetLease(id: string, lease: AccessLease): void {
@@ -1024,6 +1037,21 @@ export class CloudWorkspaceAccessBroker {
       throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
   }
 
+  /** Remember route health only for the current account's exact runtime.
+   * Late or mismatched status publication never changes runtime authority. */
+  async publishRuntimeConnection(input: CloudWorkspaceRuntimeIdentity & { connected: boolean }): Promise<void> {
+    if (!input.connected || !this.hasCurrentSession()) return;
+    this.pruneExpired();
+    const actor = this.actorRuntimes.get(input.runtimeId);
+    if (!actor || actor.closing || !sameRuntimeIdentity(actor.target, input) ||
+        actor.target.channel !== "control-plane-websocket") return;
+    const key = actorBootRouteKey(actor.target);
+    if (!key) return;
+    if (!this.controlPlanePreferences.has(key) && this.controlPlanePreferences.size >= MAX_CONTROL_PLANE_PREFERENCES)
+      this.controlPlanePreferences.delete(this.controlPlanePreferences.keys().next().value!);
+    this.controlPlanePreferences.set(key, this.now() + CONTROL_PLANE_PREFERENCE_MS);
+  }
+
   async startAutomaticTunnel(input: CloudWorkspaceRuntimeIdentity & CloudServiceContext & { remotePort: number; localPort: number }): Promise<{
     accessId: string; expiresAt: string; localHost: "127.0.0.1"; localPort: number; remotePort: number;
   }> {
@@ -1036,11 +1064,34 @@ export class CloudWorkspaceAccessBroker {
     return { ...result, localPort: result.localPort!, remotePort: result.remotePort! };
   }
 
-  private actorRuntimeTarget(admission:CloudActorRuntimeGrant,runtimeId:string,sequence:number):CloudWorkspaceRuntimeConnectionTarget {
-    return {kind:"cloud",channel:"control-plane-websocket",runtimeId,connectionSequence:sequence,
+  private actorRuntimeTarget(admission:CloudActorConnectionGrant,runtimeId:string,sequence:number,preferControlPlane=false):CloudWorkspaceRuntimeConnectionTarget {
+    const parsed = CloudActorConnectionGrantSchema.safeParse(admission), expiresAt = Date.parse(admission.expiresAt);
+    if (!parsed.success || !Number.isFinite(expiresAt) || expiresAt - this.now() < 5_000 || expiresAt - this.now() > 16 * 60_000)
+      throw new CloudWorkspaceAccessClientError(201,"bad_response","The cloud workspace control plane returned invalid runtime access");
+    const direct = !preferControlPlane && parsed.data.directProvider;
+    const target = {kind:"cloud",channel:direct?"direct-provider-websocket":"control-plane-websocket",runtimeId,connectionSequence:sequence,
       organizationId:admission.organizationId,workspaceId:admission.workspaceId,generation:admission.generation,
-      authorityEpoch:admission.authorityEpoch,engineInstanceId:admission.engineInstanceId,url:admission.bridgeUrl,
-      cloudToken:admission.grantToken,expiresAt:Date.parse(admission.expiresAt)};
+      authorityEpoch:admission.authorityEpoch,engineInstanceId:admission.engineInstanceId,url:direct?direct.url:admission.bridgeUrl,
+      cloudToken:admission.grantToken,expiresAt,
+      ...(parsed.data.bootScope?{bootScope:parsed.data.bootScope}:{}),...(direct?{remotePort:admission.remotePort}:{})};
+    const result = CloudRuntimeConnectionTargetSchema.safeParse(target);
+    if (!result.success)
+      throw new CloudWorkspaceAccessClientError(201,"bad_response","The cloud workspace control plane returned invalid runtime access");
+    const value = result.data;
+    if (value.channel !== "electron-ssh-tunnel" && value.bootScope) Object.freeze(value.bootScope);
+    return Object.freeze(value);
+  }
+
+  private assertSameActorBoot(previous:CloudWorkspaceRuntimeConnectionTarget,next:CloudWorkspaceRuntimeConnectionTarget):void {
+    const oldScope = previous.channel === "electron-ssh-tunnel" ? undefined : previous.bootScope;
+    if (!oldScope) return; // Existing legacy actor refresh keeps its contract.
+    const scope = next.channel === "electron-ssh-tunnel" ? undefined : next.bootScope;
+    if (!scope || previous.authorityEpoch !== next.authorityEpoch || previous.cloudToken === next.cloudToken ||
+        scope.organizationId !== oldScope.organizationId || scope.workspaceId !== oldScope.workspaceId ||
+        scope.generation !== oldScope.generation || scope.engineInstanceId !== oldScope.engineInstanceId ||
+        scope.bootId !== oldScope.bootId || scope.writerEpoch !== oldScope.writerEpoch ||
+        scope.fundingOwnerUserId !== oldScope.fundingOwnerUserId || scope.fundingOwnerEpoch !== oldScope.fundingOwnerEpoch)
+      throw new CloudWorkspaceAccessClientError(409,"cloud_workspace_access_superseded","The cloud workspace runtime session has been superseded");
   }
 
   private async releaseActorAdmission(token:string,admission:{organizationId:string;workspaceId:string;grantToken:string}) {
@@ -1186,11 +1237,25 @@ export class CloudWorkspaceAccessBroker {
     const releaseCapacity = this.reserveCapacity();
     try {
       const token = await this.token();
-      const admission = await this.api.issueEngineAdmission(token, input);
+      const admission = await this.api.issueEngineAdmission(token, {
+        organizationId:input.organizationId,workspaceId:input.workspaceId,directProviderVersion:1,
+      });
       if(admission.version===2){
         if(!this.hasCurrentSession()){await this.releaseActorAdmission(token,admission).catch(()=>undefined);throw new CloudWorkspaceAccessClientError(401,"signed_out","Cloud workspace access authority has ended");}
-        const target=this.actorRuntimeTarget(admission,this.randomId(),1);
-        this.actorRuntimes.set(target.runtimeId,{target,grantToken:admission.grantToken,retainUntil:this.now()+24*60*60_000});
+        let target:CloudWorkspaceRuntimeConnectionTarget;
+        let preferControlPlane = false;
+        try {
+          target=this.actorRuntimeTarget(admission,this.randomId(),1);
+          if(target.organizationId!==input.organizationId||target.workspaceId!==input.workspaceId)
+            throw new CloudWorkspaceAccessClientError(201,"bad_response","The cloud workspace control plane returned invalid runtime access");
+          const routeKey = actorBootRouteKey(target);
+          preferControlPlane = Boolean(routeKey && (this.controlPlanePreferences.get(routeKey) ?? 0) > this.now());
+          if (preferControlPlane) target = this.actorRuntimeTarget(admission, target.runtimeId, 1, true);
+        } catch(error) {
+          await this.releaseActorAdmission(token,{...input,grantToken:admission.grantToken}).catch(()=>undefined);
+          throw error;
+        }
+        this.actorRuntimes.set(target.runtimeId,{target,grantToken:admission.grantToken,retainUntil:this.now()+24*60*60_000,preferControlPlane});
         return target;
       }
 
@@ -1215,18 +1280,39 @@ export class CloudWorkspaceAccessBroker {
     }
   }
 
-  /** Mint a fresh one-use admission for the exact active runtime session. A
-   * sequence compare-and-swap prevents concurrent refreshes from publishing
-   * two descriptors for one reconnect boundary. */
-  async refreshRuntime(input: {
-    runtimeId: string;
-    organizationId: string;
-    workspaceId: string;
-    generation: number;
-    authorityEpoch: number;
-    engineInstanceId: string;
-    connectionSequence: number;
-  }): Promise<CloudWorkspaceRuntimeConnectionTarget> {
+  /** Reconcile the exact reconnect boundary before minting. Concurrent and
+   * retried requests share one published descriptor, even if IPC lost it. */
+  async refreshRuntime(input: CloudWorkspaceRuntimeIdentity): Promise<CloudWorkspaceRuntimeConnectionTarget> {
+    this.pruneExpired();
+    if (!this.hasCurrentSession())
+      throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+    const receipt = this.runtimeRefreshReceipts.get(input.runtimeId);
+    if (receipt && sameRuntimeIdentity(receipt.source, input)) {
+      const actor = this.actorRuntimes.get(input.runtimeId);
+      const accessId = this.runtimeById.get(input.runtimeId), lease = accessId ? this.leases.get(accessId) : undefined;
+      const current = actor ? !actor.closing && actor.target === receipt.target : lease?.runtime && lease.tunnel && sameRuntimeIdentity(receipt.target, {
+        ...lease, runtimeId: lease.runtime.id, connectionSequence: lease.runtime.sequence, authorityEpoch: lease.runtime.authorityEpoch, engineInstanceId: lease.runtime.engineInstanceId,
+      });
+      if (!current || receipt.target.expiresAt - this.now() < 5_000)
+        throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+      return receipt.target;
+    }
+    const flight = this.runtimeRefreshFlights.get(input.runtimeId);
+    if (flight) {
+      if (sameRuntimeIdentity(flight.source, input)) return flight.promise;
+      throw new CloudWorkspaceAccessClientError(409, "cloud_workspace_access_superseded", "The cloud workspace runtime session has been superseded");
+    }
+    const source = runtimeIdentity(input);
+    const entry = { source, promise: this.mintRuntimeRefresh(source).then(target => {
+      if (this.hasCurrentSession()) this.runtimeRefreshReceipts.set(source.runtimeId, { source, target });
+      return target;
+    }) };
+    this.runtimeRefreshFlights.set(input.runtimeId, entry);
+    try { return await entry.promise; }
+    finally { if (this.runtimeRefreshFlights.get(input.runtimeId) === entry) this.runtimeRefreshFlights.delete(input.runtimeId); }
+  }
+
+  private async mintRuntimeRefresh(input: CloudWorkspaceRuntimeIdentity): Promise<CloudWorkspaceRuntimeConnectionTarget> {
     this.pruneExpired();
     const actor=this.actorRuntimes.get(input.runtimeId);
     if(actor){
@@ -1235,14 +1321,23 @@ export class CloudWorkspaceAccessBroker {
         target.authorityEpoch!==input.authorityEpoch||target.engineInstanceId!==input.engineInstanceId||target.connectionSequence!==input.connectionSequence)
         throw new CloudWorkspaceAccessClientError(409,"cloud_workspace_access_superseded","The cloud workspace runtime session has been superseded");
       const token=await this.token();
-      const admission=await this.api.issueEngineAdmission(token,{organizationId:input.organizationId,workspaceId:input.workspaceId});
+      const preferControlPlane=target.channel==="direct-provider-websocket"||actor.preferControlPlane===true;
+      const admission=await this.api.issueEngineAdmission(token,{organizationId:input.organizationId,workspaceId:input.workspaceId,
+        directProviderVersion:1,...(preferControlPlane?{connectionChannel:"control-plane-websocket" as const}:{})});
       if(admission.version!==2)throw new CloudWorkspaceAccessClientError(409,"cloud_workspace_access_superseded","An actor-aware cloud runtime is required");
       if(!this.hasCurrentSession()||actor.closing||this.actorRuntimes.get(input.runtimeId)!==actor){
         await this.releaseActorAdmission(token,admission).catch(()=>undefined);
         throw new CloudWorkspaceAccessClientError(409,"cloud_workspace_access_superseded","The cloud workspace runtime session has been superseded");
       }
-      const next=this.actorRuntimeTarget(admission,input.runtimeId,input.connectionSequence+1);
-      this.actorRuntimes.set(input.runtimeId,{target:next,grantToken:admission.grantToken,retainUntil:this.now()+24*60*60_000});
+      let next:CloudWorkspaceRuntimeConnectionTarget;
+      try {
+        next=this.actorRuntimeTarget(admission,input.runtimeId,input.connectionSequence+1,preferControlPlane);
+        this.assertSameActorBoot(target,next);
+      } catch(error) {
+        await this.releaseActorAdmission(token,{organizationId:input.organizationId,workspaceId:input.workspaceId,grantToken:admission.grantToken}).catch(()=>undefined);
+        throw error;
+      }
+      this.actorRuntimes.set(input.runtimeId,{target:next,grantToken:admission.grantToken,retainUntil:this.now()+24*60*60_000,preferControlPlane});
       await this.releaseActorAdmission(token,{...target,grantToken:actor.grantToken}).catch(()=>undefined);
       const published=this.actorRuntimes.get(input.runtimeId);
       if(!this.hasCurrentSession()||published?.target!==next||published.closing)throw new CloudWorkspaceAccessClientError(409,"cloud_workspace_access_superseded","The cloud workspace runtime session has been superseded");
@@ -1350,6 +1445,7 @@ export class CloudWorkspaceAccessBroker {
 
   async closeRuntime(runtimeId: string): Promise<boolean> {
     this.pruneExpired();
+    this.runtimeRefreshReceipts.delete(runtimeId);
     const actor=this.actorRuntimes.get(runtimeId);
     if(actor){
       if (!actor.closing) {
@@ -1431,6 +1527,8 @@ export class CloudWorkspaceAccessBroker {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.runtimeRefreshReceipts.clear();
+    this.controlPlanePreferences.clear();
     const nativeCleanup = Promise.allSettled([...this.nativeLeases.values()].map(lease => this.retireNativeLease(lease)));
     const runtimeIds = [...this.actorRuntimes.keys(), ...this.runtimeById.keys()];
     try { this.onRuntimeRetired(runtimeIds); } catch { /* local cleanup must continue */ }

@@ -36,3 +36,37 @@ describe("cloud workspace sharing projection", () => {
     expect(CloudWorkspaceDocumentSchema.safeParse({ ...document, accessRevision: 0 }).success).toBe(false);
   });
 });
+
+describe("negotiated cloud credential document", () => {
+  const binding = {
+    mode: "boot-owner-v1", fundingScope: "workspace-roles-v1",
+    bootId: "44444444-4444-4444-8444-444444444444", writerEpoch: "55555555-5555-4555-8555-555555555555",
+    fundingOwnerUserId: document.createdBy, fundingOwnerEpoch: 1, generation: 1,
+    engineInstanceId: "66666666-6666-4666-8666-666666666666", status: "owner-changed",
+  };
+
+  it("retains the exact boot owner-transfer state separately from current workspace ownership", () => {
+    expect(CloudWorkspaceDocumentSchema.parse({ ...document, ownerUserId: "77777777-7777-4777-8777-777777777777",
+      agentCredentials: binding })).toMatchObject({ agentCredentials: binding });
+  });
+
+  it("does not infer new-mode funding or a changed card for a legacy document", () => {
+    expect(CloudWorkspaceDocumentSchema.parse(document)).not.toHaveProperty("agentCredentials");
+  });
+
+  it.each([
+    { mode: "actor-grant-v1" }, { fundingScope: "owner-only" }, { bootId: "foreign" }, { writerEpoch: "foreign" },
+    { fundingOwnerUserId: "foreign" }, { fundingOwnerEpoch: 0 }, { generation: 0 }, { engineInstanceId: "foreign" },
+    { status: "credentials-changed" }, { material: { apiKey: "synthetic-private-key" } },
+    { cacheRevision: 2 }, { refreshToken: "synthetic-private-refresh" },
+  ])("refuses unbound or private credential document fields %#", patch => {
+    expect(CloudWorkspaceDocumentSchema.safeParse({ ...document, agentCredentials: { ...binding, ...patch } }).success).toBe(false);
+  });
+
+  it("retains only bounded nonsecret initial adoption states with unknown distinct from missing", () => {
+    const initialAdoptions = [{ provider: "claude", status: "missing" }, { provider: "codex", status: "known", adoptionId: binding.bootId },
+      { provider: "cursor", status: "unknown" }];
+    expect(CloudWorkspaceDocumentSchema.parse({ ...document, agentCredentials: { ...binding, status: "current", initialAdoptions } }))
+      .toMatchObject({ agentCredentials: { initialAdoptions } });
+  });
+});

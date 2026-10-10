@@ -2,14 +2,14 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { buildEngineImage } from "../cloud-workspace-validation/image";
 
 const read = (path: string) => readFileSync(path, "utf8");
 
-// The Linux host prerequisites the contained-execution suites need. These used
+// Offline artifact closure prerequisites, independent of provider execution. These used
 // to be inline shell duplicated across preflight.yml's jobs, which is how the
 // three release workflows came to be missing them entirely.
-const CONTAINMENT_ACTION =
-  ".github/actions/contained-execution-runtime/action.yml";
+const CLOSURE_ACTION = ".github/actions/runtime-closure-tools/action.yml";
 
 function sourceFiles(root: string): string[] {
   return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
@@ -95,11 +95,12 @@ describe("repository layout contracts", () => {
     // Only shipped targets gate a pull request: the Mac app is Apple Silicon
     // only and cloud workers run on Linux amd64, so no Intel Mac or arm64
     // Linux job.
-    expect(preflight).not.toMatch(/macos-\d+-intel|ubuntu-[\d.]+-arm|zsr-macos-intel|zsr-linux-arm64/);
-    // The broad test job already owns every source-level ZSR contract. The
-    // macOS workload job exercises only the real shipping kernel/runtime so a
-    // host-specific unit fixture cannot mask or duplicate that evidence.
-    expect(preflight.match(/pnpm check:zsr:runtime/g)).toHaveLength(1);
+    expect(preflight).not.toMatch(
+      /macos-\d+-intel|ubuntu-[\d.]+-arm|zsr-macos-intel|zsr-linux-arm64/,
+    );
+    // The broad test job owns source contracts. The shipping macOS job
+    // retains provider, Host lifecycle and packaged artifact checks.
+    expect(preflight).not.toContain("pnpm check:zsr");
     expect(preflight).not.toMatch(/run: .*pnpm check:zsr$/m);
   });
 
@@ -113,7 +114,7 @@ describe("repository layout contracts", () => {
   });
 
   it("uses the HTTPS Ubuntu archive before the amd64 containment install", () => {
-    const action = read(CONTAINMENT_ACTION);
+    const action = read(CLOSURE_ACTION);
     const archive = action.indexOf("https://archive.ubuntu.com/ubuntu");
     const update = action.indexOf("sudo apt-get update");
 
@@ -121,17 +122,19 @@ describe("repository layout contracts", () => {
     expect(archive).toBeLessThan(update);
     // archive.ubuntu.com serves no arm64 packages — those live on
     // ports.ubuntu.com — so rewriting an arm64 runner's mirror list to it would
-    // break `apt-get update` outright. The arm64 ZSR job used to avoid that
+    // break `apt-get update` outright. The arm64 job used to avoid that
     // only by omitting the rewrite; one shared action makes the guard explicit.
     expect(action).toContain('[ "$(uname -m)" = "x86_64" ]');
   });
 
-  it("smokes the production bubblewrap and seccomp namespace prerequisites", () => {
-    const action = read(CONTAINMENT_ACTION);
+  it("smokes offline artifact closure namespace prerequisites", () => {
+    const action = read(CLOSURE_ACTION);
     const usernsEnable = action.indexOf("with-userns.sh");
     const sandboxSmoke = action.indexOf("--ro-bind / /");
 
-    expect(action).toContain("bubblewrap socat");
+    expect(action).toContain("bubblewrap util-linux");
+    expect(action).toContain("command -v setpriv");
+    expect(action).not.toContain("sandbox-runtime");
     expect(usernsEnable).toBeGreaterThanOrEqual(0);
     expect(usernsEnable).toBeLessThan(sandboxSmoke);
     expect(action).not.toContain("bwrap-userns-restrict");
@@ -139,7 +142,7 @@ describe("repository layout contracts", () => {
     expect(action.slice(sandboxSmoke)).toContain("--cap-drop ALL");
     expect(action.slice(sandboxSmoke)).toContain("--unshare-pid");
     expect(action.slice(sandboxSmoke)).toContain("--proc /proc");
-    expect(action.slice(sandboxSmoke)).toContain('"$apply_seccomp" /bin/true');
+    expect(action.slice(sandboxSmoke)).toContain("-- /bin/true");
   });
 
   it("keeps the userns relaxation scoped to one command and restores it", () => {
@@ -181,21 +184,25 @@ describe("repository layout contracts", () => {
     }
   });
 
-  it("gates every execution-boundary suite plus interactive init/resume contracts", () => {
+  it("discovers every execution-boundary suite plus interactive init/resume contracts", () => {
     const rootPackage = JSON.parse(read("package.json")) as {
       scripts: Record<string, string>;
     };
-    expect(rootPackage.scripts["check:zsr"]).toBe(
-      "pnpm check:zsr:contracts && pnpm check:zsr:runtime",
+    expect(rootPackage.scripts["test:git"]).toBe(
+      "vitest run --config vitest.config.ts",
     );
-    expect(rootPackage.scripts["check:zsr:contracts"]).toBe(
-      "pnpm build:zsr-supervisor && node scripts/run-zsr-contract-tests.mjs",
+    expect(rootPackage.scripts["check:zsr"]).toBeUndefined();
+    const config = read("vitest.config.ts");
+    expect(config).toContain(
+      '"apps/desktop/src/engine/agents/**/__tests__/**/*.test.ts"',
     );
-    expect(rootPackage.scripts["check:zsr:runtime"]).toContain(
-      "scripts/zsr-qualification/run.mjs --require-secure",
+    expect(config).toContain(
+      '"apps/desktop/src/engine/__tests__/**/*.test.ts"',
     );
-
-    const runner = read("scripts/run-zsr-contract-tests.mjs");
+    expect(config).toContain(
+      '"apps/desktop/src/renderer/features/agent/__tests__/**/*.test.ts"',
+    );
+    expect(config).not.toMatch(/exclude:.*(?:gateway|containment|agent)/);
     const automaticallyRequired = [
       ...readdirSync("apps/desktop/src/engine/agents/containment/__tests__")
         .filter((name) => name.endsWith(".test.ts"))
@@ -226,9 +233,10 @@ describe("repository layout contracts", () => {
       ...automaticallyRequired,
       ...interactiveContracts,
     ]) {
-      expect(runner, `${testFile} must be execution-boundary-gated`).toContain(
-        testFile,
-      );
+      expect(
+        existsSync(testFile),
+        `${testFile} must remain discoverable in the complete suite`,
+      ).toBe(true);
     }
   });
 
@@ -297,7 +305,9 @@ describe("repository layout contracts", () => {
     expect(rootPackage.scripts["electron:dev"]).toContain(
       "hosted-entry.mjs start",
     );
-    expect(read("scripts/dev-environment/hosted-launcher.mjs")).toContain('process.argv.includes("--run-only") ? "--run-only" : "--watch"');
+    expect(read("scripts/dev-environment/hosted-launcher.mjs")).toContain(
+      'process.argv.includes("--run-only") ? "--run-only" : "--watch"',
+    );
     expect(launcher).toContain("useMainSupervisor");
     expect(supervisor).toContain('new Set(["main.cjs", "preload.cjs"])');
   });
@@ -681,14 +691,14 @@ describe("repository layout contracts", () => {
     );
     expect(image).toContain("&& pnpm rebuild better-sqlite3`");
     expect(image).not.toContain("pnpm rebuild better-sqlite3 || true");
-    expect(config).toContain('SANDBOX_ENGINE_DIR = runtimeLayout.engine');
-    expect(config).toContain('SANDBOX_REPO_DIR = runtimeLayout.repository');
+    expect(config).toContain("SANDBOX_ENGINE_DIR = runtimeLayout.engine");
+    expect(config).toContain("SANDBOX_REPO_DIR = runtimeLayout.repository");
     expect(config).toMatch(/node:22[^"\n]+@sha256:[a-f0-9]{64}/);
-    expect(image).toContain("acl apparmor bubblewrap busybox-static ca-certificates");
+    expect(image).toContain("apparmor bubblewrap ca-certificates");
     expect(image).toContain('"/etc/zeros/cloud-worker.json"');
     expect(dockerfile).toContain("bubblewrap");
-    expect(dockerfile).toContain("podman");
-    expect(image).toContain("podman");
+    expect(dockerfile).toContain("util-linux");
+    expect(image).toContain("util-linux");
     expect(dockerfile).toContain(
       "COPY sandbox/cloud-worker.json /etc/zeros/cloud-worker.json",
     );
@@ -712,30 +722,58 @@ describe("repository layout contracts", () => {
     expect(launcher).not.toContain(
       '"$RUNTIME" "$ENGINE_DIR/dist-engine/cli.js" serve --root "$REPO_DIR"',
     );
-    expect(launcher).toContain('"$RUNTIME" "$RUNTIME_LIB/cloud-engine-launcher.mjs"');
+    expect(launcher).toContain(
+      '"$RUNTIME" "$RUNTIME_LIB/cloud-engine-launcher.mjs"',
+    );
     expect(launcher).not.toContain('node "$REPO_DIR/dist-engine/cli.js"');
   });
 
   it("packages the durable layout and capture worker in both cloud image paths", () => {
     const dockerfile = read("scripts/cloud-workspace-validation/Dockerfile");
     const image = read("scripts/cloud-workspace-validation/image.ts");
-    const launcher = read("scripts/cloud-workspace-validation/sandbox/start-engine.sh");
-    const layout = JSON.parse(read("scripts/cloud-workspace-validation/sandbox/runtime-layout.json"));
+    const launcher = read(
+      "scripts/cloud-workspace-validation/sandbox/start-engine.sh",
+    );
+    const layout = JSON.parse(
+      read("scripts/cloud-workspace-validation/sandbox/runtime-layout.json"),
+    );
     expect(layout.version).toBe(3);
-    for (const field of ["repository", "data", "agentHome", "captureHome", "log"]) {
+    for (const field of [
+      "repository",
+      "data",
+      "agentHome",
+      "captureHome",
+      "log",
+    ]) {
       expect(layout[field]).toMatch(/^\/srv\/zeros\//);
       expect(dockerfile).toContain(layout[field]);
     }
     for (const field of ["logicalRepository", "data", "agentHome", "log"]) {
       expect(launcher).toContain(layout[field]);
     }
-    expect(dockerfile).toContain("COPY sandbox/runtime-layout.json /opt/zeros-runtime/lib/zeros/runtime-layout.json");
-    expect(image).toContain('"/opt/zeros-runtime/lib/zeros/runtime-layout.json"');
+    expect(dockerfile).toContain(
+      "COPY sandbox/runtime-layout.json /opt/zeros-runtime/lib/zeros/runtime-layout.json",
+    );
+    expect(image).toContain(
+      '"/opt/zeros-runtime/lib/zeros/runtime-layout.json"',
+    );
     expect(layout.logicalRepository).toBe("/srv/zeros/workspace");
     expect(layout.repository).toBe(`${layout.engineFilesRoot}/workspace`);
-    expect(layout.attachmentTemporaryRoot).toBe(`${layout.engineFilesRoot}/attachment-staging`);
-    for (const source of [dockerfile, image]) {
-      expect(source).toContain("--uid 10002 --gid 10002");
+    expect(layout.attachmentTemporaryRoot).toBe(
+      `${layout.engineFilesRoot}/attachment-staging`,
+    );
+    for (const source of [dockerfile, buildEngineImage().dockerfile]) {
+      expect(source).toContain("useradd --uid 10003 --gid 10003");
+      expect(source).toMatch(/(?:^|\s)USER=["']?zeros-engine["']?(?:\s|$)/m);
+      expect(source).not.toMatch(/chown[^\n]*1000[124]:1000[124]/);
+      expect(source).toMatch(
+        new RegExp(`chown[^\\n]*10003:10003[^\\n]*${layout.repository}`),
+      );
+      expect(source).toContain("chown -R 10003:10003");
+      expect(source).toContain("chmod 0700 /srv/zeros/state");
+      expect(source).toContain(
+        "install -d -o 10003 -g 10003 -m 0700 /srv/zeros/home/capture",
+      );
       expect(source).toContain("playwright-core install --with-deps chromium");
     }
   });
@@ -819,7 +857,7 @@ describe("repository layout contracts", () => {
     ])
       expect(cloudIndex).toContain(contract);
     expect(read(`${cloudDocs}/qualification-status.md`)).toContain(
-      "0138_cloud_workspace_usage_and_ui.sql",
+      "0138_cloud_workspace_ui_metadata.sql",
     );
     const followUps = read(`${cloudDocs}/warm-pool.md`);
     for (const boundary of [
@@ -881,8 +919,17 @@ describe("repository layout contracts", () => {
     expect(beta).not.toContain("workflow_dispatch:");
     // Signing (build), Apple submission/notarization polling and feed
     // publication each need Production secrets; nothing else may declare it.
-    const productionJobs = [...stable.matchAll(/^  ([a-z][a-z_-]*):\n(?:(?!^  [a-z][a-z_-]*:\n)[\s\S])*?^    environment: production$/gm)].map((match) => match[1]);
-    expect(productionJobs.sort()).toEqual(["build", "notarize", "publish", "submit"]);
+    const productionJobs = [
+      ...stable.matchAll(
+        /^  ([a-z][a-z_-]*):\n(?:(?!^  [a-z][a-z_-]*:\n)[\s\S])*?^    environment: production$/gm,
+      ),
+    ].map((match) => match[1]);
+    expect(productionJobs.sort()).toEqual([
+      "build",
+      "notarize",
+      "publish",
+      "submit",
+    ]);
     expect(stable).toContain("Require a Beta-validated release branch");
     expect(stable).toContain(
       "Production must be dispatched from 'release/X.Y.Z' after Beta validation",
@@ -894,30 +941,57 @@ describe("repository layout contracts", () => {
     const alpha = read(".github/workflows/release-alpha.yml");
     const publication = read(".github/workflows/alpha-publication.yml");
     const preflight = read(".github/workflows/preflight.yml");
-    expect(preflight).toContain("    needs: [quality, test, build, control-plane, secret-scan]");
+    expect(preflight).toContain(
+      "    needs: [quality, test, build, control-plane, secret-scan]",
+    );
     expect(alpha).toContain("ready: ${{ steps.barrier.outputs.ready }}");
-    expect(alpha.match(/if: github\.event\.repository\.fork == false && needs\.ci\.outputs\.ready == 'true'/g)).toHaveLength(1);
+    expect(
+      alpha.match(
+        /if: github\.event\.repository\.fork == false && needs\.ci\.outputs\.ready == 'true'/g,
+      ),
+    ).toHaveLength(1);
     expect(alpha).toContain("uses: ./.github/workflows/alpha-publication.yml");
     expect(alpha).toContain("needs: [ci, metadata]");
     expect(publication).toContain("    name: Publish Alpha feed");
-    expect(publication).toContain('      - name: Publish rolling "alpha" prerelease');
+    expect(publication).toContain(
+      '      - name: Publish rolling "alpha" prerelease',
+    );
     expect(publication.match(/needs: \[entry, hosted\]/g)).toHaveLength(2);
     expect(publication).toContain("    needs: entry");
     expect(publication).not.toContain("workflow_dispatch:");
-    expect(alpha).toContain("pnpm check:zsr");
+    expect(alpha).not.toContain("pnpm check:zsr");
     expect(alpha).toContain("pnpm smoke:engine");
     expect(alpha).toContain("pnpm smoke:packaged-pty");
-    expect(alpha).toContain("ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}");
-    expect(alpha).toContain("if: success() && steps.barrier.outputs.admission_issued == 'true'");
-    for (const workflow of ["release-beta", "release", "controlled-cutover", "staff-owner-bootstrap"]) {
-      expect(read(`.github/workflows/${workflow}.yml`)).not.toMatch(/ZEROS_ALPHA_CI_FAST_PATH|ZEROS_ALPHA_FORWARD_ONLY/);
+    expect(alpha).toContain(
+      "ZEROS_ALPHA_FORWARD_ONLY: ${{ vars.ZEROS_ALPHA_FORWARD_ONLY }}",
+    );
+    expect(alpha).toContain(
+      "if: success() && steps.barrier.outputs.admission_issued == 'true'",
+    );
+    for (const workflow of [
+      "release-beta",
+      "release",
+      "controlled-cutover",
+      "staff-owner-bootstrap",
+    ]) {
+      expect(read(`.github/workflows/${workflow}.yml`)).not.toMatch(
+        /ZEROS_ALPHA_CI_FAST_PATH|ZEROS_ALPHA_FORWARD_ONLY/,
+      );
     }
     const worker = read(".github/workflows/cloud-worker-promotion.yml");
     expect(worker).not.toMatch(/vars\.ZEROS_ALPHA_/);
     const [dispatch, callable] = worker.split("  workflow_call:\n");
-    for (const input of ["alpha_ci_fast_path", "alpha_forward_only", "alpha_prepared_version"]) {
+    for (const input of [
+      "alpha_ci_fast_path",
+      "alpha_forward_only",
+      "alpha_prepared_version",
+    ]) {
       expect(dispatch).not.toContain(`${input}:`);
-      expect(callable).toMatch(new RegExp(`${input}:\\n        description: [^\\n]+\\n        default: ''\\n        type: string`));
+      expect(callable).toMatch(
+        new RegExp(
+          `${input}:\\n        description: [^\\n]+\\n        default: ''\\n        type: string`,
+        ),
+      );
     }
   });
 
@@ -969,7 +1043,10 @@ describe("repository layout contracts", () => {
     expect(existsSync(verifier)).toBe(true);
     for (const channel of channels) {
       const parent = read(channel.workflow);
-      const workflow = channel.appName === "Zeros Alpha.app" ? `${parent}\n${read(".github/workflows/alpha-publication.yml")}` : parent;
+      const workflow =
+        channel.appName === "Zeros Alpha.app"
+          ? `${parent}\n${read(".github/workflows/alpha-publication.yml")}`
+          : parent;
       const verifierIndex = workflow.indexOf(`node ${verifier}`);
       const publishIndex = workflow.indexOf(channel.publishStep);
 
@@ -982,9 +1059,13 @@ describe("repository layout contracts", () => {
         /node scripts\/verify-macos-release-artifacts\.mjs[\s\S]*?--dmg "\$DMG"[\s\S]*?--zip "\$ZIP"/,
       );
       if (channel.appName === "Zeros Alpha.app") {
-        expect(parent.indexOf("name: Save signed Alpha artifacts")).toBeGreaterThan(verifierIndex);
+        expect(
+          parent.indexOf("name: Save signed Alpha artifacts"),
+        ).toBeGreaterThan(verifierIndex);
         const publication = read(".github/workflows/alpha-publication.yml");
-        expect(publication.indexOf("alpha-build-cli.ts --wait desktop")).toBeLessThan(publication.indexOf(channel.publishStep));
+        expect(
+          publication.indexOf("alpha-build-cli.ts --wait desktop"),
+        ).toBeLessThan(publication.indexOf(channel.publishStep));
         expect(publication).toContain("alpha-build-cli.ts --verify-metadata");
       }
     }

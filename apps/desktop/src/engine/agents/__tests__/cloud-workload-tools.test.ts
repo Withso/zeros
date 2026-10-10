@@ -7,6 +7,7 @@ import {PassThrough} from "node:stream";
 import {afterEach,describe,expect,it,vi} from "vitest";
 import type {CloudAgentLease} from "../cloud-agent-lease";
 import {CloudWorkloadTools} from "../cloud-workload-tools";
+import {createCloudNativeHome} from "../containment/cloud-native-home";
 import type {BoundaryProcess,BoundarySpawnRequest,PreparedBoundary} from "../containment/types";
 import { testCloudRuntime } from "./helpers/test-cloud-runtime";
 vi.mock("../containment/cloud-runtime-root.mjs", async original => ({
@@ -14,7 +15,7 @@ vi.mock("../containment/cloud-runtime-root.mjs", async original => ({
   resolveCloudRuntime: (await import("./helpers/test-cloud-runtime")).testCloudRuntime,
 }));
 const roots:string[]=[],hosts:CloudWorkloadTools[]=[];
-async function fixture(gitAuthor?:{name:string;email:string},values?:Record<string,string>){
+async function fixture(gitAuthor?:{name:string;email:string},values?:Record<string,string>,cwd="/srv/zeros/workspace"){
   const root=await mkdtemp(path.join(os.tmpdir(),"zeros-cloud-tools-"));roots.push(root);
   const domains=new Set<{stopAndProve():Promise<void>}>();
   const controller=new AbortController();
@@ -33,17 +34,23 @@ async function fixture(gitAuthor?:{name:string;email:string},values?:Record<stri
       stopAndProve:async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill("SIGKILL");await exit;}};
   });
   const boundary={spawn:launched,stopAndProve:async()=>{}} as unknown as PreparedBoundary;
-  const tools=new CloudWorkloadTools(lease,boundary,"/srv/zeros/workspace");hosts.push(tools);return {root,tools,launched,domains,lease,controller};
+  const nativeHome=await createCloudNativeHome({dataRoot:root,provider:"cursor",conversationId:"tools",executionId:"native-run"});
+  const tools=new CloudWorkloadTools(lease,boundary,cwd,nativeHome);hosts.push(tools);return {root,tools,launched,domains,lease,controller,nativeHome};
 }
 afterEach(async()=>{for(const host of hosts.splice(0))await host.stopAndProve();for(const root of roots.splice(0))await rm(root,{recursive:true,force:true});});
 describe.skipIf(process.platform!=="linux")("credential-free cloud workspace tools",()=>{
+  it.each(["/srv/zeros/workspace","/srv/zeros/state/workspaces/managed-worktree"])("uses the server-admitted managed root %s",async cwd=>{
+    const {tools,launched}=await fixture(undefined,undefined,cwd);
+    expect(await tools.call({operation:"exec",command:"true"})).toMatchObject({ok:true});
+    expect(launched).toHaveBeenCalledWith(expect.objectContaining({cwd,env:expect.objectContaining({ZEROS_WORKTREE_PATH:cwd})}));
+  });
   it("delivers each actor's admitted environment to shells without provider credentials or values in argv",async()=>{
     for(const actor of ["member-one","member-two"]){
       const values={ORG_VALUE:"synthetic-org-value",REPO_VALUE:"synthetic-repository-value",PERSONAL_VALUE:actor,ORG_SECRET:"synthetic-org-secret",EMPTY_VALUE:"",
         OPENAI_API_KEY:"synthetic-provider-value",ANTHROPIC_API_KEY:"synthetic-provider-value",CURSOR_API_KEY:"synthetic-provider-value",CODEX_API_KEY:"synthetic-provider-value"};
-      const {tools,launched}=await fixture(undefined,values);
+      const {tools,launched,nativeHome}=await fixture(undefined,values);
       const result=await tools.call({operation:"exec",command:'printf "%s\\n" "$ORG_VALUE" "$REPO_VALUE" "$PERSONAL_VALUE" "$ORG_SECRET" "${EMPTY_VALUE-unset}" "${OPENAI_API_KEY-unset}" "${ANTHROPIC_API_KEY-unset}" "${CURSOR_API_KEY-unset}" "${CODEX_API_KEY-unset}" "$HOME"'});
-      expect(result).toMatchObject({ok:true,data:{exit:{code:0},output:[values.ORG_VALUE,values.REPO_VALUE,actor,values.ORG_SECRET,"","unset","unset","unset","unset","/srv/zeros/home/agent",""].join("\n")}});
+      expect(result).toMatchObject({ok:true,data:{exit:{code:0},output:[values.ORG_VALUE,values.REPO_VALUE,actor,values.ORG_SECRET,"","unset","unset","unset","unset",nativeHome.paths.home,""].join("\n")}});
       for(const [request] of launched.mock.calls){
         for(const value of Object.values(values).filter(Boolean))expect(request.args.join("\0").includes(value)).toBe(false);
         for(const name of ["OPENAI_API_KEY","ANTHROPIC_API_KEY","CURSOR_API_KEY","CODEX_API_KEY"])expect(request.env).not.toHaveProperty(name);

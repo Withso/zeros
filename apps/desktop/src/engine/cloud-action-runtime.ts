@@ -1,9 +1,13 @@
 import { CloudActionClientRequestSchema, CloudActionReceiptSchema, type CloudAction,
   type CloudActionReceipt, type CloudActionEngineRequest } from "@zeros/protocol/cloud-actions";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
+import { isCloudLocalCommandActionStore, type CloudLocalCommandActionStore } from "./cloud-local-command-queue-actions";
 
 type Result = { outcome: "delivered" | "queued" | "interrupted"; turnId: string | null };
 type Settlement = Extract<CloudActionEngineRequest, { kind: "settle" }>;
+/** Engine-owned ORIGINAL action authority, checked synchronously at native
+ * delivery. Legacy CP authorization returns no local guard. */
+export type CloudActionDeliveryGuard = () => void;
 function canonical(value: unknown, budget = { nodes: 0 }, depth = 0): string {
   if (++budget.nodes > 20000 || depth > 24) throw new CloudCommandRuntimeError("invalid_command");
   if (Array.isArray(value)) return `[${value.map(item => canonical(item, budget, depth + 1)).join(",")}]`;
@@ -21,13 +25,29 @@ export class CloudActionRuntime {
   private readonly unsettled = new Map<string, Settlement>();
   private readonly retries = new Map<string, { timer: ReturnType<typeof setTimeout>; delay: number }>();
   private closed = false;
+  private serviceRequests = 0;
+  private localStore: CloudLocalCommandActionStore | null = null;
   constructor(private readonly dependencies: {
     request(input: CloudActionEngineRequest,actorSessionId?:string): Promise<unknown>;
     validate(action: CloudAction): boolean;
-    authorize(action:CloudAction,actorSessionId?:string):Promise<void>;
-    dispatch(action: CloudAction): Promise<Result>;
+    authorize(action:CloudAction,actorSessionId?:string):Promise<void | CloudActionDeliveryGuard>;
+    dispatch(action: CloudAction, deliveryGuard?: CloudActionDeliveryGuard): Promise<Result>;
     changed(conversationId: string): void;
   }) {}
+
+  installLocalStore(store: CloudLocalCommandActionStore): void {
+    if (!isCloudLocalCommandActionStore(store) || this.closed || this.localStore && this.localStore !== store)
+      throw new CloudCommandRuntimeError("engine_authority_rejected");
+    if (this.localStore === store) return;
+    if (this.serviceRequests || this.flights.size || this.unsettled.size || this.retries.size || store.hasActiveWork())
+      throw new CloudCommandRuntimeError("command_conflict");
+    this.localStore = store;
+  }
+  private async request(...args: Parameters<CloudLocalCommandActionStore["request"]>): Promise<unknown> {
+    this.serviceRequests++;
+    try { return await (this.localStore ? this.localStore.request(...args) : this.dependencies.request(...args)); }
+    finally { this.serviceRequests--; }
+  }
 
   async handle(input: unknown,actorSessionId?:string): Promise<CloudActionReceipt> {
     if (this.closed) throw new CloudCommandRuntimeError("engine_authority_rejected");
@@ -38,7 +58,7 @@ export class CloudActionRuntime {
     if (request.kind === "read") {
       const pending = this.unsettled.get(request.operationId);
       if (pending) await this.settle(pending).catch(() => undefined);
-      const receipt = CloudActionReceiptSchema.parse(await (actorSessionId?this.dependencies.request(request,actorSessionId):this.dependencies.request(request)));
+      const receipt = CloudActionReceiptSchema.parse(await (actorSessionId?this.request(request,actorSessionId):this.request(request)));
       if (receipt.operationId !== request.operationId) throw new CloudCommandRuntimeError("command_response_invalid");
       return receipt;
     }
@@ -55,7 +75,7 @@ export class CloudActionRuntime {
   }
   private async run(action: CloudAction,actorSessionId?:string): Promise<CloudActionReceipt> {
     const request={kind:"begin" as const,action,admissible:this.dependencies.validate(action)};
-    const receipt = CloudActionReceiptSchema.parse(await (actorSessionId?this.dependencies.request(request,actorSessionId):this.dependencies.request(request)));
+    const receipt = CloudActionReceiptSchema.parse(await (actorSessionId?this.request(request,actorSessionId):this.request(request)));
     if (receipt.operationId !== action.operationId || receipt.conversationId !== action.conversationId ||
       receipt.executionId !== action.executionId || receipt.kind !== action.kind || receipt.requestId !== action.requestId)
       throw new CloudCommandRuntimeError("command_response_invalid");
@@ -67,8 +87,9 @@ export class CloudActionRuntime {
     // execute, even in the same process. Read the receipt instead of guessing.
     if (!receipt.replayed && !this.closed && this.dependencies.validate(action)) {
       try {
-        await this.dependencies.authorize(action,actorSessionId);
-        if(!this.closed&&this.dependencies.validate(action))result = await this.dependencies.dispatch(action);
+        const deliveryGuard = await this.dependencies.authorize(action,actorSessionId);
+        if(!this.closed&&this.dependencies.validate(action))result = await (deliveryGuard
+          ? this.dependencies.dispatch(action,deliveryGuard) : this.dependencies.dispatch(action));
       } catch { /* delivery is uncertain */ }
     }
     const settlement: Settlement = { kind: "settle", operationId: action.operationId, claimId: receipt.claimId, ...result };
@@ -79,7 +100,7 @@ export class CloudActionRuntime {
   private async settle(result: Settlement): Promise<CloudActionReceipt> {
     if (this.closed) throw new CloudCommandRuntimeError("engine_authority_rejected");
     try {
-      const receipt = CloudActionReceiptSchema.parse(await this.dependencies.request(result));
+      const receipt = CloudActionReceiptSchema.parse(await this.request(result));
       if (receipt.operationId !== result.operationId || receipt.claimId !== result.claimId ||
         receipt.state !== "settled" || receipt.outcome !== result.outcome || receipt.turnId !== result.turnId)
         throw new CloudCommandRuntimeError("command_response_invalid");
@@ -106,5 +127,5 @@ export class CloudActionRuntime {
     this.closed = true; for (const { timer } of this.retries.values()) clearTimeout(timer);
     this.retries.clear(); this.unsettled.clear();
   }
-  hasActiveWork(): boolean { return this.closed || this.flights.size > 0 || this.unsettled.size > 0 || this.retries.size > 0; }
+  hasActiveWork(): boolean { return this.closed || this.serviceRequests > 0 || this.flights.size > 0 || this.unsettled.size > 0 || this.retries.size > 0; }
 }

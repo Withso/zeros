@@ -5,6 +5,7 @@ export {
   cloudProfileIdentityMapVersion,
   isCloudEngineIdMap,
   hasCloudEngineUserNamespace,
+  isCloudEngineSecurityStatus,
   isReadOnlyCloudMount,
   isCloudDeploymentOwner,
 } from "./cloud-runtime-root.mjs";

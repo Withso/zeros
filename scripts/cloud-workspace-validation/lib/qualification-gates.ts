@@ -310,12 +310,12 @@ function assertDeclaredCloudBoundary(agentId: string, raw: unknown, expectedProf
   const restrictions = parity?.restrictions;
   if (!expected || boundary?.version !== 1 || boundary.actor !== "agent-code" || boundary.state !== "ready" ||
       boundary.backend !== "cloud-worker" || design?.required !== true ||
-      design.enforced !== true || !Number.isSafeInteger(design.protectedDirectoryCount) ||
+      design.enforced !== (expectedProfile === CLOUD_NATIVE_EXECUTION_PROFILE ? false : true) || !Number.isSafeInteger(design.protectedDirectoryCount) ||
       Number(design.protectedDirectoryCount) < 1 || parity?.level !== "restricted" ||
       !Array.isArray(restrictions) || restrictions.length !== expected.length ||
       restrictions.some((value: unknown, index: number) => value !== expected[index]) ||
       profile?.version !== 1 || profile.profile !== expectedProfile ||
-      profile.runtimeProfile !== "zeros-cloud-worker-v3" || profile.provider !== agentId || profile.designApi !== "admitted") {
+      profile.runtimeProfile !== (expectedProfile === CLOUD_NATIVE_EXECUTION_PROFILE ? "zeros-cloud-worker-v4" : "zeros-cloud-worker-v3") || profile.provider !== agentId || profile.designApi !== "admitted") {
     throw new Error(`${agentId} did not receive the declared ${expectedProfile} and admitted Design API contract`);
   }
 }

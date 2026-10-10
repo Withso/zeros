@@ -19,6 +19,8 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { gunzipSync, gzipSync } from "node:zlib";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import {
   canonicalJson,
   createManifest,
@@ -43,6 +45,7 @@ import {
   prepareToolchain,
   versionAtMost,
 } from "../cloud-workspace-validation/runtime-bundle/toolchain";
+import { RUNTIME_HELPERS } from "../cloud-workspace-validation/runtime-bundle/closure";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -50,6 +53,74 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 const temporary: string[] = [];
+
+describe("Cursor platform payload closure", () => {
+  it.skipIf(process.platform !== "linux")("executes shipped Cursor payload as shared engine10003 in the actual read-only proc closure view", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-cursor-payload-"));
+    temporary.push(root);
+    const worker = path.join(root, "worker");
+    const sdk = path.join(worker, "node_modules/@cursor/sdk");
+    const platform = path.join(worker, "node_modules/@cursor/sdk-linux-x64");
+    await mkdir(sdk, { recursive: true }); await mkdir(path.join(platform, "bin"), { recursive: true });
+    await mkdir(path.join(root, "lib/zeros"), { recursive: true });
+    await mkdir(path.join(root, "bin"));
+    await writeFile(path.join(worker, "package.json"), "{}");
+    await writeFile(path.join(sdk, "index.js"), "module.exports={Agent:{}};");
+    await writeFile(path.join(platform, "package.json"), '{"name":"@cursor/sdk-linux-x64"}');
+    const require = createRequire(import.meta.url);
+    const shipped = path.dirname(createRequire(require.resolve("@cursor/sdk")).resolve("@cursor/sdk-linux-x64/package.json"));
+    const { copyFile } = await import("node:fs/promises");
+    await copyFile(process.execPath, path.join(root, "bin/node"));
+    await chmod(path.join(root, "bin/node"), 0o555);
+    for (const binary of ["rg", "cursorsandbox"]) {
+      await copyFile(path.join(shipped, "bin", binary), path.join(platform, "bin", binary));
+      await chmod(path.join(platform, "bin", binary), 0o555);
+    }
+    // Import the actual self-test with its shipped helper graph. The identity
+    // probe still runs only the original Cursor payload check; no VM custody,
+    // engine role or provider success is fabricated by this fixture.
+    for (const helper of RUNTIME_HELPERS) await copyFile(helper.source, path.join(root, helper.target));
+    for (const file of ["bin/start-engine.sh", "lib/zeros/setup-cloud-workspace.mjs", "lib/zeros/cloud-worker-supervisor.mjs"])
+      await writeFile(path.join(root, file), "", { mode: 0o555 });
+    await writeFile(path.join(root, "manifest.json"), canonicalJson(createManifest({
+      source: { commit: "a".repeat(40), lockfileSha256: "b".repeat(64) },
+      engineProtocolVersion: 43,
+      agents: { claude: { sdk: "1", cli: "1" }, codex: { package: "1" }, cursor: { sdk: "1" } },
+    }, await inventoryTree(root))));
+    // Keep the production namespace and actual Cursor check. The small fixture
+    // deliberately supplies no unrelated engine/provider dependencies.
+    const script = fileURLToPath(new URL("../cloud-workspace-validation/runtime-bundle/probe.cjs", import.meta.url));
+    const fixture = path.join(root, "cursor-probe.cjs");
+    const source = await readFile(script, "utf8");
+    expect(source).toContain("Object.entries(checks)");
+    await writeFile(fixture, source.replace("Object.entries(checks)",
+      'Object.entries(process.argv[3] === "engine" ? { fixture_engine() {} } : { cursor_load: checks.cursor_load })'));
+    const toolchain = await import("../cloud-workspace-validation/runtime-bundle/toolchain");
+    const runTool = toolchain.runTool;
+    const identities: string[] = [];
+    const spy = vi.spyOn(toolchain, "runTool").mockImplementation((command, args, options, failure) => {
+      expect(args.slice(args.indexOf("/proc") - 1, args.indexOf("/proc") + 2)).toEqual(["--ro-bind", "/proc", "/proc"]);
+      expect(args).toContain("--unshare-net"); expect(args).toContain("--clearenv");
+      expect(options.env).toEqual({ PATH: "/usr/bin:/bin", HOME: options.cwd });
+      identities.push(args[args.indexOf("--uid") + 1]);
+      const replaced = [...args], mount = replaced.indexOf("/probe.cjs");
+      replaced[mount - 1] = fixture;
+      return runTool(command, replaced, options, failure);
+    });
+    try {
+      const { runClosureProbes } = await import("../cloud-workspace-validation/runtime-bundle/probe");
+      await expect(runClosureProbes(root)).resolves.toMatchObject({ checks: ["fixture_engine", "cursor_load"] });
+      expect(identities).toEqual(["10003", "10003"]);
+      // Import still succeeds when packaging drops an executable bit/file;
+      // closure must reject both under the shared non-root engine identity.
+      await chmod(path.join(platform, "bin/rg"), 0o444);
+      await expect(runClosureProbes(root)).rejects.toMatchObject({ failedChecks: ["closure_probes", "cursor_load"] });
+      await chmod(path.join(platform, "bin/rg"), 0o555);
+      await rm(path.join(platform, "bin/cursorsandbox"));
+      await expect(runClosureProbes(root)).rejects.toMatchObject({ failedChecks: ["closure_probes", "cursor_load"] });
+    } finally { spy.mockRestore(); }
+  });
+});
 
 describe("Linux toolchain contract", () => {
   it("compares numeric GLIBC versions and inspects needs instead of definitions", () => {

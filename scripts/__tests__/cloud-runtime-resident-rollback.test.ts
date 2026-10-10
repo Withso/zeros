@@ -1,11 +1,13 @@
-import { spawn } from "node:child_process";
+import { ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { PassThrough } from "node:stream";
 import { expect, it, vi } from "vitest";
 import { createCloudRuntimeResolver } from "../../apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
 import { cloudRuntimeFixture } from "../../apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-fixture";
 import { CloudResidentWorkload } from "../cloud-workspace-validation/sandbox/cloud-resident-workload.mjs";
+import { CloudEngineCgroup } from "../cloud-workspace-validation/sandbox/cloud-engine-cgroup.mjs";
 import { CloudWorkerSupervisor, parseCloudWorkerSupervisorRequest, CLOUD_WORKER_SUPERVISOR_AUDIENCE }
   from "../cloud-workspace-validation/sandbox/cloud-worker-supervisor.mjs";
 
@@ -50,10 +52,26 @@ it("replays the adapter's rollback prepare after a lost root response without re
   try {
     const runtime = createCloudRuntimeResolver({ filesystem: tree.filesystem }).resolve();
     const hostId = randomUUID(), organizationId = randomUUID(), workspaceId = randomUUID(), engineId = randomUUID();
-    const resident = new CloudResidentWorkload({ runtime, hostId, organizationId, workspaceId });
-    // Mock only root-to-resident IPC and kernel scope IO; authority, descriptor,
-    // detach, supervisor dispatch and the Python retry remain their real code.
+    // The frozen updater retains an ORIGINAL archived dedicated leaf, rather
+    // than treating a modern shared-pool controller as its PTY owner.
+    const owner = { pid: 12346, startToken: "123460" };
+    const originalScope = { directory: `${runtime.cgroupRoot}/engine-workload-${hostId}`, dev: "0", ino: "21" };
+    const originalCustody = { version: 1, episode: randomUUID(),
+      runtime: { runtimeId: runtime.runtimeId, bootId: runtime.bootId, supervisorSessionId: runtime.supervisorSessionId },
+      owner, scope: originalScope, birth: { kind: "resident", pid: 23456, startToken: "234560" } };
+    const residentChild = Object.assign(new ChildProcess(), { pid: owner.pid, exitCode: null,
+      signalCode: null, stdin: new PassThrough(), stdout: new PassThrough() });
+    const readCustody = vi.fn(() => structuredClone(originalCustody));
+    const resident = new CloudResidentWorkload({ runtime, hostId, organizationId, workspaceId,
+      spawnProcess: () => residentChild, readBirth: () => ({ ...owner, parentPid: process.pid }), readCustody });
+    resident.scope = new CloudEngineCgroup({ runtime, directory: originalScope.directory });
+    vi.spyOn(resident.scope, "currentIdentity", "get").mockReturnValue(originalScope);
+    // Only process/kernel/IPC observations are substituted; original custody,
+    // authority, descriptor, detach and the Python retry remain real code.
     vi.spyOn(resident, "request").mockResolvedValue(undefined);
+    await resident.start("synthetic-runtime-identity");
+    expect(resident.rootCustody()).toEqual(originalCustody);
+    expect(readCustody).toHaveBeenCalledWith(expect.objectContaining({ owner, scope: originalScope }));
     await resident.enroll({ organizationId, workspaceId, engineId, generation: 2, fence: 3, token: "test-only-resident-grant" });
     const detach = vi.spyOn(resident, "detach"), stop = vi.spyOn(resident, "stop").mockResolvedValue(undefined);
     const retire = vi.fn(async () => {}), setupRetire = vi.fn(async () => {});

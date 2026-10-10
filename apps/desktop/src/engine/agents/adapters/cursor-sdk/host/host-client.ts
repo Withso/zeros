@@ -40,7 +40,7 @@ import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {cloudProviderExecution,type CloudProviderExecution} from "../../../cloud-provider-execution";
+import {cloudExecutionLifetime,cloudProviderExecution,type CloudProviderExecution} from "../../../cloud-provider-execution";
 import {cloudCursorRequest} from "./cloud-policy";
 
 import {
@@ -197,7 +197,7 @@ export class AsyncMsgQueue<T = unknown> {
 /** Minimal stdio transport the client drives. Abstracted so unit tests can
  *  inject an in-memory fake instead of a real subprocess. */
 export interface HostTransport {
-  send(line: string): void;
+  send(line: string, onWrite?: (error?: Error | null) => void): void;
   onLine(cb: (line: string) => void): void;
   onExit(cb: () => void): void;
   dispose(): void | Promise<void>;
@@ -310,7 +310,7 @@ export class CursorHostClient {
         if(!id||!transport||!this.cloud)return;
         if(this.toolCalls.has(id)||this.toolCalls.size>=4){transport.send(JSON.stringify({k:"tool_result",id,result:{ok:false,error:"capacity"}}));return;}
         const controller=new AbortController();this.toolCalls.set(id,controller);
-        const signal=AbortSignal.any([controller.signal,this.cloud.lease.signal,AbortSignal.timeout(310000)]);
+        const signal=AbortSignal.any([controller.signal,cloudExecutionLifetime(this.cloud).signal,AbortSignal.timeout(310000)]);
         void this.cloud.tools.call(m.request,signal).catch(()=>({ok:false,error:"unavailable"})).then(result=>{
           if(this.transport===transport)transport.send(JSON.stringify({k:"tool_result",id,result}));
         }).catch(()=>{}).finally(()=>{if(this.toolCalls.get(id)===controller)this.toolCalls.delete(id);});
@@ -368,7 +368,7 @@ export class CursorHostClient {
    *  stream, then reset so the next call respawns. */
   private onExit(): void {
     for(const call of this.toolCalls.values())call.abort();this.toolCalls.clear();
-    if(this.cloud)void this.cloud.lease.close().catch(()=>{});
+    if(this.cloud)void cloudExecutionLifetime(this.cloud).close().catch(()=>{});
     this.transport = null;
     this.buf = "";
     // Crash-loop accounting. A death before the ready line, or within the
@@ -427,6 +427,8 @@ export class CursorHostClient {
     op: string,
     args: unknown,
     timeoutMs = CONTROL_REQUEST_TIMEOUT_MS,
+    onWritten?: () => void,
+    beforeNativeWrite?: () => void,
   ): Promise<T> {
     if(this.cloud){
       try{args=cloudCursorRequest(this.cloud,op,args);}
@@ -472,6 +474,7 @@ export class CursorHostClient {
         ),
       );
     }
+    const transport = this.transport!;
     const id = this.nextReqId++;
     return new Promise<T>((resolve, reject) => {
       const pending: Pending = {
@@ -486,7 +489,7 @@ export class CursorHostClient {
           pending.timer = undefined;
           // A rejected response is not proof that the native operation never
           // started. Cloud credentials/tools must not outlive a lost handle.
-          if(this.cloud)void this.cloud.lease.close().catch(()=>{});
+          if(this.cloud)void cloudExecutionLifetime(this.cloud).close().catch(()=>{});
           reject(
             new Error(
               `cursor host request ${op} timed out after ${timeoutMs}ms`,
@@ -495,11 +498,18 @@ export class CursorHostClient {
         }, timeoutMs);
       }
       try {
-        this.transport!.send(JSON.stringify({ k: "req", id, op, args }));
+        const line = JSON.stringify({ k: "req", id, op, args });
+        beforeNativeWrite?.();
+        if (onWritten) transport.send(line, error => {
+          if (!error && this.transport === transport) {
+            try { onWritten(); } catch { /* observation is inert */ }
+          }
+        });
+        else transport.send(line);
       } catch (err) {
         this.pending.delete(id);
         clearPendingTimer(pending);
-        if(this.cloud)void this.cloud.lease.close().catch(()=>{});
+        if(this.cloud)void cloudExecutionLifetime(this.cloud).close().catch(()=>{});
         reject(err);
       }
     });
@@ -517,7 +527,7 @@ export class CursorHostClient {
     for (const q of this.queues.values()) q.end();
     this.queues.clear();
     try{if (t) await t.dispose();}
-    finally{if(this.cloud)await this.cloud.lease.close();}
+    finally{if(this.cloud)await cloudExecutionLifetime(this.cloud).close();}
   }
 
   // ── CursorSdkModule proxy ─────────────────────────────────
@@ -577,9 +587,12 @@ export class CursorHostClient {
         const runId = String(this.nextRunId++);
         const queue = new AsyncMsgQueue<HostRunQueueItem>();
         this.queues.set(runId, queue);
-        const { onDelta, onStep, ...wireOptions } = options ?? {};
+        const { onDelta, onStep, onNativePromptStage, beforeNativeWrite, ...wireOptions } = options ?? {};
+        const observe = (stage: "native_write" | "sdk_run_created") => {
+          try { void Promise.resolve(onNativePromptStage?.(stage)).catch(() => {}); } catch { /* observation is inert */ }
+        };
         try {
-          const res = await this.request<{ sdkRunId: string | null }>(
+          const sending = this.request<{ sdkRunId: string | null }>(
             "agent.send",
             {
               ...identity,
@@ -591,7 +604,15 @@ export class CursorHostClient {
                 step: typeof onStep === "function",
               },
             },
+            CONTROL_REQUEST_TIMEOUT_MS,
+            onNativePromptStage ? () => observe("native_write") : undefined,
+            beforeNativeWrite,
           );
+          const transport = this.transport;
+          const res = await sending;
+          // The pinned host's successful agent.send response proves SDK run
+          // creation, not executor/provider acceptance.
+          if (onNativePromptStage && transport && this.transport === transport) observe("sdk_run_created");
           return this.makeRun(runId, res?.sdkRunId ?? null, queue, {
             onDelta,
             onStep,
@@ -674,7 +695,7 @@ export class CursorHostClient {
       },
       platform: {
         // Building the workspace executor can outlast the ordinary control
-        // budget on a cold contained host — that IS the cost being moved off
+        // budget on a cold host — that IS the cost being moved off
         // the turn — and nothing waits on the reply, so it opts out of the
         // 30s timeout the way `run.wait` does.
         prewarm: (opts) =>
@@ -809,15 +830,6 @@ export function spawnSubprocessTransport(
     : preserveAmbientConfigRoots({
         ...(process.env as Record<string, string>),
       });
-  if (options && options.executionBoundary.status.backend !== "none") {
-    // Cursor's SDK uses global fetch plus Node's HTTP/1 transport during
-    // Agent.create. A contained host must route the configured proxy before a
-    // kernel fence sees the socket. Native Code inherits the user's setting
-    // verbatim instead of Zeros changing process-wide Node transport behavior.
-    // Electron 43 embeds Node 24, whose built-in proxy support covers fetch,
-    // http.request and https.request when enabled at process startup.
-    env.NODE_USE_ENV_PROXY = "1";
-  }
   if (runtime.electron) env.ELECTRON_RUN_AS_NODE = "1";
   // A cloud host resolves its SDK beside the verified source script.
   if (cloudRuntime) delete env.ZEROS_CURSOR_SDK_ENTRY;
@@ -864,10 +876,11 @@ export function spawnSubprocessTransport(
   });
 
   return {
-    send: (line: string) => {
+    send: (line: string, onWrite?: (error?: Error | null) => void) => {
       if (child.stdin && !child.stdin.destroyed) {
         try {
-          child.stdin.write(line + "\n");
+          if (onWrite) child.stdin.write(line + "\n", onWrite);
+          else child.stdin.write(line + "\n");
         } catch {
           /* pipe broke — onExit reconciles */
         }

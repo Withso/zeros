@@ -35,6 +35,8 @@ import {
   parseCloudV4Document,
   validV4Diagnostic,
 } from "./attest-cloud-worker.mjs";
+import { adoptCloudEngineState, CLOUD_ENGINE_MUTABLE_LAYOUT } from "./prepare-cloud-image-files.mjs";
+import { CLOUD_RESOURCE_CONTRACT } from "./cloud-engine-cgroup.mjs";
 import { runScopedCloudSetup } from "./cloud-setup-process.mjs";
 import {
   CLOUD_COMPUTER_WORKSPACE_ADMISSION,
@@ -42,10 +44,12 @@ import {
   checkoutCloudComputerPrimary,
   parseCloudComputerSetup,
   verifyCloudComputerTemplate,
+  adoptCloudComputerTemplateOwnership,
 } from "./cloud-computer-checkout.mjs";
 import {
   validCloudResourceContract,
   cloudResourcesMeetContract,
+  cloudRuntimeResourcesQualified,
 } from "./cloud-resource-admission.mjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { TextDecoder } from "node:util";
@@ -81,8 +85,11 @@ const RUNTIME = resolveCloudRuntime();
 const ATTESTER = RUNTIME.helpers.attester;
 const ASKPASS = RUNTIME.helpers.gitAskpass;
 const GITHUB_REVOKE_URL = "https://api.github.com/installation/token";
-const WORKER_UID = 10_001;
-const WORKER_GID = 10_001;
+const ENGINE_UID = 10_003;
+const ENGINE_GID = 10_003;
+// The host settings parent remains part of the frozen base contract. The
+// launcher publishes a separate read-only GID10003 projection to the engine.
+const BASE_AGENT_GID = 10_001;
 const MAX_REQUEST_BYTES = 32 * 1024;
 const MAX_MATERIAL_BYTES = 1024 * 1024;
 const MAX_PROCESS_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -102,12 +109,22 @@ const RECOVERY_TOKEN_PATTERN = /^zrc_[A-Za-z0-9_-]{43}$/;
 const SESSION_PATTERN = /^zsp_[A-Za-z0-9_-]{43}$/;
 const ENV_NAME_PATTERN = /^[A-Z_][A-Z0-9_]{0,127}$/;
 const GITHUB_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}$/;
+const ANSI_CSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`, "g");
+
+function hasAsciiControl(value) {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code < 32 || code === 127) return true;
+  }
+  return false;
+}
 
 // Both deployed setup and the bundled engine use the same immutable native
 // checkpoint parser. Its path is deployment-owned, never selected by a grant.
 const CHECKPOINT_HELPER_URL = fileURLToPath(import.meta.url) === RUNTIME.helpers.setup
   ? pathToFileURL(path.join(RUNTIME.workerRoot, "apps/desktop/src/engine/agents/containment/cloud-checkpoint-artifacts.mjs"))
   : new URL("../../../apps/desktop/src/engine/agents/containment/cloud-checkpoint-artifacts.mjs", import.meta.url);
+const STARTUP_FAILURE_HELPER_URL = new URL("cloud-engine-startup-failure.mjs", CHECKPOINT_HELPER_URL);
 
 export const CLOUD_WORKSPACE_UNPRIVILEGED_SET_PRIV_ARGS = Object.freeze([
   "--no-new-privs",
@@ -115,8 +132,8 @@ export const CLOUD_WORKSPACE_UNPRIVILEGED_SET_PRIV_ARGS = Object.freeze([
   "--inh-caps=-all",
   "--ambient-caps=-all",
   "--pdeathsig=SIGKILL",
-  `--reuid=${WORKER_UID}`,
-  `--regid=${WORKER_GID}`,
+  `--reuid=${ENGINE_UID}`,
+  `--regid=${ENGINE_GID}`,
   "--clear-groups",
 ]);
 
@@ -135,7 +152,10 @@ function failure(code) {
 /** Only the immutable helper has the execution's literals. Filter them before
  * either the root journal or the bounded private result receives command text. */
 export function redactCloudWorkspaceSetupHookLog(output, values, truncated = false) {
-  const normalize = text => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+  const normalize = text => text.replace(ANSI_CSI_PATTERN, "").replace(/\p{Control}/gu, character => {
+    const code = character.charCodeAt(0);
+    return (code < 32 && code !== 9 && code !== 10) || code === 127 ? "" : character;
+  });
   output = normalize(output);
   const literals = [...new Set(values.filter(value => typeof value === "string" && value.length).flatMap(value => [value, normalize(value)])
     .filter(Boolean).flatMap(value => [value, JSON.stringify(value).slice(1, -1)]))]
@@ -690,7 +710,7 @@ function normalizedRecoveryPath(value) {
     value.startsWith("/") ||
     value.endsWith("/") ||
     value.includes("\\") ||
-    /[\u0000-\u001f\u007f]/u.test(value) ||
+    hasAsciiControl(value) ||
     path.posix.normalize(value) !== value
   ) {
     throw failure("checkpoint_restore_invalid");
@@ -842,7 +862,7 @@ async function recoveryFetch(url, token, signal) {
       method: "GET",
       redirect: "error",
       cache: "no-store",
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(HTTP_TIMEOUT_MS)]) : AbortSignal.timeout(HTTP_TIMEOUT_MS),
+      signal: signal ? globalThis.AbortSignal.any([signal, globalThis.AbortSignal.timeout(HTTP_TIMEOUT_MS)]) : globalThis.AbortSignal.timeout(HTTP_TIMEOUT_MS),
       headers: {
         Accept: "application/json, application/octet-stream",
         Authorization: `Bearer ${token}`,
@@ -970,7 +990,7 @@ function ensureRecoveryParents(repositoryDirectory, relativePath) {
       if (error instanceof SetupFailure) throw error;
       if (error?.code !== "ENOENT") throw error;
       mkdirSync(current, { mode: 0o755 });
-      chownSync(current, WORKER_UID, WORKER_GID);
+      chownSync(current, ENGINE_UID, ENGINE_GID);
     }
     const resolved = realpathSync(current);
     if (
@@ -1001,6 +1021,9 @@ function recoveryParentsExistSafely(repositoryDirectory, relativePath) {
   return true;
 }
 
+/** @param {number} descriptor
+ * @param {Uint8Array} value
+ * @param {(descriptor:number,value:Uint8Array,offset:number,length:number,position:null)=>number} [write] */
 export function writeAllSync(descriptor, value, write = writeSync) {
   let offset = 0;
   while (offset < value.byteLength) {
@@ -1070,7 +1093,7 @@ function safeSymlinkTarget(repositoryDirectory, entryPath, bytes) {
     target !== target.normalize("NFC") ||
     path.posix.isAbsolute(target) ||
     target.includes("\\") ||
-    /[\u0000-\u001f\u007f]/u.test(target)
+    hasAsciiControl(target)
   ) {
     throw failure("checkpoint_restore_invalid");
   }
@@ -1114,7 +1137,7 @@ function normalizeRecoveryFailure(error, signal, deadlineAtMs) {
  * The declared-byte budget also bounds concurrent buffering in the API server. */
 export async function stageCloudRecoveryBlobs(recovery, entries, payloadDirectory, signal) {
   const deadlineAtMs = recoveryDeadline(recovery);
-  signal = signal ?? AbortSignal.timeout(Math.max(1, deadlineAtMs - Date.now()));
+  signal = signal ?? globalThis.AbortSignal.timeout(Math.max(1, deadlineAtMs - Date.now()));
   const descriptors = new Map();
   for (const entry of entries) {
     assertRecoveryActive(signal, deadlineAtMs);
@@ -1126,7 +1149,7 @@ export async function stageCloudRecoveryBlobs(recovery, entries, payloadDirector
     descriptors.set(entry.blobId, descriptor);
   }
   const cached = new Map(), pending = new Set(), queue = [...descriptors.values()];
-  const controller = new AbortController(), lifetime = AbortSignal.any([signal, controller.signal]);
+  const controller = new AbortController(), lifetime = globalThis.AbortSignal.any([signal, controller.signal]);
   let next = 0, activeBytes = 0, failed = null;
   try {
     while (next < queue.length || pending.size) {
@@ -1162,7 +1185,7 @@ export async function restoreCloudWorkspaceCheckpoint(
 ) {
   if (!material.recovery) return false;
   const deadlineAtMs = recoveryDeadline(material.recovery);
-  const signal = AbortSignal.timeout(Math.max(1, deadlineAtMs - Date.now()));
+  const signal = globalThis.AbortSignal.timeout(Math.max(1, deadlineAtMs - Date.now()));
   try {
     return await restoreCloudWorkspaceCheckpointContents(material, repositoryDirectory, privateIdentity, deadlineAtMs, signal);
   } catch (error) {
@@ -1236,8 +1259,8 @@ async function restoreCloudWorkspaceCheckpointContents(material, repositoryDirec
       const { restoreCloudNativeCheckpoint } = await import(CHECKPOINT_HELPER_URL.href);
       await restoreCloudNativeCheckpoint({
         archive: native,
-        roots: { repository: repositoryDirectory, logicalRepository: runtimeLayout.logicalRepository, agentHome: runtimeLayout.agentHome, data: runtimeLayout.data },
-        identity: { uid: WORKER_UID, gid: WORKER_GID },
+        roots: { repository: repositoryDirectory, logicalRepository: runtimeLayout.logicalRepository, agentHome: CLOUD_ENGINE_MUTABLE_LAYOUT.agentHome, data: runtimeLayout.data },
+        identity: { uid: ENGINE_UID, gid: ENGINE_GID },
         privateIdentity,
         deadlineAtMs,
         getChunk: async blobId => {
@@ -1249,7 +1272,7 @@ async function restoreCloudWorkspaceCheckpointContents(material, repositoryDirec
           return readFileSync(destination);
         },
       });
-      const recoveredHead = await repositoryIdentity(repositoryDirectory, runtimeLayout.agentHome, material.repository.cloneUrl);
+      const recoveredHead = await repositoryIdentity(repositoryDirectory, CLOUD_ENGINE_MUTABLE_LAYOUT.agentHome, material.repository.cloneUrl);
       if (recoveredHead !== manifest.gitBaseCommit) throw failure("checkpoint_restore_invalid");
     }
     for (const entry of [...manifest.entries]
@@ -1277,13 +1300,13 @@ async function restoreCloudWorkspaceCheckpointContents(material, repositoryDirec
             safeSymlinkTarget(repositoryDirectory, entry.path, bytes),
             target,
           );
-          lchownSync(target, WORKER_UID, WORKER_GID);
+          lchownSync(target, ENGINE_UID, ENGINE_GID);
         } finally {
           bytes.fill(0);
         }
       } else {
         copyFileSync(source, target, fsConstants.COPYFILE_EXCL);
-        chownSync(target, WORKER_UID, WORKER_GID);
+        chownSync(target, ENGINE_UID, ENGINE_GID);
         chmodSync(target, entry.mode === 33261 ? 0o755 : 0o644);
       }
     }
@@ -1297,7 +1320,7 @@ async function restoreCloudWorkspaceCheckpointContents(material, repositoryDirec
       // credentials or the rest of settings.local.toml.
       rmSync(target, { force: true });
       writeFileSync(target, text, { flag: "wx", mode: 0o600 });
-      chownSync(target, WORKER_UID, WORKER_GID);
+      chownSync(target, ENGINE_UID, ENGINE_GID);
     }
     if (native && material.execution) {
       const { saveCloudNativeCheckpointCache } = await import(CHECKPOINT_HELPER_URL.href);
@@ -1691,7 +1714,7 @@ export async function readCompletedCloudWorkspacePreparation(material, profile, 
   if (profile.version !== 4 || !validResumePlan(material.resume) || material.resume.mode !== "resume_existing") return null;
   try {
     assertRootDirectory(profile.setupDirectory, 0o700);
-    assertRootDirectory(profile.managedSettingsDirectory, 0o750, WORKER_GID);
+    assertRootDirectory(profile.managedSettingsDirectory, 0o750, BASE_AGENT_GID);
     const completed = readPhysicalJson(path.join(profile.setupDirectory, "resume.json"), 1024);
     if (!isRecord(completed) || !exactKeys(completed, ["version", "keySha256", "engineInstanceId"]) || completed.version !== 1 ||
       completed.keySha256 !== material.resume.keySha256 || completed.engineInstanceId !== material.resume.proofEpoch) return null;
@@ -1707,7 +1730,7 @@ export async function readCompletedCloudWorkspacePreparation(material, profile, 
         current.isSymbolicLink() || stat.dev !== current.dev || stat.ino !== current.ino || realpathSync(file) !== file ||
         createHash("sha256").update(readFileSync(fd)).digest("hex") !== managedSha256) return null;
     } finally { closeSync(fd); }
-    const commit = await repositoryIdentity(hostRepository(material), runtimeLayout.agentHome, material.repository.cloneUrl);
+    const commit = await repositoryIdentity(hostRepository(material), CLOUD_ENGINE_MUTABLE_LAYOUT.agentHome, material.repository.cloneUrl);
     return commit && journalMatches(journal, journalIdentity(material, commit, managedSha256), material.settings.setupCommands.length, true)
       ? commit : null;
   } catch { return null; }
@@ -1768,7 +1791,7 @@ async function repositoryIdentity(directory, homeDirectory, cloneUrl) {
   if (
     !stat.isDirectory() ||
     stat.isSymbolicLink() ||
-    stat.uid !== WORKER_UID ||
+    stat.uid !== ENGINE_UID ||
     realpathSync(directory) !== directory
   ) {
     return null;
@@ -1779,7 +1802,7 @@ async function repositoryIdentity(directory, homeDirectory, cloneUrl) {
     if (
       !gitStat.isDirectory() ||
       gitStat.isSymbolicLink() ||
-      gitStat.uid !== WORKER_UID ||
+      gitStat.uid !== ENGINE_UID ||
       realpathSync(gitDirectory) !== gitDirectory
     ) {
       return null;
@@ -1839,7 +1862,7 @@ export function repositoryIdentityMatchesSetup(expectedCommit, observedCommit) {
 export function recoverInterruptedCloudWorkspaceClone({
   targetDirectory = TARGET_REPOSITORY,
   seededRepositoryBackup = SEEDED_REPOSITORY_BACKUP,
-  expectedUid = WORKER_UID,
+  expectedUid = ENGINE_UID,
 } = {}) {
   if (
     !path.isAbsolute(targetDirectory) ||
@@ -1877,7 +1900,7 @@ export function recoverInterruptedCloudWorkspaceClone({
 
 async function cloneRepository(material,profile) {
   const { stagingParent: workspace, seededRepositoryBackup } = clonePaths(profile);
-  if (profile.version === 4) assertRootDirectory(workspace, 0o710, WORKER_GID);
+  if (profile.version === 4) assertRootDirectory(workspace, 0o710, ENGINE_GID);
   const workspaceStat = lstatSync(workspace);
   if (
     !workspaceStat.isDirectory() ||
@@ -1895,9 +1918,9 @@ async function cloneRepository(material,profile) {
   try {
     mkdirSync(repositoryDirectory, { mode: 0o700 });
     mkdirSync(homeDirectory, { mode: 0o700 });
-    chownSync(stagingRoot, WORKER_UID, WORKER_GID);
-    chownSync(repositoryDirectory, WORKER_UID, WORKER_GID);
-    chownSync(homeDirectory, WORKER_UID, WORKER_GID);
+    chownSync(stagingRoot, ENGINE_UID, ENGINE_GID);
+    chownSync(repositoryDirectory, ENGINE_UID, ENGINE_GID);
+    chownSync(homeDirectory, ENGINE_UID, ENGINE_GID);
     chmodSync(stagingRoot, 0o700);
     const revisionCheck = COMMIT_PATTERN.test(material.repository.revision)
       ? { code: 0, timedOut: false, overflow: false }
@@ -1967,7 +1990,7 @@ async function cloneRepository(material,profile) {
       if (
         !target.isDirectory() ||
         target.isSymbolicLink() ||
-        target.uid !== WORKER_UID ||
+        target.uid !== ENGINE_UID ||
         realpathSync(TARGET_REPOSITORY) !== TARGET_REPOSITORY
       ) {
         throw failure("image_contract_invalid");
@@ -1996,8 +2019,27 @@ function clonePaths(profile) {
   // Both staging and the seed must share the checkout's bind mount. Root
   // controls this parent's entries; the agent group can only traverse it to
   // the per-operation 0700 repository/home. The engine view masks the parent.
-  const stagingParent = path.join(runtimeLayout.engineFilesRoot, ".zeros-setup");
-  return { stagingParent, seededRepositoryBackup: path.join(stagingParent, "seed") };
+  const stagingParent = CLOUD_ENGINE_MUTABLE_LAYOUT.stagingParent;
+  return { stagingParent, seededRepositoryBackup: path.join(stagingParent, "seed"),
+    legacySeededRepositoryBackup: path.join(CLOUD_ENGINE_MUTABLE_LAYOUT.legacyStagingParent, "seed") };
+}
+
+function existingCloneSeed(profile) {
+  const paths = clonePaths(profile);
+  const present = [];
+  for (const [file, gid] of [[paths.seededRepositoryBackup, ENGINE_GID], [paths.legacySeededRepositoryBackup, BASE_AGENT_GID]]) {
+    let seed;
+    try { seed = lstatSync(file); }
+    catch (error) { if (error?.code === "ENOENT") continue; throw error; }
+    const parent = path.dirname(file), stat = lstatSync(parent);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== 0 || stat.gid !== gid ||
+        (stat.mode & 0o7777) !== 0o710 || realpathSync(parent) !== parent ||
+        !seed.isDirectory() || seed.isSymbolicLink() || seed.uid !== ENGINE_UID || seed.gid !== ENGINE_GID ||
+        realpathSync(file) !== file) throw failure("image_contract_invalid");
+    present.push(file);
+  }
+  if (present.length > 1) throw failure("image_contract_invalid");
+  return present[0] ?? null;
 }
 
 async function stringifyManagedSettings(values) {
@@ -2027,7 +2069,7 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
     "settings.managed.toml",
   );
   assertRootDirectory(profile.setupDirectory, 0o700);
-  assertRootDirectory(profile.managedSettingsDirectory, 0o750, WORKER_GID);
+  assertRootDirectory(profile.managedSettingsDirectory, 0o750, BASE_AGENT_GID);
   const managedToml = await stringify(
     material.settings.document.values,
   );
@@ -2037,7 +2079,7 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
   atomicWrite(managedSettings, managedToml, {
     mode: 0o640,
     uid: 0,
-    gid: WORKER_GID,
+    gid: BASE_AGENT_GID,
   });
 
   let journal = existsSync(journalFile)
@@ -2118,7 +2160,7 @@ export async function prepareRepositoryAndSettings(material, profile, stringify 
   }
   const verifiedCommit = await repositoryIdentity(
     repositoryDirectory,
-    runtimeLayout.agentHome,
+    CLOUD_ENGINE_MUTABLE_LAYOUT.agentHome,
     material.repository.cloneUrl,
   );
   if (!repositoryIdentityMatchesSetup(commit, verifiedCommit)) {
@@ -2141,13 +2183,16 @@ function hostRepository(material) {
  * Host steps use the physical clone; only the engine mounts the primary alias.
  * A journaled setup preserves edits and still checks the full journal identity. */
 export async function prepareCloudWorkspaceRepository(material, profile, journal, {
-  readIdentity = () => repositoryIdentity(hostRepository(material), runtimeLayout.agentHome, material.repository.cloneUrl),
-  recoverClone = () => recoverInterruptedCloudWorkspaceClone({ seededRepositoryBackup: clonePaths(profile).seededRepositoryBackup }),
-  hasSeed = () => existsSync(clonePaths(profile).seededRepositoryBackup),
+  readIdentity = () => repositoryIdentity(hostRepository(material), CLOUD_ENGINE_MUTABLE_LAYOUT.agentHome, material.repository.cloneUrl),
+  recoverClone = () => {
+    const seededRepositoryBackup = existingCloneSeed(profile);
+    return seededRepositoryBackup !== null && recoverInterruptedCloudWorkspaceClone({ seededRepositoryBackup });
+  },
+  hasSeed = () => existingCloneSeed(profile) !== null,
   clone = () => cloneRepository(material, profile),
   checkoutComputer = () => checkoutCloudComputerPrimary(material.computer, material.repository, {
     git: async (directory, args, token, options) => {
-      const result = await gitCommand(directory, runtimeLayout.agentHome,
+      const result = await gitCommand(directory, CLOUD_ENGINE_MUTABLE_LAYOUT.agentHome,
         ["-c", "core.fsmonitor=false", "-c", "submodule.recurse=false", ...args], token, options);
       if (result.code !== 0 || result.signal || result.timedOut || result.aborted || result.overflow)
         throw failure(args[0] === "fetch" ? "repository_temporarily_unavailable" : "repository_revision_invalid");
@@ -2254,6 +2299,38 @@ async function prepareSupervisor() {
     throw failure("image_contract_invalid");
   }
   return response.session;
+}
+
+/** This is admitted setup material, not a RAM-derived nominal SKU. The root
+ * broker keeps it outside the shared view and projects only nonsecret fields. */
+export function publishCloudRuntimeResourceContract(material) {
+  if (RUNTIME.profile !== "v4") throw failure("image_contract_invalid");
+  if (material?.version === 1 && material.image?.resources === undefined) {
+    removeRootRuntimeFile(CLOUD_RESOURCE_CONTRACT);
+    return;
+  }
+  if (material?.version !== 2 || !validCloudResourceContract(material.image?.resources))
+    throw failure("image_contract_invalid");
+  for (let directory = path.dirname(CLOUD_RESOURCE_CONTRACT); ; directory = path.dirname(directory)) {
+    const metadata = lstatSync(directory);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== 0 ||
+        metadata.mode & 0o022 || realpathSync(directory) !== directory)
+      throw failure("image_contract_invalid");
+    if (directory === "/") break;
+  }
+  atomicWrite(CLOUD_RESOURCE_CONTRACT, `${JSON.stringify({ version: 1, resources: material.image.resources })}\n`, { mode: 0o600 });
+}
+
+/** Positive root retirement of every original old scope precedes both UID
+ * adoption and replacing the nominal allocation used for the next boot. */
+export async function prepareCloudWorkspaceRuntime(material, {
+  prepare = prepareSupervisor, adopt = adoptCloudEngineState,
+  publish = publishCloudRuntimeResourceContract, onPrepared = () => {},
+} = {}) {
+  const session = await prepare();
+  onPrepared();
+  if (RUNTIME.profile === "v4") { adopt(RUNTIME); publish(material); }
+  return session;
 }
 
 function engineRuntimeB64(material) {
@@ -2368,14 +2445,16 @@ export function cloudWorkspaceImageAdmissionChecks(
 ) {
   return {
     execution: result.code === 0 && !result.timedOut && !result.overflow,
-    report: isRecord(report) && report.version === 1,
+    report: isRecord(report) && report.version === 2 && report.boundary === "workspace-vm",
     profile: profile.version === 4 && profile.profile === "zeros-cloud-worker-v4" && report?.profile === profile.profile,
     qualified: report?.qualified === true,
     metadata: isRecord(report?.runtime) && exactKeys(report.runtime, CLOUD_V4_IDENTITY_FIELDS) &&
       CLOUD_V4_IDENTITY_FIELDS.every(key => report.runtime[key] === RUNTIME[key]),
-    helpers: report?.helpers?.deploymentTrusted?.setupHelper === true && report?.helpers?.deploymentTrusted?.workerSupervisor === true,
-    resources: report?.resources?.finite === true && cloudResourcesMeetContract(material.image.resources, report.resources),
-    runtime: report?.qualification?.secure === true,
+    helpers: report?.helpers?.deploymentTrusted?.setupHelper === true && report?.helpers?.deploymentTrusted?.hostProcessSupervisor === true,
+    resources: cloudRuntimeResourcesQualified(report?.resources) && cloudResourcesMeetContract(material.image.resources, report.resources),
+    runtime: report?.qualified === true &&
+      ["sameEngineIdentity", "noSandbox", "ownedProcessGroups", "originalProcessGroupsRetired", "timeoutRetired", "workloadCgroup", "vmWorkloadDrain"]
+        .every(name => report?.qualification?.execution?.[name] === true),
   };
 }
 
@@ -2440,6 +2519,20 @@ const IMAGE_ADMISSION_PROBES = new Set([
   "macos-detached-process-domain"
 ]);
 export function cloudWorkspaceImageAdmissionDiagnostic(report) {
+  if (report?.version === 2) return {
+    identity: report.qualification?.identity?.hostUid === 10003 && report.qualification?.identity?.namespaceUid === 10003 &&
+      report.qualification?.identity?.noNewPrivs === 1 && report.qualification?.identity?.seccompMode === 2 &&
+      exactKeys(report.qualification?.identity?.capabilities, ["effective", "permitted", "inheritable", "bounding", "ambient"]) &&
+      Object.values(report.qualification.identity.capabilities).every(value => value === 0),
+    workload: ["sameEngineIdentity", "noSandbox", "ownedProcessGroups", "originalProcessGroupsRetired", "timeoutRetired", "workloadCgroup", "vmWorkloadDrain"]
+      .every(name => report.qualification?.execution?.[name] === true),
+    capture: report.qualification?.capture?.sameEngineIdentity === true && report.qualification?.capture?.chromiumSandbox === true,
+    humanServices: report.qualification?.humanServices?.sameEngineIdentity === true && report.qualification?.humanServices?.noSandbox === true,
+    setup: { hostUid: report.setupQualification?.hostUid, hostGid: report.setupQualification?.hostGid,
+      detachedDescendantsRetired: report.setupQualification?.detachedDescendantsRetired === true,
+      timeoutRetired: report.setupQualification?.timeoutRetired === true },
+  };
+  // Archived v1 diagnostics remain readable; new runtimes never emit these claims.
   const qualification = report?.qualification;
   const failedProbes = new Set();
   for (const lane of [qualification?.identity, qualification?.workload]) {
@@ -2534,7 +2627,7 @@ export function parseCloudWorkspaceEngineReadiness(raw, material) {
   return raw.engine;
 }
 
-async function waitForReadiness(material) {
+async function waitForReadiness(material, profile) {
   const deadline = Date.now() + READINESS_DEADLINE_MS;
   const endpoint = `http://127.0.0.1:${material.engine.port}/internal/readiness`;
   while (Date.now() < deadline) {
@@ -2577,7 +2670,14 @@ async function waitForReadiness(material) {
       setTimeout(resolve, Math.min(125, remaining));
     });
   }
-  throw failure("engine_readiness_failed");
+  const error = failure("engine_readiness_failed");
+  try {
+    const { readCloudEngineStartupFailure } = await import(STARTUP_FAILURE_HELPER_URL.href);
+    const engineStartup = await readCloudEngineStartupFailure({ dataRoot: runtimeLayout.data,
+      engineInstanceId: material.engine.instanceId, expectedUid: profile.engineUid });
+    if (engineStartup) error.diagnostic = { version: 1, phase: "engine_readiness", engineStartup };
+  } catch { /* Evidence is optional and cannot replace the readiness predicate. */ }
+  throw error;
 }
 
 async function revokeGithubToken(token, { required = false, fetchImpl = fetch } = {}) {
@@ -2683,7 +2783,7 @@ export async function prepareAndLaunchCloudWorkspace(material, profile, session,
   record("engine-launch");
   await start(material, session);
   record("engine-readiness");
-  const engine = await ready(material);
+  const engine = await ready(material, profile);
   saveCompleted(material, profile);
   return readyResult(material, commit, engine);
 }
@@ -2733,14 +2833,13 @@ async function executeSetup(encoded) {
     profile = ensureCloudHostRuntimeDirectory(readCloudHostRuntimeProfile());
     assertRootDirectory(profile.setupDirectory, 0o700);
     record("supervisor");
-    const session = await prepareSupervisor();
-    supervisorPrepared = true;
+    const session = await prepareCloudWorkspaceRuntime(material, { onPrepared: () => { supervisorPrepared = true; } });
     if (material.computer) {
       if (RUNTIME.profile !== "v4") throw failure("image_contract_invalid");
       // The root-only, boot/session-bound document routes all host work and
       // selects the primary alias for each fresh engine mount namespace.
       const verified = timing?.start("template_verify");
-      try { verifyCloudComputerTemplate(material.computer, material.repository); verified?.(); }
+      try { adoptCloudComputerTemplateOwnership(material.computer, material.repository); verified?.(); }
       catch (error) { verified?.("failed"); throw error; }
       atomicWrite(CLOUD_COMPUTER_WORKSPACE_ADMISSION,
         `${JSON.stringify(createCloudComputerWorkspaceAdmission(material, RUNTIME))}\n`, { mode: 0o600 });
@@ -2762,6 +2861,7 @@ async function executeSetup(encoded) {
     if (timing) normalized.timings = snapshotTimings();
     normalized.diagnostic = {
       version: 1, phase: diagnostic.stage.replaceAll("-", "_"),
+      ...(normalized.diagnostic?.engineStartup ? { engineStartup: normalized.diagnostic.engineStartup } : {}),
       ...(diagnostic.checks ? { checks: diagnostic.checks } : {}),
       ...(diagnostic.digests ? { digests: diagnostic.digests } : {}),
       files: {
@@ -2808,6 +2908,7 @@ async function executeSetup(encoded) {
 /** SSH bootstrap carries the same admission document over the encrypted stdin
  * channel. Keep the original provider environment transport readable, while
  * refusing ambiguous sources and bounding a peer that never closes stdin. */
+/** @param {{args?:string[],env?:NodeJS.ProcessEnv,input?:import("node:stream").Readable,timeoutMs?:number}} [options] */
 export async function readCloudWorkspaceSetupInput({
   args = process.argv.slice(2),
   env = process.env,

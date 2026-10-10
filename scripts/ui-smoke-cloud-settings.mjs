@@ -11,12 +11,29 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
   const accounts = new Map(),
     requests = [];
   const designations = new Map(), designationOperations = new Map();
+  const removals = new Map();
+  const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+  let runningAgents = false;
   let ownerMode = false, designationSequence = 10, loseDesignationResponse = false;
   let designationResponseHold = null;
   const account = (key) => {
     if (!accounts.has(key))
       accounts.set(key, { credentials: [], connections: [] });
     return accounts.get(key);
+  };
+  const remove = (operation) => {
+    const { state, target } = operation;
+    if (target.kind === "disconnect-provider") {
+      const connection = state.connections.find(row => row.provider === target.provider);
+      expect(connection.revision).toBe(target.expectedConnectionRevision);
+      state.connections = state.connections.map(row => row.provider === target.provider
+        ? { ...row, revision: row.revision + 1, credentialId: null, connected: false } : row);
+    } else {
+      expect(target.kind).toBe("remove-organization-credential");
+      expect(state.credentials.find(row => row.id === target.credentialId).revision).toBe(target.expectedCredentialRevision);
+      // Remove this organization association, leaving other account/org lists alone.
+      state.credentials = state.credentials.filter(row => row.id !== target.credentialId);
+    }
   };
   await page.route("https://api.example.test/v1/**", async (route) => {
     const request = route.request(),
@@ -26,13 +43,67 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
     const user = request
       .headers()
       .authorization?.replace("Bearer fixture-", "");
+    const removalPath = path.match(/^\/v1\/cloud-agent-credentials\/removals\/([^/]+)(?:\/(confirm|cancel))?$/);
+    const priorRemoval = removalPath && removals.get(removalPath[1]);
     const org =
-      path.match(/\/organizations\/([^/]+)/)?.[1] ?? body?.organizationId;
+      path.match(/\/organizations\/([^/]+)/)?.[1] ?? body?.organizationId ?? body?.target?.organizationId ??
+      (priorRemoval?.user === user ? priorRemoval.organizationId : undefined);
     const state = account(`${user}:${org}`);
     requests.push({ path, method, body, user });
     let result;
     const designationPath = path.match(/^\/v1\/cloud-agent-credentials\/([^/]+)\/release-canary$/);
-    if (designationPath) {
+    if (path === "/v1/cloud-agent-credentials/removals/prepare" && method === "POST") {
+      expect(Object.keys(body).sort()).toEqual(["operationId", "target", "version"]);
+      expect(body.version).toBe(1);
+      expect(body.operationId).toMatch(uuid);
+      expect(user).toMatch(uuid);
+      expect(body.target.organizationId).toMatch(uuid);
+      expect(body.target.organizationId).toBe(org);
+      const previous = removals.get(body.operationId);
+      if (previous) {
+        expect(previous.user).toBe(user); expect(previous.body).toEqual(body); result = previous.outcome;
+      } else {
+        if (body.target.kind === "disconnect-provider") {
+          expect(Object.keys(body.target).sort()).toEqual(["expectedConnectionRevision", "kind", "organizationId", "provider"]);
+          expect(state.connections.find(row => row.provider === body.target.provider).revision).toBe(body.target.expectedConnectionRevision);
+        } else {
+          expect(body.target.kind).toBe("remove-organization-credential");
+          expect(Object.keys(body.target).sort()).toEqual(["credentialId", "expectedCredentialRevision", "kind", "organizationId"]);
+          expect(body.target.credentialId).toMatch(uuid);
+          expect(state.credentials.find(row => row.id === body.target.credentialId).revision).toBe(body.target.expectedCredentialRevision);
+        }
+        const outcome = runningAgents
+          ? { version: 1, operationId: body.operationId, revision: 2, state: "awaiting-confirmation",
+            confirmedRunning: true, expiresAt: new Date(Date.now() + 60_000).toISOString() }
+          : { version: 1, operationId: body.operationId, revision: 3, state: "removed" };
+        const operation = { user, organizationId: org, state, target: body.target, body, outcome };
+        if (!runningAgents) remove(operation);
+        removals.set(body.operationId, operation); result = outcome;
+      }
+    } else if (removalPath) {
+      const operation = removals.get(removalPath[1]);
+      expect(operation).toBeDefined(); expect(operation.user).toBe(user); expect(operation.organizationId).toBe(org);
+      if (method === "GET" && !removalPath[2]) {
+        if (operation.outcome.state === "pending") {
+          const confirmed = operation.outcome.phase === "removing";
+          if (confirmed) remove(operation);
+          operation.outcome = { version: 1, operationId: removalPath[1], revision: 4, state: confirmed ? "removed" : "cancelled" };
+        }
+      } else {
+        expect(method).toBe("POST"); expect(["confirm", "cancel"]).toContain(removalPath[2]);
+        expect(Object.keys(body).sort()).toEqual(["expectedRevision", "requestId", "version"]);
+        expect(body).toMatchObject({ version: 1, expectedRevision: 2 });
+        expect(body.requestId).toMatch(uuid);
+        if (operation.decision) expect(operation.decision).toEqual({ action: removalPath[2], body });
+        else {
+          expect(operation.outcome.state).toBe("awaiting-confirmation");
+          operation.decision = { action: removalPath[2], body };
+          operation.outcome = { version: 1, operationId: removalPath[1], revision: 3, state: "pending",
+            phase: removalPath[2] === "confirm" ? "removing" : "cancelling", retryAfterMs: 1000 };
+        }
+      }
+      result = operation.outcome;
+    } else if (designationPath) {
       const credentialId = designationPath[1], key = `${user}:${credentialId}`;
       const credential = [...accounts.entries()].filter(([scope]) => scope.startsWith(`${user}:`))
         .flatMap(([, details]) => details.credentials).find(row => row.id === credentialId);
@@ -78,6 +149,7 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
       /\/agent-connections\/(claude|codex|cursor)$/.test(path) &&
       method === "PUT"
     ) {
+      expect(body).toMatchObject({ allModels: true, consent: "zeros-managed" });
       const provider = path.split("/").at(-1),
         revision = body.expectedRevision + 1;
       state.connections = state.connections.filter(
@@ -112,10 +184,18 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
   const connect = page.getByRole("button", { name: "Connect", exact: true });
   await connect.click();
   const dialog = page.getByRole("dialog", { name: "Claude Code", exact: true });
+  const expectOneStepConnection = async (connectionDialog) => {
+    await expect(connectionDialog.getByRole("button", { name: "Connect", exact: true })).toBeVisible();
+    await expect(connectionDialog.getByRole("checkbox")).toHaveCount(0);
+    await expect(connectionDialog.getByText("Allow all models", { exact: true })).toHaveCount(0);
+    await expect(connectionDialog.getByText(/^Allowed models/)).toHaveCount(0);
+    await expect(connectionDialog.getByText("Includes future models supported by this provider. Applies only to your own sessions.", { exact: true })).toHaveCount(0);
+    await expect(connectionDialog.getByText("Connecting stores this account encrypted in the cloud for your sessions on Zeros-managed computers in this organization, until you disconnect.", { exact: true })).toBeVisible();
+  };
   await expect(
     dialog.getByRole("button", { name: "CLI", exact: true }),
   ).toHaveCount(0);
-  await expect(dialog.getByRole("checkbox", { name: "Allow all models", exact: true })).toBeChecked();
+  await expectOneStepConnection(dialog);
   await dialog
     .getByLabel("Account name", { exact: true })
     .fill("First subscription");
@@ -123,7 +203,7 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
     .getByLabel("Cloud setup token", { exact: true })
     .fill("synthetic-cloud-setup-token");
   await dialog
-    .getByRole("button", { name: "Connect account", exact: true })
+    .getByRole("button", { name: "Connect", exact: true })
     .click();
   await expect(dialog).toHaveCount(0);
   await expect(
@@ -151,7 +231,7 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
     .getByLabel("Cloud API key", { exact: true })
     .fill("synthetic-cloud-api-key");
   await dialog
-    .getByRole("button", { name: "Connect account", exact: true })
+    .getByRole("button", { name: "Connect", exact: true })
     .click();
   await expect(dialog).toHaveCount(0);
   await expect(
@@ -160,26 +240,24 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
   await expect(page.getByText("Second API", { exact: true })).toBeVisible();
   await expect(page.getByRole("switch", { name: "Use for release checks", exact: true })).toHaveCount(0);
   expect(requests.some(row => row.path.endsWith("/release-canary"))).toBe(false);
-  // A released connection has an explicit list and no all-model flag.
-  const legacy = account(`${userA}:${orgA}`).connections.find(row => row.provider === "claude");
-  delete legacy.allModels; legacy.models = ["claude-haiku-4-5"];
-  await page.evaluate(async () => {
-    const { cloudOrganizationConnectionsCache } = await import("/apps/desktop/src/renderer/features/settings/cloud-provider-connection.ts");
-    cloudOrganizationConnectionsCache.invalidateAll();
-  });
-  await page.getByRole("button", { name: "Configure", exact: true }).click();
-  await expect(dialog.getByRole("checkbox", { name: "Allow all models", exact: true })).not.toBeChecked();
-  await expect(dialog.getByText("Allowed models (1)", { exact: true })).toBeVisible();
-  await dialog.getByRole("button", { name: "Connect account", exact: true }).click();
-  await expect(dialog).toHaveCount(0);
-  expect(requests.filter(row => row.path.endsWith("/agent-connections/claude") && row.method === "PUT").at(-1).body)
-    .toMatchObject({ allModels: false, models: ["claude-haiku-4-5"] });
-  await page.getByRole("button", { name: "Configure", exact: true }).click();
-  await dialog.getByText("Allow all models", { exact: true }).click();
-  await dialog.getByRole("button", { name: "Connect account", exact: true }).click();
-  await expect(dialog).toHaveCount(0);
-  expect(requests.filter(row => row.path.endsWith("/agent-connections/claude") && row.method === "PUT").at(-1).body.allModels).toBe(true);
-  check("New self connections default to all models; older explicit consent changes only after Allow all models is selected", true);
+  // Both archived missing flags and explicit restrictions reconnect in one step.
+  for (const allModels of [undefined, false]) {
+    const legacy = account(`${userA}:${orgA}`).connections.find(row => row.provider === "claude");
+    if (allModels === undefined) delete legacy.allModels;
+    else legacy.allModels = allModels;
+    legacy.models = ["claude-haiku-4-5"];
+    await page.evaluate(async () => {
+      const { cloudOrganizationConnectionsCache } = await import("/apps/desktop/src/renderer/features/settings/cloud-provider-connection.ts");
+      cloudOrganizationConnectionsCache.invalidateAll();
+    });
+    await page.getByRole("button", { name: "Configure", exact: true }).click();
+    await expectOneStepConnection(dialog);
+    await dialog.getByRole("button", { name: "Connect", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(requests.filter(row => row.path.endsWith("/agent-connections/claude") && row.method === "PUT").at(-1).body)
+      .toMatchObject({ allModels: true, models: grant.body.models });
+  }
+  check("New and saved cloud accounts connect all supported models in one step", true);
   ownerMode = true;
   await page.getByRole("button", { name: "Platform owner", exact: true }).click();
   const firstRow = page.locator("[data-release-canary-control]").locator("..").filter({ has: page.getByText("First subscription", { exact: true }) });
@@ -245,15 +323,60 @@ export async function runCloudSettingsSmoke({ page, check, harnessBase, releaseC
   await expect(
     page.getByText("First subscription", { exact: true }),
   ).toBeVisible();
+  const disconnectedRevision = account(`${userA}:${orgA}`).connections.find(row => row.provider === "claude").revision;
   await page.getByRole("button", { name: "Disconnect", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "Use account", exact: true }),
   ).toHaveCount(2);
+  const removeDialog = page.getByRole("dialog", { name: "Remove this connection?", exact: true });
+  await expect(removeDialog).toHaveCount(0);
+  const disconnected = [...removals.values()].find(row => row.target.kind === "disconnect-provider");
+  expect(disconnected).toMatchObject({ user: userA, organizationId: orgA,
+    target: { organizationId: orgA, provider: "claude", expectedConnectionRevision: disconnectedRevision },
+    outcome: { revision: 3, state: "removed" } });
+  expect(disconnected.decision).toBeUndefined();
+  const replay = await page.evaluate(async input => {
+    const removal = await import("/apps/desktop/src/renderer/features/settings/cloud-credential-removal.ts");
+    return { prepare: await removal.prepareCloudCredentialRemoval(input.operationId, input.target),
+      status: await removal.readCloudCredentialRemoval(input.operationId) };
+  }, disconnected.body);
+  expect(replay).toEqual({ prepare: disconnected.outcome, status: disconnected.outcome });
+  // Positive running proof alone shows the dialog. No preserves the exact
+  // organization association; Yes waits for pending Stop and the status receipt.
+  runningAgents = true;
+  const apiCredential = account(`${userA}:${orgA}`).credentials.find(row => row.displayName === "Second API");
+  const otherOrg = "33333333-3333-4333-8333-333333333333";
+  account(`${userA}:${otherOrg}`).credentials.push({ ...apiCredential });
+  const apiAccountRow = page.getByText("Second API", { exact: true }).locator("..").locator("..");
+  await apiAccountRow.getByRole("button", { name: "Remove", exact: true }).click();
+  await expect(removeDialog.getByText("All running agents will be stopped", { exact: true })).toBeVisible();
+  const cancelled = [...removals.values()].at(-1);
+  expect(cancelled).toMatchObject({ user: userA, organizationId: orgA,
+    target: { kind: "remove-organization-credential", organizationId: orgA, credentialId: apiCredential.id,
+      expectedCredentialRevision: apiCredential.revision }, outcome: { revision: 2, state: "awaiting-confirmation", confirmedRunning: true } });
+  await removeDialog.getByRole("button", { name: "No", exact: true }).click();
+  await expect(removeDialog).toHaveCount(0);
+  await expect.poll(() => cancelled.outcome.state).toBe("cancelled");
+  await expect(page.getByText("Second API", { exact: true })).toBeVisible();
+  await apiAccountRow.getByRole("button", { name: "Remove", exact: true }).click();
+  await expect(removeDialog.getByText("All running agents will be stopped", { exact: true })).toBeVisible();
+  const confirmed = [...removals.values()].at(-1);
+  await removeDialog.getByRole("button", { name: "Yes, remove", exact: true }).click();
+  await expect(removeDialog).toHaveCount(0);
+  await expect(page.getByText("Second API", { exact: true })).toHaveCount(0);
+  expect(confirmed).toMatchObject({ outcome: { revision: 4, state: "removed" }, decision: { action: "confirm" } });
+  expect(cancelled).toMatchObject({ outcome: { revision: 4, state: "cancelled" }, decision: { action: "cancel" } });
+  expect(requests.some(row => row.path === `/v1/cloud-agent-credentials/removals/${confirmed.body.operationId}` && row.method === "GET")).toBe(true);
+  expect(account(`${userA}:${otherOrg}`).credentials).toContainEqual(apiCredential);
+  expect(requests.some(row => row.path.includes("/agent-connections/accounts/") && row.method === "DELETE")).toBe(false);
+  runningAgents = false;
+  check("Cloud credential removal keeps no-agent Disconnect immediate, shows only positive running proof, and preserves No/Yes and organization scope", true);
   await page.getByRole("tab", { name: "Codex", exact: true }).click();
   await connect.click();
   const codex = page.getByRole("dialog", { name: "Codex", exact: true });
+  await expectOneStepConnection(codex);
   await codex
-    .getByRole("button", { name: "Connect account", exact: true })
+    .getByRole("button", { name: "Connect", exact: true })
     .click();
   await expect(codex.getByText("TEST-CODE", { exact: true })).toBeVisible();
   await page.keyboard.press("Escape");

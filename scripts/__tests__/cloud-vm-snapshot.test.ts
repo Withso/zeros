@@ -28,7 +28,8 @@ describe("portable VM image identity",()=>{
       const sources=fileURLToPath(new URL("../cloud-workspace-validation/sandbox/",import.meta.url));
       await writeVmImageContext(image,output,sources);
       for(const item of image.contextList)expect(await readFile(path.join(output,item.archivePath.replace(/^\/+/,"")))).toEqual(await readFile(item.sourcePath));
-      expect(await readFile(path.join(output,"Dockerfile"),"utf8")).toContain("cloud-process-supervisor");
+      expect(await readFile(path.join(output,"Dockerfile"),"utf8")).toContain("cloud-engine-namespace");
+      expect(await readFile(path.join(output,"Dockerfile"),"utf8")).not.toContain("cloud-process-supervisor");
     }finally{await rm(root,{recursive:true,force:true});}
   });
   it("exports explicit build files and rejects path escape, links and duplicate context entries",async()=>{

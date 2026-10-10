@@ -7,6 +7,7 @@ const migrations = [
   "0002_generation_revocations.sql",
   "0003_refresh_cooldown.sql",
   "0004_all_models.sql",
+  "0005_conditional_removals.sql",
 ] as const;
 /** Explicit owner-only command. The service never starts product migrations. */
 export async function migrateDevConnections(pool: pg.Pool) {

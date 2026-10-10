@@ -1,5 +1,6 @@
-/** Cloud image entrypoint, executed as the dedicated capture UID. One bounded
+/** Cloud image entrypoint, executed as the non-root engine user. One bounded
  * source request on stdin, one PNG reply on stdout, then process teardown. */
+import { pathToFileURL } from "node:url";
 import { chromium } from "playwright-core";
 import {
   DESIGN_CAPTURE_HTML_BYTES,
@@ -11,9 +12,16 @@ import { sanitizeDesignFrameMarkup, insertDesignHeadMarkup } from "./source";
 import { assertDesignCapturePng } from "./capture-service";
 import { prepareDesignCaptureViewport, captureScaledDesignPng } from "./capture-viewport";
 
+export async function captureCloudDesignFrame(input: ReturnType<typeof designCaptureRequestSchema.parse>) {
+  if (process.platform !== "linux" || process.geteuid?.() !== 10003 || process.getegid?.() !== 10003)
+    throw new Error("Capture requires the fixed non-root engine capture identity.");
+  if (Buffer.byteLength(input.html) > DESIGN_CAPTURE_HTML_BYTES)
+    throw new Error("Capture input too large.");
+  const identity = { uid: process.geteuid(), gid: process.getegid() };
+  return render(input, identity);
+}
+
 async function main() {
-  if (process.platform !== "linux" || process.getuid?.() === 0)
-    throw new Error("Capture requires an unprivileged Linux worker.");
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) {
@@ -25,8 +33,10 @@ async function main() {
   const input = designCaptureRequestSchema.parse(
     JSON.parse(Buffer.concat(chunks).toString("utf8")),
   );
-  if (Buffer.byteLength(input.html) > DESIGN_CAPTURE_HTML_BYTES)
-    throw new Error("Capture input too large.");
+  process.stdout.write(JSON.stringify(await captureCloudDesignFrame(input)));
+}
+
+async function render(input: ReturnType<typeof designCaptureRequestSchema.parse>, identity: { uid: number; gid: number }) {
   const browser = await chromium.launch({
     headless: true,
     chromiumSandbox: true,
@@ -75,15 +85,19 @@ async function main() {
     const reply = {
       data: bytes.toString("base64"),
       renderer: `chromium-${browser.version()}/playwright-1.59.1`,
+      identity,
     };
     await context.close();
-    process.stdout.write(JSON.stringify(reply));
+    return reply;
   } finally {
     await browser.close();
   }
 }
 // The parent owns the hard deadline/process group. Never print untrusted source
 // or raw browser errors (which may contain full data URLs) to an agent-readable log.
-main().catch(() => {
-  process.exitCode = 1;
-});
+const entrypoint = typeof require !== "undefined" && typeof module !== "undefined"
+  ? require.main === module
+  : !!process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
+if (entrypoint) {
+  void main().catch(() => { process.exitCode = 1; });
+}

@@ -32,9 +32,6 @@
       "scripts/design-system/**",
       "styles/policy/ui-debt.json",
       "scripts/run-explicit-vitest.mjs",
-      "scripts/run-zsr-contract-tests.mjs",
-      "scripts/zsr-qualification/pin.json",
-      "scripts/node-forge-patch.json",
       "scripts/release/ci.ts",
       "scripts/release/ci-cli.ts",
       "scripts/release/github.ts",
@@ -295,8 +292,7 @@
       "include": [
         "scripts/cloud-workspace-validation/**",
         "scripts/runtime-skew/**",
-        "scripts/zsr-qualification/**",
-        "scripts/zsr-preview-browser-smoke.ts",
+        "scripts/preview-browser-smoke.ts",
         "scripts/dev-environment/**",
         "scripts/setup-zeros-dev.sh"
       ],
@@ -387,7 +383,7 @@
         "scripts/release/**",
         "scripts/release-environment.ts",
         "scripts/build-sidecar.mjs",
-        "scripts/build-zsr-supervisor.mjs",
+        "scripts/stage-ripgrep.mjs",
         "scripts/electron-*.cjs",
         "scripts/electron-*.mjs",
         "scripts/fix-node-pty-helper.cjs",
@@ -739,7 +735,7 @@
       },
       "execution_group": "test",
       "commands": [
-        "bash scripts/ci/with-userns.sh pnpm check:design-containment"
+        "pnpm check:design-containment"
       ]
     },
     "catalog-and-provider-runtime": {
@@ -936,7 +932,6 @@
       "commands": [
         "pnpm check:runtime-pins",
         "pnpm agents:smoke:offline",
-        "pnpm check:zsr:runtime",
         "pnpm build:sidecar",
         "pnpm smoke:engine",
         "pnpm test:workspace-lifecycle",
@@ -979,8 +974,7 @@
       "commands": [
         "pnpm check:runtime-pins",
         "pnpm agents:smoke:offline",
-        "bash scripts/ci/with-userns.sh pnpm check:zsr",
-        "bash scripts/ci/with-userns.sh pnpm check:zsr-preview-browser",
+        "pnpm check:preview-browser",
         "pnpm --dir apps/control-plane typecheck"
       ],
       "runs_elsewhere": ".github/workflows/cloud-runner-qualification.yml"

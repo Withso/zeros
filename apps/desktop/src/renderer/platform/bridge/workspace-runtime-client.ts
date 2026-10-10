@@ -1,9 +1,13 @@
+import { CloudAgentBootIdentitySchema, type CloudAgentBootConversation } from "@zeros/protocol/cloud-agent-bootstrap";
 import type { BridgeMessage } from "./messages";
 import { WORKSPACE_RESOURCE_USAGE_CAPABILITY } from "@zeros/protocol/workspace-resource-usage";
 import { isCloudGithubWriteOperation } from "@zeros/protocol/github-auth";
 import { RuntimeClient, type ConnectionStatus } from "./ws-client";
 import type { CloudAgentConnection, CloudConversationAttachment } from "./cloud-agent-connection";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
+import { CloudHistoryRestoreTracker, type CloudHistoryRestoreTicket } from "../../state/cloud-transcript-cache";
+import { CloudHistoryRestoreMetadataSchema, type CloudHistoryRestoreMetadata, type CloudHistoryRestoreFence } from "../cloud-transcript-cache-contract";
+import { installCloudHistoryRestoreMetadata, captureCloudHistoryRestoreRead, assertCloudHistoryRestoreResult } from "../cloud-transcript-cache";
 import {
   cloudWorkspaceKey,
   isCloudRepositorySlug,
@@ -63,11 +67,22 @@ export interface WorkspaceRuntimeOptions {
   readHistory?: (target: CloudWorkspaceTarget, op: string, params: WireRecord) => Promise<WireRecord>;
   /** Desktop durable cache: checkpoint passive projections at turn/departure boundaries. */
   checkpointHistory?: boolean;
+  /** Passive authenticated head publications, including before a later page or
+   * optional disk write fails. No connection/wake/recovery is opened here. */
+  onHistoryRestoreHead?: (listener: (chatId: string, head: CloudHistoryRestoreFence) => void) => () => void;
   prepareGithubWrite?: (target: CloudWorkspaceTarget, op: string, params: WireRecord) => Promise<string>;
 }
 interface WakeOwner { account: string; generation: number; stopVersion: number; lifecyclePending?: boolean; retargetVersion?: number }
 class CloudAdmissionGenerationChangedError extends Error {
   constructor(readonly generation: number) { super("Cloud workspace generation changed during admission"); }
+}
+function cloudHistoryReadError(response: BridgeMessage, invalidResponseMessage: string): Error {
+  if (response.type !== "WORKSPACE_ERROR") return new Error(invalidResponseMessage);
+  return Object.assign(new Error(response.message), {
+    name: "WorkspaceOpError",
+    code: response.code,
+    ...(response.remediation !== undefined ? { remediation: response.remediation } : {}),
+  });
 }
 interface PeerEntry extends CloudPeer {
   unsubscribers: Map<string, () => void>;
@@ -130,9 +145,23 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private sawCloudCatalog = false;
   private readonly stopLocalStatus: () => void;
   private readonly stopLocalChanges: () => void;
+  private readonly historyRestore = new CloudHistoryRestoreTracker();
+  private readonly nativeHistoryRestore = new CloudHistoryRestoreTracker();
+  private readonly stopHistoryRestore: () => void;
 
   constructor(private readonly routing: WorkspaceRuntimeOptions) {
     super({ kind: "local" });
+    this.historyRestore.setAccount(String(this.accountEpoch));
+    this.nativeHistoryRestore.setAccount(String(this.accountEpoch));
+    this.stopHistoryRestore = routing.onHistoryRestoreHead?.((chatId, fence) => {
+      const target = parseCloudScopedId(chatId);
+      if (!target || this.closed || this.routing.canAccess?.(target) === false) return;
+      const ticket = this.captureHistoryRestore(target);
+      if (!ticket) return;
+      const metadata = CloudHistoryRestoreMetadataSchema.parse({ projection: fence.projection,
+        historyHeads: fence.head ? [fence.head] : [] });
+      this.installHistoryRestore(target, ticket, metadata, [target.id]);
+    }) ?? (() => {});
     this.stopLocalStatus = super.onStatusChange(() => { this.localEpoch++; });
     // Subscribe directly to the Local transport before consumer subscriptions.
     // Renderer snapshot publications use emit(), so cannot invalidate themselves.
@@ -452,6 +481,79 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private historyKey(target: CloudWorkspaceTarget, op: string, params: WireRecord): string {
     return `${cloudWorkspaceKey(target)}\0${this.identity(target)}\0${op}\0${JSON.stringify(params)}`;
   }
+  private captureHistoryRestore(target: CloudWorkspaceTarget): CloudHistoryRestoreTicket | null {
+    return this.historyRestore.capture({ accountId: String(this.accountEpoch),
+      organizationId: target.organizationId, workspaceId: target.workspaceId });
+  }
+  private historyMetadata(value: WireRecord): CloudHistoryRestoreMetadata | null {
+    return value.projection === undefined && value.historyHeads === undefined ? null
+      : CloudHistoryRestoreMetadataSchema.parse({ projection: value.projection, historyHeads: value.historyHeads });
+  }
+  private historyConversations(op: string, params: WireRecord, value: WireRecord): string[] {
+    const ids = new Set<string>();
+    const add = (id: unknown) => {
+      const scoped = parseCloudScopedId(id);
+      if (scoped) ids.add(scoped.id);
+    };
+    add(params.chatId);
+    if (op === "chats.list") {
+      for (const row of Array.isArray(value.chats) ? value.chats : []) add(record(row).id);
+      for (const id of Array.isArray(value.chatDeletions) ? value.chatDeletions : []) add(id);
+    }
+    if (op === "messages.search") for (const row of Array.isArray(value.hits) ? value.hits : []) add(record(row).chatId);
+    return [...ids];
+  }
+  private installHistoryRestore(target: CloudWorkspaceTarget, ticket: CloudHistoryRestoreTicket,
+    metadata: CloudHistoryRestoreMetadata, conversations: readonly string[]): void {
+    const changed = this.historyRestore.install(ticket, metadata, conversations);
+    if (!changed.length) return;
+    const ids = new Set(changed.map(head => head.conversationId)), prefix = `${cloudWorkspaceKey(target)}\0`;
+    for (const key of this.history.keys()) {
+      if (!key.startsWith(prefix)) continue;
+      const parts = key.split("\0");
+      // A proven live engine is a separate lineage. CP restore revisions cannot
+      // retire its native transcript or stream merely because they are larger.
+      if (parts.slice(4).some(part => part.startsWith("runtime:"))) continue;
+      const op = parts[2], params = record(JSON.parse(parts[3] ?? "{}"));
+      const chat = parseCloudScopedId(params.chatId);
+      if (op === "chats.list" || op === "messages.search" && (!chat || ids.has(chat.id)) || chat && ids.has(chat.id))
+        this.history.forget(key);
+    }
+    this.changed(cloudWorkspaceKey(target), ["chats", "messages"]);
+  }
+
+  private captureNativeHistoryRestore(entry: PeerEntry): CloudHistoryRestoreTicket | null {
+    return this.nativeHistoryRestore.capture({ accountId: String(this.accountEpoch),
+      organizationId: entry.scope.organizationId, workspaceId: entry.scope.workspaceId });
+  }
+  private installNativeHistoryRestore(entry: PeerEntry, ticket: CloudHistoryRestoreTicket,
+    metadata: CloudHistoryRestoreMetadata, conversations: readonly string[]): void {
+    this.assertCurrent(entry);
+    const binding = this.cloudAgentBootBinding(cloudWorkspaceKey(entry.scope));
+    if (!binding || (["organizationId", "workspaceId", "generation", "engineInstanceId", "bootId", "writerEpoch",
+      "fundingOwnerUserId", "fundingOwnerEpoch"] as const).some(key => binding[key] !== metadata.projection[key]) ||
+        metadata.historyHeads.some(head => !conversations.includes(head.conversationId)))
+      throw new Error("Live cloud restore belongs to another admitted writer or page.");
+    const changed = this.nativeHistoryRestore.install(ticket, metadata, conversations);
+    this.nativeHistoryRestore.assertResult(ticket, metadata, conversations);
+    if (changed.length) {
+      const ids = new Set(changed.map(head => head.conversationId)), prefix = `${cloudWorkspaceKey(entry.scope)}\0`;
+      for (const key of this.history.keys()) {
+        if (!key.startsWith(prefix)) continue;
+        const parts = key.split("\0"), op = parts[2], params = record(JSON.parse(parts[3] ?? "{}"));
+        const chat = parseCloudScopedId(params.chatId);
+        if (op === "chats.list" || op === "messages.search" && (!chat || ids.has(chat.id)) || chat && ids.has(chat.id)) this.history.forget(key);
+      }
+    }
+    // The independently verified live binding installs memory/disk/visible
+    // fences synchronously before the optional durable-cache I/O awaits.
+    // CP projection revisions and VM record/event cursors remain independent.
+    const cacheTicket = captureCloudHistoryRestoreRead(entry.scope);
+    void installCloudHistoryRestoreMetadata(entry.scope, metadata, conversations, cacheTicket, "native").catch(() => {});
+    // Optional disk persistence may fail later. Original head validation must
+    // still succeed synchronously before a snapshot or page can be forwarded.
+    assertCloudHistoryRestoreResult(cacheTicket, metadata, conversations);
+  }
 
   private async readHistory(target: CloudWorkspaceTarget, op: string, params: WireRecord): Promise<WireRecord> {
     const epoch = this.accountEpoch;
@@ -461,11 +563,14 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         throw new Error("Cloud history access changed");
     };
     assertAccess();
+    const restoreRead = this.captureHistoryRestore(target);
     const key = cloudWorkspaceKey(target);
-    const attached = op === "messages.window" || op === "messages.windowOlder"
-      ? this.peers.get(key) : undefined;
-    const peer = attached && attached.identity === identity && !attached.retired && attached.client.status === "connected"
+    const attached = this.peers.get(key);
+    const peer = attached && (op === "messages.window" || op === "messages.windowOlder" || this.cloudAgentBootBinding(key)) &&
+      attached.identity === identity && !attached.retired && attached.client.status === "connected"
       ? attached : undefined;
+    const nativeRead = peer ? this.captureNativeHistoryRestore(peer) : null;
+    const globalNativeRead = peer ? captureCloudHistoryRestoreRead(target) : null;
     // Cloud-owned records remain readable without a worker. An already attached
     // worker has the newer normalized transcript while its cloud projection is
     // committing a turn; never overwrite streamed text with that older copy.
@@ -480,25 +585,49 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
           type: "WORKSPACE_REQUEST", op, params,
         }) as Message);
         this.assertCurrent(peer);
-        if (response.type !== "WORKSPACE_RESPONSE" || !Array.isArray(record(record(response).result).messages))
-          throw new Error("Could not read the current cloud transcript");
+        const rows = op === "chats.list" ? "chats" : op === "messages.search" ? "hits" : "messages";
+        if (response.type !== "WORKSPACE_RESPONSE" || !Array.isArray(record(record(response).result)[rows]))
+          throw cloudHistoryReadError(response, "Could not read the current cloud transcript");
         result = record(cloudIncoming(peer.scope, response as unknown as WireRecord).result);
+        const metadata = this.historyMetadata(result);
+        if (metadata && nativeRead) this.installNativeHistoryRestore(peer, nativeRead, metadata, this.historyConversations(op, params, result));
+        else if (this.cloudAgentBootBinding(key)) throw new Error("Live cloud restore is missing its current head.");
       } else {
         result = await this.routing.readHistory!(target, op, params);
+        const metadata = this.historyMetadata(result);
+        if (metadata && restoreRead) this.installHistoryRestore(target, restoreRead, metadata, this.historyConversations(op, params, result));
       }
       assertAccess();
       if (op === "chats.list") {
         const previous = this.history.peekSnapshot(this.historyKey(target, op, params)).data;
-        if (previous && typeof result.revision === "number" && previous.revision === result.revision) return previous;
+        if (previous && !this.historyMetadata(result) && !this.historyMetadata(previous) &&
+            typeof result.revision === "number" && previous.revision === result.revision) return previous;
         if (previous && JSON.stringify(previous) === JSON.stringify(result)) return previous;
       }
       return result;
     }, { maxAgeMs: (this.historyIntents.get(cacheKey) ?? -1) >= performance.now() ? 15_000 : 1000 });
     assertAccess();
+    if (peer && nativeRead) {
+      this.assertCurrent(peer);
+      const metadata = this.historyMetadata(snapshot);
+      if (metadata) this.nativeHistoryRestore.assertResult(nativeRead, metadata, this.historyConversations(op, params, snapshot));
+      else if (this.cloudAgentBootBinding(key)) throw new Error("Live cloud restore is missing its current head.");
+      // Cached pages and shared flights may skip the loader's publication.
+      // Recheck their original global head before returning any native rows.
+      assertCloudHistoryRestoreResult(globalNativeRead, metadata, this.historyConversations(op, params, snapshot));
+      if (metadata && this.history.peekSnapshot(cacheKey).data !== snapshot) this.history.setData(cacheKey, snapshot);
+    }
+    if (!peer && restoreRead) {
+      const metadata = this.historyMetadata(snapshot);
+      // KeyedAsyncCache fences replacement, but still returns a retired
+      // fetch's value to its caller. Check its exact immutable head again here.
+      this.historyRestore.assertResult(restoreRead, metadata, this.historyConversations(op, params, snapshot));
+      if (metadata && this.history.peekSnapshot(cacheKey).data !== snapshot) this.history.setData(cacheKey, snapshot);
+    }
     // A cold projection may finish after a user attaches the newer runtime.
     // Reuse that peer; never open/wake one to reconcile a passive history read.
     const currentPeer = this.peers.get(key);
-    if (!peer && (op === "messages.window" || op === "messages.windowOlder") && currentPeer &&
+    if (!peer && (op === "messages.window" || op === "messages.windowOlder" || this.cloudAgentBootBinding(key)) && currentPeer &&
         currentPeer.identity === identity && !currentPeer.retired && currentPeer.client.status === "connected")
       return this.readHistory(target, op, params);
     if (op === "chats.list") {
@@ -560,6 +689,20 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     return this.history.peekSnapshot(key).data !== undefined;
   }
 
+  /** Existing current peer only. CP mirror revisions and disk cache cannot
+   * prove this native transcript lineage, and this never opens a connection. */
+  hasCloudNativeTranscript(chatId: string, executionId: string | null | undefined, limit: number): boolean {
+    const target = parseCloudScopedId(chatId);
+    if (!target || this.closed || this.routing.canAccess && !this.routing.canAccess(target)) return false;
+    const entry = this.peers.get(cloudWorkspaceKey(target));
+    if (!entry || entry.retired || entry.identity !== this.identity(target) || entry.client.status !== "connected") return false;
+    const execution = executionId ? parseCloudScopedId(executionId) : null;
+    if (execution && execution.organizationId === target.organizationId && execution.workspaceId === target.workspaceId &&
+        entry.agents?.hasCurrentExecution(target.id, execution.id)) return true;
+    const key = this.historyKey(target, "messages.window", { chatId, limit }) + `\0runtime:${entry.runtimeId}`;
+    return this.history.peekSnapshot(key).data !== undefined;
+  }
+
   statusForWorkspace(folder?: string | null): ConnectionStatus {
     const target = parseCloudWorkspaceKey(folder);
     if (!target) return this.status;
@@ -567,6 +710,23 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     if (this.opening.has(key)) return "connecting";
     const entry = this.peers.get(key);
     return entry && !entry.retired ? entry.client.status : "disconnected";
+  }
+
+  /** Cached presentation identity from a connected, actor-confirmed peer.
+   * Does not open, wake, read CP state, or authorize an agent command. */
+  cloudAgentBootBinding(folder: string): CloudAgentBootConversation | null {
+    const target = parseCloudWorkspaceKey(folder);
+    if (!target || this.closed || this.routing.canAccess?.(target) === false) return null;
+    const entry = this.peers.get(cloudWorkspaceKey(target));
+    if (!entry || entry.retired || entry.epoch !== this.accountEpoch || entry.identity !== this.identity(target) ||
+        entry.client.status !== "connected") return null;
+    const binding = entry.client.activatedCloudAgentBootBinding;
+    const identity = entry.client.executionIdentity;
+    if (!binding || !identity || identity.kind !== "cloud" || !identity.bootScope ||
+        binding.organizationId !== target.organizationId || binding.workspaceId !== target.workspaceId ||
+        binding.authorityEpoch !== identity.authorityEpoch ||
+        Object.entries(identity.bootScope).some(([key, value]) => binding[key as keyof CloudAgentBootConversation] !== value)) return null;
+    return binding;
   }
 
   /** Safe metadata from an already admitted peer. Does not connect or adopt. */
@@ -654,6 +814,25 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         if (this.routing.canAccess && !this.routing.canAccess(entry.scope))
           return;
         const wire = message as unknown as WireRecord;
+        const restoreValue = type === "DB_CHANGED" ? wire.cloudHistoryRestore : record(wire.cloudSnapshot).historyRestore;
+        if (restoreValue !== undefined) {
+          try {
+            const metadata = CloudHistoryRestoreMetadataSchema.parse(restoreValue), ticket = this.captureNativeHistoryRestore(entry);
+            const ids = type === "DB_CHANGED" ? (Array.isArray(wire.chatIds) ? wire.chatIds.filter((id): id is string => typeof id === "string") : [])
+              : typeof record(wire.cloudSnapshot).conversationId === "string" ? [record(wire.cloudSnapshot).conversationId as string] : [];
+            if (!ticket) return;
+            this.installNativeHistoryRestore(entry, ticket, metadata, ids);
+          } catch { return; }
+        }
+        if (type === "CLOUD_AGENT_CREDENTIAL_USED") {
+          const binding = this.cloudAgentBootBinding(cloudWorkspaceKey(entry.scope));
+          const use = record(wire.use), source = record(use.scope);
+          const scope = CloudAgentBootIdentitySchema.safeParse(source);
+          const identity = entry.client.executionIdentity;
+          if (!binding || !scope.success || identity?.kind !== "cloud" || !identity.bootScope ||
+              Object.entries(source).some(([key, value]) => binding[key as keyof CloudAgentBootConversation] !== value)) return;
+        }
+
         if (type === "DB_CHANGED") {
           this.invalidateHistory(entry.scope);
           if (this.routing.readHistory && Array.isArray(wire.kinds) && wire.kinds.includes("chats"))
@@ -667,10 +846,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
           !wire.executionId
         )
           return;
-        this.emit(
-          type,
-          cloudIncoming(entry.scope, entry.agents?.incoming(wire) ?? wire),
-        );
+        const incoming = entry.agents ? entry.agents.incoming(wire) : wire;
+        if (incoming) this.emit(type, cloudIncoming(entry.scope, incoming));
       }),
     );
   }
@@ -771,6 +948,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         this.peers.set(key, entry);
         for (const type of this.routedHandlers.keys()) this.attach(entry, type);
         entry.stopStatus = entry.client.onStatusChange((status) => {
+          if (!entry.retired && status === "disconnected" && entry.client.lastRejection) this.retirePeer(entry);
           this.workspaceStatusChanged(key);
           if (entry.retired || status !== "connected" || epoch !== this.accountEpoch) return;
           void this.readChats(entry)
@@ -822,7 +1000,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private async readChats(entry: PeerEntry, warming?: Promise<WireRecord>): Promise<WireRecord> {
     this.assertCurrent(entry);
     const revision = ++entry.snapshotRevision;
-    if (this.routing.readHistory) {
+    if (this.routing.readHistory && !this.cloudAgentBootBinding(cloudWorkspaceKey(entry.scope))) {
       const snapshot = await (warming ?? this.readHistory(entry.scope, "chats.list", {}));
       this.assertCurrent(entry);
       if (revision === entry.snapshotRevision) {
@@ -838,11 +1016,14 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     } as Message);
     if (response.type !== "WORKSPACE_RESPONSE" ||
         !Array.isArray(record(record(response).result).chats))
-      throw new Error("Could not read cloud conversations");
+      throw cloudHistoryReadError(response, "Could not read cloud conversations");
     if (entry.epoch !== this.accountEpoch)
       throw new Error("Cloud account changed");
     this.assertCurrent(entry);
     const next = cloudIncoming(entry.scope, response as unknown as WireRecord);
+    const metadata = this.historyMetadata(record(next.result)), ticket = this.captureNativeHistoryRestore(entry);
+    if (metadata && ticket) this.installNativeHistoryRestore(entry, ticket, metadata, this.historyConversations("chats.list", {}, record(next.result)));
+    else if (this.cloudAgentBootBinding(cloudWorkspaceKey(entry.scope))) throw new Error("Live cloud restore is missing its current head.");
     if (revision === entry.snapshotRevision) {
       const snapshot = record(next.result);
       if (JSON.stringify(entry.snapshot) !== JSON.stringify(snapshot)) entry.snapshot = snapshot;
@@ -896,11 +1077,9 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     if (entry.epoch !== this.accountEpoch)
       throw new Error("Cloud account changed before the response arrived");
     this.assertCurrent(entry);
-    const incoming = cloudIncoming(
-      entry.scope,
-      entry.agents?.incoming(response as unknown as WireRecord) ??
-        (response as unknown as WireRecord),
-    );
+    const mapped = entry.agents ? entry.agents.incoming(response as unknown as WireRecord) : response as unknown as WireRecord;
+    if (!mapped) throw new Error("Cloud execution changed before the response arrived");
+    const incoming = cloudIncoming(entry.scope, mapped);
     if (["AGENT_PROMPT_COMPLETE", "AGENT_PROMPT_FAILED"].includes(String(incoming.type)) && typeof incoming.chatId === "string")
       this.checkpointCloudTranscript(incoming.chatId);
     return incoming as unknown as BridgeMessage;
@@ -1031,7 +1210,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     type: string,
     handler: (message: BridgeMessage) => void,
   ): () => void {
-    const offLocal = super.on(type, handler);
+    const offLocal = type === "CLOUD_AGENT_CREDENTIAL_USED" ? () => {} : super.on(type, handler);
     const set = this.routedHandlers.get(type) ?? new Set();
     set.add(handler);
     this.routedHandlers.set(type, set);
@@ -1067,6 +1246,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
 
   clearCloudConnections(): void {
     this.accountEpoch++;
+    this.historyRestore.setAccount(String(this.accountEpoch));
+    this.nativeHistoryRestore.setAccount(String(this.accountEpoch));
     this.cloudRepositorySlugs.clear();
     this.sawCloudCatalog = false;
     for (const pending of this.opening.values()) pending.controller.abort();
@@ -1151,6 +1332,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     this.closed = true;
     this.stopLocalStatus();
     this.stopLocalChanges();
+    this.stopHistoryRestore();
     this.clearCloudConnections();
     super.dispose();
   }

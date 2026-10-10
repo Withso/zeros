@@ -13,6 +13,14 @@ of setup-worker startup; enrollment can proceed while cleanup is pending.
 Historical tables, identities and referenced snapshots remain. No live
 qualification is claimed by these tests.
 
+
+The engine, agents, tools, terminals/SSH/LSP and capture use the [normal VM execution model](security.md#agent-execution-model):
+one non-root `zeros-engine` user (10003), the real checkout and normal VM egress, without an agent sandbox.
+The approved base's setup recipes and account inventory remain immutable. The root broker adopts
+legacy mutable checkout/HOME ownership from 10001/10002 to 10003 only after positive old-engine drain.
+Agents can read engine data on their VM: one trust domain per workspace. Conversation directories
+separate state, not agents from each other.
+
 ## Worker and durable authority
 
 `apps/control-plane/src/cloud-workspaces/computer-template-worker.ts` consumes
@@ -113,7 +121,9 @@ helper only on SSH stdin, then Git through a private root-owned Unix socket and
 fixed askpass. They never enter a Git URL, argv, environment variable or file.
 Each clone fetches depth one at the selected ref, records its exact SHA, removes
 credential helpers and hooks, and ends at
-`/srv/zeros/files/repos/<owner>/<name>`, owned by UID/GID 10001. The repo root and
+`/srv/zeros/files/repos/<owner>/<name>`, owned by UID/GID 10001 under the frozen
+base's legacy setup contract. The root broker adopts mutable checkout ownership
+to 10003 after positive old-engine drain, before new runtime attestation. The repo root and
 owner directories are explicitly set and checked as root:root 0755, including
 during sanitation; the helper's umask 077 cannot make them inaccessible.
 Private job and credential directories stay 0700. An empty selection does not
@@ -135,7 +145,7 @@ script digest; repeating start after an SSH failure inspects the same execution.
 Polls retry up to three consecutive transport failures without rerunning it.
 
 The v4 launcher checks the repository parent/owner directories, names and
-UID/GID-10001 checkout roots before projecting the files tree. The engine sees
+checkout roots adopted to 10003 after positive old-engine drain before projecting the files tree. The engine sees
 the same `/srv/zeros/repos/<owner>/<name>` paths used by recipes, preserving
 absolute dependency paths. It does not expose `/srv/zeros/files/repos`.
 Files and managed Git remain rooted at the primary `/srv/zeros/workspace` for

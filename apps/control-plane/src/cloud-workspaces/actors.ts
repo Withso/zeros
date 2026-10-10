@@ -1,3 +1,4 @@
+import { recordCloudAgentFundingConsents } from "./agent-funding-consent.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { z } from "zod";
@@ -9,6 +10,7 @@ import { withSystemTx, type Tx } from "../db.js";
 import {emitCloudWorkspaceAccessChange} from "./collaboration-events.js";
 import {sealWorkspaceInvitation} from "./invitation-envelope.js";
 import {activateWriterSlot,hasProSharing,pruneWriterSlots,releaseWriterSlot,reserveWriterSlot,writerAvailability} from "./pro-sharing.js";
+import { purgeCloudAgentAdoptions } from "./agent-boot-credentials.js";
 
 export type WorkspaceInvitationDeliveryConfig={keys:Readonly<Record<number,string>>;currentKeyVersion:number;webOrigin:string};
 
@@ -133,6 +135,7 @@ export async function authorizeCloudWorkspaceCleanup(tx:Tx,input:CloudWorkspaceA
 /** Account purge anonymizes users instead of deleting their row. Erase hashed
  * recipient addresses while identity history still exists for exact matching. */
 export async function eraseCloudWorkspaceCollaborationIdentity(tx:Tx,userId:string):Promise<void> {
+  await purgeCloudAgentAdoptions(tx,userId);
   await tx.query(`DELETE FROM cloud_workspace_invitations WHERE accepted_by=$1 OR invited_by=$1
     OR recipient_email_sha256 IN (
       SELECT digest(lower(btrim(email_at_link)),'sha256') FROM user_identities WHERE user_id=$1
@@ -181,6 +184,7 @@ export class DatabaseCloudWorkspaceCollaborationService {
       const row = (await tx.query<{access_revision:string}>(`UPDATE cloud_workspaces
         SET sharing_mode=$3,single_member_mode=false,pro_sharing_ready=true,access_revision=access_revision+1,version=version+1,updated_at=now()
         WHERE id=$1 AND org_id=$2 RETURNING access_revision`,[input.workspaceId,input.organizationId,input.sharingMode])).rows[0]!;
+      await recordCloudAgentFundingConsents(tx,{organizationId:input.organizationId,workspaceId:input.workspaceId,issuerUserId:input.actorUserId});
       await audit(tx,input.organizationId,input.actorUserId,"cloud_workspace.sharing_changed",{workspaceId:input.workspaceId,sharingMode:input.sharingMode});
       await emitCloudWorkspaceAccessChange(tx,{...input,reason:"sharing_changed",discoveryChanged:true});
       return {accessRevision:Number(row.access_revision),sharingMode:input.sharingMode};
@@ -293,6 +297,7 @@ export class DatabaseCloudWorkspaceCollaborationService {
         if(invitation.role==="viewer")await releaseWriterSlot(tx,scope.workspace_id,input.actorUserId);
         else await activateWriterSlot(tx,scope.workspace_id,input.actorUserId,invitation.id);
       }
+      await recordCloudAgentFundingConsents(tx,{organizationId:scope.org_id,workspaceId:scope.workspace_id,issuerUserId:invitation.invited_by,subjectUserId:input.actorUserId});
       await tx.query(`UPDATE cloud_workspace_invitations SET accepted_at=now(),accepted_by=$2,guest_grant_id=$3 WHERE id=$1`,[invitation.id,input.actorUserId,grantId]);
       await this.cancelInvalidDeliveries(tx,binding.workspaceId);
       await audit(tx,scope.org_id,input.actorUserId,"cloud_workspace.invitation_accepted",{workspaceId:scope.workspace_id,invitationId:invitation.id,grantId});
@@ -334,6 +339,7 @@ export class DatabaseCloudWorkspaceCollaborationService {
         await releaseWriterSlot(tx,input.workspaceId,input.guestUserId);
         await tx.query("DELETE FROM cloud_workspace_members WHERE workspace_id=$1 AND user_id=$2 AND role<>'owner'",[input.workspaceId,input.guestUserId]);
       }
+      await recordCloudAgentFundingConsents(tx,{organizationId:input.organizationId,workspaceId:input.workspaceId,issuerUserId:input.actorUserId,subjectUserId:input.guestUserId});
       await audit(tx,input.organizationId,input.actorUserId,"cloud_workspace.guest_revoked",{workspaceId:input.workspaceId,guestUserId:input.guestUserId});
       await emitCloudWorkspaceAccessChange(tx,{...input,reason:"guests_changed",target:{userId:input.guestUserId,reason:"access_revoked"}});
       return {revoked:true};
@@ -366,6 +372,7 @@ export class DatabaseCloudWorkspaceCollaborationService {
         await releaseWriterSlot(tx,input.workspaceId,input.userId);
       }else await reserveWriterSlot(tx,input.workspaceId,{userId:input.userId});
       await this.cancelInvalidDeliveries(tx,input.workspaceId);
+      await recordCloudAgentFundingConsents(tx,{organizationId:input.organizationId,workspaceId:input.workspaceId,issuerUserId:input.actorUserId,subjectUserId:input.userId});
       await audit(tx,input.organizationId,input.actorUserId,"cloud_workspace.collaborator_role_changed",{workspaceId:input.workspaceId,userId:input.userId,role:input.role});
       await emitCloudWorkspaceAccessChange(tx,{...input,reason:"guests_changed",discoveryChanged:member.rowCount===1});
       return {userId:input.userId,role:input.role,writers:await writerAvailability(tx,input.workspaceId)};

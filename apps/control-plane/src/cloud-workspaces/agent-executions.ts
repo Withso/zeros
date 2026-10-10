@@ -1,4 +1,5 @@
-import { cloudAgentModels, cloudAgentModelAllowed } from "./agent-models.js";
+import { DatabaseCloudAgentBootService, type CloudAgentBootOperation } from "./agent-boot-credentials.js";
+import { cloudAgentModels } from "./agent-models.js";
 import type { CloudAgentAdmissionCode } from "./agent-admission-errors.js";
 import { devConnectionRuntime } from "../dev-connections/runtime.js";
 import {createHash,createHmac,randomUUID} from "node:crypto";
@@ -23,6 +24,7 @@ import {openCloudAgentCredential,type CloudAgentCredentialKind,type CloudAgentCr
 import {CloudBackgroundOperationSchema,readCloudBackgroundTasks,writeCloudBackgroundTasks} from "./agent-background-tasks.js";
 import {cloudRuntimeQualificationMode} from "./runtime-config.js";
 import {runtimeCredentialQualificationJoin,runtimeNativeCapabilities} from "./runtime-selection.js";
+import { CloudAgentCredentialControlExchangeRequestSchema, exchangeCloudAgentCredentialControls } from "./agent-credential-mutations.js";
 import {adminComputerToolsVersion,computerToolsRejected} from "./computer-admin-workspaces.js";
 import {CloudComputerToolExecutionRequestSchema} from "./computer-tools-contract.js";
 import {ComputerToolConflictError,executeComputerTool,type ComputerToolsDependencies} from "./computer-tools.js";
@@ -122,8 +124,8 @@ async function credentialBinding(tx:Tx,scope:EngineScope,input:Admission,actor:N
         AND ($9::text IS NULL OR (qualification.native_capabilities->>'version'='1' AND qualification.native_capabilities->>$9='true'))
       WHERE delegation.id=$1 AND delegation.workspace_id=$2 AND delegation.org_id=$3 AND delegation.grantee_user_id=$4
         AND credential.revoked_at IS NULL AND delegation.revoked_at IS NULL AND delegation.expires_at>clock_timestamp()+interval '5 seconds'
-        AND ((NOT delegation.all_models AND $7=ANY(delegation.models)) OR
-          (delegation.all_models AND delegation.owner_user_id=delegation.grantee_user_id AND $7=ANY($11::text[])))
+        AND $7=ANY($11::text[])
+        AND (delegation.owner_user_id=delegation.grantee_user_id OR $7=ANY(delegation.models))
       FOR SHARE OF delegation,material`,
     [input.delegationId,scope.workspaceId,scope.organizationId,actor.actorUserId,scope.engineInstanceId,scope.generation,input.model,requireMcp&&!!input.customization&&input.customization.version!==3,actor.nativeCapability??null,cloudRuntimeQualificationMode(),cloudAgentModels(input.provider)])).rows[0];
     if(!row||(!allowStale&&!row.material_ready))rejected();
@@ -166,7 +168,8 @@ async function admissionDenial(tx:Tx,scope:EngineScope,input:Admission,actor:Nat
   if(owner.fingerprint!==row.owner_fingerprint)return null;
   if(row.revoked)return "cloud_agent_credential_revoked";
   if(row.expired)return "cloud_agent_credential_expired";
-  if(!cloudAgentModelAllowed(row.kind,input.model,row.models,row.all_models))return "cloud_agent_model_not_authorized";
+  if(!cloudAgentModels(row.kind).includes(input.model)||
+    (row.owner_user_id!==actor.actorUserId&&!row.models.includes(input.model)))return "cloud_agent_model_not_authorized";
   return null;
 }
 async function recordAdmissionDenial(tx:Tx,scope:EngineScope,input:Admission,code:CloudAgentAdmissionCode){
@@ -213,6 +216,19 @@ export class DatabaseCloudAgentExecutionService {
   constructor(private readonly pool:pg.Pool,private readonly encryption:CloudAgentCredentialKeys,private readonly workosEnabled:boolean,
     private readonly codexRenewal=new DatabaseCodexAuthRenewal(pool,encryption),
     private readonly computerTools?:ComputerToolsDependencies,private readonly settingsEncryption:SecretEncryptionConfiguration={}){}
+
+  boot(scope:EngineScope,operation:CloudAgentBootOperation,value:unknown) {
+    return new DatabaseCloudAgentBootService(this.pool,this.encryption,this.workosEnabled,this.settingsEncryption,this.codexRenewal).execute(scope,operation,value);
+  }
+
+  credentialControls(scope:EngineScope,value:unknown) {
+    const request=CloudAgentCredentialControlExchangeRequestSchema.safeParse(value);
+    if(!request.success)throw new HttpError(422,"invalid_agent_execution","invalid_agent_execution");
+    for(const key of ["organizationId","workspaceId","generation","engineInstanceId"] as const)
+      if(request.data[key]!==scope[key])throw new HttpError(403,"cloud_validation_access_denied","cloud_validation_access_denied");
+    return withSystemTx(this.pool,tx=>exchangeCloudAgentCredentialControls(tx,{...scope,
+      bootId:request.data.bootId,writerEpoch:request.data.writerEpoch,workosEnabled:this.workosEnabled},request.data));
+  }
 
   private transaction<T>(operation:(tx:Tx)=>Promise<T>){
     return withCloudAgentCredentialRetry(()=>withSystemTx(this.pool,operation));
@@ -543,8 +559,8 @@ export class DatabaseCloudAgentExecutionService {
           AND delegation.workspace_id=$4 AND delegation.org_id=$5 AND delegation.grantee_user_id=$6
           AND credential.revoked_at IS NULL AND delegation.revoked_at IS NULL
           AND delegation.expires_at>clock_timestamp()
-          AND ((NOT delegation.all_models AND $7=ANY(delegation.models)) OR
-            (delegation.all_models AND delegation.owner_user_id=delegation.grantee_user_id AND $7=ANY($8::text[])))
+          AND $7=ANY($8::text[])
+          AND (delegation.owner_user_id=delegation.grantee_user_id OR $7=ANY(delegation.models))
           AND (material.material_expires_at IS NULL OR material.material_expires_at>clock_timestamp())
         FOR SHARE OF credential,delegation,material SKIP LOCKED`,
         [lease.credential_id,lease.credential_revision,lease.delegation_id,scope.workspaceId,scope.organizationId,actor.actorUserId,lease.model,cloudAgentModels(lease.provider)])).rows[0];

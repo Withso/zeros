@@ -100,6 +100,23 @@ describe("resident update conversation", () => {
 });
 
 describe("runtime update root channel", () => {
+  it("admits a v2 VM report on the original root conversation with exact runtime binding", async () => {
+    const { dialog, handlers } = fixture();
+    await dialog.onFrame(frame("authorize", { controller: source }));
+    const current = { ...report, version: 2, boundary: "workspace-vm" };
+    expect(JSON.parse((await dialog.onFrame(frame("enroll", { active, controller: source, report: current })))!)).toMatchObject({ allow: true });
+    expect(handlers.enroll).toHaveBeenCalledWith(expect.objectContaining({ report: current }));
+  });
+
+  it.each([{ version: 2 }, { version: 2, boundary: "process" }, { version: 3, boundary: "workspace-vm" }])(
+    "refuses a missing/foreign VM report posture before enrollment: %j", async changed => {
+      const { dialog, handlers } = fixture();
+      await dialog.onFrame(frame("authorize", { controller: source }));
+      await expect(dialog.onFrame(frame("enroll", { active, controller: source, report: { ...report, ...changed } }))).rejects.toThrow();
+      expect(handlers.enroll).not.toHaveBeenCalled();
+    },
+  );
+
   it("authorizes only after the VM's verified ready frame and never places grants in the command", async () => {
     const { dialog, handlers } = fixture();
     expect(handlers.authorize).not.toHaveBeenCalled();

@@ -6,17 +6,20 @@ import path from "node:path";
 const PROC_SUPER_MAGIC = 0x9fa0;
 const OVERFLOW_ID = 65534;
 
-/** The fixed launcher maps only the versioned VM identities. In particular VM
- * root, the provider's login user, and supplementary groups are not mapped. */
+/** Archived maps remain readable. New execution maps only the non-root engine
+ * identity; VM root and the retired worker identities are not mapped. */
 export function cloudEngineIdMapVersion(source) {
   if (typeof source !== "string" || source.length > 256) return null;
   const rows = source.trim().split("\n");
-  if (rows.length !== 2 && rows.length !== 3) return null;
+  if (rows.length !== 1 && rows.length !== 2 && rows.length !== 3) return null;
   const parsed = rows.map((row) => {
     if (!/^\s*\d+\s+\d+\s+\d+\s*$/.test(row)) return null;
     return row.trim().split(/\s+/).map(Number);
   });
-  if(parsed[0]?.join(",")!=="0,10003,1"||parsed[1]?.join(",")!=="10001,10001,2")return null;
+  if (rows.length === 1 && parsed[0]?.join(",") === "10003,10003,1") return 5;
+  if (parsed[0]?.join(",") !== "0,10003,1") return null;
+  if (rows.length === 1) return 4;
+  if (parsed[1]?.join(",") !== "10001,10001,2") return null;
   return rows.length===2?2:parsed[2]?.join(",")==="10004,10004,1"?3:null;
 }
 
@@ -53,20 +56,37 @@ function readProc(file, maximum) {
 export function hasCloudEngineUserNamespace(version) {
   if (
     process.platform !== "linux" ||
-    process.getuid?.() !== 0 ||
-    process.geteuid?.() !== 0 ||
-    process.getgid?.() !== 0 ||
-    process.getegid?.() !== 0
+    process.getuid?.() !== 10003 ||
+    process.geteuid?.() !== 10003 ||
+    process.getgid?.() !== 10003 ||
+    process.getegid?.() !== 10003
   )
     return false;
-  return hasCloudIdentityMap(version);
+  try {
+    return hasCloudIdentityMap(version) &&
+      isCloudEngineSecurityStatus(readProc("/proc/self/status", 65536));
+  } catch { return false; }
+}
+
+/** Closed kernel status contract for the current engine, never child input. */
+export function isCloudEngineSecurityStatus(source) {
+  if (typeof source !== "string" || source.length > 65536 || source.includes("\0")) return false;
+  const values = new Map();
+  for (const line of source.split("\n")) {
+    const match = /^(CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs|Seccomp):[ \t]*(\S+)[ \t]*$/.exec(line);
+    if (!match) continue;
+    if (values.has(match[1])) return false;
+    values.set(match[1], match[2]);
+  }
+  return ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"].every(key => values.get(key) === "0000000000000000") &&
+    values.get("NoNewPrivs") === "1" && values.get("Seccomp") === "2";
 }
 
 function hasCloudIdentityMap(version) {
   try {
     const uidVersion=cloudEngineIdMapVersion(readProc("/proc/self/uid_map",256));
     const gidVersion=cloudEngineIdMapVersion(readProc("/proc/self/gid_map",256));
-    return uidVersion === 3 && uidVersion === gidVersion &&
+    return uidVersion === 5 && uidVersion === gidVersion &&
       uidVersion === cloudProfileIdentityMapVersion(version ?? 4);
   } catch {
     return false;
@@ -135,7 +155,7 @@ export function isCloudDeploymentOwner(candidate, uid) {
 }
 
 export function cloudProfileIdentityMapVersion(version) {
-  return version === 4 ? 3 : null;
+  return version === 4 ? 5 : null;
 }
 
 const MARKER = "/etc/zeros/cloud-worker.json";
@@ -179,8 +199,9 @@ export function cloudActiveRuntimeDescriptor(runtime) {
 export function validateCloudRuntimeMarker(value, projection = false) {
   if (!exactKeys(value, ["backend", "gid", "profile", "uid", "version", ...(projection ? ["toolchain"] : [])]) ||
     value.version !== 4 || value.backend !== "cloud-worker" || value.profile !== "zeros-cloud-worker-v4" ||
-    value.uid !== 10001 || value.gid !== 10001) throw invalidRuntime();
-  if (projection && (!exactKeys(value.toolchain, ["bwrap", "node", "setpriv", "supervisor"]) ||
+    !(value.uid === 10001 && value.gid === 10001 || projection &&
+      (value.uid === 0 && value.gid === 0 || value.uid === 10003 && value.gid === 10003))) throw invalidRuntime();
+  if (projection && (!exactKeys(value.toolchain, value.uid === 10001 ? ["bwrap", "node", "setpriv", "supervisor"] : ["node", "supervisor"]) ||
     Object.values(value.toolchain).some(file => typeof file !== "string" || !path.isAbsolute(file) || path.resolve(file) !== file || file.includes("\0"))))
     throw invalidRuntime();
   return value;
@@ -357,16 +378,18 @@ export function createCloudRuntimeResolver({
     const descriptor = parseCloudActiveRuntime(readDocument(ACTIVE, 16384));
     const runtime = runtimePaths(descriptor);
     if (pinnedNode && pinnedNode !== runtime.node) throw invalidRuntime();
-    if (projection && (!isReadOnly(MARKER) || marker.toolchain.node !== runtime.node ||
-      marker.toolchain.supervisor !== `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs` ||
-      marker.toolchain.bwrap !== "/usr/bin/bwrap" || marker.toolchain.setpriv !== "/usr/bin/setpriv")) throw invalidRuntime();
+    if (projection && (marker.uid !== 10003 || marker.gid !== 10003 || !isReadOnly(MARKER) || marker.toolchain.node !== runtime.node ||
+      marker.toolchain.supervisor !== `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`)) throw invalidRuntime();
     assertPath(runtime.root, true);
     assertPath(runtime.workerRoot, true);
     assertPath(runtime.libRoot, true);
     assertFacade(runtime);
-    for (const file of [runtime.node, runtime.startEngine, runtime.engineNamespace, runtime.processSupervisor,
+    // The raw immutable base marker remains a reader contract. Current runtime
+    // assets use the Host supervisor even before entering the engine view.
+    const hostSupervisor = `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`;
+    for (const file of [runtime.node, runtime.startEngine, runtime.engineNamespace, hostSupervisor,
       `${runtime.workerRoot}/dist-engine/cli.js`, `${runtime.root}/manifest.json`, runtime.helpers.supervisor, runtime.helpers.setup]) assertPath(file);
-    for (const file of [runtime.node, runtime.startEngine, runtime.engineNamespace, runtime.processSupervisor])
+    for (const file of [runtime.node, runtime.startEngine, runtime.engineNamespace])
       if (!(filesystem.lstatSync(file).mode & 0o111)) throw invalidRuntime();
     return resolved = runtime;
   }
@@ -381,8 +404,8 @@ export function createCloudRuntimeResolver({
     const match = /^\/opt\/zeros-infra\/(r1-[a-f0-9]{64})\/bin\/node$/.exec(node);
     if (!match) throw invalidRuntime();
     const runtime = runtimePaths({ root: path.dirname(path.dirname(node)), runtimeId: match[1] });
-    // Restricted children keep the admitted map but have dropped to their
-    // actor UID. Unmapped VM root is accepted only on the inherited RO view.
+    // Same-user children keep the exact admitted map. Unmapped VM root is
+    // accepted only on the inherited read-only deployment view.
     assertChildPath(runtime.root, true);
     assertChildPath(runtime.workerRoot, true);
     assertChildPath(runtime.node);

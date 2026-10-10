@@ -8,6 +8,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import {
   CloudRuntimeBridgeRelay,
   runtimeBridgeToken,
+  type CloudRuntimeRelayMessageObservation,
 } from "./runtime-bridge.js";
 import { CLOUD_RUNTIME_BRIDGE_PATH } from "./engine-client-admission.js";
 
@@ -215,6 +216,112 @@ afterEach(async () => {
 });
 
 describe("portable cloud runtime relay", () => {
+  it("observes actual complete small messages in both directions without retaining payloads, endpoints or tokens", async () => {
+    const observed: CloudRuntimeRelayMessageObservation[] = [];
+    const f = await fixture({ observeMessage: event => observed.push(event) });
+    const ws = f.connect(); await once(ws, "open");
+    const received = once(ws, "message"); ws.send("synthetic unicode \u2713"); await received;
+    await vi.waitFor(() => expect(observed.filter(row => row.phase === "forwarded")).toHaveLength(2));
+    expect(observed.map(row => row.direction)).toEqual(["client_to_engine", "client_to_engine", "engine_to_client", "engine_to_client"]);
+    const size = Buffer.byteLength("synthetic unicode \u2713");
+    for (const row of observed) {
+      expect(row).toMatchObject({ version: 1, payloadBytes: size, binary: false, activeSubscribers: 1,
+        correlation: "unknown", scope: { organizationId: grant.organizationId, workspaceId: grant.workspaceId,
+          generation: grant.generation, engineInstanceId: grant.engineInstanceId } });
+      expect(Number.isFinite(row.atMs)).toBe(true);
+      expect(Object.keys(row).sort()).toEqual(["activeSubscribers", "atMs", "binary", "clockId", "correlation", "direction", "payloadBytes", "phase", "scope", "sequence", "version"]);
+    }
+    expect(JSON.stringify(observed)).not.toContain(token);
+    expect(JSON.stringify(observed)).not.toContain(endpoint.headerValue);
+    expect(JSON.stringify(observed)).not.toContain("synthetic unicode");
+    expect(f.relay.messageObservationCoverage()).toMatchObject({ enabled: true, observedMessages: 2, omittedMessages: 0,
+      pendingForwards: 0, observerFailures: 0, complete: true, clockId: observed[0]!.clockId });
+  });
+  it("counts a binary message and actual authenticated subscribers without imposing the inbound charge threshold", async () => {
+    const observed: CloudRuntimeRelayMessageObservation[] = [];
+    const f = await fixture({ observeMessage: event => observed.push(event) }, { upstream: "record" });
+    const a = f.connect(), b = f.connect(); await Promise.all([once(a, "open"), once(b, "open")]);
+    const message = once(a, "message"); f.engines[0]!.send(Buffer.alloc(8)); await message;
+    await vi.waitFor(() => expect(observed).toHaveLength(2));
+    expect(observed).toMatchObject([{ phase: "received", binary: true, payloadBytes: 8, activeSubscribers: 2 },
+      { phase: "forwarded", binary: true, payloadBytes: 8, activeSubscribers: 2 }]);
+    expect(observed[0]!.sequence).toBe(observed[1]!.sequence);
+    expect(f.relay.stats().inboundReservedBytes).toBe(0);
+  });
+  it("reports incomplete coverage when observation capacity is exhausted and keeps forwarding", async () => {
+    const observed: CloudRuntimeRelayMessageObservation[] = [];
+    const f = await fixture({ observeMessage: event => observed.push(event), maxObservedMessages: 1 });
+    const ws = f.connect(); await once(ws, "open");
+    const receive = once(ws, "message"); ws.send("first"); await receive;
+    const next = once(ws, "message"); ws.send("second"); await next;
+    await vi.waitFor(() => expect(f.relay.messageObservationCoverage().pendingForwards).toBe(0));
+    expect(observed).toHaveLength(2);
+    expect(f.relay.messageObservationCoverage()).toMatchObject({ observedMessages: 1, omittedMessages: 3, complete: false });
+    expect(f.relay.messageObservationCoverage().directions).toEqual({
+      client_to_engine: { receivedMessages: 2, receivedBytes: 11, forwardedMessages: 2, forwardedBytes: 11, failedMessages: 0, failedBytes: 0 },
+      engine_to_client: { receivedMessages: 2, receivedBytes: 11, forwardedMessages: 2, forwardedBytes: 11, failedMessages: 0, failedBytes: 0 },
+    });
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+  });
+  it("contains observation failures without changing bytes or connection authority", async () => {
+    const observer = vi.fn(() => { throw new Error("synthetic observer failure"); });
+    const f = await fixture({ observeMessage: observer }); const ws = f.connect(); await once(ws, "open");
+    const received = once(ws, "message"); ws.send("unchanged"); const [value] = await received;
+    expect(value.toString()).toBe("unchanged");
+    await vi.waitFor(() => expect(observer).toHaveBeenCalledTimes(4));
+    expect(f.relay.messageObservationCoverage()).toMatchObject({ observerFailures: 4, complete: false });
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    expect(f.logs.join("\n")).not.toContain("synthetic observer failure");
+  });
+  it("records actual failed forwarding and its bytes without turning it into delivered traffic", async () => {
+    const observed: CloudRuntimeRelayMessageObservation[] = [];
+    const f = await fixture({ observeMessage: event => observed.push(event) }, { upstream: "record" });
+    const ws = f.connect(); await once(ws, "open");
+    vi.spyOn(f.relayRemotes[0]!, "send").mockImplementation((...args: unknown[]) => {
+      const callback = args.at(-1);
+      if (typeof callback === "function") callback(new Error("synthetic send refusal"));
+    });
+    const closed = once(ws, "close"); ws.send("failed bytes"); await closed;
+    expect(observed.map(row => row.phase)).toEqual(["received", "failed"]);
+    expect(f.relay.messageObservationCoverage()).toMatchObject({ pendingForwards: 0, directions: {
+      client_to_engine: { receivedMessages: 1, receivedBytes: 12, forwardedMessages: 0, forwardedBytes: 0, failedMessages: 1, failedBytes: 12 },
+    } });
+    expect(JSON.stringify(observed)).not.toContain("synthetic send refusal");
+  });
+  it("leaves observation disabled by default while preserving ordinary relay forwarding", async () => {
+    const f = await fixture(), ws = f.connect(); await once(ws, "open");
+    const message = once(ws, "message"); ws.send("legacy"); const [data] = await message;
+    expect(data.toString()).toBe("legacy");
+    expect(f.relay.messageObservationCoverage()).toMatchObject({ enabled: false, complete: false, observedMessages: 0, omittedMessages: 0 });
+  });
+  it.each(["success", "rejection"] as const)("keeps asynchronous observer %s pending without delaying forwarding", async outcome => {
+    let finish!: () => void, reject!: (reason: Error) => void;
+    const result = new Promise<void>((resolve, fail) => { finish = resolve; reject = fail; });
+    const observer = vi.fn(() => result), f = await fixture({ observeMessage: observer });
+    const ws = f.connect(); await once(ws, "open");
+    const message = once(ws, "message"); ws.send("forward without observer wait"); const [data] = await message;
+    expect(data.toString()).toBe("forward without observer wait");
+    await vi.waitFor(() => expect(observer).toHaveBeenCalledTimes(4));
+    expect(f.relay.messageObservationCoverage()).toMatchObject({ pendingForwards: 0, pendingObservations: 4,
+      observerFailures: 0, complete: false });
+    if (outcome === "success") finish(); else reject(new Error("synthetic async observer failure"));
+    await vi.waitFor(() => expect(f.relay.messageObservationCoverage()).toMatchObject({ pendingObservations: 0,
+      observerFailures: outcome === "success" ? 0 : 4, complete: outcome === "success" }));
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    expect(f.logs.join("\n")).not.toContain("synthetic async observer failure");
+  });
+  it("preserves a safe native close code and reason instead of reporting abnormal 1006", async () => {
+    const f = await fixture({}, { upstream: "record" }), ws = f.connect();
+    await once(ws, "open"); const closed = once(ws, "close");
+    f.engines.at(-1)!.close(1008, "client authority revoked");
+    const [code, reason] = await closed;
+    expect(code).toBe(1008); expect(reason.toString()).toBe("client authority revoked");
+  });
+  it("uses a graceful restart close on relay shutdown", async () => {
+    const f = await fixture(), ws = f.connect(); await once(ws, "open"); const closed = once(ws, "close");
+    f.relay.close(); const [code, reason] = await closed;
+    expect(code).toBe(1012); expect(reason.toString()).toBe("Engine shutting down");
+  });
   it("reports bounded upstream close codes and classes without arbitrary reasons or credentials", async () => {
     const f = await fixture({}, { upstream: "record" });
     for (const reason of ["CONNECTED required", ...Array.from({ length: 10 }, () => "private-upstream-text")]) {

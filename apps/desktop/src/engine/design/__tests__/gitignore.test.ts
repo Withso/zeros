@@ -29,11 +29,11 @@ describe("managed Design ignore rules", () => {
   });
 
   for (const cloud of [false, true]) {
-    it.skipIf(cloud && (process.platform !== "linux" || process.getuid?.() !== 0))(
-      `checks prospective and nested ignore rules privately for ${cloud ? "a different cloud Git UID" : "unchanged Local Git"}`,
+    it.skipIf(cloud && (process.platform !== "linux"))(
+      `checks prospective and nested ignore rules privately for ${cloud ? "the cloud engine identity" : "unchanged Local Git"}`,
       async () => {
         vi.resetModules();
-        const identity = cloud ? { uid: 10001, gid: 10001 } : undefined;
+        const identity = cloud ? { uid: process.geteuid!(), gid: process.getegid!() } : undefined;
         configuration.mockReturnValue(identity ?? null);
         const { assertDesignFilesNotIgnored } = await import("../gitignore");
         const root = fs.mkdtempSync(path.join(tmpdir(), "zeros-v2-test-ignore-"));
@@ -54,14 +54,8 @@ describe("managed Design ignore rules", () => {
           const target = path.join(root, file);
           fs.mkdirSync(path.dirname(target), { recursive: true });
           fs.writeFileSync(target, contents);
-          if (identity) {
-            fs.chownSync(target, identity.uid, identity.gid);
-            for (let dir = path.dirname(target); dir !== path.dirname(root); dir = path.dirname(dir))
-              fs.chownSync(dir, identity.uid, identity.gid);
-          }
         };
         try {
-          if (identity) fs.chownSync(root, identity.uid, identity.gid);
           execFileSync("git", ["init", "-q"], { cwd: root, ...identity, stdio: "pipe" });
           write(".gitignore", "*.toml\n*.json\n");
           const before = fs.readFileSync(path.join(root, ".gitignore"), "utf8");

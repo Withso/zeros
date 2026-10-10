@@ -48,10 +48,14 @@ export async function runClosureProbes(
       marker,
       canonicalJson({
         backend: "cloud-worker",
-        gid: 10001,
+        gid: 10003,
         profile: "zeros-cloud-worker-v4",
-        uid: 10001,
+        uid: 10003,
         version: 4,
+        toolchain: {
+          node: `${installed}/bin/node`,
+          supervisor: `${installed}/worker/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`,
+        },
       }),
       { mode: 0o444, flag: "wx" },
     );
@@ -75,7 +79,8 @@ export async function runClosureProbes(
       "--ambient-caps=-all",
       "bwrap",
       "--unshare-user",
-      // Map the builder's ownership to namespace root without host privileges.
+      // Start namespace setup as its root, then select the shared non-root
+      // engine identity for each offline phase before installing read-only proc.
       "--uid",
       "0",
       "--gid",
@@ -181,35 +186,53 @@ export async function runClosureProbes(
       "/probe.cjs",
       installed,
     );
-    const output = await runTool(
-      "setpriv",
-      args,
-      {
-        cwd: scratch,
-        env: { PATH: "/usr/bin:/bin", HOME: scratch },
-        timeout: 180_000,
-      },
-      "closure_probes",
-    );
-    const lines = output.split("\n");
-    const diagnostic = JSON.parse(lines.at(-1)!);
-    check(
-      diagnostic.ok === true &&
-        diagnostic.failedChecks.length === 0 &&
-        diagnostic.component === "bundle",
-      "closure_probes",
-    );
-    const report = JSON.parse(lines.at(-2)!);
-    check(
-      Array.isArray(report.checks) &&
-        report.checks.length > 0 &&
-        report.checks.every(
-          (name: unknown) => typeof name === "string" && /^[a-z_]+$/.test(name),
-        ),
-      "closure_probes",
-    );
+    const checks: string[] = [];
+    // Map the shared non-root engine identity before installing read-only proc
+    // (#410). These two bounded namespaces verify archive closure only.
+    for (const [phase, identity] of [
+      ["engine", "10003"],
+      ["cursor", "10003"],
+    ] as const) {
+      const phaseArgs = [...args, phase];
+      phaseArgs[phaseArgs.indexOf("--uid") + 1] = identity;
+      phaseArgs[phaseArgs.indexOf("--gid") + 1] = identity;
+      const output = await runTool(
+        "setpriv",
+        phaseArgs,
+        {
+          cwd: scratch,
+          env: { PATH: "/usr/bin:/bin", HOME: scratch },
+          timeout: phase === "cursor" ? 20_000 : 180_000,
+        },
+        "closure_probes",
+      );
+      const lines = output.split("\n");
+      const diagnostic = JSON.parse(lines.at(-1)!);
+      check(
+        diagnostic.ok === true &&
+          diagnostic.failedChecks.length === 0 &&
+          diagnostic.component === "bundle",
+        "closure_probes",
+      );
+      const report = JSON.parse(lines.at(-2)!);
+      check(
+        Array.isArray(report.checks) &&
+          report.checks.length > 0 &&
+          report.checks.every(
+            (name: unknown) => typeof name === "string" && /^[a-z_]+$/.test(name),
+          ),
+        "closure_probes",
+      );
+      check(
+        phase === "cursor"
+          ? report.checks.length === 1 && report.checks[0] === "cursor_load"
+          : !report.checks.includes("cursor_load"),
+        "closure_probes",
+      );
+      checks.push(...report.checks);
+    }
     return {
-      checks: report.checks,
+      checks,
       isolation: "mount_namespace_no_network",
       durationMs: Math.round(performance.now() - start),
     };

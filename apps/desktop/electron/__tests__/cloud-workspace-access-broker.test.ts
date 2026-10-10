@@ -320,6 +320,28 @@ describe("native service broker", () => {
 });
 
 describe("CloudWorkspaceAccessBroker", () => {
+  it("reconciles a lost published actor refresh response without minting or revoking again", async () => {
+    const accessApi = api();
+    vi.mocked(accessApi.issueEngineAdmission).mockResolvedValue({ version: 2, audience: "zeros-cloud-workspace-engine-client-admission-v2",
+      organizationId: ORGANIZATION_ID, workspaceId: WORKSPACE_ID, generation: 7, authorityEpoch: 9, engineInstanceId: ENGINE_INSTANCE_ID,
+      remotePort: 47891, grantToken: `zwa_${"d".repeat(43)}`, expiresAt: new Date(NOW + 120_000).toISOString(), bridgeUrl: "wss://api.zeros.test/v1/cloud-workspaces/bridge" });
+    const access = broker(accessApi), first = await access.openRuntime({ organizationId: ORGANIZATION_ID, workspaceId: WORKSPACE_ID });
+    const published = await access.refreshRuntime(first);
+    expect(await access.refreshRuntime(first)).toEqual(published);
+    expect(accessApi.issueEngineAdmission).toHaveBeenCalledTimes(2); expect(accessApi.revokeEngineAdmission).toHaveBeenCalledOnce();
+    await access.closeRuntime(first.runtimeId);
+    await expect(access.refreshRuntime(first)).rejects.toMatchObject({ code: "cloud_workspace_access_superseded" });
+  });
+  it("joins identical concurrent actor refresh attempts", async () => {
+    const accessApi = api();
+    vi.mocked(accessApi.issueEngineAdmission).mockResolvedValue({ version: 2, audience: "zeros-cloud-workspace-engine-client-admission-v2",
+      organizationId: ORGANIZATION_ID, workspaceId: WORKSPACE_ID, generation: 7, authorityEpoch: 9, engineInstanceId: ENGINE_INSTANCE_ID,
+      remotePort: 47891, grantToken: `zwa_${"d".repeat(43)}`, expiresAt: new Date(NOW + 120_000).toISOString(), bridgeUrl: "wss://api.zeros.test/v1/cloud-workspaces/bridge" });
+    const access = broker(accessApi), first = await access.openRuntime({ organizationId: ORGANIZATION_ID, workspaceId: WORKSPACE_ID });
+    const [a, b] = await Promise.all([access.refreshRuntime(first), access.refreshRuntime(first)]);
+    expect(a).toEqual(b); expect(accessApi.issueEngineAdmission).toHaveBeenCalledTimes(2);
+    await access.dispose();
+  });
   it("retires the issuing session before a replacement account can refresh its handle", async () => {
     const accessApi = api();
     vi.mocked(accessApi.issueEngineAdmission).mockResolvedValue({version:2,audience:"zeros-cloud-workspace-engine-client-admission-v2",
@@ -945,9 +967,7 @@ describe("CloudWorkspaceAccessBroker", () => {
       generation: 7,
       engineInstanceId: ENGINE_INSTANCE_ID,
     });
-    await expect(accessBroker.refreshRuntime(first)).rejects.toMatchObject({
-      code: "cloud_workspace_access_superseded",
-    });
+    await expect(accessBroker.refreshRuntime(first)).resolves.toEqual(refreshed);
     expect(accessApi.issueTunnel).toHaveBeenCalledOnce();
 
     await expect(accessBroker.closeRuntime(first.runtimeId)).resolves.toBe(

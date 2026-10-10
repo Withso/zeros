@@ -56,17 +56,17 @@ describe("immutable development candidates", () => {
     }
   });
 
-  it("includes the runtime qualification pin and runner in the attested worker source", () => {
+  it("includes the engine lifecycle qualifier and neutral search asset in the attested worker source", () => {
     const f = fixture();
     f.write("pnpm-lock.yaml");
-    f.write("scripts/zsr-qualification/pin.json", '{"version":"first"}');
-    f.write("scripts/zsr-qualification/run.mjs", "// qualification entrypoint");
+    f.write("scripts/stage-ripgrep.mjs", '{"version":"first"}');
+    f.write("scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs", "// qualification entrypoint");
     f.write("scripts/cloud-workspace-validation/sandbox/cloud-worker.json");
     f.write("scripts/cloud-workspace-validation/sandbox/runtime-layout.json");
     const first = captureDevelopmentSource(f.root, f.state);
     expect(cloudImageSourceIdentity(first.worker.directory).commit).toBe(first.worker.commit);
-    expect(fs.existsSync(path.join(first.worker.directory, "scripts/zsr-qualification/run.mjs"))).toBe(true);
-    f.write("scripts/zsr-qualification/pin.json", '{"version":"second"}');
+    expect(fs.existsSync(path.join(first.worker.directory, "scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs"))).toBe(true);
+    f.write("scripts/stage-ripgrep.mjs", '{"version":"second"}');
     expect(captureDevelopmentSource(f.root, f.state).workerInputsSha256).not.toBe(first.workerInputsSha256);
   });
 

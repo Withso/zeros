@@ -68,6 +68,7 @@ export function cloudRuntimeFixture({ mapAbsoluteLinks = true } = {}) {
   const install = (root = descriptor.root) => {
     for (const file of ["bin/node", "bin/start-engine.sh", "bin/cloud-engine-namespace", "bin/cloud-process-supervisor",
       "worker/dist-engine/cli.js", "worker/package.json", "worker/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs",
+      "worker/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs",
       "lib/zeros/cloud-worker-supervisor.mjs", "lib/zeros/setup-cloud-workspace.mjs", "manifest.json"])
       write(`${root}/${file}`, "installed", 0o555);
   };

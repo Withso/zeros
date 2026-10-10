@@ -422,6 +422,8 @@ export const BaseCompatibilitySchema = z
       .array(z.literal("zeros.runtime-manifest/v1"))
       .min(1),
     systemdMin: integer.positive(),
+    // Frozen approved-base account inventory. Keep these bytes/readers;
+    // execution identity is verified independently by the runtime report.
     uids: z
       .object({
         agent: z.literal(10001),

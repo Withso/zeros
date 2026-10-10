@@ -15,7 +15,8 @@ export const CloudResidentWitnessSchema = z.object({
   bootId: uuid, supervisorSessionId: uuid,
   scope: z.string(), fence: counter, engineId: uuid.nullable(), generation: counter.nullable(),
 }).strict().refine(value => value.runtimeId === `r1-${value.manifestSha256}` &&
-  value.scope === `/sys/fs/cgroup/system.slice/zeros-host.service/engine-workload-${value.hostId}` &&
+  (value.scope === `/sys/fs/cgroup/system.slice/zeros-host.service/engine-workload-${value.hostId}` ||
+   value.scope === `/sys/fs/cgroup/system.slice/zeros-host.service/engine-runtime/engine-workload-${value.hostId}`) &&
   (value.engineId === null) === (value.generation === null));
 export type CloudRuntimeHandoffRequest = z.infer<typeof CloudRuntimeHandoffRequestSchema>;
 export type CloudRuntimeHandoffReceipt = z.infer<typeof CloudRuntimeHandoffReceiptSchema>;

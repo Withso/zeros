@@ -8,6 +8,17 @@ function fixture(){
   return {lease,auth:new CloudCodexAuth(lease)};
 }
 describe("private native Codex refresh callback",()=>{
+  it("checks captured lifetime before exposing positive login access",()=>{
+    const {auth,lease}=fixture();
+    lease.assertLive.mockImplementation(()=>{throw Object.assign(new Error("closed lifetime"),{code:"cloud_validation_lease_expired"});});
+    expect(()=>auth.login()).toThrow("closed lifetime"); expect(lease.codexAuth).not.toHaveBeenCalled();
+  });
+  it("checks captured lifetime before asking for a newer native access epoch",async()=>{
+    const {auth,lease}=fixture(); auth.login();
+    lease.assertLive.mockImplementation(()=>{throw Object.assign(new Error("private-expired-proof"),{code:"cloud_validation_access_denied"});});
+    await expect(auth.refresh({reason:"unauthorized"})).rejects.toMatchObject({code:"cloud_validation_access_denied"});
+    expect(lease.refreshCodex).not.toHaveBeenCalled(); expect(lease.close).toHaveBeenCalledOnce();
+  });
   it("tracks the native access epoch and returns an explicit nullable plan without replaying any model operation",async()=>{
     const {auth,lease}=fixture();expect(auth.login()).toMatchObject({type:"chatgptAuthTokens",chatgptAccountId:"synthetic-account"});
     expect(await auth.refresh({reason:"unauthorized",previousAccountId:"synthetic-account"})).toEqual({accessToken:"synthetic-rotated-access-token",chatgptAccountId:"synthetic-account",chatgptPlanType:null});
@@ -18,15 +29,33 @@ describe("private native Codex refresh callback",()=>{
   it("preserves a partial native rotation in the lease but never returns the access token native just rejected",async()=>{
     const {auth,lease}=fixture();const login=auth.login()!;
     lease.refreshCodex.mockResolvedValueOnce({material:{...lease.codexAuth()!.material,accessToken:login.accessToken},credentialVersion:2});
-    await expect(auth.refresh({reason:"unauthorized",previousAccountId:login.chatgptAccountId})).rejects.toThrow("Cloud provider credentials require renewal");
+    await expect(auth.refresh({reason:"unauthorized",previousAccountId:login.chatgptAccountId})).rejects.toMatchObject({code:"cloud_provider_prompt_credential_refresh_unchanged"});
     expect(lease.close).toHaveBeenCalledOnce();
   });
   it("retires on a refresh failure and never reflects token-bearing errors",async()=>{
     const {auth,lease}=fixture();auth.login();lease.refreshCodex.mockRejectedValueOnce(new Error("private-refresh-token-sentinel"));
-    await expect(auth.refresh({reason:"unauthorized"})).rejects.toThrow("Cloud provider credentials require renewal");expect(lease.close).toHaveBeenCalledOnce();
+    const error = await auth.refresh({reason:"unauthorized"}).catch(error => error);
+    expect(error).toMatchObject({code:"cloud_provider_prompt_credential_refresh_rejected"});
+    expect(error.message).not.toContain("private-refresh-token-sentinel");expect(lease.close).toHaveBeenCalledOnce();
   });
   it("rejects refresh before a native login",async()=>{
-    const {auth,lease}=fixture();await expect(auth.refresh({reason:"unauthorized"})).rejects.toThrow();expect(lease.refreshCodex).not.toHaveBeenCalled();
+    const {auth,lease}=fixture();await expect(auth.refresh({reason:"unauthorized"})).rejects.toMatchObject({code:"cloud_provider_prompt_credential_refresh_invalid"});expect(lease.refreshCodex).not.toHaveBeenCalled();
+  });
+  it("preserves a typed authority refusal and clears native access state on retirement", async () => {
+    const {auth,lease}=fixture();auth.login();
+    lease.refreshCodex.mockRejectedValueOnce(Object.assign(new Error("private-refresh-sentinel"),{code:"cloud_validation_lock_busy"}));
+    const error=await auth.refresh({reason:"unauthorized"}).catch(error=>error);
+    expect(error).toMatchObject({code:"cloud_validation_lock_busy"});expect(error.message).not.toContain("private-refresh-sentinel");
+    expect(lease.close).toHaveBeenCalledOnce();
+    await expect(auth.refresh({reason:"unauthorized"})).rejects.toMatchObject({code:"cloud_provider_prompt_credential_refresh_invalid"});
+  });
+  it("distinguishes the native callback deadline from a refresh rejection", async () => {
+    vi.useFakeTimers();const {auth,lease}=fixture();auth.login();
+    lease.refreshCodex.mockImplementationOnce(()=>new Promise(()=>{}));
+    const error=auth.refresh({reason:"unauthorized"}).catch(error=>error);
+    await vi.advanceTimersByTimeAsync(8001);
+    expect(await error).toMatchObject({code:"cloud_provider_prompt_credential_refresh_timeout"});
+    expect(lease.close).toHaveBeenCalledOnce();
   });
 });
 
@@ -63,7 +92,7 @@ describe("native callback with real execution lease",()=>{
     expect(timedOut).toBe(true);expect(f.lease.signal.aborted).toBe(true);
   });
   it("coalesces concurrent native callbacks onto the already advanced access version",async()=>{
-    vi.useFakeTimers();const f=await actualLease();f.request.mockResolvedValue(f.rotation());
+    vi.useFakeTimers();const f=await actualLease();f.request.mockImplementation(async input=>input.kind==="release"?{released:true}:f.rotation());
     const values=await Promise.all([f.auth.refresh({reason:"unauthorized"}),f.auth.refresh({reason:"unauthorized"})]);
     expect(values[0]).toEqual(values[1]);expect(f.lease.signal.aborted).toBe(false);await f.lease.close();
   });

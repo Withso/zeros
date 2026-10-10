@@ -195,3 +195,28 @@ it("rejects a foreign cloud owner embedded in a typed incoming turn row", () => 
     } } })).toThrow(/changed/);
   }
 });
+
+describe("typed cloud search-hit ownership", () => {
+  it.each(["chat",cloudScopedId(scope,"chat")])("maps %s without changing opaque message/provider data", chatId => {
+    const other = { ...scope, workspaceId: "33333333-3333-4333-8333-333333333333" };
+    const hit = { chatId, msgId: "native-message", createdAt: 1,
+      payload: JSON.stringify({ chatId: cloudScopedId(other,"chat"), text: "same bytes", __proto__: null }),
+      providerMetadata: { sessionId: "native-provider", executionId: cloudScopedId(other,"execution") } };
+    expect(cloudIncoming(scope,{ type: "WORKSPACE_RESPONSE", op: "messages.search", result: { hits: [hit] } }).result)
+      .toEqual({ hits: [{ ...hit, chatId: cloudScopedId(scope,"chat") }] });
+    expect(hit.chatId).toBe(chatId);
+  });
+  it.each([
+    cloudScopedId({ ...scope, workspaceId: "33333333-3333-4333-8333-333333333333" },"chat"),
+    cloudScopedId({ ...scope, organizationId: "44444444-4444-4444-8444-444444444444" },"chat"),
+    key,"cloud:invalid","",null,
+  ])("refuses foreign or invalid typed search ownership %s", chatId => {
+    expect(() => cloudIncoming(scope,{ type: "WORKSPACE_RESPONSE", op: "messages.search", result: { hits: [{ chatId,
+      msgId: "native", payload: "opaque", createdAt: 1 }] } })).toThrow(/cloud|Cloud/);
+  });
+  it("leaves a provider-owned hits array outside messages.search opaque", () => {
+    const hits = [{ chatId: "opaque", payload: "same bytes" }];
+    expect(cloudIncoming(scope,{ type: "WORKSPACE_RESPONSE", op: "messages.window", result: { hits } }).result)
+      .toEqual({ hits });
+  });
+});

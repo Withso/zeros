@@ -44,7 +44,7 @@ import type {
   ExecutionBoundaryStatus,
 } from "@zeros/protocol/containment";
 import type { ExecutionBoundary, PreparedBoundary } from "./containment/types";
-import type { BoundaryPreviewGatewayFactory } from "./containment/zsr-preview-gateway";
+import type { BoundaryPreviewGatewayFactory } from "./containment/preview-gateway";
 
 // ── Failure taxonomy ─────────────────────────────────────
 //
@@ -493,6 +493,12 @@ export interface AgentCapabilityPorts {
   readonly safety?: AgentSafetyCapabilityPort;
 }
 
+/** Observed native boundaries only; dispatch/enqueue is not a native receipt. */
+export type NativePromptStage = "native_write" | "native_acceptance_ack" | "sdk_run_created";
+/** Output from the original native foreground run, never a generic session
+ * notification relabeled as the current turn. Observation grants no authority. */
+export type NativePromptOutputKind = "text" | "tool";
+
 export interface AgentAdapter {
   readonly agentId: string;
 
@@ -593,6 +599,12 @@ export interface AgentAdapter {
      * session identity. Older/internal callers may omit it. */
     turnId?: string;
     prompt: ContentBlock[];
+    /** Trusted nonblocking observer. Adapters may ignore it. Carries no native
+     * identity, payload, credentials or clock values. */
+    onNativePromptStage?: (stage: NativePromptStage) => void;
+    /** Optional original arrival sample from this engine process's monotonic
+     * performance clock, retained when ownership is proved after the frame. */
+    onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void;
   }): Promise<{ stopReason: StopReason; response: PromptResponse }>;
 
   /** Reconcile a provider-owned, process-scoped browser capability before a

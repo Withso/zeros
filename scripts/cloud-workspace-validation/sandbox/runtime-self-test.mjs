@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Credential-free v4 smoke. Only this file's closed result reaches the caller;
-// native tools, dependency loaders and containment probes use captured output.
+// native tools, dependency loaders and owned-process probes use captured output.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -9,11 +9,12 @@ import { closeSync, constants, fchmodSync, fchownSync, lstatSync, mkdirSync, mkd
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { adoptCloudEngineState } from "./prepare-cloud-image-files.mjs";
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 
 export const RUNTIME_SELF_TEST_CHECKS = Object.freeze([
   "node_abi", "sqlite_query", "pty_load", "claude_version", "codex_version",
-  "cursor_load", "engine_load", "supervisor_idle", "containment_smoke",
+  "cursor_load", "engine_load", "supervisor_idle", "engine_lifecycle",
 ]);
 const MAX_OUTPUT = 64 * 1024;
 const SCRIPT = fileURLToPath(import.meta.url);
@@ -37,7 +38,7 @@ export function parseSelfTestDiagnostic(output, exitCode) {
         typeof result.ok !== "boolean" || typeof result.timedOut !== "boolean" || result.exitCode !== exitCode ||
         ![0, 1].includes(exitCode) || !Array.isArray(result.failedChecks) ||
         new Set(result.failedChecks).size !== result.failedChecks.length ||
-        result.failedChecks.some(name => !RUNTIME_SELF_TEST_CHECKS.includes(name)) ||
+        result.failedChecks.some(name => !RUNTIME_SELF_TEST_CHECKS.includes(name) && name !== "containment_smoke") ||
         (result.ok ? result.timedOut || exitCode !== 0 || result.failedChecks.length !== 0 : result.failedChecks.length === 0 || exitCode !== 1)) return null;
     return result;
   } catch { return null; }
@@ -79,11 +80,29 @@ export function versionMatches(output, version, provider) {
 }
 
 export function containmentSmokePassed(output) {
+  // Read archived v1 qualification only; new checks never emit this posture.
   try {
     if (typeof output !== "string" || Buffer.byteLength(output) > 8 * 1024 * 1024) return false;
     const report = JSON.parse(output);
     return report.version === 1 && report.secure === true &&
       ["identity", "workload", "capture", "humanServices", "actorTools"].every(name => report[name]?.secure === true);
+  } catch { return false; }
+}
+
+export function engineLifecyclePassed(output) {
+  try {
+    if (typeof output !== "string" || Buffer.byteLength(output) > 8 * 1024 * 1024) return false;
+    const report = JSON.parse(output);
+    return report.version === 2 && report.boundary === "workspace-vm" && report.qualified === true &&
+      !Object.hasOwn(report, "engineChecksPassed") &&
+      report.identity?.qualified === true && report.identity?.noNewPrivs === 1 && report.identity?.seccompMode === 2 &&
+      report.identity?.hostUid === 10003 && report.identity?.namespaceUid === 10003 &&
+      exactKeys(report.identity?.capabilities, ["effective", "permitted", "inheritable", "bounding", "ambient"]) &&
+      Object.values(report.identity.capabilities).every(value => value === 0) &&
+      ["sameEngineIdentity", "noSandbox", "ownedProcessGroups", "originalProcessGroupsRetired", "timeoutRetired", "workloadCgroup", "vmWorkloadDrain"].every(name => report.execution?.[name] === true) &&
+      !Object.hasOwn(report.execution, "detachedDescendantsRetired") &&
+      report.capture?.sameEngineIdentity === true && report.capture?.chromiumSandbox === true &&
+      ["humanServices", "actorTools"].every(name => report[name]?.sameEngineIdentity === true && report[name]?.noSandbox === true);
   } catch { return false; }
 }
 
@@ -105,7 +124,32 @@ function command(executable, args, environment, timeout = 20_000, maxBuffer = MA
   return child.stdout;
 }
 
-function prepareSelfTestLayout() {
+/** Importability does not prove the platform payload survived bundling. Run
+ * its actual ELF entry points as the non-root agent, with no provider key. */
+export function probeCursorPlatformPayload(root) {
+  assert(process.getuid?.() === 10003 && process.geteuid?.() === 10003 &&
+    process.getgid?.() === 10003 && process.getegid?.() === 10003, "Cursor payload requires non-root engine identity");
+  assert.equal(path.resolve(root), root);
+  const fromWorker = createRequire(`${root}/worker/package.json`);
+  const internal = filename => {
+    const actual = realpathSync(filename);
+    assert(actual.startsWith(`${root}/`));
+    return actual;
+  };
+  const sdk = internal(fromWorker.resolve("@cursor/sdk"));
+  assert(Object.keys(fromWorker("@cursor/sdk")).length > 0);
+  const platform = internal(createRequire(sdk).resolve("@cursor/sdk-linux-x64/package.json"));
+  const binary = name => internal(path.join(path.dirname(platform), "bin", name));
+  const environment = { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", HOME: process.env.HOME, TMPDIR: process.env.HOME };
+  assert.match(command(binary("rg"), ["--version"], environment), /^ripgrep /);
+  // This payload exists on the pinned Linux x64 runtime. --help exercises its
+  // loader/ABI without attempting another sandbox or a provider operation.
+  assert.match(command(binary("cursorsandbox"), ["--help"], environment), /Usage: cursorsandbox/);
+  return true;
+}
+
+function prepareSelfTestLayout(runtime) {
+  adoptCloudEngineState(runtime);
   // B4 sanitizes files to an empty root-owned parent; qualification installation
   // deliberately skips workspace setup. Never import/move a legacy workspace.
   for (let directory = runtimeLayout.engineFilesRoot; ; directory = path.dirname(directory)) {
@@ -140,21 +184,21 @@ function prepareSelfTestLayout() {
   for (const name of ["state", "managed-settings", "home/agent", "home/capture"])
     emptyMountPoint(path.join(runtimeLayout.engineFilesRoot, name));
   // Build recipes may populate the workspace; leave their contents intact.
-  prepareDirectory(runtimeLayout.repository, 10001);
+  prepareDirectory(runtimeLayout.repository, 10003);
 }
 
-export function runtimeContainmentSmoke(runtime, environment) {
-  prepareSelfTestLayout();
+export function runtimeEngineLifecycleSmoke(runtime, environment) {
+  prepareSelfTestLayout(runtime);
   // Keep only loopback usable in this otherwise disconnected namespace so
   // the existing local gateway/service probes can exercise their sockets.
   command("/usr/bin/python3", ["-I", "-c",
     "import socket,fcntl,struct; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); fcntl.ioctl(s,0x8914,struct.pack('16sH14x',b'lo',1)); s.close()"], environment);
   // The fixed launcher runs W/scripts/.../qualify-cloud-engine.mjs inside
-  // the v4 engine view, including its ZSR/capture/service/actor probes.
+  // the v4 engine view, including direct non-root owned-process/service probes.
   // Manifest/receipt identity is checked separately; this neither consumes
   // workspace admission nor starts a model session.
   const stdout = command(runtime.node, [`${runtime.root}/lib/zeros/cloud-engine-launcher.mjs`, "--qualify"], environment, 330_000, 8 * 1024 * 1024);
-  return containmentSmokePassed(stdout);
+  return engineLifecyclePassed(stdout);
 }
 
 async function installedRuntime() {
@@ -214,6 +258,9 @@ async function offlineChecks(environment) {
       const sdk = internal(fromWorker.resolve("@cursor/sdk"));
       internal(createRequire(sdk).resolve("@cursor/sdk-linux-x64/package.json"));
       assert(Object.keys(fromWorker("@cursor/sdk")).length > 0);
+      prepareSelfTestLayout(runtime);
+      const output = command(runtime.node, [`${runtime.libRoot}/cloud-engine-launcher.mjs`, "--probe-cursor"], environment, 30_000);
+      assert.equal(output, "cursor_payload_ok");
       return true;
     },
     engine_load() {
@@ -227,11 +274,20 @@ async function offlineChecks(environment) {
       const stdout = command("/usr/bin/python3", ["-I", "/opt/zeros-bootstrap/bootstrap.py", "status"], environment, 30_000);
       return supervisorIsIdle(JSON.parse(stdout), runtime);
     },
-    containment_smoke: () => runtimeContainmentSmoke(runtime, environment),
+    engine_lifecycle: () => runtimeEngineLifecycleSmoke(runtime, environment),
   });
 }
 
 async function main() {
+  if (process.argv.length === 3 && process.argv[2] === "--engine-cursor-probe") {
+    const { resolveCloudRuntime } = await import("./cloud-runtime-root.mjs");
+    const runtime = resolveCloudRuntime();
+    const authority = await import(`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-deployment-authority.mjs`);
+    assert(authority.hasCloudEngineUserNamespace(4));
+    assert.equal(process.execPath, runtime.node);
+    if (probeCursorPlatformPayload(runtime.root)) process.stdout.write("cursor_payload_ok");
+    return;
+  }
   let result = selfTestDiagnostic({});
   let directory;
   try {

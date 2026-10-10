@@ -2,6 +2,7 @@ import { CloudAgentAdmissionError } from "./bridge/cloud-agent-errors";
 import { z } from "zod";
 import { CloudComputerAdminWorkspaceSchema } from "@zeros/protocol/cloud-computer-v2";
 import { CloudNativeCapabilitiesSchema } from "@zeros/protocol/cloud-agent-execution";
+import { CloudAgentInitialAdoptionsSchema } from "@zeros/protocol/cloud-agent-bootstrap";
 import { CloudRuntimeUpgradeAvailabilitySchema, type CloudRuntimeUpgradeAvailability } from "@zeros/protocol/cloud-runtime-lifecycle";
 import { getSession } from "../features/auth/auth-store";
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
@@ -19,6 +20,22 @@ import { forgetCloudWorkspacePortForwarding } from "./cloud-workspace-access";
 export const CloudWorkspaceActorRoleSchema = z.enum(["viewer", "prompter", "developer", "manager", "owner"]);
 export type CloudWorkspaceActorRole = z.infer<typeof CloudWorkspaceActorRoleSchema>;
 
+/** Nonsecret state from an explicitly bound cloud boot. Credential refreshes
+ * do not change this owner-transfer state or its immutable initial baseline. */
+export const CloudWorkspaceAgentCredentialsSchema = z.object({
+  mode: z.literal("boot-owner-v1"),
+  fundingScope: z.literal("workspace-roles-v1"),
+  bootId: z.string().uuid(),
+  writerEpoch: z.string().uuid(),
+  fundingOwnerUserId: z.string().uuid(),
+  fundingOwnerEpoch: z.number().int().positive().safe(),
+  generation: z.number().int().positive().safe(),
+  engineInstanceId: z.string().uuid(),
+  status: z.enum(["current", "owner-changed"]),
+  initialAdoptions: CloudAgentInitialAdoptionsSchema.optional(),
+}).strict();
+export type CloudWorkspaceAgentCredentials = z.infer<typeof CloudWorkspaceAgentCredentialsSchema>;
+
 export const CloudWorkspaceDocumentSchema = z.object({
   id: z.string().uuid(),
   organizationId: z.string().uuid(),
@@ -27,6 +44,7 @@ export const CloudWorkspaceDocumentSchema = z.object({
   createdBy: z.string().uuid(),
   createdByDisplayName: z.string().min(1).max(120).nullable().optional(),
   ownerUserId: z.string().uuid().optional(),
+  agentCredentials: CloudWorkspaceAgentCredentialsSchema.optional(),
   adminWorkspace: CloudComputerAdminWorkspaceSchema.optional(),
   actorRole: CloudWorkspaceActorRoleSchema.nullable().optional(),
   sharingMode: z.enum(["private", "organization"]).optional(),
@@ -224,6 +242,7 @@ const AgentGrantsSchema = z.object({
     .array(
       z.object({
         id: z.string().uuid(),
+        ownerUserId: z.string().uuid(),
         kind: z.string(),
         models: z.array(z.string()),
         allModels: z.boolean().optional(),
@@ -242,14 +261,36 @@ export async function cloudAgentGrant(
   target: CloudWorkspaceTarget,
   agentId: string,
   model: string,
+  selection?: { delegationId: string },
 ): Promise<string> {
+  // Local Personal and organization-local use native credentials. Validate
+  // this cloud target before touching session refresh or the control plane.
+  z.string().uuid().parse(target.organizationId);
+  z.string().uuid().parse(target.workspaceId);
+  if (selection) z.string().uuid().parse(selection.delegationId);
+  const epoch = getOrganizationStoreGeneration();
+  const sender = await getSession();
+  if (epoch !== getOrganizationStoreGeneration()) throw new Error("Your account changed while loading cloud workspaces");
+  if (!sender) throw new Error("Sign in to use cloud workspaces");
+  // WorkOS/Auth0 sub is the provider subject, never the CP account UUID.
+  // Legacy sessions lack accountId; resolve it through the same epoch-bound
+  // authenticated request instead of consulting a stale shared /me cache.
+  const senderAccountId = sender.user.accountId !== undefined
+    ? z.string().uuid().parse(sender.user.accountId)
+    : (await request("/v1/me", z.object({ user: z.object({ id: z.string().uuid() }) }))).user.id;
+  if (epoch !== getOrganizationStoreGeneration()) throw new Error("Your account changed while loading cloud workspaces");
   const delegations = await cloudAgentDelegations(target);
-  const candidates = delegations.filter(
+  if (epoch !== getOrganizationStoreGeneration()) throw new Error("Your account changed while loading cloud workspaces");
+  // CP has authorized every row for this actor, but explicit delegation is
+  // not consent to silently replace the actor's own selected connection.
+  const selected = delegations.filter(row => selection
+    ? row.id === selection.delegationId : row.ownerUserId === senderAccountId);
+  const candidates = selected.filter(
     (row) => row.kind.startsWith(`${agentId}-`) && row.models.includes(model),
   );
   const grant = candidates.find((row) => row.runtimeQualified === true) ?? candidates.find((row) => row.runtimeQualified !== false);
   if (!candidates.length)
-    throw new CloudAgentAdmissionError(delegations.some(row => row.kind.startsWith(`${agentId}-`))
+    throw new CloudAgentAdmissionError(selected.some(row => row.kind.startsWith(`${agentId}-`))
       ? "cloud_agent_model_not_authorized" : "cloud_agent_credential_required");
   if (!grant) {
     if (candidates.some(row => row.runtimeUpgradeRequired)) throw new CloudAgentAdmissionError("cloud_runtime_upgrade_required");

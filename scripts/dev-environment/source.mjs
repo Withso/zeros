@@ -25,8 +25,8 @@ export function workerSourcePath(file) {
   // organization image builder; the standalone control plane owns that module.
   if (file === "apps/control-plane/src/cloud-workspaces/computer-image-scripts.ts") return true;
   if (file === "scripts/dev-environment/provider-http.mjs") return true;
-  return file.startsWith("scripts/cloud-workspace-validation/") || file.startsWith("scripts/zsr-qualification/") ||
-    /^scripts\/(?:build-zsr-supervisor|codegen-codex(?:-lib)?|fix-node-pty-helper)\.(?:mjs|cjs)$/.test(file);
+  return file.startsWith("scripts/cloud-workspace-validation/") ||
+    /^scripts\/(?:stage-ripgrep|codegen-codex(?:-lib)?|fix-node-pty-helper)\.(?:mjs|cjs)$/.test(file);
 }
 
 /** Desktop renderer/main files are served or rebuilt on the Mac. They are not

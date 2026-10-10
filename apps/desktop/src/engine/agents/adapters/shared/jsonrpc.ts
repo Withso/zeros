@@ -136,7 +136,12 @@ export class JsonRpcStdioClient {
   request<T = unknown>(
     method: string,
     params: unknown,
-    opts: { timeoutMs?: number } = {},
+    opts: {
+      timeoutMs?: number;
+      /** Submission only, after stdin.write returns (including backpressure).
+       * Native acknowledgement is owned by the matching response. */
+      onWritten?: () => void;
+    } = {},
   ): Promise<T> {
     if (this.closed) {
       return Promise.reject(
@@ -161,7 +166,7 @@ export class JsonRpcStdioClient {
         timer,
         method,
       });
-      this.writeFrame(frame);
+      this.writeFrame(frame, opts.onWritten);
     });
   }
 
@@ -200,10 +205,13 @@ export class JsonRpcStdioClient {
 
   // ── internals ──────────────────────────────────────────
 
-  private writeFrame(frame: unknown): void {
+  private writeFrame(frame: unknown, onWritten?: () => void): void {
     const line = JSON.stringify(frame) + "\n";
     this.onOutbound?.(line.trimEnd());
-    this.child.stdin?.write(line);
+    const stdin = this.child.stdin;
+    if (!stdin) return;
+    stdin.write(line);
+    try { onWritten?.(); } catch { /* observation cannot change the request */ }
   }
 
   private feedStdout(chunk: string): void {

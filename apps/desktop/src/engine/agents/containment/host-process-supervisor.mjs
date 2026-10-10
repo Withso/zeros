@@ -3,9 +3,10 @@
 // Unrestricted native-host lifecycle supervisor.
 //
 // This process does not apply a sandbox, rewrite provider configuration, or
-// alter the target's environment. Its only jobs are to publish a durable
-// process-group claim before the target starts, keep the target in the same
-// process group, and kill that group if the owning engine disappears.
+// alter the selected target's environment. It publishes a durable process-group
+// claim before the target starts, keeps the target in the same process group,
+// and kills that group if the owning engine disappears. A cloud-only launch
+// self-enters the shared workload cgroup before restoring the target environment.
 
 import { spawn } from "node:child_process";
 import {
@@ -26,6 +27,11 @@ import path from "node:path";
 const VERSION = 1;
 const INTERNAL_ENV_PREFIX = "ZEROS_HOST_SUPERVISOR_";
 const MAX_PENDING_BYTES = 64 * 1024;
+const targetSeparator = process.argv.indexOf("--");
+const cloudFlags = targetSeparator >= 0
+  ? process.argv.slice(2, targetSeparator).filter((arg) => arg === "--cloud-workload")
+  : [];
+const cloudWorkload = cloudFlags.length > 0;
 
 function fail(message) {
   process.stderr.write(`[zeros-host-supervisor] ${message}\n`);
@@ -78,6 +84,9 @@ function validatePrivatePath(file, parent, suffix) {
 
 function restoreTargetEnvironment() {
   const encoded = process.env[`${INTERNAL_ENV_PREFIX}ORIGINAL_ENV`];
+  if (cloudWorkload && !encoded) {
+    throw new Error("missing original environment descriptor");
+  }
   let original = {};
   if (encoded) {
     const decoded = JSON.parse(
@@ -88,7 +97,10 @@ function restoreTargetEnvironment() {
     }
     original = decoded;
   }
-  const target = { ...process.env };
+  // Cloud startup contains only trusted loader settings. The selected target
+  // environment is restored in full after self-entry; Local keeps its original
+  // overlay behavior, including user-owned reserved-prefix values.
+  const target = cloudWorkload ? Object.create(null) : { ...process.env };
   for (const name of Object.keys(target)) {
     if (name.startsWith(INTERNAL_ENV_PREFIX)) delete target[name];
   }
@@ -101,7 +113,9 @@ function restoreTargetEnvironment() {
     ) {
       throw new Error("invalid original environment entry");
     }
-    target[name] = value;
+    if (!cloudWorkload || !name.startsWith(INTERNAL_ENV_PREFIX)) {
+      target[name] = value;
+    }
   }
   if (original.ELECTRON_RUN_AS_NODE === undefined) {
     delete target.ELECTRON_RUN_AS_NODE;
@@ -110,6 +124,7 @@ function restoreTargetEnvironment() {
 }
 
 async function run() {
+  if (cloudFlags.length > 1) throw new Error("duplicate cloud launch flag");
   const pendingPath = option("--pending");
   const claimPath = option("--claim");
   const domainPath = option("--domain");
@@ -200,6 +215,24 @@ async function run() {
   renameSync(temporaryDomain, domainPath);
   unlinkSync(claimPath);
 
+  if (cloudWorkload) {
+    const assertOriginalOwner = () => {
+      let ownerAlive = true;
+      try {
+        process.kill(expectedOwnerPid, 0);
+      } catch (error) {
+        ownerAlive = error?.code === "EPERM";
+      }
+      if (process.ppid !== expectedParentPid || !ownerAlive) {
+        throw new Error("cloud launch owner retired");
+      }
+    };
+    const { enterCloudHostWorkload } = await import("./cloud-host-workload-entry.mjs");
+    assertOriginalOwner();
+    enterCloudHostWorkload(process.env[`${INTERNAL_ENV_PREFIX}WORKLOAD_ENTRY`]);
+    assertOriginalOwner();
+  }
+
   const targetEnv = restoreTargetEnvironment();
   let child;
   let parentWatch;
@@ -279,5 +312,7 @@ async function run() {
 }
 
 await run().catch((error) => {
-  fail(error instanceof Error ? error.message.slice(0, 1_000) : String(error));
+  fail(cloudWorkload
+    ? "cloud_containment_environment_not_ready: Cloud workload entry is unavailable."
+    : error instanceof Error ? error.message.slice(0, 1_000) : String(error));
 });

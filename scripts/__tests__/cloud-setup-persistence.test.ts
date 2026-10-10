@@ -75,22 +75,25 @@ beforeEach(() => {
     [key, typeof value === "string" && value.startsWith("/srv/zeros") ? fixture.root + value : value])));
   fixture.version = 4; fixture.head = commit; fixture.failPublish = false; fixture.renames.length = 0; fixture.owners.clear();
   directory(`${fixture.root}/srv/zeros/files`);
-  directory(`${fixture.root}/srv/zeros/files/workspace`, 10001, 0o700);
-  directory(`${fixture.root}/srv/zeros/files/workspace/.git`, 10001, 0o700);
+  directory(`${fixture.root}/srv/zeros/files/.zeros-setup`, 0, 0o710);
+  fixture.owners.set(`${fixture.root}/srv/zeros/files/.zeros-setup`, [0, 10001]);
+  directory(`${fixture.root}/srv/zeros/home/engine`, 10003);
+  directory(`${fixture.root}/srv/zeros/files/workspace`, 10003, 0o700);
+  directory(`${fixture.root}/srv/zeros/files/workspace/.git`, 10003, 0o700);
   fs.writeFileSync(`${fixture.root}/srv/zeros/files/workspace/seed`, "original checkout");
   fixture.spawn.mockClear();
   fixture.spawn.mockImplementation((_file: string, args: string[], options: { cwd: string; env: { HOME: string } }) => {
     const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough() });
     queueMicrotask(() => {
       const cwd = options.cwd;
-      if (args.includes("init")) directory(`${cwd}/.git`, 10001, 0o700);
+      if (args.includes("init")) directory(`${cwd}/.git`, 10003, 0o700);
       if (args.includes("checkout")) fs.writeFileSync(`${cwd}/cloned`, "verified clone");
-      if (cwd.includes("/.zeros-setup/")) {
-        // Git is UID/GID 10001; it must be able to traverse the root-owned
+      if (cwd.includes("/.zeros-engine-setup/")) {
+        // Git is UID/GID 10003; it must be able to traverse the root-owned
         // private parent to reach its 0700 staging directory and home.
-        const parent = `${fixture.root}/srv/zeros/files/.zeros-setup`;
+        const parent = `${fixture.root}/srv/zeros/files/.zeros-engine-setup`;
         expect(fs.lstatSync(parent).mode & 0o777).toBe(0o710);
-        expect(fixture.owners.get(parent)).toEqual([0, 10001]);
+        expect(fixture.owners.get(parent)).toEqual([0, 10003]);
         expect(options.env.HOME.startsWith(parent + "/")).toBe(true);
       }
       const stdout = args.includes("--show-toplevel") ? cwd : args.includes("--absolute-git-dir") ? `${cwd}/.git`
@@ -108,7 +111,10 @@ it("stages, publishes and backs up v4 checkouts entirely within the files bind",
   expect(fixture.renames).toHaveLength(2);
   for (const pair of fixture.renames) for (const file of pair) expect(file.startsWith(files + "/")).toBe(true);
   expect(fs.readFileSync(`${files}/workspace/cloned`, "utf8")).toBe("verified clone");
-  expect(fs.readFileSync(`${files}/.zeros-setup/seed/seed`, "utf8")).toBe("original checkout");
+  expect(fs.readFileSync(`${files}/.zeros-engine-setup/seed/seed`, "utf8")).toBe("original checkout");
+  expect(fixture.owners.get(`${files}/.zeros-setup`)).toEqual([0, 10001]);
+  expect(fixture.owners.get(`${fixture.root}/srv/zeros/managed-settings`)).toEqual([0, 10001]);
+  expect(fixture.owners.get(`${fixture.root}/srv/zeros/managed-settings/settings.managed.toml`)).toEqual([0, 10001]);
   expect(fs.existsSync(`${fixture.root}/srv/zeros/.zeros-image-seed`)).toBe(false);
   // An idempotent setup consumes the same private backup and journal.
   await expect(setup()).resolves.toBe(commit);
@@ -120,7 +126,7 @@ it("restores the previous v4 checkout after an interrupted publication without c
   await expect(setup()).rejects.toMatchObject({ code: "EIO" });
   expect(fs.readFileSync(`${fixture.root}/srv/zeros/files/workspace/seed`, "utf8")).toBe("original checkout");
   expect(fixture.renames).toHaveLength(2);
-  expect(fs.readdirSync(`${fixture.root}/srv/zeros/files/.zeros-setup`)).toEqual([]);
+  expect(fs.readdirSync(`${fixture.root}/srv/zeros/files/.zeros-engine-setup`)).toEqual([]);
   fixture.failPublish = false;
   await expect(setup()).resolves.toBe(commit);
 });
@@ -131,6 +137,44 @@ it("reuses the v4 seed after publication completed before the journal was writte
   const renames = [...fixture.renames];
   await expect(setup()).resolves.toBe(commit);
   expect(fixture.renames).toEqual(renames);
+});
+
+it("reuses the original staging seed and actual checkout without recloning after the path switch", async () => {
+  const files = `${fixture.root}/srv/zeros/files`;
+  const legacySeed = `${files}/.zeros-setup/seed`;
+  directory(legacySeed, 10003, 0o700);
+  fs.writeFileSync(`${legacySeed}/original`, "preserved seed");
+  await expect(setup()).resolves.toBe(commit);
+  expect(fixture.renames).toEqual([]);
+  expect(fixture.spawn.mock.calls.some(([, args]) => args.includes("fetch") || args.includes("checkout"))).toBe(false);
+  expect(fs.readFileSync(`${legacySeed}/original`, "utf8")).toBe("preserved seed");
+  expect(fixture.owners.get(`${files}/.zeros-setup`)).toEqual([0, 10001]);
+  expect(fixture.spawn.mock.calls.every(([, , options]) => options.env.HOME === `${fixture.root}/srv/zeros/home/engine`)).toBe(true);
+});
+
+it("recovers a missing checkout from the original seed on the same files bind", async () => {
+  const files = `${fixture.root}/srv/zeros/files`, legacySeed = `${files}/.zeros-setup/seed`;
+  fs.renameSync(`${files}/workspace`, legacySeed); fixture.renames.length = 0;
+  await expect(setup()).resolves.toBe(commit);
+  expect(fixture.renames[0]).toEqual([legacySeed, `${files}/workspace`]);
+  expect(fs.readFileSync(`${files}/.zeros-engine-setup/seed/seed`, "utf8")).toBe("original checkout");
+  expect(fs.readFileSync(`${files}/workspace/cloned`, "utf8")).toBe("verified clone");
+  expect(fixture.renames.every(pair => pair.every(file => file.startsWith(files + "/")))).toBe(true);
+  expect(fixture.owners.get(`${files}/.zeros-setup`)).toEqual([0, 10001]);
+});
+
+it("refuses simultaneous old and current seeds before overwriting or moving either", async () => {
+  const files = `${fixture.root}/srv/zeros/files`;
+  directory(`${files}/.zeros-engine-setup`, 0, 0o710);
+  fixture.owners.set(`${files}/.zeros-engine-setup`, [0, 10003]);
+  for (const staging of [".zeros-setup", ".zeros-engine-setup"]) {
+    directory(`${files}/${staging}/seed`, 10003, 0o700);
+    fs.writeFileSync(`${files}/${staging}/seed/original`, staging);
+  }
+  await expect(setup()).rejects.toMatchObject({ code: "image_contract_invalid" });
+  expect(fixture.renames).toEqual([]);
+  for (const staging of [".zeros-setup", ".zeros-engine-setup"])
+    expect(fs.readFileSync(`${files}/${staging}/seed/original`, "utf8")).toBe(staging);
 });
 
 it("refuses legacy setup before changing checkout or preparation journals", async () => {

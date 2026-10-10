@@ -51,6 +51,15 @@ These instructions apply to the entire repository. Read and follow
   `.zeros/design-dir.toml`, `.zeros/design/` metadata and `.zeros-canvas.json`
   remain readable. Explicit Design authoring upgrades them recoverably.
 
+The cloud engine, agents, tools, terminals/SSH/LSP and capture run as one non-root
+user, `zeros-engine` (VM UID/GID 10003), without an agent sandbox, in the real
+checkout with normal VM egress. The VM is the isolation boundary, with one trust
+domain per workspace. Agents can read engine data on their VM, including the
+owner credential vault, VM credential and other conversations. Per-conversation
+HOME/configuration directories provide state separation, not a security boundary.
+Cloud API authoring is policy, not OS-enforced Design protection. Local Personal
+and organization-local provider tools, permissions and Host lifecycle stay unchanged.
+
 ## Renderer invariants
 
 - Treat native, bridge, Git, database, and remote reads as keyed server state.

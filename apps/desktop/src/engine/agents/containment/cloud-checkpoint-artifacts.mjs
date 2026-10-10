@@ -1,6 +1,8 @@
 // One native recovery format shared by the headless engine and fresh setup.
-// Only declarative Git state and an explicit provider-history allowlist cross
-// this boundary. Homes, credentials, Git config/hooks and runtime grants do not.
+// Declarative Git state, explicit provider history and an engine-owned sealed
+// command checkpoint cross this boundary. The latter is an opaque snapshot:
+// its producer/rebuilder prove seal custody, never runnable writer authority.
+// Homes, credentials, Git config/hooks and runtime grants do not cross it.
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants, promises as fs } from "node:fs";
@@ -10,6 +12,8 @@ const CHUNK_BYTES = 16 * 1024 * 1024;
 const MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_FILES = 25_000;
 const MAX_FILE_BYTES = 128 * 1024 * 1024;
+export const CLOUD_LOCAL_COMMAND_CHECKPOINT_SCOPE = "local-command-checkpoint";
+const LOCAL_COMMAND_MANIFEST_BYTES = 256 * 1024;
 const MAX_REMOTE_BASE_COMMITS = 256;
 const MAX_LOCAL_TIPS = 256;
 const MAX_REMOTE_PACKS = 256;
@@ -32,6 +36,8 @@ function relative(value) {
 }
 function allowed(scope, file) {
   relative(file);
+  if (scope === CLOUD_LOCAL_COMMAND_CHECKPOINT_SCOPE)
+    return file === "manifest.json" || /^(?:ledger|normal)\/[0-9]{6}\.part$/.test(file);
   if (scope === "git" && file.endsWith(".lock")) return false;
   if (scope === "git-pack") return file === "objects.pack" || /^remote-[a-f0-9]{64}\.pack$/.test(file);
   if (scope === "git") return gitFiles.has(file) || /^sharedindex\.[a-f0-9]{40,64}$/.test(file) ||
@@ -52,6 +58,11 @@ function allowed(scope, file) {
   }
   return false;
 }
+function fileByteLimit(scope, file) {
+  if (scope === "git-pack") return MAX_BYTES;
+  if (scope === CLOUD_LOCAL_COMMAND_CHECKPOINT_SCOPE) return file === "manifest.json" ? LOCAL_COMMAND_MANIFEST_BYTES : CHUNK_BYTES;
+  return MAX_FILE_BYTES;
+}
 function scopeRoots(roots) {
   const key = hash(path.resolve(roots.logicalRepository ?? roots.repository));
   return {
@@ -65,6 +76,7 @@ function scopeRoots(roots) {
       cursor: path.join(roots.agentHome, ".cursor", "zeros-workspaces", key),
     } : {}),
     ...(roots.data ? {
+      [CLOUD_LOCAL_COMMAND_CHECKPOINT_SCOPE]: path.join(roots.data, "cloud-local-command-checkpoints", key),
       "agent-transcripts": path.join(roots.data,"native-agent-history"),
       design: path.join(roots.data, "design-storage", key.slice(0, 32)),
       "design-recovery": path.join(roots.data, "design-transaction-recovery", key.slice(0, 32)),
@@ -117,7 +129,7 @@ async function inventory(roots, at) {
         const nested = await fs.open(target, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
         try { await walk(scope, root, nested, file); } finally { await nested.close(); }
       } else if (allowed(scope, file)) {
-        if (!stat.isFile() || stat.nlink !== 1n || stat.size > BigInt(MAX_FILE_BYTES)) throw fail();
+        if (!stat.isFile() || stat.nlink !== 1n || stat.size > BigInt(fileByteLimit(scope, file))) throw fail();
         files.push({ scope, path: file, root, sizeBytes: Number(stat.size) });
         if (files.length > MAX_FILES) throw fail();
       }
@@ -448,7 +460,7 @@ export async function captureCloudNativeCheckpoint({ roots, identity, deadlineAt
     const digest = createHash("sha256"); const segments = []; let sizeBytes = 0;
     await produce(async bytes => {
       totalBytes += bytes.length; sizeBytes += bytes.length;
-      if (totalBytes > MAX_BYTES || (scope !== "git-pack" && sizeBytes > MAX_FILE_BYTES)) throw fail();
+      if (totalBytes > MAX_BYTES || sizeBytes > fileByteLimit(scope, file)) throw fail();
       digest.update(bytes);
       let offset = 0;
       while (offset < bytes.length) {
@@ -517,7 +529,7 @@ export function validateCloudNativeCheckpoint(raw) {
   for (const file of raw.files) {
     if (!file || !allowed(file.scope, file.path) || Object.keys(file).sort().join() !== "contentSha256,path,scope,segments,sizeBytes" ||
       !SHA256.test(file.contentSha256 ?? "") || !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes < 0 ||
-      file.sizeBytes > (file.scope === "git-pack" ? MAX_BYTES : MAX_FILE_BYTES) || !Array.isArray(file.segments) || file.segments.length > 1_024) throw fail();
+      file.sizeBytes > fileByteLimit(file.scope, file.path) || !Array.isArray(file.segments) || file.segments.length > 1_024) throw fail();
     const key = `${file.scope}/${file.path}`.normalize("NFKC").toLowerCase();
     if (seen.has(key)) throw fail(); seen.add(key);
     let size = 0;
@@ -555,7 +567,7 @@ export function validateCloudNativeCheckpoint(raw) {
 export async function restoreCloudNativeCheckpoint({ archive: raw, roots, identity, privateIdentity = {uid:process.getuid(),gid:process.getgid()}, deadlineAtMs, getChunk }) {
   const archive = validateCloudNativeCheckpoint(raw); deadline(deadlineAtMs);
   for(const owner of [identity,privateIdentity])if(owner&&(!Number.isSafeInteger(owner.uid)||owner.uid<0||!Number.isSafeInteger(owner.gid)||owner.gid<0))throw fail();
-  const privateScopes=new Set(["agent-transcripts","design","design-recovery"]);
+  const privateScopes=new Set(["agent-transcripts","design","design-recovery",CLOUD_LOCAL_COMMAND_CHECKPOINT_SCOPE]);
   const targets = scopeRoots(roots);
   if (archive.files.some(file => file.scope !== "git-pack" && !targets[file.scope])) throw fail();
   const repository = await directory(roots.repository); await repository.close();

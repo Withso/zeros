@@ -1,0 +1,37 @@
+name: Offline Runtime Closure Tools
+description: >-
+  Install bubblewrap and setpriv for read-only offline artifact closure checks.
+  These tools qualify the shipped bundle; agents use the workspace VM identity.
+
+runs:
+  using: composite
+  steps:
+    - name: Install offline artifact closure tools
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The Ubuntu amd64 archive has a healthy HTTPS endpoint. Arm64 uses
+        # ports.ubuntu.com and must retain its own mirror configuration.
+        runner_ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+        if [ "$(uname -m)" = "x86_64" ] && [ -f "$runner_ubuntu_sources" ]; then
+          sudo sed -i \
+            's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
+            "$runner_ubuntu_sources"
+        fi
+        sudo apt-get update
+        sudo apt-get install --yes bubblewrap util-linux
+        command -v setpriv
+
+    - name: Verify offline artifact namespace prerequisites
+      shell: bash
+      run: |
+        set -euo pipefail
+        bash "$PWD/scripts/ci/with-userns.sh" \
+          bwrap \
+            --ro-bind / / \
+            --unshare-pid \
+            --unshare-user \
+            --cap-drop ALL \
+            --proc /proc \
+            --die-with-parent \
+            -- /bin/true

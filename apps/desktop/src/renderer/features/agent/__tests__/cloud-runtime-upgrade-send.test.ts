@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { randomUUID } from "node:crypto";
+import * as React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import { recoverCloudAdmissionFailure } from "../cloud-runtime-upgrade";
@@ -10,10 +12,11 @@ import { BLANK, useSessionsStore } from "../sessions-store";
 import { AuthPromptRecovery } from "../auth-prompt-recovery";
 import * as lifecycle from "../session-reload-lifecycle";
 import { SendQueue } from "../send-queue";
-import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode } from "../cloud-admission-failure";
+import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode, cloudAdmissionForTurn } from "../cloud-admission-failure";
 import { reportCloudAgentRuntimeUpgrade, invalidateCloudAgentRegistry } from "../workspace-agent-registry";
 import { notifyAgentSendFailure } from "../agent-send-failure-toast";
 import { turnFailureForCard } from "../turn-failure";
+import { TurnFailureCard } from "../turn-failure-card";
 import type { AgentMessage } from "../use-agent-session";
 import type { AgentFailure } from "../../../platform/bridge/failure";
 
@@ -36,6 +39,63 @@ function collect(node: ts.Node) {
 }
 collect(ast);
 const code = ts.transpileModule(`${promotion}\nglobalThis.send = ${callback};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+
+// Use the production admission branches for visible/queued/restored prompts,
+// so the callback's refusal state must actually produce its sole error card.
+const chatSource = readFileSync(new URL("../agent-chat.tsx", import.meta.url), "utf8");
+const chatAst = ts.createSourceFile("chat.tsx", chatSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+let admissionProjection = "", admissionBanner = "";
+function collectAdmission(node: ts.Node) {
+  if (ts.isVariableDeclaration(node) && node.name.getText(chatAst) === "detachedCloudAdmission")
+    admissionProjection = `const ${node.getText(chatAst)};`;
+  if (ts.isJsxExpression(node) && node.expression && ts.isBinaryExpression(node.expression) &&
+      ts.isIdentifier(node.expression.left) && node.expression.left.text === "detachedCloudAdmission")
+    admissionBanner = node.expression.getText(chatAst);
+  ts.forEachChild(node, collectAdmission);
+}
+collectAdmission(chatAst);
+if (!admissionProjection || !admissionBanner) throw new Error("Cloud admission banner branch was not found");
+const bannerCode = ts.transpileModule(`${admissionProjection}\nglobalThis.banner = (${admissionBanner});`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
+}).outputText;
+const footerSource = readFileSync(new URL("../turn-footer.tsx", import.meta.url), "utf8");
+const footerAst = ts.createSourceFile("footer.tsx", footerSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+let footerAdmission = "", footerBanner = "";
+function collectFooterAdmission(node: ts.Node) {
+  if (ts.isVariableDeclaration(node) && node.name.getText(footerAst) === "cloudAdmission")
+    footerAdmission = `const ${node.getText(footerAst)};`;
+  if (ts.isIfStatement(node) && ts.isIdentifier(node.expression) && node.expression.text === "cloudAdmission")
+    footerBanner = node.getText(footerAst);
+  ts.forEachChild(node, collectFooterAdmission);
+}
+collectFooterAdmission(footerAst);
+if (!footerAdmission || !footerBanner) throw new Error("Cloud admission footer branch was not found");
+const footerCode = ts.transpileModule(`globalThis.banner = (() => { ${footerAdmission}\n${footerBanner}\nreturn null; })();`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
+}).outputText;
+
+function expectOneAdmissionBanner() {
+  const session = useSessionsStore.getState().sessions.chat;
+  const queuedMessages = session.messages.filter(message => message.kind === "text" && message.queued &&
+    message.queuedPresentation !== "active-turn");
+  const visibleMessages = session.messages.filter(message => !queuedMessages.includes(message));
+  const context: Record<string, unknown> = { React, TurnFailureCard, isCloudWorkspace, session,
+    chatThread: { folder: session.cwd }, visibleMessages, queuedMessages, readOnly: false, interactive: true, sendNowQueued: vi.fn() };
+  vm.runInNewContext(bannerCode, context);
+  const footers = visibleMessages.map(message => {
+    if (message.kind !== "text" || message.role !== "user") return null;
+    const footerContext: Record<string, unknown> = { ...context, cloudAdmissionForTurn, folder: session.cwd,
+      turnId: message.id, recoveryFailure: message.recoveryFailure, admission: session.cloudAdmissionFailure,
+      agentId: session.agentId, retrying: false, isInterruptedTurn: () => false, turn: {}, fallbackStopReason: undefined,
+      isLastTurn: true, onRetry: vi.fn() };
+    vm.runInNewContext(footerCode, footerContext);
+    return footerContext.banner as React.ReactNode;
+  });
+  const html = renderToStaticMarkup(React.createElement(React.Fragment, null, ...footers, context.banner as React.ReactNode));
+  expect(html.match(/data-turn-failure-card/g)).toHaveLength(1);
+  expect(mocks.toast).not.toHaveBeenCalled();
+  return html;
+}
 
 function harness(folder: string, cause = "cloud_runtime_upgrade_required", duringRequest?: () => void, queued = false,
   options: { success?: boolean; history?: () => Promise<AgentMessage[]>; failureKind?: AgentFailure["kind"] } = {}) {
@@ -97,6 +157,13 @@ function harness(folder: string, cause = "cloud_runtime_upgrade_required", durin
 }
 
 describe("production send callback on runtime rejection", () => {
+  it("accepts a successful empty native turn when the durable transcript tail is empty", async () => {
+    const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "", undefined, false,
+      { success: true, history: async () => [] });
+    await h.send();
+    expect(useSessionsStore.getState().sessions.chat).toMatchObject({ status: "ready", error: null, failure: null });
+    expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "completed" })); expect(h.request).toHaveBeenCalledOnce();
+  });
   it.each(["cloud_workspace_not_ready", "CLOUD_WORKSPACE_CHECKPOINTING"])("returns accepted %s to its stable editable queue without an error or replay", async cause => {
     const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", cause, undefined, true);
     await h.send();
@@ -111,7 +178,7 @@ describe("production send callback on runtime rejection", () => {
     expect(h.queue.get("chat")![0]).toMatchObject({ bubbleId: "accepted-prompt", waitStartedAt: 42 });
     expect(useSessionsStore.getState().sessions.chat.messages).toHaveLength(1);
   });
-  it.each(["cloud_runtime_upgrade_required", "cloud_agent_model_not_authorized", "cloud_agent_credential_expired"])("keeps accepted %s editable and sends its cause to the shared one-time toast", async cause => {
+  it.each(["cloud_runtime_upgrade_required", "cloud_agent_model_not_authorized", "cloud_agent_credential_expired"])("keeps accepted %s editable with one failure banner and no admission toast", async cause => {
     const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", cause, undefined, true);
     await h.send();
     expect(h.request).toHaveBeenCalledOnce(); expect(h.readiness).not.toHaveBeenCalled();
@@ -120,10 +187,12 @@ describe("production send callback on runtime rejection", () => {
       cloudSendWait: { state: "failed", message: expect.any(String) }, cloudAdmissionFailure: { code: cause } });
     expect(getLiveChatDraft("chat")).toBeNull(); expect(mocks.refresh).toHaveBeenCalledOnce();
     expect(h.failureNotice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ chatId: "chat", attemptId: "accepted-prompt", error: expect.anything() }));
+    expectOneAdmissionBanner();
   });
   it("renews a terminal refused delivery only on explicit retry, avoiding its durable denial receipt", async () => {
     const h = harness("cloud://11111111-1111-4111-8111-111111111111/33333333-3333-4333-8333-333333333333", "cloud_agent_model_not_authorized", undefined, true);
     await h.send(); expect(h.request).toHaveBeenCalledOnce(); expect(h.readiness).not.toHaveBeenCalled();
+    expectOneAdmissionBanner();
     await h.retry();
     const first = h.request.mock.calls[0]![0] as { userMessageId: string };
     const second = h.request.mock.calls[1]![0] as { userMessageId: string };
@@ -132,7 +201,7 @@ describe("production send callback on runtime rejection", () => {
     expect(h.queue.get("chat")![0].bubbleId).toBe(second.userMessageId);
     expect(h.failureNotice).toHaveBeenCalledTimes(2);
     expect(h.failureNotice.mock.calls.map(([input]) => input.attemptId)).toEqual(["accepted-prompt", "accepted-prompt"]);
-    expect(mocks.toast).toHaveBeenCalledOnce();
+    expectOneAdmissionBanner();
   });
   it.each(["cloud_runtime_upgrade_required", "cloud_agent_model_not_authorized", "cloud_agent_credential_expired", "cloud_agent_credential_revoked", "cloud_agent_credential_refresh_required"])("restores %s once with no resend or local auth failure", async code => {
     const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", code);
@@ -144,11 +213,10 @@ describe("production send callback on runtime rejection", () => {
     expect(useSessionsStore.getState().sessions.chat.cloudAdmissionFailure).toMatchObject({ code, agentId: "codex" });
     expect(h.sending.size).toBe(0);
     expect(mocks.refresh).toHaveBeenCalledOnce();
-    expect(mocks.toast).toHaveBeenCalledOnce();
+    const banner = expectOneAdmissionBanner();
     if (code === "cloud_runtime_upgrade_required") {
-      expect(mocks.toast).toHaveBeenCalledWith("This workspace is on an older runtime", expect.objectContaining({
-        description: "Gets the new cloud runtime the next time this workspace wakes", action: undefined,
-      }));
+      expect(banner).toContain("This workspace gets the new cloud runtime the next time it wakes");
+      expect(banner).not.toContain("<button");
     }
   });
   it("labels the submitted model even when the user switches models during admission", async () => {
@@ -157,7 +225,8 @@ describe("production send callback on runtime rejection", () => {
       mocks.workspace.chats[0].model = "gpt-5.5";
     });
     await h.send();
-    expect(useSessionsStore.getState().sessions.chat.cloudAdmissionFailure).toMatchObject({ model: "gpt-6.1-sol", message: "GPT-6.1 Sol isn't enabled for this workspace" });
+    expect(useSessionsStore.getState().sessions.chat.cloudAdmissionFailure).toMatchObject({ model: "gpt-6.1-sol", message: "GPT-6.1 Sol isn't available for this agent" });
+    expectOneAdmissionBanner();
   });
   it.each(["command_dispatch_rejected", "The cloud command outcome is unknown. Review the transcript before retrying."])("never calls ambiguous %s a proved admission refusal", async code => {
     const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", code);
@@ -178,7 +247,7 @@ describe("production send callback on runtime rejection", () => {
       description: "Review the conversation before retrying.",
     }));
   });
-  it.each(["cloud_agent_model_not_authorized", "command_dispatch_rejected"])("shares the original queue toast identity across renewed %s deliveries", code => {
+  it.each(["cloud_agent_model_not_authorized", "command_dispatch_rejected"])("keeps one error surface and the original queue notification identity across renewed %s deliveries", code => {
     const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
     const h = harness(folder, code);
     for (const id of ["first-delivery", "renewed-delivery"]) {
@@ -186,8 +255,10 @@ describe("production send callback on runtime rejection", () => {
       useSessionsStore.getState().patchSession("chat", { messages: [message] });
       expect(recoverCloudAdmissionFailure({ folder, chatId: "chat", error: code, message, draft: h.draft,
         toastAttemptId: `original-queue-entry-${code}`, store: useSessionsStore.getState(), pauseQueue: h.pauseQueue })).toBe(true);
+      if (code === "cloud_agent_model_not_authorized") expectOneAdmissionBanner();
     }
-    expect(mocks.toast).toHaveBeenCalledOnce();
+    if (code === "cloud_agent_model_not_authorized") expectOneAdmissionBanner();
+    else expect(mocks.toast).toHaveBeenCalledOnce();
     expect(h.request).not.toHaveBeenCalled();
   });
   it("never requeues an accepted message after an ambiguous dispatch result", async () => {
@@ -260,12 +331,13 @@ describe("production send callback on runtime rejection", () => {
     expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "completed" }));
     expect(useSessionsStore.getState().sessions.chat.failure).toBeNull(); expect(h.request).toHaveBeenCalledOnce();
   });
-  it("does not report success when the saved window cannot recover the submitted turn", async () => {
+  it("accepts a proved successful empty turn and retains its optimistic user row", async () => {
     const h = harness("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "Cloud transcript unavailable", undefined, true,
       { success: true, history: async () => [] });
     await h.send();
-    expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed", retryCount: 0 }));
-    expect(useSessionsStore.getState().sessions.chat.status).toBe("failed");
+    expect(h.finished).toHaveBeenCalledWith(expect.objectContaining({ outcome: "completed", retryCount: 0 }));
+    expect(useSessionsStore.getState().sessions.chat.status).toBe("ready");
+    expect(useSessionsStore.getState().sessions.chat.messages[0]).toMatchObject({ id: "accepted-prompt", role: "user" });
     expect(h.request).toHaveBeenCalledOnce();
   });
   it("accepts a saved tool tail when a long successful turn has paged its user row out", async () => {

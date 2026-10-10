@@ -23,6 +23,10 @@ import type { BridgeMessage } from "./messages";
 import { createMessageId } from "./messages";
 import { PROTOCOL_VERSION } from "@zeros/protocol/version";
 import { cloudBridgeCloseDiagnostic } from "@zeros/protocol/cloud-bridge-diagnostics";
+import { RuntimeConnectionTargetSchema, type CloudRuntimeConnectionTarget, type RuntimeConnectionTarget } from "@zeros/protocol/cloud-runtime-connection";
+import { CloudAgentBootConversationSchema, type CloudAgentBootConversation, type CloudAgentBootScope } from "@zeros/protocol/cloud-agent-bootstrap";
+export type { CloudRuntimeConnectionTarget, RuntimeConnectionTarget } from "@zeros/protocol/cloud-runtime-connection";
+import { CloudRuntimeAccessError } from "./cloud-runtime-access-error";
 import {
   MAX_BRIDGE_FRAME_BYTES,
   safeParseBridgeMessage,
@@ -67,6 +71,7 @@ const RECONNECT_LADDER = [1_000, 2_000, 4_000, 8_000, 15_000];
  *  the chat UI's 7s "Reconnecting…" indicator — the indicator may show while
  *  requests keep patiently buffering; they are separate concerns. */
 const RECONNECT_GRACE_MS = 20_000;
+const CLOUD_DIRECT_READY_MS = 5_000;
 
 /** Cap on the number of requests we'll queue during a disconnect so
  *  a runaway caller can't pin unbounded memory. The previous 32 was
@@ -221,8 +226,7 @@ function resolveEngineToken(): Promise<string> {
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
-const CLOUD_RUNTIME_UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CLOUD_RUNTIME_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CLOUD_RUNTIME_TOKEN_PATTERN = /^zw[sa]_[A-Za-z0-9_-]{43}$/;
 const CLOUD_RPC_IN_FLIGHT = 16;
 const CLOUD_CONTROL_REQUESTS = new Set(["AGENT_CANCEL", "AGENT_STOP_BACKGROUND_TASK", "AGENT_STEER",
@@ -233,34 +237,13 @@ const DIAGNOSTIC_OPERATIONS = new Set(["workspace.list", "workspace.get", "works
   "cloudEvents.request", "cloudCommands.request", "cloudCommands.conversation", "cloudCommands.createConversation", "cloudCommands.setMode",
   "cloudActions.request", "cloudLsp.request", "chats.list", "chats.replaceAll", "messages.window", "messages.windowOlder",
   "git.status", "git.diff", "git.log", "git.reviewHunks", "file.read", "file.list", "design.status"]);
-type CloudDiagnosticScope = Pick<CloudRuntimeConnectionTarget, "workspaceId" | "generation" | "connectionSequence">;
+type CloudDiagnosticScope = Pick<CloudRuntimeConnectionTarget, "workspaceId" | "generation" | "connectionSequence" | "channel">;
 type CloudDiagnosticEvent = "close" | "request_failed" | "reconnect" | "connect" | "ready" | "rejection";
 function requestDiagnostic(msg: Partial<BridgeMessage> & { type: string }) {
   const operation = "op" in msg ? msg.op : undefined;
   return { requestType: DIAGNOSTIC_REQUEST_TYPES.has(msg.type) ? msg.type : "other",
     operation: typeof operation === "string" && DIAGNOSTIC_OPERATIONS.has(operation) ? operation : "other" };
 }
-
-export type CloudRuntimeConnectionTarget = {
-  readonly kind: "cloud";
-  readonly channel: "electron-ssh-tunnel" | "control-plane-websocket";
-  readonly runtimeId: string;
-  readonly organizationId: string;
-  readonly workspaceId: string;
-  readonly generation: number;
-  readonly authorityEpoch: number;
-  readonly engineInstanceId: string;
-  readonly connectionSequence: number;
-  /** Exact desktop loopback proxy or the configured control-plane relay. */
-  readonly url: string;
-  /** One-use, generation-bound engine admission. Never persisted. */
-  readonly cloudToken: string;
-  readonly expiresAt: number;
-};
-
-export type RuntimeConnectionTarget =
-  | { readonly kind: "local" }
-  | CloudRuntimeConnectionTarget;
 
 /** Secret-free execution identity. Credentials, loopback ports, expiry, and
  * reconnect sequence are deliberately excluded from keyed renderer state. */
@@ -273,7 +256,13 @@ export type RuntimeExecutionIdentity =
       readonly generation: number;
       readonly authorityEpoch: number;
       readonly engineInstanceId: string;
+      readonly bootScope?: CloudAgentBootScope;
     };
+
+function cloudRuntimeBootScope(target: RuntimeConnectionTarget): CloudAgentBootScope | undefined {
+  return target.kind === "cloud" && (target.channel === "direct-provider-websocket" || target.channel === "control-plane-websocket")
+    ? target.bootScope : undefined;
+}
 
 export function runtimeExecutionIdentity(
   target: RuntimeConnectionTarget,
@@ -287,6 +276,7 @@ export function runtimeExecutionIdentity(
         generation: target.generation,
         authorityEpoch: target.authorityEpoch,
         engineInstanceId: target.engineInstanceId,
+        ...(cloudRuntimeBootScope(target) ? { bootScope: cloudRuntimeBootScope(target) } : {}),
       };
 }
 
@@ -302,6 +292,7 @@ export function runtimeExecutionKey(
         identity.generation,
         identity.authorityEpoch,
         identity.engineInstanceId,
+        ...(identity.bootScope ? [identity.bootScope.bootId, identity.bootScope.writerEpoch, identity.bootScope.fundingOwnerUserId, identity.bootScope.fundingOwnerEpoch] : []),
       ].join(":");
 }
 
@@ -318,99 +309,22 @@ export function parseRuntimeConnectionTarget(
   raw: unknown,
   now: number = Date.now(),
 ): RuntimeConnectionTarget {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+  const parsed = RuntimeConnectionTargetSchema.safeParse(raw);
+  if (!parsed.success) throw new Error("cloud runtime connection target is invalid");
+  const target = parsed.data;
+  if (target.kind === "local") return Object.freeze(target);
+  if (!Number.isSafeInteger(now) || target.expiresAt - now < 5_000 || target.expiresAt - now > 16 * 60_000)
     throw new Error("cloud runtime connection target is invalid");
-  }
-  const value = raw as Record<string, unknown>;
-  if (value.kind === "local" && Object.keys(value).length === 1) {
-    return { kind: "local" };
-  }
-  if (
-    value.kind !== "cloud" ||
-    Object.keys(value).sort().join("\0") !==
-      [
-        "authorityEpoch",
-        "channel",
-        "cloudToken",
-        "connectionSequence",
-        "engineInstanceId",
-        "expiresAt",
-        "generation",
-        "kind",
-        "organizationId",
-        "runtimeId",
-        "url",
-        "workspaceId",
-      ]
-        .sort()
-        .join("\0") ||
-    !["electron-ssh-tunnel","control-plane-websocket"].includes(String(value.channel)) ||
-    typeof value.runtimeId !== "string" ||
-    !CLOUD_RUNTIME_UUID_PATTERN.test(value.runtimeId) ||
-    typeof value.organizationId !== "string" ||
-    !CLOUD_RUNTIME_UUID_PATTERN.test(value.organizationId) ||
-    typeof value.workspaceId !== "string" ||
-    !CLOUD_RUNTIME_UUID_PATTERN.test(value.workspaceId) ||
-    typeof value.engineInstanceId !== "string" ||
-    !CLOUD_RUNTIME_UUID_PATTERN.test(value.engineInstanceId) ||
-    !Number.isSafeInteger(value.generation) ||
-    Number(value.generation) < 1 ||
-    !Number.isSafeInteger(value.authorityEpoch) ||
-    Number(value.authorityEpoch) < 1 ||
-    !Number.isSafeInteger(value.connectionSequence) ||
-    Number(value.connectionSequence) < 1 ||
-    typeof value.url !== "string" ||
-    typeof value.cloudToken !== "string" ||
-    !CLOUD_RUNTIME_TOKEN_PATTERN.test(value.cloudToken) ||
-    !Number.isSafeInteger(value.expiresAt) ||
-    Number(value.expiresAt) - now < 5_000 ||
-    Number(value.expiresAt) - now > 16 * 60_000 ||
-    !Number.isSafeInteger(now)
-  ) {
-    throw new Error("cloud runtime connection target is invalid");
-  }
-  let url: URL;
-  try {
-    url = new URL(value.url);
-  } catch {
-    throw new Error("cloud runtime connection URL is invalid");
-  }
-  if (value.channel === "electron-ssh-tunnel" && (
-    url.protocol !== "ws:" ||
-    url.hostname !== "127.0.0.1" ||
-    !url.port ||
-    Number(url.port) < 1_024 ||
-    Number(url.port) > 65_535 ||
-    url.username ||
-    url.password ||
-    url.pathname !== "/ws" ||
-    url.search ||
-    url.hash || !value.cloudToken.startsWith("zws_")
-  )) {
-    throw new Error("cloud runtime connection URL is invalid");
-  }
-  if(value.channel === "control-plane-websocket") {
-    const base=new URL((import.meta.env.VITE_CONTROL_PLANE_URL as string|undefined)||"https://api.zeros.build");
-    if(base.username||base.password||base.search||base.hash||base.pathname!=="/"||
-      (base.protocol!=="https:"&&!(import.meta.env.DEV&&base.protocol==="http:"&&["127.0.0.1","localhost"].includes(base.hostname))))
+  if (target.channel === "control-plane-websocket") {
+    const base = new URL((import.meta.env.VITE_CONTROL_PLANE_URL as string | undefined) || "https://api.zeros.build");
+    if (base.username || base.password || base.search || base.hash || base.pathname !== "/" ||
+        (base.protocol !== "https:" && !(import.meta.env.DEV && base.protocol === "http:" && ["127.0.0.1", "localhost"].includes(base.hostname))))
       throw new Error("cloud control-plane origin is invalid");
-    const expected=new URL("/v1/cloud-workspaces/bridge",base);expected.protocol=base.protocol==="https:"?"wss:":"ws:";
-    if(url.toString()!==expected.toString()||!value.cloudToken.startsWith("zwa_"))throw new Error("cloud runtime connection URL is invalid");
+    const expected = new URL("/v1/cloud-workspaces/bridge", base);
+    expected.protocol = base.protocol === "https:" ? "wss:" : "ws:";
+    if (target.url !== expected.toString()) throw new Error("cloud runtime connection URL is invalid");
   }
-  return {
-    kind: "cloud",
-    channel: value.channel as CloudRuntimeConnectionTarget["channel"],
-    runtimeId: value.runtimeId,
-    organizationId: value.organizationId,
-    workspaceId: value.workspaceId,
-    generation: Number(value.generation),
-    authorityEpoch: Number(value.authorityEpoch),
-    engineInstanceId: value.engineInstanceId,
-    connectionSequence: Number(value.connectionSequence),
-    url: url.toString(),
-    cloudToken: value.cloudToken,
-    expiresAt: Number(value.expiresAt),
-  };
+  return Object.freeze({ ...target, ...("bootScope" in target && target.bootScope ? { bootScope: Object.freeze(target.bootScope) } : {}) });
 }
 
 function base64urlUtf8(value: string): string {
@@ -446,6 +360,7 @@ export function cloudRuntimeWebSocketProtocols(cloudToken: string): string[] {
 export interface ConnectionRejection {
   reason: string;
   message: string;
+  code?: string;
 }
 
 /** Whether an engine RESPAWN (watchdog `engine-restarted`) can plausibly cure a
@@ -627,6 +542,10 @@ export class RuntimeClient {
   private readonly refreshCloudConnectionTarget?: CloudRuntimeConnectionTargetRefresher;
   private cloudTargetNeedsRefresh = false;
   private cloudTargetRefreshPromise: Promise<boolean> | null = null;
+  private cloudRefreshFailures = 0;
+  private cloudConnectFailures = 0;
+  private directReadyTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly readyWaiters = new Set<(error?: Error) => void>();
 
   constructor(
     target: RuntimeConnectionTarget = { kind: "local" },
@@ -647,6 +566,39 @@ export class RuntimeClient {
 
   get executionIdentity(): RuntimeExecutionIdentity {
     return runtimeExecutionIdentity(this.connectionTarget);
+  }
+
+  /** Socket construction is not readiness. Startup reads wait outside the RPC
+   * queue until the actor and exact boot handshake have both completed. */
+  waitUntilReady(options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<void> {
+    if (this._disposed) return Promise.reject(new Error("Client disposed"));
+    if (options.signal?.aborted) return Promise.reject(makeRequestAbortError("runtime readiness"));
+    if (this._rejected) return Promise.reject(new Error(this.lastRejection?.message || "Runtime connection rejected"));
+    if (this._status === "connected" && this.isOpen()) return Promise.resolve();
+    const identity = runtimeExecutionKey(this.executionIdentity);
+    return new Promise<void>((resolve, reject) => {
+      const finish = (error?: Error) => {
+        clearTimeout(timer);
+        this.readyWaiters.delete(finish);
+        offStatus(); offRejection(); offIdentity();
+        options.signal?.removeEventListener("abort", abort);
+        if (error) reject(error); else resolve();
+      };
+      const check = () => {
+        if (this._rejected) finish(new Error(this.lastRejection?.message || "Runtime connection rejected"));
+        else if (this._status === "connected" && this.isOpen()) finish();
+      };
+      const abort = () => finish(makeRequestAbortError("runtime readiness"));
+      const timer = setTimeout(() => finish(new CloudRuntimeAccessError({ code: "cloud_actor_runtime_unavailable", status: 503 })), options.timeoutMs ?? 30_000);
+      const offStatus = this.onStatusChange(check);
+      const offRejection = this.onConnectionRejected(check);
+      const offIdentity = this.onExecutionIdentityChange(next => {
+        if (runtimeExecutionKey(next) !== identity) finish(new Error("Runtime execution identity changed while connecting"));
+      });
+      this.readyWaiters.add(finish);
+      options.signal?.addEventListener("abort", abort, { once: true });
+      check();
+    });
   }
 
   private engineCapabilities = new Set<string>();
@@ -672,13 +624,19 @@ export class RuntimeClient {
   /** Whether the engine is connected and ready */
   private _engineConnected = false;
   private handshakeReady = false;
+  private activatedCloudBinding: CloudAgentBootConversation | null = null;
+  private finishCloudHandshake: (() => void) | null = null;
+  get activatedCloudAgentBootBinding(): CloudAgentBootConversation | null {
+    return this.connectionTarget.kind === "cloud" && this._status === "connected" && this.isOpen() &&
+      this.engineCapabilities.has("cloud.localCommands.v1") ? this.activatedCloudBinding : null;
+  }
   private diagnostics = { at: 0, suppressed: 0, counts: { close: 0, request_failed: 0, reconnect: 0, connect: 0, ready: 0, rejection: 0 } };
   get extensionConnected(): boolean {
     return this._engineConnected;
   }
 
   async connect(): Promise<void> {
-    if (this._disposed) return;
+    if (this._disposed || (this.connectionTarget.kind === "cloud" && this._rejected)) return;
     if (this.ws?.readyState === WebSocket.OPEN) return;
     // In-flight guard. Without it, two concurrent connect() calls both
     // await enginePortPromise then both `new WebSocket(...)` — the
@@ -754,7 +712,19 @@ export class RuntimeClient {
       return;
     }
     this.pendingWs = ws;
-
+    if (this.connectionTarget.kind === "cloud" && this.connectionTarget.channel === "direct-provider-websocket") {
+      this.clearDirectReadyTimer();
+      this.directReadyTimer = setTimeout(() => {
+        this.directReadyTimer = null;
+        if (this._disposed || this._rejected || targetEpoch !== this.connectionTargetEpoch || this.handshakeReady ||
+            this.pendingWs !== ws && this.ws !== ws) return;
+        this.cloudDiagnostic("close", { class: "direct_ready_timeout", stage: this.pendingWs === ws ? "upgrade" : "handshake" });
+        if (this.pendingWs === ws) this.pendingWs = null;
+        if (this.ws === ws) this.ws = null;
+        try { ws.close(); } catch { /* already closed */ }
+        this.afterDisconnect();
+      }, CLOUD_DIRECT_READY_MS);
+    }
     ws.onopen = () => {
       // If we were disposed (or another socket beat us to it) while
       // pending, drop this one rather than promoting it.
@@ -771,7 +741,7 @@ export class RuntimeClient {
       // Actor admission expires before use. Once admitted, the server's live
       // actor lease governs the stream; ordinary reconnect always mints anew.
       if (this.connectionTarget.kind === "cloud" &&
-          this.connectionTarget.channel === "control-plane-websocket" &&
+          this.connectionTarget.channel !== "electron-ssh-tunnel" &&
           this.connectionTargetExpiryTimer) {
         clearTimeout(this.connectionTargetExpiryTimer);
         this.connectionTargetExpiryTimer = null;
@@ -793,9 +763,19 @@ export class RuntimeClient {
       const wasPending = this.pendingWs === ws;
       if (wasPending) this.pendingWs = null;
       if (this.ws !== ws && !wasPending) return;
+      this.clearDirectReadyTimer();
       this.cloudDiagnostic("close", { ...cloudBridgeCloseDiagnostic(event?.code, event?.reason),
         stage: wasPending ? "upgrade" : this.handshakeReady ? "ready" : "handshake" });
       if (this.ws === ws) this.ws = null;
+      if (this.connectionTarget.kind === "cloud") {
+        const category = cloudBridgeCloseDiagnostic(event?.code, event?.reason).class;
+        if (["authority_revoked", "account_binding_required", "actor_forbidden"].includes(category))
+          this.rejectCloudConnection(new CloudRuntimeAccessError({ code: "cloud_workspace_access_revoked", status: 403 }));
+        else if (category === "protocol_mismatch")
+          this.rejectCloudConnection(new CloudRuntimeAccessError({ code: "cloud_workspace_client_update_required", status: 409 }));
+        else if (!this.handshakeReady && ++this.cloudConnectFailures >= 5)
+          this.rejectCloudConnection(new CloudRuntimeAccessError({ code: "cloud_actor_runtime_unavailable", status: 503 }));
+      }
       this.afterDisconnect();
     };
 
@@ -835,6 +815,8 @@ export class RuntimeClient {
     assertCloudRuntimeNotRetired(parsedTarget);
     this.connectionTarget = parsedTarget;
     this.cloudTargetNeedsRefresh = false;
+    this.cloudRefreshFailures = 0;
+    this.cloudConnectFailures = 0;
     this.armConnectionTargetExpiry();
     this._rejected = false;
     this.lastRejection = null;
@@ -1057,6 +1039,7 @@ export class RuntimeClient {
     options: { refreshCloudTarget?: boolean } = {},
   ): Promise<void> {
     if (this._disposed) return;
+    this.clearDirectReadyTimer();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -1114,6 +1097,8 @@ export class RuntimeClient {
 
   dispose(): void {
     this._disposed = true;
+    this.clearDirectReadyTimer();
+    for (const finish of this.readyWaiters) finish(new Error("Client disposed"));
     if (this.connectionTargetExpiryTimer) {
       clearTimeout(this.connectionTargetExpiryTimer);
       this.connectionTargetExpiryTimer = null;
@@ -1158,7 +1143,7 @@ export class RuntimeClient {
   private diagnosticScope(): CloudDiagnosticScope | undefined {
     const target = this.connectionTarget;
     return target.kind === "cloud" ? { workspaceId: target.workspaceId, generation: target.generation,
-      connectionSequence: target.connectionSequence } : undefined;
+      connectionSequence: target.connectionSequence, channel: target.channel } : undefined;
   }
   private cloudDiagnostic(event: CloudDiagnosticEvent, data: Record<string, string | number | null | undefined>,
     scope = this.diagnosticScope()): void {
@@ -1189,6 +1174,8 @@ export class RuntimeClient {
    *  backoff, announce ourselves, and flush the disconnect queue. */
   private onTransportOpen(): void {
     this.handshakeReady = false;
+    this.activatedCloudBinding = null;
+    this.finishCloudHandshake = null;
     // A successful transport open clears any prior terminal rejection.
     this._rejected = false;
     this.lastRejection = null;
@@ -1216,9 +1203,13 @@ export class RuntimeClient {
     });
 
     const socket = this.ws;
+    let actorConfirmed = false;
     const ready = () => {
+      if (!actorConfirmed || cloudRuntimeBootScope(this.connectionTarget) && !this.activatedCloudBinding) return;
       if (this._disposed || this.ws !== socket || socket?.readyState !== WebSocket.OPEN || this._rejected) return;
       this.handshakeReady = true;
+      this.clearDirectReadyTimer();
+      this.cloudConnectFailures = 0;
       this._engineConnected = true;
       this.reconnectAttempts = 0;
       this.cloudDiagnostic("ready", {});
@@ -1228,7 +1219,8 @@ export class RuntimeClient {
       this.setStatus("connected");
       this.flushQueue();
     };
-    if (this.connectionTarget.kind === "local") { ready(); return; }
+    if (this.connectionTarget.kind === "local") { actorConfirmed = true; ready(); return; }
+    this.finishCloudHandshake = ready;
 
     // Existing engines announce ENGINE_READY before authenticating CONNECTED.
     // One harmless read proves that their CONNECTED handler has settled. Keep
@@ -1237,6 +1229,7 @@ export class RuntimeClient {
     void this.sendRequest({ type: "WORKSPACE_REQUEST", op: "workspace.list", params: {} }, 10_000)
       .then(response => {
         if (response.type !== "WORKSPACE_RESPONSE") throw new Error("Cloud handshake read failed");
+        actorConfirmed = true;
         ready();
       }).catch(() => {
         if (this.ws === socket) socket?.close(1000, "cloud handshake failed");
@@ -1248,9 +1241,30 @@ export class RuntimeClient {
    *  app message object. */
   private handleIncoming(msg: BridgeMessage): void {
     if (msg.type === "ENGINE_READY") {
-      const capabilities = (msg as unknown as { capabilities?: unknown }).capabilities;
-      this.engineCapabilities = new Set(Array.isArray(capabilities) && capabilities.length <= 64
-        ? capabilities.filter((value): value is string => typeof value === "string" && value.length <= 128) : []);
+      const wire = msg as unknown as { capabilities?: unknown; cloudLocalCommands?: unknown };
+      const capabilities = new Set(Array.isArray(wire.capabilities) && wire.capabilities.length <= 64
+        ? wire.capabilities.filter((value): value is string => typeof value === "string" && value.length <= 128) : []);
+      const target = this.connectionTarget;
+      const scope = cloudRuntimeBootScope(target);
+      if (target.kind === "cloud" && scope) {
+        const parsed = CloudAgentBootConversationSchema.safeParse(wire.cloudLocalCommands);
+        if (!capabilities.has("cloud.localCommands.v1") || !parsed.success) {
+          this.rejectCloudConnection(new CloudRuntimeAccessError({ code: "cloud_workspace_client_update_required", status: 409 }));
+          this.ws?.close(); return;
+        }
+        if (parsed.data.authorityEpoch !== target.authorityEpoch ||
+            Object.entries(scope).some(([key, value]) => parsed.data[key as keyof CloudAgentBootConversation] !== value)) {
+          this.rejectCloudConnection(new CloudRuntimeAccessError({ code: "cloud_workspace_access_superseded", status: 409 }));
+          this.ws?.close(); return;
+        }
+        this.activatedCloudBinding = Object.freeze({ ...parsed.data,
+          initialAdoptions: Object.freeze(parsed.data.initialAdoptions.map(value => Object.freeze(value))) }) as CloudAgentBootConversation;
+      } else if (target.kind === "cloud") {
+        // A legacy admission never silently adopts a grant-free boot mode.
+        capabilities.delete("cloud.localCommands.v1");
+      }
+      this.engineCapabilities = capabilities;
+      this.finishCloudHandshake?.();
     }
     // ENGINE_READY confirms the engine is fully initialized.
     if (msg.type === "ENGINE_READY" && (this.connectionTarget.kind === "local" || this.handshakeReady)) {
@@ -1267,6 +1281,7 @@ export class RuntimeClient {
     if (msg.type === "CONNECTION_REJECTED") {
       const m = msg as { reason?: string; message?: string };
       this._rejected = true;
+      this.clearDirectReadyTimer();
       this.lastRejection = {
         reason: m.reason ?? "unknown",
         message: m.message ?? "",
@@ -1311,6 +1326,7 @@ export class RuntimeClient {
    *  reject in-flight RPCs (soft-fail), schedule a reconnect, expire the
    *  queue. The caller has already cleared its transport slot. */
   private afterDisconnect(): void {
+    this.clearDirectReadyTimer();
     this.handshakeReady = false;
     this.setStatus("disconnected");
     this._engineConnected = false;
@@ -1457,6 +1473,8 @@ export class RuntimeClient {
     this._rejected = false;
     this.lastRejection = null;
     this.reconnectAttempts = 0;
+    this.cloudRefreshFailures = 0;
+    this.cloudConnectFailures = 0;
     if (opts.reconnect === false) return;
     void this.connect().catch(() => {
       /* scheduleReconnect handles retries */
@@ -1499,6 +1517,7 @@ export class RuntimeClient {
   }
 
   private armConnectionTargetExpiry(): void {
+    this.clearDirectReadyTimer();
     this.connectionTargetEpoch += 1;
     this.expiredConnectionTargetEpoch = -1;
     if (this.connectionTargetExpiryTimer) {
@@ -1578,14 +1597,18 @@ export class RuntimeClient {
       try {
         const candidate = parseRuntimeConnectionTarget(await refresh(current));
         assertCloudRuntimeNotRetired(candidate);
+        const previousBoot = cloudRuntimeBootScope(current), nextBoot = cloudRuntimeBootScope(candidate);
         if (
           candidate.kind !== "cloud" ||
           candidate.runtimeId !== current.runtimeId ||
           candidate.organizationId !== current.organizationId ||
           candidate.workspaceId !== current.workspaceId ||
-          candidate.connectionSequence !== current.connectionSequence + 1
+          candidate.connectionSequence !== current.connectionSequence + 1 ||
+          previousBoot && (candidate.authorityEpoch !== current.authorityEpoch || !nextBoot ||
+            Object.entries(previousBoot).some(([key, value]) => nextBoot[key as keyof CloudAgentBootScope] !== value) ||
+            candidate.cloudToken === current.cloudToken)
         ) {
-          return false;
+          throw new CloudRuntimeAccessError({ code: "cloud_workspace_access_superseded", status: 409 });
         }
         if (
           this._disposed ||
@@ -1597,17 +1620,38 @@ export class RuntimeClient {
         const previousKey = runtimeExecutionKey(this.executionIdentity);
         this.connectionTarget = candidate;
         this.cloudTargetNeedsRefresh = false;
+        this.cloudRefreshFailures = 0;
         this.armConnectionTargetExpiry();
         if (runtimeExecutionKey(this.executionIdentity) !== previousKey) {
           this.notifyExecutionIdentityChanged();
         }
         return true;
-      } catch {
+      } catch (error) {
+        if (this._disposed || epoch !== this.connectionTargetEpoch || this.connectionTarget !== current) return false;
+        const failure = new CloudRuntimeAccessError(error);
+        this.cloudRefreshFailures++;
+        if (failure.category !== "transient" || this.cloudRefreshFailures >= 5) {
+          this.rejectCloudConnection(failure);
+        }
         return false;
       } finally {
         this.cloudTargetRefreshPromise = null;
       }
     })();
     return this.cloudTargetRefreshPromise;
+  }
+  private rejectCloudConnection(failure: CloudRuntimeAccessError): void {
+    this._rejected = true;
+    this.clearDirectReadyTimer();
+    this.lastRejection = { reason: `cloud-${failure.category}`, message: failure.message, code: failure.code };
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.setStatus("disconnected");
+    for (const listener of this.rejectionListeners) listener(this.lastRejection);
+  }
+
+  private clearDirectReadyTimer(): void {
+    if (this.directReadyTimer) clearTimeout(this.directReadyTimer);
+    this.directReadyTimer = null;
   }
 }

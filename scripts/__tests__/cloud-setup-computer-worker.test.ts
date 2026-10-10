@@ -46,7 +46,7 @@ async function fixture() {
   const repositoryDirectory = "/srv/zeros/files/repos/fixture/primary";
   tree.mkdir(`${repositoryDirectory}/.git`);
   for (const file of [repositoryDirectory, `${repositoryDirectory}/.git`]) {
-    tree.owners.set(file, 10001);
+    tree.owners.set(file, 10003);
     fs.chmodSync(tree.physical(file), 0o700);
   }
   const template = { schema: "zeros.computer-template/v1",
@@ -85,7 +85,7 @@ async function fixture() {
       return { status: 0, signal: null };
     });
     const fakeProcess = { argv: [runtime.node, path.join(helperDirectory, "cloud-setup-process.mjs"),
-      privileged ? "--worker" : "--unprivileged"], platform: "linux", getuid: () => privileged ? 0 : 10001,
+      privileged ? "--worker" : "--unprivileged"], platform: "linux", getuid: () => privileged ? 0 : 10003,
       cwd: () => repositoryDirectory, exitCode: 0, stderr: { write: vi.fn() } };
     await loadHelper("cloud-setup-process.mjs", {
       "node:fs": { ...filesystem, readSync: (fd: number, buffer: Buffer, offset: number) => {
@@ -115,7 +115,7 @@ describe("Cloud Computer setup worker admission", () => {
     // This is the exact live failure: a pinned child knows its runtime ID but
     // cannot bind the root-private admission to a boot or supervisor session.
     expect(f.resolver.resolveChild()).toMatchObject({ runtimeId: f.runtime.runtimeId });
-    expect(f.resolver.resolveChild().bootId).toBeUndefined();
+    expect(f.resolver.resolveChild()).not.toHaveProperty("bootId");
     expect(() => f.computer.cloudComputerHostRepository(f.resolver.resolveChild()))
       .toThrow("image_contract_invalid");
     const result = await f.worker(command);
@@ -123,7 +123,7 @@ describe("Cloud Computer setup worker admission", () => {
     expect(result.process.stderr.write).not.toHaveBeenCalled();
     expect(result.spawn).toHaveBeenCalledExactlyOnceWith("/usr/bin/setpriv", [
       "--no-new-privs", "--bounding-set=-all", "--inh-caps=-all", "--ambient-caps=-all",
-      "--pdeathsig=SIGKILL", "--reuid=10001", "--regid=10001", "--clear-groups",
+      "--pdeathsig=SIGKILL", "--reuid=10003", "--regid=10003", "--clear-groups",
       f.runtime.node, f.runtime.helpers.setupProcess, "--unprivileged",
     ], expect.objectContaining({ cwd: f.repositoryDirectory, timeout: 1000, killSignal: "SIGKILL" }));
     expect(JSON.parse(result.spawn.mock.calls[0]![2].input.toString())).toEqual(result.payload);
@@ -152,6 +152,6 @@ describe("Cloud Computer setup worker admission", () => {
     expect(f.resolvers.resolveCloudRuntime).not.toHaveBeenCalled();
     expect(result.spawn).toHaveBeenCalledExactlyOnceWith("/bin/bash", ["--noprofile", "--norc", "-lc", "pwd; id -u"],
       expect.objectContaining({ cwd: f.repositoryDirectory,
-        env: expect.objectContaining({ USER: "zeros-agent", PATH: `${f.runtime.binRoot}:/usr/bin:/bin` }) }));
+        env: expect.objectContaining({ USER: "zeros-engine", PATH: `${f.runtime.binRoot}:/usr/bin:/bin` }) }));
   });
 });

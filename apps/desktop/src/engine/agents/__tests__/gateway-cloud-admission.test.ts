@@ -41,7 +41,8 @@ describe("cloud gateway admission",()=>{
     undefined, { autoMemoryEnabled: false, idleCompactionEnabled: true }, { autoMemoryEnabled: true, idleCompactionEnabled: false },
   ])("updates a retained Claude process from this command's preferences, including legacy defaults (%j)", async claudePreferences => {
     const boundary = {} as never;
-    const execution = { background: { resume: vi.fn(async () => {}) }, lease: { close: vi.fn(async () => {}) } } as unknown as cloudExecutions.CloudProviderExecution;
+    const lease = { close: vi.fn(async () => {}) };
+    const execution = { mode: "actor-grant-v1", background: { resume: vi.fn(async () => {}) }, lease, lifetime: lease } as unknown as cloudExecutions.CloudLegacyProviderExecution;
     const original = cloudExecutions.cloudProviderExecution;
     const lookup = vi.spyOn(cloudExecutions, "cloudProviderExecution").mockImplementation(value => value === boundary ? execution : original(value));
     const reuse = vi.fn(), updateConfig = vi.fn(async () => {});

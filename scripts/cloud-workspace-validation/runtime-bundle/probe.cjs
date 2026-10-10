@@ -5,8 +5,12 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createRequire } = require("node:module");
 const { execFileSync } = require("node:child_process");
+const { pathToFileURL } = require("node:url");
 
+async function main() {
 const root = process.argv[2];
+const phase = process.argv[3];
+assert(["engine", "cursor"].includes(phase));
 const worker = path.join(root, "worker");
 const node = path.join(root, "bin/node");
 const fromWorker = createRequire(path.join(worker, "package.json"));
@@ -98,10 +102,14 @@ const checks = {
       `codex-cli ${manifest.agents.codex.package}`,
     );
   },
-  cursor_load() {
+  async cursor_load() {
     const sdk = internal(fromWorker.resolve("@cursor/sdk"));
     internal(createRequire(sdk).resolve("@cursor/sdk-linux-x64/package.json"));
     assert(Object.keys(fromWorker("@cursor/sdk")).length > 0);
+    // The parent maps engine10003 before installing read-only proc. No nested
+    // user namespace is created here; its uid_map would be read-only (#410).
+    const helper = await import(pathToFileURL(path.join(root, "lib/zeros/runtime-self-test.mjs")).href);
+    assert.equal(helper.probeCursorPlatformPayload(root), true);
   },
   external_modules() {
     for (const name of [
@@ -112,7 +120,6 @@ const checks = {
       "tinyglobby",
       "@octokit/rest",
       "ssh2",
-      "@anthropic-ai/sandbox-runtime",
     ]) {
       internal(fromWorker.resolve(name));
       fromWorker(name);
@@ -137,20 +144,24 @@ const checks = {
     assert(browser.startsWith(path.join(worker, "design-browsers") + "/"));
     assert(fs.existsSync(path.join(worker, "design-browsers/NOTICE.txt")));
   },
-  supervisor_assets() {
+  host_assets() {
+    const modules = [
+      "host-process-supervisor.mjs",
+      "cloud-host-workload-entry.mjs",
+      "cloud-workload-cgroup.mjs",
+    ].map(name => path.join(worker, "apps/desktop/src/engine/agents/containment", name));
     for (const relative of [
       "bin/cloud-engine-namespace",
-      "bin/cloud-process-supervisor",
-      "worker/binaries/zsr-supervisor.mjs",
-      "worker/binaries/zsr-rg",
+      "worker/binaries/rg",
     ])
       internal(path.join(root, relative));
-    execute(node, [
-      "--check",
-      path.join(worker, "binaries/zsr-supervisor.mjs"),
-    ]);
+    for (const filename of modules) {
+      assert(fs.lstatSync(filename).isFile());
+      internal(filename);
+      execute(node, ["--check", filename]);
+    }
     assert(
-      execute(path.join(worker, "binaries/zsr-rg"), ["--version"]).startsWith(
+      execute(path.join(worker, "binaries/rg"), ["--version"]).startsWith(
         "ripgrep ",
       ),
     );
@@ -161,7 +172,7 @@ const checks = {
     fromWorker(
       path.join(
         worker,
-        "apps/desktop/src/engine/agents/containment/zsr-boundary.ts",
+        "apps/desktop/src/engine/agents/containment/host-boundary.ts",
       ),
     );
     fromWorker(
@@ -192,15 +203,18 @@ const checks = {
 };
 
 const failedChecks = [];
-for (const [name, run] of Object.entries(checks)) {
+const selectedChecks = Object.entries(checks).filter(([name]) =>
+  phase === "cursor" ? name === "cursor_load" : name !== "cursor_load",
+);
+for (const [name, run] of selectedChecks) {
   try {
-    run();
+    await run();
   } catch {
     failedChecks.push(name);
   }
 }
 if (!failedChecks.length)
-  process.stdout.write(JSON.stringify({ checks: Object.keys(checks) }) + "\n");
+  process.stdout.write(JSON.stringify({ checks: selectedChecks.map(([name]) => name) }) + "\n");
 process.stdout.write(
   JSON.stringify({
     schema: "zeros.diagnostic/v1",
@@ -213,3 +227,5 @@ process.stdout.write(
   }) + "\n",
 );
 process.exit(failedChecks.length ? 1 : 0);
+}
+if (require.main === module) main();

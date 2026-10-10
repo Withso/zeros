@@ -35,7 +35,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile --ignore-scripts
-      - uses: ./.github/actions/contained-execution-runtime
+      - uses: ./.github/actions/runtime-closure-tools
       - name: Build and verify the exact-source runtime
         run: bash scripts/ci/with-userns.sh pnpm cloud:runtime-bundle:build --out-dir "$RUNNER_TEMP/cloud-runtime-bundle" --source-commit "$GITHUB_SHA"
       - name: Save runtime bundle outputs

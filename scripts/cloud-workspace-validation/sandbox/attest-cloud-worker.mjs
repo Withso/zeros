@@ -32,8 +32,8 @@ import {
   parseCloudActiveRuntime,
   validateCloudRuntimeMarker,
 } from "./cloud-runtime-root.mjs";
-import { cloudAllocationCapacity } from "./cloud-resource-admission.mjs";
-import { cloudRuntimeProcessSecurityQualified } from "./cloud-runtime-profile.mjs";
+import { cloudAllocationCapacity, cloudResourcesMeetContract, cloudRuntimeResourcesQualified, validCloudResourceBudgetProjection } from "./cloud-resource-admission.mjs";
+import { effectiveCloudResourceLimits } from "./cgroup-resources.mjs";
 
 const MARKER = "/etc/zeros/cloud-worker.json";
 const MAX_OUTPUT = 8 * 1024 * 1024;
@@ -112,7 +112,7 @@ const V4_CHECKS = new Set([
   "manifest_digest", "manifest_schema", "base_compatibility", "root_ownership",
   "file_mode", "file_inventory", "hard_link", "symlink_escape", "boot_identity",
   "namespace_binding", "uid_map", "apparmor", "cgroup_controllers",
-  "finite_resources", "containment_smoke", "seccomp", "setup_exit", "input_schema",
+  "finite_resources", "engine_lifecycle", "containment_smoke", "seccomp", "setup_exit", "input_schema",
   "lock_busy", "launch_proof", "pointer_publish", "timeout", "process_signal", "diagnostic_missing",
 ]);
 const V4_STAGES = new Set([
@@ -314,10 +314,8 @@ function verifyV4Tree(root) {
 }
 
 function verifyV4Helpers(runtime) {
-  const toolchain = { node: runtime.node, bwrap: "/usr/bin/bwrap", setpriv: "/usr/bin/setpriv",
-    supervisor: `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs` };
-  const trusted = Object.fromEntries(Object.entries(toolchain).map(([name, file]) => [name, rootControlled(file, name !== "supervisor")]));
-  requireCloudV4Check(Object.values(trusted).every(Boolean), "root_ownership");
+  const trusted = { node: rootControlled(runtime.node, true) };
+  requireCloudV4Check(trusted.node, "root_ownership");
   const deploymentTrusted = {};
   for (const [name, relative, executable] of [
     ["runtimeProfile", "cloud-runtime-profile.mjs"], ["engineLauncher", "cloud-engine-launcher.mjs"],
@@ -326,9 +324,11 @@ function verifyV4Helpers(runtime) {
     ["resourceAdmission", "cloud-resource-admission.mjs"], ["setupProcess", "cloud-setup-process.mjs"],
     ["admissionConsumer", "consume-cloud-admission.mjs", true], ["previewLinkInstaller", "install-cloud-preview-links.mjs", true],
     ["githubCredentialInstaller", "install-cloud-github-credential.mjs", true], ["githubRefreshRequestHelper", "cloud-github-refresh-request.mjs", true],
-    ["gitAskpass", "cloud-git-askpass.mjs", true], ["workerSupervisor", "cloud-worker-supervisor.mjs", true],
+    ["gitAskpass", "cloud-git-askpass.mjs", true],
     ["setupHelper", "setup-cloud-workspace.mjs", true], ["attester", "attest-cloud-worker.mjs", true],
   ]) deploymentTrusted[name] = rootControlled(`${runtime.libRoot}/${relative}`, executable);
+  deploymentTrusted.hostProcessSupervisor = rootControlled(`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`);
+  requireCloudV4Check(rootControlled(runtime.helpers.supervisor, true), "root_ownership");
   deploymentTrusted.engineNamespace = rootControlled(runtime.engineNamespace, true);
   deploymentTrusted.launcher = rootControlled(runtime.startEngine, true);
   deploymentTrusted.engineQualification = rootControlled(`${runtime.workerRoot}/scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs`);
@@ -343,8 +343,7 @@ function verifyV4Helpers(runtime) {
 
 function runV4Probe(runtime, helper, timeout, check) {
   const result = spawnSync(runtime.node, [helper, "--qualify"], { encoding: "utf8", timeout, maxBuffer: MAX_OUTPUT,
-    env: { PATH: `${runtime.binRoot}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: "/root",
-      ZEROS_ZSR_QUALIFICATION_UID: "10001", ZEROS_ZSR_QUALIFICATION_GID: "10001" } });
+    env: { PATH: `${runtime.binRoot}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: "/root" } });
   requireCloudV4Check(result.error?.code !== "ETIMEDOUT", "timeout");
   requireCloudV4Check(!result.signal, "process_signal");
   requireCloudV4Check(!result.error && result.status === 0, check);
@@ -370,16 +369,55 @@ function v4DelegatedResources(runtime, qualification) {
       ["cpu", "memory", "pids"].every(controller => readOptional(`${root}/${name}`)?.split(/\s+/).includes(controller))), "cgroup_controllers");
   const resources = qualification?.identity?.resources;
   const relative = root.slice("/sys/fs/cgroup".length), leaf = resources?.hierarchy?.[0]?.path;
-  requireCloudV4Check(typeof leaf === "string" && leaf.length === relative.length + 44 && leaf.startsWith(`${relative}/engine-`) &&
-    /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(leaf.slice(relative.length + 8)), "cgroup_controllers");
-  requireCloudV4Check(resources?.finite === true &&
-    [resources.memoryMax, resources.pidsMax].every(value => typeof value === "string" && /^[1-9][0-9]{0,15}$/.test(value) && Number.isSafeInteger(Number(value))) &&
-    typeof resources.cpuMax === "string" && /^[1-9][0-9]{0,15} [1-9][0-9]{0,15}$/.test(resources.cpuMax), "finite_resources");
+  const prefix = `${relative}/engine-runtime/engine-`;
+  requireCloudV4Check(typeof leaf === "string" && leaf.startsWith(prefix) &&
+    /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(leaf.slice(prefix.length)), "cgroup_controllers");
+  requireCloudV4Check(cloudRuntimeResourcesQualified(resources), "finite_resources");
+  const contractPath = "/run/zeros/cloud-resource-contract.json";
+  let contract = null;
+  try { lstatSync(contractPath); contract = parseCloudV4Document(readCloudV4File(contractPath, 4096, "finite_resources", 0o600), "finite_resources"); }
+  catch (error) { if (error?.code !== "ENOENT") throw error; }
+  requireCloudV4Check(contract === null || exactKeys(contract, ["version", "resources"]) && contract.version === 1, "finite_resources");
+  requireCloudV4Check(validCloudResourceBudgetProjection({ version: 1, resources: contract?.resources ?? null,
+    memoryBudget: resources.memoryBudget }), "finite_resources");
+  const hostLimit = `${root}/host/memory.max`;
+  requireCloudV4Check(rootControlled(hostLimit) && readOptional(hostLimit) === resources.memoryBudget.hostMemoryMax, "finite_resources");
+  const meminfo = readOptional("/proc/meminfo");
+  const memoryLines = typeof meminfo === "string" && meminfo.length <= 65536 ? meminfo.split("\n").filter(line => line.startsWith("MemTotal:")) : [];
+  const rawMemory = memoryLines.length === 1 && /^MemTotal:\s+([1-9][0-9]{0,15}) kB$/.exec(memoryLines[0]);
+  const memoryBytes = rawMemory ? BigInt(rawMemory[1]) * 1024n : null;
+  requireCloudV4Check((resources.memoryBudget.measuredMemoryBytes === null || memoryBytes === BigInt(resources.memoryBudget.measuredMemoryBytes)) &&
+    (resources.memoryBudget.source === "fallback" || memoryBytes === null ||
+      BigInt(resources.memoryMax) <= memoryBytes - BigInt(resources.memoryBudget.hostMemoryMax)), "finite_resources");
+  // The root launcher has already retired this exact common tree. Validate the
+  // fixed probe's pre-retirement ancestry rather than statting a removed leaf
+  // or borrowing the unrelated host-service limits.
+  const hierarchy = resources.hierarchy;
+  requireCloudV4Check(Array.isArray(hierarchy) && hierarchy.length > 1 && hierarchy.length <= 128, "cgroup_controllers");
+  let expected = leaf;
+  const controls = new Map();
+  for (const entry of hierarchy) {
+    requireCloudV4Check(exactKeys(entry, ["path", "cpuMax", "memoryMax", "pidsMax"]) && entry.path === expected &&
+      !controls.has(entry.path), "cgroup_controllers");
+    controls.set(entry.path, entry);
+    expected = path.posix.dirname(expected);
+  }
+  requireCloudV4Check(hierarchy.at(-1).path === "/" && controls.has(`${relative}/engine-runtime`) &&
+    /^[1-9][0-9]{0,18}$/.test(controls.get(`${relative}/engine-runtime`).memoryMax ?? "") &&
+    /^[1-9][0-9]{0,18}$/.test(controls.get(`${relative}/engine-runtime`).pidsMax ?? ""), "finite_resources");
+  const observed = attemptV4("finite_resources", () => effectiveCloudResourceLimits(`0::${leaf}\n`, file => {
+    const directory = path.posix.dirname(file).slice("/sys/fs/cgroup".length) || "/";
+    return controls.get(directory)?.[({ "cpu.max": "cpuMax", "memory.max": "memoryMax", "pids.max": "pidsMax" })[path.basename(file)]] ?? null;
+  }));
+  requireCloudV4Check(["finite", "cpuMax", "memoryMax", "pidsMax"].every(name => resources[name] === observed[name]), "finite_resources");
   const storage = statfsSync(cloudComputerHostRepository(runtime), { bigint: true });
   const allocation = cloudAllocationCapacity({ isolated: false, membership: `0::${relative}\n`, read: readOptional,
     architecture: process.arch, availableCPUs: availableParallelism(), storageBytes: Number(storage.blocks * storage.bsize) });
   requireCloudV4Check([allocation.cpuMillicores, allocation.memoryBytes, allocation.storageBytes].every(value => Number.isSafeInteger(value) && value > 0), "finite_resources");
-  return { finite: true, cpuMax: resources.cpuMax, memoryMax: resources.memoryMax, pidsMax: resources.pidsMax, allocation };
+  const result = { finite: resources.finite, cpuMax: resources.cpuMax, memoryMax: resources.memoryMax, pidsMax: resources.pidsMax,
+    allocation, cpuSplit: resources.cpuSplit, memoryBudget: resources.memoryBudget };
+  requireCloudV4Check(contract === null || cloudResourcesMeetContract(contract.resources, result), "finite_resources");
+  return result;
 }
 
 export function validV4Diagnostic(value) {
@@ -422,7 +460,7 @@ function attestV4CloudWorker() {
       if (diagnostic.ok) {
         requireCloudV4Check(lines.length === 2, "diagnostic_missing");
         const report = attemptV4("diagnostic_missing", () => JSON.parse(lines[0]));
-        requireCloudV4Check(report?.version === 1 && report.profile === "zeros-cloud-worker-v4" && report.qualified === true, "diagnostic_missing");
+        requireCloudV4Check(report?.version === 2 && report.boundary === "workspace-vm" && report.profile === "zeros-cloud-worker-v4" && report.qualified === true, "diagnostic_missing");
         process.stdout.write(`${JSON.stringify(report)}\n`);
       }
       process.stdout.write(`${JSON.stringify(diagnostic)}\n`);
@@ -442,26 +480,37 @@ function attestV4CloudWorker() {
     const helpers = verifyV4Helpers(runtime);
     stage = "qualify_engine";
     next(stage);
-    const qualification = runV4Probe(runtime, runtime.helpers.launcher, 180_000, "containment_smoke");
-    requireCloudV4Check(qualification?.identity?.hostUid === 10003 && qualification?.identity?.namespaceUid === 0, "uid_map");
-    requireCloudV4Check(cloudRuntimeProcessSecurityQualified(4, null, qualification?.identity), "seccomp");
-    requireCloudV4Check(qualification?.secure === true && qualification?.identity?.secure === true &&
-      ["workload", "capture", "humanServices", "actorTools"].every(name => qualification[name]?.secure === true), "containment_smoke");
+    const qualification = runV4Probe(runtime, runtime.helpers.launcher, 180_000, "engine_lifecycle");
+    requireCloudV4Check(qualification?.identity?.hostUid === 10003 && qualification?.identity?.namespaceUid === 10003, "uid_map");
+    requireCloudV4Check(qualification?.identity?.qualified === true && qualification.identity.noNewPrivs === 1 &&
+      qualification.identity.seccompMode === 2 && exactKeys(qualification.identity.capabilities, ["effective", "permitted", "inheritable", "bounding", "ambient"]) &&
+      Object.values(qualification.identity.capabilities).every(value => value === 0), "seccomp");
+    requireCloudV4Check(qualification?.version === 2 && qualification.boundary === "workspace-vm" && qualification.qualified === true &&
+      qualification.engineChecksPassed === undefined &&
+      ["sameEngineIdentity", "noSandbox", "ownedProcessGroups", "originalProcessGroupsRetired", "timeoutRetired", "workloadCgroup", "vmWorkloadDrain"].every(name => qualification.execution?.[name] === true) &&
+      ["capture", "humanServices", "actorTools"].every(name => qualification[name]?.sameEngineIdentity === true) &&
+      qualification.capture.chromiumSandbox === true && qualification.humanServices.noSandbox === true && qualification.actorTools.noSandbox === true, "engine_lifecycle");
     const resources = attemptV4("cgroup_controllers", () => v4DelegatedResources(runtime, qualification));
     stage = "run_setup";
     next(stage);
     const setup = runV4Probe(runtime, runtime.helpers.setupProcess, 30_000, "setup_exit");
-    requireCloudV4Check(["secure", "unprivileged", "detachedDescendantsRetired", "timeoutRetired"].every(name => setup?.[name] === true), "setup_exit");
+    requireCloudV4Check(setup?.hostUid === 10003 && setup.hostGid === 10003 &&
+      ["detachedDescendantsRetired", "timeoutRetired"].every(name => setup?.[name] === true), "setup_exit");
     stage = "publish_proof";
     next(stage);
     const current = verifyCloudV4Installation();
     requireCloudV4Check([...CLOUD_V4_IDENTITY_FIELDS, "cgroupRoot"].every(key => current[key] === runtime[key]), "active_descriptor");
     requireCloudV4Check(JSON.stringify(cloudV4LaunchBinding()) === JSON.stringify(binding), "namespace_binding");
     // Project only fixed fields. Probe stdout/stderr may include workload data.
-    const report = { version: 1, profile: "zeros-cloud-worker-v4", qualified: true, runtime: cloudV4Identity(runtime), helpers, resources,
-      qualification: { secure: true, identity: { secure: true, hostUid: 10003, namespaceUid: 0, noNewPrivs: 1, seccompMode: 2 },
-        workload: { secure: true }, capture: { secure: true }, humanServices: { secure: true }, actorTools: { secure: true } },
-      setupQualification: { secure: true, unprivileged: true, detachedDescendantsRetired: true, timeoutRetired: true } };
+    const report = { version: 2, boundary: "workspace-vm", profile: "zeros-cloud-worker-v4", qualified: true,
+      runtime: cloudV4Identity(runtime), helpers, resources,
+      qualification: { identity: { hostUid: 10003, namespaceUid: 10003, noNewPrivs: 1, seccompMode: 2,
+        capabilities: { effective: 0, permitted: 0, inheritable: 0, bounding: 0, ambient: 0 } },
+        execution: { sameEngineIdentity: true, noSandbox: true, ownedProcessGroups: true, originalProcessGroupsRetired: true,
+          timeoutRetired: true, workloadCgroup: true, vmWorkloadDrain: true },
+        capture: { sameEngineIdentity: true, chromiumSandbox: true }, humanServices: { sameEngineIdentity: true, noSandbox: true },
+        actorTools: { sameEngineIdentity: true, noSandbox: true } },
+      setupQualification: { hostUid: 10003, hostGid: 10003, detachedDescendantsRetired: true, timeoutRetired: true } };
     const serialized = `${JSON.stringify(report)}\n`;
     const proof = { version: 2, profile: report.profile, qualifiedAtMs: Date.now(), reportSha256: createHash("sha256").update(serialized).digest("hex"),
       ...report.runtime, ...binding };

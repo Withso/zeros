@@ -214,7 +214,8 @@ export function createRuntimeUpdateConversation(raw: RuntimeUpdateInput, handler
           }
           const report = frame.report;
           const witness = CloudRuntimeWitnessSchema.safeParse(report.runtime);
-          requireValid(report.version === 1 && report.profile === "zeros-cloud-worker-v4" && report.qualified === true &&
+          requireValid((report.version === 1 || report.version === 2 && report.boundary === "workspace-vm") &&
+            report.profile === "zeros-cloud-worker-v4" && report.qualified === true &&
             witness.success && Object.entries(witness.data).every(([key, value]) => active[key as keyof CloudActiveRuntime] === value));
           try { environment = await handlers.enroll({ ...context(), active, report, rollback }); } catch { /* closed denial */ }
           requireValid(environment === null || typeof environment === "object" && !Array.isArray(environment));

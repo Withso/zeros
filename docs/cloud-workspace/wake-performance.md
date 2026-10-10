@@ -24,7 +24,7 @@ Actor intervals include client/bridge work and do not measure paint. The
 historical setup record proves repeated setup intervals, not loss of persistence
 or 130 seconds of guest attestation. Existing journals preserve completed hooks.
 
-No matched after-run, full intent→paint trace or successful live performance
+No matched wake/create after-run, full intent→paint trace or successful live performance
 qualification of this overhaul is available. The VM inspected during the
 read-only audit was archived before per-stage probes could run and remained
 asleep. Configured timers and fake-clock regressions establish code behavior,
@@ -36,6 +36,16 @@ VM probe. Labeling a result before/after does not deploy code. Record runtime/
 base/template, deployment/client versions, region, claim count, failures and
 cleanup evidence. Compare matched configurations and retain failed/time-out
 samples. Overlapping spans must not be summed; one run cannot establish p95.
+
+## Agent Send measurements
+
+The [measured legacy controls](qualification-status.md#measured-legacy-controls)
+record real renderer Send through typed invalid-auth results for all three
+providers, with 0/100 ms injected CP delay. They measure agent dispatch, not
+stopped wake or first output. Different source snapshots and single samples
+cannot establish a speedup or percentile. The negotiated warm path removes
+per-send grant/admit/validate dependencies; its native latency and total/background
+request comparison remain pending integrated evidence.
 
 ### Baseline / after ledger
 

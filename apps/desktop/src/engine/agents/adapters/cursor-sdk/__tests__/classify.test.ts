@@ -9,8 +9,17 @@ import { describe, it, expect } from "vitest";
 
 import { classifyCursorSdkError, resolveCursorModelId } from "../adapter";
 import { AgentFailureError } from "../../../types";
+import { CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
 
 describe("classifyCursorSdkError", () => {
+  it.each(["newSession", "loadSession", "prompt"] as const)("retains typed cloud causes at %s", stage => {
+    const inner = new CloudCommandFailureError({ stage: "containment", category: "canary_failed" });
+    expect(classifyCursorSdkError(inner, stage)).toMatchObject({ code: inner.code, failure: inner.failure });
+    for (const code of ["cloud_agent_credential_required", "cloud_agent_credential_expired", "cloud_agent_credential_revoked"]) {
+      expect(classifyCursorSdkError(Object.assign(new Error("Credential unavailable"), { code }), stage))
+        .toMatchObject({ code, failure: { kind: "cloud-credentials-unavailable", stage } });
+    }
+  });
   it.each([
     [{ code: "rate_limit_exceeded", message: "Request refused. Check your API key settings." }, "rate-limited"],
     [{ code: "unauthenticated", message: "The credential has expired." }, "auth-required"],

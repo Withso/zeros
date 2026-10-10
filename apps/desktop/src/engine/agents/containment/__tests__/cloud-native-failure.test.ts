@@ -1,37 +1,61 @@
-import { describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ attest: vi.fn(), mkdir: vi.fn(), release: vi.fn(), rm: vi.fn() }));
-vi.mock("node:fs/promises", async original => ({ ...await original<typeof import("node:fs/promises")>(),
-  mkdir: mocks.mkdir, writeFile: vi.fn(), chown: vi.fn(), rm: mocks.rm,
-  lstat: async () => ({ isDirectory: () => true, isSymbolicLink: () => false, uid: 0, mode: 0o700 }),
-  realpath: async () => "/run/zeros/coordinators", readlink: async () => "pid:[fixture]",
-}));
-vi.mock("../cloud-worker-config", () => ({ loadCloudWorkerConfiguration: () => ({ version: 4, uid: 10001, gid: 10001,
-  toolchain: { node: "/fixture/runtime/bin/node" } }) }));
-vi.mock("../cloud-coordinator-view.mjs", () => ({ CLOUD_COORDINATOR_HOME: "/home/zeros-agent",
-  cloudCoordinatorEnvironment: () => ({ HOME: "/home/zeros-agent", PATH: "/fixture/runtime/bin" }) }));
-vi.mock("../cloud-coordinator-attestation", () => ({ attestCloudCoordinator: mocks.attest }));
-vi.mock("../cloud-native-history", () => ({ CLOUD_NATIVE_HISTORY_ROOT: "/fixture/history",
-  acquireCloudNativeHistory: async () => ({ mount: { provider: "cursor", directory: "/fixture/history/cursor" }, release: mocks.release }) }));
-vi.mock("../../../git/github-native-broker", () => ({ createNativeGithubBroker: async () => ({ env: {} }) }));
+import { portableCloudWorkloads } from "./helpers/portable-cloud-custody";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CloudAgentLease } from "../../cloud-agent-lease";
+import { CloudExecutionBoundary } from "../cloud-execution-boundary";
 import { CloudNativeBoundary } from "../cloud-native-boundary";
-import type { CloudAgentLease } from "../../cloud-agent-lease";
-import type { PreparedBoundary } from "../types";
 
-describe("closed native containment failures", () => {
-  it.each(["attestation_failed", "canary_failed"] as const)("distinguishes %s and preserves cleanup", async category => {
-    vi.clearAllMocks();
-    mocks.attest.mockReset();
-    const error = new Error("private containment diagnostic");
-    const lease = { admission: { provider: "cursor", model: "test-model" }, assertLive: vi.fn(), attach: vi.fn(),
-      signal: new AbortController().signal, takeMaterial: () => ({ kind: "cursor-api-key", apiKey: "synthetic-key" }),
-      close: vi.fn(async () => {}), launch: async (launch: () => unknown) => launch(), validate: vi.fn() };
-    const workload = { generation: "fixture", status: { backend: "cloud-worker" },
-      attestation: category === "attestation_failed" ? Promise.reject(error) : Promise.resolve(),
-      spawn: vi.fn(async () => ({ stderr: { resume() {} } })) };
-    mocks.attest.mockRejectedValueOnce(error);
-    await expect(CloudNativeBoundary.prepare(lease as unknown as CloudAgentLease, workload as unknown as PreparedBoundary, "conversation"))
-      .rejects.toMatchObject({ code: `cloud_containment_${category}` });
-    if (category === "attestation_failed") expect(mocks.mkdir).not.toHaveBeenCalled();
-    else { expect(workload.spawn).toHaveBeenCalledOnce(); expect(lease.close).toHaveBeenCalledOnce(); }
+const fixture = vi.hoisted(() => ({ root: "", configuration: { version: 4 as const, backend: "cloud-worker" as const,
+  profile: "zeros-cloud-worker-v4" as const, uid: process.geteuid?.() ?? 0, gid: process.getegid?.() ?? 0,
+  toolchain: { node: process.execPath, supervisor: `${process.cwd()}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs` } } }));
+vi.mock("../cloud-worker-config", () => ({ loadCloudWorkerConfiguration: () => fixture.configuration,
+  isCloudWorkerConfiguration: (value: unknown) => value === fixture.configuration }));
+vi.mock("../cloud-runtime-root.mjs", async original => ({ ...await original<typeof import("../cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime: (await import("../../__tests__/helpers/test-cloud-runtime")).testCloudRuntime }));
+vi.mock("../../../db/paths", async original => ({ ...await original<typeof import("../../../db/paths")>(), zerosDataDir: () => fixture.root }));
+const cleanups: Array<() => Promise<void>> = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); fixture.root = ""; });
+
+async function nativeWorkload() {
+  const root = await mkdtemp(path.join(os.tmpdir(), "zeros-native-failure-")); fixture.root = root;
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const registry = portableCloudWorkloads(fixture.configuration); cleanups.push(() => registry.drain(registry.fence()));
+  const admission = { executionId: randomUUID(), delegationId: randomUUID(), provider: "cursor" as const, model: "test-model",
+    source: { kind: "session" as const, actorSessionId: randomUUID() } };
+  const request = vi.fn(async (input: { kind: string }) => input.kind === "release" ? { released: true } : {
+    leaseId: randomUUID(), authorityId: "a".repeat(64), expiresAt: new Date(Date.now() + 45000).toISOString(), credentialVersion: 1,
+    credentialKind: "cursor-api-key", provider: admission.provider, model: admission.model,
+    material: { kind: "cursor-api-key", apiKey: "synthetic-selected-key" },
+    gitAuthor: { name: "Sending member", email: "1234+sender@users.noreply.github.com" } });
+  const lease = await CloudAgentLease.admit(admission, request, new AbortController().signal, { onRetirementFailure: vi.fn() });
+  cleanups.push(() => lease.close());
+  const workload = await new CloudExecutionBoundary({ configuration: fixture.configuration, workloads: registry }).prepare({
+    executionId: admission.executionId, actor: "agent-code", cwd: root, workspaceRoot: root });
+  lease.attach(workload);
+  return { root, registry, lease, workload, takeMaterial: vi.spyOn(lease, "takeMaterial"), spawn: vi.spyOn(workload, "spawn") };
+}
+
+describe("closed native preparation failures", () => {
+  it.each(["cloud_validation_rate_limited", "cloud_validation_lease_expired", "cloud_agent_credential_revoked",
+    "cloud_containment_canary_failed"])("preserves the known authority cause %s without starting the provider", async code => {
+    const f = await nativeWorkload();
+    Object.defineProperty(f.workload, "attestation", { value: Promise.reject(Object.assign(new Error("private preparation diagnostic"), { code })) });
+    await expect(CloudNativeBoundary.prepare(f.lease, f.workload, "conversation"))
+      .rejects.toMatchObject({ code, message: expect.not.stringContaining("private") });
+    expect(f.takeMaterial).not.toHaveBeenCalled(); expect(f.spawn).not.toHaveBeenCalled();
+    await expect(lstat(path.join(f.root, "native-agent-homes"))).rejects.toMatchObject({ code: "ENOENT" });
+    await f.lease.close();
+    expect(f.registry.snapshot().scopes).toEqual([]);
+  });
+  it.each([undefined, "private_unknown_code"])("closes an unknown preparation cause (%s) without exposing it", async code => {
+    const f = await nativeWorkload();
+    Object.defineProperty(f.workload, "attestation", { value: Promise.reject(Object.assign(new Error("private preparation diagnostic"), { code })) });
+    await expect(CloudNativeBoundary.prepare(f.lease, f.workload, "conversation"))
+      .rejects.toMatchObject({ code: "cloud_containment_attestation_failed", message: expect.not.stringContaining("private") });
+    expect(f.takeMaterial).not.toHaveBeenCalled(); expect(f.spawn).not.toHaveBeenCalled();
+    await expect(lstat(path.join(f.root, "native-agent-homes"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

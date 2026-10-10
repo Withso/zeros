@@ -208,7 +208,7 @@ describe("agentIdFromTranscriptPath", () => {
 });
 
 describe("transcript roots follow the HOME the session actually ran with", () => {
-  // Regression: under ZSR the Cursor host runs with the boundary's PROJECTED
+  // Regression: in cloud the Cursor host runs with the conversation's selected
   // HOME, so it writes `.cursor/projects/<slug>/agent-transcripts` there. These
   // lookups defaulted to the engine's own `homedir()`, found nothing, and every
   // subagent card came up empty for contained sessions.

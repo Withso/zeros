@@ -7,11 +7,13 @@ import {z} from "zod";
 import {CloudAgentToolInputSchema,type CloudAgentToolBridge,type CloudAgentToolResult} from "@zeros/protocol/cloud-agent-tools";
 import type {BoundaryProcess,PreparedBoundary} from "./containment/types";
 import type {CloudAgentLease} from "./cloud-agent-lease";
+import {isCloudBootNativeAuthority,type CloudBootNativeAuthority,type CloudAgentExecutionLifetime} from "./cloud-provider-execution";
 import {CloudLanguageService} from "./cloud-language-service";
 import {parseLanguageDocument} from "./cloud-language-document";
 import {LspError} from "./lsp-rpc";
 import {cloudGitAuthorEnvironment} from "../git/cloud-git-author";
 import {cloudComputerProcessEnvironment} from "./cloud-computer-environment";
+import { isCloudNativeHome, type CloudNativeHome } from "./containment/cloud-native-home";
 
 const MAX_OUTPUT=1024*1024,MAX_JOBS=8,MAX_CALLS=4;
 
@@ -20,8 +22,8 @@ type Job={process:BoundaryProcess;chunks:Buffer[];start:number;end:number;exit:{
 type ToolError=Extract<CloudAgentToolResult,{ok:false}>["error"];
 function unavailable(code:ToolError="unavailable"){return Object.assign(new Error("Cloud workload operation failed"),{toolCode:code});}
 
-/** Model tools execute only under the credential-free workload UID. The
- * execution owns every pending spawn, process, bounded output buffer and lease. */
+/** Model tools share the engine identity and the provider's physical HOME.
+ * The product tool environment contains only its admitted actor values. */
 export class CloudWorkloadTools implements CloudAgentToolBridge {
   readonly inputSchema=z.toJSONSchema(CloudAgentToolInputSchema) as Record<string,unknown>;
   private readonly jobs=new Map<string,Job>();
@@ -33,18 +35,30 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
   private closing:Promise<void>|null=null;
   private languageService:CloudLanguageService|null=null;
   private readonly env:Record<string,string>;
+  private readonly lifetime:CloudAgentExecutionLifetime;
+  private readonly legacyLease:CloudAgentLease|null;
   private readonly runtime=resolveCloudRuntime();
-  constructor(readonly lease:CloudAgentLease,private readonly boundary:PreparedBoundary,private readonly cwd:string){
-    if(!path.isAbsolute(cwd)||path.resolve(cwd)!==cwd||!(cwd==="/srv/zeros/workspace"||cwd.startsWith("/srv/zeros/workspace/")))
+  constructor(authority:CloudAgentLease|CloudBootNativeAuthority,private readonly boundary:PreparedBoundary,private readonly cwd:string,nativeHome:CloudNativeHome){
+    // The engine resolves and admits this managed root before constructing the
+    // bridge. Workspace authorization belongs to that admission and boundary;
+    // secondary managed worktrees need not live below the primary checkout.
+    if(!path.isAbsolute(cwd)||path.resolve(cwd)!==cwd||cwd.includes("\0"))
       throw new Error("Cloud workload root is invalid");
-    this.env=cloudComputerProcessEnvironment({HOME:"/srv/zeros/home/agent",PATH:`${this.runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,LANG:"C.UTF-8",
-      USER:"zeros-agent",LOGNAME:"zeros-agent",SHELL:"/bin/bash",TMPDIR:"/tmp",ZEROS_WORKTREE_PATH:cwd,
-      ...cloudGitAuthorEnvironment(lease.gitAuthor??null)},lease.environment?.values,"agent");
-    lease.attach(this);lease.attach(boundary);
+    if (!isCloudNativeHome(nativeHome)) throw new Error("Cloud tools require the original physical native HOME");
+    const boot=isCloudBootNativeAuthority(authority);
+    if((!boot&&("mode" in authority)&&authority.mode==="boot-owner-v1")||(boot&&authority.cwd!==cwd))
+      throw new Error("Cloud workload authority is invalid");
+    this.legacyLease=boot?null:authority;
+    this.lifetime=boot?authority.lifetime:authority;
+    this.lifetime.assertLive();
+    this.env=cloudComputerProcessEnvironment({...nativeHome.environment(),PATH:`${this.runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,LANG:"C.UTF-8",
+      SHELL:"/bin/bash",ZEROS_WORKTREE_PATH:cwd,
+      ...cloudGitAuthorEnvironment(authority.gitAuthor??null)},authority.environment?.values,"agent");
+    this.lifetime.attach(this);this.lifetime.attach(boundary);
   }
-  private assertLive(){if(this.retired)throw unavailable();this.lease.assertLive();}
+  private assertLive(){if(this.retired)throw unavailable();this.lifetime.assertLive();}
   private async bounded<T>(operation:Promise<T>,timeoutMs:number,signal?:AbortSignal):Promise<T>{
-    const signals=[this.lease.signal,...(signal?[signal]:[])];let timer:ReturnType<typeof setTimeout>|undefined;
+    const signals=[this.lifetime.signal,...(signal?[signal]:[])];let timer:ReturnType<typeof setTimeout>|undefined;
     let abort=()=>{};
     try{return await Promise.race([operation,new Promise<never>((_,reject)=>{
       abort=()=>reject(unavailable());for(const source of signals)source.addEventListener("abort",abort,{once:true});
@@ -52,8 +66,8 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
       if(signals.some(source=>source.aborted))abort();
     })]);}finally{if(timer)clearTimeout(timer);for(const source of signals)source.removeEventListener("abort",abort);}
   }
-  private async retire(process:BoundaryProcess){await this.lease.retire(process);this.active.delete(process);}
-  private stopSoon(process:BoundaryProcess){void this.retire(process).catch(()=>this.lease.close().catch(()=>{}));}
+  private async retire(process:BoundaryProcess){await this.lifetime.retire(process);this.active.delete(process);}
+  private stopSoon(process:BoundaryProcess){void this.retire(process).catch(()=>this.lifetime.close().catch(()=>{}));}
   async call(raw:unknown,signal?:AbortSignal):Promise<CloudAgentToolResult>{
     const parsed=CloudAgentToolInputSchema.safeParse(raw);
     if(!parsed.success)return {ok:false,error:"invalid_input"};
@@ -61,7 +75,8 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
     this.calls++;
     try{
       this.assertLive();if(signal?.aborted)throw unavailable();
-      await this.bounded(this.lease.validate(),5000,signal);this.assertLive();if(signal?.aborted)throw unavailable();
+      if(this.legacyLease)await this.bounded(this.legacyLease.validate(),5000,signal);
+      this.assertLive();if(signal?.aborted)throw unavailable();
       const input=parsed.data;
       if(input.operation==="lsp"){
         this.languageService??=new CloudLanguageService({root:this.cwd,assertLive:()=>this.assertLive(),
@@ -69,7 +84,7 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
           settleLaunchFailure:async()=>{await Promise.allSettled([...this.launches]);await this.boundary.stopAndProve();},
           readDocument:async(file,signal)=>{const result=await this.collect(this.runtime.node,[`${this.runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-file-tool.mjs`],JSON.stringify({operation:"read",path:file,offset:0,length:65536}),signal);
             if(result.code!==0||result.truncated)throw unavailable();return parseLanguageDocument(result.output);},
-          failed:()=>{void this.lease.close().catch(()=>{});}});
+          failed:()=>{void this.lifetime.close().catch(()=>{});}});
         const data=await this.languageService.request(input.request,signal);this.assertLive();return {ok:true,data};
       }
       if(input.operation==="exec"){
@@ -115,7 +130,7 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
     this.assertLive();if(signal?.aborted)throw unavailable();let cancelled=false;
     const env=args.some(arg=>arg.endsWith("/typescript-language-server/lib/cli.mjs")||arg.endsWith("/pyright/langserver.index.js"))
       ?{...this.env,NODE_OPTIONS:"--max-old-space-size=256"}:this.env;
-    const pending=this.lease.launch(()=>this.boundary.spawn({command,args,cwd:this.cwd,env,stdio:"pipe"})).then(async process=>{
+    const pending=this.lifetime.launch(()=>this.boundary.spawn({command,args,cwd:this.cwd,env,stdio:"pipe"})).then(async process=>{
       this.active.add(process);process.stdin?.on("error",()=>{});
       try{this.assertLive();if(cancelled||signal?.aborted)throw unavailable();return process;}catch(error){await this.retire(process);throw error;}
     });
@@ -127,7 +142,7 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
       // An uncertain spawn cannot be forgotten or keep renewing credentials.
       // The lease retains its launch reservation until the late child is reaped;
       // its independent retirement ladder quarantines a permanently hung spawn.
-      void this.lease.close().catch(()=>{});throw error;
+      void this.lifetime.close().catch(()=>{});throw error;
     }
   }
   private drainOutput(process:BoundaryProcess){return this.bounded(Promise.all([process.stdout,process.stderr]
@@ -145,7 +160,7 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
       clearTimeout(job.timer);await this.retire(process);await this.drainOutput(process);
       job.exit={code:exit.code,signal:exit.signal};job.touched=Date.now();
     });
-    void job.done.catch(()=>this.lease.close().catch(()=>{}));return job;
+    void job.done.catch(()=>this.lifetime.close().catch(()=>{}));return job;
   }
   private snapshot(job:Job,cursor:number){
     const start=Math.max(job.start,Math.min(cursor,job.end));

@@ -29,6 +29,7 @@ const searchQuery = z.object({
   cursor: z.string().min(1).max(1024).optional(),
   revision: z.coerce.number().int().safe().nonnegative().optional(),
 }).strict();
+const commandsQuery = z.object({ conversationId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/) }).strict();
 function parse<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
   const result = schema.safeParse(value);
   if (!result.success)
@@ -70,5 +71,15 @@ export function createCloudWorkspaceHistoryRoutes(pool: pg.Pool): Hono {
       }),
     ),
   );
+  app.get(`${base}/commands`, async c => c.json(await service.commands({
+    workspaceId: parse(z.string().uuid(), c.req.param("workspace")),
+    organizationId: parse(z.string().uuid(), c.req.param("organization")), accountUserId: c.get("user").id,
+    ...parse(commandsQuery, c.req.query()),
+  })));
+  app.get(`${base}/commands/:command`, async c => c.json(await service.receipt({
+    workspaceId: parse(z.string().uuid(), c.req.param("workspace")),
+    organizationId: parse(z.string().uuid(), c.req.param("organization")), accountUserId: c.get("user").id,
+    commandId: parse(z.string().uuid(), c.req.param("command")),
+  })));
   return app;
 }

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { CloudProviderError } from "./provider.js";
-import { classifyCloudFailure, parseSetupDiagnostic, cloudStopReason, publicCloudIncident } from "./cloud-diagnostics.js";
+import { classifyCloudFailure, parseSetupDiagnostic, setupDiagnosticSchema, cloudStopReason, publicCloudIncident } from "./cloud-diagnostics.js";
+import { CLOUD_ENGINE_STARTUP_PHASES, CLOUD_ENGINE_STARTUP_NAMES, CLOUD_ENGINE_STARTUP_CODES, CLOUD_ENGINE_STARTUP_ERRNOS,
+  parseCloudEngineStartupFailure } from "../../../desktop/src/engine/agents/containment/cloud-engine-startup-failure.mjs";
 describe("bounded cloud diagnostics", () => {
   it("retains typed causes without messages, stacks, nested bodies or arbitrary codes", () => {
     const canary = "credential-canary-do-not-retain";
@@ -16,6 +18,32 @@ describe("bounded cloud diagnostics", () => {
     expect(parseSetupDiagnostic(valid)).toEqual(valid);
     for (const value of [{ ...valid, message: "secret" }, { ...valid, checks: { source: { value: true } } }, { ...valid, phase: "arbitrary" }, { ...valid, checks: { source: "x".repeat(5000) } }])
       expect(parseSetupDiagnostic(value)).toBeNull();
+  });
+  it("retains a closed engine startup cause in an additive setup readiness diagnostic", () => {
+    const valid = { version: 1, phase: "engine_readiness", engineStartup: {
+      phase: "history_restore", name: "Error", code: "ENOENT", errno: -2,
+    } };
+    expect(parseSetupDiagnostic(valid)).toEqual(valid);
+    for (const field of ["message", "stack", "path", "body", "cause", "engineInstanceId"])
+      expect(parseSetupDiagnostic({ ...valid, engineStartup: { ...valid.engineStartup, [field]: "credential-canary" } })).toBeNull();
+    for (const patch of [{ phase: "credential-canary" }, { name: "credential-canary" }, { code: "credential-canary" },
+      { errno: "credential-canary" }, { errno: 123456789 }, { errno: -2.5 }])
+      expect(parseSetupDiagnostic({ ...valid, engineStartup: { ...valid.engineStartup, ...patch } })).toBeNull();
+  });
+  it("accepts exactly the producer's closed startup vocabulary", () => {
+    const schema = setupDiagnosticSchema.shape.engineStartup.unwrap().shape;
+    expect(schema.phase.options).toEqual(CLOUD_ENGINE_STARTUP_PHASES);
+    expect(schema.name.options).toEqual(CLOUD_ENGINE_STARTUP_NAMES);
+    expect(schema.code.options).toEqual(CLOUD_ENGINE_STARTUP_CODES);
+    const failure = { phase: "startup", name: "unknown", code: "unknown", errno: null };
+    for (const [key, values] of [["phase", CLOUD_ENGINE_STARTUP_PHASES], ["name", CLOUD_ENGINE_STARTUP_NAMES],
+      ["code", CLOUD_ENGINE_STARTUP_CODES], ["errno", CLOUD_ENGINE_STARTUP_ERRNOS]] as const)
+      for (const value of values) {
+        const engineStartup = { ...failure, [key]: value };
+        expect(parseCloudEngineStartupFailure(engineStartup)).toEqual(engineStartup);
+        const diagnostic = { version: 1, phase: "engine_readiness", engineStartup };
+        expect(parseSetupDiagnostic(diagnostic)).toEqual(diagnostic);
+      }
   });
   it("distinguishes stable stop reasons", () => {
     expect(cloudStopReason("compute_credit_exhausted").code).toBe("budget_stop");

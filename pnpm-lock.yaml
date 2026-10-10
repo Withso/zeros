@@ -19,15 +19,9 @@ overrides:
   source-map-js: 1.2.2
 
 patchedDependencies:
-  '@anthropic-ai/sandbox-runtime@0.0.78':
-    hash: 3b39075f257357cad24c1add8f3eeb11e7b59666db9e8fbaa66b49cc709b2171
-    path: patches/@anthropic-ai__sandbox-runtime@0.0.78.patch
   app-builder-lib@26.8.1:
     hash: c51a788676a8229e1a823c54da53c14efc2450c327f323e0d724c5ba0d2daedd
     path: patches/app-builder-lib@26.8.1.patch
-  node-forge@1.4.0:
-    hash: b6876574a5de19521a766856b293aeae2689848c5d8dab03f93040be0a64b8b4
-    path: patches/node-forge@1.4.0.patch
   ssh2@1.17.0:
     hash: 2ae4ac4c3b9994064837881002959c1bc78b371845aadff5fe1816af60e7c089
     path: patches/ssh2@1.17.0.patch
@@ -39,9 +33,6 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: 0.3.293
         version: 0.3.293(@anthropic-ai/sdk@0.100.1(zod@4.3.6))(@modelcontextprotocol/sdk@1.31.0(zod@4.3.6))(zod@4.3.6)
-      '@anthropic-ai/sandbox-runtime':
-        specifier: 0.0.78
-        version: 0.0.78(patch_hash=3b39075f257357cad24c1add8f3eeb11e7b59666db9e8fbaa66b49cc709b2171)
       '@codemirror/autocomplete':
         specifier: ^6.20.3
         version: 6.20.3
@@ -549,11 +540,6 @@ packages:
       '@anthropic-ai/sdk': '>=0.93.0'
       '@modelcontextprotocol/sdk': ^1.29.0
       zod: ^4.0.0
-
-  '@anthropic-ai/sandbox-runtime@0.0.78':
-    resolution: {integrity: sha512-YAIcybXTp7MZkBjasnkR1E3yxnf7u6kUkyW0vZrtsAZ9tyJGMaugWETmquPZs0YvW0sR0VnZeMfS0gsN/wQiVQ==}
-    engines: {node: '>=20.11.0'}
-    hasBin: true
 
   '@anthropic-ai/sdk@0.100.1':
     resolution: {integrity: sha512-RANcEe7LpiLczkKGOwoXOTuFdPhuubS0i4xaAKOMpcqc55YO0mukgxppV7eygx3DXNjxWT6RYOLPyOy0aIAmwg==}
@@ -1745,9 +1731,6 @@ packages:
     resolution: {integrity: sha512-PG6q63nQg5c9rIi4/Z5lR5IVF7yU5MqmKaPOe0HSc0O2cX1fPi96sUQu5j7eo4gKCkB2AnNGoWt7y4/Xx3Kcqg==}
     engines: {node: '>=18'}
     hasBin: true
-
-  '@pondwader/socks5-server@1.0.10':
-    resolution: {integrity: sha512-bQY06wzzR8D2+vVCUoBsr5QS2U6UgPUQRmErNwtsuI6vLcyRKkafjkr3KxbtGFf9aBBIV2mcvlsKD1UYaIV+sg==}
 
   '@posthog/core@1.30.5':
     resolution: {integrity: sha512-NGBRhqyMOpiSKd8xtg8dckUxh+kB02LdtnxKYW7ngycJmgM4GBGzSDaATbMQDKaNS9m2FJ9QRZ8nJyelGCoqNQ==}
@@ -3771,10 +3754,6 @@ packages:
   comma-separated-tokens@2.0.3:
     resolution: {integrity: sha512-Fu4hJdvzeylCfQPp9SGWidpzrMs7tTrlu6Vb8XGaRGck8QSNZJJp538Wrb60Lax4fPwR64ViY468OIUTbRlGZg==}
 
-  commander@12.1.0:
-    resolution: {integrity: sha512-Vw8qHK3bZM9y/P10u3Vib8o/DdkvA2OtPtZvD871QKjy74Wj1WSKFILMPRPSdUSx5RFK1arlJzEtA4PkFgnbuA==}
-    engines: {node: '>=18'}
-
   commander@4.1.1:
     resolution: {integrity: sha512-NOKm8xhkzAjzFx8B2v5OAHT+u5pRQc2UCa2Vq9jYL/31o2wi9mxBA7LIFs3sV5VSC49z6pEhfbMULvShKj26WA==}
     engines: {node: '>= 6'}
@@ -5201,10 +5180,6 @@ packages:
   node-api-version@0.2.1:
     resolution: {integrity: sha512-2xP/IGGMmmSQpI1+O/k72jF/ykvZ89JeuKX3TLJAYPDVLUalrshrLHkeVcCCZqG/eEa635cr8IBYzgnDvM2O8Q==}
 
-  node-forge@1.4.0:
-    resolution: {integrity: sha512-LarFH0+6VfriEhqMMcLX2F7SwSXeWwnEAJEsYm5QKWchiVYVvJyV9v7UDvUv+w5HO23ZpQTXDv/GxdDdMyOuoQ==}
-    engines: {node: '>= 6.13.0'}
-
   node-gyp@12.3.0:
     resolution: {integrity: sha512-QNcUWM+HgJplcPzBvFBZ9VXacyGZ4+VTOb80PwWR+TlVzoHbRKULNEzpRsnaoxG3Wzr7Qh7BYxGDU3CbKib2Yg==}
     engines: {node: ^20.17.0 || >=22.9.0}
@@ -6563,13 +6538,6 @@ snapshots:
       '@anthropic-ai/claude-agent-sdk-win32-arm64': 0.3.293
       '@anthropic-ai/claude-agent-sdk-win32-x64': 0.3.293
 
-  '@anthropic-ai/sandbox-runtime@0.0.78(patch_hash=3b39075f257357cad24c1add8f3eeb11e7b59666db9e8fbaa66b49cc709b2171)':
-    dependencies:
-      '@pondwader/socks5-server': 1.0.10
-      commander: 12.1.0
-      node-forge: 1.4.0(patch_hash=b6876574a5de19521a766856b293aeae2689848c5d8dab03f93040be0a64b8b4)
-      zod: 3.25.76
-
   '@anthropic-ai/sdk@0.100.1(zod@4.3.6)':
     dependencies:
       json-schema-to-ts: 3.1.1
@@ -7777,8 +7745,6 @@ snapshots:
   '@playwright/test@1.59.1':
     dependencies:
       playwright: 1.59.1
-
-  '@pondwader/socks5-server@1.0.10': {}
 
   '@posthog/core@1.30.5':
     dependencies:
@@ -9852,8 +9818,6 @@ snapshots:
 
   comma-separated-tokens@2.0.3: {}
 
-  commander@12.1.0: {}
-
   commander@4.1.1: {}
 
   commander@5.1.0: {}
@@ -11574,8 +11538,6 @@ snapshots:
   node-api-version@0.2.1:
     dependencies:
       semver: 7.7.4
-
-  node-forge@1.4.0(patch_hash=b6876574a5de19521a766856b293aeae2689848c5d8dab03f93040be0a64b8b4): {}
 
   node-gyp@12.3.0:
     dependencies:

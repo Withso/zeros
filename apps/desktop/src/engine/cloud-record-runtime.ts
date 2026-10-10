@@ -19,6 +19,7 @@ import { headRev, recordTombstone, tombstonesSince } from "./db/sync";
 import { reinsertTurns, type TurnDbRow } from "./db/turns";
 import type { CloudDurabilityAuthority } from "./cloud-durability-runtime";
 import { z } from "zod";
+import { isCloudLocalCommandQueue, type CloudLocalCommandQueue } from "./cloud-local-command-queue";
 import { getWorkspaceById, updateWorkspace } from "./git/state";
 import {
   captureCloudCodeReviewRecords, isCloudCodeReviewThreadEntity,
@@ -211,10 +212,14 @@ function parseEntry(value: unknown): RecordEntry {
 }
 
 export class CloudWorkspaceRecordRuntime {
+  get usesLocalAgentJournal(): boolean { return this.agentJournalMode === "local"; }
   private readonly requestFetch: typeof fetch;
   private readonly now: () => number;
   private active: Promise<void> | null = null;
   private remoteCache: { scope: string; projection: RemoteProjection } | null = null;
+  private agentJournalMode: "legacy" | "local" = "legacy";
+  private journalScope: string | null = null;
+  private lastAuthority: CloudDurabilityAuthority | null = null;
 
   constructor(
     private readonly repositoryRoot: string,
@@ -232,9 +237,17 @@ export class CloudWorkspaceRecordRuntime {
    * checkpoint syncs must preserve live running rows. */
   synchronize(
     authority: CloudDurabilityAuthority,
-    options: { settleImportedRunningTurns?: boolean } = {},
+    options: { settleImportedRunningTurns?: boolean; agentJournalMode?: "local" | "legacy" } = {},
   ): Promise<void> {
-    if (this.active) return this.active;
+    const mode = options.agentJournalMode ?? this.agentJournalMode;
+    const scope = this.projectionScope(authority);
+    if (this.agentJournalMode === "local" && (mode !== "local" || this.journalScope !== scope))
+      return Promise.reject(new Error("cloud record journal mode changed"));
+    if (this.active) return mode === this.agentJournalMode ? this.active
+      : this.active.then(() => this.synchronize(authority, options));
+    this.agentJournalMode = mode;
+    if (mode === "local") this.journalScope = scope;
+    this.lastAuthority = authority;
     const settleImportedRunningAt = options.settleImportedRunningTurns
       ? this.now()
       : null;
@@ -251,6 +264,18 @@ export class CloudWorkspaceRecordRuntime {
   async flush(authority: CloudDurabilityAuthority): Promise<void> {
     while (this.active) await this.active;
     await this.synchronize(authority);
+  }
+
+  /** Only the original activated FULL queue can cut over an engine that
+   * enrolled through legacy history. Never share an in-flight projection
+   * across that authority boundary or allow a later legacy downgrade. */
+  async installLocalQueue(queue: CloudLocalCommandQueue): Promise<void> {
+    if (!isCloudLocalCommandQueue(queue) || !this.lastAuthority ||
+        ["organizationId", "workspaceId", "generation", "engineInstanceId"].some(key =>
+          queue.scope[key as keyof typeof queue.scope] !== this.lastAuthority![key as keyof CloudDurabilityAuthority]))
+      throw new Error("cloud record local writer authority changed");
+    while (this.active) await this.active;
+    this.agentJournalMode = "local"; this.journalScope = this.projectionScope(this.lastAuthority);
   }
 
   private endpoint(authority: CloudDurabilityAuthority, pathname: string): URL {
@@ -380,6 +405,7 @@ export class CloudWorkspaceRecordRuntime {
         prNumber: primary.prNumber, prState: primary.prState, prUrl: primary.prUrl, createdAt: primary.createdAt });
       entities.set(entityKey("metadata", PRIMARY_METADATA_ID), { entityKind: "metadata", entityId: PRIMARY_METADATA_ID, schemaVersion: 1, document });
     }
+    if (this.agentJournalMode === "legacy") {
     const chats: Array<{ chat: ChatRow; folder: string }> = listChats()
       .map((chat) => ({ chat, folder: workspaceRelative(this.repositoryRoot, chat.folder) }))
       .filter((entry): entry is { chat: ChatRow; folder: string } =>
@@ -456,6 +482,7 @@ export class CloudWorkspaceRecordRuntime {
           row: { ...row, workspace_id: null, folder },
         },
       });
+    }
     }
     for (const review of captureCloudCodeReviewRecords(this.repositoryRoot, authority, remote)) {
       entities.set(entityKey(review.entityKind, review.entityId), review);
@@ -933,24 +960,29 @@ export class CloudWorkspaceRecordRuntime {
     }
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const remote = await this.remoteProjection(authority);
+      // The old journal remains immutable compatibility history. Current
+      // restore/publication authority in local mode lives in the FULL ledger
+      // and its canonical mirror, never these chat/message/turn rows.
+      const managedRemote = this.agentJournalMode === "local" ? new Map([...remote.entries].filter(([, entry]) =>
+        !["chat", "message", "turn", "agent_session"].includes(entry.entityKind))) : remote.entries;
       const state = this.readState(authority.workspaceId);
-      const localBefore = this.localProjection(authority, remote.entries);
-      if (remote.entries.size > 0) {
+      const localBefore = this.localProjection(authority, managedRemote);
+      if (managedRemote.size > 0) {
         const clean =
           localBefore.size === 0 ||
           (state !== null &&
             this.manifest(localBefore) === state.manifestSha256);
         this.restoreRemote(
           authority,
-          remote.entries,
+          managedRemote,
           clean ? "replace" : "missing",
           settleImportedRunningAt,
           state,
         );
       }
-      const local = this.localProjection(authority, remote.entries);
+      const local = this.localProjection(authority, managedRemote);
       const capturedHead = headRev();
-      const pending = this.mutations(local, remote.entries);
+      const pending = this.mutations(local, managedRemote);
       let revision = remote.currentRevision;
       const acknowledged = new Map(remote.entries);
       let exact = true;

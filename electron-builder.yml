@@ -93,24 +93,9 @@ extraResources:
   # be recovered before the next engine publishes local process authority.
   - from: apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs
     to: host-process-supervisor.mjs
-  # Per-session Zeros Sandbox Runtime supervisor. Built by beforePack as one
-  # Node-compatible ESM file so the Bun-compiled engine never relies on an
-  # app.asar/node_modules lookup at the security boundary.
-  - from: binaries/zsr-supervisor.mjs
-    to: zsr-supervisor.mjs
-  # SRT requires ripgrep while it constructs the sandbox. Stage the exact
-  # optional-dependency binary rather than assuming Homebrew/system PATH.
-  - from: binaries/zsr-rg
-    to: zsr-rg
-  # Native Darwin lifecycle proof for descendants that call setsid(2) and
-  # double-fork out of the supervisor's POSIX process group. Built from the
-  # reviewed C source by the same beforePack hook; signed with the app bundle.
-  - from: binaries/zsr-macos-process-domain
-    to: zsr-macos-process-domain
-  # The compiled narrow Git integration dispatcher installed as
-  # `<toolsRoot>/git` inside a boundary.
-  - from: binaries/zsr-git-dispatch
-    to: zsr-git-dispatch
+  # Product-owned pinned ripgrep for Cursor; independent of execution posture.
+  - from: binaries/rg
+    to: rg
   # The Claude Code CLI — the runtime `query()` actually spawns.
   #
   # @anthropic-ai/claude-agent-sdk ships NO cli.js: the executable lives in a

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { cloudAccountRequest } from "../../platform/cloud-workspaces";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { clearReleaseCanaryDesignations } from "./release-canary-designation";
+import { cloudCredentialRemovalTargetSchema } from "./cloud-credential-removal";
 
 const credential = z.object({
   id: z.string().uuid(),
@@ -12,6 +13,14 @@ const credential = z.object({
   connectionMethod: z.enum(["api", "account"]).optional(),
 });
 export type CloudProviderCredential = z.infer<typeof credential>;
+export function cloudOrganizationCredentialRemovalTarget(organizationId: string, credential: Pick<CloudProviderCredential, "id" | "revision">) {
+  return cloudCredentialRemovalTargetSchema.parse({ kind: "remove-organization-credential", organizationId,
+    credentialId: credential.id, expectedCredentialRevision: credential.revision });
+}
+export function cloudProviderDisconnectTarget(organizationId: string, provider: string, connection: { revision: number }) {
+  return cloudCredentialRemovalTargetSchema.parse({ kind: "disconnect-provider", organizationId, provider,
+    expectedConnectionRevision: connection.revision });
+}
 type CloudProviderAccess = {
   compute: { fingerprint: string; trust: "zeros-managed" | "compute-administrator" };
   delegations: { id: string; kind: string; ownerUserId: string; models: string[]; allModels?: boolean; expiresAt: string }[];

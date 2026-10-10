@@ -10,10 +10,10 @@ import {
 } from "../check-audit.mjs";
 
 describe("root production audit retries", () => {
-  it("checks the installed backport before allowing the metadata-only exception", async () => {
+  it("checks the actual audit graph before querying the production registry", async () => {
     const order: string[] = [];
     const verifyPatch = vi.fn(() => {
-      order.push("patch");
+      order.push("graph");
     });
     const execute = vi.fn(async () => {
       order.push("audit");
@@ -23,7 +23,7 @@ describe("root production audit retries", () => {
       exitCode: 0,
       output: "found 0 vulnerabilities",
     });
-    expect(order).toEqual(["patch", "audit"]);
+    expect(order).toEqual(["graph", "audit"]);
     expect(verifyPatch).toHaveBeenCalledTimes(1);
   });
 

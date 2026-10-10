@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -17,7 +17,8 @@ import net from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { CloudEngineCgroup, CloudDelegatedCgroups } from "./cloud-engine-cgroup.mjs";
 import { cloudActiveRuntimeDescriptor, parseCloudActiveRuntime, resolveCloudRuntime } from "./cloud-runtime-root.mjs";
-import { readCloudHostRuntimeProfile } from "./cloud-runtime-profile.mjs";
+import { ensureCloudHostRuntimeDirectory, readCloudHostRuntimeProfile } from "./cloud-runtime-profile.mjs";
+import { readCloudRootControllerRecord, readCloudRootProcessBirth } from "./publish-cloud-workload-custody.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -35,6 +36,88 @@ const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SETUP_TOKEN_PATTERN = /^zws_[A-Za-z0-9_-]{43}$/;
 const READINESS_TOKEN_PATTERN = /^zwr_[A-Za-z0-9_-]{43}$/;
+const FINAL_REASONS = new Set(["before_stop", "before_archive", "before_delete", "before_rebuild"]);
+const HASH_PATTERN = /^[a-f0-9]{64}$/;
+const isUuid = value => typeof value === "string" && UUID_PATTERN.test(value);
+const nonnegative = value => Number.isSafeInteger(value) && value >= 0;
+
+function immutable(value) {
+  const copy = globalThis.structuredClone(value);
+  const freeze = item => {
+    if (item && typeof item === "object") {
+      for (const child of Object.values(item)) freeze(child);
+      Object.freeze(item);
+    }
+    return item;
+  };
+  return freeze(copy);
+}
+
+/** The matched engine response is evidence only for the original root-owned
+ * scope and this fresh read. Neither process exit nor an upload is a commit. */
+export function parseCloudEngineFinalCompletion(value, { challenge, scope }) {
+  if (!isUuid(challenge) || !isRecord(value) ||
+      !exactKeys(value, ["version", "challenge", "phase", "scope", "mode", "checkpoint", "seal"]) ||
+      value.version !== 1 || value.challenge !== challenge || value.phase !== "committed" ||
+      !["legacy", "boot-owner-v1"].includes(value.mode) || !isRecord(value.scope) ||
+      !exactKeys(value.scope, ["organizationId", "workspaceId", "generation", "engineInstanceId"]) ||
+      !["organizationId", "workspaceId", "engineInstanceId"].every(key => isUuid(value.scope[key])) ||
+      !positiveInteger(value.scope.generation) ||
+      Object.keys(value.scope).some(key => value.scope[key] !== scope?.[key])) return null;
+  const checkpoint = value.checkpoint;
+  if (!isRecord(checkpoint) || !exactKeys(checkpoint, ["requestId", "checkpointId", "contentRevision", "manifestSha256", "reason"]) ||
+      !isUuid(checkpoint.requestId) || !isUuid(checkpoint.checkpointId) || !nonnegative(checkpoint.contentRevision) ||
+      typeof checkpoint.manifestSha256 !== "string" || !HASH_PATTERN.test(checkpoint.manifestSha256) ||
+      !FINAL_REASONS.has(checkpoint.reason)) return null;
+  if (value.mode === "legacy") {
+    if (value.seal !== null) return null;
+  } else {
+    const seal = value.seal;
+    if (!isRecord(seal) || !exactKeys(seal, ["writerEpoch", "sealId", "sha256", "inventorySha256", "sequence", "recordSequence", "eventSequence"]) ||
+        !isUuid(seal.writerEpoch) || !isUuid(seal.sealId) ||
+        !["sha256", "inventorySha256"].every(key => typeof seal[key] === "string" && HASH_PATTERN.test(seal[key])) ||
+        !["sequence", "recordSequence", "eventSequence"].every(key => nonnegative(seal[key]))) return null;
+  }
+  return immutable(value);
+}
+
+/** Only the original admitted loopback endpoint and lifecycle token are used.
+ * This passive GET does not ask the engine or CP to create a checkpoint. */
+export async function requestCloudEngineFinalCompletion(endpoint, challenge) {
+  if (!positiveInteger(endpoint?.port, 65535) || !READINESS_TOKEN_PATTERN.test(endpoint?.token ?? "") || !isUuid(challenge))
+    throw new Error("Cloud engine final completion unavailable");
+  try {
+    const response = await fetch(`http://127.0.0.1:${endpoint.port}/internal/final-completion`, {
+      method: "GET", redirect: "error", cache: "no-store", signal: globalThis.AbortSignal.timeout(25_000),
+      headers: { "x-zeros-readiness-token": endpoint.token, "x-zeros-final-challenge": challenge },
+    });
+    if (response.status !== 200 || !response.body) throw new Error();
+    let size = 0; const chunks = [];
+    for await (const chunk of response.body) {
+      size += chunk.length;
+      if (size > 4096) { await response.body.cancel().catch(() => undefined); throw new Error(); }
+      chunks.push(chunk);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch { throw new Error("Cloud engine final completion unavailable"); }
+}
+
+function readEngineCustody({ runtime, engineId, owner, episode }) {
+  const scope = new CloudEngineCgroup({ runtime, instanceId: engineId }).currentIdentity;
+  return readCloudRootControllerRecord({ runtime, scope, owner, episode });
+}
+
+async function createLegacyResidentControl(options) {
+  // The supervisor starts before setup on a cold VM. Use setup's original
+  // directory authority so the engine can traverse its private socket view.
+  const profile = ensureCloudHostRuntimeDirectory({ version: 4, profile: "zeros-cloud-worker-v4" });
+  const directory = profile.runtimeDirectory;
+  const metadata = lstatSync(directory);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== profile.engineUid ||
+      metadata.gid !== profile.engineGid || (metadata.mode & 0o7777) !== 0o700 || realpathSync(directory) !== directory)
+    throw new Error("Cloud legacy control directory is unsafe");
+  return new (await import("./cloud-resident-control.mjs")).CloudLegacyResidentControl(options);
+}
 
 function isRecord(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -215,7 +298,7 @@ const sameHandoff = (left, right) => !!parseHandoff(left) && !!parseHandoff(righ
 export async function requestCloudEngineHandoff(endpoint, command) {
   try {
     const response = await fetch(`http://127.0.0.1:${endpoint.port}/internal/runtime-handoff`, {
-      method: "POST", redirect: "error", signal: AbortSignal.timeout(25_000),
+      method: "POST", redirect: "error", signal: globalThis.AbortSignal.timeout(25_000),
       headers: { "content-type": "application/json", "x-zeros-readiness-token": endpoint.token },
       body: JSON.stringify(command),
     });
@@ -362,24 +445,55 @@ export function verifySelectedCloudRuntime(expected) {
   return verified;
 }
 
+/** @typedef {Pick<import('./cloud-resident-workload.mjs').CloudResidentWorkload,
+ * 'identity'|'start'|'enroll'|'stop'> & Partial<Pick<import('./cloud-resident-workload.mjs').CloudResidentWorkload,
+ * 'runtime'|'scope'|'witness'|'detach'|'rootCustody'>>} SupervisorResident */
+
+/** The broker always launches one detached root controller with these options;
+ * the broader Node spawn overloads are not part of this internal port.
+ * @param {string} file @param {string[]} args
+ * @param {import('node:child_process').SpawnOptions} options
+ * @returns {import('node:child_process').ChildProcess} */
+function spawnCloudRootController(file, args, options) { return spawn(file, args, options); }
+
+/** @param {object} options @returns {Promise<SupervisorResident>} */
+async function createResidentWorkload(options) {
+  return new (await import("./cloud-resident-workload.mjs")).CloudResidentWorkload(options);
+}
+
 export class CloudWorkerSupervisor {
   #handlers;
   #engineHandoff = null;
   #handoffReceipt = null;
   #handoffPrepared = null;
+  #engineOwner = null;
+  #engineCustody = null;
+  #engineRuntime = null;
+  #residentAuthority = null;
+  #enrolledResident = null;
+  #retiredResident = null;
+  /** @type {{kind:string, completion:object|null, checkpoint:object|null, retired:boolean}|null} */
+  #lastRetirement = null;
+  #legacyControl = null;
+  #listenerLock = null;
+  #stopFlight = null;
 
   constructor({
     socketPath = CLOUD_WORKER_SUPERVISOR_SOCKET,
     runtime = resolveCloudRuntime(),
     launcher = runtime.startEngine,
-    spawnProcess = spawn,
-    engineScope = null,
-    setupScope = null,
+    spawnProcess = spawnCloudRootController,
+    engineScope = /** @type {{retire:(options?:{preserveWorkload:string})=>Promise<unknown>}|null} */ (null),
+    setupScope = /** @type {{retire:()=>Promise<unknown>}|null} */ (null),
     verifySelectedRuntime = verifySelectedCloudRuntime,
     // Legacy images retain their closed helper inventory. This v4-only entry
     // is part of the immutable runtime bundle, loaded only for explicit opt-in.
-    createResident = async options => new (await import("./cloud-resident-workload.mjs")).CloudResidentWorkload(options),
+    createResident = createResidentWorkload,
     requestEngineHandoff = requestCloudEngineHandoff,
+    requestEngineFinalCompletion = requestCloudEngineFinalCompletion,
+    readBirth = readCloudRootProcessBirth,
+    readEngineCustody: readCustody = readEngineCustody,
+    createLegacyControl = createLegacyResidentControl,
   } = {}) {
     this.socketPath = socketPath;
     this.runtime = runtime;
@@ -390,6 +504,11 @@ export class CloudWorkerSupervisor {
     this.verifySelectedRuntime = verifySelectedRuntime;
     this.createResident = createResident;
     this.requestEngineHandoff = requestEngineHandoff;
+    this.requestEngineFinalCompletion = requestEngineFinalCompletion;
+    this.readBirth = readBirth;
+    this.readEngineCustody = readCustody;
+    this.createLegacyControl = createLegacyControl;
+    /** @type {SupervisorResident|null} */
     this.resident = null;
     this.preparedResident = null;
     this.selectedRuntime = runtime.profile === "v4" ? cloudActiveRuntimeDescriptor(runtime) : null;
@@ -411,17 +530,139 @@ export class CloudWorkerSupervisor {
     ]));
   }
 
-  async stopChild({ preserveWorkload } = {}) {
+  get lastRetirement() { return this.#lastRetirement; }
+
+  async #assertEngine(endpoint = this.#engineHandoff) {
+    const child = this.child, owner = this.#engineOwner;
+    const refused = () => { throw new Error("Cloud engine original custody or authority changed"); };
+    if (!endpoint || endpoint !== this.#engineHandoff || !child || !owner || child.pid !== owner.pid ||
+        child.exitCode !== null || child.signalCode !== null || !this.#engineRuntime) refused();
+    const check = () => {
+      const birth = this.readBirth(owner.pid);
+      if (child !== this.child || endpoint !== this.#engineHandoff || child.exitCode !== null || child.signalCode !== null ||
+          birth?.pid !== owner.pid || birth.startToken !== owner.startToken) refused();
+    };
+    check();
+    const record = await this.readEngineCustody({ runtime: this.#engineRuntime,
+      engineId: endpoint.scope.engineInstanceId, owner: { ...owner }, episode: this.#engineCustody?.episode });
+    check();
+    if (!record || !isUuid(record.episode) || record.owner?.pid !== owner.pid || record.owner.startToken !== owner.startToken ||
+        record.birth?.kind !== "engine" || !positiveInteger(record.birth.pid, 2147483647) ||
+        !/^[1-9][0-9]{0,19}$/.test(record.birth.startToken ?? "") ||
+        record.scope?.directory !== `${this.#engineRuntime.cgroupRoot}/engine-runtime/engine-${endpoint.scope.engineInstanceId}` ||
+        ["runtimeId", "bootId", "supervisorSessionId"].some(key => record.runtime?.[key] !== this.#engineRuntime[key]) ||
+        this.#engineCustody && JSON.stringify(record) !== JSON.stringify(this.#engineCustody)) refused();
+    this.#engineCustody ??= immutable(record);
+  }
+
+  #sameResidentAuthority(authority) {
+    const original = this.#residentAuthority;
+    if (!isRecord(authority) || !exactKeys(authority, ["organizationId", "workspaceId", "engineId", "generation", "fence", "token"]) || !original ||
+        ["organizationId", "workspaceId", "engineId", "generation", "fence"].some(key => authority[key] !== original[key]) ||
+        typeof authority.token !== "string") return false;
+    const expected = Buffer.from(original.token), supplied = Buffer.from(authority.token);
+    return expected.length === supplied.length && timingSafeEqual(expected, supplied);
+  }
+
+  #assertListenerLock() {
+    const original = this.#listenerLock;
+    const refused = () => { throw new Error("Cloud original supervisor listener lock changed"); };
+    if (!original || this.lock !== original.fd || process.getuid?.() !== 0 ||
+        process.pid !== original.owner.pid || `${this.socketPath}.lock` !== original.path) refused();
+    try {
+      const descriptor = fstatSync(original.fd, { bigint: true });
+      const current = lstatSync(original.path, { bigint: true });
+      if (realpathSync(original.path) !== original.path) refused();
+      for (const stat of [descriptor, current]) {
+        if (!stat.isFile() || stat.isSymbolicLink() || String(stat.uid) !== "0" || String(stat.gid) !== "0" ||
+            String(stat.nlink) !== "1" || (BigInt(stat.mode) & 0o7777n) !== 0o600n ||
+            String(stat.dev) !== original.dev || String(stat.ino) !== original.ino) refused();
+      }
+      const birth = this.readBirth(original.owner.pid);
+      if (birth?.pid !== original.owner.pid || birth.startToken !== original.owner.startToken) refused();
+    } catch { refused(); }
+  }
+
+  /** Private callbacks for the fixed authenticated legacy listener. Clearing
+   * the pointer retains its receipt and fence floor; it never adopts a new PID. */
+  legacyResidentControlOptions() {
+    return {
+      assertListenerLock: () => this.#assertListenerLock(),
+      current: () => this.resident && this.resident === this.#enrolledResident && this.#residentAuthority
+        ? { resident: this.resident, authority: { ...this.#residentAuthority } } : null,
+      assertEngine: async authority => {
+        if (!this.#sameResidentAuthority(authority) || !this.#engineHandoff ||
+            ["organizationId", "workspaceId", "generation"].some(key => this.#engineHandoff.scope[key] !== authority[key]) ||
+            this.#engineHandoff.scope.engineInstanceId !== authority.engineId)
+          throw new Error("Cloud engine original custody or authority changed");
+        await this.#assertEngine();
+        if (!this.#sameResidentAuthority(authority)) throw new Error("Cloud engine original authority changed");
+      },
+      clearResident: async (resident, receipt) => {
+        const authority = this.#residentAuthority, source = receipt?.source;
+        if (!resident || resident !== this.resident || resident !== this.#enrolledResident || !authority ||
+            !isRecord(receipt) || !exactKeys(receipt, ["version", "operation", "requestId", "source", "phase", "proof", "replacement"]) ||
+            receipt.version !== 1 || receipt.operation !== "retire-legacy-resident" || !isUuid(receipt.requestId) ||
+            receipt.phase !== "retired" || receipt.replacement !== "fresh-view-required" ||
+            !isRecord(receipt.proof) || !exactKeys(receipt.proof, ["kind", "populated"]) ||
+            receipt.proof.kind !== "dedicated-resident-cgroup" || receipt.proof.populated !== 0 ||
+            !isRecord(source) || !exactKeys(source, ["hostId", "authority", "runtime", "scope"]) ||
+            source.hostId !== resident.identity.hostId || !isRecord(source.authority) ||
+            !exactKeys(source.authority, ["organizationId", "workspaceId", "engineId", "generation", "fence"]) ||
+            Object.keys(source.authority).some(key => source.authority[key] !== authority[key]) ||
+            !isRecord(source.runtime) || !exactKeys(source.runtime, ["runtimeId", "bootId", "supervisorSessionId"]) ||
+            Object.keys(source.runtime).some(key => source.runtime[key] !== resident.runtime[key]) ||
+            !isRecord(source.scope) || !exactKeys(source.scope, ["directory", "dev", "ino"]) ||
+            source.scope.directory !== `${resident.runtime.cgroupRoot}/engine-workload-${source.hostId}` ||
+            source.scope.directory !== resident.scope.directory || !/^(0|[1-9][0-9]{0,19})$/.test(source.scope.dev ?? "") ||
+            !/^[1-9][0-9]{0,19}$/.test(source.scope.ino ?? ""))
+          throw new Error("Cloud legacy resident retirement proof changed");
+        await this.#assertEngine();
+        if (resident !== this.resident || resident !== this.#enrolledResident || authority !== this.#residentAuthority)
+          throw new Error("Cloud legacy resident authority changed");
+        this.#retiredResident = immutable(receipt);
+        this.resident = null;
+        this.preparedResident = null;
+      },
+      serialize: operation => this.serialize(operation),
+    };
+  }
+
+  async stopChild({ preserveWorkload, force = false } = {}) {
+    if (force !== true && force !== false || force && preserveWorkload !== undefined)
+      throw new Error("Invalid cloud engine retirement mode");
     if (preserveWorkload !== undefined) {
       const witness = await this.resident?.witness();
       if (this.runtime.profile !== "v4" || witness?.hostId !== preserveWorkload || witness.engineId !== null)
         throw new Error("Resident workload preservation was not confirmed");
     }
     const child = this.child;
+    let completion = null;
+    const live = child && child.exitCode === null && child.signalCode === null;
+    const kind = preserveWorkload !== undefined ? "preserve" : force ? "force" : live ? "normal" : this.#engineOwner ? "crash" : "empty";
+    if (this.runtime.profile === "v4" && this.#engineOwner && typeof this.engineScope?.retire !== "function")
+      throw new Error("Cloud engine root scope custody unavailable");
+    if (kind === "normal" && this.runtime.profile === "v4") {
+      const endpoint = this.#engineHandoff;
+      await this.#assertEngine(endpoint);
+      const challenge = randomUUID();
+      const result = await this.requestEngineFinalCompletion(endpoint, challenge);
+      completion = parseCloudEngineFinalCompletion(result, { challenge, scope: endpoint.scope });
+      if (!completion) throw new Error("Cloud engine final completion was not confirmed");
+      await this.#assertEngine(endpoint);
+    }
+    // Retain the exact accepted immutable completion before the first signal.
+    // Force/crash/empty are explicitly checkpoint-free; preserve is separate.
+    this.#lastRetirement = immutable({ kind, completion, checkpoint: completion?.checkpoint ?? null, retired: false });
     let failure;
     try {
       if (child && child.exitCode === null && child.signalCode === null) {
         const signalGroup = (signal) => {
+          if (this.#engineOwner) {
+            const birth = this.readBirth(child.pid);
+            if (birth?.pid !== this.#engineOwner.pid || birth.startToken !== this.#engineOwner.startToken)
+              throw new Error("Cloud engine launcher original custody changed");
+          }
           try {
             process.kill(-child.pid, signal);
           } catch (error) {
@@ -461,11 +702,25 @@ export class CloudWorkerSupervisor {
       failure ??= error;
     }
     if (failure) throw failure;
+    this.#lastRetirement = immutable({ kind, completion, checkpoint: completion?.checkpoint ?? null, retired: true });
     this.#engineHandoff = null;
+    this.#engineOwner = null;
+    this.#engineRuntime = null;
+    this.#engineCustody = null;
+    if (preserveWorkload === undefined && !this.#retiredResident) {
+      this.#residentAuthority = null;
+      this.#enrolledResident = null;
+    }
     if (this.child === child) this.child = null;
   }
 
   async launch(environment) {
+    let rootResident;
+    if (environment.residentB64) {
+      if (!this.resident || typeof this.resident.rootCustody !== "function")
+        throw new Error("Resident original custody unavailable");
+      rootResident = Buffer.from(JSON.stringify(this.resident.rootCustody())).toString("base64url");
+    }
     const child = this.spawnProcess(this.launcher, [], {
       cwd: "/",
       detached: true,
@@ -490,6 +745,7 @@ export class CloudWorkerSupervisor {
         ZEROS_CLOUD_TOKEN: environment.bridgeToken,
         ZEROS_REQUIRE_ACCOUNT: "1",
         ...(environment.residentB64 ? { ZEROS_RESIDENT_PTY_B64: environment.residentB64 } : {}),
+        ...(rootResident ? { ZEROS_ROOT_RESIDENT_CUSTODY_B64: rootResident } : {}),
       },
     });
     await new Promise((resolve, reject) => {
@@ -504,8 +760,21 @@ export class CloudWorkerSupervisor {
       child.once("error", onError);
       child.once("spawn", onSpawn);
     });
-    child.unref();
     this.child = child;
+    if (this.runtime.profile === "v4") {
+      try {
+        const birth = this.readBirth(child.pid);
+        if (birth?.pid !== child.pid || !/^[1-9][0-9]{0,19}$/.test(birth.startToken ?? ""))
+          throw new Error("Cloud engine original custody unavailable");
+        this.#engineOwner = immutable({ pid: birth.pid, startToken: birth.startToken });
+        this.#engineRuntime = immutable({ ...this.runtime, ...this.selectedRuntime, profile: "v4" });
+        this.#engineCustody = null;
+      } catch (error) {
+        await this.stopChild({ force: true });
+        throw error;
+      }
+    }
+    child.unref();
     child.once("exit", () => {
       if (this.child === child) this.child = null;
     });
@@ -631,6 +900,10 @@ export class CloudWorkerSupervisor {
       execution?.workspaceId !== retained.workspaceId || execution?.organizationId !== retained.organizationId))
       return rejectSupervisorRequest();
     if (requested && this.runtime.profile !== "v4") return rejectSupervisorRequest();
+    const retired = this.#retiredResident?.source;
+    if (retired && (!requested || requested.hostId === retired.hostId || requested.fence <= retired.authority.fence ||
+        execution?.organizationId !== retired.authority.organizationId || execution?.workspaceId !== retired.authority.workspaceId))
+      return rejectSupervisorRequest();
     this.session = null;
     this.#handoffPrepared = null;
     this.preparedResident = null;
@@ -650,6 +923,8 @@ export class CloudWorkerSupervisor {
         engineId: environment.runtime.engine.instanceId, generation: execution.generation,
         fence: requested.fence, token: randomBytes(32).toString("base64url") };
       await this.resident.enroll(authority);
+      this.#residentAuthority = immutable(authority);
+      this.#enrolledResident = this.resident;
       environment = { ...environment, residentB64: Buffer.from(JSON.stringify({
         protocol: "zeros.resident-pty/v1", hostId: requested.hostId, authority,
       })).toString("base64url") };
@@ -657,12 +932,17 @@ export class CloudWorkerSupervisor {
     const scope = { workspaceId: execution.workspaceId, organizationId: execution.organizationId,
       generation: execution.generation, engineInstanceId: environment.runtime.engine.instanceId };
     const pid = await this.launch(environment);
-    this.#engineHandoff = { scope, port: environment.port, token: environment.runtime.engine.readinessProbeToken };
+    this.#engineHandoff = immutable({ scope, port: environment.port, token: environment.runtime.engine.readinessProbeToken });
     return supervisorResponse("started", { pid });
   }
 
   enqueue(request) {
-    const current = this.operation.then(() => this.apply(request));
+    return this.serialize(() => this.apply(request));
+  }
+
+  serialize(operation) {
+    if (this.stopping) return Promise.reject(new Error("Cloud root control is stopping"));
+    const current = this.operation.then(operation);
     this.operation = current.catch(() => undefined);
     return current;
   }
@@ -767,11 +1047,26 @@ export class CloudWorkerSupervisor {
       if (acquired.status !== 0 || acquired.signal || acquired.error)
         throw new Error("cloud worker supervisor is already owned");
       this.lock = lock;
+      const identity = fstatSync(lock, { bigint: true });
+      const owner = this.readBirth(process.pid);
+      if (owner?.pid !== process.pid || !/^[1-9][0-9]{0,19}$/.test(owner.startToken ?? ""))
+        throw new Error("Cloud original supervisor listener lock changed");
+      this.#listenerLock = immutable({ fd: lock, path: `${this.socketPath}.lock`,
+        dev: String(identity.dev), ino: String(identity.ino), owner: { pid: owner.pid, startToken: owner.startToken } });
+      this.#assertListenerLock();
       // A restarted systemd host begins idle only after the previous kernel
       // workload set is proven empty, including launchers it never observed.
       if (this.runtime.profile === "v4") await this.stopChild();
+      if (this.runtime.profile === "v4") {
+        const control = await this.createLegacyControl(this.legacyResidentControlOptions());
+        this.#legacyControl = control;
+        await control.listen({ socketPath: "/run/zeros/engine/resident-control.sock" });
+      }
       await this.listen();
     } catch (error) {
+      await this.#legacyControl?.close().catch(() => undefined);
+      this.#legacyControl = null;
+      this.#listenerLock = null;
       this.lock = null;
       closeSync(lock);
       throw error;
@@ -804,8 +1099,11 @@ export class CloudWorkerSupervisor {
     chmodSync(this.socketPath, 0o600);
   }
 
-  async stop() {
-    if (this.stopping) return;
+  stop() {
+    return this.#stopFlight ??= this.#stop();
+  }
+
+  async #stop() {
     this.stopping = true;
     this.session = null;
     const server = this.server;
@@ -813,12 +1111,15 @@ export class CloudWorkerSupervisor {
     if (server) {
       await new Promise((resolve) => server.close(resolve));
     }
+    await this.#legacyControl?.close();
+    this.#legacyControl = null;
     await this.operation.catch(() => undefined);
     await this.stopChild();
     if (this.lock !== null) {
       try {
         if (existsSync(this.socketPath)) unlinkSync(this.socketPath);
       } finally {
+        this.#listenerLock = null;
         closeSync(this.lock);
         this.lock = null;
       }
@@ -850,7 +1151,12 @@ async function main() {
   const shutdown = () => {
     supervisor.stop().then(
       () => process.exit(0),
-      () => process.exit(1),
+      async () => {
+        // Emergency cleanup never relabels a missing completion as normal.
+        // The outside-root owner can still retire the VM tree, checkpoint:null.
+        try { await supervisor.stopChild({ force: true }); } catch { /* Exit failed; retirement is not claimed. */ }
+        process.exit(1);
+      },
     );
   };
   process.once("SIGINT", shutdown);

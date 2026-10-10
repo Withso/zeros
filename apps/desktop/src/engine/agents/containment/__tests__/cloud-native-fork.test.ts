@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { acquireCloudNativeHistory, copyCloudNativeForkHistory, deleteCloudNativeHistory } from "../cloud-native-history";
+import { acquireCloudNativeHistory, CloudNativeHistoryError, copyCloudNativeForkHistory, deleteCloudNativeHistory } from "../cloud-native-history";
 describe.skipIf(process.platform !== "linux")("cloud native fork history", () => {
   it("copies exact source bytes into a distinct locked destination and leaves the source unchanged", async () => {
     const root=await mkdtemp(path.join(os.tmpdir(),"zeros-native-fork-"));
@@ -36,7 +36,7 @@ describe.skipIf(process.platform !== "linux")("cloud native fork history", () =>
       await source.release();
       await expect(copyCloudNativeForkHistory({...input,destinationConversationId:"source"},async()=>{})).rejects.toThrow();
       await symlink(root,path.join(source.mount.directory,"escape"));
-      await expect(copyCloudNativeForkHistory(input,async()=>{})).rejects.toThrow(/unsafe/);
+      await expect(copyCloudNativeForkHistory(input,async()=>{})).rejects.toThrow(CloudNativeHistoryError);
       await rm(path.join(source.mount.directory,"escape"));
       await deleteCloudNativeHistory(input);
       await expect(copyCloudNativeForkHistory(input,async()=>{})).rejects.toThrow(/deleted/);

@@ -89,6 +89,13 @@ d("cloud history without a running worker", () => {
     };
   };
 
+  it("reports a missing authorized conversation without calling the workspace missing", async () => {
+    await expect(history.messages({ ...scope(), chatId: "missing", limit: 100 })).rejects.toMatchObject({ status: 404, code: "cloud_conversation_not_found" });
+    const other = await seedReadyCloudWorkspace(pool);
+    await expect(history.messages({ ...scope(), accountUserId: other.userId, chatId: "missing", limit: 100 })).rejects.toMatchObject({ status: 404, code: "cloud_workspace_not_found" });
+    await expect(history.messages({ ...scope(), workspaceId: randomUUID(), chatId: "missing", limit: 100 })).rejects.toMatchObject({ status: 404, code: "not_found" });
+  });
+
   it("reads saved text and tool calls while the worker is stopped", async () => {
     await append([
       chat("a"),

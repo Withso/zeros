@@ -514,8 +514,8 @@ async function writeDesignWatchIsolationArtifacts(
   return artifacts;
 }
 
-/** Prepare the complete watcher-isolation contract inside one immutable
- * execution generation. The JSON manifest is the exact-path integration point
+/** Prepare the complete watcher-isolation contract inside one engine-owned
+ * artifact directory. This filters watcher events, never filesystem writes. The JSON manifest is the exact-path integration point
  * for custom runtimes; the ignore file is consumed automatically by Watchexec;
  * and the preload filters Node watcher APIs. */
 export async function prepareDesignWatchIsolation(

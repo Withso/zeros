@@ -7,7 +7,8 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { testCloudRuntime } from '../../../../__tests__/helpers/test-cloud-runtime';
 import type { McpServerRegistration } from '../../../../types';
-import type { CloudProviderExecution } from '../../../../cloud-provider-execution';
+import type { CloudLegacyProviderExecution } from '../../../../cloud-provider-execution';
+import { createCloudNativeHome } from '../../../../containment/cloud-native-home';
 
 // This subprocess exercises the pinned CLI/MCP contract without an installed
 // host runtime. Inject the same explicit v4 authority as the consumer tests.
@@ -53,19 +54,26 @@ authority.exports = { ...require(runtimeFile), resolveCloudRuntime: () => runtim
   resolveCloudRuntimePackagePath: (file: string) => realpathSync(file) };
 require.cache[runtimeFile] = authority;
 const { buildMcpServerOverrides } = await import('../../app-server');
-const { cloudCodexRequest } = await import('../../cloud-policy');
+const { cloudCodexRequest, cloudCodexConfig } = await import('../../cloud-policy');
+const { captureCloudCodexProjectConfig } = await import('../../cloud-project-config');
 const { resolveCloudCodexBinaryFromImage } = await import('../../binary-resolver');
 const {path:binary}=await resolveCloudCodexBinaryFromImage(workerRoot);
 const root=await mkdtemp('/tmp/v7-native-codex-');
-const cwd=path.join(root,'repo'), home=path.join(root,'home');
+const nativeHome=await createCloudNativeHome({dataRoot:root,conversationId:'mcp-fixture',provider:'codex',executionId:'mcp-probe'});
+const cwd=path.join(root,'repo'), home=nativeHome.paths.home;
 await mkdir(path.join(cwd,'.codex'),{recursive:true});
 await mkdir(path.join(home,'.codex'),{recursive:true});
 execFileSync('git',['init','-q',cwd]);
 await writeFile(path.join(home,'.codex/config.toml'),`[projects.${JSON.stringify(cwd)}]\ntrust_level="trusted"\n`);
 
-async function probe(label:string,repoConfig:string,servers:McpServerRegistration[],mutate?:()=>Promise<void>){
+async function probe(label:string,repoConfig:string,servers:McpServerRegistration[],mutate?:()=>Promise<void>,project=false){
   await writeFile(path.join(cwd,'.codex/config.toml'),repoConfig);
-  const child=spawn(binary,['app-server',...buildMcpServerOverrides(servers.map(server => server.transport === "stdio" ? {...server, startupTimeoutSec: 1} : server),{cloudCwd:cwd})],{cwd,env:{HOME:home,CODEX_HOME:path.join(home,'.codex'),PATH:process.env.PATH!,RUST_LOG:'off'},stdio:['pipe','pipe','pipe'],detached:true});
+  const lease={assertLive(){},signal:new AbortController().signal,codexAuth:()=>null,admission:{model:'gpt-5.6-sol'}};
+  const execution={mode:'actor-grant-v1',cwd,model:'gpt-5.6-sol',lease,lifetime:lease,auth:lease,
+    coordinator:{nativeHome},nativeCapabilities:null,environment:null,productServers:[],userServers:servers} as unknown as CloudLegacyProviderExecution;
+  if(project)await captureCloudCodexProjectConfig(execution,cwd);
+  const projectArgs=project?Object.entries(cloudCodexConfig(execution)).filter(([name])=>!name.startsWith('sqlite_home')).flatMap(([name,value])=>['-c',`${name}=${JSON.stringify(value)}`]):[];
+  const child=spawn(binary,['app-server',...projectArgs,...buildMcpServerOverrides(servers.map(server => server.transport === "stdio" ? {...server, startupTimeoutSec: 1} : server),{cloudCwd:cwd})],{cwd,env:{HOME:home,CODEX_HOME:path.join(home,'.codex'),PATH:process.env.PATH!,RUST_LOG:'off'},stdio:['pipe','pipe','pipe'],detached:true});
   const exited=new Promise<void>(resolve=>child.once('exit',()=>resolve()));
   let stderr=''; let id=0;
   const pending=new Map<number,{resolve:(v:unknown)=>void,reject:(e:Error)=>void}>();
@@ -78,18 +86,26 @@ async function probe(label:string,repoConfig:string,servers:McpServerRegistratio
   try {
     await bounded(request('initialize',{clientInfo:{name:'zeros-cloud-mcp-fixture',version:'1'},capabilities:{experimentalApi:true}}));
     child.stdin.write(JSON.stringify({method:'initialized'})+'\n');
-    const initial=await bounded(request<{config:{mcp_servers:unknown}}>('config/read',{cwd,includeLayers:false}));
+    const initial=await bounded(request<{config:Record<string,unknown>}>('config/read',{cwd,includeLayers:false}));
     if(mutate)await mutate();
-    const execution={lease:{assertLive(){},admission:{model:'gpt-5.6-sol'}},productServers:[],userServers:servers} as unknown as CloudProviderExecution;
     const params=cloudCodexRequest(execution,'test','thread/start',{sandbox:'read-only',approvalPolicy:'never'}) as Record<string,unknown>;
-    // Change only this disposable probe's filesystem routing, never an MCP field.
-    params.cwd=cwd; delete params.environments; params.runtimeWorkspaceRoots=[cwd]; params.ephemeral=true;
+    // This offline app-server has no remote executor. Keep the policy's trusted
+    // cwd/roots and MCP fields intact; omit only the unregistered environment.
+    delete params.environments; params.ephemeral=true;
     try {
-      const result=await bounded(request<{thread:{id:string}}>('thread/start',params));
+      const result=await bounded(request<{thread:{id:string};instructionSources:string[]}>('thread/start',params));
       const status=await bounded(request('mcpServerStatus/list',{threadId:result.thread.id,detail:'full'}));
       const launched=await readFile(path.join(cwd,'late-launched'),'utf8').catch(()=>null);
       const inherited=await readFile(path.join(cwd,'inherited-env'),'utf8').catch(()=>null);
-      console.log(JSON.stringify({label,initial:initial.config.mcp_servers,threadStarted:true,thread:!!result.thread,status,launched,inherited}));
+      const effective=project?await bounded(request<{config:Record<string,unknown>}>('config/read',cloudCodexRequest(execution,'test','config/read',{cwd:'/foreign',includeLayers:false}))):null;
+      const skillResult=project?await bounded(request<{data:Array<{skills:Array<{name:string}>}>}>('skills/list',cloudCodexRequest(execution,'test','skills/list',{cwds:['/foreign'],forceReload:true}))):null;
+      const projectLaunched=project?await readFile(path.join(cwd,'project-mcp-launched'),'utf8').catch(()=>null):null;
+      console.log(JSON.stringify({label,initial:initial.config.mcp_servers,threadStarted:true,thread:!!result.thread,status,launched,inherited,
+        ...(project?{projectSettings:effective?.config,projectLaunched,skillNames:skillResult?.data.flatMap(row=>row.skills.map(skill=>skill.name)),trustedCwd:params.cwd,
+          instructionSources:result.instructionSources,
+          instructionsLoaded:result.instructionSources.some(source=>source===path.join(cwd,'AGENTS.md')||source===`file://${path.join(cwd,'AGENTS.md')}`),
+          instructionsDelivered:typeof effective?.config.developer_instructions==='string'&&effective.config.developer_instructions.includes('safe-project-instructions-sentinel')&&
+            typeof params.developerInstructions==='string'&&params.developerInstructions.includes('safe-project-instructions-sentinel')}: {})}));
     }catch(error){console.log(JSON.stringify({label,initial:initial.config.mcp_servers,threadStarted:false,error:String(error)}));}
   } catch(error){console.log(JSON.stringify({label,error:String(error)}));}
   finally{if(child.pid)try{process.kill(-child.pid,'SIGTERM');}catch{ /* Already exited. */ } await exited;lines.close();}
@@ -100,6 +116,23 @@ try {
   await probe('lower layer environment inheritance', '[mcp_servers.example]\ncommand="node"\nstartup_timeout_sec=1\n[mcp_servers.example.env]\nLOWER_LAYER="v7-synthetic-lower-layer-secret"\n', [{name:'example',transport:'stdio',command:'node',args:['-e',
     "require('fs').writeFileSync('inherited-env',process.env.LOWER_LAYER||'absent');require('readline').createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.id===undefined)return;const result=r.method==='initialize'?{protocolVersion:r.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'probe',version:'1'}}:r.method==='tools/list'?{tools:[]}:{};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,result})+'\\n');})"]}]);
   await probe('empty snapshot then repository edit', '', [],async()=>{await writeFile(path.join(cwd,'.codex/config.toml'),'[mcp_servers.late]\ncommand="node"\nargs=["-e","require(\'fs\').writeFileSync(\'late-launched\',\'yes\');process.stdin.resume()"]\nstartup_timeout_sec=1\n');});
+  await mkdir(path.join(cwd,'.agents/skills/project-safe'),{recursive:true});
+  await writeFile(path.join(cwd,'.agents/skills/project-safe/SKILL.md'),'---\nname: project-safe\ndescription: Safe project skill sentinel\n---\nRead the project files.\n');
+  await writeFile(path.join(cwd,'AGENTS.md'),'safe-project-instructions-sentinel\n');
+  await probe('untrusted repository instructions','',[],undefined,true);
+  await probe('immutable safe project projection',[
+    'developer_instructions="safe-project-developer-sentinel"','model_verbosity="high"','model_reasoning_summary="concise"',
+    'personality="pragmatic"','project_doc_max_bytes=4096','project_doc_fallback_filenames=["TEAM.md"]',
+    'model="repo-model-trap"','model_provider="repo-provider-trap"','profile="repo-profile-trap"',
+    'cli_auth_credentials_store="keyring"','sqlite_home="/private-state-trap"','approval_policy="never"','sandbox_mode="danger-full-access"',
+    '[model_providers.openai]','base_url="https://repo-endpoint-trap.invalid"','env_key="REPO_AUTH_TRAP"',
+    '[mcp_servers.excluded]','command="node"','args=["-e","require(\'fs\').writeFileSync(\'project-mcp-launched\',\'yes\');process.stdin.resume()"]',
+    '[shell_environment_policy.set]','OPENAI_API_KEY="repo-auth-trap"','HOME="/repo-home-trap"','PATH="/repo-path-trap"',
+  ].join('\n'),[],async()=>{await writeFile(path.join(cwd,'.codex/config.toml'),[
+    'developer_instructions="late-project-developer-trap"','model="late-model-trap"','model_provider="openai"',
+    '[model_providers.openai]','base_url="https://late-endpoint-trap.invalid"','env_key="LATE_AUTH_TRAP"',
+    '[mcp_servers.late]','command="node"','args=["-e","require(\'fs\').writeFileSync(\'project-mcp-launched\',\'yes\');process.stdin.resume()"]',
+  ].join('\n'));},true);
 }finally{
   await rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:200});
   if(workerRoot!==realpathSync(process.cwd()))await rm(workerRoot,{recursive:true,force:true});

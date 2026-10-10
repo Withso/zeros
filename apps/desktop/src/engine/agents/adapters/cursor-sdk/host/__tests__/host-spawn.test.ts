@@ -91,6 +91,32 @@ describe("spawnSubprocessTransport — host cwd safety", () => {
     expect(opts.cwd).not.toBe(process.cwd());
   });
 
+  it.each(["personal", "organization"])("preserves %s Local launch args/env/cwd byte for byte", owner => {
+    vi.stubEnv("ZEROS_PTY_HOST_RUNTIME", process.execPath);
+    vi.stubEnv("ZEROS_PTY_HOST_RUNTIME_ELECTRON", "0");
+    try {
+      const cwd = `/Users/fixture/${owner}/checkout with spaces`;
+      const script = fileURLToPath(import.meta.url);
+      const env = { HOME: "/Users/fixture", PATH: "/usr/bin:/bin", HTTPS_PROXY: "http://proxy.fixture:8080", SAFE: "spaces $() \\ literal", CURSOR_RIPGREP_PATH: "/product/rg" };
+      const wrapSpawn = vi.fn(request => ({ ...request }));
+      const boundary = { status: { backend: "none" }, wrapSpawn, trackProcess: vi.fn(() => ({ stopAndProve: vi.fn() })) } as unknown as PreparedBoundary;
+      spawnSubprocessTransport({ executionBoundary: boundary, cwd, env: {
+        ...env, ZEROS_RIPGREP_PATH: "/engine-only/rg", ZEROS_ZSR_RIPGREP_PATH: "/old-engine-only/rg",
+      } });
+      const [command, args, options] = spawnSpy.mock.calls[0]!;
+      expect(JSON.stringify({ command, args, env: options.env, cwd: options.cwd })).toBe(JSON.stringify({ command: process.execPath, args: [script], env, cwd }));
+      expect(options.stdio).toEqual(["pipe", "pipe", "pipe"]);
+      expect(options.detached).toBe(true);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("does not install an agent proxy from the readable old cloud backend", () => {
+    const wrapSpawn = vi.fn(request => ({ ...request }));
+    const boundary = { status: { backend: "cloud-worker" }, wrapSpawn, trackProcess: vi.fn() } as unknown as PreparedBoundary;
+    spawnSubprocessTransport({ executionBoundary: boundary, cwd: "/fixture/workspace", env: { HOME: "/fixture/home" } });
+    expect(wrapSpawn.mock.calls[0]![0].env).toEqual({ HOME: "/fixture/home" });
+  });
+
   it("runs a session host through its prepared boundary with no ambient authority", () => {
     const stopAndProve = vi.fn(async () => undefined);
     const tracked = {
@@ -103,8 +129,8 @@ describe("spawnSubprocessTransport — host cwd safety", () => {
       stopAndProve,
     } as unknown as BoundaryProcess;
     const wrapSpawn = vi.fn((request) => ({
-      command: "/sandbox/supervisor",
-      args: ["--contained"],
+      command: "/product/host-supervisor",
+      args: ["--owned-lifecycle"],
       cwd: request.cwd,
       env: { BOOTSTRAP_ONLY: "1" },
       stdio: "pipe" as const,
@@ -133,17 +159,13 @@ describe("spawnSubprocessTransport — host cwd safety", () => {
         cwd: "/worktree",
         env: {
           HOME: "/user/home",
-          // Node fetch/http/https do not consume HTTPS_PROXY unless the
-          // runtime's built-in environment proxy support is enabled at boot.
-          // Without this, Cursor ignores the user's configured HTTPS proxy.
-          NODE_USE_ENV_PROXY: "1",
           SAFE: "visible",
         },
       }),
     );
     expect(spawnSpy).toHaveBeenCalledWith(
-      "/sandbox/supervisor",
-      ["--contained"],
+      "/product/host-supervisor",
+      ["--owned-lifecycle"],
       expect.objectContaining({
         cwd: "/worktree",
         env: { BOOTSTRAP_ONLY: "1" },

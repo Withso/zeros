@@ -10,6 +10,9 @@
 // top level and on `local`.
 
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import { CursorSdkAdapter } from "../adapter";
 import type { AgentAdapterContext, ContentBlock } from "../../../types";
@@ -86,6 +89,25 @@ const WORKTREE = "/Users/dev/zeros/workspaces/acme-widgets/ws_12ad4b-mayflower";
 const TEXT: ContentBlock[] = [{ type: "text", text: "hi" } as ContentBlock];
 
 describe("CursorSdkAdapter — every agent is rooted at its worktree cwd", () => {
+  it.each(["personal", "organization"])("keeps %s Local cwd unchanged", async owner => {
+    const cwd = `/Users/dev/workspaces/${owner}/local-worktree`;
+    const adapter = new CursorSdkAdapter(makeCtx());
+    await adapter.newSession({ cwd, env: { CURSOR_API_KEY: "k" } });
+    await adapter.loadSession({ sessionId: "saved-native-id", cwd, env: { CURSOR_API_KEY: "k" } });
+    expect(createSpy.mock.calls[0]![0]).toMatchObject({ cwd, local: { cwd } });
+    expect(resumeSpy.mock.calls[0]![1]).toMatchObject({ cwd, local: { cwd } });
+  });
+  it.each(["personal", "organization"])("keeps %s Local native sources and user messages unchanged", async owner => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), `zeros-${owner}-cursor-local-`));
+    const adapter = new CursorSdkAdapter(makeCtx());
+    try {
+      await writeFile(path.join(cwd, "AGENTS.md"), "LOCAL_NATIVE_GUIDANCE");
+      const { session } = await adapter.newSession({ cwd, env: { CURSOR_API_KEY: "k" } });
+      await adapter.prompt({ sessionId: session.executionId, prompt: TEXT });
+      expect(sendSpy.mock.calls[0]![0]).toEqual({ text: "hi" });
+      expect(createSpy.mock.calls[0]![0].local.settingSources).toEqual(["project", "user", "team", "mdm", "plugins"]);
+    } finally { await adapter.dispose(); await rm(cwd, { recursive: true, force: true }); }
+  });
   it("newSession binds the worktree cwd at top-level AND on local", async () => {
     const adapter = new CursorSdkAdapter(makeCtx());
     await adapter.newSession({ cwd: WORKTREE, env: { CURSOR_API_KEY: "k" } });

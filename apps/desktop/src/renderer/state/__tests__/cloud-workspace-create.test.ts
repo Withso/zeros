@@ -2,6 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 
 const api = vi.hoisted(() => ({ create: vi.fn(), list: vi.fn(), account: 0 }));
+// Runtime history imports the catalog. Keep that unrelated cycle out of the
+// partial API mock so the catalog receives the mocked list function.
+vi.mock("../../platform/bridge/workspace-runtime-client", () => ({
+  WorkspaceRuntimeClient: class {},
+}));
 vi.mock("../../platform/cloud-workspaces", async importOriginal => ({
   ...(await importOriginal<typeof import("../../platform/cloud-workspaces")>()),
   createCloudWorkspaceDocument: api.create,
@@ -111,6 +116,10 @@ describe("optimistic cloud creation", () => {
     const refreshing = refreshCloudWorkspaceCatalog();
     api.create.mockResolvedValue(doc());
     await createCloudWorkspaceWithPending(request, "code");
+    expect(api.list).toHaveBeenCalledExactlyOnceWith();
+    expect(visibleCount()).toBe(1);
+    expect(getCloudWorkspaceRows()[0].id).toContain(doc().id);
+    expect(creates()).toEqual([]);
     list.resolve([]); await refreshing;
     expect(visibleCount()).toBe(1);
     expect(getCloudWorkspaceRows()[0].id).toContain(doc().id);

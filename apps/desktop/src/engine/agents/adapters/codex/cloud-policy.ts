@@ -1,10 +1,11 @@
-import {executionMcpServers,type CloudProviderExecution} from "../../cloud-provider-execution";
+import {cloudExecutionLifetime,executionMcpServers,type CloudProviderExecution} from "../../cloud-provider-execution";
 import type {DynamicToolCallParams} from "./generated/v2/DynamicToolCallParams";
 import type {DynamicToolCallResponse} from "./generated/v2/DynamicToolCallResponse";
 import { z } from "zod";
 import { CloudGoalUpdateSchema } from "@zeros/protocol/cloud-commands";
 import {cloudComputerProcessEnvironment} from "../../cloud-computer-environment";
-const cwd="/srv/zeros/workspace";
+import { cloudCodexProjectSettings } from "./cloud-project-config";
+import path from "node:path";
 const record=(value:unknown):Record<string,unknown>=>value&&typeof value==="object"&&!Array.isArray(value)?value as Record<string,unknown>:{};
 const reads=new Set(["model/list","account/read","account/rateLimits/read","config/read","configRequirements/read","permissionProfile/list",
   "mcpServerStatus/list","thread/read","thread/list","thread/loaded/list","thread/backgroundTerminals/list","skills/list"]);
@@ -13,14 +14,14 @@ const controls=new Set(["turn/steer","thread/name/set","thread/compact/start","t
 const pick=(params:Record<string,unknown>,names:readonly string[])=>Object.fromEntries(names.filter(name=>params[name]!==undefined).map(name=>[name,params[name]]));
 export async function cloudCodexToolCall(execution:CloudProviderExecution,input:DynamicToolCallParams):Promise<DynamicToolCallResponse>{
   try{
-    execution.lease.assertLive();
+    const lifetime=cloudExecutionLifetime(execution); lifetime.assertLive();
     if(input.namespace!==null||input.tool!=="zeros_workspace")throw new Error("Unregistered cloud tool");
-    const result=await execution.tools.call(input.arguments,execution.lease.signal);execution.lease.assertLive();
+    const result=await execution.tools.call(input.arguments,lifetime.signal);lifetime.assertLive();
     return {success:result.ok,contentItems:[{type:"inputText",text:JSON.stringify(result)}]};
   }catch{return {success:false,contentItems:[{type:"inputText",text:"Cloud workspace tool is unavailable."}]};}
 }
-/** The private coordinator must never ingest paths from the engine's filesystem.
- * Inline images also survive reconnects without exposing temporary host paths. */
+/** Cloud inputs use bounded inline images. Caller paths never select engine
+ * attachment state; inline images also survive reconnects. */
 export function cloudCodexImage(data:string,mimeType:unknown):{type:"image";url:string}{
   if(typeof mimeType!=="string"||!["image/png","image/jpeg","image/webp","image/gif"].includes(mimeType)||
     data.length===0||data.length>16*1024*1024||data.length%4!==0||!/^[A-Za-z0-9+/]+={0,2}$/.test(data)||Buffer.from(data,"base64").toString("base64")!==data)
@@ -41,10 +42,11 @@ function safeInput(value:unknown):unknown{
   });
 }
 export const CLOUD_CODEX_CONFIG={
-  "shell_environment_policy.inherit":"none",
-  // This is inside the per-conversation locked mount; disposable HOME never
-  // retains login material. Codex owns goal/job counters and their migrations.
-  sqlite_home:"/srv/zeros/home/agent/.codex/sessions/.zeros-state",
+  // The executor is already credential-free. Native tools inherit only these
+  // selected physical state paths and captured actor environment names.
+  "shell_environment_policy.inherit":"all",
+  "shell_environment_policy.ignore_default_excludes":true,
+  "shell_environment_policy.include_only":["HOME","PATH","LANG","SHELL","TMPDIR","USER","LOGNAME","CODEX_HOME","XDG_CONFIG_HOME","XDG_CACHE_HOME","XDG_DATA_HOME","XDG_STATE_HOME"],
   "features.multi_agent":false,
   "mcp_servers.codex_apps.enabled":false,
   "mcp_servers.codex_apps.command":"zeros-disabled-mcp-server",
@@ -53,28 +55,26 @@ const nativeThreads = new WeakMap<CloudProviderExecution, string>();
 /** Called only after native start/resume, or by the admitted fork adapter.
  * A renderer-provided thread id never creates this binding. */
 export function bindCloudCodexThread(execution: CloudProviderExecution, threadId: string): void {
-  execution.lease.assertLive();
+  cloudExecutionLifetime(execution).assertLive();
   if (!threadId || threadId.length > 256) throw new Error("Invalid native conversation");
   const previous = nativeThreads.get(execution);
   if (previous && previous !== threadId) throw new Error("Cloud native conversation changed");
   nativeThreads.set(execution, threadId);
 }
 export function cloudCodexCapabilities(execution: CloudProviderExecution) {
-  execution.lease.assertLive();
-  const admitted=execution.lease.nativeCapabilities;
+  cloudExecutionLifetime(execution).assertLive();
+  const admitted=execution.nativeCapabilities;
   return { version: 1 as const, goals: admitted?.goals===true, nativeReview: admitted?.nativeReview===true, nativeFork: admitted?.nativeFork===true,
-    connectedApps: admitted?.connectedApps===true && !!execution.lease.codexAuth?.(), multiAgent: admitted?.multiAgent===true };
+    connectedApps: admitted?.connectedApps===true && !!execution.auth.codexAuth(), multiAgent: admitted?.multiAgent===true };
 }
 export function cloudCodexConfig(execution: CloudProviderExecution): Record<string, unknown> {
-  const config: Record<string, unknown> = {...CLOUD_CODEX_CONFIG};
-  if(execution.lease.environment){
-    // These config entries also reach app-server argv: pass names only. The
-    // executor inherits values from its private, credential-free launch env.
-    const names=Object.keys(cloudComputerProcessEnvironment({},execution.lease.environment.values,"agent"));
-    config["shell_environment_policy.inherit"]="all";
-    config["shell_environment_policy.ignore_default_excludes"]=true;
-    config["shell_environment_policy.include_only"]=["HOME","PATH","LANG","SHELL","TMPDIR","USER","LOGNAME",...names];
-  }
+  const config: Record<string, unknown> = {...cloudCodexProjectSettings(execution), ...CLOUD_CODEX_CONFIG,
+    // Plain state separation under the engine identity, not a protected mount.
+    sqlite_home:path.join(execution.coordinator.nativeHome.paths.codexHome,"sessions",".zeros-state")};
+  // These config entries also reach app-server argv: pass names only. The
+  // executor receives values from its explicitly credential-free launch env.
+  const names=Object.keys(cloudComputerProcessEnvironment({},execution.environment?.values,"agent"));
+  config["shell_environment_policy.include_only"]=[...new Set([...CLOUD_CODEX_CONFIG["shell_environment_policy.include_only"],...names])];
   config["features.multi_agent"]=cloudCodexCapabilities(execution).multiAgent;
   if (cloudCodexCapabilities(execution).connectedApps) {
     delete config["mcp_servers.codex_apps.enabled"];
@@ -91,7 +91,7 @@ function ownThread(execution: CloudProviderExecution, value: unknown): string {
 /** No caller can clear the remote environment or change admitted model/auth.
  * Host process/fs/config mutation RPCs have no cloud-facing route. */
 export function cloudCodexRequest(execution:CloudProviderExecution,environmentId:string,method:string,input:unknown):unknown{
-  execution.lease.assertLive();const params=record(input),model=execution.lease.admission.model;
+  cloudExecutionLifetime(execution).assertLive();const params=record(input),model=execution.model,cwd=execution.cwd;
   if(params.model!==undefined&&params.model!==null&&params.model!==model)throw new Error("Cloud model changes require a new credential admission");
   const environments=[{environmentId,cwd,runtimeWorkspaceRoots:[cwd]}];
   const servers=executionMcpServers(execution,[])??[];
@@ -115,20 +115,22 @@ export function cloudCodexRequest(execution:CloudProviderExecution,environmentId
   // codex_apps override beside a nested mcp_servers map loses its transport in
   // the pinned native loader. Connected Apps still owns its admitted built-in.
   if (!cloudCodexCapabilities(execution).connectedApps) disabled.codex_apps={enabled:false,command:"zeros-disabled-mcp-server"};
-  // The VM/workspace boundary is fixed; approval remains the user's native
-  // selection. Never turn Ask/Read-only into unattended full access.
+  // The VM is the boundary; ordinary cloud work needs no native sandbox or
+  // network restriction. Approval and explicit Plan/read-only remain native.
   const approvalPolicy = ["untrusted","on-request","never"].includes(String(params.approvalPolicy)) ? params.approvalPolicy : "untrusted";
-  const sandbox = ["read-only","workspace-write","danger-full-access"].includes(String(params.sandbox)) ? params.sandbox : "workspace-write";
+  const sandbox = params.sandbox === "read-only" ? "read-only" : "danger-full-access";
   const selected = record(params.sandboxPolicy);
-  const sandboxPolicy = selected.type === "dangerFullAccess" ? {type:"dangerFullAccess"}
-    : selected.type === "readOnly" ? {type:"readOnly",networkAccess:false}
-    : {type:"workspaceWrite",writableRoots:[cwd],networkAccess:false,excludeTmpdirEnvVar:false,excludeSlashTmp:false};
+  const sandboxPolicy = selected.type === "readOnly" || record(params.collaborationMode).mode === "plan"
+    ? {type:"readOnly",networkAccess:false} : {type:"dangerFullAccess"};
   if(method==="thread/start"||method==="thread/resume"||method==="thread/fork"){
     if(method==="thread/fork") {
       if(!cloudCodexCapabilities(execution).nativeFork)throw new Error("This native provider operation is not admitted for this account and image");
       ownThread(execution,params.threadId);
     }
-    return {...pick(params,["serviceTier","baseInstructions","developerInstructions","personality",...(method==="thread/start"?["historyMode"]:["threadId","excludeTurns"])]),
+    const repositoryInstructions=cloudCodexProjectSettings(execution).developer_instructions;
+    const developerInstructions=[typeof params.developerInstructions==="string"?params.developerInstructions:undefined,
+      typeof repositoryInstructions==="string"?repositoryInstructions:undefined].filter(Boolean).join("\n\n")||undefined;
+    return {...pick(params,["serviceTier","baseInstructions","personality",...(method==="thread/start"?["historyMode"]:["threadId","excludeTurns"])]),developerInstructions,
       model,modelProvider:"openai",allowProviderModelFallback:false,cwd,runtimeWorkspaceRoots:[cwd],config:{...config,...cloudCodexConfig(execution),...(Object.keys(disabled).length?{mcp_servers:disabled}:{})},
       ...(method==="thread/fork"?{ephemeral:false,excludeTurns:true,deferGoalContinuation:true}:{}),
       ...(method==="thread/start"?{environments}:{environments:undefined}),
@@ -150,7 +152,8 @@ export function cloudCodexRequest(execution:CloudProviderExecution,environmentId
   if(method.startsWith("thread/goal/")) {
     if(!cloudCodexCapabilities(execution).goals)throw new Error("This native provider operation is not admitted for this account and image");
     const threadId=ownThread(execution,params.threadId);
-    if(params.origin!==undefined&&execution.lease.admission.source?.kind!=="command")
+    // Boot-owner executions are minted only from an authorized command claim.
+    if(params.origin!==undefined&&execution.mode!=="boot-owner-v1"&&execution.lease.admission.source?.kind!=="command")
       throw new Error("Goal provenance requires an admitted command");
     if(method==="thread/goal/get")return z.object({threadId:z.literal(threadId)}).strict().parse(params);
     if(method==="thread/goal/clear")return z.object({threadId:z.literal(threadId),origin:z.literal("user").optional()}).strict().parse(params);
@@ -173,6 +176,8 @@ export function cloudCodexRequest(execution:CloudProviderExecution,environmentId
       ? z.object({threadId:z.string().optional(),cursor:z.string().max(8192).nullable().optional(),limit:z.number().int().min(1).max(100).optional(),forceRefetch:z.boolean().optional()}).strict().parse(params)
       : z.object({threadId:z.string().optional(),forceRefresh:z.boolean().optional()}).strict().parse(params);
   }
+  if(method==="config/read")return {...pick(params,["includeLayers"]),cwd};
+  if(method==="skills/list")return {...pick(params,["forceReload"]),cwds:[cwd]};
   if(reads.has(method)||controls.has(method))return params;
   throw new Error("This native provider operation is not admitted for cloud execution");
 }

@@ -48,6 +48,9 @@ const providerRuns=new Set([
 ]);
 
 export function cloudWorkspaceCapability(op:string,params:Record<string,unknown>,workspace:WorkspacePolicy):Capability|null {
+  // The cloud service confines this import to actor-owned attachment records;
+  // it carries no general checkout write capability.
+  if(op==="attachment.write")return "run";
   if (op === "cloudPresence.update") return CloudWorkspacePresenceSchema.safeParse(params).success ? "read" : null;
   if(op==="github.nativeGrant")return cloudGithubNativeDesktopSchema.safeParse(params).success?"edit":null;
   if(op==="cloudLsp.request")return CloudLspRequestSchema.safeParse(params.request).success?"edit":null;

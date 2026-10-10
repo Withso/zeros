@@ -1,5 +1,33 @@
 # Lifecycle evidence and idle liveness
 
+## Agent command failures
+
+Agent failures retain a closed `cloud_<stage>_<category>` result code through
+control-plane HTTP decoding, execution lease validation/renewal, native startup,
+adapter classification, gateway cleanup and durable receipt recovery. An already
+typed inner cause keeps its stage; cleanup cannot replace it with `rejected` or
+a generic protocol failure. Stages are `validation`, `admission`, `containment`,
+`provider_start` and `provider_prompt`.
+
+| Failure family | Examples |
+| --- | --- |
+| Authority | Unavailable, timeout/transport, HTTP 4xx/5xx, invalid response, access denied, lock busy, execution limit, customization drift. |
+| Native startup | Canary/attestation, executor start, provider login, private environment setup, identity mismatch or not ready. |
+| Credential renewal | Invalid, timed out, unchanged or rejected refresh; expired/revoked provider grants keep their existing `cloud_agent_credential_*` code. |
+| Provider turn | Authentication/verification, rate limit, subprocess exit, protocol/transport failure, superseded session or protection failure. |
+
+The engine's monotonic validation lease expiry is `cloud_validation_lease_expired`,
+distinct from provider credential expiry. An admission failure before a native
+turn restores failed even if history contains only the user's message. A missing
+native terminal defaults to `cloud_provider_prompt_protocol_error`; an explicit
+empty successful terminal remains valid. The full closed vocabulary is in
+`packages/protocol/src/cloud-commands.ts` and its standalone control-plane mirror.
+Closed failure diagnostics contain bounded codes and fixed guidance, never native stderr,
+HTTP bodies, credential values or config excerpts. See
+[receipt and snapshot recovery](client-runtime-contract.md#implemented-command-transport).
+
+## Lifecycle incidents
+
 Migration 0114 adds a private, RLS-protected incident store independent of
 mutable workspace and compute-lease error fields. The organization/workspace,
 generation and operation identity link compute leases to their lifecycle intent

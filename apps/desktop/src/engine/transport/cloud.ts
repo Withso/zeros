@@ -41,6 +41,7 @@ import {
 import { CloudRuntimeQuietSnapshotSchema, type CloudRuntimeQuietSnapshot } from "@zeros/protocol/cloud-runtime-lifecycle";
 import type { EngineMessage } from "../types";
 import { CloudRuntimeHandoffCommandSchema, type CloudRuntimeHandoffCommand, type CloudRuntimeHandoffReply } from "../cloud-runtime-quiet-state";
+import { CloudEngineFinalCompletionSchema, MAX_CLOUD_FINAL_COMPLETION_BYTES, type CloudEngineFinalCompletion } from "../cloud-final-completion";
 import type { Transport, TransportClient } from "./types";
 import type {
   CloudRuntimeClientAdmission,
@@ -154,6 +155,7 @@ const MAX_CLIENT_AUTHORITY_LEASE_MS = 10_000;
 const INTERNAL_READINESS_PATH = "/internal/readiness";
 const INTERNAL_QUIET_PATH = "/internal/runtime-quiet";
 const INTERNAL_HANDOFF_PATH = "/internal/runtime-handoff";
+const INTERNAL_FINAL_COMPLETION_PATH = "/internal/final-completion";
 const READINESS_TOKEN_PATTERN = /^zwr_[A-Za-z0-9_-]{43}$/;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -237,6 +239,7 @@ export interface CloudTransportOptions {
     token: string;
     read: () => CloudRuntimeReadiness | null;
     readQuiet?: (challenge: string) => Promise<CloudRuntimeQuietSnapshot | null>;
+    readFinalCompletion?: (challenge: string) => Promise<CloudEngineFinalCompletion | null>;
     handoff?: (command: CloudRuntimeHandoffCommand) => Promise<CloudRuntimeHandoffReply | null>;
   };
 }
@@ -570,7 +573,16 @@ export class CloudTransport implements Transport {
                     startedAt + this.clientAuthorityLeaseMs;
                   armExpiry();
                 },
-                () => client.close(1008, "client authority unavailable"),
+                (error: unknown) => {
+                  if (finalized || !client.authorized()) return;
+                  const failure = error && typeof error === "object" ? error as { code?: unknown; status?: unknown } : {};
+                  // Only a typed transient may use the remaining confirmed
+                  // lease. It never renews the deadline; expiry still fences
+                  // incoming/outgoing handlers even if this request stalls.
+                  if (failure.code === "cloud_client_authority_transient") return;
+                  client.close(1008, typeof failure.status === "number" && failure.status >= 400 && failure.status < 500
+                    ? "client authority revoked" : "client authority unavailable");
+                },
               )
               .finally(() => {
                 renewalInFlight = false;
@@ -1152,7 +1164,7 @@ export class CloudTransport implements Transport {
 
   private handleHTTP(req: IncomingMessage, res: ServerResponse): void {
     const url = new URL(req.url ?? "", "http://sandbox");
-    if ([INTERNAL_READINESS_PATH, INTERNAL_QUIET_PATH, INTERNAL_HANDOFF_PATH].includes(url.pathname)) {
+    if ([INTERNAL_READINESS_PATH, INTERNAL_QUIET_PATH, INTERNAL_HANDOFF_PATH, INTERNAL_FINAL_COMPLETION_PATH].includes(url.pathname)) {
       void this.handleInternalReadiness(url, req, res).catch(() => res.destroy());
       return;
     }
@@ -1238,6 +1250,34 @@ export class CloudTransport implements Transport {
       res.writeHead(200, { "Cache-Control": "no-store", "Content-Type": "application/json; charset=utf-8",
         "X-Content-Type-Options": "nosniff" });
       res.end(JSON.stringify(result)); return;
+    }
+    if (url.pathname === INTERNAL_FINAL_COMPLETION_PATH) {
+      const challenge = req.headers["x-zeros-final-challenge"];
+      if (!this.internalReadiness.readFinalCompletion || typeof challenge !== "string" || !UUID_PATTERN.test(challenge) ||
+          req.headers["transfer-encoding"] !== undefined ||
+          (req.headers["content-length"] !== undefined && req.headers["content-length"] !== "0")) {
+        reject(); return;
+      }
+      let result: string | null = null;
+      try {
+        const initial = this.internalReadiness.read();
+        // Denial of NEW admissions during a fresh-view transition is distinct
+        // from the original engine's committed, still-fenced lifecycle proof.
+        // The callback checks that original scope/custody on both sides of its
+        // fresh census; any available readiness must still match it exactly.
+        const parsed = CloudEngineFinalCompletionSchema.safeParse(await this.internalReadiness.readFinalCompletion(challenge));
+        const current = this.internalReadiness.read();
+        const matches = (value: CloudRuntimeReadiness | null) => !value || parsed.success &&
+          value.health === "ready" && value.durableRecordConnected === true && value.instanceId === parsed.data.scope.engineInstanceId;
+        if (parsed.success && parsed.data.challenge === challenge && !!initial === !!current && matches(initial) && matches(current)) {
+          const bytes = JSON.stringify(parsed.data);
+          if (Buffer.byteLength(bytes) <= MAX_CLOUD_FINAL_COMPLETION_BYTES) result = bytes;
+        }
+      } catch { /* Unknown completion never authorizes ordinary root retirement. */ }
+      res.writeHead(result === null ? 503 : 200, { "Cache-Control": "no-store",
+        "Content-Type": result === null ? "text/plain; charset=utf-8" : "application/json; charset=utf-8",
+        "X-Content-Type-Options": "nosniff" });
+      res.end(result ?? "unavailable"); return;
     }
     const quiet = url.pathname === INTERNAL_QUIET_PATH;
     const challenge = req.headers["x-zeros-quiet-challenge"];

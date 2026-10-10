@@ -21,16 +21,20 @@ lanes. No jobs are added; merge, deployment and publication workflows are unchan
 [`scripts/runtime-skew/pins.json`](../../scripts/runtime-skew/pins.json) records
 full immutable Git commit and tree hashes for the historical directions:
 
-- Current client → runtime source `ea34b8ac84ee13aaf89a5d76eb2a4c22540cb36e`
+- Current client → Alpha #406 runtime source `c8e60c064ec1e4661254c46dee24bc8cfcc300e5`
   → current control-plane HTTP validators. The supplied runtime identifier is
-  only the prefix `r1-89d46240`; its full bundle digest, base/profile and
+  only the prefix `r1-7a4e5161`; its full bundle digest, base/profile and
   qualification evidence have **not** been verified by this task.
-- Desktop release `v0.1.22`, resolved to source
-  `1dc0d625c74388559374fd634852c60b1005123c` → current engine modules → current
-  control-plane HTTP validators. This is released source, not a signed Alpha
+- Alpha #406 desktop source `c8e60c064ec1e4661254c46dee24bc8cfcc300e5`
+  → current engine modules → current control-plane HTTP validators.
+  This is operator-supplied Alpha source provenance, not a signed Alpha
   desktop binary.
 - Each `retainedRuntimes` pin → the current client and control-plane validators.
   Keep this list for older cohorts which still need support.
+
+Both #406 directions verify immutable source tree
+`a3d284577be7d17163a560db8c2b92a0df94f390` from Git objects. Those source pins
+do not establish a complete runtime ID, signed artifact or qualified base pair.
 
 The loader reads every historical project import from that commit's Git objects,
 including relative imports and `@zeros/protocol`. It verifies the recorded tree
@@ -39,8 +43,10 @@ when history is absent. The existing CI checkout already fetches full history.
 The gate performs no Git fetch and contacts no providers. It builds only portable
 schemas, renderer adapters, command/action pumps and registration clients;
 current control-plane Hono routes run in process with injected memory services.
-No socket or database is opened. Synthetic transport material is constructed
-inside the harness; diagnostics never print requests, credentials or raw errors.
+The frozen/current native transport opens ephemeral sockets with a loopback
+client for confirmed lease expiry. No database or external provider is used.
+Synthetic transport material stays inside the harness; diagnostics never print
+requests, credentials or raw errors.
 
 Historical bundles are cached under gitignored `.context/runtime-skew/`, keyed
 by full source commit, harness entry digest, compiler version and the current
@@ -55,7 +61,8 @@ No historical checkout, generated source or compiled fixture is committed.
 | Approval                    | Frozen/current action schema and engine pump, current HTTP validation, permission delivery and receipt parsing                                                                                                                       | Native provider approval callback and durable replay/idempotency                         |
 | Terminal                    | Actual renderer attach/input adapter, receiving cohort ingress parser, optional reattach snapshot fields                                                                                                                             | Native PTY creation, screen state, input acknowledgements and disconnect survival        |
 | Records / events            | Current record-append request validator; frozen/current event append/replay clients and receiving parsers                                                                                                                            | Actual record consumer/recovery and durable ordered replay across reconnects             |
-| Services / renewal          | Frozen/current registration client, current registration/heartbeat/admission request validators, strict response parsing and SSH relative lease                                                                                      | Base attestation, real service stream, credential refresh/revocation and timer lifecycle |
+| Services / renewal          | Frozen/current registration and native transport; network/408/429/503 renewal retains only the confirmed deadline, 401/403 refuses; one renewal and actual bounded lease expiry                                                       | Base attestation, real service stream and provider credential refresh/revocation         |
+| Failure / terminal / replies | Both directions cover 17 new categories across five stages, 17 actual failure receipts, direct/snapshot terminal projection and opt-in, and correlated permission/question ownership                                                | Native provider callbacks, signed binaries and durable replay                            |
 | Files / Git / Design create | Deferred                                                                                                                                                                                                                             | Real receiving engine handlers and stable persisted/source identities                    |
 
 Responses and persistence are memory fixtures. A change solely to database
@@ -64,6 +71,15 @@ this slice. Passing it must never be presented as proof that a released desktop,
 control plane and runtime pair is fully qualified. It does not diagnose the
 specific reported workspace's provider failure or guarantee that every generic
 dispatch error has been removed.
+
+The gate captures each cohort's actual engine handlers and failure formatter,
+plus standalone control-plane Zod 3 schemas. Terminal acknowledgement is bound
+to the exact CP/org/workspace/generation/engine; lost support restores legacy
+projection. Alpha CP refuses all 17 new producer categories even after terminal
+stripping, so **deploy the control plane first**. Unsupported cloud contracts
+refuse before send/queue mutation. These
+source checks and the [cloud compatibility activation gate](qualification-status.md#rollout-order)
+do not substitute for a signed-client/released-VM run.
 
 The deliberately incompatible fixture adds `futurePromptFormat` to a real
 queued prompt, which the frozen strict parser rejects before a durable mutation:
@@ -91,8 +107,8 @@ but publication is not qualification, and an older cohort may remain active.
    the initial prefix/provenance with that verified identity when available.
    This gate itself never reads provider credentials or the registry.
 2. Resolve the preceding **actual Alpha desktop release** to an immutable source
-   commit and tree. Replace the initial v0.1.22 released-source baseline when the
-   Alpha binary/source provenance is confirmed. Moving `alpha` tags must never
+   commit and tree. Replace the operator-supplied #406 source baseline only with
+   verified binary/source provenance. Moving `alpha` tags must never
    be used as executable pins.
 3. Move a replaced runtime pin into `retainedRuntimes` while any running workspace
    still needs it. Do not overwrite the sole old pin to make a failing release
@@ -134,10 +150,9 @@ source-contract gate.
 ## Local workspace impact
 
 Local-owner and organization-owned local workspaces continue through their
-existing local engine and pathname dispatch. The sole runtime behavior change
-is the error type at an existing refusal in `CloudAgentConnection`, constructed
-only for cloud peers. No local engine, transport, IPC, persistence, environment
-or owner-selection path changes. The gate checks both local pathname identities
+existing local engine and pathname dispatch. Cloud contract refusals are scoped
+to cloud peers; they do not select cloud execution or credentials for a Local
+owner. The gate checks both local pathname identities
 and selection of an exact `cloud://` key; adjacent workspace-runtime tests cover
 delegation to the local client and switching peers.
 

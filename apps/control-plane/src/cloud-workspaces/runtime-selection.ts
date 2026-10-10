@@ -13,6 +13,15 @@ export function runtimeNativeCapabilities(value: unknown) {
   const parsed = nativeCapabilitiesSchema.safeParse(value);
   return parsed.success ? parsed.data : undefined;
 }
+/** Smoke qualification stores the column default `{}` because it exercises no
+ * extended native feature: that is the explicit all-false set, not a refusal.
+ * Any other unparseable value stays unadmitted. */
+export function runtimeQualifiedNativeCapabilities(value: unknown) {
+  if (value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0)
+    return { version: 1 as const, goals: false, nativeFork: false, transcriptFork: false, nativeReview: false,
+      connectedApps: false, multiAgent: false };
+  return runtimeNativeCapabilities(value);
+}
 
 export class CloudRuntimeError extends HttpError {
   constructor(code: "cloud_runtime_revoked" | "cloud_runtime_unavailable") {

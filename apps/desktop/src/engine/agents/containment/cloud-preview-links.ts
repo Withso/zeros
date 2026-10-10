@@ -4,18 +4,20 @@ import {
   fstatSync,
   lstatSync,
   openSync,
-  readFileSync,
+  readSync,
   realpathSync,
+  type Stats,
 } from "node:fs";
 import path from "node:path";
+import { hasCloudEngineUserNamespace, isCloudDeploymentOwner } from "./cloud-runtime-root.mjs";
 
 import {
-  ZsrPreviewGateway,
+  PreviewGateway,
   type BoundaryPreviewGateway,
   type BoundaryPreviewGatewayFactory,
   type PreviewNavigation,
-  type ZsrPreviewTarget,
-} from "./zsr-preview-gateway";
+  type PreviewTarget,
+} from "./preview-gateway";
 
 export const CLOUD_PREVIEW_LINKS_PATH = "/run/zeros/cloud-preview-links.json";
 export const MAX_CLOUD_PREVIEW_LINKS = 64;
@@ -154,28 +156,36 @@ export function parseCloudPreviewLinks(
   return validateCloudPreviewLinks(parsed, now);
 }
 
-function assertRootControlledPrivateFile(file: string): void {
-  if (!path.isAbsolute(file) || realpathSync(file) !== file) {
+function privateStateFile(stat: Stats): boolean {
+  return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && stat.uid === 10003 && stat.gid === 10003 &&
+    (stat.mode & 0o7777) === 0o600;
+}
+
+function assertEngineOwnedPrivateFile(file: string): Stats {
+  if (!path.isAbsolute(file) || path.resolve(file) !== file || realpathSync(file) !== file) {
     throw new Error("cloud preview link path is not canonical");
   }
   let cursor = file;
+  let leafStat: Stats | undefined;
   for (;;) {
     const stat = lstatSync(cursor);
     const leaf = cursor === file;
     if (
       stat.isSymbolicLink() ||
-      stat.uid !== 0 ||
-      (stat.mode & 0o022) !== 0 ||
+      (stat.mode & 0o7022) !== 0 ||
       (leaf
-        ? !stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0
-        : !stat.isDirectory())
+        ? !privateStateFile(stat)
+        : !stat.isDirectory() || !(stat.uid === 10003 && stat.gid === 10003 ||
+            stat.uid === 65534 && stat.gid === 65534 && isCloudDeploymentOwner(cursor, stat.uid)))
     ) {
-      throw new Error("cloud preview link state is not root-controlled");
+      throw new Error("cloud preview link state is not engine-owned");
     }
+    if (leaf) leafStat = stat;
     const parent = path.dirname(cursor);
     if (parent === cursor) break;
     cursor = parent;
   }
+  return leafStat!;
 }
 
 export function loadCloudPreviewLinks(
@@ -186,7 +196,7 @@ export function loadCloudPreviewLinks(
   try {
     descriptor = openSync(
       file,
-      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
     );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -197,26 +207,43 @@ export function loadCloudPreviewLinks(
   try {
     if (
       process.platform !== "linux" ||
-      typeof process.geteuid !== "function" ||
-      process.geteuid() !== 0
+      process.getuid?.() !== 10003 || process.geteuid?.() !== 10003 ||
+      process.getgid?.() !== 10003 || process.getegid?.() !== 10003 ||
+      !hasCloudEngineUserNamespace(4)
     ) {
-      throw new Error("cloud preview links require a root Linux coordinator");
+      throw new Error("cloud preview links require the non-root cloud engine");
     }
-    assertRootControlledPrivateFile(file);
     const stat = fstatSync(descriptor);
-    const current = lstatSync(file);
+    const current = assertEngineOwnedPrivateFile(file);
     if (
-      !stat.isFile() ||
-      stat.nlink !== 1 ||
+      !privateStateFile(stat) ||
       stat.dev !== current.dev ||
       stat.ino !== current.ino
     ) {
-      throw new Error("cloud preview link state is not root-controlled");
+      throw new Error("cloud preview link state is not engine-owned");
     }
-    if (stat.size < 2 || stat.size > MAX_LINK_FILE_BYTES) {
+    if (!Number.isSafeInteger(stat.size) || stat.size < 2 || stat.size > MAX_LINK_FILE_BYTES) {
       throw new Error("cloud preview link state has an invalid size");
     }
-    return parseCloudPreviewLinks(readFileSync(descriptor, "utf8"), now);
+    // Read the same no-follow descriptor with an independent byte bound, so
+    // a growing inode cannot turn the initial size check into an unbounded read.
+    const buffer = Buffer.alloc(MAX_LINK_FILE_BYTES + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const length = readSync(descriptor, buffer, size, buffer.length - size, null);
+      if (!Number.isSafeInteger(length) || length < 0 || length > buffer.length - size) {
+        throw new Error("cloud preview link state has an invalid size");
+      }
+      if (!length) break;
+      size += length;
+    }
+    const after = fstatSync(descriptor), pathAfter = assertEngineOwnedPrivateFile(file);
+    if (size > MAX_LINK_FILE_BYTES || size !== stat.size || size !== after.size ||
+      !privateStateFile(after) || stat.dev !== after.dev || stat.ino !== after.ino ||
+      after.dev !== pathAfter.dev || after.ino !== pathAfter.ino) {
+      throw new Error("cloud preview link state changed while reading");
+    }
+    return parseCloudPreviewLinks(buffer.toString("utf8", 0, size), now);
   } finally {
     closeSync(descriptor);
   }
@@ -233,7 +260,7 @@ class CloudBoundaryPreviewGateway implements BoundaryPreviewGateway {
     private readonly factory: CloudPreviewGatewayFactory,
     private readonly port: number,
     private readonly displayPort: number,
-    private readonly gateway: ZsrPreviewGateway,
+    private readonly gateway: PreviewGateway,
   ) {}
 
   async navigation(): Promise<PreviewNavigation> {
@@ -258,7 +285,7 @@ class CloudBoundaryPreviewGateway implements BoundaryPreviewGateway {
 
 /** Allocates one provider-authenticated, dedicated origin per live preview.
  * The API key stays with the external cloud coordinator; the engine receives
- * only root-owned, short-lived signed links for this bounded port pool. */
+ * only engine-owned, short-lived signed links for this bounded port pool. */
 export class CloudPreviewGatewayFactory
   implements BoundaryPreviewGatewayFactory
 {
@@ -290,13 +317,13 @@ export class CloudPreviewGatewayFactory
     return { link, expiresAt: document.expiresAt };
   }
 
-  async open(target: ZsrPreviewTarget): Promise<BoundaryPreviewGateway> {
+  async open(target: PreviewTarget): Promise<BoundaryPreviewGateway> {
     const document = this.readLinks();
     for (const link of document.links) {
       if (this.reservedPorts.has(link.port)) continue;
       this.reservedPorts.add(link.port);
       try {
-        const gateway = await ZsrPreviewGateway.open(target, {
+        const gateway = await PreviewGateway.open(target, {
           listenHost: this.listenHost,
           listenPort: link.port,
           exposure: {

@@ -44,8 +44,8 @@ export type ExecutionBoundaryRestriction =
   | "cursor-team-settings-unavailable"
   | "provider-native-extensions-restricted"
   | "native-session-fork-disabled"
-  /** Retained for v1 wire compatibility. Current ZSR sessions use native Git
-   * plus a narrow trusted broker for whole-tree integrations. */
+  /** Retained for archived v1 wire compatibility. New cloud processes share
+   * the engine identity; this value never asserts a new filesystem boundary. */
   | "additional-repository-git-read-only";
 
 export const CLOUD_CORE_EXECUTION_PROFILE = "zeros-cloud-core-v1" as const;
@@ -91,8 +91,8 @@ export const CLOUD_CORE_PROVIDER_RESTRICTIONS: Readonly<Record<CloudCoreProvider
  * and history remain scoped to the organization execution; host attachment
  * and conversation-fork workflows require their own cloud admission. */
 export const CLOUD_NATIVE_PROVIDER_RESTRICTIONS: Readonly<Record<CloudCoreProvider, readonly ExecutionBoundaryRestriction[]>> = {
-  claude: ["additional-directories-disabled", "mcp-oauth-unavailable", "native-session-fork-disabled"],
-  cursor: ["additional-directories-disabled", "cursor-team-settings-unavailable", "mcp-oauth-unavailable", "native-session-fork-disabled"],
+  claude: ["additional-directories-disabled", "mcp-oauth-unavailable", "native-session-fork-disabled", "plugins-disabled", "provider-native-extensions-restricted"],
+  cursor: ["additional-directories-disabled", "cursor-team-settings-unavailable", "mcp-oauth-unavailable", "native-session-fork-disabled", "provider-native-extensions-restricted"],
   codex: ["additional-directories-disabled", "mcp-oauth-unavailable", "native-session-fork-disabled", "provider-native-extensions-restricted"],
 };
 /** Defaults describe an older/basic qualification. Feature support is reported

@@ -145,7 +145,19 @@ describe("cursorModelStateFingerprint (pure)", () => {
 });
 
 describe("cursorRipgrepPathFromEnvironment (packaged host)", () => {
-  it("reuses the staged ZSR binary when Cursor has no separate path", () => {
+  it("uses the neutral product binary before the legacy courier", () => {
+    expect(cursorRipgrepPathFromEnvironment({
+      ZEROS_RIPGREP_PATH: "/Applications/Zeros.app/Resources/rg",
+      ZEROS_ZSR_RIPGREP_PATH: "/old/rg",
+    })).toBe("/Applications/Zeros.app/Resources/rg");
+  });
+
+  it("keeps explicit Local search bytes and refuses relative neutral courier paths", () => {
+    expect(cursorRipgrepPathFromEnvironment({ CURSOR_RIPGREP_PATH: "/custom/rg", ZEROS_RIPGREP_PATH: "/product/rg" })).toBe("/custom/rg");
+    expect(cursorRipgrepPathFromEnvironment({ ZEROS_RIPGREP_PATH: "relative-rg" })).toBeNull();
+  });
+
+  it("reads the previous staged binary name when Cursor has no separate path", () => {
     expect(
       cursorRipgrepPathFromEnvironment({
         ZEROS_ZSR_RIPGREP_PATH: "/Applications/Zeros.app/Resources/zsr-rg",

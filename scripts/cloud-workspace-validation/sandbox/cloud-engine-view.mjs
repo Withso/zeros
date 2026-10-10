@@ -1,6 +1,7 @@
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
 import { isCloudComputerRepositoryDirectory } from "./cloud-computer-checkout.mjs";
+import { CLOUD_ENGINE_MUTABLE_LAYOUT } from "./prepare-cloud-image-files.mjs";
 
 /** Credential-free alias metadata for engine-owned publication and policy.
  * The launcher supplies only a primary from its validated private admission. */
@@ -10,12 +11,20 @@ export function cloudEngineWorkspacePaths(primaryRepository) {
     repositoryAlias: `/srv/zeros/${primaryRepository.slice("/srv/zeros/files/".length)}` };
 }
 
+/** Current runtime projection; the immutable base marker remains a legacy reader. */
+export function cloudEngineWorkerProjection(runtime) {
+  if (runtime?.profile !== "v4") throw new Error("Invalid cloud engine profile version");
+  return { version: 4, backend: "cloud-worker", profile: "zeros-cloud-worker-v4", uid: 10003, gid: 10003,
+    toolchain: { node: runtime.node,
+      supervisor: `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs` } };
+}
+
 /** Mount inputs are image-owned constants, never paths or commands from an
  * engine request. The host launcher verifies their physical ownership first.
  * Private broker authority, provider login homes and the host shadow/SSH files
  * have no mount in this view. */
-export function cloudEngineViewArguments(operation = "serve",version=4,runtime=resolveCloudRuntime(),viewDirectory,primaryRepository,residentHostId) {
-  if (!["serve", "qualify", "resident"].includes(operation))
+export function cloudEngineViewArguments(operation = "serve",version=4,runtime=resolveCloudRuntime(),viewDirectory,primaryRepository,residentHostId,placement) {
+  if (!["serve", "qualify", "resident", "probe-cursor"].includes(operation))
     throw new Error("Invalid cloud engine launch operation");
   if(version!==4 || runtime.profile!=="v4")throw new Error("Invalid cloud engine profile version");
   if (residentHostId !== undefined && (!["serve", "resident"].includes(operation) ||
@@ -25,6 +34,14 @@ export function cloudEngineViewArguments(operation = "serve",version=4,runtime=r
     throw new Error("Invalid cloud engine runtime projection");
   if (primaryRepository !== undefined && !isCloudComputerRepositoryDirectory(primaryRepository))
     throw new Error("Invalid cloud engine repository projection");
+  let common;
+  if (placement !== undefined) {
+    const expected = `${runtime.cgroupRoot}/engine-runtime/`;
+    const suffix = typeof placement === "string" && placement.startsWith(expected) ? placement.slice(expected.length) : "";
+    if (!/^(?:engine-|engine-workload-)[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}@(0|[1-9][0-9]{0,19}):[1-9][0-9]{0,19}$/.test(suffix))
+      throw new Error("Invalid original cloud engine placement");
+    common = `${runtime.cgroupRoot}/engine-runtime`;
+  }
   const args = [
     "--die-with-parent",
     "--unshare-ipc",
@@ -47,8 +64,8 @@ export function cloudEngineViewArguments(operation = "serve",version=4,runtime=r
     // Keep procfs fully visible: a locked child mask makes the kernel reject
     // fresh proc mounts in private container PID namespaces. VM root is not
     // mapped into the engine; global controls retain host ownership and the
-    // kernel denies writes even to namespace root. Qualification verifies
-    // those denials as well as host-process and user-namespace isolation.
+    // kernel denies writes; the engine also drops every capability before exec. Qualification verifies
+    // those denials without claiming per-agent isolation.
     "--bind",
     "/proc",
     "/proc",
@@ -67,6 +84,9 @@ export function cloudEngineViewArguments(operation = "serve",version=4,runtime=r
     "--ro-bind",
     "/sys/fs/cgroup",
     "/sys/fs/cgroup",
+    // All other cgroups, including /host and its ancestor, remain read-only.
+    // Only this same-user tree exposes migration controls; limits stay root-owned.
+    ...(common ? ["--bind", common, common] : []),
     ...[
       // The resident remains pinned, but future shells need the selected
       // immutable runtime's binaries. No mutable facade/host authority is
@@ -76,12 +96,6 @@ export function cloudEngineViewArguments(operation = "serve",version=4,runtime=r
       "--symlink", "/opt/zeros", "/zeros",
       "--ro-bind", `${viewDirectory}/etc`, "/etc/zeros",
     ],
-    "--ro-bind",
-    "/etc/containers/policy.json",
-    "/etc/containers/policy.json",
-    "--ro-bind",
-    "/etc/containers/registries.conf",
-    "/etc/containers/registries.conf",
     "--bind",
     // One mount permits atomic attachment publication from an engine-private
     // sibling. The checked v4 repos/<owner>/<name> subtree is also writable at
@@ -91,8 +105,10 @@ export function cloudEngineViewArguments(operation = "serve",version=4,runtime=r
     "/srv/zeros",
     // v4 setup must stage within the files bind to avoid EXDEV and retain
     // Boat persistence. Its private seed/home are never engine-visible.
-    ...["--tmpfs", "/srv/zeros/.zeros-setup", "--chmod", "0000", "/srv/zeros/.zeros-setup",
-      "--remount-ro", "/srv/zeros/.zeros-setup"],
+    ...[".zeros-setup", ".zeros-engine-setup"].flatMap(name => [
+      "--tmpfs", `/srv/zeros/${name}`, "--chmod", "0000", `/srv/zeros/${name}`,
+      "--remount-ro", `/srv/zeros/${name}`,
+    ]),
     // The source is the admitted host clone. No mount is installed beneath
     // the host's files bind; this alias belongs only to this engine namespace.
     ...(primaryRepository ? ["--bind", primaryRepository, "/srv/zeros/workspace"] : []),
@@ -100,14 +116,20 @@ export function cloudEngineViewArguments(operation = "serve",version=4,runtime=r
     "/srv/zeros/state",
     "/srv/zeros/state",
     "--bind",
-    "/srv/zeros/home/agent",
+    CLOUD_ENGINE_MUTABLE_LAYOUT.agentHome,
     "/srv/zeros/home/agent",
     "--bind",
-    "/srv/zeros/home/capture",
+    CLOUD_ENGINE_MUTABLE_LAYOUT.captureHome,
     "/srv/zeros/home/capture",
     "--bind",
     "/run/zeros/engine",
     "/run/zeros",
+    ...(common ? [
+      "--bind", "/run/zeros/workload-custody", "/run/zeros/workload-custody",
+      // The pinned root publisher fills this one file before the C transition
+      // remounts it read-only and removes every root control alias.
+      "--bind", `${viewDirectory}/etc/cloud-workload-custody.json`, "/etc/zeros/cloud-workload-custody.json",
+    ] : []),
     "--ro-bind", `${viewDirectory}/active-runtime.json`, "/run/zeros/active-runtime.json",
     "--ro-bind",
     "/run/zeros/view/settings",
@@ -124,9 +146,7 @@ export function cloudEngineViewArguments(operation = "serve",version=4,runtime=r
     "alternatives",
   ])
     args.push("--ro-bind", `/etc/${name}`, `/etc/${name}`);
-  // Empty mount point for the native provider view's Codex system
-  // configuration. That view's root is this read-only one, so it cannot
-  // create the directory itself.
+  // Retain the empty Codex mount point for old runtime compatibility.
   args.push("--dir", "/etc/codex");
   args.push("--cap-drop", "ALL");
   for (const capability of [
@@ -139,9 +159,8 @@ export function cloudEngineViewArguments(operation = "serve",version=4,runtime=r
     "CAP_DAC_OVERRIDE",
     "CAP_CHOWN",
     "CAP_FOWNER",
-    // Nested UID-0 maps require SETFCAP on Linux >=5.12. The native
-    // transition retains it only for namespace root mapped to host UID 10003;
-    // inherited NoNewPrivs prevents file capabilities adding privilege on exec.
+    // These capabilities exist only during the trusted namespace construction.
+    // The fixed C transition drops the entire bounding set before engine exec.
     "CAP_SETFCAP",
   ])
     args.push("--cap-add", capability);
@@ -154,7 +173,6 @@ export function cloudEngineViewArguments(operation = "serve",version=4,runtime=r
     "/run",
     "/etc",
     "/etc/codex",
-    "/etc/containers",
     "/sys",
     "/sys/fs",
   ])
@@ -171,8 +189,10 @@ export function cloudEngineViewArguments(operation = "serve",version=4,runtime=r
     runtime.engineNamespace,
   );
   args.push("--runtime-id",runtime.runtimeId);
+  if (placement !== undefined) args.push("--engine-scope", placement);
   if (operation === "qualify") args.push("--qualify");
   if (operation === "resident") args.push("--resident");
+  if (operation === "probe-cursor") args.push("--probe-cursor");
   return args;
 }
 
@@ -180,13 +200,13 @@ export function cloudEngineViewArguments(operation = "serve",version=4,runtime=r
  * listings. Every authority-bearing variable is selected explicitly from the
  * existing supervisor contract; ambient provider/loader variables are absent. */
 export function cloudEngineViewEnvironment(source, operation = "serve", runtime=resolveCloudRuntime()) {
-  if (!["serve", "qualify", "resident"].includes(operation) || runtime.profile !== "v4")
+  if (!["serve", "qualify", "resident", "probe-cursor"].includes(operation) || runtime.profile !== "v4")
     throw new Error("Invalid cloud engine launch operation");
   const environment = {
     PATH: `${runtime.binRoot}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
     HOME: "/srv/zeros/home/agent",
-    USER: "zeros-agent",
-    LOGNAME: "zeros-agent",
+    USER: "zeros-engine",
+    LOGNAME: "zeros-engine",
     LANG: "C.UTF-8",
     SHELL: "/bin/bash",
     ZEROS_DATA_DIR: "/srv/zeros/state",
@@ -199,11 +219,7 @@ export function cloudEngineViewEnvironment(source, operation = "serve", runtime=
       `${runtime.workerRoot}/apps/desktop/src/engine/pty/pty-host.cjs`,
     ZEROS_CURSOR_HOST_SCRIPT:
       `${runtime.workerRoot}/apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs`,
-    ZEROS_ZSR_SUPERVISOR_RUNTIME: runtime.node,
-    ZEROS_ZSR_SUPERVISOR_SCRIPT:
-      `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs`,
-    ZEROS_ZSR_BWRAP_PATH: "/usr/bin/bwrap",
-    ZEROS_ZSR_SETPRIV_PATH: "/usr/bin/setpriv",
+    ZEROS_RIPGREP_PATH: `${runtime.workerRoot}/binaries/rg`,
   };
   if (operation === "serve") {
     for (const name of [

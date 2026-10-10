@@ -14,13 +14,24 @@ import type {AgentSessionCreatedMessage} from "../messages";
 
 const chat = "11111111-1111-4111-8111-111111111111";
 const grant = "22222222-2222-4222-8222-222222222222";
-function fixture(receiptIdentity: Record<string, unknown> = {}) {
+const peer = { kind: "cloud" as const, organizationId: "33333333-3333-4333-8333-333333333333",
+  workspaceId: "44444444-4444-4444-8444-444444444444", generation: 1, authorityEpoch: 1,
+  engineInstanceId: "55555555-5555-4555-8555-555555555555" };
+const { kind: _peerKind, ...peerScope } = peer;
+const boot = { ...peerScope, version: 1, mode: "boot-owner-v1", fundingScope: "workspace-roles-v1",
+  bootId: "66666666-6666-4666-8666-666666666666", writerEpoch: "77777777-7777-4777-8777-777777777777",
+  fundingOwnerUserId: "88888888-8888-4888-8888-888888888888", fundingOwnerEpoch: 1,
+  cacheRevision: 1, desiredCacheRevision: 1,
+  initialAdoptions: ["claude", "codex", "cursor"].map(provider => ({ provider, status: "unknown" })) };
+function fixture(receiptIdentity: Record<string, unknown> = {}, cloudTurnProtocolVersion = 1,
+  metadata?: Record<string, unknown>, capable = true) {
   let enqueued: WireRecord | undefined;
   let state = "succeeded";
   const request = vi.fn(async (message: WireRecord) => {
     const params = message.params as WireRecord;
     const input = params.request as WireRecord;
-    let result: unknown = { conversationId: chat, modeRevision: 0, permissionModeVersion: 1, nativeCommandsVersion: 1, claudePreferencesVersion: 1 };
+    let result: unknown = { conversationId: chat, modeRevision: 0, permissionModeVersion: 1, nativeCommandsVersion: 1, claudePreferencesVersion: 1,
+      ...(cloudTurnProtocolVersion ? { cloudTurnProtocolVersion } : {}), ...(metadata ? { cloudLocalCommands: metadata } : {}) };
     if (message.op === "cloudCommands.request") {
       if (input.kind === "snapshot")
         result = {
@@ -81,7 +92,8 @@ function fixture(receiptIdentity: Record<string, unknown> = {}) {
   });
   const authorize = vi.fn(async () => grant);
   const connection = new CloudAgentConnection(
-    { request, status: "connected" } as unknown as RuntimeClient,
+    { request, status: "connected", executionIdentity: peer,
+      supportsEngineCapability: (feature: string) => capable && !!metadata && feature === "cloud.localCommands.v1" } as unknown as RuntimeClient,
     "local-main",
     authorize,
   );
@@ -173,6 +185,227 @@ describe("cloud Claude preference carriage", () => {
 });
 
 describe("cloud snapshot and replay installation", () => {
+  it("skips the renderer credential grant only on the exact negotiated boot peer", async () => {
+    const f = fixture({}, 1, boot);
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "test-model" } });
+    await f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "turn", prompt: [] });
+    expect(f.authorize).not.toHaveBeenCalled();
+    expect(f.getEnqueued()).toMatchObject({ payload: { agentId: "codex", model: "test-model" } });
+    expect(f.getEnqueued()!.payload).not.toHaveProperty("agentCredentialGrantId");
+    for (const [message] of f.request.mock.calls.filter(([message]) => message.op === "cloudCommands.request"))
+      expect(message.params).toMatchObject({ cloudLocalCommandsVersion: 1, bootId: boot.bootId, writerEpoch: boot.writerEpoch });
+    f.connection.dispose();
+  });
+  it.each([
+    [boot, false], [{ ...boot, engineInstanceId: chat }, true], [{ ...boot, authorityEpoch: 2 }, true],
+    [{ ...boot, providers: [] }, true],
+  ])("refuses partial or foreign boot advertisement before requesting a grant or enqueueing", async (metadata, capable) => {
+    const f = fixture({}, 1, metadata as Record<string, unknown>, capable as boolean);
+    await expect(f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex",
+      env: { OPENAI_MODEL: "test-model" } })).rejects.toMatchObject({ code: "cloud_workspace_client_update_required" });
+    expect(f.authorize).not.toHaveBeenCalled(); expect(f.getEnqueued()).toBeUndefined(); f.connection.dispose();
+  });
+  it.each([0, 1])("negotiates new command fields only after runtime advertisement (turn protocol %s)", async version => {
+    const f = fixture({}, version);
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "test-model" } });
+    await f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "turn", prompt: [] });
+    const commandCalls = f.request.mock.calls.filter(([message]) => message.op === "cloudCommands.request");
+    expect(commandCalls.length).toBeGreaterThan(0);
+    for (const [message] of commandCalls) {
+      expect(message.params).toMatchObject({ nativeCommandsVersion: 1 });
+      if (version) expect(message.params).toMatchObject({ cloudTurnProtocolVersion: 1 });
+      else expect(message.params).not.toHaveProperty("cloudTurnProtocolVersion");
+    }
+    f.connection.dispose();
+  });
+  it.each(["AGENT_PERMISSION_RESPONSE", "AGENT_QUESTION_RESPONSE"])("projects an exact %s into the pinned runtime's legacy envelope", async type => {
+    const f = fixture({}, 0);
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex" });
+    f.connection.incoming({ type: "AGENT_SESSION_CREATED", agentId: "codex", chatId: chat, session: { sessionId: "native" } });
+    const reply = { type, chatId: chat, executionId: "native", permissionId: "permission", questionId: "question", id: "operation" };
+    expect(f.connection.outgoing(reply)).toEqual({ type, permissionId: "permission", questionId: "question", id: "operation" });
+    expect(() => f.connection.outgoing({ ...reply, executionId: "retired" })).toThrow(/changed/);
+    f.connection.dispose();
+  });
+  it("enforces the attachment limit during concurrent creates and releases failed reservations", async () => {
+    const f = fixture();
+    const results = await Promise.allSettled(Array.from({ length: 257 }, (_, index) =>
+      f.connection.request({ type: "AGENT_NEW_SESSION", chatId: `parallel-${index}`, agentId: "codex" })));
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(256);
+    expect(f.connection.snapshotAttachments()).toHaveLength(256);
+    await f.connection.request({ type: "AGENT_CLOSE_SESSION", chatId: "parallel-0" });
+    f.request.mockRejectedValueOnce(new Error("Create failed"));
+    await expect(f.connection.request({ type: "AGENT_NEW_SESSION", chatId: "failed", agentId: "codex" })).rejects.toThrow("Create failed");
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: "replacement", agentId: "codex" });
+    expect(f.connection.snapshotAttachments()).toHaveLength(256);
+    f.connection.dispose();
+  });
+  it("retries a lost Stop acknowledgement with one durable operation and preserves a newer execution", async () => {
+    const f = fixture(), original = f.request.getMockImplementation()!;
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex" });
+    f.connection.incoming({ type: "AGENT_SESSION_CREATED", agentId: "codex", chatId: chat, session: { sessionId: "old-execution" } });
+    let stops = 0;
+    f.request.mockImplementation(async message => {
+      const input = (message.params as any).request;
+      if (message.op === "cloudCommands.request" && input.kind === "stop") {
+        stops++;
+        if (stops === 1) throw new Error("Request timeout: engine disconnected");
+        f.connection.incoming({ type: "AGENT_SESSION_CREATED", agentId: "codex", chatId: chat, session: { sessionId: "new-execution" } });
+        return { type: "WORKSPACE_RESPONSE", op: message.op, result: { version: 1, conversationId: chat, revision: 2, paused: true, pending: [], receipts: [], replayed: true } };
+      }
+      return original(message);
+    });
+    await expect(f.connection.request({ type: "AGENT_CANCEL", sessionId: `conversation:${chat}`, agentId: "codex" })).resolves.toMatchObject({ type: "WORKSPACE_RESPONSE", result: { conversationId: chat, paused: true } });
+    const operations = f.request.mock.calls.filter(([message]) => message.op === "cloudCommands.request" && (message.params as any).request.kind === "stop");
+    expect(operations).toHaveLength(2); expect((operations[0][0].params as any).request.operationId).toBe((operations[1][0].params as any).request.operationId);
+    expect(() => f.connection.outgoing({ type: "AGENT_PERMISSION_RESPONSE", chatId: chat, executionId: "new-execution", permissionId: "new-permission" })).not.toThrow();
+    f.connection.dispose();
+  });
+  it.each(["execution", "turn"])("does not retry an unapplied Stop after its %s changes", async changed => {
+    const f = fixture(), original = f.request.getMockImplementation()!;
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex" });
+    f.connection.incoming({ type: "AGENT_SESSION_CREATED", agentId: "codex", chatId: chat, session: { sessionId: "old-execution" } });
+    let stops = 0;
+    f.request.mockImplementation(async message => {
+      const input = (message.params as WireRecord).request as WireRecord;
+      if (message.op === "cloudCommands.request" && input.kind === "stop") {
+        if (++stops === 1) {
+          if (changed === "execution") f.connection.incoming({ type: "AGENT_SESSION_CREATED", agentId: "codex", chatId: chat, session: { sessionId: "new-execution" } });
+          else f.connection.incoming({ type: "AGENT_SESSION_UPDATE", agentId: "codex", chatId: chat,
+            notification: { sessionId: "old-execution", update: { sessionUpdate: "turn_state", turnId: "new-turn", state: "running", startedAt: 200 } } });
+          throw new Error("Network timeout before Stop was applied");
+        }
+        return { type: "WORKSPACE_RESPONSE", op: message.op, result: { version: 1, conversationId: chat, revision: 1, paused: true, pending: [], receipts: [] } };
+      }
+      return original(message);
+    });
+    await expect(f.connection.request({ type: "AGENT_CANCEL", sessionId: `conversation:${chat}`, agentId: "codex" })).rejects.toThrow(/changed/);
+    expect(stops).toBe(1);
+    expect(() => f.connection.outgoing({ type: "AGENT_PERMISSION_RESPONSE", chatId: chat,
+      executionId: changed === "execution" ? "new-execution" : "old-execution", permissionId: "new-permission" })).not.toThrow();
+    f.connection.dispose();
+  });
+  it("does not retry an unapplied Stop after a newer local prompt starts awaiting its grant", async () => {
+    const f = fixture(), original = f.request.getMockImplementation()!;
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "test-model" } });
+    f.connection.incoming({ type: "AGENT_SESSION_CREATED", agentId: "codex", chatId: chat, session: { sessionId: "old-execution" } });
+    let grantReady!: (value: string) => void, newer!: Promise<WireRecord | null>, stops = 0;
+    f.authorize.mockImplementationOnce(() => new Promise<string>(resolve => { grantReady = resolve; }));
+    f.request.mockImplementation(async message => {
+      const input = (message.params as WireRecord).request as WireRecord;
+      if (message.op === "cloudCommands.request" && input.kind === "stop") {
+        if (++stops === 1) {
+          newer = f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "new-local-turn", prompt: [] });
+          throw new Error("Network timeout before Stop was applied");
+        }
+        return { type: "WORKSPACE_RESPONSE", op: message.op, result: { version: 1, conversationId: chat, revision: 1, paused: true, pending: [], receipts: [] } };
+      }
+      return original(message);
+    });
+    try {
+      await expect(f.connection.request({ type: "AGENT_CANCEL", sessionId: `conversation:${chat}`, agentId: "codex" })).rejects.toThrow(/changed/);
+      expect(stops).toBe(1);
+    } finally { grantReady(grant); await newer; f.connection.dispose(); }
+  });
+  it.each(["execution", "turn"])("fences checkpoint Stop retries when the captured %s changes during backoff", async changed => {
+    vi.useFakeTimers();
+    const f = fixture(), original = f.request.getMockImplementation()!;
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex" });
+    f.connection.incoming({ type: "AGENT_SESSION_CREATED", agentId: "codex", chatId: chat, session: { sessionId: "old-execution" } });
+    let stops = 0;
+    f.request.mockImplementation(async message => {
+      const input = (message.params as WireRecord).request as WireRecord;
+      if (message.op === "cloudCommands.request" && input.kind === "stop") {
+        if (++stops === 1) return { type: "WORKSPACE_ERROR", code: "CLOUD_WORKSPACE_CHECKPOINTING", message: "Capturing" } as never;
+        return { type: "WORKSPACE_RESPONSE", op: message.op, result: { version: 1, conversationId: chat, revision: 1, paused: true, pending: [], receipts: [] } };
+      }
+      return original(message);
+    });
+    const stopping = f.connection.request({ type: "AGENT_CANCEL", sessionId: `conversation:${chat}`, agentId: "codex" });
+    void stopping.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(stops).toBe(1));
+      if (changed === "execution") f.connection.incoming({ type: "AGENT_SESSION_CREATED", agentId: "codex", chatId: chat, session: { sessionId: "new-execution" } });
+      else f.connection.incoming({ type: "AGENT_SESSION_UPDATE", agentId: "codex", chatId: chat,
+        notification: { sessionId: "old-execution", update: { sessionUpdate: "turn_state", turnId: "new-turn", state: "running", startedAt: 200 } } });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(stopping).rejects.toThrow(/changed/);
+      expect(stops).toBe(1);
+    } finally { f.connection.dispose(); vi.useRealTimers(); }
+  });
+  it("drops late old-execution frames before they can rebind a newer conversation route", async () => {
+    const f = fixture();
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex" });
+    f.connection.incoming({ type: "AGENT_SESSION_CREATED", chatId: chat, agentId: "codex", session: { sessionId: "old-execution" } });
+    f.connection.incoming({ type: "AGENT_SESSION_CREATED", chatId: chat, agentId: "codex", session: { sessionId: "new-execution" } });
+    for (const frame of [
+      { type: "AGENT_SESSION_UPDATE", chatId: chat, notification: { sessionId: "old-execution", update: { sessionUpdate: "agent_message_chunk" } } },
+      { type: "AGENT_PROMPT_COMPLETE", chatId: chat, agentId: "codex", executionId: "old-execution", stopReason: "end_turn", response: {} },
+      { type: "AGENT_SESSION_CREATED", chatId: chat, agentId: "codex", session: { sessionId: "old-execution" } },
+    ]) expect(f.connection.incoming(frame)).toBeNull();
+    expect(() => f.connection.outgoing({ type: "AGENT_PERMISSION_RESPONSE", chatId: chat, executionId: "new-execution", permissionId: "permission" })).not.toThrow();
+    expect(() => f.connection.outgoing({ type: "AGENT_PERMISSION_RESPONSE", chatId: chat, executionId: "old-execution", permissionId: "permission" })).toThrow(/changed/);
+    f.connection.dispose();
+  });
+  it("releases a closed attachment so the 256 cap counts current conversations", async () => {
+    const f = fixture();
+    for (let i = 0; i < 260; i++) {
+      const id = `chat-${i}`;
+      await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: id, agentId: "codex" });
+      await f.connection.request({ type: "AGENT_CLOSE_SESSION", sessionId: `conversation:${id}` });
+    }
+    expect(f.connection.snapshotAttachments()).toHaveLength(0);
+    expect(f.request.mock.calls.some(([message]) => message.op === "cloudCommands.request" && (message.params as any).request.kind === "stop")).toBe(false);
+    f.connection.dispose();
+  });
+  it.each(["succeeded", "failed"])("recovers the exact native %s receipt after its live terminal is lost", async state => {
+    const f = fixture(), original = f.request.getMockImplementation()!; f.setState(state);
+    f.request.mockImplementation(async message => {
+      const response = await original(message), input = (message.params as any).request;
+      if (message.op === "cloudCommands.request" && input.kind === "read") Object.assign(response.result!, { payload: {
+        agentId: "codex", agentCredentialGrantId: grant, model: "test-model", fast: false, userMessageId: "exact-turn", prompt: [{ type: "text", text: "test" }], modeRevision: 0,
+      }, result: { version: 1, terminal: { commandId: input.commandId, conversationId: chat, executionId: "execution", turnId: "exact-turn", agentId: "codex",
+        status: state === "succeeded" ? "completed" : "failed", stopReason: state === "succeeded" ? "max_tokens" : null,
+        ...(state === "succeeded" ? { response: { stopReason: "max_tokens", effectiveModel: "native-model", usage: { outputTokens: 17, reasoningTokens: 3 } } }
+          : { error: "Provider verification", failure: { kind: "verification-required", stage: "prompt", message: "Verify", advice: "Complete verification" } }),
+      } } });
+      return response;
+    });
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "test-model" } });
+    const result = await f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "exact-turn", prompt: [] });
+    expect(result).toMatchObject(state === "succeeded" ? { type: "AGENT_PROMPT_COMPLETE", stopReason: "max_tokens",
+      response: { effectiveModel: "native-model", usage: { outputTokens: 17, reasoningTokens: 3 } } }
+      : { type: "AGENT_PROMPT_FAILED", error: "Provider verification", failure: { kind: "verification-required", stage: "prompt", advice: "Complete verification" } });
+    f.connection.dispose();
+  });
+  it("refuses a terminal receipt whose native turn differs from the sending turn", async () => {
+    const f = fixture(), original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async message => {
+      const response = await original(message), input = (message.params as any).request;
+      if (message.op === "cloudCommands.request" && input.kind === "read") Object.assign(response.result!, { result: { version: 1, terminal: {
+        commandId: input.commandId, conversationId: chat, executionId: "execution", turnId: "another-turn", agentId: "codex", status: "completed", stopReason: "end_turn",
+      } } });
+      return response;
+    });
+    await f.connection.request({ type: "AGENT_NEW_SESSION", chatId: chat, agentId: "codex", env: { OPENAI_MODEL: "test-model" } });
+    await expect(f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "current-turn", prompt: [] })).rejects.toThrow(/terminal.*match/i);
+    f.connection.dispose();
+  });
+  it("publishes transcript, retired terminal and empty controls even with no native execution", async () => {
+    const f = fixture(), original = f.request.getMockImplementation()!;
+    const message = { id: "user", kind: "text", role: "user", text: "failed turn", createdAt: 1 };
+    f.request.mockImplementation(async input => input.op === "cloudEvents.request" ? { type: "WORKSPACE_RESPONSE", op: input.op, result: {
+      snapshot: { version: 1, conversationId: chat, agentId: "codex", executionId: null, session: null, initialize: null,
+        messages: [{ msgId: "user", kind: "text", payload: JSON.stringify(message), createdAt: 1 }], activeTurn: null,
+        latestTurn: { conversationId: chat, executionId: null, agentId: "codex", turnId: "user", status: "failed", stopReason: null,
+          failure: { kind: "auth-required", stage: "prompt", message: "Sign in" } }, permissions: [], questions: [] },
+    } } : original(input));
+    const restored = vi.fn(); f.connection.on("AGENT_SESSION_CREATED", restored);
+    await f.connection.request({ type: "AGENT_LOAD_SESSION", chatId: chat, agentId: "codex" });
+    expect(restored).toHaveBeenCalledWith(expect.objectContaining({ cloudSnapshot: expect.objectContaining({ messages: [expect.objectContaining({ msgId: "user" })],
+      latestTurn: expect.objectContaining({ status: "failed" }), executionId: null, permissions: [], questions: [] }) }));
+    f.connection.dispose();
+  });
   it("holds a succeeded receipt for snapshot recovery and drops buffered transcript duplicates", async () => {
     const f = fixture(), original = f.request.getMockImplementation()!;
     const streamId = "33333333-3333-4333-8333-333333333333";
@@ -291,7 +524,7 @@ function retainedTaskFixture(){
   const id=cloudScopedId({organizationId:chat,workspaceId:grant},`conversation:${chat}`);
   let slot:AgentSessionState={...BLANK,agentId:"codex",executionId:id,sessionId:id};
   const metadata=vi.fn((frame:unknown)=>{
-    const mapped=f.connection.incoming(frame as WireRecord),session=mapped.session as AgentSessionCreatedMessage["session"];
+    const mapped=f.connection.incoming(frame as WireRecord)!,session=mapped.session as AgentSessionCreatedMessage["session"];
     const event={...mapped,session:{...session,executionId:id,sessionId:id}} as AgentSessionCreatedMessage;
     slot={...slot,...cloudSessionMetadata(slot,event)};
   });
@@ -775,8 +1008,8 @@ describe("cloud agent command adapter", () => {
       // The old read must not change routing or keep polling after completion.
       finishRead({ type: "WORKSPACE_RESPONSE", op: "cloudCommands.request", result: {} });
       await flight;
-      expect(f.connection.outgoing({ type: "AGENT_PERMISSION_RESPONSE", sessionId: `conversation:${chat}` }))
-        .toMatchObject({ sessionId: "native-execution" });
+      expect(f.connection.outgoing({ type: "AGENT_PERMISSION_RESPONSE", chatId: chat, executionId: "native-execution" }))
+        .toMatchObject({ executionId: "native-execution" });
     } finally {
       f.connection.dispose();
     }
@@ -974,11 +1207,11 @@ describe("cloud agent command adapter", () => {
     expect(
       f.connection.outgoing({
         type: "AGENT_PERMISSION_RESPONSE",
-        sessionId: `conversation:${chat}`,
+        chatId: chat, executionId: "real-execution",
         permissionId: "native-permission",
       }),
     ).toMatchObject({
-      sessionId: "real-execution",
+      executionId: "real-execution",
       permissionId: "native-permission",
     });
   });
@@ -1004,9 +1237,9 @@ describe("cloud agent command adapter", () => {
     expect(
       f.connection.outgoing({
         type: "AGENT_PERMISSION_RESPONSE",
-        sessionId: `conversation:${chat}`,
+        chatId: chat, executionId: "reconnected",
       }),
-    ).toMatchObject({ sessionId: "reconnected" });
+    ).toMatchObject({ executionId: "reconnected" });
     expect(
       f.request.mock.calls.some(
         ([message]) => message.type === "AGENT_NEW_SESSION",

@@ -33,7 +33,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PtyHandle } from "./service";
@@ -51,6 +51,40 @@ export interface PtyHostSpawnSpec {
   name?: string;
   /** Wrapper argv slot that pty-host.cjs replaces with its own PID. */
   immediateParentPidArgIndex?: number;
+}
+
+export interface PtyHostBirth {
+  readonly pid: number;
+  readonly parent: number;
+  readonly startToken: string;
+}
+
+/** Capture only the child just spawned by this client. A failed observation
+ * leaves ordinary PTY operation available but grants no idle exemption. */
+function capturePtyHostBirth(child: ChildProcess): PtyHostBirth | null {
+  const pid = child.pid;
+  if (process.platform !== "linux" || pid === undefined || !Number.isSafeInteger(pid) || pid < 2) return null;
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(`/proc/${pid}/stat`, constants.O_RDONLY | constants.O_NOFOLLOW);
+    if (!fstatSync(descriptor).isFile()) return null;
+    const maximum = 4096, buffer = Buffer.alloc(maximum + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const count = readSync(descriptor, buffer, size, buffer.length - size, null);
+      if (!count) break;
+      size += count;
+    }
+    if (size > maximum) return null;
+    const source = buffer.toString("utf8", 0, size), end = source.lastIndexOf(")");
+    const fields = source.slice(end + 1).trim().split(/\s+/);
+    const parent = Number(fields[1]), startToken = fields[19];
+    if (end < 0 || !source.startsWith(`${pid} (`) || parent !== process.pid ||
+      !startToken || !/^[1-9][0-9]{0,19}$/.test(startToken) || BigInt(startToken) > 18446744073709551615n ||
+      !/^[A-Z]$/.test(fields[0] ?? "") || fields[0] === "Z" || fields[0] === "X") return null;
+    return Object.freeze({ pid, parent, startToken });
+  } catch { return null; }
+  finally { if (descriptor !== undefined) closeSync(descriptor); }
 }
 
 interface SessionEntry {
@@ -121,6 +155,7 @@ const MAX_PARTIAL_LINE_CHARS = 32 * 1024 * 1024;
 
 class PtyHost {
   private child: ChildProcess | null = null;
+  private childBirth: PtyHostBirth | null = null;
   private buf = "";
   private readonly entries = new Map<string, SessionEntry>();
   private nextId = 1;
@@ -144,6 +179,12 @@ class PtyHost {
    *  (0 = not held off). */
   respawnHoldOffMs(): number {
     return Math.max(0, this.respawnBlockedUntil - Date.now());
+  }
+
+  currentBirth(): PtyHostBirth | null {
+    const child = this.child, birth = this.childBirth;
+    if (!child || !birth || child.pid !== birth.pid || child.killed || child.exitCode !== null || child.signalCode !== null) return null;
+    return birth;
   }
 
   /** Lazily (re)spawn the host subprocess. No-op if one is already running. */
@@ -183,6 +224,9 @@ class PtyHost {
       return;
     }
     this.child = child;
+    this.childBirth = null;
+    try { this.childBirth = capturePtyHostBirth(child); }
+    catch { /* Even a descriptor-close failure grants no exemption. */ }
     this.spawnFailed = false;
     this.fatalFailure = false;
     this.sawReady = false;
@@ -238,6 +282,7 @@ class PtyHost {
    *  respawn off (bounded exponential; ensure() enforces the deadline). */
   private onHostGone(code: number | null, reason: PtyExitReason): void {
     this.child = null;
+    this.childBirth = null;
     this.buf = "";
     const fatal = this.fatalFailure;
     this.fatalFailure = false;
@@ -465,6 +510,7 @@ class PtyHost {
   dispose(): void {
     const child = this.child;
     this.child = null;
+    this.childBirth = null;
     this.buf = "";
     this.fatalFailure = false;
     // Intentional teardown (engine stop / test cleanup), not a crash: the
@@ -507,6 +553,12 @@ export function spawnPtyViaHost(spec: PtyHostSpawnSpec): PtyHandle {
  *  engine's stop() and as a process-exit safety net. */
 export function disposePtyHost(): void {
   host.dispose();
+}
+
+/** Read-only identity of this client's current original Linux transport.
+ * Shell/session descendants and arbitrary caller PIDs are never included. */
+export function currentPtyHostBirth(): PtyHostBirth | null {
+  return host.currentBirth();
 }
 
 /** Test-only: milliseconds until the crash-loop hold-off allows the next host
