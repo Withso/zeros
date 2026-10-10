@@ -1,4 +1,4 @@
-import { closeSync, constants, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, writeSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { expect, it } from "vitest";
@@ -30,15 +30,18 @@ it("refuses changed paths, noncanonical inode data, oversize lists or private ex
     expect(() => cloudWorkloadCustodyBirth(value, child)).toThrow();
 });
 it("replaces the seed it read through the same descriptor from byte zero", () => {
-  const directory = mkdtempSync(path.join(os.tmpdir(), "zeros-custody-document-")), file = path.join(directory, "custody.json");
+  const directory = mkdtempSync(path.join(os.tmpdir(), "zeros-custody-document-"));
+  const published = JSON.stringify(cloudWorkloadCustodyBirth(seed, child));
   try {
-    writeFileSync(file, JSON.stringify({ ...seed, prior: "x".repeat(96) }), { mode: 0o600 });
-    const published = JSON.stringify(cloudWorkloadCustodyBirth(seed, child));
-    const descriptor = openSync(file, constants.O_RDWR);
+    const descriptor = openSync(path.join(directory, "custody.json"), constants.O_RDWR | constants.O_CREAT | constants.O_EXCL, 0o600);
     try {
+      writeSync(descriptor, JSON.stringify({ ...seed, prior: "x".repeat(96) }), 0);
+      // As in the publisher, reading the seed leaves the offset at its end.
       JSON.parse(readFileSync(descriptor, "utf8"));
       replaceCloudCustodyDocument(descriptor, published);
+      const bytes = Buffer.alloc(fstatSync(descriptor).size);
+      expect(readSync(descriptor, bytes, 0, bytes.length, 0)).toBe(bytes.length);
+      expect(bytes.toString("utf8")).toBe(published);
     } finally { closeSync(descriptor); }
-    expect(readFileSync(file, "utf8")).toBe(published);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
