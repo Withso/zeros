@@ -1050,6 +1050,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: control-plane-database-report-${{ matrix.shard }}
+          overwrite: true
           path: ${{ runner.temp }}/control-plane-report/
           # A missing report is reported by the `control-plane` job instead.
           if-no-files-found: warn

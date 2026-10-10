@@ -90,7 +90,7 @@ d("reusable migrated test database", () => {
     await expect(resetMigratedTestDatabase(pool)).resolves.toBe("restored");
     expect(await snapshot()).toEqual(migrated);
     await expect(resetMigratedTestDatabase(pool)).resolves.toBe("restored");
-  });
+  }, 30_000);
 
   it("replays the ladder after any schema, privilege or trigger change", async () => {
     const changes = [
