@@ -119,27 +119,42 @@ class PostgresCostSampler {
   private ordinal = 0;
   private sampling = false;
   private readonly drainTimeoutMs: number;
+  private readonly initialNonClientDrainTimeoutMs: number;
   private readonly statementEntryLimit: number;
   private readonly monitorDatabase: string;
-  constructor(private readonly options: { monitorPool: Db; targetDatabase: string; monitorDatabase?: string; drainTimeoutMs?: number; statementEntryLimit?: number;
+  constructor(private readonly options: { monitorPool: Db; targetDatabase: string; monitorDatabase?: string; drainTimeoutMs?: number;
+    initialNonClientDrainTimeoutMs?: number; statementEntryLimit?: number;
     statementStatistics?: "optional" | "unavailable" }) {
     databaseName(options.targetDatabase);
     this.monitorDatabase = databaseName(options.monitorDatabase ?? `${options.targetDatabase}_monitor`);
     if (this.monitorDatabase === options.targetDatabase) refuse("postgres_cost_monitor_not_separate");
     this.drainTimeoutMs = options.drainTimeoutMs ?? 2000;
+    this.initialNonClientDrainTimeoutMs = options.initialNonClientDrainTimeoutMs ?? this.drainTimeoutMs;
     this.statementEntryLimit = options.statementEntryLimit ?? 8192;
     if (!Number.isSafeInteger(this.drainTimeoutMs) || this.drainTimeoutMs < 0 || this.drainTimeoutMs > 5000 ||
+        !Number.isSafeInteger(this.initialNonClientDrainTimeoutMs) || this.initialNonClientDrainTimeoutMs < this.drainTimeoutMs ||
+        this.initialNonClientDrainTimeoutMs > 30_000 ||
         !Number.isSafeInteger(this.statementEntryLimit) || this.statementEntryLimit < 1 || this.statementEntryLimit > 8192)
       refuse("postgres_cost_options_invalid");
   }
   private async drained(client: Tx, targetOid: string, final = false): Promise<void> {
-    const deadline = performance.now() + this.drainTimeoutMs;
+    const started = performance.now();
     for (;;) {
       // Clears this monitor session's cache only; it never resets counters.
       await client.query("SELECT pg_stat_clear_snapshot()");
-      const row = one((await client.query("SELECT count(*)::text AS backend_count FROM pg_stat_activity WHERE datid=$1::oid", [targetOid])).rows);
-      if (counter(field(row, "backend_count")) === "0") return;
+      const row = one((await client.query(`SELECT count(*)::text AS backend_count,
+        count(*) FILTER (WHERE backend_type <> 'client backend')::text AS non_client_backend_count
+        FROM pg_stat_activity WHERE datid=$1::oid`, [targetOid])).rows);
+      const backendCount = counter(field(row, "backend_count"));
+      if (backendCount === "0") return;
       if (final) refuse("postgres_cost_target_changed_during_sample");
+      // An explicit fixture allowance can finish initial maintenance before
+      // reading baseline counters. Every target backend must still exit;
+      // clients, unclassified rows and later samples keep the original bound.
+      const nonClientCount = field(row, "non_client_backend_count");
+      const onlyNonClients = nonClientCount !== undefined && counter(nonClientCount) === backendCount;
+      const deadline = started + (this.ordinal === 0 && onlyNonClients ?
+        this.initialNonClientDrainTimeoutMs : this.drainTimeoutMs);
       if (performance.now() >= deadline) refuse("postgres_cost_target_not_drained");
       await new Promise(resolve => setTimeout(resolve, 25));
     }
