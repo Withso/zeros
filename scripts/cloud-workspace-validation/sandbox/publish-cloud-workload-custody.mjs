@@ -1,4 +1,4 @@
-import { closeSync, constants, fchmodSync, fchownSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, openSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fchmodSync, fchownSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, openSync, writeFileSync, writeSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -199,6 +199,19 @@ export function cloudWorkloadCustodyBirth(seed, child) {
   return { ...structuredClone(seed), infrastructure: [...structuredClone(seed.infrastructure), birth] };
 }
 
+/** Reading the seed through this descriptor left its offset at the old end.
+ * Write from byte zero: an offset write after truncation leaves a NUL hole
+ * that every later custody reader refuses. */
+export function replaceCloudCustodyDocument(descriptor, encoded) {
+  const bytes = Buffer.from(encoded);
+  ftruncateSync(descriptor, 0);
+  for (let written = 0; written < bytes.length;) {
+    const count = writeSync(descriptor, bytes, written, bytes.length - written, written);
+    if (!(count > 0)) fail();
+    written += count;
+  }
+}
+
 function main() {
   const args = process.argv.slice(2);
   if (process.getuid?.() !== 0 || process.geteuid?.() !== 0 || args.length !== 2 || !/^[1-9][0-9]{0,9}$/.test(args[1])) fail();
@@ -227,8 +240,7 @@ function main() {
     publishRecord({ ...context, common: seed.common, workload: seed.workload, monitor: { pid: monitor.pid, startToken: monitor.startToken }, birth: result.infrastructure.at(-1) });
     const encoded = JSON.stringify(result);
     if (Buffer.byteLength(encoded) > 16384) fail();
-    ftruncateSync(descriptor, 0);
-    writeFileSync(descriptor, encoded);
+    replaceCloudCustodyDocument(descriptor, encoded);
   } finally { closeSync(descriptor); }
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

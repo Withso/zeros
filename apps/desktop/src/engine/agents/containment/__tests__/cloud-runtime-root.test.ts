@@ -184,6 +184,32 @@ describe("verified cloud runtime root", () => {
     expect(() => createCloudRuntimeResolver({ filesystem: tree.filesystem,
       isOwner: (_file, uid) => uid === 0 || uid === 65534, isEngine: () => true, isReadOnly: () => true }).resolve()).toThrow();
   });
+  it("admits only the engine view's own private /run/zeros around the read-only descriptor", () => {
+    const tree = fixture(), root = tree.descriptor.root;
+    const supervisor = `${root}/worker/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`;
+    tree.write(supervisor, "pinned Host supervisor", 0o444);
+    tree.write("/etc/zeros/cloud-worker.json", { ...tree.marker, uid: 10003, gid: 10003,
+      toolchain: { node: `${root}/bin/node`, supervisor } });
+    tree.write("/run/zeros/active-runtime.json", tree.descriptor, 0o444);
+    tree.owners.set("/run/zeros/active-runtime.json", 65534);
+    // The launcher mounts the engine's 0700 tmpfs at /run/zeros in its view.
+    tree.owners.set("/run/zeros", 10003); fs.chmodSync(tree.physical("/run/zeros"), 0o700);
+    const resolve = () => createCloudRuntimeResolver({ filesystem: tree.filesystem,
+      isOwner: (_file, uid) => uid === 0 || uid === 65534, isEngine: () => true, isReadOnly: () => true }).resolve();
+    expect(resolve().profile).toBe("v4");
+    fs.chmodSync(tree.physical("/run/zeros"), 0o770);
+    expect(resolve).toThrow(/runtime/);
+    fs.chmodSync(tree.physical("/run/zeros"), 0o700);
+    for (const file of ["/run", "/etc/zeros", root]) {
+      tree.owners.set(file, 10003);
+      expect(resolve).toThrow(/runtime/);
+      tree.owners.delete(file);
+    }
+    tree.owners.set("/run/zeros/active-runtime.json", 10003);
+    expect(resolve).toThrow(/runtime/);
+    const host = fixture(); host.owners.set("/run/zeros", 10003); fs.chmodSync(host.physical("/run/zeros"), 0o700);
+    expect(() => host.resolver.resolve()).toThrow(/runtime/);
+  });
   it("reads the immutable base marker with the new pinned Host assets without requiring a retired agent reaper", () => {
     const tree = fixture(), root = tree.descriptor.root;
     tree.write(`${root}/worker/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`, "pinned Host supervisor", 0o444);

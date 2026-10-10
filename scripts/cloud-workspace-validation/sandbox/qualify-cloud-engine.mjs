@@ -23,6 +23,8 @@ import { effectiveCloudResourceLimits } from "./cgroup-resources.mjs";
 import { cloudRuntimeResourcesQualified, validCloudResourceBudgetProjection } from "./cloud-resource-admission.mjs";
 import { readCloudResourceBudgetProjection } from "./cloud-resource-budget.mjs";
 import { loadCloudWorkloadCustody, nativeCloudWorkloadIO } from "../../../apps/desktop/src/engine/agents/containment/cloud-workload-cgroup.mjs";
+import { cloudEnginePrivilegeStatus } from "./cloud-engine-privilege.mjs";
+import { loadCloudQualificationRoles } from "./cloud-qualification-loader.mjs";
 
 function optional(file) {
   try {
@@ -59,23 +61,6 @@ function denied(file) {
   } catch (error) {
     return ["EACCES", "EPERM"].includes(error?.code);
   }
-}
-
-/** Closed observations from the fixed kernel status file. Missing, duplicate
- * or nonzero capability evidence is unknown, never an inferred empty set. */
-export function cloudEnginePrivilegeStatus(source) {
-  const fields = new Map();
-  if (typeof source === "string" && source.length <= 65536 && !source.includes("\0")) {
-    for (const line of source.split("\n")) {
-      const match = /^(CapEff|CapPrm|CapInh|CapBnd|CapAmb|NoNewPrivs|Seccomp):([^\r\n]*)$/.exec(line);
-      if (!match) continue;
-      fields.set(match[1], fields.has(match[1]) ? null : match[2].trim());
-    }
-  }
-  const observed = (name, expected) => fields.get(name) === String(expected) ? expected : null;
-  return { noNewPrivs: observed("NoNewPrivs", 1), seccompMode: observed("Seccomp", 2),
-    capabilities: Object.fromEntries(Object.entries({ effective: "CapEff", permitted: "CapPrm", inheritable: "CapInh", bounding: "CapBnd", ambient: "CapAmb" })
-      .map(([name, field]) => [name, fields.get(field) === "0000000000000000" ? 0 : null])) };
 }
 
 /** Actual root-projected controller and kernel controls, not caller-selected
@@ -234,8 +219,9 @@ export async function qualifyCloudEngineIdentity(context) {
 /** Every true field comes from the fixed probe executed in this exact engine
  * view. Owned groups mean the original detached Host supervisor group and its
  * non-escaped members; this does not prove retirement of arbitrary setsid escapes. */
-/** @param {Awaited<ReturnType<typeof qualifyCloudEngineIdentity>>} [identity] */
-export async function qualifyCloudEngineRuntime(identity) {
+/** @param {Awaited<ReturnType<typeof qualifyCloudEngineIdentity>>} [identity]
+ * @param {typeof loadCloudQualificationRoles} [loadRoles] */
+export async function qualifyCloudEngineRuntime(identity, loadRoles = loadCloudQualificationRoles) {
   const report = { version: 2, boundary: "workspace-vm", engineChecksPassed: false, qualified: false, identity,
     execution: null, capture: null, humanServices: null, actorTools: null };
   const identityPassed = value => {
@@ -246,17 +232,12 @@ export async function qualifyCloudEngineRuntime(identity) {
       Object.values(capabilities).every(value => value === 0) && cloudRuntimeResourcesQualified(value.resources);
   };
   if (identity !== undefined && !identityPassed(identity)) return report;
-  let unregister;
+  let loaded, context;
   try {
-    // The existing shipped loader supports the fixed TypeScript role modules.
     // Inline execution preserves the original root-projected controller birth.
-    const { register } = await import("tsx/esm/api");
-    unregister = register();
-    const [{ createCloudQualificationRuntime }, { qualifyCloudActorTools }, { qualifyCloudCapture }, { qualifyCloudHumanServices }] = await Promise.all([
-      import("./cloud-qualification-runtime.ts"), import("./qualify-cloud-actor-tools.ts"),
-      import("./qualify-cloud-capture.ts"), import("./qualify-cloud-human-services.ts"),
-    ]);
-    const context = createCloudQualificationRuntime();
+    loaded = await loadRoles();
+    const { createCloudQualificationRuntime, qualifyCloudActorTools, qualifyCloudCapture, qualifyCloudHumanServices } = loaded.roles;
+    context = createCloudQualificationRuntime();
     if (identity === undefined) {
       report.identity = await qualifyCloudEngineIdentity(context);
       if (!identityPassed(report.identity)) return report;
@@ -279,7 +260,12 @@ export async function qualifyCloudEngineRuntime(identity) {
     context.custody.assertLive();
     report.engineChecksPassed = true;
   } catch { /* Raw probe failures never become public diagnostics or success. */ }
-  finally { await unregister?.(); }
+  finally {
+    // Services that role probes start for this controller end with it, as in
+    // the engine's stop(); otherwise it never exits to publish this report.
+    try { context?.close(); } catch { report.engineChecksPassed = false; }
+    await loaded?.unregister();
+  }
   return report;
 }
 async function main() {
