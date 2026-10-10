@@ -224,6 +224,40 @@ describe("CI and Preflight job parity", () => {
   );
 
   it.each(["ci.yml", "preflight.yml"])(
+    "replaces every report upload consumed by a merged pattern on reruns in %s",
+    (file) => {
+      const steps = Object.entries(workflow(file).jobs).flatMap(([job, value]) =>
+        (value.steps ?? []).map((step) => ({ job, step })),
+      );
+      const uploads = steps.filter(({ step }) =>
+        step.uses?.startsWith("actions/upload-artifact@"),
+      );
+      const downloads = steps.filter(
+        ({ step }) =>
+          step.uses?.startsWith("actions/download-artifact@") &&
+          step.with?.pattern !== undefined &&
+          String(step.with?.["merge-multiple"]) === "true",
+      );
+      expect(downloads.length).toBeGreaterThan(0);
+      for (const { job, step: download } of downloads) {
+        const pattern = String(download.with!.pattern);
+        const matched = uploads.filter(
+          ({ step }) =>
+            typeof step.with?.name === "string" &&
+            path.matchesGlob(step.with.name, pattern),
+        );
+        expect(matched.length, `${file}:${job}:${pattern}`).toBeGreaterThan(0);
+        for (const { job: producer, step: upload } of matched) {
+          expect(
+            upload.with?.overwrite,
+            `${file}:${producer}:${upload.with?.name} merged by ${job}`,
+          ).toBe(true);
+        }
+      }
+    },
+  );
+
+  it.each(["ci.yml", "preflight.yml"])(
     "uploads eight distinct database reports and checks all eight in the stable aggregate in %s",
     (file) => {
       const jobs = workflow(file).jobs;

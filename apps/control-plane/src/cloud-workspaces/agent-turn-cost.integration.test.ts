@@ -43,6 +43,9 @@ const enabled = Boolean(process.env.TEST_DATABASE_URL);
 const integration = enabled ? describe : describe.skip;
 const DELTAS = 100;
 const EVENT_COUNT = DELTAS + 3; // permission request, settled receipt, terminal
+// Migration/reset maintenance must finish before the initial cost snapshot.
+// Clients and all subsequent/final drain checks retain the sampler's bounds.
+const INITIAL_NON_CLIENT_DRAIN_TIMEOUT_MS = 20_000;
 const provider = "cursor" as const;
 const model = "grok-4.6";
 const responseId = z.string().uuid();
@@ -277,7 +280,8 @@ integration("actual control-plane synthetic turn cost", () => {
 
   it("measures a real legacy enqueue/claim/admit/validate/journal/settle turn after setup and positive PG drain", async () => {
     const turn = workload(scope, delegationId), relay = await relayFixture(scope);
-    const pair = await relay.connect(), sampler = createPostgresCostSampler({ monitorPool: monitor, targetDatabase, monitorDatabase });
+    const pair = await relay.connect(), sampler = createPostgresCostSampler({ monitorPool: monitor, targetDatabase, monitorDatabase,
+      initialNonClientDrainTimeoutMs: INITIAL_NON_CLIENT_DRAIN_TIMEOUT_MS });
     try {
       const start = await sampler.checkpoint(), writes = producer();
       const app = new Hono().route("/", createCloudCommandRoutes(new DatabaseCloudWorkspaceCommandService({ pool: writes })))
@@ -342,7 +346,8 @@ integration("actual control-plane synthetic turn cost", () => {
 
   it("measures genuine boot binding and warm actor setup separately from per-turn persistence", async () => {
     await configureBootSource();
-    const sampler = createPostgresCostSampler({ monitorPool: monitor, targetDatabase, monitorDatabase });
+    const sampler = createPostgresCostSampler({ monitorPool: monitor, targetDatabase, monitorDatabase,
+      initialNonClientDrainTimeoutMs: INITIAL_NON_CLIENT_DRAIN_TIMEOUT_MS });
     const start = await sampler.checkpoint(), writes = producer();
     let bootId: string, writerEpoch: string;
     try {
@@ -416,7 +421,8 @@ integration("actual control-plane synthetic turn cost", () => {
         throw new Error("cost_local_events_requested_cp");
       }, onFailure: () => undefined });
       eventRuntime.start(); await eventRuntime.installLocalStore(eventStore);
-      const sampler = createPostgresCostSampler({ monitorPool: monitor, targetDatabase, monitorDatabase });
+      const sampler = createPostgresCostSampler({ monitorPool: monitor, targetDatabase, monitorDatabase,
+        initialNonClientDrainTimeoutMs: INITIAL_NON_CLIENT_DRAIN_TIMEOUT_MS });
       const start = await sampler.checkpoint(), writes = producer();
       let mirrorRequests = 0, clientBytes = 0, engineBytes = 0;
       try {
