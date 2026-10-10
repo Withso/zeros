@@ -258,6 +258,31 @@ describe("Claude genuine boot foreground handoff", () => {
       expect(f.boot.request.sync).not.toHaveBeenCalled();
     }finally{await f.dispose();}
   });
+  it.skipIf(process.platform !== "linux")("accepts the warm pump configuration while rejecting permission mode on that port", async () => {
+    const f=await fixture();
+    try{
+      const first=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]}).catch(error=>error);
+      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(1));
+      f.callbacks[0]!.beforeUserMessageWrite!(String(f.live.inputsSeen[0]!.uuid));
+      f.live.push(initMsg("warm-config"),{...resultOk("warm-config"),user_message_uuid:f.live.inputsSeen[0]!.uuid});
+      expect(await first).toMatchObject({stopReason:"end_turn"});
+      await f.boot.factory.settleBootTurn(f.boot.execution,f.reservation);
+      const selected=f.boot.factory.selectBoot(f.boot.input),next=f.boot.factory.reserveBootTurn(f.boot.execution,selected);
+      await f.adapter.setMode({sessionId:f.session.executionId,modeId:"plan"});
+      const env={ZEROS_THINKING_EFFORT:"high",ZEROS_FAST_MODE:"1"};
+      await expect(f.adapter.updateConfig({sessionId:f.session.executionId,env})).resolves.toBeUndefined();
+      await expect(f.adapter.updateConfig({sessionId:f.session.executionId,env:{...env,ZEROS_PERMISSION_MODE:"plan"}}))
+        .rejects.toThrow("Cloud provider configuration requires a new credential admission");
+      const second=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("Second")]}).catch(error=>error);
+      await vi.waitFor(()=>expect(f.live.inputsSeen).toHaveLength(2));
+      f.callbacks[0]!.beforeUserMessageWrite!(String(f.live.inputsSeen[1]!.uuid));
+      f.live.push({...resultOk("warm-config"),user_message_uuid:f.live.inputsSeen[1]!.uuid});
+      expect(await second).toMatchObject({stopReason:"end_turn"});
+      await f.boot.factory.settleBootTurn(f.boot.execution,next);
+      expect(f.callbacks).toHaveLength(1);expect(f.live.captured).toHaveLength(1);
+      expect(f.boot.request.sync).not.toHaveBeenCalled();
+    }finally{await f.dispose();}
+  });
   it.skipIf(process.platform !== "linux")("preserves the exact original refusal when the pinned SDK wraps a transport throw", async () => {
     const f=await fixture();
     try{
