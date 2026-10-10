@@ -141,7 +141,7 @@ async function main() {
         const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
         if (CONTROL_PLANE_URL && url.startsWith(CONTROL_PLANE_URL) && url.endsWith("/agent-credentials/prepare")) {
           return Response.json({ delegations: agents.filter(agent => agent.authenticated).map((agent, index) => ({
-            id: `55555555-5555-4555-8555-${String(index + 1).padStart(12, "0")}`, kind: `${agent.id}-api-key`,
+            id: `55555555-5555-4555-8555-${String(index + 1).padStart(12, "0")}`, ownerUserId: "66666666-6666-4666-8666-666666666666", kind: `${agent.id}-api-key`,
             models: modelsForAgent(agent.id, null).map(model => model.value), expiresAt: "2099-01-01T00:00:00Z", runtimeQualified: true,
           })) });
         }

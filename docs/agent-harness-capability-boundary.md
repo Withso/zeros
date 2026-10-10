@@ -287,8 +287,10 @@ force-enable native compaction.
 
 Cloud queued prompts retain a strict optional `claudePreferences` object with
 `autoMemoryEnabled` and `idleCompactionEnabled`. The admitted command supplies
-both cold coordinator settings and retained-process updates; another actor's
-or device's later selection cannot alter an accepted command. Legacy payloads
+both cold session settings and retained-process updates, through the legacy
+queue and the boot-owner local queue alike; the control-plane local-command
+mirror accepts the same strict object. Another actor's or device's later
+selection cannot alter an accepted command. Legacy payloads
 keep auto memory On and idle compaction Off. Workers advertise
 `claudePreferencesVersion: 1`, and clients emit the additive payload/request
 fields only after that capability is confirmed. The worker's control-plane
