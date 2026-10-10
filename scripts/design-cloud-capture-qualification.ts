@@ -1,7 +1,6 @@
-// Run on the immutable Linux capture image as its coordinator user. This
+// Run on the immutable Linux capture image as its non-root engine user. This
 // probes source tools and rendering; it does not qualify a hosted bridge.
 import { createServer } from "node:http";
-import { readdir, stat, readFile } from "node:fs/promises";
 import { startCloudDesignCapture } from "../apps/desktop/src/engine/design/capture-cloud";
 import { createDesignCaptureRenderer } from "../apps/desktop/src/engine/design/capture-client";
 import {
@@ -15,6 +14,9 @@ import { DesignCodeTools } from "../apps/desktop/src/engine/design/code-tools";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createCloudCaptureQualificationRuntime } from "./cloud-workspace-validation/sandbox/qualify-cloud-capture";
+import { inspectCloudQualificationWorkloads, type CloudQualificationRuntime } from "./cloud-workspace-validation/sandbox/cloud-qualification-runtime";
 import {
   expectedCloudCaptureRenderer,
   writeCloudCaptureReport,
@@ -23,23 +25,12 @@ const assert = (ok: unknown, label: string) => {
   if (!ok) throw new Error(label);
   console.log("PASS", label);
 };
-async function workers() {
-  const found: string[] = [];
-  for (const pid of await readdir("/proc")) {
-    if (!/^\d+$/.test(pid)) continue;
-    try {
-      if (
-        (await stat(`/proc/${pid}`)).uid === 10002 &&
-        !(await readFile(`/proc/${pid}/stat`, "utf8"))
-          .split(") ")[1]!
-          .startsWith("Z")
-      )
-        found.push(pid);
-    } catch {}
-  }
-  return found;
+async function workers(context: CloudQualificationRuntime) {
+  const current = await inspectCloudQualificationWorkloads(context);
+  return current.workloadPids.length + current.pendingLaunches;
 }
 async function main() {
+  const context = createCloudCaptureQualificationRuntime();
   process.env.ZEROS_CLOUD_PORT ??= "39111";
   const root = await mkdtemp(
     path.join(tmpdir(), "zeros-cloud-capture-fixture-"),
@@ -55,7 +46,7 @@ async function main() {
     throw new Error("Network fixture missing");
   let service;
   try {
-    service = await startCloudDesignCapture();
+    service = await startCloudDesignCapture(context.boundary);
     if (!service) throw new Error("Cloud capture admission missing");
   } catch (error) {
     await new Promise<void>((resolve) => network.close(() => resolve()));
@@ -84,7 +75,7 @@ async function main() {
     const first = await request();
     assert(
       first.status === 200,
-      "Dedicated sandboxed cloud worker returns a bounded PNG",
+      "Pinned same-user cloud worker returns a bounded PNG with Chromium sandbox",
     );
     const reply = await first.json();
     const renderer = expectedCloudCaptureRenderer();
@@ -99,7 +90,7 @@ async function main() {
       "Cloud capture blocks network and authored scripts",
     );
     assert(
-      (await workers()).length === 0,
+      (await workers(context)) === 0,
       "Completed cloud capture retains no worker/browser processes",
     );
     const concurrent = await Promise.all([request(), request(), request()]);
@@ -111,14 +102,15 @@ async function main() {
     for (const response of concurrent) await response.body?.cancel();
     const abort = new AbortController();
     const pending = request(abort.signal).catch((error) => error);
-    for (let n = 0; n < 100 && !(await workers()).length; n++)
+    for (let n = 0; n < 100 && !(await workers(context)); n++)
       await new Promise((resolve) => setTimeout(resolve, 10));
+    assert(await workers(context) > 0, "Cancellation observes an original capture workload before Stop");
     abort.abort();
     await pending;
-    for (let n = 0; n < 200 && (await workers()).length; n++)
+    for (let n = 0; n < 200 && (await workers(context)); n++)
       await new Promise((resolve) => setTimeout(resolve, 10));
     assert(
-      (await workers()).length === 0,
+      (await workers(context)) === 0,
       "Cancellation reaps the cloud capture process group",
     );
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -143,11 +135,12 @@ async function main() {
         }),
       },
     );
-    const call = async (name: string, input: unknown) =>
-      JSON.parse(
-        (await tools!.callTool(name, input, new AbortController().signal))
-          .content[0].text as string,
-      );
+    const call = async (name: string, input: unknown) => {
+      const response = await tools!.callTool(name, input, new AbortController().signal);
+      const content = response.content[0];
+      if (content?.type !== "text") throw new Error("Design tool response was not text");
+      return JSON.parse(content.text);
+    };
     const nodeId = /<main data-oid="([^"]+)"/.exec(
       state.files[frame.file]!,
     )![1]!;
@@ -188,7 +181,7 @@ async function main() {
       "Headless Code tools persist source-bound before/after cloud evidence",
     );
     assert(
-      (await workers()).length === 0,
+      (await workers(context)) === 0,
       "Result generation leaves no browser process",
     );
     const reportFile = await writeCloudCaptureReport({
@@ -197,7 +190,7 @@ async function main() {
       renderer,
       checkedAt: new Date().toISOString(),
       elapsedMs: performance.now() - started,
-      activeWorkers: await workers(),
+      activeWorkers: await inspectCloudQualificationWorkloads(context),
       networkReads,
       hostedCloud: false,
       limitation:
@@ -211,11 +204,6 @@ async function main() {
     await rm(root, { recursive: true, force: true });
   }
 }
-main().catch((error) => {
-  console.error(
-    error instanceof Error
-      ? error.message
-      : "Cloud capture qualification failed.",
-  );
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(() => { console.error("Cloud capture qualification failed."); process.exitCode = 1; });
+}

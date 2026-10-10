@@ -80,3 +80,29 @@ int refuse_legacy_identity_map(size_t count, const gid_t *groups) { (void)count;
     expect(spawnSync(binary, args, { timeout: 3000 }).status).toBe(125);
   });
 });
+
+describe.skipIf(process.platform !== "linux")("non-root shared engine identity map", () => {
+  it("maps only non-root10003 identically in both kernel maps", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "zeros-engine-map-"));
+    try {
+      const source = path.join(directory, "probe.c"), binary = path.join(directory, "probe");
+      writeFileSync(source, `#define main zeros_namespace_main
+#define open map_open
+#define write map_write
+#define close map_close
+#include ${JSON.stringify(path.resolve("scripts/cloud-workspace-validation/sandbox/cloud-engine-namespace.c"))}
+#undef main
+#undef open
+#undef write
+#undef close
+static char captured[128];
+int map_open(const char *file, int flags, ...) { (void)flags; if (strcmp(file,"/proc/234/uid_map") && strcmp(file,"/proc/234/gid_map")) return -1; return 42; }
+ssize_t map_write(int fd,const void *value,size_t size) { if(fd!=42 || size>=sizeof(captured)) return -1; memcpy(captured,value,size);captured[size]=0;return size; }
+int map_close(int fd) { return fd==42?0:-1; }
+int main(void) { write_map(234,"uid");fputs(captured,stdout);write_map(234,"gid");fputs(captured,stdout);return 0; }
+`);
+      execFileSync("cc", ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", source, "-o", binary], {timeout:15000,stdio:"pipe"});
+      expect(execFileSync(binary, {encoding:"utf8",timeout:3000})).toBe("10003 10003 1\n10003 10003 1\n");
+    } finally { rmSync(directory, {recursive:true,force:true}); }
+  });
+});

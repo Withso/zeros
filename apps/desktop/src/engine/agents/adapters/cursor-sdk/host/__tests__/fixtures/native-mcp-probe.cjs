@@ -18,21 +18,23 @@ fsp.readFile = async function(filename, ...args) {
 };
 (async () => {
   const options = JSON.parse(process.argv[3]);
-  if (process.argv[4] === "immutable") {
-    if (process.getuid() !== 10001 || process.getgid() !== 10001) throw new Error("Wrong worker identity");
-    try { fs.writeFileSync(path.join(process.env.HOME, ".cursor/mcp.json"), "{}"); throw new Error("Mutable Cursor config"); }
-    catch (error) { if (!["EROFS", "EACCES", "EPERM"].includes(error.code)) throw error; }
-  }
+  const sameEngineIdentity = process.getuid() === Number(process.argv[5]) && process.getgid() === Number(process.argv[6]) &&
+    process.geteuid() === Number(process.argv[5]) && process.getegid() === Number(process.argv[6]);
+  if (!sameEngineIdentity) throw new Error("Wrong engine identity");
+  const stateProbe = path.join(process.env.HOME, ".cursor-state-write-probe");
+  fs.writeFileSync(stateProbe, "ordinary provider state", { flag: "wx" });
+  fs.unlinkSync(stateProbe);
+  const stateWritable = true;
   const platform = await createAgentPlatform({ localStore: new JsonlLocalAgentStore(path.join(process.env.HOME, "store")), workspaceRef: options.cwd });
   const release = await platform.prewarmLocalWorkspace(options);
   // Rule/skill discovery starts asynchronously during prewarm. Keep positive
   // controls alive until actual SDK reads finish, with a fixed deadline.
   const expectRepo = options.local.settingSources.includes("project") && fs.existsSync(path.join(options.cwd, "AGENTS.md"));
-  const expectSkill = process.argv[4] === "immutable" && Object.keys(options.mcpServers).length > 0;
+  const expectSkill = process.argv[4] === "engine-home" && Object.keys(options.mcpServers).length > 0;
   const deadline = Date.now() + 3000;
   while (((expectRepo && (!repoAgentsRead || !repoRuleRead)) || (expectSkill && !skillRead)) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
   await release();
-  process.stdout.write(JSON.stringify({ skillRead, repoAgentsRead, repoRuleRead }) + "\n");
+  process.stdout.write(JSON.stringify({ skillRead, repoAgentsRead, repoRuleRead, sameEngineIdentity, stateWritable }) + "\n");
   process.stdout.write("native_prewarm_ok");
   process.exit(0);
 })().catch(() => process.exit(1));

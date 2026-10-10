@@ -45,6 +45,7 @@ import {
   prepareToolchain,
   versionAtMost,
 } from "../cloud-workspace-validation/runtime-bundle/toolchain";
+import { RUNTIME_HELPERS } from "../cloud-workspace-validation/runtime-bundle/closure";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -54,7 +55,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 const temporary: string[] = [];
 
 describe("Cursor platform payload closure", () => {
-  it.skipIf(process.platform !== "linux")("executes the shipped worker payload with the actual read-only proc closure view", async () => {
+  it.skipIf(process.platform !== "linux")("executes shipped Cursor payload as shared engine10003 in the actual read-only proc closure view", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "zeros-cursor-payload-"));
     temporary.push(root);
     const worker = path.join(root, "worker");
@@ -75,8 +76,10 @@ describe("Cursor platform payload closure", () => {
       await copyFile(path.join(shipped, "bin", binary), path.join(platform, "bin", binary));
       await chmod(path.join(platform, "bin", binary), 0o555);
     }
-    for (const file of ["runtime-self-test.mjs", "runtime-layout.json"]) await copyFile(
-      path.join("scripts/cloud-workspace-validation/sandbox", file), path.join(root, "lib/zeros", file));
+    // Import the actual self-test with its shipped helper graph. The identity
+    // probe still runs only the original Cursor payload check; no VM custody,
+    // engine role or provider success is fabricated by this fixture.
+    for (const helper of RUNTIME_HELPERS) await copyFile(helper.source, path.join(root, helper.target));
     for (const file of ["bin/start-engine.sh", "lib/zeros/setup-cloud-workspace.mjs", "lib/zeros/cloud-worker-supervisor.mjs"])
       await writeFile(path.join(root, file), "", { mode: 0o555 });
     await writeFile(path.join(root, "manifest.json"), canonicalJson(createManifest({
@@ -107,9 +110,9 @@ describe("Cursor platform payload closure", () => {
     try {
       const { runClosureProbes } = await import("../cloud-workspace-validation/runtime-bundle/probe");
       await expect(runClosureProbes(root)).resolves.toMatchObject({ checks: ["fixture_engine", "cursor_load"] });
-      expect(identities).toEqual(["0", "10001"]);
+      expect(identities).toEqual(["10003", "10003"]);
       // Import still succeeds when packaging drops an executable bit/file;
-      // closure must reject both, even after the worker namespace fix.
+      // closure must reject both under the shared non-root engine identity.
       await chmod(path.join(platform, "bin/rg"), 0o444);
       await expect(runClosureProbes(root)).rejects.toMatchObject({ failedChecks: ["closure_probes", "cursor_load"] });
       await chmod(path.join(platform, "bin/rg"), 0o555);

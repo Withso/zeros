@@ -33,7 +33,7 @@ The build downloads Node 22.23.1 from nodejs.org, verifies its official SHA-256
 checksum, bootstraps pnpm 10.28.0, and uses that Node for both native rebuilds.
 Installed ELF objects must be x86-64 and require no GLIBC newer than 2.39.
 The receipt records GLIBCXX/CXXABI and library needs for base qualification.
-It does not claim to qualify host containment or the base's OS libraries.
+It does not qualify the production VM boundary, workload custody, or the base's OS libraries.
 
 Four outputs are produced:
 
@@ -70,7 +70,7 @@ SDK packages, peers and workspace packages, plus `tsx` and TypeScript. Its
 source slices and single append-only helper inventory live in `closure.ts`.
 Copies preserve package topology with internal relative links; regenerated
 `.bin` shims invoke the bundled Node. pnpm metadata, browser `.links`, install
-validation markers, native build intermediates, non-target embedded SRT/PTY/SSH helpers,
+validation markers, native build intermediates, non-target embedded PTY/SSH helpers,
 upstream SQLite/PTY prebuilds, secrets and caches are omitted. The Octokit auth-token
 README and SSH2/Zod test fixtures containing credential examples are omitted;
 their package code and license/NOTICE files remain unchanged. The source-built
@@ -88,27 +88,47 @@ The manifest lists `selfTest` only when B7's regular self-test file is included;
 every listed entrypoint must be a regular inventory file. B2's runtime-root
 resolver is required and copied from its engine source as a regular file at
 `lib/zeros/cloud-runtime-root.mjs`; B7's self-test is included when present.
-This builder does not implement these helpers or publish artifacts.
+The inventory also includes the runtime-only legacy ownership-adoption and
+root workload-custody publication helpers, plus the readonly resource-budget
+reader. Cloud Host supervision uses the
+fixed `host-process-supervisor.mjs`, `cloud-host-workload-entry.mjs` and
+`cloud-workload-cgroup.mjs` source modules; staging requires regular files and
+the offline probe checks each module's syntax. Neutral ripgrep is staged as
+`worker/binaries/rg`. Retired ZSR binaries, qualification sources and the
+sandbox-runtime dependency are omitted. Archived artifact and base readers
+retain their existing keys; this builder does not publish artifacts.
 
 The build always verifies the archive, rehashes its extracted tree, and probes
 it at `/opt/zeros-infra/<runtimeId>` in a mount/network namespace. Only the
 runtime, OS tools/libraries, devices and a read-only proc view are mounted; the
 checkout/store and their parent directories are absent from module resolution.
-The namespace maps payload ownership to root and supplies disposable v4 marker,
-active-runtime and facade fixtures so source imports exercise B2's resolver.
+Namespace setup maps payload ownership to root, then both engine and Cursor
+probes run as UID/GID 10003. The map is installed before read-only proc; Cursor
+does not attempt a nested user namespace (#410). Disposable v4 marker,
+active-runtime and facade fixtures let source imports exercise B2's resolver.
 Their synthetic base/receipt/session identities are never archived and do not
 qualify a real base installation.
 It loads SQLite, PTY, Cursor, engine externals and source qualification modules;
-runs Claude/Codex versions, LSP/compiler shims, engine help and ZSR syntax/ripgrep
-checks; and resolves the pinned browser assets. Browser launch, live provider
-turns and privileged runtime self-test belong to base/runtime qualification.
+runs Claude/Codex versions, LSP/compiler shims, engine help, Host module syntax
+and ripgrep checks; and resolves the pinned browser assets. The pinned Cursor
+platform executables are checked with `--version`/`--help`, including missing
+file and execute-bit refusals. These offline mount/network namespaces are
+builder checks, not an agent sandbox or a production controller exemption.
+Production runs share one non-root engine identity and workspace VM trust domain.
+Browser launch, shared workload entry/drain, live provider turns and privileged
+runtime self-test belong to base/runtime qualification.
 
 Fast tests and opt-in real-archive acceptance:
 
 ```sh
-pnpm exec vitest run scripts/__tests__/cloud-runtime-bundle.test.ts scripts/__tests__/cloud-runtime-bundle-closure.test.ts
+pnpm exec vitest run scripts/__tests__/cloud-runtime-bundle.test.ts scripts/__tests__/cloud-runtime-bundle-closure.test.ts -t '^(?!Cursor platform payload closure)'
+pnpm exec vitest run scripts/__tests__/cloud-runtime-bundle.test.ts -t 'Cursor platform payload closure'
 ZEROS_RUNTIME_BUNDLE_TEST_DIR=.context/runtime-bundle pnpm exec vitest run scripts/__tests__/cloud-runtime-bundle-closure.test.ts
 ```
+
+The first command is portable. The Cursor command uses real Linux namespaces;
+run it in an available native qualification lane. Real-archive acceptance also
+uses namespaces and remains opt-in via the bundle directory.
 
 For reproducibility, build the same clean commit twice into distinct output and
 work directories using the same host toolchain. Compare the manifest, descriptor

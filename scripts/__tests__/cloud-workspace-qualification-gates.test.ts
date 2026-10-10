@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertFullCloudBoundary,
   assertCloudCoreBoundary,
+  assertCloudNativeBoundary,
   assertLiveAgentChallengeResponse,
   assertCommandExitCode,
   evaluateSoakGate,
@@ -15,7 +16,7 @@ import {
   validateEphemeralSnapshotName,
   validateDeletableQualificationSnapshotName,
 } from "../cloud-workspace-validation/lib/qualification-gates";
-import {CLOUD_CORE_PROVIDER_RESTRICTIONS} from "../../packages/protocol/src/containment";
+import {CLOUD_CORE_PROVIDER_RESTRICTIONS,CLOUD_NATIVE_PROVIDER_RESTRICTIONS} from "../../packages/protocol/src/containment";
 
 describe("cloud workspace qualification gates", () => {
   it("requires explicit models before a paid agent qualification can start", () => {
@@ -212,6 +213,16 @@ describe("cloud workspace qualification gates", () => {
         /claude/,
       );
     }
+  });
+
+  it.each(["claude","cursor","codex"] as const)("requires truthful %s VM/native policy without claiming Design OS enforcement",provider=>{
+    const native={version:1,actor:"agent-code",state:"ready",backend:"cloud-worker",designProtection:{required:true,enforced:false,protectedDirectoryCount:1},
+      parity:{level:"restricted",restrictions:[...CLOUD_NATIVE_PROVIDER_RESTRICTIONS[provider]]},
+      cloudExecution:{version:1,profile:"zeros-cloud-native-v1",runtimeProfile:"zeros-cloud-worker-v4",provider,designApi:"admitted"}};
+    expect(()=>assertCloudNativeBoundary(provider,native)).not.toThrow();
+    for(const invalid of [{...native,designProtection:{...native.designProtection,enforced:true}},
+      {...native,cloudExecution:{...native.cloudExecution,designApi:"unavailable"}}, {...native,parity:{level:"full",restrictions:[]}}])
+      expect(()=>assertCloudNativeBoundary(provider,invalid)).toThrow();
   });
 
   it.each(["claude","cursor","codex"] as const)("keeps the %s core diagnostic separate from full parity and rejects omitted capabilities",provider=>{

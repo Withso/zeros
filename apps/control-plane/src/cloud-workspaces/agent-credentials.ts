@@ -159,7 +159,7 @@ export class DatabaseCloudAgentCredentialService {
       const connections=(await tx.query<OrganizationConnection>(`SELECT * FROM cloud_agent_organization_connections
         WHERE org_id=$1 AND owner_user_id=$2 ORDER BY provider`,[organizationId,ownerUserId])).rows;
       return {credentials:credentials.map(metadata),connections:connections.map(row=>({provider:row.provider,revision:Number(row.revision),
-        credentialId:row.credential_id,models:row.models,allModels:row.all_models,connected:row.consent_fingerprint===fingerprint&&credentials.some(
+        credentialId:row.credential_id,models:[...cloudAgentModels(row.provider)],allModels:row.all_models,connected:row.consent_fingerprint===fingerprint&&credentials.some(
           credential=>credential.id===row.credential_id&&credential.revision===row.credential_revision&&credential.usable)}))};
     });
   }
@@ -472,9 +472,10 @@ export class DatabaseCloudAgentCredentialService {
     if(!uuid.safeParse(credentialId).success)invalid();
     return withSystemTx(this.pool,async tx=>{
       await this.owner(tx,ownerUserId);
-      if(!(await tx.query("SELECT id FROM cloud_agent_credentials WHERE id=$1 AND owner_user_id=$2",[credentialId,ownerUserId])).rowCount)unavailable();
+      const credential=(await tx.query<Pick<Credential,"kind">>("SELECT kind FROM cloud_agent_credentials WHERE id=$1 AND owner_user_id=$2",[credentialId,ownerUserId])).rows[0];
+      if(!credential)unavailable();
       return {delegations:(await tx.query<Delegation>(`SELECT * FROM cloud_agent_credential_delegations
-        WHERE credential_id=$1 AND owner_user_id=$2 AND revoked_at IS NULL AND expires_at>clock_timestamp() ORDER BY created_at DESC,id LIMIT 100`,[credentialId,ownerUserId])).rows.map(grantMetadata)};
+        WHERE credential_id=$1 AND owner_user_id=$2 AND revoked_at IS NULL AND expires_at>clock_timestamp() ORDER BY created_at DESC,id LIMIT 100`,[credentialId,ownerUserId])).rows.map(row=>({...grantMetadata(row),models:[...cloudAgentModels(credential.kind)]}))};
     });
   }
 
@@ -506,7 +507,7 @@ export class DatabaseCloudAgentCredentialService {
           AND delegation.owner_fingerprint=cloud_workspace_actor_fingerprint($1,credential.owner_user_id)
           AND cloud_workspace_actor_role($1,credential.owner_user_id) IN ('prompter','developer','manager','owner')
         ORDER BY delegation.created_at DESC,delegation.id LIMIT 100`,[workspaceId,workspace.org_id,actorUserId,actor.fingerprint,compute.fingerprint,compute.trust,cloudRuntimeQualificationMode()]);
-      return {compute,delegations:rows.rows.map(row=>({id:row.id,kind:row.kind,ownerUserId:row.owner_user_id,models:row.all_models?cloudAgentModels(row.kind):row.models,allModels:row.all_models,expiresAt:row.expires_at.toISOString(),
+      return {compute,delegations:rows.rows.map(row=>({id:row.id,kind:row.kind,ownerUserId:row.owner_user_id,models:[...cloudAgentModels(row.kind)],allModels:row.all_models,expiresAt:row.expires_at.toISOString(),
         runtimeQualified:row.runtime_qualified,runtimeUpgradeRequired:row.runtime_upgrade_required,mcpQualified:row.mcp_qualified,...(runtimeNativeCapabilities(row.native_capabilities)?{nativeCapabilities:runtimeNativeCapabilities(row.native_capabilities)}:{})}))};
     });
   }

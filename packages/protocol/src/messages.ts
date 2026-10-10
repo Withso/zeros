@@ -400,9 +400,9 @@ export interface AgentNewSessionMessage extends BaseMessage {
   type: "AGENT_NEW_SESSION";
   agentId: string;
   /** Immutable execution actor. Omitted/"code" preserves the native Code
-   * session path. "design" asks the trusted engine to mint a scoped Design API
-   * capability and admit the provider through ZSR. Workspace view changes do
-   * not alter this value for a running session. */
+   * session path. "design" remains readable for archived Design-actor sessions;
+   * new authoring follows composer context and placement policy. Workspace
+   * view changes do not rewrite an existing session's recorded value. */
   agentRole?: "code" | "design";
   /** Required only for a Design actor. The engine resolves and snapshots this
    * document's current draft revision; callers never supply capability data. */

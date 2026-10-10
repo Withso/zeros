@@ -1,5 +1,8 @@
 # Native SSH and TCP forwarding: Mac Alpha acceptance
 
+Execution follows the [normal VM agent execution model](security.md#agent-execution-model).
+The workspace VM provides isolation; ordinary conversation directories do not.
+
 This is the E1 live acceptance procedure for the orchestrator. Run it on a signed
 Zeros Alpha Mac build against Alpha/test workspaces only. Linux OpenSSH tests and
 the browser fixture establish local integration, not this combined qualification.
@@ -43,10 +46,22 @@ to that path, preserving quotes/spaces; do not evaluate clipboard text. The path
 is local metadata, not a bearer, but is ephemeral and should remain private.
 Keep Zeros Alpha running. A command is single-use, including failed handshakes.
 
+Cloud terminal/SSH/LSP/capture launches enter one shared workload cgroup through
+the original broker before exec; engine/control processes remain outside it.
+Per-conversation Stop proves only the original process group, without an
+escaped/detached descendant guarantee. Idle requires a fresh complete census of
+the entire engine-runtime tree, including the engine leaf and any new sibling;
+only exact infrastructure births are exempt. Unknown means busy with bounded
+recovery. The C3 quiet populated-shell exception applies only to idle classification.
+VM drain closes launches; checkpoint and seal complete before kill. Acceptance
+checks require the outside root broker's whole-tree `cgroup.kill` plus final
+`populated=0` receipt, including engine retirement. Local Host process-group
+behavior is unchanged.
+
 | Case | Action | Required result |
 | --- | --- | --- |
 | Delayed copy | Copy a command, wait at least 15 seconds, then use it before its 15-minute expiry. | Shell opens without a host-key prompt. Copying did not start the remote SSH handshake deadline. |
-| Terminal | Choose Open Terminal; run `id -u`, `pwd`, and `stty size`. Resize that Terminal and run `stty size` again. | UID 10001, selected primary checkout, dimensions follow the window. No provider-admin credential path. |
+| Terminal | Choose Open Terminal; run `id -u`, `pwd`, and `stty size`. Resize that Terminal and run `stty size` again. | UID 10003, selected primary checkout, dimensions follow the window. The same non-root `zeros-engine` identity as agents and tools, without an agent sandbox. No provider-admin credential path. |
 | Exec | Run the command below with a fresh config. | Separate stdout/stderr and exit status 17. |
 | SFTP | Run the file roundtrip below with another fresh config. | Identical downloaded bytes; ordinary workload file permissions. |
 | One use | Try the consumed command again. | Fails. A newly copied command works with fresh key trust. |
@@ -157,10 +172,13 @@ several simultaneous local connections and verify isolation. Test these cases:
    ```
 
    Use the separate ordinary Zeros terminal to observe the file grow. Close the
-   SSH window (then repeat with explicit revoke). After retirement, sample
-   `wc -c zeros-v2-test-e1/detached` twice at least three seconds apart. It must
-   stop growing. This validates the actual v4 PID namespace, not only local
-   OpenSSH behavior.
+   SSH window (then repeat with explicit revoke). That operation proves only the
+   original process group; if the detached writer remains, the fresh shared
+   census must keep the VM busy. Perform an authorized VM Stop/drain: complete
+   checkpoint/seal first, then require the outside root broker's whole-tree
+   `cgroup.kill` plus `populated=0` receipt. After wake, sample
+   `wc -c zeros-v2-test-e1/detached` twice at least three seconds apart; it must
+   stop growing. This distinguishes final VM retirement from local OpenSSH closure.
 2. Leave a copied command unused until its 15-minute expiry. It must fail and
    its local files/access row must be retired. An established SSH or tunnel
    also closes at expiry. Obtain a new grant to reconnect.

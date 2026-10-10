@@ -1,5 +1,6 @@
 import { CloudAgentCredentialCards } from "./cloud-agent-credential-cards";
 import { cloudAdmissionForTurn } from "./cloud-admission-failure";
+import { TurnFailureCard } from "./turn-failure-card";
 import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-send-failure-toast";
 // ──────────────────────────────────────────────────────────
 // AgentChat — messages + tool cards + permission modal + composer
@@ -525,6 +526,13 @@ export function AgentChat({
         queuedMessages,
       };
     }, [session.messages]);
+  // A refused prompt may still belong to the queue or the restored draft.
+  // When it has no visible turn footer, the transcript owns its one banner.
+  const detachedCloudAdmission = isCloudWorkspace(chatThread?.folder ?? session.cwd) &&
+    session.cwd === (chatThread?.folder ?? session.cwd) && session.cloudAdmissionFailure &&
+    session.cloudAdmissionFailure.kind !== "unavailable" &&
+    !visibleMessages.some(message => message.kind === "text" && message.role === "user" &&
+      message.id === session.cloudAdmissionFailure?.turnId) ? session.cloudAdmissionFailure : null;
   const livePendingLocalTurnId = usePendingLocalTurnId(chatId);
   const pendingLocalTurnId = readOnly ? null : livePendingLocalTurnId;
   const activity = readOnly ? null : agentActivity(session, pendingLocalTurnId);
@@ -2570,11 +2578,18 @@ export function AgentChat({
   const [loadingOlder, setLoadingOlder] = useState(false);
   const olderPageRequestRef = useRef<object | null>(null);
   const olderPageEpochRef = useRef(0);
+  const olderPageFailureRef = useRef<{
+    epoch: number;
+    cursor: string;
+    executionId: AgentSessionState["executionId"];
+    sessionId: AgentSessionState["sessionId"];
+  } | null>(null);
   const olderScrollCancelRef = useRef<() => void>(() => {});
   // Retiring a surface invalidates its read and correction before the next
   // paint. A late finally must not clear a replacement surface's loading state.
   useLayoutEffect(() => {
     setLoadingOlder(false);
+    olderPageFailureRef.current = null;
     return () => {
       olderPageEpochRef.current += 1;
       olderPageRequestRef.current = null;
@@ -2603,6 +2618,8 @@ export function AgentChat({
     if (!scrollEl || !surfaceActive) return;
     const onScroll = () => {
       if (!surfaceActiveRef.current || restoreInProgressRef.current) return;
+      // Retry a failed cursor only after the reader leaves this paging band.
+      if (scrollEl.scrollTop > NEAR_TOP_PX) olderPageFailureRef.current = null;
       setNearTop(scrollEl.scrollTop <= NEAR_TOP_PX);
     };
     setNearTop(scrollEl.scrollTop <= NEAR_TOP_PX);
@@ -2706,8 +2723,17 @@ export function AgentChat({
     const slot = useSessionsStore.getState().sessions[chatId];
     const oldest = slot?.messages[0];
     if (!oldest || slot.transcriptState !== "resident") return;
-    const request = {};
     const epoch = olderPageEpochRef.current;
+    const failure = olderPageFailureRef.current;
+    // Clearing loading state must not retry the same failed read on each
+    // render. Live appends leave this execution/session/cursor unchanged.
+    if (
+      failure?.epoch === epoch &&
+      failure.cursor === oldest.id &&
+      failure.executionId === slot.executionId &&
+      failure.sessionId === slot.sessionId
+    ) return;
+    const request = {};
     let awaitingRestore = false;
     const finishRequest = () => {
       if (olderPageRequestRef.current !== request) return;
@@ -2766,8 +2792,8 @@ export function AgentChat({
               return cancel;
             },
             onFinished: finishRequest,
-            requestFrame: requestAnimationFrame,
-            cancelFrame: cancelAnimationFrame,
+            requestFrame: (callback) => window.requestAnimationFrame(callback),
+            cancelFrame: (frame) => window.cancelAnimationFrame(frame),
           },
         );
         awaitingRestore = true;
@@ -2781,8 +2807,21 @@ export function AgentChat({
       // If the page wasn't full, no point offering another load.
       if (older.length < LOAD_OLDER_PAGE) setHasOlder(false);
     } catch (err) {
+      if (
+        olderPageRequestRef.current === request &&
+        olderPageEpochRef.current === epoch &&
+        surfaceActiveRef.current &&
+        canApplyHistoryPage(slot, useSessionsStore.getState().sessions[chatId])
+      ) {
+        olderPageFailureRef.current = {
+          epoch,
+          cursor: oldest.id,
+          executionId: slot.executionId,
+          sessionId: slot.sessionId,
+        };
+        console.warn("[Zeros] load-older failed:", err);
+      }
       if (awaitingRestore) olderScrollCancelRef.current();
-      console.warn("[Zeros] load-older failed:", err);
     } finally {
       // React may publish the prepend before the correction frame. Keep the
       // synchronous lock through settling so auto-paging cannot overtake it.
@@ -4986,6 +5025,17 @@ export function AgentChat({
                 </React.Fragment>
               );
             })}
+            {detachedCloudAdmission && (
+              <TurnFailureCard
+                failure={{ kind: "cloud-admission", message: detachedCloudAdmission.message, newChatAllowed: false }}
+                cloudAdmission={detachedCloudAdmission}
+                folder={chatThread?.folder ?? session.cwd}
+                agentId={detachedCloudAdmission.agentId}
+                readOnly={readOnly || !interactive}
+                onRetry={interactive && queuedMessages.some(message => message.id === detachedCloudAdmission.turnId)
+                  ? () => sendNowQueued(detachedCloudAdmission.turnId) : undefined}
+              />
+            )}
             {/* Checkpoint bottom spacer — see the state comment above.
               -mt-5 cancels the column's gap-5 so the div contributes
               EXACTLY `height` px to scrollHeight (the rail's reach math

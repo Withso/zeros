@@ -69,7 +69,7 @@ describe("Cursor provider-state overlay", () => {
     const durable = await durableCursorStateRoot(cwd);
     // Same root the overlay path promotes INTO, so existing chats keep resuming
     // against their own history — and it is stable across sessions, which is what
-    // makes concurrent parity sessions share one store the way they did pre-ZSR.
+    // makes concurrent parity sessions share one store the way they did earlier native builds.
     const overlay = await prepareCursorStateOverlay(await local("overlay"), cwd);
     expect(durable).toBe(overlay.persistentRoot);
     expect(await durableCursorStateRoot(cwd)).toBe(durable);

@@ -153,7 +153,7 @@ describe("verified cloud runtime root", () => {
       syncBuiltinESMExports();
     }
   });
-  it("accepts the host-owned engine projection but rejects engine-owned or writable replacements", () => {
+  it("refuses an archived worker projection as the current engine contract", () => {
     const tree=fixture(),root=tree.descriptor.root;
     tree.write("/etc/zeros/cloud-worker.json",{...tree.marker,toolchain:{node:`${root}/bin/node`,
       supervisor:`${root}/worker/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs`,bwrap:"/usr/bin/bwrap",setpriv:"/usr/bin/setpriv"}});
@@ -161,10 +161,34 @@ describe("verified cloud runtime root", () => {
     tree.owners.set("/run/zeros/active-runtime.json",65534);
     const resolve=(readOnly=true)=>createCloudRuntimeResolver({filesystem:tree.filesystem,
       isOwner:(_file,uid)=>uid===0||uid===65534,isEngine:()=>true,isReadOnly:()=>readOnly}).resolve();
-    expect(resolve().profile).toBe("v4");
+    expect(()=>resolve()).toThrow(/runtime/);
     expect(()=>resolve(false)).toThrow(/runtime/);
     tree.owners.set("/run/zeros/active-runtime.json",0);
     expect(()=>resolve()).toThrow(/runtime/);
+  });
+  it("resolves the same-user Host projection without any agent sandbox assets", () => {
+    const tree = fixture(), root = tree.descriptor.root;
+    const supervisor = `${root}/worker/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`;
+    tree.write(supervisor, "pinned Host supervisor", 0o444);
+    tree.write("/etc/zeros/cloud-worker.json", { ...tree.marker, uid: 10003, gid: 10003,
+      toolchain: { node: `${root}/bin/node`, supervisor } });
+    tree.write("/run/zeros/active-runtime.json", tree.descriptor, 0o444);
+    tree.owners.set("/run/zeros/active-runtime.json", 65534);
+    for (const file of [`${root}/bin/cloud-process-supervisor`,
+      `${root}/worker/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs`])
+      fs.rmSync(tree.physical(file));
+    const resolver = createCloudRuntimeResolver({ filesystem: tree.filesystem,
+      isOwner: (_file, uid) => uid === 0 || uid === 65534, isEngine: () => true, isReadOnly: () => true });
+    expect(resolver.resolve().profile).toBe("v4");
+    tree.write(supervisor, "changed", 0o666);
+    expect(() => createCloudRuntimeResolver({ filesystem: tree.filesystem,
+      isOwner: (_file, uid) => uid === 0 || uid === 65534, isEngine: () => true, isReadOnly: () => true }).resolve()).toThrow();
+  });
+  it("reads the immutable base marker with the new pinned Host assets without requiring a retired agent reaper", () => {
+    const tree = fixture(), root = tree.descriptor.root;
+    tree.write(`${root}/worker/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`, "pinned Host supervisor", 0o444);
+    fs.rmSync(tree.physical(`${root}/bin/cloud-process-supervisor`));
+    expect(tree.resolver.resolve().profile).toBe("v4");
   });
   it("refuses arbitrary facade links and symlinked physical runtime ancestry", () => {
     for (const file of ["/zeros", "/opt/zeros/current", "/opt/zeros/bin", "/opt/zeros/worker", "/opt/zeros/manifest.json", "/opt/zeros/logs", "/opt/zeros/state"]) {
@@ -215,8 +239,8 @@ describe("verified cloud runtime root", () => {
     expect(fs.realpathSync.native(tree.physical(file))).toBe(tree.physical(actual));
     expect(tree.resolver.packagePath(file)).toBe(actual);
   });
-  it("maps the declared v4 profile to map version 3 without inferring the profile from maps", () => {
-    expect(cloudProfileIdentityMapVersion(4)).toBe(3);
+  it("maps the declared v4 profile to the exact non-root map without inferring a profile from maps", () => {
+    expect(cloudProfileIdentityMapVersion(4)).toBe(5);
     expect(cloudProfileIdentityMapVersion(3)).toBeNull();
     expect(cloudProfileIdentityMapVersion(2)).toBeNull();
     expect(cloudProfileIdentityMapVersion(5)).toBeNull();

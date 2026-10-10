@@ -12,8 +12,8 @@ const MAX_FRAME=4*1024*1024,MAX_BUFFER=8*1024*1024;
 
 
 /** Adapt the pinned native executor's JSONL stdio to its WebSocket protocol.
- * The capability URL stays in the private app-server; the workspace never
- * receives provider credentials, a listening socket, or an engine RPC API. */
+ * Its scoped capability routes only executor frames. The launch environment
+ * excludes provider credentials; same-user VM processes are not isolated. */
 export class CloudCodexExecServer {
   readonly environmentId=`zeros-${randomBytes(16).toString("hex")}`;
   private readonly capability=`/${randomBytes(32).toString("hex")}`;
@@ -65,7 +65,7 @@ export class CloudCodexExecServer {
       try{
         bridge.child=await Promise.race([lifetime.launch(()=>execution.coordinator.workload.spawn({
           command:runtime.node,args:[`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-codex-executor.mjs`,binary],cwd:execution.cwd,
-          env:cloudComputerProcessEnvironment({HOME:"/srv/zeros/home/agent",PATH:`${runtime.binRoot}:/usr/bin:/bin`,LANG:"C.UTF-8"},execution.environment?.values,"agent"),stdio:"pipe",
+          env:cloudComputerProcessEnvironment({...execution.coordinator.nativeHome.environment(),PATH:`${runtime.binRoot}:/usr/bin:/bin`,LANG:"C.UTF-8"},execution.environment?.values,"agent"),stdio:"pipe",
         })),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error("Cloud executor launch timed out")),5000);})]);
       }finally{if(timer)clearTimeout(timer);}
       lifetime.assertLive();

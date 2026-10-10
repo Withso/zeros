@@ -188,30 +188,42 @@ async function hasPendingOrbStackMachineRecovery(sessionRoot: string) {
 }
 
 async function hasPendingProcessDomainRecovery(sessionRoot: string) {
+  return (await countPendingProcessDomainRecovery(sessionRoot)) > 0;
+}
+
+/** Shared legacy quarantine scan for startup recovery and session cleanup.
+ * Ambiguous ancestors remain holds without following their symlinks. The
+ * optional visitor lets startup enforce its overall recovery scan bound. */
+export async function countPendingProcessDomainRecovery(
+  sessionRoot: string,
+  visitEntry?: () => boolean,
+): Promise<number> {
   const boundaryRoot = path.join(sessionRoot, "boundary");
-  let generations: import("node:fs").Dirent[];
+  let preserved = 0;
   try {
-    generations = await fsp.readdir(boundaryRoot, { withFileTypes: true });
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ENOENT";
-  }
-  for (const generation of generations) {
-    if (!generation.isDirectory() || generation.isSymbolicLink()) continue;
-    try {
-      await fsp.lstat(
-        path.join(
-          boundaryRoot,
-          generation.name,
-          "commands",
-          "process-domain.json",
-        ),
-      );
-      return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return true;
+    await assertPhysicalDirectory(boundaryRoot, "boundary root");
+    for await (const generation of await fsp.opendir(boundaryRoot)) {
+      if (visitEntry && !visitEntry()) return preserved + 1;
+      if (generation.isSymbolicLink()) {
+        preserved++;
+        continue;
+      }
+      if (!generation.isDirectory()) continue;
+      const generationRoot = path.join(boundaryRoot, generation.name);
+      const commands = path.join(generationRoot, "commands");
+      try {
+        await assertPhysicalDirectory(generationRoot, "boundary generation");
+        await assertPhysicalDirectory(commands, "legacy commands");
+        await fsp.lstat(path.join(commands, "process-domain.json"));
+        preserved++;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") preserved++;
+      }
     }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") preserved++;
   }
-  return false;
+  return preserved;
 }
 
 async function hasPendingProviderHomeRecovery(sessionRoot: string) {

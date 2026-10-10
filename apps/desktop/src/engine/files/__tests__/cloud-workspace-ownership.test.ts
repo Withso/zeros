@@ -4,26 +4,36 @@ import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudWorkspaceOwnership } from "../cloud-workspace-ownership";
 
+const changeOwner = vi.hoisted(() => vi.fn());
+const foreignOwner = vi.hoisted(() => ({target:""}));
+vi.mock("node:fs", async original => {
+  const actual=await original<typeof import("node:fs")>();
+  return {...actual,fchownSync:changeOwner,fstatSync:(fd:number)=>{
+    const info=actual.fstatSync(fd);
+    return actual.realpathSync(`/proc/self/fd/${fd}`)===foreignOwner.target?Object.assign(info,{uid:10004}):info;
+  }};
+});
+
 describe.runIf(process.platform === "linux")("cloud workspace file publication", () => {
   let temporary: string, root: string;
-  const changeOwner = vi.fn();
   let owner: CloudWorkspaceOwnership;
   beforeEach(() => {
     temporary = mkdtempSync(path.join(tmpdir(), "zeros-cloud-file-owner-"));
     root = path.join(temporary, "workspace");
     mkdirSync(root);
     changeOwner.mockReset();
-    owner = new CloudWorkspaceOwnership(root, { uid: 10001, gid: 10001 }, changeOwner);
+    foreignOwner.target="";
+    owner = new CloudWorkspaceOwnership(root, { uid: process.geteuid!(), gid: process.getegid!() });
   });
   afterEach(() => rmSync(temporary, { force: true, recursive: true }));
 
-  it("publishes newly authored files and parent directories without broadening permissions", () => {
+  it("validates engine-owned files and parent directories without chown or broadening permissions", () => {
     const target = path.join(root, "Design", "frame.html");
     mkdirSync(path.dirname(target), { mode: 0o700 });
     writeFileSync(target, "fixture", { mode: 0o600 });
     owner.publish(target);
-    expect(changeOwner).toHaveBeenCalledTimes(2);
-    for (const [, uid, gid] of changeOwner.mock.calls) expect([uid, gid]).toEqual([10001, 10001]);
+    expect(changeOwner).not.toHaveBeenCalled();
+    expect(statSync(target).uid).toBe(process.geteuid!());
     expect(statSync(target).mode & 0o777).toBe(0o600);
     expect(readFileSync(target, "utf8")).toBe("fixture");
   });
@@ -53,7 +63,7 @@ describe.runIf(process.platform === "linux")("cloud workspace file publication",
     const fd = openSync(exclude, "r");
     try { owner.publish(exclude, fd); }
     finally { closeSync(fd); }
-    expect(changeOwner).toHaveBeenCalledTimes(3);
+    expect(changeOwner).not.toHaveBeenCalled();
     changeOwner.mockClear();
     expect(owner.recover()).toMatchObject({ published: 0, skipped: 1 });
     expect(changeOwner).not.toHaveBeenCalled();
@@ -85,7 +95,7 @@ describe.runIf(process.platform === "linux")("cloud workspace file publication",
     const fd = openSync(target, "wx", 0o600);
     try {
       owner.publish(target, fd);
-      expect(changeOwner).toHaveBeenCalledWith(fd, 10001, 10001);
+      expect(changeOwner).not.toHaveBeenCalled();
     } finally { closeSync(fd); }
   });
 
@@ -110,8 +120,8 @@ describe.runIf(process.platform === "linux")("cloud workspace file publication",
       privateRoots: [path.join(root, "private-state")],
       ownerRoots: [root, path.join(root, "registered-owner")],
     });
-    expect(published.sort()).toEqual([path.join(root, ".codex"), path.dirname(source), source].sort());
-    expect(result).toMatchObject({ published: 3, failed: 0, bounded: false });
+    expect(published).toEqual([]);
+    expect(result).toMatchObject({ published: 0, failed: 0, bounded: false });
     expect(result.skipped).toBeGreaterThanOrEqual(9);
     expect(statSync(source).mode & 0o777).toBe(0o600);
     expect(statSync(path.dirname(source)).mode & 0o777).toBe(0o700);
@@ -121,7 +131,7 @@ describe.runIf(process.platform === "linux")("cloud workspace file publication",
     for (let i = 0; i < 8; i++) writeFileSync(path.join(root, `${i}.txt`), "fixture");
     const entries = owner.recover({ maxEntries: 2 });
     expect(entries.visited).toBe(2);
-    expect(entries.published).toBe(2);
+    expect(entries.published).toBe(0);
     expect(entries.bounded).toBe(true);
     changeOwner.mockClear();
     const time = owner.recover({ maxDurationMs: 0 });
@@ -139,8 +149,9 @@ describe.runIf(process.platform === "linux")("cloud workspace file publication",
     let yielded = false;
     setImmediate(() => { yielded = true; });
     const result = await owner.recoverCompletely({ maxEntries: 2, maxDurationMs: 10_000 });
-    expect(result).toMatchObject({ visited: 9, published: 8, skipped: 1, failed: 0, bounded: false });
-    expect(published.sort()).toEqual(expected.sort());
+    expect(result).toMatchObject({ visited: 9, published: 0, skipped: 1, failed: 0, bounded: false });
+    expect(published).toEqual([]);
+    for (const file of expected) expect(readFileSync(file,"utf8")).toBe("fixture");
     expect(yielded).toBe(true);
   });
 
@@ -164,7 +175,8 @@ describe.runIf(process.platform === "linux")("cloud workspace file publication",
     // nested owner must prevent the retained cursor from publishing the rest.
     setImmediate(() => writeFileSync(path.join(nested, ".git"), "gitdir: elsewhere"));
     const result = await owner.recoverCompletely({ maxEntries: 2, maxDurationMs: 10_000 });
-    expect(published.filter(file => file.endsWith(".txt"))).toHaveLength(1);
+    expect(published).toEqual([]);
+    expect(result.visited).toBeLessThan(6);
     expect(result).toMatchObject({ skipped: 1, failed: 0, bounded: false });
   });
 
@@ -172,6 +184,13 @@ describe.runIf(process.platform === "linux")("cloud workspace file publication",
     writeFileSync(path.join(root, "private"), "fixture");
     expect(owner.recover({ privateRoots: [temporary] })).toMatchObject({ visited: 0, published: 0 });
     expect(changeOwner).not.toHaveBeenCalled();
+  });
+  it("refuses foreign-owner inode evidence without chown and skips it during recovery",()=>{
+    const target=path.join(root,"foreign");writeFileSync(target,"fixture",{mode:0o600});
+    foreignOwner.target=target;
+    expect(()=>owner.publish(target)).toThrow("Unexpected cloud checkout file owner");
+    expect(owner.recover()).toMatchObject({published:0,skipped:1,failed:0,bounded:false});
+    expect(changeOwner).not.toHaveBeenCalled();expect(readFileSync(target,"utf8")).toBe("fixture");
   });
 });
 

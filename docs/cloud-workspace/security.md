@@ -89,82 +89,103 @@ and limits pages, hits and retained bytes. Search uses PostgreSQL simple full-te
 matching with stable entity-ID pagination; it does not promise Local FTS5's
 relevance ordering. A changed projection retries the complete search once.
 
-## Sandbox requirements
+## Agent execution model
 
-- Isolate tenants at the provider's strongest supported compute boundary.
-- Run as a non-root user with the minimum filesystem and process privileges.
+The workspace VM is the isolation boundary, with one trust domain per workspace.
+The engine, provider CLIs, their tools, MCP children, terminals/SSH/LSP and capture
+run as one non-root user, `zeros-engine` (VM UID/GID 10003), without an agent sandbox,
+in the real checkout. They use normal VM egress; there is no per-agent bwrap,
+user namespace, SRT, proxy, allowlist or switch to a separate worker account.
+
+Physical per-conversation HOME, XDG and provider configuration/history directories
+owned by 10003 provide state separation, not a security boundary between agents.
+Agents can read engine data on their VM, including the owner credential vault,
+VM credential and other conversations. Mode 0700 does not hide engine state from
+processes sharing its UID. Application admission binds
+actor/device, workspace generation, funding and credential epochs, model, cwd
+and context; it does not create isolation from another process with that UID.
+Provider working credentials still enter the CLI environment. Infrastructure,
+signing and production database credentials remain outside that environment.
+Output redaction and bearer-free renderer IPC remain required.
+
+Cloud workload custody requires one shared workload cgroup owned by the original
+broker, with entry before exec. Engine and control processes stay outside it;
+there are no per-launch cgroups. A per-conversation Stop proves only the original
+process group: escaped or detached descendants are not proven retired by that
+operation. Local Host process-group behavior is unchanged.
+
+The delegated common parent is `engine-runtime`. Cgroup v2 migration checks
+destination and common-ancestor write access, not the target UID. Root ownership
+alone does not make a process unmovable: `/host` and every root process stays
+outside engine-runtime, with no root helper inside the delegated tree. The root
+broker owns custody from outside that tree.
+
+Idle requires a fresh complete census of the whole `engine-runtime` tree,
+including the engine leaf and any new sibling, exempting only exact infrastructure
+births. A worker-UID scan cannot distinguish agents from the engine. Unknown means busy and must
+surface a bounded diagnostic and recovery path. The C3 quiet populated-shell
+exception applies only to a confirmed original quiescent terminal shell, with
+executable dev/inode, foreground/session/TTY, direct-child and sampled kernel
+State S proof; builtin loops, exec replacements and other descendants remain
+work. This exception permits idle classification, not retirement. VM drain closes
+new launches; checkpoint and seal complete before kill. The outside root broker
+then uses whole-tree `cgroup.kill` and owns the final verified `populated=0`
+receipt, since that kill also terminates the engine. A quiet shell does not waive
+the final empty proof.
+Live actor/authority guards and checkpoint barriers remain mandatory.
+
+Cloud retains API authoring for now as instruction and API policy, not an
+OS-enforced Design filesystem restriction. Local Personal and organization-local
+workspaces retain their normal provider tools, permissions, native Code/Design
+editing and Host lifecycle. Chromium and iframe sandboxing protect browser
+content independently of the provider execution model.
+
+## VM and bootstrap requirements
+
+- Isolate workspaces at the provider VM boundary; keep the generation's approved
+  base/runtime and minimum engine privileges.
 - Deny inbound traffic except the intended bridge/health boundary.
-- Treat outbound traffic as direct tenant-VM traffic for the initial release.
-  Per-agent egress policy is not a ZSR claim and may be added later at the
-  provider/VM boundary.
-- Do not mount control-plane credentials, signing keys, production database
-  credentials, or broad Git tokens in the environment.
-- Destroy ephemeral credentials on stop/delete and verify resource deletion
-  through reconciliation.
-- Invoke only fixed image-owned setup/bootstrap entrypoints through the bounded
-  provider command adapter. Repository names, revisions, settings, and secrets
-  are data inputs; never concatenate them into a shell command.
-- Revalidate the physical Git directory, origin, top level, and HEAD after all
-  repository-controlled setup commands and before engine readiness.
+- Use only fixed image-owned setup/bootstrap entrypoints through the bounded
+  provider command adapter. Repository names, revisions, settings and secrets
+  are data, never concatenated into command text.
+- Revalidate the physical Git directory, origin, top level and HEAD after
+  repository-controlled setup and before readiness.
+- Retire ephemeral authority on stop/delete and verify provider resource deletion.
 - Treat snapshots and caches as sensitive copies subject to encryption,
-  retention, and deletion policy.
+  retention and deletion policy.
 
-## Protected bootstrap and v4 engine boundary
+## Protected bootstrap and compatibility
 
-Only worker profile 4 with a saved v2 source and actor protocol 2 executes. Profiles 1–3,
-including the old VM-root engine, are retired and have no production root
-exception. A missing cloud marker is the Local path; a present unsupported
-marker fails before cloud credential preparation or execution. Historical
-metadata/schema records remain readable for audit/cleanup. See
-[runtime bundles](runtime-bundles.md) for immutable layout and witnesses.
+Only worker profile 4 with saved v2 source and actor protocol 2 executes.
+Profiles 1–3 remain retired. A missing cloud marker selects Local; a present
+unsupported marker fails before cloud credential preparation. Historical records
+remain readable for audit and cleanup; no old root exception admits v4.
 
-The v4 engine is namespace root mapped to **VM UID/GID 10003**. Worker 10001,
-capture 10002 and private coordinator 10004 are separately mapped; VM root and
-the provider login identity are absent. The fixed launcher supplies read-only
-protected deployment and explicit workspace/state views, no supplementary
-groups, `NoNewPrivs` and seccomp. Namespace capabilities allow checked ownership
-publication and child containment without VM-root authority.
+Current execution uses namespace and VM UID/GID **10003** with the exact
+`10003->10003` map (length 1) for both UID and GID; all capability sets are empty.
+The root broker completes the locked mount namespace before dropping to 10003.
+NoNewPrivs and seccomp remain enabled. This change grants no sudo privileges.
+The approved Boat base/bootstrap, account inventory and compatibility bytes remain
+unchanged. Base accounts 10001/10002/10004 and old `0->10003` maps remain archived
+reader contracts, not new runtime roles. Legacy mutable checkout/HOME ownership
+is adopted to 10003 by the root broker only after the old engine is positively drained.
+See [runtime bundles](runtime-bundles.md).
 
-`CAP_SETFCAP` is retained through exec into the ZSR supervisor for Linux nested
-UID 0 mapping, confined to this namespace. Inherited `NoNewPrivs` prevents gaining
-privilege from file capabilities. Nonzero worker/capture/coordinator/setup
-children drop all capabilities. Process-local procfs permits nested worker and
-browser namespaces; VM-global controls remain unmapped-root owned and unwritable.
-Admission checks real procfs UID maps, read-only deployment, host-process/root-
-link and ancestor-namespace denial, finite cgroup ancestry, memory/CPU/PID bounds
-and actual nested execution. A provider broker filter cannot substitute for
-engine confinement. Malformed/unbounded evidence fails admission.
+VM-root bootstrap still owns verified installation, attestation and lifecycle.
+Root-controlled deployment, exact manifests, source/runtime pins, setup journals
+and fixed-schema privileged operations remain distinct from the shared writable
+checkout and engine state. Actor/device/credential revocation, queue idempotency,
+redaction, current generation/epoch checks and checkpoint/seal ordering remain
+application integrity requirements. They do not create confidentiality between
+the engine, agents and other processes running as `zeros-engine` in that workspace.
 
-On restricted AppArmor hosts, the initial-host-user-namespace launcher loads the
-image-owned `zeros-cloud-engine` profile for the fixed namespace helper and its
-descendants; it never disables global restrictions. A provider-owned outer user
-namespace keeps its own policy. Hosts needing unavailable policy support fail
-closed. Bounded root-owned provider FUSE sysctl reads are distinct from real
-procfs identity maps. Only the exact `/sys` and `/sys/fs` sysfs ancestors permit
-unmapped owners; writable cgroup controls still require UID 0/cgroup-v2 identity.
-Private shared memory is a bounded 512 MiB tmpfs charged to the engine cgroup.
-
-The minimal VM-root bootstrap/broker owns verified runtime installation,
-attestation and lifecycle. Its mode-0700 state/0600 socket, setup journals, provider
-login homes and root credentials are absent from the engine view. Engine launch
-material uses a separate private projection. Fixed exact-schema operations
-accept no arbitrary executable/path/environment; prepare is a one-use session.
-A lifetime kernel lock prevents replacing a live endpoint; retirement drains
-engine/setup cgroups, including detached descendants, before a new launch.
-
-| Threat | Current control | Remaining qualification |
-| --- | --- | --- |
-| Repository replaces privileged code | Root-controlled pinned tree/manifest/receipt, checked ancestry/links/modes and restored-tree verification before launch. | Exact base/kernel/provider restoration and tamper negatives. |
-| Engine or parser compromise | VM root unmapped; deployment read-only; minimal root protocol, separate worker/capture/coordinator views and grants. | Engine still sees its own working credentials and workspace state; qualify actual namespaces and broker isolation. |
-| Stale proof or overlapping engines | Boot/session/mount/cgroup/runtime-bound one-use proof, shared locks and complete descendant retirement. | Cold/warm restore, stale-session and crash/ambiguous-reply boundaries. |
-| Resource exhaustion | Finite memory/CPU/PID ancestry, bounded processes/commands/I/O and explicit deadlines. | Exact provider resource envelope and edge abuse limits; no per-agent egress guarantee. |
-| Runtime/client authority survives stop/revocation | Current actor/device/generation/epoch checks, durable grant retirement and positive cleanup. | Actual provider and signed Mac cleanup/expiry races. |
-| Desktop or preview obtains bearer | Main-only keys/configs, exact frame/origin header injection and bearer-free IPC. | Packaged native trust, frame isolation and multi-connection/editor behavior. |
-
-Qualification must exercise the actual worker/engine identities, base/runtime
-pair, setup/readiness, native tools, Git/Files/Design, PTY, SSH/preview/tunnels,
-recovery/rollback and cleanup. Code/Linux root probes are insufficient. No old
-root exception can qualify v4; keep unqualified release capabilities gated.
+Qualification must exercise the exact non-root identity/map and empty capabilities,
+the pinned base/runtime,
+setup/readiness, providers, Git/Files/Design, PTY, SSH/preview/tunnels, recovery
+and positive cleanup. Offline read-only archive namespaces test dependency
+closure only; they do not prove provider isolation or a successful model turn.
+Old sandbox status/backend/profile/session names and `__zsr_cap` URL readers
+remain compatibility contracts and cannot emit new sandbox-enforcement success.
 See [qualification status](qualification-status.md).
 
 Boat bootstrap uses the provider API only for public SSH material and fixed

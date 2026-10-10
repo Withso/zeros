@@ -52,6 +52,28 @@ describe("resident engine safe point", () => {
     const request = { challenge, ...scope, hostId, fence: 7, expiresAtMs: Date.now() + 30_000 };
     return { ...f, options, controls, reader, request };
   }
+  it("awaits the exact resident release ACK before reopening claims on cancellation", async () => {
+    const f = handoffFixture();
+    await f.reader.prepareHandoff(f.request);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    f.controls.fence.mockImplementation(enabled => enabled ? undefined : gate);
+    let finished = false;
+    const cancelling = f.reader.cancelHandoff(challenge).then(result => { finished = true; return result; });
+    await expect.poll(() => f.controls.fence.mock.calls.some(([enabled]) => enabled === false)).toBe(true);
+    expect(finished).toBe(false); expect(f.controls.resumeClaims).not.toHaveBeenCalled();
+    release(); expect(await cancelling).toBe(true); expect(f.controls.resumeClaims).toHaveBeenCalledOnce();
+  });
+  it("retains admission and the same handoff when resident release ACK is unknown", async () => {
+    const f = handoffFixture(); await f.reader.prepareHandoff(f.request);
+    const failed = Promise.reject(new Error("resident release ACK unknown"));
+    void failed.catch(() => undefined);
+    f.controls.fence.mockImplementationOnce(() => failed);
+    expect(await f.reader.cancelHandoff(challenge)).toBe(false);
+    expect(f.controls.resumeClaims).not.toHaveBeenCalled();
+    expect(await f.reader.cancelHandoff(challenge)).toBe(true);
+    expect(f.controls.resumeClaims).toHaveBeenCalledOnce();
+  });
   it("pauses new claims while an admitted turn drains, then seals only at a stable safe point", async () => {
     const f = handoffFixture(); f.controls.drained = () => false;
     expect(await f.reader.prepareHandoff(f.request)).toMatchObject({ phase: "draining" });

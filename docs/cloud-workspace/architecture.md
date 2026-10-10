@@ -12,8 +12,9 @@ Control plane: organization/actor/device authority
   | verified direct WSS or authenticated relay; engine background HTTP
   v
 Boat VM: protected bootstrap -> pinned engine + existing SQLite
-  contained worker: repository, native provider CLIs, scoped Git operations
-  checked engine-write publication; separately admitted PTY/preview/capture
+  zeros-engine (10003): engine, real checkout, providers, tools, terminals and capture
+  one trust domain: agents can read engine data and other-conversation state
+  one shared workload cgroup; original process groups; actor-admitted PTY/preview/capture
 ```
 
 The control plane authorizes work and persists its delivery/result evidence. The
@@ -44,6 +45,100 @@ A Local↔cloud copy creates a fresh destination UUID and immutable provenance.
 The source remains authoritative for itself. Receive-only replicas belong to one
 user/device/workspace; paths remain device-local, and replica edits never upload
 or change cloud authority. See [data and sync](data-and-sync.md).
+
+## Resource layout
+
+The root broker places all agents, tools, terminals/SSH/LSP and capture in one
+shared workload cgroup before exec. Engine/control processes use a sibling engine
+cgroup. Both belong to the common engine-runtime parent, which protects the
+separate `/host` sibling; `/host` limits are unchanged. In
+`memoryBudget.source=nominal`, parent bounds scale at each boot to the VM allocation:
+
+- Parent `cpu.max` is `admitted SKU CPUs * 100000` with period `100000`.
+  The raw effective CPU count comes from the nearest readable
+  `cpuset.cpus.effective` in the engine's own cgroup and exact ancestors;
+  it never falls back to os.cpus(). A wider raw cpuset does not enlarge the
+  admitted parent budget.
+- Parent `memory.max` starts at nominal SKU memory minus 1 GiB of host reserve.
+  Nominal memory is the configured/admitted allocation, such as 8192 MiB for the
+  default SKU. The effective limit is
+  `min(nominal SKU memory - 1 GiB, measured MemTotal - /host memory limit)`.
+  It must not exceed that measured ceiling in nominal mode. The report records
+  nominal memory, measured MemTotal, `/host` memory limit and effective cap,
+  including any reduction below the nominal budget.
+- Parent `pids.max=4096` and `memory.oom.group=1` remain unchanged.
+
+Admission keeps the existing SKU sufficiency floor: normal kernel overhead is
+accepted when measured MemTotal is below nominal memory and still passes that
+floor. Nominal memory is not a new minimum MemTotal requirement. Admission and
+readers enforce strict per-mode equality: nominal CPU must equal the admitted SKU
+CPU count, and nominal memory must equal the SKU-derived budget with its measured
+cap and recorded reduction.
+
+Cgroup v2 migration checks destination and common-ancestor write access, not the
+target UID. `/host` stays outside the delegated parent and every root process
+stays outside engine-runtime, with no root helper inside it. The root broker
+retains control from outside the tree; UID 0 alone is not a migration barrier.
+
+The parent enables only the CPU controller for its children. The engine cgroup
+stays uncapped at its leaf (`cpu.max=max 100000`); inherited parent bounds remain.
+The shared workload has
+`cpu.max=round(0.75 * min(raw cpuset CPUs, actual ancestor quota in CPUs) * 100000)`
+with period `100000`. Convert finite ancestor `cpu.max` values to CPUs with
+`quota / period`; use the tightest actual quota, including the newly set parent.
+Both children use `cpu.weight=100`. There are no new per-leaf memory/pids limits
+and no per-launch resource groups.
+
+These CPU examples assume admitted SKU CPUs, raw cpuset CPUs and actual ancestor
+quota coincide:
+
+| Admitted SKU CPUs | Workload `cpu.max` | Parent `cpu.max` |
+| --- | --- | --- |
+| 1 | 75000 100000 | 100000 100000 |
+| 2 | 150000 100000 | 200000 100000 |
+| 4 | 300000 100000 | 400000 100000 |
+| 8 | 600000 100000 | 800000 100000 |
+| 16 | 1200000 100000 | 1600000 100000 |
+
+When the raw cpuset is wider than the admitted SKU, the parent still governs the
+workload cap:
+
+| Admitted SKU CPUs | Raw cpuset CPUs | Actual ancestor quota (CPUs) | Parent `cpu.max` | Workload `cpu.max` |
+| --- | --- | --- | --- | --- |
+| 4 | 8 | 4 | 400000 100000 | 300000 100000 |
+
+The table gives the nominal parent budget before measured cap.
+
+| Nominal SKU memory | Nominal parent budget (bytes) |
+| --- | --- |
+| 4 GiB | 3221225472 |
+| 8 GiB | 7516192768 |
+| 16 GiB | 16106127360 |
+
+The default 4 vCPU / 8 GiB SKU matches main's nominal constants: parent CPU
+`400000 100000`, memory `7516192768`, pids `4096` and OOM group `1`; the measured
+ceiling may reduce the memory limit and that reduction is reported. The measured
+memory cap applies only in nominal mode.
+
+With unavailable or malformed required inputs, the broker selects
+`memoryBudget.source=fallback` and the parent falls back to main's exact constants.
+The fallback parent is exactly `cpu.max=400000 100000`, `memory.max=7516192768`,
+`pids.max=4096`, `memory.oom.group=1` (4 CPUs and 7 GiB (7516192768 bytes)). This
+reproduces main byte-for-byte: fallback applies no MemTotal or `/host` cap, even
+when some raw measurements are available. The workload cap stays uncapped with a
+closed diagnostic; fallback requires the matching workload-cap skip diagnostic.
+Use the report's root-published `memoryBudget.source`, assigned by the broker,
+as the only mode indicator. Record raw measurements honestly; never infer the mode
+from them. Boot does not fail for unavailable measurements and shared custody
+remains mandatory. Archived v1 reports remain
+byte-for-byte unchanged. These bounds do not imply memory/pids resource
+qualification.
+
+Idle inspects the complete engine-runtime census, including the engine leaf and
+new siblings, exempting only exact infrastructure births and the original C3
+quiet populated-shell exception. Conversation Stop proves its original process
+group only. VM drain closes launches and completes checkpoint/seal before the
+outside root broker kills the whole tree and records final `populated=0`.
 
 ## Create and wake
 
@@ -84,11 +179,11 @@ See [queue and canonical history](data-and-sync.md#negotiated-local-queue-and-co
 Native agents use the shared Local gateway/adapters after cloud admission.
 Legacy uses an actor-bound grant and real execution lease. Boot mode captures
 the owner's background-published selection plus independently confirmed actor
-authority, then enters its UID-10001 session lifetime. Warm turns retain only
+authority, then enters an engine-owned native session lifetime. Warm turns retain only
 the exact eligible conversation scope. The factory pins cwd, model/key, private
 HOME and MCP/skill snapshots. Cloud-only
 authority checks stay outside the adapters' ordinary tool/transcript path;
-refusal never bypasses containment or dispatches through the live bridge.
+refusal never bypasses admission or dispatches through the live bridge.
 See [native configuration and restrictions](agent-authentication-and-language-tools.md#native-execution-and-compatibility).
 
 Authorized history can be read without a running VM. Desktop's bounded durable

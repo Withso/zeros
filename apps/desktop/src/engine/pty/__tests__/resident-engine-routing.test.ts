@@ -5,7 +5,22 @@ import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
 import { ZerosEngine } from "../../zeros-engine";
 import type { TransportClient } from "../../transport/types";
-import type { ResidentTerminalService } from "../resident-service";
+import { ResidentTerminalService } from "../resident-service";
+import { CloudOwnedWorkloadRegistry } from "../../agents/containment/cloud-owned-workloads";
+import { createCloudWorkloadCustody } from "../../agents/containment/cloud-workload-custody";
+import { cloudWorkloadKernelFixture } from "../../agents/containment/__tests__/helpers/cloud-workload-kernel";
+
+// Portable routing fixture with explicit fake kernel custody; this does not
+// qualify a deployed namespace or root-controller placement.
+const configuration = vi.hoisted(() => ({ version: 4 as const, backend: "cloud-worker" as const,
+  profile: "zeros-cloud-worker-v4" as const, uid: 10003, gid: 10003,
+  toolchain: { node: process.execPath, supervisor: "/unused/pinned-supervisor.mjs" } }));
+vi.mock("../../agents/containment/cloud-worker-config", async original => ({ ...await original<object>(),
+  isCloudWorkerConfiguration: (value: unknown) => value === configuration,
+}));
+vi.mock("../../agents/containment/cloud-runtime-root.mjs", async original => ({ ...await original<object>(),
+  resolveCloudRuntime: () => ({ cgroupRoot: "/sys/fs/cgroup/system.slice/zeros-host.service" }),
+}));
 
 const cleanup: Array<() => Promise<unknown>> = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const fn of cleanup.splice(0).reverse()) await fn(); });
@@ -14,13 +29,26 @@ it("routes qualified persistent cloud terminals through the resident and restore
   const root = await mkdtemp(path.join(tmpdir(), "zeros-resident-routing-"));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const engine = new ZerosEngine({ root, port: 0 });
+  const kernel = cloudWorkloadKernelFixture();
+  const custody = createCloudWorkloadCustody(configuration, { io: kernel.io });
+  Object.defineProperty(engine, "cloudWorkloads", { value: new CloudOwnedWorkloadRegistry({ custody }) });
   const session = { sessionId: "pty-existing", pid: process.pid, cwd: root, cols: 80, rows: 24,
     createdAt: 1, actorUserId: "actor-a", registryWorkspaceId: "local-main", environmentOwnerId: "actor-a",
-    brokerId: null, githubShared: false, exited: false };
-  const resident = { connect: vi.fn(async () => {}), list: () => [session], get: () => session, has: () => true,
-    events: vi.fn(), snapshot: vi.fn(async () => ({ data: "before", bytes: 6, truncated: false, sequence: 3 })),
-    write: vi.fn(async () => {}), resize: vi.fn(async () => {}), close: vi.fn(async () => {}),
-    create: vi.fn(async () => session), busy: () => false } as unknown as ResidentTerminalService;
+    brokerId: null, githubShared: false, exited: false, lastInputAtMs: 0 };
+  const resident = new ResidentTerminalService({ hostId: "22222222-2222-4222-8222-222222222222",
+    socketPath: path.join(root, "unused.sock"), authority: { organizationId: randomUUID(), workspaceId: randomUUID(),
+      engineId: randomUUID(), generation: 1, fence: 1, token: "a".repeat(43) } });
+  cleanup.push(async () => resident.disconnect());
+  vi.spyOn(resident["client"], "connect").mockResolvedValue();
+  vi.spyOn(resident["client"], "isConnected").mockReturnValue(true);
+  vi.spyOn(resident["client"], "list").mockResolvedValue([session]);
+  vi.spyOn(resident, "has").mockReturnValue(true);
+  vi.spyOn(resident, "snapshot").mockResolvedValue({ data: "before", bytes: 6, truncated: false, sequence: 3 });
+  vi.spyOn(resident, "write").mockResolvedValue();
+  vi.spyOn(resident, "resize").mockResolvedValue();
+  vi.spyOn(resident, "close").mockResolvedValue();
+  vi.spyOn(resident, "create").mockResolvedValue(session);
+  const workloadOwner = vi.spyOn(resident, "workloadOwner");
   Object.defineProperty(engine, "residentTerminals", { value: resident });
   Object.defineProperty(engine, "cloudWorker", { value: { version: 4 } });
   const seam = engine as unknown as { restoreResidentTerminals(): Promise<void>; workspaceAllowsProcessStart(): boolean };
@@ -28,6 +56,8 @@ it("routes qualified persistent cloud terminals through the resident and restore
   vi.spyOn(engine["pty"], "resolveCwd").mockReturnValue(root);
   const localCreate = vi.spyOn(engine["pty"], "create");
   await seam.restoreResidentTerminals();
+  expect(workloadOwner).toHaveBeenCalledExactlyOnceWith(custody);
+  expect(workloadOwner.mock.results[0]?.value.owner).toEqual({ pid: 102, startToken: "1020" });
   expect(engine["terminals"].get(session.sessionId)).toMatchObject({ workspaceId: "local-main", createdAt: 1 });
   const a: TransportClient = { id: randomUUID(), kind: "cloud", accountUserId: "actor-a", authorized: () => true,
     cloudActor: { sessionId: randomUUID(), deviceId: randomUUID(), role: "developer", fingerprint: "a".repeat(64) },

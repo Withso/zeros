@@ -7,8 +7,11 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
+  lstat,
   mkdir,
   mkdtemp,
+  readFile,
+  readlink,
   readdir,
   rm,
   symlink,
@@ -41,6 +44,10 @@ import {
   sweepDeadSessions,
   writeSessionMeta,
 } from "../session-paths";
+import {
+  recoverLegacyExecutionProcesses,
+  recoverLegacyMutableState,
+} from "../containment/legacy-execution-recovery";
 
 // A pid that is never a live process (above pid_max on macOS/Linux):
 // process.kill(_, 0) → ESRCH/EINVAL, both classified as dead.
@@ -416,3 +423,100 @@ describe("session paths: dev/prod isolation", () => {
     expect(betaWithInstance).toBe(betaRoot);
   });
 });
+
+describe.each(["dead", "missing"] as const)(
+  "legacy quarantine cleanup with %s owner metadata", (owner) => {
+    const cleanup = [
+      { name: "startup GC", run: () => sweepDeadSessions(), heldResult: 0, removedResult: 1 },
+      { name: "explicit close", run: () => removeSessionDir("quarantined"), heldResult: undefined, removedResult: undefined },
+    ];
+
+    async function retainedSession() {
+      if (owner === "dead") await seedSession("quarantined", DEAD_PID);
+      else await ensureSessionDir("quarantined");
+      const session = path.join(sessionsRoot(), "quarantined");
+      // Keep the state under a recognized top-level directory so missing
+      // metadata exercises recovery holds rather than the unknown-shape guard.
+      const state = path.join(session, "env", "retained-state.jsonl");
+      await writeFile(state, "original recoverable state\n");
+      return { session, state };
+    }
+
+    describe.each(cleanup)("$name", ({ run, heldResult, removedResult }) => {
+      it.each([
+        ["boundary", "file"],
+        ["boundary", "link"],
+        ["boundary", "dangling-link"],
+        ["generation", "link"],
+        ["generation", "dangling-link"],
+        ["commands", "file"],
+        ["commands", "link"],
+        ["commands", "dangling-link"],
+        ["marker", "file"],
+        ["marker", "directory"],
+        ["marker", "link"],
+        ["marker", "dangling-link"],
+        ["boundary-entry", "link"],
+      ] as const)("retains a %s %s held by recovery", async (component, shape) => {
+        const { session, state } = await retainedSession();
+        const boundary = path.join(session, "boundary");
+        const generation = path.join(boundary, "generation");
+        const commands = path.join(generation, "commands");
+        const locations = {
+          boundary, generation, commands,
+          marker: path.join(commands, "process-domain.json"),
+          "boundary-entry": path.join(boundary, "unrecognized-entry"),
+        };
+        const entry = locations[component];
+        const target = path.join(fakeHome, "original-external-target");
+        const externalState = component === "marker" || component === "boundary-entry"
+          ? target : path.join(target, "retained.txt");
+        await mkdir(path.dirname(entry), { recursive: true });
+        if (shape === "file") await writeFile(entry, "unproven legacy bytes");
+        else if (shape === "directory") await mkdir(entry);
+        else {
+          if (shape === "link") {
+            if (externalState !== target) await mkdir(target);
+            await writeFile(externalState, "original external state\n");
+          }
+          await symlink(target, entry);
+        }
+
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await expect(recoverLegacyExecutionProcesses({ sessionsRoot: sessionsRoot() })).resolves.toMatchObject({ recovered: 0, preserved: 1 });
+          await expect(recoverLegacyMutableState({ sessionsRoot: sessionsRoot() })).resolves.toMatchObject({ recovered: 0, preserved: 1 });
+          expect(await run()).toBe(heldResult);
+          expect(await readFile(state, "utf8")).toBe("original recoverable state\n");
+          if (owner === "dead") expect(JSON.parse(await readFile(path.join(session, "meta.json"), "utf8"))).toMatchObject({ pid: DEAD_PID });
+          else await expect(lstat(path.join(session, "meta.json"))).rejects.toMatchObject({ code: "ENOENT" });
+          if (shape === "file") expect(await readFile(entry, "utf8")).toBe("unproven legacy bytes");
+          else if (shape === "directory") expect((await lstat(entry)).isDirectory()).toBe(true);
+          else {
+            expect((await lstat(entry)).isSymbolicLink()).toBe(true);
+            expect(await readlink(entry)).toBe(target);
+            if (shape === "link") expect(await readFile(externalState, "utf8")).toBe("original external state\n");
+            else await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+          }
+        }
+      });
+
+      it.each(["no-boundary", "plain-boundary-file", "empty-physical-generation", "retired-physical-record"])(
+        "collects the non-held %s shape", async (kind) => {
+          const { session } = await retainedSession();
+          const boundary = path.join(session, "boundary");
+          if (kind === "plain-boundary-file") {
+            await mkdir(boundary);
+            await writeFile(path.join(boundary, "ordinary-file"), "not a recovery hold");
+          } else if (kind === "empty-physical-generation" || kind === "retired-physical-record") {
+            const commands = path.join(boundary, "generation", "commands");
+            await mkdir(commands, { recursive: true });
+            if (kind === "retired-physical-record") await writeFile(path.join(commands, "process-domain.json.reaped"), "existing retirement proof");
+          }
+          await expect(recoverLegacyExecutionProcesses({ sessionsRoot: sessionsRoot() })).resolves.toMatchObject({ preserved: 0 });
+          expect(await run()).toBe(removedResult);
+          await expect(lstat(session)).rejects.toMatchObject({ code: "ENOENT" });
+        },
+      );
+    });
+  },
+);

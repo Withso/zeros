@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { ChildProcess } from "node:child_process";
 import { Writable } from "node:stream";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,15 +12,16 @@ import { cloudRuntimeFixture } from "../../apps/desktop/src/engine/agents/contai
 import { testCloudRuntime } from "../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime";
 function fixture() {
   const runtime = testCloudRuntime();
+  const directory = `${runtime.cgroupRoot}/engine-runtime/engine-11111111-1111-4111-8111-111111111111`;
+  const common = `${runtime.cgroupRoot}/engine-runtime`;
   const order: string[] = [];
   const signals = new EventEmitter();
-  const child = Object.assign(new EventEmitter(), {
+  const child = Object.assign(new ChildProcess(), {
     pid: 12345,
     exitCode: null as number | null,
     signalCode: null as string | null,
     kill: vi.fn(() => true),
     unref: vi.fn(),
-    stdio: [] as unknown[],
   });
   const barrier = new Writable({
     write(_chunk, _encoding, done) {
@@ -27,14 +29,23 @@ function fixture() {
       done();
     },
   });
-  child.stdio[3] = barrier;
+  Object.assign(child, { stdio: [null, null, null, barrier] });
   const scope = {
+    directory,
+    placement: `${directory}@0:23`,
     prepare: vi.fn(() => {
       order.push("scope");
     }),
     attach: vi.fn(() => {
       order.push("place");
     }),
+    custodySeed: vi.fn(() => ({ version: 1,
+      common: { directory: common, dev: "0", ino: "21" },
+      workload: { directory: `${common}/engine-workload-shared/workload`, dev: "0", ino: "22" },
+      infrastructure: [],
+      cpuSplit: { engine: { cpuMax: "max 100000", cpuWeight: 100 }, workload: { controllers: ["cpu"], cpuWeight: 100,
+        cap: { kind: "applied", effectiveCpus: 4, cpuMax: "300000 100000" } } },
+    })),
     retire: vi.fn(async () => {
       order.push("retire");
     }),
@@ -45,9 +56,14 @@ function fixture() {
   });
   const options = {
     runtime,
+    assertOutside: vi.fn(),
     prepare: () => {
       order.push("prepare");
-      return {version:4,runtime,viewDirectory:"/run/zeros/view/runtime-11111111-1111-4111-8111-111111111111"};
+      return { version: 4 as const, profile: "zeros-cloud-worker-v4" as const,
+        engineUid: 10003 as const, engineGid: 10003 as const, runtimeDirectory: "/run/zeros/engine" as const,
+        setupDirectory: "/srv/zeros/setup" as const, managedSettingsDirectory: "/srv/zeros/managed-settings" as const,
+        runtime, viewDirectory: "/run/zeros/view/runtime-11111111-1111-4111-8111-111111111111",
+        residentHostId: undefined, releaseView: vi.fn() };
     },
     scope,
     spawnProcess,
@@ -68,11 +84,12 @@ describe("cloud engine admission and lifecycle", () => {
       const runtime = createCloudRuntimeResolver({ filesystem: tree.filesystem }).resolve();
       const f = fixture();
       const options = { ...f.options, operation: "resident", runtime,
-        prepare: () => ({ version: 4, runtime, viewDirectory: "/run/zeros/view/runtime-11111111-1111-4111-8111-111111111111" }) };
+        prepare: () => ({ ...f.options.prepare(), runtime }) };
       f.barrier.once("finish", () => queueMicrotask(() => f.finish(125)));
       await expect(launchCloudEngine(options)).resolves.toBe(125);
       const call = f.options.spawnProcess.mock.calls[0] as unknown as [string, string[], { stdio: string[] }];
-      expect(call[1].at(-1)).toBe("--resident");
+      expect(call[1]).toContain("--resident");
+      expect(call[1].slice(-3)).toEqual(["--engine-scope", f.scope.placement, "--resident"]);
       expect(call[2].stdio).toEqual(["inherit", "inherit", "inherit", "pipe"]);
       expect(f.scope.retire).toHaveBeenCalledOnce();
     } finally { tree.dispose(); }
@@ -96,7 +113,7 @@ describe("cloud engine admission and lifecycle", () => {
       expect(() => assertCloudEngineFilesProjection({ profile: "v4" }, { root, rootPath })).toThrow();
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
-  it("blocks before bubblewrap can fork, so every descendant inherits the admitted scope", async () => {
+  it("starts the fixed C entry behind the root launch barrier with the original placement", async () => {
     const f = fixture();
     f.barrier.once("finish", () => queueMicrotask(() => f.finish()));
     await launchCloudEngine(f.options);
@@ -105,22 +122,23 @@ describe("cloud engine admission and lifecycle", () => {
       string[],
     ];
     expect(call[0]).toBe(f.options.runtime.engineNamespace);
-    expect(call[1][0]).toBe("--await-scope");
+    expect(call[1][0]).toBe("--await-launch");
     expect(call[1]).not.toContain("--block-fd");
+    expect(call[1].slice(-2)).toEqual(["--engine-scope", f.scope.placement]);
+    expect(f.scope.attach).not.toHaveBeenCalled();
   });
-  it("places the blocked child before admitting execution and reaps its scope on exit", async () => {
+  it("prepares original custody before releasing the fixed C entry and reaps its scope on exit", async () => {
     const f = fixture();
     f.barrier.once("finish", () => queueMicrotask(() => f.finish()));
     await expect(launchCloudEngine(f.options)).resolves.toBe(0);
-    expect(f.order).toEqual(["prepare", "scope", "place", "release", "retire"]);
+    expect(f.order).toEqual(["scope", "prepare", "release", "retire"]);
+    expect(f.scope.attach).not.toHaveBeenCalled();
   });
-  it("never releases execution when cgroup placement fails", async () => {
+  it("never admits execution when the original root launch barrier fails", async () => {
     const f = fixture();
-    f.scope.attach.mockImplementation(() => {
-      throw new Error("placement unconfirmed");
-    });
+    f.barrier._write = (_bytes, _encoding, done) => done(new Error("launch barrier unconfirmed"));
     await expect(launchCloudEngine(f.options)).rejects.toThrow(
-      /placement unconfirmed/,
+      /launch barrier failed/,
     );
     expect(f.order).not.toContain("release");
     expect(f.child.kill).toHaveBeenCalledWith("SIGKILL");

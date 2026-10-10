@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
+import { ChildProcess, execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -175,11 +175,11 @@ describe("cloud image admission diagnostics", () => {
     );
     expect(checks).toMatchObject({
       execution: false,
-      report: true,
+      report: false,
       profile: false,
       qualified: false,
       metadata: false,
-      helpers: true,
+      helpers: false,
       resources: false,
       runtime: false,
     });
@@ -775,13 +775,23 @@ describe("cloud worker supervisor protocol", () => {
       };
     }> = [];
     const supervisor = new CloudWorkerSupervisor({
-      spawnProcess: (
-        file: string,
-        args: readonly string[],
-        options: (typeof spawnCalls)[number]["options"],
-      ) => {
-        spawnCalls.push({ file, args, options });
-        const child = Object.assign(new EventEmitter(), {
+      // Only parser/session behavior is under test. The original fake launcher
+      // has an explicit birth; this does not claim installed/kernel custody.
+      readBirth: pid => {
+        if (pid !== 91_337) throw new Error("Unknown fixture launcher");
+        return { pid, parentPid: process.pid, startToken: "700010" };
+      },
+      engineScope: { retire: async () => {} },
+      spawnProcess: (file, args, options) => {
+        if (typeof options.cwd !== "string" || typeof options.detached !== "boolean" ||
+            typeof options.stdio !== "string" || !options.env) throw new Error("Invalid fixture launch options");
+        const env: Record<string, string> = {};
+        for (const [key, value] of Object.entries(options.env)) {
+          if (typeof value !== "string") throw new Error("Invalid fixture launch environment");
+          env[key] = value;
+        }
+        spawnCalls.push({ file, args, options: { cwd: options.cwd, detached: options.detached, stdio: options.stdio, env } });
+        const child = Object.assign(new ChildProcess(), {
           pid: 91_337,
           exitCode: null,
           signalCode: null,
@@ -846,7 +856,7 @@ describe("cloud worker supervisor protocol", () => {
   });
 
   it("reaps the engine scope even when its launcher exited or was lost", async () => {
-    for (const child of [null, { exitCode: 0, signalCode: null }]) {
+    for (const child of [null, Object.assign(new ChildProcess(), { exitCode: 0, signalCode: null })]) {
       const retire = vi.fn().mockResolvedValue(undefined);
       const supervisor = new CloudWorkerSupervisor({ engineScope: { retire } });
       supervisor.child = child;

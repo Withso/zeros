@@ -7,10 +7,12 @@ import * as providerEnv from "../../settings/provider-env";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((nextResolve) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
     resolve = nextResolve;
+    reject = nextReject;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function gatewayWith(adapter: AgentAdapter): AgentGateway {
@@ -114,6 +116,29 @@ describe("gateway agent initialization single-flight", () => {
       { value: "fast", label: "Fast" },
     ]);
     expect(initialize).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a successor auth flight shared when the stale initialization rejects", async () => {
+    const config = vi.spyOn(providerEnv, "applyUserProviderConfig").mockReturnValue({ env: { OPENAI_API_KEY: "fixture-a" } });
+    const old = deferred<InitializeResponse>(), current = deferred<InitializeResponse>();
+    const initialize = vi.fn<() => Promise<InitializeResponse>>().mockReturnValueOnce(old.promise).mockReturnValue(current.promise);
+    const gateway = gatewayWith({ agentId: "codex", initialize, dispose: async () => {} } as unknown as AgentAdapter);
+    gateways.push(gateway);
+    const stale = gateway.initializeAgent("codex");
+    const staleRejection = expect(stale).rejects.toThrow("stale authentication failed");
+    await vi.waitFor(() => expect(initialize).toHaveBeenCalledTimes(1));
+    config.mockReturnValue({ env: { OPENAI_API_KEY: "fixture-b" } });
+    const successor = gateway.initializeAgent("codex");
+    await vi.waitFor(() => expect(initialize).toHaveBeenCalledTimes(2));
+    old.reject(new Error("stale authentication failed"));
+    await staleRejection;
+    const joined = gateway.initializeAgent("codex");
+    current.resolve({ protocolVersion: 1, _meta: { models: [{ value: "current", label: "Current" }] } });
+    const [first, second] = await Promise.all([successor, joined]);
+    expect(first).toBe(second);
+    expect(first._meta?.models).toEqual([{ value: "current", label: "Current" }]);
+    expect(gateway.agentInitializeSnapshot("codex")).toBe(first);
+    expect(initialize).toHaveBeenCalledTimes(2);
   });
 
   it("clears a rejected flight so a later request can retry", async () => {

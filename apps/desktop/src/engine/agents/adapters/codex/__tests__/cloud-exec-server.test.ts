@@ -15,6 +15,7 @@ import {codexAppServerFeatureArgs} from "../app-server";
 import {createInterface} from "node:readline";
 import type {CloudLegacyProviderExecution as CloudProviderExecution} from "../../../cloud-provider-execution";
 import type {BoundaryProcess,BoundarySpawnRequest} from "../../../containment/types";
+import {createCloudNativeHome} from "../../../containment/cloud-native-home";
 vi.mock("../../../containment/cloud-runtime-root.mjs", async original => ({
   ...await original<typeof import("../../../containment/cloud-runtime-root.mjs")>(),
   resolveCloudRuntime: () => ({ ...(importedRuntime), workerRoot: process.cwd(), node: process.execPath, binRoot: path.dirname(process.execPath) }),
@@ -22,7 +23,7 @@ vi.mock("../../../containment/cloud-runtime-root.mjs", async original => ({
 const importedRuntime = (await import("../../../__tests__/helpers/test-cloud-runtime")).testCloudRuntime();
 
 describe.skipIf(process.platform!=="linux")("cloud native executor wire (no model or credential)",()=>{
-  it("initializes the real app-server with the complete cloud configuration in an empty private HOME",async()=>{
+  it("initializes the real app-server with the complete cloud configuration in an empty physical HOME",async()=>{
     const binary=await resolveCodexBinary({}),root=await mkdtemp(path.join(os.tmpdir(),"zeros-cloud-codex-config-"));
     await mkdir(path.join(root,".codex"));
     const child=spawn(path.join(binary.sandboxRuntimeRoot!,"bin","codex"),["app-server",...codexAppServerFeatureArgs(true),
@@ -42,17 +43,19 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
     }finally{if(timer)clearTimeout(timer);lines.close();child.kill("SIGKILL");await exited;await rm(root,{recursive:true,force:true});}
   });
   it("does not leave a bridge listening when the executor exits during startup",async()=>{
+    const root=await mkdtemp(path.join(os.tmpdir(),"zeros-executor-startup-"));
+    const nativeHome=await createCloudNativeHome({dataRoot:root,conversationId:"startup",provider:"codex",executionId:"startup"});
     const listeners=vi.spyOn(Server.prototype,"listen");
     const abort=new AbortController(),domains=new Set<{stopAndProve():Promise<void>}>();let closing:Promise<void>|undefined;
     const close=()=>{abort.abort();return closing??=Promise.resolve().then(()=>Promise.all([...domains].map(domain=>domain.stopAndProve()))).then(()=>{});};
     const child={stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),wait:()=>Promise.resolve({code:1,signal:null}),stopAndProve:async()=>{}} as unknown as BoundaryProcess;
-    const execution={lease:{assertLive(){if(abort.signal.aborted)throw new Error("retired");},signal:abort.signal,attach:(domain:{stopAndProve():Promise<void>})=>domains.add(domain),launch:async()=>child,close},coordinator:{workload:{spawn:vi.fn()}}} as unknown as CloudProviderExecution;
+    const execution={lease:{assertLive(){if(abort.signal.aborted)throw new Error("retired");},signal:abort.signal,attach:(domain:{stopAndProve():Promise<void>})=>domains.add(domain),launch:async()=>child,close},coordinator:{nativeHome,workload:{spawn:vi.fn()}}} as unknown as CloudProviderExecution;
     Object.assign(execution,{lifetime:execution.lease,environment:null});
     try {
       await expect(CloudCodexExecServer.start(execution,path.join(process.cwd(),"pinned/bin/codex"))).rejects.toThrow("retired");
       await close();
       for(const server of listeners.mock.instances as Server[]) expect(server.listening).toBe(false);
-    } finally {for(const server of listeners.mock.instances as Server[]) server.close();listeners.mockRestore();}
+    } finally {for(const server of listeners.mock.instances as Server[]) server.close();listeners.mockRestore();await rm(root,{recursive:true,force:true});}
   });
   it.each(["member-one","member-two"])("authenticates its private bridge and runs shells with only %s's admitted environment",async actor=>{
     const protocolVersion=JSON.parse(await readFile(path.join(process.cwd(),"package.json"),"utf8")).codexProtocolVersion;
@@ -60,6 +63,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
     expect(binary.sandboxRuntimeRoot).toBeTruthy();
     const nativeBinary=path.join(binary.sandboxRuntimeRoot!,"bin","codex");
     const root=await mkdtemp(path.join(os.tmpdir(),"zeros-executor-wire-"));await mkdir(path.join(root,".codex"));
+    const nativeHome=await createCloudNativeHome({dataRoot:root,conversationId:actor,provider:"codex",executionId:"executor"});
     const helper=path.join(root,"cloud-codex-executor.mjs");
     await copyFile(path.resolve("apps/desktop/src/engine/agents/containment/cloud-codex-executor.mjs"),helper);
     // Only the runtime's absolute deployment paths differ in this offline fixture.
@@ -75,6 +79,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
     const workloadSpawn=vi.fn(async(request:BoundarySpawnRequest)=>{
       expect(request.cwd).toBe(root);
       expect(request.env).toMatchObject({ORG_VALUE:values.ORG_VALUE,REPO_VALUE:values.REPO_VALUE,PERSONAL_VALUE:actor});
+      expect(request.env).toMatchObject(nativeHome.environment());
       const child=spawn(process.execPath,[helper,nativeBinary],{cwd:request.cwd,env:{...request.env},stdio:["pipe","pipe","pipe"],detached:true});
       const exited=new Promise<{code:number|null;signal:string|null}>(resolve=>child.once("close",(code,signal)=>resolve({code,signal})));
       let stopped:Promise<void>|undefined;
@@ -83,7 +88,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
       domains.add(domain);return domain;
     });
     const execution={cwd:root,lease:{environment:{values},assertLive(){if(abort.signal.aborted)throw new Error("retired");},signal:abort.signal,attach:(domain:{stopAndProve():Promise<void>})=>domains.add(domain),
-      launch:async(callback:()=>Promise<BoundaryProcess>)=>callback(),close},coordinator:{workload:{spawn:workloadSpawn}}} as unknown as CloudProviderExecution;
+      launch:async(callback:()=>Promise<BoundaryProcess>)=>callback(),close},coordinator:{nativeHome,workload:{spawn:workloadSpawn}}} as unknown as CloudProviderExecution;
     Object.assign(execution,{lifetime:execution.lease,environment:{values},nativeCapabilities:null,auth:{codexAuth:()=>null}});
     let socket:WebSocket|undefined,uncooperative:Socket|undefined,proofTimer:ReturnType<typeof setTimeout>|undefined;
     try{
@@ -110,7 +115,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
       });
       const config=cloudCodexConfig(execution);
       // Force distinct output reads with an empty poll between them so a cursor bug cannot hide an admitted layer.
-      await rpc(3,"process/start",{processId:"env-check",argv:["/bin/bash","--noprofile","--norc","-c",'printf "%s\\n" "$ORG_VALUE"; while [ ! -f environment-release ]; do sleep 0.01; done; printf "%s\\n" "$REPO_VALUE" "$PERSONAL_VALUE" "$ORG_SECRET" "${EMPTY_VALUE-unset}" "${OPENAI_API_KEY-unset}" "${ANTHROPIC_API_KEY-unset}" "${CURSOR_API_KEY-unset}" "${CODEX_API_KEY-unset}" "$HOME" "$LANG"'],cwd:`file://${root}`,env:{},tty:false,
+      await rpc(3,"process/start",{processId:"env-check",argv:["/bin/bash","--noprofile","--norc","-c",'printf "%s\\n" "$ORG_VALUE"; while [ ! -f environment-release ]; do sleep 0.01; done; printf "%s\\n" "$REPO_VALUE" "$PERSONAL_VALUE" "$ORG_SECRET" "${EMPTY_VALUE-unset}" "${OPENAI_API_KEY-unset}" "${ANTHROPIC_API_KEY-unset}" "${CURSOR_API_KEY-unset}" "${CODEX_API_KEY-unset}" "$HOME" "$CODEX_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$LANG"'],cwd:`file://${root}`,env:{},tty:false,
         envPolicy:{inherit:config["shell_environment_policy.inherit"],ignoreDefaultExcludes:config["shell_environment_policy.ignore_default_excludes"]??false,
           includeOnly:config["shell_environment_policy.include_only"]??[],exclude:[],set:{}}});
       let output="",afterSeq:number|null=null,closed=false,released=false;
@@ -132,8 +137,9 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
       expect(closed).toBe(true);
       const lines=output.split("\n");
       expect(lines.slice(0,9)).toEqual([values.ORG_VALUE,values.REPO_VALUE,actor,values.ORG_SECRET,"","unset","unset","unset","unset"]);
-      expect(lines[9]).toMatch(/^\/tmp\/zeros-codex-executor-/);
-      expect(lines[10]).toBe("C");
+      expect(lines[9]).toBe(nativeHome.paths.home);
+      expect(lines.slice(10,15)).toEqual([nativeHome.paths.codexHome,nativeHome.paths.xdgConfigHome,nativeHome.paths.xdgCacheHome,nativeHome.paths.xdgDataHome,nativeHome.paths.xdgStateHome]);
+      expect(lines[15]).toBe("C");
       for(const [request] of workloadSpawn.mock.calls){
         for(const value of Object.values(values).filter(value=>value.length>1)){
           expect(request.args.join("\0").includes(value)).toBe(false);expect(JSON.stringify(config).includes(value)).toBe(false);

@@ -568,16 +568,15 @@ const TURN_INACTIVITY_TIMEOUT_MS = PERMISSION_RESPONSE_TIMEOUT_MS;
 // adapters share one cap.
 const APPROVAL_TIMEOUT_MS = PERMISSION_RESPONSE_TIMEOUT_MS;
 
-/** Per-process Codex configuration. A ZSR child cannot access the host
- * keychain by design, so both Codex and MCP OAuth refreshes must remain in the
- * generation-private CODEX_HOME owned for that contained session. */
-export function codexAppServerFeatureArgs(contained: boolean): string[] {
+/** Per-process file auth storage for the selected cloud HOME. Plain same-user
+ * directories separate state; they do not hide it from other VM processes. */
+export function codexAppServerFeatureArgs(fileAuthStorage: boolean): string[] {
   return [
     "-c",
     "features.default_mode_request_user_input=true",
     "-c",
     "suppress_unstable_features_warning=true",
-    ...(contained
+    ...(fileAuthStorage
       ? [
           "-c",
           'cli_auth_credentials_store="file"',
@@ -637,7 +636,7 @@ export async function bootCodexAppServerRuntime(
   //     turn's output. We enabled the feature deliberately; the per-turn
   //     banner is pure noise for the user.
   const featureArgs = codexAppServerFeatureArgs(
-    hasKernelExecutionBoundary(opts.executionBoundary),
+    !!cloud || hasKernelExecutionBoundary(opts.executionBoundary),
   );
   if(cloud){
     const project=await captureCloudCodexProjectConfig(cloud,cwd);

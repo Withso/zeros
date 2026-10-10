@@ -35,8 +35,8 @@ describe("admitted cloud publication routing", () => {
     const target = `${fixture.mapping.repositoryAlias}/nested/source.md`;
     fixture.descriptors.set(42, target);
     ownership.publishCloudWorkspacePath(target, 42);
-    expect(fixture.changeOwner).toHaveBeenCalledWith(42, 10001, 10001);
-    expect(fixture.changeOwner).toHaveBeenCalledTimes(2);
+    expect(fixture.changeOwner).not.toHaveBeenCalled();
+    expect(fixture.open).toHaveBeenCalledWith(`${fixture.mapping.repositoryAlias}/nested`, expect.any(Number));
     expect(fixture.close).not.toHaveBeenCalledWith(42);
     fixture.changeOwner.mockClear(); fixture.open.mockClear();
     ownership.publishCloudWorkspacePath("/srv/zeros/repos/other/repo/source.md");

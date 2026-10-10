@@ -3,12 +3,11 @@
 # with-userns — run one command with unprivileged user namespaces permitted
 # ──────────────────────────────────────────────────────────
 #
-# The contained-execution (ZSR) suites nest a second capability-bearing user
-# namespace inside bubblewrap. Ubuntu restricts those nested capabilities with
-# a sysctl and, on 26.04, an independently enforced bwrap AppArmor profile. The
-# pinned runtime's documented host prerequisite is satisfied ONLY for the
-# command passed here; both controls are restored when it returns. Production
-# image policy is separate and is never changed by this CI helper.
+# Offline bundle closure checks mount a read-only runtime and use a private
+# process namespace to reject dependencies outside the archive. Ubuntu may
+# restrict those test namespaces with a sysctl and a bwrap AppArmor profile.
+# Permit them only for the command passed here and restore both controls on
+# exit. This is CI artifact verification, not a provider execution boundary.
 #
 # Usage: bash scripts/ci/with-userns.sh pnpm test:git
 #
@@ -52,7 +51,7 @@ if sudo test -f "$BWRAP_APPARMOR_PROFILE"; then
      printf '%s\n' "$loaded_profiles" | grep -qx 'unpriv_bwrap (enforce)'; then
     # The 26.04 profile stacks unpriv_bwrap on every bwrap child and explicitly
     # denies capabilities, independently of the sysctl. Keep --cap-drop ALL in
-    # the runtime; suspend only this extra host restriction for the test.
+    # artifact verification; suspend only this extra host restriction for it.
     # Mark restoration first because the parser may fail after partial removal.
     restore_bwrap_profile=1
     sudo apparmor_parser --remove --skip-cache "$BWRAP_APPARMOR_PROFILE"
@@ -66,7 +65,7 @@ sudo sysctl -q -w "$KEY=0"
 applied=$(sysctl -n "$KEY")
 if [ "$applied" != "0" ]; then
   # Fail loudly rather than run the suite under a restriction that makes the
-  # containment tests fail for an environmental reason, not a real regression.
+  # artifact tests fail for an environmental reason, not a real regression.
   echo "with-userns: could not lift $KEY (still '$applied')" >&2
   exit 1
 fi

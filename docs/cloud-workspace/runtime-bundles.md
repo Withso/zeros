@@ -108,6 +108,14 @@ integers, and dates are RFC3339. Shared document schemas and exported types are:
 | `BaseCompatibility` (`zeros.base-compatibility/v1`)          | `arch:x64`, `artifactHostSuffixes`, `bootstrapProtocolVersion:1`, `glibc`, `os:{id,versionId}`, `protectedFiles:{mode,path,sha256}[]`, `supportedManifestSchemas`, `systemdMin`, `uids:{agent:10001,capture:10002,coordinator:10004,engine:10003}`                                                                                       |
 | `RuntimeBaseStatus` (`zeros.base-status/v1`)                 | `baseCompatibilityId`, `bootId`, nullable `currentRuntimeId`, `hostState:idle\|waiting_for_runtime\|stopped\|failed`                                                                                                                                                                                                                     |
 
+The account inventory above is an immutable base compatibility contract. Current
+engine, provider tools, cloud terminals and capture use the same non-root
+`zeros-engine` identity (namespace and VM UID/GID 10003), with the exact length-1
+`10003->10003` UID/GID maps and all capability sets empty. The root broker locks
+the mount namespace before dropping identity; NoNewPrivs and seccomp remain.
+The old base accounts and markers remain archived readers. Changing those base bytes requires
+a separate base build and qualification.
+
 Archive bytes are 1 through 2 GiB; expanded bytes and the sum of regular-file
 sizes are 1 through 4 GiB. Individual regular files may be empty.
 `nodeModulesAbi` and engine protocol versions are integers from 1 through 65,535.
@@ -173,11 +181,11 @@ dispatcher. Runtime self-test is `R/bin/node R/lib/zeros/runtime-self-test.mjs` 
 emits a qualification diagnostic. These executable entrypoints belong to their
 runtime/base implementation changes.
 
-The `cursor_load` check verifies the shipped Linux platform payload as worker
-UID/GID 10001, executing its actual `rg --version` and `cursorsandbox --help`
+The `cursor_load` offline artifact closure check verifies the shipped Linux
+platform payload as the non-root engine identity (10003), executing its actual `rg --version` and `cursorsandbox --help`
 entrypoints under bundled Node. Resolved files must stay inside R. The bundle
 probe uses a private user/network namespace and read-only runtime; the installed
-self-test uses the worker identity. Importing the SDK alone cannot establish
+self-test uses the same non-root engine identity. No provider isolation is inferred. Importing the SDK alone cannot establish
 that its ELF payload survived packaging. These loader/ABI probes use no provider
 credentials and do not establish a successful model turn or runtime qualification.
 
@@ -413,11 +421,21 @@ checks the original manifest and receipt bytes against that descriptor. It runs
 with a private HOME, minimal environment and a disconnected network namespace
 (loopback is enabled only inside that namespace). Its closed checks are
 `node_abi`, `sqlite_query`, `pty_load`, `claude_version`, `codex_version`,
-`cursor_load`, `engine_load`, `supervisor_idle` and `containment_smoke`.
-Containment uses the existing credential-free `qualify-cloud-engine.mjs`
-through R's fixed engine launcher, including identity, workload, capture,
-human-service and actor-tool probes. Before launch, the self-test creates the
-worker-owned workspace if missing and the root-owned empty mount points under
+`cursor_load`, `engine_load`, `supervisor_idle` and `engine_lifecycle`.
+The cloud lifecycle probe requires one shared workload cgroup owned by the
+original broker, with entry before exec and engine/control processes outside it.
+Per-conversation Stop proves the original process group only, without an
+escaped/detached descendant guarantee. Idle requires a fresh complete census of
+the entire engine-runtime tree, including the engine leaf and any new sibling;
+only exact infrastructure births and the C3 quiet populated-shell exception may
+be exempt. Unknown means busy with bounded recovery. VM drain closes launches;
+checkpoint and seal complete before kill. The outside root broker then uses
+whole-tree `cgroup.kill` and owns the final verified `populated=0` receipt,
+including the engine. Local Host process-group behavior is unchanged.
+The archived
+`containment_smoke` diagnostic remains readable; it is not a new sandbox witness.
+Before launch, the self-test creates the
+engine-owned workspace if missing and the root-owned empty mount points under
 `/srv/zeros/files`. Existing workspace contents are preserved. These paths use
 the existing image-layout ownership and modes, are
 created directly at their final paths, and are revalidated by the launcher.

@@ -33,6 +33,14 @@ vi.mock("node:fs", () => ({
   realpathSync: (file: string) => file,
   mkdirSync: vi.fn(),
   rmdirSync: vi.fn(),
+  readdirSync: vi.fn(() => []),
+  // The nested engine leaf checks native UID/GID before opening cgroup.procs.
+  // Keep that observation separate from the original descriptor failures.
+  readFileSync: (file: string, encoding: string) => {
+    if (file !== "/proc/123/status" || encoding !== "utf8")
+      throw new Error("Unexpected native cgroup fixture read");
+    return "Uid:\t10003\t10003\t10003\t10003\nGid:\t10003\t10003\t10003\t10003\n";
+  },
   readSync: vi.fn((_fd: number, buffer: Buffer, offset: number) => offset ? 0 : Buffer.from("populated 0\n").copy(buffer)),
   writeSync: vi.fn((_fd: number, value: string) => Buffer.byteLength(value)),
 }));

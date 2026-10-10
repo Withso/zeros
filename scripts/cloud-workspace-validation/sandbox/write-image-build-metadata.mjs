@@ -5,7 +5,6 @@ import {
   chmodSync,
   lstatSync,
   mkdirSync,
-  readFileSync,
   realpathSync,
   writeFileSync,
 } from "node:fs";
@@ -73,25 +72,16 @@ if (
   fail("engine installation is not root-controlled");
 }
 
-const pin = JSON.parse(
-  readFileSync(path.join(engine, "scripts/zsr-qualification/pin.json"), "utf8"),
-);
 const selectedPackages = [
-  "acl",
   "apparmor",
   "bubblewrap",
-  "busybox-static",
-  "crun",
   "git",
   "git-lfs",
   "gnupg",
   "inotify-tools",
   "openssh-sftp-server",
-  "podman",
   "ripgrep",
-  "slirp4netns",
   "socat",
-  "uidmap",
   "util-linux",
 ];
 const packageVersions = Object.fromEntries(
@@ -116,12 +106,6 @@ const metadata = {
     ...cloudImageSourceIdentity(engine),
   },
   artifacts: cloudImageArtifactHashes(engine),
-  zsr: {
-    package: pin.package,
-    version: pin.version,
-    upstreamCommit: pin.upstreamCommit,
-    patchSha256: pin.patchSha256,
-  },
   packages: packageVersions,
 };
 

@@ -69,15 +69,19 @@ export function agentSmokeProviderRuntimeEnvironment(
 
 /** Resolve the native process owner and provider host used by the live Code
  * smoke. Its gateway serves a temporary repository, so projectRoot-relative
- * development discovery would point at files that do not exist. Design-agent
- * ZSR assets are deliberately absent: this command opens Code sessions only. */
+ * discovery would point at files that do not exist. Search uses the same
+ * product-owned pinned ripgrep asset as the desktop. */
 export function agentSmokeRuntimeEnvironment(
   repoRoot,
   runtime = process.execPath,
   ambient = process.env,
 ) {
   const hostRuntime = ambient.ZEROS_PTY_HOST_RUNTIME?.trim() || runtime;
+  const staged = path.join(repoRoot, "binaries", process.platform === "win32" ? "rg.exe" : "rg");
+  const ripgrep = ambient.CURSOR_RIPGREP_PATH?.trim() || ambient.ZEROS_RIPGREP_PATH?.trim() ||
+    ambient.ZEROS_ZSR_RIPGREP_PATH?.trim() || (existsSync(staged) ? staged : undefined);
   return {
+    ...(ripgrep ? { ZEROS_RIPGREP_PATH: ripgrep } : {}),
     ZEROS_PTY_HOST_RUNTIME: hostRuntime,
     ZEROS_CURSOR_HOST_SCRIPT:
       ambient.ZEROS_CURSOR_HOST_SCRIPT?.trim() ||

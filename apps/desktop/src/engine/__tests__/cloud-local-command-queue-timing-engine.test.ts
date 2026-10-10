@@ -81,9 +81,11 @@ describe("authenticated exact-conversation timing inspection", () => {
   it("clears timing ownership before even an already-stopped engine closes optional services", async () => {
     const f = fixture();
     const close = vi.fn(() => { expect(f.timings.sample(f.conversationId).coverage.retired).toBe(true); });
-    await ZerosEngine.prototype.stop.call({ ...f.engine, running: false, cloudIdleStop: { close },
+    const engine = { ...f.engine, running: false, cloudIdleStop: { close },
       cloudCommands: { close }, cloudActions: null, cloudEvents: null, activityHeartbeat: null,
-      cloudCheckpointScheduler: null } as unknown as ZerosEngine);
+      cloudCheckpointScheduler: null };
+    Object.setPrototypeOf(engine, ZerosEngine.prototype);
+    await ZerosEngine.prototype.stop.call(engine as unknown as ZerosEngine);
     expect(f.timings.retainedCount()).toBe(0);
     expect(f.timings.lookupExecution(f.claim.executionId)).toBeNull();
   });

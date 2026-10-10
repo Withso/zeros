@@ -283,8 +283,8 @@ export async function buildRuntimeBundle(options: {
         "native_load",
       );
       await runTool(
-        tools.pnpm,
-        ["build:zsr-supervisor"],
+        tools.node,
+        ["scripts/stage-ripgrep.mjs"],
         command,
         "supervisor_build",
       );
@@ -323,7 +323,7 @@ export async function buildRuntimeBundle(options: {
         path.join(checkout, "dist-engine"),
         path.join(runtime, "worker/dist-engine"),
       );
-      for (const name of ["zsr-supervisor.mjs", "zsr-rg"])
+      for (const name of ["rg"])
         await copyPayload(
           path.join(checkout, "binaries", name),
           path.join(runtime, "worker/binaries", name),
@@ -347,11 +347,6 @@ export async function buildRuntimeBundle(options: {
           "cloud-engine-namespace",
           "scripts/cloud-workspace-validation/sandbox/cloud-engine-namespace.c",
           0o500,
-        ],
-        [
-          "cloud-process-supervisor",
-          "apps/desktop/src/engine/agents/containment/cloud-process-supervisor.c",
-          0o555,
         ],
       ] as const) {
         await runTool(

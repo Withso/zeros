@@ -1,11 +1,13 @@
-import { spawn } from "node:child_process";
+import { ChildProcess, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { PassThrough } from "node:stream";
 import { expect, it, vi } from "vitest";
 import { createCloudRuntimeResolver } from "../../apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
 import { cloudRuntimeFixture } from "../../apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-fixture";
 import { CloudResidentWorkload } from "../cloud-workspace-validation/sandbox/cloud-resident-workload.mjs";
+import { CloudEngineCgroup } from "../cloud-workspace-validation/sandbox/cloud-engine-cgroup.mjs";
 import { CloudWorkerSupervisor, parseCloudWorkerSupervisorRequest, CLOUD_WORKER_SUPERVISOR_AUDIENCE }
   from "../cloud-workspace-validation/sandbox/cloud-worker-supervisor.mjs";
 
@@ -49,7 +51,7 @@ try:
             active = next(value for value in (initial['source'], initial['target']) if argv[0] == value['root'] + '/bin/node')
             read, write = os.pipe()
             self.stdout = os.fdopen(read, 'rb')
-            report = {'profile': 'zeros-cloud-worker-v4', 'qualified': True, 'runtime': active}
+            report = {'version': 2, 'boundary': 'workspace-vm', 'profile': 'zeros-cloud-worker-v4', 'qualified': True, 'runtime': active}
             diagnostic = {'schema': 'zeros.diagnostic/v1', 'component': 'attester', 'ok': True,
                           'stage': 'done', 'exitCode': 0, 'failedChecks': []}
             os.write(write, (json.dumps(report) + '\\n' + json.dumps(diagnostic) + '\\n').encode())
@@ -90,7 +92,7 @@ const scenarios = [
   ["rejected_changed_replay_witness", "recovery_required"],
 ] as const;
 
-it.each(scenarios)("handles actual supervisor start %s with %s and retains the workload", async (scenario, expected) => {
+it.each(scenarios)("handles archived dedicated resident start %s with %s and retains the workload", async (scenario, expected) => {
   const tree = cloudRuntimeFixture();
   try {
     const runtime = createCloudRuntimeResolver({ filesystem: tree.filesystem }).resolve();
@@ -109,7 +111,23 @@ it.each(scenarios)("handles actual supervisor start %s with %s and retains the w
         registration: { endpoint: "https://control.example.test/register", expiresAtMs: Date.now() + 60_000,
           token: `zws_${randomBytes(32).toString("base64url")}` } })).toString("base64url"),
     });
-    const resident = new CloudResidentWorkload({ runtime, hostId, organizationId, workspaceId });
+    // The frozen Python updater admits the original direct dedicated leaf.
+    // A current shared-pool controller is a different ownership contract.
+    // Substitute only original kernel/process/IPC observations; start,
+    // custody comparison, descriptor, enrollment and detach remain real.
+    const owner = { pid: 12346, startToken: "123460" };
+    const originalScope = { directory: `${runtime.cgroupRoot}/engine-workload-${hostId}`, dev: "0", ino: "21" };
+    const originalCustody = { version: 1, episode: randomUUID(),
+      runtime: { runtimeId: runtime.runtimeId, bootId: runtime.bootId, supervisorSessionId: runtime.supervisorSessionId },
+      owner, scope: originalScope, birth: { kind: "resident", pid: 23456, startToken: "234560" } };
+    const residentChild = Object.assign(new ChildProcess(), { pid: owner.pid, exitCode: null,
+      signalCode: null, stdin: new PassThrough(), stdout: new PassThrough() });
+    const readCustody = vi.fn(() => structuredClone(originalCustody));
+    const resident = new CloudResidentWorkload({ runtime, hostId, organizationId, workspaceId,
+      spawnProcess: () => residentChild, readBirth: () => ({ ...owner, parentPid: process.pid }), readCustody });
+    expect(resident.scope.directory).toBe(`${runtime.cgroupRoot}/engine-runtime/engine-workload-${hostId}`);
+    resident.scope = new CloudEngineCgroup({ runtime, directory: originalScope.directory });
+    vi.spyOn(resident.scope, "currentIdentity", "get").mockReturnValue(originalScope);
     let failTargetAttach = scenario === "failed_while_detached";
     vi.spyOn(resident, "request").mockImplementation(async command => {
       if (failTargetAttach && command.op === "authorize" && command.authority.engineId === targetId) {
@@ -117,7 +135,6 @@ it.each(scenarios)("handles actual supervisor start %s with %s and retains the w
         throw new Error("Injected attach failure");
       }
     });
-    vi.spyOn(resident, "start").mockResolvedValue(undefined);
     const enroll = vi.spyOn(resident, "enroll"), detach = vi.spyOn(resident, "detach");
     const stop = vi.spyOn(resident, "stop").mockResolvedValue(undefined);
     const retire = vi.fn(async () => {});
@@ -132,6 +149,8 @@ it.each(scenarios)("handles actual supervisor start %s with %s and retains the w
       session: initialPrepare.session, environment: environment(sourceId, 1), resident: { hostId, fence: 1 },
     })));
     expect(initialStart.outcome).toBe("started");
+    expect(resident.rootCustody()).toEqual(originalCustody);
+    expect(readCustody).toHaveBeenCalledWith(expect.objectContaining({ owner, scope: originalScope }));
     enroll.mockClear(); detach.mockClear(); retire.mockClear(); launch.mockClear();
     if (scenario === "failed_after_attach") launch.mockRejectedValueOnce(new Error("Injected launch failure"));
     const handoff = { challenge: randomUUID(), organizationId, workspaceId, generation: 1,

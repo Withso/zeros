@@ -20,10 +20,20 @@ import { ZerosEngine } from "../zeros-engine";
 describe("ZerosEngine.stop", () => {
   it("requests a clean local writer seal before closing transports or registration", async () => {
     const calls: string[] = [];
-    const engine = { running: false, cloudIdleStop: { close: vi.fn() }, cloudAgentBoot: { active: true, dispose: vi.fn(async () => { calls.push("boot-close"); }) },
+    let releaseLegacyRetirement!: () => void;
+    const legacyRetirement = new Promise<void>(resolve => { releaseLegacyRetirement = resolve; });
+    const engine = { running: false, joinCloudLegacyResidentRetirement: vi.fn(() => legacyRetirement),
+      cloudIdleStop: { close: vi.fn() }, cloudAgentBoot: { active: true, dispose: vi.fn(async () => { calls.push("boot-close"); }) },
       cloudLocalWriterLifecycle: { close: vi.fn() }, sealCloudLocalWriter: vi.fn(async () => { calls.push("seal"); }),
       cloudLocalMirror: { close: () => calls.push("mirror-close") }, cloudLocalNativePump: { dispose: vi.fn(async () => {}) } };
-    await ZerosEngine.prototype.stop.call(engine as unknown as ZerosEngine);
+    const stopped = ZerosEngine.prototype.stop.call(engine as unknown as ZerosEngine);
+    expect(engine.joinCloudLegacyResidentRetirement).toHaveBeenCalledOnce();
+    expect(calls).toEqual([]);
+    expect(engine.sealCloudLocalWriter).not.toHaveBeenCalled();
+    expect(engine.cloudLocalNativePump.dispose).not.toHaveBeenCalled();
+    expect(engine.cloudAgentBoot.dispose).not.toHaveBeenCalled();
+    releaseLegacyRetirement();
+    await stopped;
     expect(calls).toEqual(["seal", "mirror-close", "boot-close"]);
   });
   it("fences mirror work immediately and closes local replay only after scope retirement", async () => {
@@ -32,10 +42,14 @@ describe("ZerosEngine.stop", () => {
       let release!: () => void;
       const retirement = new Promise<void>(resolve => { release = resolve; });
       const closeMirror = vi.fn(),closeStore = vi.fn(),latePoll = vi.fn();
-      const engine = { running: false,cloudIdleStop: { close: vi.fn() },cloudLocalMirror: { close: closeMirror },
+      const engine = { running: false,joinCloudLegacyResidentRetirement: vi.fn(async () => undefined),
+        cloudIdleStop: { close: vi.fn() },cloudLocalMirror: { close: closeMirror },
         cloudLocalMirrorTimer: setTimeout(latePoll,1000),cloudLocalEvents: { close: closeStore },
         cloudLocalNativePump: { dispose: vi.fn(async () => {}) },cloudAgentBoot: { dispose: vi.fn(() => retirement) } };
       const stopped = ZerosEngine.prototype.stop.call(engine as unknown as ZerosEngine);
+      // Even the no-flight join is awaited before the immediate mirror fence.
+      await Promise.resolve();
+      expect(engine.joinCloudLegacyResidentRetirement).toHaveBeenCalledOnce();
       expect(closeMirror).toHaveBeenCalledOnce(); expect(closeStore).not.toHaveBeenCalled();
       release(); await stopped; expect(closeStore).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(2000); expect(latePoll).not.toHaveBeenCalled();
@@ -45,6 +59,7 @@ describe("ZerosEngine.stop", () => {
     const calls: string[] = [];
     const engine = {
       running: true,
+      joinCloudLegacyResidentRetirement: vi.fn(async () => undefined),
       cloudIdleStop: { close: async () => { calls.push("idle-stop"); } },
       cloudRuntimeRegistration: {
         stop: async () => {
@@ -89,6 +104,8 @@ describe("ZerosEngine.stop", () => {
       .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(AggregateError);
+    expect(engine.joinCloudLegacyResidentRetirement).toHaveBeenCalledOnce();
+    expect((error as AggregateError).errors).toHaveLength(3);
     expect((error as AggregateError).errors).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ message: "agent boundary proof failed" }),

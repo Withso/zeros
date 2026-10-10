@@ -7,6 +7,7 @@ import {
 } from "node:module";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url),
@@ -218,8 +219,34 @@ function redactQualificationText(value, maximum = 2000) {
     .slice(-maximum);
 }
 
+/** @typedef {{secure?:boolean,qualified?:boolean,error?:string,phase?:string,failureCode?:string,signal?:string,
+ * exitCode?:number,hostUid?:number,namespaceUid?:number,noNewPrivs?:number,seccompMode?:number,
+ * sameEngineIdentity?:boolean,noSandbox?:boolean,ownedProcessGroups?:boolean,originalProcessGroupsRetired?:boolean,
+ * timeoutRetired?:boolean,workloadCgroup?:boolean,vmWorkloadDrain?:boolean,chromiumSandbox?:boolean,
+ * checks?:Array<string|Record<string,string>>,resources?:Record<string,string|boolean|null>,
+ * capabilities?:Record<string,number|null>}} ClosedQualificationSection */
+/** @typedef {{version:number|null,secure?:boolean,qualified?:boolean,boundary?:string|null,engineChecksPassed?:boolean,
+ * identity?:ClosedQualificationSection|null,execution?:ClosedQualificationSection|null,workload?:ClosedQualificationSection|null,
+ * capture?:ClosedQualificationSection|null,humanServices?:ClosedQualificationSection|null,actorTools?:ClosedQualificationSection|null}} ClosedQualificationSummary */
+/** @returns {ClosedQualificationSummary|null} */
 export function summarizeQualification(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (value.version === 2) {
+    const result = { version: 2, boundary: value.boundary === "workspace-vm" ? "workspace-vm" : null, qualified: value.qualified === true };
+    if (typeof value.engineChecksPassed === "boolean") result.engineChecksPassed = value.engineChecksPassed;
+    for (const name of ["identity","execution","capture","humanServices","actorTools"]) {
+      const section = value[name];
+      result[name] = !section || typeof section !== "object" || Array.isArray(section) ? null : Object.fromEntries(
+        ["qualified","sameEngineIdentity","noSandbox","ownedProcessGroups","originalProcessGroupsRetired","timeoutRetired","workloadCgroup","vmWorkloadDrain","chromiumSandbox","hostUid","namespaceUid","noNewPrivs","seccompMode"]
+          .filter(key => typeof section[key] === "boolean" || Number.isSafeInteger(section[key]))
+          .map(key=>[key,section[key]]));
+      if (name === "identity" && result[name] && section.capabilities && typeof section.capabilities === "object" && !Array.isArray(section.capabilities))
+        result[name].capabilities = Object.fromEntries(["effective", "permitted", "inheritable", "bounding", "ambient"]
+          .map(key => [key, Number.isSafeInteger(section.capabilities[key]) && section.capabilities[key] >= 0 ? section.capabilities[key] : null]));
+    }
+    return result;
+  }
+  // Archived v1 diagnostics only.
   const result = {
     version: Number.isSafeInteger(value.version) ? value.version : null,
     secure: value.secure === true,
@@ -339,13 +366,18 @@ export function setupProbeResult(result, durationMs, timeoutMs) {
   let report = null;
   try {
     const value = JSON.parse(result.stdout);
-    if (value && typeof value === "object" && !Array.isArray(value))
-      report = Object.fromEntries(
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      if (Object.hasOwn(value, "hostUid") || Object.hasOwn(value, "hostGid")) {
+        report = Object.fromEntries(["hostUid", "hostGid"].map(key => [key,
+          Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= 2147483647 ? value[key] : null]));
+        for (const key of ["detachedDescendantsRetired", "timeoutRetired"]) report[key] = typeof value[key] === "boolean" ? value[key] : null;
+      } else report = Object.fromEntries(
         SETUP_FIELDS.map((key) => [
           key,
           typeof value[key] === "boolean" ? value[key] : null,
         ]),
       );
+    }
   } catch {
     /* Raw output stays private. */
   }
@@ -643,6 +675,9 @@ export async function runLaterSetupDiagnostics({
   return projectLater(results);
 }
 
+/** @typedef {{exitCode:number|null,timedOut:boolean,outputLimit:boolean,report:ClosedQualificationSummary|null,
+ * launcherError?:{name?:string,code?:string,message?:string},launchDetail?:ClosedQualificationObservation,truncated?:boolean}} ClosedQualificationObservation */
+/** @returns {ClosedQualificationObservation|undefined} */
 function projectQualification(value) {
   if (!value || typeof value !== "object") return undefined;
   const result = {
@@ -1417,8 +1452,8 @@ function laterOperations(
       "--bounding-set=-all",
       "--inh-caps=-all",
       "--ambient-caps=-all",
-      "--reuid=10001",
-      "--regid=10001",
+      "--reuid=10003",
+      "--regid=10003",
       "--clear-groups",
       "/usr/bin/git",
       "-C",
@@ -1510,8 +1545,8 @@ function laterOperations(
         );
         view.cloudEngineViewEnvironment(source, "serve", runtime);
         const writable = run("/usr/bin/setpriv", [
-          "--reuid=10001",
-          "--regid=10001",
+          "--reuid=10003",
+          "--regid=10003",
           "--clear-groups",
           "/usr/bin/test",
           "-w",
@@ -1589,7 +1624,7 @@ function laterOperations(
         version: 1,
         environment: {},
         timeoutMs: 10000,
-        command: `test "$(id -u)" = 10001 && test "$PWD" = '${primary}' && printf zeros-template-hook-ok`,
+        command: `test "$(id -u)" = 10003 && test "$PWD" = '${primary}' && printf zeros-template-hook-ok`,
       });
       const ok =
         result.code === 0 &&

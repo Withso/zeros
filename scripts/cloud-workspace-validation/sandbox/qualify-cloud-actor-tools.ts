@@ -1,22 +1,26 @@
-import {resolveCloudRuntime} from "../../../apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
+
 import { readCloudAgentRuntimeAttestation } from "../../../apps/desktop/src/engine/cloud-runtime-attestation";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { chown, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chown, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { finished } from "node:stream/promises";
 import { CloudAgentLease } from "../../../apps/desktop/src/engine/agents/cloud-agent-lease";
 import { CloudWorkloadTools } from "../../../apps/desktop/src/engine/agents/cloud-workload-tools";
-import { CloudCoordinatorBoundary } from "../../../apps/desktop/src/engine/agents/containment/cloud-coordinator-boundary";
+import { CloudNativeBoundary } from "../../../apps/desktop/src/engine/agents/containment/cloud-native-boundary";
 import { CLOUD_NATIVE_HISTORY_ROOT } from "../../../apps/desktop/src/engine/agents/containment/cloud-native-history";
-import { loadCloudWorkerConfiguration } from "../../../apps/desktop/src/engine/agents/containment/cloud-worker-config";
-import { ZsrExecutionBoundary } from "../../../apps/desktop/src/engine/agents/containment/zsr-boundary";
+import { createCloudQualificationRuntime, type CloudQualificationRuntime } from "./cloud-qualification-runtime";
+import { cloudRoleIdentityProbe } from "./cloud-role-identity";
+
 import type { PreparedBoundary } from "../../../apps/desktop/src/engine/agents/containment/types";
 import { CloudRuntimeLanguageServices } from "../../../apps/desktop/src/engine/transport/cloud-language-services";
 
 // Runs only inside the attested image's engine namespace. Authentication here
 // is a synthetic lifecycle fixture; no provider SDK, network login or model is
 // invoked. Live account admission is a separate end-to-end qualification.
+export async function qualifyCloudActorTools(context: CloudQualificationRuntime = createCloudQualificationRuntime()) {
+const { configuration: worker, boundary, workloads: owned, custody } = context;
 const workspace = "/srv/zeros/workspace";
 const conversationId = `image-qualification-${randomUUID()}`;
 const prefix = `.zeros-actor-qualification-${randomUUID()}`;
@@ -31,9 +35,10 @@ let failureCode: string | undefined;
 let workload: PreparedBoundary | undefined;
 let lease: CloudAgentLease | undefined;
 let languages: CloudRuntimeLanguageServices | undefined;
+let identityObserved = false, groupsObserved = false, descendantsRetired = false, timeoutRetired = false;
 
 async function main() {
-  const worker = loadCloudWorkerConfiguration();
+  custody.assertLive();
   assert(worker?.version === 4);
   assert(worker);
   const runtime=readCloudAgentRuntimeAttestation(worker);
@@ -50,31 +55,10 @@ async function main() {
   await mkdir(design, { mode: 0o755 });
   await chown(design, worker.uid, worker.gid);
   phase = "workload";
-  workload = await new ZsrExecutionBoundary({
-    projectRoot: workspace,
-    supervisorScript: `${resolveCloudRuntime().workerRoot}/binaries/zsr-supervisor.mjs`,
-    cloudWorker: worker,
-    cloudWorkerToolchain: worker.toolchain,
-  }).prepare({
-    executionId: randomUUID(),
-    actor: "agent-code",
-    providerId: "cursor",
-    cwd: workspace,
-    workspaceRoot: workspace,
-    territory: {
-      agentRole: "code",
-      workspaceRoot: workspace,
-      designDirectory: design,
-      protectedDesignDirectories: [design],
-      designRecognitionPaths: [],
-      writeCapabilities: {
-        workspace: "write",
-        deniedPaths: [design, path.join(workspace, ".git")],
-      },
-    },
-  });
+  const executionId = randomUUID();
+  workload = await boundary.prepare({ executionId, actor: "agent-code", providerId: "cursor", cwd: workspace, workspaceRoot: workspace });
   const admission = {
-    executionId: randomUUID(),
+    executionId,
     delegationId: randomUUID(),
     provider: "cursor" as const,
     model: "grok-4.6",
@@ -111,8 +95,8 @@ async function main() {
     },
   );
   lease.attach(workload);
-  phase = "private-coordinator";
-  const coordinator = await CloudCoordinatorBoundary.prepare(
+  phase = "native-home";
+  const coordinator = await CloudNativeBoundary.prepare(
     lease,
     workload,
     conversationId,
@@ -122,10 +106,10 @@ async function main() {
       command: worker.toolchain.node,
       args: [
         "-e",
+        cloudRoleIdentityProbe({ workloadDirectory: custody.entry.workload.directory, home: coordinator.nativeHome.paths.home, credential: "synthetic-cursor" }) +
         `const fs=require('node:fs');
-      if(process.getuid()!==10004||process.env.CURSOR_API_KEY!=='synthetic-image-private-credential')process.exit(91);
-      if(fs.existsSync(${JSON.stringify(path.join(workspace, source))}))process.exit(92);
-      process.stdout.write('private-coordinator-qualified');`,
+      if(!fs.readFileSync(${JSON.stringify(path.join(workspace, source))},'utf8').includes('welcome'))process.exit(92);
+      process.stdout.write('shared-native-home-qualified');`,
       ],
       cwd: workspace,
       env: {},
@@ -142,17 +126,16 @@ async function main() {
     probe.stdout ? finished(probe.stdout, { cleanup: true }) : undefined,
   ]);
   assert.equal(exit.code, 0);
-  assert.equal(output, "private-coordinator-qualified");
+  assert.equal(output, "shared-native-home-qualified");
   await lease.retire(probe);
-  checks.push(
-    "credential-private-coordinator-in-engine-namespace",
-    "coordinator-cannot-read-worktree",
-  );
+  identityObserved = true;
+  checks.push("captured-provider-credential-and-engine-identity", "shared-managed-worktree");
   phase = "agent-tools";
-  const tools = new CloudWorkloadTools(lease, workload, workspace);
+  const tools = new CloudWorkloadTools(lease, workload, workspace, coordinator.nativeHome);
+  const toolProbe = cloudRoleIdentityProbe({ workloadDirectory: custody.entry.workload.directory, home: coordinator.nativeHome.paths.home, credential: "absent" }) + 'process.stdout.write("workload-qualified");';
   const execution = await tools.call({
     operation: "exec",
-    command: `${worker.toolchain.node} -e 'if(process.getuid()!==10001||process.env.CURSOR_API_KEY)process.exit(91);process.stdout.write("workload-qualified")'`,
+    command: `'${worker.toolchain.node.replaceAll("'", "'\\''")}' -e '${toolProbe.replaceAll("'", "'\\''")}'`,
   });
   assert.equal(execution.ok, true);
   assert.match(JSON.stringify(execution), /workload-qualified/);
@@ -162,11 +145,11 @@ async function main() {
   });
   assert.equal(agentSymbols.ok, true);
   assert.match(JSON.stringify(agentSymbols), /welcome/);
-  checks.push("credential-free-agent-execution", "agent-native-language-tools");
+  checks.push("legacy-workload-bridge-engine-identity", "agent-native-language-tools");
   phase = "human-tools";
   languages = new CloudRuntimeLanguageServices(worker, () => {
     failed = true;
-  });
+  }, boundary);
   for (const [language, file] of [
     ["typescript", source],
     ["python", python],
@@ -212,28 +195,56 @@ async function main() {
     "disk-document-refresh",
     "symlink-read-denial",
   );
-  phase = "retirement";
+  phase = "owned-group-retirement";
+  const marker = path.join(workspace, `${prefix}-owned-group`);
+  const child = await workload.spawn({command: worker.toolchain.node, args: ["-e",
+    `const fs=require('node:fs'),{spawn}=require('node:child_process');
+     spawn(process.execPath,['-e',${JSON.stringify("const fs=require('node:fs');process.on('SIGTERM',()=>{});setInterval(()=>fs.appendFileSync(" + JSON.stringify(marker) + ",'x'),20);")}],{stdio:'ignore'});
+     process.on('SIGTERM',()=>{});setInterval(()=>{},1000);`], cwd: workspace, env: {PATH:"/usr/bin:/bin",HOME:"/tmp"},stdio:"pipe"});
+  child.stderr?.resume(); child.stdout?.resume();
+  groupsObserved = owned.snapshot().scopes.some(scope => scope.executionId === executionId && scope.processGroups.includes(child.pid));
+  assert(groupsObserved);
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) { try { if ((await readFile(marker)).length) break; } catch {} await new Promise(resolve=>setTimeout(resolve,20)); }
+  assert((await readFile(marker)).length > 0);
   await lease.close();
+  const before = await readFile(marker,"utf8");
+  await new Promise(resolve=>setTimeout(resolve,100));
+  assert.equal(await readFile(marker,"utf8"),before);
+  descendantsRetired = true;
   await languages.pause();
+  await rm(marker, {force:true});
+  phase = "timeout-retirement";
+  const timeout = AbortSignal.timeout(250);
+  const timed = await boundary.prepare({executionId:randomUUID(),actor:"repo-code-task",providerId:"timeout-probe",cwd:workspace,workspaceRoot:workspace},{signal:timeout});
+  try {
+    const process = await timed.spawn({command:worker.toolchain.node,args:["-e","process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],cwd:workspace,env:{PATH:"/usr/bin:/bin",HOME:"/tmp"},stdio:"pipe"});
+    process.stdout?.resume(); process.stderr?.resume();
+    if (!timeout.aborted) await new Promise<void>(resolve=>timeout.addEventListener("abort",()=>resolve(),{once:true}));
+  } finally { await timed.stopAndProve(); }
+  const inspection = await owned.inspect();
+  assert(inspection.complete && !inspection.pendingLaunches && !inspection.failedRetirements && !inspection.workloadPids.length);
+  custody.assertLive();
+  timeoutRetired = true;
   assert.equal(failed, false);
-  checks.push("all-tool-and-coordinator-processes-retired");
+  checks.push("original-detached-group-and-non-escaped-descendants-retired", "timeout-original-group-retired");
+
 }
 
-main()
+await main()
   .catch((error: unknown) => {
     failed = true;
     // Only fixed error categories leave the synthetic canary; never source,
     // subprocess output, credentials or filesystem paths.
     const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-    failureCode = ["denied", "capacity", "timeout", "output_limit", "unavailable", "ERR_ASSERTION", "EACCES", "EPERM"].includes(String(code)) ? String(code) : "unclassified";
-    process.exitCode = 1;
+    failureCode = typeof code === "string" && ["denied", "capacity", "timeout", "output_limit", "unavailable", "ERR_ASSERTION", "EACCES", "EPERM"].includes(code) ? code : "unclassified";
   })
   .finally(async () => {
     try {
       await lease?.close();
       await languages?.pause();
       await workload?.stopAndProve();
-      for (const name of [source, python, escaped, path.basename(design)])
+      for (const name of [source, python, escaped, `${prefix}-owned-group`, path.basename(design)])
         await rm(path.join(workspace, name), { recursive: true, force: true });
       // This unguessable synthetic conversation has no external callers. Remove
       // only its own test history after both execution domains prove retirement.
@@ -246,9 +257,16 @@ main()
       );
     } catch {
       failed = true;
-      process.exitCode = 1;
     }
-    process.stdout.write(
-      JSON.stringify({ secure: !failed, phase, checks, failureCode }) + "\n",
-    );
   });
+return { execution:{sameEngineIdentity: !failed && identityObserved, noSandbox: !failed && identityObserved,
+  ownedProcessGroups: !failed && groupsObserved, originalProcessGroupsRetired: !failed && descendantsRetired,
+  timeoutRetired: !failed && timeoutRetired, workloadCgroup: !failed && identityObserved, vmWorkloadDrain: false},
+  actorTools:{sameEngineIdentity: !failed && identityObserved, noSandbox: !failed && identityObserved}, phase, checks, failureCode };
+}
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  qualifyCloudActorTools().then(report => {
+    process.stdout.write(`${JSON.stringify(report)}\n`);
+    if (!report.execution.sameEngineIdentity || !report.execution.originalProcessGroupsRetired || !report.execution.timeoutRetired) process.exitCode = 1;
+  }).catch(() => { process.stdout.write(`${JSON.stringify({ execution: null, actorTools: null })}\n`); process.exitCode = 1; });
+}

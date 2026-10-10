@@ -1,12 +1,46 @@
-import {describe,expect,it,vi} from "vitest";
+import {afterEach,beforeEach,describe,expect,it,vi} from "vitest";
+import {mkdtemp,rm} from "node:fs/promises";
+import {tmpdir} from "node:os";
+import path from "node:path";
+import {createCloudNativeHome,type CloudNativeHome} from "../../../containment/cloud-native-home";
+let dataRoot:string, nativeHome:CloudNativeHome;
+beforeEach(async()=>{dataRoot=await mkdtemp(path.join(tmpdir(),"zeros-codex-policy-"));nativeHome=await createCloudNativeHome({dataRoot,conversationId:"original-conversation",provider:"codex",executionId:"original-execution"});});
+afterEach(async()=>{await rm(dataRoot,{recursive:true,force:true});});
 import type {CloudLegacyProviderExecution as CloudProviderExecution} from "../../../cloud-provider-execution";
 import {bindCloudCodexThread,cloudCodexConfig,cloudCodexImage,cloudCodexRequest,cloudCodexToolCall,CLOUD_CODEX_CONFIG} from "../cloud-policy";
 const context=(cwd="/srv/zeros/workspace")=>{
   const lease={assertLive:vi.fn(),admission:{model:"qualified-model"},codexAuth:()=>null};
-  return {cwd,lease,lifetime:lease,auth:lease,model:"qualified-model",nativeCapabilities:null,environment:null,
+  return {cwd,coordinator:{nativeHome},lease,lifetime:lease,auth:lease,model:"qualified-model",nativeCapabilities:null,environment:null,
     tools:{inputSchema:{type:"object"},call:vi.fn()}} as unknown as CloudProviderExecution;
 };
 describe("Codex cloud native authority",()=>{
+  it.each(["untrusted","on-request","never"])("uses the VM boundary with normal egress while preserving %s approvals", approvalPolicy=>{
+    const execution=context();
+    for(const method of ["thread/start","thread/resume"])
+      expect(cloudCodexRequest(execution,"env",method,{approvalPolicy,sandbox:"workspace-write"})).toMatchObject({approvalPolicy,sandbox:"danger-full-access"});
+    expect(cloudCodexRequest(execution,"env","turn/start",{approvalPolicy,sandboxPolicy:{type:"workspaceWrite",networkAccess:false}}))
+      .toMatchObject({approvalPolicy,sandboxPolicy:{type:"dangerFullAccess"}});
+    expect(cloudCodexRequest(execution,"env","turn/start",{approvalPolicy,sandboxPolicy:{type:"readOnly"}}))
+      .toMatchObject({approvalPolicy,sandboxPolicy:{type:"readOnly",networkAccess:false}});
+    expect(cloudCodexRequest(execution,"env","thread/start",{approvalPolicy,sandbox:"read-only"})).toMatchObject({approvalPolicy,sandbox:"read-only"});
+    expect(cloudCodexRequest(execution,"env","turn/start",{approvalPolicy,sandboxPolicy:{type:"dangerFullAccess"},collaborationMode:{mode:"plan",settings:{}}}))
+      .toMatchObject({approvalPolicy,sandboxPolicy:{type:"readOnly",networkAccess:false},collaborationMode:{mode:"plan"}});
+  });
+  it("pins state to the original physical HOME and refuses caller state-root redirects",()=>{
+    const execution=context(), expected=path.join(nativeHome.paths.codexHome,"sessions",".zeros-state");
+    expect(cloudCodexConfig(execution)).toMatchObject({sqlite_home:expected});
+    expect(cloudCodexRequest(execution,"env","thread/start",{config:{sqlite_home:"/caller-trap"}})).toMatchObject({config:{sqlite_home:expected}});
+  });
+  it.each([null, {values:{}}])("preserves tool HOME/CODEX_HOME/XDG with or without an admitted env layer (%j)",environment=>{
+    const execution=context();Object.assign(execution,{environment});
+    const config=cloudCodexConfig(execution);
+    expect(config["shell_environment_policy.inherit"]).toBe("all");
+    expect(config["shell_environment_policy.include_only"]).toEqual(expect.arrayContaining([
+      "HOME","CODEX_HOME","XDG_CONFIG_HOME","XDG_CACHE_HOME","XDG_DATA_HOME","XDG_STATE_HOME",
+    ]));
+    expect(config["shell_environment_policy.include_only"]).not.toContain("OPENAI_API_KEY");
+  });
+
   it("uses captured common model/capabilities/auth instead of contradictory legacy fields", () => {
     const execution=context();
     const assertLive=vi.fn();
@@ -41,7 +75,7 @@ describe("Codex cloud native authority",()=>{
       expect(result).toMatchObject({cwd,runtimeWorkspaceRoots:[cwd]});
       expect(JSON.stringify(result)).not.toContain("/private/caller");
       if(method==="thread/start"||method==="turn/start")expect(result).toMatchObject({environments:[{environmentId:"admitted-env",cwd,runtimeWorkspaceRoots:[cwd]}]});
-      if(method==="turn/start")expect(result).toMatchObject({sandboxPolicy:{type:"workspaceWrite",writableRoots:[cwd]}});
+      if(method==="turn/start")expect(result).toMatchObject({sandboxPolicy:{type:"dangerFullAccess"}});
     }
     expect(cloudCodexRequest(execution,"env","config/read",hostile)).toEqual({cwd});
     expect(cloudCodexRequest(execution,"env","skills/list",{...hostile,forceReload:true})).toEqual({cwds:[cwd],forceReload:true});
@@ -51,7 +85,7 @@ describe("Codex cloud native authority",()=>{
       const execution=context();Object.assign(execution,{environment:{values}});
       const config=cloudCodexConfig(execution);
       expect(config).toMatchObject({"shell_environment_policy.inherit":"all","shell_environment_policy.ignore_default_excludes":true,
-        "shell_environment_policy.include_only":["HOME","PATH","LANG","SHELL","TMPDIR","USER","LOGNAME",...(values.ORG_SECRET?["ORG_SECRET"]:[])]});
+        "shell_environment_policy.include_only":["HOME","PATH","LANG","SHELL","TMPDIR","USER","LOGNAME","CODEX_HOME","XDG_CONFIG_HOME","XDG_CACHE_HOME","XDG_DATA_HOME","XDG_STATE_HOME",...(values.ORG_SECRET?["ORG_SECRET"]:[])]});
       for(const method of ["thread/start","thread/resume"]){
         expect(cloudCodexRequest(execution,"env",method,{threadId:"native",config:{"shell_environment_policy.include_only":["*"],"shell_environment_policy.set":{OPENAI_API_KEY:"injected"}}}))
           .toMatchObject({config});

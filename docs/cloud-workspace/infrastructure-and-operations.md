@@ -9,6 +9,110 @@ separate follow-ups. The opt-in v3 release-worker promotion lane is
 retained. This guide owns lifecycle, operations and controlled migration/restore
 procedures.
 
+
+The engine, agents, tools, terminals/SSH/LSP and capture use the [normal VM execution model](security.md#agent-execution-model):
+one non-root `zeros-engine` user (10003), the real checkout and normal VM egress, without an agent sandbox.
+The approved base's setup recipes and account inventory remain immutable. The root broker adopts
+legacy mutable checkout/HOME ownership from 10001/10002 to 10003 only after positive old-engine drain.
+Agents can read engine data on their VM: one trust domain per workspace. Conversation directories
+separate state, not agents from each other.
+
+## Resource setup at boot
+
+The original root broker owns one shared workload cgroup for agents, tools,
+terminals/SSH/LSP and capture. Entry happens before exec. Engine/control processes
+stay in a sibling engine cgroup, outside workload custody; both children sit under
+the common engine-runtime parent. The separate `/host` limits are unchanged.
+
+Cgroup v2 migration checks destination and common-ancestor write access, not the
+target UID. `/host` stays outside the delegated tree and every root process
+stays outside engine-runtime, with no root helper inside it. Do not treat root UID
+as protection against migration; the outside root broker retains custody.
+
+At each boot, in `memoryBudget.source=nominal`, the parent sets `cpu.max` to
+`admitted SKU CPUs * 100000` with period `100000`. Read the raw effective CPU count
+from the nearest readable `cpuset.cpus.effective` in the engine's own cgroup and
+exact ancestors, rather than assuming the CPU-only leaf has that file. This
+measurement never falls back to os.cpus(). A wider raw cpuset does not enlarge the
+admitted parent budget.
+Parent `memory.max` starts at nominal SKU memory minus 1 GiB of host reserve.
+Nominal memory is the configured/admitted allocation, such as 8192 MiB for the
+default SKU. The effective limit is
+`min(nominal SKU memory - 1 GiB, measured MemTotal - /host memory limit)`;
+never exceed that measured ceiling in nominal mode. The report records nominal
+memory, measured MemTotal, `/host` memory limit and effective cap, including any
+reduction below the nominal budget. Parent `pids.max=4096` and `memory.oom.group=1`
+stay unchanged.
+
+Admission keeps the existing SKU sufficiency floor: normal kernel overhead is
+accepted when measured MemTotal is below nominal memory and still passes that
+floor. Do not replace that floor with a nominal-memory minimum. Admission and
+readers enforce strict per-mode equality: nominal CPU must equal the admitted SKU
+CPU count, and nominal memory must equal the SKU-derived budget with its measured
+cap and recorded reduction.
+
+The parent enables only CPU for its children. The engine cgroup stays uncapped
+at its leaf (`cpu.max=max 100000`); inherited parent bounds remain. Set the single
+workload's CPU quota to
+`round(0.75 * min(raw cpuset CPUs, actual ancestor quota in CPUs) * 100000)`,
+period `100000`. Convert finite ancestor `cpu.max` values to CPUs with
+`quota / period`; use the tightest actual quota, including the newly set parent.
+Set both children to `cpu.weight=100`. There are no new per-leaf memory/pids limits.
+No per-launch resource cgroups are created.
+
+These CPU examples assume admitted SKU CPUs, raw cpuset CPUs and actual ancestor
+quota coincide:
+
+| Admitted SKU CPUs | Workload `cpu.max` | Parent `cpu.max` |
+| --- | --- | --- |
+| 1 | 75000 100000 | 100000 100000 |
+| 2 | 150000 100000 | 200000 100000 |
+| 4 | 300000 100000 | 400000 100000 |
+| 8 | 600000 100000 | 800000 100000 |
+| 16 | 1200000 100000 | 1600000 100000 |
+
+When the raw cpuset is wider than the admitted SKU, the parent still governs the
+workload cap:
+
+| Admitted SKU CPUs | Raw cpuset CPUs | Actual ancestor quota (CPUs) | Parent `cpu.max` | Workload `cpu.max` |
+| --- | --- | --- | --- | --- |
+| 4 | 8 | 4 | 400000 100000 | 300000 100000 |
+
+The table gives the nominal parent budget before measured cap.
+
+| Nominal SKU memory | Nominal parent budget (bytes) |
+| --- | --- |
+| 4 GiB | 3221225472 |
+| 8 GiB | 7516192768 |
+| 16 GiB | 16106127360 |
+
+The default 4 vCPU / 8 GiB SKU matches main's nominal constants: parent CPU
+`400000 100000`, memory `7516192768`, pids `4096`, OOM group `1`; record any lower
+effective memory limit required by the measured ceiling. The measured memory cap
+applies only in nominal mode.
+
+With unavailable or malformed required inputs, the broker selects
+`memoryBudget.source=fallback` and the parent falls back to main's exact constants.
+The fallback parent is exactly `cpu.max=400000 100000`, `memory.max=7516192768`,
+`pids.max=4096`, `memory.oom.group=1` (4 CPUs and 7 GiB (7516192768 bytes)). This
+reproduces main byte-for-byte: fallback applies no MemTotal or `/host` cap, even
+when some raw measurements are available. The workload cap stays uncapped with a
+closed diagnostic; fallback requires the matching workload-cap skip diagnostic.
+Use the report's root-published `memoryBudget.source`, assigned by the broker,
+as the only mode indicator. Record raw measurements honestly; never infer the mode
+from them. Do not refuse boot: shared custody remains mandatory. Archived v1
+reports remain byte-for-byte unchanged. This
+fallback and inherited bounds are distinct from provider capacity or memory/pids
+resource qualification.
+
+Idle requires a fresh complete engine-runtime census, including the engine leaf
+and any new sibling, exempting only exact infrastructure births and the original
+C3 quiet populated-shell exception. Unknown is busy with bounded recovery.
+Conversation Stop proves its original process group only; escaped/detached
+descendants are not proven retired. Final VM drain closes launches and completes
+checkpoint/seal first. The outside root broker then uses whole-tree `cgroup.kill`
+and owns the final `populated=0` receipt because the kill also terminates the engine.
+
 ## Build and image contract
 
 The remote image must be reproducible from reviewed source and a pinned runtime
@@ -48,8 +152,9 @@ wire values become compatibility contracts when introduced.
 - Production setup has its own operator gate. The image entrypoint is a
   root-only Unix-socket supervisor; one prepare session authorizes one fixed
   engine launcher and stops an older process group before replacement. The
-  helper performs exact-revision Git and declared setup commands as UID/GID
-  10001, then requires live image attestation and durable engine registration.
+  frozen base helper retains its legacy UID/GID 10001 Git/setup contract. The
+  root broker adopts mutable roots to 10003 after positive old-engine drain,
+  then requires live image attestation and durable engine registration.
   Its journal skips durably completed commands, but setup commands remain
   at-least-once across the command-success/journal-write crash window and must
   be written to tolerate replay.

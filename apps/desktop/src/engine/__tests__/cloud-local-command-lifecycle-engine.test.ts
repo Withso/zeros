@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("../pty/node-pty-spawn", () => ({ createNodePtyShell: vi.fn(), createTerminalMirror: vi.fn(), disposePtyHost: vi.fn() }));
 vi.mock("../db/database", async original => ({ ...await original<object>(), sealZerosDbForRuntimeHandoff: vi.fn(), resumeZerosDbAfterRuntimeHandoff: vi.fn() }));
 import { ZerosEngine } from "../zeros-engine";
+import { CloudOwnedWorkloadRegistry } from "../agents/containment/cloud-owned-workloads";
 import { sealZerosDbForRuntimeHandoff, resumeZerosDbAfterRuntimeHandoff } from "../db/database";
 
 const methods = ZerosEngine.prototype as unknown as {
@@ -9,17 +10,22 @@ const methods = ZerosEngine.prototype as unknown as {
   resumeCloudRuntimeHandoff(this: unknown): void;
   retireIdleCloudBootAgents(this: unknown): Promise<void>;
   sealCloudLocalWriter(this: unknown): Promise<void>;
-  cloudIdleWarmHostsDeferInspection(this: unknown): boolean;
+  cloudIdleUserProcesses(this: unknown): Promise<boolean>;
 };
 describe("original local writer lifecycle at engine boundaries", () => {
   it.each(["idle", "empty", "foreground", "reserved", "background", "unknown", "retired", "local"])(
-    "defers observational process checks only for exact original idle hosts (%s)", kind => {
+    "requires the current census despite cached native inventory (%s)", async kind => {
       const inventory = { complete: kind !== "unknown", foreground: kind === "foreground" ? 1 : 0,
         reservedLaunches: kind === "reserved" ? 1 : 0, background: kind === "background" ? 1 : 0,
-        idleHosts: kind === "empty" ? 0 : 1, scopes: [{ phase: "idle" }] };
-      const state = { cloudWorker: kind === "local" ? null : {},
-        cloudAgentBoot: { authorityActive: kind !== "retired", executionFactory: { bootScopeActivity: () => inventory } } };
-      expect(methods.cloudIdleWarmHostsDeferInspection.call(state)).toBe(kind === "idle");
+        idleHosts: kind === "empty" ? 0 : 1, scopes: [{ phase: "idle", executionId: "original-native" }] };
+      const cloudWorkloads = new CloudOwnedWorkloadRegistry();
+      const inspect = vi.spyOn(cloudWorkloads, "inspect").mockResolvedValue({ complete: true,
+        pendingLaunches: 0, failedRetirements: 0, workloadPids: [123], infrastructurePids: [] });
+      const bootScopeActivity = vi.fn(() => inventory);
+      const state = { cloudWorker: kind === "local" ? null : {}, cloudWorkloads,
+        cloudAgentBoot: { authorityActive: kind !== "retired", executionFactory: { bootScopeActivity } } };
+      expect(await methods.cloudIdleUserProcesses.call(state)).toBe(true);
+      expect(inspect).toHaveBeenCalledOnce(); expect(bootScopeActivity).not.toHaveBeenCalled();
     });
   it("captures the exact acknowledged file pair before publishing final local writer completion", async () => {
     const order: string[] = [];
@@ -28,6 +34,7 @@ describe("original local writer lifecycle at engine boundaries", () => {
     const state = { root: "/trusted/repository", cloudLocalSealFlight: null, cloudLocalWriterLifecycle: lifecycle,
       cloudAgentBoot: { authorityActive: true, executionFactory: {} }, cloudLocalMirror: {}, cloudRuntimeRegistration: {},
       cloud: { setHumanServicesPaused: vi.fn() }, cloudCommands: { pauseClaims: vi.fn() } };
+    Object.setPrototypeOf(state, ZerosEngine.prototype);
     await methods.sealCloudLocalWriter.call(state);
     expect(order).toEqual(["sealed", "captured"]); expect(lifecycle.captureCheckpoint).toHaveBeenCalledOnce();
   });
@@ -36,6 +43,7 @@ describe("original local writer lifecycle at engine boundaries", () => {
       cloudLocalWriterLifecycle: { drainAndSeal: vi.fn(async () => {}), captureCheckpoint: vi.fn(async () => { throw new Error("capture refused"); }) },
       cloudAgentBoot: { authorityActive: true, executionFactory: {} }, cloudLocalMirror: {}, cloudRuntimeRegistration: {},
       cloud: { setHumanServicesPaused: vi.fn() }, cloudCommands: { pauseClaims: vi.fn() } };
+    Object.setPrototypeOf(state, ZerosEngine.prototype);
     await expect(methods.sealCloudLocalWriter.call(state)).rejects.toThrow("capture refused");
   });
   it.each(["local", "legacy"])("uses the %s writer seal for resident handoff", async mode => {

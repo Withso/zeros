@@ -106,8 +106,8 @@ const checks = {
     const sdk = internal(fromWorker.resolve("@cursor/sdk"));
     internal(createRequire(sdk).resolve("@cursor/sdk-linux-x64/package.json"));
     assert(Object.keys(fromWorker("@cursor/sdk")).length > 0);
-    // The parent maps the worker before mounting the read-only proc view.
-    // Nesting another user namespace here would need to write /proc/uid_map.
+    // The parent maps engine10003 before installing read-only proc. No nested
+    // user namespace is created here; its uid_map would be read-only (#410).
     const helper = await import(pathToFileURL(path.join(root, "lib/zeros/runtime-self-test.mjs")).href);
     assert.equal(helper.probeCursorPlatformPayload(root), true);
   },
@@ -120,7 +120,6 @@ const checks = {
       "tinyglobby",
       "@octokit/rest",
       "ssh2",
-      "@anthropic-ai/sandbox-runtime",
     ]) {
       internal(fromWorker.resolve(name));
       fromWorker(name);
@@ -145,20 +144,24 @@ const checks = {
     assert(browser.startsWith(path.join(worker, "design-browsers") + "/"));
     assert(fs.existsSync(path.join(worker, "design-browsers/NOTICE.txt")));
   },
-  supervisor_assets() {
+  host_assets() {
+    const modules = [
+      "host-process-supervisor.mjs",
+      "cloud-host-workload-entry.mjs",
+      "cloud-workload-cgroup.mjs",
+    ].map(name => path.join(worker, "apps/desktop/src/engine/agents/containment", name));
     for (const relative of [
       "bin/cloud-engine-namespace",
-      "bin/cloud-process-supervisor",
-      "worker/binaries/zsr-supervisor.mjs",
-      "worker/binaries/zsr-rg",
+      "worker/binaries/rg",
     ])
       internal(path.join(root, relative));
-    execute(node, [
-      "--check",
-      path.join(worker, "binaries/zsr-supervisor.mjs"),
-    ]);
+    for (const filename of modules) {
+      assert(fs.lstatSync(filename).isFile());
+      internal(filename);
+      execute(node, ["--check", filename]);
+    }
     assert(
-      execute(path.join(worker, "binaries/zsr-rg"), ["--version"]).startsWith(
+      execute(path.join(worker, "binaries/rg"), ["--version"]).startsWith(
         "ripgrep ",
       ),
     );
@@ -169,7 +172,7 @@ const checks = {
     fromWorker(
       path.join(
         worker,
-        "apps/desktop/src/engine/agents/containment/zsr-boundary.ts",
+        "apps/desktop/src/engine/agents/containment/host-boundary.ts",
       ),
     );
     fromWorker(

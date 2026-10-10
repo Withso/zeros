@@ -15,6 +15,7 @@ export function classifyEngineStderrLine(line: string): EngineStderrLevel {
   ) {
     return "warn";
   }
+  // Read successful diagnostics from older engines during rolling upgrades.
   if (/^\[zsr\] retired \S+ in \d+ms \(/.test(text)) return "log";
   if (/^\[codex\/binary-resolver\] no bundled codex resolved\b/.test(text)) {
     return "warn";

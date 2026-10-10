@@ -67,6 +67,26 @@ function makeFake() {
 }
 
 describe("PtyService", () => {
+  it('reports only positive no-child failures to the original launch owner',()=>{
+    for(const reason of ['spawn-failed','host-unavailable','host-lost',undefined] as const){
+      const fake=makeFake();Object.defineProperty(fake.handle,'pid',{get:()=>0});
+      const svc=new PtyService(process.cwd(),()=>fake.handle);const reported:unknown[]=[];
+      svc.create({sessionId:'pending-proof',onSpawnFailed:value=>reported.push(value)});
+      fake.emitExit(null,null,reason);
+      expect(reported).toEqual(reason==='spawn-failed'||reason==='host-unavailable'?[reason]:[]);
+    }
+  });
+  it('publishes native exit and settles waiters even when an owner callback fails',async()=>{
+    const fake=makeFake();Object.defineProperty(fake.handle,'pid',{get:()=>0});
+    const svc=new PtyService(process.cwd(),()=>fake.handle),exits:unknown[]=[];
+    svc.onExit((...args)=>exits.push(args));
+    svc.create({sessionId:'owner-failed',onSpawnFailed:()=>{throw new Error('original launch proof failed');},
+      onExit:()=>{throw new Error('original retirement failed');}});
+    const exited=svc.waitForExit('owner-failed');
+    expect(()=>fake.emitExit(null,null,'spawn-failed')).not.toThrow();
+    expect(await exited).toBe(true);expect(svc.has('owner-failed')).toBe(false);
+    expect(exits).toEqual([['owner-failed',null,null,'spawn-failed']]);
+  });
   it("preserves local writes and output without using cloud input tracking", () => {
     const fake = makeFake();
     let clockReads = 0;
@@ -84,7 +104,7 @@ describe("PtyService", () => {
   it("retains recent input for ten minutes without treating replay/output as input", () => {
     let now = 0;
     const fake = makeFake();
-    const svc = new PtyService(process.cwd(), () => fake.handle, undefined, { now: () => now, agentAuthIdentity: { uid: 10001, gid: 10001 } });
+    const svc = new PtyService(process.cwd(), () => fake.handle, undefined, { now: () => now, agentAuthIdentity: { uid: process.geteuid?.() ?? 0, gid: process.getegid?.() ?? 0 } });
     svc.create({ sessionId: "idle-input", cwd: process.cwd() });
     expect(svc.hasRecentInput()).toBe(false);
     svc.write("idle-input", "hello"); expect(svc.hasRecentInput()).toBe(true);
@@ -343,10 +363,10 @@ describe("PtyService", () => {
     }
   });
 
-  // The qualified cloud worker and its uid/gid projection exist only on the
-  // Linux backend. macOS should never construct this PtyService option.
+  // Cloud agents use the actual engine identity. Local keeps its existing
+  // repository-free authentication directory.
   it.runIf(process.platform === "linux")(
-    "projects the isolated auth cwd read-only to a qualified cloud worker",
+    "keeps the cloud auth cwd private to the actual engine identity",
     () => {
       const stateRoot = fs.mkdtempSync(
         path.join(os.tmpdir(), "zeros-pty-auth-"),
@@ -354,9 +374,9 @@ describe("PtyService", () => {
       setStateRootForTesting(stateRoot);
       try {
         const ownerUid = process.getuid?.() ?? 1_000;
-        const uid = ownerUid === 0 ? 10_001 : ownerUid;
+        const uid = ownerUid;
         const ownerGid = process.getgid?.() ?? 1_000;
-        const gid = ownerGid === 0 ? 10_001 : ownerGid;
+        const gid = ownerGid;
         const svc = new PtyService(
           process.cwd(),
           () => makeFake().handle,
@@ -367,7 +387,7 @@ describe("PtyService", () => {
         const stat = fs.statSync(authCwd);
         expect(stat.uid).toBe(ownerUid);
         expect(stat.gid).toBe(gid);
-        expect(stat.mode & 0o777).toBe(0o750);
+        expect(stat.mode & 0o777).toBe(0o700);
       } finally {
         setStateRootForTesting(null);
         fs.rmSync(stateRoot, { recursive: true, force: true });

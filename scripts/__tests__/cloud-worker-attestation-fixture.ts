@@ -19,7 +19,7 @@ export const markerPath = "/etc/zeros/cloud-worker.json";
 export const compatibilityPath = "/opt/zeros-bootstrap/compatibility.json";
 export const digest = (bytes: string | Buffer) => crypto.createHash("sha256").update(bytes).digest("hex");
 
-export function attestationFixture(version = 4) {
+export function attestationFixture(version = 4, observations: { availableCPUs?: number } = {}) {
   const tree = cloudRuntimeFixture();
   if (version !== 4) fs.rmSync(tree.physical("/opt/zeros"), { recursive: true, force: true });
   let root = version === 4 ? tree.descriptor.root : "/opt/zeros-runtime";
@@ -37,7 +37,7 @@ export function attestationFixture(version = 4) {
   for (const file of ["bin/node", "bin/start-engine.sh", version === 4 ? "bin/cloud-engine-namespace" : "cloud-engine-namespace",
     version === 4 ? "bin/cloud-process-supervisor" : "cloud-process-supervisor"])
     tree.write(`${root}/${file}`, "installed", 0o555);
-  for (const file of ["dist-engine/cli.js", "apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs",
+  for (const file of ["dist-engine/cli.js", "apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs",
     "scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs"])
     tree.write(`${worker}/${file}`, "installed", 0o555);
   for (const file of ["/usr/bin/bwrap", "/usr/bin/setpriv"]) tree.write(file, "installed", 0o555);
@@ -111,17 +111,41 @@ export function attestationFixture(version = 4) {
   tree.write(`${cgroup}/cgroup.controllers`, "cpu memory pids");
   tree.write(`${cgroup}/cgroup.subtree_control`, "cpu memory pids");
   tree.write(`${cgroup}/cgroup.procs`, "");
-  const limits = { finite: true, cpuMax: "400000 100000", memoryMax: String(7 * 1024 ** 3), pidsMax: "4096",
-    hierarchy: [{ path: `${cgroup.slice("/sys/fs/cgroup".length)}/engine-32345678-1234-4234-8234-123456789abc`,
-      cpuMax: "400000 100000", memoryMax: String(7 * 1024 ** 3), pidsMax: "4096" }] };
-  const qualification = { version: 1, secure: true,
-    identity: { secure: true, hostUid: 10003, namespaceUid: 0, noNewPrivs: 1, seccompMode: 2, resources: limits,
+  const common = `${cgroup}/engine-runtime`, engine = `${common}/engine-32345678-1234-4234-8234-123456789abc`;
+  tree.write(`${common}/cpu.max`, "400000 100000");
+  tree.write(`${common}/memory.max`, String(7 * 1024 ** 3));
+  tree.write(`${common}/pids.max`, "4096");
+  tree.write(`${engine}/cpu.max`, "max 100000");
+  const readLimit = (file: string) => { try { return fs.readFileSync(tree.physical(file), "utf8"); } catch { return null; } };
+  const limits = { ...resources.effectiveCloudResourceLimits(`0::${engine.slice("/sys/fs/cgroup".length)}\n`, readLimit),
+    memoryBudget: { nominalMemoryBytes: String(8 * 1024 ** 3), measuredMemoryBytes: String(8 * 1024 ** 3),
+      hostMemoryMax: String(256 * 1024 ** 2), source: "nominal", capped: false },
+    cpuSplit: { engine: { cpuMax: "max 100000", cpuWeight: 100 }, workload: { controllers: ["cpu"], cpuWeight: 100,
+      cap: { kind: "applied", effectiveCpus: 4, cpuMax: "300000 100000" } } } };
+  tree.write(`${cgroup}/host/memory.max`, String(256 * 1024 ** 2));
+  tree.write("/run/zeros/cloud-resource-contract.json", { version: 1,
+    resources: { architecture: "linux/amd64", cpuMillicores: 4000, memoryMiB: 8192, storageMiB: 20480 } }, 0o600);
+  const qualification = { version: 2, boundary: "workspace-vm", qualified: true,
+    identity: { qualified: true, hostUid: 10003, namespaceUid: 10003, noNewPrivs: 1, seccompMode: 2, resources: limits,
+      capabilities: { effective: 0, permitted: 0, inheritable: 0, bounding: 0, ambient: 0 },
       checks: [{ name: "fixed-engine-user-namespace", status: "pass" }] },
-    workload: { secure: true }, capture: { secure: true }, humanServices: { secure: true }, actorTools: { secure: true } };
-  const setupQualification = { secure: true, unprivileged: true, detachedDescendantsRetired: true, timeoutRetired: true };
+    execution: { sameEngineIdentity:true,noSandbox:true,ownedProcessGroups:true,originalProcessGroupsRetired:true,
+      timeoutRetired:true,workloadCgroup:true,vmWorkloadDrain:true },
+    capture: { sameEngineIdentity:true,chromiumSandbox:true },
+    humanServices: { sameEngineIdentity:true,noSandbox:true }, actorTools: { sameEngineIdentity:true,noSandbox:true } };
+  const setupQualification = { hostUid: 10003, hostGid: 10003, detachedDescendantsRetired: true, timeoutRetired: true };
   const namespaces = Object.fromEntries(["mnt", "pid", "cgroup", "net", "ipc", "uts", "user"].map((name, i) => [name, `${name}:[${100 + i}]`]));
   tree.mkdir("/run/zeros"); fs.chmodSync(tree.physical("/run/zeros"), 0o700);
-  const filesystem = { ...fs, ...tree.filesystem,
+  const filesystem: typeof tree.filesystem & {
+    readFileSync: typeof fs.readFileSync;
+    writeFileSync(file: string, data: string | Buffer, options: fs.WriteFileOptions): void;
+    mkdirSync(file: string, options: fs.MakeDirectoryOptions): string | undefined;
+    chmodSync(file: string, mode: number): void;
+    unlinkSync(file: string): void;
+    renameSync(from: string, to: string): void;
+    rmSync(file: string, options: fs.RmOptions): void;
+    statfsSync(): { blocks: bigint; bsize: bigint; type: number };
+  } = { ...fs, ...tree.filesystem,
     realpathSync: (file: string) => file.startsWith(`${sandbox}/`) ? file : tree.filesystem.realpathSync(file),
     readFileSync: ((file: string | number, options?: fs.EncodingOption) => fs.readFileSync(typeof file === "number" ? file : tree.physical(file), options)) as typeof fs.readFileSync,
     readlinkSync: (file: string) => file.startsWith("/proc/self/ns/") ? namespaces[path.basename(file)] : tree.filesystem.readlinkSync(file),
@@ -174,8 +198,9 @@ export function attestationFixture(version = 4) {
       const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
       const require = (id: string): unknown => {
         if (id === "node:fs") return filesystem;
+        if (id === "node:perf_hooks") return {performance};
         if (id === "node:crypto") return { ...crypto, randomBytes: (count: number) => Buffer.alloc(count, 1) };
-        if (id === "node:os") return { ...os, availableParallelism: () => 4 };
+        if (id === "node:os") return { ...os, availableParallelism: () => observations.availableCPUs ?? 4 };
         if (id === "node:path") return path;
         if (id === "node:url") return url;
         if (id === "node:util") return { TextDecoder };
@@ -206,6 +231,7 @@ export function attestationFixture(version = 4) {
   }
   return { ...tree, root, worker, receipt, receiptPath, manifest, compatibility, marker, filesystem,
     qualification, setupQualification, namespaces, limits, calls, execute, updateReceipt,
+    refreshLimits: () => Object.assign(limits, resources.effectiveCloudResourceLimits(`0::${engine.slice("/sys/fs/cgroup".length)}\n`, readLimit)),
     setSpawn: (override: typeof spawnOverride) => { spawnOverride = override; },
     advance: (milliseconds: number) => { now += milliseconds; } };
 }

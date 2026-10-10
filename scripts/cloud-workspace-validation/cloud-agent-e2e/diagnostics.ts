@@ -1,4 +1,5 @@
-/** Fixed production log contract; raw engine/provider output stays in memory. */
+/** Compatibility reader for archived ZSR logs, not an active launch or success
+ * contract. Raw engine/provider output stays in memory. */
 export function zsrAdmissionDiagnostic(logs: string) {
   const stages = new Set(["preflight", "ownership", "territory", "policy", "resources", "cloud-state", "activation", "canary"]);
   const patterns = [ ["canary_exit", /host-parity canary exited/], ["canary_timeout", /host-parity canary.*timed out/],
@@ -41,6 +42,7 @@ export function zsrAdmissionDiagnostic(logs: string) {
     supervisorPrefixPresent: line.includes("[zsr-supervisor]"), containerPrefixPresent: line.includes("[cloud-container-worker]"),
     ...(canaryExitCode !== undefined ? { canaryExitCode } : {}) };
 }
+/** Compatibility reader for the old bounded preflight diagnostic. */
 export function cloudPreflightDiagnostic(logs: string): { code: "cloud_containment_environment_setup_failed"; reasons: string[] } | undefined {
   const reasons = new Set(["supervisor_missing", "supervisor_runtime_missing", "ripgrep_missing", "container_launcher_unavailable",
     "podman_unavailable", "process_domain_unavailable", "unsupported_platform", "probe_rejected"]);

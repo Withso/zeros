@@ -12,10 +12,11 @@
 // liberal (we only need to prove bytes/keystrokes/exit flow end to end).
 // ──────────────────────────────────────────────────────────
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import * as fs from "node:fs";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,10 +24,16 @@ import {
   spawnPtyViaHost,
   disposePtyHost,
   ptyHostRespawnHoldOffMsForTests,
+  currentPtyHostBirth,
 } from "../pty-host-client";
 import type { PtyHandle } from "../service";
 import type { PtyExitReason } from "@zeros/protocol/messages";
 import { HostExecutionBoundary } from "../../agents/containment/host-boundary";
+
+vi.mock("node:fs", async original => {
+  const actual = await original<typeof import("node:fs")>();
+  return { ...actual, openSync: vi.fn(actual.openSync) };
+});
 
 const SHELL =
   process.env.SHELL && process.env.SHELL.length > 0
@@ -130,6 +137,120 @@ afterEach(() => {
   // Tear down the shared host between tests so a lingering shell can't bleed
   // output into the next case.
   disposePtyHost();
+  vi.mocked(fs.openSync).mockReset();
+  vi.restoreAllMocks();
+});
+
+describe.runIf(process.platform === "linux")("original shared PTY host birth", () => {
+  it("captures the original child at spawn and retains it after its last session exits", async () => {
+    expect(currentPtyHostBirth()).toBeNull();
+    const opened = vi.mocked(fs.openSync);
+    const { handle, data, exit } = makeHandle();
+    const birth = currentPtyHostBirth();
+    expect(birth).not.toBeNull();
+    expect(Object.keys(birth!).sort()).toEqual(["parent", "pid", "startToken"]);
+    expect(Object.isFrozen(birth)).toBe(true);
+    expect(birth!.parent).toBe(process.pid);
+    const call = opened.mock.calls.find(([file]) => file === `/proc/${birth!.pid}/stat`);
+    expect(call).toBeDefined();
+    expect(Number(call![1]) & fs.constants.O_NOFOLLOW).toBe(fs.constants.O_NOFOLLOW);
+    const stat = fs.readFileSync(`/proc/${birth!.pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
+    expect(stat.startsWith(`${birth!.pid} (`)).toBe(true);
+    expect(Number(fields[1])).toBe(birth!.parent);
+    expect(fields[19]).toBe(birth!.startToken);
+    expect(await waitFor(data, () => handle.pid > 0)).toBe(true);
+    expect(handle.pid).not.toBe(birth!.pid);
+    handle.write("exit 0\r");
+    await exit;
+    expect(currentPtyHostBirth()).toBe(birth);
+  });
+
+  it("clears on disposal and never lets an old child's close clear its successor", async () => {
+    const first = makeHandle(), original = currentPtyHostBirth();
+    expect(original).not.toBeNull();
+    expect(await waitFor(first.data, () => first.handle.pid > 0)).toBe(true);
+    disposePtyHost();
+    expect(currentPtyHostBirth()).toBeNull();
+    const second = makeHandle(), successor = currentPtyHostBirth();
+    expect(successor).not.toBeNull();
+    expect(successor!.pid).not.toBe(original!.pid);
+    expect(await waitFor(second.data, () => second.handle.pid > 0)).toBe(true);
+    expect(await waitFor(() => "", () => !fs.existsSync(`/proc/${original!.pid}/stat`))).toBe(true);
+    expect(currentPtyHostBirth()).toBe(successor);
+  });
+
+  it("clears a lost host and captures a new original birth on respawn", async () => {
+    const first = makeHandle(), original = currentPtyHostBirth();
+    expect(original).not.toBeNull();
+    expect(await waitFor(first.data, () => first.handle.pid > 0)).toBe(true);
+    process.kill(original!.pid, "SIGTERM");
+    expect((await first.exit).reason).toBe("host-lost");
+    expect(currentPtyHostBirth()).toBeNull();
+    const second = makeHandle(), successor = currentPtyHostBirth();
+    expect(successor).not.toBeNull();
+    expect(successor!.pid).not.toBe(original!.pid);
+    expect(await waitFor(second.data, () => second.handle.pid > 0)).toBe(true);
+  });
+
+  it("keeps ordinary PTY operation available when the original birth read fails", async () => {
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.mocked(fs.openSync).mockImplementation((...args) => {
+      if (/^\/proc\/\d+\/stat$/.test(String(args[0]))) throw Object.assign(new Error("unavailable"), { code: "EACCES" });
+      return actual.openSync(...args);
+    });
+    const { handle, data } = makeHandle();
+    expect(currentPtyHostBirth()).toBeNull();
+    expect(await waitFor(data, () => handle.pid > 0)).toBe(true);
+    handle.write("echo ZEROS_BIRTH_READ_FAILURE_OK\r");
+    expect(await waitFor(data, bytes => bytes.includes("ZEROS_BIRTH_READ_FAILURE_OK"))).toBe(true);
+    expect(currentPtyHostBirth()).toBeNull();
+  });
+
+  it.each(["symlink", "overflow", "directory", "truncated", "wrong-pid", "wrong-parent"])(
+    "grants no exemption for %s birth evidence and keeps the terminal usable", async condition => {
+      const directory = await mkdtemp(path.join(tmpdir(), "zeros-pty-birth-"));
+      const artifact = path.join(directory, "stat"), actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+      try {
+        await writeFile(artifact, condition === "overflow" ? "0".repeat(4097) : "truncated");
+        if (condition === "symlink") await symlink(artifact, path.join(directory, "stat-link"));
+        // Explicit fault injection at the original child's fixed proc-stat
+        // open; the real child still runs with its normal env/argv and IPC.
+        vi.mocked(fs.openSync).mockImplementation((...args) => {
+          const match = /^\/proc\/([1-9][0-9]*)\/stat$/.exec(String(args[0]));
+          if (!match) return actual.openSync(...args);
+          if (condition === "wrong-pid" || condition === "wrong-parent") {
+            const source = actual.readFileSync(args[0], "utf8"), end = source.lastIndexOf(")");
+            const fields = source.slice(end + 1).trim().split(/\s+/);
+            if (condition === "wrong-parent") fields[1] = String(process.pid + 1);
+            actual.writeFileSync(artifact, (condition === "wrong-pid" ? source.slice(0, end + 1).replace(/^\d+/, "1") : source.slice(0, end + 1)) + " " + fields.join(" "));
+          }
+          const file = condition === "directory" ? directory : condition === "symlink" ? path.join(directory, "stat-link") : artifact;
+          return actual.openSync(file, args[1], args[2]);
+        });
+        const { handle, data } = makeHandle();
+        expect(currentPtyHostBirth()).toBeNull();
+        expect(await waitFor(data, () => handle.pid > 0)).toBe(true);
+        expect(currentPtyHostBirth()).toBeNull();
+      } finally {
+        disposePtyHost();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("does not capture a birth on a non-Linux host", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    let terminal!: ReturnType<typeof makeHandle>;
+    try {
+      Object.defineProperty(process, "platform", { ...platform, value: "darwin" });
+      terminal = makeHandle();
+      expect(currentPtyHostBirth()).toBeNull();
+      expect(vi.mocked(fs.openSync).mock.calls.some(([file]) => /^\/proc\/\d+\/stat$/.test(String(file)))).toBe(false);
+    } finally { Object.defineProperty(process, "platform", platform); }
+    expect(await waitFor(terminal.data, () => terminal.handle.pid > 0)).toBe(true);
+    expect(currentPtyHostBirth()).toBeNull();
+  });
 });
 
 describe("pty-host-client — out-of-process node-pty", () => {

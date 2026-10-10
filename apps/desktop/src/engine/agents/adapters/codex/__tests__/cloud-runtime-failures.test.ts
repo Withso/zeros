@@ -9,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StdioAgentProcess } from "../../shared/stdio-process";
 import type { CloudProviderExecution } from "../../../cloud-provider-execution";
 import type { AgentAdapterContext } from "../../../types";
+import {createCloudNativeHome,type CloudNativeHome} from "../../../containment/cloud-native-home";
+let nativeDataRoot:string, nativeHome:CloudNativeHome;
 
 const harness = vi.hoisted(() => ({
   proc: null as StdioAgentProcess | null,
@@ -104,7 +106,7 @@ function installCloud(cwd="/srv/zeros/workspace", credentialKind: "codex-chatgpt
     refreshCodex: vi.fn(async () => { throw new Error("private-refresh-token-sentinel"); }),
   };
   harness.execution = { mode:"actor-grant-v1",cwd,lease,lifetime:lease,auth:lease,model:lease.admission.model,
-    credentialKind,nativeCapabilities:null,environment:null,coordinator: { environment: () => ({}) } } as unknown as CloudProviderExecution;
+    credentialKind,nativeCapabilities:null,environment:null,coordinator: { nativeHome, environment: () => nativeHome.environment() } } as unknown as CloudProviderExecution;
   return lease;
 }
 const boot = () => bootCodexAppServerRuntime({ cwd: "/srv/zeros/workspace", clientInfo: { name: "Zeros-test", version: "1" } });
@@ -139,7 +141,7 @@ async function installRealCloud(attachProcess = true) {
   realLeases.push(lease);
   harness.execution = { mode:"actor-grant-v1",cwd: "/srv/zeros/workspace",lease,lifetime:lease,auth:lease,model:lease.admission.model,
     credentialKind:lease.credentialKind,nativeCapabilities:lease.nativeCapabilities,environment:lease.environment,
-    coordinator: { environment: () => ({}) } } as unknown as CloudProviderExecution;
+    coordinator: { nativeHome, environment: () => nativeHome.environment() } } as unknown as CloudProviderExecution;
   return { lease, request, advance: (ms: number) => { elapsed += ms; } };
 }
 function installAdapter() {
@@ -167,13 +169,43 @@ function installOriginalLifetime(native: ReturnType<typeof installProcess>, cred
   Object.assign(harness.execution!, { mode: "boot-owner-v1", lifetime, auth });
   return { original, lifetime };
 }
-beforeEach(() => { harness.execution = null; harness.proc = null; harness.executor.mockReset();
+beforeEach(async () => { nativeDataRoot=await mkdtemp(path.join(os.tmpdir(),"zeros-codex-runtime-home-"));
+  nativeHome=await createCloudNativeHome({dataRoot:nativeDataRoot,conversationId:"original-conversation",provider:"codex",executionId:"original-execution"});
+  harness.execution = null; harness.proc = null; harness.executor.mockReset();
   vi.mocked(removeSessionDir).mockClear();
   harness.executor.mockResolvedValue({ environmentId: "synthetic-env", url: "ws://127.0.0.1/synthetic-capability" }); });
 afterEach(async () => {
   for (const adapter of adapters.splice(0)) await adapter.dispose();
   for (const lease of realLeases.splice(0)) await lease.close();
   await harness.proc?.stop(); vi.clearAllTimers(); vi.useRealTimers();
+  await rm(nativeDataRoot,{recursive:true,force:true});
+});
+
+describe("Codex VM-only auth storage", () => {
+  it("keeps cloud credentials in the original physical file store even without a kernel boundary",async()=>{
+    installProcess(startupReplies);installCloud();const runtime=await boot();
+    expect(vi.mocked(spawnStdioAgent).mock.calls.at(-1)?.[0].args).toEqual(expect.arrayContaining([
+      'cli_auth_credentials_store="file"','mcp_oauth_credentials_store="file"',
+    ]));
+    expect(vi.mocked(spawnStdioAgent).mock.calls.at(-1)?.[0].env?.CODEX_HOME).toBe(nativeHome.paths.codexHome);
+    await runtime.dispose();
+  });
+});
+
+describe("Codex permission metadata by placement", () => {
+  it.each([[false,"new"],[true,"new"],[false,"resume"],[true,"resume"]] as const)("keeps Local mode text and avoids a cloud workspace sandbox claim (cloud=%s, %s)", async (cloud,kind) => {
+    installProcess(startupReplies); if(cloud)installCloud();
+    const {adapter}=installAdapter();
+    const modes=kind==="new"
+      ? (await adapter.newSession({executionId:"mode-execution",cwd:"/srv/zeros/workspace"})).session.modes!.availableModes
+      : (await adapter.loadSession({executionId:"mode-resume",sessionId:"native-thread",cwd:"/srv/zeros/workspace"})).modes!.availableModes;
+    expect(modes.map(mode=>mode.id)).toEqual(["ask","auto-edit","full-access","read-only"]);
+    if(cloud)expect(JSON.stringify(modes)).not.toMatch(/sandbox: workspace-write|keeping the workspace sandbox/);
+    else {
+      expect(modes.find(mode=>mode.id==="ask")?.description).toBe("Prompt before every tool call (sandbox: workspace-write).");
+      expect(modes.find(mode=>mode.id==="auto-edit")?.description).toContain("keeping the workspace sandbox");
+    }
+  });
 });
 
 describe("Codex real native prompt observation", () => {

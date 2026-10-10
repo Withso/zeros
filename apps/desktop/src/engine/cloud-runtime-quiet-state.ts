@@ -26,7 +26,7 @@ export interface CloudRuntimeHandoffControls {
   drained(): boolean;
   busy(): boolean;
   /** Synchronous admission barrier. Existing admitted work is never killed. */
-  fence(enabled: boolean): void;
+  fence(enabled: boolean): void | Promise<void>;
   inspectUserProcesses(): Promise<boolean>;
   /** Flush durable writes and close/seal the old SQLite writer. */
   seal(): Promise<void>;
@@ -52,6 +52,7 @@ export interface CloudRuntimeQuietStateOptions {
 export class CloudRuntimeQuietState {
   private handoff: Handoff | null = null;
   private preparing: Promise<CloudRuntimeHandoffReceipt | null> | null = null;
+  private restoring: Promise<boolean> | null = null;
   constructor(private readonly options: CloudRuntimeQuietStateOptions) {}
 
   async handleHandoff(raw: CloudRuntimeHandoffCommand): Promise<CloudRuntimeHandoffReply | null> {
@@ -110,7 +111,7 @@ export class CloudRuntimeQuietState {
     if (!state || state.request.challenge !== challenge || state.phase === "consumed") return false;
     state.cancelled = true;
     await this.preparing;
-    return this.handoff !== state || this.restore(state);
+    return this.handoff !== state || await this.restore(state);
   }
 
   private sameSource(request: CloudRuntimeHandoffRequest): boolean {
@@ -125,13 +126,22 @@ export class CloudRuntimeQuietState {
     try { return !this.options.handoff!.drained() || this.options.handoff!.busy() || this.options.activity().recordSync !== "ready"; }
     catch { return true; }
   }
-  private restore(state: Handoff): boolean {
+  private restore(state: Handoff): Promise<boolean> {
+    if (this.restoring) return this.restoring;
+    const flight = this.restoreOriginal(state).finally(() => { if (this.restoring === flight) this.restoring = null; });
+    this.restoring = flight;
+    return flight;
+  }
+  private async restoreOriginal(state: Handoff): Promise<boolean> {
     if (this.handoff !== state || state.phase === "consumed") return false;
     clearTimeout(state.timer);
     if (!this.sameSource(state.request)) { state.cancelled = true; return false; }
     try {
       if (state.sealing) this.options.handoff!.unseal();
-      if (state.admissionFenced) this.options.handoff!.fence(false);
+      if (state.admissionFenced) await this.options.handoff!.fence(false);
+      // The async resident ACK may cross an authority replacement. Never
+      // publish resumed claims using the earlier source check.
+      if (this.handoff !== state || !this.sameSource(state.request)) return false;
       this.options.handoff!.resumeClaims();
       this.handoff = null; return true;
     } catch { state.cancelled = true; return false; }
@@ -146,12 +156,12 @@ export class CloudRuntimeQuietState {
       if (state.phase === "fenced") return receipt();
       if (this.handoffBusy()) return receipt();
       state.revision = this.options.activity().revision;
-      state.admissionFenced = true; controls.fence(true);
+      state.admissionFenced = true; await controls.fence(true);
       let processes = true;
       try { processes = await controls.inspectUserProcesses(); } catch { /* Unknown is busy. */ }
       if (!current()) return null;
       if (processes || this.handoffBusy() || this.options.activity().revision !== state.revision) {
-        controls.fence(false); state.admissionFenced = false; return receipt();
+        await controls.fence(false); state.admissionFenced = false; return receipt();
       }
       state.sealing = true;
       await controls.seal();
@@ -161,7 +171,7 @@ export class CloudRuntimeQuietState {
       state.phase = "fenced";
       return receipt();
     } catch { state.cancelled = true; return null; }
-    finally { if (!current()) this.restore(state); }
+    finally { if (!current()) await this.restore(state); }
   }
 
   async snapshot(challenge: string): Promise<CloudRuntimeQuietSnapshot | null> {

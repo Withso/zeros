@@ -22,6 +22,7 @@ import {
   type NativeCheckpointRoots,
 } from "./agents/containment/cloud-checkpoint-artifacts.mjs";
 import { DESIGN_DIRECTORY_ID_PATTERN, sanitizeDesignDirectoryName } from "./design/directory-path";
+import { CloudFinalCheckpointReceiptSchema, type CloudFinalCheckpointReceipt } from "./cloud-final-completion";
 
 const execFileAsync = promisify(execFile);
 const CONTENT_HEAD_PATH = "/internal/v1/cloud-workspaces/engine/content/head";
@@ -1077,6 +1078,7 @@ export class CloudWorkspaceDurabilityRuntime {
   private uploadCacheScope = "";
   private readonly uploadCache = new Map<string, { blobId: string; expiresAtMs: number }>();
   private lastDurable: DurableCheckpointState | null = null;
+  private finalCheckpoint: { scopeKey: string; receipt: CloudFinalCheckpointReceipt } | null = null;
 
   constructor(
     private readonly repositoryRoot: string,
@@ -1123,11 +1125,19 @@ export class CloudWorkspaceDurabilityRuntime {
         new Error("cloud checkpoint is already in progress"),
       );
     }
-    const task = this.runCheckpoint(directive, authority, stillIdle).finally(() => {
+    this.finalCheckpoint = null;
+    const task = this.runCheckpoint({ ...directive }, { ...authority }, stillIdle).finally(() => {
       if (this.active === task) this.active = null;
     });
     this.active = task;
     return task;
+  }
+
+  /** Only a response to this runtime's actual final CP commit can mint this
+   * receipt. Durable upload/cache state and an unknown ACK cannot supply it. */
+  readFinalCheckpoint(authority: CloudDurabilityAuthority): CloudFinalCheckpointReceipt | null {
+    return !this.active && this.finalCheckpoint?.scopeKey === this.scopeKey(authority)
+      ? this.finalCheckpoint.receipt : null;
   }
 
   private endpoint(
@@ -1894,6 +1904,14 @@ export class CloudWorkspaceDurabilityRuntime {
         designSelection: JSON.stringify(designSelection),
         nativeArchive: native,
       };
+      if (["before_stop", "before_archive", "before_delete", "before_rebuild"].includes(directive.reason)) {
+        const receipt = CloudFinalCheckpointReceiptSchema.parse({ scope: this.scope(authority), checkpoint: {
+          requestId: directive.id, checkpointId: this.lastDurable.checkpointId,
+          contentRevision: projection.currentRevision, manifestSha256: manifest.contentSha256, reason: directive.reason,
+        } });
+        Object.freeze(receipt.scope); Object.freeze(receipt.checkpoint); Object.freeze(receipt);
+        this.finalCheckpoint = { scopeKey: this.scopeKey(authority), receipt };
+      }
       await saveCloudNativeCheckpointCache({ roots: this.nativeRoots, deadlineAtMs: directive.deadlineAtMs, archive: native,
         scope: { workspaceId: authority.workspaceId, organizationId: authority.organizationId, checkpointId: this.lastDurable.checkpointId },
         snapshot: { contentRevision: this.lastDurable.contentRevision, scanFingerprint: this.lastDurable.scanFingerprint,

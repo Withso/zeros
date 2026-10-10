@@ -7,14 +7,15 @@ import path from "node:path";
 const CONTRACT_FILES = [
   "package.json",
   "pnpm-lock.yaml",
-  "scripts/zsr-qualification/pin.json",
+  "scripts/stage-ripgrep.mjs",
   "scripts/cloud-workspace-validation/sandbox/cloud-worker.json",
   "scripts/cloud-workspace-validation/sandbox/runtime-layout.json",
 ];
 const ARTIFACTS = [
   "dist-engine/cli.js",
   "dist-engine/design-capture-worker.js",
-  "binaries/zsr-supervisor.mjs",
+  "apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs",
+  "binaries/rg",
 ];
 const SHA256 = /^[a-f0-9]{64}$/;
 const hash = (value) => createHash("sha256").update(value).digest("hex");

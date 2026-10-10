@@ -76,6 +76,14 @@ interface WakeOwner { account: string; generation: number; stopVersion: number; 
 class CloudAdmissionGenerationChangedError extends Error {
   constructor(readonly generation: number) { super("Cloud workspace generation changed during admission"); }
 }
+function cloudHistoryReadError(response: BridgeMessage, invalidResponseMessage: string): Error {
+  if (response.type !== "WORKSPACE_ERROR") return new Error(invalidResponseMessage);
+  return Object.assign(new Error(response.message), {
+    name: "WorkspaceOpError",
+    code: response.code,
+    ...(response.remediation !== undefined ? { remediation: response.remediation } : {}),
+  });
+}
 interface PeerEntry extends CloudPeer {
   unsubscribers: Map<string, () => void>;
   stopStatus: () => void;
@@ -579,7 +587,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         this.assertCurrent(peer);
         const rows = op === "chats.list" ? "chats" : op === "messages.search" ? "hits" : "messages";
         if (response.type !== "WORKSPACE_RESPONSE" || !Array.isArray(record(record(response).result)[rows]))
-          throw new Error("Could not read the current cloud transcript");
+          throw cloudHistoryReadError(response, "Could not read the current cloud transcript");
         result = record(cloudIncoming(peer.scope, response as unknown as WireRecord).result);
         const metadata = this.historyMetadata(result);
         if (metadata && nativeRead) this.installNativeHistoryRestore(peer, nativeRead, metadata, this.historyConversations(op, params, result));
@@ -1008,7 +1016,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     } as Message);
     if (response.type !== "WORKSPACE_RESPONSE" ||
         !Array.isArray(record(record(response).result).chats))
-      throw new Error("Could not read cloud conversations");
+      throw cloudHistoryReadError(response, "Could not read cloud conversations");
     if (entry.epoch !== this.accountEpoch)
       throw new Error("Cloud account changed");
     this.assertCurrent(entry);

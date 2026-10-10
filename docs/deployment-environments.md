@@ -793,7 +793,7 @@ DMG/ZIP rather than being normalized by Actions artifact upload.
 
 The release graph deliberately has no repeated Linux quality job: exact-SHA
 Preflight already covers typechecks, lint, Vitest, release contracts and the
-secret-free ship guards. Mac builds retain shipping-kernel ZSR qualification,
+secret-free ship guards. Mac builds retain provider artifact checks,
 the compiled engine lifecycle and packaged terminal smoke tests, channel-specific
 environment routing, blockmaps, and signature verification. Builds have only
 `contents: read`, protected signing credentials and public build configuration,
@@ -945,14 +945,14 @@ workflow and 1,000 jobs, and an attempt change during job retrieval denies the
 old snapshot.
 
 The full Preflight run continues, including composer smoke and macOS workload.
-Pending macOS sandbox and credential proof is a deliberate Alpha deferral.
-Observed failures in the macOS runtime pins, agent boot, ZSR kernel, Design
-containment, GitHub credential or file-access checks veto later admission and
+Pending macOS credential proof is a deliberate Alpha deferral.
+Observed failures in the macOS runtime pins, agent boot, Design authoring,
+GitHub credential or file-access checks veto later admission and
 publication even with a green gate. Only explicitly classified packaged-engine
 lifecycle, workspace-lifecycle and Changes/Review failures may be deferred;
 unknown or mixed failing macOS steps deny. Composer smoke failure may coexist
 with a successful critical gate. Signed Mac builds retain their own shipping
-kernel, engine, packaged terminal, artifact and signature checks.
+provider, engine, packaged terminal, artifact and signature checks.
 
 The initial automatic Alpha barrier writes `ready=true` after successful CI
 and freshness checks, including when the flag is off and full CI succeeds. A

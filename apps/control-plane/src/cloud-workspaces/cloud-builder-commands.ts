@@ -7,8 +7,10 @@ export type BuilderFixedCommand = "install-runtime" | "runtime-self-test" | `com
 export const BUILDER_BASE_STATUS_COMMAND = "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status";
 export const RUNTIME_SMOKE_CHECKS = [
   "node_abi", "sqlite_query", "pty_load", "claude_version", "codex_version",
-  "cursor_load", "engine_load", "supervisor_idle", "containment_smoke",
+  "cursor_load", "engine_load", "supervisor_idle", "engine_lifecycle",
 ] as const;
+// Older runtime diagnostics remain readable; new inventory never emits this.
+const archivedRuntimeSmokeChecks = new Set(["containment_smoke"]);
 
 export const COMPUTER_TEMPLATE_MAX_INPUT_BYTES = 256 * 1024;
 export const COMPUTER_TEMPLATE_FIXED_COMMANDS = {
@@ -56,7 +58,8 @@ export function parseBuilderDiagnostic(stdout: string, command: BuilderFixedComm
     if (command === "install-runtime")
       return value.component === "installer" && (!value.ok || value.stage === "done") ? value : null;
     if (command === "runtime-self-test" && value.component === "qualification" && value.stage === "self_test" &&
-        value.failedChecks.every(check => (RUNTIME_SMOKE_CHECKS as readonly string[]).includes(check))) return value;
+        value.failedChecks.every(check => (RUNTIME_SMOKE_CHECKS as readonly string[]).includes(check) ||
+          archivedRuntimeSmokeChecks.has(check))) return value;
     if (isComputerBuilderCommand(command) && value.component === "build" &&
         (value.stage === computerStages[command] || (!value.ok && value.stage === "validate_input")) &&
         value.failedChecks.every(check => computerChecks.has(check))) return value;

@@ -2,7 +2,7 @@ import type { SessionStatus } from "./use-agent-session";
 
 /** Let an interactive admission or turn own provider, disk, and network
  * startup. Registry auth/version probes are useful freshness work, but their
- * provider subprocesses and ZSR canaries must not race the work the user just
+ * provider subprocesses and runtime probes must not race the work the user just
  * asked for. */
 export function canVerifyAgentRegistryInBackground(
   status: SessionStatus,

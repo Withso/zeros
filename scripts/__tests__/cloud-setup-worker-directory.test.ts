@@ -40,7 +40,7 @@ it.each([false, true])("runs v4 host setup in the physical repository before the
   fixture.spawn.mockReturnValue({ status: 0 });
   const argv = process.argv, exitCode = process.exitCode;
   vi.spyOn(process, "execPath", "get").mockReturnValue(`/opt/zeros-infra/r1-${"a".repeat(64)}/bin/node`);
-  vi.spyOn(process, "getuid").mockReturnValue(privileged ? 0 : 10001);
+  vi.spyOn(process, "getuid").mockReturnValue(privileged ? 0 : 10003);
   vi.spyOn(process, "platform", "get").mockReturnValue("linux");
   const physical = "/srv/zeros/files/repos/fixture/primary";
   fixture.admittedPath = physical;
@@ -50,9 +50,9 @@ it.each([false, true])("runs v4 host setup in the physical repository before the
   try {
     await import("../cloud-workspace-validation/sandbox/cloud-setup-process.mjs");
     expect(fixture.spawn).toHaveBeenCalledWith(privileged ? "/usr/bin/setpriv" : "/bin/bash",
-      privileged ? expect.arrayContaining(["--reuid=10001", "--unprivileged"]) : ["--noprofile", "--norc", "-lc", "pwd"], expect.objectContaining({
+      privileged ? expect.arrayContaining(["--reuid=10003", "--unprivileged"]) : ["--noprofile", "--norc", "-lc", "pwd"], expect.objectContaining({
       cwd: physical,
-      env: expect.objectContaining({ USER: "zeros-agent" }),
+      env: expect.objectContaining({ USER: "zeros-engine", HOME: "/srv/zeros/home/engine" }),
     }));
     expect(runtimeLayout.repository).not.toBe(runtimeLayout.logicalRepository);
   } finally {

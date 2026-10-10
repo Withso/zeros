@@ -36,10 +36,13 @@ credential_names=['.claude/.credentials.json','.codex/auth.json','.cursor/auth.j
 credentials=sum(present(root/name) for root in roots for name in credential_names)
 coordinators=pathlib.Path('/run/zeros/coordinators')
 history=pathlib.Path('/srv/zeros/state/native-agent-history')
+nativeHomes=pathlib.Path('/srv/zeros/state/native-agent-homes')
 runtime=pathlib.Path('/run/zeros')
 result={'sourceCommit':json.loads(pathlib.Path('/etc/zeros/image-build.json').read_text())['source']['commit'],
  'coordinatorEntries':entries(coordinators),
- 'nativeHistoryFiles':descendants(history),'knownCredentialFiles':credentials,
+ # Keep the closed legacy field: it inventories all native private state,
+ # including physical per-conversation HOME/XDG files in current runtimes.
+ 'nativeHistoryFiles':descendants(history)+descendants(nativeHomes),'knownCredentialFiles':credentials,
  'engineCoordinatorEntries':entries(pathlib.Path('/run/zeros/engine/coordinators')),
  'setupCgroup':present(pathlib.Path('/sys/fs/cgroup/zeros-cloud-setup')),
  'engineCgroup':present(pathlib.Path('/sys/fs/cgroup/zeros-cloud-engine')),

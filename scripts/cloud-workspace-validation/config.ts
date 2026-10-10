@@ -38,13 +38,13 @@ export const SANDBOX_ENGINE_DIR = runtimeLayout.engine;
 /** Writable validation checkout served by the engine. This deliberately
  * differs from SANDBOX_ENGINE_DIR so an agent cannot replace its supervisor. */
 export const SANDBOX_REPO_DIR = runtimeLayout.repository;
-/** Engine database/control state. It is absent from every code boundary. */
+/** Engine database/control state. Its0700 VM10003 ownership is shared by same-user agents. */
 export const SANDBOX_DATA_DIR = runtimeLayout.data;
 export const SANDBOX_ENGINE_LOG = runtimeLayout.log;
 export const SANDBOX_AGENT_HOME = runtimeLayout.agentHome;
 export const SANDBOX_CAPTURE_HOME = runtimeLayout.captureHome;
-export const SANDBOX_AGENT_UID = 10_001;
-export const SANDBOX_AGENT_GID = 10_001;
+export const SANDBOX_AGENT_UID = 10_003;
+export const SANDBOX_AGENT_GID = 10_003;
 
 
 function boundedEnvValue(

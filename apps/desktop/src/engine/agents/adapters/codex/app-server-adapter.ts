@@ -283,6 +283,16 @@ const CODEX_MODES: SessionMode[] = [
   },
 ] as never;
 
+// Cloud permission choices control native approvals and Plan. They do not
+// install a workspace sandbox around the provider process.
+const CLOUD_CODEX_MODES: SessionMode[] = CODEX_MODES.map(mode => ({
+  ...mode,
+  description: mode.id === "ask" ? "Prompt before operations requiring approval."
+    : mode.id === "auto-edit" ? "Approve requested operations automatically; permission changes still ask."
+    : mode.id === "read-only" ? "Plan with native read-only permissions."
+    : mode.description,
+}));
+
 export type CodexModeId = "ask" | "auto-edit" | "full-access" | "read-only";
 
 /** Resolve the renderer's persisted permission posture (plus legacy/native
@@ -332,8 +342,8 @@ export interface CodexSession {
   env?: Record<string, string>;
   cliBinary?: string;
   territory?: AgentFilesystemTerritory;
-  /** Authoritative outer execution boundary. Codex keeps its normal per-mode
-   * sandbox/approval posture; an active kernel backend subtracts Design. */
+  /** Authoritative placement and original lifecycle. Local keeps native
+   * permissions; cloud policy uses the VM and preserves approvals/read-only. */
   executionBoundary?: PreparedBoundary;
   runtime: CodexAppServerHandle;
   translator: CodexAppServerTranslator;
@@ -646,7 +656,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *
    *  It is honest only because of that. `mcpServers: []` means "Zeros injects
    *  none"; the user's native `~/.codex/config.toml` servers still load, since
-   *  Zeros never relocates CODEX_HOME (shared/config-isolation.ts). An
+   *  these Local metadata reads retain CODEX_HOME (shared/config-isolation.ts). An
    *  operation added here that DOES start a thread must disable them
    *  explicitly in the thread configuration. */
   private async withMemoryRuntime<T>(
@@ -1106,7 +1116,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         }),
         modes: {
           currentModeId: session.modeId,
-          availableModes: CODEX_MODES,
+          availableModes: cloud ? CLOUD_CODEX_MODES : CODEX_MODES,
         },
       },
       initialize,
@@ -1171,7 +1181,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       }),
       modes: {
         currentModeId: session.modeId,
-        availableModes: CODEX_MODES,
+        availableModes: cloudProviderExecution(session.executionBoundary) ? CLOUD_CODEX_MODES : CODEX_MODES,
       },
       resumedFresh,
     };

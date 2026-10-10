@@ -48,10 +48,21 @@ it("keeps the resolved launch root when current switches before the native child
       stdio:[null,null,null,new Writable({write(_chunk,_encoding,done){done();setImmediate(()=>child.emit("exit",0));}})]});
     const launch=vi.fn(()=>{setImmediate(()=>child.emit("spawn"));return child;});
     const releaseView=vi.fn();
+    const common=`${runtime.cgroupRoot}/engine-runtime`;
+    const directory=`${common}/engine-32345678-1234-4234-8234-123456789abc`;
+    const custody={version:1,common:{directory:common,dev:"0",ino:"21"},
+      workload:{directory:`${common}/engine-workload-shared/workload`,dev:"0",ino:"22"},infrastructure:[]};
+    const scope={directory,placement:`${directory}@0:23`,prepare:vi.fn(),attach:vi.fn(),
+      custodySeed:vi.fn(()=>custody),retire:vi.fn(async()=>{})};
+    // Kernel placement is explicit fixture IO; the resolver/current race and
+    // original launcher argument selection remain real production code.
+    const assertOutside=vi.fn();
     await launchCloudEngine({runtime,source:{},signals:new EventEmitter(),spawnProcess:launch,
-      scope:{prepare(){},attach(){},async retire(){}},
-      prepare(selected:unknown){
+      scope,assertOutside,
+      prepare(selected:unknown,_source:unknown,_operation:unknown,original:unknown,placement:unknown){
         expect(selected).toBe(runtime);
+        expect(original).toBe(custody);
+        expect(placement).toBe(scope.placement);
         fs.unlinkSync(tree.physical("/opt/zeros/current"));tree.link("/opt/zeros/current",`../zeros-infra/${next}`);
         tree.write("/run/zeros/active-runtime.json",{...tree.descriptor,root:`/opt/zeros-infra/${next}`,runtimeId:next,manifestSha256:"d".repeat(64)},0o600);
         return {version:4,runtime,viewDirectory:"/run/zeros/view/runtime-32345678-1234-4234-8234-123456789abc",releaseView};
@@ -60,6 +71,11 @@ it("keeps the resolved launch root when current switches before the native child
     expect(launch.mock.calls[0][1]).toContain(runtime.root);
     expect(launch.mock.calls[0][1]).not.toContain(`/opt/zeros-infra/${next}`);
     expect(releaseView).toHaveBeenCalledOnce();
+    expect(assertOutside).toHaveBeenCalledExactlyOnceWith(runtime);
+    expect(scope.custodySeed).toHaveBeenCalledExactlyOnceWith([]);
+    expect(launch.mock.calls[0][1]).toContain(scope.placement);
+    expect(scope.attach).not.toHaveBeenCalled();
+    expect(scope.retire).toHaveBeenCalledOnce();
   } finally {tree.dispose();}
 });
 afterEach(() => {

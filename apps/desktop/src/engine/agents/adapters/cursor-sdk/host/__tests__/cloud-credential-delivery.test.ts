@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import type { ChildProcess } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,16 +7,30 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudAgentLease } from "../../../../cloud-agent-lease";
 import * as executions from "../../../../cloud-provider-execution";
 import { CloudNativeBoundary, cloudNativeProviderEnvironment } from "../../../../containment/cloud-native-boundary";
-import type { BoundarySpawnRequest, PreparedBoundary } from "../../../../containment/types";
+import { createCloudNativeHome } from "../../../../containment/cloud-native-home";
+import { CloudExecutionBoundary } from "../../../../containment/cloud-execution-boundary";
+import { portableCloudWorkloads } from "../../../../containment/__tests__/helpers/portable-cloud-custody";
 import { cloudCursorRequest } from "../cloud-policy";
 import { createCursorHostRuntime } from "../host-client";
 
-const runtime = vi.hoisted(() => ({ workerRoot: "", node: process.execPath }));
-vi.mock("../../../../containment/cloud-runtime-root.mjs", async original => ({
-  ...await original<typeof import("../../../../containment/cloud-runtime-root.mjs")>(),
-  resolveCloudRuntime: () => ({ ...(runtime), profile: "v4" }),
+const runtime = vi.hoisted(() => ({ workerRoot: "", node: process.execPath,
+  binRoot: process.execPath.slice(0, process.execPath.lastIndexOf("/")) }));
+const configuration = vi.hoisted(() => ({ version: 4 as const, backend: "cloud-worker" as const,
+  profile: "zeros-cloud-worker-v4" as const, uid: process.geteuid?.() ?? 0, gid: process.getegid?.() ?? 0,
+  toolchain: { node: process.execPath,
+    supervisor: `${process.cwd()}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs` } }));
+vi.mock("../../../../containment/cloud-runtime-root.mjs", async original => {
+  const { testCloudRuntime } = await import("../../../../__tests__/helpers/test-cloud-runtime");
+  return {
+    ...await original<typeof import("../../../../containment/cloud-runtime-root.mjs")>(),
+    resolveCloudRuntime: () => ({ ...testCloudRuntime(), ...runtime, profile: "v4" }),
+  };
+});
+vi.mock("../../../../containment/cloud-worker-config", async original => ({
+  ...await original<typeof import("../../../../containment/cloud-worker-config")>(),
+  isCloudWorkerConfiguration: (value: unknown) => value === configuration,
 }));
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 const admission = () => ({ executionId: randomUUID(), delegationId: randomUUID(), provider: "cursor" as const,
   model: "qualified-model", source: { kind: "session" as const, actorSessionId: randomUUID() } });
 const key = "synthetic-admitted-cursor-key";
@@ -76,9 +89,10 @@ describe("Cursor delegated credential delivery", () => {
     const lease = await CloudAgentLease.admit(admission(), async input => input.kind === "release" ? { released: true } : grant(),
       new AbortController().signal, { onRetirementFailure: vi.fn() });
     let host: ReturnType<typeof createCursorHostRuntime> | undefined;
-    const children: ChildProcess[] = [];
+    const workloads = portableCloudWorkloads(configuration);
     try {
       runtime.workerRoot = temporary;
+      vi.stubEnv("ZEROS_DATA_DIR", path.join(temporary, "engine"));
       const hostFile = path.join(temporary, "apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs");
       await mkdir(path.dirname(hostFile), { recursive: true });
       await copyFile(fileURLToPath(new URL("../cursor-host.cjs", import.meta.url)), hostFile);
@@ -90,6 +104,8 @@ describe("Cursor delegated credential delivery", () => {
           admittedKey: opts.apiKey === ${JSON.stringify(key)},
           environmentKey: process.env.CURSOR_API_KEY === ${JSON.stringify(key)},
           callerKeyAbsent: process.env.OPENAI_API_KEY === undefined,
+          engineIdentity: process.getuid() === ${process.getuid?.()} && process.geteuid() === ${process.geteuid?.()} &&
+            process.getgid() === ${process.getgid?.()} && process.getegid() === ${process.getegid?.()},
           model: opts.model.id, cwd: opts.cwd, localCwd: opts.local.cwd,
           store: opts.local.store instanceof JsonlLocalAgentStore,
           sources: opts.local.settingSources, autoReview: opts.local.autoReview
@@ -97,49 +113,42 @@ describe("Cursor delegated credential delivery", () => {
         module.exports = { JsonlLocalAgentStore, getDefaultSdkStateRoot: () => process.env.ZEROS_CURSOR_STATE_ROOT,
           Agent: { create: async opts => describe(opts), resume: async (_id, opts) => describe(opts) } };
       `);
-      const privateHome = path.join(temporary, "private-home");
-      await mkdir(privateHome);
-      const env = cloudNativeProviderEnvironment(lease.takeMaterial(), lease.admission.model, undefined, undefined);
+      const nativeHome = await createCloudNativeHome({ dataRoot: temporary, conversationId: "credential-delivery",
+        provider: "cursor", executionId: lease.admission.executionId });
+      const env = cloudNativeProviderEnvironment(lease.takeMaterial(), lease.admission.model, undefined, undefined, nativeHome);
       expect(env.CURSOR_API_KEY === key).toBe(true);
       expect(() => lease.takeMaterial()).toThrow(/consumed/);
-      const launches: BoundarySpawnRequest[] = [];
-      // This fixture substitutes only the outer namespace/UID launcher. The
-      // real lease, native env replacement, transport and CJS host execute.
-      // Actual UID-10001 containment is the Linux harness's separate proof.
-      const stop = async () => { for (const child of children) { child.kill("SIGKILL"); } };
-      const workload = {
-        generation: "unit-native", status: { backend: "cloud-worker", parity: { level: "restricted", restrictions: [] } },
-        attestation: Promise.resolve(), stopAndProve: stop,
-        wrapSpawn: (request: BoundarySpawnRequest) => {
-          launches.push(request);
-          return { ...request, cwd: temporary, env: { ...request.env, HOME: privateHome,
-            ZEROS_CURSOR_STATE_ROOT: path.join(privateHome, ".cursor/zeros-store") } };
-        },
-        trackProcess: (child: ChildProcess) => {
-          children.push(child);
-          const done = new Promise(resolve => child.once("exit", resolve));
-          return { pid: child.pid, wait: () => done, stopAndProve: async () => { child.kill("SIGKILL"); await done; } };
-        },
-      } as unknown as PreparedBoundary;
+      // The deployment resolver, cgroup membership and SDK response are fixtures. The real lease,
+      // original cloud/Host scope, physical HOME, native environment, transport
+      // and CJS host execute as the engine identity without agent namespaces.
+      const admittedCwd = path.join(temporary, "managed-worktree");
+      await mkdir(admittedCwd);
+      const workload = await new CloudExecutionBoundary({ configuration, workloads }).prepare({
+        executionId: lease.admission.executionId, actor: "agent-code", cwd: admittedCwd, workspaceRoot: admittedCwd });
+      const launches = vi.spyOn(workload, "wrapSpawn");
       const Constructor = CloudNativeBoundary as unknown as new (...args: unknown[]) => CloudNativeBoundary;
-      const boundary = new Constructor(lease, workload, { directory: path.join(temporary, "native-view") }, env, { release: async () => {} });
+      const boundary = new Constructor(lease, workload, nativeHome, env, { capture: async () => {}, release: async () => {} });
       lease.attach(boundary);
-      const execution = { cwd: "/srv/zeros/state/workspaces/managed-worktree", lease, model: lease.admission.model, lifetime: lease, customization: lease.customization, coordinator: boundary, productServers: [] } as unknown as executions.CloudProviderExecution;
+      const execution = { cwd: admittedCwd, lease, model: lease.admission.model, lifetime: lease, customization: lease.customization, coordinator: boundary, productServers: [] } as unknown as executions.CloudProviderExecution;
       vi.spyOn(executions, "cloudProviderExecution").mockImplementation(input => input === boundary ? execution : null);
-      host = createCursorHostRuntime({ executionBoundary: boundary, cwd: temporary,
+      host = createCursorHostRuntime({ executionBoundary: boundary, cwd: admittedCwd,
         env: { CURSOR_API_KEY: "synthetic-caller-key", OPENAI_API_KEY: "synthetic-other-provider-key",
           ZEROS_CURSOR_SDK_ENTRY: "/untrusted/sdk.js", ZEROS_LOCAL_WS_TOKEN: "synthetic-engine-authority" } });
       const options = { apiKey: "synthetic-caller-key", cwd: "/untrusted-root", model: { id: "qualified-model" }, local: { autoReview: true } };
       const created = await host.module.Agent.create(options);
       const resumed = await host.module.Agent.resume(created.agentId, options);
       for (const result of [created, resumed]) expect(JSON.parse(result.agentId)).toEqual({ admittedKey: true, environmentKey: true,
-        callerKeyAbsent: true, model: "qualified-model", cwd: execution.cwd, localCwd: execution.cwd, store: true, sources: [], autoReview: true });
-      expect(launches).toHaveLength(1);
-      expect(launches[0]!.env.CURSOR_API_KEY === key).toBe(true);
-      for (const name of ["OPENAI_API_KEY", "ZEROS_CURSOR_SDK_ENTRY", "ZEROS_LOCAL_WS_TOKEN"]) expect(launches[0]!.env).not.toHaveProperty(name);
+        callerKeyAbsent: true, engineIdentity: true, model: "qualified-model", cwd: execution.cwd, localCwd: execution.cwd, store: true, sources: [], autoReview: true });
+      expect(launches).toHaveBeenCalledOnce();
+      expect(launches.mock.calls[0]![0].env.CURSOR_API_KEY === key).toBe(true);
+      expect(launches.mock.calls[0]![0].env.HOME).toBe(nativeHome.paths.home);
+      expect(launches.mock.calls[0]![0].env.ZEROS_CURSOR_STATE_ROOT).toBe(path.join(nativeHome.paths.cursorHome, "zeros-store"));
+      for (const name of ["OPENAI_API_KEY", "ZEROS_CURSOR_SDK_ENTRY", "ZEROS_LOCAL_WS_TOKEN"]) expect(launches.mock.calls[0]![0].env).not.toHaveProperty(name);
       expect(process.env.CURSOR_API_KEY === ambient).toBe(true);
     } finally {
-      await host?.dispose(); await lease.close(); await rm(temporary, { recursive: true, force: true });
+      await host?.dispose(); await lease.close(); await workloads.drain(workloads.fence());
+      expect(await workloads.inspect()).toMatchObject({ complete: true, pendingLaunches: 0, workloadPids: [] });
+      await rm(temporary, { recursive: true, force: true });
     }
   });
 });

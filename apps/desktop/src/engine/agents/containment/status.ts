@@ -30,7 +30,6 @@ export function hasKernelExecutionBoundary(
   if (boundary.status.state !== "ready") return false;
   return (
     boundary.status.backend === "zeros-srt" ||
-    boundary.status.backend === "cloud-worker" ||
     boundary.status.backend === "provider-native"
   );
 }

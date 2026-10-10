@@ -790,7 +790,7 @@ describe("session reload lifecycle", () => {
 // pending prompt went out anyway and the agent started working on the turn the
 // user had just stopped.
 describe("stopping a send that has not gone out yet", () => {
-  it("shows Stop while the first prompt waits for ZSR admission", () => {
+  it("shows Stop while the first prompt waits for provider admission", () => {
     expect(
       composerShowsStopControl({
         status: "warming",

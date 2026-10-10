@@ -1,14 +1,21 @@
 import { randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import type { CloudAgentBootCredentialResponse, CloudAgentBootProviderReady, CloudAgentWarmActorRequest, CloudAgentWarmActorResponse } from "@zeros/protocol/cloud-agent-bootstrap";
 import type { PreparedBoundary } from "../containment/types";
 import { CloudActorAuthorityRegistry } from "../cloud-actor-authority";
 import { CloudAgentCredentialCache } from "../cloud-agent-credential-cache";
 import * as executionModule from "../cloud-provider-execution";
 import { readCloudRepositoryMcp } from "../cloud-mcp";
+import { isCloudNativeHome } from "../containment/cloud-native-home";
+import type { CloudNativeHome } from "../containment/cloud-native-home";
+import { cloudNativeProviderEnvironment } from "../containment/cloud-native-boundary";
+import { prepareClaudeCloudWorkload } from "../adapters/claude-sdk/__tests__/helpers/legacy-execution";
 
 const native = vi.hoisted(() => ({ prepareBoot: vi.fn(), tools: vi.fn() }));
-vi.mock("../containment/cloud-native-boundary", () => ({ CloudNativeBoundary: { prepare: vi.fn(), prepareBoot: native.prepareBoot } }));
+vi.mock("../containment/cloud-native-boundary", async original => ({ ...await original<typeof import("../containment/cloud-native-boundary")>(), CloudNativeBoundary: { prepare: vi.fn(), prepareBoot: native.prepareBoot } }));
 vi.mock("../cloud-workload-tools", () => ({ CloudWorkloadTools: class {
   constructor(...args: unknown[]) { native.tools(...args); }
   async call() { return { ok: true, data: null }; }
@@ -23,20 +30,27 @@ vi.mock("../containment/cloud-runtime-root.mjs", async original => ({
 const capabilities = { version: 1 as const, goals: false, nativeFork: false, transcriptFork: false,
   nativeReview: false, connectedApps: false, multiAgent: false };
 const cleanups: (() => void | Promise<void>)[] = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.clearAllMocks(); vi.useRealTimers(); });
+let dataRoot: string;
+const nativeHomes = new WeakMap<PreparedBoundary, CloudNativeHome>();
+beforeEach(async () => {
+  dataRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), "zeros-boot-factory-consumer-")));
+  vi.stubEnv("ZEROS_DATA_DIR", dataRoot);
+});
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  await rm(dataRoot, { recursive: true, force: true });
+  vi.unstubAllEnvs(); vi.clearAllMocks(); vi.useRealTimers();
+});
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(yes => { resolve = yes; });
   return { promise, resolve };
 }
-function workload(): PreparedBoundary {
-  const stop = vi.fn(async () => {});
-  return { generation: "native-workload", status: { version: 1, actor: "agent-code", state: "ready", backend: "cloud-worker",
-    designProtection: { required: true, enforced: true, protectedDirectoryCount: 1 },
-    parity: { level: "restricted", restrictions: [] }, checkedAt: Date.now() },
-    attestation: Promise.resolve(), stopAndProve: stop, revoke: stop,
-    activePorts: () => [], onPortsChanged: () => () => {}, portDiscoveryStatus: () => ({ state: "idle" }),
-  } as unknown as PreparedBoundary;
+async function workload(executionId: string = randomUUID(), conversationId = "conversation"): Promise<PreparedBoundary> {
+  const physical = await prepareClaudeCloudWorkload({ executionId, conversationId, provider: "claude", cwd: "/srv/zeros/workspace", dataRoot });
+  cleanups.push(physical.dispose);
+  nativeHomes.set(physical.workload, physical.nativeHome);
+  return physical.workload;
 }
 async function fixture(initialize = true) {
   let live = true, wall = 1_791_468_000_000, monotonic = 1000;
@@ -81,14 +95,17 @@ async function fixture(initialize = true) {
   const create = () => executionModule.createCloudBootAgentExecutionFactory(options);
   native.prepareBoot.mockImplementation(async (authority: executionModule.CloudBootNativeAuthority, domain: PreparedBoundary) => {
     authority.lifetime.assertLive();
-    const coordinator = { ...domain, providerHomePath: "/srv/zeros/home/agent", environment: () => ({
-      HOME: "/srv/zeros/home/agent", ANTHROPIC_API_KEY: "synthetic-private-provider-A", ACTOR_PRIVATE: "synthetic-sender-only-value" }),
+    const nativeHome = nativeHomes.get(domain);
+    if (!nativeHome) throw new Error("Expected original physical fixture HOME");
+    const material = authority.takeMaterial();
+    const coordinator = { ...domain, nativeHome, providerHomePath: nativeHome.paths.home,
+      environment: () => cloudNativeProviderEnvironment(material,authority.model,undefined,authority.environment?.values,nativeHome),
       codexExternalAuth: () => null, hasBackgroundServers: async () => false };
     authority.lifetime.attach(coordinator); return coordinator;
   });
   const register = (factory: ReturnType<typeof create>) => { cleanups.push(() => factory.disposeBoot()); return factory; };
   const prepare = async (factory: ReturnType<typeof create>, selection = factory.selectBoot(input)) => {
-    const domain = workload();
+    const domain = await workload(selection.executionId, selection.conversationId);
     await factory.launchBootSelection(selection, async () => domain);
     const result = await factory.prepareBoot({ selection, workload: domain, signal: new AbortController().signal });
     const execution = executionModule.cloudProviderExecution(result.boundary)!;
@@ -106,6 +123,16 @@ async function fixture(initialize = true) {
 }
 
 describe("genuine boot execution factory", () => {
+  it("shares one original physical HOME between the native provider and workload tools", async () => {
+    const f = await fixture(), factory = f.register(f.create()), prepared = await f.prepare(factory);
+    const home = prepared.execution.coordinator.nativeHome;
+    expect(isCloudNativeHome(home)).toBe(true);
+    expect(native.tools).toHaveBeenCalledWith(executionModule.cloudBootNativeAuthority(prepared.selection),
+      prepared.domain, f.input.cwd, home);
+    expect(prepared.result.env).toMatchObject({ ...home.environment(), ACTOR_PRIVATE: "synthetic-sender-only-value" });
+    expect(prepared.result.boundary.providerHomePath).toBe(home.paths.home);
+    expect(prepared.domain.status.designProtection.enforced).toBe(false);
+  });
   it("chooses warm native identity from exact cached authority before a claim without minting another selection", async () => {
     const f = await fixture(), factory = f.register(f.create()), p = await f.prepare(factory);
     const token = factory.reserveBootTurn(p.execution, p.selection);
@@ -211,7 +238,7 @@ describe("genuine boot execution factory", () => {
   });
   it("reserves workload ownership before an asynchronous allocation and reaps a late return after Stop", async () => {
     const f = await fixture(), factory = f.register(f.create()), selected = factory.selectBoot(f.input);
-    const pending = deferred<PreparedBoundary>(), domain = workload(), spawn = vi.fn((_signal: AbortSignal) => pending.promise);
+    const pending = deferred<PreparedBoundary>(), domain = await workload(selected.executionId), spawn = vi.fn((_signal: AbortSignal) => pending.promise);
     const launched = factory.launchBootSelection(selected, spawn); const outcome = launched.catch(error => error);
     await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
     const authority = executionModule.cloudBootNativeAuthority(selected);
@@ -224,12 +251,12 @@ describe("genuine boot execution factory", () => {
   });
   it("rechecks the start fence in the deferred workload allocation callback", async () => {
     const f = await fixture(), factory = f.register(f.create()), selected = factory.selectBoot(f.input);
-    const domain = workload(), spawn = vi.fn(async () => domain);
+    const domain = await workload(selected.executionId), spawn = vi.fn(async () => domain);
     const launched = factory.launchBootSelection(selected, spawn);
     f.canStart.mockReturnValue(false);
     await expect(launched).rejects.toMatchObject({ code: "cloud_validation_access_denied" });
     expect(spawn).not.toHaveBeenCalled();
-    expect(factory.bootScopeActivity([]).scopes).toHaveLength(0);
+    await vi.waitFor(() => expect(factory.bootScopeActivity([]).scopes).toHaveLength(0));
   });
   it("prepares a private native authority from the same reservation, never a fabricated lease", async () => {
     const f = await fixture(), factory = f.register(f.create()), prepared = await f.prepare(factory);
@@ -241,7 +268,7 @@ describe("genuine boot execution factory", () => {
       gitAuthor: { name: "Sending member" }, backgroundTasksVersion: null, computerToolsVersion: null });
     expect(authority).not.toHaveProperty("leaseId"); expect(authority).not.toHaveProperty("validate");
     expect(native.prepareBoot).toHaveBeenCalledWith(authority, prepared.domain, f.input.conversationId, undefined);
-    expect(native.tools).toHaveBeenCalledWith(authority, prepared.domain, f.input.cwd);
+    expect(native.tools).toHaveBeenCalledWith(authority, prepared.domain, f.input.cwd, prepared.execution.coordinator.nativeHome);
     expect(prepared.execution.mode).toBe("boot-owner-v1");
     expect(executionModule.isCloudBootProviderExecution(prepared.execution)).toBe(true);
     expect(executionModule.isCloudBootProviderExecution({ ...prepared.execution })).toBe(false);
@@ -251,8 +278,8 @@ describe("genuine boot execution factory", () => {
   it("refuses an arbitrary workload or a copied selection before native preparation", async () => {
     const f = await fixture(), factory = f.register(f.create()), selection = factory.selectBoot(f.input);
     const signal = new AbortController().signal;
-    await expect(factory.prepareBoot({ selection, workload: workload(), signal })).rejects.toThrow();
-    await expect(async () => factory.prepareBoot({ selection: { ...selection }, workload: workload(), signal })).rejects.toThrow();
+    await expect(factory.prepareBoot({ selection, workload: await workload(), signal })).rejects.toThrow();
+    await expect(async () => factory.prepareBoot({ selection: { ...selection }, workload: await workload(), signal })).rejects.toThrow();
     expect(native.prepareBoot).not.toHaveBeenCalled();
   });
   it("checks exact current selection and durable starts at handoff, then marks conservatively before write", async () => {
@@ -352,7 +379,7 @@ describe("genuine boot execution factory", () => {
     f.advance(1001); await vi.advanceTimersByTimeAsync(1001);
     await vi.waitFor(() => expect(prepared.domain.stopAndProve).toHaveBeenCalled());
     expect(executionModule.cloudExecutionLifetime(prepared.execution).signal.reason).toMatchObject({ code: "cloud_agent_credential_expired" });
-    expect(factory.bootScopeActivity([]).scopes).toHaveLength(0);
+    await vi.waitFor(() => expect(factory.bootScopeActivity([]).scopes).toHaveLength(0));
   });
   it("whole-session Stop proves this host only and leaves sibling authority and boot cache live", async () => {
     const f = await fixture(), factory = f.register(f.create()), first = await f.prepare(factory);

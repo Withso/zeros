@@ -7,7 +7,6 @@ vi.mock("../cloud-workspace-validation/sandbox/cloud-engine-cgroup.mjs",async or
   ...await original<typeof import("../cloud-workspace-validation/sandbox/cloud-engine-cgroup.mjs")>(),
   CloudEngineCgroup:class {constructor(options:unknown){fixture.scope(options);}retire=fixture.retire;prepare=fixture.prepare;attach=fixture.attach;},
 }));
-// @ts-expect-error The image helper is plain Node JavaScript.
 import { validateCloudSetupPayload,runScopedCloudSetup } from "../cloud-workspace-validation/sandbox/cloud-setup-process.mjs";
 import {createCloudRuntimeResolver} from "../../apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs";
 import {cloudRuntimeFixture} from "../../apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-fixture";

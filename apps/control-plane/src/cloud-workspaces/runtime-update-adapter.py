@@ -97,7 +97,8 @@ def resident_document(b, value):
         b.text_match(value[key], b.UUID, "input_schema")
     b.text_match(value["runtimeId"], b.RID, "input_schema")
     require(value["manifestSha256"] == value["runtimeId"][3:] and value["protocol"] == "zeros.resident-pty/v1")
-    require(value["scope"] == b.CGROUP + "/engine-workload-" + value["hostId"])
+    require(value["scope"] in (b.CGROUP + "/engine-workload-" + value["hostId"],
+                               b.CGROUP + "/engine-runtime/engine-workload-" + value["hostId"]))
     b.integer(value["fence"], 1, 2**53 - 2, "input_schema")
     if value["engineId"] is None:
         require(value["generation"] is None)
@@ -651,7 +652,9 @@ class SystemRuntime:
         lines = output.splitlines()
         require(len(lines) == 2)
         report, diagnostic = [self.b.strict_json(line, "input_schema") for line in lines]
-        require(report.get("profile") == "zeros-cloud-worker-v4" and report.get("qualified") is True)
+        require(type(report.get("version")) is int and
+                (report["version"] == 1 or report["version"] == 2 and report.get("boundary") == "workspace-vm") and
+                report.get("profile") == "zeros-cloud-worker-v4" and report.get("qualified") is True)
         require(diagnostic.get("schema") == "zeros.diagnostic/v1" and diagnostic.get("component") == "attester" and
                 diagnostic.get("ok") is True and diagnostic.get("stage") == "done" and
                 diagnostic.get("exitCode") == 0 and diagnostic.get("failedChecks") == [])

@@ -11,6 +11,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
+import { mkdir, realpath, rm } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ClaudeSdkAdapter } from "../adapter";
@@ -21,6 +22,8 @@ import * as cloudRuntimeRoot from "../../../containment/cloud-runtime-root.mjs";
 import { cloudRuntimeFixture } from "../../../containment/__tests__/cloud-runtime-fixture";
 import { testCloudRuntime } from "../../../__tests__/helpers/test-cloud-runtime";
 import { bootClaudeExecutionFixture } from "./helpers/boot-execution";
+import { createCloudNativeHome } from "../../../containment/cloud-native-home";
+import { HostExecutionBoundary } from "../../../containment/host-boundary";
 import {
   AgentFailureError,
   type AgentAdapterContext,
@@ -63,18 +66,81 @@ function admittedClaudeRuntimeFixture() {
 
 const TMP_DATA = path.join(os.tmpdir(), `zeros-sdk-test-${process.pid}`);
 let prevDataDir: string | undefined;
-beforeAll(() => {
+beforeAll(async () => {
   prevDataDir = process.env.ZEROS_DATA_DIR;
   process.env.ZEROS_DATA_DIR = TMP_DATA;
+  await mkdir(TMP_DATA, { recursive: true });
 });
-afterAll(() => {
+afterAll(async () => {
   if (prevDataDir === undefined) delete process.env.ZEROS_DATA_DIR;
   else process.env.ZEROS_DATA_DIR = prevDataDir;
+  await rm(TMP_DATA, { recursive: true, force: true });
 });
+
+async function physicalClaudeHome() {
+  return createCloudNativeHome({ dataRoot: await realpath(TMP_DATA), provider: "claude",
+    conversationId: randomUUID(), executionId: randomUUID() });
+}
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 describe("Claude private cloud coordinator policy",()=>{
+  it.each(["Personal Local", "organization-local"])("preserves exact %s SDK launch bytes and config roots", async owner => {
+    const cwd = path.join(TMP_DATA, owner, "checkout");
+    const boundary = await new HostExecutionBoundary({ projectRoot: process.cwd() }).prepare({
+      executionId: randomUUID(), actor: "agent-code", cwd, workspaceRoot: cwd });
+    const env = { HOME: "/fixture/local-home", CLAUDE_CONFIG_DIR: "/fixture/local-claude", CODEX_HOME: "/fixture/local-codex",
+      XDG_CONFIG_HOME: "/fixture/local-config", PATH: "/fixture/local-bin:/usr/bin", ANTHROPIC_MODEL: "claude-haiku-4-5",
+      ANTHROPIC_API_KEY: "synthetic-local-key", ZEROS_WORKSPACE_OWNER: owner, EMPTY_VALUE: "",
+      ZEROS_CLOUD_TOKEN: "synthetic-engine-only", ZEROS_RIPGREP_PATH: "/engine-only/rg", ZEROS_ZSR_RIPGREP_PATH: "/legacy-engine-only/rg" };
+    const { queryFn, captured } = makeScriptedQuery([[initMsg("local-byte-contract"), resultOk("local-byte-contract")]]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const spawn = vi.spyOn(containedProcess, "spawnContainedClaudeProcess").mockReturnValue({} as never);
+    try {
+      const { session } = await adapter.newSession({ cwd, env, executionBoundary: boundary });
+      await adapter.prompt({ sessionId: session.executionId, prompt: [textBlock("Continue")] });
+      const expectedEnv = { HOME: env.HOME, CLAUDE_CONFIG_DIR: env.CLAUDE_CONFIG_DIR, CODEX_HOME: env.CODEX_HOME,
+        XDG_CONFIG_HOME: env.XDG_CONFIG_HOME, PATH: env.PATH, ANTHROPIC_MODEL: env.ANTHROPIC_MODEL, ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
+        ZEROS_WORKSPACE_OWNER: owner, EMPTY_VALUE: "", CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1", CLAUDE_CODE_STARTUP_FAILURE_RESULTS: "1" };
+      expect(JSON.stringify(captured[0]?.env)).toBe(JSON.stringify(expectedEnv));
+      const sdkLaunch = { command: "/fixture/local claude", args: ["--literal", "quotes'\"", "$HOME", "", "\\"],
+        cwd, env: expectedEnv, signal: new AbortController().signal };
+      (captured[0]!.spawnClaudeCodeProcess as (options: Parameters<typeof containedProcess.spawnContainedClaudeProcess>[0]) => unknown)(sdkLaunch);
+      expect(spawn).toHaveBeenCalledWith(sdkLaunch, expect.any(Object), boundary);
+      expect(JSON.stringify(spawn.mock.calls[0]![0].args)).toBe(JSON.stringify(sdkLaunch.args));
+      expect(spawn.mock.calls[0]![0].cwd).toBe(cwd);
+      expect(JSON.stringify(spawn.mock.calls[0]![0].env)).toBe(JSON.stringify(expectedEnv));
+    } finally { spawn.mockRestore(); await adapter.dispose(); await boundary.stopAndProve(); }
+  });
+  it("keeps the original physical HOME on cold and resumed queries despite caller root overrides", async () => {
+    const nativeHome = await physicalClaudeHome();
+    const boundary = { status: { actor: "agent-code", backend: "cloud-worker" }, providerHomePath: "/untrusted/boundary-home" } as never;
+    const lifetime = { signal: new AbortController().signal, assertLive: vi.fn() };
+    const execution = { mode: "actor-grant-v1", model: "claude-haiku-4-5", cwd: "/srv/zeros/workspace",
+      customization: null, lifetime, coordinator: { nativeHome }, productServers: [] } as unknown as cloudExecutions.CloudProviderExecution;
+    const original = cloudExecutions.cloudProviderExecution;
+    const authority = vi.spyOn(cloudExecutions, "cloudProviderExecution").mockImplementation(value => value === boundary ? execution : original(value));
+    const runtime = admittedClaudeRuntimeFixture();
+    const { queryFn, captured } = makeScriptedQuery([[initMsg("physical-home"), resultOk("physical-home")],
+      [initMsg("physical-home"), resultOk("physical-home")]]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const env = { ANTHROPIC_MODEL: execution.model, ANTHROPIC_API_KEY: "synthetic-selected-key",
+      HOME: "/untrusted/home", CLAUDE_CONFIG_DIR: "/untrusted/claude", XDG_CONFIG_HOME: "/untrusted/config",
+      TMPDIR: "/untrusted/tmp", ACTOR_PRIVATE: "synthetic-actor-value", ZEROS_PERMISSION_MODE: "plan" };
+    try {
+      const { session } = await adapter.newSession({ cwd: "/untrusted/cwd", env, executionBoundary: boundary });
+      await adapter.prompt({ sessionId: session.executionId, prompt: [textBlock("First")] });
+      await adapter.loadSession({ executionId: session.executionId, cwd: "/untrusted/resume", env: { ...env, ACTOR_PRIVATE: "synthetic-next-actor-value" }, executionBoundary: boundary });
+      await adapter.prompt({ sessionId: session.executionId, prompt: [textBlock("Second")] });
+      expect(captured).toHaveLength(2);
+      for (const options of captured) {
+        expect(options).toMatchObject({ cwd: execution.cwd, permissionMode: "plan", settingSources: [],
+          env: { ...nativeHome.environment(), ANTHROPIC_API_KEY: "synthetic-selected-key" } });
+        expect((options.env as Record<string, string>).HOME).not.toBe("/untrusted/boundary-home");
+      }
+      expect(captured[1]?.env).toMatchObject({ ACTOR_PRIVATE: "synthetic-next-actor-value" });
+    } finally { await adapter.dispose(); runtime.dispose(); authority.mockRestore(); }
+  });
   it.each(["default", "accept-edits", "auto", "plan", "bypass"])("starts the persisted native %s mode before the first prompt", async mode => {
     const {queryFn} = makeScriptedQuery([]);
     const adapter = new ClaudeSdkAdapter(makeCtx([],[]), {queryFn});
@@ -85,11 +151,12 @@ describe("Claude private cloud coordinator policy",()=>{
   });
 
   it.each([false, true])("reports an unexpected idle exit but not completed cloud retirement (retired=%s)", async retired => {
+    const nativeHome = await physicalClaudeHome();
     const boundary = { status: { actor: "agent-code", backend: "cloud-worker" } } as never;
     const lease = new AbortController();
     const lifetime = { signal: lease.signal, assertLive: vi.fn() };
     const execution = { mode: "actor-grant-v1", model: "claude-haiku-4-5", customization: null, lifetime, lease: { ...lifetime, admission: { model: "claude-haiku-4-5" } },
-      tools: { call: vi.fn() }, productServers: [] } as unknown as cloudExecutions.CloudProviderExecution;
+      tools: { call: vi.fn() }, coordinator: { nativeHome }, productServers: [] } as unknown as cloudExecutions.CloudProviderExecution;
     const original = cloudExecutions.cloudProviderExecution;
     const authority = vi.spyOn(cloudExecutions, "cloudProviderExecution").mockImplementation(value => value === boundary ? execution : original(value));
     const runtime = admittedClaudeRuntimeFixture();
@@ -114,10 +181,11 @@ describe("Claude private cloud coordinator policy",()=>{
   });
 
   it("keeps native workspace tools and fences external credential/model overrides",async()=>{
+    const nativeHome = await physicalClaudeHome();
     const boundary={status:{actor:"agent-code",backend:"zeros-srt"}} as never;
     const lease=new AbortController(),assertLive=vi.fn();
     const execution={mode:"actor-grant-v1",model:"claude-haiku-4-5",customization:null,lifetime:{signal:lease.signal,assertLive},
-      cwd:"/srv/zeros/workspace",tools:{call:vi.fn()},
+      cwd:"/srv/zeros/workspace",tools:{call:vi.fn()},coordinator:{nativeHome},
       productServers:[{name:"zeros_design",transport:"http",url:"http://127.0.0.1:42000/mcp",headers:{Authorization:"Bearer synthetic-scoped-tool"}}]} as unknown as cloudExecutions.CloudProviderExecution;
     Object.defineProperty(execution,"lease",{get:()=>{throw new Error("Common Claude policy accessed legacy lease");}});
     const original=cloudExecutions.cloudProviderExecution;
@@ -148,6 +216,7 @@ describe("Claude private cloud coordinator policy",()=>{
 });
 
 describe("Claude genuine boot foreground handoff", () => {
+  // Genuine cloud custody requires Linux /proc process births and membership.
   async function fixture(idleTimeoutMs = 30_000) {
     const runtime = admittedClaudeRuntimeFixture(), boot = await bootClaudeExecutionFixture(), live = makePushableQuery(), lives=[live];
     const callbacks: Parameters<typeof containedProcess.spawnContainedClaudeProcess>[1][] = [];
@@ -165,7 +234,7 @@ describe("Claude genuine boot foreground handoff", () => {
     return {boot,live,lives,callbacks,adapter,reservation,session,
       dispose:async()=>{try{await adapter.dispose();}finally{spawn.mockRestore();await boot.dispose();runtime.dispose();}}};
   }
-  it("guards an original cold and warm turn even when passive observers are disabled", async () => {
+  it.skipIf(process.platform !== "linux")("guards an original cold and warm turn even when passive observers are disabled", async () => {
     const f=await fixture();
     try{
       const first=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]});
@@ -189,7 +258,7 @@ describe("Claude genuine boot foreground handoff", () => {
       expect(f.boot.request.sync).not.toHaveBeenCalled();
     }finally{await f.dispose();}
   });
-  it("preserves the exact original refusal when the pinned SDK wraps a transport throw", async () => {
+  it.skipIf(process.platform !== "linux")("preserves the exact original refusal when the pinned SDK wraps a transport throw", async () => {
     const f=await fixture();
     try{
       const outcome=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]}).catch(error=>error);
@@ -203,7 +272,7 @@ describe("Claude genuine boot foreground handoff", () => {
       expect(f.boot.factory.bootScopeActivity([]).foreground).toBe(0);
     }finally{await f.dispose();}
   });
-  it("keeps the genuine boot query warm through the ordinary idle timeout", async () => {
+  it.skipIf(process.platform !== "linux")("keeps the genuine boot query warm through the ordinary idle timeout", async () => {
     const f=await fixture(1);
     try{
       const outcome=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]}).catch(error=>error);
@@ -216,7 +285,7 @@ describe("Claude genuine boot foreground handoff", () => {
       expect(f.live.control.closes).toBe(0);expect(f.boot.execution.lifetime.signal.aborted).toBe(false);
     }finally{await f.dispose();}
   });
-  it("refuses foreground SDK input without an original factory turn reservation", async () => {
+  it.skipIf(process.platform !== "linux")("refuses foreground SDK input without an original factory turn reservation", async () => {
     const f=await fixture();
     try{
       f.boot.factory.markNativeHandoff(f.boot.execution,f.reservation);
@@ -227,7 +296,7 @@ describe("Claude genuine boot foreground handoff", () => {
       expect(f.live.inputsSeen).toHaveLength(0);
     }finally{await f.dispose();}
   });
-  it("keeps entered steering on captured authority but never hands the same steering UUID off twice",async()=>{
+  it.skipIf(process.platform !== "linux")("keeps entered steering on captured authority but never hands the same steering UUID off twice",async()=>{
     const f=await fixture();
     try{
       const outcome=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]}).catch(error=>error);
@@ -242,7 +311,7 @@ describe("Claude genuine boot foreground handoff", () => {
       await f.adapter.cancel({sessionId:f.session.executionId});await steering;await outcome;
     }finally{await f.dispose();}
   });
-  it("rejects a held prior query write without rejecting the newer warm turn",async()=>{
+  it.skipIf(process.platform !== "linux")("rejects a held prior query write without rejecting the newer warm turn",async()=>{
     const f=await fixture();
     try{
       const first=f.adapter.prompt({sessionId:f.session.executionId,prompt:[textBlock("First")]}).catch(error=>error);
@@ -266,8 +335,9 @@ describe("Claude genuine boot foreground handoff", () => {
 
 describe("Claude explicit approval hints", () => {
   it("offers cloud approvals only for this chat and preserves another actor's explicit Plan",async()=>{
+    const nativeHome = await physicalClaudeHome();
     const boundary={status:{actor:"agent-code",backend:"cloud-worker"}} as never;
-    const execution={mode:"actor-grant-v1",model:"claude-haiku-4-5",customization:null,cwd:"/srv/zeros/workspace",lifetime:{signal:new AbortController().signal,assertLive:vi.fn()},productServers:[]} as unknown as cloudExecutions.CloudProviderExecution;
+    const execution={mode:"actor-grant-v1",model:"claude-haiku-4-5",customization:null,cwd:"/srv/zeros/workspace",coordinator:{nativeHome},lifetime:{signal:new AbortController().signal,assertLive:vi.fn()},productServers:[]} as unknown as cloudExecutions.CloudProviderExecution;
     const original=cloudExecutions.cloudProviderExecution;
     const authority=vi.spyOn(cloudExecutions,"cloudProviderExecution").mockImplementation(value=>value===boundary?execution:original(value));
     const runtime=admittedClaudeRuntimeFixture();
