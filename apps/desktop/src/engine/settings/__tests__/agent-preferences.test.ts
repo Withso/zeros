@@ -15,6 +15,16 @@ describe("acknowledged agent preferences", () => {
     delete process.env.ZEROS_USER_SETTINGS_DIR;
     rmSync(root, { recursive: true, force: true });
   });
+  it("acknowledges idle compaction independently of existing Claude memory preferences", () => {
+    syncAgentPreferences({ models: { claude_code: { auto_memory_enabled: false } } });
+    for (const value of [true, false]) {
+      const confirmed = syncAgentPreferences({}, [
+        { path: ["models", "claude_code", "idle_compaction_enabled"], value },
+      ]);
+      expect(confirmed).toMatchObject({ models: { claude_code: { auto_memory_enabled: false, idle_compaction_enabled: value } } });
+      expect(readFileSync(path.join(root, "settings.toml"), "utf8")).toContain(`idle_compaction_enabled = ${value}`);
+    }
+  });
   it("imports missing legacy tables once and never resurrects a deleted table", () => {
     opSettingsWrite("user", { models: { default: "from-file" } });
     const legacy = {

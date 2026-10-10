@@ -37,10 +37,12 @@ const STATUS_LABELS = {
 export const ComposerToolGroups = memo(function ComposerToolGroups({
   snapshot,
   authBusy,
+  authFailed = null,
   onAuthenticate,
 }: {
   snapshot: SessionToolsInventorySnapshot;
   authBusy: string | null;
+  authFailed?: string | null;
   onAuthenticate: (id: string) => void;
 }) {
   const groups = useMemo(
@@ -123,6 +125,7 @@ export const ComposerToolGroups = memo(function ComposerToolGroups({
                   entries={rows}
                   canAuthenticate={group.kind === "mcp"}
                   authBusy={authBusy}
+                  authFailed={authFailed}
                   onAuthenticate={onAuthenticate}
                 />
               )}
@@ -159,6 +162,7 @@ export const ComposerToolGroups = memo(function ComposerToolGroups({
                       entries={local}
                       canAuthenticate
                       authBusy={authBusy}
+                      authFailed={authFailed}
                       onAuthenticate={onAuthenticate}
                     />
                   </CollapsibleContent>
@@ -177,6 +181,7 @@ function ToolRows({
   entries,
   canAuthenticate,
   authBusy,
+  authFailed,
   onAuthenticate,
 }: {
   label: string;
@@ -184,6 +189,7 @@ function ToolRows({
   /** Only MCP connections offer an Authenticate action. */
   canAuthenticate: boolean;
   authBusy: string | null;
+  authFailed: string | null;
   onAuthenticate: (id: string) => void;
 }) {
   return (
@@ -201,6 +207,7 @@ function ToolRows({
             entry={entry}
             canAuthenticate={canAuthenticate && entry.canAuthenticate === true}
             authBusy={authBusy}
+            authFailed={authFailed}
             onAuthenticate={onAuthenticate}
           />
         </li>
@@ -213,14 +220,55 @@ function ToolStatus({
   entry,
   canAuthenticate,
   authBusy,
+  authFailed,
   onAuthenticate,
 }: {
   entry: SessionToolInventoryEntry;
   canAuthenticate: boolean;
   authBusy: string | null;
+  authFailed: string | null;
   onAuthenticate: (id: string) => void;
 }) {
   const label = STATUS_LABELS[entry.status];
+  // RPC/browser launch and native OAuth completion share the same row. A
+  // native opening state survives the URL response until its matched result.
+  if (
+    canAuthenticate &&
+    (authBusy === entry.id ||
+      (entry.status === "connecting" && authFailed !== entry.id))
+  )
+    return (
+      <Button
+        type="button"
+        size="sm"
+        variant="ghost"
+        disabled
+        className="text-blue-fg h-auto shrink-0 bg-transparent p-0 hover:bg-transparent hover:text-(--composer-tool-action-hover)"
+        aria-label={`Authenticate ${entry.name}`}
+      >
+        Opening…
+      </Button>
+    );
+  if (
+    canAuthenticate &&
+    (entry.status === "error" || authFailed === entry.id)
+  )
+    return (
+      <Button
+        type="button"
+        size="sm"
+        variant="ghost"
+        disabled={authBusy !== null}
+        className="h-auto shrink-0 bg-transparent p-0 hover:bg-transparent"
+        aria-label={`Authenticate ${entry.name}`}
+        title="Sign-in failed. Authenticate again to retry."
+        onClick={() => onAuthenticate(entry.id)}
+      >
+        <span role="img" aria-label="Sign-in failed">
+          <X className="text-red-primary size-4" />
+        </span>
+      </Button>
+    );
   if (
     entry.status === "connected" ||
     entry.status === "available" ||
@@ -255,7 +303,7 @@ function ToolStatus({
         aria-label={`Authenticate ${entry.name}`}
         onClick={() => onAuthenticate(entry.id)}
       >
-        {authBusy === entry.id ? "Opening…" : "Authenticate"}
+        Authenticate
       </Button>
     );
   return (

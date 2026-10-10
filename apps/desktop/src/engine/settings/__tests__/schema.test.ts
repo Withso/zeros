@@ -229,6 +229,7 @@ describe("sanitizeLayer", () => {
         budget_cap_usd: 5,
         idle_timeout_minutes: 300,
         auto_memory_enabled: false,
+        idle_compaction_enabled: true,
       },
     };
 
@@ -244,6 +245,7 @@ describe("sanitizeLayer", () => {
             fallback_model: "none",
             idle_timeout_minutes: 301,
             auto_memory_enabled: "yes",
+            idle_compaction_enabled: "yes",
           },
         },
       },
@@ -255,6 +257,7 @@ describe("sanitizeLayer", () => {
     expect(invalid.warnings).toEqual([
       expect.stringContaining("models.claude_code.idle_timeout_minutes"),
       expect.stringContaining("models.claude_code.auto_memory_enabled"),
+      expect.stringContaining("models.claude_code.idle_compaction_enabled"),
     ]);
   });
 

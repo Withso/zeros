@@ -35,6 +35,9 @@ import {
 
 import { loadAiSettings } from "../shared/lib/openai";
 import { normalizeChatPermissionMode } from "./chat-permission";
+import { agentFamily } from "../features/agent/model-catalog";
+import { legacySelectedModel } from "../features/agent/legacy-default-models";
+import { samePersistedChat } from "./chat-reconciliation";
 import {
   loadCachedChatsForBoot,
   loadLegacyActiveChatId,
@@ -101,13 +104,23 @@ import type {
   WorkspaceState,
 } from "./store";
 
-/** Normalize a chat's persisted permission posture to the current vocabulary
- *  (legacy full/auto-edit/ask/plan-only → plan/auto/tool-approval/danger) as it
- *  enters the store from disk / cross-device sync. Returns the same object when
+/** Normalize persisted permissions and freeze legacy implicit model identities
+ *  as chats enter from disk / cross-device sync. Preserve the same object when
  *  already current, so unchanged chats keep referential identity. */
-function migrateChatPermission(c: ChatThread): ChatThread {
+function migratePersistedChat(c: ChatThread, previous?: ChatThread): ChatThread {
   const norm = normalizeChatPermissionMode(c.permissionMode);
-  return norm === c.permissionMode ? c : { ...c, permissionMode: norm };
+  const priorAgentId = c.agentId ?? c.agentName;
+  const family = agentFamily(priorAgentId);
+  // Existing null-model rows used the prior catalog fallback. Stamp it at the
+  // persistence boundary so a default-policy update affects only new chats.
+  // Revalidation keeps this exact chat's confirmed model, never another owner's.
+  const model = c.model ?? (c.kind !== "terminal" && family
+    ? previous?.folder === c.folder && agentFamily(previous.agentId ?? previous.agentName) === family && previous.model
+      ? previous.model
+      : legacySelectedModel(priorAgentId)
+    : null);
+  const migrated = norm === c.permissionMode && model === c.model ? c : { ...c, model, permissionMode: norm };
+  return previous && samePersistedChat(previous, migrated) ? previous : migrated;
 }
 
 // ──────────────────────────────────────────────────────────
@@ -362,7 +375,7 @@ const persistedUiState = loadPersistedUiState();
 // flipped to persistent so reload doesn't lose an in-flight prompt.
 // Each record is type-guarded on read — corrupt entries become empty.
 const persistedDrafts = loadPersistedDrafts();
-const bootChats = loadCachedChatsForBoot().map(migrateChatPermission);
+const bootChats = loadCachedChatsForBoot().map(chat => migratePersistedChat(chat));
 const persistedActiveChatId =
   "activeChatId" in persistedUiState
     ? (persistedUiState.activeChatId ?? null)
@@ -1317,7 +1330,10 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       };
     }
     case "HYDRATE_CHATS": {
-      const chats = action.chats.map(migrateChatPermission);
+      const previousById = new Map(state.chats.map(chat => [chat.id, chat]));
+      const migrated = action.chats.map(chat => migratePersistedChat(chat, previousById.get(chat.id)));
+      const chats = migrated.length === state.chats.length && migrated.every((chat, index) => chat === state.chats[index])
+        ? state.chats : migrated;
       const pending = state.pendingWorkspaceValidationFolder;
       const pendingChats = state.pendingChatHydrationFolder;
       const confirmed = action.confirmedCloudWorkspaces;
@@ -1355,8 +1371,8 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       const byId = new Map(state.chats.map((c) => [c.id, c]));
       let changed = false;
       for (const raw of action.chats) {
-        const incoming = migrateChatPermission(raw);
-        const existing = byId.get(incoming.id);
+        const existing = byId.get(raw.id);
+        const incoming = migratePersistedChat(raw, existing);
         if (!existing) {
           byId.set(incoming.id, incoming);
           changed = true;

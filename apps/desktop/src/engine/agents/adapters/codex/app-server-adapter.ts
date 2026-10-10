@@ -490,7 +490,24 @@ export class CodexAppServerAdapter implements AgentAdapter {
         );
         if (this.sessions.get(sessionId) !== session)
           throw new Error("This chat session ended.");
-        return result;
+        // Inventory is opt-in. Preserve the strict legacy list while projecting
+        // the latest native login result into the existing MCP status fields.
+        return {
+          ...result,
+          groups: result.groups?.map((group) => {
+            if (group.kind !== "mcp") return group;
+            return {
+              ...group,
+              entries: group.entries.map((entry) => {
+                const state = session.translator.mcpOauthInventoryState(entry.id, entry.status);
+                if (!state) return entry;
+                const status = state === "opening" ? "connecting"
+                  : state === "connected" && entry.status === "error" ? "error" : state;
+                return { ...entry, status, canAuthenticate: state !== "connected" };
+              }),
+            };
+          }),
+        };
       },
       list: async ({ sessionId }) => {
         const session = this.requireSession(sessionId);
@@ -514,6 +531,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         const key = JSON.stringify([sessionId, toolId]);
         const existing = this.toolAuthFlights.get(key);
         if (existing) return existing;
+        const attempt = session.translator.beginMcpOauthLogin(toolId);
         const flight = authenticateCodexSessionTool(
           session.runtime,
           session.threadId,
@@ -522,7 +540,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
           .then((result) => {
             if (this.sessions.get(sessionId) !== session)
               throw new Error("This chat session ended.");
-            return result;
+            session.translator.finishMcpOauthLogin(toolId, attempt, result.loginId);
+            return { authorizationUrl: result.authorizationUrl };
+          })
+          .catch((error) => {
+            session.translator.failMcpOauthLogin(toolId, attempt);
+            throw error;
           })
           .finally(() => {
             if (this.toolAuthFlights.get(key) === flight)
@@ -886,6 +909,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   async setGoal(opts: {
     sessionId: string;
+    origin?: "user";
     update: {
       objective?: string;
       status?: AgentGoal["status"];
@@ -899,15 +923,17 @@ export class CodexAppServerAdapter implements AgentAdapter {
     >("thread/goal/set", {
       threadId: session.threadId,
       ...opts.update,
+      ...(opts.origin ? { origin: opts.origin } : {}),
     });
     session.goalSnapshotEpoch += 1;
     return canonicalGoal(response.goal);
   }
 
-  async clearGoal(opts: { sessionId: string }): Promise<void> {
+  async clearGoal(opts: { sessionId: string; origin?: "user" }): Promise<void> {
     const session = this.requireSession(opts.sessionId);
     await session.runtime.requestTyped("thread/goal/clear", {
       threadId: session.threadId,
+      ...(opts.origin ? { origin: opts.origin } : {}),
     });
     session.goalSnapshotEpoch += 1;
   }
@@ -4587,6 +4613,40 @@ function commandApprovalContext(params: Record<string, unknown>): string[] {
   return items.slice(0, 6);
 }
 
+/** This presentation is only truthful for one concrete, outside-workspace
+ * write grant. Mixed permissions, stdin and policy amendments keep the normal
+ * command card so none of their scope is hidden. Native grant data is untouched. */
+function commandWriteAccessPath(params: Record<string, unknown>, sessionCwd: string): string | null {
+  const additional = asRecord(params.additionalPermissions);
+  const fileSystem = asRecord(additional?.fileSystem);
+  if (!fileSystem || params.kind === "writeStdin" || params.networkApprovalContext != null ||
+      asRecord(additional?.network)?.enabled === true ||
+      (Array.isArray(params.proposedExecpolicyAmendment) && params.proposedExecpolicyAmendment.length > 0) ||
+      (Array.isArray(params.proposedNetworkPolicyAmendments) && params.proposedNetworkPolicyAmendments.length > 0) ||
+      (Array.isArray(params.availableDecisions) && params.availableDecisions.some(value => typeof value !== "string"))) return null;
+  if (fileSystem.read != null && (!Array.isArray(fileSystem.read) || fileSystem.read.length > 0)) return null;
+  if (fileSystem.write != null && !Array.isArray(fileSystem.write)) return null;
+  const writes: string[] = [];
+  for (const value of (fileSystem.write as unknown[] | null | undefined) ?? []) {
+    if (typeof value !== "string" || !value.trim() || value.includes("\0")) return null;
+    writes.push(value);
+  }
+  if (fileSystem.entries != null) {
+    if (!Array.isArray(fileSystem.entries)) return null;
+    for (const value of fileSystem.entries) {
+      const entry = asRecord(value), target = asRecord(entry?.path);
+      if (entry?.access !== "write" || target?.type !== "path" || typeof target.path !== "string" ||
+          !target.path.trim() || target.path.includes("\0")) return null;
+      writes.push(target.path);
+    }
+  }
+  const cwd = stringField(params, "cwd") ?? sessionCwd;
+  if (!cwd || !path.isAbsolute(cwd)) return null;
+  const root = path.resolve(cwd), targets = [...new Set(writes.map(value => path.resolve(root, value)))];
+  if (targets.length !== 1 || targets[0] === root || targets[0].startsWith(root + path.sep)) return null;
+  return path.relative(root, targets[0]);
+}
+
 /** Convert a codex approval request into the canonical Zeros shape the
  *  gateway broadcasts to the renderer. Command approvals honor the exact
  *  ordered `availableDecisions` list when app-server supplies one, including
@@ -4605,6 +4665,8 @@ export function mapApprovalToCanonical(
   const cwd = stringField(params, "cwd");
   const commandApprovalKind =
     stringField(params, "kind") === "writeStdin" ? "writeStdin" : "command";
+  const writeAccessPath = request.method === "item/commandExecution/requestApproval"
+    ? commandWriteAccessPath(params, session.cwd) : null;
 
   let title: string;
   let kind: "execute" | "edit" | "switch_mode";
@@ -4635,6 +4697,7 @@ export function mapApprovalToCanonical(
         proposedExecpolicyAmendment: params.proposedExecpolicyAmendment,
         proposedNetworkPolicyAmendments: params.proposedNetworkPolicyAmendments,
         availableDecisions: params.availableDecisions,
+        ...(writeAccessPath ? { codexWriteAccessPath: writeAccessPath } : {}),
       };
       break;
     case "item/fileChange/requestApproval": {
@@ -4696,12 +4759,13 @@ export function mapApprovalToCanonical(
             },
           ];
   const contextItems =
-    request.method === "item/commandExecution/requestApproval"
+    writeAccessPath ? [`Write · ${writeAccessPath}`] : request.method === "item/commandExecution/requestApproval"
       ? commandApprovalContext(params)
       : [];
 
   return {
     sessionId: session.zerosSessionId as never,
+    ...(writeAccessPath ? { title: "Do you want to allow write access outside the workspace?" } : {}),
     toolCall: {
       toolCallId: itemId,
       title,

@@ -776,6 +776,8 @@ export interface AgentGoalSetMessage extends BaseMessage {
   agentId: string;
   sessionId: string;
   executionId?: ExecutionId;
+  /** Explicit GoalCard action; omitted by automatic and legacy callers. */
+  origin?: "user";
   update: {
     objective?: string;
     status?: AgentGoalStatus;
@@ -788,6 +790,7 @@ export interface AgentGoalClearMessage extends BaseMessage {
   agentId: string;
   sessionId: string;
   executionId?: ExecutionId;
+  origin?: "user";
 }
 
 export interface AgentGoalChangedMessage extends BaseMessage {

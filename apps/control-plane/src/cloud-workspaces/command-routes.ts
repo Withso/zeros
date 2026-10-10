@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
-import { CloudCommandError, CloudCommandRequestSchema, legacyCloudCommandResponse, type DatabaseCloudWorkspaceCommandService } from "./commands.js";
+import { CloudCommandError, CloudCommandRequestSchema, legacyCloudCommandResponse, withoutCloudClaudePreferences, type DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { CloudWorkspaceEngineAuthorityError } from "./engine-authority.js";
 import { HttpError } from "../authz.js";
 
@@ -43,7 +43,8 @@ export function createCloudCommandRoutes(service: DatabaseCloudWorkspaceCommandS
         case "settle": result = await service.settle(scope, request.result); break;
         case "confirm-goal": result = await service.confirmGoal(scope,request); break;
       }
-      return c.json({ result:native?result:legacyCloudCommandResponse(result) });
+      const compatible = c.req.header("x-zeros-claude-preferences") === "1" ? result : withoutCloudClaudePreferences(result);
+      return c.json({ result:native?compatible:legacyCloudCommandResponse(compatible) });
     } catch (error) {
       if (error instanceof CloudWorkspaceEngineAuthorityError) return c.json({ error: "engine_authority_rejected" }, 401);
       if (error instanceof HttpError) return c.json({error:"cloud_actor_authority_rejected"},403);

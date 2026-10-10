@@ -26,7 +26,7 @@ async function requestCloudControl(authority: CloudRuntimeAuthority, request: Cl
       method: "POST", redirect: "error",
       signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
       headers: { "content-type": "application/json", authorization: `Bearer ${heartbeatToken}`,
-        ...(resource==="commands"?{"x-zeros-native-commands":"1"}:{}) },
+        ...(resource==="commands"?{"x-zeros-native-commands":"1","x-zeros-claude-preferences":"1"}:{}) },
       body: JSON.stringify({ ...scope, request,...(actorSessionId?{actorSessionId}:{}) }),
     });
   } catch { throw new CloudCommandRuntimeError("command_service_unavailable"); }

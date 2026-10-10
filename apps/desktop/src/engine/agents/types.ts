@@ -436,13 +436,14 @@ export interface AgentGoalCapabilityPort {
   get(opts: { sessionId: string }): Promise<AgentGoal | null>;
   set(opts: {
     sessionId: string;
+    origin?: "user";
     update: {
       objective?: string;
       status?: AgentGoalStatus;
       tokenBudget?: number | null;
     };
   }): Promise<AgentGoal>;
-  clear(opts: { sessionId: string }): Promise<void>;
+  clear(opts: { sessionId: string; origin?: "user" }): Promise<void>;
 }
 
 export interface AgentSafetyCapabilityPort {

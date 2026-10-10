@@ -191,6 +191,7 @@ export function resolveCloudClaudeCli(): {path:string;source:"bundled"} {
 
 const CLAUDE_IDLE_TIMEOUT_ENV_VAR = "ZEROS_CLAUDE_IDLE_TIMEOUT_MINUTES";
 const CLAUDE_AUTO_MEMORY_ENV_VAR = "ZEROS_CLAUDE_AUTO_MEMORY";
+const CLAUDE_IDLE_COMPACTION_ENV_VAR = "ZEROS_CLAUDE_IDLE_COMPACTION";
 const DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES = 30;
 const ALLOWED_CLAUDE_IDLE_TIMEOUT_MINUTES = new Set([30, 60, 120, 300]);
 
@@ -2031,10 +2032,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       state?: string;
       command_uuid?: string;
       parent_tool_use_id?: string | null;
+      agent_id?: string;
       user_message_uuid?: unknown;
       user_message_uuids?: unknown;
     };
-    if (m.parent_tool_use_id) return;
+    if (m.parent_tool_use_id || m.agent_id) return;
     // Native 0.3.266 command_lifecycle is forwarded by the wrapper although
     // absent from its exported SDKMessage union. command_uuid identifies the
     // input; uuid identifies the lifecycle frame and must never be joined here.
@@ -2113,6 +2115,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           queued_turn_count?: number;
           startup_failure_reason?: unknown;
           parent_tool_use_id?: string | null;
+          agent_id?: string;
           state?: "idle" | "running" | "requires_action";
         };
 
@@ -2223,6 +2226,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           state.turnlessRunsPending === 0 &&
           !state.cancelRequested &&
           !m.parent_tool_use_id &&
+          !m.agent_id &&
           (m.type === "assistant" ||
             m.type === "stream_event" ||
             isClaudeParentProgress(msg as unknown as Record<string, unknown>))
@@ -3053,7 +3057,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     const cloud=cloudProviderExecution(state.executionBoundary);
     if(cloud){
       cloud.lease.assertLive();
-      if(Object.keys(opts.env).some(name=>!["ANTHROPIC_MODEL","ZEROS_THINKING_EFFORT","ZEROS_FAST_MODE","CLAUDE_MAX_TURNS"].includes(name))||
+      if(Object.keys(opts.env).some(name=>!["ANTHROPIC_MODEL","ZEROS_THINKING_EFFORT","ZEROS_FAST_MODE","CLAUDE_MAX_TURNS",CLAUDE_AUTO_MEMORY_ENV_VAR,CLAUDE_IDLE_COMPACTION_ENV_VAR].includes(name))||
+        [CLAUDE_AUTO_MEMORY_ENV_VAR,CLAUDE_IDLE_COMPACTION_ENV_VAR].some(name=>opts.env[name]!==undefined&&opts.env[name]!=="0"&&opts.env[name]!=="1")||
         (opts.env.ANTHROPIC_MODEL!==undefined&&opts.env.ANTHROPIC_MODEL!==cloud.lease.admission.model))
         throw new Error("Cloud provider configuration requires a new credential admission");
     }
@@ -3081,6 +3086,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     delete carried.CLAUDE_MAX_BUDGET_USD;
     delete carried[CLAUDE_IDLE_TIMEOUT_ENV_VAR];
     delete carried[CLAUDE_AUTO_MEMORY_ENV_VAR];
+    delete carried[CLAUDE_IDLE_COMPACTION_ENV_VAR];
     state.env = { ...carried, ...opts.env };
     delete state.env.CLAUDE_FALLBACK_MODEL;
     delete state.env.CLAUDE_MAX_BUDGET_USD;
@@ -3102,7 +3108,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       (state.env.ZEROS_THINKING_EFFORT === "max");
     if (!maxTurnsChanged && !maxEffortToggled) {
       try {
-        const settings = this.buildFlagSettings(state);
+        const settings = {
+          ...this.buildFlagSettings(state),
+          // On restores the lower-precedence native policy. Omission cannot
+          // clear a live false override, and true cannot force-enable it.
+          idleCompaction: state.env[CLAUDE_IDLE_COMPACTION_ENV_VAR] === "1" ? null : false,
+        };
         await state.query?.applyFlagSettings(
           state.env.ZEROS_THINKING_EFFORT?.trim()
             ? settings
@@ -4244,6 +4255,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // Claude auto-memory is repo-scoped and live-mutable. Keep an explicit
       // boolean so turning it off (or back on) clears the prior query value.
       autoMemoryEnabled: env?.[CLAUDE_AUTO_MEMORY_ENV_VAR] !== "0",
+      // SDK Settings.idleCompaction only disables. On leaves native policy
+      // in charge; an absent/legacy preference keeps Zeros' default Off.
+      ...(env?.[CLAUDE_IDLE_COMPACTION_ENV_VAR] === "1" ? {} : { idleCompaction: false }),
       permissions: {
         additionalDirectories:cloud?[]:additionalDirectories,
         allow:cloud?[]:allow,

@@ -720,6 +720,10 @@
             "auto_memory_enabled": {
               "type": "boolean",
               "description": "Allow Claude Code to maintain its native repository memory."
+            },
+            "idle_compaction_enabled": {
+              "type": "boolean",
+              "description": "Allow Claude Code to compact long conversations while idle (off by default)."
             }
           },
           "description": "Claude-specific model defaults."

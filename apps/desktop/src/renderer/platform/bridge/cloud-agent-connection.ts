@@ -5,6 +5,7 @@ import {
   CLOUD_AGENT_PERMISSION_MODES,
   cloudPermissionMode,
   type CloudCommandSnapshot,
+  type CloudClaudePreferences,
   type CloudNativeOperation,
   CloudNativeOperationSchema,
   CloudNativeResultSchema,
@@ -26,6 +27,7 @@ type Conversation = {
   model: string;
   effort?: string;
   fast: boolean;
+  claudePreferences?: CloudClaudePreferences;
   execution?: string;
   modeRevision: number;
   localDirectories?: boolean;
@@ -114,6 +116,7 @@ export class CloudAgentConnection {
   }>();
   private closed = false;
   private nativeCommandsVersion=0;
+  private claudePreferencesVersion=0;
   private listeners = new Map<string, Set<(message: BridgeMessage) => void>>();
 
   constructor(
@@ -137,6 +140,7 @@ export class CloudAgentConnection {
       id: owner.id, agentId: owner.agentId, model: owner.model,
       effort: owner.effort, fast: owner.fast, modeRevision: owner.modeRevision,
       localDirectories: owner.localDirectories, permissionMode: owner.permissionMode,
+      ...(owner.claudePreferences ? { claudePreferences: { ...owner.claudePreferences } } : {}),
     }));
   }
 
@@ -147,6 +151,7 @@ export class CloudAgentConnection {
       id: owner.id, agentId: owner.agentId, model: owner.model,
       effort: owner.effort, fast: owner.fast, modeRevision: owner.modeRevision,
       localDirectories: owner.localDirectories, permissionMode: owner.permissionMode,
+      ...(owner.claudePreferences ? { claudePreferences: { ...owner.claudePreferences } } : {}),
     });
   }
 
@@ -319,7 +324,11 @@ export class CloudAgentConnection {
       const remaining = submission ? submission.deadline - Date.now() : 30_000;
       if (remaining <= 0) throw new Error("The cloud workspace is still checkpointing. Try sending again when it is ready.");
       const response = await this.client.request(
-        { type: "WORKSPACE_REQUEST", op, params:op==="cloudCommands.request"&&this.nativeCommandsVersion===1?{...params,nativeCommandsVersion:1}:params },
+        { type: "WORKSPACE_REQUEST", op, params: op === "cloudCommands.request" ? {
+          ...params,
+          ...(this.nativeCommandsVersion === 1 ? { nativeCommandsVersion: 1 } : {}),
+          ...(this.claudePreferencesVersion === 1 ? { claudePreferencesVersion: 1 } : {}),
+        } : params },
         submission ? { timeoutMs: Math.min(30_000, remaining), signal: submission.signal } : 30_000,
       );
       assertCurrent();
@@ -340,7 +349,10 @@ export class CloudAgentConnection {
         throw new Error(response.message || "Cloud request failed");
       }
       const result=record((response as unknown as WireRecord).result);
-      if(op==="cloudCommands.conversation"||op==="cloudCommands.createConversation")this.nativeCommandsVersion=Number(result.nativeCommandsVersion??0);
+      if(op==="cloudCommands.conversation"||op==="cloudCommands.createConversation") {
+        this.nativeCommandsVersion=Number(result.nativeCommandsVersion??0);
+        this.claudePreferencesVersion=Number(result.claudePreferencesVersion??0);
+      }
       return result;
     }
   }
@@ -443,6 +455,10 @@ export class CloudAgentConnection {
     if (message.env) {
       owner.fast = env.ZEROS_FAST_MODE === "1";
       owner.permissionMode = cloudPermissionMode(owner.agentId, env.ZEROS_PERMISSION_MODE ?? "auto");
+      if (owner.agentId === "claude") owner.claudePreferences = {
+        autoMemoryEnabled: env.ZEROS_CLAUDE_AUTO_MEMORY !== "0",
+        idleCompactionEnabled: env.ZEROS_CLAUDE_IDLE_COMPACTION === "1",
+      };
     }
   }
 
@@ -605,7 +621,7 @@ export class CloudAgentConnection {
   }
 
   private async nativeOperation(owner:Conversation,operation:CloudNativeOperation,commandId:string,signal?:AbortSignal) {
-    const {agentId,model,effort,fast}=owner;
+    const {agentId,model,effort,fast,claudePreferences}=owner;
     const permissionMode=owner.permissionMode??cloudPermissionMode(agentId);
     if(!model)throw new Error("Choose a model before using this cloud operation");
     const [grant,conversation,snapshot]=await Promise.all([this.grant(agentId,model),
@@ -619,7 +635,10 @@ export class CloudAgentConnection {
       await this.op("cloudCommands.request",{request:{kind:"mutate",mutation:{conversationId:owner.id,operationId:commandId,
         expectedRevision:queue.revision,action:{kind:operation.kind==="fork"?"fork":"enqueue",commandId,payload:{agentId,model,
           agentCredentialGrantId:grant,userMessageId:commandId,modeRevision:Number(conversation.modeRevision),permissionMode,
-          ...(effort?{effort}:{}),fast,prompt:[{type:"text",text:""}],operation}}}}});
+          ...(effort?{effort}:{}),fast,
+          ...(agentId === "claude" && conversation.claudePreferencesVersion === 1
+            ? { claudePreferences: claudePreferences ?? { autoMemoryEnabled: true, idleCompactionEnabled: false } } : {}),
+          prompt:[{type:"text",text:""}],operation}}}}});
     }
     // Read the same receipt after reconnect/unknown acknowledgement. An
     // uncertain native mutation is never automatically dispatched again.
@@ -642,7 +661,7 @@ export class CloudAgentConnection {
   ): Promise<WireRecord> {
     // Composer changes apply to the next send. This command must retain the
     // model/effort that its credential lookup authorizes across every await.
-    const { agentId, model, effort, fast, localDirectories } = owner;
+    const { agentId, model, effort, fast, localDirectories, claudePreferences } = owner;
     const permissionMode = owner.permissionMode ?? cloudPermissionMode(agentId);
     if (!model)
       throw new Error("Choose a model before sending to the cloud workspace");
@@ -759,6 +778,10 @@ export class CloudAgentConnection {
                       ? { effort }
                       : {}),
                     fast,
+                    // Older pinned workers accept only their original strict
+                    // payload. Preferences are additive and capability-gated.
+                    ...(agentId === "claude" && conversation.claudePreferencesVersion === 1
+                      ? { claudePreferences: claudePreferences ?? { autoMemoryEnabled: true, idleCompactionEnabled: false } } : {}),
                     ...(conversation.permissionModeVersion === 1 ? { permissionMode } : {}),
                   },
                 },

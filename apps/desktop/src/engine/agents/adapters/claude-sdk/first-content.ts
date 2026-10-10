@@ -25,7 +25,7 @@ function contentBlock(value: unknown): boolean {
  * Child traffic and synthetic error prose cannot establish parent latency. */
 export function hasClaudeModelContent(value: unknown): boolean {
   const message = record(value);
-  if (!message || message.parent_tool_use_id || message.error) return false;
+  if (!message || message.parent_tool_use_id || message.agent_id || message.error) return false;
   if (message.type === "assistant") {
     const content = record(message.message)?.content;
     return Array.isArray(content)

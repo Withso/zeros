@@ -24,6 +24,7 @@ import {
   relativizePath,
 } from "../permission-card";
 import type { RequestPermissionRequest } from "../../../platform/bridge/agent-events";
+import { mapApprovalToCanonical } from "../../../../engine/agents/adapters/codex/app-server-adapter";
 
 const CWD = "/Users/x/repos/ws-feverfew";
 
@@ -71,6 +72,22 @@ describe("relativizePath", () => {
 });
 
 describe("describePermission", () => {
+  it.each(["/Users/x/repos/workspace", "/srv/zeros/workspace"])("renders only the Write chip for a native filesystem escalation (%s)", cwd => {
+    const request = mapApprovalToCanonical({ zerosSessionId: "session", cwd } as never, {
+      permissionId: "permission", method: "item/commandExecution/requestApproval",
+      params: { itemId: "write-access", command: "pnpm build --out ../shared/build", cwd,
+        additionalPermissions: { network: null, fileSystem: { read: null, write: [cwd + "/../shared/build"] } } },
+    } as never);
+    const html = renderToStaticMarkup(createElement(PermissionCard, { request, cwd, onRespond: () => {} }));
+    expect(html).toContain("Do you want to allow write access outside the workspace?");
+    expect(html).toContain("Write · ../shared/build");
+    expect(html).not.toContain("pnpm build");
+    expect(html).not.toContain("Reads unchanged");
+    expect(html).not.toContain("Network unchanged");
+    expect(html).toContain(">Allow for this chat</span>");
+    expect(html.match(/data-permission-context-item/g)).toHaveLength(1);
+    expect(html.match(/<button /g)).toHaveLength(3);
+  });
   it("uses only the existing Yes/No rows for an explicit approval, even with stale broad options", () => {
     const request = {
       ...req("execute", "Bash", { command: "rm -rf dist" }),

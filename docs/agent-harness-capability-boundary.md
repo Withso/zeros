@@ -252,6 +252,36 @@ without the field recover the saved chat choice. The conversation response
 advertises `permissionModeVersion: 1`; clients omit the additive field for older
 workers during a rolling update.
 
+Claude preferences use the same renderer cache and acknowledged agent-preference
+outbox as model selections. `claude-idle-compaction-enabled` mirrors the user
+TOML leaf `models.claude_code.idle_compaction_enabled`, defaulting to false for
+new and legacy settings. `ZEROS_CLAUDE_IDLE_COMPACTION` carries the boolean as
+`0`/`1` alongside `ZEROS_CLAUDE_AUTO_MEMORY`. The SDK accepts idle compaction
+through its inline `Settings`: Off sets `idleCompaction: false`; On omits it at
+query creation and clears a live override with `null`. A true SDK value cannot
+force-enable native compaction.
+
+Cloud queued prompts retain a strict optional `claudePreferences` object with
+`autoMemoryEnabled` and `idleCompactionEnabled`. The admitted command supplies
+both cold coordinator settings and retained-process updates; another actor's
+or device's later selection cannot alter an accepted command. Legacy payloads
+keep auto memory On and idle compaction Off. Workers advertise
+`claudePreferencesVersion: 1`, and clients emit the additive payload/request
+fields only after that capability is confirmed. The worker's control-plane
+request uses `x-zeros-claude-preferences: 1`. Responses to older workers and
+attachments omit only the new preference field, preserving the durable payload
+and the existing native-command compatibility projection. Older pinned workers
+retain their legacy behavior until a runtime upgrade.
+
+Roll out the control-plane schema before publishing workers that advertise
+this capability. Older control planes reject the new strict payload field;
+the worker capability only negotiates desktop/worker compatibility.
+
+The optional task run/type/ownership fields and negotiated Claude preferences
+are additive compatibility extensions. They retain protocol version 20;
+`check:protocol` reports the source change advisory until a protocol-changing
+release is required.
+
 Between cloud commands, changing the permission picker records the next command's
 selection. During a live turn, the provider must acknowledge the change. The
 Codex VM wrapper retains the native approval/sandbox policy while fixing the

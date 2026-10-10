@@ -41,6 +41,11 @@ describe("matchSubagent", () => {
     expect(info).toMatchObject({ subagentType: "explore", description: "Look around" });
   });
 
+  it("uses the SDK's resolved type after a task-start or background snapshot", () => {
+    expect(matchSubagent(tool({ title: "Agent", toolKind: "subagent", rawInput: { description: "Review the diff" }, rawOutput: { subagentType: "Explore" } })))
+      .toEqual({ subagentType: "Explore", description: "Review the diff" });
+  });
+
   it("matches Cursor's camelCase subagentType:{kind} even without a task-y title or kind", () => {
     // The real failing case: title is "Subagent …" (not "task") and toolKind
     // wasn't tagged subagent (old/persisted chat) — must still route to the card.

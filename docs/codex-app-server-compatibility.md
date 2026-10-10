@@ -37,7 +37,7 @@ the compatibility manifest. A regenerated method cannot silently appear or
 disappear without review.
 
 The control-plane authentication keeper is independently qualified at 0.154.0
-while the interactive runtime is 0.160.0. Its version participates in encrypted
+while the interactive runtime is 0.161.0. Its version participates in encrypted
 cache authentication and a database constraint. `check:codex-pin` checks that
 package against `CODEX_AUTH_RUNTIME_VERSION`, not the desktop protocol version;
 Renovate excludes it from routine agent upgrades. A keeper upgrade requires an
@@ -68,8 +68,8 @@ every classified method has a behavioral implementation or test.
 - Notification `forwarded`: generated typed subscription is available, but no
   canonical or product behavior is claimed.
 
-At the 0.160.0 pin this covers 264 methods: 168 client requests, 11 server
-requests, and 85 server notifications. The five `userVerification/*` client
+At the 0.161.0 pin this covers 267 methods: 170 client requests, 11 server
+requests, and 86 server notifications. The five `userVerification/*` client
 methods are generated-only: Zeros does not expose native identity verification.
 Relative to 0.154.0, `userVerification/cancel`, the three `thread/attachment/*`
 requests, `memory/status`, `rollout/compress`, and the three
@@ -87,6 +87,50 @@ the same validated, fail-closed form path as `openai/form`. Run
 `pnpm check:codex-coverage` for the offline drift check.
 
 ## Transcript fidelity
+
+### 0.161.0 compatibility
+
+The two new client requests, `thread/prediction/request` and
+`account/bedrock/checkGovCloudRequirements`, are generated-only.
+`thread/prediction/updated` is forwarded through the typed engine subscription;
+it has no canonical transcript or renderer surface. The 267-method inventory
+retains every other disposition from 0.160.0.
+
+Explicit GoalCard set/status/clear actions send `origin: "user"` to the native
+goal RPC so Codex can record the user's instruction. Automatic and legacy
+engine callers omit provenance. Cloud portable commands cannot assert origin:
+their strict mirrored schemas reject it, and the admitted command's actor
+supplies it at dispatch. The provider set/clear schemas accept only that bounded
+user value behind a command admission and the exact native thread binding.
+Goal reads never accept provenance, and no goal action creates a Zeros prompt.
+
+MCP OAuth responses and completions use the optional `loginId` to match the
+latest attempt per server in the exact native session. Older or duplicate
+completions cannot settle a newer attempt or emit a stale failure notice.
+Completions that precede their response are bounded and matched after it
+arrives. Older servers retain the omitted/null-id path only when the response
+also lacks an id. IDs and native diagnostics stay adapter-side. The opt-in
+Tools inventory carries only existing status fields for Authenticate,
+Opening…, connected, and failed; a failed row offers authentication again.
+After native inventory confirms success, it owns subsequent connection health;
+the completed attempt remains private so late duplicates cannot change it.
+The strict legacy list response is unchanged. Cloud OAuth MCP remains
+unavailable under its existing provider policy; this correlation does not add
+cloud authentication authority.
+
+A command approval requesting only one concrete filesystem write path outside
+the workspace uses the existing permission card with a single workspace-relative
+`Write · <path>` chip and no command row. Mixed permissions, multiple paths,
+glob/special entries, stdin callbacks, and policy amendments keep their existing
+command presentation. The full native request and ordered decisions remain
+unchanged, including approve/decline routing.
+
+`CodexErrorInfo` now permits unknown string and object variants. The existing
+classifier keeps their tag and optional HTTP status as a label, with the normal
+`end_turn` fallback; only the known context-window tag changes the stop reason.
+Thread-start web-search configuration, sandbox/approval selection, and the
+omitted native `permissions` field retain their existing behavior. Offline
+parameter and cloud-policy tests cover those unchanged start/resume paths.
 
 ### 0.160.0 compatibility
 

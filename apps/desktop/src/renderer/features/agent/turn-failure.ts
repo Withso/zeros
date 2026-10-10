@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@zeros/protocol/agent-messages";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
+import { claudeOrganizationStartupCode, claudeOrganizationStartupMessage } from "@zeros/protocol/claude-startup-notice";
 import type { AgentFailure } from "../../platform/bridge/failure";
 
 export interface TurnFailure {
@@ -60,8 +61,10 @@ export function turnFailureForCard(input: {
     notice?.code === "claude-background-transport-closed";
   if (input.status === "completed" && !backgroundFailure) return null;
   const fallback = input.fallback ?? input.recoveryFailure;
+  const organizationMessage = claudeOrganizationStartupMessage(notice?.code) ??
+    claudeOrganizationStartupMessage(claudeOrganizationStartupCode(input.fallback?.advice));
   const message =
-    notice?.kind === "error_notice" ? notice.message : fallback?.message;
+    organizationMessage ?? (notice?.kind === "error_notice" ? notice.message : fallback?.message);
   if (!message) return null;
   const kind =
     (notice?.code === "claude-background-transport-closed"
@@ -76,7 +79,7 @@ export function turnFailureForCard(input: {
   // A new conversation cannot fix account verification or cloud credentials.
   // Authentication has its own Sign in action. The caller also gates ownership
   // and Design scope before supplying any retry callbacks.
-  const newChatAllowed = ![
+  const newChatAllowed = !organizationMessage && ![
     "auth-required", "verification-required", "cloud-credentials-unavailable",
   ].includes(kind);
   return {

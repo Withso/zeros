@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { BridgeRegistryAgent } from "../../../platform/bridge/messages";
 import { setModelPreference } from "../../../features/agent/model-preferences";
+import { setFavoriteModel } from "../../../features/agent/model-favorites";
 import {
   clearProvisionalBindings,
   rememberProvisionalBinding,
@@ -42,6 +43,14 @@ describe("cold chat default binding", () => {
     delete (globalThis as { localStorage?: Storage }).localStorage;
   });
 
+  it("keeps an explicit provider and model during a cold or empty registry", () => {
+    setFavoriteModel("codex", "gpt-5.6-sol");
+    for (const agents of [null, []]) {
+      expect(resolveAutoBindChatSettings(agents)).toMatchObject({ agentId: "codex", model: "gpt-5.6-sol" });
+      expect(resolveAutoBindChatSettings(agents, "cursor")).toMatchObject({ agentId: "cursor", model: "grok-4.7" });
+    }
+  });
+
   it("never waits for the registry — a cold snapshot resolves the same product default", () => {
     // Still loading. Binding anyway is the point: the composer paints now and
     // the guess is reconciled once the live list lands. Blocking here would put
@@ -52,9 +61,9 @@ describe("cold chat default binding", () => {
     const empty = resolveAutoBindChatSettings([]);
     for (const settings of [provisional, empty]) {
       expect(settings).toMatchObject({
-        agentId: "codex",
-        model: "gpt-5.6-sol",
-        effort: "high",
+        agentId: "claude",
+        model: "claude-opus-5-5[1m]",
+        effort: "medium",
         fast: false,
       });
     }
@@ -68,7 +77,7 @@ describe("cold chat default binding", () => {
         detectedAgent("claude", { installed: true }),
         detectedAgent("cursor", { installed: true }),
       ]),
-    ).toMatchObject({ agentId: "claude", model: "claude-opus-5[1m]" });
+    ).toMatchObject({ agentId: "claude", model: "claude-opus-5-5[1m]" });
     // Installed beats merely-listed within the same product order.
     expect(
       resolveAutoBindChatSettings([
@@ -82,28 +91,28 @@ describe("cold chat default binding", () => {
         detectedAgent("codex", { installed: true }),
         agent("cursor"),
       ]),
-    ).toMatchObject({ agentId: "cursor", model: "composer-2.5" });
+    ).toMatchObject({ agentId: "cursor", model: "grok-4.7" });
   });
 
   it("binds agent, fallback model, and exact default configuration together", () => {
     expect(resolveAutoBindChatSettings([agent("claude")])).toMatchObject({
       agentId: "claude",
-      model: "claude-opus-5[1m]",
-      effort: "high",
+      model: "claude-opus-5-5[1m]",
+      effort: "medium",
       fast: false,
     });
     expect(
       resolveAutoBindChatSettings([agent("claude"), agent("codex")]),
     ).toMatchObject({
-      agentId: "codex",
-      model: "gpt-5.6-sol",
-      effort: "high",
+      agentId: "claude",
+      model: "claude-opus-5-5[1m]",
+      effort: "medium",
       fast: false,
     });
     expect(resolveAutoBindChatSettings([agent("cursor")])).toMatchObject({
       agentId: "cursor",
-      model: "composer-2.5",
-      effort: "high",
+      model: "grok-4.7",
+      effort: "xhigh",
       fast: false,
     });
   });
@@ -117,13 +126,13 @@ describe("cold chat default binding", () => {
   });
 
   it("restores the selected default model's remembered configuration", () => {
-    setModelPreference("codex", "gpt-5.6-sol", {
+    setModelPreference("codex", "gpt-6.1-sol", {
       effort: "max",
       fast: true,
     });
     expect(resolveAutoBindChatSettings([agent("codex")])).toMatchObject({
       agentId: "codex",
-      model: "gpt-5.6-sol",
+      model: "gpt-6.1-sol",
       effort: "max",
       fast: true,
       sessionId: undefined,
@@ -134,7 +143,7 @@ describe("cold chat default binding", () => {
 
   it("returns a repaired chat to its own agent, keeping a same-agent session", () => {
     const registry = [agent("claude"), agent("codex")];
-    // Codex would win the product order, but this chat already ran on Claude.
+    // The chat's own provider survives independently of the product default.
     expect(
       resolveAutoBindChatSettings(registry, null, undefined, {
         agentName: "Claude",
@@ -207,7 +216,7 @@ describe("cold chat default binding", () => {
         model: "gpt-5.6-sol",
         effort: "max",
       }),
-    ).toMatchObject({ model: "claude-opus-5[1m]" });
+    ).toMatchObject({ model: "claude-opus-5-5[1m]" });
     // A different family can't vouch for the configuration either.
     expect(
       resolveAutoBindChatSettings([agent("codex")], null, undefined, {
@@ -215,7 +224,7 @@ describe("cold chat default binding", () => {
         model: "claude-sonnet-5[1m]",
         effort: "max",
       }),
-    ).toMatchObject({ agentId: "codex", model: "gpt-5.6-sol", effort: "high" });
+    ).toMatchObject({ agentId: "codex", model: "gpt-6.1-sol", effort: "max" });
   });
 
   it("drops a session id that the rebound agent could not resume", () => {
@@ -266,14 +275,14 @@ describe("provisional bindings", () => {
   // the global default by design, so the guessed family would win forever.
   it("re-resolves from the live registry instead of the guess", () => {
     const cold = resolveAutoBindChatSettings(null, null, undefined, {});
-    expect(cold.agentId).toBe("codex");
+    expect(cold.agentId).toBe("claude");
     rememberProvisionalBinding("chat-2", {});
     const prior = takeProvisionalBinding("chat-2");
     expect(prior).toEqual({});
-    // Live list: only Claude is present, so the codex guess must not survive.
+    // Live list: only Codex is present, so the Claude guess must not survive.
     expect(
-      resolveAutoBindChatSettings([agent("claude")], null, undefined, prior!),
-    ).toMatchObject({ agentId: "claude", model: "claude-opus-5[1m]" });
+      resolveAutoBindChatSettings([agent("codex")], null, undefined, prior!),
+    ).toMatchObject({ agentId: "codex", model: "gpt-6.1-sol" });
   });
 
   it("bounds the pending map instead of growing with every chat", () => {

@@ -6,14 +6,16 @@ import { AGENT_NOTICE_ACTION, AgentNotice } from "./agent-notice";
 /** Product state beside the prompt, outside agent output/tool groups/footers. */
 export function AuthenticationNotice({
   name,
+  message,
   onSignIn,
 }: {
   name: string;
+  message?: string;
   onSignIn: () => void;
 }) {
   return (
     <AgentNotice
-      message={`Sign in to ${name} in Settings, then send a new message or type “Continue” to resume.`}
+      message={message ?? `Sign in to ${name} in Settings, then send a new message or type “Continue” to resume.`}
       data-authentication-notice
     >
       <Button

@@ -15,6 +15,7 @@ import {
   agentFamily,
   agentSupportsFast,
   defaultEffortForLevels,
+  defaultEffortForModel,
   effortLevelsFor,
   modelsForAgent,
 } from "./model-catalog";
@@ -159,7 +160,7 @@ export function resolveModelConfiguration(
   const effort =
     saved?.effort && levels.includes(saved.effort)
       ? saved.effort
-      : defaultEffortForLevels(levels);
+      : defaultEffortForModel(agentId ?? null, exactModel || null, initialize);
   const fast =
     saved?.fast === true &&
     agentSupportsFast(agentId ?? null, exactModel || null, initialize);

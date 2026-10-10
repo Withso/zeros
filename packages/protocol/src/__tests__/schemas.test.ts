@@ -479,6 +479,16 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
     }
   });
 
+  it("accepts optional explicit goal origin and rejects other client provenance", () => {
+    for (const type of ["AGENT_GOAL_SET", "AGENT_GOAL_CLEAR"] as const) {
+      const message = { ...base, source: "browser", type, agentId: "codex", sessionId: "session-1",
+        ...(type === "AGENT_GOAL_SET" ? { update: { objective: "Finish" } } : {}) };
+      expect(parseBridgeMessage({ ...message, origin: "user" })).toMatchObject({ origin: "user" });
+      expect(parseBridgeMessage(message)).not.toHaveProperty("origin");
+      for (const origin of ["automatic", "forged", null]) expect(() => parseBridgeMessage({ ...message, origin })).toThrow();
+    }
+  });
+
   it("validates session-spawn environment maps at the wire boundary", () => {
     const b = { ...base, source: "browser" as const };
     expect(

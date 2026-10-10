@@ -20,7 +20,7 @@ function fixture(receiptIdentity: Record<string, unknown> = {}) {
   const request = vi.fn(async (message: WireRecord) => {
     const params = message.params as WireRecord;
     const input = params.request as WireRecord;
-    let result: unknown = { conversationId: chat, modeRevision: 0, permissionModeVersion: 1, nativeCommandsVersion: 1 };
+    let result: unknown = { conversationId: chat, modeRevision: 0, permissionModeVersion: 1, nativeCommandsVersion: 1, claudePreferencesVersion: 1 };
     if (message.op === "cloudCommands.request") {
       if (input.kind === "snapshot")
         result = {
@@ -96,6 +96,81 @@ function fixture(receiptIdentity: Record<string, unknown> = {}) {
   };
 }
 afterEach(() => vi.restoreAllMocks());
+
+describe("cloud Claude preference carriage", () => {
+  const choices = [
+    { autoMemoryEnabled: true, idleCompactionEnabled: false },
+    { autoMemoryEnabled: false, idleCompactionEnabled: false },
+    { autoMemoryEnabled: true, idleCompactionEnabled: true },
+    { autoMemoryEnabled: false, idleCompactionEnabled: true },
+  ];
+  it.each(choices)("retains %j across attachment replacement and a durable send", async claudePreferences => {
+    const before = fixture(), after = fixture();
+    try {
+      await before.connection.request({ type: "AGENT_NEW_SESSION", agentId: "claude", chatId: chat,
+        env: { ANTHROPIC_MODEL: "claude-haiku-4-5", ZEROS_CLAUDE_AUTO_MEMORY: claudePreferences.autoMemoryEnabled ? "1" : "0",
+          ZEROS_CLAUDE_IDLE_COMPACTION: claudePreferences.idleCompactionEnabled ? "1" : "0" } });
+      after.connection.restoreAttachments(before.connection.snapshotAttachments());
+      await after.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "preferences", prompt: [{ type: "text", text: "test" }] });
+      expect(after.getEnqueued()?.payload).toMatchObject({ claudePreferences });
+      expect(after.request.mock.calls.filter(([message]) => message.op === "cloudCommands.request" && ((message.params as WireRecord).request as WireRecord).kind !== "snapshot")
+        .every(([message]) => (message.params as WireRecord).claudePreferencesVersion === 1)).toBe(true);
+    } finally { before.connection.dispose(); after.connection.dispose(); }
+  });
+
+  it("defaults to native auto memory On and idle compaction Off when a legacy env omits them", async () => {
+    const f = fixture();
+    try {
+      await f.connection.request({ type: "AGENT_NEW_SESSION", agentId: "claude", chatId: chat, env: { ANTHROPIC_MODEL: "claude-haiku-4-5" } });
+      await f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "legacy-preferences", prompt: [{ type: "text", text: "test" }] });
+      expect(f.getEnqueued()?.payload).toMatchObject({ claudePreferences: { autoMemoryEnabled: true, idleCompactionEnabled: false } });
+    } finally { f.connection.dispose(); }
+  });
+
+  it.each([undefined, 0, 2])("preserves the old strict wire contract for a worker without preferences v1 (%s)", async version => {
+    const f = fixture(), original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async message => {
+      const response = await original(message);
+      if (["cloudCommands.conversation", "cloudCommands.createConversation"].includes(String(message.op)))
+        return { ...response, result: { ...response.result as WireRecord, claudePreferencesVersion: version } };
+      return response;
+    });
+    try {
+      await f.connection.request({ type: "AGENT_NEW_SESSION", agentId: "claude", chatId: chat,
+        env: { ANTHROPIC_MODEL: "claude-haiku-4-5", ZEROS_CLAUDE_IDLE_COMPACTION: "1" } });
+      await f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "old-worker", prompt: [{ type: "text", text: "test" }] });
+      expect(f.getEnqueued()?.payload).not.toHaveProperty("claudePreferences");
+      for (const [message] of f.request.mock.calls) expect(message.params).not.toHaveProperty("claudePreferencesVersion");
+    } finally { f.connection.dispose(); }
+  });
+
+  it("captures preferences before credential lookup and uses a later change only on the next send", async () => {
+    const f = fixture();
+    let authorize!: (value: string) => void;
+    try {
+      await f.connection.request({ type: "AGENT_NEW_SESSION", agentId: "claude", chatId: chat,
+        env: { ANTHROPIC_MODEL: "claude-haiku-4-5", ZEROS_CLAUDE_AUTO_MEMORY: "0", ZEROS_CLAUDE_IDLE_COMPACTION: "0" } });
+      f.authorize.mockReturnValueOnce(new Promise(resolve => { authorize = resolve; }));
+      const pending = f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "captured-preferences", prompt: [] });
+      f.connection.send({ type: "AGENT_UPDATE_CONFIG", sessionId: `conversation:${chat}`, env: { ZEROS_CLAUDE_AUTO_MEMORY: "1", ZEROS_CLAUDE_IDLE_COMPACTION: "1" } });
+      authorize(grant);
+      await pending;
+      expect(f.getEnqueued()?.payload).toMatchObject({ claudePreferences: { autoMemoryEnabled: false, idleCompactionEnabled: false } });
+      await f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "next-preferences", prompt: [] });
+      expect(f.getEnqueued()?.payload).toMatchObject({ claudePreferences: { autoMemoryEnabled: true, idleCompactionEnabled: true } });
+    } finally { f.connection.dispose(); }
+  });
+
+  it.each(["codex", "cursor"])("leaves %s commands free of Claude preferences", async agentId => {
+    const f = fixture();
+    try {
+      await f.connection.request({ type: "AGENT_NEW_SESSION", agentId, chatId: chat,
+        env: { OPENAI_MODEL: "test-model", ZEROS_CLAUDE_AUTO_MEMORY: "0", ZEROS_CLAUDE_IDLE_COMPACTION: "1" } });
+      await f.connection.request({ type: "AGENT_PROMPT", sessionId: `conversation:${chat}`, userMessageId: "other-provider", prompt: [] });
+      expect(f.getEnqueued()?.payload).not.toHaveProperty("claudePreferences");
+    } finally { f.connection.dispose(); }
+  });
+});
 
 describe("cloud snapshot and replay installation", () => {
   it("holds a succeeded receipt for snapshot recovery and drops buffered transcript duplicates", async () => {
@@ -389,6 +464,7 @@ describe("cloud agent command adapter", () => {
     expect(await f.connection.request(request)).toMatchObject({type:"AGENT_CONVERSATION_FORKED"});
     expect(f.request.mock.calls.filter(([message])=>message.op==="cloudCommands.request"&&((message.params as WireRecord).request as WireRecord).kind==="mutate")).toHaveLength(1);
     expect(f.getEnqueued()).toMatchObject({kind:"fork",payload:{operation:{kind:"fork",sourceConversationId:chat,strategy:agentId==="codex"?"native":"transcript"}}});
+    if (agentId === "claude") expect(f.getEnqueued()?.payload).toMatchObject({ claudePreferences: { autoMemoryEnabled: true, idleCompactionEnabled: false } });
     expect(f.connection.snapshotAttachments().map(row=>row.id)).toEqual([chat,destination]);f.connection.dispose();
   });
   it("restores confirmed goals from durable receipts after the native execution retired",async()=>{
@@ -411,8 +487,10 @@ describe("cloud agent command adapter", () => {
     const f=fixture({result:{version:1,goal:null}});
     const session=await f.connection.request({type:"AGENT_NEW_SESSION",chatId:chat,agentId:"codex",env:{OPENAI_MODEL:"test-model"}});
     expect(session).toMatchObject({initialize:{_meta:{modelSelectionTiming:"next-message"}}});
-    expect(await f.connection.request({type:"AGENT_GOAL_CLEAR",sessionId:`conversation:${chat}`,agentId:"codex"})).toMatchObject({type:"AGENT_GOAL_CHANGED",goal:null});
+    expect(await f.connection.request({type:"AGENT_GOAL_CLEAR",sessionId:`conversation:${chat}`,agentId:"codex",origin:"user"})).toMatchObject({type:"AGENT_GOAL_CHANGED",goal:null});
     expect(f.getEnqueued()).toMatchObject({kind:"enqueue",payload:{operation:{version:1,kind:"goal",action:"clear"},model:"test-model"}});
+    expect((f.getEnqueued() as WireRecord).payload).not.toHaveProperty("origin");
+    expect(((f.getEnqueued() as WireRecord).payload as WireRecord).operation).not.toHaveProperty("origin");
   });
   it.each([undefined, 0, 2])("rejects unsupported native commands before queue mutation with an actionable typed error (version=%s)", async version => {
     const f = fixture(), original = f.request.getMockImplementation()!;

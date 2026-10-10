@@ -35,6 +35,9 @@ export const BackgroundTaskRecord: Renderer<AgentToolMessage> = memo(
       text(input.name, input.description, input.command, input.prompt) ??
       `Task ${text(input.taskId) ?? ""}`.trim();
     const command = text(input.command);
+    const subagentType = text(input.subagentType);
+    const runOrdinal = typeof input.runOrdinal === "number" && Number.isSafeInteger(input.runOrdinal) && input.runOrdinal > 1
+      ? input.runOrdinal : null;
     const taskId = text(input.taskId);
     const summary = text(output.summary);
     const error = text(output.error);
@@ -45,7 +48,7 @@ export const BackgroundTaskRecord: Renderer<AgentToolMessage> = memo(
     const meta: EventMeta = {
       Icon: Play,
       label: "Background Task",
-      target: name,
+      target: subagentType ? `${subagentType} · ${name}` : name,
       expandable: true,
     };
 
@@ -62,6 +65,7 @@ export const BackgroundTaskRecord: Renderer<AgentToolMessage> = memo(
                 <InfoRow label="Command" value={command} mono />
               ) : null}
               <InfoRow label="Task ID" value={taskId ?? "Unknown"} mono />
+              {runOrdinal !== null ? <InfoRow label="Run" value={String(runOrdinal)} run /> : null}
               {providerStatus ? (
                 <InfoRow label="Status" value={providerStatus} />
               ) : null}
@@ -85,13 +89,15 @@ function InfoRow({
   label,
   value,
   mono,
+  run,
 }: {
   label: string;
   value: string;
   mono?: boolean;
+  run?: boolean;
 }) {
   return (
-    <div className="grid min-w-0 grid-cols-[88px_minmax(0,1fr)] gap-2">
+    <div data-background-task-run={run ? "" : undefined} className="grid min-w-0 grid-cols-[88px_minmax(0,1fr)] gap-2">
       <span className="text-muted-fg">{label}</span>
       <span
         className={

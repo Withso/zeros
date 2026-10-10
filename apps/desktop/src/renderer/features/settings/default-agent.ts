@@ -35,22 +35,15 @@ export const DEFAULT_AGENT_KEY = "default-agent-id";
 
 /** The one preference ordering every "which agent?" resolution shares:
  *  the starred choice (exact id, else same family), then the product
- *  provider order Codex → Claude → Cursor, then the first candidate.
+ *  provider order Claude → Codex → Cursor, then the first candidate.
  *  Returns null only for an empty candidate list. */
-function pickByPreference(
-  candidates: BridgeRegistryAgent[],
+function pickByPreference<T extends BridgeRegistryAgent>(
+  candidates: T[],
   starredId: string | null,
-): BridgeRegistryAgent | null {
-  if (starredId) {
-    const starredFamily = agentFamily(starredId);
-    const starred = candidates.find(
-      (agent) =>
-        agent.id === starredId ||
-        (starredFamily !== "" && agentFamily(agent.id) === starredFamily),
-    );
-    if (starred) return starred;
-  }
-  for (const family of ["codex", "claude", "cursor"] as const) {
+): T | null {
+  const starred = findStarredAgent(candidates, starredId);
+  if (starred) return starred;
+  for (const family of ["claude", "codex", "cursor"] as const) {
     const preferred = candidates.find(
       (agent) => agentFamily(agent.id) === family,
     );
@@ -59,18 +52,21 @@ function pickByPreference(
   return candidates[0] ?? null;
 }
 
+function findStarredAgent<T extends BridgeRegistryAgent>(
+  agents: T[],
+  starredId: string | null,
+): T | null {
+  if (!starredId) return null;
+  const family = agentFamily(starredId);
+  return agents.find(agent => agent.id === starredId) ??
+    agents.find(agent => family !== "" && agentFamily(agent.id) === family) ?? null;
+}
+
 /** Resolve the agent id a brand-new chat should bind to.
  *
- *  Priority:
- *    1. The user's default agent (picked in Settings → Models) — if
- *       it has a confirmed connection on this machine.
- *    2. Product provider order: Codex, then Claude, then Cursor. This makes
- *       every connected-provider combination deterministic and intentionally
- *       prefers Codex when both Codex and Claude are available.
- *    3. First selectable agent in the registry — last-resort fallback
- *       so a machine that's missing claude still gets *some* agent
- *       (e.g. someone with only Codex installed).
- *    4. null — only if zero agents are selectable. Callers must handle.
+ *  Settings, the catalog star, and New Chat share the full chain below. A saved
+ *  choice wins even while it needs sign-in; otherwise confirmed connections
+ *  precede the installed/enabled fallback tiers. Null only for an empty registry.
  *
  *  Deliberately omit a "sticky last-used" step: an unset preference resolves
  *  to the stable fallback rather than whichever agent was last used in another
@@ -79,46 +75,44 @@ export function pickDefaultAgentId(
   agents: BridgeRegistryAgent[],
   starredId: string | null = getDefaultAgentId(),
 ): string | null {
-  const runnable = agents.filter(
-    (agent) => isAgentEnabled(agent.id, agent.beta) && isSelectableAgent(agent),
-  );
-  return pickByPreference(runnable, starredId)?.id ?? null;
+  return pickAgentForNewChat(agents, starredId)?.id ?? null;
 }
 
 /** Same priority chain as `pickDefaultAgentId`, but returns the full
  *  registry entry so callers can grab `name` + `icon` for the chat
- *  thread row. Returns null when no agent is runnable. */
-export function pickDefaultAgent(
-  agents: BridgeRegistryAgent[],
+ *  thread row. Returns null only for an empty registry. */
+export function pickDefaultAgent<T extends BridgeRegistryAgent>(
+  agents: T[],
   starredId: string | null = getDefaultAgentId(),
-): BridgeRegistryAgent | null {
-  const id = pickDefaultAgentId(agents, starredId);
-  if (!id) return null;
-  return agents.find((a) => a.id === id) ?? null;
+): T | null {
+  return pickAgentForNewChat(agents, starredId);
 }
 
 /** Which agent should a brand-new chat BIND to, given that a chat must
  *  always end up with one (there is no picker; the composer's sign-in /
  *  install flow is the recovery surface for a not-ready agent)?
  *
- *  Tiered relaxation of `pickDefaultAgentId` — each tier applies the same
- *  starred → Codex → Claude → Cursor → first ordering:
- *    1. enabled + runnable (identical to pickDefaultAgentId),
- *    2. enabled + installed — nothing is signed in; bind the best installed
+ *  A saved default is honored before the tiers, even while disconnected.
+ *  Otherwise each tier uses Claude → Codex → Cursor → first ordering:
+ *    1. enabled + confirmed connected,
+ *    2. enabled + runnable (preserves the existing auth-probe recovery tier),
+ *    3. enabled + installed — nothing is signed in; bind the best installed
  *       agent so AgentChat's "Sign in required" flow can take over,
- *    3. enabled — detected but not even installed; the spawn path surfaces
+ *    4. enabled — detected but not even installed; the spawn path surfaces
  *       the install error with instructions,
- *    4. any registry agent — the user disabled everything; an agent the
+ *    5. any registry agent — the user disabled everything; an agent the
  *       user hid still beats a dead pane, and the pill lets them switch.
  *
  *  Returns null ONLY for an empty registry list (engine listed zero
  *  adapters / listing failed). Callers that must bind anyway fall back to
  *  FALLBACK_NEW_CHAT_AGENT_ID. */
-export function pickAgentForNewChat(
-  agents: BridgeRegistryAgent[],
+export function pickAgentForNewChat<T extends BridgeRegistryAgent>(
+  agents: T[],
   starredId: string | null = getDefaultAgentId(),
   isEnabled: (id: string, beta?: boolean) => boolean = isAgentEnabled,
-): BridgeRegistryAgent | null {
+): T | null {
+  const starred = findStarredAgent(agents, starredId);
+  if (starred) return starred;
   const enabled = agents.filter((agent) => isEnabled(agent.id, agent.beta));
   return (
     pickByPreference(enabled.filter(isSelectableAgent), starredId) ??
@@ -138,8 +132,8 @@ export function pickAgentForNewChat(
  *  has an agent" outranks accuracy here: binding the product-priority
  *  default renders a live composer whose spawn error ("not installed" /
  *  sign-in) is actionable, where an unbound chat renders a dead pane.
- *  Codex per the Codex → Claude → Cursor product order. */
-export const FALLBACK_NEW_CHAT_AGENT_ID = "codex";
+ *  Claude per the Claude → Codex → Cursor product order. */
+export const FALLBACK_NEW_CHAT_AGENT_ID = "claude";
 
 /** Read the default agent id from persistent settings. Returns null if never
  *  set; New Chat then follows the fallback chain in `pickDefaultAgentId`. */

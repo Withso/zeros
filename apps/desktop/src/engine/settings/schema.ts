@@ -395,6 +395,9 @@ const claudeModelsSchema = z
     auto_memory_enabled: z
       .boolean()
       .describe("Allow Claude Code to maintain its native repository memory."),
+    idle_compaction_enabled: z
+      .boolean()
+      .describe("Allow Claude Code to compact long conversations while idle (off by default)."),
   })
   .partial();
 const codexModelsSchema = z

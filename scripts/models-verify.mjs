@@ -53,6 +53,7 @@ const KNOWN_KEYS = new Set([
   "description",
   "badge",
   "effortLevels",
+  "defaultEffort",
   "supportsFast",
   "minCliVersion",
   "liveRequired",
@@ -116,6 +117,10 @@ export function validateCatalog(catalog) {
             }
           }
         }
+      }
+      if (m.defaultEffort !== undefined &&
+          (!VALID_EFFORTS.includes(m.defaultEffort) || !Array.isArray(m.effortLevels) || !m.effortLevels.includes(m.defaultEffort))) {
+        errors.push(`${at}.defaultEffort must be a supported effortLevels value`);
       }
       if (m.supportsFast !== undefined && typeof m.supportsFast !== "boolean") {
         errors.push(`${at}.supportsFast must be a boolean`);

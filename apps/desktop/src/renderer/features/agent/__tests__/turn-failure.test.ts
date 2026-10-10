@@ -16,6 +16,14 @@ const notice: AgentMessage = {
 };
 
 describe("persistent turn failure card", () => {
+  it("uses the persisted organization-settings reason with a single Retry action", () => {
+    const failure = turnFailureForCard({ events: JSON.parse(JSON.stringify([{ ...notice, code: "org_config_required_unavailable", message: "Native settings service is unavailable. Try to sign in." }])), turnId: "u1", status: "failed" })!;
+    expect(failure).toEqual({ kind: "protocol-error", message: "Claude couldn't load your organization's required settings. Check your connection, then retry.", newChatAllowed: false });
+    const html = renderToStaticMarkup(createElement(TurnFailureCard, { failure, onRetry: vi.fn(), onRetryNewChat: vi.fn() }));
+    expect(html).toContain("lucide-arrow-right");
+    expect(html).not.toContain("Retry in new chat");
+    expect(html).not.toContain("Sign in");
+  });
   it.each([
     ["protocol-error", "Unexpected provider error. Check your API key settings.", true],
     ["protocol-error", "Claude model unavailable: Selection rejected.", true],

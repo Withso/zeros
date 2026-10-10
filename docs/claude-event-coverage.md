@@ -1,7 +1,7 @@
 # Claude SDK event coverage
 
-Audited against installed `@anthropic-ai/claude-agent-sdk` **0.3.288** and its
-bundled CLI **2.1.288**. The installed `sdk.d.ts` and wrapper are the contract;
+Audited against installed `@anthropic-ai/claude-agent-sdk` **0.3.293** and its
+bundled CLI **2.1.293**. The installed `sdk.d.ts` and wrapper are the contract;
 online documentation can describe a different version.
 
 The public `SDKMessage` union has 39 member aliases and 42 distinct type/subtype
@@ -20,8 +20,8 @@ the table and native fixtures whenever the pinned SDK changes.
 
 | Native event | Disposition | Consumer and supported behavior / limitation |
 | --- | --- | --- |
-| `assistant` | handled | Translator/transcript state: text, Thinking, tool invocations, parent ownership, partial/completed block reconciliation, errors, supersedes, native context usage and steering receipts. A completed block is not a completed turn. |
-| `user` | handled | Translator: correlate tool results, rich content and artifacts by native tool ID and parent; user echoes do not create duplicate user prompts. A single-result `detachedToolCall: true` acknowledgement retains unresolved work until its later native result. Includes `SDKUserMessageReplay`; replayed results retain one durable row. |
+| `assistant` | handled | Translator/transcript state: text, Thinking, tool invocations, parent ownership, partial/completed block reconciliation, errors, supersedes, native context usage and steering receipts. Stable `agent_id` scopes subagent messages across resumes. A completed block is not a completed turn. |
+| `user` | handled | Translator: correlate tool results, rich content and artifacts by native tool ID, parent and stable `agent_id`; user echoes do not create duplicate user prompts. A single-result `detachedToolCall: true` acknowledgement retains unresolved work until its later native result. Includes `SDKUserMessageReplay`; replayed results retain one durable row. |
 | `result/success` | handled | Translator and adapter: final answer, terminal reason, authoritative error details even on `is_error`, cumulative usage deltas and exact-once send settlement. |
 | `result/error_during_execution` | handled | Native errors and codes feed existing failure/recovery classification; never infer success from EOF or subtype alone. |
 | `result/error_max_turns` | handled | Existing terminal reason and turn settlement; preserve provider explanation and usage. |
@@ -42,11 +42,11 @@ the table and native fixtures whenever the pinned SDK changes.
 | `system/plugin_install` | handled | One installation progress message and a separate explanation for each failed plugin. Overall completion does not erase plugin failures; per-plugin success metadata stays quiet. |
 | `tool_progress` | handled | Native subagent retry feedback stays inside the exact owning Agent group. Missing identity defers publication. Ordinary elapsed-time/heartbeat metadata does not create rows, complete tools, reset parent retries or wake an idle parent. |
 | `auth_status` | handled | Generic authentication progress/failure commentary using existing provider settings. Raw output/error material stays private. Only existing authoritative error handling changes provider health; progress does not prove authentication success. |
-| `system/task_notification` | handled | Native task settlement, summary/output and resource links; child outcomes and ambient/skip-transcript policy are preserved. |
-| `system/task_started` | handled | Track task and Agent identity, ownership, description, background/ambient membership and workflow lifecycle. |
-| `system/task_updated` | handled | Running/paused/terminal state and metadata; late edges cannot reopen terminal work. |
-| `system/task_progress` | handled | Existing task/group progress and bounded native workflow compatibility fields. Progress is not a new invocation or completion. |
-| `system/background_tasks_changed` | handled | Replace authoritative membership. Keep process retention separate from visible waiting; ambient watchers do not count toward user activity. |
+| `system/task_notification` | handled | Native task settlement, summary/output and resource links; `run_id` rejects an older run's settlement. Child outcomes and ambient/skip-transcript policy are preserved. |
+| `system/task_started` | handled | Track task and Agent identity, `run_id`, parent task ownership, subagent type, description, background/ambient membership and workflow lifecycle. A newer run reopens the same durable task row. |
+| `system/task_updated` | handled | Running/paused/terminal state and metadata for the current `run_id`; late older runs cannot settle or reopen current work. |
+| `system/task_progress` | handled | Current-run task/group progress and bounded native workflow compatibility fields. Progress is not a new invocation or completion. |
+| `system/background_tasks_changed` | handled | Replace authoritative membership for current runs; consume run/type/parent metadata. Keep process retention separate from visible waiting; ambient watchers do not count toward user activity. |
 | `system/thinking_tokens` | handled | Valid root estimates prove activity before prose arrives; a correlated client UUID acknowledges consumed steering. Estimates are not billed tokens or visible Thinking content. |
 | `system/session_state_changed` | handled | Existing running/requires-action/idle indicators and idle retention. Deduplicate native UUIDs before adapter side effects; a replay cannot reactivate settled work. |
 | `system/worker_shutting_down` | intentionally ignored | This local query integration does not own the remote bridge's worker lifecycle. The SDK warns that these records can be historical. Query EOF/error is authoritative here; replay must not stop a live local query. |
@@ -62,6 +62,37 @@ the table and native fixtures whenever the pinned SDK changes.
 | `system/mirror_error` | handled | Generic synchronization explanation without exposing private mirror paths/keys. Does not falsely mark an ordinary file tool failed. |
 | `system/informational` | handled | Plain bounded content as an inbetween message, tool-scoped where identified. `prevent_continuation` explains runtime behavior but is not itself a terminal result. |
 | `conversation_reset` | handled | Existing idempotent accounting reset at `/clear`. **Limitation:** the SDK's fresh-transcript/title remount is unsupported; this handler does not erase saved chat history or invent a new chat. Native session binding still follows init. |
+
+## 0.3.293 field dispositions
+
+The public union still has 39 aliases and 42 discriminators. Added fields on
+existing messages and tools have the following explicit dispositions:
+
+| Native field or surface | Disposition | Supported behavior / limitation |
+| --- | --- | --- |
+| Task `run_id` on started/progress/updated/notification and background entries | handled | Compare runs within the stable `task_id`; older runs cannot settle or hide newer work. A resumed run keeps its Background Task/tool identity and exposes only an ordinal. Idle detach uses current-run process work; waiting keeps the original turn timer. Missing IDs retain the older task-only contract. |
+| Assistant/user `agent_id` | handled | Bind subagent messages to their stable task scope across resumes, before root activity/replay classification. Unknown ownership stays deferred instead of borrowing a sibling group. |
+| `parent_task_id` and `subagent_type` on task starts/background entries | handled | Nest a known child Agent under its parent's group; unknown parents mean no parent. Type reaches the Agent metadata and background task target. |
+| `SDKMessageOrigin.runId` | SDK-owned | Notification provenance stays native; Zeros does not use it to settle a task/turn or render the opaque run ID. Lifecycle correlation uses the task events above. |
+| `org_config_required_unavailable` / `org_config_refused` | handled | Exhaustive startup recovery maps unavailable to protocol-error with Retry, and refused to auth-required with Sign in. A known non-auth reason outranks incidental sign-in prose and preserves local sign-in health. Unknown/absent reasons keep existing prose classification. |
+| Agent tool `effort` | handled | Preserve native effort on the subagent record and display it beside model metadata; execution remains CLI-owned. |
+| `OfferChromeSetup.reason` / `outcome` | handled / intentionally ignored | Show the optional short human reason and the existing notice/action for Settings → Browser use. Missing reasons render no pill. Successful outcomes (`connected`, `not_now`, `no_attempt_yet`) stay out of the transcript; native failures remain readable. |
+| `Settings.idleCompaction` | handled | Default Off sends `false` through SDK settings. On omits the creation override and clears a live override with `null`; `true` cannot force-enable native compaction. The Auto memory preference path is mirrored for Local and cloud. |
+| WebFetch `offset` | SDK-owned | Native pagination executes in the CLI; repeated calls retain distinct native tool IDs. No dedicated pagination UI. |
+| Artifact-list `total` / `total_at_least`, notification `arrived_at` / result `read_at` | intentionally ignored | Routine count/timestamp metadata is not a transcript summary or lifecycle signal. Zeros does not infer that a returned list is complete. |
+
+The stricter `disableClaudeAiConnectors` behavior remains SDK-owned: when set,
+the CLI blocks explicitly configured `claudeai-proxy` servers as well as
+discovery. Zeros adds no override. Native `resume_reason`, headless background
+command shutdown and idle skill-sync polling likewise keep the native
+contract; none independently completes a Zeros turn. Bridge diagnostics retain
+the existing bounded, sanitized presentation.
+
+Regression entry points for these fields are `task-runs.test.ts`,
+`subagent-ownership.test.ts`, `action-errors.test.ts`, the Claude SDK adapter
+and shared provider-error suites, and the `claude-runtime-ui` browser scenario.
+The Local/cloud preference capability and control-plane-before-worker deploy
+order are documented in [the harness capability boundary](agent-harness-capability-boundary.md).
 
 ## Other native surfaces
 

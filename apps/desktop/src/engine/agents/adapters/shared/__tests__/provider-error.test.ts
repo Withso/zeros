@@ -228,6 +228,8 @@ describe("Claude startup reason recovery", () => {
     ["org_pin_mismatch", "protocol-error", /organization/i],
     ["managed_settings_invalid", "protocol-error", /administrator/i],
     ["remote_settings_required_unavailable", "protocol-error", /settings/i],
+    ["org_config_required_unavailable", "protocol-error", /connection.*retry/i],
+    ["org_config_refused", "auth-required", /sign in again.*administrator/i],
     ["proxy_invalid", "protocol-error", /proxy/i],
     ["temp_dir_unusable", "protocol-error", /temporary/i],
     ["cwd_unavailable", "protocol-error", /directory/i],

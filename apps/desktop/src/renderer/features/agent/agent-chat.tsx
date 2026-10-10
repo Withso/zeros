@@ -244,12 +244,13 @@ import { useWorkspaceAgents } from "./workspace-agent-registry";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
 import { isRunnableAgent } from "./agent-runnable";
-import { requestProviderSettings } from "../settings/settings-navigation";
+import { requestProviderSettings, requestUserSettingsSection } from "../settings/settings-navigation";
 import { isSubscriptionProvider } from "../settings/subscription-connection";
 import { AuthenticationNotice } from "./authentication-notice";
 import {
   authenticationTurnState,
   authenticationTurnOutput,
+  authenticationFailureMessage,
 } from "./auth-prompt-recovery";
 import { useAgentSessions } from "./sessions-hooks";
 import { useStickyBottom, nextTextMessageTarget } from "./use-sticky-bottom";
@@ -797,6 +798,11 @@ export function AgentChat({
       ? retry(retryId)
       : Promise.reject(new Error("Safety retry is unavailable."));
   }, [readOnly]);
+  const openBrowserSettings = useCallback(() => {
+    if (!interactive) return;
+    requestUserSettingsSection("browser-use");
+    dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
+  }, [dispatch, interactive]);
   const messageCtx: RendererContext = useMemo(
     () => ({
       isStreaming,
@@ -824,9 +830,12 @@ export function AgentChat({
       warmFile: warmFileThroughRef,
       openPrUrl: readOnly ? undefined : openPrUrlThroughRef,
       openPreviewUrl: readOnly ? undefined : openPreviewUrlThroughRef,
+      openBrowserSettings: interactive ? openBrowserSettings : undefined,
     }),
     [
       isStreaming,
+      openBrowserSettings,
+      interactive,
       lastMessageId,
       activeTurnStartedAt,
       subagentChildren,
@@ -4972,6 +4981,7 @@ export function AgentChat({
                     )}
                     {authRequired && (
                       <AuthenticationNotice
+                        message={authenticationFailureMessage(turn.events, isVisualTail ? session.failure : null)}
                         name={
                           session.agentName ??
                           chatThread?.agentName ??

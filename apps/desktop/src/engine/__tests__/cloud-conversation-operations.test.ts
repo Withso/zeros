@@ -8,7 +8,7 @@ import { getChat, setChatComposerMode } from "../db/chats";
 
 const prototype = ZerosEngine.prototype as unknown as {
   handleConnect(this: unknown, client: { id: string; kind: string; send: (message: unknown) => void }): Promise<void>;
-  handleCloudCommandOperation(this: unknown, op: string, params: Record<string, unknown>): Promise<unknown>;
+  handleCloudCommandOperation(this: unknown, op: string, params: Record<string, unknown>, client?: unknown): Promise<unknown>;
   validateCloudCommand(this: unknown, conversationId: string, payload?: unknown): void;
 };
 let directory: string;
@@ -20,7 +20,7 @@ function fixture() {
     workspace: { resolveReadCwd: vi.fn((id: string) => { if (id !== "local-main") throw new Error("unknown workspace"); return root; }),
       workspaceIdForCwd: () => "local-main", handle: vi.fn(async (_op: string, params: { chatId: string; mode: "code" | "design"; expectedRevision: number }) =>
         setChatComposerMode(params.chatId, params.mode, params.expectedRevision)) } };
-  const call = (op: string, params: Record<string, unknown>) => prototype.handleCloudCommandOperation.call(engine, "cloudCommands." + op, params);
+  const call = (op: string, params: Record<string, unknown>) => prototype.handleCloudCommandOperation.call(engine, "cloudCommands." + op, params, {});
   return { engine, call };
 }
 describe("portable cloud conversations", () => {
@@ -32,11 +32,23 @@ describe("portable cloud conversations", () => {
   it("creates and reads an idempotent conversation using only opaque workspace identity", async () => {
     const { engine, call } = fixture();
     const input = { conversationId: "chat", workspaceId: "local-main", agentId: "claude" };
-    expect(await call("createConversation", input)).toMatchObject({ conversationId: "chat", workspaceId: "local-main", agentId: "claude", mode: "code", modeRevision: 0, permissionModeVersion: 1,nativeCommandsVersion:1 });
+    expect(await call("createConversation", input)).toMatchObject({ conversationId: "chat", workspaceId: "local-main", agentId: "claude", mode: "code", modeRevision: 0, permissionModeVersion: 1,nativeCommandsVersion:1, claudePreferencesVersion: 1 });
     await call("createConversation", input);
     expect(getChat("chat")?.folder).toBe(engine.root);
     expect(JSON.stringify(await call("conversation", { conversationId: "chat" }))).not.toContain(engine.root);
     await expect(call("createConversation", { ...input, agentId: "cursor" })).rejects.toMatchObject({ code: "command_conflict" });
+  });
+  it("omits new preference payload fields for old clients while preserving their native-command receipts", async () => {
+    const { engine, call } = fixture();
+    const payload = { agentId: "claude", claudePreferences: { autoMemoryEnabled: false, idleCompactionEnabled: true } };
+    const snapshot = { revision: 1, pending: [{ payload }], receipts: [{ payload, result: { version: 1 } }] };
+    engine.cloudCommands.handle.mockResolvedValue(snapshot);
+    const params = { request: { kind: "snapshot", conversationId: "chat" }, nativeCommandsVersion: 1 };
+    expect(await call("request", params)).toEqual({ revision: 1, pending: [{ payload: { agentId: "claude" } }],
+      receipts: [{ payload: { agentId: "claude" }, result: { version: 1 } }] });
+    expect(await call("request", { ...params, claudePreferencesVersion: 1 })).toEqual(snapshot);
+    expect(snapshot.pending[0].payload).toHaveProperty("claudePreferences");
+    await expect(call("request", { ...params, claudePreferencesVersion: 2 })).rejects.toMatchObject({ code: "invalid_command" });
   });
   it("rejects client paths and stale mode changes before overwriting another device", async () => {
     const { call } = fixture();

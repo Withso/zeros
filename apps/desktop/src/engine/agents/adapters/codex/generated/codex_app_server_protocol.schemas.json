@@ -598,6 +598,30 @@
             },
             "method": {
               "enum": [
+                "thread/prediction/request"
+              ],
+              "title": "Thread/prediction/requestRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadPredictionRequestParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/prediction/requestRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "thread/goal/set"
               ],
               "title": "Thread/goal/setRequestMethod",
@@ -3480,6 +3504,30 @@
             "params"
           ],
           "title": "Account/bedrock/setupRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "account/bedrock/checkGovCloudRequirements"
+              ],
+              "title": "Account/bedrock/checkGovCloudRequirementsRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/BedrockCheckGovCloudRequirementsParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Account/bedrock/checkGovCloudRequirementsRequest",
           "type": "object"
         },
         {
@@ -6465,6 +6513,26 @@
             "params"
           ],
           "title": "Thread/goal/updatedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "thread/prediction/updated"
+              ],
+              "title": "Thread/prediction/updatedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadPredictionUpdatedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/prediction/updatedNotification",
           "type": "object"
         },
         {
@@ -9788,6 +9856,31 @@
         ],
         "type": "object"
       },
+      "BedrockCheckGovCloudRequirementsParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "BedrockCheckGovCloudRequirementsParams",
+        "type": "object"
+      },
+      "BedrockCheckGovCloudRequirementsResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Advisory check of the current Bedrock configuration after login or setup.",
+        "properties": {
+          "isGovCloud": {
+            "description": "Whether the active Bedrock authentication resolves to a GovCloud region.",
+            "type": "boolean"
+          },
+          "shouldWarn": {
+            "description": "Whether GovCloud is selected and the managed requirements miss the baseline. A false value is not a general certification of the network configuration.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "isGovCloud",
+          "shouldWarn"
+        ],
+        "title": "BedrockCheckGovCloudRequirementsResponse",
+        "type": "object"
+      },
       "BedrockDiscoverParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "title": "BedrockDiscoverParams",
@@ -10182,8 +10275,7 @@
         "type": "string"
       },
       "CodexErrorInfo": {
-        "description": "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.",
-        "oneOf": [
+        "anyOf": [
           {
             "enum": [
               "contextWindowExceeded",
@@ -10320,8 +10412,15 @@
             ],
             "title": "ActiveTurnNotSteerableCodexErrorInfo",
             "type": "object"
+          },
+          {
+            "type": [
+              "string",
+              "object"
+            ]
           }
-        ]
+        ],
+        "description": "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant."
       },
       "CodexResponseHandoffMode": {
         "enum": [
@@ -12569,7 +12668,7 @@
         "type": "object"
       },
       "CyberAccessProgram": {
-        "description": "Requested cyber treatment for a ChatGPT-authenticated Codex turn. Authorization and model-tier restrictions remain server-owned.",
+        "description": "Requested cyber treatment for an OpenAI model turn. Authorization and model-tier restrictions remain server-owned.",
         "enum": [
           "standard",
           "daybreakBlue",
@@ -16922,6 +17021,13 @@
               "null"
             ]
           },
+          "loginId": {
+            "description": "Identifies the explicit login attempt. Older servers omit this field.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },
@@ -16993,6 +17099,14 @@
         "properties": {
           "authorizationUrl": {
             "type": "string"
+          },
+          "loginId": {
+            "default": null,
+            "description": "Identifies this login attempt across the response and completion notification. Older servers omit this field; current servers always return it.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -24764,6 +24878,17 @@
       "ThreadGoalClearParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadGoalMutationOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Missing provenance does not supply user authorization."
+          },
           "threadId": {
             "type": "string"
           }
@@ -24830,6 +24955,14 @@
         "title": "ThreadGoalGetResponse",
         "type": "object"
       },
+      "ThreadGoalMutationOrigin": {
+        "description": "Distinguishes explicit user actions from automatic goal lifecycle mutations.",
+        "enum": [
+          "user",
+          "automatic"
+        ],
+        "type": "string"
+      },
       "ThreadGoalSetParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
@@ -24838,6 +24971,17 @@
               "string",
               "null"
             ]
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadGoalMutationOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Missing provenance does not supply user authorization."
           },
           "status": {
             "anyOf": [
@@ -26334,6 +26478,91 @@
           "threadId"
         ],
         "title": "ThreadNameUpdatedNotification",
+        "type": "object"
+      },
+      "ThreadPredictionRequestParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "sourceTurnId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sourceTurnId",
+          "threadId"
+        ],
+        "title": "ThreadPredictionRequestParams",
+        "type": "object"
+      },
+      "ThreadPredictionRequestResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "ThreadPredictionRequestResponse",
+        "type": "object"
+      },
+      "ThreadPredictionResult": {
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "enum": [
+                  "completed"
+                ],
+                "title": "CompletedThreadPredictionResultType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "CompletedThreadPredictionResult",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "failed"
+                ],
+                "title": "FailedThreadPredictionResultType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "FailedThreadPredictionResult",
+            "type": "object"
+          }
+        ]
+      },
+      "ThreadPredictionUpdatedNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "result": {
+            "$ref": "#/definitions/v2/ThreadPredictionResult"
+          },
+          "sourceTurnId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result",
+          "sourceTurnId",
+          "threadId"
+        ],
+        "title": "ThreadPredictionUpdatedNotification",
         "type": "object"
       },
       "ThreadProjectUpdatedNotification": {
@@ -30147,7 +30376,7 @@
                 "type": "null"
               }
             ],
-            "description": "EXPERIMENTAL - Request a workspace-authorized cyber program for this turn. Omission preserves automatic behavior. This does not grant access."
+            "description": "EXPERIMENTAL - Request an authorized cyber program for this turn. Omission preserves automatic behavior. This does not grant access."
           },
           "disabledPluginIds": {
             "description": "Replace this thread's disabled plugin IDs. Omitted/null preserves the list; [] clears it.",

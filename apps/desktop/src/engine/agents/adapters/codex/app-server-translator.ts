@@ -51,6 +51,16 @@ import type { AsyncUserInputQuestion } from "./generated/v2/AsyncUserInputQuesti
 import type { ThreadItem } from "./generated/v2/ThreadItem";
 import type { WebSearchAction } from "./generated/WebSearchAction";
 import type { ImageGenerationItem } from "./generated/ImageGenerationItem";
+import type { McpServerOauthLoginCompletedNotification } from "./generated/v2/McpServerOauthLoginCompletedNotification";
+
+type McpOauthCompletion = Pick<McpServerOauthLoginCompletedNotification, "loginId" | "success">;
+interface McpOauthAttempt {
+  awaitingResponse: boolean;
+  loginId?: string;
+  state: "opening" | "connected" | "error";
+  inventoryConfirmed?: boolean;
+  early: McpOauthCompletion[];
+}
 
 type Emit = (notification: SessionNotification) => void;
 type ToolKind =
@@ -102,6 +112,8 @@ export class CodexAppServerTranslator {
   private readonly asyncQuestionItems = new Set<string>();
   private readonly resolveArtwork?: CodexAppServerTranslatorOptions["resolveArtwork"];
   private readonly artworkRequests = new Map<string, symbol>();
+  /** Auth belongs to the native session, not a turn. Never expose login ids. */
+  private readonly mcpOauthAttempts = new Map<string, McpOauthAttempt>();
 
   /** Codex item.id → Zeros tool call id. One tool per item.id so we
    *  can correlate item/completed back to the originating tool_call. */
@@ -417,6 +429,45 @@ export class CodexAppServerTranslator {
         retryId: null,
       },
     });
+  }
+
+  beginMcpOauthLogin(name: string): McpOauthAttempt {
+    const attempt: McpOauthAttempt = { awaitingResponse: true, state: "opening", early: [] };
+    this.mcpOauthAttempts.delete(name);
+    if (this.mcpOauthAttempts.size >= 1000) this.mcpOauthAttempts.delete(this.mcpOauthAttempts.keys().next().value!);
+    this.mcpOauthAttempts.set(name, attempt);
+    return attempt;
+  }
+
+  finishMcpOauthLogin(name: string, attempt: McpOauthAttempt, loginId?: string): void {
+    if (this.mcpOauthAttempts.get(name) !== attempt) return;
+    attempt.awaitingResponse = false;
+    attempt.loginId = loginId;
+    const early = attempt.early;
+    attempt.early = [];
+    // Native completion may overtake the RPC response. Match only after that
+    // response identifies the attempt; an older completion cannot settle it.
+    for (const completion of early) this.onMcpOauthCompleted({ name, ...completion });
+  }
+
+  failMcpOauthLogin(name: string, attempt: McpOauthAttempt): void {
+    if (this.mcpOauthAttempts.get(name) !== attempt) return;
+    attempt.awaitingResponse = false;
+    attempt.state = "error";
+    attempt.early = [];
+  }
+
+  mcpOauthState(name: string): McpOauthAttempt["state"] | undefined {
+    return this.mcpOauthAttempts.get(name)?.state;
+  }
+
+  mcpOauthInventoryState(name: string, nativeStatus: string): McpOauthAttempt["state"] | undefined {
+    const attempt = this.mcpOauthAttempts.get(name);
+    if (!attempt) return;
+    // Once the inventory confirms success, it owns subsequent connection
+    // health (including expiry). Keep the attempt to ignore late duplicates.
+    if (attempt.state === "connected" && nativeStatus === "connected") attempt.inventoryConfirmed = true;
+    return attempt.inventoryConfirmed ? undefined : attempt.state;
   }
 
   /** Reset terminal/streaming state at the start of a new turn. The
@@ -1583,8 +1634,24 @@ export class CodexAppServerTranslator {
   }
 
   private onMcpOauthCompleted(params: unknown): void {
-    const p = params as { name?: string; success?: boolean };
-    if (typeof p.name !== "string" || p.success === true) return;
+    const p = params as Partial<McpServerOauthLoginCompletedNotification>;
+    if (typeof p.name !== "string" || typeof p.success !== "boolean") return;
+    const attempt = this.mcpOauthAttempts.get(p.name);
+    if (attempt) {
+      if (attempt.state !== "opening") return;
+      if (attempt.awaitingResponse) {
+        if (attempt.early.length === 8) attempt.early.shift();
+        attempt.early.push({ loginId: p.loginId, success: p.success });
+        return;
+      }
+      // Missing ids remain compatible with older servers only when both
+      // sides omit them. An uncorrelated completion cannot settle a known id.
+      if ((p.loginId ?? undefined) !== attempt.loginId) return;
+      attempt.state = p.success ? "connected" : "error";
+    } else if (p.loginId != null) {
+      return;
+    }
+    if (p.success) return;
     this.emit({
       sessionId: this.sessionId,
       update: {
@@ -2474,7 +2541,7 @@ function truncate(s: string, n: number): string {
  *  e.g. "unauthorized" / "usageLimitExceeded" / { httpConnectionFailed }).
  * Returns only the legacy stop reason/label. Native failure classification
  * belongs to the shared provider-error normalizer. */
-function classifyCodexErrorInfo(info: unknown): {
+export function classifyCodexErrorInfo(info: unknown): {
   stopReason: "end_turn" | "max_turn_requests";
   label: string;
 } {

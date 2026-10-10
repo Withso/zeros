@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { BridgeRegistryAgent } from "../../../platform/bridge/messages";
@@ -21,11 +21,15 @@ import {
   useWorkspaceAgents,
   reportCloudAgentRuntimeUpgrade,
   modelsForWorkspaceAgent,
+  cloudModelRuntimeUpgradeRequired,
   warmCloudAgentRegistry,
   workspaceAgentsSnapshot,
 } from "../workspace-agent-registry";
 import { refreshAgents } from "../agents-cache";
-import { modelsForAgent } from "../model-catalog";
+import { modelsForAgent, resolveModelOption } from "../model-catalog";
+import { pickAgentForNewChat, pickDefaultAgentId } from "../../settings/default-agent";
+import { newChatBornDefaults } from "../new-chat-defaults";
+import { getFavoriteSelection, setFavoriteModel } from "../model-favorites";
 const a =
   "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 const b =
@@ -33,8 +37,72 @@ const b =
 beforeEach(() => {
   vi.clearAllMocks();
   clearCloudAgentRegistry();
+  const values = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, String(value)); },
+    removeItem: (key: string) => { values.delete(key); },
+  });
 });
+afterEach(() => { vi.unstubAllGlobals(); });
 describe("workspace agent registry", () => {
+  it.each(Array.from({ length: 8 }, (_, mask) => mask))("resolves new-chat defaults from confirmed actor grants for combination %i", async mask => {
+    const families = ["claude", "codex", "cursor"] as const;
+    const models = { claude: "claude-opus-5-5[1m]", codex: "gpt-6.1-sol", cursor: "grok-4.7" };
+    const efforts = { claude: "medium", codex: "max", cursor: "xhigh" };
+    // The VM's credential verdict cannot substitute for this actor's grants.
+    const native = families.map(id => ({ id, installed: true, authenticated: true }));
+    mock.request.mockResolvedValue({ type: "AGENT_AGENTS_LIST", agents: native });
+    mock.grants.mockResolvedValue(families.flatMap((id, index) => mask & (1 << index)
+      ? [{ kind: `${id}-api-key`, runtimeQualified: true, models: [models[id]] }]
+      : []));
+    const agents = await warmCloudAgentRegistry(a);
+    const expected = mask & 1 ? "claude" : mask & 2 ? "codex" : mask & 4 ? "cursor" : "claude";
+    expect(pickDefaultAgentId(agents)).toBe(expected);
+    const selected = pickAgentForNewChat(agents)!;
+    expect(selected.id).toBe(expected);
+    expect(newChatBornDefaults(selected.id, selected.cloudModels)).toMatchObject(mask
+      ? { model: models[expected], effort: efforts[expected], fast: false }
+      : { model: null, fast: false });
+    expect(getFavoriteSelection()).toBeNull();
+  });
+
+  it("keeps the saved provider while bounding its model to exact cloud consent", async () => {
+    setFavoriteModel("claude", "claude-sonnet-5-5[1m]");
+    mock.request.mockResolvedValue({ type: "AGENT_AGENTS_LIST", agents: [{ id: "codex", installed: true }, { id: "claude", installed: true }] });
+    mock.grants.mockResolvedValue([{ kind: "codex-api-key", runtimeQualified: true, models: ["gpt-6.1-sol"] },
+      { kind: "claude-api-key", runtimeQualified: true, models: ["claude-opus-5[1m]"] }]);
+    const agents = await warmCloudAgentRegistry(a);
+    const selected = pickAgentForNewChat(agents)!;
+    expect(selected.id).toBe("claude");
+    expect(newChatBornDefaults(selected.id, selected.cloudModels).model).toBe("claude-opus-5[1m]");
+    expect(getFavoriteSelection()).toEqual({ agentId: "claude", model: "claude-sonnet-5-5[1m]" });
+  });
+
+  it("uses Haiku's exact CLI floor only for its cloud workspace", () => {
+    const model = resolveModelOption("claude", "claude-haiku-5-5", null);
+    const agent = { id: "claude", installedVersion: "2.1.292 (Claude Code)" } as BridgeRegistryAgent;
+    expect(cloudModelRuntimeUpgradeRequired(a, agent, model)).toBe(true);
+    for (const folder of [undefined, "/local/personal", "/local/organization"])
+      expect(cloudModelRuntimeUpgradeRequired(folder, agent, model)).toBe(false);
+    expect(cloudModelRuntimeUpgradeRequired(b, { ...agent, installedVersion: "2.1.293" }, model)).toBe(false);
+    expect(cloudModelRuntimeUpgradeRequired(a, agent, resolveModelOption("claude", "haiku", null))).toBe(false);
+    expect(cloudModelRuntimeUpgradeRequired(a, { ...agent, installedVersion: undefined }, model)).toBe(false);
+    expect(cloudModelRuntimeUpgradeRequired(a, { ...agent, runtimeUpgradeRequired: true }, model)).toBe(true);
+  });
+  it("uses Fable 5.1's official CLI floor for cloud while preserving Local choices", () => {
+    const model = resolveModelOption("claude", "claude-fable-5-1[1m]", null);
+    expect(model?.minCliVersion).toBe("2.1.257");
+    for (const version of ["2.1.255", "2.1.256"]) {
+      const agent = { id: "claude", installedVersion: version } as BridgeRegistryAgent;
+      expect(cloudModelRuntimeUpgradeRequired(a, agent, model)).toBe(true);
+      for (const folder of ["/local/personal", "/local/organization"])
+        expect(cloudModelRuntimeUpgradeRequired(folder, agent, model)).toBe(false);
+    }
+    expect(cloudModelRuntimeUpgradeRequired(a, { id: "claude", installedVersion: "2.1.257" } as BridgeRegistryAgent, model)).toBe(false);
+    expect(resolveModelOption("claude", "fable-5.1", null)?.value).toBe(model?.value);
+  });
+
   it("preserves local registry and model choices while cloud qualification changes", async () => {
     const local: BridgeRegistryAgent[] = ["claude", "codex", "cursor"].map(id => ({
       id, name: id, version: "1", description: "Local provider", distribution: {},

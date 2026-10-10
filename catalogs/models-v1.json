@@ -1,7 +1,7 @@
 {
   "$schema": "./models-v1.schema.json",
-  "version": 12,
-  "updatedAt": "2026-10-03",
+  "version": 13,
+  "updatedAt": "2026-10-08",
   "notes": "Curated model-picker source of truth. See catalogs/README.md for capability precedence, compatibility contracts, runtime context handling, verification, and update requirements.",
   "families": {
     "claude": [
@@ -10,7 +10,7 @@
         "label": "Claude Fable 5.1",
         "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
         "supportsFast": false,
-        "minCliVersion": "2.1.255"
+        "minCliVersion": "2.1.257"
       },
       {
         "value": "claude-fable-5[1m]",
@@ -23,6 +23,7 @@
         "value": "claude-opus-5-5[1m]",
         "label": "Claude Opus 5.5",
         "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+        "defaultEffort": "medium",
         "supportsFast": true,
         "minCliVersion": "2.1.280"
       },
@@ -54,6 +55,14 @@
         "minCliVersion": "2.1.206"
       },
       {
+        "value": "claude-haiku-5-5",
+        "label": "Claude Haiku 5.5",
+        "effortLevels": ["low", "medium", "high", "xhigh", "max"],
+        "defaultEffort": "medium",
+        "supportsFast": false,
+        "minCliVersion": "2.1.293"
+      },
+      {
         "value": "claude-haiku-4-5",
         "label": "Claude Haiku 4.5",
         "effortLevels": [],
@@ -71,6 +80,7 @@
         "value": "gpt-6.1-sol",
         "label": "GPT-6.1 Sol",
         "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+        "defaultEffort": "max",
         "supportsFast": true
       },
       {
@@ -122,6 +132,7 @@
         "value": "grok-4.7",
         "label": "Grok 4.7",
         "effortLevels": ["low", "medium", "high", "xhigh"],
+        "defaultEffort": "xhigh",
         "supportsFast": true
       },
       {
@@ -151,15 +162,16 @@
     "cursor": "CURSOR_MODEL"
   },
   "defaultFavorites": {
-    "claude": "claude-opus-5[1m]",
-    "codex": "gpt-5.6-sol",
-    "cursor": "composer-2.5"
+    "claude": "claude-opus-5-5[1m]",
+    "codex": "gpt-6.1-sol",
+    "cursor": "grok-4.7"
   },
   "aliases": {
     "claude": {
       "opus": "claude-opus-4-8",
       "sonnet": "claude-sonnet-5",
       "haiku": "claude-haiku-4-5",
+      "haiku-5.5": "claude-haiku-5-5",
       "fable": "claude-fable-5",
       "best": "claude-fable-5",
       "default": "claude-opus-4-8",

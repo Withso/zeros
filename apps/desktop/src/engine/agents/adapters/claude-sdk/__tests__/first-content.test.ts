@@ -10,6 +10,7 @@ describe("Claude content-bearing frames", () => {
     { type: "assistant", message: { content: [] } },
     { type: "assistant", error: "verification_required", message: { content: [{ type: "text", text: "Verify your account" }] } },
     { type: "assistant", parent_tool_use_id: "child", message: { content: [{ type: "text", text: "Child output" }] } },
+    { type: "assistant", agent_id: "child", message: { content: [{ type: "text", text: "Resumed child output" }] } },
     { type: "stream_event", parent_tool_use_id: "child", event: { type: "content_block_delta", delta: { type: "text_delta", text: "Child output" } } },
     ...[
       { type: "message_start", message: { role: "assistant", content: [] } },

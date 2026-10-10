@@ -3,12 +3,23 @@ import {
   AuthPromptRecovery,
   authenticationTurn,
   authenticationTurnOutput,
+  authenticationFailureMessage,
   authenticationTurnState,
   pendingAuthenticationPrompts,
 } from "../auth-prompt-recovery";
 import type { AgentMessage, AgentTextMessage } from "../use-agent-session";
 
 describe("authentication recovery", () => {
+  it("renders a persisted organization refusal once, while retaining child notices and real work", () => {
+    const message = "Your organization's Claude settings were refused for this sign-in. Sign in again or ask your administrator.";
+    const terminal = { id: "terminal", kind: "error_notice", code: "org_config_refused", message: "Native settings rejection",
+      severity: "error", recoverable: false, turnFailure: { turnId: "u", kind: "auth-required" }, createdAt: 2 } as AgentMessage;
+    const child = { ...terminal, id: "child", parentToolId: "agent" } as AgentMessage;
+    const work = { id: "work", kind: "tool", toolCallId: "work", toolKind: "read" } as AgentMessage;
+    const events = JSON.parse(JSON.stringify([work, child, terminal]));
+    expect(authenticationFailureMessage(events)).toBe(message);
+    expect(authenticationTurnOutput(events).map(event => event.id)).toEqual(["work", "child"]);
+  });
   it.each(["rate-limited", "protocol-error", "session-expired", "transport-closed"])("does not override %s with legacy sign-in wording", (kind) => {
     const events = [{ kind: "text", role: "agent", text: "Unauthorized request for the selected model." }] as AgentMessage[];
     expect(authenticationTurn(events, kind)).toBe(false);

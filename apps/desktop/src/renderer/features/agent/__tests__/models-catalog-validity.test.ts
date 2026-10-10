@@ -69,18 +69,23 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     const on206 = checkCliVersionGate(catalog, "2.1.206");
     expect(on206.some((w) => w.includes('"claude-sonnet-5[1m]"'))).toBe(false);
     expect(on206.some((w) => w.includes("claude-opus-5"))).toBe(true);
-    // Fable 5.1 first shipped in Claude Code 2.1.255. Older CLIs silently
+    // Official model docs require 2.1.257 for Fable 5.1. Earlier CLIs can
     // substitute another model, so the exact boundary stays executable here.
     const on254 = checkCliVersionGate(catalog, "2.1.254");
     expect(on254.some((w) => w.includes("claude-fable-5-1"))).toBe(true);
-    expect(checkCliVersionGate(catalog, "2.1.255")).toHaveLength(2);
+    for (const version of ["2.1.255", "2.1.256"])
+      expect(checkCliVersionGate(catalog, version)).toContainEqual(
+        expect.stringContaining('"claude-fable-5-1[1m]"'),
+      );
+    expect(checkCliVersionGate(catalog, "2.1.257")).toHaveLength(3);
     // Opus 5.5 arrived in 2.1.280; Sonnet 5.5 followed in 2.1.284.
-    expect(checkCliVersionGate(catalog, "2.1.279")).toHaveLength(2);
+    expect(checkCliVersionGate(catalog, "2.1.279")).toHaveLength(3);
     expect(checkCliVersionGate(catalog, "2.1.280")).toEqual([
       expect.stringContaining('"claude-sonnet-5-5[1m]"'),
+      expect.stringContaining('"claude-haiku-5-5"'),
     ]);
-    expect(checkCliVersionGate(catalog, "2.1.283")).toHaveLength(1);
-    expect(checkCliVersionGate(catalog, "2.1.284")).toEqual([]);
+    expect(checkCliVersionGate(catalog, "2.1.283")).toHaveLength(2);
+    expect(checkCliVersionGate(catalog, "2.1.284")).toEqual([expect.stringContaining('"claude-haiku-5-5"')]);
   });
 
   it("ships a catalog every model of which the PINNED SDK can actually run", () => {
@@ -172,6 +177,7 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
       "claude-opus-4-8[1m]",
       "claude-sonnet-5-5[1m]",
       "claude-sonnet-5[1m]",
+      "claude-haiku-5-5",
       "claude-haiku-4-5",
     ]) {
       expect(values).toContain(v);
@@ -187,6 +193,7 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
       "claude-opus-4-8[1m]",
       "claude-sonnet-5-5[1m]",
       "claude-sonnet-5[1m]",
+      "claude-haiku-5-5",
       "claude-haiku-4-5",
     ]);
     // Opus 4.8 is deliberately KEPT alongside Opus 5 (persisted picks + a
@@ -197,6 +204,28 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     expect(catalog.aliases.claude["sonnet"]).toBe("claude-sonnet-5");
     expect(catalog.aliases.claude["opus-5.5"]).toBe("claude-opus-5-5");
     expect(catalog.aliases.claude["sonnet-5.5"]).toBe("claude-sonnet-5-5");
+  });
+
+  it("qualifies Haiku 5.5 without retargeting saved Haiku selections", () => {
+    expect(catalog.version).toBe(13);
+    expect(catalog.families.claude.find(model => model.value === "claude-haiku-5-5")).toEqual({
+      value: "claude-haiku-5-5", label: "Claude Haiku 5.5",
+      effortLevels: ["low", "medium", "high", "xhigh", "max"],
+      defaultEffort: "medium", supportsFast: false, minCliVersion: "2.1.293",
+    });
+    expect(catalog.aliases.claude).toMatchObject({
+      haiku: "claude-haiku-4-5", "haiku-5.5": "claude-haiku-5-5",
+    });
+    expect(checkCliVersionGate(catalog, "2.1.292")).toContainEqual(expect.stringContaining('"claude-haiku-5-5"'));
+    expect(checkCliVersionGate(catalog, "2.1.293")).toEqual([]);
+  });
+
+  it.each(["unsupported", "ultracode", 42])("rejects an invalid or off-ladder default effort: %s", defaultEffort => {
+    const invalid = { ...catalog, families: { claude: [{
+      value: "claude-haiku-5-5", label: "Haiku 5.5",
+      effortLevels: ["low", "medium", "high", "xhigh", "max"], defaultEffort,
+    }] } };
+    expect(validateCatalog(invalid).errors).toContainEqual(expect.stringContaining("defaultEffort"));
   });
 
   it("curates GPT-6 Astra and Cursor Auto / Grok 4.6 without dropping compatibility rows", () => {
@@ -238,7 +267,7 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     expect(byFamily.claude["claude-fable-5-1[1m]"]).toMatchObject({
       effortLevels: ["low", "medium", "high", "xhigh", "max", "ultracode"],
       supportsFast: false,
-      minCliVersion: "2.1.255",
+      minCliVersion: "2.1.257",
     });
     expect(byFamily.codex["gpt-6-astra"]).toMatchObject({
       effortLevels: ["low", "medium", "high", "xhigh", "max", "ultracode"],

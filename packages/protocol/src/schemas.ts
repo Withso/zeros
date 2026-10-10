@@ -546,9 +546,11 @@ function assertInboundPayload(env: Record<string, unknown>): void {
     case "AGENT_GOAL_SET":
       if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
       if (!isGoalUpdate(env.update)) bad("update");
+      if (env.origin !== undefined && env.origin !== "user") bad("origin");
       break;
     case "AGENT_GOAL_CLEAR":
       if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
+      if (env.origin !== undefined && env.origin !== "user") bad("origin");
       break;
     case "AGENT_RETRY_SAFETY_REVIEW":
       if (!isNonEmptyStr(executionRoute(env))) bad("executionId");

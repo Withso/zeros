@@ -72,6 +72,28 @@ afterAll(() => {
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 describe("Claude private cloud coordinator policy",()=>{
+  it("applies admitted Claude preferences to a private cloud query and validates live changes", async () => {
+    const boundary = { status: { actor: "agent-code", backend: "cloud-worker" } } as never;
+    const execution = { lease: { signal: new AbortController().signal, assertLive: vi.fn(), admission: { model: "claude-haiku-4-5" } },
+      tools: { call: vi.fn() }, productServers: [] } as unknown as cloudExecutions.CloudProviderExecution;
+    const original = cloudExecutions.cloudProviderExecution;
+    const authority = vi.spyOn(cloudExecutions, "cloudProviderExecution").mockImplementation(value => value === boundary ? execution : original(value));
+    const runtime = admittedClaudeRuntimeFixture();
+    const { queryFn, captured, control } = makeScriptedQuery([[initMsg("cloud-preferences")]]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/srv/zeros/workspace", executionBoundary: boundary,
+        env: { ANTHROPIC_MODEL: "claude-haiku-4-5", ZEROS_CLAUDE_AUTO_MEMORY: "0", ZEROS_CLAUDE_IDLE_COMPACTION: "0" } });
+      void adapter.prompt({ sessionId: session.executionId, prompt: [textBlock("Continue")] });
+      await tick();
+      expect(captured[0].settings).toMatchObject({ autoMemoryEnabled: false, idleCompaction: false });
+      await adapter.updateConfig({ sessionId: session.executionId, env: { ZEROS_CLAUDE_AUTO_MEMORY: "1", ZEROS_CLAUDE_IDLE_COMPACTION: "1" } });
+      expect(control.flagSettings.at(-1)).toMatchObject({ autoMemoryEnabled: true, idleCompaction: null });
+      await expect(adapter.updateConfig({ sessionId: session.executionId, env: { ZEROS_CLAUDE_IDLE_COMPACTION: "yes" } })).rejects.toThrow(/admission/);
+      expect(runtime.desktop).not.toHaveBeenCalled();
+    } finally { await adapter.dispose(); runtime.dispose(); authority.mockRestore(); }
+  });
+
   it.each(["default", "accept-edits", "auto", "plan", "bypass"])("starts the persisted native %s mode before the first prompt", async mode => {
     const {queryFn} = makeScriptedQuery([]);
     const adapter = new ClaudeSdkAdapter(makeCtx([],[]), {queryFn});
@@ -929,6 +951,7 @@ describe("Claude first-content diagnostics", () => {
       );
       await vi.advanceTimersByTimeAsync(1_000);
       live.push({ type: "assistant", parent_tool_use_id: "old-background-child", message: { id: "background-output", role: "assistant", content: [{ type: "text", text: "Child progress" }] } });
+      live.push({ type: "assistant", agent_id: "resumed-child", message: { id: "resumed-child-output", role: "assistant", content: [{ type: "text", text: "Resumed child progress" }] } });
       await vi.advanceTimersByTimeAsync(5_000);
       expect(timingLines()).toEqual([]);
       live.push(content);
@@ -1651,6 +1674,36 @@ describe("ClaudeSdkAdapter", () => {
       expect(background.tasks).toHaveLength(ambient ? 0 : 1);
       expect(background.waiting).toBe(!ambient);
       live.push({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(live.control.closes).toBe(1);
+    } finally {
+      await adapter.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true])("retains the newest resumed task run across idle teardown and an older completion (ambient=%s)", async (ambient) => {
+    vi.useFakeTimers();
+    const live = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn, idleTimeoutMs: 1_000 });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const first = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("first")] });
+      await flushMicrotasks();
+      live.push(initMsg("persistent"),
+        { type: "system", subtype: "task_started", task_id: "task", run_id: "run-001", is_backgrounded: true, ambient },
+        { type: "system", subtype: "task_notification", task_id: "task", run_id: "run-001", status: "completed" },
+        { type: "system", subtype: "background_tasks_changed", tasks: [] },
+        resultOk("persistent"));
+      await first;
+      live.push(
+        { type: "system", subtype: "task_started", task_id: "task", run_id: "run-002", is_backgrounded: true, ambient },
+        { type: "system", subtype: "task_notification", task_id: "task", run_id: "run-001", status: "completed" });
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(live.control.closes).toBe(0);
+      live.push({ type: "system", subtype: "task_notification", task_id: "task", run_id: "run-002", status: "completed" });
       await flushMicrotasks();
       await vi.advanceTimersByTimeAsync(1_000);
       expect(live.control.closes).toBe(1);
@@ -4777,6 +4830,38 @@ describe("ClaudeSdkAdapter", () => {
       ).autoMemoryEnabled,
     ).toBe(true);
     await adapter.dispose();
+  });
+
+  it.each([undefined, "0", "invalid", "1"])("disables idle compaction by default and omits the startup override only for On (%s)", async value => {
+    const { queryFn, captured } = makeScriptedQuery([[initMsg("idle-compaction"), resultOk("idle-compaction")]]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp", env: value === undefined ? undefined : { ZEROS_CLAUDE_IDLE_COMPACTION: value } });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Continue")] });
+      if (value === "1") expect(captured[0].settings).not.toHaveProperty("idleCompaction");
+      else expect(captured[0].settings).toHaveProperty("idleCompaction", false);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("clears the live idle-compaction override with null on On, then restores false on Off or a legacy snapshot", async () => {
+    const { queryFn, captured, control } = makeScriptedQuery([[initMsg("idle-compaction-live")]]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      void adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Continue")] });
+      await tick();
+      expect(captured[0].settings).toHaveProperty("idleCompaction", false);
+      for (const [env, expected] of [
+        [{ ZEROS_CLAUDE_IDLE_COMPACTION: "1" }, null],
+        [{ ZEROS_CLAUDE_IDLE_COMPACTION: "0" }, false],
+        [{ ZEROS_CLAUDE_IDLE_COMPACTION: "1" }, null],
+        [{}, false],
+      ] as const) {
+        await adapter.updateConfig({ sessionId: session.sessionId, env });
+        expect(control.flagSettings.at(-1)).toHaveProperty("idleCompaction", expected);
+      }
+      expect(captured).toHaveLength(1);
+    } finally { await adapter.dispose(); }
   });
 
   it("buildOptions sends an EMPTY additionalDirectories array (not omitted) when env is absent or malformed", async () => {

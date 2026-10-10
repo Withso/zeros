@@ -11,8 +11,9 @@ import { boundedStructuredOutput } from "../shared/tool-content";
 // cleaner than the CLI's (`{ tool_call: { <name>: {...} } }`), so the
 // tool-kind / merge-key / todo / subagent helpers port directly. Tool
 // NAMES are assumed to match the CLI's `*ToolCall` vocabulary; unknown
-// names degrade to a generic "other" card (confirm + extend via the
-// spike / dogfood).
+// names degrade to a generic "other" card. The installed tool-type inventory
+// test requires a reviewed disposition for every SDK tool, including generic
+// computerUse events.
 //
 // Text/thought chunks share an id within one uninterrupted segment. A new
 // tool or a change of role starts another segment so final replies retain
@@ -1541,8 +1542,8 @@ function mapConversationToolCall(message: unknown): {
       };
     }
     default:
-      // readLints / generateImage / recordScreen / createPlan / updateTodos /
-      // any future tool — surface a generic row rather than dropping it.
+      // readLints / generateImage / recordScreen / computerUse / createPlan /
+      // updateTodos / any future tool — keep the generic row readable.
       return {
         title: humanizeToolType(message.type),
         kind: "other",

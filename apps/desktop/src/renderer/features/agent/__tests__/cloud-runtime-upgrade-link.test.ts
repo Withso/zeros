@@ -43,7 +43,13 @@ describe("composer runtime update entry", () => {
     state.available = true;
     expect(render()).toContain("Updates automatically the next time this workspace wakes");
   });
-  it.each(["hidden", "signed-out", "nonmanager", "local"])("keeps %s composer surfaces inert", reason => {
+  it("shows an informational agents update note to a prompter without asking for manage authority", () => {
+    state.manager = false;
+    expect(render({ required: true })).toContain("Agents need a runtime update");
+    expect(render({ required: true })).not.toContain("<button");
+    expect(state.reads.mock.calls.some(call => call[0] === "runtime" && call[2].enabled)).toBe(false);
+  });
+  it.each(["hidden", "signed-out", "local"])("keeps %s composer surfaces inert", reason => {
     if (reason === "signed-out") state.accountAccess = false;
     if (reason === "nonmanager") state.manager = false;
     expect(render({ active: reason !== "hidden", cwd: reason === "local" ? "/local/workspace" : folder, required: true })).toBe("");

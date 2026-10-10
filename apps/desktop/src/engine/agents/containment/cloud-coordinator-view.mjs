@@ -74,6 +74,8 @@ export function cloudCoordinatorEnvironment(material, model, settings = {}, runt
     default: throw new Error("Invalid private coordinator credential");
   }
   if (material.kind.startsWith("claude-")) {
+    for (const name of ["ZEROS_CLAUDE_AUTO_MEMORY", "ZEROS_CLAUDE_IDLE_COMPACTION"])
+      if (settings[name] === "0" || settings[name] === "1") env[name] = settings[name];
     env.ANTHROPIC_MODEL = model; env.CLAUDE_CONFIG_DIR = `${CLOUD_COORDINATOR_HOME}/.claude`;
     env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
   } else if (material.kind.startsWith("cursor-")) {

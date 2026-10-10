@@ -20,4 +20,11 @@ describe("standalone control-plane provider catalog", () => {
     expect(cloudAgentModelAllowed("cursor-api-key", "legacy-model", ["legacy-model"], false)).toBe(true);
     expect(cloudAgentModels("unknown")).toEqual([]);
   });
+  it("admits Haiku 5.5 under existing all-model consent without expanding explicit grants", () => {
+    for (const kind of ["claude-api-key", "claude-setup-token"]) {
+      expect(cloudAgentModelAllowed(kind, "claude-haiku-5-5", ["claude-haiku-4-5"], true)).toBe(true);
+      expect(cloudAgentModelAllowed(kind, "claude-haiku-5-5", ["claude-haiku-4-5"], false)).toBe(false);
+      expect(cloudAgentModelAllowed(kind, "claude-haiku-4-5", ["claude-haiku-4-5"], false)).toBe(true);
+    }
+  });
 });

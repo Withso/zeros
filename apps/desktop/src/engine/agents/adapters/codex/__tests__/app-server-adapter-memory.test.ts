@@ -91,7 +91,7 @@ const native = vi.hoisted(() => {
     configWriteFailures: 0,
     notificationHandlers: new Map<string, (params: unknown) => void>(),
   };
-  const requestTyped = vi.fn(async (method: string, params?: unknown) => {
+  const requestTyped = vi.fn(async (method: string, params?: unknown): Promise<Record<string, unknown>> => {
     if (method === "config/read") {
       const effectiveConfig =
         state.effectiveMemoriesOverride === null
@@ -279,13 +279,13 @@ describe("Codex native memory capability", () => {
     native.requestTyped.mockClear();
   });
 
-  const adapter = () =>
+  const adapter = (onSessionUpdate = vi.fn()) =>
     new CodexAppServerAdapter({
       projectRoot: "/tmp/proj",
       mcpServers: [],
       sessionDirRoot: "/tmp/sessions",
       emit: {
-        onSessionUpdate: vi.fn(),
+        onSessionUpdate,
         onPermissionRequest: vi.fn(),
         onQuestionRequest: vi.fn(),
         onAgentStderr: vi.fn(),
@@ -425,6 +425,75 @@ describe("Codex native memory capability", () => {
       threadId: "thread-memory",
     });
     await instance.dispose();
+  });
+
+  it("records explicit goal actions as user instructions and leaves legacy callers unmarked", async () => {
+    const instance = adapter();
+    const created = await instance.newSession({ cwd: "/tmp/proj" });
+    const sessionId = created.session.executionId;
+    try {
+      await instance.capabilityPorts.goal.set({ sessionId, update: { objective: "Finish" }, origin: "user" });
+      expect(native.requestTyped.mock.calls.filter(call => call[0] === "thread/goal/set").at(-1)?.[1]).toEqual({ threadId: expect.any(String), objective: "Finish", origin: "user" });
+      await instance.capabilityPorts.goal.clear({ sessionId, origin: "user" });
+      expect(native.requestTyped.mock.calls.filter(call => call[0] === "thread/goal/clear").at(-1)?.[1]).toEqual({ threadId: expect.any(String), origin: "user" });
+      await instance.capabilityPorts.goal.set({ sessionId, update: { objective: "Automatic continuation" } });
+      expect(native.requestTyped.mock.calls.filter(call => call[0] === "thread/goal/set").at(-1)?.[1]).not.toHaveProperty("origin");
+      await instance.capabilityPorts.goal.clear({ sessionId });
+      expect(native.requestTyped.mock.calls.filter(call => call[0] === "thread/goal/clear").at(-1)?.[1]).not.toHaveProperty("origin");
+    } finally { await instance.dispose(); }
+  });
+
+  it("keeps the latest MCP sign-in pending when an older attempt completes", async () => {
+    const emit = vi.fn(), instance = adapter(emit);
+    const original = native.requestTyped.getMockImplementation()!;
+    const loginIds = ["older-login", "newer-login", "failed-login"];
+    let needsAuthentication = true;
+    native.requestTyped.mockImplementation(async (method, params) => {
+      if (method === "mcpServerStatus/list") return { data: [
+        { name: "linear", runtimeStatus: needsAuthentication ? "authenticationRequired" : "connected", authStatus: "notLoggedIn" },
+        { name: "github", runtimeStatus: "connected" },
+      ], nextCursor: null };
+      if (method === "mcpServer/oauth/login") return { authorizationUrl: "https://auth.example.test/authorize", loginId: loginIds.shift() };
+      return original(method, params);
+    });
+    try {
+      const { session } = await instance.newSession({ cwd: "/tmp/proj" });
+      const port = instance.capabilityPorts.sessionTools;
+      const opts = { sessionId: session.executionId, toolId: "linear" };
+      expect(await port.authenticate(opts)).toEqual({ authorizationUrl: "https://auth.example.test/authorize" });
+      await port.authenticate(opts);
+      emit.mockClear();
+      const completed = native.state.notificationHandlers.get("mcpServer/oauthLogin/completed")!;
+      completed({ threadId: "thread-memory", name: "linear", loginId: "older-login", success: false });
+      expect(emit.mock.calls.filter(call => call[1].update.code === "mcp_oauth_failed")).toHaveLength(0);
+      const entry = async () => (await port.inventory(opts)).groups!.find(group => group.kind === "mcp")!.entries.find(row => row.id === "linear")!;
+      expect(await entry()).toMatchObject({ status: "connecting", canAuthenticate: true });
+      completed({ threadId: "thread-memory", name: "linear", loginId: "older-login", success: true });
+      completed({ threadId: "foreign-thread", name: "linear", loginId: "newer-login", success: true });
+      completed({ threadId: "thread-memory", name: "linear", success: false });
+      expect(await entry()).toMatchObject({ status: "connecting" });
+      completed({ threadId: "thread-memory", name: "linear", loginId: "newer-login", success: true });
+      expect(await entry()).toMatchObject({ status: "connected", canAuthenticate: false });
+      needsAuthentication = false;
+      expect(await entry()).toMatchObject({ status: "connected" });
+      needsAuthentication = true;
+      // A completed login must not mask a later native expiry/revocation.
+      expect(await entry()).toMatchObject({ status: "needs-auth", canAuthenticate: true });
+      completed({ name: "linear", loginId: "newer-login", success: false });
+      expect(await entry()).toMatchObject({ status: "needs-auth" });
+      await port.authenticate(opts);
+      completed({ name: "linear", loginId: "failed-login", success: false, error: "private-callback-sentinel" });
+      expect(await entry()).toMatchObject({ status: "error", canAuthenticate: true });
+      expect(emit.mock.calls.filter(call => call[1].update.code === "mcp_oauth_failed")).toHaveLength(1);
+      const inventory = await port.inventory(opts);
+      expect(inventory.groups!.find(group => group.kind === "mcp")!.entries.find(row => row.id === "github")).toMatchObject({ status: "connected" });
+      expect(JSON.stringify(inventory)).not.toMatch(/older-login|newer-login|failed-login|private-callback-sentinel/);
+      // The strict legacy list contract still returns the native status shape.
+      expect((await port.list(opts)).entries.find(row => row.id === "linear")).toMatchObject({ status: "needs-auth" });
+    } finally {
+      await instance.dispose();
+      native.requestTyped.mockImplementation(original);
+    }
   });
 
   it("does not let a stale initial goal read overwrite a newer goal mutation", async () => {

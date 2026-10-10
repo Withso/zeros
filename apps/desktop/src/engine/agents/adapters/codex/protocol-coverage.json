@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "codexProtocolVersion": "0.160.0",
+  "codexProtocolVersion": "0.161.0",
   "threadItems": {
     "handled": [
       "userMessage",
@@ -64,6 +64,7 @@
       "userVerification/verify",
       "userVerification/delete",
       "userVerification/cancel",
+      "thread/prediction/request",
       "thread/attachment/add",
       "thread/attachment/list",
       "thread/attachment/remove",
@@ -145,6 +146,7 @@
       "account/gatewayOAuth/read",
       "account/gatewayOAuth/login",
       "account/gatewayOAuth/cancel",
+      "account/bedrock/checkGovCloudRequirements",
       "account/rateLimitResetCredit/consume",
       "account/usage/read",
       "account/workspaceMessages/read",
@@ -269,6 +271,7 @@
       "thread/closed"
     ],
     "forwarded": [
+      "thread/prediction/updated",
       "thread/attachment/updated",
       "account/gatewayOAuth/changed",
       "thread/archived",

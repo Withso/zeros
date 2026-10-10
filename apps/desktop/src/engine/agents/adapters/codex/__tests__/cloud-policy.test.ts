@@ -1,8 +1,26 @@
 import {describe,expect,it,vi} from "vitest";
 import type {CloudProviderExecution} from "../../../cloud-provider-execution";
-import {cloudCodexConfig,cloudCodexImage,cloudCodexRequest,cloudCodexToolCall,CLOUD_CODEX_CONFIG} from "../cloud-policy";
+import {bindCloudCodexThread,cloudCodexConfig,cloudCodexImage,cloudCodexRequest,cloudCodexToolCall,CLOUD_CODEX_CONFIG} from "../cloud-policy";
 const context=()=>({lease:{assertLive:vi.fn(),admission:{model:"qualified-model"}},tools:{inputSchema:{type:"object"},call:vi.fn()}}) as unknown as CloudProviderExecution;
 describe("Codex cloud native authority",()=>{
+  it("accepts goal provenance only behind an admitted command boundary", () => {
+    const execution = context();
+    Object.assign(execution.lease, { nativeCapabilities: { goals: true }, admission: { model: "qualified-model", source: { kind: "command", commandId: "command", claimId: "claim" } } });
+    bindCloudCodexThread(execution, "native");
+    expect(cloudCodexRequest(execution, "env", "thread/goal/set", { threadId: "native", objective: "Finish", origin: "user" }))
+      .toEqual({ threadId: "native", objective: "Finish", origin: "user" });
+    expect(cloudCodexRequest(execution, "env", "thread/goal/clear", { threadId: "native", origin: "user" }))
+      .toEqual({ threadId: "native", origin: "user" });
+    for (const method of ["thread/goal/set", "thread/goal/clear"]) {
+      const params = { threadId: "native", ...(method.endsWith("set") ? { status: "paused" } : {}) };
+      expect(cloudCodexRequest(execution, "env", method, params)).not.toHaveProperty("origin");
+      expect(() => cloudCodexRequest(execution, "env", method, { ...params, origin: "forged" })).toThrow();
+      expect(() => cloudCodexRequest(execution, "env", method, { ...params, threadId: "foreign", origin: "user" })).toThrow();
+    }
+    Object.assign(execution.lease, { admission: { model: "qualified-model", source: { kind: "session", actorSessionId: "actor" } } });
+    expect(() => cloudCodexRequest(execution, "env", "thread/goal/clear", { threadId: "native", origin: "user" })).toThrow(/origin|provenance/);
+    expect(() => cloudCodexRequest(execution, "env", "thread/goal/get", { threadId: "native", origin: "user" })).toThrow();
+  });
   it("limits shell inheritance to admitted names and managed paths, including an empty org environment",()=>{
     for(const values of [{},{ORG_SECRET:"synthetic-env-value",OPENAI_API_KEY:"synthetic-provider-value"}]){
       const execution=context();Object.assign(execution.lease,{environment:{values}});
@@ -73,7 +91,7 @@ describe("Codex cloud native authority",()=>{
     expect(cloudCodexRequest(context(),"env","thread/resume",{threadId:"native"})).toMatchObject({threadId:"native",environments:undefined,config:CLOUD_CODEX_CONFIG});
     expect(()=>cloudCodexRequest(context(),"env","turn/start",{model:"another-model"})).toThrow(/model/);
   });
-  it.each(["process/spawn","fs/readFile","account/login/start","config/batchWrite","thread/fork","review/start","thread/goal/set"])("rejects unqualified host mutation %s",method=>{
+  it.each(["process/spawn","fs/readFile","account/login/start","mcpServer/oauth/login","config/batchWrite","thread/fork","review/start","thread/goal/set"])("rejects unqualified host mutation %s",method=>{
     expect(()=>cloudCodexRequest(context(),"env",method,{})).toThrow(/not admitted/);
   });
 });

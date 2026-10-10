@@ -10,11 +10,18 @@
 
 import { describe, expect, it } from "vitest";
 
-import { bundledRuntimeVersion } from "../registry";
+import { bundledRuntimeVersion, cloudAgentManifest } from "../registry";
 
 const SEMVER = /^\d+\.\d+\.\d+/;
 
 describe("bundledRuntimeVersion", () => {
+  it("reports the actual bundled Claude CLI in public cloud inventory without authentication discovery", () => {
+    const agent = cloudAgentManifest().find(row => row.id === "claude")!;
+    expect(agent.installedVersion).toBe(bundledRuntimeVersion("claude"));
+    expect(agent).not.toHaveProperty("authenticated");
+    expect(agent).not.toHaveProperty("account");
+    expect(agent.distribution).toEqual({});
+  });
   it("reports the bundled CLI semver for Claude (the Agent SDK's pinned claude-code)", () => {
     const v = bundledRuntimeVersion("claude");
     expect(v).not.toBeNull();

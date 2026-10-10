@@ -3,7 +3,8 @@
 // so the pill renders. An unknown id maps to "" → modelsForAgent returns []
 // → the pill renders null.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { setClaudeAutoMemoryEnabled, setClaudeIdleCompactionEnabled } from "../reliability-settings";
 
 import {
   agentFamily,
@@ -611,9 +612,9 @@ describe("agentSupportsEffort (EffortPill capability gate)", () => {
     expect(agentSupportsEffort("codex")).toBe(true);
   });
   it("is false for agents with no effort knob", () => {
-    for (const id of ["cursor", null]) {
-      expect(agentSupportsEffort(id)).toBe(false);
-    }
+    expect(agentSupportsEffort(null)).toBe(false);
+    expect(agentSupportsEffort("cursor", "composer-2.5", null)).toBe(false);
+    expect(agentSupportsEffort("cursor")).toBe(true);
   });
   it("Cursor reasoning is per model: Grok models have ladders while Auto and Composer do not", () => {
     expect(agentSupportsEffort("cursor", "grok-4.5")).toBe(true);
@@ -1243,6 +1244,22 @@ describe("staticModesForAgent (pre-session fallback modes)", () => {
 });
 
 describe("envForChatSettings — permission posture carriage", () => {
+  it("carries explicit Claude memory and idle-compaction choices only for Claude", () => {
+    const data = new Map<string, string>();
+    vi.stubGlobal("localStorage", { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => data.set(key, value) });
+    try {
+      const env = (agentId: string) => envForChatSettings({ agentId, initialize: null, model: null, effort: "high" });
+      expect(env("claude")).toMatchObject({ ZEROS_CLAUDE_AUTO_MEMORY: "1", ZEROS_CLAUDE_IDLE_COMPACTION: "0" });
+      setClaudeAutoMemoryEnabled(false);
+      setClaudeIdleCompactionEnabled(true);
+      expect(env("claude")).toMatchObject({ ZEROS_CLAUDE_AUTO_MEMORY: "0", ZEROS_CLAUDE_IDLE_COMPACTION: "1" });
+      for (const agentId of ["codex", "cursor"]) {
+        expect(env(agentId)).not.toHaveProperty("ZEROS_CLAUDE_AUTO_MEMORY");
+        expect(env(agentId)).not.toHaveProperty("ZEROS_CLAUDE_IDLE_COMPACTION");
+      }
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("carries Claude's bounded idle timeout only for Claude sessions", () => {
     const claude = envForChatSettings({
       agentId: "claude",
@@ -1380,7 +1397,7 @@ describe("envForChatSettings — model carriage (2026-07-13 default-model fix)",
     //
     // The resolved value is the STARRED model (catalog fallback when unset),
     // not the catalog list head. Those differ for Claude — head is Fable 5,
-    // star is Opus 5 — and sending the head while the pill rendered the star
+    // star is Opus 5.5 — and sending the head while the pill rendered the star
     // is that same bug wearing a different hat.
     const claude = envForChatSettings({
       agentId: "claude",
@@ -1388,7 +1405,7 @@ describe("envForChatSettings — model carriage (2026-07-13 default-model fix)",
       model: null,
       effort: "high",
     });
-    expect(claude.ANTHROPIC_MODEL).toBe("claude-opus-5[1m]");
+    expect(claude.ANTHROPIC_MODEL).toBe("claude-opus-5-5[1m]");
 
     const codex = envForChatSettings({
       agentId: "codex",
@@ -1396,7 +1413,7 @@ describe("envForChatSettings — model carriage (2026-07-13 default-model fix)",
       model: null,
       effort: "high",
     });
-    expect(codex.OPENAI_MODEL).toBe("gpt-5.6-sol");
+    expect(codex.OPENAI_MODEL).toBe("gpt-6.1-sol");
 
     const cursor = envForChatSettings({
       agentId: "cursor",
@@ -1404,7 +1421,7 @@ describe("envForChatSettings — model carriage (2026-07-13 default-model fix)",
       model: null,
       effort: "high",
     });
-    expect(cursor.CURSOR_MODEL).toBe("composer-2.5");
+    expect(cursor.CURSOR_MODEL).toBe("grok-4.7");
   });
 
   it("an unknown family (no catalog) still omits the model env", () => {
@@ -1463,7 +1480,7 @@ describe("a null ChatThread.model means ONE model everywhere", () => {
       "claude-fable-5-1[1m]",
     );
     expect(resolveModelOption("claude", null, null)?.value).toBe(
-      "claude-opus-5[1m]",
+      "claude-opus-5-5[1m]",
     );
     // Fast capability follows the starred model, not the head.
     expect(agentSupportsFast("claude", null, null)).toBe(true);

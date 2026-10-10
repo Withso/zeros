@@ -9,6 +9,7 @@ describe("cloud command HTTP boundary", () => {
     const [url, init] = fetcher.mock.calls[0]!;
     expect(String(url)).toBe("https://control.example.test/internal/v1/cloud-workspaces/engine/actions");
     expect(init?.headers).toMatchObject({ authorization: "Bearer fixture-private-heartbeat" });
+    expect(init?.headers).not.toHaveProperty("x-zeros-claude-preferences");
     expect(init?.redirect).toBe("error");
   });
   it("uses only the registered control origin and scopes authority outside the untrusted request", async () => {
@@ -17,6 +18,7 @@ describe("cloud command HTTP boundary", () => {
     expect(await requestCloudCommand(authority, request, new AbortController().signal, fetcher)).toBeNull();
     const [endpoint, init] = fetcher.mock.calls[0]!;
     expect(String(endpoint)).toBe("https://control.example.test/internal/v1/cloud-workspaces/engine/commands");
+    expect(init?.headers).toHaveProperty("x-zeros-claude-preferences", "1");
     expect(init?.redirect).toBe("error");
     expect(init?.headers).toMatchObject({ authorization: "Bearer fixture-private-heartbeat" });
     expect(JSON.parse(String(init?.body))).toEqual({ workspaceId: "workspace", organizationId: "organization", generation: 3, engineInstanceId: "engine", request });

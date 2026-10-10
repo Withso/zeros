@@ -10,12 +10,28 @@ function fixture() {
   const app = createCloudCommandRoutes(service as unknown as DatabaseCloudWorkspaceCommandService);
   const scope = { workspaceId: randomUUID(), organizationId: randomUUID(), generation: 1, engineInstanceId: randomUUID() };
   const token = "zwh_" + "x".repeat(43);
-  const call = (request: unknown, authorization = `Bearer ${token}`,native=true) => app.request(CLOUD_COMMAND_PATH, {
-    method: "POST", headers: { "content-type": "application/json", authorization,...(native?{"x-zeros-native-commands":"1"}:{}) }, body: JSON.stringify({ ...scope, request }),
+  const call = (request: unknown, authorization = `Bearer ${token}`,native=true,claudePreferences=true) => app.request(CLOUD_COMMAND_PATH, {
+    method: "POST", headers: { "content-type": "application/json", authorization,...(native?{"x-zeros-native-commands":"1"}:{}),
+      ...(claudePreferences?{"x-zeros-claude-preferences":"1"}:{}) }, body: JSON.stringify({ ...scope, request }),
   });
   return { service, scope, token, call };
 }
 describe("cloud command routes", () => {
+  it("preserves validated Claude preferences across HTTP and strips them for older workers", async () => {
+    const f = fixture(), payload = { agentId: "claude", userMessageId: randomUUID(), prompt: [{ type: "text", text: "test" }], modeRevision: 0,
+      model: "claude-haiku-4-5", agentCredentialGrantId: randomUUID(), claudePreferences: { autoMemoryEnabled: false, idleCompactionEnabled: true } };
+    const mutation = { conversationId: "chat", operationId: randomUUID(), expectedRevision: 0, action: { kind: "enqueue", commandId: randomUUID(), payload } };
+    expect((await f.call({ kind: "mutate", mutation })).status).toBe(200);
+    expect(f.service.mutate).toHaveBeenCalledWith(expect.anything(), mutation, null);
+    f.service.snapshot.mockResolvedValue({ revision: 1, pending: [{ payload }], receipts: [] });
+    const request = { kind: "snapshot", conversationId: "chat" };
+    expect(await (await f.call(request)).json()).toEqual({ result: { revision: 1, pending: [{ payload }], receipts: [] } });
+    const { claudePreferences: _preferences, ...legacyPayload } = payload;
+    expect(await (await f.call(request, undefined, true, false)).json()).toEqual({ result: { revision: 1, pending: [{ payload: legacyPayload }], receipts: [] } });
+    f.service.claim.mockResolvedValue({ payload });
+    expect(await (await f.call({ kind: "claim", conversationId: "chat", executionId: "worker" }, undefined, true, false)).json())
+      .toEqual({ result: { payload: legacyPayload } });
+  });
   it("keeps native receipts opaque and native claims disabled for older engines",async()=>{
     const f=fixture();f.service.snapshot.mockResolvedValue({revision:1,nativeGoal:{version:1,conversationId:"chat",revision:1,goal:null},pending:[{payload:{operation:{kind:"goal"}}}],receipts:[{result:{version:1,goal:null},payload:null}]} as never);
     const response=await f.call({kind:"snapshot",conversationId:"chat"},undefined,false);

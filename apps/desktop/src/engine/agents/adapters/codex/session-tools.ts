@@ -89,7 +89,7 @@ export async function authenticateCodexSessionTool(
   runtime: Pick<CodexAppServerHandle, "requestTyped">,
   threadId: string,
   toolId: string,
-): Promise<{ authorizationUrl: string }> {
+): Promise<{ authorizationUrl: string; loginId?: string }> {
   // A renderer cannot turn this into login for an arbitrary configured server.
   const current = await readCodexSessionTools(runtime, threadId);
   if (
@@ -112,5 +112,6 @@ export async function authenticateCodexSessionTool(
   const authorizationUrl = normalizeExternalHttpUrl(result.authorizationUrl);
   if (!authorizationUrl)
     throw new Error("The provider returned an invalid authentication link.");
-  return { authorizationUrl };
+  // The adapter keeps this correlation id private; the renderer gets the URL.
+  return { authorizationUrl, ...(result.loginId ? { loginId: result.loginId } : {}) };
 }

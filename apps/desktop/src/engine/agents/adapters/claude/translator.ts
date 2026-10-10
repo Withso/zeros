@@ -103,6 +103,9 @@ interface RetainedToolInput {
   name: string;
   command?: string;
   description?: string;
+  subagentType?: string;
+  model?: string;
+  effort?: string;
   scheduledWakeup?: {
     stop: boolean;
     reason: string | null;
@@ -148,6 +151,10 @@ interface ClaudeMessageEvent {
    *  this to route child events into the
    *  parent SubagentCard's nested transcript. */
   parent_tool_use_id?: string | null;
+  /** Stable task ownership survives a resumed Agent's new tool-use parent. */
+  agent_id?: string;
+  subagent_type?: string;
+  task_description?: string;
   /** Claude Code's rich result for THIS user event's tool_result (SDK
    *  `tool_use_result`). For Edit/Write/MultiEdit it carries
    *  `structuredPatch` — real hunks with real file line numbers, which the
@@ -174,6 +181,8 @@ interface ClaudeSystemEvent {
   tools?: string[];
   mcp_servers?: Array<{ name: string; status?: string }>;
   task_id?: string;
+  run_id?: string;
+  parent_task_id?: string;
   tool_use_id?: string;
   description?: string;
   subagent_type?: string;
@@ -185,7 +194,10 @@ interface ClaudeSystemEvent {
   is_backgrounded?: boolean;
   tasks?: Array<{
     task_id?: string;
+    run_id?: string;
+    parent_task_id?: string;
     task_type?: string;
+    subagent_type?: string;
     description?: string;
     ambient?: boolean;
   }>;
@@ -408,13 +420,22 @@ export class ClaudeStreamTranslator {
    * could forget completion while retaining its ID and fail that row on Stop. */
   private readonly taskRecords = new Map<string, {
     toolCallId: string;
+    runOrdinal: number;
+    task?: BackgroundTask;
     settlement?: SettledTaskRecord;
   }>();
   private readonly skippedTaskRecords = new Set<string>();
   private readonly notifiedTaskIds = new Set<string>();
-  /** Edge/level ordering is unspecified. Once an edge settles an id, ignore a
-   * late membership frame for it until the SDK process restarts. */
+  /** Edge/level ordering is unspecified. A terminal bookend wins within one
+   * run; a newer run of the same stable task reopens its lifetime. */
   private readonly terminalTaskIds = new Set<string>();
+  /** Native run ids stay process-local. The SDK guarantees lexical ordering,
+   * but no format; only the observed run ordinal reaches durable records. */
+  private readonly taskRuns = new Map<string, {
+    id: string;
+    ordinal: number;
+    hasBackgroundSnapshot: boolean;
+  }>();
   /** A pause edge can legally beat the first workflow level frame. Preserve
    * that edge separately so the later level cannot briefly reopen the row as
    * running. Like terminal ids, this is process-local and bounded. */
@@ -542,11 +563,18 @@ export class ClaudeStreamTranslator {
     string,
     {
       toolCallId: string;
+      nativeParent: string;
       status: "in_progress" | "completed" | "failed";
       model?: string;
+      subagentType?: string;
+      effort?: string;
+      parentToolId?: string;
       error?: string;
     }
   >();
+  /** Early child messages may precede their task/tool join. Keep their exact
+   * scope so late correlation reparents those records rather than replaying. */
+  private readonly agentMessageParents = new Map<string, string>();
 
   // A terminal task notification may precede both its start and launch ack,
   // and tool_use_id is optional. Preserve its outcome until the task id binds.
@@ -685,7 +713,9 @@ export class ClaudeStreamTranslator {
     this.skippedTaskRecords.clear();
     this.notifiedTaskIds.clear();
     this.terminalTaskIds.clear();
+    this.taskRuns.clear();
     this.agentTasks.clear();
+    this.agentMessageParents.clear();
     this.agentTaskEnds.clear();
     this.pausedTaskIds.clear();
     this.ambientTaskIds.clear();
@@ -844,11 +874,12 @@ export class ClaudeStreamTranslator {
   }
 
   /** Feed a parsed JSON event from Claude's stdout. */
-  feed(event: unknown): boolean {
-    if (!isObj(event) || typeof event.type !== "string") {
-      this.onUnknown?.(event);
+  feed(rawEvent: unknown): boolean {
+    if (!isObj(rawEvent) || typeof rawEvent.type !== "string") {
+      this.onUnknown?.(rawEvent);
       return false;
     }
+    const event = this.withAgentOwner(rawEvent);
     // Side-channel feedback is not model output or proof of successful work.
     // It must not reset the API retry burst or wake the parent for child traffic.
     if (this.feedback.feed(event)) return false;
@@ -1277,22 +1308,56 @@ export class ClaudeStreamTranslator {
     });
   }
 
-  private onTaskStarted(event: ClaudeSystemEvent): void {
-    if (!event.task_id || this.activityStopped) return;
-    const agentToolId =
-      event.tool_use_id && this.toolCallIds.get(event.tool_use_id);
-    if (
-      agentToolId &&
-      event.task_type === "local_agent" &&
-      !this.agentTasks.has(event.task_id)
-    ) {
-      setBoundedMap(
-        this.agentTasks,
-        event.task_id,
-        { toolCallId: agentToolId, status: "in_progress" },
-        MAX_BACKGROUND_TASK_LIFECYCLE,
-      );
+  private acceptTaskRun(taskId: string, runId?: string): boolean {
+    // Older CLIs omit run_id. Retain their existing task-id-only lifecycle.
+    if (!runId) return true;
+    const previous = this.taskRuns.get(taskId);
+    if (previous && runId < previous.id) return false;
+    if (previous?.id === runId) return true;
+    if (this.activityStopped) return false;
+    setBoundedMap(this.taskRuns, taskId, {
+      id: runId,
+      ordinal: previous ? previous.ordinal + 1 : 1,
+      // A level for the old run cannot veto a resumed start. The next level
+      // for this run still has replacement semantics, including an empty set.
+      hasBackgroundSnapshot: previous ? false : this.hasBackgroundTaskSnapshot,
+    }, MAX_BACKGROUND_TASK_LIFECYCLE);
+    if (!previous) return true;
+    this.terminalTaskIds.delete(taskId);
+    this.notifiedTaskIds.delete(taskId);
+    this.pausedTaskIds.delete(taskId);
+    this.agentTaskEnds.delete(taskId);
+    const record = this.taskRecords.get(taskId);
+    if (record) delete record.settlement;
+    const task = this.backgroundTaskMetadata.get(taskId) ?? this.backgroundTasks.get(taskId);
+    if (task) {
+      const current = { ...task, startedAt: Date.now(), updatedAt: Date.now(), summary: undefined, lastToolName: undefined };
+      setBoundedMap(this.backgroundTaskMetadata, taskId, current, MAX_BACKGROUND_TASK_LIFECYCLE);
+      if (this.backgroundTasks.has(taskId)) this.backgroundTasks.set(taskId, current);
     }
+    const agent = this.agentTasks.get(taskId);
+    if (agent && agent.status !== "in_progress") {
+      agent.status = "in_progress";
+      agent.error = undefined;
+      for (const tool of this.scopedTools.values()) {
+        if (tool.id === agent.toolCallId) tool.status = "in_progress";
+      }
+      this.emit({ sessionId: this.sessionId, update: {
+        sessionUpdate: "tool_call_update", toolCallId: agent.toolCallId,
+        status: "in_progress", content: [],
+        rawOutput: { status: "running", ...this.agentMetadata(agent) },
+      } });
+    }
+    return true;
+  }
+
+  private onTaskStarted(event: ClaudeSystemEvent): void {
+    if (!event.task_id || this.activityStopped || !this.acceptTaskRun(event.task_id, event.run_id)) return;
+    if (event.task_type === "local_agent" || this.agentTasks.has(event.task_id))
+      this.bindAgentTask(event.task_id, event.tool_use_id, {
+        ...event,
+        subagent_type: event.subagent_type ?? this.backgroundTaskMetadata.get(event.task_id)?.subagentType,
+      });
     const priorEnd = this.agentTaskEnds.get(event.task_id);
     if (priorEnd)
       this.settleAgentTask(event.task_id, priorEnd.status, priorEnd.error);
@@ -1300,7 +1365,7 @@ export class ClaudeStreamTranslator {
     addBoundedSet(this.taskStartedIds, event.task_id, MAX_BACKGROUND_TASK_LIFECYCLE);
     if (event.skip_transcript) addBoundedSet(this.skippedTaskRecords, event.task_id, MAX_BACKGROUND_TASK_LIFECYCLE);
     const ambient = this.taskIsAmbient(event);
-    if (!this.hasBackgroundTaskSnapshot && (ambient || event.is_backgrounded)) {
+    if (this.acceptsBackgroundEdge(event.task_id) && (ambient || event.is_backgrounded)) {
       this.trackBackgroundOwnership(event.task_id, ambient);
     }
     if (ambient) {
@@ -1360,6 +1425,7 @@ export class ClaudeStreamTranslator {
       name,
       taskType:
         event.task_type ?? previous?.taskType ?? previousMetadata?.taskType,
+      subagentType: event.subagent_type ?? previous?.subagentType ?? previousMetadata?.subagentType,
       startedAt: previousMetadata?.startedAt ?? previous?.startedAt ?? now,
       updatedAt: now,
       ...(command
@@ -1406,30 +1472,37 @@ export class ClaudeStreamTranslator {
     taskId: string,
     task: BackgroundTask,
   ): void {
-    if (this.skippedTaskRecords.has(taskId) || this.taskRecords.has(taskId)) {
-      return;
-    }
-    const toolCallId = `background-task-${randomUUID()}`;
+    if (this.skippedTaskRecords.has(taskId)) return;
+    const existing = this.taskRecords.get(taskId);
+    const runOrdinal = this.taskRuns.get(taskId)?.ordinal ?? 1;
+    const resumed = existing && existing.runOrdinal !== runOrdinal;
+    if (existing && !resumed && existing.task?.name === task.name &&
+        existing.task?.taskType === task.taskType && existing.task?.subagentType === task.subagentType &&
+        existing.task?.command === task.command) return;
+    const toolCallId = existing?.toolCallId ?? `background-task-${randomUUID()}`;
     setBoundedMap(
       this.taskRecords,
       taskId,
-      { toolCallId },
+      { toolCallId, runOrdinal, task, ...(!resumed && existing?.settlement ? { settlement: existing.settlement } : {}) },
       MAX_BACKGROUND_TASK_LIFECYCLE,
     );
     this.emit({
       sessionId: this.sessionId,
       update: {
-        sessionUpdate: "tool_call",
+        sessionUpdate: existing ? "tool_call_update" : "tool_call",
         toolCallId,
         title: "Background Task",
         kind: "background_task",
-        status: "in_progress",
+        status: !resumed && existing?.settlement ? existing.settlement.status : "in_progress",
         rawInput: {
           taskId,
           name: task.name,
+          runOrdinal,
           ...(task.taskType ? { taskType: task.taskType } : {}),
+          ...(task.subagentType ? { subagentType: task.subagentType } : {}),
           ...(task.command ? { command: task.command } : {}),
         },
+        ...(resumed ? { rawOutput: {}, content: [] } : {}),
       },
     });
   }
@@ -1438,13 +1511,28 @@ export class ClaudeStreamTranslator {
     if (this.activityStopped || !Array.isArray(event.tasks)) return;
     const now = Date.now();
     const next = new Map<string, BackgroundTask>();
+    const previousOwnership = new Map(this.liveBackgroundTasks);
     this.liveBackgroundTasks.clear();
     this.backgroundTaskOverflow = false;
     this.hasBackgroundTaskSnapshot = true;
+    for (const run of this.taskRuns.values()) run.hasBackgroundSnapshot = true;
     for (const incoming of event.tasks) {
-      if (!incoming || typeof incoming.task_id !== "string" || !incoming.task_id || this.terminalTaskIds.has(incoming.task_id)) {
+      if (!incoming || typeof incoming.task_id !== "string" || !incoming.task_id) {
         continue;
       }
+      if (!this.acceptTaskRun(incoming.task_id, incoming.run_id)) {
+        // A stale entry names this task, but cannot remove its newer run.
+        // Tasks omitted entirely still leave through the authoritative level.
+        if (previousOwnership.has(incoming.task_id)) this.trackBackgroundOwnership(incoming.task_id, previousOwnership.get(incoming.task_id)!);
+        const current = this.backgroundTasks.get(incoming.task_id);
+        if (current) next.set(incoming.task_id, current);
+        continue;
+      }
+      const run = this.taskRuns.get(incoming.task_id);
+      if (run) run.hasBackgroundSnapshot = true;
+      if (this.terminalTaskIds.has(incoming.task_id)) continue;
+      if (incoming.task_type === "local_agent" || this.agentTasks.has(incoming.task_id))
+        this.bindAgentTask(incoming.task_id, undefined, incoming);
       const ambient = incoming.ambient === true ||
         (incoming.ambient == null && this.skippedTaskRecords.has(incoming.task_id));
       this.trackBackgroundOwnership(incoming.task_id, ambient);
@@ -1467,6 +1555,7 @@ export class ClaudeStreamTranslator {
           ) ?? `Task ${incoming.task_id}`,
         taskType:
           incoming.task_type ?? previous?.taskType ?? metadata?.taskType,
+        subagentType: incoming.subagent_type ?? previous?.subagentType ?? metadata?.subagentType,
         startedAt: previous?.startedAt ?? metadata?.startedAt ?? now,
         updatedAt: now,
         ...((previous?.command ?? metadata?.command)
@@ -1517,7 +1606,7 @@ export class ClaudeStreamTranslator {
   }
 
   private acceptsBackgroundEdge(taskId: string): boolean {
-    return !this.hasBackgroundTaskSnapshot || this.liveBackgroundTasks.has(taskId) || this.backgroundTasks.has(taskId);
+    return !this.hasBackgroundTaskSnapshot || this.taskRuns.get(taskId)?.hasBackgroundSnapshot === false || this.liveBackgroundTasks.has(taskId) || this.backgroundTasks.has(taskId);
   }
 
   private taskIsAmbient(event: ClaudeSystemEvent): boolean {
@@ -1556,7 +1645,7 @@ export class ClaudeStreamTranslator {
   }
 
   private onTaskProgress(event: ClaudeSystemEvent): void {
-    if (!event.task_id || this.activityStopped || this.ambientTaskIds.has(event.task_id)) return;
+    if (!event.task_id || this.activityStopped || !this.acceptTaskRun(event.task_id, event.run_id) || this.ambientTaskIds.has(event.task_id)) return;
     if (Array.isArray(event.workflow_progress)) {
       this.onWorkflowProgress(event);
     }
@@ -1590,6 +1679,7 @@ export class ClaudeStreamTranslator {
     );
     if (previous) {
       this.backgroundTasks.set(event.task_id, updated);
+      if (this.taskRecords.has(event.task_id)) this.ensureBackgroundTaskRecord(event.task_id, updated);
       this.emitBackgroundTasks();
     }
   }
@@ -1742,7 +1832,7 @@ export class ClaudeStreamTranslator {
   }
 
   private onTaskUpdated(event: ClaudeSystemEvent): void {
-    if (!event.task_id || this.activityStopped) return;
+    if (!event.task_id || this.activityStopped || !this.acceptTaskRun(event.task_id, event.run_id)) return;
     // Level and edge ordering is unspecified. Once either terminal bookend has
     // won, no later task_updated edge may mutate or reopen that lifecycle.
     if (this.terminalTaskIds.has(event.task_id)) return;
@@ -1782,6 +1872,7 @@ export class ClaudeStreamTranslator {
             previousMetadata?.name ||
             `Task ${event.task_id}`,
           taskType: event.task_type ?? previousMetadata?.taskType,
+          subagentType: event.subagent_type ?? previousMetadata?.subagentType,
           startedAt: previousMetadata?.startedAt ?? Date.now(),
           updatedAt: Date.now(),
           ...(previousMetadata?.command
@@ -1795,7 +1886,7 @@ export class ClaudeStreamTranslator {
       this.observedBackgroundTaskIds.has(event.task_id) ||
       explicitlyBackgrounded;
     if (explicitlyBackgrounded && !terminal && !previous && transitionTask && this.acceptsBackgroundEdge(event.task_id)) {
-      if (!this.hasBackgroundTaskSnapshot) this.trackBackgroundOwnership(event.task_id, false);
+      this.trackBackgroundOwnership(event.task_id, false);
       this.backgroundTasks.set(event.task_id, transitionTask);
       setBoundedMap(
         this.backgroundTaskMetadata,
@@ -1928,7 +2019,7 @@ export class ClaudeStreamTranslator {
   }
 
   private onTaskNotification(event: ClaudeSystemEvent): void {
-    if (!event.task_id) return;
+    if (!event.task_id || !this.acceptTaskRun(event.task_id, event.run_id)) return;
     // The SDK joins these links to the originating MCP call by tool_use_id.
     // Never guess a parent or revive a retracted call. Background completion
     // enriches that existing row, including after foreground settlement.
@@ -1944,23 +2035,7 @@ export class ClaudeStreamTranslator {
       this.endAmbientTask(event);
       return;
     }
-    const agentToolId =
-      event.tool_use_id && this.toolCallIds.get(event.tool_use_id);
-    const agentTool =
-      event.tool_use_id && this.toolInputs.get(event.tool_use_id);
-    if (
-      agentToolId &&
-      agentTool &&
-      /^(Agent|Task)$/i.test(agentTool.name) &&
-      !this.agentTasks.has(event.task_id)
-    ) {
-      setBoundedMap(
-        this.agentTasks,
-        event.task_id,
-        { toolCallId: agentToolId, status: "in_progress" },
-        MAX_BACKGROUND_TASK_LIFECYCLE,
-      );
-    }
+    this.bindAgentTask(event.task_id, event.tool_use_id, event);
     this.settleAgentTask(
       event.task_id,
       event.status === "failed" || event.status === "stopped"
@@ -2035,6 +2110,67 @@ export class ClaudeStreamTranslator {
     );
   }
 
+  /** Resolve native agent_id before replay/activity checks. An unknown agent
+   * gets its own pending scope; neither a sole group nor equal prose owns it. */
+  private withAgentOwner(event: Record<string, unknown>): Record<string, unknown> {
+    if ((event.type !== "assistant" && event.type !== "user") ||
+        typeof event.agent_id !== "string" || !event.agent_id) return event;
+    const nativeParent = typeof event.parent_tool_use_id === "string" ? event.parent_tool_use_id : undefined;
+    const message = isObj(event.message) ? event.message : {};
+    this.bindAgentTask(event.agent_id, nativeParent, {
+      subagent_type: typeof event.subagent_type === "string" ? event.subagent_type : undefined,
+      model: event.type === "assistant" && !event.error && typeof message.model === "string" ? message.model : undefined,
+    });
+    const parent = this.agentTasks.get(event.agent_id)?.nativeParent ??
+      this.agentMessageParents.get(event.agent_id) ?? nativeParent ?? `agent-task:${event.agent_id}`;
+    setBoundedMap(this.agentMessageParents, event.agent_id, parent, MAX_BACKGROUND_TASK_LIFECYCLE);
+    return { ...event, parent_tool_use_id: parent };
+  }
+
+  private bindAgentTask(
+    taskId: string,
+    nativeToolUseId: string | undefined,
+    metadata: { subagent_type?: string; parent_task_id?: string; model?: string },
+    publish = true,
+  ): void {
+    const existing = this.agentTasks.get(taskId);
+    const tool = nativeToolUseId ? this.toolInputs.get(nativeToolUseId) : undefined;
+    const toolCallId = existing?.toolCallId ?? (nativeToolUseId && this.toolCallIds.get(nativeToolUseId));
+    if (!toolCallId || (!existing && !/^(Agent|Task)$/i.test(tool?.name ?? ""))) return;
+    const agent = {
+      ...existing,
+      toolCallId,
+      nativeParent: existing?.nativeParent ?? this.agentMessageParents.get(taskId) ?? nativeToolUseId!,
+      status: existing?.status ?? "in_progress" as const,
+      model: metadata.model ?? existing?.model ?? tool?.model,
+      subagentType: metadata.subagent_type ?? existing?.subagentType ?? tool?.subagentType,
+      effort: existing?.effort ?? tool?.effort,
+    };
+    setBoundedMap(this.agentTasks, taskId, agent, MAX_BACKGROUND_TASK_LIFECYCLE);
+    this.toolCallIds.set(agent.nativeParent, toolCallId);
+    this.transcript.attachParent(agent.nativeParent, toolCallId);
+    const parentToolId = metadata.parent_task_id && this.agentTasks.get(metadata.parent_task_id)?.toolCallId;
+    if (parentToolId && parentToolId !== toolCallId && parentToolId !== agent.parentToolId) {
+      agent.parentToolId = parentToolId;
+      this.emit({ sessionId: this.sessionId, update: {
+        sessionUpdate: "message_parent_update", messageIds: [toolCallId], parentToolId,
+      } });
+    }
+    if (publish && (agent.model !== existing?.model || agent.subagentType !== existing?.subagentType || agent.effort !== existing?.effort))
+      this.emit({ sessionId: this.sessionId, update: {
+        sessionUpdate: "tool_call_update", toolCallId,
+        rawOutput: { status: agent.status, ...this.agentMetadata(agent), ...(agent.error ? { message: agent.error } : {}) },
+      } });
+  }
+
+  private agentMetadata(agent: { model?: string; subagentType?: string; effort?: string }) {
+    return {
+      ...(agent.model ? { resolvedModel: agent.model } : {}),
+      ...(agent.subagentType ? { subagentType: agent.subagentType } : {}),
+      ...(agent.effort ? { effort: agent.effort } : {}),
+    };
+  }
+
   private settleAgentTask(
     taskId: string,
     status: "completed" | "failed",
@@ -2060,7 +2196,7 @@ export class ClaudeStreamTranslator {
         status,
         rawOutput: {
           status,
-          ...(agent.model ? { resolvedModel: agent.model } : {}),
+          ...this.agentMetadata(agent),
           ...(error ? { message: error } : {}),
         },
         ...(error
@@ -2115,7 +2251,8 @@ export class ClaudeStreamTranslator {
       return;
     }
     const toolCallId = existing?.toolCallId ?? `background-task-${randomUUID()}`;
-    setBoundedMap(this.taskRecords, taskId, { toolCallId, settlement }, MAX_BACKGROUND_TASK_LIFECYCLE);
+    const runOrdinal = this.taskRuns.get(taskId)?.ordinal ?? existing?.runOrdinal ?? 1;
+    setBoundedMap(this.taskRecords, taskId, { toolCallId, runOrdinal, task: task ?? existing?.task, settlement }, MAX_BACKGROUND_TASK_LIFECYCLE);
     if (existing) {
       this.emit({
         sessionId: this.sessionId,
@@ -2141,7 +2278,9 @@ export class ClaudeStreamTranslator {
         rawInput: {
           taskId,
           name: task?.name ?? `Task ${taskId}`,
+          runOrdinal,
           ...(task?.taskType ? { taskType: task.taskType } : {}),
+          ...(task?.subagentType ? { subagentType: task.subagentType } : {}),
           ...(task?.command ? { command: task.command } : {}),
         },
         rawOutput,
@@ -2428,8 +2567,11 @@ export class ClaudeStreamTranslator {
       }
       this.detachedToolKeys.delete(key);
       const toolCallId = previous?.id ?? randomUUID();
-      const knownAgent = asyncAgent
-        ? this.agentTasks.get(agentResult.agentId as string)
+      if (typeof agentResult?.agentId === "string") this.bindAgentTask(agentResult.agentId, tool.tool_use_id, {
+        model: typeof agentResult.resolvedModel === "string" ? agentResult.resolvedModel : undefined,
+      }, false);
+      const knownAgent = typeof agentResult?.agentId === "string"
+        ? this.agentTasks.get(agentResult.agentId)
         : undefined;
       const endedAgent = asyncAgent
         ? this.agentTaskEnds.get(agentResult.agentId as string)
@@ -2442,13 +2584,14 @@ export class ClaudeStreamTranslator {
         : asyncAgent
           ? (agent?.status ?? "in_progress")
           : "completed";
-      if (asyncAgent)
+      if (typeof agentResult?.agentId === "string")
         setBoundedMap(
           this.agentTasks,
           agentResult.agentId as string,
           {
             ...agent,
             toolCallId,
+            nativeParent: agent?.nativeParent ?? tool.tool_use_id,
             status,
             ...(typeof agentResult.resolvedModel === "string"
               ? { model: agentResult.resolvedModel }
@@ -2492,7 +2635,9 @@ export class ClaudeStreamTranslator {
           ...(previous ? { sessionUpdate: "tool_call_update" as const } : { sessionUpdate: "tool_call" as const, title: "Tool", kind: "other" as const, nativeToolCallId: tool.tool_use_id, ...(event.parent_tool_use_id && this.toolCallIds.get(event.parent_tool_use_id) ? { parentToolId: this.toolCallIds.get(event.parent_tool_use_id) } : {}) }),
           toolCallId,
           status,
-          rawOutput: structuredPatch
+          rawOutput: nativeTool?.name === "OfferChromeSetup" && !tool.is_error
+            ? {}
+            : structuredPatch
             ? { structuredPatch }
             : agentResult
               ? {
@@ -2504,10 +2649,13 @@ export class ClaudeStreamTranslator {
                   ...(typeof agentResult.resolvedModel === "string"
                     ? { resolvedModel: agentResult.resolvedModel }
                     : {}),
+                  ...(agent ? this.agentMetadata(agent) : {}),
                   ...(agent?.error ? { message: agent.error } : {}),
                 }
               : (structuredTaskOutput ?? (structuredContent ? { content: boundedStructuredOutput(tool.content), ...structuredContent } : (Array.isArray(tool.content) ? boundedStructuredOutput(tool.content) : tool.content))),
-          content: agent?.error
+          content: nativeTool?.name === "OfferChromeSetup" && !tool.is_error
+            ? []
+            : agent?.error
             ? [
                 {
                   type: "content",
@@ -2641,6 +2789,14 @@ export class ClaudeStreamTranslator {
       },
     });
     this.transcript.attachParent(block.id, toolCallId);
+    if (block.name === "OfferChromeSetup" && !previous?.announced) this.emit({
+      sessionId: this.sessionId, update: {
+        sessionUpdate: "error_notice", noticeId: `claude-chrome-setup-${toolCallId}`,
+        severity: "warning", code: "claude-chrome-setup", recoverable: true,
+        message: "Set up Claude in Chrome in Settings to let Claude use your browser.",
+        ...(parentToolId ? { parentToolId } : {}),
+      },
+    });
     this.feedback.flushTools();
   }
 
@@ -2837,13 +2993,18 @@ function retainToolInput(
         : {}),
     };
   }
-  if (!command && !description && !/^(Agent|Task)$/i.test(name)) return null;
+  if (!command && !description && !/^(Agent|Task|OfferChromeSetup)$/i.test(name)) return null;
   return {
     name,
     ...(command ? { command: command.slice(0, MAX_RETAINED_TOOL_TEXT) } : {}),
     ...(description
       ? { description: description.slice(0, MAX_RETAINED_TOOL_TEXT) }
       : {}),
+    ...(/^(Agent|Task)$/i.test(name) ? {
+      subagentType: pickFirstString(record.subagent_type)?.slice(0, MAX_RETAINED_TOOL_TEXT),
+      model: pickFirstString(record.model)?.slice(0, MAX_RETAINED_TOOL_TEXT),
+      effort: pickFirstString(record.effort)?.slice(0, MAX_RETAINED_TOOL_TEXT),
+    } : {}),
   };
 }
 
@@ -2873,6 +3034,7 @@ function sameBackgroundTaskContents(
     a.taskId === b.taskId &&
     a.name === b.name &&
     a.taskType === b.taskType &&
+    a.subagentType === b.subagentType &&
     a.startedAt === b.startedAt &&
     a.command === b.command &&
     a.summary === b.summary &&
@@ -3139,6 +3301,8 @@ export function describeTool(name: string, input: unknown): string {
     }
     case "TaskCreate":
       return "Task Created";
+    case "OfferChromeSetup":
+      return "Chrome setup";
     case "TaskUpdate": {
       const status = typeof inp.status === "string" ? inp.status : "";
       if (status === "in_progress") return "Task Started";

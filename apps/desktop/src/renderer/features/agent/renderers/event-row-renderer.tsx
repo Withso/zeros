@@ -18,7 +18,7 @@ import { cursorSearchOutput } from "./search-output";
 // ──────────────────────────────────────────────────────────
 
 import { memo, useState } from "react";
-import { FileText, Globe2, SquareMousePointer } from "lucide-react";
+import { FileText, Globe2, Settings, SquareMousePointer } from "lucide-react";
 
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { Button } from "@/renderer/shared/ui";
@@ -49,7 +49,7 @@ import {
 import { nativeAgentWait, toolRecord } from "./native-tool-presentation";
 import { pendingChecksMessage } from "./tool-pending-checks";
 import { toolPresentationReady } from "./tool-readiness";
-import { AgentNotice } from "../agent-notice";
+import { AgentNotice, AGENT_NOTICE_ACTION } from "../agent-notice";
 import { getLang } from "./syntax";
 import type { Renderer, RendererContext } from "./types";
 
@@ -126,6 +126,13 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
       );
     }
     if (message.kind === "error_notice" && message.code !== "api_retry") {
+      if (message.code === "claude-chrome-setup") return (
+        <AgentNotice message={message.message} data-chrome-setup-notice="">
+          {ctx.openBrowserSettings ? <Button type="button" variant="ghost" size="sm" className={cn(AGENT_NOTICE_ACTION, "mt-1")} onClick={ctx.openBrowserSettings}>
+            <Settings className="size-3.5" aria-hidden="true" /> Open Settings
+          </Button> : null}
+        </AgentNotice>
+      );
       return <AgentNotice message={message.message} />;
     }
     if (message.kind === "tool") {

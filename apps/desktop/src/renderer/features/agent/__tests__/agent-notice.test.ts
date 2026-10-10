@@ -55,6 +55,16 @@ const surfaceOf = (html: string) =>
   classList(html.match(/<div[^>]*\sdata-agent-notice\b[^>]*>/)?.[0]);
 
 describe("chat notices", () => {
+  it("offers Browser use settings only for Claude's Chrome setup notice", () => {
+    const html = renderToStaticMarkup(createElement(EventRowRenderer, {
+      message: notice({ code: "claude-chrome-setup", message: "Set up Claude in Chrome in Settings to let Claude use your browser." }),
+      ctx: { ...ctx, openBrowserSettings: vi.fn() },
+    }));
+    expect(html).toContain("Open Settings");
+    expect(html).toContain("lucide-settings");
+    expect(html).not.toContain("Retry");
+    expect(renderToStaticMarkup(createElement(EventRowRenderer, { message: notice(), ctx }))).not.toContain("Open Settings");
+  });
   it("share the sent message's sans text, 12px corners and 8px/12px padding", () => {
     for (const html of renderedNotices()) {
       const surface = surfaceOf(html);

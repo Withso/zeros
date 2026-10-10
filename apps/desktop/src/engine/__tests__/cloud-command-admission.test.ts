@@ -15,7 +15,8 @@ import {deleteChat,getChat,upsertChat,setChatComposerMode} from "../db/chats";
 import { windowChatMessages } from "../db/messages";
 import type {CloudAgentSelection} from "../agents/cloud-provider-execution";
 import {AgentGateway} from "../agents/gateway";
-import type {AgentAdapter} from "../agents/types";
+import {AgentFailureError, type AgentAdapter} from "../agents/types";
+import { CLAUDE_ORGANIZATION_STARTUP_MESSAGES } from "@zeros/protocol/claude-startup-notice";
 import type {PreparedBoundary} from "../agents/containment/types";
 import {testExecutionBoundary} from "../agents/__tests__/helpers/test-execution-boundary";
 
@@ -30,7 +31,7 @@ const methods=ZerosEngine.prototype as unknown as {
   agentSpawnOpts(this:unknown,message:Start,client:TransportClient,stage:string):Promise<Spawn>;
   validateCloudCommand(this:unknown,id:string,payload?:unknown):void;
   handleCloudEventOperation(this:unknown,params:Record<string,unknown>):Promise<unknown>;
-  publishCloudCommandFailure(this:unknown,claim:Pick<CloudCommandClaim,"commandId"|"conversationId"|"payload"> & {executionId:string|null},code:string):void;
+  publishCloudCommandFailure(this:unknown,claim:Pick<CloudCommandClaim,"commandId"|"conversationId"|"payload"> & {executionId:string|null},code:string,error?:unknown):void;
 };
 let root:string;
 beforeEach(async()=>{root=await mkdtemp(path.join(os.tmpdir(),"zeros-command-admit-"));setZerosDbPathForTesting(path.join(root,"state.db"));await mkdir(path.join(root,"workspace"));});
@@ -70,6 +71,43 @@ function failingRetirement(engine:ReturnType<typeof fixture>["engine"],execution
   return proof;
 }
 describe("cloud engine credential admission",()=>{
+  it.each([
+    ["org_config_required_unavailable", "protocol-error", "cloud_provider_start_protocol_error"],
+    ["org_config_refused", "auth-required", "cloud_provider_start_auth_required"],
+  ] as const)("retains the known Claude %s remedy across cloud history reload", (reason, kind, code) => {
+    const { claim, engine } = fixture();
+    upsertChat({ ...getChat("conversation")!, agentId: "claude" });
+    claim.payload = { ...claim.payload, agentId: "claude" };
+    const failure = new AgentFailureError({ kind, stage: "newSession", agentId: "claude",
+      message: "Native organization settings service returned an error. Try to sign in.",
+      advice: CLAUDE_ORGANIZATION_STARTUP_MESSAGES[reason] });
+    methods.publishCloudCommandFailure.call(engine, claim, code, failure);
+    closeZerosDb();
+    expect(windowChatMessages(claim.conversationId, 100).map(row => JSON.parse(row.payload))).toMatchObject([
+      { recoveryFailure: { kind, message: failure.failure.message } },
+      { code: reason, message: failure.failure.message, turnFailure: { kind } },
+    ]);
+    expect(engine.broadcast).toHaveBeenCalledWith(expect.objectContaining({ error: code, failure: expect.objectContaining({ kind }) }));
+  });
+
+  it.each([
+    undefined, ...[false, true].flatMap(autoMemoryEnabled => [false, true].map(idleCompactionEnabled => ({ autoMemoryEnabled, idleCompactionEnabled }))),
+  ])("derives Claude preference env from the admitted durable command, including legacy commands (%j)", async claudePreferences => {
+    const { claim, engine, captures } = fixture();
+    upsertChat({ ...getChat("conversation")!, agentId: "claude" });
+    claim.payload = { ...claim.payload, agentId: "claude", model: "claude-haiku-4-5", ...(claudePreferences ? { claudePreferences } : {}) };
+    engine.handleAgentMessage.mockImplementation(async (message, client) => {
+      captures.push(await methods.agentSpawnOpts.call(engine, message, client, "newSession"));
+      engine.conversationExecution.set("conversation", claim.executionId);
+      engine.sessionAgent.set(claim.executionId, "claude");
+    });
+    await methods.prepareCloudCommand.call(engine, claim);
+    const expected = { ZEROS_CLAUDE_AUTO_MEMORY: claudePreferences?.autoMemoryEnabled === false ? "0" : "1",
+      ZEROS_CLAUDE_IDLE_COMPACTION: claudePreferences?.idleCompactionEnabled === true ? "1" : "0" };
+    expect(engine.handleAgentMessage.mock.calls[0]?.[0].env).toMatchObject(expected);
+    expect(captures[0]?.env).toMatchObject(expected);
+  });
+
   it("keeps a typed startup refusal instead of replacing it with generic admission failure", async () => {
     const { claim, engine } = fixture();
     const failure = new CloudCommandFailureError({ stage: "containment", category: "canary_failed" });
@@ -224,9 +262,14 @@ describe("cloud engine credential admission",()=>{
     claim.payload.agentId="codex";
     claim.payload.operation={version:1,kind:"goal",action:"set",update:{objective:"Finish"}};
     const goal={objective:"Finish",status:"active",tokenBudget:null,tokensUsed:0,timeUsedSeconds:0,createdAt:1,updatedAt:1};
-    Object.assign(engine.agents,{setGoal:vi.fn(async()=>goal),getGoal:vi.fn(async()=>goal),clearGoal:vi.fn(async()=>{})});
+    const setGoal=vi.fn(async()=>goal),clearGoal=vi.fn(async()=>{});
+    Object.assign(engine.agents,{setGoal,getGoal:vi.fn(async()=>goal),clearGoal});
     engine.cloudCommandSessions.set(claim.commandId,{claim,controller:new AbortController()});
     expect(await methods.dispatchCloudCommand.call(engine,claim)).toEqual({state:"succeeded",resultCode:null,result:{version:1,goal}});
+    expect(setGoal).toHaveBeenCalledWith("codex", claim.executionId, { objective: "Finish" }, "user");
+    claim.payload.operation={version:1,kind:"goal",action:"clear"};
+    await methods.dispatchCloudCommand.call(engine,claim);
+    expect(clearGoal).toHaveBeenCalledWith("codex", claim.executionId, "user");
     expect(engine.handleAgentMessage).not.toHaveBeenCalled();
   });
   it("rejects a fork whose source belongs to a different workspace or was deleted",()=>{

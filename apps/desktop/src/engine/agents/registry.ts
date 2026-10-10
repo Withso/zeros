@@ -444,6 +444,8 @@ export function bundledRuntimeVersion(agentId: string): string | null {
  * account discovery. Credential availability comes from actor-scoped grants. */
 export function cloudAgentManifest():EnrichedRegistryAgent[] {
   return AGENT_MANIFEST.map(agent=>({id:agent.id,name:agent.name,version:"",description:agent.description,
+    // Package metadata is public and process-local; no provider/auth probe.
+    ...(bundledRuntimeVersion(agent.id) ? { installedVersion: bundledRuntimeVersion(agent.id)! } : {}),
     ...(agent.icon?{icon:agent.icon}:{}),distribution:{},installed:agent.bundledRuntime===true,
     launchKind:agent.bundledRuntime===true?"binary":"unavailable"}));
 }

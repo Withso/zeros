@@ -9,6 +9,7 @@ import {
 } from "../../features/agent/model-catalog";
 import {
   FALLBACK_NEW_CHAT_AGENT_ID,
+  getDefaultAgentId,
   pickAgentForNewChat,
 } from "../../features/settings/default-agent";
 import type { ChatThread } from "../../state/store";
@@ -83,12 +84,14 @@ export function resolveAutoBindChatSettings(
   // record onto a different provider than it ran on is a bigger surprise than
   // ignoring the default for this one chat.
   const priorFamily = agentFamily(prior.agentName ?? null);
+  const preferred = priorFamily || (preferredAgentId === undefined ? getDefaultAgentId() : preferredAgentId);
   const agent: WorkspaceRegistryAgent | null = pickAgentForNewChat(
     agents ?? [],
-    priorFamily || (preferredAgentId ?? null),
+    preferred,
     isEnabled,
   );
-  const agentId = agent?.id ?? FALLBACK_NEW_CHAT_AGENT_ID;
+  // A cold registry cannot disprove an explicit choice or a prior binding.
+  const agentId = agent?.id ?? preferred ?? FALLBACK_NEW_CHAT_AGENT_ID;
   // An empty priorFamily means the old agent is unidentifiable, so it can
   // never vouch for the chat's agent-scoped fields — two family-less ids are
   // not a match.

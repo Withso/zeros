@@ -29,6 +29,7 @@
     "./agent-events": "./src/agent-events.ts",
     "./builtin-commands": "./src/builtin-commands.ts",
     "./agent-messages": "./src/agent-messages.ts",
+    "./claude-startup-notice": "./src/claude-startup-notice.ts",
     "./design-runtime": "./src/design-runtime.ts",
     "./design-context": "./src/design-context.ts",
     "./design-path": "./src/design-path.ts",

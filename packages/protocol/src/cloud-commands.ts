@@ -99,11 +99,14 @@ export const CloudGoalUpdateSchema = z.object({
   objective: z.string().trim().min(1).max(32_768).optional(),
   status: z.enum(["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"]).optional(),
   tokenBudget: z.number().int().safe().positive().nullable().optional(),
-}).strict().refine(value => Object.keys(value).length > 0);
+  /** Provider boundary only; a portable command cannot assert provenance. */
+  origin: z.literal("user").optional(),
+}).strict().refine(value => Object.keys(value).some(key => key !== "origin"));
 export const CloudNativeOperationSchema = z.discriminatedUnion("kind", [
   z.object({ version: z.literal(1), kind: z.literal("fork"), sourceConversationId: identity,
     strategy: z.enum(["native", "transcript"]) }).strict(),
-  z.object({ version: z.literal(1), kind: z.literal("goal"), action: z.enum(["get", "set", "clear"]), update: CloudGoalUpdateSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), kind: z.literal("goal"), action: z.enum(["get", "set", "clear"]),
+    update: CloudGoalUpdateSchema.refine(value => value.origin === undefined).optional() }).strict(),
 ]).refine(value => value.kind !== "goal" || (value.action === "set") === (value.update !== undefined));
 export const CloudNativeResultSchema = z.object({ version: z.literal(1),
   capabilities: CloudNativeCapabilitiesSchema.optional(), model: z.string().min(1).max(256).optional(),
@@ -134,6 +137,11 @@ const content = z.discriminatedUnion("type", [
     z.object({ uri, blob: text, mimeType: mimeType.optional() }).strict(),
   ]) }).strict(),
 ]);
+/** Explicit user preferences, never an arbitrary SDK settings object. */
+export const CloudClaudePreferencesSchema = z.object({
+  autoMemoryEnabled: z.boolean(), idleCompactionEnabled: z.boolean(),
+}).strict();
+export type CloudClaudePreferences = z.infer<typeof CloudClaudePreferencesSchema>;
 export const CloudQueuedPromptSchema = z.object({
   agentId: identity, userMessageId: identity, prompt: z.array(content).min(1).max(128),
   bubble: z.record(z.string(), z.unknown()).optional(), modeRevision: revision,
@@ -141,8 +149,11 @@ export const CloudQueuedPromptSchema = z.object({
   agentCredentialGrantId:z.uuid().optional(),
   model:z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/).optional(),
   effort:z.enum(["low","medium","high","xhigh","max","ultracode"]).optional(),fast:z.boolean().optional(),
+  claudePreferences: CloudClaudePreferencesSchema.optional(),
   operation: CloudNativeOperationSchema.optional(),
 }).strict().superRefine((value,context)=>{
+  if (value.claudePreferences && value.agentId !== "claude")
+    context.addIssue({ code: "custom", message: "Claude preferences require the Claude provider" });
   if (value.operation && (!value.agentCredentialGrantId || !value.model ||
     (value.operation.kind !== "fork" && value.agentId !== "codex") ||
     (value.operation.kind === "fork" && value.operation.strategy === "native" && value.agentId !== "codex")))
@@ -218,6 +229,21 @@ export function legacyCloudCommandResponse(value:unknown):unknown {
   };
   return Array.isArray(row.pending)&&Array.isArray(row.receipts)
     ?{...row,pending:row.pending.map(entry),receipts:row.receipts.map(entry)}:entry(row);
+}
+/** Older workers/attachments parse strict payloads. Hide only the additive
+ * preferences until that reader advertises support; leave stored work intact. */
+export function withoutCloudClaudePreferences(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const entry = (value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const row = value as Record<string, unknown>;
+    if (!row.payload || typeof row.payload !== "object" || Array.isArray(row.payload) || !("claudePreferences" in row.payload)) return value;
+    const { claudePreferences: _preferences, ...payload } = row.payload as Record<string, unknown>;
+    return { ...row, payload };
+  };
+  const row = value as Record<string, unknown>;
+  return Array.isArray(row.pending) && Array.isArray(row.receipts)
+    ? { ...row, pending: row.pending.map(entry), receipts: row.receipts.map(entry) } : entry(row);
 }
 export type CloudCommandResult = { commandId: string; claimId: string; state: "succeeded" | "failed" | "cancelled"; resultCode: string | null; result?: z.infer<typeof CloudNativeResultSchema> };
 export type CloudCommandEngineRequest = Exclude<CloudCommandClientRequest, { kind: "mutate" }> |

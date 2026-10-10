@@ -12,6 +12,7 @@ import {
   type CloudCommandSnapshot,
 } from "@zeros/protocol/cloud-commands";
 import { isCloudAgentAdmissionCode } from "@zeros/protocol/cloud-agent-execution";
+import { claudeOrganizationStartupCode } from "@zeros/protocol/claude-startup-notice";
 import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
 import { CloudCommandRuntime } from "../../../../engine/cloud-command-runtime";
@@ -314,6 +315,7 @@ async function harness(options: Scenario = {}) {
     redactLogSecrets,
     cloudCommandFailureFromCode,
     cloudCommandFailureCode,
+    claudeOrganizationStartupCode,
     isCloudAgentAdmissionCode,
     createMessage,
     getChat: () => ({ id: CHAT, agentId }),

@@ -29,9 +29,11 @@ export function useCloudRuntimeUpgradeLink(folder: string | undefined, active: b
     }, 30_000);
     return () => clearInterval(timer);
   }, [allowed, key]);
-  if (!allowed || !runtimeUpgradeRequiredForAgents && !availability.data?.updateAvailable) return null;
+  // The model's required update is informational for every admitted actor.
+  // Generic update discovery retains its manager-only reads and visibility.
+  if (!enabled || !runtimeUpgradeRequiredForAgents && (!allowed || !availability.data?.updateAvailable)) return null;
   return (
-    <div className="border-border1 mt-2 space-y-2 border-t px-3 pt-3 pb-2">
+    <div data-cloud-runtime-update-note="" className="border-border1 mt-2 space-y-2 border-t px-3 pt-3 pb-2">
       <p className="text-fg2 text-xs">{runtimeUpgradeRequiredForAgents ? "Agents need a runtime update. It installs the next time this workspace wakes." : "Updates automatically the next time this workspace wakes."}</p>
     </div>
   );

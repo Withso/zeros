@@ -150,7 +150,10 @@ export function cloudCodexRequest(execution:CloudProviderExecution,environmentId
   if(method.startsWith("thread/goal/")) {
     if(!cloudCodexCapabilities(execution).goals)throw new Error("This native provider operation is not admitted for this account and image");
     const threadId=ownThread(execution,params.threadId);
-    if(method==="thread/goal/get"||method==="thread/goal/clear")return z.object({threadId:z.literal(threadId)}).strict().parse(params);
+    if(params.origin!==undefined&&execution.lease.admission.source?.kind!=="command")
+      throw new Error("Goal provenance requires an admitted command");
+    if(method==="thread/goal/get")return z.object({threadId:z.literal(threadId)}).strict().parse(params);
+    if(method==="thread/goal/clear")return z.object({threadId:z.literal(threadId),origin:z.literal("user").optional()}).strict().parse(params);
     if(method==="thread/goal/set") {
       const {threadId:_thread,...update}=params;
       return {threadId,...CloudGoalUpdateSchema.parse(update)};

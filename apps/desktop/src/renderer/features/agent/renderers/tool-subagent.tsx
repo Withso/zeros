@@ -10,7 +10,8 @@ import { matchSubagent } from "./subagent";
 import { EventStripe } from "./event-stripe";
 import { renderDetail } from "./event-row-renderer";
 import { renderMarkdown } from "../markdown";
-import { displayNameForModelValue } from "../model-catalog";
+import { displayNameForModelValue, effortLabel } from "../model-catalog";
+import type { ChatEffort } from "../../../state/store";
 import { cn } from "@/renderer/shared/ui/cn";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { asDisplayString, toolCompletionUnreported } from "./raw-output";
@@ -35,6 +36,10 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
     const model = readString(output.resolvedModel) ?? readString(input.model);
     const modelLabel =
       model && model !== "inherit" ? agentModelLabel(model) : undefined;
+    const subagentType = readString(info?.subagentType);
+    // Resolved metadata survives native launch acknowledgements and resumes.
+    const effort = readString(output.effort) ?? readString(input.effort);
+    const label = ["Agent", subagentType, modelLabel].filter(Boolean).join(" · ");
     const prompt = readString(input.prompt) ?? readString(input.task);
     const children = ctx.subagentChildren.get(tool.toolCallId) ?? NO_CHILDREN;
     const result = agentReportText(tool);
@@ -107,13 +112,15 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
             />
           </span>
           <span
+            data-agent-label=""
             className={cn(
-              "max-w-[50%] min-w-0 shrink-0 truncate text-sm",
+              // A half-row cap hides effort even when the full label fits.
+              "min-w-0 truncate text-sm",
               failed ? "text-red-primary" : "text-fg1",
             )}
           >
-            Agent
-            {modelLabel ? ` · ${modelLabel}` : ""}
+            {label}
+            {effort ? <span data-agent-effort="" className={cn("text-fg2 text-xs opacity-80", failed && "text-red-primary")}>{` ${effortLabel("claude", effort as ChatEffort)}`}</span> : null}
           </span>
           <span
             className={cn(

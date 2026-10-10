@@ -77,6 +77,7 @@ import {
   useActivePage,
   useWorkspaceDispatch,
   useWorkspaceStore,
+  selectActiveFolder,
 } from "../../state/store";
 import { useCachedRead } from "../../state/use-cached-read";
 import {
@@ -163,7 +164,9 @@ import {
 } from "./settings-ui";
 import { useAgentSessions } from "../agent/sessions-hooks";
 import { useEnabledAgents } from "../agent/enabled-agents";
-import { useAgentsSnapshot, loadAgents } from "../agent/agents-cache";
+import { loadAgents } from "../agent/agents-cache";
+import { useWorkspaceAgents } from "../agent/workspace-agent-registry";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { isSelectableAgent } from "../agent/agent-runnable";
 import {
   agentFamily,
@@ -172,19 +175,16 @@ import {
 } from "../agent/model-catalog";
 import {
   effectiveFavoriteModel,
+  getFavoriteModel,
   useFavoritesVersion,
 } from "../agent/model-favorites";
 import {
   mirrorModelsToSettings,
+  modelForNewChat,
   starFavoriteModel,
   useDefaultPlanMode,
 } from "../agent/new-chat-defaults";
-import {
-  CLAUDE_IDLE_TIMEOUT_OPTIONS,
-  DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES,
-  useClaudeAutoMemoryEnabled,
-  useClaudeIdleTimeoutMinutes,
-} from "../agent/reliability-settings";
+import { ClaudeProviderSettings } from "./claude-provider-settings";
 import { useDefaultAgent, pickDefaultAgentId } from "./default-agent";
 import type { AgentMemorySettings } from "@zeros/protocol/agent-events";
 
@@ -622,7 +622,9 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     () =>
       SECTIONS.filter(
         (s) =>
-          (local ? !["cloud-computer", "cloud-mcp", "cloud-skills"].includes(s.id) : ["providers", "integrations", "cloud-computer", "cloud-mcp", "cloud-skills"].includes(s.id)) &&
+          // Chrome setup links to the existing availability panel for cloud
+          // owners; its Local installation controls remain placement-gated.
+          (local ? !["cloud-computer", "cloud-mcp", "cloud-skills"].includes(s.id) : ["providers", "integrations", "cloud-computer", "cloud-mcp", "cloud-skills", "browser-use"].includes(s.id)) &&
           (s.id !== "terminal-agents" || terminalAgentsEnabled) &&
           (s.id !== "internal" || internalUser),
       ),
@@ -1156,7 +1158,8 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
   >("claude");
   const [codexMemoryBusy, setCodexMemoryBusy] = useState(false);
   const [resetMemoryOpen, setResetMemoryOpen] = useState(false);
-  const agents = useAgentsSnapshot();
+  const workspaceFolder = useWorkspaceStore(selectActiveFolder);
+  const agents = useWorkspaceAgents(workspaceFolder, surfaceActive);
   const { isEnabled } = useEnabledAgents();
   const { agentId: defaultAgentId, setDefault } = useDefaultAgent();
 
@@ -1171,11 +1174,11 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
     listAgentsRef.current = sessions.listAgents;
   }, [sessions]);
   useEffect(() => {
-    if (!surfaceActive || bridgeStatus !== "connected") return;
+    if (!surfaceActive || bridgeStatus !== "connected" || isCloudWorkspace(workspaceFolder)) return;
     loadAgents((force) => listAgentsRef.current(force)).catch(() => {
       /* engine respawn / bridge blip — the next connect re-runs */
     });
-  }, [bridgeStatus, surfaceActive]);
+  }, [bridgeStatus, surfaceActive, workspaceFolder]);
 
   const codexDiagnosticsActive =
     surfaceActive &&
@@ -1196,35 +1199,20 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
     });
   }, [codexDiagnosticsActive, memoryRead.error]);
 
-  // Runnable, enabled agents whose family we have a curated catalog for
-  // (claude / codex / cursor), name-sorted for a stable dropdown.
+  // Resolve against the same exact-workspace snapshot as New Chat. Keep a
+  // saved disconnected default visible, while only connected choices can pick.
+  const effectiveAgentId = pickDefaultAgentId(agents ?? [], defaultAgentId);
+  const effectiveAgent = agents?.find(agent => agent.id === effectiveAgentId);
   const modelAgents = (agents ?? [])
-    .filter((a) => isEnabled(a.id, a.beta) && isSelectableAgent(a))
+    .filter((a) => a.id === effectiveAgentId || (isEnabled(a.id, a.beta) && isSelectableAgent(a)))
     .filter((a) => agentFamily(a.id) !== "")
     .sort((a, b) => a.name.localeCompare(b.name));
-
-  // The effective default agent: the user's star if runnable, else the
-  // fallback (codex) — so the picker mirrors what new chats actually use.
-  const effectiveAgentId =
-    modelAgents.find(
-      (agent) =>
-        agent.id === defaultAgentId ||
-        agentFamily(agent.id) === agentFamily(defaultAgentId),
-    )?.id ??
-    pickDefaultAgentId(agents ?? []) ??
-    modelAgents[0]?.id ??
-    null;
 
   // Read the effective model synchronously from the same atomic selection as
   // the agent. A family switch must never paint one frame with the prior
   // family's model in the new provider's Select.
   useFavoritesVersion();
   const [planDefault, setPlanDefault] = useDefaultPlanMode();
-  // Claude process lifetime and memory settings.
-  const [claudeAutoMemoryEnabled, setClaudeAutoMemoryEnabled] =
-    useClaudeAutoMemoryEnabled();
-  const [idleTimeoutMinutes, setIdleTimeoutMinutes] =
-    useClaudeIdleTimeoutMinutes();
   // Reliability settings are global, but already-loaded Claude chats hold an
   // engine session. Push the same full env encoder those sessions use so a
   // timeout change takes effect now instead of waiting for the next restart.
@@ -1284,8 +1272,9 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
   const agentModels = effectiveAgentId
     ? modelsForAgent(effectiveAgentId, null)
     : [];
-  const currentModel =
-    effectiveFavoriteModel(effectiveAgentId) ?? agentModels[0]?.value ?? null;
+  const favorite = effectiveFavoriteModel(effectiveAgentId);
+  const currentModel = getFavoriteModel(effectiveAgentId) ? favorite
+    : modelForNewChat(effectiveAgentId, effectiveAgent?.cloudModels) ?? favorite ?? agentModels[0]?.value ?? null;
   const currentModelLabel = currentModel
     ? displayModelLabel(
         effectiveAgentId,
@@ -1311,8 +1300,8 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
         <SettingsRow label="Default agent" hint="Agent for new chats">
           <div className="flex items-center gap-2">
             <Select value={effectiveAgentId ?? ""} onValueChange={pickAgent}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select an agent" />
+              <SelectTrigger aria-label="Default agent" data-default-agent-picker>
+                <SelectValue placeholder="Select an agent">{effectiveAgent?.name}</SelectValue>
               </SelectTrigger>
               <SelectContent className="min-w-[180px]">
                 {modelAgents.length === 0 ? (
@@ -1321,7 +1310,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
                   </div>
                 ) : (
                   modelAgents.map((a) => (
-                    <SelectItem key={a.id} value={a.id}>
+                    <SelectItem key={a.id} value={a.id} disabled={!isEnabled(a.id, a.beta) || !isSelectableAgent(a)}>
                       {a.name}
                     </SelectItem>
                   ))
@@ -1337,7 +1326,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
                   starFavoriteModel(effectiveAgentId, model)
                 }
               >
-                <SelectTrigger aria-label="Default model">
+                <SelectTrigger aria-label="Default model" data-default-model-picker>
                   <SelectValue>{currentModelLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectContent className="min-w-[180px]">
@@ -1385,61 +1374,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
           </TabsList>
           <TabsContent value="claude" className="mt-0">
             <SettingsList className={MODELS_SECTION_CLS}>
-              <SettingsRow
-                label="Auto memory"
-                hint="Let Claude remember useful project context for future chats"
-              >
-                <Switch
-                  checked={claudeAutoMemoryEnabled}
-                  onCheckedChange={(enabled) => {
-                    setClaudeAutoMemoryEnabled(enabled);
-                    applyClaudeSettings();
-                  }}
-                  aria-label="Claude auto memory"
-                />
-              </SettingsRow>
-              <SettingsRow
-                label="Keep sessions active"
-                hint={
-                  <>
-                    <span className="block">
-                      How long Claude stays ready between turns
-                    </span>
-                    {idleTimeoutMinutes >
-                      DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES && (
-                      <span className="text-yellow-fg block">
-                        Longer sessions use more memory.
-                      </span>
-                    )}
-                  </>
-                }
-              >
-                <Select
-                  value={String(idleTimeoutMinutes)}
-                  onValueChange={(value) => {
-                    const option = CLAUDE_IDLE_TIMEOUT_OPTIONS.find(
-                      (candidate) => String(candidate.minutes) === value,
-                    );
-                    if (!option) return;
-                    setIdleTimeoutMinutes(option.minutes);
-                    applyClaudeSettings();
-                  }}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent className="min-w-[180px]">
-                    {CLAUDE_IDLE_TIMEOUT_OPTIONS.map((option) => (
-                      <SelectItem
-                        key={option.minutes}
-                        value={String(option.minutes)}
-                      >
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </SettingsRow>
+              <ClaudeProviderSettings onChange={applyClaudeSettings} />
             </SettingsList>
           </TabsContent>
           <TabsContent value="codex" className="mt-0">

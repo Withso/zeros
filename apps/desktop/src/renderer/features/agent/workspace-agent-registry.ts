@@ -22,13 +22,32 @@ import {
   hasConfirmedAgents,
   useAgentsSnapshot,
 } from "./agents-cache";
-import { modelsForAgent } from "./model-catalog";
+import { modelsForAgent, type ModelOption } from "./model-catalog";
 
 /** Renderer metadata from exact-workspace consent, never part of the engine registry. */
 export type WorkspaceRegistryAgent = BridgeRegistryAgent & {
   cloudModels?: string[];
   runtimeUpgradeRequired?: boolean;
 };
+
+/** Selecting a newer model explains the pinned cloud runtime; it never changes
+ * authentication or hides a saved model, and Local uses its existing path. */
+export function cloudModelRuntimeUpgradeRequired(
+  folder: string | undefined,
+  agent: WorkspaceRegistryAgent | undefined,
+  model: ModelOption | null,
+): boolean {
+  if (!parseCloudWorkspaceKey(folder)) return false;
+  if (agent?.runtimeUpgradeRequired) return true;
+  const current = agent?.installedVersion?.match(/^(\d+)\.(\d+)\.(\d+)(?:\s|$)/);
+  const minimum = model?.minCliVersion?.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  if (!current || !minimum) return false;
+  for (let index = 1; index <= 3; index++) {
+    const installed = Number(current[index]), required = Number(minimum[index]);
+    if (installed !== required) return installed < required;
+  }
+  return false;
+}
 
 export function modelsForWorkspaceAgent(
   agent: WorkspaceRegistryAgent,

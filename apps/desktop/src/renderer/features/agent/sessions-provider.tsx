@@ -4707,6 +4707,7 @@ export function AgentSessionsProvider({
       >(
         {
           type: "AGENT_GOAL_SET",
+          origin: "user",
           agentId: current.agentId,
           executionId: current.executionId ?? current.sessionId,
           sessionId: current.sessionId,
@@ -4736,6 +4737,7 @@ export function AgentSessionsProvider({
       >(
         {
           type: "AGENT_GOAL_CLEAR",
+          origin: "user",
           agentId: current.agentId,
           executionId: current.executionId ?? current.sessionId,
           sessionId: current.sessionId,

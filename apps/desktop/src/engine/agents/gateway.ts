@@ -1403,6 +1403,7 @@ import {copyCloudNativeForkHistory,CLOUD_NATIVE_HISTORY_ROOT} from "./containmen
 import {loadCloudWorkerConfiguration} from "./containment/cloud-worker-config";
 import {CloudAgentExecutionAdmissionSchema,type CloudAgentExecutionAdmission} from "@zeros/protocol/cloud-agent-execution";
 import type {CloudQueuedPrompt} from "@zeros/protocol/cloud-commands";
+import { cloudClaudePreferencesEnv } from "../cloud-claude-preferences";
 import {CLOUD_BACKGROUND_SERVERS_TASK} from "./cloud-background-execution";
 
 export interface NewAgentSessionOptions {
@@ -4823,6 +4824,8 @@ export class AgentGateway {
     const settings:Record<string,string>={ZEROS_PERMISSION_MODE:cloudPermissionMode(agentId,env?.ZEROS_PERMISSION_MODE??"auto")};
     if(env?.ZEROS_THINKING_EFFORT&&["low","medium","high","xhigh","max","ultracode"].includes(env.ZEROS_THINKING_EFFORT))settings.ZEROS_THINKING_EFFORT=env.ZEROS_THINKING_EFFORT;
     if(env?.ZEROS_FAST_MODE==="1"||env?.ZEROS_FAST_MODE==="0")settings.ZEROS_FAST_MODE=env.ZEROS_FAST_MODE;
+    if (agentId === "claude") for (const name of ["ZEROS_CLAUDE_AUTO_MEMORY", "ZEROS_CLAUDE_IDLE_COMPACTION"])
+      if (env?.[name] === "0" || env?.[name] === "1") settings[name] = env[name];
     return settings;
   }
 
@@ -6311,7 +6314,7 @@ export class AgentGateway {
   async resumeCloudExecution(agentId:string,sessionId:string,admission:CloudAgentExecutionAdmission,payload:CloudQueuedPrompt):Promise<void>{
     const cloud=cloudProviderExecution(this.executionBoundaries.get(sessionId));
     if(!cloud?.background)throw new Error("Cloud background execution is unavailable");
-    const env={...(payload.effort?{ZEROS_THINKING_EFFORT:payload.effort}:{}),ZEROS_FAST_MODE:payload.fast?"1":"0"};
+    const env={...cloudClaudePreferencesEnv(payload),...(payload.effort?{ZEROS_THINKING_EFFORT:payload.effort}:{}),ZEROS_FAST_MODE:payload.fast?"1":"0"};
     const modeId=payload.permissionMode?cloudPermissionMode(agentId,payload.permissionMode):undefined;
     this.adapterForSession(sessionId,agentId).assertBackgroundReuse?.({sessionId,env,modeId});
     await cloud.background.resume(admission);
@@ -6704,20 +6707,21 @@ export class AgentGateway {
     update: Parameters<
       NonNullable<AgentCapabilityPorts["goal"]>["set"]
     >[0]["update"],
+    origin?: "user",
   ) {
     const adapter = this.adapterForSession(sessionId, agentId);
     const goal = resolveAgentCapabilityPorts(adapter).goal;
     if (!goal)
       throw new Error(`agent ${adapter.agentId} does not support goals`);
-    return goal.set({ sessionId, update });
+    return goal.set({ sessionId, update, ...(origin ? { origin } : {}) });
   }
 
-  async clearGoal(agentId: string, sessionId: string): Promise<void> {
+  async clearGoal(agentId: string, sessionId: string, origin?: "user"): Promise<void> {
     const adapter = this.adapterForSession(sessionId, agentId);
     const goal = resolveAgentCapabilityPorts(adapter).goal;
     if (!goal)
       throw new Error(`agent ${adapter.agentId} does not support goals`);
-    await goal.clear({ sessionId });
+    await goal.clear({ sessionId, ...(origin ? { origin } : {}) });
   }
 
   async retryDeniedAction(

@@ -34,6 +34,20 @@ it("carries explicit effort and fast settings without accepting credential or lo
   expect(env).not.toHaveProperty("NODE_OPTIONS");
 });
 describe("private provider coordinator view",()=>{
+  it.each(["claude-api-key", "claude-setup-token"] as const)("carries only boolean Claude preferences into the private %s coordinator", kind => {
+    const settings = { ZEROS_CLAUDE_AUTO_MEMORY: "0", ZEROS_CLAUDE_IDLE_COMPACTION: "1", NODE_OPTIONS: "untrusted" };
+    const material = kind === "claude-api-key" ? { kind, apiKey: "synthetic-key" } : { kind, accessToken: "synthetic-token" };
+    const env = cloudCoordinatorEnvironment(material, "claude-haiku-4-5", settings);
+    expect(env).toMatchObject({ ZEROS_CLAUDE_AUTO_MEMORY: "0", ZEROS_CLAUDE_IDLE_COMPACTION: "1" });
+    expect(env).not.toHaveProperty("NODE_OPTIONS");
+    const invalid = cloudCoordinatorEnvironment(material, "claude-haiku-4-5",
+      { ZEROS_CLAUDE_AUTO_MEMORY: "yes", ZEROS_CLAUDE_IDLE_COMPACTION: "true" });
+    expect(invalid).not.toHaveProperty("ZEROS_CLAUDE_AUTO_MEMORY");
+    expect(invalid).not.toHaveProperty("ZEROS_CLAUDE_IDLE_COMPACTION");
+    const foreign = cloudCoordinatorEnvironment({ kind: "codex-api-key", apiKey: "synthetic-key" }, "model", settings);
+    expect(foreign).not.toHaveProperty("ZEROS_CLAUDE_AUTO_MEMORY");
+    expect(foreign).not.toHaveProperty("ZEROS_CLAUDE_IDLE_COMPACTION");
+  });
   it.each(["max", "ultracode"])("preserves Claude's context suffix and %s effort in the private worker environment", effort => {
     const env=cloudCoordinatorEnvironment({kind:"claude-api-key",apiKey:"synthetic-claude-key"},"claude-opus-5[1m]",{ZEROS_THINKING_EFFORT:effort});
     expect(env).toMatchObject({ANTHROPIC_MODEL:"claude-opus-5[1m]",ZEROS_THINKING_EFFORT:effort});
