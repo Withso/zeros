@@ -10,6 +10,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { adoptCloudEngineState } from "./prepare-cloud-image-files.mjs";
+import { adoptCloudComputerBuildRepositories } from "./cloud-computer-checkout.mjs";
 import { CLOUD_HOST_LIMITS, CloudDelegatedCgroups } from "./cloud-engine-cgroup.mjs";
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 
@@ -267,6 +268,9 @@ export function probeCursorPlatformPayload(root) {
 
 function prepareSelfTestLayout(runtime) {
   adoptCloudEngineState(runtime);
+  // A Cloud Computer template build reaches this after the base clone step,
+  // which leaves legacy-owned repositories the launcher refuses.
+  adoptCloudComputerBuildRepositories();
   // B4 sanitizes files to an empty root-owned parent; qualification installation
   // deliberately skips workspace setup. Never import/move a legacy workspace.
   for (let directory = runtimeLayout.engineFilesRoot; ; directory = path.dirname(directory)) {

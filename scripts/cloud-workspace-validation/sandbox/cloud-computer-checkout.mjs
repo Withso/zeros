@@ -183,6 +183,39 @@ export function adoptCloudComputerTemplateOwnership(computer, repository, overri
   return verifyCloudComputerTemplate(computer, repository, overrides);
 }
 
+/** A Cloud Computer template build runs the runtime self-test after the base
+ * clone step, before sanitation writes the manifest and before any workspace
+ * admission exists. The frozen base clones as the legacy workspace owner, which
+ * the launcher's repository projection refuses. Adopt each legacy clone as
+ * workspace setup does; sanitation then re-verifies and re-owns it. Root only,
+ * under the setup lock with every engine scope retired. */
+export function adoptCloudComputerBuildRepositories(overrides = {}) {
+  if (process.geteuid?.() !== 0) throw invalid();
+  const options = settings(overrides), repos = path.join(options.filesRoot, "repos");
+  directory(options.filesRoot, options.rootUid, true);
+  try { lstatSync(repos); } catch (error) { if (error?.code === "ENOENT") return 0; throw error; }
+  directory(repos, options.rootUid, true);
+  const legacy = [];
+  let count = 0;
+  for (const owner of readdirSync(repos)) {
+    if (!name(owner)) throw invalid();
+    directory(path.join(repos, owner), options.rootUid, true);
+    for (const repository of readdirSync(path.join(repos, owner))) {
+      if (!name(repository) || ++count > 20) throw invalid();
+      const checkout = path.join(repos, owner, repository);
+      gitDirectory(checkout, { ...options, adoptLegacy: true });
+      if (lstatSync(checkout).uid === 10001) legacy.push(checkout);
+    }
+  }
+  if (!legacy.length) return 0;
+  if (mountPoints(options).some(mount => mount.path.startsWith(`${options.filesRoot}/`))) throw invalid();
+  for (const checkout of legacy) {
+    adoptCloudEngineTree(checkout);
+    gitDirectory(checkout, options);
+  }
+  return legacy.length;
+}
+
 const runtimeIdentity = runtime => Object.fromEntries(["runtimeId", "manifestSha256", "baseCompatibilityId", "bootId", "supervisorSessionId"]
   .map(key => [key, runtime[key]]));
 
