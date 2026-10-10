@@ -1,6 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, cp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import {isCloudAgentAdmissionCode,type CloudAgentAccessMaterial} from "@zeros/protocol/cloud-agent-execution";
 import {CloudCommandFailureError,decodeCloudCommandFailure,type CloudCommandFailureCause} from "@zeros/protocol/cloud-commands";
 import type { CloudAgentLease } from "../cloud-agent-lease";
@@ -177,7 +177,9 @@ export class CloudNativeBoundary implements PreparedBoundary {
       assertLive();
       const env = cloudNativeProviderEnvironment(authority.takeMaterial(), owner.model, settings, owner.environment?.values, nativeHome);
       for (const key of Object.keys(env)) if (/^(GH_|GITHUB_)/.test(key)) delete env[key];
-      const githubDirectory = `${nativeHome.paths.home}/.zeros-github`;
+      // Unix socket paths fit in 107 bytes and the native home alone can exceed
+      // that. The broker removes this private directory when it retires.
+      const githubDirectory = await mkdtemp("/tmp/zeros-native-github-");
       const github = await createNativeGithubBroker({ directory: githubDirectory, visibleDirectory: githubDirectory,
         cwd: admitted.cwd, path: env.PATH!, node: configuration.toolchain.node, identity: configuration,
         source: isCloudBootNativeAuthority(authority) ? {kind:"boot-agent",contextId:authority.contextId} : {kind:"agent",leaseId:authority.leaseId}, signal: lease.signal,

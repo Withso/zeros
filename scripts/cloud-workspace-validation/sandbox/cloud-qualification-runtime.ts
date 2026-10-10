@@ -3,6 +3,7 @@ import { CloudExecutionBoundary } from "../../../apps/desktop/src/engine/agents/
 import { CloudOwnedWorkloadRegistry } from "../../../apps/desktop/src/engine/agents/containment/cloud-owned-workloads";
 import { loadCloudWorkerConfiguration } from "../../../apps/desktop/src/engine/agents/containment/cloud-worker-config";
 import { createCloudWorkloadCustody } from "../../../apps/desktop/src/engine/agents/containment/cloud-workload-custody";
+import { disposePtyHost } from "../../../apps/desktop/src/engine/pty/pty-host-client";
 
 /** Run role checks in the root-projected engine controller. Role children
  * launch through its original prepared boundary, never mint controller births. */
@@ -13,7 +14,9 @@ export function createCloudQualificationRuntime() {
   custody.assertLive();
   const workloads = new CloudOwnedWorkloadRegistry({ custody });
   const boundary = new CloudExecutionBoundary({ projectRoot: "/srv/zeros/workspace", configuration, workloads });
-  return Object.freeze({ configuration, custody, workloads, boundary });
+  // Role probes lazily start the engine's process-global PTY transport. The
+  // engine ends it in stop(); this controller ends it after its final census.
+  return Object.freeze({ configuration, custody, workloads, boundary, close: () => disposePtyHost() });
 }
 export type CloudQualificationRuntime = ReturnType<typeof createCloudQualificationRuntime>;
 

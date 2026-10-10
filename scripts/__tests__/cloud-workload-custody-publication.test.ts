@@ -1,5 +1,8 @@
+import { closeSync, constants, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { expect, it } from "vitest";
-import { cloudWorkloadCustodyBirth } from "../cloud-workspace-validation/sandbox/publish-cloud-workload-custody.mjs";
+import { cloudWorkloadCustodyBirth, replaceCloudCustodyDocument } from "../cloud-workspace-validation/sandbox/publish-cloud-workload-custody.mjs";
 const common = "/sys/fs/cgroup/system.slice/zeros-host.service/engine-runtime";
 const scope = `${common}/engine-32345678-1234-4234-8234-123456789abc`;
 const seed = { version: 1, common: { directory: common, dev: "0", ino: "201" }, workload: { directory: `${common}/engine-workload-shared/workload`, dev: "0", ino: "202" }, infrastructure: [],
@@ -25,4 +28,17 @@ it("refuses changed paths, noncanonical inode data, oversize lists or private ex
   for (const value of [{ ...seed, common: { ...seed.common, directory: "/sys/fs/cgroup/host" } }, { ...seed, workload: { ...seed.workload, ino: "0202" } },
     { ...seed, infrastructure: Array.from({ length: 16 }, (_, n) => ({ kind: "resident", pid: 1000 + n, startToken: String(1000 + n) })) }, { ...seed, token: "synthetic-private" }])
     expect(() => cloudWorkloadCustodyBirth(value, child)).toThrow();
+});
+it("replaces the seed it read through the same descriptor from byte zero", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "zeros-custody-document-")), file = path.join(directory, "custody.json");
+  try {
+    writeFileSync(file, JSON.stringify({ ...seed, prior: "x".repeat(96) }), { mode: 0o600 });
+    const published = JSON.stringify(cloudWorkloadCustodyBirth(seed, child));
+    const descriptor = openSync(file, constants.O_RDWR);
+    try {
+      JSON.parse(readFileSync(descriptor, "utf8"));
+      replaceCloudCustodyDocument(descriptor, published);
+    } finally { closeSync(descriptor); }
+    expect(readFileSync(file, "utf8")).toBe(published);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
