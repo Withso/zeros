@@ -826,6 +826,78 @@ suite("managed compute lifecycle admission", () => {
       ).rows[0].state,
     ).toBe("settled");
   });
+  it("settles at the last confirmed meter only once a lower final reading persists 15 minutes after the stop", async () => {
+    await ready();
+    await age();
+    provider.inspect.mockResolvedValue(resource(200));
+    await coordinator.runOnce();
+    expect((await balance())[0]).toMatchObject({ debitedMicroUsd: 6000 });
+    provider.inspect.mockResolvedValue({ ...resource(), state: "archived" });
+    provider.readComputeUsage.mockImplementation(async (id, window) => ({
+      resourceId: id,
+      since: window!.since.toISOString(),
+      until: window!.until!.toISOString(),
+      billableSeconds: 0,
+      secondsPerDollar: 100000,
+      listPriceMicroUsd: 0,
+      running: false,
+    }));
+    await coordinator.runOnce();
+    // An older, unrelated failure streak must not shorten the grace.
+    await pool.query(
+      "UPDATE managed_compute_allocation_leases SET last_error_code='compute_final_meter_unavailable',first_error_at=now()-interval '1 hour' WHERE id=$1",
+      [input.intentId],
+    );
+    const pass = async (stopAge: string) => {
+      await pool.query(
+        "UPDATE managed_compute_allocation_leases SET stopped_observed_at=now()-$2::interval,next_check_at=now() WHERE id=$1",
+        [input.intentId, stopAge],
+      );
+      await coordinator.runOnce();
+      return (await pool.query<{ state: string; last_error_code: string | null; reservation: string; billable: string; final_reason: string | null }>(
+        `SELECT lease.state,lease.last_error_code,reservation.state AS reservation,reservation.billable_seconds AS billable,reservation.final_reason
+        FROM managed_compute_allocation_leases lease JOIN managed_compute_credit_reservations reservation ON reservation.id=lease.id WHERE lease.id=$1`,
+        [input.intentId],
+      )).rows[0]!;
+    };
+    for (const stopAge of ["10 seconds", "10 seconds", "14 minutes"])
+      expect(await pass(stopAge)).toMatchObject({ last_error_code: "compute_credit_meter_rejected", reservation: "open", billable: "600" });
+    expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
+    expect(await pass("16 minutes")).toMatchObject({
+      state: "settled", last_error_code: null, reservation: "final", billable: "600", final_reason: "allocation_stopped",
+    });
+    expect((await balance())[0]).toMatchObject({ debitedMicroUsd: 6000, reservedMicroUsd: 0, availableMicroUsd: 14000 });
+  });
+  it("keeps a stopped VM unsettled when its lower final reading is otherwise invalid", async () => {
+    await ready();
+    await age();
+    provider.inspect.mockResolvedValue(resource(200));
+    await coordinator.runOnce();
+    provider.inspect.mockResolvedValue({ ...resource(), state: "archived" });
+    provider.readComputeUsage.mockImplementation(async (id, window) => ({
+      resourceId: id,
+      since: window!.since.toISOString(),
+      until: window!.until!.toISOString(),
+      billableSeconds: 0,
+      secondsPerDollar: 50000,
+      listPriceMicroUsd: 0,
+      running: false,
+    }));
+    await coordinator.runOnce();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await pool.query(
+        "UPDATE managed_compute_allocation_leases SET stopped_observed_at=now()-interval '1 hour',next_check_at=now() WHERE id=$1",
+        [input.intentId],
+      );
+      await coordinator.runOnce();
+    }
+    expect((await pool.query(
+      `SELECT lease.state<>'settled' AS unsettled,lease.last_error_code,reservation.state AS reservation
+      FROM managed_compute_allocation_leases lease JOIN managed_compute_credit_reservations reservation ON reservation.id=lease.id WHERE lease.id=$1`,
+      [input.intentId],
+    )).rows[0]).toEqual({ unsettled: true, last_error_code: "compute_credit_meter_rejected", reservation: "open" });
+    expect((await balance())[0]).toMatchObject({ debitedMicroUsd: 6000 });
+  });
   const stoppedMeter = () => {
     provider.inspect.mockResolvedValue({ ...resource(), state: "archived" });
     provider.readComputeUsage.mockImplementation(async (id, window) => ({

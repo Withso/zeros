@@ -597,34 +597,7 @@ export class DatabaseManagedComputeCreditLedger {
       input.periodId,
       async (tx, row, period) => {
         const usage = input.usage;
-        const binding = (
-          await tx.query<{ provider_resource_id: string | null }>(
-            `SELECT coalesce(provider_resource_id,(SELECT lease.provider_resource_id FROM managed_compute_allocation_leases lease
-              JOIN cloud_workspace_allocation_owners owner ON owner.allocation_lease_id=lease.id
-                AND owner.workspace_id=lease.workspace_id AND owner.org_id=lease.org_id AND owner.provider_resource_id=lease.provider_resource_id
-              WHERE lease.id=$4 AND lease.workspace_id=$1 AND lease.generation=$2 AND lease.org_id=$3)) AS provider_resource_id
-              FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=$2 AND org_id=$3`,
-            [row.workspace_id, row.generation, row.org_id, input.reservationId],
-          )
-        ).rows[0];
-        if (
-          !binding?.provider_resource_id ||
-          binding.provider_resource_id !== usage.resourceId ||
-          usage.secondsPerDollar !== integer(row.seconds_per_dollar) ||
-          instant(usage.since) !== instant(row.meter_since) ||
-          instant(usage.until) < instant(usage.since) ||
-          instant(usage.until) > instant(period.ends_at) ||
-          instant(usage.until) > instant(period.evaluated_at) + 5000 ||
-          integer(usage.billableSeconds) !== usage.billableSeconds ||
-          computeMicroUsd(usage.billableSeconds, usage.secondsPerDollar) !==
-            usage.listPriceMicroUsd ||
-          (input.finalReason &&
-            input.finalReason !== "period_ended" &&
-            usage.running) ||
-          (input.finalReason === "period_ended" &&
-            (instant(usage.until) !== instant(period.ends_at) ||
-              instant(period.ends_at) > instant(period.evaluated_at)))
-        )
+        if (!(await this.meterEvidence(tx, row, period, usage, input.finalReason)))
           deny("compute_credit_meter_rejected");
         if (instant(usage.until) < instant(row.meter_through)) {
           if (input.finalReason) deny("compute_credit_meter_rejected");
@@ -654,6 +627,83 @@ export class DatabaseManagedComputeCreditLedger {
         });
       },
       input.allocationLeaseClaim,
+    );
+  }
+
+  /** Finalize an independently stopped allocation at its last confirmed meter
+   * when the provider's final reading for the same window is lower. The
+   * coordinator calls this only after that regression outlasts its grace
+   * period. The bill is never lowered and unmetered time is never billed. */
+  async finalizeRegressed(input: {
+    reservationId: string;
+    periodId: string;
+    usage: CloudProviderComputeUsage;
+    allocationLeaseClaim?: { owner: string };
+  }): Promise<ComputeCreditReservation> {
+    identity(input.reservationId, input.periodId);
+    return this.mutateMeter(
+      input.reservationId,
+      input.periodId,
+      async (tx, row, period) => {
+        const usage = input.usage;
+        if (
+          !(await this.meterEvidence(tx, row, period, usage, "allocation_stopped")) ||
+          usage.running ||
+          instant(usage.until) < instant(row.meter_through) ||
+          (usage.listPriceMicroUsd >= integer(row.actual_micro_usd) &&
+            usage.billableSeconds >= integer(row.billable_seconds))
+        )
+          deny("compute_credit_meter_rejected");
+        if (row.state === "final") {
+          if (row.final_reason !== "allocation_stopped")
+            deny("compute_credit_conflict");
+          return document(row);
+        }
+        return this.applyMeter(tx, row, {
+          actual: integer(row.actual_micro_usd),
+          billableSeconds: integer(row.billable_seconds),
+          through: row.meter_through,
+          finalReason: "allocation_stopped",
+        });
+      },
+      input.allocationLeaseClaim,
+    );
+  }
+
+  /** Whether a provider reading belongs to this reservation's exact bound
+   * allocation, price and window. Monotonic progress is checked separately. */
+  private async meterEvidence(
+    tx: Tx,
+    row: Reservation,
+    period: Period,
+    usage: CloudProviderComputeUsage,
+    finalReason?: ComputeCreditFinalReason,
+  ): Promise<boolean> {
+    const binding = (
+      await tx.query<{ provider_resource_id: string | null }>(
+        `SELECT coalesce(provider_resource_id,(SELECT lease.provider_resource_id FROM managed_compute_allocation_leases lease
+          JOIN cloud_workspace_allocation_owners owner ON owner.allocation_lease_id=lease.id
+            AND owner.workspace_id=lease.workspace_id AND owner.org_id=lease.org_id AND owner.provider_resource_id=lease.provider_resource_id
+          WHERE lease.id=$4 AND lease.workspace_id=$1 AND lease.generation=$2 AND lease.org_id=$3)) AS provider_resource_id
+          FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=$2 AND org_id=$3`,
+        [row.workspace_id, row.generation, row.org_id, row.id],
+      )
+    ).rows[0];
+    return !(
+      !binding?.provider_resource_id ||
+      binding.provider_resource_id !== usage.resourceId ||
+      usage.secondsPerDollar !== integer(row.seconds_per_dollar) ||
+      instant(usage.since) !== instant(row.meter_since) ||
+      instant(usage.until) < instant(usage.since) ||
+      instant(usage.until) > instant(period.ends_at) ||
+      instant(usage.until) > instant(period.evaluated_at) + 5000 ||
+      integer(usage.billableSeconds) !== usage.billableSeconds ||
+      computeMicroUsd(usage.billableSeconds, usage.secondsPerDollar) !==
+        usage.listPriceMicroUsd ||
+      (finalReason && finalReason !== "period_ended" && usage.running) ||
+      (finalReason === "period_ended" &&
+        (instant(usage.until) !== instant(period.ends_at) ||
+          instant(period.ends_at) > instant(period.evaluated_at)))
     );
   }
 
