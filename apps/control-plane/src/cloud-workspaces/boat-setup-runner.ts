@@ -4,8 +4,7 @@ import { executeBoatPinnedSsh, type BoatBootstrapChannel } from "./boat-pinned-s
 export { boatAuthorizedKeyCommand, isPublicBoatAddress, openBoatBootstrapChannel,
   parseBoatHostKey, parseBoatSshEndpoint, type BoatBootstrapExecution } from "./boat-pinned-ssh.js";
 export type { BoatBootstrapChannel } from "./boat-pinned-ssh.js";
-import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND, CLOUD_WORKSPACE_RUNTIME_ADMISSION_TTL_SECONDS, CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND,
-  MIN_ADMISSION_REMAINING_MS, RUNTIME_INSTALL_BUDGET_MS } from "./linux-setup-executor.js";
+import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND, CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "./linux-setup-executor.js";
 import { RuntimeBaseStatusSchema, RuntimeInstallInputSchema, RUNTIME_INSTALL_MAX_ENCODED_BYTES } from "./runtime-contract.js";
 import { setupTimingClock } from "./setup-timings.js";
 import {
@@ -18,11 +17,9 @@ const ENSURE_SUPERVISOR_COMMAND =
   "/usr/bin/sudo -n /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs";
 const BASE_STATUS_COMMAND = "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status";
 const BASE_STATUS_TIMEOUT_SECONDS = 20;
-// Polling runs after the one-use admission and artifact capability are minted.
-// A restoring base may use only what their install allowance leaves, less the
-// helper's entry minimum, one status interval and a margin (270 seconds).
-const BASE_RESTORE_POLL_MS = CLOUD_WORKSPACE_RUNTIME_ADMISSION_TTL_SECONDS * 1000 - RUNTIME_INSTALL_BUDGET_MS -
-  MIN_ADMISSION_REMAINING_MS - BASE_STATUS_TIMEOUT_SECONDS * 1000 - 5_000;
+// The v4 base waits up to 480 seconds for the provider restore (bootstrap.py
+// HYDRATION_TIMEOUT) before reporting failure; allow a further minute.
+const BASE_RESTORE_GATE_MS = 540_000;
 // A fixed list, no path/argv disclosure and no dependency on the restored Node.
 const BOOTSTRAP_FILE_PROBE_COMMAND = "/bin/sh -c 'for f in /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs /opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs /opt/zeros/dist-engine/cli.js; do if test -f \"$f\"; then printf 1; else printf 0; fi; done'";
 type CommandResult = Awaited<ReturnType<CloudWorkspaceCommandRunner["execute"]>>;
@@ -39,17 +36,20 @@ function baseHostStopped(response: Record<string, unknown>, expectedBase: string
 /** Before any admission or SSH key is sent, poll only the fixed read-only v4
  * status command. A provider-running VM can still be restoring its overlay.
  * All setup/installer/SSH failures retain the worker's ordinary retry policy.
+ * A nonzero restoreCeilingMs is used only before setup authority exists.
  */
-async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, resourceId: string, expectedBase: string, signal: AbortSignal, timeoutSeconds: number) {
+async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, resourceId: string, expectedBase: string, signal: AbortSignal,
+  timeoutSeconds: number, restoreCeilingMs = 0) {
   const started = Date.now();
   const boot = new AbortController(), restore = new AbortController();
-  const restoreMs = Math.min(BASE_RESTORE_POLL_MS, timeoutSeconds * 1000);
-  const timers = [setTimeout(() => boot.abort(), Math.min(120_000, timeoutSeconds * 1000)), setTimeout(() => restore.abort(), restoreMs)];
+  const restoreMs = Math.min(restoreCeilingMs, timeoutSeconds * 1000);
+  const timers = [setTimeout(() => boot.abort(), Math.min(120_000, timeoutSeconds * 1000)),
+    ...(restoreMs > 0 ? [setTimeout(() => restore.abort(), restoreMs)] : [])];
   for (const timer of timers) timer.unref();
   // The status command itself waits while the base gates on the provider
   // restore, so a timed-out status means the base is restoring, not broken.
-  // That evidence extends this claim's polling instead of failing it into a
-  // backed-off retry that would wait for the same restore.
+  // Before authority exists, that evidence extends the wait instead of failing
+  // the claim into a backed-off retry that would wait for the same restore.
   let restoring = false;
   const deadline = () => restoring ? restore.signal : boot.signal;
   const pause = (ms: number, error: unknown) => new Promise<void>((resolve, reject) => {
@@ -120,6 +120,22 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
     ) {
       throw new Error("Invalid Boat bootstrap bounds");
     }
+  }
+
+  /** Wait out a restoring base before the coordinator mints setup authority.
+   * Any definitive status, ready or not, is left to the readiness check that
+   * runs after admission; provider errors keep their ordinary bound. */
+  async awaitReadiness(
+    input: Parameters<NonNullable<CloudWorkspaceCommandRunner["awaitReadiness"]>>[0],
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (!BOAT_RESOURCE_ID_PATTERN.test(input.resourceId) || !/^bc1-[a-f0-9]{64}$/.test(input.runtimeBaseCompatibilityId) ||
+      !Number.isSafeInteger(input.timeoutSeconds) || input.timeoutSeconds < 1 || input.timeoutSeconds > this.options.maxTimeoutSeconds)
+      throw new CloudProviderError("provider_command_invalid", "Boat accepts only the fixed setup admission", false);
+    signal.throwIfAborted();
+    await this.options.assertOwned(input.resourceId);
+    await waitForBoatBaseStatus(this.options.client, input.resourceId, input.runtimeBaseCompatibilityId, signal, input.timeoutSeconds,
+      BASE_RESTORE_GATE_MS);
   }
 
   async execute(
