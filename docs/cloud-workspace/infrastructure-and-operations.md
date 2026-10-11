@@ -407,6 +407,43 @@ writes append-only owner evidence. Quota provisioning is independent of
 `CLOUD_WORKSPACES_ENABLED` and
 `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED`.
 
+### Operator-requested workspace deletion
+
+In development, Alpha or Beta, use
+`pnpm --dir apps/control-plane cloud-workspace-deletion:manage` (deployed image:
+`node dist/manage-cloud-workspace-deletion.js`) from a controlled database-owner
+shell with that deployment's `DATABASE_URL`. Production is refused. The command
+only requests the server's normal deletion lifecycle; workers retire provider
+resources and finish durable-data deletion. Never delete the provider sandbox
+directly while its workspace row still references it.
+
+Set `CONTROL_PLANE_CLOUD_DELETION_CHANNEL`, `ORGANIZATION_ID`,
+`EXPECTED_ORGANIZATION_SLUG`, `ACTOR_USER_ID`, `WORKSPACE_IDS`, `APPROVAL_ID` and
+`REASON` (all names use the `CONTROL_PLANE_CLOUD_DELETION_` prefix). Use an active
+organization owner/admin who passes the workspace's normal cleanup check; admin
+membership alone cannot delete someone else's private workspace. `WORKSPACE_IDS`
+is an explicit comma-separated list of 1–100 cloud UUIDs. `APPROVAL_ID` is one new
+operator-chosen UUID per batch, and `REASON` is a non-secret audit explanation of
+16–512 characters. No wildcard or automatic organization-wide selection exists.
+
+Run without flags to print a read-only plan. Review the database fingerprint,
+channel, organization/actor IDs and each workspace's status/version. Put the
+exact printed approval into `CONTROL_PLANE_CLOUD_DELETION_APPROVAL`, then rerun
+with `--execute`. The entire batch checks its locked current state before any
+mutation; a stale plan requires another review. Preserve the same approval ID,
+approval and inputs on retries: they replay the original intents, including
+repairing failed deletion jobs, without another deletion audit. The separate
+operator receipt records the reason and original plan in `audit_log`. Replays
+still check current cleanup authority and the running-workspace guard.
+
+Only stopped, archived and failed workspaces are accepted by default; deleted
+rows are skipped. To include ready/busy workspaces, use `--allow-running` for
+both planning and execution. This queues the same final checkpoint as HTTP
+DELETE and keeps runtime authority until that checkpoint completes; it never
+opts into discarding uncheckpointed work. A requested deletion is asynchronous,
+so confirm worker completion before treating its resources as removed. Personal
+Local and organization-local workspaces are outside this command's scope.
+
 A Boat create journal whose outcome can never be certified (a pre-0093
 untracked journal, or dispatches whose refusal was not recognized) keeps its
 reservation open and blocks deletion and purge. Resolve it only through
