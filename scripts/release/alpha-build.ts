@@ -120,7 +120,8 @@ export async function validateAlphaProducerProof(proof: unknown, env: NodeJS.Pro
   return recorded;
 }
 
-export async function validateAlphaBuildMetadata(metadata: unknown, proof: unknown, env: NodeJS.ProcessEnv, read: Read) {
+export async function validateAlphaBuildMetadata(metadata: unknown, proof: unknown, env: NodeJS.ProcessEnv, read: Read,
+  options: Parameters<typeof poll>[1] = {}) {
   const parsed = AlphaBuildMetadata.safeParse(metadata), evidence = AlphaProducerProof.safeParse(proof);
   requireCheck(parsed.success && evidence.success, "Alpha signed-build metadata or producer proof is invalid");
   const value = parsed.data, recorded = evidence.data;
@@ -130,10 +131,13 @@ export async function validateAlphaBuildMetadata(metadata: unknown, proof: unkno
     ["repository", "branch", "sourceSha", "runId", "runNumber"].every(key => value[key as keyof typeof value] === recorded[key as keyof ProducerProof]) &&
     recorded.runAttempt === env.GITHUB_RUN_ATTEMPT && (recorded.producerAttempt === null || recorded.producerAttempt === Number(value.runAttempt)),
   "Alpha signed-build metadata belongs to another source, run, producing attempt or version");
-  await validateAlphaProducerProof(recorded, env, read);
-  const jobs = await jobPages(read, `/actions/runs/${value.runId}/attempts/${value.runAttempt}/jobs`);
-  const producer = producerJob("desktop", jobs, { ...env, GITHUB_RUN_ATTEMPT: value.runAttempt });
-  requireCheck(producer && producer.id === recorded.producerId, "Alpha metadata's recorded attempt has no matching successful producer");
-  await authenticatedAlphaParent(env, read);
-  return value;
+  // The parent can enter an environment wait during these reads. Then every
+  // check repeats once it resumes, so no producer or artifact evidence is stale.
+  return poll(async () => {
+    await validateAlphaProducerProof(recorded, env, read, options);
+    const jobs = await jobPages(read, `/actions/runs/${value.runId}/attempts/${value.runAttempt}/jobs`);
+    const producer = producerJob("desktop", jobs, { ...env, GITHUB_RUN_ATTEMPT: value.runAttempt });
+    requireCheck(producer && producer.id === recorded.producerId, "Alpha metadata's recorded attempt has no matching successful producer");
+    return (await authenticatedAlphaParent(env, read, { waiting: true })).status === "in_progress" ? value : false;
+  }, { attempts: 60, timeoutMs: ALPHA_PROOF_RECHECK_MS, ...options });
 }

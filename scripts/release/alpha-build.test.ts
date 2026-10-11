@@ -27,6 +27,30 @@ function fixture() {
 }
 
 describe("same-run Alpha producer readiness", () => {
+  it("waits when the parent enters approval waiting during the final signed-metadata read", async () => {
+    vi.useFakeTimers();
+    try {
+      const test = fixture();
+      const proof = await waitForAlphaBuild("desktop", env, test.read);
+      const metadata = createAlphaBuildMetadata({ ...env, GITHUB_JOB: "build" });
+      let jobReads = 0;
+      const read = async (route: string) => {
+        const reply = await test.read(route);
+        if (route.startsWith("/actions/runs/300/attempts/2/jobs?") && ++jobReads === 2)
+          test.state.parent.status = "waiting";
+        if (route === "/actions/runs/300" && test.state.parent.status === "waiting") {
+          const observed = { ...reply };
+          test.state.parent.status = "in_progress";
+          return observed;
+        }
+        return reply;
+      };
+      const result = validateAlphaBuildMetadata(metadata, proof, env, read)
+        .then(value => ({ value }), error => ({ error }));
+      await vi.runAllTimersAsync();
+      expect(await result).toEqual({ value: metadata });
+    } finally { vi.useRealTimers(); }
+  });
   it("rechecks a downloaded proof through an environment approval wait, within its bound", async () => {
     const test = fixture();
     const proof = await waitForAlphaBuild("desktop", env, test.read, { sleep: vi.fn(async () => {}), attempts: 1 });
