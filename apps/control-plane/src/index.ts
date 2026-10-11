@@ -27,6 +27,7 @@ import { BoatApiClient } from "./cloud-workspaces/boat-client.js";
 import { DatabaseBuilderVmOperationStore } from "./cloud-workspaces/cloud-builder-vm-store.js";
 import { CloudComputerTemplateRetentionWorker } from "./cloud-workspaces/computer-template-retention.js";
 import { startCloudWorkerNotifications } from "./cloud-workspaces/worker-notifications.js";
+import { CloudEngineCheckpointHints, startCloudEngineCheckpointHintNotifications } from "./cloud-workspaces/engine-checkpoint-hints.js";
 import { DatabaseCloudWorkspaceActionService } from "./cloud-workspaces/action-receipts.js";
 import { loadConfig } from "./config.js";
 import { createPool, createMigrationPool, withSystemTx } from "./db.js";
@@ -127,6 +128,8 @@ if (workosSync) {
 }
 let stopCloudReconciler = async () => {};
 let stopCloudWorkerNotifications = async () => {};
+let stopCloudCheckpointHintNotifications = async () => {};
+let closeCloudCheckpointHints = () => {};
 let stopCloudProAllowances = async () => {};
 let stopCloudSetupWorker = async () => {};
 let stopCloudComputerRetirementWorker = async () => {};
@@ -492,6 +495,18 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       pool,
       workosEnabled: config.auth.provider === "workos",
     });
+    // Served by the API process itself, independent of background workers:
+    // waiting engines are released by a dedicated LISTEN session.
+    const checkpointHints = new CloudEngineCheckpointHints(pool);
+    const checkpointHintListenerPool = createPool(config.databaseListenUrl ?? config.databaseUrl, {
+      maxConnections: 1, applicationName: "zeros-checkpoint-hint-listener",
+    });
+    const stopCheckpointHints = startCloudEngineCheckpointHintNotifications(checkpointHintListenerPool, checkpointHints);
+    closeCloudCheckpointHints = () => checkpointHints.close();
+    stopCloudCheckpointHintNotifications = async () => {
+      try { await stopCheckpointHints(); }
+      finally { await checkpointHintListenerPool.end(); }
+    };
     cloudWorkspaceInternalSetupService = {
       ...(cloudAgentCredentialKeys(cloud)?{agentExecutions:new DatabaseCloudAgentExecutionService(pool,cloudAgentCredentialKeys(cloud)!,config.auth.provider==="workos",undefined,
         {computer:computerV2,updateRepositorySetupScript:createRepositorySetupScriptWriter(pool)}, {
@@ -503,6 +518,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       redeem: (input) => materials.redeem(input),
       registerEngine: (input) => materials.registerEngine(input),
       heartbeat: (input) => materials.heartbeat(input),
+      waitForCheckpointHint: (input, signal) => checkpointHints.wait(input, signal),
       admitEngineClient: (input) =>
         cloudWorkspaceEngineClientAdmissionService!.consume(input),
       admitActorClient: (input) => cloudWorkspaceEngineClientAdmissionService!.consumeActor(input),
@@ -738,11 +754,14 @@ function shutdown(signal: string): void {
   shuttingDown = true;
   if (githubWriteCleanup) clearInterval(githubWriteCleanup);
   cloudRuntimeBridge?.close();
+  // Held engine hints would otherwise keep the server open past its exit deadline.
+  closeCloudCheckpointHints();
   cloudPreviewWebSocketRelay?.close();
   cloudRuntimeServiceRelay?.close();
   console.log(`[control-plane] ${signal}; draining`);
   const backgroundStopped = Promise.allSettled([
     stopCloudWorkerNotifications(),
+    stopCloudCheckpointHintNotifications(),
     cloudGithubReads?.close(),
     githubWriteCleanupPending,
     stopCloudSetupWorker(),

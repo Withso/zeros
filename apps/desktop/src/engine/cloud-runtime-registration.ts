@@ -31,6 +31,10 @@ const READINESS_TOKEN_PATTERN = /^zwr_[A-Za-z0-9_-]{43}$/;
 const MAX_RUNTIME_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
+const CHECKPOINT_HINT_PATH = "/internal/v1/cloud-workspaces/engine/checkpoint-hint";
+const CHECKPOINT_HINT_AUDIENCE = "zeros-cloud-workspace-engine-checkpoint-hint-v1" as const;
+// Outlives the control plane's 25-second hint wait.
+const CHECKPOINT_HINT_TIMEOUT_MS = 35_000;
 
 // This module is also imported by server-side setup contracts. Keep the wire
 // check pure; only the engine's attester may read the installed runtime.
@@ -128,6 +132,9 @@ export type CloudRuntimeRegistrationDependencies = {
   agentRuntime: CloudAgentRuntimeAttestation;
   /** Explicit supported wire opt-in; a committed CP ACK is still required. */
   negotiateLocalCommands?: true;
+  /** Hold the optional checkpoint hint wait so a queued Stop, Restart or
+   * Archive is fetched by an immediate heartbeat instead of the next beat. */
+  checkpointHints?: true;
   fetch?: FetchLike;
   now?: () => number;
   onAuthorityLost: () => void;
@@ -416,6 +423,10 @@ export class CloudRuntimeRegistration {
   private recordHandoffFlight: Promise<void> | null = null;
   private checkpointInFlight: string | null = null;
   private readonly negotiateLocalCommands: boolean;
+  private readonly checkpointHints: boolean;
+  private heartbeatInFlight = false;
+  private heartbeatAgain = false;
+  private checkpointHintsStarted = false;
   private localCommandsAcknowledged = false;
   private agentJournalMode: "local" | "legacy" | undefined;
   private sourceWriterEpoch: string | null = null;
@@ -430,6 +441,7 @@ export class CloudRuntimeRegistration {
     }
     this.agentRuntime = Object.freeze({ ...dependencies.agentRuntime });
     this.negotiateLocalCommands = dependencies.negotiateLocalCommands === true;
+    this.checkpointHints = dependencies.checkpointHints === true;
     this.fetch = dependencies.fetch ?? globalThis.fetch;
     this.now = dependencies.now ?? Date.now;
     this.onAuthorityLost = dependencies.onAuthorityLost;
@@ -497,6 +509,7 @@ export class CloudRuntimeRegistration {
     const document = this.parseRegistration(raw);
     this.document = document;
     this.scheduleHeartbeat(document.heartbeat.intervalMs);
+    if (this.checkpointHints) this.startCheckpointHints(document);
     try {
       await this.synchronizeDurableRecord(document, { initial: true });
       this.initialRecordConnected = this.document === document && !this.authorityLost && !this.stopped;
@@ -909,6 +922,8 @@ export class CloudRuntimeRegistration {
     this.timer = null;
     const document = this.document;
     if (!document || this.stopped || this.authorityLost) return;
+    this.heartbeatInFlight = true;
+    this.heartbeatAgain = false;
     try {
       const credentialRefresh = this.readCredentialRefresh();
       const observedPorts = await this.observedPorts();
@@ -965,7 +980,8 @@ export class CloudRuntimeRegistration {
         now,
       );
       document.leaseExpiresAtMs = Number(raw.leaseExpiresAtMs);
-      this.scheduleHeartbeat(document.heartbeat.intervalMs);
+      // A checkpoint hint that arrived during this beat asks for one more now.
+      this.scheduleHeartbeat(this.heartbeatAgain ? 0 : document.heartbeat.intervalMs);
       if (!this.recordHandoffPaused) void this.synchronizeDurableRecord(document, { initial: false }).catch(
         () => undefined,
       );
@@ -985,7 +1001,97 @@ export class CloudRuntimeRegistration {
           Math.max(250, document.leaseExpiresAtMs - this.now() - 1_000),
         ),
       );
+    } finally {
+      this.heartbeatInFlight = false;
     }
+  }
+
+  /** Timing only: the next beat fetches any durable checkpoint directive
+   * through the same fenced heartbeat as the regular cadence. */
+  private heartbeatSoon(): void {
+    if (!this.document || this.stopped || this.authorityLost) return;
+    if (this.heartbeatInFlight) {
+      this.heartbeatAgain = true;
+      return;
+    }
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.scheduleHeartbeat(0);
+  }
+
+  private startCheckpointHints(document: RegistrationDocument): void {
+    if (this.checkpointHintsStarted) return;
+    this.checkpointHintsStarted = true;
+    void this.checkpointHintLoop(document).catch(() => undefined);
+  }
+
+  /** Optional fast path. An older control plane answers 404 and a refused
+   * hint ends it; the heartbeat alone keeps authority and the cadence. */
+  private async checkpointHintLoop(document: RegistrationDocument): Promise<void> {
+    let failures = 0;
+    while (this.document === document && !this.stopped && !this.authorityLost) {
+      let pending = false;
+      try {
+        const raw = await this.post(
+          new URL(CHECKPOINT_HINT_PATH, document.heartbeat.endpoint).href,
+          document.heartbeat.token,
+          {
+            workspaceId: this.config.execution.workspaceId,
+            organizationId: this.config.execution.organizationId,
+            generation: this.config.execution.generation,
+            engineInstanceId: this.config.engine.instanceId,
+          },
+          undefined,
+          CHECKPOINT_HINT_TIMEOUT_MS,
+        );
+        if (
+          !isRecord(raw) ||
+          !exactKeys(raw, ["audience", "pending", "version"]) ||
+          raw.version !== 1 ||
+          raw.audience !== CHECKPOINT_HINT_AUDIENCE ||
+          typeof raw.pending !== "boolean"
+        ) {
+          throw new CloudRuntimeRequestError(
+            "cloud engine checkpoint hint response is invalid",
+            false,
+          );
+        }
+        failures = 0;
+        pending = raw.pending;
+      } catch (error) {
+        if (
+          error instanceof CloudRuntimeRequestError &&
+          error.status !== undefined &&
+          error.status !== 408 &&
+          error.status !== 429 &&
+          error.status < 500
+        )
+          return;
+        failures += 1;
+      }
+      if (pending) this.heartbeatSoon();
+      // Never spin: a delivered directive leaves the queued state, and
+      // failures back off up to half a minute.
+      await this.pauseCheckpointHints(
+        pending ? 2_000 : failures ? Math.min(30_000, 1_000 * 2 ** Math.min(failures - 1, 5)) : 0,
+      );
+    }
+  }
+
+  private pauseCheckpointHints(delayMs: number): Promise<void> {
+    const signal = this.abortController.signal;
+    if (delayMs <= 0 || signal.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const done = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", done);
+        resolve();
+      };
+      timer = setTimeout(done, delayMs);
+      timer.unref?.();
+      signal.addEventListener("abort", done, { once: true });
+    });
   }
 
   private async observedPorts(): Promise<
@@ -1221,6 +1327,7 @@ export class CloudRuntimeRegistration {
     token: string,
     body: Record<string, unknown>,
     negotiation?: { localCommandsVersion: 1; acknowledgement(acknowledged: boolean, journalMode?: "local" | "legacy", sourceWriterEpoch?: string): void },
+    timeoutMs = REQUEST_TIMEOUT_MS,
   ): Promise<unknown> {
     let response: Response;
     try {
@@ -1229,7 +1336,7 @@ export class CloudRuntimeRegistration {
         redirect: "error",
         signal: AbortSignal.any([
           this.abortController.signal,
-          AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          AbortSignal.timeout(timeoutMs),
         ]),
         headers: {
           accept: "application/json",
