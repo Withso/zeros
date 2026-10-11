@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { build } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { captureCloudNativeCheckpoint, fingerprintCloudNativeCheckpoint, nativeCheckpointFingerprint,
   loadCloudNativeCheckpointCache, restoreCloudNativeCheckpoint, saveCloudNativeCheckpointCache,
@@ -144,26 +145,46 @@ describe.runIf(process.platform === "linux")("native cloud checkpoint artifacts"
   it("preserves native deletion fences in a fresh checkpoint generation",async()=>{
     const f=await fixture(),conversationId="deleted-conversation";
     const root=path.join(f.roots.data,"native-agent-history");
-    await deleteCloudNativeHistory({root,conversationId});
+    await deleteCloudNativeHistory({root,conversationId,dataRoot:root});
     const archive=await captureCloudNativeCheckpoint(f),repository=path.join(f.root,"restored"),data=path.join(f.root,"restored-state");
     expect(archive.files.some(file=>file.scope==="agent-transcripts"&&file.path.endsWith("/.deleted"))).toBe(true);
     await fs.mkdir(repository);git(repository,"init","-q");await fs.mkdir(data,{mode:0o700});
     await restoreCloudNativeCheckpoint({archive,roots:{...f.roots,repository,data},deadlineAtMs:f.deadlineAtMs,getChunk:async id=>f.chunks.get(id)!});
     await expect(acquireCloudNativeHistory({root:path.join(data,"native-agent-history"),conversationId,provider:"codex",uid:process.getuid!(),gid:process.getgid!()})).rejects.toThrow(/deleted/i);
   });
-  it.runIf(process.getuid?.()===0)("restores distinct workload and private-history identities and reacquires native history",async()=>{
+  it.runIf(process.getuid?.()===0)("restores the one-user cloud identity and reacquires history as the engine user",async()=>{
     const f=await fixture(),conversationId="restored-conversation",key=createHash("sha256").update(conversationId).digest("hex");
     const source=path.join(f.roots.data,"native-agent-history",key,"cursor");await fs.mkdir(source,{recursive:true,mode:0o700});await fs.writeFile(path.join(source,"checkpoints.ndjson"),"native-context");
     const archive=await captureCloudNativeCheckpoint(f),repository=path.join(f.root,"restored"),data=path.join(f.root,"restored-state");
     await fs.chmod(f.root,0o755);await fs.mkdir(repository);git(repository,"init","-q");
-    execFileSync("/usr/bin/chown",["-R","10001:10001",repository]);await fs.mkdir(data,{mode:0o700});
-    await restoreCloudNativeCheckpoint({archive,roots:{...f.roots,repository,data},identity:{uid:10001,gid:10001},privateIdentity:{uid:0,gid:0},deadlineAtMs:f.deadlineAtMs,getChunk:async id=>f.chunks.get(id)!});
-    expect((await fs.stat(path.join(repository,".git/HEAD"))).uid).toBe(10001);
-    expect((await fs.stat(path.join(data,"native-agent-history"))).uid).toBe(0);
-    expect((await fs.stat(path.join(data,"native-agent-history",key))).uid).toBe(0);
-    const native=await acquireCloudNativeHistory({root:path.join(data,"native-agent-history"),conversationId,provider:"cursor",uid:10004,gid:10004});
-    try{expect((await fs.stat(native.mount.directory)).uid).toBe(10004);expect(await fs.readFile(path.join(native.mount.directory,"checkpoints.ndjson"),"utf8")).toBe("native-context");}
-    finally{await native.release();}
+    execFileSync("/usr/bin/chown",["-R","10003:10003",repository]);await fs.mkdir(data,{mode:0o700});
+    await fs.chown(data,10003,10003);
+    await restoreCloudNativeCheckpoint({archive,roots:{...f.roots,repository,data},identity:{uid:10003,gid:10003},privateIdentity:{uid:10003,gid:10003},deadlineAtMs:f.deadlineAtMs,getChunk:async id=>f.chunks.get(id)!});
+    expect((await fs.stat(path.join(repository,".git/HEAD"))).uid).toBe(10003);
+    expect((await fs.stat(path.join(data,"native-agent-history"))).uid).toBe(10003);
+    expect((await fs.stat(path.join(data,"native-agent-history",key))).uid).toBe(10003);
+    // Run the actual reacquisition as the admitted identity; the root restore
+    // helper alone cannot prove that the subsequent engine can read its state.
+    // The repository may sit below a private developer HOME. Bundle only this
+    // helper into the fixture so the child needs no access to that HOME.
+    const historyModule=path.join(f.root,"history.cjs");
+    await build({entryPoints:[path.resolve("apps/desktop/src/engine/agents/containment/cloud-native-history.ts")],
+      outfile:historyModule,bundle:true,platform:"node",format:"cjs",logLevel:"silent"});
+    const probeSource=`import {createRequire} from 'node:module';
+      import {readFile,stat} from 'node:fs/promises';
+      import path from 'node:path';
+      const {acquireCloudNativeHistory}=createRequire(import.meta.url)(process.argv[1]);
+      const native=await acquireCloudNativeHistory({root:process.argv[2],conversationId:process.argv[3],
+        provider:'cursor',uid:process.getuid(),gid:process.getgid()});
+      try{process.stdout.write(JSON.stringify({uid:(await stat(native.mount.directory)).uid,
+        restored:(await readFile(path.join(native.mount.directory,'checkpoints.ndjson'),'utf8'))==='native-context'}));}
+      finally{await native.release();}`;
+    let result:string;
+    try{result=execFileSync(process.execPath,["--input-type=module","-e",probeSource,historyModule,
+      path.join(data,"native-agent-history"),conversationId],
+    {uid:10003,gid:10003,cwd:f.root,env:{PATH:"/usr/bin:/bin"},encoding:"utf8",stdio:["ignore","pipe","ignore"],timeout:10_000});}
+    catch{throw new Error("Restored native history could not be reacquired as the engine user");}
+    expect(JSON.parse(result)).toEqual({uid:10003,restored:true});
   });
   it("restores private per-conversation transcripts while excluding lock and auth material",async()=>{
     const f=await fixture(),key="a".repeat(64),base=path.join(f.roots.data,"native-agent-history",key);

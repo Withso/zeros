@@ -2,7 +2,7 @@ import type {ChildProcess} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 import {StringDecoder} from 'node:string_decoder';
 import type {CloudExecutionBoundary} from '../agents/containment/cloud-execution-boundary';
-import type {PreparedBoundary} from '../agents/containment/types';
+import type {BoundaryProcess,PreparedBoundary} from '../agents/containment/types';
 import {spawnPtyViaHost} from '../pty/pty-host-client';
 import type {PtyHandle} from '../pty/service';
 
@@ -73,9 +73,20 @@ export class CloudHumanWorkloads {
           ...(launch.immediateParentPidArgIndex === undefined ? {} : {immediateParentPidArgIndex:launch.immediateParentPidArgIndex})});
       } catch(error) {scope.cancelUnstartedLaunch?.(launch);throw error;}
       const terminal = handle;
+      let process: BoundaryProcess|undefined;
+      const pendingSignals = new Set<NodeJS.Signals>();
+      const signal = (value: NodeJS.Signals) => {
+        if (owner.stopping || !this.owners.has(owner)) return;
+        if (!process) {pendingSignals.add(value);return;}
+        void process.signal(value).catch(() => {this.failed();});
+      };
       owner.closeNative = () => terminal.kill();
       terminal.onSpawned(pid => {
-        try {scope.trackProcessGroup(pid,{leaderExited:()=>exited});}
+        try {
+          process = scope.trackProcessGroup(pid,{leaderExited:()=>exited});
+          for (const value of pendingSignals) signal(value);
+          pendingSignals.clear();
+        }
         catch {this.failed();this.retired(owner);}
       });
       terminal.onExit((_code,_signal,reason) => {
@@ -90,7 +101,11 @@ export class CloudHumanWorkloads {
       return {
         write: (data: string|Buffer) => {const text = typeof data === "string" ? data : decoder.write(data);if(text)terminal.write(text);},
         resize: (cols:number,rows:number) => terminal.resize(cols,rows),
-        kill: (_signal?:string) => this.retired(owner),
+        kill: (value?:string) => {
+          if (value === undefined) {this.retired(owner);return;}
+          if (value !== 'SIGINT' && value !== 'SIGTERM' && value !== 'SIGHUP') throw new Error('Cloud SSH signal is unavailable');
+          signal(value);
+        },
         // The shared PTY transport has bounded output and no pause RPC. The
         // SSH channel's existing one-MiB limit closes an overloaded stream.
         pause() {},resume() {},

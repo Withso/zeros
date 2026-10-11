@@ -249,9 +249,22 @@ describe("Boat image kit", () => {
     expect(creates).toHaveLength(2);
     for (const call of creates) {
       expect(call.headers).toEqual({ "idempotency-key": "11111111-2222-4333-8444-555555555555", "x-boat-org": ORG });
-      expect(call.body).toEqual({ type: "default", from: "zeros-qualification-aa11196c97a6", ttlSeconds: 3600, noEnv: true, env: {} });
+      expect(call.body).toEqual({ type: "default", from: "zeros-qualification-aa11196c97a6", ttlSeconds: 3600, noEnv: true, env: {}, monitoring: false });
     }
     expect(fs.existsSync(path.join(deps.stateDir, "builder-intent.json"))).toBe(false);
+  });
+
+  it("replays a create journaled before the monitoring policy with its exact original body", async () => {
+    const { root } = repository();
+    const fake = boat({ "POST /sandboxes": () => ({ status: 202, body: { sandbox: { id: "bx_builder1", state: "provisioning", team: { id: ORG } } } }) });
+    const deps = kit(root, fake.request);
+    fs.mkdirSync(deps.stateDir, { recursive: true });
+    fs.writeFileSync(path.join(deps.stateDir, "builder-intent.json"), JSON.stringify({ from: "zeros-qualification-aa11196c97a6",
+      type: "default", idempotencyKey: "11111111-2222-4333-8444-555555555555", createdAt: new Date().toISOString() }), { mode: 0o600 });
+    await expect(main(["builder", "create", "--from", "zeros-qualification-aa11196c97a6", "--max-used-hours", "9"], deps))
+      .resolves.toMatchObject({ id: "bx_builder1" });
+    const [create] = fake.calls.filter((call) => call.path === "/sandboxes");
+    expect(create?.body).toEqual({ type: "default", from: "zeros-qualification-aa11196c97a6", ttlSeconds: 3600, noEnv: true, env: {} });
   });
 
   it("forgets only an authenticated authorization denial and never replays an uncertain create past its window", async () => {

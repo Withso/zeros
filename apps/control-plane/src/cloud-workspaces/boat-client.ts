@@ -256,7 +256,7 @@ export class BoatApiClient {
           response.status === 408 ||
           response.status >= 500 ||
           (response.status === 409 &&
-            ["idempotency_in_progress", "boat_restoring", "boat_starting"].includes(
+            ["idempotency_in_progress", "boat_restoring", "boat_starting", "sandbox_starting"].includes(
               String(value?.code),
             ));
         const code =
@@ -272,7 +272,7 @@ export class BoatApiClient {
         const retrySeconds = Number(response.headers.get("retry-after"));
         const retryOptions = { httpStatus: response.status, ...(Number.isFinite(retrySeconds) && retrySeconds > 0
           ? { retryAfterMs: Math.min(retrySeconds * 1000, 300_000) } : {}) };
-        if (response.status === 409 && ["boat_restoring", "boat_starting"].includes(String(value?.code)))
+        if (response.status === 409 && ["boat_restoring", "boat_starting", "sandbox_starting"].includes(String(value?.code)))
           throw new BoatBootPendingError(retryOptions);
         const createRefusal = (path === "/sandboxes" || /^\/sandboxes\/[A-Za-z0-9_-]+\/fork$/.test(path)) &&
           input.method === "POST" && Boolean(input.idempotencyKey) && response.status === 429;

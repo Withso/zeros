@@ -42,6 +42,7 @@ const SandboxSchema = z.object({
     .enum(["queued", "in_progress", "completed", "failed", "cancelled"])
     .nullable()
     .optional(),
+  monitoring: z.boolean().optional(),
 });
 const BillingTeamSchema = z.object({ id: z.string() });
 const DeletionSchema = z.object({
@@ -280,27 +281,39 @@ export class BoatWorkspaceProvider
     const resolvedName = this.templateSandboxId ? null : this.options.resolveSnapshot ? await this.options.resolveSnapshot(input) : this.snapshotName;
     if (resolvedName !== this.snapshotName || (this.snapshotName?.startsWith("zeros-org-") && !this.options.resolveSnapshot))
       throw failure("provider_snapshot_identity_mismatch");
-    const body = {
+    const unmonitored = {
       type,
       ...(this.templateSandboxId ? {} : { from: resolvedName }),
       ttlSeconds,
       noEnv: true,
       env: {},
     };
-    const record = await this.options.operations.prepareCreate({
+    // Boat's process tracer keeps what processes write to pipes, terminals and
+    // sockets, which here carries prompts and admitted provider material.
+    // Disable it explicitly rather than relying on the account default.
+    const monitored = { ...unmonitored, monitoring: false };
+    const prepare = (value: typeof unmonitored) => this.options.operations.prepareCreate({
       workspaceId: input.workspaceId,
       generation: input.generation,
       idempotencyKey: input.idempotencyKey,
       requestSha256: createHash("sha256")
-        .update(JSON.stringify({ imageRef: input.imageRef, body, createAttemptJournalVersion: 1 }))
+        .update(JSON.stringify({ imageRef: input.imageRef, body: value, createAttemptJournalVersion: 1 }))
         .digest("hex"),
       legacyRequestSha256: createHash("sha256")
-        .update(JSON.stringify({ imageRef: input.imageRef, body }))
+        .update(JSON.stringify({ imageRef: input.imageRef, body: value }))
         .digest("hex"),
+    });
+    // A create journaled before this policy replays its exact original body
+    // under the same idempotency key; a different body would be a new request.
+    let body: typeof unmonitored = monitored;
+    const record = await prepare(monitored).catch(async (error: unknown) => {
+      if (!(error instanceof CloudProviderError) || error.code !== "provider_operation_conflict") throw error;
+      body = unmonitored;
+      return prepare(unmonitored);
     });
     if (record.createClosedAt) throw failure("provider_generation_retired");
     this.usable(record);
-    if (record.resourceId) return this.allocatableResource(record);
+    if (record.resourceId) return this.allocatableResource(record, undefined, true);
     const age = this.now() - record.createdAt.getTime();
     if (!Number.isFinite(age) || age < -60_000 || age >= CREATE_RETRY_WINDOW_MS)
       throw failure("provider_create_outcome_unknown");
@@ -316,7 +329,7 @@ export class BoatWorkspaceProvider
     // another request using the same key receives a definite refusal later.
     const attemptId = randomUUID();
     const dispatch = await this.options.operations.beginCreateAttempt(input, attemptId);
-    if (dispatch.resourceId) return this.allocatableResource(dispatch);
+    if (dispatch.resourceId) return this.allocatableResource(dispatch, undefined, true);
     let response: Record<string, unknown>;
     try {
       response = await this.client.request(this.templateSandboxId ? `/sandboxes/${this.templateSandboxId}/fork` : "/sandboxes", {
@@ -345,11 +358,11 @@ export class BoatWorkspaceProvider
       // Fork is a 202 action receipt, not readiness. Read the bound child even
       // when the response includes a sandbox; lost replies replay the same
       // journal key to recover its ID and follow this identical GET path.
-      return this.allocatableResource(bound);
+      return this.allocatableResource(bound, undefined, true);
     }
     if (!id.success) throw failure("provider_response_invalid");
     const bound = await this.options.operations.bindResource(input, id.data.id);
-    return this.allocatableResource(bound, response.sandbox);
+    return this.allocatableResource(bound, response.sandbox, true);
   }
 
   /** Boat reports an organization-billed sandbox's wallet as `team`; null is
@@ -375,9 +388,15 @@ export class BoatWorkspaceProvider
    * configured wallet: create, create retry, resume and renewal. Anything else
    * is read back once. A refusal keeps the bound cleanup identity; inspection,
    * Stop and deletion never depend on the wallet. */
-  private async allocatableResource(record: CloudProviderOperationRecord, value?: unknown): Promise<CloudProviderResource> {
+  /** `unmonitored` gates a new allocation, which receives setup admission
+   * next: only a sandbox that reports provider process monitoring off is
+   * returned. A pre-policy body replay or an omitted setting is refused while
+   * the bound identity stays journaled for cleanup. Existing allocations'
+   * start and renewal do not use this gate. */
+  private async allocatableResource(record: CloudProviderOperationRecord, value?: unknown, unmonitored = false): Promise<CloudProviderResource> {
     let sandbox = value;
-    if (sandbox === undefined || this.billingScope(sandbox) !== "match")
+    const monitoring = () => (sandbox && typeof sandbox === "object" ? (sandbox as { monitoring?: unknown }).monitoring : undefined);
+    if (sandbox === undefined || this.billingScope(sandbox) !== "match" || (unmonitored && monitoring() !== false))
       sandbox = (await this.client.request(`/sandboxes/${record.resourceId}`)).sandbox;
     const scope = this.billingScope(sandbox);
     if (scope !== "match") {
@@ -385,7 +404,9 @@ export class BoatWorkspaceProvider
       throw failure(`provider_billing_scope_${scope}`);
     }
     if (!this.templateSourceMatches(sandbox)) throw failure("provider_template_identity_mismatch");
-    return this.resource(record, sandbox);
+    const resource = this.resource(record, sandbox);
+    if (unmonitored && monitoring() !== false) throw failure("provider_monitoring_unconfirmed");
+    return resource;
   }
 
   async inspect(resourceId: string): Promise<CloudProviderResource | null> {
@@ -411,8 +432,11 @@ export class BoatWorkspaceProvider
         throw failure("provider_response_invalid");
       if (parsed.data.status === "completed" && parsed.data.completedAt === null)
         throw failure("provider_response_invalid");
-      const stage = typeof parsed.data.stage === "string" && ["waiting_for_uploads","kept_for_newer_snapshots","waiting_for_restore","deleting"].includes(parsed.data.stage)
-        ? parsed.data.stage : parsed.data.status;
+      // Boat's current `removing` stage is the stored `deleting` stage. Other
+      // stages, including `retrying`, retain the coarse provider status.
+      const reported = parsed.data.stage === "removing" ? "deleting" : parsed.data.stage;
+      const stage = typeof reported === "string" && ["waiting_for_uploads","kept_for_newer_snapshots","waiting_for_restore","deleting"].includes(reported)
+        ? reported : parsed.data.status;
       await this.options.operations.recordDeletionProgress?.(resourceId,current.deletionOperationId,stage).catch(() => undefined);
       if (parsed.data.status === "completed") {
         if (parsed.data.completedAt === null)

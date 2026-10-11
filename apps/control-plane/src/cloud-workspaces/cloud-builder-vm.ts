@@ -21,7 +21,8 @@ export interface CloudBuilderVms {
   waitForBase(vm: BuilderVm): Promise<BaseStatus>;
   runFixed(vm: BuilderVm, command: BuilderFixedCommand, input?: Buffer, opts?: { timeoutMs?: number }):
     Promise<{ exitCode: number; stdout: string; diagnostic: ClosedDiagnostic | null }>;
-  stop(vm: BuilderVm): Promise<{ archived: true }>;
+  /** `requireSnapshot` makes a completed disk snapshot part of the result. */
+  stop(vm: BuilderVm, options?: { timeoutMs?: number; requireSnapshot?: boolean }): Promise<{ archived: true }>;
   delete(vm: BuilderVm): Promise<void>;
 }
 
@@ -39,6 +40,16 @@ const sandboxSchema = z.object({
   id: z.string().regex(BOAT_RESOURCE_ID_PATTERN),
   state: z.enum(["init", "provisioning", "provisioned", "cloning", "ready", "idle", "running", "archiving", "archived", "error", "cancelled"]),
   team: z.object({ id: z.string() }).nullish(),
+  snapshotAvailable: z.boolean().optional(),
+  lastSnapshotStatus: z.string().nullable().optional(),
+  monitoring: z.boolean().optional(),
+  // Parsed separately: a malformed stop never hides the sandbox state.
+  stop: z.unknown().optional(),
+});
+// Boat's stop operation. Its free-text failure detail is never retained.
+const stopSchema = z.object({
+  id: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+  status: z.enum(["pending", "failing", "completed", "superseded"]),
 });
 const deletionSchema = z.object({
   id: z.string().regex(/^bdop_[a-f0-9]{32}$/), kind: z.literal("sandbox"),
@@ -51,11 +62,20 @@ const CREATE_RETRY_WINDOW_MS = 23 * 60 * 60_000;
 
 export class BuilderVmError extends Error {
   constructor(readonly check: "input_schema" | "source_unavailable" | "wallet_mismatch" | "provider_response" |
-    "provider_unavailable" | "builder_stopped" | "timeout" | "command_invalid" | "command_unconfirmed" | "cleanup_unconfirmed") {
+    "provider_unavailable" | "builder_stopped" | "timeout" | "command_invalid" | "command_unconfirmed" | "cleanup_unconfirmed" |
+    "stop_unconfirmed" | "stop_snapshot_failed" | "monitoring_unconfirmed") {
     super(`Builder VM ${check}`);
   }
 }
 function fail(check: BuilderVmError["check"]): never { throw new BuilderVmError(check); }
+/** The action reply and its sandbox may both report the stop; they must agree. */
+function stopOperation(...values: unknown[]): z.infer<typeof stopSchema> | null {
+  const reported = values.filter(value => value !== undefined && value !== null);
+  if (!reported.length) return null;
+  const parsed = reported.map(value => stopSchema.safeParse(value));
+  if (parsed.some(value => !value.success) || new Set(parsed.map(value => value.data!.id)).size !== 1) fail("stop_unconfirmed");
+  return parsed[0]!.data!;
+}
 const vmFor = (row: BuilderVmOperation): BuilderVm => ({ sandboxId: row.sandbox_id!, purpose: row.purpose, operationKey: row.operation_key });
 
 export function builderVmBaseSnapshot(imageRef: string) {
@@ -82,7 +102,10 @@ export async function prepareBuilderVmOperation(operations: BuilderVmOperationSt
   return operations.prepare(input, digest, {
     path: input.source.kind === "base" ? "/sandboxes" : `/sandboxes/${source}/fork`,
     body: { ...(input.source.kind === "base" ? { from: source } : {}), name: input.name,
-      type: "default", ttlSeconds: input.ttlSeconds, noEnv: true, env: {}, snapshots: input.purpose === "computer-build" },
+      type: "default", ttlSeconds: input.ttlSeconds, noEnv: true, env: {}, snapshots: input.purpose === "computer-build",
+      // Boat's process tracer would keep builder pipe and terminal output.
+      // Journals created before this field replay their stored request.
+      monitoring: false },
   }, tx);
 }
 
@@ -166,6 +189,10 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
     for (;;) {
       const sandbox = await this.inspect(vm.sandboxId, deadline);
       if (sandbox.team?.id.toLowerCase() !== this.options.billingOrg.toLowerCase()) fail("wallet_mismatch");
+      // Builders receive runtime artifacts and repository credentials next.
+      // A replayed pre-policy request or an omitted setting stays bound for
+      // cleanup but is never made ready.
+      if (sandbox.monitoring !== false) fail("monitoring_unconfirmed");
       if (["ready", "idle", "running"].includes(sandbox.state)) break;
       if (["error", "cancelled", "archived", "archiving"].includes(sandbox.state)) fail("builder_stopped");
       await this.pause(deadline);
@@ -252,23 +279,63 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
     } catch { return fail("command_unconfirmed"); }
   }
 
-  async stop(vm: BuilderVm): Promise<{ archived: true }> {
+  async stop(vm: BuilderVm, options: { timeoutMs?: number; requireSnapshot?: boolean } = {}): Promise<{ archived: true }> {
     const row = await this.owned(vm, false);
     if (row.state === "deleted") builderOperationConflict();
     // Cleanup may stop compute while deletion is pending. Keep its monotonic
     // journal state and deletion identity; this does not make the VM usable.
     const cleanupOnly = row.state === "deleting";
-    const deadline = this.now() + this.lifecycleTimeoutMs;
-    let sandbox = await this.inspect(vm.sandboxId, deadline);
+    const timeoutMs = options.timeoutMs ?? this.lifecycleTimeoutMs;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 1_800_000) fail("input_schema");
+    const deadline = this.now() + timeoutMs, capture = options.requireSnapshot === true;
+    // Each read is bounded by what remains of the caller's absolute deadline.
+    const read = (path: string) => this.retry(() => this.options.client.request(path,
+      { signal: AbortSignal.timeout(Math.max(1, deadline - this.now())) }), deadline);
+    let sandbox = await this.inspect(vm.sandboxId, deadline, read);
+    // A capture needs the stop this call issued. An archive it did not issue
+    // (an earlier stop or auto-stop) proves nothing about the sanitized disk.
+    if (capture && sandbox.state === "archived") fail("stop_unconfirmed");
     if (sandbox.state !== "archived") {
       if (!cleanupOnly) await this.options.operations.state(vm.operationKey, "stopping");
-      if (sandbox.state !== "archiving") await this.retry(() => this.options.client.request(`/sandboxes/${vm.sandboxId}/stop`, { method: "POST" }), deadline);
-      while (sandbox.state !== "archived") {
-        if (["error", "cancelled"].includes(sandbox.state)) fail("builder_stopped");
-        await this.pause(deadline);
-        sandbox = await this.inspect(vm.sandboxId, deadline);
+      // A stop saves the disk first and is an operation: pin the one this call
+      // issued or joined. Boat retries a failing save itself, so it is awaited
+      // within the bound; only a resume supersedes it. Never force a stop: that
+      // keeps an older snapshot and discards everything written since.
+      let stop = sandbox.state === "archiving" ? stopOperation(sandbox.stop) : null;
+      if (sandbox.state !== "archiving") {
+        const reply = await this.retry(() => this.options.client.request(`/sandboxes/${vm.sandboxId}/stop`, {
+          method: "POST", signal: AbortSignal.timeout(Math.max(1, deadline - this.now())),
+        }), deadline);
+        stop = stopOperation(reply.stop, (reply.sandbox as { stop?: unknown } | null | undefined)?.stop);
+        // A reply without its stop is recovered from the sandbox, once.
+        if (!stop) { sandbox = await this.inspect(vm.sandboxId, deadline, read); stop = stopOperation(sandbox.stop); }
+      }
+      if (capture && !stop) fail("stop_unconfirmed");
+      for (;;) {
+        if (stop?.status === "superseded" || ["error", "cancelled"].includes(sandbox.state)) fail("builder_stopped");
+        // Cleanup needs only stopped compute; a capture needs its own stop completed.
+        if (sandbox.state === "archived" && (!capture || stop?.status === "completed")) break;
+        const failing = stop?.status === "failing";
+        try { await this.pause(deadline); }
+        catch (error) { if (failing) fail("stop_snapshot_failed"); throw error; }
+        if (stop) {
+          const id = stop.id;
+          stop = stopOperation((await read(`/sandboxes/${vm.sandboxId}/stops/${id}`)).stop);
+          if (stop?.id !== id) fail("stop_unconfirmed");
+        }
+        sandbox = await this.inspect(vm.sandboxId, deadline, read);
       }
     }
+    // A template is only as good as the disk snapshot its stop saved; forks
+    // require the same completed snapshot from their source.
+    while (capture && (sandbox.snapshotAvailable !== true || sandbox.lastSnapshotStatus !== "completed")) {
+      if (!["queued", "in_progress"].includes(sandbox.lastSnapshotStatus ?? "")) fail("stop_snapshot_failed");
+      try { await this.pause(deadline); } catch { fail("stop_snapshot_failed"); }
+      sandbox = await this.inspect(vm.sandboxId, deadline, read);
+      if (sandbox.state !== "archived") fail("builder_stopped");
+    }
+    // A late success must never publish a capture past the caller's deadline.
+    if (this.now() >= deadline) fail("timeout");
     if (!cleanupOnly) await this.options.operations.state(vm.operationKey, "archived");
     return { archived: true };
   }
@@ -292,6 +359,9 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
         if (!(error instanceof CloudProviderError && error.code === "provider_not_found")) throw error;
       }
     }
+    // Absence alone is not deletion evidence: without an accepted receipt the
+    // journal stays deleting and cleanup stays unconfirmed.
+    if (!operationId) fail("cleanup_unconfirmed");
     for (;;) {
       if (operationId) {
         const reply = await this.retry(() => this.options.client.request(`/deletion-operations/${operationId}`), deadline);
@@ -299,6 +369,7 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
         if (!parsed.success || parsed.data.id !== operationId || parsed.data.targetId !== vm.sandboxId) fail("cleanup_unconfirmed");
         // These documented blocked stages retain storage only. Compute release
         // still requires the following sandbox 404; this does not prove erasure.
+        // Boat's generic `retrying` names no phase, so it never qualifies.
         const storagePending = parsed.data.status === "blocked" &&
           ["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"].includes(parsed.data.stage ?? "");
         if (parsed.data.status !== "completed" && !storagePending) { await this.pause(deadline); continue; }
@@ -320,8 +391,9 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
         (usable && ["deleting", "deleted"].includes(row.state))) builderOperationConflict();
     return row;
   }
-  private async inspect(id: string, deadline: number) {
-    const reply = await this.retry(() => this.options.client.request(`/sandboxes/${id}`), deadline);
+  private async inspect(id: string, deadline: number,
+    read: (path: string) => Promise<Record<string, unknown>> = path => this.retry(() => this.options.client.request(path), deadline)) {
+    const reply = await read(`/sandboxes/${id}`);
     const parsed = sandboxSchema.safeParse(reply.sandbox);
     if (!parsed.success || parsed.data.id !== id) fail("provider_response");
     return parsed.data;

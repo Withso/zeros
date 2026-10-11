@@ -1,4 +1,4 @@
-import { BoatBootPendingError } from "./boat-client.js";
+import { BoatApiClient, BoatBootPendingError } from "./boat-client.js";
 import { CloudProviderError } from "./provider.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
@@ -111,6 +111,47 @@ describe("Boat bootstrap transport", () => {
     return { ...f, input, prepared };
   }
   afterEach(() => { vi.useRealTimers(); });
+
+  it.each([
+    { status: 409, code: "sandbox_starting", message: "sandbox_starting", details: undefined },
+    { status: 502, code: "sandbox_direct_failed", message: "sandbox_restoring",
+      details: { retryable: true, message: "sandbox_restoring" } },
+  ])("waits for the documented Boat $code readiness response before sending setup once", async failure => {
+    vi.useFakeTimers();
+    const f = v4Fixture();
+    const ordinaryReply = fixture().request.getMockImplementation()!;
+    let probes = 0;
+    const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+      const resourcePath = new URL(String(url)).pathname.replace("/api/v1", "");
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      if (body?.command?.includes("bootstrap.py status")) {
+        if (++probes === 1) return Response.json({
+          ok: false, type: "sandbox.error", status: failure.status,
+          code: failure.code, message: failure.message,
+          error: { code: failure.code, status: failure.status, message: failure.message,
+            ...(failure.details ? { details: failure.details } : {}) },
+        }, { status: failure.status });
+        return Response.json(f.prepared);
+      }
+      return Response.json(await ordinaryReply(resourcePath, { body }));
+    });
+    const runner = new BoatSetupCommandRunner({
+      client: new BoatApiClient({ apiKey: "boat_test-only-credential", timeoutMs: 1000, fetch: fetcher }),
+      openChannel: f.openChannel, assertOwned: f.assertOwned,
+      maxOutputBytes: 1024, maxTimeoutSeconds: 600,
+    });
+    const outcome = runner.execute(f.input, new AbortController().signal)
+      .then(value => ({ exitCode: value.exitCode }), error => ({ code: error.code, retryable: error.retryable }));
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(probes).toBe(1);
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await outcome).toEqual({ exitCode: 0 });
+    expect(probes).toBe(2);
+    expect(f.channel.execute).toHaveBeenCalledOnce();
+    expect(f.channel.dispose).toHaveBeenCalledOnce();
+    expect(JSON.stringify(fetcher.mock.calls).includes(f.input.env.ZEROS_CLOUD_WORKSPACE_SETUP_B64)).toBe(false);
+  });
 
   it("holds one claim and polls transient boot failures every two seconds before sending admission once", async () => {
     vi.useFakeTimers();

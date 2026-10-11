@@ -256,20 +256,18 @@ export function templateSetupForkBody(material) {
       resource.storageMiB > 0,
     "source_invalid",
   );
-  return { type, ttlSeconds: 1800, noEnv: true, env: {} };
+  // Boat's process tracer would keep the setup and agent pipes of the fork.
+  return { type, ttlSeconds: 1800, noEnv: true, env: {}, monitoring: false };
 }
 
 export async function recoverFork(journal, { request, save }) {
+  // A journal written before the monitoring policy replays its exact body.
+  const canonical = (monitoring) => JSON.stringify({ type: journal.forkBody?.type, ttlSeconds: 1800, noEnv: true, env: {},
+    ...(monitoring ? { monitoring: false } : {}) });
   requireCheck(
     journal.forkBody &&
       ["small", "default", "large"].includes(journal.forkBody.type) &&
-      JSON.stringify(journal.forkBody) ===
-        JSON.stringify({
-          type: journal.forkBody.type,
-          ttlSeconds: 1800,
-          noEnv: true,
-          env: {},
-        }) &&
+      [canonical(true), canonical(false)].includes(JSON.stringify(journal.forkBody)) &&
       Number.isFinite(Date.parse(journal.createdAt)) &&
       Date.now() - Date.parse(journal.createdAt) >= -60000 &&
       Date.now() - Date.parse(journal.createdAt) < 23 * 60 * 60_000,
@@ -300,6 +298,13 @@ export async function recoverFork(journal, { request, save }) {
       ),
     "child_invalid",
   );
+}
+
+/** Setup material reaches a fork only once Boat reports its process
+ * monitoring off. A pre-policy replay is refused; cleanup still owns it. */
+export async function requireUnmonitoredFork(journal, { request }) {
+  const { sandbox } = await request(`/sandboxes/${journal.childId}`);
+  requireCheck(sandbox?.id === journal.childId && sandbox.monitoring === false, "monitoring_unconfirmed");
 }
 
 export async function cleanupTemplateSetupFork(journal, dependencies) {
@@ -413,6 +418,7 @@ export async function runTemplateSetupRepro(journal, billingOrg, dependencies) {
     journal.createAttempted = true;
     save(journal);
     await recoverFork(journal, dependencies);
+    await requireUnmonitoredFork(journal, dependencies);
     journal.phase = "bootstrap";
     save(journal);
     await request(`/sandboxes/${journal.childId}`, {

@@ -204,6 +204,31 @@ Do not set public reliability or latency promises until measurements exist from
 representative regions, repositories, agents, stop/wake cycles, and long-lived
 connections.
 
+Boat's own monitoring is not part of this record. By default Boat's process
+tracer keeps what every sandbox process writes to a terminal, pipe or socket
+(72 hours) and the provider command history (90 days). Native agent IPC carries
+prompts and admitted provider material over pipes. Every new workspace,
+template fork and builder VM therefore requests `monitoring: false`, and is
+handed to setup or made ready only after Boat reports `monitoring: false` for
+it (a 202 fork is read back first). Boat then keeps no command history, process
+list or CPU/RAM samples for it, and its dashboard graphs and lost-sandbox causes
+are unavailable; live command output, lifecycle events and webhooks still work.
+A create journaled before this policy replays its original body under its
+existing key; that replay, or a sandbox that omits the setting, fails closed
+(`provider_monitoring_unconfirmed`, or builder `monitoring_unconfirmed`) with
+its identity kept for cleanup. Starting and renewing existing allocations is
+unchanged: a sandbox's setting is fixed at creation, so monitored allocations
+keep it until they are replaced. The template-setup, engine-connect and
+workspace-performance validation forks apply the same request and verification
+before any setup material. The retired release-worker producers create no new
+sandboxes; their journals serve cleanup only. The base-image kit requests
+`monitoring: false` for new builders (a replayed create keeps its original
+body), and its live check delivers the presigned runtime URL over SSH only to a
+sandbox that reports monitoring off. Its generic `builder run` executes operator
+scripts through Boat's command API, whose command text and output Boat retains
+unless monitoring is off; never pass secrets through it. Boat's account-level
+**Monitoring off** is not evidence for any existing or replayed allocation.
+
 ## Health alerts
 
 `/healthz` reports aggregate cloud health: `operationalState` is `healthy` or
@@ -254,8 +279,8 @@ target-bound approval, and change nothing until rerun unchanged with
 | `compute_platform_exposure` | Provider overrun was recorded as platform exposure in the last 24 hours. | Reconcile the provider meter against the ledger and review the affected credit period. |
 | `health_query_failed` | The aggregate health query itself failed. | Check database connectivity, pool saturation and whether a migration is pending. |
 
-Alpha can use the bounded, private [retired Boat deletion readiness exception](../deployment-environments.md#temporary-alpha-exception-for-retired-boat-deletion-receipts)
-while the provider resolves named retired allocations. It changes publication
+[Retired Boat deletions do not block release readiness](../deployment-environments.md#retired-boat-deletions-do-not-block-release-readiness)
+while Boat finishes erasing accepted receipts. That changes publication
 admission only: this health reason, operator alerts, reserved storage and
 deletion verification remain active. A sandbox lookup returning 404 is not a
 physical-deletion receipt.

@@ -73,6 +73,9 @@ export function builderFixture(operations: BuilderVmOperationStore = memoryBuild
     baseStatusReplies: [] as Array<{ success?: boolean; exitCode?: number; timedOut?: boolean; stdout?: string; hostState?: string }>,
     createRepliesLost: 0, createRefused: false, creates: 0, allocations: new Set<string>(), failChecks: [] as string[],
     sshOutput: null as string | null, sshExit: 0, stdoutTruncated: false,
+    // Boat stop operations; unset keeps the plain archive reply.
+    stopId: null as string | null, stopStatuses: [] as string[], stopReplyId: null as string | null,
+    stopBodies: [] as unknown[], snapshot: {} as Record<string, unknown>, snapshots: [] as Array<Record<string, unknown>>,
   };
   const operation = () => ({ id: `bdop_${"d".repeat(32)}`, kind: "sandbox", targetId: state.sandboxId,
     status: state.deletionStatus, stage: state.deletionStage });
@@ -101,7 +104,18 @@ export function builderFixture(operations: BuilderVmOperationStore = memoryBuild
       if (state.deletionReleasesCompute) state.deleted = true;
       return response({ operation: operation() });
     }
-    if (route.endsWith("/stop")) { state.states = ["archived"]; return response({}); }
+    if (route.endsWith("/stop")) {
+      state.stopBodies.push(init?.body === undefined ? null : JSON.parse(String(init.body)));
+      if (!state.stopId) { state.states = ["archived"]; return response({}); }
+      return response({ id: state.sandboxId, status: "archiving",
+        sandbox: { id: state.sandboxId, state: "archiving", stop: { id: state.stopId, status: state.stopStatuses[0] ?? "pending" } } });
+    }
+    if (route.startsWith(`/sandboxes/${state.sandboxId}/stops/`)) {
+      const status = state.stopStatuses.length > 1 ? state.stopStatuses.shift()! : state.stopStatuses[0];
+      if (status === "completed") state.states = ["archived"];
+      if (status === "superseded") state.states = ["running"];
+      return response({ id: state.sandboxId, stop: { id: state.stopReplyId ?? state.stopId, status, error: "private stop detail" } });
+    }
     if (route.endsWith("/commands")) {
       const command = JSON.parse(String(init?.body)).command as string;
       if (command.endsWith("bootstrap.py status")) {
@@ -116,7 +130,8 @@ export function builderFixture(operations: BuilderVmOperationStore = memoryBuild
     }
     if (state.deleted) return response({}, 404);
     const current = state.states.length > 1 ? state.states.shift()! : state.states[0];
-    return response({ sandbox: { id: state.sandboxId, state: current, team: { id: state.wallet }, ip: "208.67.222.222" } });
+    const snapshot = state.snapshots.shift() ?? state.snapshot;
+    return response({ sandbox: { id: state.sandboxId, state: current, team: { id: state.wallet }, ip: "208.67.222.222", monitoring: false, ...snapshot } });
   });
   const client = new BoatApiClient({ apiKey: "builder-test-api-key", billingOrg: BUILDER_WALLET, timeoutMs: 1000, fetch: fetcher });
   const channel = { publicKey, dispose: vi.fn(async () => {}),

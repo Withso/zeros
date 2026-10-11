@@ -4917,7 +4917,7 @@ export class ZerosEngine {
         const failed=settled.find(result=>result.status==="rejected");
         if(failed?.status==="rejected")throw failed.reason;
       }catch(error){retainFence=true;this.handleCloudRuntimeAuthorityLoss();throw error;}
-      await deleteCloudNativeHistory({root:CLOUD_NATIVE_HISTORY_ROOT,conversationId:id});
+      await deleteCloudNativeHistory({root:CLOUD_NATIVE_HISTORY_ROOT,conversationId:id,dataRoot:zerosDataDir()});
       return await remove();
     }finally{if(!retainFence&&!this.cloudRuntimeAuthorityStopping)this.cloudConversationDeletions.delete(id);}
   }

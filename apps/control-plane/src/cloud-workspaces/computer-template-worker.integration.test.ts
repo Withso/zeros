@@ -23,6 +23,7 @@ import type {
 } from "./computer-template-boat.js";
 import { seedComputerTemplateRuntime } from "./computer-template-test-fixtures.js";
 import { builderFixture, memoryBuilderOperations } from "./cloud-builder-vm-test-fixtures.js";
+import { BuilderVmError } from "./cloud-builder-vm.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const runtime: ComputerTemplateRuntime = {
@@ -315,6 +316,11 @@ database("Cloud Computer template worker", () => {
       protected_contract_digest: Buffer.from(tcb, "hex"),
     });
     expect(vm.stop).toHaveBeenCalledTimes(1);
+    // Capture waits within the build deadline and needs a completed snapshot.
+    const [, stopOptions] = vi.mocked(vm.stop).mock.calls[0]!;
+    expect(stopOptions).toMatchObject({ requireSnapshot: true });
+    expect(stopOptions!.timeoutMs).toBeGreaterThan(180_000);
+    expect(stopOptions!.timeoutMs).toBeLessThanOrEqual(600_000);
     expect(remove).not.toHaveBeenCalled();
     expect(validateRuntime).toHaveBeenCalled();
     expect(
@@ -385,6 +391,17 @@ database("Cloud Computer template worker", () => {
       );
     },
   );
+
+  it.each([
+    ["stop_snapshot_failed", "template_capture_failed"],
+    ["timeout", "template_stop_failed"],
+  ] as const)("reports a %s template stop as %s and cleans up", async (check, error) => {
+    vi.mocked(vm.stop).mockRejectedValueOnce(new BuilderVmError(check));
+    await request();
+    await worker.tick();
+    expect(await read()).toMatchObject({ active: null, latestBuild: { state: "failed", errorCode: error } });
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
 
   it.each([
     ["script failure", "install_failed"],

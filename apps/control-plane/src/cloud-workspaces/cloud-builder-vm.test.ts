@@ -4,6 +4,44 @@ import { BuilderVmError } from "./cloud-builder-vm.js";
 import { builderFixture, builderIntent, BUILDER_SANDBOX, BUILDER_WALLET, diagnostic, encodeInstaller, installerInput } from "./cloud-builder-vm-test-fixtures.js";
 
 describe("short-lived Boat builder VMs", () => {
+  it("does not close a builder deletion on two 404s without a deletion receipt", async () => {
+    const f = builderFixture();
+    const vm = await f.vms.create(builderIntent);
+    f.fetcher.mockResolvedValueOnce(Response.json({ ok: false }, { status: 404 }))
+      .mockResolvedValueOnce(Response.json({ ok: false }, { status: 404 }));
+    await expect(f.vms.delete(vm)).rejects.toMatchObject({ check: "cleanup_unconfirmed" });
+    const row = await f.operations.find(vm.operationKey);
+    expect(row?.state).toBe("deleting");
+    expect(row?.deletion_operation_id).toBeNull();
+  });
+
+  it.each([true, undefined])("refuses builder setup admission with monitoring=%s and permits cleanup", async monitoring => {
+    const f = builderFixture();
+    const fetch = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (...args) => {
+      const response = await fetch(...args);
+      const body = await response.json() as { sandbox?: Record<string, unknown> };
+      if (body.sandbox) body.sandbox.monitoring = monitoring;
+      return Response.json(body, { status: response.status });
+    });
+    await expect(f.vms.create(builderIntent)).rejects.toBeInstanceOf(BuilderVmError);
+    expect((await f.operations.find(builderIntent.operationKey))?.sandbox_id).toBe(BUILDER_SANDBOX);
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    await f.vms.delete({ sandboxId: BUILDER_SANDBOX, purpose: builderIntent.purpose, operationKey: builderIntent.operationKey });
+    expect(f.state.deleted).toBe(true);
+  });
+
+  it.each([
+    ["runtime-qualification", "base"], ["runtime-qualification", "template"],
+    ["computer-build", "base"], ["computer-build", "template"],
+  ] as const)("disables process monitoring for a new %s VM from %s", async (purpose, source) => {
+    const f = builderFixture();
+    await f.vms.create({ ...builderIntent, purpose, source: source === "base" ? builderIntent.source :
+      { kind: "template", templateId: "zeros-v2-test-template" } });
+    const request = f.fetcher.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(JSON.parse(String(request?.[1]?.body)).monitoring).toBe(false);
+  });
+
   it.each(["ready", "idle", "running"])("journals before creating, verifies the wallet and accepts %s", async ready => {
     const f = builderFixture();
     f.state.states = ["provisioning", ready];
@@ -13,7 +51,7 @@ describe("short-lived Boat builder VMs", () => {
     const request = f.fetcher.mock.calls[0][1]!;
     expect(new Headers(request.headers).get("x-boat-org")).toBe(BUILDER_WALLET);
     expect(JSON.parse(String(request.body))).toEqual({ from: "zeros-v2-test-base", name: builderIntent.name,
-      type: "default", ttlSeconds: 1800, noEnv: true, env: {}, snapshots: false });
+      type: "default", ttlSeconds: 1800, noEnv: true, env: {}, snapshots: false, monitoring: false });
     await expect(f.vms.create(builderIntent)).resolves.toEqual(vm);
     expect(f.state.creates).toBe(1);
     await expect(f.vms.create({ ...builderIntent, ttlSeconds: 600 })).rejects.toMatchObject({ code: "provider_operation_conflict" });
@@ -101,11 +139,78 @@ describe("short-lived Boat builder VMs", () => {
     expect(f.state.deleteRequests).toBe(1);
   });
   it.each([["blocked", "unknown_stage"], ["blocked", null], ["pending", "waiting_for_uploads"],
-    ["processing", "waiting_for_uploads"]])("does not confirm %s / %s even when the sandbox is absent", async (status, stage) => {
+    ["processing", "waiting_for_uploads"], ["blocked", "retrying"], ["processing", "retrying"], ["processing", "removing"]])("does not confirm %s / %s even when the sandbox is absent", async (status, stage) => {
     const f = builderFixture(); const vm = await f.vms.create(builderIntent);
     f.state.deletionStatus = status!; f.state.deletionStage = stage; f.state.deletionReleasesCompute = true;
     await expect(f.vms.delete(vm)).rejects.toMatchObject({ check: "timeout" });
     expect((await f.operations.find(vm.operationKey))?.state).toBe("deleting");
+  });
+  describe("Boat stop operations", () => {
+    const completedSnapshot = { snapshotAvailable: true, lastSnapshotStatus: "completed" };
+    async function stopping(statuses: string[], states = ["running", "archiving"]) {
+      const f = builderFixture(); const vm = await f.vms.create({ ...builderIntent, purpose: "computer-build" });
+      Object.assign(f.state, { stopId: "stop_3f9a1c2e7b4d5a60", stopStatuses: statuses, states, snapshot: completedSnapshot });
+      return { f, vm };
+    }
+    it("waits past the default lifecycle bound for a pending archive within the caller's bound", async () => {
+      const { f, vm } = await stopping([...Array(6).fill("pending"), "completed"]);
+      await expect(f.vms.stop(vm, { timeoutMs: 20_000, requireSnapshot: true })).resolves.toEqual({ archived: true });
+      expect(f.waits.reduce((total, ms) => total + ms, 0)).toBeGreaterThan(3000);
+      expect((await f.operations.find(vm.operationKey))?.state).toBe("archived");
+      expect(f.state.stopBodies).toEqual([null]);
+    });
+    it("reports a save Boat keeps refusing as a snapshot failure at the bound, never forcing it", async () => {
+      const { f, vm } = await stopping(["failing"], ["running"]);
+      await expect(f.vms.stop(vm, { timeoutMs: 5000, requireSnapshot: true })).rejects.toMatchObject({ check: "stop_snapshot_failed" });
+      expect(f.state.stopBodies).toEqual([null]);
+      expect(JSON.stringify(f.fetcher.mock.calls)).not.toContain("force");
+    });
+    it("recovers when Boat's own retry of a failing save succeeds", async () => {
+      const { f, vm } = await stopping(["failing", "failing", "pending", "completed"], ["running", "running", "archiving"]);
+      await expect(f.vms.stop(vm, { timeoutMs: 20_000, requireSnapshot: true })).resolves.toEqual({ archived: true });
+    });
+    it("fails when a resume supersedes the stop", async () => {
+      const { f, vm } = await stopping(["pending", "superseded"]);
+      await expect(f.vms.stop(vm, { timeoutMs: 20_000 })).rejects.toMatchObject({ check: "builder_stopped" });
+    });
+    it("refuses a stop read whose identity differs from the one issued", async () => {
+      const { f, vm } = await stopping(["pending"]);
+      f.state.stopReplyId = "stop_other";
+      await expect(f.vms.stop(vm, { timeoutMs: 20_000 })).rejects.toMatchObject({ check: "stop_unconfirmed" });
+    });
+    it("joins an archive already in progress without issuing another stop", async () => {
+      const { f, vm } = await stopping(["pending", "completed"], ["archiving"]);
+      f.fetcher.mockImplementationOnce(async () => new Response(JSON.stringify({ ok: true, sandbox: { id: BUILDER_SANDBOX,
+        state: "archiving", team: { id: BUILDER_WALLET }, stop: { id: "stop_3f9a1c2e7b4d5a60", status: "pending" } } }), { status: 200 }));
+      await expect(f.vms.stop(vm, { timeoutMs: 20_000, requireSnapshot: true })).resolves.toEqual({ archived: true });
+      expect(f.state.stopBodies).toEqual([]);
+    });
+    it.each([
+      [{ snapshotAvailable: true, lastSnapshotStatus: "failed" }],
+      [{ snapshotAvailable: false, lastSnapshotStatus: "completed" }],
+      [{}],
+    ])("refuses template capture without a completed snapshot: %j", async snapshot => {
+      const { f, vm } = await stopping(["completed"]);
+      f.state.snapshot = snapshot;
+      await expect(f.vms.stop(vm, { timeoutMs: 20_000, requireSnapshot: true })).rejects.toMatchObject({ check: "stop_snapshot_failed" });
+    });
+    it("waits for a snapshot that is still uploading after the archive", async () => {
+      const { f, vm } = await stopping(["completed"]);
+      const uploading = { snapshotAvailable: true, lastSnapshotStatus: "in_progress" };
+      f.state.snapshots = [uploading, uploading, uploading, uploading];
+      await expect(f.vms.stop(vm, { timeoutMs: 20_000, requireSnapshot: true })).resolves.toEqual({ archived: true });
+      expect(f.state.snapshots).toEqual([]);
+    });
+    it("keeps cleanup stops independent of snapshots", async () => {
+      const { f, vm } = await stopping(["completed"]);
+      f.state.snapshot = {};
+      await expect(f.vms.stop(vm)).resolves.toEqual({ archived: true });
+    });
+    it("rejects an unbounded stop timeout", async () => {
+      const { f, vm } = await stopping(["completed"]);
+      for (const timeoutMs of [0, 1_800_001, 1.5])
+        await expect(f.vms.stop(vm, { timeoutMs })).rejects.toMatchObject({ check: "input_schema" });
+    });
   });
   it("forks an explicitly resolved template with no inherited environment and stops to archived", async () => {
     const f = builderFixture();

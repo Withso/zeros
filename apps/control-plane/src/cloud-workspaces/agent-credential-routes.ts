@@ -132,6 +132,9 @@ export function createCloudAgentCredentialRoutes(service:DatabaseCloudAgentCrede
     app.get("/v1/cloud-workspaces/:workspace/agent-credentials",async c=>{
       c.header("Cache-Control","no-store");return c.json(await service.forWorkspace(c.get("user").id,c.req.param("workspace")));
     });
+    app.get("/v1/cloud-workspaces/:workspace/agent-availability",async c=>{
+      c.header("Cache-Control","no-store");return c.json(await service.bootAvailability(c.get("user").id,c.req.param("workspace")));
+    });
   }
   const organizationBase="/v1/organizations/:organization/agent-connections";
   for(const path of [organizationBase,`${organizationBase}/*`,"/v1/cloud-workspaces/:workspace/agent-credentials/prepare"]){

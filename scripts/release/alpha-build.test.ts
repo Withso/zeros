@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ALPHA_BUILD_WAIT_MS, createAlphaBuildMetadata, validateAlphaBuildMetadata, validateAlphaProducerProof, waitForAlphaBuild } from "./alpha-build";
+import { ALPHA_BUILD_WAIT_MS, ALPHA_PROOF_RECHECK_MS, createAlphaBuildMetadata, validateAlphaBuildMetadata, validateAlphaProducerProof, waitForAlphaBuild } from "./alpha-build";
 
 const sourceSha = "b".repeat(40), repository = "example/zeros";
 const env: NodeJS.ProcessEnv = { RELEASE_CHANNEL: "alpha", RELEASE_SHA: sourceSha, RELEASE_BRANCH: "main", GITHUB_SHA: sourceSha,
@@ -27,6 +27,116 @@ function fixture() {
 }
 
 describe("same-run Alpha producer readiness", () => {
+  it("shares one metadata recheck deadline across recurring environment waits", async () => {
+    const test = fixture();
+    const proof = await waitForAlphaBuild("desktop", env, test.read);
+    const metadata = createAlphaBuildMetadata({ ...env, GITHUB_JOB: "build" });
+    let elapsed = 0, jobReads = 0, secondWait = false;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => elapsed);
+    test.state.parent.status = "waiting";
+    const sleep = async (ms: number) => {
+      elapsed += ms;
+      if (elapsed >= (secondWait ? 1_100_000 : 580_000)) test.state.parent.status = "in_progress";
+    };
+    const read = async (route: string) => {
+      const reply = await test.read(route);
+      if (route.startsWith("/actions/runs/300/attempts/2/jobs?") && ++jobReads === 2) {
+        secondWait = true;
+        test.state.parent.status = "waiting";
+      }
+      return reply;
+    };
+    try {
+      await expect(validateAlphaBuildMetadata(metadata, proof, env, read, { sleep })).rejects.toThrow(/timed out/);
+      expect(secondWait).toBe(true);
+      expect(elapsed).toBeLessThanOrEqual(ALPHA_PROOF_RECHECK_MS);
+    } finally { clock.mockRestore(); }
+  });
+  it("refuses signed metadata if its final successful observation exceeds the recheck deadline", async () => {
+    const test = fixture();
+    const proof = await waitForAlphaBuild("desktop", env, test.read);
+    const metadata = createAlphaBuildMetadata({ ...env, GITHUB_JOB: "build" });
+    let elapsed = 0, jobReads = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => elapsed);
+    const read = async (route: string) => {
+      const reply = await test.read(route);
+      if (route.startsWith("/actions/runs/300/attempts/2/jobs?") && ++jobReads === 2)
+        elapsed = ALPHA_PROOF_RECHECK_MS + 1;
+      return reply;
+    };
+    try {
+      await expect(validateAlphaBuildMetadata(metadata, proof, env, read)).rejects.toThrow(/timed out/);
+    } finally { clock.mockRestore(); }
+  });
+  it("rechecks artifact identity after the final metadata boundary waits", async () => {
+    const test = fixture();
+    const proof = await waitForAlphaBuild("desktop", env, test.read);
+    const metadata = createAlphaBuildMetadata({ ...env, GITHUB_JOB: "build" });
+    let jobReads = 0;
+    const read = async (route: string) => {
+      const reply = await test.read(route);
+      if (route.startsWith("/actions/runs/300/attempts/2/jobs?") && ++jobReads === 2)
+        test.state.parent.status = "waiting";
+      return reply;
+    };
+    const sleep = async () => {
+      test.state.artifact.id = 501;
+      test.state.parent.status = "in_progress";
+    };
+    await expect(validateAlphaBuildMetadata(metadata, proof, env, read, { sleep })).rejects.toThrow(/artifact changed/);
+  });
+  it("waits when the parent enters approval waiting during the final signed-metadata read", async () => {
+    vi.useFakeTimers();
+    try {
+      const test = fixture();
+      const proof = await waitForAlphaBuild("desktop", env, test.read);
+      const metadata = createAlphaBuildMetadata({ ...env, GITHUB_JOB: "build" });
+      let jobReads = 0;
+      const read = async (route: string) => {
+        const reply = await test.read(route);
+        if (route.startsWith("/actions/runs/300/attempts/2/jobs?") && ++jobReads === 2)
+          test.state.parent.status = "waiting";
+        if (route === "/actions/runs/300" && test.state.parent.status === "waiting") {
+          const observed = { ...reply };
+          test.state.parent.status = "in_progress";
+          return observed;
+        }
+        return reply;
+      };
+      const result = validateAlphaBuildMetadata(metadata, proof, env, read)
+        .then(value => ({ value }), error => ({ error }));
+      await vi.runAllTimersAsync();
+      expect(await result).toEqual({ value: metadata });
+    } finally { vi.useRealTimers(); }
+  });
+  it("rechecks a downloaded proof through an environment approval wait, within its bound", async () => {
+    const test = fixture();
+    const proof = await waitForAlphaBuild("desktop", env, test.read, { sleep: vi.fn(async () => {}), attempts: 1 });
+    test.state.parent.status = "waiting";
+    const sleep = vi.fn(async () => { test.state.parent.status = "in_progress"; });
+    await expect(validateAlphaProducerProof(proof, env, test.read, { sleep })).resolves.toEqual(proof);
+    expect(sleep).toHaveBeenCalledOnce();
+    test.state.parent.status = "waiting";
+    await expect(validateAlphaProducerProof(proof, env, test.read, { sleep: vi.fn(async () => {}), attempts: 3 }))
+      .rejects.toThrow(/timed out/);
+  });
+  it.each([["completed", "success"], ["completed", "cancelled"], ["queued", null]])(
+    "still refuses a %s/%s parent at once instead of waiting", async (status, conclusion) => {
+      const test = fixture();
+      Object.assign(test.state.parent, { status, conclusion });
+      const sleep = vi.fn(async () => {});
+      await expect(waitForAlphaBuild("desktop", env, test.read, { sleep, attempts: 3 })).rejects.toThrow(/parent identity or current attempt/);
+      expect(sleep).not.toHaveBeenCalled();
+    },
+  );
+  it("waits for the authenticated parent to leave an environment approval wait", async () => {
+    const test = fixture();
+    test.state.parent.status = "waiting";
+    const sleep = vi.fn(async () => { test.state.parent.status = "in_progress"; });
+    await expect(waitForAlphaBuild("desktop", env, test.read, { sleep, attempts: 2 }))
+      .resolves.toMatchObject({ producerId: 400 });
+    expect(sleep).toHaveBeenCalledOnce();
+  });
   it.each(["desktop", "runtime"] as const)("refuses replacement or rerun of the %s producer between wait and publication", async kind => {
     for (const boundary of ["artifact", "parent attempt", "producer", "producing attempt"]) {
       const test = fixture();

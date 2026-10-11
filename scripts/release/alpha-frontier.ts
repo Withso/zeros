@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CHANNELS, PromotionError, ReleaseIdentity, ReleaseIdentityBase, SHA, checkAlphaReadinessException, requireCheck } from "./contracts";
+import { CHANNELS, PromotionError, ReleaseIdentity, ReleaseIdentityBase, SHA, checkDeferredReadiness, requireCheck } from "./contracts";
 import { buildReleaseLedger, previousReleaseLedger, ReleaseLedger } from "./release-ledger";
 
 type Read = (route: string) => Promise<any>;
@@ -80,7 +80,7 @@ function requireDestination(condition: unknown, reason: string): asserts conditi
 const AlphaFrontierIdentity = ReleaseIdentityBase.extend({ ready: z.boolean(),
   cloud: ReleaseIdentityBase.shape.cloud.extend({ ready: z.boolean(),
     state: z.enum(["healthy", "disabled", "unready", "unknown"]) }),
-}).superRefine(checkAlphaReadinessException);
+}).superRefine(checkDeferredReadiness);
 
 export async function alphaFrontierIdentity(fetcher: typeof fetch = fetch) {
   const controller = new AbortController();

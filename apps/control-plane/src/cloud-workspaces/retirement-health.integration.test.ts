@@ -46,6 +46,24 @@ suite("retirement progress health",()=>{
     await pool.query("UPDATE cloud_workspace_provider_bindings SET deletion_verified_at=now(),observed_state='deleted' WHERE workspace_id=$1",[f.workspaceId]);
     expect((await withSystemTx(pool,tx=>readPendingDeletionCapacity(tx,f.organizationId))).pendingDeletion).toEqual([]);
   });
+  it("advances progress once when Boat starts removing data, never on a later retrying fallback",async()=>{
+    const resource=(await pool.query("SELECT provider_resource_id FROM cloud_workspace_provider_bindings WHERE workspace_id=$1",[f.workspaceId])).rows[0].provider_resource_id;
+    await pool.query(`INSERT INTO cloud_workspace_provider_operations(provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,resource_id,deletion_requested_at,deletion_operation_id)
+      VALUES('boat','synthetic',$1,1,$2,'synthetic-removing',repeat('c',64),$3,now()-interval '2 hours','receipt')`,[f.workspaceId,f.organizationId,resource]);
+    const store=new DatabaseCloudProviderOperationStore(pool,"boat","synthetic");
+    const read=async()=>(await pool.query("SELECT deletion_stage,deletion_progress_at FROM cloud_workspace_provider_operations WHERE workspace_id=$1",[f.workspaceId])).rows[0];
+    await store.recordDeletionProgress(resource,"receipt","processing");
+    const processing=(await read()).deletion_progress_at;
+    // The Boat provider records its `removing` stage as the stored `deleting`.
+    await store.recordDeletionProgress(resource,"receipt","deleting");
+    const removing=await read();
+    expect(removing.deletion_stage).toBe("deleting");
+    expect(removing.deletion_progress_at.getTime()).toBeGreaterThan(processing.getTime());
+    // `retrying` falls back to the coarse blocked status: same or lower rank.
+    await store.recordDeletionProgress(resource,"receipt","blocked");
+    await store.recordDeletionProgress(resource,"receipt","deleting");
+    expect((await read()).deletion_progress_at).toEqual(removing.deletion_progress_at);
+  });
   const waitingDeletion=async(stage:string,requestedHoursAgo:number)=>{
     // Boat retains a deleted sandbox while it finishes snapshot uploads or
     // serves newer restores; those receipts can complete many hours later.

@@ -13,7 +13,7 @@ export type BuilderVmIntent = {
 };
 export type BuilderProviderRequest = { path: string; body: {
   from?: string; name: string; type: "default"; ttlSeconds: number;
-  noEnv: true; env: Record<string, never>; snapshots: boolean;
+  noEnv: true; env: Record<string, never>; snapshots: boolean; monitoring?: false;
 } };
 export type BuilderVmOperation = {
   operation_key: string;

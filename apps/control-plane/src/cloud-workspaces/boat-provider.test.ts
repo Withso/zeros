@@ -31,6 +31,7 @@ function sandbox(state = "ready", extra: Record<string, unknown> = {}) {
       type: "default",
       snapshotAvailable: true,
       team: { id: WALLET, name: "Zeros" },
+      monitoring: false,
       ...extra,
     },
   };
@@ -76,7 +77,7 @@ function fixture(extraOptions: { billingOrg?: string } = {}) {
   const operations: CloudProviderOperationStore = {
     prepareCreate: vi.fn(async (input) => {
       if (stored && stored.requestSha256 !== input.requestSha256)
-        throw new Error("conflicting body");
+        throw new CloudProviderError("provider_operation_conflict", "conflicting body", false);
       stored ??= {
         ...input,
         createdAt: new Date(NOW),
@@ -163,6 +164,63 @@ function fixture(extraOptions: { billingOrg?: string } = {}) {
   };
 }
 
+describe("Boat workspace monitoring policy", () => {
+  it.each([
+    ["new", true], ["new", undefined], ["legacy", true], ["legacy", undefined],
+  ] as const)("refuses %s setup admission with monitoring=%s while retaining cleanup identity", async (policy, monitoring) => {
+    const f = fixture();
+    if (policy === "legacy") {
+      const original = { type: "default", from: "zeros-linux-qualified", ttlSeconds: null, noEnv: true, env: {} };
+      const digest = (value: object) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+      await f.operations.prepareCreate({ workspaceId: INPUT.workspaceId, generation: INPUT.generation, idempotencyKey: INPUT.idempotencyKey,
+        requestSha256: digest({ imageRef: INPUT.imageRef, body: original, createAttemptJournalVersion: 1 }),
+        legacyRequestSha256: digest({ imageRef: INPUT.imageRef, body: original }) });
+    }
+    f.fetcher.mockResolvedValue(json(sandbox("ready", { monitoring })));
+    await expect(f.provider.create(INPUT)).rejects.toBeInstanceOf(CloudProviderError);
+    expect(f.stored().resourceId).toBe(RESOURCE);
+    expect(f.stored().deletedAt).toBeNull();
+  });
+
+  it.each(["base", "template"] as const)("disables provider process monitoring for a new %s allocation", async source => {
+    const f = fixture();
+    const sourceId = "bx_3456789a";
+    const input = source === "base" ? INPUT : { ...INPUT, imageRef: `boat-template:${sourceId}` };
+    const provider = source === "base" ? f.provider : new BoatWorkspaceProvider({ ...f.options,
+      imageRef: input.imageRef, ttlSeconds: 1800, resolveTemplate: async () => sourceId });
+    if (source === "template") {
+      f.fetcher.mockResolvedValueOnce(json(sandbox("archived", { id: sourceId, lastSnapshotStatus: "completed" })))
+        .mockResolvedValueOnce(json({ ok: true, sandboxId: RESOURCE }, 202))
+        .mockResolvedValueOnce(json(sandbox("ready", { sourceSandboxId: sourceId })));
+    } else f.fetcher.mockResolvedValueOnce(json(sandbox()));
+    await provider.create(input);
+    const request = f.fetcher.mock.calls.find(([, init]) => init?.method === "POST");
+    // Native IPC carries prompts and admitted material over pipes. Boat's
+    // process tracer must be disabled explicitly, independent of account defaults.
+    expect(JSON.parse(String(request?.[1]?.body)).monitoring).toBe(false);
+  });
+  it("replays a create journaled before the monitoring policy with its exact original body and key", async () => {
+    const f = fixture();
+    const original = { type: "default", from: "zeros-linux-qualified", ttlSeconds: null, noEnv: true, env: {} };
+    const digest = (value: object) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    await f.operations.prepareCreate({ workspaceId: INPUT.workspaceId, generation: INPUT.generation, idempotencyKey: INPUT.idempotencyKey,
+      requestSha256: digest({ imageRef: INPUT.imageRef, body: original, createAttemptJournalVersion: 1 }),
+      legacyRequestSha256: digest({ imageRef: INPUT.imageRef, body: original }) });
+    f.fetcher.mockResolvedValueOnce(json(sandbox("provisioning")));
+    await expect(f.provider.create(INPUT)).resolves.toMatchObject({ resourceId: RESOURCE });
+    const posts = f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(String(posts[0]?.[1]?.body))).toEqual(original);
+    expect(new Headers(posts[0]?.[1]?.headers).get("idempotency-key")).toBe(INPUT.idempotencyKey);
+  });
+  it("never replays a different lease under an existing key, with or without the policy", async () => {
+    const f = fixture();
+    await f.provider.createWithComputeLease(INPUT, 900).catch(() => undefined);
+    await expect(f.provider.createWithComputeLease(INPUT, 1800)).rejects.toMatchObject({ code: "provider_operation_conflict" });
+    expect(f.operations.prepareCreate).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("Boat Cloud Computer template forks", () => {
   const sourceId = "bx_3456789a";
   const input = { ...INPUT, imageRef: `boat-template:${sourceId}` };
@@ -184,7 +242,7 @@ describe("Boat Cloud Computer template forks", () => {
     const posts = f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
     expect(posts).toHaveLength(1);
     expect(posts[0]?.[0]).toBe(`https://boat.dev/api/v1/sandboxes/${sourceId}/fork`);
-    expect(JSON.parse(posts[0]?.[1]?.body as string)).toEqual({ type: "default", ttlSeconds: 1800, noEnv: true, env: {} });
+    expect(JSON.parse(posts[0]?.[1]?.body as string)).toEqual({ type: "default", ttlSeconds: 1800, noEnv: true, env: {}, monitoring: false });
     expect(walletOf(posts[0]?.[1])).toBe(WALLET);
     expect(new Headers(posts[0]?.[1]?.headers).get("idempotency-key")).toBe(INPUT.idempotencyKey);
     expect(f.operations.beginCreateAttempt).toHaveBeenCalledOnce();
@@ -360,6 +418,7 @@ describe("Boat allocation lifecycle", () => {
         ttlSeconds: null,
         noEnv: true,
         env: {},
+        monitoring: false,
       });
       expect(new Headers(init!.headers).get("idempotency-key")).toBe(
         INPUT.idempotencyKey,
@@ -613,6 +672,19 @@ describe("Boat allocation lifecycle", () => {
       code: "provider_generation_retired",
     });
   });
+  it.each([["processing", "removing", "deleting"], ["blocked", "retrying", "blocked"], ["blocked", "waiting_for_uploads", "waiting_for_uploads"],
+    ["processing", "unrecognized", "processing"], ["pending", undefined, "pending"]])(
+    "records Boat's %s / %s receipt as the %s stage", async (status, stage, recorded) => {
+      const f=fixture(); await f.allocate();
+      await f.operations.beginDelete(RESOURCE); await f.operations.bindDeletion(RESOURCE,OPERATION);
+      f.fetcher.mockResolvedValueOnce(json(deletion(status!, stage === undefined ? {} : { stage })));
+      const resource = await f.provider.listManaged()[Symbol.asyncIterator]().next().then(next => next.value).catch(error => error);
+      if (status === "blocked") expect(resource).toMatchObject({ state: "deleting", metadata: { deletionStatus: "blocked" } });
+      else expect(resource).toMatchObject({ state: "deleting", metadata: { deletionStatus: status } });
+      expect(f.operations.recordDeletionProgress).toHaveBeenCalledWith(RESOURCE, OPERATION, recorded);
+      expect(f.operations.completeDeletion).not.toHaveBeenCalled();
+    },
+  );
   it("never advances cleanup progress from an incomplete completed receipt", async () => {
     const f=fixture(); await f.allocate();
     await f.operations.beginDelete(RESOURCE); await f.operations.bindDeletion(RESOURCE,OPERATION);
@@ -790,7 +862,7 @@ describe('Boat compute metering and lease authority', () => {
   it('applies the funded finite lease to the initial create and binds retries to that exact body', async () => {
     const f = fixture(); f.fetcher.mockResolvedValueOnce(json(sandbox('running', { archiveAfter: new Date(NOW+900_000).toISOString() })));
     await f.provider.createWithComputeLease(INPUT,900);
-    expect(f.fetcher.mock.calls[0]?.[1]).toMatchObject({ method: 'POST', body: JSON.stringify({ type: 'default', from: 'zeros-linux-qualified', ttlSeconds: 900, noEnv: true, env: {} }) });
+    expect(f.fetcher.mock.calls[0]?.[1]).toMatchObject({ method: 'POST', body: JSON.stringify({ type: 'default', from: 'zeros-linux-qualified', ttlSeconds: 900, noEnv: true, env: {}, monitoring: false }) });
     await expect(f.provider.createWithComputeLease(INPUT,1800)).rejects.toThrow('conflicting body');
     expect(f.fetcher).toHaveBeenCalledTimes(1);
   });

@@ -244,6 +244,109 @@ suite("genuine private boot credential execution",()=>{
     expect(await withSystemTx(pool,tx=>assertNativeGithubActor(tx,engine(),source,false))).toMatchObject({actorUserId:sender.user.id});
     expect(sender.user.id).not.toBe(fixture.userId);
   });
+  it("discovers the owner-funded Cursor models for an authorized member with no personal credential",async()=>{
+    const member=await ensureCloudPilotUser(pool,{provider:"workos",providerSubject:`discovery_${randomUUID()}`,
+      email:`discovery-${randomUUID()}@example.test`,displayName:"Discovery member"});
+    await withCloudFixtureOwnerTx(pool,async tx=>{
+      await tx.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')",[fixture.organizationId,member.id]);
+      await tx.query("INSERT INTO organization_seat_assignments(org_id,user_id,state) VALUES($1,$2,'active')",[fixture.organizationId,member.id]);
+      await tx.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')",[member.id]);
+    });
+    await new DatabaseCloudWorkspaceCollaborationService(pool).setSharing({workspaceId:fixture.workspaceId,
+      organizationId:fixture.organizationId,actorUserId:fixture.userId,sharingMode:"organization",expectedRevision:1});
+    const bound=await boot();
+    await service.boot(engine(),"activate",syncRequest(bound));
+    const sender=await actor(member.id,member.identity.subject);
+    const context=CloudAgentWarmActorResponseSchema.parse(await service.boot(engine(),"warm-context",{
+      ...request(),bootId:bound.bootId,writerEpoch:bound.writerEpoch,actorSessionId:sender.actorSessionId,
+      provider:"cursor",model:"grok-4.7",conversationId:randomUUID(),cwd:"/srv/zeros/workspace",repositoryServers:[],
+    }));
+    expect(context.actor.actor.userId).toBe(member.id);
+    expect(context.actor.scope.fundingOwnerUserId).toBe(fixture.userId);
+    // This is the exact public metadata read used by the composer registry.
+    // A positive native admission must not disappear from the member's picker.
+    const discovery=await credentials.bootAvailability(member.id,fixture.workspaceId);
+    expect(discovery).toMatchObject({mode:"boot-owner-v1",status:"ready",scope:{bootId:bound.bootId,writerEpoch:bound.writerEpoch,
+      fundingOwnerUserId:fixture.userId,generation:1}});
+    expect(discovery.mode==="boot-owner-v1"&&discovery.providers.find(slot=>slot.provider==="cursor")).toEqual(
+      {provider:"cursor",status:"ready",kind:"cursor-api-key",models:cloudAgentModels("cursor")});
+    expect(JSON.stringify(discovery)).not.toContain(secret);
+  });
+  describe("passive boot-owner discovery",()=>{
+    const member=async(role:"developer"|"viewer"="developer",share=true)=>{
+      const user=await ensureCloudPilotUser(pool,{provider:"workos",providerSubject:`discovery_${randomUUID()}`,
+        email:`discovery-${randomUUID()}@example.test`,displayName:"Discovery member"});
+      await withCloudFixtureOwnerTx(pool,async tx=>{
+        await tx.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')",[fixture.organizationId,user.id]);
+        await tx.query("INSERT INTO organization_seat_assignments(org_id,user_id,state) VALUES($1,$2,'active')",[fixture.organizationId,user.id]);
+        await tx.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')",[user.id]);
+      });
+      if(share)await new DatabaseCloudWorkspaceCollaborationService(pool).setSharing({workspaceId:fixture.workspaceId,
+        organizationId:fixture.organizationId,actorUserId:fixture.userId,sharingMode:"organization",expectedRevision:1});
+      if(role==="viewer")await withCloudFixtureOwnerTx(pool,tx=>tx.query(`INSERT INTO cloud_workspace_members(workspace_id,org_id,user_id,role)
+        VALUES($1,$2,$3,'viewer') ON CONFLICT(workspace_id,user_id) DO UPDATE SET role='viewer'`,[fixture.workspaceId,fixture.organizationId,user.id]));
+      return user;
+    };
+    const activated=async()=>{const bound=await boot();await service.boot(engine(),"activate",syncRequest(bound));return bound;};
+    const cursor=(value:Awaited<ReturnType<typeof credentials.bootAvailability>>)=>value.mode==="boot-owner-v1"?value.providers.find(slot=>slot.provider==="cursor"):undefined;
+    it("reports legacy mode only for a workspace that never activated a boot",async()=>{
+      expect(await credentials.bootAvailability(fixture.userId,fixture.workspaceId)).toEqual({version:1,mode:"legacy"});
+    });
+    it("shows the funding owner's own slots, and is read-only",async()=>{
+      await activated();
+      const before=(await pool.query("SELECT id,revoked_at FROM cloud_agent_credential_delegations ORDER BY id")).rows;
+      const discovery=await credentials.bootAvailability(fixture.userId,fixture.workspaceId);
+      expect(discovery).toMatchObject({mode:"boot-owner-v1",status:"ready"});
+      expect(cursor(discovery)).toMatchObject({status:"ready",models:cloudAgentModels("cursor")});
+      expect(discovery.mode==="boot-owner-v1"&&discovery.providers.find(slot=>slot.provider==="claude")).toEqual(
+        {provider:"claude",status:"unavailable",code:"cloud_agent_credential_required"});
+      expect((await pool.query("SELECT id,revoked_at FROM cloud_agent_credential_delegations ORDER BY id")).rows).toEqual(before);
+    });
+    it("never offers a member's personal provider that the funding owner has not supplied",async()=>{
+      await activated();
+      const user=await member();
+      const personal=randomUUID();
+      await credentials.put({credentialId:personal,ownerUserId:user.id,organizationId:fixture.organizationId,operationId:randomUUID(),
+        expectedRevision:0,displayName:"Member Claude",material:{kind:"claude-api-key",apiKey:"synthetic-member-claude-key"}});
+      await credentials.setOrganizationConnection(user.id,fixture.organizationId,"claude",{expectedRevision:0,credentialId:personal,credentialRevision:1,
+        models:["claude-sonnet-4-6"],consent:"zeros-managed"});
+      const discovery=await credentials.bootAvailability(user.id,fixture.workspaceId);
+      expect(discovery.mode==="boot-owner-v1"&&discovery.providers.find(slot=>slot.provider==="claude")).toMatchObject({status:"unavailable"});
+      expect(cursor(discovery)).toMatchObject({status:"ready"});
+      expect(JSON.stringify(discovery)).not.toContain("synthetic-member-claude-key");
+    });
+    it("denies a viewer the run read and gives a member without a funding grant no providers",async()=>{
+      await activated();
+      const viewer=await member("viewer");
+      await expect(credentials.bootAvailability(viewer.id,fixture.workspaceId)).rejects.toMatchObject({status:403,code:"cloud_workspace_capability_required"});
+      const unfunded=await member("developer",false);
+      expect(await credentials.bootAvailability(unfunded.id,fixture.workspaceId)).toMatchObject({mode:"boot-owner-v1",status:"ready"});
+      // General access still authorizes the run read, but nothing funds it.
+      await pool.query("UPDATE cloud_agent_funding_consents SET revoked_at=now(),revision=revision+1 WHERE workspace_id=$1 AND source_kind<>'owner'",[fixture.workspaceId]);
+      expect(await credentials.bootAvailability(unfunded.id,fixture.workspaceId)).toMatchObject({mode:"boot-owner-v1",status:"funding_unavailable",providers:[]});
+      expect(await credentials.bootAvailability(fixture.userId,fixture.workspaceId)).toMatchObject({status:"ready"});
+    });
+    it("reports an owner change, a retired writer and a revoked source without falling back",async()=>{
+      await activated();
+      await pool.query("UPDATE cloud_agent_credentials SET revoked_at=now() WHERE id=$1",[credentialId]);
+      expect(cursor(await credentials.bootAvailability(fixture.userId,fixture.workspaceId))).toMatchObject({status:"unavailable",code:"cloud_agent_credential_revoked"});
+      await withCloudFixtureOwnerTx(pool,tx=>tx.query("UPDATE cloud_workspace_local_command_writers SET state='retired',retired_at=now() WHERE workspace_id=$1",[fixture.workspaceId]));
+      expect(await credentials.bootAvailability(fixture.userId,fixture.workspaceId)).toMatchObject({mode:"boot-owner-v1",status:"retired",providers:[]});
+      await withCloudFixtureOwnerTx(pool,async tx=>{
+        await tx.query("SET LOCAL session_replication_role=replica");
+        await tx.query("UPDATE cloud_workspaces SET agent_funding_owner_epoch=agent_funding_owner_epoch+1 WHERE id=$1",[fixture.workspaceId]);
+      });
+      expect(await credentials.bootAvailability(fixture.userId,fixture.workspaceId)).toMatchObject({mode:"boot-owner-v1",status:"owner_changed",providers:[]});
+    });
+    it("reports a source change the boot cannot adopt as a runtime upgrade, not a ready slot",async()=>{
+      await activated();
+      await withCloudFixtureOwnerTx(pool,tx=>tx.query("UPDATE cloud_agent_organization_connections SET revision=revision+1 WHERE org_id=$1 AND provider='cursor'",[fixture.organizationId]));
+      expect(await credentials.bootAvailability(fixture.userId,fixture.workspaceId)).toMatchObject({mode:"boot-owner-v1",status:"runtime_upgrade_required",providers:[]});
+      // Delivery refuses the same slot, so discovery and admission agree.
+      await expect(service.boot(engine(),"sync",syncRequest((await pool.query("SELECT boot_id AS \"bootId\",writer_epoch AS \"writerEpoch\",cache_revision::int AS \"cacheRevision\" FROM cloud_agent_boot_bindings")).rows[0])))
+        .rejects.toMatchObject({code:"cloud_runtime_upgrade_required"});
+    });
+  });
   it.each(["context-expiry","context-retirement","device-revoke","customization-change","foreign-engine"] as const)("refuses boot Git after %s",async cause=>{
     const {sender,context,source}=await gitContext();
     if(cause==="context-expiry")await pool.query("UPDATE cloud_agent_boot_contexts SET expires_at=clock_timestamp()-interval '1 second' WHERE context_id=$1",[context.contextId]);

@@ -77,23 +77,30 @@ export const ReleaseIdentityBase = z.object({ version: z.literal(1), ready: z.li
   // Additive signal: old hosted/Beta receipts remain readable, but cannot
   // authorize publication of cloud capability without current qualification.
   workerQualified: z.boolean().optional(),
+  // Boat-accepted deletions of retired allocations never close readiness; the
+  // API reports them as degraded operational health on every channel.
+  deferredReadiness: z.object({ kind: z.literal("retired-boat-deletions") }).strict().optional(),
+  // The expiring Alpha waiver that deferredReadiness replaced. An API deployed
+  // before it can still report one until it expires.
   alphaReadinessException: z.object({ kind: z.literal("retired-boat-deletions"), expiresAt: z.string().datetime() }).strict().optional(),
 });
-export function checkAlphaReadinessException(value: {
+export function checkDeferredReadiness(value: {
   channel: string;
   cloud: { enabled: boolean; ready: boolean; state: string; operationalState?: string };
+  deferredReadiness?: { kind: "retired-boat-deletions" };
   alphaReadinessException?: { kind: "retired-boat-deletions"; expiresAt: string };
 }, context: z.RefinementCtx) {
-  const exception = value.alphaReadinessException;
+  const { deferredReadiness: deferred, alphaReadinessException: exception } = value;
   const now = Date.now();
-  if (exception ? value.channel !== "alpha" || !value.cloud.enabled || !value.cloud.ready || value.cloud.state !== "healthy" ||
-    value.cloud.operationalState !== "degraded" || Date.parse(exception.expiresAt) <= now ||
-    Date.parse(exception.expiresAt) > now + 72 * 60 * 60_000
-    : value.cloud.operationalState === "degraded") {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: "Temporary deletion readiness requires a current Alpha exception" });
-  }
+  const degraded = value.cloud.enabled && value.cloud.ready && value.cloud.state === "healthy" && value.cloud.operationalState === "degraded";
+  const valid = deferred && exception ? false
+    : deferred ? degraded
+    : exception ? degraded && value.channel === "alpha" && Date.parse(exception.expiresAt) > now &&
+      Date.parse(exception.expiresAt) <= now + 72 * 60 * 60_000
+    : value.cloud.operationalState !== "degraded";
+  if (!valid) context.addIssue({ code: z.ZodIssueCode.custom, message: "Degraded cloud readiness requires deferred retired Boat deletions" });
 }
-export const ReleaseIdentity = ReleaseIdentityBase.superRefine(checkAlphaReadinessException);
+export const ReleaseIdentity = ReleaseIdentityBase.superRefine(checkDeferredReadiness);
 export const WorkOSVerification = z.object({ kind: z.literal("workos-handshake-v1"), surfaces: z.array(z.enum(["app", "ops"])), verifiedAt: z.string().datetime() });
 export const HostedReceipt = z.object({ version: z.literal(1), status: z.literal("success"), channel: z.enum(["alpha", "beta", "production"]),
   sourceSha: z.string().regex(SHA), branch: z.string(), repository: z.string(), runId: z.string().regex(/^\d+$/), runAttempt: z.string().regex(/^\d+$/),

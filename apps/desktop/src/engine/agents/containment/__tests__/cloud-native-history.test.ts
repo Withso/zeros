@@ -218,12 +218,12 @@ describe.skipIf(process.platform!=="linux")("cloud native transcript lifetime",(
     try{
       await writeFile(path.join(current.mount.directory,"checkpoints.ndjson"),"private-history");
       await writeFile(path.join(other.mount.directory,"checkpoints.ndjson"),"other-history");
-      await expect(deleteCloudNativeHistory(input)).rejects.toThrow("active native execution");
-      await current.release();await deleteCloudNativeHistory(input);
+      await expect(deleteCloudNativeHistory({...input,dataRoot:root})).rejects.toThrow("active native execution");
+      await current.release();await deleteCloudNativeHistory({...input,dataRoot:root});
       await expect(readFile(path.join(current.mount.directory,"checkpoints.ndjson"))).rejects.toMatchObject({code:"ENOENT"});
       expect(await readFile(path.join(other.mount.directory,"checkpoints.ndjson"),"utf8")).toBe("other-history");
       await expect(acquireCloudNativeHistory(input)).rejects.toThrow("deleted");
-      await deleteCloudNativeHistory(input);
+      await deleteCloudNativeHistory({...input,dataRoot:root});
     }finally{await current.release();await other.release();await rm(root,{recursive:true,force:true});}
   });
   it("preserves native history across leases, isolates conversations, and excludes simultaneous writers",async()=>{

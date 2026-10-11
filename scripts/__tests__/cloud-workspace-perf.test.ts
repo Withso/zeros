@@ -209,7 +209,7 @@ describe("cloud performance measurement", () => {
         baseCompatibilityId, bootId: runId, currentRuntimeId: `r1-${"b".repeat(64)}`, hostState: "idle" }) };
       if (deleted && pathname.endsWith(child)) throw new CloudProviderError("provider_not_found", "private error", false);
       return { sandbox: { id: pathname.split("/").at(-1), name, team: { id: billingOrg }, state: pathname.endsWith(source) || stopped ? "archived" : "running",
-        snapshotAvailable: true, lastSnapshotStatus: "completed", sourceSandboxId: pathname.endsWith(child) ? source : undefined } };
+        snapshotAvailable: true, lastSnapshotStatus: "completed", sourceSandboxId: pathname.endsWith(child) ? source : undefined, monitoring: false } };
     });
     const request = perfVmRequest(journal, billingOrg, raw, () => time);
     const prepared: string[] = [];
