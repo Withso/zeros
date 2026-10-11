@@ -159,7 +159,7 @@ export function readCloudGithubCredentialRefreshRequest(
   } = {},
 ): CloudGithubCredentialRefreshRequest | null {
   const file = options.file ?? CLOUD_GITHUB_REFRESH_REQUEST_FILE;
-  const expectedUid = options.expectedUid ?? 0;
+  const expectedUid = options.expectedUid ?? process.getuid?.() ?? 0;
   if (
     !path.isAbsolute(file) ||
     !Number.isInteger(expectedUid) ||
@@ -194,7 +194,7 @@ export function requestCloudGithubCredentialRefresh(options: {
   readonly now?: number;
 }): CloudGithubCredentialRefreshRequest {
   const file = options.file ?? CLOUD_GITHUB_REFRESH_REQUEST_FILE;
-  const expectedUid = options.expectedUid ?? 0;
+  const expectedUid = options.expectedUid ?? process.getuid?.() ?? 0;
   const generation =
     options.generation ?? randomBytes(24).toString("base64url");
   const requestedAt = options.now ?? Date.now();
@@ -282,7 +282,7 @@ export function acknowledgeCloudGithubCredentialRefreshRequest(options: {
   readonly expectedUid?: number;
 }): boolean {
   const file = options.file ?? CLOUD_GITHUB_REFRESH_REQUEST_FILE;
-  const expectedUid = options.expectedUid ?? 0;
+  const expectedUid = options.expectedUid ?? process.getuid?.() ?? 0;
   if (
     !path.isAbsolute(file) ||
     !Number.isInteger(expectedUid) ||
