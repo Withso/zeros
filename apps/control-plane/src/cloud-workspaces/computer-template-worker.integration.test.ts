@@ -397,13 +397,17 @@ database("Cloud Computer template worker", () => {
     expect(runFixed).not.toHaveBeenCalled();
   });
 
-  it("withdraws an image only after a confirmed TCB failure in the initial baseline", async () => {
+  it("keeps an image ready when the frozen TCB helper reports an internal failure", async () => {
     const image = await enableImage();
-    runFixed.mockResolvedValueOnce({ exitCode: 1, stdout: "", diagnostic: diagnostic("integrity", "build", false) });
+    // The frozen helper emits this same diagnostic for internal command
+    // timeouts and OS errors, so it cannot prove shared-image corruption.
+    const proof = { schema: "zeros.diagnostic/v1", component: "build", stage: "integrity", ok: false,
+      exitCode: 1, timedOut: false, failedChecks: ["tcb_modified"] };
+    runFixed.mockResolvedValueOnce({ exitCode: 1, stdout: `${JSON.stringify(proof)}\n`, diagnostic: proof });
     await request();
     await worker.tick();
     expect(await read()).toMatchObject({ active: null, latestBuild: { state: "failed", errorCode: "tcb_modified" } });
-    expect(await imageRow(image.imageId)).toMatchObject({ state: "retiring", diagnostic: { failedChecks: ["tcb_modified"] } });
+    expect(await imageRow(image.imageId)).toMatchObject({ state: "ready", diagnostic: null });
     expect(runFixed).toHaveBeenCalledOnce();
     expect(remove).toHaveBeenCalledOnce();
   });

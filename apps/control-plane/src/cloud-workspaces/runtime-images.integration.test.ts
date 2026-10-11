@@ -397,12 +397,12 @@ const url = process.env.TEST_DATABASE_URL;
     const [image] = await images();
     vi.spyOn(snapshots, "get").mockResolvedValue({ name: image.snapshot_name, status: "ready" });
     const template = await seedTemplate(image.image_id);
-    expect(await quarantineRuntimeImage(pool, image.image_id, "tcb_modified")).toBe(true);
-    expect(await quarantineRuntimeImage(pool, image.image_id, "tcb_modified")).toBe(false);
+    expect(await quarantineRuntimeImage(pool, image.image_id, "runtime_identity")).toBe(true);
+    expect(await quarantineRuntimeImage(pool, image.image_id, "runtime_identity")).toBe(false);
     expect(await withSystemTx(pool, tx => lockReadyRuntimeImage(tx, lockInput()))).toBeNull();
     await worker().tick();
     expect((await images())[0]).toMatchObject({ state: "retiring", snapshot_id: image.snapshot_id, verified_at: image.verified_at,
-      diagnostic: { component: "build", stage: "runtime", failedChecks: ["tcb_modified"] } });
+      diagnostic: { component: "build", stage: "runtime", failedChecks: ["runtime_identity"] } });
     await expect(withSystemTx(pool, tx => tx.query(`UPDATE cloud_computer_templates SET builder_source_image_id=NULL WHERE build_id=$1`,
       [template]))).rejects.toThrow(/immutable/);
   });

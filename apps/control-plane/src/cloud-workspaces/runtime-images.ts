@@ -82,7 +82,9 @@ export async function lockReadyRuntimeImage(tx: Tx, input: {
   return { imageId: row.image_id, snapshotName: row.snapshot_name };
 }
 
-export type RuntimeImageQuarantineCheck = "runtime_identity" | "base_compatibility" | "tcb_modified" | "snapshot_missing";
+// The frozen TCB helper also reports internal timeouts and OS errors as
+// tcb_modified, so a consumer's TCB failure is not withdrawal evidence.
+export type RuntimeImageQuarantineCheck = "runtime_identity" | "base_compatibility" | "snapshot_missing";
 /** Withdraw a ready image after deterministic evidence that it cannot serve
  * its pinned runtime. Publication evidence stays; the name is deleted only
  * once no builder that recorded the image can still create from it. */

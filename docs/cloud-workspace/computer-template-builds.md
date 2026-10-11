@@ -42,6 +42,15 @@ base path. A null source-image pin preserves the original intent digest; a saved
 image pin remains authoritative on replay and cleanup even after withdrawal or
 flag disablement.
 
+The consumer withdraws an image only after an initial runtime/base identity
+mismatch. A TCB failure still fails the build, but the frozen helper also emits
+`tcb_modified` for internal timeouts and generic OS errors, so it leaves the
+shared image ready. Set `CLOUD_RUNTIME_IMAGES_ENABLED=false` to use the base for
+new claims while investigating repeated failures. Automatic TCB withdrawal
+requires a future qualified base that distinguishes corruption from transient
+errors. See the runtime-image [rollout and rollback guidance](runtime-images.md#rollout-and-rollback)
+before enabling images or reverting the control plane.
+
 `CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS` defaults to 2 and accepts 1–32. Pass the
 same config value to C1 and the worker. Running builds and terminal builders
 without positive stop/delete or journal-confirmed non-allocation evidence count against the global cap. An

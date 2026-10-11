@@ -22,6 +22,16 @@ using Beta and Production release heads requires a separate change to runtime
 selection. Image creation grants no new runtime qualification or channel
 admission.
 
+## Rollout and rollback
+
+Enable images only after every control-plane replica runs image-aware code.
+Before reverting to a release without image support, set
+`CLOUD_RUNTIME_IMAGES_ENABLED=false` and keep an image-aware worker running
+until unknown image creates, building attempts and pending retirements have
+drained. Disabling selection preserves saved image intents; older workers cannot
+replay them. Any remaining operation requires operator reconciliation before
+removing the image-aware worker.
+
 ## Production and publication
 
 `runtime-images.ts` owns the producer and named-snapshot lifecycle. Migration
@@ -89,12 +99,16 @@ Computer manifest remain required. Completion revalidates the original runtime
 pin as before. See [Computer template builds](computer-template-builds.md).
 
 A deterministic initial runtime/base mismatch withdraws the image from ready
-to retiring. A baseline failure does so only with a matching nonzero
-`build/integrity` diagnostic containing `tcb_modified` and `timedOut: false`.
-Transport errors, timeouts, malformed output and failures after repositories or
-recipes do not establish corruption of the shared image. Withdrawal retains
-publication evidence; later claims can fall back to the base while the producer
-prepares a replacement.
+to retiring. This is the consumer's only automatic withdrawal evidence. The
+frozen base helper reports internal timeouts and generic OS errors as
+`tcb_modified` with `timedOut: false`, so even that diagnostic fails only the
+build and leaves the image ready. Transport errors, malformed output and later
+recipe or integrity failures also leave the image ready. Setting
+`CLOUD_RUNTIME_IMAGES_ENABLED=false` provides a manual base fallback for new
+claims while investigating repeated TCB failures. A future qualified base with
+distinct corruption and transient-error diagnostics can restore automatic TCB
+withdrawal. Identity withdrawal retains publication evidence; later claims can
+fall back to the base while the producer prepares a replacement.
 
 ## Retention and recovery
 

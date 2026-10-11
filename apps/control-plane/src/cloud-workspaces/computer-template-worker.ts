@@ -81,7 +81,7 @@ const SanitationResult = z
   .strict();
 
 class BuildFailure extends Error {
-  constructor(readonly code: CloudComputerV2BuildError, readonly confirmedTcbModification = false) {
+  constructor(readonly code: CloudComputerV2BuildError) {
     super(code);
   }
 }
@@ -298,13 +298,9 @@ export class ComputerTemplateWorker {
         diagnostic.timedOut ||
         diagnostic.failedChecks.length
       )
-        throw new BuildFailure(error, command === "computer:verify-tcb" && output.exitCode > 0 &&
-          diagnostic?.schema === "zeros.diagnostic/v1" && diagnostic.component === "build" && diagnostic.stage === "integrity" &&
-          diagnostic.ok === false && diagnostic.exitCode === output.exitCode && diagnostic.timedOut === false &&
-          diagnostic.failedChecks.includes("tcb_modified"));
+        throw new BuildFailure(error);
       return output.stdout;
-    } catch (cause) {
-      if (cause instanceof BuildFailure) throw cause;
+    } catch {
       throw new BuildFailure(error);
     } finally {
       input?.fill(0);
@@ -381,27 +377,21 @@ export class ComputerTemplateWorker {
         baseCompatibilityId: runtime.baseCompatibilityId,
         runtimeId: pin.runtimeId,
       };
-      let baseline: z.infer<typeof TcbResult>;
-      try {
-        baseline = result(
-          TcbResult,
-          await this.fixed(
-            vm,
-            "computer:verify-tcb",
-            { ...tcbInput, action: "baseline" },
-            "tcb_modified",
-            this.timeout(claim, 180_000),
-            "build",
-            "integrity",
-          ),
+      // The frozen helper also reports internal timeouts and OS errors as
+      // tcb_modified; this diagnostic cannot establish shared-image corruption.
+      const baseline = result(
+        TcbResult,
+        await this.fixed(
+          vm,
+          "computer:verify-tcb",
+          { ...tcbInput, action: "baseline" },
           "tcb_modified",
-        );
-      } catch (error) {
-        // Only a confirmed initial TCB failure implicates the shared image.
-        if (imageId && error instanceof BuildFailure && error.confirmedTcbModification)
-          await quarantineRuntimeImage(this.deps.pool, imageId, "tcb_modified");
-        throw error;
-      }
+          this.timeout(claim, 180_000),
+          "build",
+          "integrity",
+        ),
+        "tcb_modified",
+      );
       if (
         baseline.buildId !== id ||
         baseline.runtimeId !== pin.runtimeId ||
