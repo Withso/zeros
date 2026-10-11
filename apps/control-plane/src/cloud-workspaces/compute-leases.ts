@@ -59,6 +59,7 @@ type Lease = {
   lease_owner: string | null;
   lease_expires_at: Date | null;
   last_error_code: string | null;
+  first_error_at: Date | null;
 };
 type Scope = {
   user_id: string;
@@ -108,6 +109,9 @@ const ALLOCATION_RETRY_WINDOW_MS = 45 * 60_000;
 /** A final meter queries this far behind the provider clock, so it can cover
  * the first stopped observation only once this much time has passed. */
 const FINAL_METER_LAG_MS = 5000;
+/** A stopped allocation's lower final reading may be a passing provider fault;
+ * it settles at the confirmed meter only after rejections last this long. */
+const REGRESSED_FINAL_METER_GRACE_MS = 15 * 60_000;
 const MAX_CHECKPOINT_DEADLINE_MS = 300_000;
 const STOP_MARGIN_MS = 15_000;
 // Reserve the full checkpoint deadline plus the existing stop margin. Retry
@@ -939,17 +943,24 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       if (finalStopped && usage.running)
         throw failure("compute_stop_meter_unconfirmed", true);
       phase("ledger_commit");
+      const meter = { reservationId: lease.id, periodId: row.period_id, usage, allocationLeaseClaim: { owner: this.workerId } };
       await retryAbortedDatabaseTransaction(() => this.ledger.meter({
-        reservationId: lease.id,
-        periodId: row.period_id,
-        usage,
-        allocationLeaseClaim: { owner: this.workerId },
+        ...meter,
         ...(finalStopped
           ? { finalReason: "allocation_stopped" as const }
           : until === row.ends_at.getTime()
             ? { finalReason: "period_ended" as const }
             : {}),
-      }));
+      })).catch(async (error: unknown) => {
+        // The provider can later report less for a window we already metered.
+        // Once that rejection outlasts the grace period, settle the stopped
+        // allocation at its confirmed meter instead of holding it open forever.
+        if (!finalStopped || !(error instanceof CloudProviderError) || error.code !== "compute_credit_meter_rejected" ||
+            lease.last_error_code !== "compute_credit_meter_rejected" || !lease.first_error_at ||
+            observed.now.getTime() - lease.first_error_at.getTime() < REGRESSED_FINAL_METER_GRACE_MS) throw error;
+        await retryAbortedDatabaseTransaction(() => this.ledger.finalizeRegressed(meter));
+        this.options.logger?.error("[cloud-workspace] settled a stopped allocation at its confirmed meter after the provider meter regressed");
+      });
     }
     if (finalStopped) {
       phase("final_settlement");

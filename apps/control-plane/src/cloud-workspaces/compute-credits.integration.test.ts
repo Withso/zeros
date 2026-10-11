@@ -380,6 +380,44 @@ suite("managed compute credit ledger", () => {
       { availableMicroUsd: 800, exposureMicroUsd: 100 },
     ]);
   });
+  it("finalizes a regressed stopped meter at its last confirmed reading, never lower or later", async () => {
+    const { periodId } = await grant();
+    const [r] = await reserve(periodId);
+    const input = { reservationId: r!.reservationId, periodId, usage: usage() };
+    const confirmed = await ledger.meter(input);
+    const regressed = usage(0, { until: usage(60).until, running: false });
+    for (const invalid of [
+      usage(60, { running: false }),
+      usage(50, { running: false }),
+      { ...regressed, running: true },
+      usage(0, { until: usage(40).until, running: false }),
+      { ...regressed, resourceId: "another-sandbox" },
+      { ...regressed, secondsPerDollar: 50_000 },
+      { ...regressed, listPriceMicroUsd: 1 },
+      { ...regressed, since: new Date(now - 601_000).toISOString() },
+      { ...regressed, until: new Date(now + 10_000).toISOString() },
+    ]) {
+      await expect(
+        ledger.finalizeRegressed({ ...input, usage: invalid }),
+      ).rejects.toMatchObject({ code: "compute_credit_meter_rejected" });
+    }
+    const final = await ledger.finalizeRegressed({ ...input, usage: regressed });
+    expect(final).toMatchObject({
+      state: "final",
+      actualMicroUsd: 500,
+      debitedMicroUsd: 500,
+      reservedMicroUsd: 0,
+      meterThrough: confirmed.meterThrough,
+    });
+    expect(await ledger.finalizeRegressed({ ...input, usage: regressed })).toEqual(final);
+    expect((await pool.query(
+      "SELECT billable_seconds,final_reason FROM managed_compute_credit_reservations WHERE id=$1",
+      [r!.reservationId],
+    )).rows[0]).toEqual({ billable_seconds: "50", final_reason: "allocation_stopped" });
+    expect(await ledger.balanceSystem(account())).toMatchObject([
+      { debitedMicroUsd: 500, reservedMicroUsd: 0 },
+    ]);
+  });
   it("keeps reservations on missing, regressing, wrong-rate or wrong-allocation meter evidence", async () => {
     const { periodId } = await grant();
     const [r] = await reserve(periodId);
