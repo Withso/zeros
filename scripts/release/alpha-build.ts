@@ -104,6 +104,11 @@ export function createAlphaBuildMetadata(env: NodeJS.ProcessEnv) {
   return value.data;
 }
 
+function requireSameProducer(recorded: ProducerProof, current: ProducerProof) {
+  requireCheck(current.producerId === recorded.producerId && current.producerAttempt === recorded.producerAttempt &&
+    current.artifactId === recorded.artifactId, "Alpha build producer or artifact changed after download");
+}
+
 /** Recheck the immutable artifact and producer after download. This also owns
  * runtime handoff, whose descriptor independently verifies exact-source bytes. */
 export async function validateAlphaProducerProof(proof: unknown, env: NodeJS.ProcessEnv, read: Read, options: Parameters<typeof poll>[1] = {}) {
@@ -115,8 +120,7 @@ export async function validateAlphaProducerProof(proof: unknown, env: NodeJS.Pro
   "Alpha build producer proof belongs to another source, run or attempt");
   // The same environment wait can recur after download; wait within a bound.
   const current = await poll(() => buildSnapshot(recorded.kind, env, read), { attempts: 60, timeoutMs: ALPHA_PROOF_RECHECK_MS, ...options });
-  requireCheck(current.producerId === recorded.producerId && current.producerAttempt === recorded.producerAttempt &&
-    current.artifactId === recorded.artifactId, "Alpha build producer or artifact changed after download");
+  requireSameProducer(recorded, current);
   return recorded;
 }
 
@@ -133,11 +137,16 @@ export async function validateAlphaBuildMetadata(metadata: unknown, proof: unkno
   "Alpha signed-build metadata belongs to another source, run, producing attempt or version");
   // The parent can enter an environment wait during these reads. Then every
   // check repeats once it resumes, so no producer or artifact evidence is stale.
+  const deadline = Date.now() + (options.timeoutMs ?? ALPHA_PROOF_RECHECK_MS);
   return poll(async () => {
-    await validateAlphaProducerProof(recorded, env, read, options);
+    const current = await buildSnapshot(recorded.kind, env, read);
+    if (!current) return false;
+    requireSameProducer(recorded, current);
     const jobs = await jobPages(read, `/actions/runs/${value.runId}/attempts/${value.runAttempt}/jobs`);
     const producer = producerJob("desktop", jobs, { ...env, GITHUB_RUN_ATTEMPT: value.runAttempt });
     requireCheck(producer && producer.id === recorded.producerId, "Alpha metadata's recorded attempt has no matching successful producer");
-    return (await authenticatedAlphaParent(env, read, { waiting: true })).status === "in_progress" ? value : false;
+    const run = await authenticatedAlphaParent(env, read, { waiting: true });
+    requireCheck(Date.now() < deadline, "Release readiness timed out; no downstream publication is authorized");
+    return run.status === "in_progress" ? value : false;
   }, { attempts: 60, timeoutMs: ALPHA_PROOF_RECHECK_MS, ...options });
 }
