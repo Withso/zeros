@@ -155,11 +155,15 @@ describe("sanitizePickerSelection", () => {
   });
 
   it("rebuilds the payload from known fields only", () => {
+    // A literal `__proto__:` would set the prototype instead of adding a key;
+    // JSON.parse yields the own `__proto__` key a cloned page message can carry.
+    const styles = JSON.parse('{"color":"red","__proto__":"x","unknownProp":"y"}');
+    expect(Object.keys(styles)).toContain("__proto__");
     const result = sanitizePickerSelection(
       selection({
         screenshot: "data:image/png;base64,forged",
         extra: { nested: true },
-        styles: { color: "red", __proto__: "x", unknownProp: "y" },
+        styles,
       }),
       { origin, viewport },
     );
@@ -167,6 +171,7 @@ describe("sanitizePickerSelection", () => {
     expect(result).not.toHaveProperty("screenshot");
     expect(result).not.toHaveProperty("extra");
     expect(result?.styles).toEqual({ color: "red" });
+    expect(Object.getPrototypeOf(result?.styles)).toBe(Object.prototype);
   });
 
   it("neutralizes control characters in page text", () => {
