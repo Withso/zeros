@@ -52,12 +52,20 @@ async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, res
   // backed-off retry that would wait for the same restore.
   let restoring = false;
   const deadline = () => restoring ? restore.signal : boot.signal;
+  const pause = (ms: number, error: unknown) => new Promise<void>((resolve, reject) => {
+    const readinessSignal = AbortSignal.any([signal, deadline()]);
+    const abort = () => { clearTimeout(wait); reject(error); };
+    const wait = setTimeout(() => { readinessSignal.removeEventListener("abort", abort); resolve(); }, ms);
+    readinessSignal.addEventListener("abort", abort, { once: true });
+    if (readinessSignal.aborted) abort();
+  });
   const hostPending = Object.assign(new CloudProviderError("provider_bootstrap_unavailable", "Boat runtime broker is not ready", true),
     { diagnostic: { version: 1, phase: "bootstrap", exit: "unknown" } });
   let previousError: unknown;
   try {
     for (;;) {
       signal.throwIfAborted();
+      const polled = Date.now();
       try {
         const response = await client.request(`/sandboxes/${resourceId}/commands`, {
           method: "POST", body: { command: BASE_STATUS_COMMAND, timeoutSeconds: BASE_STATUS_TIMEOUT_SECONDS },
@@ -70,6 +78,9 @@ async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, res
         if (response.timedOut === true && response.stdoutTruncated !== true &&
             restoreMs - (Date.now() - started) >= (BASE_STATUS_TIMEOUT_SECONDS + 2) * 1000) {
           restoring = true;
+          // An early timeout report must not turn polling into a busy loop.
+          const early = 2000 - (Date.now() - polled);
+          if (early > 0) await pause(early, hostPending);
           continue;
         }
         return response;
@@ -80,13 +91,7 @@ async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, res
           error.retryable && error.httpStatus !== undefined && error.httpStatus >= 500);
         if (!bootPending || (error instanceof CloudProviderError && (error.retryAfterMs ?? 0) > 2000)) throw error;
         previousError = error;
-        const readinessSignal = AbortSignal.any([signal, deadline()]);
-        await new Promise<void>((resolve, reject) => {
-          const abort = () => { clearTimeout(wait); reject(error); };
-          const wait = setTimeout(() => { readinessSignal.removeEventListener("abort", abort); resolve(); }, 2000);
-          readinessSignal.addEventListener("abort", abort, { once: true });
-          if (readinessSignal.aborted) abort();
-        });
+        await pause(2000, error);
       }
     }
   } finally { for (const timer of timers) clearTimeout(timer); }

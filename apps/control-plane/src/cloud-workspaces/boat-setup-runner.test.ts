@@ -229,6 +229,18 @@ describe("Boat bootstrap transport", () => {
     expect(f.channel.execute).not.toHaveBeenCalled();
     expect(f.channel.dispose).toHaveBeenCalledOnce();
   });
+  it("spaces restore polls when the provider reports a timed-out status immediately", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture();
+    f.input.timeoutSeconds = 600;
+    f.request.mockReset().mockResolvedValue({ ...f.prepared, exitCode: null, stdout: "", timedOut: true });
+    const result = f.runner.execute(f.input, new AbortController().signal).catch(error => error);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(f.request).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(270_000);
+    expect(await result).toMatchObject({ code: "provider_bootstrap_unavailable", diagnostic: { exit: "timeout" } });
+    expect(f.channel.execute).not.toHaveBeenCalled();
+  });
   it("bounds a restore-gated base by a shorter execution timeout", async () => {
     vi.useFakeTimers();
     const f = v4Fixture();
