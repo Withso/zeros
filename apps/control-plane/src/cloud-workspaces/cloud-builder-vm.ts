@@ -291,7 +291,7 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
     // Each read is bounded by what remains of the caller's absolute deadline.
     const read = (path: string) => this.retry(() => this.options.client.request(path,
       { signal: AbortSignal.timeout(Math.max(1, deadline - this.now())) }), deadline);
-    let sandbox = await this.inspect(vm.sandboxId, deadline);
+    let sandbox = await this.inspect(vm.sandboxId, deadline, read);
     // A capture needs the stop this call issued. An archive it did not issue
     // (an earlier stop or auto-stop) proves nothing about the sanitized disk.
     if (capture && sandbox.state === "archived") fail("stop_unconfirmed");
@@ -303,7 +303,9 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
       // keeps an older snapshot and discards everything written since.
       let stop = sandbox.state === "archiving" ? stopOperation(sandbox.stop) : null;
       if (sandbox.state !== "archiving") {
-        const reply = await this.retry(() => this.options.client.request(`/sandboxes/${vm.sandboxId}/stop`, { method: "POST" }), deadline);
+        const reply = await this.retry(() => this.options.client.request(`/sandboxes/${vm.sandboxId}/stop`, {
+          method: "POST", signal: AbortSignal.timeout(Math.max(1, deadline - this.now())),
+        }), deadline);
         stop = stopOperation(reply.stop, (reply.sandbox as { stop?: unknown } | null | undefined)?.stop);
         // A reply without its stop is recovered from the sandbox, once.
         if (!stop) { sandbox = await this.inspect(vm.sandboxId, deadline, read); stop = stopOperation(sandbox.stop); }
