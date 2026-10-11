@@ -622,8 +622,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     () =>
       SECTIONS.filter(
         (s) =>
-          // Chrome setup links to the existing availability panel for cloud
-          // owners; its Local installation controls remain placement-gated.
+          // Chrome setup is reachable for every owner. BrowserUsePanel selects
+          // device controls or cloud guidance from the workspace placement.
           (local ? !["cloud-computer", "cloud-mcp", "cloud-skills"].includes(s.id) : ["providers", "integrations", "cloud-computer", "cloud-mcp", "cloud-skills", "browser-use"].includes(s.id)) &&
           (s.id !== "terminal-agents" || terminalAgentsEnabled) &&
           (s.id !== "internal" || internalUser),

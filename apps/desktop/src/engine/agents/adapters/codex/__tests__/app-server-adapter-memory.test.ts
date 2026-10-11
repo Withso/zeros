@@ -496,6 +496,43 @@ describe("Codex native memory capability", () => {
     }
   });
 
+  it.each(["failed", "pending"])("removes a %s MCP sign-in override when native inventory reconnects", async (outcome) => {
+    const emit = vi.fn(), instance = adapter(emit);
+    const original = native.requestTyped.getMockImplementation()!;
+    let connected = false;
+    native.requestTyped.mockImplementation(async (method, params) => {
+      if (method === "mcpServerStatus/list") return { data: [
+        { name: "linear", runtimeStatus: connected ? "connected" : "authenticationRequired", authStatus: connected ? "oAuth" : "notLoggedIn" },
+      ], nextCursor: null };
+      if (method === "mcpServer/oauth/login") return { authorizationUrl: "https://auth.example.test/authorize", loginId: "login" };
+      return original(method, params);
+    });
+    try {
+      const { session } = await instance.newSession({ cwd: "/tmp/proj" });
+      const port = instance.capabilityPorts.sessionTools;
+      const opts = { sessionId: session.executionId, toolId: "linear" };
+      const entry = async () => (await port.inventory(opts)).groups!.find(group => group.kind === "mcp")!.entries.find(row => row.id === "linear")!;
+      await port.authenticate(opts);
+      const completed = native.state.notificationHandlers.get("mcpServer/oauthLogin/completed")!;
+      if (outcome === "failed") completed({ name: "linear", loginId: "login", success: false });
+      expect(await entry()).toMatchObject({ status: outcome === "failed" ? "error" : "connecting", canAuthenticate: true });
+      connected = true;
+      const recovered = await entry();
+      expect(recovered.status).toBe("connected");
+      expect(recovered.canAuthenticate).toBeFalsy();
+      emit.mockClear();
+      completed({ name: "linear", loginId: "login", success: false });
+      expect(emit.mock.calls.filter(call => call[1].update.code === "mcp_oauth_failed")).toHaveLength(0);
+      connected = false;
+      expect(await entry()).toMatchObject({ status: "needs-auth", canAuthenticate: true });
+      await port.authenticate(opts);
+      expect(await entry()).toMatchObject({ status: "connecting", canAuthenticate: true });
+    } finally {
+      await instance.dispose();
+      native.requestTyped.mockImplementation(original);
+    }
+  });
+
   it("does not let a stale initial goal read overwrite a newer goal mutation", async () => {
     let releaseGoalRead!: () => void;
     native.state.goalGetGate = new Promise<void>((resolve) => {

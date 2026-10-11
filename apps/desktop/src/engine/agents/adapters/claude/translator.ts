@@ -564,6 +564,7 @@ export class ClaudeStreamTranslator {
     {
       toolCallId: string;
       nativeParent: string;
+      pendingToolCallIds: Set<string>;
       status: "in_progress" | "completed" | "failed";
       model?: string;
       subagentType?: string;
@@ -2135,17 +2136,23 @@ export class ClaudeStreamTranslator {
   ): void {
     const existing = this.agentTasks.get(taskId);
     const tool = nativeToolUseId ? this.toolInputs.get(nativeToolUseId) : undefined;
-    const toolCallId = existing?.toolCallId ?? (nativeToolUseId && this.toolCallIds.get(nativeToolUseId));
+    const invocationId = nativeToolUseId && this.toolCallIds.get(nativeToolUseId);
+    const toolCallId = existing?.toolCallId ?? invocationId;
     if (!toolCallId || (!existing && !/^(Agent|Task)$/i.test(tool?.name ?? ""))) return;
     const agent = {
       ...existing,
       toolCallId,
       nativeParent: existing?.nativeParent ?? this.agentMessageParents.get(taskId) ?? nativeToolUseId!,
+      pendingToolCallIds: existing?.pendingToolCallIds ?? new Set<string>(),
       status: existing?.status ?? "in_progress" as const,
       model: metadata.model ?? existing?.model ?? tool?.model,
       subagentType: metadata.subagent_type ?? existing?.subagentType ?? tool?.subagentType,
       effort: existing?.effort ?? tool?.effort,
     };
+    // A resume has its own native invocation, but child output still belongs
+    // to the original group. Both rows follow the current task's lifetime.
+    if (invocationId && agent.status === "in_progress")
+      addBoundedSet(agent.pendingToolCallIds, invocationId, MAX_BACKGROUND_TASK_LIFECYCLE);
     setBoundedMap(this.agentTasks, taskId, agent, MAX_BACKGROUND_TASK_LIFECYCLE);
     this.toolCallIds.set(agent.nativeParent, toolCallId);
     this.transcript.attachParent(agent.nativeParent, toolCallId);
@@ -2188,11 +2195,16 @@ export class ClaudeStreamTranslator {
     if (!agent || agent.status === "failed" || agent.status === status) return;
     agent.status = status;
     agent.error = error;
-    this.emit({
+    const toolCallIds = new Set([agent.toolCallId, ...agent.pendingToolCallIds]);
+    agent.pendingToolCallIds.clear();
+    for (const tool of this.scopedTools.values()) {
+      if (toolCallIds.has(tool.id)) tool.status = status;
+    }
+    for (const toolCallId of toolCallIds) this.emit({
       sessionId: this.sessionId,
       update: {
         sessionUpdate: "tool_call_update",
-        toolCallId: agent.toolCallId,
+        toolCallId,
         status,
         rawOutput: {
           status,
@@ -2554,7 +2566,7 @@ export class ClaudeStreamTranslator {
         agentResult?.status === "async_launched" &&
         typeof agentResult.agentId === "string";
       if (
-        previous?.status === "failed" ||
+        (previous?.status === "failed" && !asyncAgent) ||
         (previous?.status === "completed" && !tool.is_error && !agentResult)
       )
         continue;
@@ -2569,7 +2581,7 @@ export class ClaudeStreamTranslator {
       const toolCallId = previous?.id ?? randomUUID();
       if (typeof agentResult?.agentId === "string") this.bindAgentTask(agentResult.agentId, tool.tool_use_id, {
         model: typeof agentResult.resolvedModel === "string" ? agentResult.resolvedModel : undefined,
-      }, false);
+      }, this.agentTasks.get(agentResult.agentId)?.toolCallId !== toolCallId);
       const knownAgent = typeof agentResult?.agentId === "string"
         ? this.agentTasks.get(agentResult.agentId)
         : undefined;
@@ -2577,21 +2589,24 @@ export class ClaudeStreamTranslator {
         ? this.agentTaskEnds.get(agentResult.agentId as string)
         : undefined;
       const agent = endedAgent
-        ? { ...knownAgent, ...endedAgent, toolCallId }
+        ? { ...knownAgent, ...endedAgent }
         : knownAgent;
       const status = tool.is_error
         ? "failed"
         : asyncAgent
           ? (agent?.status ?? "in_progress")
           : "completed";
+      if (typeof agentResult?.agentId === "string" && status !== "in_progress")
+        this.settleAgentTask(agentResult.agentId, status, agent?.error);
       if (typeof agentResult?.agentId === "string")
         setBoundedMap(
           this.agentTasks,
           agentResult.agentId as string,
           {
             ...agent,
-            toolCallId,
+            toolCallId: agent?.toolCallId ?? toolCallId,
             nativeParent: agent?.nativeParent ?? tool.tool_use_id,
+            pendingToolCallIds: agent?.pendingToolCallIds ?? new Set<string>(),
             status,
             ...(typeof agentResult.resolvedModel === "string"
               ? { model: agentResult.resolvedModel }

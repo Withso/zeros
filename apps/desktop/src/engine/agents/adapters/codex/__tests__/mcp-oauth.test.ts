@@ -51,6 +51,32 @@ describe("Codex MCP OAuth correlation", () => {
     expect(translator.mcpOauthState("linear")).toBe("error");
     expect(emit).not.toHaveBeenCalled();
   });
+
+  it.each(["failed-login", "failed-request", "missing-completion"])("lets connected inventory recover from %s and own subsequent health", outcome => {
+    const { translator, emit, complete } = fixture();
+    const attempt = translator.beginMcpOauthLogin("linear");
+    if (outcome === "failed-request") translator.failMcpOauthLogin("linear", attempt);
+    else {
+      translator.finishMcpOauthLogin("linear", attempt, "login");
+      if (outcome === "failed-login") complete("linear", "login", false);
+    }
+    const state = outcome === "missing-completion" ? "opening" : "error";
+    expect(translator.mcpOauthInventoryState("linear", "needs-auth")).toBe(state);
+    expect(translator.mcpOauthInventoryState("linear", "connected")).toBeUndefined();
+    emit.mockClear();
+    complete("linear", outcome === "failed-request" ? undefined : "login", false);
+    expect(emit).not.toHaveBeenCalled();
+    expect(translator.mcpOauthInventoryState("linear", "needs-auth")).toBeUndefined();
+    expect(translator.mcpOauthInventoryState("linear", "error")).toBeUndefined();
+
+    const retry = translator.beginMcpOauthLogin("linear");
+    translator.finishMcpOauthLogin("linear", retry, "retry");
+    complete("linear", "login", false);
+    expect(translator.mcpOauthInventoryState("linear", "needs-auth")).toBe("opening");
+    complete("linear", "retry");
+    expect(translator.mcpOauthInventoryState("linear", "needs-auth")).toBe("connected");
+  });
+
   it("retains a matching early result after a burst of obsolete completions", () => {
     const { translator, complete } = fixture();
     const attempt = translator.beginMcpOauthLogin("linear");

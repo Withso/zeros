@@ -9,6 +9,9 @@ import { TooltipProvider, Button } from "../shared/ui/primitives";
 import { AuthContext, type AuthContextValue } from "../features/auth/auth-context";
 import { ActionsCtx, type SessionsActions } from "../features/agent/sessions-context";
 import { useWorkspaceStore } from "../state/workspace-store";
+import { upsertProject } from "../state/projects-store";
+import { notifyProjectsChanged, setWorkspaceRowsForTesting } from "../state/use-projects";
+import type { Workspace } from "../platform/git";
 import type { ChatThread } from "../state/store";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
 import type { RuntimeClient } from "../platform/bridge/ws-client";
@@ -23,18 +26,30 @@ import type { RendererContext } from "../features/agent/renderers/types";
 
 const query = new URLSearchParams(location.search);
 const organizationId = "11111111-1111-4111-8111-111111111111";
+const otherOrganizationId = "33333333-3333-4333-8333-333333333333";
 const cloudFolder = `cloud://${organizationId}/22222222-2222-4222-8222-222222222222`;
-const folder = query.get("placement") === "cloud" ? cloudFolder : "/fixture/workspace";
+const localFolder = "/fixture/workspace";
+const folder = query.get("placement") === "cloud" ? cloudFolder : localFolder;
+const project = upsertProject({ repoRoot: localFolder, repoSlug: "claude-runtime-ui", name: "Runtime fixture" });
+const workspace: Workspace = {
+  id: "claude-local-workspace", repoSlug: project.repoSlug, repoRoot: localFolder, path: localFolder,
+  organizationId: query.get("owner") === "organization" ? organizationId : null, placement: "local",
+  branch: "fixture", baseBranch: "main", status: "in-progress", createdAt: 1, archivedAt: null,
+  stashRef: null, prNumber: null, prState: null, prUrl: null, agentId: null, lastActiveAt: null,
+};
+notifyProjectsChanged();
+setWorkspaceRowsForTesting(project.repoSlug, [workspace]);
 const agents = [{ id: "claude", name: "Claude Code", description: "", version: "2.1.293", distribution: {}, installed: true, authenticated: true }];
 const updates: Array<{ chatId: string; env: Record<string, string> }> = [];
 const calls: Array<{ op: string }> = [];
 Object.assign(window, { __ZEROS_NATIVE__: { invoke: async () => null, on: () => () => {} } });
 setActiveBridge({
   status: "connected", onStatusChange: () => () => {}, onMessage: () => () => {}, on: () => () => {},
-  request: async ({ op }: { op: string }) => {
+  request: async ({ op, args }: { op: string; args?: { archived?: boolean } }) => {
     calls.push({ op });
     let result: unknown = {};
-    if (op === "project.list") result = { projects: [] };
+    if (op === "project.list") result = { projects: [project] };
+    if (op === "workspace.list") result = { workspaces: args?.archived ? [] : [workspace] };
     if (op === "settings.resolve") result = { effective: { browser: { codex_enabled: false, claude_enabled: false } }, sources: {}, layers: [] };
     if (op === "settings.read") result = { doc: {}, exists: true, path: "/fixture/settings.toml" };
     return { result };
@@ -44,12 +59,21 @@ if (query.get("owner") === "organization") {
   const organization = { id: organizationId, name: "Fixture organization", slug: "fixture", logo: null, isPersonal: false,
     role: "owner" as const, defaultTeamId: organizationId, workspaceCapabilities: { local: true, cloud: true },
     teamCapabilities: { multiple: false as const, canCreate: false as const } };
+  const otherOrganization = { ...organization, id: otherOrganizationId, name: "Other organization", slug: "other" };
   acceptOrganizationSnapshot({ user: { id: "44444444-4444-4444-8444-444444444444", email: "fixture@example.test", displayName: "Fixture", staffRole: null },
-    organizations: [organization], teams: [organization] });
+    organizations: [organization, otherOrganization], teams: [organization, otherOrganization] });
   setActiveOrganizationSelection(organizationId, false);
 }
 controlPlane.me = async () => { throw new Error("Offline fixture membership refresh"); };
-useWorkspaceStore.setState({ activePage: "dashboard", chats: [{ id: "claude-ui-chat", agentId: "claude", folder } as ChatThread] });
+const selectPlacement = (placement: "local" | "cloud" | null) => {
+  const selectedFolder = placement === "cloud" ? cloudFolder : placement === "local" ? localFolder : null;
+  useWorkspaceStore.setState({
+    activeChatId: selectedFolder ? "claude-ui-chat" : null, newAgentFolder: null, lastWorkspaceFolder: selectedFolder,
+    chats: selectedFolder ? [{ id: "claude-ui-chat", agentId: "claude", folder: selectedFolder } as ChatThread] : [],
+  });
+};
+useWorkspaceStore.setState({ activePage: "dashboard" });
+selectPlacement(query.get("placement") === "cloud" ? "cloud" : "local");
 await loadAgents(async () => agents);
 const sessions = {
   listAgents: async () => agents,
@@ -69,7 +93,12 @@ const ctx: RendererContext = { isStreaming: false, lastMessageId: null, activeTu
   openBrowserSettings: () => openSettings("browser-use"),
 };
 Object.assign(window, { claudeRuntimeUi: { updates, calls, preferences: () => [...pendingAgentPreferences().values()],
-  openSettings, folder } });
+  openSettings, folder, selectPlacement,
+  selectOwner: (owner: "personal" | "organization" | "other") => {
+    setActiveOrganizationSelection(owner === "personal" ? null : owner === "organization" ? organizationId : otherOrganizationId, owner === "personal");
+    openSettings("browser-use");
+  },
+} });
 if (query.has("settings")) openSettings(query.get("settings")!);
 const { SettingsPage } = await import("../features/settings/settings-page");
 

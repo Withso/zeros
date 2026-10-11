@@ -152,6 +152,32 @@ export async function runClaudeRuntimeUiSmoke({ page, check, harnessBase }) {
   await expect(page.locator("#browser-use-claude-enabled")).toHaveCount(0);
   check("Cloud Chrome setup opens the existing organization Browser use availability panel", true);
 
+  await page.goto(`${transcript}?owner=organization&placement=local`);
+  await page.getByRole("button", { name: "Open Settings", exact: true }).click();
+  const localChrome = page.locator("#browser-use-claude-enabled");
+  const cloudGuidance = page.getByText("Native browser is unavailable in cloud workspaces.", { exact: true });
+  await expect(localChrome).toBeVisible();
+  await expect(page.getByRole("button", { name: "Install the Claude in Chrome extension", exact: true })).toBeVisible();
+  await expect(cloudGuidance).toHaveCount(0);
+  check("Organization-local Chrome setup opens the device controls and extension action", true);
+  await page.evaluate(() => window.claudeRuntimeUi.selectPlacement("cloud"));
+  await expect(localChrome).toHaveCount(0);
+  await expect(cloudGuidance).toHaveCount(2);
+  await page.evaluate(() => window.claudeRuntimeUi.selectPlacement("local"));
+  await expect(localChrome).toBeVisible();
+  await expect(cloudGuidance).toHaveCount(0);
+  await page.evaluate(() => window.claudeRuntimeUi.selectOwner("other"));
+  await expect(localChrome).toHaveCount(0);
+  await expect(cloudGuidance).toHaveCount(2);
+  await page.evaluate(() => window.claudeRuntimeUi.selectOwner("personal"));
+  await expect(localChrome).toBeVisible();
+  await page.evaluate(() => window.claudeRuntimeUi.selectOwner("organization"));
+  await expect(localChrome).toBeVisible();
+  await page.evaluate(() => window.claudeRuntimeUi.selectPlacement(null));
+  await expect(localChrome).toHaveCount(0);
+  await expect(cloudGuidance).toHaveCount(2);
+  check("Browser settings follow placement and exact owner through Local, cloud, Personal and cleared workspace selections", true);
+
   for (const theme of ["dark", "light"]) {
     await page.goto(transcript);
     await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);

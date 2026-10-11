@@ -43,6 +43,56 @@ describe("Claude stable subagent ownership and metadata", () => {
     expect(background()).toMatchObject({ waiting: true, activity: { state: "idle" } });
   });
 
+  it.each([
+    { outcome: "completed", beforeAck: false },
+    { outcome: "failed", beforeAck: false },
+    { outcome: "stopped", beforeAck: false },
+    { outcome: "completed", beforeAck: true },
+    { outcome: "failed", beforeAck: true },
+    { outcome: "stopped", beforeAck: true },
+  ])("keeps one child owner and settles both invocations on $outcome (before acknowledgement: $beforeAck)", ({ outcome, beforeAck }) => {
+    const { t, tool, start, row, text } = session();
+    const acknowledge = (id: string) => t.feed({
+      type: "user", tool_use_result: { status: "async_launched", agentId: "child", resolvedModel: id === "launch" ? "claude-opus-5-5" : "claude-sonnet-5" },
+      message: { content: [{ type: "tool_result", tool_use_id: id, content: "Launched" }] },
+    });
+    const output = (id: string, parent: string) => t.feed({
+      type: "assistant", agent_id: "child", parent_tool_use_id: parent,
+      message: { id, content: [{ type: "text", text: id }] },
+    });
+    const finish = () => {
+      if (outcome === "stopped") t.endActivity();
+      else t.feed({ type: "system", subtype: "task_notification", task_id: "child", run_id: "run-002", tool_use_id: "resume", status: outcome });
+    };
+    tool("launch", { description: "Audit source", run_in_background: true });
+    start("child", "launch", { run_id: "run-001", is_backgrounded: true });
+    acknowledge("launch");
+    output("First report", "launch");
+    t.feed({ type: "system", subtype: "task_notification", task_id: "child", run_id: "run-001", status: "completed" });
+    const groupId = row("launch").toolCallId;
+
+    tool("resume", { description: "Continue audit", resume: "child", run_in_background: true });
+    start("child", "resume", { run_id: "run-002", is_backgrounded: true });
+    output("Before acknowledgement", "resume");
+    if (beforeAck) finish();
+    acknowledge("resume");
+    output("After acknowledgement", "resume");
+    expect(text("First report")).toMatchObject({ parentToolId: groupId });
+    expect(text("Before acknowledgement")).toMatchObject({ parentToolId: groupId });
+    expect(text("After acknowledgement")).toMatchObject({ parentToolId: groupId });
+    expect(row("resume").toolCallId).not.toBe(groupId);
+    if (!beforeAck) {
+      expect(row("launch").status).toBe("in_progress");
+      expect(row("resume").status).toBe("in_progress");
+      finish();
+    }
+    t.endActivity();
+    const status = outcome === "completed" ? "completed" : "failed";
+    expect(row("launch")).toMatchObject({ toolCallId: groupId, status, rawOutput: { resolvedModel: "claude-sonnet-5" } });
+    expect(row("resume")).toMatchObject({ status, rawOutput: { resolvedModel: "claude-sonnet-5" } });
+    expect(t.hasProcessWork).toBe(false);
+  });
+
   it.each([false, true])("nests a child Agent beneath a known parent task, including an ended parent (%s)", (ended) => {
     const { t, tool, start, row } = session();
     tool("parent-call", { description: "Parent audit" });
@@ -51,6 +101,34 @@ describe("Claude stable subagent ownership and metadata", () => {
     tool("child-call", { description: "Nested audit" });
     start("child", "child-call", { parent_task_id: "parent", subagent_type: "code-reviewer" });
     expect(row("child-call")).toMatchObject({ parentToolId: row("parent-call").toolCallId, rawOutput: { subagentType: "code-reviewer" } });
+  });
+
+  it("settles a foreground resume result without changing its stable group or an earlier invocation", () => {
+    const { t, tool, start, row } = session();
+    const result = (id: string, content: string) => t.feed({
+      type: "user", tool_use_result: { status: "completed", agentId: "child", content: [{ type: "text", text: content }] },
+      message: { content: [{ type: "tool_result", tool_use_id: id, content: "Transport metadata" }] },
+    });
+    tool("launch", { description: "Audit source" });
+    start("child", "launch", { run_id: "run-001" });
+    result("launch", "First report");
+    const groupId = row("launch").toolCallId;
+    tool("resume", { description: "Continue audit", resume: "child" });
+    start("child", "resume", { run_id: "run-002" });
+    result("resume", "Second report");
+    expect(row("launch")).toMatchObject({ toolCallId: groupId, status: "completed" });
+    expect(row("resume")).toMatchObject({ status: "completed", content: [{ content: { text: "Second report" } }] });
+
+    tool("third", { description: "Continue audit", resume: "child" });
+    start("child", "third", { run_id: "run-003" });
+    expect(row("launch").status).toBe("in_progress");
+    expect(row("resume").status).toBe("completed");
+    t.feed({ type: "system", subtype: "task_notification", task_id: "child", run_id: "run-002", status: "failed" });
+    expect(row("launch").status).toBe("in_progress");
+    t.endActivity();
+    expect(row("launch").status).toBe("failed");
+    expect(row("third").status).toBe("failed");
+    expect(row("resume").status).toBe("completed");
   });
 
   it("leaves an unknown parent task unparented rather than borrowing another Agent group", () => {

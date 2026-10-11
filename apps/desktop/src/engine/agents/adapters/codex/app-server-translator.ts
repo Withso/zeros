@@ -464,9 +464,10 @@ export class CodexAppServerTranslator {
   mcpOauthInventoryState(name: string, nativeStatus: string): McpOauthAttempt["state"] | undefined {
     const attempt = this.mcpOauthAttempts.get(name);
     if (!attempt) return;
-    // Once the inventory confirms success, it owns subsequent connection
-    // health (including expiry). Keep the attempt to ignore late duplicates.
-    if (attempt.state === "connected" && nativeStatus === "connected") attempt.inventoryConfirmed = true;
+    // A native connection also confirms recovery from a failed login or a
+    // missing completion. Inventory then owns health, including later expiry.
+    // Retain the attempt so late completions cannot override that evidence.
+    if (nativeStatus === "connected") attempt.inventoryConfirmed = true;
     return attempt.inventoryConfirmed ? undefined : attempt.state;
   }
 
@@ -1638,7 +1639,7 @@ export class CodexAppServerTranslator {
     if (typeof p.name !== "string" || typeof p.success !== "boolean") return;
     const attempt = this.mcpOauthAttempts.get(p.name);
     if (attempt) {
-      if (attempt.state !== "opening") return;
+      if (attempt.inventoryConfirmed || attempt.state !== "opening") return;
       if (attempt.awaitingResponse) {
         if (attempt.early.length === 8) attempt.early.shift();
         attempt.early.push({ loginId: p.loginId, success: p.success });
