@@ -212,7 +212,7 @@ Diagnostics cannot include free text, paths, URLs, stderr or exception fields.
 
 ## Registry, pins and authority
 
-The registry has five tables: base compatibility contracts, approved Boat base
+The runtime authority has five registry tables: base compatibility contracts, approved Boat base
 images, runtime bundles, ordered channel releases, and per-runtime/base/
 credential-kind v4 qualifications. Every new channel release uses the
 OIDC-verified GitHub run ID as its order, shared across the Alpha and standalone
@@ -230,7 +230,7 @@ bounded to 16 KiB. There are no per-provider real-turn case or continuation
 tables. Smoke scheduling uses the separate run and provider journals below.
 
 For internal Alpha, the control plane inserts qualification evidence itself
-(AB-2, for example `{mode:"smoke",checks:[...]}`). All registry tables have enabled
+(AB-2, for example `{mode:"smoke",checks:[...]}`). These five registry tables have enabled
 and forced RLS with only `app_is_system()` policies. The broad `zeros_app` DML
 grants inherited from migration 0004 remain; **restrictions are enforced by RLS
 and triggers, not column grants**. Tenant contexts cannot read or write these
@@ -241,6 +241,14 @@ Qualification `enabled`/`mcp_qualified` can only move to false while revoked;
 revoked qualifications must have both false. Native capabilities are immutable.
 Historical qualification rows remain immutable audit data; current executable
 admission joins only exact v4 qualification records.
+
+The separate `cloud_runtime_images` registry (migration 0141) records derived
+Boat named snapshots containing an approved base and its qualified current
+runtime. Image identity and provider observations are immutable; lifecycle moves
+from building to ready or failed, and ready to retiring to retired. Images do not
+grant qualification or replace runtime/base admission. Cloud Computer claims
+optionally pin a ready image alongside their builder intent to avoid installing
+the runtime on each builder. See [runtime images](runtime-images.md).
 
 Generations carry the nullable six-column group `runtime_id`,
 `runtime_manifest_sha256`, `runtime_base_image_id`, `runtime_base_compatibility_id`,
@@ -545,7 +553,7 @@ tracks attempts from the start. Deleting a bound sandbox remains possible after
 the qualification run becomes terminal; cleanup evidence is recorded only
 after confirmed absence.
 
-The shared `CloudBuilderVms` module also supports authorized template sources
+The shared `CloudBuilderVms` module also supports authorized template and runtime-image sources
 and graceful stop-to-archived for Cloud Computer builds. Its system-only
 `cloud_builder_vm_operations` journal preserves intent before provider I/O
 and the sandbox ID before readiness or wallet validation. Workspace journals
@@ -553,6 +561,11 @@ require an organization/generation owner and cannot represent these
 infrastructure VMs. The extracted pinned-SSH transport is shared with workspace
 setup; fixed commands live in `cloud-builder-commands.ts`, where computer
 builds add their closed command entries.
+
+The `runtime-image` purpose enables snapshots and admits only the TCB helper
+among those Computer commands. Image preparation and its cold probe retain the
+same durable allocation journal; the Computer consumer preserves legacy base
+intent digests and replays its saved image source after disablement or retirement.
 
 ## Alpha live verification runbook
 
@@ -607,6 +620,7 @@ directly. The control-plane worker owns VM cleanup.
 | --- | --- | --- |
 | `CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE` | `v4` | Only `v4` is accepted; new cloud workspaces require a saved v2 Computer source and qualified pin. |
 | `CLOUD_RUNTIME_QUALIFICATION_MODE` | `full` | `full` requires full evidence; `smoke` accepts smoke or full evidence for selection and credential admission. |
+| `CLOUD_RUNTIME_IMAGES_ENABLED` | `false` | Permits new derived runtime images and Computer image choices. Saved creates and cleanup keep their original source when disabled. |
 
 The configured base is the newest approved, non-revoked base image. A revoked
 compatibility contract on that base closes admission rather than selecting an

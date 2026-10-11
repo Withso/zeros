@@ -7,7 +7,7 @@ B7 database journal, the actual adapter/helper transport, and fake provider and
 GitHub boundaries.
 This is the supported Alpha build path for active organization owners/admins;
 engineering staff membership and the desktop internal flag are not required.
-The legacy image producer/service is removed. Historical cancellation and
+The legacy custom-Computer image producer/service is removed. Historical cancellation and
 receipt-verified deletion run in the cleanup-only retirement worker, independent
 of setup-worker startup; enrollment can proceed while cleanup is pending.
 Historical tables, identities and referenced snapshots remain. No live
@@ -34,17 +34,29 @@ creator, and frees capacity; a failed preparation rolls back the claim. The acce
 manifest is added independently after clones finish. The public C1 request and
 response shapes stay unchanged except for the closed `tcb_modified` error.
 
+With `CLOUD_RUNTIME_IMAGES_ENABLED=true`, the claim also selects a ready
+[runtime image](runtime-images.md) for that exact runtime/base, channel and
+provider scope. Its share lock lasts through recording the immutable
+`builder_source_image_id` and builder intent. Missing or disabled images use the
+base path. A null source-image pin preserves the original intent digest; a saved
+image pin remains authoritative on replay and cleanup even after withdrawal or
+flag disablement.
+
 `CLOUD_COMPUTER_MAX_CONCURRENT_BUILDS` defaults to 2 and accepts 1–32. Pass the
 same config value to C1 and the worker. Running builds and terminal builders
 without positive stop/delete or journal-confirmed non-allocation evidence count against the global cap. An
 organization with unresolved compute cannot claim another build. Verified
 archival releases compute capacity while physical deletion can retry.
 
-The pipeline is base create → build-purpose runtime install → protected-file
-baseline → shallow repository clones → root recipe → integrity and runtime
+The pipeline starts with base create and build-purpose runtime install, or a
+create from a ready runtime image with the pinned runtime already current and
+idle. The image path skips artifact presigning and installation. Both continue
+with protected-file baseline → shallow repository clones → root recipe → integrity and runtime
 self-test → sanitation → verified archive → C1 completion CAS. The baseline
 digest and final manifest digest are stored outside the VM. The source ref is
-`boat-template:<sandboxId>`; there is no named snapshot or verifier VM.
+`boat-template:<sandboxId>`; the final Computer template does not require a named
+snapshot or verifier VM. The separate runtime-image producer owns its shared
+named snapshot and cold probe.
 Per the ACD-11/D8 capture decision, the final evidence is the sanitation manifest
 plus the stopped/ARCHIVED sandbox confirmed by B7's provider GET. There is no
 separate snapshot operation. Boat's stop saves the disk first and reports itself
@@ -123,7 +135,8 @@ descriptor and a presigned GET URL expiring in 900 seconds. Its input is limited
 to 64 KiB. Every helper ends with a closed `zeros.diagnostic/v1` line. B7
 returns the bounded stdout **and** parsed last diagnostic, with the command
 stage and closed failure checks validated. Computer-command stdin is accepted
-only for a computer-build VM. Poll batches are measured after JSON escaping,
+for a computer-build VM; a runtime-image VM may invoke only the TCB helper for
+its cold probe. Poll batches are measured after JSON escaping,
 reserving 4096 bytes for the diagnostic and both newlines within the real
 64 KiB transport limit. The adapter/helper test executes the actual Python
 entrypoint through B7's pinned-SSH channel fixture and drains escaped/multibyte
@@ -184,6 +197,12 @@ mode must remain unchanged. Namespace/seccomp/cgroup isolation belongs to the
 verified launcher. Adding unrelated packages is allowed; replacing a protected
 dependency requires a new approved base/runtime.
 
+Before repositories or recipes run, a deterministic base/runtime mismatch or a
+confirmed non-timeout `tcb_modified` baseline withdraws an image from selection.
+Transport failures, malformed results and later recipe/integrity failures do not
+quarantine the shared image. Both source paths still require the complete
+baseline and post-install checks.
+
 Sanitation verifies integrity and repository SHAs again, normalizes Git config
 and repo ownership, stops the idle host and removes private homes, setup and
 admission state, logs/journals, settings, sessions and machine-specific state.
@@ -222,7 +241,8 @@ mode still governs runtime selection and validation.
 controlled migrations, starts it with the other cloud background workers, and
 awaits its stop callback before closing the database pool on shutdown. The
 existing background-worker pause switch also pauses template builds. No new
-environment flags are required.
+setup-worker flag is required. `CLOUD_RUNTIME_IMAGES_ENABLED` independently
+enables the optional image source and defaults to false.
 
 Live qualification remains an operator task:
 
