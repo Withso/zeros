@@ -156,7 +156,6 @@
         "rounded-[2px]": 1
       },
       "apps/desktop/src/renderer/shell/workbench/tabs/browser-tab.tsx": {
-        "leading-[1.55]": 1,
         "rounded-[2px]": 2
       },
       "apps/desktop/src/renderer/shell/workbench/tabs/changes-tab.tsx": {
@@ -568,7 +567,7 @@
         "button": 4
       },
       "apps/desktop/src/renderer/shell/workbench/tabs/browser-tab.tsx": {
-        "button": 6,
+        "button": 5,
         "input": 3
       },
       "apps/desktop/src/renderer/shell/workbench/tabs/changes-diff-viewer.tsx": {

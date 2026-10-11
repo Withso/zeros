@@ -34,6 +34,7 @@ describe("cloud-off credential bootstrap HTTP boundaries", () => {
       expect(put).toHaveBeenCalledWith({ ...input, ownerUserId: owner, credentialId: credential });
       for (const [method, path] of [["GET", `/v1/organizations/${organization}/customization`],
         ["POST", "/v1/cloud-agent-credentials/delegations"], ["POST", `/v1/cloud-workspaces/${credential}/agent-credentials/prepare`],
+        ["GET", `/v1/cloud-workspaces/${credential}/agent-availability`],
         ["POST", "/internal/v2/cloud-workspaces/engine/agent-execution"]]) {
         expect((await app.request(path, { method })).status).toBe(404);
       }

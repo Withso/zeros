@@ -7,7 +7,7 @@ import { CloudAgentContextCache, createCloudBootAgentExecutionFactory, cloudBoot
 
 /** Real private registry/cache/factory identity with synthetic admitted data.
  * Native containment, CP endpoints and provider qualification are not proven. */
-export async function testCloudBootFixture(cwd = "/srv/zeros/workspace", provider: "cursor" | "codex" = "cursor") {
+export async function testCloudBootFixture(cwd = "/srv/zeros/workspace", provider: "cursor" | "codex" | "claude" = "cursor") {
   const scope = { organizationId: randomUUID(), workspaceId: randomUUID(), generation: 1, engineInstanceId: randomUUID(),
     bootId: randomUUID(), writerEpoch: randomUUID(), fundingOwnerUserId: randomUUID(), fundingOwnerEpoch: 1 };
   let live = true;
@@ -22,10 +22,10 @@ export async function testCloudBootFixture(cwd = "/srv/zeros/workspace", provide
     authorityEpoch: 1, cacheRevision: 1, desiredCacheRevision: 1,
     initialAdoptions: [{ provider: "cursor", status: "missing" }, { provider: "claude", status: "missing" }, { provider: "codex", status: "missing" }],
     providers: [{ provider, status: "ready", credentialId: randomUUID(), credentialRevision: 1, connectionRevision: 1,
-      adoptionId: randomUUID(), displayName: "Synthetic account", kind: provider === "cursor" ? "cursor-api-key" : "codex-api-key", models: ["test-model"],
+      adoptionId: randomUUID(), displayName: "Synthetic account", kind: provider === "cursor" ? "cursor-api-key" : provider === "claude" ? "claude-api-key" : "codex-api-key", models: ["test-model"],
       nativeCapabilities, materialVersion: 1, expiresAt: null, refreshAfter: null, authorityExpiresAt: null,
-      material: { kind: provider === "cursor" ? "cursor-api-key" : "codex-api-key", apiKey: "synthetic-cursor-private-key" } },
-      { provider: "claude", status: "unavailable", code: "cloud_agent_credential_required" },
+      material: { kind: provider === "cursor" ? "cursor-api-key" : provider === "claude" ? "claude-api-key" : "codex-api-key", apiKey: "synthetic-cursor-private-key" } },
+      { provider: provider === "claude" ? "codex" : "claude", status: "unavailable", code: "cloud_agent_credential_required" },
       { provider: provider === "cursor" ? "codex" : "cursor", status: "unavailable", code: "cloud_agent_credential_required" }] };
   const request = { bootstrap: vi.fn(async () => response), sync: vi.fn(async () => response) };
   const credentials = new CloudAgentCredentialCache({ scope, engineLive, request });

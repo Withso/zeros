@@ -8,6 +8,7 @@ import { loadPinnedCloudRuntime, selectCloudRuntime } from "./runtime-selection.
 import type { RuntimeDescriptor } from "./runtime-contract.js";
 
 export type { BuilderVm, BuilderFixedCommand, ClosedDiagnostic, CloudBuilderVms } from "./cloud-builder-vm.js";
+export { BuilderVmError } from "./cloud-builder-vm.js";
 export type { BuilderVmOperationStore as BuilderVmOperations } from "./cloud-builder-vm-store.js";
 export { COMPUTER_TEMPLATE_FIXED_COMMANDS } from "./cloud-builder-commands.js";
 

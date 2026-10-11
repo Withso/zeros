@@ -1,5 +1,6 @@
 import { beforeEach, expect, it, vi } from "vitest";
-const ports = vi.hoisted(() => ({ load: vi.fn(), custody: vi.fn(), registry: vi.fn(), boundary: vi.fn(), live: vi.fn(), inspect: vi.fn() }));
+const ports = vi.hoisted(() => ({ load: vi.fn(), custody: vi.fn(), registry: vi.fn(), boundary: vi.fn(), live: vi.fn(), inspect: vi.fn(), dispose: vi.fn() }));
+vi.mock("../../apps/desktop/src/engine/pty/pty-host-client", () => ({ disposePtyHost: ports.dispose }));
 vi.mock("../../apps/desktop/src/engine/agents/containment/cloud-worker-config", () => ({ loadCloudWorkerConfiguration: ports.load }));
 vi.mock("../../apps/desktop/src/engine/agents/containment/cloud-workload-custody", () => ({ createCloudWorkloadCustody: ports.custody }));
 vi.mock("../../apps/desktop/src/engine/agents/containment/cloud-owned-workloads", () => ({ CloudOwnedWorkloadRegistry: class { inspect = ports.inspect; constructor(options: unknown) { ports.registry(options); } } }));
@@ -15,6 +16,11 @@ it("shares one original controller custody, registry and boundary across inline 
   expect(ports.registry).toHaveBeenCalledExactlyOnceWith({ custody });
   expect(ports.boundary).toHaveBeenCalledExactlyOnceWith({ projectRoot: "/srv/zeros/workspace", configuration, workloads: context.workloads });
   expect(ports.live).toHaveBeenCalledOnce();
+  expect(ports.dispose).not.toHaveBeenCalled();
+});
+it("ends the engine's process-global PTY transport with the controller", () => {
+  const context = createCloudQualificationRuntime();
+  context.close(); expect(ports.dispose).toHaveBeenCalledOnce();
 });
 it.each([null, { uid: 0, gid: 0 }, { uid: 10001, gid: 10001 }])("refuses absent or legacy activation identity %s", value => {
   ports.load.mockReturnValue(value); expect(() => createCloudQualificationRuntime()).toThrow();

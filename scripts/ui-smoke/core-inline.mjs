@@ -2384,4 +2384,38 @@ export async function runBrowserRetentionSmoke({ page, harnessBase, check }) {
       ),
     JSON.stringify(browserRetention.active),
   );
+
+  // Float preview moves the tab's viewport host into a slot over the chat and
+  // back. Each move must keep the same browsing context (moveBefore).
+  const floatState = () =>
+    page.evaluate(() => {
+      const frame = document.querySelector('iframe[data-browser-id="a"]');
+      const child = frame?.contentWindow;
+      return {
+        loads: window.__zerosBrowserRetentionLoads,
+        floated: Boolean(frame?.closest('[data-testid="browser-float-slot"]')),
+        input: frame?.contentDocument?.querySelector("input")?.value,
+        heap: child?.__zerosBrowserRetentionHeap?.token,
+        scrollY: child?.scrollY,
+      };
+    });
+  const keptDocument = (state) =>
+    state.loads?.a === 1 &&
+    state.input === "typed-a" &&
+    state.heap === "heap-a" &&
+    state.scrollY >= 600;
+  await page.getByRole("button", { name: "Float A" }).click();
+  const floated = await floatState();
+  check(
+    "Floating a Browser iframe keeps its document without a reload",
+    floated.floated && keptDocument(floated),
+    JSON.stringify(floated),
+  );
+  await page.getByRole("button", { name: "Float A" }).click();
+  const docked = await floatState();
+  check(
+    "Docking a floated Browser iframe keeps its document without a reload",
+    !docked.floated && keptDocument(docked),
+    JSON.stringify(docked),
+  );
 }

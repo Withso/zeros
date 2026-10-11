@@ -234,6 +234,22 @@ describe("one-step organization provider connection", () => {
     await connected();
   });
 
+  it("explains a busy credential update and keeps the connection ready to retry", async () => {
+    f.request.mockRejectedValueOnce(Object.assign(new Error("cloud_agent_credential_busy"), {
+      code: "cloud_agent_credential_busy", status: 503,
+    }));
+    action("Configure").props.onClick!();
+    submit().props.onClick!();
+    await vi.waitFor(() => expect(f.error).toHaveBeenCalledOnce());
+    expect(f.error).toHaveBeenCalledWith("Your cloud connection is being updated. Try again in a moment.");
+    expect(dialog().props.open).toBe(true);
+    expect(submit().props.disabled).toBe(false);
+    expect(f.success).not.toHaveBeenCalled();
+    f.error.mockClear();
+    submit().props.onClick!();
+    await connected();
+  });
+
   it.each(["hidden", "removal-pending", "retired-owner"])("keeps a %s dialog from submitting", async state => {
     action("Configure").props.onClick!();
     if (state === "hidden") f.active = false;

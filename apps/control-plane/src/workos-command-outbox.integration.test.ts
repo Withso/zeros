@@ -621,15 +621,20 @@ d("WorkOS command outbox", () => {
         logger: { info() {}, warn() {}, error() {} },
       },
     ).tick(1);
-    await new Promise((resolve) => setTimeout(resolve, 75));
-    await blocker.query(
-      `SELECT pg_advisory_unlock(
-         hashtextextended('workos-provider-org:' || $1::text, 0)
-       )`,
-      [seeded.organizationId],
-    );
-    blocker.release();
-    await expect(processing).resolves.toBe(1);
+    // Hold the lock until the tick settles. A fixed release timer raced the
+    // claim on slow runners, so the processor sometimes took the lock and
+    // completed instead of observing contention.
+    try {
+      await expect(processing).resolves.toBe(1);
+    } finally {
+      await blocker.query(
+        `SELECT pg_advisory_unlock(
+           hashtextextended('workos-provider-org:' || $1::text, 0)
+         )`,
+        [seeded.organizationId],
+      );
+      blocker.release();
+    }
 
     await expect(
       pool.query(

@@ -520,8 +520,9 @@ the provider journal, delete it, verify the deletion receipt and a subsequent
 404, then mark the run failed. A receipt may be `completed`, or `blocked` at
 `waiting_for_uploads`, `kept_for_newer_snapshots` or `waiting_for_restore` with
 the sandbox absent. The latter proves compute release while storage remains
-pending; it does not prove storage erasure. Unknown stages, `pending`/`processing`
-operations and still-visible sandboxes never confirm builder deletion.
+pending; it does not prove storage erasure. Unknown stages, Boat's generic
+`retrying` (which names no phase), `pending`/`processing` operations and
+still-visible sandboxes never confirm builder deletion.
 A seven-minute cleanup lease prevents concurrent
 reconcilers. Unconfirmed cleanup keeps the running slot occupied. A lost create
 reply is recovered with the original idempotency key and exact request; replay

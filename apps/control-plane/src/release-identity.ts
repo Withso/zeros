@@ -7,7 +7,6 @@ import { withSystemTx } from "./db.js";
 import type { MigrationStatus } from "./migrate.js";
 import { isNewerExpandMigration } from "./migration-phase.js";
 import type { CloudWorkspaceReleaseHealthReader } from "./cloud-workspaces/health.js";
-import { activeAlphaDeletionReadinessException } from "./cloud-workspaces/alpha-deletion-readiness.js";
 import { readRuntimeReleaseIdentity } from "./cloud-workspaces/runtime-publication-routes.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./cloud-workspaces/engine-protocol-version.js";
 
@@ -78,24 +77,23 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
     const configured = config.cloudWorkspaces;
     let cloud: { enabled: boolean; ready: boolean; state: string; operationalState?: "degraded" } =
       { enabled: !!configured, ready: !configured, state: configured ? "unknown" : "disabled" };
-    let alphaReadinessException: { kind: "retired-boat-deletions"; expiresAt: string } | undefined;
+    let deferredReadiness: { kind: "retired-boat-deletions" } | undefined;
     if (configured && !maintenance && migrations.state === "current") {
       try {
-        const exception = activeAlphaDeletionReadinessException(config.alphaDeletionReadinessException, config.deploymentChannel);
         const service = deps.cloudWorkspaceHealthService;
-        const measured = exception && service?.readForRelease
-          ? await service.readForRelease(exception.sandboxIds)
+        const measured = service?.readForRelease
+          ? await service.readForRelease()
           : { health: await service?.read(), stalledDeletionsDeferred: false };
         const health = measured.health;
-        // Recheck after the database read: slow queries cannot extend the window.
-        const deferred = !!exception && !!activeAlphaDeletionReadinessException(exception, config.deploymentChannel) &&
-          measured.stalledDeletionsDeferred && health?.operationalState === "degraded" &&
+        // Provider-owned erasure of retired Boat allocations stays visible as
+        // degraded operational health; it never closes release readiness.
+        const deferred = measured.stalledDeletionsDeferred && health?.operationalState === "degraded" &&
           health.reasons.length === 1 && health.reasons[0] === "deletion_intent_stalled";
         const ready = (health?.operationalState === "healthy" || deferred) && health?.backgroundWorkers === "enabled" &&
           health.setupExecution === "enabled" && health.durability === "enabled";
         cloud = { enabled: true, ready, state: ready ? "healthy" : "unready",
           ...(deferred && ready ? { operationalState: "degraded" as const } : {}) };
-        if (deferred && ready) alphaReadinessException = { kind: "retired-boat-deletions", expiresAt: exception!.expiresAt };
+        if (deferred && ready) deferredReadiness = { kind: "retired-boat-deletions" };
       } catch { /* Never reflect health diagnostics into the identity. */ }
     }
     // Image references are immutable public artifact identities, never URLs.
@@ -143,25 +141,16 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
     }
     return { version: 1 as const, ready: !!sourceSha && !maintenance && migrations.state === "current" && cloud.ready && (!configured || !!worker),
       sourceSha, channel: config.deploymentChannel, maintenance, migrations, cloud, worker, workerQualified,
-      ...(alphaReadinessException ? { alphaReadinessException } : {}),
+      ...(deferredReadiness ? { deferredReadiness } : {}),
       ...(runtimeV4 ? { runtimeV4 } : {}) };
   }
   app.get("/v1/release-identity", async c => {
     c.header("Cache-Control", "no-store");
     if (!cached || cached.until <= Date.now()) {
-      pending ??= read().then(body => { cached = { body,
-        until: Math.min(Date.now() + 5_000, body.alphaReadinessException ? Date.parse(body.alphaReadinessException.expiresAt) : Infinity) };
-        return body; }).finally(() => { pending = undefined; });
+      pending ??= read().then(body => { cached = { body, until: Date.now() + 5_000 }; return body; }).finally(() => { pending = undefined; });
       await pending;
     }
-    const body = cached!.body;
-    // Qualification or registry reads can finish after the exception deadline.
-    // Check again at the response boundary, including coalesced requests.
-    if (body.alphaReadinessException && Date.parse(body.alphaReadinessException.expiresAt) <= Date.now()) {
-      return c.json({ ...body, ready: false, cloud: { enabled: true, ready: false, state: "unready" },
-        alphaReadinessException: undefined }, 503);
-    }
-    return c.json(body, body.ready ? 200 : 503);
+    return c.json(cached!.body, cached!.body.ready ? 200 : 503);
   });
   return app;
 }

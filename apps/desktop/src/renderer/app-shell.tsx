@@ -73,6 +73,7 @@ import { useShortcutsHotkey } from "./shell/use-shortcuts-hotkey";
 import { ShortcutsPalette } from "./shell/shortcuts-palette";
 import { FeedbackDialog } from "./shell/dialogs/feedback-dialog";
 import { onFeedbackDialogRequest } from "./shell/feedback-controller";
+import { onWorkbenchCollapseRequest } from "./shell/workbench/workbench-visibility-controller";
 import { isFeedbackConfigured } from "./features/feedback/submit-feedback";
 import { BrowserConfirmationController } from "./features/browser/browser-confirmation-controller";
 import { BrowserSessionController } from "./features/browser/browser-session-controller";
@@ -831,6 +832,16 @@ function ShellRouter() {
       return false;
     });
   }, [workspaceToolsAvailable]);
+  // Floating a Browser preview over the chat hides the column it came from.
+  const collapseWorkbench = React.useCallback(() => {
+    if (!workspaceToolsAvailable) return;
+    setWorkbenchCollapsed((previous) => {
+      if (previous) return previous;
+      setSetting(WORKBENCH_COLLAPSED_KEY, true);
+      return true;
+    });
+  }, [workspaceToolsAvailable]);
+  React.useEffect(() => onWorkbenchCollapseRequest(collapseWorkbench), [collapseWorkbench]);
 
   // ⌥⌘B anywhere toggles Workbench. Skipped inside editable surfaces so
   // we don't steal from native text-input bindings (if any use ⌥⌘B).

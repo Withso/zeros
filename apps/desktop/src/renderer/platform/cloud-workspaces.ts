@@ -299,6 +299,46 @@ export async function cloudAgentGrant(
   return grant.id;
 }
 
+// Forward compatible: an unknown status or code is simply not ready.
+const CloudAgentBootAvailabilitySchema = z.discriminatedUnion("mode", [
+  z.object({ version: z.literal(1), mode: z.literal("legacy") }),
+  z.object({
+    version: z.literal(1),
+    mode: z.literal("boot-owner-v1"),
+    scope: z.object({
+      generation: z.number().int().positive().safe(),
+      bootId: z.string().uuid(),
+      writerEpoch: z.string().uuid(),
+      fundingOwnerUserId: z.string().uuid(),
+      fundingOwnerEpoch: z.number().int().positive().safe(),
+    }),
+    status: z.string().max(64),
+    providers: z.array(z.object({
+      provider: z.string().max(32),
+      status: z.string().max(32),
+      kind: z.string().max(64).optional(),
+      models: z.array(z.string().max(128)).max(64).optional(),
+      code: z.string().max(128).optional(),
+    })).max(8),
+  }),
+]);
+export type CloudAgentBootAvailability = z.infer<typeof CloudAgentBootAvailabilitySchema>;
+
+/** Passive composer discovery for an activated workspace boot: the funding
+ * owner's provider slots this actor may run. Null when the server predates
+ * it, so the caller keeps the per-actor legacy discovery. */
+export async function cloudAgentBootAvailability(target: CloudWorkspaceTarget): Promise<CloudAgentBootAvailability | null> {
+  try {
+    return await request(
+      `/v1/cloud-workspaces/${z.string().uuid().parse(target.workspaceId)}/agent-availability`,
+      CloudAgentBootAvailabilitySchema,
+    );
+  } catch (error) {
+    if (error instanceof ControlPlaneError && error.status === 404 && error.code === "not_found") return null;
+    throw error;
+  }
+}
+
 export async function cloudAgentDelegations(target: CloudWorkspaceTarget) {
   const result = await request(
     `/v1/cloud-workspaces/${z.string().uuid().parse(target.workspaceId)}/agent-credentials/prepare`,

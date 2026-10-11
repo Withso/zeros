@@ -285,8 +285,8 @@ export function createCloudRuntimeResolver({
       if (current === "/") break;
     }
   }
-  function readDocument(file, maximum) {
-    assertPath(file);
+  function readDocument(file, maximum, owns = isOwner) {
+    assertPath(file, false, owns);
     const fd = filesystem.openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       const stat = filesystem.fstatSync(fd), current = filesystem.lstatSync(file);
@@ -375,7 +375,12 @@ export function createCloudRuntimeResolver({
     // from the descriptor; matching kernel UID maps never select a profile.
     const projection = isEngine();
     validateCloudRuntimeMarker(marker, projection);
-    const descriptor = parseCloudActiveRuntime(readDocument(ACTIVE, 16384));
+    // The engine view mounts its private 0700 /run/zeros tmpfs, owned by the
+    // fixed engine identity, around the read-only root descriptor bind. Only
+    // that parent may be engine-owned; the descriptor itself stays root's.
+    const descriptorOwner = (candidate, uid) => isOwner(candidate, uid) ||
+      projection && marker.uid === 10003 && uid === 10003 && candidate === path.dirname(ACTIVE);
+    const descriptor = parseCloudActiveRuntime(readDocument(ACTIVE, 16384, descriptorOwner));
     const runtime = runtimePaths(descriptor);
     if (pinnedNode && pinnedNode !== runtime.node) throw invalidRuntime();
     if (projection && (marker.uid !== 10003 || marker.gid !== 10003 || !isReadOnly(MARKER) || marker.toolchain.node !== runtime.node ||

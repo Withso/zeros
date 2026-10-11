@@ -126,4 +126,12 @@ describe("credential-free installed runtime self-test", () => {
     expect(child.stdout.trim().split("\n")).toHaveLength(1);
     expect(parseSelfTestDiagnostic(child.stdout, 1)).toMatchObject({ ok: false, failedChecks: RUNTIME_SELF_TEST_CHECKS });
   });
+  it.each(["--host-probe-cursor", "--host-qualify"])("refuses the fixed %s entry outside the original installed runtime", argument => {
+    const child = spawnSync(process.execPath, ["scripts/cloud-workspace-validation/sandbox/runtime-self-test.mjs", argument], {
+      encoding: "utf8", env: { PATH: "/usr/bin:/bin" }, timeout: 5000,
+    });
+    expect(child.status).toBe(125);
+    expect(child.stdout).toBe("");
+    expect(child.stderr).toBe("cloud self-test launch or retirement was not confirmed\n");
+  });
 });

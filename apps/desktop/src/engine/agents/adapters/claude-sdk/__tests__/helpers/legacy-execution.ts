@@ -40,17 +40,24 @@ export async function prepareClaudeCloudWorkload(input: { cwd: string; execution
     workloads = portableCloudWorkloads(configuration);
     boundary = new CloudExecutionBoundary({ configuration, workloads });
   } finally { guard.mockRestore(); restoreRuntime?.(); }
+  const drain = async () => {
+    const fence = workloads.fence();
+    // This portable fixture reads real host /proc entries. An unrelated
+    // process can make one census incomplete; retain the fence and require
+    // a positive empty proof within a bound, just as after asynchronous exit.
+    await vi.waitFor(() => workloads.drain(fence), { timeout: 1000, interval: 20 });
+  };
   try {
     const nativeHome = await createCloudNativeHome({ ...input, dataRoot });
     const workload = await boundary.prepare({ executionId: input.executionId, actor: "agent-code",
       cwd: input.cwd, workspaceRoot: input.cwd, providerId: input.provider });
     vi.spyOn(workload, "stopAndProve");
     return { workload, workloads, nativeHome, dispose: async () => {
-      await workloads.drain(workloads.fence());
+      await drain();
       if (ownRoot) await rm(dataRoot, { recursive: true, force: true });
     } };
   } catch (error) {
-    await workloads.drain(workloads.fence());
+    await drain();
     if (ownRoot) await rm(dataRoot, { recursive: true, force: true });
     throw error;
   }

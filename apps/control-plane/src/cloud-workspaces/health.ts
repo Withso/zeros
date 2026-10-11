@@ -2,7 +2,7 @@ import type pg from "pg";
 
 import { withSystemTx, type Tx } from "../db.js";
 import { canDeferRetiredBoatDeletions, PROVIDER_DELETION_WAITING_STAGES,
-  stalledDeletionIntentPredicate, stalledProviderDeletionPredicate } from "./alpha-deletion-readiness.js";
+  stalledDeletionIntentPredicate, stalledProviderDeletionPredicate } from "./retired-deletion-readiness.js";
 
 export type CloudWorkspaceHealth = {
   enabled: true;
@@ -16,7 +16,7 @@ export type CloudWorkspaceHealth = {
 
 export type CloudWorkspaceReleaseHealthReader = {
   read(): Promise<CloudWorkspaceHealth>;
-  readForRelease?(sandboxIds: readonly string[]): Promise<{ health: CloudWorkspaceHealth; stalledDeletionsDeferred: boolean }>;
+  readForRelease?(): Promise<{ health: CloudWorkspaceHealth; stalledDeletionsDeferred: boolean }>;
 };
 
 type HealthSignals = {
@@ -56,12 +56,12 @@ export class DatabaseCloudWorkspaceHealthService {
     return withSystemTx(this.pool, tx => this.readHealth(tx));
   }
 
-  async readForRelease(sandboxIds: readonly string[]): Promise<{ health: CloudWorkspaceHealth; stalledDeletionsDeferred: boolean }> {
+  async readForRelease(): Promise<{ health: CloudWorkspaceHealth; stalledDeletionsDeferred: boolean }> {
     return withSystemTx(this.pool, async tx => {
       const health = await this.readHealth(tx);
       const stalledDeletionsDeferred = health.operationalState === "degraded" &&
         health.reasons.length === 1 && health.reasons[0] === "deletion_intent_stalled" &&
-        await canDeferRetiredBoatDeletions(tx, sandboxIds);
+        await canDeferRetiredBoatDeletions(tx);
       return { health, stalledDeletionsDeferred };
     }, { consistentRead: true });
   }

@@ -8,7 +8,7 @@ import { readPendingDeletionCapacity } from "./pending-deletion.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
-suite("target-bound Alpha retirement readiness", () => {
+suite("retired Boat deletion release readiness", () => {
   let pool: pg.Pool;
   let fixture: Awaited<ReturnType<typeof seedReadyCloudWorkspace>>;
   let service: DatabaseCloudWorkspaceHealthService;
@@ -68,10 +68,10 @@ suite("target-bound Alpha retirement readiness", () => {
     [id, fixture.workspaceId, generation, fixture.organizationId, `retirement-${id}`, randomBytes(32), state, errorCode]);
   }
 
-  it("admits only the named retired generation and retains health, accounting and deletion evidence", async () => {
+  it("defers a retired generation and retains health, accounting and deletion evidence", async () => {
     const resource = await retiredDeletion();
     const before = await withSystemTx(pool, tx => readPendingDeletionCapacity(tx, fixture.organizationId));
-    const measured = await service.readForRelease([resource]);
+    const measured = await service.readForRelease();
     expect(measured).toMatchObject({ stalledDeletionsDeferred: true,
       health: { operationalState: "degraded", reasons: ["deletion_intent_stalled"] } });
     expect(await service.read()).toEqual(measured.health);
@@ -91,17 +91,34 @@ suite("target-bound Alpha retirement readiness", () => {
     ]);
   });
 
-  it("fails closed when any additional stalled sandbox is absent from the private allowlist", async () => {
-    const resource = await retiredDeletion();
-    const extra = await retiredDeletion({ generation: 3 });
-    expect((await service.readForRelease([resource])).stalledDeletionsDeferred).toBe(false);
-    expect((await service.readForRelease([resource, extra])).stalledDeletionsDeferred).toBe(true);
+  it("needs no operator allowlist for several eligible retired generations", async () => {
+    await retiredDeletion();
+    await retiredDeletion({ generation: 3, requestedHoursAgo: 30 });
+    expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(true);
+  });
+
+  it("defers more retired generations than the former allowlist bound, but not with one disqualified", async () => {
+    for (let generation = 2; generation <= 9; generation++) await retiredDeletion({ generation });
+    expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(true);
+    await retiredDeletion({ generation: 10, receipt: null });
+    expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(false);
+  });
+
+  it("fails closed when one of several stalled generations is ineligible", async () => {
+    await retiredDeletion();
+    await retiredDeletion({ generation: 3, intentState: "failed" });
+    expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(false);
+  });
+
+  it("has nothing to defer without a stalled deletion", async () => {
+    const measured = await service.readForRelease();
+    expect(measured).toMatchObject({ stalledDeletionsDeferred: false, health: { operationalState: "healthy", reasons: [] } });
   });
 
   it("never defers the workspace's current generation, even if marked retired", async () => {
-    const resource = await retiredDeletion();
+    await retiredDeletion();
     await withSystemTx(pool, tx => tx.query("UPDATE cloud_workspaces SET current_generation=2 WHERE id=$1", [fixture.workspaceId]));
-    expect((await service.readForRelease([resource])).stalledDeletionsDeferred).toBe(false);
+    expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(false);
   });
 
   it.each([
@@ -110,43 +127,43 @@ suite("target-bound Alpha retirement readiness", () => {
     { intentState: "queued" }, { intentState: "dispatching" }, { intentState: "failed" },
     { errorCode: "provider_absence_unconfirmed" }, { provider: "daytona" as const },
   ])("refuses incomplete or mismatched retirement evidence: %j", async options => {
-    const resource = await retiredDeletion(options);
-    expect((await service.readForRelease([resource])).stalledDeletionsDeferred).toBe(false);
+    await retiredDeletion(options);
+    expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(false);
   });
 
   it("cannot hide an unexplained stalled intent behind another allowed intent on the same generation", async () => {
-    const resource = await retiredDeletion();
+    await retiredDeletion();
     await withSystemTx(pool, tx => addIntent(tx, 2, "observing", "provider_absence_unconfirmed"));
-    expect((await service.readForRelease([resource])).stalledDeletionsDeferred).toBe(false);
+    expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(false);
   });
 
   it("keeps an unbound provider-only journal blocking, including one from another organization", async () => {
-    const resource = await retiredDeletion();
+    await retiredDeletion();
     const other = await seedReadyCloudWorkspace(pool);
     await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_workspace_provider_operations
       (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,resource_id,
        deletion_requested_at,deletion_operation_id)
       VALUES('boat','fixture',$1,1,$2,'unbound-deletion',repeat('c',64),'bx_unbound',now()-interval '2 hours',$3)`,
     [randomUUID(), other.organizationId, `bdop_${"d".repeat(32)}`]));
-    expect((await service.readForRelease([resource, "bx_unbound"])).stalledDeletionsDeferred).toBe(false);
+    expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(false);
   });
 
   it("does not suppress other operational health failures", async () => {
-    const resource = await retiredDeletion();
+    await retiredDeletion();
     await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_workspace_lifecycle_intents
       (id,workspace_id,generation,org_id,operation,idempotency_key,request_sha256,affects_workspace,state,
        created_at,updated_at,next_attempt_at)
       VALUES($1,$2,1,$3,'wake','unrelated-lifecycle',$4,true,'queued',now()-interval '20 minutes',
         now()-interval '20 minutes',now()-interval '20 minutes')`,
     [randomUUID(), fixture.workspaceId, fixture.organizationId, randomBytes(32)]));
-    const result = await service.readForRelease([resource]);
+    const result = await service.readForRelease();
     expect(result.health.reasons).toContain("lifecycle_stalled");
     expect(result.stalledDeletionsDeferred).toBe(false);
   });
 
-  it("does not expand the allowlist for a separate legitimate waiting-for-uploads receipt", async () => {
-    const resource = await retiredDeletion();
+  it("keeps a separate legitimate waiting-for-uploads receipt out of the stall inventory", async () => {
+    await retiredDeletion();
     await retiredDeletion({ generation: 3, stage: "waiting_for_uploads" });
-    expect((await service.readForRelease([resource])).stalledDeletionsDeferred).toBe(true);
+    expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(true);
   });
 });

@@ -265,6 +265,7 @@ import {launchCloudEngine,prepareCloudEngineView} from '${runtime.libRoot}/cloud
 import {cloudEngineViewArguments,cloudEngineViewEnvironment} from '${runtime.libRoot}/cloud-engine-view.mjs';
 import {resolveCloudRuntime} from '${runtime.libRoot}/cloud-runtime-root.mjs';
 import {adoptCloudEngineTree} from '${runtime.libRoot}/prepare-cloud-image-files.mjs';
+import {adoptCloudComputerBuildRepositories} from '${runtime.libRoot}/cloud-computer-checkout.mjs';
 import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
@@ -276,10 +277,10 @@ const runtime=resolveCloudRuntime();
 await assert.rejects(launchCloudEngine({operation:'qualify',runtime,source:{},
   scope:{prepare(){throw new Error('unadmitted scope prepared');}}}),
   {message:'Cloud root monitor placement was refused'});
-// The frozen computer-build helper still emits legacy-owned clones. Exercise
-// the actual ownership adoption primitive on this fixture's unused files.
+// The frozen computer-build helper still emits legacy-owned clones. The
+// template build's self-test adopts them before its launcher checks.
 adoptCloudEngineTree('/srv/zeros/files/workspace');
-if(fs.existsSync('/srv/zeros/files/repos'))adoptCloudEngineTree('/srv/zeros/files/repos');
+assert.equal(adoptCloudComputerBuildRepositories(),${repositoryCount});
 ${alteration}
 const resourceProjection={version:1,resources:null,memoryBudget:{nominalMemoryBytes:null,
   measuredMemoryBytes:null,hostMemoryMax:'268435456',source:'fallback',capped:false}};

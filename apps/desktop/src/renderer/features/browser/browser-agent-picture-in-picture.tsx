@@ -24,6 +24,7 @@ import {
 } from "./native-browser-overlay";
 import { listenForNativeSurfaceOverlayIntent } from "../../shared/ui/native-surface-overlay";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
+import { setBrowserAgentPipSurface } from "./browser-float-store";
 
 interface BrowserAgentPictureInPictureProps {
   visible: boolean;
@@ -374,6 +375,7 @@ export function BrowserAgentPictureInPicture({
   });
   return (
     <section
+      ref={setBrowserAgentPipSurface}
       className="border-border2 bg-bg1 z-chrome fixed right-4 bottom-4 flex overflow-hidden rounded-lg border shadow-[0_14px_42px_rgba(0,0,0,.38)]"
       style={{
         width: pipSize.width,

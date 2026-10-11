@@ -52,6 +52,14 @@ type Tabs = ComponentType<{
   onSelect: (id: string) => void;
 }>;
 
+function connectionErrorMessage(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error
+    ? error.code : error instanceof Error ? error.message : null;
+  if (code === "cloud_agent_credential_busy")
+    return "Your cloud connection is being updated. Try again in a moment.";
+  return error instanceof Error ? error.message : "Cloud connection failed";
+}
+
 export function CloudProviderConnections({
   organizationId,
   surfaceActive,
@@ -185,9 +193,7 @@ function CloudProviderConnection({
         mounted.current &&
         !(error instanceof DOMException && error.name === "AbortError")
       )
-        toast.error(
-          error instanceof Error ? error.message : "Cloud connection failed",
-        );
+        toast.error(connectionErrorMessage(error));
       await refresh().catch(() => {});
     } finally {
       inFlight.current = false;
@@ -303,7 +309,7 @@ function CloudProviderConnection({
       {snapshot.error && (
         <div className="flex items-center justify-between gap-3">
           <p className="text-red-primary text-xs" role="alert">
-            {snapshot.error.message}
+            {connectionErrorMessage(snapshot.error)}
           </p>
           <Button variant="ghost" onClick={() => void snapshot.refresh()}>
             Retry

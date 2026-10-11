@@ -181,7 +181,7 @@ export function readCloudGithubCredentialProjection(options: {
   readonly now?: number;
 }): CloudGithubCredentialProjection | null {
   const file = options.file ?? CLOUD_GITHUB_CREDENTIAL_FILE;
-  const expectedUid = options.expectedUid ?? 0;
+  const expectedUid = options.expectedUid ?? process.getuid?.() ?? 0;
   const now = options.now ?? Date.now();
   if (
     !path.isAbsolute(file) ||
@@ -252,7 +252,7 @@ export function installCloudGithubCredentialProjection(options: {
   readonly now?: number;
 }): CloudGithubCredentialProjection {
   const file = options.file ?? CLOUD_GITHUB_CREDENTIAL_FILE;
-  const expectedUid = options.expectedUid ?? 0;
+  const expectedUid = options.expectedUid ?? process.getuid?.() ?? 0;
   const now = options.now ?? Date.now();
   if (
     !path.isAbsolute(file) ||
@@ -334,7 +334,7 @@ export interface CloudGithubCredentialProjectionWatcher {
   stop(): void;
 }
 
-/** Poll a root-owned atomic projection. Polling avoids inode-watch loss across
+/** Poll an engine-owned atomic projection. Polling avoids inode-watch loss across
  * rename and makes expiry itself a state transition even when no file changes. */
 export function watchCloudGithubCredentialProjection(options: {
   readonly ownerSubject: string;

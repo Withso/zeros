@@ -25,7 +25,8 @@ vi.mock("../cloud-native-history", async original => {
   return { ...module, acquireCloudNativeHistory: (input: Parameters<typeof module.acquireCloudNativeHistory>[0]) =>
     module.acquireCloudNativeHistory({ ...input, root: fixture.historyRoot }) };
 });
-const broker = vi.hoisted(() => vi.fn(async () => ({ env: {}, stopAndProve: async () => {} })));
+const broker = vi.hoisted(() => vi.fn(async (options: { directory: string; visibleDirectory: string }) => ({ env: {},
+  stopAndProve: async () => { await (await import("node:fs/promises")).rm(options.directory, { recursive: true, force: true }); } })));
 vi.mock("../../../git/github-native-broker", () => ({ createNativeGithubBroker: broker }));
 const roots: string[] = [], leases: CloudAgentLease[] = [];
 afterEach(async () => {
@@ -90,9 +91,16 @@ describe("native cloud processes share the engine identity", () => {
     const tools = new CloudWorkloadTools(f.lease, f.workload, process.cwd(), f.coordinator.nativeHome);
     const result = await tools.call({ operation: "exec", command: 'printf "%s" "$HOME"' });
     expect(result).toMatchObject({ ok: true, data: { output: f.coordinator.nativeHome.paths.home, exit: { code: 0 } } });
-    expect(broker).toHaveBeenCalledWith(expect.objectContaining({ visibleDirectory: path.join(f.coordinator.nativeHome.paths.home, ".zeros-github"),
-      identity: fixture.configuration }));
+    expect(broker).toHaveBeenCalledWith(expect.objectContaining({ identity: fixture.configuration }));
+    // Unix socket paths fit in 107 bytes; a native home path alone may not.
+    const { directory, visibleDirectory } = broker.mock.calls[0]![0];
+    const socket = path.join(visibleDirectory, "g");
+    expect(visibleDirectory).toBe(directory);
+    expect(visibleDirectory).toMatch(/^\/tmp\/zeros-native-github-[A-Za-z0-9]{6}$/);
+    expect(Buffer.byteLength(socket)).toBeLessThanOrEqual(107);
+    expect((await lstat(directory)).mode & 0o777).toBe(0o700);
     await tools.stopAndProve(); await f.lease.close();
+    await expect(lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await f.workloads.inspect()).toMatchObject({ complete: true, workloadPids: [] });
   });
   it("keeps native transcript state in a plain durable directory before and after whole-scope Stop", async () => {

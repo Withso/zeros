@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { cloudEnginePrivilegeStatus } from "../cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs";
+import { cloudEnginePrivilegeStatus } from "../cloud-workspace-validation/sandbox/cloud-engine-privilege.mjs";
 const names = { effective: "CapEff", permitted: "CapPrm", inheritable: "CapInh", bounding: "CapBnd", ambient: "CapAmb" };
 const status = Object.values(names).map(name => `${name}:\t0000000000000000`).join("\n") + "\nNoNewPrivs:\t1\nSeccomp:\t2\n";
 it("observes all five empty kernel capability sets and retained NNP/seccomp", () => {

@@ -18,6 +18,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   cleanupTemplateSetupFork,
   newTemplateSetupJournal,
+  recoverFork,
   runTemplateSetupRepro,
   runTemplateSetupProbe,
   readTemplateSetupSource,
@@ -113,6 +114,7 @@ function fixture() {
         snapshotAvailable: true,
         lastSnapshotStatus: "completed",
         sourceSandboxId: pathname.endsWith(childId) ? templateId : undefined,
+        monitoring: false,
       },
     };
   });
@@ -411,6 +413,7 @@ else {
       ttlSeconds: 1800,
       noEnv: true,
       env: {},
+      monitoring: false,
     });
     expect(() =>
       templateSetupForkBody({
@@ -450,7 +453,7 @@ else {
       `/sandboxes/${templateId}/fork`,
       expect.objectContaining({
         method: "POST",
-        body: { type: "default", ttlSeconds: 1800, noEnv: true, env: {} },
+        body: { type: "default", ttlSeconds: 1800, noEnv: true, env: {}, monitoring: false },
         idempotencyKey: `zeros-v2-test-s1-${f.journal.id}`,
       }),
     );
@@ -461,6 +464,30 @@ else {
     expect(
       f.request.mock.calls.filter(([, input]) => input?.method === "DELETE"),
     ).toHaveLength(1);
+  });
+
+  it.each([true, undefined])("refuses setup for a fork reporting monitoring=%s and still deletes it", async monitoring => {
+    const f = fixture(), implementation = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (pathname, input) => {
+      const reply = await implementation(pathname, input);
+      if (pathname === `/sandboxes/${childId}` && !input?.method)
+        return { ...reply, sandbox: { ...(reply.sandbox as object), monitoring } };
+      return reply;
+    });
+    const result = await runTemplateSetupRepro(f.journal, billingOrg, f.dependencies);
+    expect(result).toMatchObject({ cleanup: "verified", failedChecks: ["verification_failed"] });
+    expect(f.dependencies.ready).not.toHaveBeenCalled();
+    expect(f.deleted()).toBe(true);
+  });
+
+  it("replays a fork journaled before the monitoring policy with its exact original body", async () => {
+    const f = fixture();
+    const original = { type: "default", ttlSeconds: 1800, noEnv: true, env: {} };
+    Object.assign(f.journal, { forkBody: original, createAttempted: true });
+    await recoverFork(f.journal, f.dependencies);
+    expect(f.request).toHaveBeenCalledWith(`/sandboxes/${templateId}/fork`, expect.objectContaining({ body: original }));
+    Object.assign(f.journal, { forkBody: { ...original, monitoring: true }, childId: null });
+    await expect(recoverFork(f.journal, f.dependencies)).rejects.toThrow(/^fork_unknown$/);
   });
 
   it("recovers a lost fork reply using the saved key and body before cleanup", async () => {
@@ -590,7 +617,7 @@ else {
               ...operation,
             },
           };
-        if (!absent && pathname === `/sandboxes/${childId}` && !input?.method)
+        if (!absent && pathname === `/sandboxes/${childId}` && !input?.method && f.deleted())
           return { sandbox: { id: childId, state: "deleting" } };
         return implementation(pathname, input);
       });

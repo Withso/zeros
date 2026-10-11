@@ -1,5 +1,5 @@
 import { readlinkSync } from "node:fs";
-import { cloudEnginePrivilegeStatus } from "./qualify-cloud-engine.mjs";
+import { cloudEnginePrivilegeStatus } from "./cloud-engine-privilege.mjs";
 
 /** Fixed credential-free kernel observation executed by an original target.
  * It emits nothing; callers publish only a fixed success marker after checks. */
@@ -13,8 +13,10 @@ export function cloudRoleIdentityProbe(options: { workloadDirectory: string; hom
   }));
   if (!options.workloadDirectory.startsWith("/sys/fs/cgroup/") || options.workloadDirectory.includes("\0"))
     throw new Error("Cloud role workload is unavailable");
+  // The shipped tsx hook compiles the parser with esbuild keepNames, so its
+  // source calls the module-scope __name helper; a fresh node -e lacks it.
   return `{
-    const fs=require('node:fs'), expected=${JSON.stringify(namespaces)};
+    const fs=require('node:fs'), expected=${JSON.stringify(namespaces)}, __name=target=>target;
     let ok=false;
     try {
       const privilege=(${cloudEnginePrivilegeStatus.toString()})(fs.readFileSync('/proc/self/status','utf8'));

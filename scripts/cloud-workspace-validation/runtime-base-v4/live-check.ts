@@ -257,6 +257,9 @@ export async function installOverSsh(deps: KitDeps, id: string, value: unknown, 
     const hostPublicKey = parseBoatHostKey(keyReply.body.stdout);
     const access = await deps.boat("GET", `/sandboxes/${id}`);
     requireBase(access.status === 200 && access.body?.sandbox?.id === id, "install", "provider_request");
+    // The presigned artifact URL is bearer material: Boat's process tracer
+    // would keep the VM side of this SSH pipe unless monitoring is off.
+    requireBase(access.body.sandbox.monitoring === false, "install", "monitoring_unconfirmed");
     const endpoint = parseBoatSshEndpoint(access.body.sandbox);
     const command = "/usr/bin/sudo -n /usr/bin/timeout --signal=TERM --kill-after=5s 1200s /usr/bin/flock --exclusive --nonblock /run/zeros/setup.lock /opt/zeros-bootstrap/install-runtime.sh --stdin";
     installed = true;

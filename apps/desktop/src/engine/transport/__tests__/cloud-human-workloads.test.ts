@@ -5,6 +5,7 @@ import {afterEach,describe,expect,it,vi} from 'vitest';
 import {HostExecutionBoundary} from '../../agents/containment/host-boundary';
 import {CloudOwnedWorkloadRegistry} from '../../agents/containment/cloud-owned-workloads';
 import {CloudHumanWorkloads} from '../cloud-human-workloads';
+import {disposePtyHost} from '../../pty/pty-host-client';
 import type {BoundaryRequest,AdmissionControl} from '../../agents/containment/types';
 
 const cleanup:Array<()=>Promise<void>>=[];
@@ -17,6 +18,23 @@ async function fixture(){
  return{root,registry,boundary,workloads};
 }
 describe('human workload groups on the original shared registry',()=>{
+ it('delivers an SSH PTY interrupt without closing a process that handles SIGINT',async()=>{
+  cleanup.unshift(async()=>{disposePtyHost();});
+  const f=await fixture();
+  const terminal=await f.workloads.spawnPty(process.execPath,['-e',
+   'process.on("SIGINT",()=>console.log("INTERRUPTED"));process.on("SIGTERM",()=>process.exit(0));setInterval(()=>{},1000);console.log("READY");',
+  ],{cwd:f.root,env:{PATH:'/usr/bin:/bin'}});
+  let output='',exited=false;
+  terminal.onData(data=>{output+=data;});terminal.onExit(()=>{exited=true;});
+  await vi.waitFor(()=>expect(output).toContain('READY'),{timeout:5000});
+  terminal.kill('SIGINT');
+  await vi.waitFor(()=>expect(output).toContain('INTERRUPTED'),{timeout:2000});
+  expect(exited).toBe(false);expect(f.workloads.hasActiveWork()).toBe(true);
+  expect(f.registry.snapshot().scopes).toHaveLength(1);
+  terminal.kill();
+  await vi.waitFor(()=>expect(f.workloads.hasActiveWork()).toBe(false),{timeout:5000});
+  expect(exited).toBe(true);expect(f.registry.snapshot().scopes).toEqual([]);
+ });
  it('owns every process independently and stops descendants without stopping its sibling',async()=>{
   const a=await fixture(),b=await fixture();
   const first=await a.workloads.spawnProcess('/bin/sh',['-c','sleep 60 & wait'],{cwd:a.root,env:{PATH:'/usr/bin:/bin'}});

@@ -11,6 +11,7 @@ import {readCloudAgentComputeTrust} from "./agent-compute-trust.js";
 import {CODEX_AUTH_RUNTIME_VERSION,parseCodexNativeCache,sealCodexNativeCache,type CodexNativeAuthCache} from "./codex-auth-cache.js";
 import {rememberCodexRefreshSeed} from "./codex-auth-renewal.js";
 import {cloudAgentModels} from "./agent-models.js";
+import {readCloudAgentBootAvailability} from "./agent-boot-credentials.js";
 import {cloudRuntimeQualificationMode} from "./runtime-config.js";
 import {runtimeCredentialQualificationJoin,runtimeNativeCapabilities} from "./runtime-selection.js";
 import { prepareCloudAgentCredentialRemoval, readCloudAgentCredentialRemoval, decideCloudAgentCredentialRemoval,
@@ -477,6 +478,13 @@ export class DatabaseCloudAgentCredentialService {
       return {delegations:(await tx.query<Delegation>(`SELECT * FROM cloud_agent_credential_delegations
         WHERE credential_id=$1 AND owner_user_id=$2 AND revoked_at IS NULL AND expires_at>clock_timestamp() ORDER BY created_at DESC,id LIMIT 100`,[credentialId,ownerUserId])).rows.map(row=>({...grantMetadata(row),models:[...cloudAgentModels(credential.kind)]}))};
     });
+  }
+
+  /** Composer discovery for an activated workspace boot. A read-only snapshot,
+   * so it can neither lock, mint nor revoke anything; see the reader. */
+  async bootAvailability(actorUserId:string,workspaceId:string){
+    if(!uuid.safeParse(workspaceId).success)invalid();
+    return withSystemTx(this.pool,tx=>readCloudAgentBootAvailability(tx,{workspaceId,actorUserId}),{consistentRead:true});
   }
 
   async forWorkspace(actorUserId:string,workspaceId:string){

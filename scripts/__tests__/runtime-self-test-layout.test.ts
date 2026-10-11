@@ -150,7 +150,7 @@ beforeEach(async () => {
   vm.execute.mockImplementation((executable: string, args: string[]) => {
     const success = { status: 0, signal: null, stdout: "", stderr: "" };
     if (executable === "/usr/bin/python3") return success;
-    if (args[0] === `${runtime.libRoot}/cloud-engine-launcher.mjs` && args[1] === "--qualify") {
+    if (args[0] === `${runtime.libRoot}/runtime-self-test.mjs` && args[1] === "--host-qualify") {
       const view = prepareCloudEngineView(runtime, {}, "qualify", undefined, undefined, resourceProjection);
       const releaseView = vi.fn(() => view.releaseView?.());
       const result = qualified().finally(releaseView);
@@ -337,6 +337,50 @@ it("preserves a populated build workspace while reaching the real qualification 
   expect(actual.statSync(mapped(workspace)).mode & 0o777).toBe(0o755);
   expect(vm.owners.get(workspace)).toEqual({ uid: 10003, gid: 10003 });
   expect(vm.directoryRenames).toEqual([]);
+});
+
+it("adopts base-cloned template repositories before reaching the real launcher", async () => {
+  // The frozen base computer-build helper clones as the legacy workspace owner.
+  const checkout = "/srv/zeros/files/repos/fixture/app";
+  for (const parent of ["/srv/zeros/files/repos", "/srv/zeros/files/repos/fixture"]) {
+    actual.mkdirSync(mapped(parent), { mode: 0o755 }); actual.chmodSync(mapped(parent), 0o755);
+    vm.owners.set(parent, { uid: 0, gid: 0 });
+  }
+  const entries = [checkout, `${checkout}/.git`, `${checkout}/.git/objects`, `${checkout}/src`];
+  for (const directory of entries) {
+    actual.mkdirSync(mapped(directory), { mode: 0o755 }); actual.chmodSync(mapped(directory), 0o755);
+  }
+  const files = { [`${checkout}/.git/HEAD`]: "ref: refs/heads/main\n", [`${checkout}/.git/config`]: "[core]\n",
+    [`${checkout}/src/main.js`]: "export default 42;\n" };
+  for (const [file, data] of Object.entries(files)) actual.writeFileSync(mapped(file), data, { mode: 0o644 });
+  for (const entry of [...entries, ...Object.keys(files)]) vm.owners.set(entry, { uid: 10001, gid: 10001 });
+  actual.writeFileSync(mapped("/proc/self/mountinfo"), "1 0 8:1 / / rw,relatime shared:1 - ext4 /dev/root rw\n");
+
+  expect(smoke(runtime, { PATH: "/usr/bin:/bin", HOME: "/tmp" })).toBe(false);
+
+  expect(qualified).toHaveBeenCalledOnce();
+  await observeUnqualifiedRuntime();
+  for (const entry of [...entries, ...Object.keys(files)]) expect(vm.owners.get(entry)).toEqual({ uid: 10003, gid: 10003 });
+  for (const parent of ["/srv/zeros/files/repos", "/srv/zeros/files/repos/fixture"])
+    expect(vm.owners.get(parent)).toEqual({ uid: 0, gid: 0 });
+  expect(actual.readFileSync(mapped(`${checkout}/src/main.js`), "utf8")).toBe("export default 42;\n");
+  expect(vm.directoryRenames).toEqual([]);
+});
+
+it("refuses template repositories behind a nested mount without adopting them", () => {
+  const checkout = "/srv/zeros/files/repos/fixture/app";
+  for (const parent of ["/srv/zeros/files/repos", "/srv/zeros/files/repos/fixture"]) {
+    actual.mkdirSync(mapped(parent), { mode: 0o755 }); actual.chmodSync(mapped(parent), 0o755);
+  }
+  for (const directory of [checkout, `${checkout}/.git`]) {
+    actual.mkdirSync(mapped(directory), { mode: 0o755 }); vm.owners.set(directory, { uid: 10001, gid: 10001 });
+  }
+  actual.writeFileSync(mapped("/proc/self/mountinfo"), "1 0 8:1 / / rw - ext4 /dev/root rw\n" +
+    `2 1 8:2 / ${checkout} rw - ext4 /dev/other rw\n`);
+
+  expect(() => smoke(runtime, {})).toThrow("image_contract_invalid");
+  expect(qualified).not.toHaveBeenCalled();
+  expect(vm.owners.get(checkout)).toEqual({ uid: 10001, gid: 10001 });
 });
 
 it.each(["symlink", "populated-mount", "legacy-workspace"])("refuses %s without reaching qualification or moving directories", kind => {

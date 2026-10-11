@@ -16,7 +16,7 @@ import {
   type TemplateAllocation,
 } from "./computer-template-capacity.js";
 import { ComputerTemplateLogRedactor } from "./computer-template-logs.js";
-import { computerTemplateBuilderIntent } from "./computer-template-boat.js";
+import { BuilderVmError, computerTemplateBuilderIntent } from "./computer-template-boat.js";
 import type {
   BuilderFixedCommand,
   BuilderVm,
@@ -26,6 +26,9 @@ import type {
 } from "./computer-template-boat.js";
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
+// Recording the capture and completing the build must finish before the
+// build deadline, so the template stop leaves this much of it unused.
+const CAPTURE_COMPLETION_MS = 60_000;
 const TcbResult = z
   .object({
     schema: z.literal("zeros.computer-tcb/v1"),
@@ -476,7 +479,16 @@ export class ComputerTemplateWorker {
       await this.journal.recordDigest(id, fence, manifestSha256, "manifest");
       await this.stage(claim, "stopping");
       failure = "template_stop_failed";
-      const stopped = await this.deps.vms.stop(vm);
+      // Archiving saves the whole disk, and Boat can take well over ten
+      // minutes to do it. Wait for the build's own deadline, keeping a minute
+      // to record the capture and complete the build before it.
+      const stopped = await this.deps.vms
+        .stop(vm, { timeoutMs: this.timeout(claim, 30 * 60_000, CAPTURE_COMPLETION_MS), requireSnapshot: true })
+        .catch((error: unknown) => {
+          if (error instanceof BuilderVmError && error.check === "stop_snapshot_failed")
+            throw new BuildFailure("template_capture_failed");
+          throw error;
+        });
       if (stopped.archived !== true)
         throw new BuildFailure("template_capture_failed");
       const stoppedAt = await this.journal.recordStopped(id);
@@ -510,8 +522,8 @@ export class ComputerTemplateWorker {
       if (cleanup) await this.cleanup(cleanup);
     }
   }
-  private timeout(claim: CloudComputerV2Claim, limit: number) {
-    const remaining = Date.parse(claim.deadlineAt) - Date.now();
+  private timeout(claim: CloudComputerV2Claim, limit: number, reserve = 0) {
+    const remaining = Date.parse(claim.deadlineAt) - Date.now() - reserve;
     if (remaining <= 0) throw new BuildFailure("build_timeout");
     return Math.max(1, Math.min(limit, remaining));
   }
