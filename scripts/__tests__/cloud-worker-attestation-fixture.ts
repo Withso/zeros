@@ -183,7 +183,11 @@ export function attestationFixture(version = 4, observations: { availableCPUs?: 
       calls.push({ file, args: childArgs, options });
       const override = spawnOverride?.(file, childArgs);
       if (override) return override;
-      const output = childArgs[0]?.endsWith("cloud-engine-launcher.mjs") || childArgs.includes("--cloud-worker")
+      const launcher = childArgs[0]?.endsWith("cloud-engine-launcher.mjs");
+      // The real launcher refuses a qualification monitor outside the original
+      // host; only its fixed host entry places itself first.
+      if (launcher && childArgs[1] === "--qualify") return { status: 125, signal: null, stdout: "", stderr: "" };
+      const output = launcher || childArgs.includes("--cloud-worker")
         ? JSON.stringify(qualification) : childArgs[0]?.endsWith("cloud-setup-process.mjs") ? JSON.stringify(setupQualification)
           : file === "/usr/bin/findmnt" ? JSON.stringify({ filesystems: [{ target: childArgs.at(-1), fstype: "fixture", options: "ro" }] }) : "fixture-version";
       return { status: 0, signal: null, stdout: output, stderr: "" };

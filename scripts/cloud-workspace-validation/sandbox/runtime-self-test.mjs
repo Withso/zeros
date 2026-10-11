@@ -5,13 +5,13 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { closeSync, constants, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync,
-  readFileSync, readdirSync, realpathSync, rmSync, statfsSync, writeSync } from "node:fs";
+  readFileSync, readdirSync, realpathSync, rmSync, statfsSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { adoptCloudEngineState } from "./prepare-cloud-image-files.mjs";
 import { adoptCloudComputerBuildRepositories } from "./cloud-computer-checkout.mjs";
-import { CLOUD_HOST_LIMITS, CloudDelegatedCgroups } from "./cloud-engine-cgroup.mjs";
+import { CloudDelegatedCgroups, enterCloudRootHost } from "./cloud-engine-cgroup.mjs";
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 
 export const RUNTIME_SELF_TEST_CHECKS = Object.freeze([
@@ -197,44 +197,7 @@ export function assertSelfTestSetupLock(fd) {
 /** Only the small fixed root launch wrapper joins the original protected host.
  * Keep the importing self-test orchestrator outside its 256 MiB budget. */
 export function enterSelfTestHost(runtime) {
-  assert(process.platform === "linux" && [process.getuid?.(), process.geteuid?.(), process.getgid?.(), process.getegid?.()]
-    .every(id => id === 0));
-  assert.equal(runtime.cgroupRoot, "/sys/fs/cgroup/system.slice/zeros-host.service");
-  const delegated = new CloudDelegatedCgroups({ runtime });
-  const host = `${runtime.cgroupRoot}/host`;
-  const expected = `0::${host.slice("/sys/fs/cgroup".length)}`;
-  const membership = delegated.readMembership().trim();
-  assert(/^0::\/[^\n\r\0]*$/.test(membership) && membership.length <= 8192);
-  assert(!membership.startsWith(`0::${runtime.cgroupRoot.slice("/sys/fs/cgroup".length)}/`) || membership === expected);
-  delegated.assertRetired();
-  assert(delegated.leaves().includes("host") && delegated.io.children(host).length === 0);
-  assert.equal(delegated.io.read(runtime.cgroupRoot, "cgroup.procs"), "");
-  const controllers = delegated.io.read(runtime.cgroupRoot, "cgroup.subtree_control").split(/\s+/);
-  assert(["cpu", "memory", "pids"].every(controller => controllers.includes(controller)));
-  for (const [name, value] of Object.entries(CLOUD_HOST_LIMITS)) assert.equal(delegated.io.read(host, name), value);
-  const original = [runtime.cgroupRoot, host].map(directory => {
-    const stat = lstatSync(directory);
-    assert(stat.isDirectory() && !stat.isSymbolicLink() && stat.uid === 0 && stat.gid === 0 && !(stat.mode & 0o022));
-    return stat;
-  });
-  const verifyDirectories = () => [runtime.cgroupRoot, host].forEach((directory, index) => {
-    assert.equal(realpathSync(directory), directory);
-    assert(sameEntry(original[index], lstatSync(directory)));
-  });
-  const control = `${host}/cgroup.procs`;
-  const fd = openSync(control, constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try {
-    const stat = fstatSync(fd);
-    assert(stat.isFile() && stat.uid === 0 && stat.gid === 0 && stat.nlink === 1 && !(stat.mode & 0o022));
-    assert.equal(statfsSync(`/proc/self/fd/${fd}`).type, 0x63677270);
-    assert(sameEntry(stat, lstatSync(control)));
-    verifyDirectories();
-    // Zero identifies this exact calling process, with no numeric PID adoption.
-    assert.equal(writeSync(fd, "0"), 1);
-    assert.equal(delegated.readMembership().trim(), expected);
-    verifyDirectories();
-    assert(sameEntry(stat, fstatSync(fd)) && sameEntry(stat, lstatSync(control)));
-  } finally { closeSync(fd); }
+  enterCloudRootHost(runtime);
 }
 
 function selfTestLauncher(runtime, operation, environment, timeout = 30_000, maxBuffer = MAX_OUTPUT) {

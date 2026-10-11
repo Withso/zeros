@@ -619,3 +619,52 @@ export class CloudDelegatedCgroups {
       await new CloudEngineCgroup({ runtime: this.runtime, directory: `${this.runtime.cgroupRoot}/${name}`, io: this.io }).retire();
   }
 }
+
+const sameEntry = (left, right) => left.dev === right.dev && left.ino === right.ino &&
+  left.uid === right.uid && left.gid === right.gid && left.mode === right.mode && left.nlink === right.nlink;
+const requireHostEntry = condition => { if (!condition) throw new Error("Cloud root host entry was refused"); };
+
+/** Only a small fixed root launch wrapper joins the original protected host:
+ * the runtime self-test and the workspace attester each spawn one, and keep
+ * their importing orchestrators outside its 256 MiB budget. The launcher's
+ * own placement gate is unchanged. */
+export function enterCloudRootHost(runtime) {
+  requireHostEntry(process.platform === "linux" &&
+    [process.getuid?.(), process.geteuid?.(), process.getgid?.(), process.getegid?.()].every(id => id === 0));
+  requireHostEntry(runtime.cgroupRoot === "/sys/fs/cgroup/system.slice/zeros-host.service");
+  const delegated = new CloudDelegatedCgroups({ runtime });
+  const host = `${runtime.cgroupRoot}/host`;
+  const expected = `0::${host.slice("/sys/fs/cgroup".length)}`;
+  const membership = delegated.readMembership().trim();
+  requireHostEntry(/^0::\/[^\n\r\0]*$/.test(membership) && membership.length <= 8192);
+  requireHostEntry(!membership.startsWith(`0::${runtime.cgroupRoot.slice("/sys/fs/cgroup".length)}/`) || membership === expected);
+  delegated.assertRetired();
+  requireHostEntry(delegated.leaves().includes("host") && delegated.io.children(host).length === 0);
+  requireHostEntry(delegated.io.read(runtime.cgroupRoot, "cgroup.procs") === "");
+  const controllers = delegated.io.read(runtime.cgroupRoot, "cgroup.subtree_control").split(/\s+/);
+  requireHostEntry(["cpu", "memory", "pids"].every(controller => controllers.includes(controller)));
+  for (const [name, value] of Object.entries(CLOUD_HOST_LIMITS)) requireHostEntry(delegated.io.read(host, name) === value);
+  const original = [runtime.cgroupRoot, host].map(directory => {
+    const stat = lstatSync(directory);
+    requireHostEntry(stat.isDirectory() && !stat.isSymbolicLink() && stat.uid === 0 && stat.gid === 0 && !(stat.mode & 0o022));
+    return stat;
+  });
+  const verifyDirectories = () => [runtime.cgroupRoot, host].forEach((directory, index) => {
+    requireHostEntry(realpathSync(directory) === directory);
+    requireHostEntry(sameEntry(original[index], lstatSync(directory)));
+  });
+  const control = `${host}/cgroup.procs`;
+  const fd = openSync(control, constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    requireHostEntry(stat.isFile() && stat.uid === 0 && stat.gid === 0 && stat.nlink === 1 && !(stat.mode & 0o022));
+    requireHostEntry(statfsSync(`/proc/self/fd/${fd}`).type === 0x63677270);
+    requireHostEntry(sameEntry(stat, lstatSync(control)));
+    verifyDirectories();
+    // Zero identifies this exact calling process, with no numeric PID adoption.
+    requireHostEntry(writeSync(fd, "0") === 1);
+    requireHostEntry(delegated.readMembership().trim() === expected);
+    verifyDirectories();
+    requireHostEntry(sameEntry(stat, fstatSync(fd)) && sameEntry(stat, lstatSync(control)));
+  } finally { closeSync(fd); }
+}
