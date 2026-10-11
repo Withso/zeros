@@ -14,7 +14,10 @@ import {
 const PROFILE = "runtime-base-v4";
 const MAX_STARTS = 10;
 const HEX = /^[a-f0-9]{64}$/;
-const NAME = /^zeros-v2-test-[a-z0-9-]{1,49}$/;
+// Released bases are zeros-base-v<N>. Earlier zeros-v2-test- names stay valid
+// for registered bases, kit state and disposable test bases.
+const BASE_NAME = /^zeros-base-v[1-9][0-9]{0,3}$/;
+const NAME = /^(?:zeros-base-v[1-9][0-9]{0,3}|zeros-v2-test-[a-z0-9-]{1,49})$/;
 const STAGES = new Set(["validate_input", "create", "upload", "build", "verify", "sanitize", "snapshot", "cold_boot", "install", "resume", "cleanup", "done"]);
 const CHECKS = new Set(["input_schema", "source_commit", "provider_request", "provider_budget", "start_budget", "build_exit", "timeout",
   "process_signal", "diagnostic_missing", "base_compatibility", "uid_map", "apparmor", "cgroup_controllers", "cgroup_retired", "root_ownership",
@@ -373,7 +376,8 @@ async function createOwned(deps: KitDeps, target: KitDeps, from?: string) {
     requireBase(id, "create", "provider_request");
     await sandboxInWallet(target, id);
     const named = await deps.boat("PATCH", `/sandboxes/${id}`, {
-      body: { name: `zeros-v2-test-${from ? "verify" : "builder"}-${state.attemptHex.slice(0, 12)}` },
+      body: { name: BASE_NAME.test(state.name) ? `${state.name}-${from ? "verify" : "build"}`
+        : `zeros-v2-test-${from ? "verify" : "builder"}-${state.attemptHex.slice(0, 12)}` },
     });
     requireBase(named.status === 200, "create", "provider_request");
     return id;

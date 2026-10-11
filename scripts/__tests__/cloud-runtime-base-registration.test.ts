@@ -109,6 +109,11 @@ describe("verified Alpha base registration", () => {
     );
   });
 
+  it("registers a released zeros-base-v<N> base under its own name", () => {
+    const body = baseRegistrationBody({ ...receipt, snapshotName: "zeros-base-v1" }, sourceCommit, 70_225);
+    expect(body).toMatchObject({ baseImageId: "zeros-base-v1", imageRef: `boat:zeros-base-v1@sha256:${baseBuildSha256}` });
+  });
+
   it.each([
     { baseCompatibilityId: `bc1-${"c".repeat(64)}` },
     { compatibilityRawB64: Buffer.from("{}").toString("base64") },
@@ -116,6 +121,8 @@ describe("verified Alpha base registration", () => {
     { compatibilityRawB64: "not base64" },
     { sourceCommit: "c".repeat(40) },
     { snapshotName: "invalid/snapshot" },
+    { snapshotName: "zeros-base-v0" },
+    { snapshotName: "zeros-alpha-runtime" },
     { baseBuildSha256: "invalid" },
     { cleanup: { confirmed: false, snapshot: "retained" } },
     { cleanup: { confirmed: true, snapshot: "deleted" } },

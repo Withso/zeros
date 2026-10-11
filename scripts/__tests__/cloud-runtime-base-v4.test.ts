@@ -467,6 +467,24 @@ class Bootstrap:
     ]);
   }, 30_000);
 
+  it("names a released base's builder and verification VMs after the base", async () => {
+    const f = fullKit();
+    const result: any = await v4Command("build", new Map([["--name", "zeros-base-v1"], ["--max-used-hours", "2"]]), [], f.d);
+    expect(result).toMatchObject({ snapshotName: "zeros-base-v1", cleanup: { confirmed: true, snapshot: "retained" } });
+    const creates = f.requests.filter(request => request.route === "/sandboxes" && request.method === "POST");
+    expect(creates.map(request => request.body.from)).toEqual([undefined, "zeros-base-v1"]);
+    expect(f.requests.filter(request => request.method === "PATCH").map(request => request.body.name))
+      .toEqual(["zeros-base-v1-build", "zeros-base-v1-verify"]);
+  }, 30_000);
+
+  it.each(["zeros-base-v0", "zeros-base-1", "zeros-base-v1-", "zeros-base-v12345", "zeros-alpha-runtime", "Zeros-base-v1"])(
+    "rejects the base name %s before contacting the provider", async name => {
+      const f = fullKit();
+      await expect(v4Command("build", new Map([["--name", name], ["--max-used-hours", "2"]]), [], f.d))
+        .rejects.toMatchObject({ diagnostic: { stage: "validate_input", failedChecks: ["input_schema"] } });
+      expect(f.requests).toHaveLength(0);
+    });
+
   it.each([undefined, "", "not base64", compatibilityRawB64 + "\n", Buffer.from("{}").toString("base64")])(
     "rejects missing, malformed or substituted compatibility bytes from verification (%#)", async raw => {
       const f = fullKit(), original = f.d.boat;
