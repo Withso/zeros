@@ -27,9 +27,11 @@ admission.
 `runtime-images.ts` owns the producer and named-snapshot lifecycle. Migration
 0141 adds the system-only `cloud_runtime_images` registry, the `runtime-image`
 builder purpose and the nullable Computer source-image pin. The worker ticks
-every 60 seconds, admits one building image per channel and provider account,
-and records its builder intent before provider I/O. It reads and changes only
-rows, journals and names of its own provider account. Each attempt has a 60-minute deadline, bounded VM
+every 60 seconds, admits one building image per channel, provider account and
+wallet, and records its builder intent before provider I/O. It reads and
+changes only rows, journals and names of its own provider account and wallet;
+a wallet rotation keeps the account scope, so a prior wallet's rows never
+block or get touched by the new one. Each attempt has a 60-minute deadline, bounded VM
 operations and separate cleanup reconciliation.
 
 1. Select the qualified runtime and approved base with the same selector and

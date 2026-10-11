@@ -225,6 +225,24 @@ const url = process.env.TEST_DATABASE_URL;
     expect((await images())[0]).toMatchObject({ state: "building", cleanup_lease_until: null });
   });
 
+  it.each(["building", "ready"] as const)("is not blocked by a prior wallet's %s image under the same account and never touches it", async state => {
+    const prior = "team_22222222-2222-4222-8222-222222222222", name = `zeros-rtimg-alpha-${runtimeId.slice(3, 15)}-0000cccc`;
+    await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_runtime_images
+      (channel,account_scope,billing_org,runtime_id,base_image_id,base_compatibility_id,snapshot_name,state,deadline_at,
+        builder_sandbox_id,probe_sandbox_id,snapshot_requested_at,snapshot_id,size_bytes,verified_at,ready_at,cleanup_confirmed_at)
+      VALUES ('alpha',$1,$2,$3,$4,$5,$6,$7,clock_timestamp()-interval '1 second',$8,$9,clock_timestamp(),
+        $10,$11,$12,$13,$13)`,
+    [SCOPE, prior, runtimeId, runtimeBase.id, runtimeBase.compatibilityId, name, state, SANDBOXES[20], SANDBOXES[21],
+      state === "ready" ? "snap_prior" : null, state === "ready" ? 1 : null, state === "ready" ? new Date() : null,
+      state === "ready" ? new Date() : null]));
+    await worker().tick();
+    const rows = await images();
+    expect(rows.find(row => row.billing_org === prior)).toMatchObject({ state, snapshot_name: name, cleanup_lease_until: null });
+    expect(rows.find(row => row.billing_org === WALLET)).toMatchObject({ state: "ready" });
+    expect(snapshots.removed).toEqual([]);
+    expect(vms.calls.filter(call => call.startsWith("delete"))).toEqual(["delete runtime-image-probe", "delete runtime-image"]);
+  });
+
   it("deletes the builder of a failed install, saves no name and does not retry at once", async () => {
     vms.installDiagnostic = failed("installer", "download", "http_status");
     await worker().tick();

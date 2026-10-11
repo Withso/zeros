@@ -50,9 +50,11 @@ CREATE TABLE cloud_runtime_images (
   CHECK ((state IN ('retiring', 'retired')) = (retire_requested_at IS NOT NULL)),
   CHECK ((state = 'retired') = (retired_at IS NOT NULL))
 );
--- A producer owns only its own provider account's rows and journals.
-CREATE UNIQUE INDEX cloud_runtime_images_one_building ON cloud_runtime_images(channel, account_scope) WHERE state = 'building';
-CREATE UNIQUE INDEX cloud_runtime_images_ready ON cloud_runtime_images(channel, account_scope, runtime_id, base_image_id)
+-- A producer owns only its own provider account and wallet's rows and
+-- journals. A wallet rotation keeps the account scope, so slots include it.
+CREATE UNIQUE INDEX cloud_runtime_images_one_building ON cloud_runtime_images(channel, account_scope, lower(billing_org))
+  WHERE state = 'building';
+CREATE UNIQUE INDEX cloud_runtime_images_ready ON cloud_runtime_images(channel, account_scope, lower(billing_org), runtime_id, base_image_id)
   WHERE state = 'ready';
 CREATE INDEX cloud_runtime_images_attempts ON cloud_runtime_images(channel, account_scope, runtime_id, base_image_id, created_at DESC);
 CREATE INDEX cloud_runtime_images_base ON cloud_runtime_images(base_image_id, base_compatibility_id);
