@@ -10,6 +10,8 @@ import type { RequestPermissionRequest } from "../platform/bridge/agent-events";
 import { ComposerToolGroups } from "../features/agent/composer-tool-groups";
 import { PermissionCard } from "../features/agent/permission-card";
 import { Surface } from "../shared/ui/layout/surface";
+import { TooltipProvider } from "../shared/ui/primitives/tooltip";
+import { CodexRuntimeTranscriptFixture } from "./codex-runtime-transcript-fixture";
 
 type OAuthState = "authenticate" | "opening" | "stale-completion" | "connected" | "failed";
 const states: OAuthState[] = ["authenticate", "opening", "stale-completion", "connected", "failed"];
@@ -78,8 +80,11 @@ const permission = (write: boolean): RequestPermissionRequest => ({
 });
 
 function Harness() {
+  const owner = placement === "cloud" ? "organization-cloud" : query.get("owner") === "organization-local" ? "organization-local" : "personal-local";
   return (
+    <TooltipProvider>
     <Surface role="main" kind="canvas" className="text-fg1 flex min-h-screen flex-col gap-6 p-6" data-placement={placement}>
+      <CodexRuntimeTranscriptFixture initialOwner={owner} />
       <div className="grid gap-4 lg:grid-cols-3">{states.map(id => <OAuthFixture key={id} id={id} />)}</div>
       <div className="grid gap-4 lg:grid-cols-2">
         {[true, false].map(write => {
@@ -95,6 +100,7 @@ function Harness() {
         })}
       </div>
     </Surface>
+    </TooltipProvider>
   );
 }
 createRoot(document.getElementById("root")!).render(<Harness />);

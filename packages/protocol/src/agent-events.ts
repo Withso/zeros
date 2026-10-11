@@ -576,7 +576,7 @@ export interface UserMessageChunkUpdate {
   messageId?: string | null;
 }
 
-export type AgentMessagePhase = "commentary" | "final_answer";
+export type AgentMessagePhase = "commentary" | "partial_answer" | "final_answer";
 
 export interface AgentMessageChunkUpdate {
   sessionUpdate: "agent_message_chunk";
@@ -585,9 +585,9 @@ export interface AgentMessageChunkUpdate {
   /** Authoritative replacement for this exact message id. Omitted updates
    * remain append-only, preserving older providers and persisted streams. */
   textMode?: "replace";
-  /** Provider-declared role for assistant prose. Codex emits commentary while
-   * working and a final_answer when the turn concludes. Absent preserves the
-   * legacy behavior for providers that do not classify message phases. */
+  /** Provider-declared role for assistant prose. Commentary is working content;
+   * partial_answer and final_answer are readable reports in source order.
+   * Message phase never completes a turn. Absent preserves legacy behavior. */
   phase?: AgentMessagePhase | null;
   /** When a subagent emits text through this stream,
    *  the parent Task's toolCallId. Renderer hides the message from

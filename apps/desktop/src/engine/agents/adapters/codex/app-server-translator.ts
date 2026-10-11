@@ -49,6 +49,7 @@ import { isDevRuntime } from "../../../runtime";
 import type { ContentBlock, QuestionRequest, SessionNotification, TurnUsage } from "../../types";
 import type { AsyncUserInputQuestion } from "./generated/v2/AsyncUserInputQuestion";
 import type { ThreadItem } from "./generated/v2/ThreadItem";
+import type { MessagePhase } from "./generated/MessagePhase";
 import type { WebSearchAction } from "./generated/WebSearchAction";
 import type { ImageGenerationItem } from "./generated/ImageGenerationItem";
 import type { McpServerOauthLoginCompletedNotification } from "./generated/v2/McpServerOauthLoginCompletedNotification";
@@ -132,6 +133,8 @@ export class CodexAppServerTranslator {
       terminal: boolean;
       seen: Set<string>;
       input?: Record<string, unknown>;
+      /** Only the current activity's bookend may enrich resolved metadata. */
+      activityKey?: string;
     }
   >();
   private readonly safetyReviewToolCalls = new Map<string, string>();
@@ -214,18 +217,18 @@ export class CodexAppServerTranslator {
   private readonly emittedMessageText = new Map<string, string>();
   private readonly reasoningParts = new Map<string, { summary: Map<number, string>; content: Map<number, string> }>();
   /** Agent-message deltas carry only itemId + text. Retain the phase announced
-   * by item/started so streamed chunks keep Codex's commentary/final
+   * by item/started so streamed chunks keep Codex's commentary/partial/final
    * distinction all the way to the renderer. */
   private readonly messagePhases = new Map<
     string,
-    "commentary" | "final_answer"
+    MessagePhase
   >();
   /** Last phase forwarded for each streamed message. Some app-server builds
    * attach phase only to item/completed, after the final text delta. An empty
    * coalescing update can then reclassify the message without duplicating it. */
   private readonly emittedMessagePhases = new Map<
     string,
-    "commentary" | "final_answer"
+    MessagePhase
   >();
   /** Native review can finish with only exitedReviewMode.review. Wait for
    * turn completion so a companion final agentMessage remains authoritative. */
@@ -775,27 +778,42 @@ export class CodexAppServerTranslator {
     // event kind owns the child's lifetime, independent of the parent's turn.
     const seen = previous?.seen ?? new Set<string>();
     const activityKey = JSON.stringify([item.id, item.kind]);
-    if (seen.has(activityKey)) return;
+    const repeated = seen.has(activityKey);
+    if (repeated && previous?.activityKey !== activityKey) return;
     seen.add(activityKey);
     if (seen.size > 512) seen.delete(seen.values().next().value!);
     // A new interaction is positive evidence of a resumed child. Replaying
     // its old spawn or terminal event must not change that newer lifetime.
-    if (previous?.terminal && item.kind === "started") return;
+    if (!repeated && previous?.terminal && item.kind === "started") return;
     const terminal = item.kind === "completed" || item.kind === "interrupted";
-    const input = {
-      ...previous?.input,
-      agentThreadId: item.agentThreadId,
-      agentPath: item.agentPath,
-    };
-    this.agentGroups.set(item.agentThreadId, { id, terminal, seen, input });
-    if (this.agentGroups.size > 512)
-      this.agentGroups.delete(this.agentGroups.keys().next().value!);
     const name =
       item.agentPath
         ?.split("/")
         .filter(Boolean)
         .at(-1)
         ?.replace(/[_-]+/g, " ") ?? "";
+    const input = {
+      ...previous?.input,
+      agentThreadId: item.agentThreadId,
+      ...(item.agentPath ? { agentPath: item.agentPath } : {}),
+      description: previous?.input?.description ??
+        (name ? name[0].toUpperCase() + name.slice(1) : undefined),
+      ...(typeof item.model === "string" && item.model.trim() ? { model: item.model } : {}),
+      ...(typeof item.reasoningEffort === "string" && item.reasoningEffort.trim()
+        ? { reasoningEffort: item.reasoningEffort } : {}),
+    };
+    if (repeated && previous) {
+      // A completed activity item may supply metadata missing at its start.
+      // It cannot reopen a child that has since emitted its own terminal turn.
+      if (Object.entries(input).some(([key, value]) => previous.input?.[key] !== value)) {
+        previous.input = input;
+        this.emitToolCallUpsert(id, { rawInput: input });
+      }
+      return;
+    }
+    this.agentGroups.set(item.agentThreadId, { id, terminal, seen, input, activityKey });
+    if (this.agentGroups.size > 512)
+      this.agentGroups.delete(this.agentGroups.keys().next().value!);
     this.emitToolCallUpsert(id, {
       nativeToolCallId: item.id,
       title: "Agent",
@@ -806,12 +824,7 @@ export class CodexAppServerTranslator {
           : terminal
             ? "completed"
             : "in_progress",
-      rawInput: {
-        ...input,
-        description:
-          previous?.input?.description ??
-          (name ? name[0].toUpperCase() + name.slice(1) : undefined),
-      },
+      rawInput: input,
       rawOutput:
         item.kind === "interrupted"
           ? {
@@ -1885,7 +1898,7 @@ export class CodexAppServerTranslator {
     itemId: string,
     isThought: boolean,
     fullText: string,
-    phase?: "commentary" | "final_answer",
+    phase?: MessagePhase,
   ): void {
     if (!isThought && phase === "final_answer" && fullText.length > 0) this.hasFinalAgentMessage = true;
     const already = this.emittedMessageText.get(itemId) ?? "";
@@ -1966,7 +1979,7 @@ type CompatibleThreadItem =
       type: "agentMessage";
       id: string;
       text: string;
-      phase?: "commentary" | "final_answer" | null;
+      phase?: MessagePhase | null;
       delivery?: "async" | null;
       questions?: AsyncUserInputQuestion[] | null;
     }

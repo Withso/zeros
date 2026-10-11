@@ -18,6 +18,7 @@ import { cursorSearchOutput } from "./search-output";
 // ──────────────────────────────────────────────────────────
 
 import { memo, useState } from "react";
+import { useTurnDisclosure } from "../turn-disclosures";
 import { FileText, Globe2, Settings, SquareMousePointer } from "lucide-react";
 
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
@@ -177,7 +178,7 @@ function CommandReadRows({ tool, reads, ctx }: {
   reads: CommandReadAction[];
   ctx: RendererContext;
 }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [expanded, setExpanded] = useTurnDisclosure<string | null>(tool.id, "command-read", null);
   const label = readLabel(readLineCount(tool), true);
   const detail = (
     <>
