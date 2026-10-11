@@ -309,9 +309,33 @@ async function acquireHistory(input:CloudNativeHistoryInput,copyOnly:boolean) {
   }catch(error){await lock.close();throw error;}
 }
 
-/** Keep the lock inode and a tiny durable tombstone. Removing either while
- * releasing the lock would let a stale parallel admission recreate the store. */
-export async function deleteCloudNativeHistory(input:{root:string;conversationId:string}):Promise<void>{
+/** Removes one conversation's execution HOMEs (`dataRoot` is the trusted
+ * native data root used to create them) through physical parents. Its entry is
+ * removed, never followed, even if it was replaced with a link. */
+async function eraseCloudNativeHomes(dataRoot:string,conversationId:string):Promise<void>{
+  const data=await openPhysicalHistoryDirectory(dataRoot);
+  try{
+    let homes:FileHandle;
+    try{homes=await open("/proc/self/fd/"+data.fd+"/native-agent-homes",constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);}
+    catch(error){if((error as NodeJS.ErrnoException).code==="ENOENT")return;throw error;}
+    try{
+      if((await homes.stat()).uid!==process.geteuid?.())throw new Error("Cloud native HOME root is not engine-owned");
+      await rm("/proc/self/fd/"+homes.fd+"/"+createHash("sha256").update(conversationId).digest("hex"),{recursive:true,force:true});
+      await homes.sync();
+    }finally{await homes.close();}
+  }finally{await data.close();}
+}
+
+/** Explicit deletion erases all of this conversation's managed native state
+ * while holding its original kernel lock: provider transcripts, customization
+ * records, interrupted capture stages and backups, and its execution HOMEs,
+ * including those an abrupt engine exit left behind. Keep the lock inode and a
+ * tiny durable tombstone. Removing either while releasing the lock would let a
+ * stale parallel admission recreate the store. A cleanup failure propagates, so
+ * the conversation is not reported deleted; deletion is safe to retry. */
+export async function deleteCloudNativeHistory(input:{root:string;conversationId:string;dataRoot:string}):Promise<void>{
+  if(!path.isAbsolute(input.dataRoot)||path.resolve(input.dataRoot)!==input.dataRoot)
+    throw new Error("Cloud native history identity is invalid");
   const {owner,lock}=await lockConversation(input);
   try{
     const marker=await open(path.join(owner,".deleted"),constants.O_WRONLY|constants.O_CREAT|constants.O_NOFOLLOW|constants.O_NONBLOCK,0o600);
@@ -319,9 +343,14 @@ export async function deleteCloudNativeHistory(input:{root:string;conversationId
       const stat=await marker.stat();if(!stat.isFile()||stat.nlink!==1||stat.uid!==process.getuid?.())throw new Error("Cloud history deletion fence is invalid");
       await marker.writeFile("zeros-native-conversation-deleted-v1\n");await marker.sync();
     }finally{await marker.close();}
-    for(const provider of providers){await rm(path.join(owner,provider),{recursive:true,force:true});await rm(path.join(owner,`.customization-${provider}.json`),{force:true});}
-    const parent=await open(owner,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
-    try{await parent.sync();}finally{await parent.close();}
+    const parent=await openPhysicalHistoryDirectory(owner);
+    try{
+      for(const name of await readdir("/proc/self/fd/"+parent.fd)){
+        if(name!==".lock"&&name!==".deleted")await rm("/proc/self/fd/"+parent.fd+"/"+name,{recursive:true,force:true});
+      }
+      await parent.sync();
+    }finally{await parent.close();}
+    await eraseCloudNativeHomes(input.dataRoot,input.conversationId);
   }finally{await lock.close();}
 }
 

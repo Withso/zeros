@@ -18,6 +18,11 @@ import type {CloudAgentSelection} from "../agents/cloud-provider-execution";
 import {AgentGateway} from "../agents/gateway";
 import type {AgentAdapter} from "../agents/types";
 import type {PreparedBoundary} from "../agents/containment/types";
+import {CLOUD_NATIVE_HISTORY_ROOT,deleteCloudNativeHistory} from "../agents/containment/cloud-native-history";
+import {zerosDataDir} from "../db/paths";
+
+vi.mock("../agents/containment/cloud-native-history",async original=>({
+  ...await original<typeof import("../agents/containment/cloud-native-history")>(),deleteCloudNativeHistory:vi.fn(async()=>{})}));
 import {testExecutionBoundary} from "../agents/__tests__/helpers/test-execution-boundary";
 import {testCloudBootFixture} from "../agents/__tests__/helpers/test-cloud-boot";
 
@@ -448,6 +453,16 @@ describe("cloud engine credential admission",()=>{
     await expect(methods.deleteCloudConversation.call(engine,"conversation",randomUUID(),client,remove)).rejects.toThrow("uncertain");
     expect(engine.handleCloudRuntimeAuthorityLoss).toHaveBeenCalledOnce();expect(deletions.has("conversation")).toBe(true);
     expect(remove).not.toHaveBeenCalled();expect(getChat("conversation")).not.toBeNull();
+  });
+  it("erases native state under the engine's own data root before removing the conversation",async()=>{
+    const {engine}=fixture(),order:string[]=[],remove=vi.fn(async()=>{order.push("remove");return {ok:true};});
+    vi.mocked(deleteCloudNativeHistory).mockImplementationOnce(async()=>{order.push("erase");});
+    Object.assign(engine,{cloudCommands:{handle:vi.fn(async()=>({}))},cloudConversationDeletions:new Set(),
+      cancelCloudCommandConversation:vi.fn(async()=>{}),sessionChat:new Map()});
+    const client={cloudActor:{sessionId:"actor"},authorized:()=>true} as unknown as TransportClient;
+    await expect(methods.deleteCloudConversation.call(engine,"conversation",randomUUID(),client,remove)).resolves.toEqual({ok:true});
+    expect(deleteCloudNativeHistory).toHaveBeenCalledWith({root:CLOUD_NATIVE_HISTORY_ROOT,conversationId:"conversation",dataRoot:zerosDataDir()});
+    expect(order).toEqual(["erase","remove"]);
   });
   it("accepts an authorized retry of an already deleted conversation",async()=>{
     const {engine}=fixture(),remove=vi.fn(async()=>({ok:true}));deleteChat("conversation");

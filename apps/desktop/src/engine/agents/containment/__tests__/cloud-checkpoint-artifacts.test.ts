@@ -144,7 +144,7 @@ describe.runIf(process.platform === "linux")("native cloud checkpoint artifacts"
   it("preserves native deletion fences in a fresh checkpoint generation",async()=>{
     const f=await fixture(),conversationId="deleted-conversation";
     const root=path.join(f.roots.data,"native-agent-history");
-    await deleteCloudNativeHistory({root,conversationId});
+    await deleteCloudNativeHistory({root,conversationId,dataRoot:root});
     const archive=await captureCloudNativeCheckpoint(f),repository=path.join(f.root,"restored"),data=path.join(f.root,"restored-state");
     expect(archive.files.some(file=>file.scope==="agent-transcripts"&&file.path.endsWith("/.deleted"))).toBe(true);
     await fs.mkdir(repository);git(repository,"init","-q");await fs.mkdir(data,{mode:0o700});

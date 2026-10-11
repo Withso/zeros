@@ -48,7 +48,7 @@ it('copies encrypted fork dictionaries, reseals keys, isolates new owners and de
   const next=await acquireCloudNativeHistory({...input,conversationId:'fork',customization:{authority:{...rotated,owner:b.owner},secrets:[]}});
   try{expect(next.fresh).toBe(true);expect(await readdir(next.mount.directory)).toEqual([]);}finally{await next.release();}
   expect(await readFile(path.join(source.mount.directory,'raw-history'),'utf8')).toBe(secret);
-  await deleteCloudNativeHistory({...input,conversationId:'fork'});
+  await deleteCloudNativeHistory({...input,conversationId:'fork',dataRoot:root});
   expect(await readdir(forkParent)).toEqual(expect.arrayContaining(['.deleted','.lock']));
   expect((await readdir(forkParent)).some(n=>n.startsWith('.customization')||n==='codex')).toBe(false);
   await expect(acquireCloudNativeHistory({...input,conversationId:'fork',customization:{authority:a,secrets:[]}})).rejects.toThrow(/deleted/);

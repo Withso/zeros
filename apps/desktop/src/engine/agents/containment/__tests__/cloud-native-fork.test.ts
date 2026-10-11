@@ -13,7 +13,7 @@ describe.skipIf(process.platform !== "linux")("cloud native fork history", () =>
       await source.release();
       await copyCloudNativeForkHistory({...input,destinationConversationId:"destination"},async () => {
         await expect(acquireCloudNativeHistory(input)).rejects.toThrow(/active/);
-        await expect(deleteCloudNativeHistory(input)).rejects.toThrow(/active/);
+        await expect(deleteCloudNativeHistory({...input,dataRoot:root})).rejects.toThrow(/active/);
         const fork=await acquireCloudNativeHistory({...input,conversationId:"destination"});
         expect(fork.mount.directory).not.toBe(source.mount.directory);
         expect(await readFile(path.join(fork.mount.directory,"rollout.jsonl"),"utf8")).toBe('source history\n');
@@ -38,7 +38,7 @@ describe.skipIf(process.platform !== "linux")("cloud native fork history", () =>
       await symlink(root,path.join(source.mount.directory,"escape"));
       await expect(copyCloudNativeForkHistory(input,async()=>{})).rejects.toThrow(CloudNativeHistoryError);
       await rm(path.join(source.mount.directory,"escape"));
-      await deleteCloudNativeHistory(input);
+      await deleteCloudNativeHistory({...input,dataRoot:root});
       await expect(copyCloudNativeForkHistory(input,async()=>{})).rejects.toThrow(/deleted/);
     } finally { await rm(root,{recursive:true,force:true}); }
   });
