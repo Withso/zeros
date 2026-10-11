@@ -38,6 +38,8 @@ function deps(): KitDeps & { calls: { method: string; route: string; body: unkno
   };
 }
 
+const envelope = { ok: true, type: "snapshot.tree", snapshotId: "snapshot_fixture", sandboxId: "bx_v4test1", treeAvailable: true, truncated: false };
+
 function fullKit(failColdBoot = false) {
   const d = deps(), root = temp();
   const relative = "scripts/cloud-workspace-validation";
@@ -52,8 +54,8 @@ function fullKit(failColdBoot = false) {
   d.repoRoot = root;
   const machines = new Set<string>();
   let sequence = 0, snapshot: any;
-  let tree: any = { ok: true, type: "snapshot.tree", treeAvailable: true, truncated: false,
-    entries: [{ path: "__system__/root", kind: "dir" }, { path: "__system__/opt/zeros-bootstrap/bootstrap.py", kind: "file", size: 1 }] };
+  let tree: any = { ok: true, type: "snapshot.tree", snapshotId: "snapshot_fixture", sandboxId: "bx_v4test1", treeAvailable: true,
+    truncated: false, entries: [{ path: "__system__/root", kind: "dir" }, { path: "__system__/opt/zeros-bootstrap/bootstrap.py", kind: "file", size: 1 }] };
   const requests: { method: string; route: string; body: any }[] = [];
   d.boat = async (method, route, options = {}) => {
     const body: any = options.body;
@@ -478,16 +480,20 @@ class Bootstrap:
     { path: "__system__/root/.netrc", kind: "symlink" },
   ])("refuses a saved base whose captured tree holds $path before any cold boot", async entry => {
     const f = fullKit();
-    f.setTree({ ok: true, treeAvailable: true, truncated: false, entries: [{ path: "__system__/root", kind: "dir" }, entry] });
+    f.setTree({ ...envelope, entries: [{ path: "__system__/root", kind: "dir" }, entry] });
     await expect(v4Command("build", new Map([["--name", "zeros-base-v1"], ["--max-used-hours", "2"]]), [], f.d))
       .rejects.toMatchObject({ diagnostic: { stage: "snapshot", failedChecks: ["private_state"] } });
     expect(f.requests.filter(request => request.route === "/sandboxes" && request.method === "POST")).toHaveLength(1);
   }, 30_000);
 
-  it.each([{ treeAvailable: false }, { truncated: true }, { entries: undefined }])(
-    "refuses a saved base whose captured tree cannot be read completely (%j)", async change => {
+  it.each([{ treeAvailable: false }, { truncated: true }, { entries: undefined }, { ok: false }, { type: "snapshot.files" },
+    { snapshotId: "another_snapshot" }, { sandboxId: "bx_v4test9" }, { entries: [null] },
+    { entries: [{ path: "__system__/root/.ssh/authorized_keys", kind: "file", size: 90 },
+      { path: "__system__/root/.ssh/authorized_keys", kind: "file", size: 0 }] },
+    { entries: [{ path: ".codex/auth.json", kind: "file", size: -1 }] }])(
+    "refuses a saved base whose captured tree is incomplete, foreign or malformed (%j)", async change => {
       const f = fullKit();
-      f.setTree({ ok: true, treeAvailable: true, truncated: false, entries: [], ...change });
+      f.setTree({ ...envelope, entries: [], ...change });
       await expect(v4Command("build", new Map([["--name", "zeros-base-v1"], ["--max-used-hours", "2"]]), [], f.d))
         .rejects.toMatchObject({ diagnostic: { stage: "snapshot", failedChecks: ["private_state"] } });
       expect(f.requests.filter(request => request.route === "/sandboxes" && request.method === "POST")).toHaveLength(1);
@@ -495,7 +501,7 @@ class Bootstrap:
 
   it("accepts an empty private placeholder in the captured tree", async () => {
     const f = fullKit();
-    f.setTree({ ok: true, treeAvailable: true, truncated: false, entries: [{ path: ".bash_history", kind: "file", size: 0 }] });
+    f.setTree({ ...envelope, entries: [{ path: ".bash_history", kind: "file", size: 0 }] });
     await expect(v4Command("build", new Map([["--name", "zeros-base-v1"], ["--max-used-hours", "2"]]), [], f.d))
       .resolves.toMatchObject({ snapshotName: "zeros-base-v1" });
   }, 30_000);

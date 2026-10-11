@@ -310,13 +310,21 @@ const PRIVATE_FILES = [".ssh/authorized_keys", ".git-credentials", ".netrc", ".n
   ".claude/.credentials.json", ".codex/auth.json", ".cursor/auth.json", ".config/cursor/auth.json"];
 
 // Boat installs its own root key on every machine during boot, so a cold boot
-// cannot show that the captured disk is clean. Check the saved tree instead.
-async function requireCleanCapture(deps: KitDeps, snapshotId: string) {
+// cannot show that the captured disk is clean. Check the saved tree instead:
+// it must be the complete tree of this snapshot of this builder.
+async function requireCleanCapture(deps: KitDeps, snapshotId: string, sandboxId: string) {
   const reply = await deps.boat("GET", `/snapshots/${encodeURIComponent(snapshotId)}/tree`, { timeoutMs: 60_000 });
   const tree = reply.body;
-  requireBase(reply.status === 200 && tree?.treeAvailable === true && tree.truncated === false && Array.isArray(tree.entries),
+  requireBase(reply.status === 200 && tree?.ok === true && tree.type === "snapshot.tree" && tree.snapshotId === snapshotId &&
+    tree.sandboxId === sandboxId && tree.treeAvailable === true && tree.truncated === false && Array.isArray(tree.entries),
     "snapshot", "private_state");
-  const entries = new Map<string, any>(tree.entries.map((entry: any) => [entry?.path, entry]));
+  const entries = new Map<string, { kind: string; size?: number }>();
+  for (const entry of tree.entries) {
+    requireBase(typeof entry?.path === "string" && entry.path.length > 0 && typeof entry.kind === "string" &&
+      (entry.size === undefined || Number.isSafeInteger(entry.size) && entry.size >= 0) && !entries.has(entry.path),
+      "snapshot", "private_state");
+    entries.set(entry.path, entry);
+  }
   for (const home of ["", "__system__/root/"]) for (const name of PRIVATE_FILES) {
     const entry = entries.get(home + name);
     requireBase(entry === undefined || (entry.kind === "file" && entry.size === 0), "snapshot", "private_state");
@@ -601,7 +609,7 @@ export async function buildBase(options: Map<string, string>, deps: KitDeps, liv
         "snapshot", "snapshot_identity");
     }
     const snapshot = await waitSnapshot(deps, id, state);
-    await requireCleanCapture(deps, snapshot.id);
+    await requireCleanCapture(deps, snapshot.id, id);
     state = updateState(deps, { phase: "saved", snapshot });
     checkpoint();
     stage = "cold_boot";
