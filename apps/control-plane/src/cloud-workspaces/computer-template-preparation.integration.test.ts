@@ -251,7 +251,7 @@ database("computer template claim preparation with the real B7 journal", () => {
 
   it("constructs the real adapters and revalidates the selected pin without following a new head", async () => {
     const adapters = createComputerTemplateBoatAdapters({ pool, client: boat.client,
-      accountScope: claimOptions().accountScope, billingOrg: BUILDER_WALLET, qualificationMode: "full" });
+      accountScope: claimOptions().accountScope, billingOrg: BUILDER_WALLET, qualificationMode: "full", deploymentChannel: "alpha" });
     expect(adapters.vms).toBeInstanceOf(BoatCloudBuilderVms);
     expect(adapters.operations).toBeInstanceOf(DatabaseBuilderVmOperationStore);
     const first = await withSystemTx(pool, tx => seedRuntimeBundle(tx, { digit: "2" }));

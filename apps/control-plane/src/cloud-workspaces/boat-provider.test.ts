@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { describe, expect, it, vi } from "vitest";
-import { BoatWorkspaceProvider } from "./boat-provider.js";
+import { BoatWorkspaceProvider, type BoatWorkspaceProviderOptions } from "./boat-provider.js";
 import type {
   CloudProviderOperationRecord,
   CloudProviderOperationStore,
@@ -71,7 +72,7 @@ function memberCapRefusal() {
 }
 const walletOf = (init?: RequestInit) => new Headers(init?.headers).get("x-boat-org");
 const unreported = { team: undefined };
-function fixture(extraOptions: { billingOrg?: string } = {}) {
+function fixture(extraOptions: Partial<Pick<BoatWorkspaceProviderOptions, "billingOrg" | "resolveDisplayName">> = {}) {
   let stored: CloudProviderOperationRecord | null = null;
   const attempts = new Map<string, boolean>();
   const operations: CloudProviderOperationStore = {
@@ -163,6 +164,107 @@ function fixture(extraOptions: { billingOrg?: string } = {}) {
     stored: () => stored!,
   };
 }
+
+describe("Boat workspace display names", () => {
+  describe.each(["lookup", "PATCH"] as const)("pending label %s", stage => {
+    it.each([
+      ["base", 1, "create"], ["base", 3, "createWithComputeLease"],
+      ["template", 1, "create"], ["template", 3, "createWithComputeLease"],
+    ] as const)("returns %s generation %s from %s before naming and catches its later rejection", async (source, generation, method) => {
+      let rejectLabel!: (error: Error) => void;
+      const pending = new Promise<never>((_resolve, reject) => { rejectLabel = reject; });
+      const resolveDisplayName = vi.fn(() => stage === "lookup" ? pending : "example-alpha-workspace-demo");
+      const f = fixture({ resolveDisplayName });
+      const sourceId = "bx_3456789a";
+      const input = { ...INPUT, generation, ...(source === "template" ? { imageRef: `boat-template:${sourceId}` } : {}) };
+      const provider = source === "base" ? f.provider : new BoatWorkspaceProvider({ ...f.options,
+        imageRef: input.imageRef, ttlSeconds: 1800, resolveTemplate: async () => sourceId });
+      if (source === "template") {
+        f.fetcher.mockResolvedValueOnce(json(sandbox("archived", { id: sourceId, lastSnapshotStatus: "completed" })))
+          .mockResolvedValueOnce(json({ ok: true, sandboxId: RESOURCE }, 202))
+          .mockResolvedValueOnce(json(sandbox("ready", { sourceSandboxId: sourceId })));
+      } else f.fetcher.mockResolvedValueOnce(json(sandbox()));
+      if (stage === "PATCH") f.fetcher.mockImplementationOnce(() => pending);
+      const unhandled = vi.fn();
+      process.on("unhandledRejection", unhandled);
+      const created = method === "create" ? provider.create(input) : provider.createWithComputeLease(input, 1800);
+      try {
+        expect(await Promise.race([created, nextTurn().then(() => null)])).toMatchObject({ resourceId: RESOURCE, generation });
+        expect(f.stored().resourceId).toBe(RESOURCE);
+        expect(resolveDisplayName).toHaveBeenCalledExactlyOnceWith(input);
+        expect(f.fetcher.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(stage === "PATCH");
+        rejectLabel(new Error("late naming failure"));
+        await nextTurn();
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        rejectLabel(new Error("release pending label"));
+        await created;
+        await nextTurn();
+        process.off("unhandledRejection", unhandled);
+      }
+    });
+  });
+
+  it.each([["base", 1], ["base", 3], ["template", 1], ["template", 3]] as const)("labels a new %s allocation in generation %s after binding and wallet confirmation", async (source, generation) => {
+    const name = "example-org-beta-workspace-search-ui";
+    const resolveDisplayName = vi.fn(async () => name);
+    const f = fixture({ resolveDisplayName });
+    const sourceId = "bx_3456789a";
+    const input = { ...INPUT, generation, ...(source === "template" ? { imageRef: `boat-template:${sourceId}` } : {}) };
+    const provider = source === "base" ? f.provider : new BoatWorkspaceProvider({ ...f.options,
+      imageRef: input.imageRef, ttlSeconds: 1800, resolveTemplate: async () => sourceId });
+    if (source === "template") {
+      f.fetcher.mockResolvedValueOnce(json(sandbox("archived", { id: sourceId, lastSnapshotStatus: "completed" })))
+        .mockResolvedValueOnce(json({ ok: true, sandboxId: RESOURCE }, 202))
+        .mockResolvedValueOnce(json(sandbox("ready", { sourceSandboxId: sourceId })));
+    } else f.fetcher.mockResolvedValueOnce(json(sandbox()));
+    f.fetcher.mockImplementationOnce(async (_url, init) => {
+      expect(f.stored().resourceId).toBe(RESOURCE);
+      expect(init?.method).toBe("PATCH");
+      return json({ ok: true });
+    });
+    await expect(provider.create(input)).resolves.toMatchObject({ resourceId: RESOURCE, generation });
+    expect(resolveDisplayName).toHaveBeenCalledExactlyOnceWith(input);
+    const patches = f.fetcher.mock.calls.filter(([, init]) => init?.method === "PATCH");
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.[0]).toBe(`https://boat.dev/api/v1/sandboxes/${RESOURCE}`);
+    expect(patches[0]?.[1]?.body).toBe(JSON.stringify({ name }));
+  });
+
+  it.each([false, true])("keeps a recorded create body byte-identical when the label changes (monitoring policy %s)", async monitoring => {
+    const resolveDisplayName = vi.fn(async () => "renamed-org-alpha-workspace-renamed-workspace");
+    const f = fixture({ resolveDisplayName });
+    const original = { type: "default", from: "zeros-linux-qualified", ttlSeconds: null, noEnv: true, env: {},
+      ...(monitoring ? { monitoring: false } : {}) };
+    const requestSha256 = createHash("sha256").update(JSON.stringify({ imageRef: INPUT.imageRef, body: original, createAttemptJournalVersion: 1 })).digest("hex");
+    await f.operations.prepareCreate({ ...INPUT, requestSha256 });
+    f.fetcher.mockResolvedValueOnce(json(sandbox())).mockResolvedValueOnce(json({ ok: true }));
+    await f.provider.create({ ...INPUT, idempotencyKey: "retry-from-new-wake" });
+    expect(f.fetcher.mock.calls[0]?.[1]?.body).toBe(JSON.stringify(original));
+    expect(new Headers(f.fetcher.mock.calls[0]?.[1]?.headers).get("idempotency-key")).toBe(INPUT.idempotencyKey);
+    expect(f.stored().requestSha256).toBe(requestSha256);
+    expect(f.fetcher.mock.calls.at(-1)?.[1]?.body).toBe(JSON.stringify({ name: await resolveDisplayName() }));
+  });
+
+  it("preserves the allocation when naming fails and retries only the label on an already bound create", async () => {
+    const f = fixture({ resolveDisplayName: async () => "example-alpha-workspace-demo" });
+    f.fetcher.mockResolvedValueOnce(json(sandbox())).mockRejectedValueOnce(new Error("name unavailable"));
+    await expect(f.provider.createWithComputeLease(INPUT, 1800)).resolves.toMatchObject({ resourceId: RESOURCE });
+    f.fetcher.mockResolvedValueOnce(json(sandbox())).mockResolvedValueOnce(json({ ok: true }));
+    await expect(f.provider.createWithComputeLease(INPUT, 1800)).resolves.toMatchObject({ resourceId: RESOURCE });
+    expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(2);
+  });
+
+  it("does not resolve or patch names on an unconfirmed wallet", async () => {
+    const resolveDisplayName = vi.fn(async () => "example-alpha-workspace-demo");
+    const f = fixture({ resolveDisplayName });
+    f.fetcher.mockImplementation(async () => json(sandbox("ready", { team: { id: OTHER_WALLET } })));
+    await expect(f.provider.create(INPUT)).rejects.toMatchObject({ code: "provider_billing_scope_mismatch" });
+    expect(resolveDisplayName).not.toHaveBeenCalled();
+    expect(f.fetcher.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
+  });
+});
 
 describe("Boat workspace monitoring policy", () => {
   it.each([

@@ -259,7 +259,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
   cloudWorkspaceRepositoryResolver = new GithubCloudWorkspaceRepositoryResolver(
     { credential: github },
   );
-  const { provider, registry } = createCloudProviderDeployment(pool, cloud);
+  const { provider, registry } = createCloudProviderDeployment(pool, cloud, config.deploymentChannel);
   const providerResolver = new DatabaseCloudWorkspaceProviderResolver({
     pool,
     workosEnabled: config.auth.provider === "workos",
