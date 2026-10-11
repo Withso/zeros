@@ -466,7 +466,8 @@ const config = { provider: "boat", imageRef: "zeros-v2-test-current-legacy-image
   it.each(["checkpoint","quota"])("keeps a plain resume available when automatic admission is blocked by %s",async blocker=>{
     await finalCheckpoint(); await advanceHead();
     if(blocker==="checkpoint") await pool.query("UPDATE workspace_content_heads SET current_checkpoint_id=NULL WHERE workspace_id=$1",[fixture.workspaceId]);
-    else await pool.query("UPDATE cloud_workspace_quotas SET max_storage_mib=20480 WHERE org_id=$1",[fixture.organizationId]);
+    else await pool.query(`UPDATE cloud_workspace_quotas SET max_cpu_millicores=(SELECT cpu_millicores FROM cloud_workspace_generations
+      WHERE workspace_id=$2 AND generation=1) WHERE org_id=$1`,[fixture.organizationId,fixture.workspaceId]);
     expect((await route("/wake")).status).toBe(202);
     const {provider,calls}=stoppedProvider();
     await new CloudWorkspaceReconciler({pool,provider,runtimeUpgradeConfig:config,intervalMs:1000}).runOnce();

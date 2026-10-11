@@ -928,13 +928,13 @@ function assertCreateQuota(
     "cpuMillicores" | "memoryMiB" | "storageMiB"
   >,
 ): void {
+  // Only concurrent compute is bounded. Stopped and archived workspaces keep
+  // their disks but run nothing, so their number and storage never block one.
   const exceeded =
-    Number(usage.workspaces) + 1 > quota.max_workspaces ||
     Number(usage.running) + 1 > quota.max_running_workspaces ||
     Number(usage.cpu_millicores) + config.cpuMillicores >
       quota.max_cpu_millicores ||
-    Number(usage.memory_mib) + config.memoryMiB > quota.max_memory_mib ||
-    Number(usage.storage_mib) + config.storageMiB > quota.max_storage_mib;
+    Number(usage.memory_mib) + config.memoryMiB > quota.max_memory_mib;
   if (exceeded) {
     throw new HttpError(
       409,

@@ -152,7 +152,8 @@ suite("automatic Boat checkpoint recovery", () => {
       .toEqual({ status: "failed", last_error_code: "recovery_needed", current_generation: 1 });
   });
   it("waits durably for capacity without allocating a generation", async () => {
-    await pool.query("UPDATE cloud_workspace_quotas SET max_storage_mib=20480 WHERE org_id=$1", [fixture.organizationId]);
+    await pool.query(`UPDATE cloud_workspace_quotas SET max_cpu_millicores=(SELECT cpu_millicores FROM cloud_workspace_generations
+      WHERE workspace_id=$2 AND generation=1) WHERE org_id=$1`, [fixture.organizationId, fixture.workspaceId]);
     const subject = await exhaust(); await drain(); await subject.runOnce();
     expect((await pool.query("SELECT last_error_code,current_generation FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0])
       .toEqual({ last_error_code: "recovery_waiting_for_capacity", current_generation: 1 });

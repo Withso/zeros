@@ -37,6 +37,8 @@ const messages: Record<string, string> = {
     "Enable workspace sharing before inviting collaborators",
   cloud_compute_allowance_exhausted:
     "This workspace's monthly compute allowance is exhausted",
+  cloud_quota_exceeded:
+    "Too many cloud workspaces are running. Stop one to start another",
   cloud_compute_allowance_unavailable:
     "This workspace's compute allowance is unavailable",
   compute_usage_unavailable: "Compute usage is temporarily unavailable",

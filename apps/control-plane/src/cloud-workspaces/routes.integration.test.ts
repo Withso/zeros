@@ -2682,7 +2682,7 @@ d("cloud workspace API contracts", () => {
     ).resolves.toMatchObject({ rows: [{ count: 1 }] });
   });
 
-  it("retains retired provider storage in create admission until deletion is verified", async () => {
+  it("does not hold creates on retained provider storage", async () => {
     const created = await createWorkspace();
     const workspaceId = created.body.workspace.id;
     await withSystemTx(pool, async (tx) => {
@@ -2729,8 +2729,8 @@ d("cloud workspace API contracts", () => {
          WHERE workspace_id = $1 AND operation = 'create'`,
         [workspaceId],
       );
-      // Current + one new workspace fit exactly, but the retired provider disk
-      // still makes that allocation unsafe until deletion is observed.
+      // Current + one new workspace fit exactly in compute. Retained disks,
+      // including a retired one still being deleted, never block a create.
       await tx.query(
         `UPDATE cloud_workspace_quotas
          SET max_cpu_millicores = 4000, max_memory_mib = 8192,
@@ -2744,25 +2744,33 @@ d("cloud workspace API contracts", () => {
       `/v1/organizations/${orgId}/cloud-workspaces`,
       { method: "POST", key: randomUUID(), body: createBody() },
     );
-    expect(beforeDeletion.status).toBe(409);
-    await expect(beforeDeletion.json()).resolves.toMatchObject({
-      error: { code: "cloud_quota_exceeded" },
-    });
+    expect(beforeDeletion.status).toBe(202);
+  });
 
-    await withSystemTx(pool, (tx) =>
-      tx.query(
-        `UPDATE cloud_workspace_provider_bindings
-         SET observed_state = 'deleted', deletion_verified_at = now(),
-             last_observed_at = now(), updated_at = now()
-         WHERE workspace_id = $1 AND generation = 1`,
-        [workspaceId],
-      ),
+  it("admits creates beyond the stored workspace count while running compute stays bounded", async () => {
+    await pool.query(
+      `UPDATE cloud_workspace_quotas SET max_workspaces = 1, max_running_workspaces = 1 WHERE org_id = $1`,
+      [orgId],
     );
-    const afterDeletion = await request(
-      `/v1/organizations/${orgId}/cloud-workspaces`,
-      { method: "POST", key: randomUUID(), body: createBody() },
-    );
-    expect(afterDeletion.status).toBe(202);
+    const first = await createWorkspace();
+    expect(first.response.status).toBe(202);
+    const runningLimit = await createWorkspace();
+    expect(runningLimit.response.status).toBe(409);
+    expect(runningLimit.body).toMatchObject({ error: { code: "cloud_quota_exceeded" } });
+    await withSystemTx(pool, async (tx) => {
+      await tx.query(
+        `UPDATE cloud_workspaces SET status = 'stopped', desired_state = 'stopped', updated_at = now() WHERE id = $1`,
+        [first.body.workspace.id],
+      );
+      await tx.query(
+        `UPDATE cloud_workspace_lifecycle_intents SET state = 'succeeded', completed_at = now(), updated_at = now()
+         WHERE workspace_id = $1 AND operation = 'create'`,
+        [first.body.workspace.id],
+      );
+    });
+    // Stopped and archived workspaces use no concurrent compute; their number is not limited.
+    const second = await createWorkspace();
+    expect(second.response.status).toBe(202);
   });
 
   it("cancels a generation replacement before stopping the restored source", async () => {

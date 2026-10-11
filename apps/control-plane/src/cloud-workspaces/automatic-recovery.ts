@@ -125,11 +125,11 @@ export function assertGenerationReplacementQuota(
     storageMiB: number;
   },
 ): void {
+  // Like creates, a replacement is bounded by concurrent compute, not disks.
   const exceeded =
     Number(usage.cpu_millicores) + resources.cpuMillicores >
       quota.max_cpu_millicores ||
-    Number(usage.memory_mib) + resources.memoryMiB > quota.max_memory_mib ||
-    Number(usage.storage_mib) + resources.storageMiB > quota.max_storage_mib;
+    Number(usage.memory_mib) + resources.memoryMiB > quota.max_memory_mib;
   if (exceeded) {
     throw new HttpError(
       409,
