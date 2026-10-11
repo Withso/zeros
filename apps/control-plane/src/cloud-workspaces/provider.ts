@@ -44,6 +44,12 @@ export interface CloudWorkspaceCommandRunner {
     outputTruncated: boolean;
     timings?: SetupTimings | undefined;
   }>;
+  /** Optional secret-free wait for a restoring v4 base, run before any setup
+   * admission or artifact capability is minted. It never reports readiness. */
+  awaitReadiness?(
+    input: { resourceId: string; runtimeBaseCompatibilityId: string; timeoutSeconds: number },
+    signal: AbortSignal,
+  ): Promise<void>;
 }
 
 export type CloudProviderObservedState =

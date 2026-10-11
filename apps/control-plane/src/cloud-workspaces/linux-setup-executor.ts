@@ -572,6 +572,25 @@ export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExec
       throw failure;
     }
 
+    if (execution.runtime && commandRunner.awaitReadiness) {
+      // Wait out a provider restore before minting any setup authority, so the
+      // one-use admission and artifact capability keep their full lifetime.
+      const readinessFinished = clock?.start("bootstrap_probe");
+      try {
+        await commandRunner.awaitReadiness({ resourceId: execution.provider.resourceId,
+          runtimeBaseCompatibilityId: execution.runtime.baseCompatibilityId, timeoutSeconds: this.timeoutSeconds }, signal);
+        readinessFinished?.();
+      } catch (error) {
+        readinessFinished?.(signal.aborted ? "cancelled" : "failed");
+        const failure = signal.aborted
+          ? setupError("setup_execution_aborted", "Cloud workspace setup execution was aborted", true)
+          : normalizeExecutionError(error);
+        failure.timings = clock?.snapshot();
+        await this.retain(execution,failure,"bootstrap",error);
+        throw failure;
+      }
+    }
+
     let admission: CloudWorkspaceSetupAdmission;
     const admissionFinished = clock?.start("admission");
     try {

@@ -193,6 +193,99 @@ describe("Boat bootstrap transport", () => {
     expect(f.channel.dispose).toHaveBeenCalledOnce();
   });
 
+  const restoringStatus = (f: ReturnType<typeof v4Fixture>) => () => new Promise<Record<string, unknown>>(resolve =>
+    setTimeout(() => resolve({ ...f.prepared, exitCode: null, stdout: "", timedOut: true }), 20_000));
+  const readinessInput = (f: ReturnType<typeof v4Fixture>, timeoutSeconds = 600) =>
+    ({ resourceId: f.input.resourceId, runtimeBaseCompatibilityId: f.input.runtimeBaseCompatibilityId!, timeoutSeconds });
+  const statusCalls = (f: ReturnType<typeof v4Fixture>) => f.request.mock.calls.filter(([, init]) =>
+    String((init as { body?: { command?: string } } | undefined)?.body?.command).includes("bootstrap.py status")).length;
+  it("waits out a restoring base before setup authority exists, without opening access", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture();
+    f.request.mockReset();
+    for (let poll = 0; poll < 9; poll++) f.request.mockImplementationOnce(restoringStatus(f));
+    f.request.mockResolvedValueOnce(f.prepared);
+    let settled = false;
+    const waiting = f.runner.awaitReadiness(readinessInput(f), new AbortController().signal).then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(179_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await waiting;
+    expect(statusCalls(f)).toBe(10);
+    expect(f.assertOwned).toHaveBeenCalledWith(f.input.resourceId);
+    expect(f.openChannel).not.toHaveBeenCalled();
+    expect(JSON.stringify(f.request.mock.calls).includes(f.input.env.ZEROS_CLOUD_WORKSPACE_SETUP_B64)).toBe(false);
+  });
+  it("returns at the base's restore ceiling and leaves the decision to the post-admission check", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture();
+    f.request.mockReset().mockImplementation(restoringStatus(f));
+    let settled = false;
+    const waiting = f.runner.awaitReadiness(readinessInput(f), new AbortController().signal).then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(519_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await waiting;
+    expect(statusCalls(f)).toBe(26);
+    expect(f.openChannel).not.toHaveBeenCalled();
+  });
+  it("spaces restore polls when the provider reports a timed-out status immediately", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture();
+    f.request.mockReset().mockResolvedValue({ ...f.prepared, exitCode: null, stdout: "", timedOut: true });
+    const waiting = f.runner.awaitReadiness(readinessInput(f), new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(statusCalls(f)).toBe(5);
+    await vi.advanceTimersByTimeAsync(540_000);
+    await waiting;
+    expect(statusCalls(f)).toBeLessThanOrEqual(271);
+    expect(f.openChannel).not.toHaveBeenCalled();
+  });
+  it("bounds the pre-admission wait by a shorter execution timeout", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture();
+    f.request.mockReset().mockImplementation(restoringStatus(f));
+    let settled = false;
+    const waiting = f.runner.awaitReadiness(readinessInput(f, 60), new AbortController().signal).then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(39_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await waiting;
+    expect(statusCalls(f)).toBe(2);
+  });
+  it("keeps the ordinary 120-second bound for provider errors before authority exists", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture(), error = new BoatBootPendingError();
+    f.request.mockReset().mockRejectedValue(error);
+    const waiting = f.runner.awaitReadiness(readinessInput(f), new AbortController().signal).catch(failure => failure);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(await waiting).toBe(error);
+    expect(statusCalls(f)).toBeLessThanOrEqual(61);
+    expect(f.openChannel).not.toHaveBeenCalled();
+  });
+  it("cancels the pre-admission wait promptly while a status is in flight", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture();
+    f.request.mockReset().mockImplementation((_path: string, init?: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+    }));
+    const controller = new AbortController();
+    const waiting = f.runner.awaitReadiness(readinessInput(f), controller.signal).catch(failure => failure);
+    await vi.advanceTimersByTimeAsync(5_000);
+    controller.abort();
+    expect(await waiting).toBe(controller.signal.reason);
+    expect(statusCalls(f)).toBe(1);
+  });
+  it("keeps the post-admission readiness check's original handling of a timed-out status", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture();
+    f.request.mockReset().mockImplementation(fixture().request.getMockImplementation()!).mockImplementationOnce(restoringStatus(f));
+    const result = f.runner.execute(f.input, new AbortController().signal).catch(error => error);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(await result).toMatchObject({ code: "provider_bootstrap_unavailable", retryable: true, diagnostic: { phase: "bootstrap", exit: "timeout" } });
+    expect(statusCalls(f)).toBe(1);
+    expect(f.channel.execute).not.toHaveBeenCalled();
+  });
   it("keeps polling an exact-base stopped host while enabled restore units start", async () => {
     vi.useFakeTimers();
     const f = v4Fixture("stopped");

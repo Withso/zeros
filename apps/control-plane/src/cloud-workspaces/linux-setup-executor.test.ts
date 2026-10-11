@@ -159,6 +159,42 @@ describe("CloudWorkspaceLinuxSetupExecutor", () => {
     return { ...f, executor, runtimeArtifacts, resolveRuntimeArtifact, descriptor, pin, objectKey, artifact, artifactUrl, installerDiagnostic, output };
   };
 
+  it("waits for a restoring base before minting any setup authority", async () => {
+    const f = v4(), order: string[] = [];
+    f.runner.awaitReadiness = vi.fn(async (input: { resourceId: string; runtimeBaseCompatibilityId: string; timeoutSeconds: number }) => {
+      order.push(`ready:${input.resourceId}:${input.runtimeBaseCompatibilityId}:${input.timeoutSeconds}`);
+    });
+    vi.mocked(f.broker.issue).mockImplementation(async () => { order.push("issue"); return f.grant; });
+    f.runtimeArtifacts.presignGet.mockImplementation(async () => { order.push("presign"); return f.artifact; });
+    vi.mocked(f.runner.execute).mockImplementation(async () => { order.push("execute"); return { exitCode: 0, output: f.output, outputTruncated: false }; });
+    const result = await f.executor.execute(f.input, new AbortController().signal);
+    expect(order).toEqual([`ready:sandbox-exact-id:${runtimeBase.compatibilityId}:300`, "issue", "presign", "execute"]);
+    const control = result.timings?.clocks.find(clock => clock.source === "control_plane");
+    expect(control?.spans.map(span => [span.stage, span.outcome])).toEqual(expect.arrayContaining([["bootstrap_probe", "passed"], ["admission", "passed"]]));
+  });
+  it("does not mint setup authority when the pre-admission wait fails or is cancelled", async () => {
+    const failing = v4();
+    failing.runner.awaitReadiness = vi.fn(async () => { throw new CloudProviderError("provider_request_failed", "closed", true, { httpStatus: 409 }); });
+    await expect(failing.executor.execute(failing.input, new AbortController().signal))
+      .rejects.toMatchObject({ code: "setup_provider_request_failed", retryable: true });
+    const cancelled = v4(), controller = new AbortController();
+    cancelled.runner.awaitReadiness = vi.fn(async (_input: unknown, signal: AbortSignal) => { controller.abort(); signal.throwIfAborted(); });
+    await expect(cancelled.executor.execute(cancelled.input, controller.signal))
+      .rejects.toMatchObject({ code: "setup_execution_aborted", retryable: true });
+    for (const f of [failing, cancelled]) {
+      expect(f.broker.issue).not.toHaveBeenCalled();
+      expect(f.runtimeArtifacts.presignGet).not.toHaveBeenCalled();
+      expect(f.runner.execute).not.toHaveBeenCalled();
+    }
+  });
+  it("does not wait for a v4 base on legacy setup", async () => {
+    const f = harness(execution());
+    f.runner.awaitReadiness = vi.fn(async () => {});
+    vi.mocked(f.runner.execute).mockResolvedValue({ exitCode: 0, output: JSON.stringify({ version: 1, audience: "zeros-cloud-workspace-setup-result-v1",
+      outcome: "ready", readiness: readiness(execution()) }), outputTruncated: false });
+    await f.executor.execute(f.input, new AbortController().signal).catch(() => undefined);
+    expect(f.runner.awaitReadiness).not.toHaveBeenCalled();
+  });
   it("wraps the unchanged setup payload in the fixed v4 installer input with a 15-minute artifact capability", async () => {
     const f = v4();
     await expect(f.executor.execute(f.input, new AbortController().signal)).resolves.toMatchObject({ readiness: readiness(f.input) });
