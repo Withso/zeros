@@ -1462,5 +1462,27 @@ else:
         self.assertEqual(error, b"")
 
 
+class VerifyPrivateStateTests(unittest.TestCase):
+    def test_cold_boot_accepts_only_the_provider_root_key(self):
+        verifier = template("verify.py")
+        self.assertFalse(verifier.COLD_BOOT)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertTrue(verifier.private_state_clean(root, cold_boot=False))
+            key = root / "root/.ssh/authorized_keys"
+            key.parent.mkdir(parents=True)
+            key.write_text("ssh-ed25519 AAAA provider\n")
+            self.assertFalse(verifier.private_state_clean(root, cold_boot=False))
+            self.assertTrue(verifier.private_state_clean(root, cold_boot=True))
+            empty = root / "home/user/.codex/auth.json"
+            empty.parent.mkdir(parents=True)
+            empty.write_text("")
+            self.assertTrue(verifier.private_state_clean(root, cold_boot=True))
+            user = root / "home/user/.ssh/authorized_keys"
+            user.parent.mkdir(parents=True)
+            user.write_text("ssh-ed25519 AAAA user\n")
+            self.assertFalse(verifier.private_state_clean(root, cold_boot=True))
+
+
 if __name__ == "__main__":
     unittest.main()

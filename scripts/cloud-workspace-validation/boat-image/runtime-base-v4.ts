@@ -305,8 +305,26 @@ export async function waitSandbox(deps: KitDeps, id: string, desired: "ready" | 
   throw new BaseFailure("create", "timeout", 124);
 }
 
-export async function verifyBase(deps: KitDeps, id: string) {
-  const result = parseProbe(await remote(deps, id, pythonProbe(fillTemplate("v4/verify.py", {}), "verify"), 600), "verify");
+// The same credential paths verify.py checks in /root and /home/user.
+const PRIVATE_FILES = [".ssh/authorized_keys", ".git-credentials", ".netrc", ".npmrc", ".pypirc", ".bash_history", ".zsh_history",
+  ".claude/.credentials.json", ".codex/auth.json", ".cursor/auth.json", ".config/cursor/auth.json"];
+
+// Boat installs its own root key on every machine during boot, so a cold boot
+// cannot show that the captured disk is clean. Check the saved tree instead.
+async function requireCleanCapture(deps: KitDeps, snapshotId: string) {
+  const reply = await deps.boat("GET", `/snapshots/${encodeURIComponent(snapshotId)}/tree`, { timeoutMs: 60_000 });
+  const tree = reply.body;
+  requireBase(reply.status === 200 && tree?.treeAvailable === true && tree.truncated === false && Array.isArray(tree.entries),
+    "snapshot", "private_state");
+  const entries = new Map<string, any>(tree.entries.map((entry: any) => [entry?.path, entry]));
+  for (const home of ["", "__system__/root/"]) for (const name of PRIVATE_FILES) {
+    const entry = entries.get(home + name);
+    requireBase(entry === undefined || (entry.kind === "file" && entry.size === 0), "snapshot", "private_state");
+  }
+}
+
+export async function verifyBase(deps: KitDeps, id: string, boot: "builder" | "cold" = "builder") {
+  const result = parseProbe(await remote(deps, id, pythonProbe(fillTemplate("v4/verify.py", { BOOT: boot }), "verify"), 600), "verify");
   requireBase(result?.schema === "zeros.base-verification/v1" && /^bc1-[a-f0-9]{64}$/.test(result.baseCompatibilityId) &&
     HEX.test(result.baseBuildSha256) && /^[a-f0-9]{40}$/.test(result.sourceCommit) && result.hostState === "waiting_for_runtime" &&
     /^[a-f0-9-]{36}$/.test(result.bootId), "verify", "base_compatibility");
@@ -583,12 +601,13 @@ export async function buildBase(options: Map<string, string>, deps: KitDeps, liv
         "snapshot", "snapshot_identity");
     }
     const snapshot = await waitSnapshot(deps, id, state);
+    await requireCleanCapture(deps, snapshot.id);
     state = updateState(deps, { phase: "saved", snapshot });
     checkpoint();
     stage = "cold_boot";
     const clone = await createOwned(deps, cloneDeps(deps), name);
     await waitSandbox(deps, clone);
-    const coldProof = await verifyBase(deps, clone);
+    const coldProof = await verifyBase(deps, clone, "cold");
     requireBase(coldProof.baseCompatibilityId === state.proof?.baseCompatibilityId && coldProof.baseBuildSha256 === state.proof?.baseBuildSha256 &&
       coldProof.bootId !== state.proof?.bootId, "cold_boot", "base_compatibility");
     state = updateState(deps, { phase: "verified", coldProof });

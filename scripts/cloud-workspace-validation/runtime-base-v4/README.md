@@ -258,19 +258,23 @@ and verification VMs are named `<base>-build` and `<base>-verify`. Registration
 and kit state still accept `zeros-v2-test-` names, which remain valid for
 existing registered bases and disposable test bases.
 
-Rebuild the base when VMs deployed from it start capturing the whole system.
-A Boat change between 2026-10-07 and 2026-10-09 caused this for VMs deployed
-from named snapshots saved before it (an October 5 base and a September 23
-image). On 2026-10-11 they captured the whole system on stop after writing
-about 250 MB or more, in `/opt` or `/home/user`. Computer templates derived
-from the October 5 base grew from about 45,000 entries and 2.5 GB to about
-350,000 entries and 11.9 GB, and each restore spent minutes in Boat's
-`sysdelta` phase. Deploying that base took about 53 seconds to hydration,
-compared with 17.5 seconds from a snapshot saved after the change. The same
-base with no writes, and a snapshot saved from a current stock VM before the
-same 2.1 GB was written, still captured only their own changes. Compare a
-recent template's snapshot tree (`GET /snapshots/<id>/tree`) with its base and
-runtime contents to detect the condition.
+Since a Boat change between 2026-10-07 and 2026-10-09, a VM deployed from a
+named snapshot with a large system delta re-captures every system directory
+that delta touched once it writes and stops. On 2026-10-11, a stock snapshot
+with 537 MB added under `/usr/lib` led to a capture of all of `/usr/lib` (about
+51,000 files) after 480 MB was written to `/opt`; a 6-byte change did not. The
+v4 base installs about 359 MB of packages across `/usr/lib`, `/usr/share`,
+`/usr/bin`, `/usr/local` and `/var/lib`, so Computer templates and workspaces
+derived from it grew from about 45,000 entries and 2.5 GB to about 350,000
+entries and 11.9 GB, and each restore spent minutes in Boat's `sysdelta` phase.
+A base rebuilt on 2026-10-11 behaves the same, so a rebuild alone does not
+restore the old snapshot size. To detect it, compare a recent template's
+snapshot tree (`GET /snapshots/<id>/tree`) with its base and runtime contents.
+
+Boat also installs its own root SSH key on every machine during boot. Builder
+sanitation removes it before capture, the kit checks the saved snapshot tree
+for credential files, and a cold boot from the snapshot accepts only the
+provider's reinstalled root key.
 
 An unchanged `compatibility.json` gives a rebuilt base the same `bc1-` ID, so
 existing runtime qualifications apply to it. New Computer builds and runtime

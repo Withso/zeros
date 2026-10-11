@@ -52,6 +52,8 @@ function fullKit(failColdBoot = false) {
   d.repoRoot = root;
   const machines = new Set<string>();
   let sequence = 0, snapshot: any;
+  let tree: any = { ok: true, type: "snapshot.tree", treeAvailable: true, truncated: false,
+    entries: [{ path: "__system__/root", kind: "dir" }, { path: "__system__/opt/zeros-bootstrap/bootstrap.py", kind: "file", size: 1 }] };
   const requests: { method: string; route: string; body: any }[] = [];
   d.boat = async (method, route, options = {}) => {
     const body: any = options.body;
@@ -81,6 +83,7 @@ function fullKit(failColdBoot = false) {
       if (method === "DELETE") snapshot = undefined;
       return { status: snapshot ? 200 : 404, body: { snapshot } };
     }
+    if (method === "GET" && route === "/snapshots/snapshot_fixture/tree") return { status: 200, body: tree };
     if (route.endsWith("/commands")) {
       const command: string = body.command;
       if (command.includes("zeros.base-private-evidence/v1")) {
@@ -101,7 +104,7 @@ function fullKit(failColdBoot = false) {
     }
     throw new Error("unexpected fixture operation");
   };
-  return { d, requests, machines, getSnapshot: () => snapshot };
+  return { d, requests, machines, getSnapshot: () => snapshot, setTree: (value: any) => { tree = value; } };
 }
 
 function seedState(d: KitDeps, overrides = {}) {
@@ -453,6 +456,8 @@ class Bootstrap:
     const verification = f.requests.filter(request => request.route.endsWith("/commands") && request.body.command.includes("def verify()"));
     expect(verification).toHaveLength(3);
     expect(verification.every(request => request.body.timeoutSeconds === 600)).toBe(true);
+    expect(verification.map(request => request.body.command.includes("COLD_BOOT = 'cold' == 'cold'"))).toEqual([false, false, true]);
+    expect(f.requests.some(request => request.method === "GET" && request.route === "/snapshots/snapshot_fixture/tree")).toBe(true);
     expect(result.cleanup.sandboxes).toEqual(["bx_v4test2", "bx_v4test1"]);
     expect(result.compatibilityRawB64).toBe(compatibilityRawB64);
     expect(result.baseCompatibilityId).toBe(baseCompatibilityId);
@@ -465,6 +470,34 @@ class Bootstrap:
     expect(f.requests.filter(request => request.method === "PATCH").map(request => request.body.name)).toEqual([
       "zeros-v2-test-builder-111111111111", "zeros-v2-test-verify-111111111111",
     ]);
+  }, 30_000);
+
+  it.each([
+    { path: "__system__/root/.ssh/authorized_keys", kind: "file", size: 90 },
+    { path: ".codex/auth.json", kind: "file", size: 12 },
+    { path: "__system__/root/.netrc", kind: "symlink" },
+  ])("refuses a saved base whose captured tree holds $path before any cold boot", async entry => {
+    const f = fullKit();
+    f.setTree({ ok: true, treeAvailable: true, truncated: false, entries: [{ path: "__system__/root", kind: "dir" }, entry] });
+    await expect(v4Command("build", new Map([["--name", "zeros-base-v1"], ["--max-used-hours", "2"]]), [], f.d))
+      .rejects.toMatchObject({ diagnostic: { stage: "snapshot", failedChecks: ["private_state"] } });
+    expect(f.requests.filter(request => request.route === "/sandboxes" && request.method === "POST")).toHaveLength(1);
+  }, 30_000);
+
+  it.each([{ treeAvailable: false }, { truncated: true }, { entries: undefined }])(
+    "refuses a saved base whose captured tree cannot be read completely (%j)", async change => {
+      const f = fullKit();
+      f.setTree({ ok: true, treeAvailable: true, truncated: false, entries: [], ...change });
+      await expect(v4Command("build", new Map([["--name", "zeros-base-v1"], ["--max-used-hours", "2"]]), [], f.d))
+        .rejects.toMatchObject({ diagnostic: { stage: "snapshot", failedChecks: ["private_state"] } });
+      expect(f.requests.filter(request => request.route === "/sandboxes" && request.method === "POST")).toHaveLength(1);
+    }, 30_000);
+
+  it("accepts an empty private placeholder in the captured tree", async () => {
+    const f = fullKit();
+    f.setTree({ ok: true, treeAvailable: true, truncated: false, entries: [{ path: ".bash_history", kind: "file", size: 0 }] });
+    await expect(v4Command("build", new Map([["--name", "zeros-base-v1"], ["--max-used-hours", "2"]]), [], f.d))
+      .resolves.toMatchObject({ snapshotName: "zeros-base-v1" });
   }, 30_000);
 
   it("names a released base's builder and verification VMs after the base", async () => {
