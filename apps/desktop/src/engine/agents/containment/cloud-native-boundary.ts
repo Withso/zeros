@@ -63,7 +63,13 @@ export function cloudNativeProviderEnvironment(material: CloudAgentAccessMateria
     case "codex-chatgpt": break; // Native external login remains the sole account source.
     default: throw new Error("Invalid cloud provider credential");
   }
-  if (material.kind.startsWith("claude-")) { env.ANTHROPIC_MODEL = model; env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"; }
+  if (material.kind.startsWith("claude-")) {
+    for (const name of ["ZEROS_CLAUDE_AUTO_MEMORY", "ZEROS_CLAUDE_IDLE_COMPACTION"]) {
+      const value = settings?.[name];
+      if (value === "0" || value === "1") env[name] = value;
+    }
+    env.ANTHROPIC_MODEL = model; env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
+  }
   else if (material.kind.startsWith("cursor-")) { env.CURSOR_MODEL = model; env.ZEROS_CURSOR_STATE_ROOT = `${nativeHome.paths.cursorHome}/zeros-store`; }
   else env.OPENAI_MODEL = model;
   return cloudComputerProcessEnvironment(env, values, "agent");

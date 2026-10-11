@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { applyUpdate, type AgentMessage } from "@zeros/protocol/agent-messages";
 import { ClaudeStreamTranslator } from "../translator";
+import { normalizeProviderError, providerErrorFailure } from "../../shared/provider-error";
 
 const assistant = (id: string, text: string, error?: string) => ({
   type: "assistant", uuid: id, error,
@@ -9,6 +10,23 @@ const assistant = (id: string, text: string, error?: string) => ({
 const stream = (event: object, parent_tool_use_id?: string) => ({ type: "stream_event", event, parent_tool_use_id });
 
 describe("Claude user-action error identities", () => {
+  it.each([
+    ["org_config_required_unavailable", "protocol-error", "Claude couldn't load your organization's required settings. Check your connection, then retry."],
+    ["org_config_refused", "auth-required", "Your organization's Claude settings were refused for this sign-in. Sign in again or ask your administrator."],
+  ] as const)("uses the native %s reason before incidental sign-in prose", (code, category, advice) => {
+    const translator = new ClaudeStreamTranslator({ sessionId: "s", emit: () => {} });
+    translator.feed({ type: "result", subtype: "error_during_execution", startup_failure_reason: code, errors: ["Native settings failure: please sign in and retry."] });
+    const error = normalizeProviderError("claude", translator.terminalFailure);
+    expect(error).toMatchObject({ code, category, message: "Native settings failure: please sign in and retry." });
+    expect(providerErrorFailure("claude", error, "prompt").failure.advice).toBe(advice);
+  });
+
+  it.each([undefined, "future_startup_reason"])("keeps prose-based classification when no known reason is present (%s)", (code) => {
+    const translator = new ClaudeStreamTranslator({ sessionId: "s", emit: () => {} });
+    translator.feed({ type: "result", subtype: "error_during_execution", startup_failure_reason: code, errors: ["Please sign in and retry."] });
+    expect(normalizeProviderError("claude", translator.terminalFailure).category).toBe("auth-required");
+  });
+
   it.each(["verification_required", "cloud_credential_error"])("cannot restore a recovered %s by replaying its native frame", (code) => {
     let messages: AgentMessage[] = [];
     const translator = new ClaudeStreamTranslator({ sessionId: "s", streamPartials: true, emit: (n) => { messages = applyUpdate(messages, n); } });

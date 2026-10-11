@@ -213,6 +213,9 @@
         }
       ]
     },
+    "BedrockCheckGovCloudRequirementsParams": {
+      "type": "object"
+    },
     "BedrockDiscoverParams": {
       "type": "object"
     },
@@ -824,7 +827,7 @@
       "type": "string"
     },
     "CyberAccessProgram": {
-      "description": "Requested cyber treatment for a ChatGPT-authenticated Codex turn. Authorization and model-tier restrictions remain server-owned.",
+      "description": "Requested cyber treatment for an OpenAI model turn. Authorization and model-tier restrictions remain server-owned.",
       "enum": [
         "standard",
         "daybreakBlue",
@@ -5167,6 +5170,17 @@
     },
     "ThreadGoalClearParams": {
       "properties": {
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadGoalMutationOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Missing provenance does not supply user authorization."
+        },
         "threadId": {
           "type": "string"
         }
@@ -5187,6 +5201,14 @@
       ],
       "type": "object"
     },
+    "ThreadGoalMutationOrigin": {
+      "description": "Distinguishes explicit user actions from automatic goal lifecycle mutations.",
+      "enum": [
+        "user",
+        "automatic"
+      ],
+      "type": "string"
+    },
     "ThreadGoalSetParams": {
       "properties": {
         "objective": {
@@ -5194,6 +5216,17 @@
             "string",
             "null"
           ]
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadGoalMutationOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Missing provenance does not supply user authorization."
         },
         "status": {
           "anyOf": [
@@ -5598,6 +5631,21 @@
         }
       },
       "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadPredictionRequestParams": {
+      "properties": {
+        "sourceTurnId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sourceTurnId",
         "threadId"
       ],
       "type": "object"
@@ -7259,7 +7307,7 @@
               "type": "null"
             }
           ],
-          "description": "EXPERIMENTAL - Request a workspace-authorized cyber program for this turn. Omission preserves automatic behavior. This does not grant access."
+          "description": "EXPERIMENTAL - Request an authorized cyber program for this turn. Omission preserves automatic behavior. This does not grant access."
         },
         "disabledPluginIds": {
           "description": "Replace this thread's disabled plugin IDs. Omitted/null preserves the list; [] clears it.",
@@ -8160,6 +8208,30 @@
         "params"
       ],
       "title": "Thread/name/setRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/prediction/request"
+          ],
+          "title": "Thread/prediction/requestRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadPredictionRequestParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/prediction/requestRequest",
       "type": "object"
     },
     {
@@ -11051,6 +11123,30 @@
         "params"
       ],
       "title": "Account/bedrock/setupRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "account/bedrock/checkGovCloudRequirements"
+          ],
+          "title": "Account/bedrock/checkGovCloudRequirementsRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/BedrockCheckGovCloudRequirementsParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Account/bedrock/checkGovCloudRequirementsRequest",
       "type": "object"
     },
     {

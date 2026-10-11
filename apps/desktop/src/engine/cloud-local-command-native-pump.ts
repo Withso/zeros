@@ -8,6 +8,7 @@ import { legacyProviderBinding, type ProviderBinding } from "@zeros/protocol/ide
 import { createMessage, type EngineMessage } from "./types";
 import type { TransportClient } from "./transport/types";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
+import { cloudClaudePreferencesEnv } from "./cloud-claude-preferences";
 import { cloudBootNativeAuthority, isCloudBootAgentExecutionFactory, isCloudBootAgentSelection,
   type CloudBootAgentExecutionFactory, type CloudBootAgentSelection, type CloudBootSelectionInput,
   type CloudBootTurnReservation, type CloudAgentExecutionLifetime } from "./agents/cloud-provider-execution";
@@ -134,7 +135,8 @@ export class CloudLocalCommandNativePump {
           conversation.folder !== selected.cwd) throw new CloudCommandRuntimeError("command_context_changed");
       const previous = this.options.execution(claim.conversationId);
       if (previous && this.options.busy(previous)) throw new CloudCommandRuntimeError("command_conflict");
-      const env = { ...(parsed.data.payload.effort ? { ZEROS_THINKING_EFFORT: parsed.data.payload.effort } : {}),
+      const env = { ...cloudClaudePreferencesEnv(parsed.data.payload),
+        ...(parsed.data.payload.effort ? { ZEROS_THINKING_EFFORT: parsed.data.payload.effort } : {}),
         ZEROS_FAST_MODE: parsed.data.payload.fast ? "1" : "0", ZEROS_PERMISSION_MODE: cloudPermissionMode(parsed.data.payload.agentId,
           parsed.data.payload.permissionMode ?? conversation.lastModeId ?? conversation.permissionMode ?? "auto") };
       if (previous === claim.executionId && parsed.data.payload.operation?.kind !== "fork") {

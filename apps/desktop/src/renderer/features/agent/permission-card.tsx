@@ -78,6 +78,8 @@ interface Described {
   detail: string | null;
   /** The raw command, when present — used in the "don't ask again for: …" label. */
   command: string | null;
+  /** Adapter-selected, display-only scope for a Codex filesystem escalation. */
+  writeAccessPath?: string;
 }
 
 /** Show a tool's file path workspace-relative. Claude's read/edit tools pass
@@ -108,6 +110,17 @@ export function describePermission(
   const str = (v: unknown): string | null =>
     typeof v === "string" && v.trim().length > 0 ? v : null;
   const titleOverride = str(request.title);
+  const writeAccessPath = tc.kind === "execute" ? str(raw.codexWriteAccessPath) : null;
+  if (writeAccessPath) {
+    return {
+      title: titleOverride ?? "Do you want to allow write access outside the workspace?",
+      Icon: FilePen,
+      label: null,
+      detail: null,
+      command: null,
+      writeAccessPath: relativizePath(writeAccessPath, cwd),
+    };
+  }
 
   const command = str(raw.command);
   const label = str(raw.description) ?? str(raw.reason);
@@ -195,7 +208,7 @@ export const PermissionCard = memo(function PermissionCard({
   chatId,
   cwd,
 }: PermissionCardProps) {
-  const { title, Icon, label, detail, command } = describePermission(
+  const { title, Icon, label, detail, command, writeAccessPath } = describePermission(
     request,
     cwd,
   );
@@ -213,12 +226,12 @@ export const PermissionCard = memo(function PermissionCard({
   const allowProject = opts.find((o) => o.kind === "allow_always_project");
   const useOptionNames = !requiresExplicitApproval && request.useOptionNames === true;
   const reject = providerRejectOption(opts, useOptionNames);
-  const allowAlwaysLabel = allowProject
+  const allowAlwaysLabel = allowProject || writeAccessPath
     ? "Allow for this chat"
     : command
       ? `Yes, and don't ask again for: ${command}`
       : "Yes, and don't ask again";
-  const contextItems = (request.contextItems ?? []).filter(
+  const contextItems = writeAccessPath ? [`Write · ${writeAccessPath}`] : (request.contextItems ?? []).filter(
     (item) => typeof item === "string" && item.trim().length > 0,
   );
 
@@ -348,6 +361,7 @@ export const PermissionCard = memo(function PermissionCard({
   return (
     <div
       ref={rootRef}
+      data-permission-card=""
       className="border-border1 bg-bg2 flex w-full min-w-0 flex-col gap-3 rounded-lg border px-3.5 py-3"
     >
       <div className="text-fg1 text-sm font-medium">{title}</div>
@@ -357,6 +371,7 @@ export const PermissionCard = memo(function PermissionCard({
           {contextItems.map((item, index) => (
             <span
               key={`${index}:${item}`}
+              data-permission-context-item=""
               className="border-border3 bg-bg1 text-fg2 max-w-full truncate rounded-md border px-2 py-1 text-xs"
             >
               {item}

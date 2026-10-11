@@ -12,6 +12,8 @@ import {
 } from "../../shared/ui/primitives/select";
 import { toast } from "../../shared/ui/primitives/elements";
 import { shellOpenUrl } from "../../platform/app";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { SettingsGroup, SettingsRow } from "./settings-ui";
 import { useResolvedSettings, useSettingsLayer } from "./use-settings";
 import { getActiveOrganizationIdSnapshot, useActiveOrganization } from "../team/team-store";
@@ -57,13 +59,24 @@ export function BrowserUsePanel() {
   const organization = useActiveOrganization();
   if (!organization && getActiveOrganizationIdSnapshot())
     return <p className="text-fg2 text-xs">Loading organization browser settings…</p>;
-  if (organization && !organization.isPersonal) return (
+  if (organization && !organization.isPersonal)
+    return <OrganizationBrowserUsePanel organizationId={organization.id} />;
+  return <LocalBrowserUsePanel />;
+}
+
+function OrganizationBrowserUsePanel({ organizationId }: { organizationId: string }) {
+  const { workspace } = useActiveWorkspace();
+  // Ownership alone does not determine placement. Only the selected owner's
+  // confirmed local workspace may expose this device's browser controls.
+  if (workspace?.organizationId === organizationId &&
+      workspace.placement !== "cloud" && !isCloudWorkspace(workspace.path))
+    return <LocalBrowserUsePanel />;
+  return (
     <SettingsGroup title="Browser use">
       <SettingsRow label="Codex" hint={<NativeBrowserAvailability provider="codex" />} />
       <SettingsRow label="Claude" hint={<NativeBrowserAvailability provider="claude" />} />
     </SettingsGroup>
   );
-  return <LocalBrowserUsePanel />;
 }
 
 function LocalBrowserUsePanel() {

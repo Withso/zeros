@@ -18,6 +18,17 @@ describe("remote agent spawn env authority clamp", () => {
   const scrub = (ZerosEngine.prototype as unknown as RelayScrubber)
     .scrubRemoteAgentSpawnEnv;
 
+  it("carries validated Claude preferences through remote spawn and live config without widening authority", () => {
+    const receiver = { pty: { isWithinAllowed: () => false } };
+    const env = { ZEROS_CLAUDE_AUTO_MEMORY: "0", ZEROS_CLAUDE_IDLE_COMPACTION: "1", NODE_OPTIONS: "untrusted" };
+    const expected = { ZEROS_CLAUDE_AUTO_MEMORY: "0", ZEROS_CLAUDE_IDLE_COMPACTION: "1" };
+    expect(scrub.call(receiver, env)).toEqual(expected);
+    expect((ZerosEngine.prototype as unknown as RelayScrubber).scrubRelayUpdateConfigEnv.call(receiver, env)).toEqual(expected);
+    const invalid = { ZEROS_CLAUDE_AUTO_MEMORY: "yes", ZEROS_CLAUDE_IDLE_COMPACTION: "true" };
+    expect(scrub.call(receiver, invalid)).toBeUndefined();
+    expect((ZerosEngine.prototype as unknown as RelayScrubber).scrubRelayUpdateConfigEnv.call(receiver, invalid)).toEqual({});
+  });
+
   it("preserves exact-model qualification through the remote spawn boundary", () => {
     expect(scrub.call({ pty: { isWithinAllowed: () => false } }, {
       CURSOR_MODEL: "grok-4.6",

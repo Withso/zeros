@@ -9,7 +9,7 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 
-import { CodexAppServerTranslator } from "../app-server-translator";
+import { classifyCodexErrorInfo, CodexAppServerTranslator } from "../app-server-translator";
 import type { SessionNotification } from "../../../types";
 
 function collect(): {
@@ -1359,6 +1359,15 @@ describe("CodexAppServerTranslator", () => {
   });
 
   describe("error + advisory notices", () => {
+    it.each([
+      ["futureProviderError", "futureProviderError"],
+      [{ futureTransportError: { httpStatusCode: 529 } }, "futureTransportError (HTTP 529)"],
+    ])("retains an unknown CodexErrorInfo variant without changing the stop reason (%j)", (codexErrorInfo, label) => {
+      env.t.handle("turn/completed", { threadId: "t1", turn: { status: "failed", error: { codexErrorInfo } } });
+      expect(env.t.stopReason).toBe("end_turn");
+      expect(env.t.sawTurnTerminal).toBe(true);
+      expect(classifyCodexErrorInfo(codexErrorInfo)).toEqual({ stopReason: "end_turn", label });
+    });
     // 2026-07-04: errors/advisories emit `error_notice` rows (one compact
     // timeline row per event), NOT agent_message_chunk prose — a retry burst
     // used to render as one run-on "⚠ Codex error: …⚠ Codex error: …" blob.

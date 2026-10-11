@@ -68,9 +68,10 @@ import {
   resolveModelOption,
   type ModelOption,
 } from "./model-catalog";
-import { effectiveFavoriteModel, useFavoritesVersion } from "./model-favorites";
+import { effectiveFavoriteModel, getFavoriteModel, useFavoritesVersion } from "./model-favorites";
 import {
   rememberModelConfiguration,
+  modelForNewChat,
   starFavoriteModel,
 } from "./new-chat-defaults";
 import {
@@ -125,6 +126,7 @@ interface Row {
   agent: BridgeRegistryAgent;
   family: string;
   model: ModelOption;
+  unavailable?: boolean;
 }
 
 function effortLevelsForRow(row: Row) {
@@ -208,6 +210,24 @@ export function AgentModelMenu({
 
   const registry: WorkspaceRegistryAgent[] | null = agentsProp !== undefined ? agentsProp : snapshot;
 
+  // Resolve the star from the complete workspace registry, just like New Chat.
+  // A saved default retains its identity even while its provider needs sign-in.
+  const defaultAgent = pickDefaultAgent(registry ?? []);
+  const defaultFamily = agentFamily(defaultAgent?.id ?? null);
+  const hasSavedDefault = !!getFavoriteModel(defaultAgent?.id);
+  const defaultValue = defaultAgent
+    ? hasSavedDefault ? effectiveFavoriteModel(defaultAgent.id)
+      : modelForNewChat(defaultAgent.id, defaultAgent.cloudModels) ?? effectiveFavoriteModel(defaultAgent.id)
+    : null;
+  const defaultOption = useMemo(() => defaultAgent && defaultValue
+    ? resolveModelOption(defaultAgent.id, defaultValue, defaultAgent.id === value?.agentId ? initialize : null)
+    : null, [defaultAgent, defaultValue, value?.agentId, initialize]);
+  const defaultModel = defaultOption?.value ?? defaultValue;
+
+  const rowUnavailable = useCallback((agent: WorkspaceRegistryAgent, model: ModelOption) =>
+    !isEnabled(agent.id, agent.beta) || !isSelectableAgent(agent) || model.selectable === false ||
+    (agent.cloudModels !== undefined && !agent.cloudModels.includes(model.value)), [isEnabled]);
+
   // Only confirmed connections supply selectable models. The chat's persisted
   // identity stays on the trigger while its provider needs configuration.
   const groups = useMemo<AgentGroup[]>(() => {
@@ -221,12 +241,22 @@ export function AgentModelMenu({
           agent.id === value?.agentId ? initialize : null,
         ),
       }))
-      .filter((g) => g.family !== "" && g.models.length > 0)
-      .sort(
+      .filter((g) => g.family !== "" && g.models.length > 0);
+    // Retain only the effective default when it cannot currently be selected.
+    // Its disabled row explains the star without expanding cloud consent or
+    // turning a disconnected provider's catalog into selectable choices.
+    if (hasSavedDefault && defaultAgent && defaultOption) {
+      const group = fromRegistry.find(group => group.agent.id === defaultAgent.id);
+      if (group && !group.models.some(model => model.value === defaultOption.value)) {
+        group.models = [...group.models, { ...defaultOption, selectable: false }];
+      } else if (!group) {
+        fromRegistry.push({ agent: defaultAgent, family: defaultFamily, models: [{ ...defaultOption, selectable: false }] });
+      }
+    }
+    return fromRegistry.sort(
         (a, b) => (FAMILY_ORDER[a.family] ?? 9) - (FAMILY_ORDER[b.family] ?? 9),
       );
-    return fromRegistry;
-  }, [registry, isEnabled, value?.agentId, initialize]);
+  }, [registry, isEnabled, value?.agentId, initialize, hasSavedDefault, defaultAgent, defaultFamily, defaultOption]);
 
   const currentFamily = agentFamily(value?.agentId ?? null);
 
@@ -297,6 +327,7 @@ export function AgentModelMenu({
           agent: g.agent,
           family: g.family,
           model,
+          unavailable: rowUnavailable(g.agent, model),
         })),
       )
       .filter(
@@ -305,7 +336,7 @@ export function AgentModelMenu({
           r.model.value.toLowerCase().includes(q) ||
           agentTitle(r.agent, r.family).toLowerCase().includes(q),
       );
-  }, [groups, search, searching]);
+  }, [groups, search, searching, rowUnavailable]);
 
   // The row carrying the ✓: the current agent's current model (null model ⇒
   // its effective favorite, matching what the trigger pill displays).
@@ -322,7 +353,8 @@ export function AgentModelMenu({
       groups.find((candidate) => candidate.agent.id === value.agentId) ??
       groups.find((candidate) => candidate.family === currentFamily);
     if (!group) return null;
-    if (group.agent.cloudModels && !group.agent.cloudModels.includes(activeModel)) return null;
+    if (group.agent.cloudModels && !group.agent.cloudModels.includes(activeModel) &&
+      !(hasSavedDefault && activeModel === defaultValue)) return null;
     const model = group.models.find((option) => option.value === activeModel) ??
       resolveModelOption(value.agentId, activeModel, initialize) ?? {
         value: activeModel,
@@ -334,18 +366,6 @@ export function AgentModelMenu({
       model,
     };
   })();
-
-  // Exactly one filled star across the catalog. A valid explicit user default
-  // wins; otherwise the same connected-provider preference as New Chat picks
-  // Codex → Claude → Cursor and that family's catalog fallback.
-  const defaultAgent =
-    pickDefaultAgent(groups.map((group) => group.agent)) ??
-    groups[0]?.agent ??
-    null;
-  const defaultFamily = agentFamily(defaultAgent?.id ?? null);
-  const defaultModel = defaultAgent
-    ? effectiveFavoriteModel(defaultAgent.id)
-    : null;
 
   // The editor shows what this exact model will actually run: `effectiveEffort`
   // is the same clamp the composer pill's label and the spawn env apply, so a
@@ -379,6 +399,7 @@ export function AgentModelMenu({
   };
 
   const pick = (row: Row) => {
+    if (row.unavailable) return;
     setEditingModelKey(null);
     setCatalogOpen(false);
     onSelect({
@@ -686,6 +707,7 @@ export function AgentModelMenu({
                             agent: group.agent,
                             family: group.family,
                             model,
+                            unavailable: rowUnavailable(group.agent, model),
                           };
                           const isActive =
                             currentFamily === row.family &&
@@ -1109,6 +1131,9 @@ function SearchModelRow({
       ref={rowRef}
       value={`${row.agent.id}:${row.model.value}`}
       data-favorite-placement={placement}
+      data-model-value={row.model.value}
+      data-model-unavailable={row.unavailable ? "" : undefined}
+      disabled={row.unavailable}
       aria-label={
         redirects
           ? `Open ${displayModelLabel(row.agent.id, row.model.label)} in a new chat with ${groupTitle(row.agent, row.family)}`
@@ -1127,12 +1152,13 @@ function SearchModelRow({
       <ModelRowDetails
         row={row}
         configuration={configuration}
+        isFavorite={row.unavailable && isFavorite}
         className={cn(
           placement === "inline" ? "flex-initial" : "flex-1",
           isActive && placement === "overlay" && "pr-7",
         )}
       />
-      {placement === "inline" && (
+      {!row.unavailable && placement === "inline" && (
         <FavoriteModelButton
           row={row}
           isFavorite={isFavorite}
@@ -1142,7 +1168,7 @@ function SearchModelRow({
       {placement === "inline" && (
         <span className="min-w-0 flex-1" aria-hidden="true" />
       )}
-      <ModelRowActions
+      {!row.unavailable && <ModelRowActions
         row={row}
         configuration={configuration}
         isActive={isActive}
@@ -1153,7 +1179,7 @@ function SearchModelRow({
         onEditorPointerEnter={onEditorPointerEnter}
         onEditorPointerLeave={onEditorPointerLeave}
         onFavorite={onFavorite}
-      />
+      />}
       {isActive && <SelectedModelTick />}
     </CommandItem>
   );
@@ -1191,6 +1217,9 @@ function CatalogModelRow({
     <div
       ref={rowRef}
       data-model-catalog-item
+      data-model-value={row.model.value}
+      data-model-unavailable={row.unavailable ? "" : undefined}
+      aria-disabled={row.unavailable || undefined}
       data-favorite-placement={placement}
       className={cn(
         "group/mi bg-bg3 hover:bg-bg3-hover focus-within:bg-bg3-hover relative flex items-center",
@@ -1200,6 +1229,7 @@ function CatalogModelRow({
     >
       <button
         type="button"
+        disabled={row.unavailable}
         aria-label={
           redirects
             ? `Open ${displayModelLabel(row.agent.id, row.model.label)} in a new chat with ${groupTitle(row.agent, row.family)}`
@@ -1211,13 +1241,14 @@ function CatalogModelRow({
       <ModelRowDetails
         row={row}
         configuration={configuration}
+        isFavorite={row.unavailable && isFavorite}
         className={cn(
           "pointer-events-none relative z-10 pl-2",
           placement === "inline" ? "flex-initial" : "flex-1",
           isActive && placement === "overlay" && "pr-7",
         )}
       />
-      {placement === "inline" && (
+      {!row.unavailable && placement === "inline" && (
         <FavoriteModelButton
           row={row}
           isFavorite={isFavorite}
@@ -1230,7 +1261,7 @@ function CatalogModelRow({
           aria-hidden="true"
         />
       )}
-      <ModelRowActions
+      {!row.unavailable && <ModelRowActions
         row={row}
         configuration={configuration}
         isActive={isActive}
@@ -1241,7 +1272,7 @@ function CatalogModelRow({
         onEditorPointerEnter={onEditorPointerEnter}
         onEditorPointerLeave={onEditorPointerLeave}
         onFavorite={onFavorite}
-      />
+      />}
       {isActive && <SelectedModelTick />}
     </div>
   );

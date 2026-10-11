@@ -54,6 +54,24 @@ describe("per-model effort and fast preferences", () => {
     });
   });
 
+  it("uses Haiku 5.5's native Medium default only when no effort is remembered", () => {
+    expect(resolveModelConfiguration("claude", "claude-haiku-5-5")).toEqual({ effort: "medium", fast: false });
+    expect(resolveModelConfiguration("claude", "haiku-5.5")).toEqual({ effort: "medium", fast: false });
+    setModelPreference("claude", "claude-haiku-5-5", { effort: "high", fast: true });
+    expect(resolveModelConfiguration("claude", "claude-haiku-5-5")).toEqual({ effort: "high", fast: false });
+    // Persisted preference keys deliberately distinguish aliases from IDs.
+    expect(resolveModelConfiguration("claude", "haiku-5.5")).toEqual({ effort: "medium", fast: false });
+    setModelPreference("claude", "haiku-5.5", { effort: "low" });
+    expect(resolveModelConfiguration("claude", "haiku-5.5")).toEqual({ effort: "low", fast: false });
+    expect(resolveModelConfiguration("claude", "claude-haiku-5-5")).toEqual({ effort: "high", fast: false });
+    expect(resolveModelConfiguration("claude", "haiku")).toEqual({ effort: "high", fast: false });
+  });
+
+  it("does not invent a Haiku effort control when the exact live runtime says none", () => {
+    const initialize = { _meta: { models: [{ value: "claude-haiku-5-5", label: "Haiku", effortLevels: [], supportsFast: false }] } } as never;
+    expect(resolveModelConfiguration("claude", "claude-haiku-5-5", initialize)).toEqual({ effort: "high", fast: false });
+  });
+
   it("isolates settings by exact agent family and model across A -> B -> A", () => {
     setModelPreference("codex", "gpt-5.6-sol", {
       effort: "max",

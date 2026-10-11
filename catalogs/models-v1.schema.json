@@ -61,6 +61,10 @@
           }
         },
         "supportsFast": { "type": "boolean" },
+        "defaultEffort": {
+          "enum": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+          "description": "Initial effort when no per-model effort is remembered. Must be in this model's effortLevels; exact live capabilities still gate it."
+        },
         "minCliVersion": {
           "type": "string",
           "description": "Minimum agent CLI version this model needs (e.g. Fable 5 → 2.1.170). Gated so it never silently downgrades on an older CLI."

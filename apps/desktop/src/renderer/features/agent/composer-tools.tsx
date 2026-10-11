@@ -110,7 +110,7 @@ function ToolsPopover({
     toolId?: string;
     error?: string;
   } | null>(null);
-  const authBusy = authState?.key === key ? (authState.toolId ?? null) : null;
+  const authBusy = authState?.key === key && !authState.error ? (authState.toolId ?? null) : null;
   const authError = authState?.key === key ? (authState.error ?? null) : null;
   const authFlight = useRef<string | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -183,6 +183,7 @@ function ToolsPopover({
         if (current.current === key)
           setAuthState({
             key,
+            toolId,
             error: "Could not open authentication. Refresh and try again.",
           });
       } finally {
@@ -302,6 +303,7 @@ function ToolsPopover({
           <ComposerToolGroups
             snapshot={read.data}
             authBusy={authBusy}
+            authFailed={authState?.key === key && authState.error ? (authState.toolId ?? null) : null}
             onAuthenticate={authenticate}
           />
         )}

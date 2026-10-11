@@ -213,8 +213,12 @@ describe("VM-local native command pump", () => {
   it.each([["claude", "plan"], ["codex", "read-only"], ["cursor", "plan"]] as const)(
     "keeps %s warm reuse on separate permission and configuration ports", async (provider, mode) => {
       const f = await fixture(provider), first = f.claim(); await f.pump.prepare(first); await f.finish(first);
+      const config = {
+        ZEROS_FAST_MODE: "1", ZEROS_THINKING_EFFORT: "high",
+        ...(provider === "claude" ? { ZEROS_CLAUDE_AUTO_MEMORY: "1", ZEROS_CLAUDE_IDLE_COMPACTION: "0" } : {}),
+      };
       expect(f.handleAgentMessage.mock.calls[0]![0]).toMatchObject({
-        env: { ZEROS_PERMISSION_MODE: mode, ZEROS_FAST_MODE: "1", ZEROS_THINKING_EFFORT: "high" },
+        env: { ZEROS_PERMISSION_MODE: mode, ...config },
       });
       if (provider === "claude") f.gateway.updateConfig.mockImplementation(async (_agent, _id, env) => {
         if ("ZEROS_PERMISSION_MODE" in env) throw new Error("Cloud provider configuration requires a new credential admission");
@@ -222,8 +226,7 @@ describe("VM-local native command pump", () => {
       const second = f.claim(first.executionId);
       await expect(f.pump.prepare(second)).resolves.toBeUndefined();
       expect(f.gateway.setMode).toHaveBeenCalledWith(provider, second.executionId, mode);
-      expect(f.gateway.updateConfig).toHaveBeenCalledWith(provider, second.executionId,
-        { ZEROS_FAST_MODE: "1", ZEROS_THINKING_EFFORT: "high" });
+      expect(f.gateway.updateConfig).toHaveBeenCalledWith(provider, second.executionId, config);
       expect(f.gateway.setMode.mock.invocationCallOrder[0]).toBeLessThan(f.gateway.updateConfig.mock.invocationCallOrder[0]!);
       await f.finish(second);
       expect(f.gateway.completeCloudForeground).toHaveBeenCalledTimes(2);

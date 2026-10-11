@@ -10,9 +10,11 @@ import {
 } from "../renderers/event-row-renderer";
 import { metaForEvent } from "../renderers/event-meta";
 import { PenTool } from "lucide-react";
+import { ChromeIcon } from "../../../shared/ui/chrome-icon";
 import { commandReadActions, displayCommand } from "../renderers/tool-command";
 import { isVisibleTranscriptEvent } from "../turn-partition";
 import { EventStripe } from "../renderers/event-stripe";
+import { SubagentCard } from "../renderers/tool-subagent";
 import type { RendererContext } from "../renderers/types";
 
 vi.mock("../renderers/highlighted-code", () => ({
@@ -54,6 +56,40 @@ const row = (value: AgentToolMessage, open = true) =>
   );
 
 describe("tool presentation contract", () => {
+  it("shows resolved Agent type, model and effort in the shared metadata style", () => {
+    const html = renderToStaticMarkup(createElement(SubagentCard, { ctx, message: tool({
+      title: "Agent", toolKind: "subagent", rawInput: { description: "Review the diff", model: "inherit", effort: "low" },
+      rawOutput: { subagentType: "Explore", resolvedModel: "claude-sonnet-5-5[1m]", effort: "high" },
+    }) }));
+    expect(html).toContain("Agent · Explore · Sonnet 5.5");
+    expect(html.replace(/<[^>]*>/g, "")).toContain("Agent · Explore · Sonnet 5.5 High");
+    expect(html).toMatch(/data-agent-effort[^>]*class="[^"]*text-fg2[^"]*opacity-80[^>]*> High</);
+    expect(html).not.toContain("inherit");
+    expect(html).not.toContain(">Low<");
+  });
+
+  it("omits missing Agent metadata without inventing separators or effort", () => {
+    const html = renderToStaticMarkup(createElement(SubagentCard, { ctx, message: tool({ title: "Agent", toolKind: "subagent", rawInput: { description: "Review the diff" } }) }));
+    expect(html).not.toContain("Agent ·");
+    expect(html).not.toContain("data-agent-effort");
+  });
+
+  it("presents Chrome setup with its reason and no result bookkeeping", () => {
+    const value = tool({ title: "Chrome setup", toolKind: "other", rawInput: { reason: "Test checkout in your browser" }, rawOutput: {} });
+    expect(metaForEvent(value)).toMatchObject({ Icon: ChromeIcon, label: "Chrome setup", target: "Test checkout in your browser", expandable: false });
+    const html = renderToStaticMarkup(createElement(EventRowRenderer, { message: value, ctx }));
+    expect(html).toContain("lucide-chrome");
+    expect(html).toContain("Test checkout in your browser");
+    expect(html).not.toContain("aria-expanded");
+  });
+  it("shows no reason pill when Chrome setup omits its reason", () => {
+    const value = tool({ title: "Chrome setup", toolKind: "other", rawInput: {}, rawOutput: { outcome: "no_attempt_yet" } });
+    expect(metaForEvent(value).target).toBeUndefined();
+    const html = renderToStaticMarkup(createElement(EventRowRenderer, { message: value, ctx }));
+    expect(html).toContain("Chrome setup");
+    expect(html).not.toContain("data-tool-preview");
+    expect(html).not.toContain("no_attempt_yet");
+  });
   it.each([
     ["design_document_list", "List"], ["design_document_open", "Inspect"],
     ["design_provenance_read", "Inspect Styles"], ["design_transaction_apply", "Edit"],

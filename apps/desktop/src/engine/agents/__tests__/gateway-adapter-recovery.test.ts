@@ -12,6 +12,7 @@ import { AgentGateway } from "../gateway";
 import { AgentFailureError, type AgentAdapter } from "../types";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 import { normalizeProviderError, providerErrorFailure } from "../adapters/shared/provider-error";
+import { ClaudeStreamTranslator } from "../adapters/claude/translator";
 
 function makeGateway() {
   return new AgentGateway({
@@ -28,6 +29,30 @@ function makeGateway() {
 }
 
 describe("AgentGateway session/adapter recovery classification", () => {
+  it.each([
+    ["org_config_required_unavailable", false],
+    ["org_config_refused", true],
+    [undefined, true],
+    ["future_startup_reason", true],
+  ] as const)("invalidates local sign-in only for an auth failure from the real translator (%s)", async (code, authFailed) => {
+    const translator = new ClaudeStreamTranslator({ sessionId: "s-error", emit: () => {} });
+    translator.feed({ type: "result", subtype: "error_during_execution", startup_failure_reason: code, errors: ["Native settings failure: please sign in and retry."] });
+    const error = providerErrorFailure("claude", normalizeProviderError("claude", translator.terminalFailure), "prompt");
+    const gw = makeGateway() as unknown as {
+      executionToAgent: Map<string, string>;
+      adapters: Map<string, AgentAdapter>;
+      markAuthFailed(agentId: string): void;
+      prompt(a: string, s: string, p: unknown[]): Promise<unknown>;
+    };
+    const failed = vi.spyOn(gw, "markAuthFailed").mockImplementation(() => {});
+    gw.adapters.set("claude", {
+      agentId: "claude", prompt: async () => { throw error; }, respondToPermission: () => {},
+    } as unknown as AgentAdapter);
+    gw.executionToAgent.set("s-error", "claude");
+    await expect(gw.prompt("claude", "s-error", [])).rejects.toBe(error);
+    expect(failed).toHaveBeenCalledTimes(authFailed ? 1 : 0);
+  });
+
   it.each([
     ["verification_required", false],
     ["cloud_credential_error", false],

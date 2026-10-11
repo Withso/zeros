@@ -188,9 +188,15 @@ export async function loadContractSource(pin = null) {
               };
               ts.forEachChild(source, visit);
             }
+            // Negotiated response projections are portable protocol helpers.
+            // Import one only when this cohort's handlers use it: a frozen
+            // cohort never needs a newer export, and a missing export still
+            // fails the build closed.
+            const projections = engine ? ["withoutCloudClaudePreferences"].filter(name =>
+              bodies.some(body => new RegExp(`\\b${name}\\b`).test(body))) : [];
             return { loader: "ts", resolveDir: root, contents: engine ? `
               import { CloudCommandRuntimeError } from "./apps/desktop/src/engine/cloud-command-client";
-              import { legacyCloudCommandResponse } from "@zeros/protocol/cloud-commands";
+              import { ${["legacyCloudCommandResponse", ...projections].join(", ")} } from "@zeros/protocol/cloud-commands";
               import { createMessage } from "@zeros/protocol/messages";
               export const cloudTurnProtocolVersion = ${advertised};
               export class EngineReplyContract { ${bodies.join("\n")} }

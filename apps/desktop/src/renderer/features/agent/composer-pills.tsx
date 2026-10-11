@@ -49,6 +49,7 @@ import {
 } from "./permission-feedback-placement";
 import "./composer-pills.css";
 import { useCloudRuntimeUpgradeLink } from "./cloud-runtime-upgrade-link";
+import { cloudModelRuntimeUpgradeRequired, type WorkspaceRegistryAgent } from "./workspace-agent-registry";
 
 // Wave 3 close-out (2026-05-16): the in-file useClickAway helper that
 // every pill once shared was deleted. All pills now use shadcn Popover,
@@ -125,7 +126,7 @@ export function ModelPill({
   active = true,
   runtimeUpgradeRequiredForAgents = false,
 }: {
-  agents?: import("../../platform/bridge/messages").BridgeRegistryAgent[] | null;
+  agents?: WorkspaceRegistryAgent[] | null;
   agentId: string | null;
   /** Optional brand-logo URL fallback. Usually unset — AgentIcon prefers
    *  the bundled SVG keyed by agentId (claude/codex/cursor/…). */
@@ -157,7 +158,6 @@ export function ModelPill({
   // one-frame strand at the viewport origin); the effect syncs local state so
   // the popover doesn't spring back open when the composer returns.
   const concealed = useContext(ComposerConcealedContext);
-  const runtimeUpgradeLink = useCloudRuntimeUpgradeLink(workspaceFolder, active && !concealed, runtimeUpgradeRequiredForAgents);
   useEffect(() => {
     if ((concealed || !active) && open) setOpen(false);
   }, [concealed, active, open]);
@@ -175,6 +175,8 @@ export function ModelPill({
   const current =
     models.find((m) => m.value === value) ??
     resolveModelOption(agentId, value ?? null, initialize);
+  const runtimeUpgradeLink = useCloudRuntimeUpgradeLink(workspaceFolder, active && !concealed,
+    runtimeUpgradeRequiredForAgents || cloudModelRuntimeUpgradeRequired(workspaceFolder, agents?.find(agent => agent.id === agentId), current));
   const activeValue = current?.value ?? value ?? null;
   const displayLabel = configuredModelLabelParts(
     agentId,

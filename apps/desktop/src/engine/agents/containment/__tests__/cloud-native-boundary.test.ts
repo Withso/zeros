@@ -75,6 +75,23 @@ describe("native provider process ownership", () => {
     expect({ APP_PATH: env.APP_PATH, ORG_SECRET: env.ORG_SECRET }).toEqual(values);
     await lease.close();
   });
+  it.each(["claude-api-key", "claude-setup-token"] as const)("carries only boolean Claude preferences into the %s provider environment", async kind => {
+    const { nativeHome, lease } = await fixture();
+    try {
+      const settings = { ZEROS_CLAUDE_AUTO_MEMORY: "0", ZEROS_CLAUDE_IDLE_COMPACTION: "1", NODE_OPTIONS: "untrusted" };
+      const material = kind === "claude-api-key" ? { kind, apiKey: "synthetic-key" } : { kind, accessToken: "synthetic-token" };
+      const env = cloudNativeProviderEnvironment(material, "claude-haiku-4-5", settings, undefined, nativeHome);
+      expect(env).toMatchObject({ ZEROS_CLAUDE_AUTO_MEMORY: "0", ZEROS_CLAUDE_IDLE_COMPACTION: "1" });
+      expect(env).not.toHaveProperty("NODE_OPTIONS");
+      const invalid = cloudNativeProviderEnvironment(material, "claude-haiku-4-5",
+        { ZEROS_CLAUDE_AUTO_MEMORY: "yes", ZEROS_CLAUDE_IDLE_COMPACTION: "true" }, undefined, nativeHome);
+      expect(invalid).not.toHaveProperty("ZEROS_CLAUDE_AUTO_MEMORY");
+      expect(invalid).not.toHaveProperty("ZEROS_CLAUDE_IDLE_COMPACTION");
+      const foreign = cloudNativeProviderEnvironment({ kind: "codex-api-key", apiKey: "synthetic-key" }, "model", settings, undefined, nativeHome);
+      expect(foreign).not.toHaveProperty("ZEROS_CLAUDE_AUTO_MEMORY");
+      expect(foreign).not.toHaveProperty("ZEROS_CLAUDE_IDLE_COMPACTION");
+    } finally { await lease.close(); }
+  });
   it("uses the existing workspace policy and supplies only the active run's environment and home", async () => {
     const { boundary, lease, workload, nativeHome } = await fixture();
     try {

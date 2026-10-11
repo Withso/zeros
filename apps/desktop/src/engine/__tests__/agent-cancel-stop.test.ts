@@ -29,6 +29,7 @@ import type { LoadSessionResponse } from "@zeros/protocol/agent-events";
 import type { EngineMessage } from "../types";
 import { ZerosEngine } from "../index";
 import { AgentFailureError } from "../agents/types";
+import { CLAUDE_ORGANIZATION_STARTUP_MESSAGES } from "@zeros/protocol/claude-startup-notice";
 import { closeZerosDb, openZerosDb, setZerosDbPathForTesting } from "../db";
 import { engineRuntimeDir, zerosDbPath } from "../db/paths";
 import { openSqlite } from "../db/sqlite";
@@ -243,6 +244,27 @@ afterEach(() => {
 });
 
 describe("prompt start time continuity", () => {
+  it.each([
+    ["org_config_required_unavailable", "protocol-error"],
+    ["org_config_refused", "auth-required"],
+  ] as const)("persists the known Local Claude %s remedy before settling", async (reason, kind) => {
+    const { state } = testEngine(29_944);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("session-1", "claude");
+    const persisted = vi.spyOn(state, "persistSessionUpdate");
+    const nativeMessage = "Native organization settings service returned an error. Try to sign in.";
+    vi.spyOn(state.agents, "prompt").mockRejectedValue(new AgentFailureError({
+      kind, stage: "prompt", agentId: "claude", message: nativeMessage,
+      advice: CLAUDE_ORGANIZATION_STARTUP_MESSAGES[reason],
+    }));
+    await state.handleMessage(promptMessage({ agentId: "claude" }), client);
+    expect(persisted).toHaveBeenCalledWith("session-1", expect.objectContaining({ update: expect.objectContaining({
+      sessionUpdate: "error_notice", code: reason, message: nativeMessage, turnFailure: { turnId: "user-1", kind },
+    }) }));
+    expect(messages).toContainEqual(expect.objectContaining({ type: "AGENT_PROMPT_FAILED", failure: expect.objectContaining({ kind }) }));
+  });
+
   it.each(["claude", "codex", "cursor"])(
     "publishes and persists the %s error before settling the turn",
     async (agentId) => {

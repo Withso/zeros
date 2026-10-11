@@ -46,6 +46,7 @@ import type {
 import { getSetting } from "../../platform/settings";
 import {
   getClaudeAutoMemoryEnabled,
+  getClaudeIdleCompactionEnabled,
   getClaudeIdleTimeoutMinutes,
 } from "./reliability-settings";
 import catalogJson from "../../../../../../catalogs/models-v1.json";
@@ -75,6 +76,8 @@ export type ModelOption = {
    *  the EffortPill. Exact live discovery overrides the bundled fallback when
    *  present; otherwise the curated value stands. */
   effortLevels?: ChatEffort[];
+  /** Initial effort only when the user has no remembered configuration. */
+  defaultEffort?: ChatEffort;
   /** Whether this model supports Fast mode (drives the FastPill). */
   supportsFast?: boolean;
   /** Minimum agent CLI version this model needs (e.g. Fable 5 → "2.1.170").
@@ -195,6 +198,8 @@ function coerceModelOption(x: unknown): ModelOption | null {
     );
   }
   if (typeof o.supportsFast === "boolean") out.supportsFast = o.supportsFast;
+  if (typeof o.defaultEffort === "string" && (VALID_EFFORTS as readonly string[]).includes(o.defaultEffort))
+    out.defaultEffort = o.defaultEffort as ChatEffort;
   if (typeof o.minCliVersion === "string") out.minCliVersion = o.minCliVersion;
   return out;
 }
@@ -230,8 +235,8 @@ const MODEL_ENV_VARS: Record<string, string> = catalog.modelEnvVars ?? {};
 const ALIASES: Record<string, Record<string, string>> = catalog.aliases ?? {};
 
 /** Per-family fallback favorite: the model a new chat opens on
- *  when the user hasn't selected one — claude → Opus 5, codex → GPT-5.6 Sol,
- *  cursor → Composer 2.5. Curated in models-v1.json so the catalog stays the
+ *  when the user hasn't selected one — claude → Opus 5.5, codex → GPT-6.1 Sol,
+ *  cursor → Grok 4.7. Curated in models-v1.json so the catalog stays the
  *  single source of truth; validated against family membership here (a typo'd
  *  id degrades to the family's first curated model instead of a dead value). */
 const DEFAULT_FAVORITES: Record<string, string> =
@@ -596,6 +601,17 @@ export function defaultEffortForLevels(levels: ChatEffort[]): ChatEffort {
   );
 }
 
+/** A model's initial effort never widens the installed runtime's ladder. */
+export function defaultEffortForModel(
+  agentId: string | null,
+  model: string | null,
+  initialize: InitializeResponse | null = null,
+): ChatEffort {
+  const levels = effortLevelsFor(agentId, model, initialize);
+  const initial = resolveModelOption(agentId, model, initialize)?.defaultEffort;
+  return initial && levels.includes(initial) ? initial : defaultEffortForLevels(levels);
+}
+
 /** The effort this exact model can actually run: the stored tier when its
  * ladder advertises it, else that ladder's default. A model with no knob keeps
  * the stored value (nothing to clamp to).
@@ -614,7 +630,7 @@ export function effectiveEffort(
 ): ChatEffort {
   const levels = effortLevelsFor(agentId, model, initialize);
   if (levels.length === 0 || levels.includes(effort)) return effort;
-  return defaultEffortForLevels(levels);
+  return defaultEffortForModel(agentId, model, initialize);
 }
 
 /** Whether the agent+model supports Fast mode (lower-latency inference at
@@ -1373,6 +1389,7 @@ export function envForChatSettings(args: {
   if (agentFamily(args.agentId) === "claude") {
     env[CLAUDE_IDLE_TIMEOUT_ENV_VAR] = String(getClaudeIdleTimeoutMinutes());
     env.ZEROS_CLAUDE_AUTO_MEMORY = getClaudeAutoMemoryEnabled() ? "1" : "0";
+    env.ZEROS_CLAUDE_IDLE_COMPACTION = getClaudeIdleCompactionEnabled() ? "1" : "0";
   }
   return env;
 }

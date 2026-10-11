@@ -125,6 +125,9 @@ export const scenarioRegistry = [
     regressions: "cloudComputerV2ReviewRegressions",
   },
   fresh("context-gauge", "context-gauge", "runContextGaugeSmoke"),
+  fresh("claude-runtime-ui", "claude-runtime-ui", "runClaudeRuntimeUiSmoke", 1280, 950),
+  fresh("codex-runtime-ui", "codex-runtime-ui", "runCodexRuntimeUiSmoke", 1280, 950),
+  fresh("shared-default-model", "shared-default-model", "runSharedDefaultModelSmoke", 1280, 950),
   fresh("composer-send-failures", "composer-send-failures", "runComposerSendFailuresSmoke", 1100, 760),
   fresh("permission-hints", "permission-hints", "runPermissionHintsSmoke"),
   fresh(

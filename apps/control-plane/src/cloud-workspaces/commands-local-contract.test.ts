@@ -30,6 +30,15 @@ describe("standalone negotiated local command contracts", () => {
         operation: { version: 1, kind: "fork", strategy: "native", sourceConversationId: "source" } }])
       expect(local.CloudBootCommandPayloadSchema.safeParse(value).success).toBe(wire.CloudBootCommandPayloadSchema.safeParse(value).success);
   });
+  it("mirrors Claude-only preferences on grant-free payloads", () => {
+    const claudePreferences = { autoMemoryEnabled: false, idleCompactionEnabled: true };
+    const claude = { ...goal, agentId: "claude", permissionMode: undefined, operation: undefined, claudePreferences };
+    expect(local.CloudBootCommandPayloadSchema.parse(claude)).toEqual(wire.CloudBootCommandPayloadSchema.parse(claude));
+    expect(local.CloudBootCommandPayloadSchema.safeParse({ ...goal, claudePreferences }).success).toBe(false);
+    for (const value of [claude, { ...goal, claudePreferences }, { ...claude, claudePreferences: { autoMemoryEnabled: true } },
+      { ...claude, claudePreferences: { ...claudePreferences, privateMaterial: "synthetic" } }])
+      expect(local.CloudBootCommandPayloadSchema.safeParse(value).success).toBe(wire.CloudBootCommandPayloadSchema.safeParse(value).success);
+  });
   it("retains strict entry/snapshot privacy, native outcomes and collection bounds", () => {
     const pending = entry(), receipt = { ...entry(null), state: "succeeded", executionId: "execution", result: { version: 1,
       terminal: { conversationId: "chat", executionId: "execution", turnId: "turn", agentId: "codex", status: "completed", stopReason: "end_turn" } } };

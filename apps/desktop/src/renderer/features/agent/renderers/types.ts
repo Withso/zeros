@@ -143,6 +143,8 @@ export interface RendererContext {
   /** Opens loopback links in this chat's workspace Browser tab. */
   openPreviewUrl?: (url: string) => boolean;
   warmFile?: (path: string) => void;
+  /** Navigate to the owning account's Settings → Browser use. */
+  openBrowserSettings?: () => void;
 }
 
 export type Renderer<M extends AgentMessage> = ComponentType<{

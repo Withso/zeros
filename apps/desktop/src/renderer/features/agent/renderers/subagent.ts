@@ -13,7 +13,7 @@
 
 import type { AgentToolMessage } from "../use-agent-session";
 
-const SUBAGENT_TITLE_PATTERN = /^(task|spawn_?agent|delegate|subagent)$/i;
+const SUBAGENT_TITLE_PATTERN = /^(agent|task|spawn_?agent|delegate|subagent)$/i;
 
 export interface SubagentInfo {
   /** Which subagent role the parent agent is invoking, if declared. */
@@ -57,8 +57,11 @@ export function matchSubagent(tool: AgentToolMessage): SubagentInfo | null {
     };
   }
   // The role name, normalizing Claude's string form and Cursor's { kind } form.
+  const output = tool.rawOutput as { subagentType?: unknown } | undefined;
   const subagentType =
-    typeof input?.subagent_type === "string"
+    typeof output?.subagentType === "string" && output.subagentType.trim()
+      ? output.subagentType
+      : typeof input?.subagent_type === "string"
       ? input.subagent_type
       : typeof input?.subagentType === "string"
         ? input.subagentType

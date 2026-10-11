@@ -386,6 +386,8 @@ export interface BackgroundTask {
   name: string;
   /** Provider-native task category, intentionally open for forward compat. */
   taskType?: string;
+  /** Native agent role, when this background task runs a subagent. */
+  subagentType?: string;
   /** Epoch milliseconds. Preserved across metadata refreshes. */
   startedAt: number;
   /** Epoch milliseconds of the latest provider observation. */

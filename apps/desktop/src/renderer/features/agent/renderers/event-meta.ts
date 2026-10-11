@@ -1,5 +1,6 @@
 import { generatedImagePath, isImageGenerationTool } from "./tool-artifacts";
 import { designToolLabel } from "./design-tool-presentation";
+import { ChromeIcon } from "@/renderer/shared/ui/chrome-icon";
 // ──────────────────────────────────────────────────────────
 // event-meta — pure label/meta extractors per event kind
 // ──────────────────────────────────────────────────────────
@@ -200,6 +201,11 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
 
   const wait = nativeAgentWait(tool);
   if (wait) return { Icon: Hourglass, label: wait.label, expandable: !!wait.result };
+
+  if (tool.title === "Chrome setup" || tool.title === "OfferChromeSetup") {
+    return { Icon: ChromeIcon, label: "Chrome setup", target: pickString(input.reason) ?? undefined,
+      expandable: tool.status === "failed" || toolCompletionUnreported(tool.rawOutput) };
+  }
 
   if (isImageGenerationTool(tool)) {
     const path = generatedImagePath(tool);

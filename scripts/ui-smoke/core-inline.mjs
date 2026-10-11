@@ -313,7 +313,7 @@ export async function runModelMenuSmoke({
   const catalogFavoriteButton = (label) =>
     catalogRow(label).locator("[data-model-favorite-action]");
   const defaultIndicators = () =>
-    page.locator("[data-default-model-indicator]");
+    catalog().locator("[data-default-model-indicator]");
   const modelEditor = () => page.getByTestId("model-configuration-popover");
 
   const initialPillText = (
@@ -323,7 +323,7 @@ export async function runModelMenuSmoke({
     .trim();
   check(
     "composer combines model and effort in one pill",
-    initialPillText === "Opus 5 High",
+    initialPillText === "Opus 5.5 Medium",
     initialPillText,
   );
   const pillMetadataPresentation = await pill
@@ -344,7 +344,7 @@ export async function runModelMenuSmoke({
     .catch(() => null);
   check(
     "composer renders effort/Fast as 80%-opacity fg2 metadata",
-    pillMetadataPresentation?.text === "High" &&
+    pillMetadataPresentation?.text === "Medium" &&
       pillMetadataPresentation.color === pillMetadataPresentation.fg2 &&
       pillMetadataPresentation.opacity === "0.8",
     JSON.stringify(pillMetadataPresentation),
@@ -390,8 +390,8 @@ export async function runModelMenuSmoke({
   check(
     "default model section shows only the selected model",
     (await selectedModel().count()) === 1 &&
-      ((await selectedModel().textContent()) ?? "").includes("Opus 5") &&
-      ((await selectedModel().textContent()) ?? "").includes("High"),
+      ((await selectedModel().textContent()) ?? "").includes("Opus 5.5") &&
+      ((await selectedModel().textContent()) ?? "").includes("Medium"),
   );
   await selectedModel().hover();
   check(
@@ -509,8 +509,8 @@ export async function runModelMenuSmoke({
     (await page.locator("kbd").count()) === 0,
   );
   check(
-    "active model row shows default High effort",
-    ((await catalogRow("Opus 5").textContent()) ?? "").includes("High"),
+    "active model row shows the catalog Medium effort",
+    ((await catalogRow("Opus 5.5").textContent()) ?? "").includes("Medium"),
   );
   for (const label of [
     "Opus 5.5",
@@ -544,7 +544,7 @@ export async function runModelMenuSmoke({
         ),
         opusNameBox: box(
           [...group.querySelectorAll("span")].find(
-            (span) => span.textContent === "Opus 5",
+            (span) => span.textContent === "Opus 5.5",
           ),
         ),
       };
@@ -561,7 +561,7 @@ export async function runModelMenuSmoke({
       !!claudeHeadingBox &&
       claudeHeadingBox.x - (claudeMarkBox.x + claudeMarkBox.width) <= 8,
   );
-  const modelNameFontWeight = await catalogRow("Opus 5")
+  const modelNameFontWeight = await catalogRow("Opus 5.5")
     .locator("[data-model-name]")
     .evaluate((name) => getComputedStyle(name).fontWeight);
   // "Reasoning", "Options", "Model", and every agent title are one label tier:
@@ -745,36 +745,39 @@ export async function runModelMenuSmoke({
     JSON.stringify(solMetadataPresentation),
   );
   check(
-    "Codex fallback is the single connected-provider default",
+    "Claude fallback is the single connected-provider default",
     (await defaultIndicators().count()) === 1 &&
       (await defaultIndicators()
         .first()
         .evaluate((indicator) =>
           indicator
             .closest("[data-model-catalog-item]")
-            ?.textContent?.includes("GPT-5.6 Sol"),
+            ?.textContent?.includes("Opus 5.5"),
         )),
   );
-  const solStarBox = await catalogRow("GPT-5.6 Sol")
+  const defaultMetadataBox = await catalogRow("Opus 5.5")
+    .locator("[data-model-metadata]")
+    .boundingBox();
+  const defaultStarBox = await catalogRow("Opus 5.5")
     .locator("[data-default-model-indicator]")
     .boundingBox();
   check(
     "default star sits directly after effort metadata",
-    !!solEffortBox &&
-      !!solStarBox &&
-      solStarBox.x - (solEffortBox.x + solEffortBox.width) <= 12,
+    !!defaultMetadataBox &&
+      !!defaultStarBox &&
+      defaultStarBox.x - (defaultMetadataBox.x + defaultMetadataBox.width) <= 12,
   );
   check(
-    "selected non-default model shows no star",
-    (await catalogRow("Opus 5")
+    "selected default shows the same star in the catalog and summary",
+    (await catalogRow("Opus 5.5")
       .locator("[data-default-model-indicator]")
-      .count()) === 0 &&
+      .count()) === 1 &&
       (await selectedModel()
         .locator("[data-default-model-indicator]")
-        .count()) === 0,
+        .count()) === 1,
   );
-  const activeRowBox = await catalogRow("Opus 5").boundingBox();
-  const selectedTickBox = await catalogRow("Opus 5")
+  const activeRowBox = await catalogRow("Opus 5.5").boundingBox();
+  const selectedTickBox = await catalogRow("Opus 5.5")
     .getByLabel("Selected model")
     .boundingBox();
   check(
@@ -788,7 +791,7 @@ export async function runModelMenuSmoke({
   );
   check(
     "selected row has no edit action",
-    (await catalogEditButton("Opus 5").count()) === 0,
+    (await catalogEditButton("Opus 5.5").count()) === 0,
   );
   check(
     "non-selected configurable rows expose a right-edge edit action",
@@ -1041,9 +1044,9 @@ export async function runModelMenuSmoke({
     "editing a non-selected model does not select it",
     consoleLines.filter((line) => line.includes("[harness] onChange"))
       .length === selectionsBeforeEdit &&
-      (await catalogRow("Opus 5").getByLabel("Selected model").count()) === 1 &&
-      ((await selectedModel().textContent()) ?? "").includes("High") &&
-      !((await selectedModel().textContent()) ?? "").includes("Medium") &&
+      (await catalogRow("Opus 5.5").getByLabel("Selected model").count()) === 1 &&
+      ((await selectedModel().textContent()) ?? "").includes("Medium") &&
+      !((await selectedModel().textContent()) ?? "").includes("High") &&
       !((await selectedModel().textContent()) ?? "").includes("Fast"),
   );
   check(
@@ -1126,7 +1129,7 @@ export async function runModelMenuSmoke({
       .locator("[data-default-model-indicator]")
       .boundingBox();
     check(
-      "an active default keeps its star directly beside its configuration",
+      "the new default keeps its star directly beside its configuration",
       !!activeDefaultMetadataBox &&
         !!activeDefaultStarBox &&
         activeDefaultStarBox.x -
@@ -1141,10 +1144,11 @@ export async function runModelMenuSmoke({
         )),
     );
     check(
-      "collapsed selected model reflects the new default star",
+      "changing the default keeps the current chat model and removes its star",
       (await selectedModel()
         .locator("[data-default-model-indicator]")
-        .count()) === 1,
+        .count()) === 0 &&
+        ((await selectedModel().textContent()) ?? "").includes("Opus 5.5"),
     );
   } else {
     check("non-default favorite star reveals on row hover", false);
@@ -1153,11 +1157,11 @@ export async function runModelMenuSmoke({
       false,
     );
     check(
-      "an active default keeps its star directly beside its configuration",
+      "the new default keeps its star directly beside its configuration",
       false,
     );
     check("favorite click keeps catalog open and search focused", false);
-    check("collapsed selected model reflects the new default star", false);
+    check("changing the default keeps the current chat model and removes its star", false);
   }
 
   // 3. Active-model settings and the searchable model list share one popover.
@@ -1340,21 +1344,19 @@ export async function runModelMenuSmoke({
         consoleLines.filter((line) => line.includes("[harness] onChange"))
           .length === searchSelectionsBeforeFavorite,
     );
-    // The harness's null model deliberately follows Claude's default, so the
-    // new Fable default also becomes its pending active model. Round-trip the
-    // default to Opus before the later Opus-only Fast assertions, while proving
-    // the same search-row favorite path remains selection-free in reverse.
-    await searchInput.fill("Opus 5");
-    const opusSearchFavorite = modelRow("Opus 5").locator(
+    // A born chat holds a concrete model, so changing the default leaves it
+    // intact. Return the star to that same model before testing its settings.
+    await searchInput.fill("Opus 5.5");
+    const opusSearchFavorite = modelRow("Opus 5.5").locator(
       "[data-model-favorite-action]",
     );
-    await modelRow("Opus 5").hover();
+    await modelRow("Opus 5.5").hover();
     await opusSearchFavorite.click();
     check(
-      "search favorite round-trip restores a default-bound pending model",
+      "search favorite round-trip returns the star to the unchanged chat model",
       (await waitFor(
         async () =>
-          (await modelRow("Opus 5")
+          (await modelRow("Opus 5.5")
             .locator("[data-default-model-indicator]")
             .count()) === 1,
         "search-favorite-restore",
@@ -1372,7 +1374,7 @@ export async function runModelMenuSmoke({
       false,
     );
     check(
-      "search favorite round-trip restores a default-bound pending model",
+      "search favorite round-trip returns the star to the unchanged chat model",
       false,
     );
   }
@@ -1417,7 +1419,7 @@ export async function runModelMenuSmoke({
   );
   await page.getByRole("radio", { name: "Max", exact: true }).click();
   const fastSwitch = page.getByRole("switch", {
-    name: "Fast mode for claude-opus-5[1m]",
+    name: "Fast mode for claude-opus-5-5[1m]",
   });
   await fastSwitch.click();
   check(
@@ -1442,7 +1444,7 @@ export async function runModelMenuSmoke({
     .trim();
   check(
     "composer model pill reflects effort and Fast configuration",
-    configuredPillText === "Opus 5 Max Fast",
+    configuredPillText === "Opus 5.5 Max Fast",
     configuredPillText,
   );
   check(
@@ -1480,8 +1482,8 @@ export async function runModelMenuSmoke({
     ((await selectedModel().textContent()) ?? "").includes("High") &&
       !((await selectedModel().textContent()) ?? "").includes("Fast"),
   );
-  await searchInput.fill("Opus 5");
-  await modelRow("Opus 5").click({ position: { x: 8, y: 8 } });
+  await searchInput.fill("Opus 5.5");
+  await modelRow("Opus 5.5").click({ position: { x: 8, y: 8 } });
   await waitFor(async () => !(await menuOpen()), "close-second-selection");
   await pill.click();
   await waitFor(menuOpen, "reopen-restored-model");

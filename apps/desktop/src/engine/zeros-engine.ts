@@ -2,6 +2,7 @@ import { getWorkspace as getGithubWriteWorkspace } from "./git/worktree";
 import { githubWritePublication } from "./git/github-write-publication";
 import { configureNativeGithubDesktop, acceptNativeGithubDesktop } from "./git/github-native-desktop";
 import { readCloudAgentRuntimeAttestation } from "./cloud-runtime-attestation";
+import { claudeOrganizationStartupCode } from "@zeros/protocol/claude-startup-notice";
 import { CLOUD_IDLE_STOP_MS, CloudIdleStopScheduler, CloudUserPresence, hasCloudUserProcesses, isCloudIdleMaintenance } from "./cloud-idle-stop";
 import { CloudRuntimeQuietState } from "./cloud-runtime-quiet-state";
 import { CloudEngineFinalCompletionSchema, CloudFinalCheckpointReceiptSchema,
@@ -174,7 +175,8 @@ import { CloudEventRuntimeError } from "./cloud-event-client";
 import { CloudEventClientRequestSchema, CloudTurnOutcomeSchema, type CloudTurnOutcome, type CloudAgentHistoryRestoreMetadata,
   type CloudAgentTurnTimingsPacket, type CloudNativePromptStage } from "@zeros/protocol/cloud-events";
 import { CloudLocalCommandHistoryHeadSchema, type CloudLocalCommandHistoryHead } from "@zeros/protocol/cloud-local-mirror";
-import { cloudPermissionMode, legacyCloudCommandResponse, type CloudCommandClaim, type CloudCommandResult, type CloudQueuedPrompt } from "@zeros/protocol/cloud-commands";
+import { cloudPermissionMode, legacyCloudCommandResponse, withoutCloudClaudePreferences, type CloudCommandClaim, type CloudCommandResult, type CloudQueuedPrompt } from "@zeros/protocol/cloud-commands";
+import { cloudClaudePreferencesEnv } from "./cloud-claude-preferences";
 import { CloudConversationCreateSchema, CloudConversationReadSchema, CloudConversationModeSchema, CloudCommandSnapshotSchema,
   CloudCommandClientRequestSchema, CloudBootCommandClientRequestSchema, CloudBootCommandSnapshotSchema, CloudBootCommandClaimSchema } from "@zeros/protocol/cloud-commands";
 import { cloudCommandFailureCode, decodeCloudCommandFailure, cloudCommandFailureFromCode, CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
@@ -491,6 +493,8 @@ const REMOTE_AGENT_SAFE_ZEROS_ENV = new Set([
   "ZEROS_REQUIRE_EXACT_MODEL",
   "ZEROS_ADDITIONAL_DIRS",
   "ZEROS_CLAUDE_IDLE_TIMEOUT_MINUTES",
+  "ZEROS_CLAUDE_AUTO_MEMORY",
+  "ZEROS_CLAUDE_IDLE_COMPACTION",
   "ZEROS_FAST_MODE",
   "ZEROS_PERMISSION_MODE",
   "ZEROS_THINKING_EFFORT",
@@ -4525,11 +4529,12 @@ export class ZerosEngine {
           params.cloudLocalCommandsVersion !== 1 || params.bootId !== boot.metadataFor(client.cloudActor.sessionId).bootId ||
           params.writerEpoch !== boot.metadataFor(client.cloudActor.sessionId).writerEpoch))
         throw new CloudCommandRuntimeError("cloud_workspace_client_update_required");
-      const allowed = boot ? ["request", "nativeCommandsVersion", "cloudTurnProtocolVersion", "cloudLocalCommandsVersion", "bootId", "writerEpoch"]
-        : ["request", "nativeCommandsVersion", "cloudTurnProtocolVersion"];
+      const allowed = boot ? ["request", "nativeCommandsVersion", "cloudTurnProtocolVersion", "claudePreferencesVersion", "cloudLocalCommandsVersion", "bootId", "writerEpoch"]
+        : ["request", "nativeCommandsVersion", "cloudTurnProtocolVersion", "claudePreferencesVersion"];
       if (Object.keys(params).some(key=>!allowed.includes(key)) || !("request" in params) ||
           (params.nativeCommandsVersion!==undefined&&params.nativeCommandsVersion!==1) ||
-          (params.cloudTurnProtocolVersion!==undefined&&params.cloudTurnProtocolVersion!==1)) throw new CloudCommandRuntimeError("invalid_command");
+          (params.cloudTurnProtocolVersion!==undefined&&params.cloudTurnProtocolVersion!==1) ||
+          (params.claudePreferencesVersion!==undefined&&params.claudePreferencesVersion!==1)) throw new CloudCommandRuntimeError("invalid_command");
       let observed: Parameters<CloudAgentTurnTimings["receive"]>[0] | undefined;
       try {
         if (this.cloudWorker && this.cloudAgentTurnTimings && !this.cloudRuntimeAuthorityStopping &&
@@ -4559,7 +4564,8 @@ export class ZerosEngine {
         }
       } catch { /* The original response remains authoritative. */ }
       if (params.cloudTurnProtocolVersion === 1) this.cloudTurnProtocols?.set(client, 1);
-      return params.cloudTurnProtocolVersion === 1 ? result : legacyCloudCommandResponse(result, params.nativeCommandsVersion === 1 ? 1 : undefined);
+      const compatible = params.claudePreferencesVersion === 1 ? result : withoutCloudClaudePreferences(result);
+      return params.cloudTurnProtocolVersion === 1 ? compatible : legacyCloudCommandResponse(compatible, params.nativeCommandsVersion === 1 ? 1 : undefined);
     }
     let conversationId: string;
     if (op === "cloudCommands.createConversation") {
@@ -4628,7 +4634,7 @@ export class ZerosEngine {
     }
     return { conversationId, workspaceId: this.workspace.workspaceIdForCwd(chat.folder), agentId: chat.agentId,
       providerBinding:chat.providerBinding,nativeCommandsVersion:1,cloudTurnProtocolVersion:1,
-      mode: chat.composerMode ?? "code", modeRevision: chat.composerModeRevision ?? 0, permissionModeVersion: 1,
+      mode: chat.composerMode ?? "code", modeRevision: chat.composerModeRevision ?? 0, permissionModeVersion: 1, claudePreferencesVersion: 1,
       ...(cloudLocalCommands ? { cloudLocalCommands } : {}),
       ...(agentTurnTimings ? { agentTurnTimings } : {}) };
   }
@@ -4838,7 +4844,7 @@ export class ZerosEngine {
       record.controller.signal.addEventListener("abort",invalidate,{once:true});
       try{
         const common={source:"engine" as const,agentId:chat.agentId,chatId:chat.id,workspaceId,
-          env:{...(claim.payload.effort?{ZEROS_THINKING_EFFORT:claim.payload.effort}:{}),ZEROS_FAST_MODE:claim.payload.fast?"1":"0",
+          env:{...cloudClaudePreferencesEnv(claim.payload),...(claim.payload.effort?{ZEROS_THINKING_EFFORT:claim.payload.effort}:{}),ZEROS_FAST_MODE:claim.payload.fast?"1":"0",
             ZEROS_PERMISSION_MODE:cloudPermissionMode(claim.payload.agentId,claim.payload.permissionMode??getChat(claim.conversationId)?.lastModeId??getChat(claim.conversationId)?.permissionMode??"auto")}};
         if (claim.payload.operation?.kind === "fork") {
           if (binding) throw new Error("Cloud fork destination is already bound");
@@ -5020,8 +5026,11 @@ export class ZerosEngine {
       queued: false, queuedPresentation: undefined, queuedEditable: undefined,
       recoveryFailure: { kind: isCloudAgentAdmissionCode(code) ? "cloud-admission" : failure.kind,
         message: isCloudAgentAdmissionCode(code) ? code : failure.message } };
+    // Keep the native settings remedy after reload, alongside the unchanged
+    // closed cloud receipt code. Only adapter-selected Claude advice qualifies.
+    const startupCode = chat.agentId === "claude" ? claudeOrganizationStartupCode(native?.advice) : undefined;
     const notice: AgentMessage = { id: noticeId, kind: "error_notice", severity: "error",
-      recoverable: false, message: failure.message, code, createdAt: Date.now(),
+      recoverable: false, message: failure.message, code: startupCode ?? code, createdAt: Date.now(),
       turnFailure: { turnId: prompt.id, kind: failure.kind } };
     // Preserve a richer native terminal notice already persisted for this turn.
     const rows = previous.some(row => row.kind === "error_notice" && row.turnFailure?.turnId === prompt.id && !row.recoverable)
@@ -5048,8 +5057,10 @@ export class ZerosEngine {
     if(operation?.kind==="fork"){await this.cloudGoals.flush(claim);return {state:"succeeded",resultCode:null};}
     if(operation?.kind==="goal") {
       const revision=this.cloudGoals.revision(claim);
-      if(operation.action==="clear")await this.agents.clearGoal("codex",claim.executionId);
-      const goal=operation.action==="set" ? await this.agents.setGoal("codex",claim.executionId,operation.update!)
+      // The admitted command actor supplies provenance, never a payload flag.
+      const origin=claim.actor?"user" as const:undefined;
+      if(operation.action==="clear")await this.agents.clearGoal("codex",claim.executionId,origin);
+      const goal=operation.action==="set" ? await this.agents.setGoal("codex",claim.executionId,operation.update!,origin)
         : operation.action==="clear" ? null : await this.agents.getGoal("codex",claim.executionId);
       await this.cloudGoals.confirm(claim,goal,revision);
       return {state:"succeeded",resultCode:null,result:{...nativeResult,version:1,goal:(await this.cloudGoals.flush(claim))!.goal}};
@@ -7547,6 +7558,7 @@ export class ZerosEngine {
               const failure =
                 err instanceof AgentFailureError ? err.failure : fromCloudCommand
                   ? cloudCommandFailureFromCode(cloudCommandFailureCode(err, "provider_prompt"), msg.agentId) ?? undefined : undefined;
+              const startupCode = msg.agentId === "claude" ? claudeOrganizationStartupCode(failure?.advice) : undefined;
               const notification: SessionNotification = {
                 sessionId: msg.sessionId,
                 update: {
@@ -7557,6 +7569,7 @@ export class ZerosEngine {
                   message: redactLogSecrets(
                     failure?.message ?? (err instanceof Error ? err.message : String(err)),
                   ).slice(0, 8000) || "The agent stopped before confirming completion.",
+                  ...(startupCode ? { code: startupCode } : {}),
                   turnFailure: {
                     turnId: activePrompt.turnId,
                     kind: failure?.kind ?? "protocol-error",
@@ -8045,7 +8058,7 @@ export class ZerosEngine {
             ...(msg.update.objective !== undefined
               ? { objective: msg.update.objective.trim() }
               : {}),
-          });
+          }, this.cloudWorker ? undefined : msg.origin);
           if(claim)await this.cloudGoals.confirm(claim,goal,revision);
           client.send(
             createMessage({
@@ -8067,7 +8080,8 @@ export class ZerosEngine {
           }
           const claim=this.cloudGoalClaim(msg.sessionId),revision=claim?this.cloudGoals.revision(claim):0;
           controlDeliveryGuard?.();
-          await this.agents.clearGoal(msg.agentId, msg.sessionId);
+          // Cloud provenance is minted by durable command dispatch above.
+          await this.agents.clearGoal(msg.agentId, msg.sessionId, this.cloudWorker ? undefined : msg.origin);
           if(claim)await this.cloudGoals.confirm(claim,null,revision);
           client.send(
             createMessage({
@@ -9192,14 +9206,15 @@ export class ZerosEngine {
         const cwd = this.assertRemoteWorkspaceOperable(msg.workspaceId, stage);
         if (cwd !== selection.cwd) throw new CloudCommandRuntimeError("command_context_changed");
         return { cwd, workspaceId: msg.workspaceId, cloudExecutionId: claim.executionId, cloudExecution: selection,
-          env: { ...(claim.payload.effort ? { ZEROS_THINKING_EFFORT: claim.payload.effort } : {}), ZEROS_FAST_MODE: claim.payload.fast ? "1" : "0",
+          env: { ...cloudClaudePreferencesEnv(claim.payload), ...(claim.payload.effort ? { ZEROS_THINKING_EFFORT: claim.payload.effort } : {}),
+            ZEROS_FAST_MODE: claim.payload.fast ? "1" : "0",
             ZEROS_PERMISSION_MODE: cloudPermissionMode(claim.payload.agentId, claim.payload.permissionMode ?? getChat(claim.conversationId)?.lastModeId ??
               getChat(claim.conversationId)?.permissionMode ?? "auto") } };
       }
       if(!claim||claim.conversationId!==msg.chatId||claim.payload.agentId!==msg.agentId||!claim.payload.agentCredentialGrantId||!claim.payload.model)
         throw new AgentFailureError({kind:"protocol-error",stage,message:"Cloud agents start from an admitted durable command with delegated credentials."});
       return {cwd:this.assertRemoteWorkspaceOperable(msg.workspaceId,stage),workspaceId:msg.workspaceId,
-        env:{...(claim.payload.effort?{ZEROS_THINKING_EFFORT:claim.payload.effort}:{}),ZEROS_FAST_MODE:claim.payload.fast?"1":"0",
+        env:{...cloudClaudePreferencesEnv(claim.payload),...(claim.payload.effort?{ZEROS_THINKING_EFFORT:claim.payload.effort}:{}),ZEROS_FAST_MODE:claim.payload.fast?"1":"0",
             ZEROS_PERMISSION_MODE:cloudPermissionMode(claim.payload.agentId,claim.payload.permissionMode??getChat(claim.conversationId)?.lastModeId??getChat(claim.conversationId)?.permissionMode??"auto")},
         cloudExecutionId:claim.executionId,cloudExecution:{delegationId:claim.payload.agentCredentialGrantId,model:claim.payload.model,
           source:{kind:"command",commandId:claim.commandId,claimId:claim.claimId}}};
@@ -9267,6 +9282,7 @@ export class ZerosEngine {
       }
       if (name.startsWith("ZEROS_")) {
         if (!REMOTE_AGENT_SAFE_ZEROS_ENV.has(name)) continue;
+        if ((name === "ZEROS_CLAUDE_AUTO_MEMORY" || name === "ZEROS_CLAUDE_IDLE_COMPACTION") && value !== "0" && value !== "1") continue;
         if (name === "ZEROS_ADDITIONAL_DIRS") {
           const clamped = clampRemoteAdditionalDirectories(value, (candidate) =>
             this.pty.isWithinAllowed(candidate),
@@ -9419,6 +9435,8 @@ export class ZerosEngine {
       "ZEROS_THINKING_EFFORT",
       "ZEROS_FAST_MODE",
       "ZEROS_CLAUDE_IDLE_TIMEOUT_MINUTES",
+      "ZEROS_CLAUDE_AUTO_MEMORY",
+      "ZEROS_CLAUDE_IDLE_COMPACTION",
       "ANTHROPIC_MODEL",
       "OPENAI_MODEL",
       "CURSOR_MODEL",
@@ -9426,6 +9444,7 @@ export class ZerosEngine {
     const out: Record<string, string> = {};
     for (const [name, value] of Object.entries(env)) {
       if (RELAY_SAFE_KEYS.has(name)) {
+        if ((name === "ZEROS_CLAUDE_AUTO_MEMORY" || name === "ZEROS_CLAUDE_IDLE_COMPACTION") && value !== "0" && value !== "1") continue;
         out[name] = value;
         continue;
       }

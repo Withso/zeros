@@ -3,9 +3,9 @@
 // ──────────────────────────────────────────────────────────
 //
 // One atomic default-model identity drives the agent + model for a new chat.
-// With no user choice, connected agents resolve in Codex → Claude → Cursor
-// order and each family uses its catalog fallback (Opus 5 / GPT-5.6 Sol /
-// Composer 2.5). Exactly one model is starred across the whole picker.
+// With no user choice, connected agents resolve in Claude → Codex → Cursor
+// order and each family uses its catalog fallback (Opus 5.5 / GPT-6.1 Sol /
+// Grok 4.7). Exactly one model is starred across the whole picker.
 //
 // Effort and Fast are remembered by exact family + model (never globally or
 // per family). Permission mode is remembered as an exact native id per agent
@@ -25,6 +25,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { getSetting, setSetting } from "../../platform/settings";
+import { legacySelectedModel } from "./legacy-default-models";
 import { queueAgentPreferenceChanges } from "../../platform/agent-preferences";
 import {
   getDefaultAgentId,
@@ -61,11 +62,14 @@ import {
 } from "./permission-preferences";
 import {
   DEFAULT_CLAUDE_AUTO_MEMORY_ENABLED,
+  DEFAULT_CLAUDE_IDLE_COMPACTION_ENABLED,
   DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES,
   getClaudeAutoMemoryEnabled,
+  getClaudeIdleCompactionEnabled,
   getClaudeIdleTimeoutMinutes,
   isClaudeIdleTimeoutMinutes,
   setClaudeAutoMemoryEnabled,
+  setClaudeIdleCompactionEnabled,
   setClaudeIdleTimeoutMinutes,
 } from "./reliability-settings";
 import type { ChatEffort, ChatPermissionMode } from "../../state/store";
@@ -153,8 +157,8 @@ export function starFavoriteModel(
 
 /** One-time localStorage migration. The old family effort + global Fast values
  * cannot truthfully describe every model, so preserve them only on the model
- * each family had selected when the migration happened. Every other model starts
- * at High/Fast-off, preventing the old cross-model leakage from continuing.
+ * each family had selected before the birth policy changed. Other models use
+ * their catalog effort/Fast-off, without inheriting those old choices.
  *
  * EVERY family migrates in this single pass. The marker written below makes this
  * a permanent no-op and the clear drops the whole legacy map, so a family left
@@ -166,26 +170,24 @@ function migrateLegacyConfigurationFor(
 ): void {
   if (!agentId || !model || hasModelPreferenceStorage()) return;
   const family = agentFamily(agentId);
+  const legacyModel = legacySelectedModel(agentId);
   const legacyEfforts = readEffortMap();
   const legacyFast = getDefaultFastMode();
   const records: PersistedModelPreference[] = Object.entries(
     legacyEfforts,
   ).flatMap(([owner, effort]) => {
     if (!isEffort(effort)) return [];
-    // The caller's own family keeps the model in hand (which is the model the
-    // user was configuring); every other family lands on its own selection.
-    const target = owner === family ? model : effectiveFavoriteModel(owner);
+    const target = legacySelectedModel(owner);
     return target ? [{ agent: owner, model: target, effort }] : [];
   });
-  // Legacy Fast was one global flag, so the model in hand is the only one it can
-  // honestly describe — fanning it across families would recreate exactly the
-  // cross-model leakage this migration exists to end.
-  if (legacyFast) {
+  // The global flag describes this family's prior selection, never a new
+  // catalog default. Exact-model Fast memory remains authoritative afterward.
+  if (legacyFast && legacyModel) {
     const own = records.find(
-      (record) => record.agent === family && record.model === model,
+      (record) => record.agent === family && record.model === legacyModel,
     );
     if (own) own.fast = true;
-    else records.push({ agent: family, model, fast: true });
+    else records.push({ agent: family, model: legacyModel, fast: true });
   }
   // An absence of local legacy values is not proof that migration is done:
   // settings.toml hydrates asynchronously and may still contain the durable
@@ -213,10 +215,19 @@ function legacyMigrationAgentId(): string | null {
   return null;
 }
 
+/** Pure model resolution shared by births, the catalog star and Settings. */
+export function modelForNewChat(agentId: string | null, cloudModels?: readonly string[]): string | null {
+  const favorite = effectiveFavoriteModel(agentId);
+  // Workspace consent is exact, including context suffixes. Choosing a cloud
+  // fallback must not change the user's global favorite or local defaults.
+  return cloudModels === undefined || (favorite !== null && cloudModels.includes(favorite))
+    ? favorite
+    : modelsForAgent(agentId, null).find(option => cloudModels.includes(option.value))?.value ?? null;
+}
+
 /** The fields a brand-new chat for `agentId` is born with — the single
  *  source of truth shared by every spawn path (new workspace, "+" → Chat,
- *  ⌘T). Model = the global default when this agent owns it, otherwise the
- *  family fallback. Effort/Fast restore this exact model's last user choice. */
+ *  ⌘T). Effort/Fast restore this exact model's last user choice. */
 export function newChatBornDefaults(agentId: string | null, cloudModels?: readonly string[]): {
   model: string | null;
   effort: ChatEffort;
@@ -224,12 +235,7 @@ export function newChatBornDefaults(agentId: string | null, cloudModels?: readon
   lastModeId?: string;
   fast: boolean;
 } {
-  const favorite = effectiveFavoriteModel(agentId);
-  // Workspace consent is exact, including context suffixes. Choosing a cloud
-  // fallback must not change the user's global favorite or local defaults.
-  const model = cloudModels === undefined || (favorite !== null && cloudModels.includes(favorite))
-    ? favorite
-    : modelsForAgent(agentId, null).find(option => cloudModels.includes(option.value))?.value ?? null;
+  const model = modelForNewChat(agentId, cloudModels);
   migrateLegacyConfigurationFor(agentId, model);
   const { effort, fast } = resolveModelConfiguration(agentId, model, null);
   // Default exact native modes: Claude Auto, Codex Approve for me, Cursor Auto.
@@ -330,6 +336,7 @@ function buildModelsTable(): Record<string, unknown> {
       budget_cap_usd: null,
       idle_timeout_minutes: getClaudeIdleTimeoutMinutes(),
       auto_memory_enabled: getClaudeAutoMemoryEnabled(),
+      idle_compaction_enabled: getClaudeIdleCompactionEnabled(),
     },
     codex: { default_thinking_level: null },
   };
@@ -431,12 +438,12 @@ export function hydrateModelsFromSettings(
       replaceModelPreferences(m.model_preferences);
       setSetting(DEFAULT_EFFORT_KEY, {});
       setSetting(DEFAULT_FAST_KEY, false);
-    } else if ((authoritative || !hasModelPreferenceStorage()) && fam) {
+    } else if ((authoritative || !hasModelPreferenceStorage()) && (fam || isEffort(claude) || isEffort(codex) || m.default_fast_mode === true)) {
       // A confirmed legacy file also replaces an already-populated cache.
       // Defaulting its missing array to [] would skip these migration inputs.
       // Loss-minimizing migration: an old field described only its family's
-      // selected model. Preserve each one there and leave every other model
-      // High/Fast-off. EVERY family migrates here for the same reason the
+      // prior selected model. Other models keep their catalog born defaults.
+      // EVERY family migrates here for the same reason the
       // localStorage pass does — the marker below closes the door behind it,
       // and buildModelsTable then deletes both legacy keys from the file.
       replaceModelPreferences([]);
@@ -445,15 +452,16 @@ export function hydrateModelsFromSettings(
         ["claude", claude],
         ["codex", codex],
       ] as const) {
-        const selectedModel = effectiveFavoriteModel(owner);
+        const selectedModel = legacySelectedModel(owner);
         if (selectedModel && isEffort(legacyEffort)) {
           setModelPreference(owner, selectedModel, { effort: legacyEffort });
         }
       }
       // Global Fast can only describe the default family's own model.
-      const selectedModel = effectiveFavoriteModel(fam);
+      const fastOwner = fam || (isEffort(claude) || legacyFast ? "claude" : "codex");
+      const selectedModel = legacySelectedModel(fastOwner);
       if (selectedModel && legacyFast) {
-        setModelPreference(fam, selectedModel, { fast: true });
+        setModelPreference(fastOwner, selectedModel, { fast: true });
       }
       if (hasModelPreferenceStorage()) {
         setSetting(DEFAULT_EFFORT_KEY, {});
@@ -482,6 +490,13 @@ export function hydrateModelsFromSettings(
     if (getClaudeAutoMemoryEnabled() !== autoMemory) {
       setClaudeAutoMemoryEnabled(autoMemory);
     }
+    const idleCompaction =
+      typeof cc?.idle_compaction_enabled === "boolean"
+        ? cc.idle_compaction_enabled
+        : DEFAULT_CLAUDE_IDLE_COMPACTION_ENABLED;
+    if (getClaudeIdleCompactionEnabled() !== idleCompaction) {
+      setClaudeIdleCompactionEnabled(idleCompaction);
+    }
   } finally {
     suppressMirror = false;
     lastProjectedModels = buildModelsTable();
@@ -499,6 +514,8 @@ export function hasModelDefaults(): boolean {
   if (getClaudeIdleTimeoutMinutes() !== DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES)
     return true;
   if (getClaudeAutoMemoryEnabled() !== DEFAULT_CLAUDE_AUTO_MEMORY_ENABLED)
+    return true;
+  if (getClaudeIdleCompactionEnabled() !== DEFAULT_CLAUDE_IDLE_COMPACTION_ENABLED)
     return true;
   // Legacy values count only until the exact-model migration marker lands.
   if (!hasModelPreferenceStorage()) {

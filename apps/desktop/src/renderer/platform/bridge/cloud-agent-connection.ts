@@ -7,6 +7,7 @@ import {
   CLOUD_AGENT_PERMISSION_MODES,
   cloudPermissionMode,
   type CloudCommandSnapshot,
+  type CloudClaudePreferences,
   type CloudNativeOperation,
   CloudNativeOperationSchema,
   CloudNativeResultSchema,
@@ -29,6 +30,7 @@ type Conversation = {
   model: string;
   effort?: string;
   fast: boolean;
+  claudePreferences?: CloudClaudePreferences;
   execution?: string;
   turnId?: string;
   intentRevision?: number;
@@ -120,6 +122,7 @@ export class CloudAgentConnection {
   }>();
   private closed = false;
   private nativeCommandsVersion=0;
+  private claudePreferencesVersion=0;
   private cloudTurnProtocolVersion=0;
   private localCommandsBinding?: CloudAgentBootConversation;
   private readonly attaching = new Map<string, number>();
@@ -173,6 +176,7 @@ export class CloudAgentConnection {
       id: owner.id, agentId: owner.agentId, model: owner.model,
       effort: owner.effort, fast: owner.fast, modeRevision: owner.modeRevision,
       localDirectories: owner.localDirectories, permissionMode: owner.permissionMode,
+      ...(owner.claudePreferences ? { claudePreferences: { ...owner.claudePreferences } } : {}),
     }));
   }
 
@@ -191,6 +195,7 @@ export class CloudAgentConnection {
       id: owner.id, agentId: owner.agentId, model: owner.model,
       effort: owner.effort, fast: owner.fast, modeRevision: owner.modeRevision,
       localDirectories: owner.localDirectories, permissionMode: owner.permissionMode,
+      ...(owner.claudePreferences ? { claudePreferences: { ...owner.claudePreferences } } : {}),
     });
   }
 
@@ -384,6 +389,7 @@ export class CloudAgentConnection {
         { type: "WORKSPACE_REQUEST", op, params:op==="cloudCommands.request"?{...params,
           ...(this.nativeCommandsVersion===1?{nativeCommandsVersion:1}:{}),
           ...(this.cloudTurnProtocolVersion===1?{cloudTurnProtocolVersion:1}:{}),
+          ...(this.claudePreferencesVersion===1?{claudePreferencesVersion:1}:{}),
           ...(this.localCommandsBinding ? { cloudLocalCommandsVersion: 1,
             bootId: this.localCommandsBinding.bootId, writerEpoch: this.localCommandsBinding.writerEpoch } : {}),
         }:params },
@@ -413,6 +419,7 @@ export class CloudAgentConnection {
         this.confirmLocalCommands(result.cloudLocalCommands);
         this.nativeCommandsVersion=Number(result.nativeCommandsVersion??0);
         this.cloudTurnProtocolVersion=Number(result.cloudTurnProtocolVersion??0);
+        this.claudePreferencesVersion=Number(result.claudePreferencesVersion??0);
       }
       return result;
     }
@@ -544,6 +551,10 @@ export class CloudAgentConnection {
     if (message.env) {
       owner.fast = env.ZEROS_FAST_MODE === "1";
       owner.permissionMode = cloudPermissionMode(owner.agentId, env.ZEROS_PERMISSION_MODE ?? "auto");
+      if (owner.agentId === "claude") owner.claudePreferences = {
+        autoMemoryEnabled: env.ZEROS_CLAUDE_AUTO_MEMORY !== "0",
+        idleCompactionEnabled: env.ZEROS_CLAUDE_IDLE_COMPACTION === "1",
+      };
     }
   }
 
@@ -735,7 +746,7 @@ export class CloudAgentConnection {
   }
 
   private async nativeOperation(owner:Conversation,operation:CloudNativeOperation,commandId:string,signal?:AbortSignal) {
-    const {agentId,model,effort,fast}=owner;
+    const {agentId,model,effort,fast,claudePreferences}=owner;
     const permissionMode=owner.permissionMode??cloudPermissionMode(agentId);
     if(!model)throw new Error("Choose a model before using this cloud operation");
     const [grant,conversation,snapshot]=await Promise.all([this.localCommandsBinding ? Promise.resolve(undefined) : this.grant(agentId,model),
@@ -749,7 +760,10 @@ export class CloudAgentConnection {
       await this.op("cloudCommands.request",{request:{kind:"mutate",mutation:{conversationId:owner.id,operationId:commandId,
         expectedRevision:queue.revision,action:{kind:operation.kind==="fork"?"fork":"enqueue",commandId,payload:{agentId,model,
           ...(grant ? { agentCredentialGrantId:grant } : {}),userMessageId:commandId,modeRevision:Number(conversation.modeRevision),permissionMode,
-          ...(effort?{effort}:{}),fast,prompt:[{type:"text",text:""}],operation}}}}});
+          ...(effort?{effort}:{}),fast,
+          ...(agentId === "claude" && conversation.claudePreferencesVersion === 1
+            ? { claudePreferences: claudePreferences ?? { autoMemoryEnabled: true, idleCompactionEnabled: false } } : {}),
+          prompt:[{type:"text",text:""}],operation}}}}});
     }
     // Read the same receipt after reconnect/unknown acknowledgement. An
     // uncertain native mutation is never automatically dispatched again.
@@ -772,7 +786,7 @@ export class CloudAgentConnection {
   ): Promise<WireRecord> {
     // Composer changes apply to the next send. This command must retain the
     // model/effort that its credential lookup authorizes across every await.
-    const { agentId, model, effort, fast, localDirectories } = owner;
+    const { agentId, model, effort, fast, localDirectories, claudePreferences } = owner;
     const permissionMode = owner.permissionMode ?? cloudPermissionMode(agentId);
     if (!model)
       throw new Error("Choose a model before sending to the cloud workspace");
@@ -889,6 +903,10 @@ export class CloudAgentConnection {
                       ? { effort }
                       : {}),
                     fast,
+                    // Older pinned workers accept only their original strict
+                    // payload. Preferences are additive and capability-gated.
+                    ...(agentId === "claude" && conversation.claudePreferencesVersion === 1
+                      ? { claudePreferences: claudePreferences ?? { autoMemoryEnabled: true, idleCompactionEnabled: false } } : {}),
                     ...(conversation.permissionModeVersion === 1 ? { permissionMode } : {}),
                   },
                 },

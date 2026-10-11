@@ -1,5 +1,6 @@
 import type { AgentMessage, AgentTextMessage } from "./use-agent-session";
 import type { SessionsActions } from "./sessions-context";
+import { claudeOrganizationStartupCode, claudeOrganizationStartupMessage } from "@zeros/protocol/claude-startup-notice";
 
 type PromptArgs = Parameters<SessionsActions["sendPrompt"]>;
 export class AuthPromptRecovery {
@@ -83,6 +84,8 @@ export function authenticationTurnOutput(
   return events.filter(
     (event) =>
       !isAuthenticationNotice(event) &&
+      !(event.kind === "error_notice" && !event.parentToolId && event.code === "org_config_refused" &&
+        !event.recoverable && event.turnFailure?.kind === "auth-required") &&
       !(
         event.kind === "tool" &&
         event.toolKind === "model_switch" &&
@@ -90,6 +93,21 @@ export function authenticationTurnOutput(
           "<synthetic>"
       ),
   );
+}
+
+/** The product Sign in notice owns this explanation outside the activity feed.
+ * Legacy and other providers retain their existing generic sign-in copy. */
+export function authenticationFailureMessage(
+  events: readonly AgentMessage[],
+  failure?: { advice?: string } | null,
+): string | undefined {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (event.kind === "error_notice" && !event.parentToolId && !event.recoverable && event.code === "org_config_refused")
+      return claudeOrganizationStartupMessage(event.code);
+  }
+  const code = claudeOrganizationStartupCode(failure?.advice);
+  return code === "org_config_refused" ? claudeOrganizationStartupMessage(code) : undefined;
 }
 
 /** Auth is a product notice only while it owns the visual tail. Once the user

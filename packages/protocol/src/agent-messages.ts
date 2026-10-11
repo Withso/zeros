@@ -612,6 +612,10 @@ export function applyUpdate(
         if (m.kind !== "tool" || m.toolCallId !== upd2.toolCallId) return m;
         const status = upd2.status ?? m.status;
         const updatedAt = typeof upd2.at === "number" ? upd2.at : Date.now();
+        // Claude resumes one stable Background Task row for a new run. Its
+        // previous result and settlement time belong to the completed run.
+        const reopenedTask = m.toolKind === "background_task" &&
+          status === "in_progress" && isSettledToolStatus(m.status);
         return {
           ...m,
           status,
@@ -619,16 +623,16 @@ export function applyUpdate(
           nativeToolCallId: upd2.nativeToolCallId ?? m.nativeToolCallId,
           title: upd2.title ?? m.title,
           toolKind: upd2.kind ?? m.toolKind,
-          content: upd2.content ?? m.content,
-          resourceLinks: m.resultRetracted ? undefined : mergeResourceLinks(m.resourceLinks, upd2.resourceLinks),
+          content: upd2.content ?? (reopenedTask ? undefined : m.content),
+          resourceLinks: m.resultRetracted || reopenedTask ? undefined : mergeResourceLinks(m.resourceLinks, upd2.resourceLinks),
           locations: upd2.locations ?? m.locations,
           rawInput: upd2.rawInput ?? m.rawInput,
-          rawOutput: mergeRawOutput(m.rawOutput, upd2.rawOutput),
+          rawOutput: mergeRawOutput(reopenedTask ? undefined : m.rawOutput, upd2.rawOutput),
           mergeKey: upd2.mergeKey ?? m.mergeKey,
           updatedAt,
           settledAt:
-            m.settledAt ??
-            (isSettledToolStatus(status) ? updatedAt : undefined),
+            reopenedTask ? undefined : (m.settledAt ??
+            (isSettledToolStatus(status) ? updatedAt : undefined)),
         };
       });
     }

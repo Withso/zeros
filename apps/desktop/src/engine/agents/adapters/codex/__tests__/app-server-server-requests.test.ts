@@ -33,6 +33,7 @@ vi.mock("../../shared/login-shell-path", () => ({
 import {
   bootCodexAppServerRuntime,
   redactCodexRpcLine,
+  type CodexServerNotificationParams,
   type CodexUserInputRequest,
 } from "../app-server";
 
@@ -283,6 +284,60 @@ describe("codex app-server initiated requests", () => {
     await vi.waitFor(() => expect(received).toEqual(notifications));
     await runtime.dispose();
   });
+
+  it.each([
+    { type: "completed", text: "A predicted follow-up" },
+    { type: "completed", text: null },
+    { type: "failed" },
+  ] as const)(
+    "forwards 0.161.0 prediction results ($type, $text) through typed subscriptions",
+    async (result) => {
+      const fake = createFakeProcess();
+      harness.proc = fake.proc;
+      const runtime = await bootCodexAppServerRuntime({
+        cwd: "/tmp/project",
+        clientInfo: { name: "Zeros-test", version: "0.0.0" },
+      });
+      type Prediction =
+        CodexServerNotificationParams<"thread/prediction/updated">;
+      const received: Prediction[] = [];
+      const retained: Prediction[] = [];
+      const unsubscribe = runtime.onNotificationTyped(
+        "thread/prediction/updated",
+        (params) => received.push(params),
+      );
+      runtime.onNotificationTyped("thread/prediction/updated", (params) =>
+        retained.push(params),
+      );
+      const params = {
+        threadId: "thread-1",
+        sourceTurnId: "turn-1",
+        result,
+      } satisfies Prediction;
+
+      try {
+        fake.send({
+          jsonrpc: "2.0",
+          method: "thread/prediction/updated",
+          params,
+        });
+        await vi.waitFor(() => expect(received).toEqual([params]));
+        expect(retained).toEqual([params]);
+
+        unsubscribe();
+        const nextParams = { ...params, sourceTurnId: "turn-2" };
+        fake.send({
+          jsonrpc: "2.0",
+          method: "thread/prediction/updated",
+          params: nextParams,
+        });
+        await vi.waitFor(() => expect(retained).toEqual([params, nextParams]));
+        expect(received).toEqual([params]);
+      } finally {
+        await runtime.dispose();
+      }
+    },
+  );
 
   it("answers currentTime/read instead of rejecting a native Codex request", async () => {
     const fake = createFakeProcess();

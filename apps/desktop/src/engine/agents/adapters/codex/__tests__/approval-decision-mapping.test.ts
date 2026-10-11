@@ -84,6 +84,36 @@ describe("mapResponseToCodexDecision — command & file-change (4 options × 2 m
 });
 
 describe("Codex ordered command approval decisions", () => {
+  it.each([
+    { read: null, write: ["/repo/shared/build"] },
+    { read: null, write: null, entries: [{ path: { type: "path", path: "/repo/shared/build" }, access: "write" }] },
+  ])("presents a single filesystem write escalation without changing its native grant (%j)", fileSystem => {
+    const params = { itemId: "write-access", command: "pnpm build --out ../shared/build", cwd: "/repo/workspace",
+      additionalPermissions: { network: null, fileSystem } };
+    const request = mapApprovalToCanonical({ zerosSessionId: "session", cwd: "/repo/workspace" } as never,
+      { permissionId: "permission", method: EXEC, params } as never);
+    expect(request.title).toBe("Do you want to allow write access outside the workspace?");
+    expect(request.contextItems).toEqual(["Write · ../shared/build"]);
+    expect(request.toolCall.rawInput).toMatchObject({ command: params.command, additionalPermissions: params.additionalPermissions,
+      codexWriteAccessPath: "../shared/build" });
+    expect(mapResponseToCodexDecision(pending(EXEC, params), selected("accept"))).toEqual({ decision: "accept" });
+    expect(mapResponseToCodexDecision(pending(EXEC, params), selected("decline"))).toEqual({ decision: "decline" });
+  });
+
+  it.each([
+    { additionalPermissions: { network: { enabled: true }, fileSystem: { write: ["/repo/shared/build"] } } },
+    { additionalPermissions: { fileSystem: { read: ["/repo/shared/input"], write: ["/repo/shared/build"] } } },
+    { additionalPermissions: { fileSystem: { write: ["/repo/shared/a", "/repo/shared/b"] } } },
+    { additionalPermissions: { fileSystem: { write: ["/repo/workspace/build"] } } },
+    { additionalPermissions: { fileSystem: { entries: [{ path: { type: "glob_pattern", pattern: "/repo/**" }, access: "write" }] } } },
+    { kind: "writeStdin", additionalPermissions: { fileSystem: { write: ["/repo/shared/build"] } } },
+  ])("keeps other command approvals on their existing presentation (%j)", extra => {
+    const request = mapApprovalToCanonical({ zerosSessionId: "session", cwd: "/repo/workspace" } as never,
+      { permissionId: "permission", method: EXEC, params: { itemId: "command", cwd: "/repo/workspace", command: "pnpm test", ...extra } } as never);
+    expect(request.title).toBeUndefined();
+    expect(request.toolCall.rawInput).toMatchObject({ command: "pnpm test" });
+    expect(request.toolCall.rawInput).not.toHaveProperty("codexWriteAccessPath");
+  });
   const execAmendment = {
     acceptWithExecpolicyAmendment: {
       execpolicy_amendment: ["git", "status"],

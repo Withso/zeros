@@ -9,11 +9,15 @@ import { getSetting, setSetting } from "../../platform/settings";
 const CLAUDE_IDLE_TIMEOUT_KEY = "claude-idle-timeout-minutes";
 /** Claude Code's repository-scoped native auto-memory switch. */
 const CLAUDE_AUTO_MEMORY_KEY = "claude-auto-memory-enabled";
+/** Whether Claude Code may compact idle conversations using native policy. */
+const CLAUDE_IDLE_COMPACTION_KEY = "claude-idle-compaction-enabled";
 
 /** The default balances quick follow-up turns with bounded process memory. */
 export const DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES = 30;
 /** Claude Code enables auto memory natively unless the user turns it off. */
 export const DEFAULT_CLAUDE_AUTO_MEMORY_ENABLED = true;
+/** Idle compaction is opt-in; On restores Claude Code's native behavior. */
+export const DEFAULT_CLAUDE_IDLE_COMPACTION_ENABLED = false;
 
 /** The complete, intentionally bounded set shown in Settings. */
 export const CLAUDE_IDLE_TIMEOUT_OPTIONS = [
@@ -68,6 +72,18 @@ export function getClaudeAutoMemoryEnabled(): boolean {
 
 export function setClaudeAutoMemoryEnabled(enabled: boolean): void {
   setSetting(CLAUDE_AUTO_MEMORY_KEY, enabled === true);
+  notify();
+}
+
+export function getClaudeIdleCompactionEnabled(): boolean {
+  return getSetting<unknown>(
+    CLAUDE_IDLE_COMPACTION_KEY,
+    DEFAULT_CLAUDE_IDLE_COMPACTION_ENABLED,
+  ) === true;
+}
+
+export function setClaudeIdleCompactionEnabled(enabled: boolean): void {
+  setSetting(CLAUDE_IDLE_COMPACTION_KEY, enabled === true);
   notify();
 }
 
@@ -135,6 +151,25 @@ export function useClaudeAutoMemoryEnabled(): [
   }, []);
   const set = useCallback((enabled: boolean) => {
     setClaudeAutoMemoryEnabled(enabled);
+  }, []);
+  return [value, set];
+}
+
+/** Hook: allow Claude Code's native idle-compaction behavior. */
+export function useClaudeIdleCompactionEnabled(): [
+  boolean,
+  (enabled: boolean) => void,
+] {
+  const [value, setValue] = useState<boolean>(getClaudeIdleCompactionEnabled);
+  useEffect(() => {
+    const sync = () => setValue(getClaudeIdleCompactionEnabled());
+    listeners.add(sync);
+    return () => {
+      listeners.delete(sync);
+    };
+  }, []);
+  const set = useCallback((enabled: boolean) => {
+    setClaudeIdleCompactionEnabled(enabled);
   }, []);
   return [value, set];
 }

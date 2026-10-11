@@ -84,6 +84,13 @@ describe("modePolicyFor", () => {
 });
 
 describe("buildThreadStartParams", () => {
+  it.each(MODES)("keeps web search inherited and native permissions omitted for %s", mode => {
+    const params = buildThreadStartParams("/tmp", undefined, mode);
+    expect(params).not.toHaveProperty("config.web_search");
+    expect(params).not.toHaveProperty("webSearch");
+    expect(params).not.toHaveProperty("permissions");
+    expect(params).toMatchObject({ sandbox: modePolicyFor(mode).sandboxMode, approvalPolicy: modePolicyFor(mode).approvalPolicy });
+  });
   it("disables provider fallback when a qualification requires the exact model", () => {
     expect(buildThreadStartParams("/tmp", {
       OPENAI_MODEL: "gpt-5.6-sol", ZEROS_REQUIRE_EXACT_MODEL: "1",

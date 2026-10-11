@@ -14,6 +14,28 @@ import type { AgentToolMessage } from "../use-agent-session";
 import { BackgroundTasksWaitingLine } from "../background-task-activity";
 
 describe("background task transcript routing", () => {
+  it.each([undefined, 1, 2, 3, "2", -1, 2.5])("shows only a resumed native run ordinal (%s)", runOrdinal => {
+    const message = { id: "tool-task", kind: "tool", toolCallId: "stable-task", title: "Background Task",
+      toolKind: "background_task", status: "in_progress", createdAt: 1, updatedAt: 1,
+      rawInput: { taskId: "native-task", name: "pnpm dev --watch", runOrdinal },
+    } as AgentToolMessage;
+    const record = (BackgroundTaskRecord as unknown as { type: (props: { message: AgentToolMessage; ctx: never }) => ReactElement }).type({ message, ctx: {} as never });
+    const html = renderToStaticMarkup(cloneElement(record, { defaultOpen: true }));
+    if (typeof runOrdinal === "number" && Number.isSafeInteger(runOrdinal) && runOrdinal > 1) {
+      expect(html).toContain("data-background-task-run");
+      expect(html).toContain(`>${runOrdinal}</span>`);
+    } else expect(html).not.toContain("data-background-task-run");
+    expect(record.props.message.toolCallId).toBe("stable-task");
+  });
+
+  it("uses the native agent type in a background agent target without changing the details title", () => {
+    const message = { id: "tool-task", kind: "tool", toolCallId: "task", title: "Background Task",
+      toolKind: "background_task", status: "in_progress", createdAt: 1, updatedAt: 1,
+      rawInput: { taskId: "native-task", name: "Audit flaky tests", subagentType: "Explore" },
+    } as AgentToolMessage;
+    const record = (BackgroundTaskRecord as unknown as { type: (props: { message: AgentToolMessage; ctx: never }) => ReactElement }).type({ message, ctx: {} as never });
+    expect(record.props.meta.target).toBe("Explore · Audit flaky tests");
+  });
   it("routes the canonical kind to the quiet expandable record", () => {
     const message: AgentToolMessage = {
       id: "tool-task-1",

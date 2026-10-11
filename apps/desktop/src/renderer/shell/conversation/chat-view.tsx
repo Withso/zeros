@@ -224,7 +224,7 @@ function priorIdentityOf(chat: ChatThread): PriorChatIdentity {
  *  the composer is the first thing the user sees, not an intermediate state.
  *
  *  The lookup priority mirrors `pickAgentForNewChat` in default-agent.ts:
- *  explicit default > Codex > Claude > Cursor > first, relaxing from
+ *  explicit default > Claude > Codex > Cursor > first, relaxing from
  *  enabled+runnable down to best-detected so the registry ALWAYS binds — a
  *  machine with nothing signed in gets the composer's "Sign in required" flow,
  *  never a dead pane.
