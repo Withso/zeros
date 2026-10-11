@@ -15,6 +15,13 @@ import sys
 
 sys.dont_write_bytecode = True
 
+# Boat installs its own root key on every machine during boot. Builder
+# sanitation removes it before capture and the kit checks the saved tree, so a
+# cold boot from the snapshot may show only the provider's reinstalled key.
+COLD_BOOT = '{{BOOT}}' == 'cold'
+PRIVATE_FILES = ('.ssh/authorized_keys', '.git-credentials', '.netrc', '.npmrc', '.pypirc', '.bash_history', '.zsh_history',
+                 '.claude/.credentials.json', '.codex/auth.json', '.cursor/auth.json', '.config/cursor/auth.json')
+
 
 def verify_protected_ancestry(app):
     # Check every protected path, including its root and all intermediate
@@ -22,6 +29,17 @@ def verify_protected_ancestry(app):
     for entry in app.compat['protectedFiles']:
         with app.directory(entry['path'].rsplit('/', 1)[0] or '/'):
             pass
+
+
+def private_state_clean(root='/', cold_boot=COLD_BOOT):
+    for home in ('root', 'home/user'):
+        for name in PRIVATE_FILES:
+            if cold_boot and home == 'root' and name == '.ssh/authorized_keys':
+                continue
+            target = Path(root) / home / name
+            if os.path.lexists(target) and not (target.is_file() and target.stat().st_size == 0):
+                return False
+    return True
 
 
 def verify():
@@ -90,12 +108,7 @@ def verify_host(bootstrap, app):
     for name in ('/srv/zeros/files/repos', '/srv/zeros/files/.zeros-setup', '/srv/zeros/repos', '/srv/zeros/setup', '/srv/zeros/log', '/srv/zeros/home/agent', '/srv/zeros/home/capture'):
         require(not os.listdir(name), 'base_compatibility')
     require(set(os.listdir('/srv/zeros/state')) <= {'workspaces'} and not os.listdir('/srv/zeros/state/workspaces'), 'base_compatibility')
-    private = ('.ssh/authorized_keys', '.git-credentials', '.netrc', '.npmrc', '.pypirc', '.bash_history', '.zsh_history',
-               '.claude/.credentials.json', '.codex/auth.json', '.cursor/auth.json', '.config/cursor/auth.json')
-    for home in ('/root', '/home/user'):
-        for name in private:
-            target = Path(home) / name
-            require(not os.path.lexists(target) or (target.is_file() and target.stat().st_size == 0), 'base_compatibility')
+    require(private_state_clean(), 'base_compatibility')
     compatibility_raw = app.read('/opt/zeros-bootstrap/compatibility.json', 65536, 0o444)
     require('bc1-' + hashlib.sha256(compatibility_raw).hexdigest() == app.compat_id, 'base_compatibility')
     return {'schema': 'zeros.base-verification/v1', 'baseCompatibilityId': app.compat_id,
