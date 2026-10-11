@@ -56,8 +56,9 @@ describe("cloud worker attestation", () => {
     const proof = JSON.parse(fs.readFileSync(tree.physical(proofPath), "utf8"));
     expect(proof).toMatchObject({ version: 2, ...report.runtime, profile: report.profile });
     expect(proof).not.toHaveProperty("buildSha256");
-    expect(tree.calls.filter(call => call.args.includes("--qualify")).map(call => call.args[0])).toEqual([
-      `${tree.root}/lib/zeros/cloud-engine-launcher.mjs`, `${tree.root}/lib/zeros/cloud-setup-process.mjs`]);
+    // The engine monitor enters the original host itself; the attester stays outside.
+    expect(tree.calls.filter(call => /^--(host-)?qualify$/.test(call.args[1] ?? "")).map(call => call.args)).toEqual([
+      [`${tree.root}/lib/zeros/cloud-engine-launcher.mjs`, "--host-qualify"], [`${tree.root}/lib/zeros/cloud-setup-process.mjs`, "--qualify"]]);
     expect(tree.calls.every(call => call.file === `${tree.root}/bin/node`)).toBe(true);
     for (const call of tree.calls) expect(Object.keys(call.options.env as object).sort()).toEqual([
       "HOME", "PATH"]);

@@ -22,7 +22,7 @@ import {
 import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CloudEngineCgroup, CloudRuntimeCgroup } from "./cloud-engine-cgroup.mjs";
+import { CloudEngineCgroup, CloudRuntimeCgroup, enterCloudRootHost } from "./cloud-engine-cgroup.mjs";
 import {
   cloudEngineViewArguments,
   cloudEngineViewEnvironment,
@@ -632,11 +632,18 @@ export async function launchCloudEngine({
   }
 }
 
-if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
-  const args = process.argv.slice(2);
+/** Fixed command-line entries. Workspace attestation runs outside the
+ * protected host, so `--host-qualify` moves only this small root process into
+ * the original host before the unchanged placement gate, as the runtime
+ * self-test does. Returns null for an unknown entry. */
+export function launchCloudEngineEntry(args, {
+  launch = launchCloudEngine, enterHost = enterCloudRootHost, resolveRuntime = resolveCloudRuntime,
+} = {}) {
+  if (args.length === 1 && args[0] === "--host-qualify") return (async () => {
+    const runtime = resolveRuntime();
+    enterHost(runtime);
+    return launch({ runtime, operation: "qualify" });
+  })();
   const operation =
     args.length === 0
       ? "serve"
@@ -647,9 +654,17 @@ if (
         : args.length === 1 && args[0] === "--probe-cursor"
           ? "probe-cursor"
         : null;
-  if (!operation) process.exitCode = 125;
+  return operation ? launch({ operation }) : null;
+}
+
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  const launched = launchCloudEngineEntry(process.argv.slice(2));
+  if (!launched) process.exitCode = 125;
   else
-    launchCloudEngine({ operation }).then(
+    launched.then(
       (code) => {
         process.exitCode = code;
       },

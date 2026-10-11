@@ -181,6 +181,14 @@ dispatcher. Runtime self-test is `R/bin/node R/lib/zeros/runtime-self-test.mjs` 
 emits a qualification diagnostic. These executable entrypoints belong to their
 runtime/base implementation changes.
 
+The engine launcher admits a root monitor only inside the original
+`zeros-host.service/host` cgroup. Installer, setup, self-test and attester
+orchestrators run outside it, so engine qualification goes through a small
+fixed root wrapper that first moves only itself into that host after the
+checked placement preconditions: the self-test's `--host-qualify` entry, and
+the launcher's own `--host-qualify` entry spawned by workspace attestation.
+The launcher's placement gate is unchanged for every other entry.
+
 The `cursor_load` offline artifact closure check verifies the shipped Linux
 platform payload as the non-root engine identity (10003), executing its actual `rg --version` and `cursorsandbox --help`
 entrypoints under bundled Node. Resolved files must stay inside R. The bundle

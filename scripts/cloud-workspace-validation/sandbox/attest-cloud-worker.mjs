@@ -341,8 +341,8 @@ function verifyV4Helpers(runtime) {
   return { trusted, deploymentTrusted };
 }
 
-function runV4Probe(runtime, helper, timeout, check) {
-  const result = spawnSync(runtime.node, [helper, "--qualify"], { encoding: "utf8", timeout, maxBuffer: MAX_OUTPUT,
+function runV4Probe(runtime, helper, timeout, check, entry = "--qualify") {
+  const result = spawnSync(runtime.node, [helper, entry], { encoding: "utf8", timeout, maxBuffer: MAX_OUTPUT,
     env: { PATH: `${runtime.binRoot}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: "/root" } });
   requireCloudV4Check(result.error?.code !== "ETIMEDOUT", "timeout");
   requireCloudV4Check(!result.signal, "process_signal");
@@ -480,7 +480,9 @@ function attestV4CloudWorker() {
     const helpers = verifyV4Helpers(runtime);
     stage = "qualify_engine";
     next(stage);
-    const qualification = runV4Probe(runtime, runtime.helpers.launcher, 180_000, "engine_lifecycle");
+    // The launcher admits a root monitor only inside the original host; setup
+    // and this attester run outside it, like the runtime self-test.
+    const qualification = runV4Probe(runtime, runtime.helpers.launcher, 180_000, "engine_lifecycle", "--host-qualify");
     requireCloudV4Check(qualification?.identity?.hostUid === 10003 && qualification?.identity?.namespaceUid === 10003, "uid_map");
     requireCloudV4Check(qualification?.identity?.qualified === true && qualification.identity.noNewPrivs === 1 &&
       qualification.identity.seccompMode === 2 && exactKeys(qualification.identity.capabilities, ["effective", "permitted", "inheritable", "bounding", "ambient"]) &&
