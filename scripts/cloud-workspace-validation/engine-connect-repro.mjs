@@ -8,7 +8,7 @@ import { parseEnv } from "node:util";
 import { BoatApiClient, BOAT_RESOURCE_ID_PATTERN } from "../../apps/control-plane/src/cloud-workspaces/boat-client.ts";
 import { RuntimeBaseStatusSchema } from "../../apps/control-plane/src/cloud-workspaces/runtime-contract.ts";
 import { templateSetupReproConfig, privateFile, newTemplateSetupJournal, templateSetupForkBody,
-  recoverFork, cleanupTemplateSetupFork, readTemplateSetupSource, templateSetupErrorDiagnostic } from "./template-setup-repro.mjs";
+  recoverFork, requireUnmonitoredFork, cleanupTemplateSetupFork, readTemplateSetupSource, templateSetupErrorDiagnostic } from "./template-setup-repro.mjs";
 import { sanitizeEngineConnectProbe } from "./engine-connect-probe.mjs";
 import { pythonProbe } from "./boat-image/runtime-base-v4.ts";
 
@@ -113,6 +113,7 @@ export async function runEngineConnectRepro(journal, material, billingOrg, deps)
       journal.forkBody = templateSetupForkBody(material);
       journal.phase = "fork"; journal.createAttempted = true; deps.save(journal);
       await recoverFork(journal, deps);
+      await requireUnmonitoredFork(journal, deps);
       await deps.request(`/sandboxes/${journal.childId}`, { method: "PATCH", body: { name: `zeros-v2-test-engine-connect-${journal.id}` } });
       journal.phase = "bootstrap"; deps.save(journal);
       await deps.ready(journal, material);

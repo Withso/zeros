@@ -218,9 +218,13 @@ existing key; that replay, or a sandbox that omits the setting, fails closed
 (`provider_monitoring_unconfirmed`, or builder `monitoring_unconfirmed`) with
 its identity kept for cleanup. Starting and renewing existing allocations is
 unchanged: a sandbox's setting is fixed at creation, so monitored allocations
-keep it until they are replaced. Turning on Boat's account-level **Monitoring
-off** also covers sandboxes that release tooling creates; their admission does
-not yet verify the setting.
+keep it until they are replaced. The template-setup, engine-connect and
+workspace-performance validation forks apply the same request and verification
+before any setup material. The retired release-worker producers create no new
+sandboxes; their journals serve cleanup only. The base-image kit's builder
+receives no setup material and is unchanged; Boat's account-level **Monitoring
+off** covers it for new builders, but is not evidence for any existing or
+replayed allocation.
 
 ## Health alerts
 

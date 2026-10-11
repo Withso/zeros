@@ -24,7 +24,8 @@ function fixture(state = "archived") {
     if (url.startsWith("/deletion-operations/")) return { operation: { id: `bdop_${"d".repeat(32)}`, targetId: childId,
       kind: "sandbox", status: "blocked", stage: "waiting_for_uploads" } };
     if (deleted && url === `/sandboxes/${childId}`) throw new CloudProviderError("provider_not_found", "private", false, { httpStatus: 404 });
-    return { sandbox: { id: sourceId, state, snapshotAvailable: true, lastSnapshotStatus: "completed", team: { id: billingOrg } } };
+    return { sandbox: { id: url === `/sandboxes/${childId}` ? childId : sourceId, state, snapshotAvailable: true,
+      lastSnapshotStatus: "completed", team: { id: billingOrg }, monitoring: false } };
   });
   const deps = { request, save: vi.fn(), diagnose: vi.fn(), ready: vi.fn(), probe: vi.fn(async () => emptyProbe), wait: async () => {} };
   return { journal, material, billingOrg, sourceId, childId, deps };
@@ -49,7 +50,7 @@ describe("engine connection operator diagnostics", () => {
     expect(result.cleanupStorageStage).toBe("waiting_for_uploads");
     expect(result.failedChecks).toEqual(["probe_failed"]);
     expect(f.deps.request).toHaveBeenCalledWith(`/sandboxes/${f.sourceId}/fork`, expect.objectContaining({
-      body: { type: "default", ttlSeconds: 1800, noEnv: true, env: {} }, idempotencyKey: expect.stringMatching(/^zeros-v2-test-/) }));
+      body: { type: "default", ttlSeconds: 1800, noEnv: true, env: {}, monitoring: false }, idempotencyKey: expect.stringMatching(/^zeros-v2-test-/) }));
     expect(f.deps.request).not.toHaveBeenCalledWith(`/sandboxes/${f.sourceId}`, expect.objectContaining({ method: "DELETE" }));
   });
   it("inspects a running source without starting an engine or changing its lifecycle", async () => {
