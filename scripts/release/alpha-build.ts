@@ -21,16 +21,18 @@ const producers = {
     steps: ["Build and verify the exact-source runtime", "Save runtime bundle outputs"] },
 } as const;
 export const ALPHA_BUILD_WAIT_MS = 45 * 60_000;
+export const ALPHA_PROOF_RECHECK_MS = 10 * 60_000;
 
 /** Reusable publishers retain the original push/main parent. Counters are
  * authenticated as well as source, path and attempt; no other run can supply
  * a build or a version. */
-export async function authenticatedAlphaParent(env: NodeJS.ProcessEnv, read: Read) {
+export async function authenticatedAlphaParent(env: NodeJS.ProcessEnv, read: Read, options: { waiting?: boolean } = {}) {
   const candidate = releaseSource(env), run = await read(`/actions/runs/${env.GITHUB_RUN_ID}`);
   requireCheck(await automaticAlpha(candidate, env, async () => run) && run.name === "Release (alpha)" &&
     counter.safeParse(env.GITHUB_RUN_NUMBER).success && run.run_number === Number(env.GITHUB_RUN_NUMBER) &&
-    run.status === "in_progress" && run.conclusion === null, "Automatic Alpha parent identity or current attempt is invalid");
-  return run as { id: number; run_attempt: number; run_number: number };
+    (run.status === "in_progress" || options.waiting === true && run.status === "waiting") && run.conclusion === null,
+  "Automatic Alpha parent identity or current attempt is invalid");
+  return run as { id: number; run_attempt: number; run_number: number; status: "in_progress" | "waiting" };
 }
 
 function producerJob(kind: Kind, jobs: any[], env: NodeJS.ProcessEnv) {
@@ -55,19 +57,23 @@ function producerJob(kind: Kind, jobs: any[], env: NodeJS.ProcessEnv) {
 }
 
 async function buildSnapshot(kind: Kind, env: NodeJS.ProcessEnv, read: Read): Promise<ProducerProof | false> {
-  const run = await authenticatedAlphaParent(env, read);
+  // A job awaiting its environment marks the live parent `waiting`. That is
+  // not ready yet, never a trust failure; terminal states still refuse.
+  const live = async () => (await authenticatedAlphaParent(env, read, { waiting: true })).status === "in_progress";
+  const run = await authenticatedAlphaParent(env, read, { waiting: true });
+  if (run.status === "waiting") return false;
   // This endpoint authenticates carried successes; never search filter=all or
   // another workflow run to replace a failed/latest producer.
   const jobs = await jobPages(read, `/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`);
   const job = producerJob(kind, jobs, env);
-  if (!job) { await authenticatedAlphaParent(env, read); return false; }
+  if (!job) { await live(); return false; }
   const list = await read(`/actions/runs/${run.id}/artifacts?per_page=100`);
   requireCheck(list && Number.isSafeInteger(list.total_count) && list.total_count >= 0 && list.total_count <= 100 &&
     Array.isArray(list.artifacts) && list.artifacts.length === list.total_count, "Alpha build artifact history is unavailable or exceeds its bound");
   const matches = list.artifacts.filter((artifact: any) => artifact?.name === `${producers[kind].artifact}-${env.GITHUB_SHA}` &&
     artifact.expired === false && artifact.workflow_run?.id === run.id && artifact.workflow_run?.head_sha === env.GITHUB_SHA && artifact.workflow_run?.head_branch === "main");
   requireCheck(matches.length === 1 && integer.safeParse(matches[0].id).success, "Alpha build artifact is missing, ambiguous or belongs to another source/run");
-  await authenticatedAlphaParent(env, read);
+  if (!await live()) return false;
   return AlphaProducerProof.parse({ version: 1, repository: env.GITHUB_REPOSITORY, branch: "main",
     sourceSha: env.GITHUB_SHA, runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT, runNumber: env.GITHUB_RUN_NUMBER,
     kind, producerId: job.id, producerAttempt: job.run_attempt ?? null, artifactId: matches[0].id });
@@ -100,15 +106,16 @@ export function createAlphaBuildMetadata(env: NodeJS.ProcessEnv) {
 
 /** Recheck the immutable artifact and producer after download. This also owns
  * runtime handoff, whose descriptor independently verifies exact-source bytes. */
-export async function validateAlphaProducerProof(proof: unknown, env: NodeJS.ProcessEnv, read: Read) {
+export async function validateAlphaProducerProof(proof: unknown, env: NodeJS.ProcessEnv, read: Read, options: Parameters<typeof poll>[1] = {}) {
   const parsed = AlphaProducerProof.safeParse(proof);
   requireCheck(parsed.success, "Alpha build producer proof is invalid");
   const recorded = parsed.data;
   requireCheck(recorded.repository === env.GITHUB_REPOSITORY && recorded.branch === "main" && recorded.sourceSha === env.GITHUB_SHA &&
     recorded.runId === env.GITHUB_RUN_ID && recorded.runAttempt === env.GITHUB_RUN_ATTEMPT && recorded.runNumber === env.GITHUB_RUN_NUMBER,
   "Alpha build producer proof belongs to another source, run or attempt");
-  const current = await buildSnapshot(recorded.kind, env, read);
-  requireCheck(current && current.producerId === recorded.producerId && current.producerAttempt === recorded.producerAttempt &&
+  // The same environment wait can recur after download; wait within a bound.
+  const current = await poll(() => buildSnapshot(recorded.kind, env, read), { attempts: 60, timeoutMs: ALPHA_PROOF_RECHECK_MS, ...options });
+  requireCheck(current.producerId === recorded.producerId && current.producerAttempt === recorded.producerAttempt &&
     current.artifactId === recorded.artifactId, "Alpha build producer or artifact changed after download");
   return recorded;
 }

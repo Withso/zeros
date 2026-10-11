@@ -27,6 +27,34 @@ function fixture() {
 }
 
 describe("same-run Alpha producer readiness", () => {
+  it("rechecks a downloaded proof through an environment approval wait, within its bound", async () => {
+    const test = fixture();
+    const proof = await waitForAlphaBuild("desktop", env, test.read, { sleep: vi.fn(async () => {}), attempts: 1 });
+    test.state.parent.status = "waiting";
+    const sleep = vi.fn(async () => { test.state.parent.status = "in_progress"; });
+    await expect(validateAlphaProducerProof(proof, env, test.read, { sleep })).resolves.toEqual(proof);
+    expect(sleep).toHaveBeenCalledOnce();
+    test.state.parent.status = "waiting";
+    await expect(validateAlphaProducerProof(proof, env, test.read, { sleep: vi.fn(async () => {}), attempts: 3 }))
+      .rejects.toThrow(/timed out/);
+  });
+  it.each([["completed", "success"], ["completed", "cancelled"], ["queued", null]])(
+    "still refuses a %s/%s parent at once instead of waiting", async (status, conclusion) => {
+      const test = fixture();
+      Object.assign(test.state.parent, { status, conclusion });
+      const sleep = vi.fn(async () => {});
+      await expect(waitForAlphaBuild("desktop", env, test.read, { sleep, attempts: 3 })).rejects.toThrow(/parent identity or current attempt/);
+      expect(sleep).not.toHaveBeenCalled();
+    },
+  );
+  it("waits for the authenticated parent to leave an environment approval wait", async () => {
+    const test = fixture();
+    test.state.parent.status = "waiting";
+    const sleep = vi.fn(async () => { test.state.parent.status = "in_progress"; });
+    await expect(waitForAlphaBuild("desktop", env, test.read, { sleep, attempts: 2 }))
+      .resolves.toMatchObject({ producerId: 400 });
+    expect(sleep).toHaveBeenCalledOnce();
+  });
   it.each(["desktop", "runtime"] as const)("refuses replacement or rerun of the %s producer between wait and publication", async kind => {
     for (const boundary of ["artifact", "parent attempt", "producer", "producing attempt"]) {
       const test = fixture();
