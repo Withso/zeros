@@ -184,8 +184,12 @@ suite("automatic Boat checkpoint recovery", () => {
   });
   it("bounds a capacity wait and keeps the source quarantined after its deadline", async () => {
     const subject = await exhaust(); await drain();
-    await pool.query("UPDATE cloud_workspace_quotas SET max_storage_mib=20480 WHERE org_id=$1", [fixture.organizationId]);
+    // Numeric limits are not enforced; a missing quota record still holds recovery for capacity.
+    await pool.query("DELETE FROM cloud_workspace_quotas WHERE org_id=$1", [fixture.organizationId]);
     await subject.runOnce();
+    expect((await pool.query("SELECT last_error_code FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].last_error_code)
+      .toBe("recovery_waiting_for_capacity");
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_generations WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].n).toBe(1);
     await pool.query("UPDATE cloud_workspace_restore_incidents SET deadline_at=now()-interval '1 second',next_attempt_at=now() WHERE workspace_id=$1", [fixture.workspaceId]);
     await worker("setup_immutable_runtime_missing").runOnce();
     expect((await pool.query("SELECT last_error_code FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].last_error_code).toBe("recovery_needed");
