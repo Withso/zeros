@@ -47,7 +47,16 @@ digest and final manifest digest are stored outside the VM. The source ref is
 `boat-template:<sandboxId>`; there is no named snapshot or verifier VM.
 Per the ACD-11/D8 capture decision, the final evidence is the sanitation manifest
 plus the stopped/ARCHIVED sandbox confirmed by B7's provider GET. There is no
-separate snapshot operation.
+separate snapshot operation. Boat's stop saves the disk first and reports itself
+as an operation: B7 pins the stop it issued or joined (`GET
+/sandboxes/{id}/stops/{stopId}`), waits up to ten minutes within the build
+deadline while it is `pending` or `failing` (Boat retries a refused save itself),
+and requires the archived sandbox's `snapshotAvailable` with a `completed`
+`lastSnapshotStatus`, the same evidence a template fork checks on its source. A
+save that is still refused at the bound, or a missing/failed snapshot, is
+`template_capture_failed`; any other stop failure, including a resume that
+supersedes the stop, is `template_stop_failed`. B7 never sends `force`, which
+would keep an older snapshot and discard the sanitized disk.
 
 Running builds have a 30-minute deadline; time in the queue does not count.
 Installer, repository and integrity calls also have bounded transport timeouts.

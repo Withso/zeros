@@ -16,7 +16,7 @@ import {
   type TemplateAllocation,
 } from "./computer-template-capacity.js";
 import { ComputerTemplateLogRedactor } from "./computer-template-logs.js";
-import { computerTemplateBuilderIntent } from "./computer-template-boat.js";
+import { BuilderVmError, computerTemplateBuilderIntent } from "./computer-template-boat.js";
 import type {
   BuilderFixedCommand,
   BuilderVm,
@@ -476,7 +476,15 @@ export class ComputerTemplateWorker {
       await this.journal.recordDigest(id, fence, manifestSha256, "manifest");
       await this.stage(claim, "stopping");
       failure = "template_stop_failed";
-      const stopped = await this.deps.vms.stop(vm);
+      // Archiving saves the whole disk, which can outlast the default VM
+      // lifecycle bound; stay within the build's own deadline.
+      const stopped = await this.deps.vms
+        .stop(vm, { timeoutMs: this.timeout(claim, 600_000), requireSnapshot: true })
+        .catch((error: unknown) => {
+          if (error instanceof BuilderVmError && error.check === "stop_snapshot_failed")
+            throw new BuildFailure("template_capture_failed");
+          throw error;
+        });
       if (stopped.archived !== true)
         throw new BuildFailure("template_capture_failed");
       const stoppedAt = await this.journal.recordStopped(id);

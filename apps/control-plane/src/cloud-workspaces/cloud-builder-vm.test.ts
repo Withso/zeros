@@ -118,6 +118,73 @@ describe("short-lived Boat builder VMs", () => {
     await expect(f.vms.delete(vm)).rejects.toMatchObject({ check: "timeout" });
     expect((await f.operations.find(vm.operationKey))?.state).toBe("deleting");
   });
+  describe("Boat stop operations", () => {
+    const completedSnapshot = { snapshotAvailable: true, lastSnapshotStatus: "completed" };
+    async function stopping(statuses: string[], states = ["running", "archiving"]) {
+      const f = builderFixture(); const vm = await f.vms.create({ ...builderIntent, purpose: "computer-build" });
+      Object.assign(f.state, { stopId: "stop_3f9a1c2e7b4d5a60", stopStatuses: statuses, states, snapshot: completedSnapshot });
+      return { f, vm };
+    }
+    it("waits past the default lifecycle bound for a pending archive within the caller's bound", async () => {
+      const { f, vm } = await stopping([...Array(6).fill("pending"), "completed"]);
+      await expect(f.vms.stop(vm, { timeoutMs: 20_000, requireSnapshot: true })).resolves.toEqual({ archived: true });
+      expect(f.waits.reduce((total, ms) => total + ms, 0)).toBeGreaterThan(3000);
+      expect((await f.operations.find(vm.operationKey))?.state).toBe("archived");
+      expect(f.state.stopBodies).toEqual([null]);
+    });
+    it("reports a save Boat keeps refusing as a snapshot failure at the bound, never forcing it", async () => {
+      const { f, vm } = await stopping(["failing"], ["running"]);
+      await expect(f.vms.stop(vm, { timeoutMs: 5000, requireSnapshot: true })).rejects.toMatchObject({ check: "stop_snapshot_failed" });
+      expect(f.state.stopBodies).toEqual([null]);
+      expect(JSON.stringify(f.fetcher.mock.calls)).not.toContain("force");
+    });
+    it("recovers when Boat's own retry of a failing save succeeds", async () => {
+      const { f, vm } = await stopping(["failing", "failing", "pending", "completed"], ["running", "running", "archiving"]);
+      await expect(f.vms.stop(vm, { timeoutMs: 20_000, requireSnapshot: true })).resolves.toEqual({ archived: true });
+    });
+    it("fails when a resume supersedes the stop", async () => {
+      const { f, vm } = await stopping(["pending", "superseded"]);
+      await expect(f.vms.stop(vm, { timeoutMs: 20_000 })).rejects.toMatchObject({ check: "builder_stopped" });
+    });
+    it("refuses a stop read whose identity differs from the one issued", async () => {
+      const { f, vm } = await stopping(["pending"]);
+      f.state.stopReplyId = "stop_other";
+      await expect(f.vms.stop(vm, { timeoutMs: 20_000 })).rejects.toMatchObject({ check: "stop_unconfirmed" });
+    });
+    it("joins an archive already in progress without issuing another stop", async () => {
+      const { f, vm } = await stopping(["pending", "completed"], ["archiving"]);
+      f.fetcher.mockImplementationOnce(async () => new Response(JSON.stringify({ ok: true, sandbox: { id: BUILDER_SANDBOX,
+        state: "archiving", team: { id: BUILDER_WALLET }, stop: { id: "stop_3f9a1c2e7b4d5a60", status: "pending" } } }), { status: 200 }));
+      await expect(f.vms.stop(vm, { timeoutMs: 20_000, requireSnapshot: true })).resolves.toEqual({ archived: true });
+      expect(f.state.stopBodies).toEqual([]);
+    });
+    it.each([
+      [{ snapshotAvailable: true, lastSnapshotStatus: "failed" }],
+      [{ snapshotAvailable: false, lastSnapshotStatus: "completed" }],
+      [{}],
+    ])("refuses template capture without a completed snapshot: %j", async snapshot => {
+      const { f, vm } = await stopping(["completed"]);
+      f.state.snapshot = snapshot;
+      await expect(f.vms.stop(vm, { timeoutMs: 20_000, requireSnapshot: true })).rejects.toMatchObject({ check: "stop_snapshot_failed" });
+    });
+    it("waits for a snapshot that is still uploading after the archive", async () => {
+      const { f, vm } = await stopping(["completed"]);
+      const uploading = { snapshotAvailable: true, lastSnapshotStatus: "in_progress" };
+      f.state.snapshots = [uploading, uploading, uploading, uploading];
+      await expect(f.vms.stop(vm, { timeoutMs: 20_000, requireSnapshot: true })).resolves.toEqual({ archived: true });
+      expect(f.state.snapshots).toEqual([]);
+    });
+    it("keeps cleanup stops independent of snapshots", async () => {
+      const { f, vm } = await stopping(["completed"]);
+      f.state.snapshot = {};
+      await expect(f.vms.stop(vm)).resolves.toEqual({ archived: true });
+    });
+    it("rejects an unbounded stop timeout", async () => {
+      const { f, vm } = await stopping(["completed"]);
+      for (const timeoutMs of [0, 1_800_001, 1.5])
+        await expect(f.vms.stop(vm, { timeoutMs })).rejects.toMatchObject({ check: "input_schema" });
+    });
+  });
   it("forks an explicitly resolved template with no inherited environment and stops to archived", async () => {
     const f = builderFixture();
     const vm = await f.vms.create({ ...builderIntent, purpose: "computer-build", source: { kind: "template", templateId: "zeros-v2-test-template" } });
