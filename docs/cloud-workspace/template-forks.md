@@ -89,9 +89,9 @@ Create replays retain the accepted tuple and skip external repository lookup.
 
 `boat-template:<sandboxId>` allocations resolve through this saved generation.
 The provider verifies the source's archived snapshot and configured wallet,
-then journals a fork with finite `ttlSeconds`, `noEnv: true`, `env: {}`, the
-wallet header and the existing idempotency key. A lost reply repeats that key
-and reads the recovered child with GET. A known child is read directly. The
+then journals a fork with finite `ttlSeconds`, `noEnv: true`, `env: {}`,
+`monitoring: false`, the wallet header and the existing idempotency key. A lost
+reply repeats that key and reads the recovered child with GET. A known child is read directly. The
 child wallet must match, the child cannot be the source, and conflicting source
 echoes are rejected. The saved source and journaled request identity remain
 authoritative when Boat omits a source echo. Cleanup retains a bound child ID

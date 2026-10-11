@@ -280,23 +280,35 @@ export class BoatWorkspaceProvider
     const resolvedName = this.templateSandboxId ? null : this.options.resolveSnapshot ? await this.options.resolveSnapshot(input) : this.snapshotName;
     if (resolvedName !== this.snapshotName || (this.snapshotName?.startsWith("zeros-org-") && !this.options.resolveSnapshot))
       throw failure("provider_snapshot_identity_mismatch");
-    const body = {
+    const unmonitored = {
       type,
       ...(this.templateSandboxId ? {} : { from: resolvedName }),
       ttlSeconds,
       noEnv: true,
       env: {},
     };
-    const record = await this.options.operations.prepareCreate({
+    // Boat's process tracer keeps what processes write to pipes, terminals and
+    // sockets, which here carries prompts and admitted provider material.
+    // Disable it explicitly rather than relying on the account default.
+    const monitored = { ...unmonitored, monitoring: false };
+    const prepare = (value: typeof unmonitored) => this.options.operations.prepareCreate({
       workspaceId: input.workspaceId,
       generation: input.generation,
       idempotencyKey: input.idempotencyKey,
       requestSha256: createHash("sha256")
-        .update(JSON.stringify({ imageRef: input.imageRef, body, createAttemptJournalVersion: 1 }))
+        .update(JSON.stringify({ imageRef: input.imageRef, body: value, createAttemptJournalVersion: 1 }))
         .digest("hex"),
       legacyRequestSha256: createHash("sha256")
-        .update(JSON.stringify({ imageRef: input.imageRef, body }))
+        .update(JSON.stringify({ imageRef: input.imageRef, body: value }))
         .digest("hex"),
+    });
+    // A create journaled before this policy replays its exact original body
+    // under the same idempotency key; a different body would be a new request.
+    let body: typeof unmonitored = monitored;
+    const record = await prepare(monitored).catch(async (error: unknown) => {
+      if (!(error instanceof CloudProviderError) || error.code !== "provider_operation_conflict") throw error;
+      body = unmonitored;
+      return prepare(unmonitored);
     });
     if (record.createClosedAt) throw failure("provider_generation_retired");
     this.usable(record);

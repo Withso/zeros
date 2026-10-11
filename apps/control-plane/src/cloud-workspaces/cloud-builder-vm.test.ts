@@ -4,6 +4,17 @@ import { BuilderVmError } from "./cloud-builder-vm.js";
 import { builderFixture, builderIntent, BUILDER_SANDBOX, BUILDER_WALLET, diagnostic, encodeInstaller, installerInput } from "./cloud-builder-vm-test-fixtures.js";
 
 describe("short-lived Boat builder VMs", () => {
+  it.each([
+    ["runtime-qualification", "base"], ["runtime-qualification", "template"],
+    ["computer-build", "base"], ["computer-build", "template"],
+  ] as const)("disables process monitoring for a new %s VM from %s", async (purpose, source) => {
+    const f = builderFixture();
+    await f.vms.create({ ...builderIntent, purpose, source: source === "base" ? builderIntent.source :
+      { kind: "template", templateId: "zeros-v2-test-template" } });
+    const request = f.fetcher.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(JSON.parse(String(request?.[1]?.body)).monitoring).toBe(false);
+  });
+
   it.each(["ready", "idle", "running"])("journals before creating, verifies the wallet and accepts %s", async ready => {
     const f = builderFixture();
     f.state.states = ["provisioning", ready];
@@ -13,7 +24,7 @@ describe("short-lived Boat builder VMs", () => {
     const request = f.fetcher.mock.calls[0][1]!;
     expect(new Headers(request.headers).get("x-boat-org")).toBe(BUILDER_WALLET);
     expect(JSON.parse(String(request.body))).toEqual({ from: "zeros-v2-test-base", name: builderIntent.name,
-      type: "default", ttlSeconds: 1800, noEnv: true, env: {}, snapshots: false });
+      type: "default", ttlSeconds: 1800, noEnv: true, env: {}, snapshots: false, monitoring: false });
     await expect(f.vms.create(builderIntent)).resolves.toEqual(vm);
     expect(f.state.creates).toBe(1);
     await expect(f.vms.create({ ...builderIntent, ttlSeconds: 600 })).rejects.toMatchObject({ code: "provider_operation_conflict" });

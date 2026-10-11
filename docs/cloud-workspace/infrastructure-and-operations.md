@@ -204,6 +204,19 @@ Do not set public reliability or latency promises until measurements exist from
 representative regions, repositories, agents, stop/wake cycles, and long-lived
 connections.
 
+Boat's own monitoring is not part of this record. By default Boat's process
+tracer keeps what every sandbox process writes to a terminal, pipe or socket
+(72 hours) and the provider command history (90 days). Native agent IPC carries
+prompts and admitted provider material over pipes. Every new workspace,
+template fork and builder VM therefore requests `monitoring: false`. Boat then
+keeps no command history, process list or CPU/RAM samples for it, and its
+dashboard graphs and lost-sandbox causes are unavailable; live command output,
+lifecycle events and webhooks still work. A create journaled before this policy
+replays its original body under its existing key. A sandbox's setting is fixed
+at creation, so existing monitored allocations keep it until they are replaced.
+Turning on Boat's account-level **Monitoring off** also covers sandboxes that
+release tooling creates.
+
 ## Health alerts
 
 `/healthz` reports aggregate cloud health: `operationalState` is `healthy` or

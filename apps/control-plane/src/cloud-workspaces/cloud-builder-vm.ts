@@ -82,7 +82,10 @@ export async function prepareBuilderVmOperation(operations: BuilderVmOperationSt
   return operations.prepare(input, digest, {
     path: input.source.kind === "base" ? "/sandboxes" : `/sandboxes/${source}/fork`,
     body: { ...(input.source.kind === "base" ? { from: source } : {}), name: input.name,
-      type: "default", ttlSeconds: input.ttlSeconds, noEnv: true, env: {}, snapshots: input.purpose === "computer-build" },
+      type: "default", ttlSeconds: input.ttlSeconds, noEnv: true, env: {}, snapshots: input.purpose === "computer-build",
+      // Boat's process tracer would keep builder pipe and terminal output.
+      // Journals created before this field replay their stored request.
+      monitoring: false },
   }, tx);
 }
 
