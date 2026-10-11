@@ -80,8 +80,9 @@ visible as an operator reconciliation failure; it is never invented.
 A provider can later report less usage for a window that was already metered.
 For a running allocation, or any reading with the wrong allocation, price or
 window, that rejection remains a reconciliation failure. After an independent
-stopped observation, a final reading that stays below the confirmed meter for
-15 minutes settles at that confirmed meter. The bill is never lowered, time
+stopped observation, a lower final reading is rejected and retried. Once the
+stop was first observed at least 15 minutes earlier, a retried lower reading
+settles the allocation at its confirmed meter. The bill is never lowered, time
 after that meter is not billed, and the remaining hold is released.
 
 Actual usage beyond an authorization is recorded as platform exposure, not

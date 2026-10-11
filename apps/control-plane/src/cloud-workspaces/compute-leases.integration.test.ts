@@ -826,7 +826,7 @@ suite("managed compute lifecycle admission", () => {
       ).rows[0].state,
     ).toBe("settled");
   });
-  it("settles at the last confirmed meter only after a stopped VM's final reading stays lower for 15 minutes", async () => {
+  it("settles at the last confirmed meter only once a lower final reading persists 15 minutes after the stop", async () => {
     await ready();
     await age();
     provider.inspect.mockResolvedValue(resource(200));
@@ -842,11 +842,16 @@ suite("managed compute lifecycle admission", () => {
       listPriceMicroUsd: 0,
       running: false,
     }));
-    const pass = async (errorAge: string) => {
+    await coordinator.runOnce();
+    // An older, unrelated failure streak must not shorten the grace.
+    await pool.query(
+      "UPDATE managed_compute_allocation_leases SET last_error_code='compute_final_meter_unavailable',first_error_at=now()-interval '1 hour' WHERE id=$1",
+      [input.intentId],
+    );
+    const pass = async (stopAge: string) => {
       await pool.query(
-        `UPDATE managed_compute_allocation_leases SET stopped_observed_at=coalesce(stopped_observed_at,now())-interval '10 seconds',
-          first_error_at=CASE WHEN first_error_at IS NULL THEN NULL ELSE now()-$2::interval END,next_check_at=now() WHERE id=$1`,
-        [input.intentId, errorAge],
+        "UPDATE managed_compute_allocation_leases SET stopped_observed_at=now()-$2::interval,next_check_at=now() WHERE id=$1",
+        [input.intentId, stopAge],
       );
       await coordinator.runOnce();
       return (await pool.query<{ state: string; last_error_code: string | null; reservation: string; billable: string; final_reason: string | null }>(
@@ -855,9 +860,8 @@ suite("managed compute lifecycle admission", () => {
         [input.intentId],
       )).rows[0]!;
     };
-    await coordinator.runOnce();
-    for (const errorAge of ["0 seconds", "14 minutes"])
-      expect(await pass(errorAge)).toMatchObject({ last_error_code: "compute_credit_meter_rejected", reservation: "open", billable: "600" });
+    for (const stopAge of ["10 seconds", "10 seconds", "14 minutes"])
+      expect(await pass(stopAge)).toMatchObject({ last_error_code: "compute_credit_meter_rejected", reservation: "open", billable: "600" });
     expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
     expect(await pass("16 minutes")).toMatchObject({
       state: "settled", last_error_code: null, reservation: "final", billable: "600", final_reason: "allocation_stopped",
@@ -882,8 +886,7 @@ suite("managed compute lifecycle admission", () => {
     await coordinator.runOnce();
     for (let attempt = 0; attempt < 2; attempt++) {
       await pool.query(
-        `UPDATE managed_compute_allocation_leases SET stopped_observed_at=coalesce(stopped_observed_at,now())-interval '10 seconds',
-          first_error_at=CASE WHEN first_error_at IS NULL THEN NULL ELSE now()-interval '1 hour' END,next_check_at=now() WHERE id=$1`,
+        "UPDATE managed_compute_allocation_leases SET stopped_observed_at=now()-interval '1 hour',next_check_at=now() WHERE id=$1",
         [input.intentId],
       );
       await coordinator.runOnce();

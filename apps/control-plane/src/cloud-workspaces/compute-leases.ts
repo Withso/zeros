@@ -59,7 +59,6 @@ type Lease = {
   lease_owner: string | null;
   lease_expires_at: Date | null;
   last_error_code: string | null;
-  first_error_at: Date | null;
 };
 type Scope = {
   user_id: string;
@@ -109,8 +108,9 @@ const ALLOCATION_RETRY_WINDOW_MS = 45 * 60_000;
 /** A final meter queries this far behind the provider clock, so it can cover
  * the first stopped observation only once this much time has passed. */
 const FINAL_METER_LAG_MS = 5000;
-/** A stopped allocation's lower final reading may be a passing provider fault;
- * it settles at the confirmed meter only after rejections last this long. */
+/** A stopped allocation's lower final reading may be a passing provider fault.
+ * It settles at the confirmed meter only this long after the stop was first
+ * observed, on a retry after an earlier rejection. */
 const REGRESSED_FINAL_METER_GRACE_MS = 15 * 60_000;
 const MAX_CHECKPOINT_DEADLINE_MS = 300_000;
 const STOP_MARGIN_MS = 15_000;
@@ -953,11 +953,12 @@ export class CloudWorkspaceComputeLeaseCoordinator {
             : {}),
       })).catch(async (error: unknown) => {
         // The provider can later report less for a window we already metered.
-        // Once that rejection outlasts the grace period, settle the stopped
-        // allocation at its confirmed meter instead of holding it open forever.
+        // Once the stop is old enough, settle the stopped allocation at its
+        // confirmed meter instead of holding it open forever. The ledger
+        // accepts only a valid stopped reading that is lower than that meter.
         if (!finalStopped || !(error instanceof CloudProviderError) || error.code !== "compute_credit_meter_rejected" ||
-            lease.last_error_code !== "compute_credit_meter_rejected" || !lease.first_error_at ||
-            observed.now.getTime() - lease.first_error_at.getTime() < REGRESSED_FINAL_METER_GRACE_MS) throw error;
+            lease.last_error_code !== "compute_credit_meter_rejected" ||
+            observed.now.getTime() - observed.stopped_observed_at!.getTime() < REGRESSED_FINAL_METER_GRACE_MS) throw error;
         await retryAbortedDatabaseTransaction(() => this.ledger.finalizeRegressed(meter));
         this.options.logger?.error("[cloud-workspace] settled a stopped allocation at its confirmed meter after the provider meter regressed");
       });
