@@ -94,7 +94,7 @@ describe("short-lived Boat builder VMs", () => {
     await f.vms.delete(vm);
     expect(f.state.deleteRequests).toBe(1);
   });
-  it.each(["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore", "retrying"])("confirms compute deletion with %s storage retention and a 404", async stage => {
+  it.each(["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"])("confirms compute deletion with %s storage retention and a 404", async stage => {
     const f = builderFixture(); const vm = await f.vms.create({ ...builderIntent, purpose: "computer-build" });
     f.state.deletionStatus = "blocked"; f.state.deletionStage = stage; f.state.deletionReleasesCompute = true;
     await expect(f.vms.delete(vm)).resolves.toBeUndefined();
@@ -112,7 +112,7 @@ describe("short-lived Boat builder VMs", () => {
     expect(f.state.deleteRequests).toBe(1);
   });
   it.each([["blocked", "unknown_stage"], ["blocked", null], ["pending", "waiting_for_uploads"],
-    ["processing", "waiting_for_uploads"], ["processing", "retrying"], ["processing", "removing"]])("does not confirm %s / %s even when the sandbox is absent", async (status, stage) => {
+    ["processing", "waiting_for_uploads"], ["blocked", "retrying"], ["processing", "retrying"], ["processing", "removing"]])("does not confirm %s / %s even when the sandbox is absent", async (status, stage) => {
     const f = builderFixture(); const vm = await f.vms.create(builderIntent);
     f.state.deletionStatus = status!; f.state.deletionStage = stage; f.state.deletionReleasesCompute = true;
     await expect(f.vms.delete(vm)).rejects.toMatchObject({ check: "timeout" });
