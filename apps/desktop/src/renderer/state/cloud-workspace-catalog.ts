@@ -386,7 +386,16 @@ export async function waitForCloudWorkspaceLifecycle(
   const terminal = operation === "wake" ? ["ready", "busy"]
     : [operation === "archive" ? "archived" : operation === "delete" ? "deleted" : "stopped"];
   if (terminal.includes(initial.status)) return initial;
-  if (initial.error) throw new Error(initial.error.message);
+  // The accepted document can still carry an earlier error, such as a past
+  // setup incident. Only a different error or a failed status ends the wait.
+  const earlier = initial.error;
+  const failure = (current: CloudWorkspaceDocument) =>
+    current.status === "failed" || (current.error !== null &&
+      (current.error.code !== earlier?.code || current.error.message !== earlier.message))
+      ? new Error(current.error?.message ?? "The cloud workspace operation failed")
+      : null;
+  const refused = failure(initial);
+  if (refused) throw refused;
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -411,7 +420,10 @@ export async function waitForCloudWorkspaceLifecycle(
         if (terminal.includes(current.status)) {
           cleanup();
           resolve(current);
-        } else if (current.error) throw new Error(current.error.message);
+        } else {
+          const error = failure(current);
+          if (error) throw error;
+        }
       } catch (error) { fail(error); }
     };
     const poll = () => {

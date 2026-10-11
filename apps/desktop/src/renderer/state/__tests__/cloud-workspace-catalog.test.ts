@@ -170,6 +170,38 @@ describe("cloud lifecycle observation", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each(["archive", "stop", "wake"] as const)("keeps waiting for %s through an error that predates the request", async operation => {
+    const earlier = { code: "setup_failed", message: "Setup failed" };
+    const accepted = { ...doc(2, operation === "archive" ? "archiving" : operation === "stop" ? "stopping" : "waking"), error: earlier };
+    const done = { ...doc(3, operation === "archive" ? "archived" : operation === "stop" ? "stopped" : "ready"), error: earlier };
+    api.read.mockResolvedValueOnce(accepted).mockResolvedValueOnce(done);
+    const settled = vi.fn(), failed = vi.fn();
+    const pending = waitForCloudWorkspaceLifecycle(target, operation, accepted).then(settled, failed);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await pending;
+    expect(failed).not.toHaveBeenCalled();
+    expect(settled).toHaveBeenCalledWith(done);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("rejects a new error or a failed status that replaces an earlier error", async () => {
+    const earlier = { code: "setup_failed", message: "Setup failed" };
+    const failed = vi.fn();
+    const pending = waitForCloudWorkspaceLifecycle(target, "archive", { ...doc(2, "archiving"), error: earlier }).catch(failed);
+    acceptCloudWorkspaceDocument({ ...doc(3, "archiving"), error: { code: "archive_failed", message: "Archive failed" } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(failed).toHaveBeenCalledWith(expect.objectContaining({ message: "Archive failed" }));
+    await pending;
+    const unchanged = vi.fn(), retried = { ...doc(4, "archiving"), error: earlier };
+    acceptCloudWorkspaceDocument(retried);
+    const second = waitForCloudWorkspaceLifecycle(target, "archive", retried).catch(unchanged);
+    acceptCloudWorkspaceDocument({ ...doc(5, "failed"), error: earlier });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(unchanged).toHaveBeenCalledWith(expect.objectContaining({ message: "Setup failed" }));
+    await second;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("bounds a hung refresh to the original elapsed deadline", async () => {
     api.read.mockReturnValue(new Promise(() => {}));
     const failed = vi.fn();
