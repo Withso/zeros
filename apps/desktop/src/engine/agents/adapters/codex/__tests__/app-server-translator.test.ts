@@ -557,6 +557,22 @@ describe("CodexAppServerTranslator", () => {
       expect(update.status).toBe("completed");
     });
 
+    it("does not replace a richer completed command with its capped persisted replay", () => {
+      const output = "Captured command output.\n".repeat(4000);
+      const item = { type: "commandExecution", id: "large-output", command: "pnpm test", status: "completed", exitCode: 0, aggregatedOutput: output };
+      env.t.handle("item/completed", { item });
+      const completed = env.out.emitted.filter((event) => event.update.sessionUpdate === "tool_call_update");
+      expect(completed.at(-1)?.update).toMatchObject({ status: "completed", rawOutput: { output, exitCode: 0 } });
+      const count = env.out.emitted.length;
+      env.t.handle("item/completed", { item: { ...item, aggregatedOutput: output.slice(0, 64 * 1024) } });
+      env.t.handle("turn/completed", { turn: { id: "turn", status: "completed", items: [{ ...item, aggregatedOutput: output.slice(0, 64 * 1024) }] } });
+      expect(env.out.emitted).toHaveLength(count);
+      // A fresh history-only observation still exposes the capped output.
+      const restored = build();
+      restored.t.handle("item/completed", { item: { ...item, aggregatedOutput: output.slice(0, 64 * 1024) } });
+      expect(restored.out.emitted.at(-1)?.update).toMatchObject({ status: "completed", rawOutput: { output: output.slice(0, 64 * 1024), exitCode: 0 } });
+    });
+
     it("appends command output deltas instead of replacing the visible log", () => {
       env.t.handle("item/started", {
         item: { type: "commandExecution", id: "cmd-stream", command: "build" },

@@ -124,6 +124,10 @@ independent.
    Prepending history must preserve the mounted turn and working-group identity
    when the older page extends an already visible group or supplies its missing
    prompt. This includes nested tool and Agent disclosures.
+   Late answer phases can split a working group. Retain row disclosure choices
+   above those groups for the mounted workspace/chat turn, including Agent
+   prompts and nested tools; prune choices when their message subtree leaves
+   the turn. Retaining a choice must not keep collapsed content mounted.
 6. A text block ending, a tool input finishing, a tool finishing and a turn
    finishing are different boundaries. Do not infer one from another.
 7. A confirmed answer remains output when a later reply continues the same
@@ -131,6 +135,13 @@ independent.
    Never downgrade earlier confirmed reports to commentary or move later work
    above them. Native end-turn metadata belongs to its own message, including
    late frames that arrive while a newer message is streaming.
+
+Codex `partial_answer` is a confirmed report in this sequence, even while the
+turn remains active. Preserve it through late phase updates and history; it
+does not settle the turn or add a second timer. The existing Agent row consumes
+native subagent `model` / `reasoningEffort` when supplied. Retain confirmed
+metadata across later activity and resume, ignore stale activity bookends, and
+omit absent fields in older records. No extra card is introduced.
 
 ### Provider boundaries
 

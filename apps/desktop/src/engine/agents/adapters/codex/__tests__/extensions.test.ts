@@ -32,6 +32,15 @@ describe("Codex extension inventory", () => {
       clock.mockRestore();
     }
   });
+  it.each(["/repo/.agents/skills/review/SKILL.md", "file:///workspace/review%20skill/SKILL.md"])("preserves the provider's skill path spelling as metadata (%s)", async (skillPath) => {
+    const requestTyped = vi.fn().mockResolvedValue({ data: [{ cwd: "/repo", errors: [], skills: [
+      { path: skillPath, name: "review", description: "Review", enabled: true },
+    ] }] });
+    const result = await readCodexExtensions({ requestTyped } as unknown as Pick<CodexAppServerHandle, "requestTyped">, "skills", "/repo");
+    expect(result.entries).toMatchObject([{ id: skillPath, sourcePath: skillPath, status: "configured" }]);
+    expect(requestTyped).toHaveBeenCalledExactlyOnceWith("skills/list", { cwds: ["/repo"], forceReload: true });
+  });
+
   it("reads effective skills including plugin ownership and disabled definitions", async () => {
     const requestTyped = vi.fn().mockResolvedValue({
       data: [

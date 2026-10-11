@@ -1,7 +1,7 @@
 # Claude SDK event coverage
 
-Audited against installed `@anthropic-ai/claude-agent-sdk` **0.3.293** and its
-bundled CLI **2.1.293**. The installed `sdk.d.ts` and wrapper are the contract;
+Audited against installed `@anthropic-ai/claude-agent-sdk` **0.3.296** and its
+bundled CLI **2.1.296**. The installed `sdk.d.ts` and wrapper are the contract;
 online documentation can describe a different version.
 
 The public `SDKMessage` union has 39 member aliases and 42 distinct type/subtype
@@ -62,6 +62,33 @@ the table and native fixtures whenever the pinned SDK changes.
 | `system/mirror_error` | handled | Generic synchronization explanation without exposing private mirror paths/keys. Does not falsely mark an ordinary file tool failed. |
 | `system/informational` | handled | Plain bounded content as an inbetween message, tool-scoped where identified. `prevent_continuation` explains runtime behavior but is not itself a terminal result. |
 | `conversation_reset` | handled | Existing idempotent accounting reset at `/clear`. **Limitation:** the SDK's fresh-transcript/title remount is unsupported; this handler does not erase saved chat history or invent a new chat. Native session binding still follows init. |
+
+## 0.3.296 field dispositions
+
+The public message inventory remains at 39 aliases and 42 discriminators.
+This upgrade keeps the existing usage-warning presentation and introduces no
+Claude screen, model-picker entry or Settings control.
+
+| Native field or surface | Disposition | Supported behavior / limitation |
+| --- | --- | --- |
+| `SDKRateLimitInfo.overageEnabled` and fuller overage warning metadata | intentionally ignored | Keep the existing usage-warning copy and behavior. The new enabled flag does not establish available credits or override policy; no new warning distinctions are adopted. |
+| `SDKControlInitializeResponse.claude_code_version` | verification-only | `claude:smoke` compares the actual control-handshake version with the pinned bundled CLI before accepting its auth rejection. Do not publish one query's version into a cache shared by other owners/custom binaries. The adapter's generic `agentInfo.version: "sdk"` remains unchanged. |
+| `AgentDefinition.autoCompactWindow` | SDK-owned | Native agent definitions may select a smaller compaction window. No host override or new preference; this is separate from idle compaction. |
+| Read `allow_large` | SDK-owned | Preserve native tool input and the ordinary Read presentation. Native execution owns read limits; no additional detail card. |
+| Hook `onFailure: "continue" \| "block"` | SDK-owned | Preserve user/admin hook policy. Existing hook failure feedback and native result handling remain authoritative; do not globally enable blocking or reinterpret cancellation. |
+| Inline `settings.sandbox` merge fixes | SDK-owned | Existing Local permissions and cloud VM isolation remain unchanged. No additional cloud agent sandbox is enabled. |
+| MCP reconnection, pagination, tool-description limits and bounded results | SDK-owned | Existing discovery/configuration and bounded supported-content handling remain. Missing optional metadata must not hide ordinary output or resource links. Native fixes do not imply a new MCP management surface. |
+| Streamed citation annotations | unsupported presentation | Retain assistant text; a citation-specific renderer is deferred. The SDK retaining annotations does not by itself give Zeros a citation UI. |
+| WebSearch result `snippet` | SDK-owned hook data | Available to PostToolUse, not `tool_use_result`; no new search-result UI follows from this field. |
+
+Restarted permission-answer validation, disabled-server handling, interrupted
+subagent shutdown, MCP recovery and native token/cost corrections arrive with
+the runtime. Existing permission, restart, replay, subagent, hook-feedback and
+usage suites run against the replacement wrapper. Those native-contract
+simulations do not claim a live account reproduced every upstream fix.
+The launch smoke additionally exercises the real 0.3.296 wrapper and bundled
+2.1.296 process without inference. See the prior-version dispositions below
+for behavior that remains part of the integration.
 
 ## 0.3.293 field dispositions
 

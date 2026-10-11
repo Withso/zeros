@@ -56,6 +56,21 @@ const row = (value: AgentToolMessage, open = true) =>
   );
 
 describe("tool presentation contract", () => {
+  it.each([
+    ["max", "Max"], ["xhigh", "Extra High"], ["ultra", "Ultra"],
+    ["none", "None"], ["minimal", "Minimal"], ["future-effort", "future-effort"],
+  ])("shows native Codex subagent model and %s effort in the existing Agent row", (reasoningEffort, label) => {
+    const html = renderToStaticMarkup(createElement(SubagentCard, { ctx, message: tool({
+      title: "Agent", toolKind: "subagent", status: "in_progress",
+      rawInput: { agentThreadId: "child", agentPath: "/root/research", description: "Research", model: "gpt-6.1-sol", reasoningEffort },
+    }) }));
+    expect(html.replace(/<[^>]*>/g, "")).toContain(`Agent · GPT-6.1 Sol ${label}`);
+    expect(html).toContain("Research");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('data-agent-effort=""');
+    expect(html).toContain('aria-label="Agent working"');
+  });
+
   it("shows resolved Agent type, model and effort in the shared metadata style", () => {
     const html = renderToStaticMarkup(createElement(SubagentCard, { ctx, message: tool({
       title: "Agent", toolKind: "subagent", rawInput: { description: "Review the diff", model: "inherit", effort: "low" },

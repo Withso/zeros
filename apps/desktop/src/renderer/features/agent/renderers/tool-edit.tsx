@@ -33,7 +33,8 @@
 // shiki+hunk renderer (DiffView/Hunk/DiffLine) was removed.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useMemo, useState } from "react";
+import { memo, useMemo } from "react";
+import { useTurnDisclosure } from "../turn-disclosures";
 import { FileEdit } from "lucide-react";
 import { Button } from "@/renderer/shared/ui";
 import { cn } from "@/renderer/shared/ui/cn";
@@ -85,7 +86,7 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
     () => extractDiffSources(tool, baseline),
     [tool, baseline],
   );
-  const [showAll, setShowAll] = useState(false);
+  const [showAll, setShowAll] = useTurnDisclosure<boolean>(tool.id, "all-edit-files", false);
   const visible = showAll
     ? sources
     : sources.slice(0, MAX_RENDERED_BATCH_EDITS);
@@ -103,6 +104,7 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
           source={source}
           baseline={sources.length === 1 ? baseline : undefined}
           batch={sources.length > 1}
+          disclosureKey={JSON.stringify(["edit", source.path, index])}
         />
       ))}
       {visible.length < sources.length && (
@@ -120,12 +122,14 @@ const EditFileRow = memo(function EditFileRow({
   source,
   baseline,
   batch = false,
+  disclosureKey,
 }: {
   tool: AgentToolMessage;
   ctx: RendererContext;
   source: DiffSource | null;
   baseline?: string;
   batch?: boolean;
+  disclosureKey?: string;
 }) {
   const counts = useMemo(
     () =>
@@ -196,6 +200,7 @@ const EditFileRow = memo(function EditFileRow({
   return (
     <EventRow
       message={tool}
+      disclosureKey={disclosureKey}
       ctx={ctx}
       meta={meta}
       detail={detail}

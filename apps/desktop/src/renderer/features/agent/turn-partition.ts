@@ -1,6 +1,6 @@
 import { toolPresentationReady } from "./renderers/tool-readiness";
 import { isTurnFailureNotice } from "./turn-failure";
-// Split working narration/tools from provider-declared final answers.
+// Split working narration/tools from provider-declared partial/final answers.
 // Live events retain their source order and become inspectable immediately.
 
 import type { AgentMessage, AgentToolMessage } from "./use-agent-session";
@@ -9,8 +9,8 @@ export interface TurnPartition {
   /** Tools, thinking, in-between narration, sub-agents — the reasoning
    *  feed shown dimmed (and collapsible once the turn settles). */
   working: AgentMessage[];
-  /** The trailing agent/system text and standalone output records, rendered
-   *  brightly. Empty when the turn ended with working content only. */
+  /** Confirmed partial/final answers, legacy trailing text and standalone
+   * output records, rendered brightly without changing turn lifetime. */
   finalOutput: AgentMessage[];
 }
 
@@ -109,13 +109,13 @@ export function partitionTurn(
     if (
       event.kind === "text" &&
       event.role === "agent" &&
-      event.phase === "final_answer"
+      (event.phase === "final_answer" || event.phase === "partial_answer")
     ) {
       finalOutputIndexes.add(index);
     }
   });
   // Legacy providers have no phase. Keep their settled trailing-answer
-  // convention, while an explicit final phase survives any late bookkeeping.
+  // convention, while explicit answers survive further work and bookkeeping.
   for (let i = events.length - 1; !options?.live && i >= 0; i--) {
     if (isBackgroundTask(events[i])) continue;
     if (isFinalOutputEvent(events[i])) {

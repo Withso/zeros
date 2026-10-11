@@ -297,6 +297,13 @@ further access until cleanup succeeds. Renderer additionally requires confirmed
 catalog read authority and exact semantic owner/chat identity. Local IDs bypass
 cache IPC. Tombstones/denial/catalog removal prune disk and memory.
 
+Agent rows retain only bounded, sanitized `model`, `reasoningEffort` and
+`description` display labels from their input. Other tool inputs, native agent
+identifiers/paths and tool results remain excluded. The same field selection
+runs in renderer and main on both write and read; malformed optional labels do
+not remove the tool row. Partial-answer phases remain presentation data and
+never establish a completed turn.
+
 Bounds are 512 entries/64 MiB total and 200 rows/512 KiB per window. Per-file/index
 atomic replacement is a recoverable presentation cache, not a transactional
 durable feed. Cached rows grant no execution permission and cannot settle a

@@ -84,6 +84,15 @@ function presentationText(value: string): string {
     .replace(/\b[A-Za-z0-9_-]{32,}\b/gu, "[redacted]");
 }
 const text = z.string().max(CLOUD_TRANSCRIPT_WINDOW_BYTES).transform(presentationText);
+// Agent rows need their confirmed display labels even during provisional
+// cached paint. Select only these labels; never retain prompts, thread paths,
+// native identifiers or other raw tool fields. Malformed labels omit metadata,
+// rather than removing an otherwise readable tool row.
+const subagentDisplayInput = z.object({
+  model: z.string().max(255).transform(presentationText).optional().catch(undefined),
+  reasoningEffort: z.string().max(64).transform(presentationText).optional().catch(undefined),
+  description: z.string().max(255).transform(presentationText).optional().catch(undefined),
+});
 const base = { id, createdAt: integer, parentToolId: id.optional() };
 const attachment = z.object({
   name: text, mimeType: z.string().max(255), kind: z.enum(["image", "text", "file"]),
@@ -97,7 +106,7 @@ const question = z.object({
 }).transform(value => value.secret ? { ...value, answer: undefined } : value);
 const presentationMessage = z.discriminatedUnion("kind", [
   z.object({ ...base, kind: z.literal("text"), role: z.enum(["user", "agent", "thought", "system"]), text,
-    updatedAt: integer.optional(), messageId: id.optional(), phase: z.enum(["commentary", "final_answer"]).optional(),
+    updatedAt: integer.optional(), messageId: id.optional(), phase: z.enum(["commentary", "partial_answer", "final_answer"]).optional(),
     redacted: z.boolean().optional(), retracted: z.literal(true).optional(), durationMs: integer.optional(),
     summaryBoundary: z.boolean().optional(), resumeBoundary: z.boolean().optional(), attachments: z.array(attachment).max(64).optional() }),
   z.object({ ...base, kind: z.literal("tool"), toolCallId: id, nativeToolCallId: id.optional(), title: text,
@@ -137,9 +146,14 @@ export function prepareCachedTranscriptWindow(input: unknown): CachedTranscriptW
   for (const row of page.messages.slice(-CLOUD_TRANSCRIPT_WINDOW_MESSAGES)) {
     if (row.payload.length > CLOUD_TRANSCRIPT_WINDOW_BYTES) continue;
     try {
-      const parsed = presentationMessage.safeParse(JSON.parse(row.payload));
+      const source = JSON.parse(row.payload);
+      const parsed = presentationMessage.safeParse(source);
       if (!parsed.success || parsed.data.id !== row.msgId || parsed.data.kind !== row.kind) continue;
-      messages.push({ ...row, payload: JSON.stringify(parsed.data) });
+      const input = parsed.data.kind === "tool" && parsed.data.toolKind === "subagent"
+        ? subagentDisplayInput.safeParse(source.rawInput) : null;
+      const presentation = input?.success && Object.values(input.data).some(value => value !== undefined)
+        ? { ...parsed.data, rawInput: input.data } : parsed.data;
+      messages.push({ ...row, payload: JSON.stringify(presentation) });
     } catch { /* An unreadable row is not a confirmed presentation snapshot. */ }
   }
   const result: CachedTranscriptWindow = { recordEpoch: page.recordEpoch, revision: page.revision,

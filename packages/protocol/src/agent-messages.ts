@@ -54,8 +54,8 @@ export interface AgentTextMessage {
    *  Codex stdin hang and turns started actually completing). */
   messageId?: string;
   /** Provider-declared assistant prose phase. Commentary belongs to working
-   * history; final_answer is the concluded response. Undefined is the legacy
-   * provider-neutral shape and remains final-output compatible. */
+   * history; partial/final answers remain output even when work continues.
+   * Undefined preserves the legacy provider-neutral presentation. */
   phase?: AgentMessagePhase;
   /** True for `role: "thought"` messages whose
    *  content the model encrypted (Anthropic `redacted_thinking`

@@ -27,6 +27,43 @@ async function fixture(options: { maxEntries?: number; maxBytes?: number } = {})
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 
 describe("durable desktop cloud transcript windows", () => {
+  it("retains root and child partial answers in source order across cached reloads", async () => {
+    const { directory, store } = await fixture();
+    const messages = [
+      ["before", "commentary", undefined], ["report", "partial_answer", undefined],
+      ["child-report", "partial_answer", "child"], ["after", "commentary", undefined],
+    ].map(([id, phase, parentToolId]) => ({ ...message(id!), payload: JSON.stringify({
+      id, kind: "text", role: "agent", text: id, phase, parentToolId, createdAt: 100,
+    }) }));
+    store.write(owner, { ...window(), messages });
+    const restored = new CloudTranscriptCacheStore(directory).read(owner)!;
+    expect(restored.messages.map(row => row.msgId)).toEqual(["before", "report", "child-report", "after"]);
+    expect(JSON.parse(restored.messages[1]!.payload)).toMatchObject({ phase: "partial_answer", text: "report" });
+    expect(JSON.parse(restored.messages[2]!.payload)).toMatchObject({ phase: "partial_answer", parentToolId: "child" });
+  });
+
+  it("retains only bounded, redacted Agent display metadata through cached reloads", async () => {
+    const { directory, store } = await fixture();
+    const tool = { id: "agent", kind: "tool", toolCallId: "child", title: "Agent", toolKind: "subagent",
+      status: "completed", createdAt: 100, updatedAt: 100,
+      rawInput: { model: "gpt-6.1-sol", reasoningEffort: "max", description: "Research /srv/private/source",
+        agentThreadId: "private-child-id", agentPath: "/root/private-agent", prompt: "synthetic-private-prompt" },
+      rawOutput: "synthetic-private-result" };
+    const rows = [tool, { ...tool, id: "command", toolCallId: "command", toolKind: "execute" },
+      { ...tool, id: "malformed", toolCallId: "malformed", rawInput: { model: "x".repeat(256), reasoningEffort: 42 } }];
+    store.write(owner, { ...window(), messages: rows.map(value => ({ msgId: value.id, kind: value.kind,
+      createdAt: value.createdAt, payload: JSON.stringify(value) })) });
+    const restored = new CloudTranscriptCacheStore(directory).read(owner)!.messages.map(row => JSON.parse(row.payload));
+    expect(restored).toHaveLength(3);
+    expect(restored[0].rawInput).toEqual({ model: "gpt-6.1-sol", reasoningEffort: "max", description: "Research [workspace]" });
+    expect(restored[1].rawInput).toBeUndefined();
+    expect(restored[2].rawInput).toBeUndefined();
+    expect(restored.every(row => row.rawOutput === undefined)).toBe(true);
+    const persisted = (await Promise.all((await readdir(directory)).map(file => readFile(path.join(directory, file), "utf8")))).join("\n");
+    for (const forbidden of ["synthetic-private-prompt", "synthetic-private-result", "private-child-id", "/srv/private", "/root/private-agent"])
+      expect(persisted).not.toContain(forbidden);
+  });
+
   it.each(["incomplete", "deleted"] as const)("keeps an exact %s restore fence through disk reopen and late writes", async kind => {
     const { directory, store } = await fixture();
     const old = store.readReceipt(owner);

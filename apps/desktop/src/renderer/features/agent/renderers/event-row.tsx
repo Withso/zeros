@@ -3,7 +3,7 @@
 // to the adapter and caller; output or status changes never own expansion.
 // File identities stay visible when open; command/query previews do not.
 
-import { memo, useId, useState } from "react";
+import { memo, useId } from "react";
 import { CircleX, Minus, Plus } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
@@ -21,6 +21,7 @@ import { DiffHoverCard } from "./diff-hover-preview";
 import { ToolIdentityIcon } from "./tool-identity-icon";
 import { nativeToolSurface, toolRecord } from "./native-tool-presentation";
 import { pendingChecksMessage } from "./tool-pending-checks";
+import { useTurnDisclosure } from "../turn-disclosures";
 
 interface EventRowProps {
   message: AgentMessage;
@@ -37,15 +38,15 @@ interface EventRowProps {
   /** Optional exact diff shown on hover/focus. Only EditCard supplies this;
    *  generic/Read tool rows deliberately remain ordinary expandable rows. */
   hoverPreview?: React.ReactNode;
-  /** Seed the detail body open at MOUNT (the exit-plan card starts open so
-   *  the plan is readable without a click). Mount-time only — it feeds
-   *  useState's initializer, so after first render `open` belongs to the
-   *  user and later prop changes neither open nor close the row. Do NOT
-   *  derive it from mutable message state (e.g. tool status): whether such a
-   *  row starts open would depend on whether the status landed before or
-   *  after the row's first commit, and every remount (summary-chip
-   *  re-expand, chat reopen) would re-apply it over the user's collapse. */
+  /** Seed an unseen disclosure (the exit-plan card starts open so the plan
+   * is readable without a click). Later prop changes do not override the
+   * user's choice, which survives regrouping within the mounted turn. Do not
+   * derive the default from mutable tool status: opening a fresh transcript
+   * must not depend on when a result happened to arrive. */
   defaultOpen?: boolean;
+  /** Native facets of one tool (for example, files in a batch edit) own
+   * independent disclosures under the same durable message. */
+  disclosureKey?: string;
   /** Batched native actions share one disclosure without remounting their rows. */
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -86,12 +87,13 @@ export const EventRow = memo(function EventRow({
   trailingNode,
   hoverPreview,
   defaultOpen,
+  disclosureKey = "details",
   toneOverride,
   open: controlledOpen,
   onOpenChange,
 }: EventRowProps) {
   const meta = metaOverride ?? metaForEvent(message);
-  const [localOpen, setLocalOpen] = useState(defaultOpen ?? false);
+  const [localOpen, setLocalOpen] = useTurnDisclosure<boolean>(message.id, disclosureKey, defaultOpen ?? false);
   const open = controlledOpen ?? localOpen;
   const detailId = useId();
   const isThinking = message.kind === "text" && message.role === "thought";
@@ -127,7 +129,7 @@ export const EventRow = memo(function EventRow({
       )}
       onClick={() => {
         if (expandable) {
-          setLocalOpen(!open);
+          if (controlledOpen === undefined) setLocalOpen(!open);
           onOpenChange?.(!open);
         }
       }}
