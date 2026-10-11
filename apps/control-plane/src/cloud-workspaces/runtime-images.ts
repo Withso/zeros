@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { Config } from "../config.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { BOAT_RESOURCE_ID_PATTERN, BoatApiClient } from "./boat-client.js";
+import { boatRuntimeDisplayName } from "./boat-display-name.js";
 import {
   BoatCloudBuilderVms, BuilderVmError, NAMED_SNAPSHOT_PATTERN, RUNTIME_IMAGE_ID_PATTERN, builderVmBaseSnapshot,
   builderVmSourceResolver, prepareBuilderVmOperation, type BuilderVm, type CloudBuilderVms,
@@ -542,7 +543,8 @@ export function createRuntimeImageWorker(config: Config, pool: pg.Pool, artifact
   if (!channel || cloud?.provider !== "boat" || !cloud.boat || !artifacts) return null;
   const operations = new DatabaseBuilderVmOperationStore(pool, cloud.boat.accountScope);
   const client = new BoatApiClient({ apiKey: cloud.apiKey, billingOrg: cloud.boat.billingOrg, timeoutMs: 45_000 });
-  const vms = new BoatCloudBuilderVms({ client, billingOrg: cloud.boat.billingOrg, operations, resolveSource: builderVmSourceResolver(pool) });
+  const vms = new BoatCloudBuilderVms({ client, billingOrg: cloud.boat.billingOrg, operations, resolveSource: builderVmSourceResolver(pool),
+    resolveDisplayName: intent => boatRuntimeDisplayName(channel, intent.source.kind === "image" ? "check" : "build") });
   return new RuntimeImageWorker({ pool, enabled: cloud.runtime?.imagesEnabled === true, channel,
     mode: cloud.runtime?.qualificationMode ?? "full", accountScope: cloud.boat.accountScope, billingOrg: cloud.boat.billingOrg,
     vms, operations, artifacts, snapshots: new BoatRuntimeImageSnapshots(client) });

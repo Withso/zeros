@@ -5,6 +5,7 @@ import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
 import { assertHostedDevAdmission } from "../development-environment.js";
 import { BOAT_BILLING_ORG_PATTERN, BOAT_RESOURCE_ID_PATTERN, BoatCreateRejectedError, type BoatApiClient } from "./boat-client.js";
+import { setBoatDisplayName, type BoatDisplayName } from "./boat-display-name.js";
 import { executeBoatPinnedSsh, type BoatBootstrapChannel } from "./boat-pinned-ssh.js";
 import { BUILDER_BASE_STATUS_COMMAND, COMPUTER_TEMPLATE_MAX_INPUT_BYTES, builderFixedCommand, isComputerBuilderCommand, parseBuilderDiagnostic, type BuilderFixedCommand, type ClosedDiagnostic } from "./cloud-builder-commands.js";
 import { builderOperationConflict, type BuilderVmIntent, type BuilderVmOperation, type BuilderVmOperationStore } from "./cloud-builder-vm-store.js";
@@ -158,6 +159,7 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
     billingOrg: string;
     operations: BuilderVmOperationStore;
     resolveSource(source: BuilderVmSource): Promise<string>;
+    resolveDisplayName?: (intent: BuilderVmIntent) => BoatDisplayName;
     openChannel?: (signal: AbortSignal) => Promise<BoatBootstrapChannel>;
     lifecycleTimeoutMs?: number;
     baseReadinessTimeoutMs?: number;
@@ -219,6 +221,8 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
       await this.pause(deadline);
     }
     await this.options.operations.state(input.operationKey, "ready");
+    const resolve = this.options.resolveDisplayName;
+    if (resolve) void setBoatDisplayName(this.options.client, vm.sandboxId, () => resolve(input));
     return vm;
   }
 

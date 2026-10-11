@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { assertHostedDevAdmission } from "../development-environment.js";
 import { z } from "zod";
 import { BoatApiClient, BoatCreateRejectedError, type BoatApiClientOptions, BOAT_RESOURCE_ID_PATTERN } from "./boat-client.js";
+import { setBoatDisplayName, type BoatDisplayName } from "./boat-display-name.js";
 import { computeMicroUsd, type CloudProviderComputeUsage, type CloudWorkspaceComputeProvider } from "./provider-compute.js";
 import type {
   CloudProviderOperationRecord,
@@ -100,6 +101,8 @@ export type BoatWorkspaceProviderOptions = BoatApiClientOptions & {
   resolveSnapshot?: (input: CloudProviderCreateInput) => Promise<string>;
   /** Resolves the saved generation's C1 source pin, account and org wallet. */
   resolveTemplate?: (input: CloudProviderCreateInput) => Promise<string>;
+  /** Mutable label only; resolved after a confirmed allocation, outside its journal. */
+  resolveDisplayName?: (input: CloudProviderCreateInput) => BoatDisplayName;
   now?: () => number;
 };
 
@@ -239,12 +242,19 @@ export class BoatWorkspaceProvider
   async create(
     input: CloudProviderCreateInput,
   ): Promise<CloudProviderResource> {
-    return this.createAllocation(input, this.options.ttlSeconds);
+    return this.namedAllocation(input, this.options.ttlSeconds);
   }
 
   async createWithComputeLease(input: CloudProviderCreateInput, ttlSeconds: number): Promise<CloudProviderResource> {
     this.assertFiniteLease(ttlSeconds);
-    return this.createAllocation(input, ttlSeconds);
+    return this.namedAllocation(input, ttlSeconds);
+  }
+
+  private async namedAllocation(input: CloudProviderCreateInput, ttlSeconds: number | null): Promise<CloudProviderResource> {
+    const resource = await this.createAllocation(input, ttlSeconds);
+    const resolve = this.options.resolveDisplayName;
+    if (resolve) void setBoatDisplayName(this.client, resource.resourceId, () => resolve(input));
+    return resource;
   }
 
   computeWeight(profile: Pick<CloudProviderCreateInput,"cpuMillicores" | "memoryMiB">): { numerator: number; denominator: number } {

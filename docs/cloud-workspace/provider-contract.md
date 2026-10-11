@@ -11,6 +11,38 @@ removes compute supplier names, targets, image references and diagnostics from
 customer responses. Public human connections use the Zeros runtime relay;
 persisted provider identities and native credentials remain internal.
 
+## Boat names
+
+Boat VM display names use the control plane's deployment channel:
+
+| VM purpose | Display name |
+| --- | --- |
+| Computer builder and resulting template | `<org-slug>-<channel>-computer-v<N>` |
+| Workspace create or fork, every generation | `<org-slug>-<channel>-workspace-<workspace-slug>` |
+| Runtime image builder | `zeros-<channel>-runtime-build` |
+| Runtime image probe | `zeros-<channel>-runtime-check` |
+| Runtime qualification | `zeros-<channel>-runtime-qualify` |
+
+In the Computer label, `N` is the build version. Organization slugs and workspace display
+names normalize to lowercase `a-z0-9` with single, trimmed dashes. Empty results
+use the corresponding ID's first 12 characters. Organization and workspace
+parts are limited to 46 characters each, and the channel to 16; complete VM
+names never exceed 120 characters.
+
+Labels are applied in the background with a best-effort PATCH after allocation
+binding and wallet verification. Allocation never waits for name lookup or
+PATCH. One shared one-second deadline bounds the naming task, aborts its PATCH,
+and prevents a late lookup result from starting a write. Naming failure leaves
+the allocation usable with its previous name.
+Recorded create/fork bodies, keys and digests replay unchanged, including their
+original names. Display names never establish identity, ownership or cleanup
+authority.
+
+Released runtime bases are named `zeros-base-v<N>`. The
+[runtime image cache](runtime-images.md) retains its immutable
+`zeros-rtimg-<channel>-<runtime12>-<nonce8>` names. Changing a VM label never
+changes a saved snapshot name or generation pin.
+
 ## Immutable generations
 
 Supported generations require the saved v2 Computer source and complete qualified

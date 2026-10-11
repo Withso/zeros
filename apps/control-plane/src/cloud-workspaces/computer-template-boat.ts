@@ -1,6 +1,8 @@
 import type pg from "pg";
-import type { Tx } from "../db.js";
+import type { Config } from "../config.js";
+import { withSystemTx, type Tx } from "../db.js";
 import type { BoatApiClient } from "./boat-client.js";
+import { boatComputerDisplayName } from "./boat-display-name.js";
 import { BoatCloudBuilderVms, builderVmSourceResolver } from "./cloud-builder-vm.js";
 import { DatabaseBuilderVmOperationStore, type BuilderVmIntent } from "./cloud-builder-vm-store.js";
 import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
@@ -32,10 +34,21 @@ export type ComputerTemplateRuntime = {
 export function createComputerTemplateBoatAdapters(input: {
   pool: pg.Pool; client: Pick<BoatApiClient, "request">;
   accountScope: string; billingOrg: string; qualificationMode: CloudRuntimeQualificationMode;
+  deploymentChannel: Config["deploymentChannel"];
 }) {
   const operations = new DatabaseBuilderVmOperationStore(input.pool, input.accountScope);
   const vms = new BoatCloudBuilderVms({ client: input.client, billingOrg: input.billingOrg, operations,
-    resolveSource: builderVmSourceResolver(input.pool) });
+    resolveSource: builderVmSourceResolver(input.pool),
+    resolveDisplayName: async intent => {
+      const row = await withSystemTx(input.pool, async tx => (await tx.query<{ org_id: string; org_slug: string; version: string }>(
+        `SELECT template.org_id,org.slug AS org_slug,build.version
+         FROM cloud_computer_templates template JOIN cloud_computer_v2_builds build ON build.id=template.build_id AND build.org_id=template.org_id
+         JOIN organizations org ON org.id=template.org_id
+         WHERE template.builder_operation_key=$1 AND template.account_scope=$2 AND lower(template.billing_org)=lower($3)`,
+        [intent.operationKey, input.accountScope, input.billingOrg])).rows[0]);
+      return row ? boatComputerDisplayName({ organizationId: row.org_id, organizationSlug: row.org_slug,
+        version: row.version, channel: input.deploymentChannel }) : null;
+    } });
   const runtime = {
     async select(tx: Tx): Promise<ComputerTemplateRuntime | null> {
       const selected = await selectCloudRuntime(tx, input.qualificationMode);

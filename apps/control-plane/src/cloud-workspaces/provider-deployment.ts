@@ -1,6 +1,8 @@
 import type pg from "pg";
-import type { CloudWorkspaceBackendConfig } from "../config.js";
+import type { CloudWorkspaceBackendConfig, Config } from "../config.js";
+import { withSystemTx } from "../db.js";
 import { BoatApiClient } from "./boat-client.js";
+import { boatWorkspaceDisplayName } from "./boat-display-name.js";
 import { BoatWorkspaceProvider } from "./boat-provider.js";
 import { resolveComputerTemplateFork } from "./computer-workspace-source.js";
 import type { CloudProviderCreateInput } from "./provider.js";
@@ -20,6 +22,7 @@ import { CloudProviderError } from "./provider.js";
 export function createCloudProviderDeployment(
   pool: pg.Pool,
   cloud: CloudWorkspaceBackendConfig,
+  deploymentChannel: Config["deploymentChannel"],
 ) {
   const registrations: CloudWorkspaceProviderRegistration[] = [];
   if (!cloud.boat)
@@ -53,6 +56,15 @@ export function createCloudProviderDeployment(
     access,
     ttlSeconds: cloud.boat.ttlSeconds,
     resolveTemplate: (input: CloudProviderCreateInput) => resolveComputerTemplateFork(pool, cloud.boat!.accountScope, cloud.boat!.billingOrg, input),
+    resolveDisplayName: async (input: CloudProviderCreateInput) => {
+      const row = await withSystemTx(pool, async tx => (await tx.query<{ org_id: string; org_slug: string; display_name: string }>(
+        `SELECT workspace.org_id,org.slug AS org_slug,workspace.display_name
+         FROM cloud_workspaces workspace JOIN organizations org ON org.id=workspace.org_id
+         JOIN cloud_workspace_generations generation ON generation.workspace_id=workspace.id AND generation.org_id=workspace.org_id
+         WHERE workspace.id=$1 AND generation.generation=$2`, [input.workspaceId, input.generation])).rows[0]);
+      return row ? boatWorkspaceDisplayName({ organizationId: row.org_id, organizationSlug: row.org_slug,
+        workspaceId: input.workspaceId, workspaceSlug: row.display_name, channel: deploymentChannel }) : null;
+    },
   };
   const provider = new BoatWorkspaceProvider({
     ...providerOptions,

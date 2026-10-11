@@ -3,6 +3,7 @@ import { HttpError } from "../authz.js";
 import type { Config } from "../config.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { BoatApiClient } from "./boat-client.js";
+import { boatRuntimeDisplayName } from "./boat-display-name.js";
 import { BoatCloudBuilderVms, BuilderVmError, builderVmBaseSnapshot, builderVmSourceResolver, prepareBuilderVmOperation, type BuilderVm, type CloudBuilderVms } from "./cloud-builder-vm.js";
 import { DatabaseBuilderVmOperationStore, type BuilderVmIntent, type BuilderVmOperationStore } from "./cloud-builder-vm-store.js";
 import { RUNTIME_SMOKE_CHECKS, type ClosedDiagnostic } from "./cloud-builder-commands.js";
@@ -300,6 +301,7 @@ export function createRuntimeQualificationWorker(config: Config, pool: pg.Pool, 
   const vms = operations && cloud?.boat ? new BoatCloudBuilderVms({
     client: new BoatApiClient({ apiKey: cloud.apiKey, billingOrg: cloud.boat.billingOrg, timeoutMs: 45_000 }),
     billingOrg: cloud.boat.billingOrg, operations, resolveSource: builderVmSourceResolver(pool),
+    resolveDisplayName: () => boatRuntimeDisplayName(config.deploymentChannel, "qualify"),
   }) : null;
   return new RuntimeQualificationWorker({ pool, enabled, vms, operations, artifacts });
 }

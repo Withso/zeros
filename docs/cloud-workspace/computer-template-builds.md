@@ -233,6 +233,7 @@ machine-id during sanitation and does not change base boot files.
 
 `createComputerTemplateBoatAdapters` constructs the account-scoped
 `DatabaseBuilderVmOperationStore`, real `BoatCloudBuilderVms`, and B5b selector.
+Pass the control plane's `deploymentChannel` explicitly for Boat display names.
 Pass its `operations`, `vms` and `runtime` together to the worker. Runtime
 selection happens inside the claim transaction; completion calls
 `loadPinnedCloudRuntime` on the original tuple without selecting a new head.
