@@ -50,9 +50,11 @@ plus the stopped/ARCHIVED sandbox confirmed by B7's provider GET. There is no
 separate snapshot operation. Boat's stop saves the disk first and reports itself
 as an operation: B7 pins the stop it issued or joined (`GET
 /sandboxes/{id}/stops/{stopId}`), rechecks it after every poll, and captures
-only when that exact stop is `completed` and the sandbox is archived. It waits
-up to ten minutes within the build deadline while the stop is `pending` or
-`failing` (Boat retries a refused save itself). Capture then requires the
+only when that exact stop is `completed` and the sandbox is archived. While the
+stop is `pending` or `failing` (Boat retries a refused save itself) it waits
+until one minute before the build's 30-minute deadline, because saving a
+builder's disk can take Boat well over ten minutes; the last minute is kept for
+recording the capture and completing the build. Capture then requires the
 archived sandbox's `snapshotAvailable` with a `completed` `lastSnapshotStatus`,
 the same evidence a template fork checks on its source. A builder that is
 already archived, or a stop without an identity, is refused: an archive this

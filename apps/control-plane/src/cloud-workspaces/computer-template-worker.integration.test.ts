@@ -316,11 +316,13 @@ database("Cloud Computer template worker", () => {
       protected_contract_digest: Buffer.from(tcb, "hex"),
     });
     expect(vm.stop).toHaveBeenCalledTimes(1);
-    // Capture waits within the build deadline and needs a completed snapshot.
+    // Boat can take well over ten minutes to save a builder's disk. Capture
+    // waits for the build's own deadline, minus a minute to complete it.
     const [, stopOptions] = vi.mocked(vm.stop).mock.calls[0]!;
     expect(stopOptions).toMatchObject({ requireSnapshot: true });
-    expect(stopOptions!.timeoutMs).toBeGreaterThan(180_000);
-    expect(stopOptions!.timeoutMs).toBeLessThanOrEqual(600_000);
+    const deadline = Date.parse((await pool.query("SELECT deadline_at FROM cloud_computer_v2_builds")).rows[0].deadline_at);
+    expect(stopOptions!.timeoutMs).toBeGreaterThan(20 * 60_000);
+    expect(stopOptions!.timeoutMs).toBeLessThanOrEqual(deadline - Date.now() - 55_000);
     expect(remove).not.toHaveBeenCalled();
     expect(validateRuntime).toHaveBeenCalled();
     expect(
