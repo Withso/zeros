@@ -243,16 +243,16 @@ suite("uncapped staff machine-hour funding", () => {
     expect(await totals()).toEqual([]);
   });
 
-  it("retains infrastructure quota rejection for an exhausted staff sponsor", async () => {
+  it("retains infrastructure quota admission for an exhausted staff sponsor", async () => {
     await exhaust();
     await admin.query("UPDATE cloud_workspaces SET status='stopped',desired_state='stopped' WHERE id=$1", [fixture.workspaceId]);
-    await admin.query("UPDATE cloud_workspace_quotas SET max_cpu_millicores=250 WHERE org_id=$1", [fixture.organizationId]);
+    await admin.query("DELETE FROM cloud_workspace_quotas WHERE org_id=$1", [fixture.organizationId]);
     const app = await http();
     const wake = await app.request(`/v1/organizations/${fixture.organizationId}/cloud-workspaces/${fixture.workspaceId}/wake`, {
       method: "POST", headers: { "Idempotency-Key": randomUUID() },
     });
     expect(wake.status).toBe(409);
-    expect(await wake.json()).toMatchObject({ error: { code: "cloud_quota_exceeded" } });
+    expect(await wake.json()).toMatchObject({ error: { code: "cloud_quota_not_configured" } });
     expect(await totals()).toMatchObject([{ granted: String(standardAmount), receipt_count: 1 }]);
     expect((await admin.query("SELECT 1 FROM managed_compute_allocation_leases WHERE user_id=$1", [fixture.userId])).rowCount).toBe(0);
   });

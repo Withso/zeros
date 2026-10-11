@@ -116,30 +116,6 @@ export async function loadUsage(tx: Tx, orgId: string): Promise<UsageRow> {
   return result.rows[0]!;
 }
 
-export function assertGenerationReplacementQuota(
-  quota: QuotaRow,
-  usage: UsageRow,
-  resources: {
-    cpuMillicores: number;
-    memoryMiB: number;
-    storageMiB: number;
-  },
-): void {
-  const exceeded =
-    Number(usage.cpu_millicores) + resources.cpuMillicores >
-      quota.max_cpu_millicores ||
-    Number(usage.memory_mib) + resources.memoryMiB > quota.max_memory_mib ||
-    Number(usage.storage_mib) + resources.storageMiB > quota.max_storage_mib;
-  if (exceeded) {
-    throw new HttpError(
-      409,
-      "cloud_replacement_headroom_exceeded",
-      "Cloud workspace quota does not have safe replacement headroom",
-    );
-  }
-}
-
-
 type RecoveryScope = { workspaceId: string; organizationId: string; sourceGeneration: number; checkpointId: string };
 type RecoveryPoint = { id: string; integrity_sha256: Buffer; content_revision: string; record_revision: string; durable_at: Date; lossless: boolean };
 
@@ -232,10 +208,8 @@ export async function createCloudRecoveryTransition(tx: Tx, input: RecoveryScope
   const connection=await loadGenerationCloudProviderConnection(tx,{...input,generation:input.sourceGeneration});
   if(!connection||connection.provider!==profile.provider)throw new HttpError(409,"cloud_provider_connection_unavailable","The cloud provider connection is unavailable");
   if(!profile.sourceCommit)throw new HttpError(409,"recovery_image_unavailable","A qualified recovery image is unavailable");
-  const quota=await loadQuota(tx,input.organizationId),usage=await loadUsage(tx,input.organizationId);
-  if(workspace.desired_state!=="running"&&Number(usage.running)+1>quota.max_running_workspaces)
-    throw new HttpError(409,"cloud_quota_exceeded","Cloud workspace running quota would be exceeded");
-  assertGenerationReplacementQuota(quota,usage,profile);
+  // A provisioned quota record is still required; its numeric limits are not.
+  await loadQuota(tx,input.organizationId);
   const digest=typeof input.requestDigest==='function'?input.requestDigest(profile):input.requestDigest;
   const generation=(await tx.query<{generation:number}>("SELECT coalesce(max(generation),0)::integer+1 AS generation FROM cloud_workspace_generations WHERE workspace_id=$1",[input.workspaceId])).rows[0]!.generation;
   const transitionId=randomUUID(),intentId=input.drainIntentId??randomUUID();

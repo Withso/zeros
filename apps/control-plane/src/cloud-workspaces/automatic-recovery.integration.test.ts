@@ -152,7 +152,8 @@ suite("automatic Boat checkpoint recovery", () => {
       .toEqual({ status: "failed", last_error_code: "recovery_needed", current_generation: 1 });
   });
   it("waits durably for capacity without allocating a generation", async () => {
-    await pool.query("UPDATE cloud_workspace_quotas SET max_storage_mib=20480 WHERE org_id=$1", [fixture.organizationId]);
+    // Numeric limits are not enforced; a missing quota record still waits for capacity.
+    await pool.query("DELETE FROM cloud_workspace_quotas WHERE org_id=$1", [fixture.organizationId]);
     const subject = await exhaust(); await drain(); await subject.runOnce();
     expect((await pool.query("SELECT last_error_code,current_generation FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0])
       .toEqual({ last_error_code: "recovery_waiting_for_capacity", current_generation: 1 });
@@ -183,8 +184,12 @@ suite("automatic Boat checkpoint recovery", () => {
   });
   it("bounds a capacity wait and keeps the source quarantined after its deadline", async () => {
     const subject = await exhaust(); await drain();
-    await pool.query("UPDATE cloud_workspace_quotas SET max_storage_mib=20480 WHERE org_id=$1", [fixture.organizationId]);
+    // Numeric limits are not enforced; a missing quota record still holds recovery for capacity.
+    await pool.query("DELETE FROM cloud_workspace_quotas WHERE org_id=$1", [fixture.organizationId]);
     await subject.runOnce();
+    expect((await pool.query("SELECT last_error_code FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].last_error_code)
+      .toBe("recovery_waiting_for_capacity");
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_generations WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].n).toBe(1);
     await pool.query("UPDATE cloud_workspace_restore_incidents SET deadline_at=now()-interval '1 second',next_attempt_at=now() WHERE workspace_id=$1", [fixture.workspaceId]);
     await worker("setup_immutable_runtime_missing").runOnce();
     expect((await pool.query("SELECT last_error_code FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].last_error_code).toBe("recovery_needed");
@@ -299,9 +304,9 @@ suite("automatic Boat checkpoint recovery", () => {
     expect((await pool.query("SELECT state FROM cloud_workspace_restore_incidents WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].state).toBe("recovery_needed");
     expect((await pool.query("SELECT current_generation FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].current_generation).toBe(3);
   });
-  it.each(["stopped", "archived"])("checks the running-workspace quota before manual recovery from %s", async state => {
+  it.each(["stopped", "archived"])("requires a quota record, not a running slot, before manual recovery from %s", async state => {
     await pool.query("UPDATE cloud_workspaces SET status=$2::text::cloud_workspace_status,desired_state=$2::text::cloud_workspace_desired_state WHERE id=$1", [fixture.workspaceId, state]);
-    await pool.query("UPDATE cloud_workspace_quotas SET max_running_workspaces=1 WHERE org_id=$1", [fixture.organizationId]);
+    await pool.query("DELETE FROM cloud_workspace_quotas WHERE org_id=$1", [fixture.organizationId]);
     const otherId = randomUUID();
     await withSystemTx(pool, async tx => {
       await tx.query(`INSERT INTO cloud_workspaces(id,org_id,team_id,created_by,display_name,repository_forge,repository_owner,repository_name,repository_revision,repository_id,owner_user_id,assignee_user_id,status,desired_state)
@@ -314,7 +319,7 @@ suite("automatic Boat checkpoint recovery", () => {
     });
     const response = await route("/generations", { operation: "recover", sourceGeneration: 1, checkpointId });
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ code: "cloud_quota_exceeded" });
+    expect(await response.json()).toEqual({ code: "cloud_quota_not_configured" });
     expect((await pool.query("SELECT desired_state,current_generation FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0]).toEqual({ desired_state: state, current_generation: 1 });
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_workspace_generations WHERE workspace_id=$1", [fixture.workspaceId])).rows[0].n).toBe(1);
   });
