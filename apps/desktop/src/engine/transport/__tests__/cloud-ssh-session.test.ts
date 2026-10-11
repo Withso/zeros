@@ -5,6 +5,7 @@ import { mkdtemp,rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Duplex, PassThrough } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 import { afterEach,describe,expect,it,vi } from 'vitest';
 import { assertCloudSshEngineIdentity,createCloudSshSession } from '../cloud-ssh-session.mjs';
 const {Client}=createRequire(import.meta.url)('ssh2');
@@ -57,6 +58,25 @@ describe('cloud SSH workload session',()=>{
   {platform:'linux',uid:10003,gid:10001},
  ])('rejects a standalone helper outside the non-root engine %j',identity=>{
   expect(()=>assertCloudSshEngineIdentity(identity)).toThrow('engine identity');
+ });
+ it('initializes and resolves its SSH server inside the CommonJS engine bundle',async()=>{
+  // The cloud engine is a tsup/esbuild CommonJS bundle, where import.meta is
+  // empty. Loading this module there must not need its own file URL.
+  const {buildSync}=await import('esbuild');
+  const dir=await mkdtemp(path.join(path.dirname(fileURLToPath(import.meta.url)),'.engine-bundle-'));cleanup.push(()=>rm(dir,{recursive:true,force:true}));
+  const outfile=path.join(dir,'cli.js');
+  buildSync({entryPoints:[fileURLToPath(new URL('../cloud-ssh-session.mjs',import.meta.url))],bundle:true,format:'cjs',platform:'node',
+   target:'node18',outfile,external:['node-pty'],logLevel:'silent'});
+  const script=`const m=require(${JSON.stringify(outfile)});const {Duplex}=require('node:stream');`+
+   `const s=m.createCloudSshSession(new Duplex({read(){},write(_c,_e,d){d();}}),{cwd:require('node:os').tmpdir(),env:{PATH:'/usr/bin:/bin'}});`+
+   `s.start();s.close();process.stdout.write('ready');`;
+  const result=await new Promise<{code:number|null;stdout:string;stderr:string}>(resolve=>{
+   const child=spawn(process.execPath,['-e',script],{stdio:['ignore','pipe','pipe']});let stdout='',stderr='';
+   child.stdout.on('data',chunk=>{stdout+=chunk;});child.stderr.on('data',chunk=>{stderr+=chunk;});
+   child.on('close',code=>resolve({code,stdout,stderr}));
+  });
+  expect(result.stderr).not.toContain('ERR_INVALID_ARG_VALUE');
+  expect(result).toMatchObject({code:0,stdout:'ready'});
  });
  it('accepts only the non-root engine identity',()=>{
   expect(()=>assertCloudSshEngineIdentity({platform:'linux',uid:10003,gid:10003})).not.toThrow();
