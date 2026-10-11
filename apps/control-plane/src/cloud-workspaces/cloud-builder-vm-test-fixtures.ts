@@ -131,7 +131,7 @@ export function builderFixture(operations: BuilderVmOperationStore = memoryBuild
     if (state.deleted) return response({}, 404);
     const current = state.states.length > 1 ? state.states.shift()! : state.states[0];
     const snapshot = state.snapshots.shift() ?? state.snapshot;
-    return response({ sandbox: { id: state.sandboxId, state: current, team: { id: state.wallet }, ip: "208.67.222.222", ...snapshot } });
+    return response({ sandbox: { id: state.sandboxId, state: current, team: { id: state.wallet }, ip: "208.67.222.222", monitoring: false, ...snapshot } });
   });
   const client = new BoatApiClient({ apiKey: "builder-test-api-key", billingOrg: BUILDER_WALLET, timeoutMs: 1000, fetch: fetcher });
   const channel = { publicKey, dispose: vi.fn(async () => {}),

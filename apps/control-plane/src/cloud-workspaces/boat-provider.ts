@@ -42,6 +42,7 @@ const SandboxSchema = z.object({
     .enum(["queued", "in_progress", "completed", "failed", "cancelled"])
     .nullable()
     .optional(),
+  monitoring: z.boolean().optional(),
 });
 const BillingTeamSchema = z.object({ id: z.string() });
 const DeletionSchema = z.object({
@@ -312,7 +313,7 @@ export class BoatWorkspaceProvider
     });
     if (record.createClosedAt) throw failure("provider_generation_retired");
     this.usable(record);
-    if (record.resourceId) return this.allocatableResource(record);
+    if (record.resourceId) return this.allocatableResource(record, undefined, true);
     const age = this.now() - record.createdAt.getTime();
     if (!Number.isFinite(age) || age < -60_000 || age >= CREATE_RETRY_WINDOW_MS)
       throw failure("provider_create_outcome_unknown");
@@ -328,7 +329,7 @@ export class BoatWorkspaceProvider
     // another request using the same key receives a definite refusal later.
     const attemptId = randomUUID();
     const dispatch = await this.options.operations.beginCreateAttempt(input, attemptId);
-    if (dispatch.resourceId) return this.allocatableResource(dispatch);
+    if (dispatch.resourceId) return this.allocatableResource(dispatch, undefined, true);
     let response: Record<string, unknown>;
     try {
       response = await this.client.request(this.templateSandboxId ? `/sandboxes/${this.templateSandboxId}/fork` : "/sandboxes", {
@@ -357,11 +358,11 @@ export class BoatWorkspaceProvider
       // Fork is a 202 action receipt, not readiness. Read the bound child even
       // when the response includes a sandbox; lost replies replay the same
       // journal key to recover its ID and follow this identical GET path.
-      return this.allocatableResource(bound);
+      return this.allocatableResource(bound, undefined, true);
     }
     if (!id.success) throw failure("provider_response_invalid");
     const bound = await this.options.operations.bindResource(input, id.data.id);
-    return this.allocatableResource(bound, response.sandbox);
+    return this.allocatableResource(bound, response.sandbox, true);
   }
 
   /** Boat reports an organization-billed sandbox's wallet as `team`; null is
@@ -387,9 +388,15 @@ export class BoatWorkspaceProvider
    * configured wallet: create, create retry, resume and renewal. Anything else
    * is read back once. A refusal keeps the bound cleanup identity; inspection,
    * Stop and deletion never depend on the wallet. */
-  private async allocatableResource(record: CloudProviderOperationRecord, value?: unknown): Promise<CloudProviderResource> {
+  /** `unmonitored` gates a new allocation, which receives setup admission
+   * next: only a sandbox that reports provider process monitoring off is
+   * returned. A pre-policy body replay or an omitted setting is refused while
+   * the bound identity stays journaled for cleanup. Existing allocations'
+   * start and renewal do not use this gate. */
+  private async allocatableResource(record: CloudProviderOperationRecord, value?: unknown, unmonitored = false): Promise<CloudProviderResource> {
     let sandbox = value;
-    if (sandbox === undefined || this.billingScope(sandbox) !== "match")
+    const monitoring = () => (sandbox && typeof sandbox === "object" ? (sandbox as { monitoring?: unknown }).monitoring : undefined);
+    if (sandbox === undefined || this.billingScope(sandbox) !== "match" || (unmonitored && monitoring() !== false))
       sandbox = (await this.client.request(`/sandboxes/${record.resourceId}`)).sandbox;
     const scope = this.billingScope(sandbox);
     if (scope !== "match") {
@@ -397,7 +404,9 @@ export class BoatWorkspaceProvider
       throw failure(`provider_billing_scope_${scope}`);
     }
     if (!this.templateSourceMatches(sandbox)) throw failure("provider_template_identity_mismatch");
-    return this.resource(record, sandbox);
+    const resource = this.resource(record, sandbox);
+    if (unmonitored && monitoring() !== false) throw failure("provider_monitoring_unconfirmed");
+    return resource;
   }
 
   async inspect(resourceId: string): Promise<CloudProviderResource | null> {

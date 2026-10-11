@@ -4,6 +4,22 @@ import { BuilderVmError } from "./cloud-builder-vm.js";
 import { builderFixture, builderIntent, BUILDER_SANDBOX, BUILDER_WALLET, diagnostic, encodeInstaller, installerInput } from "./cloud-builder-vm-test-fixtures.js";
 
 describe("short-lived Boat builder VMs", () => {
+  it.each([true, undefined])("refuses builder setup admission with monitoring=%s and permits cleanup", async monitoring => {
+    const f = builderFixture();
+    const fetch = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (...args) => {
+      const response = await fetch(...args);
+      const body = await response.json() as { sandbox?: Record<string, unknown> };
+      if (body.sandbox) body.sandbox.monitoring = monitoring;
+      return Response.json(body, { status: response.status });
+    });
+    await expect(f.vms.create(builderIntent)).rejects.toBeInstanceOf(BuilderVmError);
+    expect((await f.operations.find(builderIntent.operationKey))?.sandbox_id).toBe(BUILDER_SANDBOX);
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    await f.vms.delete({ sandboxId: BUILDER_SANDBOX, purpose: builderIntent.purpose, operationKey: builderIntent.operationKey });
+    expect(f.state.deleted).toBe(true);
+  });
+
   it.each([
     ["runtime-qualification", "base"], ["runtime-qualification", "template"],
     ["computer-build", "base"], ["computer-build", "template"],

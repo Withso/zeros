@@ -42,6 +42,7 @@ const sandboxSchema = z.object({
   team: z.object({ id: z.string() }).nullish(),
   snapshotAvailable: z.boolean().optional(),
   lastSnapshotStatus: z.string().nullable().optional(),
+  monitoring: z.boolean().optional(),
   // Parsed separately: a malformed stop never hides the sandbox state.
   stop: z.unknown().optional(),
 });
@@ -62,7 +63,7 @@ const CREATE_RETRY_WINDOW_MS = 23 * 60 * 60_000;
 export class BuilderVmError extends Error {
   constructor(readonly check: "input_schema" | "source_unavailable" | "wallet_mismatch" | "provider_response" |
     "provider_unavailable" | "builder_stopped" | "timeout" | "command_invalid" | "command_unconfirmed" | "cleanup_unconfirmed" |
-    "stop_unconfirmed" | "stop_snapshot_failed") {
+    "stop_unconfirmed" | "stop_snapshot_failed" | "monitoring_unconfirmed") {
     super(`Builder VM ${check}`);
   }
 }
@@ -188,6 +189,10 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
     for (;;) {
       const sandbox = await this.inspect(vm.sandboxId, deadline);
       if (sandbox.team?.id.toLowerCase() !== this.options.billingOrg.toLowerCase()) fail("wallet_mismatch");
+      // Builders receive runtime artifacts and repository credentials next.
+      // A replayed pre-policy request or an omitted setting stays bound for
+      // cleanup but is never made ready.
+      if (sandbox.monitoring !== false) fail("monitoring_unconfirmed");
       if (["ready", "idle", "running"].includes(sandbox.state)) break;
       if (["error", "cancelled", "archived", "archiving"].includes(sandbox.state)) fail("builder_stopped");
       await this.pause(deadline);

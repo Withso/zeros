@@ -31,6 +31,7 @@ function sandbox(state = "ready", extra: Record<string, unknown> = {}) {
       type: "default",
       snapshotAvailable: true,
       team: { id: WALLET, name: "Zeros" },
+      monitoring: false,
       ...extra,
     },
   };
@@ -164,6 +165,23 @@ function fixture(extraOptions: { billingOrg?: string } = {}) {
 }
 
 describe("Boat workspace monitoring policy", () => {
+  it.each([
+    ["new", true], ["new", undefined], ["legacy", true], ["legacy", undefined],
+  ] as const)("refuses %s setup admission with monitoring=%s while retaining cleanup identity", async (policy, monitoring) => {
+    const f = fixture();
+    if (policy === "legacy") {
+      const original = { type: "default", from: "zeros-linux-qualified", ttlSeconds: null, noEnv: true, env: {} };
+      const digest = (value: object) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+      await f.operations.prepareCreate({ workspaceId: INPUT.workspaceId, generation: INPUT.generation, idempotencyKey: INPUT.idempotencyKey,
+        requestSha256: digest({ imageRef: INPUT.imageRef, body: original, createAttemptJournalVersion: 1 }),
+        legacyRequestSha256: digest({ imageRef: INPUT.imageRef, body: original }) });
+    }
+    f.fetcher.mockResolvedValue(json(sandbox("ready", { monitoring })));
+    await expect(f.provider.create(INPUT)).rejects.toBeInstanceOf(CloudProviderError);
+    expect(f.stored().resourceId).toBe(RESOURCE);
+    expect(f.stored().deletedAt).toBeNull();
+  });
+
   it.each(["base", "template"] as const)("disables provider process monitoring for a new %s allocation", async source => {
     const f = fixture();
     const sourceId = "bx_3456789a";

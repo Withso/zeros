@@ -208,14 +208,19 @@ Boat's own monitoring is not part of this record. By default Boat's process
 tracer keeps what every sandbox process writes to a terminal, pipe or socket
 (72 hours) and the provider command history (90 days). Native agent IPC carries
 prompts and admitted provider material over pipes. Every new workspace,
-template fork and builder VM therefore requests `monitoring: false`. Boat then
-keeps no command history, process list or CPU/RAM samples for it, and its
-dashboard graphs and lost-sandbox causes are unavailable; live command output,
-lifecycle events and webhooks still work. A create journaled before this policy
-replays its original body under its existing key. A sandbox's setting is fixed
-at creation, so existing monitored allocations keep it until they are replaced.
-Turning on Boat's account-level **Monitoring off** also covers sandboxes that
-release tooling creates.
+template fork and builder VM therefore requests `monitoring: false`, and is
+handed to setup or made ready only after Boat reports `monitoring: false` for
+it (a 202 fork is read back first). Boat then keeps no command history, process
+list or CPU/RAM samples for it, and its dashboard graphs and lost-sandbox causes
+are unavailable; live command output, lifecycle events and webhooks still work.
+A create journaled before this policy replays its original body under its
+existing key; that replay, or a sandbox that omits the setting, fails closed
+(`provider_monitoring_unconfirmed`, or builder `monitoring_unconfirmed`) with
+its identity kept for cleanup. Starting and renewing existing allocations is
+unchanged: a sandbox's setting is fixed at creation, so monitored allocations
+keep it until they are replaced. Turning on Boat's account-level **Monitoring
+off** also covers sandboxes that release tooling creates; their admission does
+not yet verify the setting.
 
 ## Health alerts
 
