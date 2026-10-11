@@ -381,6 +381,18 @@ export async function buildRuntimeBundle(options: {
       await writeDependencyInventory(runtime, packages);
       return packages;
     });
+    await stage("engine_startup", () =>
+      runTool(
+        path.join(runtime, "bin/node"),
+        [
+          path.join(checkout, "scripts/smoke-engine-bundle.mjs"),
+          "--dist-engine",
+          path.join(runtime, "worker/dist-engine"),
+        ],
+        command,
+        "engine_startup",
+      ),
+    );
     // Inventory is read back from the final copied tree, not inferred from pnpm.
     const entries = await stage("inventory_payload", () =>
       inventoryTree(runtime),

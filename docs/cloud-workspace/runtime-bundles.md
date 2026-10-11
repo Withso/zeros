@@ -45,7 +45,24 @@ Forks are refused. Each channel has its own non-cancelling publication lock.
 
 The reusable build retains the contained user-namespace runner setup, verifies
 the exact event SHA, and uploads the tarball, descriptor, manifest and build
-receipt. The publisher downloads that same run's immutable artifact ID. Its
+receipt. Before writing the archive, its `engine_startup` stage runs the staged
+Node binary against `worker/dist-engine/cli.js serve` on a free loopback port
+with temporary workspace, HOME, settings and data directories. It requires
+`Engine ready` for that port and rejects early exit (including exit 0), logged
+unhandled rejections or exceptions, and a 60-second startup timeout. The check
+reaps its process group and removes temporary state. This loads the actual
+bundled module graph; `--help` and syntax checks do not. It uses no credentials
+and complements the separate cloud containment and functional qualification.
+
+The Linux `cloud-runtime-bundle-build.yml` lane already invokes this builder,
+so both standalone and desktop-triggered runtime publication inherit the gate.
+For a local Node build, run `pnpm build:engine` then
+`node scripts/smoke-engine-bundle.mjs`; use `--dist-engine <directory>` to
+check another built output under the Node binary running the smoke script.
+The macOS packaged-binary gate remains
+`pnpm smoke:engine`.
+
+The publisher downloads that same run's immutable artifact ID. Its
 job names the selected GitHub environment, so that environment's branch rules
 and configured reviewer protections apply before OIDC access. It verifies the
 current checkout and branch plus the latest exact-SHA Preflight and CodeQL
