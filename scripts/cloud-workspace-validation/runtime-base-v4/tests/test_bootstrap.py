@@ -39,6 +39,9 @@ GOLDEN = golden_directory()
 SPEC = importlib.util.spec_from_file_location("bootstrap", HERE.parent / "bootstrap.py")
 b = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(b)
+SYNTHETIC_SPEC = importlib.util.spec_from_file_location("synthetic_runtime", HERE / "synthetic_runtime.py")
+synthetic_runtime = importlib.util.module_from_spec(SYNTHETIC_SPEC)
+SYNTHETIC_SPEC.loader.exec_module(synthetic_runtime)
 NOW = datetime.datetime(2026, 10, 4, tzinfo=datetime.timezone.utc)
 BOOT = "12345678-1234-4234-8234-123456789abc"
 
@@ -51,7 +54,7 @@ def digest(value):
     return hashlib.sha256(value).hexdigest()
 
 
-def fixture(extra=None, change=None, transform=None):
+def fixture(extra=None, change=None, transform=None, assets=True):
     """Synthetic bytes with the shared B1 manifest header."""
     contents = {
         "bin/node": b"synthetic node\n", "bin/start-engine.sh": b"synthetic engine\n",
@@ -61,8 +64,12 @@ def fixture(extra=None, change=None, transform=None):
         "worker/dist-engine/cli.js": b"synthetic cli\n",
         "worker/data.txt": b"synthetic data\n",
     }
+    system_assets = synthetic_runtime.system_assets() if assets else {}
+    contents.update(system_assets)
     contents.update(extra or {})
     entries = {p: {"path": p, "type": "file", "mode": "0555", "size": len(v), "sha256": digest(v)} for p, v in contents.items()}
+    for name in system_assets:
+        if name != "bin/git-lfs": entries[name]["mode"] = "0444"
     for p in list(entries):
         for parent in Path(p).parents:
             if str(parent) != ".":
@@ -243,6 +250,14 @@ class BootstrapTests(unittest.TestCase):
         profile.chmod(0o444)
         compat["protectedFiles"] = [{"path": "/opt/zeros-bootstrap/protected", "mode": "0555", "sha256": digest(b"base-owned")},
                                     {"path": "/etc/apparmor.d/zeros-cloud-engine", "mode": "0444", "sha256": digest(profile.read_bytes())}]
+        (self.root / "usr/local/lib").mkdir(parents=True)
+        stock = {"schema": "zeros.stock-prerequisites/v1", "packages": {}, "binaries": {}, "libraries": {},
+                 "apparmorCacheMode": "skip-read-write", "optionalSystemd": self.app.qualify_optional_systemd({"uid": 4242, "gid": 4242})}
+        for name, raw in (("stock-prerequisites.py", (HERE.parent / "stock-prerequisites.py").read_bytes()),
+                          ("stock-prerequisites.json", canonical(stock))):
+            (bootstrap / name).write_bytes(raw)
+            (bootstrap / name).chmod(0o444)
+            compat["protectedFiles"].append({"path": "/opt/zeros-bootstrap/" + name, "mode": "0444", "sha256": digest(raw)})
         (bootstrap / "compatibility.json").write_bytes(canonical(compat))
         (bootstrap / "compatibility.json").chmod(0o444)
         self.app.boot()
@@ -286,7 +301,7 @@ class BootstrapTests(unittest.TestCase):
 
         def load(command, **kwargs):
             nonlocal loaded
-            self.assertEqual(command, ["/usr/sbin/apparmor_parser", "-r", "-W", "/etc/apparmor.d/zeros-cloud-engine"])
+            self.assertEqual(command, ["/usr/sbin/apparmor_parser", "-r", "-K", "/etc/apparmor.d/zeros-cloud-engine"])
             self.assertEqual(kwargs, {"env": b.ENV, "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
                                       "stderr": subprocess.DEVNULL, "timeout": 30, "check": False})
             self.assertEqual(os.readlink(self.root / "zeros"), "/opt/zeros")
@@ -355,7 +370,7 @@ class BootstrapTests(unittest.TestCase):
 
         def probe(command, **_kwargs):
             nonlocal loaded
-            if command == ["/usr/sbin/apparmor_parser", "-r", "-W", "/etc/apparmor.d/zeros-cloud-engine"]:
+            if command == ["/usr/sbin/apparmor_parser", "-r", "-K", "/etc/apparmor.d/zeros-cloud-engine"]:
                 loaded = True
                 return mock.Mock(returncode=0)
             calls.append(command)
@@ -471,6 +486,31 @@ class BootstrapTests(unittest.TestCase):
                 verifier.verify_protected_ancestry(self.app)
         self.assertEqual(caught.exception.checks, ["root_ownership"])
 
+    def test_base_requires_sealed_optional_policy(self):
+        policy = self.root / "opt/zeros-bootstrap/stock-prerequisites.json"
+        policy.chmod(0o644)
+        policy.write_bytes(b'{}')
+        policy.chmod(0o444)
+        with self.assertRaises(b.Failure): self.app.base()
+
+    def test_base_refuses_override_added_under_previously_absent_stock_surface(self):
+        target = self.root / "usr/local/lib/systemd/system/zeros-host.service.d/override.conf"
+        target.parent.mkdir(parents=True)
+        target.write_text("[Service]\nExecStart=/bin/false\n")
+        with self.assertRaises(b.Failure): self.app.boot()
+
+    def test_builder_and_cold_probe_requalify_exact_stock_inventory(self):
+        verifier = template("verify.py")
+        stock = json.loads(self.app.read("/opt/zeros-bootstrap/stock-prerequisites.json", 131072, 0o444))
+        probe = mock.Mock(return_value=stock)
+        injected = types.SimpleNamespace(probe=probe, require=lambda condition: b.require(condition, "base_compatibility"))
+        with mock.patch.object(verifier.importlib.util, "spec_from_file_location", return_value=mock.Mock()), \
+                mock.patch.object(verifier.importlib.util, "module_from_spec", return_value=injected):
+            verifier.verify_stock_prerequisites(self.app)
+            probe.assert_called_once_with(self.root, uid=os.getuid(), gid=os.getgid())
+            probe.return_value = {**stock, "packages": {"git": {"version": "changed", "arch": "amd64"}}}
+            with self.assertRaises(b.Failure): verifier.verify_stock_prerequisites(self.app)
+
     def test_private_failure_log_distinguishes_assertions_without_changing_stdout(self):
         link = self.root / "zeros"
         link.unlink()
@@ -507,7 +547,12 @@ class BootstrapTests(unittest.TestCase):
 
     def test_private_oserror_evidence_retains_errno_and_original_bootstrap_site(self):
         self.install()
-        with mock.patch.object(b.os, "listxattr", side_effect=OSError(errno.EIO, "private-canary", "/private-canary")):
+        original = os.listxattr
+        def runtime_failure(fd):
+            if "/opt/zeros-infra/" in os.readlink("/proc/self/fd/" + str(fd)):
+                raise OSError(errno.EIO, "private-canary", "/private-canary")
+            return original(fd)
+        with mock.patch.object(b.os, "listxattr", side_effect=runtime_failure):
             code, output = self.cli(["dispatch"])
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(output), {"schema": "zeros.diagnostic/v1", "component": "bootstrap",
@@ -577,6 +622,46 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(len(set(runtime_ids)), 3)
         self.assert_fresh_dispatch(runtime_ids[-1])
         self.assert_fresh_dispatch(runtime_ids[-1], boot=True)
+
+    def test_slim_base_refuses_runtime_without_system_assets(self):
+        self.payload, self.value, _ = fixture(assets=False)
+        self.reject("file_inventory")
+
+    def test_slim_base_requires_each_capability_file_as_a_regular_nonempty_file(self):
+        for name in ("bin/git-lfs", "worker/gitconfig", "worker/design-fonts/fonts.conf", "worker/runtime-system-assets.json"):
+            with self.subTest(name=name):
+                self.payload, self.value, _ = fixture(change=lambda m: m["files"].remove(next(e for e in m["files"] if e["path"] == name)))
+                self.reject("file_inventory")
+        self.payload, self.value, _ = fixture(extra={"bin/git-lfs": b""})
+        self.reject("file_inventory")
+        def alias(manifest):
+            entry = next(e for e in manifest["files"] if e["path"] == "bin/git-lfs")
+            entry.clear()
+            entry.update(path="bin/git-lfs", type="symlink", target="node")
+        self.payload, self.value, _ = fixture(change=alias)
+        self.reject("file_inventory")
+
+    def test_slim_base_requires_complete_manifested_font_and_license_inventory(self):
+        source = json.loads(synthetic_runtime.system_assets()["worker/runtime-system-assets.json"])
+        for changes in ({"schema": "unknown"}, {"fonts": []}, {"fonts": ["worker/data.txt"]},
+                        {"gitLfs": "bin/node"}, {"packages": []}, {"fonts": source["fonts"][:-1]},
+                        {"fonts": source["fonts"] + [source["fonts"][0]]}):
+            with self.subTest(changes=changes):
+                self.payload, self.value, _ = fixture(extra={"worker/runtime-system-assets.json": canonical({**source, **changes})})
+                self.reject("file_inventory")
+        for name in (source["fonts"][0], "lib/runtime-system-assets/git-lfs/copyright"):
+            with self.subTest(missing=name):
+                self.payload, self.value, _ = fixture(change=lambda m: m["files"].remove(next(e for e in m["files"] if e["path"] == name)))
+                self.reject("file_inventory")
+
+    def test_dispatch_rehashes_selected_system_asset_configuration(self):
+        self.install()
+        path = self.runtime() / "worker/gitconfig"
+        path.chmod(0o644)
+        path.write_bytes(b"x" * path.stat().st_size)
+        path.chmod(0o444)
+        with self.assertRaises(b.Failure) as caught: self.app.verify_runtime(self.app.current(), full=False)
+        self.assertEqual(caught.exception.checks, ["file_digest"])
 
     def test_dispatch_handles_symlinks_in_each_executable_inventory_directory(self):
         def add_links(manifest):

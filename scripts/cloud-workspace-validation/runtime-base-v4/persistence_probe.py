@@ -4,12 +4,14 @@ The kit invokes main with a fixed phase over Boat exec. The same directory
 operations run in local tests. Only closed checks, boolean/count evidence and
 failure class/line identities leave the VM; paths, machine IDs and messages do not.
 """
+import sys
+sys.dont_write_bytecode = True
+
 import importlib.util
 import json
 import os
 import time
 import stat
-import sys
 
 
 class AgentProbeFailure(Exception):

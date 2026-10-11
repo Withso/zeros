@@ -4,7 +4,7 @@ import type { z } from "zod";
 
 export type ClosedDiagnostic = z.infer<typeof ClosedDiagnosticSchema>;
 export type BuilderFixedCommand = "install-runtime" | "runtime-self-test" | `computer:${string}`;
-export const BUILDER_BASE_STATUS_COMMAND = "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status";
+export const BUILDER_BASE_STATUS_COMMAND = "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/bootstrap.py status";
 export const RUNTIME_SMOKE_CHECKS = [
   "node_abi", "sqlite_query", "pty_load", "claude_version", "codex_version",
   "cursor_load", "engine_load", "supervisor_idle", "engine_lifecycle",
@@ -14,10 +14,10 @@ const archivedRuntimeSmokeChecks = new Set(["containment_smoke"]);
 
 export const COMPUTER_TEMPLATE_MAX_INPUT_BYTES = 256 * 1024;
 export const COMPUTER_TEMPLATE_FIXED_COMMANDS = {
-  "computer:clone-repos": "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/computer-build.py clone-repos",
-  "computer:run-install": "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/computer-build.py run-install",
-  "computer:verify-tcb": "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/computer-build.py verify-tcb",
-  "computer:sanitize": "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/computer-build.py sanitize",
+  "computer:clone-repos": "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/computer-build.py clone-repos",
+  "computer:run-install": "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/computer-build.py run-install",
+  "computer:verify-tcb": "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/computer-build.py verify-tcb",
+  "computer:sanitize": "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/computer-build.py sanitize",
 } as const;
 const computerStages = {
   "computer:clone-repos": "repositories", "computer:run-install": "install",

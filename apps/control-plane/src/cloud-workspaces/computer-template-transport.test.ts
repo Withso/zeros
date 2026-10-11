@@ -9,7 +9,7 @@ const helper = fileURLToPath(new URL(
   "../../../../scripts/cloud-workspace-validation/runtime-base-v4/computer-build.py", import.meta.url,
 ));
 const canRunHelper = process.platform === "linux" && spawnSync(
-  "sudo", ["-n", "/usr/bin/python3", "-I", "-c", "import os; assert os.geteuid() == 0"], { stdio: "ignore" },
+  "sudo", ["-n", "/usr/bin/python3", "-I", "-B", "-c", "import os; assert os.geteuid() == 0"], { stdio: "ignore" },
 ).status === 0;
 const job = { buildId: "11111111-1111-4111-8111-111111111111", workerFence: 1 };
 const payload = (schema: string, fields: object = {}) => Buffer.from(JSON.stringify({ schema, ...job, ...fields }));
@@ -48,9 +48,9 @@ async function fixture() {
   const boat = builderFixture();
   const vm = await boat.vms.create({ ...builderIntent, purpose: "computer-build" });
   boat.channel.execute.mockImplementation(async input => {
-    const command = /^\/usr\/bin\/sudo -n \/usr\/bin\/timeout --signal=TERM --kill-after=5s [0-9]+s \/usr\/bin\/sudo -n \/usr\/bin\/python3 -I \/opt\/zeros-bootstrap\/computer-build\.py (clone-repos|run-install|verify-tcb|sanitize)$/.exec(input.command)?.[1];
+    const command = /^\/usr\/bin\/sudo -n \/usr\/bin\/timeout --signal=TERM --kill-after=5s [0-9]+s \/usr\/bin\/sudo -n \/usr\/bin\/python3 -I -B \/opt\/zeros-bootstrap\/computer-build\.py (clone-repos|run-install|verify-tcb|sanitize)$/.exec(input.command)?.[1];
     expect(command).toBeDefined();
-    const result = spawnSync("sudo", ["-n", "/usr/bin/python3", "-I", "-c", driver, helper, command!], {
+    const result = spawnSync("sudo", ["-n", "/usr/bin/python3", "-I", "-B", "-c", driver, helper, command!], {
       input: input.stdin, encoding: "utf8", timeout: 10_000, maxBuffer: 1024 * 1024,
     });
     expect(result.stderr).toBe("");

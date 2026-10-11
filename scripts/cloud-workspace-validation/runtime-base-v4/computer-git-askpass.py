@@ -1,12 +1,14 @@
-#!/usr/bin/python3 -I
+#!/usr/bin/python3 -IB
 """Fixed Git askpass. The credential exists only in the clone helper's memory."""
+import sys
+sys.dont_write_bytecode = True
+
 import os
 from pathlib import Path
 import re
 import socket
 import stat
 import struct
-import sys
 
 try:
     address = os.environ.get("ZEROS_COMPUTER_ASKPASS_SOCKET", "")

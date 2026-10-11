@@ -195,7 +195,7 @@ export function basePayload(root: string, commit: string, attemptHex: string): P
   for (const name of ["bootstrap.py", "boot.sh", "dispatch.sh", "install-runtime.sh", "compatibility.json", "cloud-worker.json",
     "zeros-boot.service", "zeros-host.service", "zeros.conf", "zeros-cloud-engine.apparmor",
     // Cloud Computer build helpers, invoked by fixed builder commands.
-    "computer-build.py", "computer-git-askpass.py"]) {
+    "computer-build.py", "computer-git-askpass.py", "stock-prerequisites.py"]) {
     add(`base/${name}`, fs.readFileSync(path.join(base, name)));
   }
   const templates = path.join(root, "scripts/cloud-workspace-validation/boat-image/templates");
@@ -219,11 +219,11 @@ export async function remote(deps: KitDeps, id: string, program: string, timeout
 
 export function pythonProbe(program: string, stage: string): string {
   requireBase(STAGES.has(stage) && !program.includes("\nPYV4\n"), "validate_input", "input_schema");
-  return `/usr/bin/sudo -n /usr/bin/python3 -I - <<'PYV4'\n${program}\nPYV4`;
+  return `/usr/bin/sudo -n /usr/bin/python3 -I -B - <<'PYV4'\n${program}\nPYV4`;
 }
 
 function closedProgram(body: string, stage: string): string {
-  return pythonProbe(`import json,os,pathlib,sys\ncode=0\ntry:\n${body.split("\n").map(line => " " + line).join("\n")}\nexcept BaseException:\n code=1\nprint(json.dumps({'schema':'zeros.diagnostic/v1','component':'base','stage':'${stage}','ok':code==0,'exitCode':code,'timedOut':False,'failedChecks':[] if code==0 else ['build_exit']}),flush=True)\nsys.exit(code)`, stage);
+  return pythonProbe(`import sys\nsys.dont_write_bytecode=True\nimport json,os,pathlib\ncode=0\ntry:\n${body.split("\n").map(line => " " + line).join("\n")}\nexcept BaseException:\n code=1\nprint(json.dumps({'schema':'zeros.diagnostic/v1','component':'base','stage':'${stage}','ok':code==0,'exitCode':code,'timedOut':False,'failedChecks':[] if code==0 else ['build_exit']}),flush=True)\nsys.exit(code)`, stage);
 }
 
 async function uploadAndStart(deps: KitDeps, id: string, payload: Payload, commit: string) {
@@ -254,7 +254,7 @@ if not job.exists():
   target.chmod(0o500)
  (job/'attempt.json').write_text(json.dumps(expected))
  with open(os.devnull,'r+b') as null:
-  subprocess.Popen(['/usr/bin/python3','-I',str(job/'owned-runner.py'),str(job)],stdin=null,stdout=null,stderr=null,start_new_session=True)
+  subprocess.Popen(['/usr/bin/python3','-I','-B',str(job/'owned-runner.py'),str(job)],stdin=null,stdout=null,stderr=null,start_new_session=True)
 else:
  assert json.loads((job/'attempt.json').read_text())==expected
 print(json.dumps({'started':True}))`;

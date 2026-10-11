@@ -654,7 +654,7 @@ else {
     expect(input.body.timeoutSeconds).toBe(480);
     expect(
       input.body.command.startsWith(
-        "/usr/bin/sudo -n /usr/bin/python3 -I - <<'PYV4'\n",
+        "/usr/bin/sudo -n /usr/bin/python3 -I -B - <<'PYV4'\n",
       ),
     ).toBe(true);
     expect(Buffer.byteLength(input.body.command)).toBeLessThanOrEqual(65536);

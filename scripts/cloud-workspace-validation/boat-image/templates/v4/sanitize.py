@@ -1,12 +1,12 @@
 """Sanitize only an empty, newly built v4 base; never an installed workspace."""
+import sys
+sys.dont_write_bytecode = True
+
 import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
-import sys
-
-sys.dont_write_bytecode = True
 
 
 def sanitize():

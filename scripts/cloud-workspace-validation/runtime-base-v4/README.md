@@ -6,6 +6,80 @@ payload. The installer accepts the single-redemption contract: a descriptor,
 short-lived artifact URL, and (for workspace setup) the unchanged nested setup
 payload. Runtime installation grants no engine or credential authority.
 
+## Slim stock prerequisite contract
+
+New bases start from stock Ubuntu 24.04 without a package update, install,
+cleanup, or package-list deletion. Before changing the guest, the read-only
+`stock-prerequisites.py` probe requires the installed stock package closure,
+executable tools, static BusyBox, a loadable CA bundle, AppArmor kernel support,
+and loadable Chromium/fontconfig/freetype native libraries. It checks the
+Bubblewrap and SFTP features used by the runtime, systemd's minimum version,
+the parser's `-K` support, and `useradd --no-log-init`. Missing capabilities
+fail with the closed `base_compatibility` check; the build never repairs stock.
+The build records package versions/architectures and binary/library hashes in
+root-owned `/opt/zeros-bootstrap/stock-prerequisites.json`. Builder and cold-clone
+verification rerun the probes and require the exact same inventory.
+
+The base does not require Podman, crun, slirp4netns, uidmap, inotify-tools, or
+Xvfb. Current execution uses the one-user host boundary and headless Chromium;
+the provider's own desktop services are untouched. Existing account IDs and
+the `zeros-agent` subuid/subgid records remain compatibility contracts. Account
+creation uses the qualified `--no-log-init` flag to avoid lastlog/faillog writes.
+Git LFS and supplemental font assets belong to the separately qualified runtime
+under `/opt`; do not compensate for a missing runtime asset with a guest install.
+The new bootstrap requires regular, nonempty `bin/git-lfs`, `worker/gitconfig`,
+`worker/design-fonts/fonts.conf` and `worker/runtime-system-assets.json` files.
+LFS is executable; the configuration/inventory and font data are read-only.
+The `zeros.runtime-system-assets/v1` inventory must name all nine selected
+packages, with manifested copyright files and font data for all eight font
+packages. Installation, cached-runtime verification and dispatch enforce this
+capability. Dispatch also rehashes the selected asset configuration; full
+runtime hashing still runs at the existing full-verification boundaries.
+
+Computer recipes independently resolve and fully verify the current physical
+runtime before exec. Their PATH starts with its `bin`; `GIT_CONFIG_SYSTEM`
+selects `worker/gitconfig`, and `FONTCONFIG_FILE`/`FONTCONFIG_PATH` select its
+`worker/design-fonts/fonts.conf` and containing directory. Managed repository
+clones still disable system Git configuration, skip LFS smudge, and refuse
+LFS pointers. The administrator recipe keeps its ordinary LFS filters.
+
+Every controlled guest Python launch disables bytecode at interpreter startup
+with `-B`; installed executable scripts use the combined `-IB` shebang option.
+The base/Computer helpers also set `sys.dont_write_bytecode` before stdlib
+imports. Isolated `-I` ignores `PYTHONDONTWRITEBYTECODE`, and a guard after
+imports is too late: missing/stale stdlib caches could otherwise write under
+stock `/usr/lib` and reintroduce whole-directory snapshot deltas. Regression
+tests extract the actual launch options and run imports with empty cache
+prefixes; these must remain empty.
+
+Only `/opt` retains ancestor custody hardening. The build never changes
+`/usr/local` or `/usr/local/lib` metadata. Instead, before any recipe runs it
+seals a narrowly scoped absence policy for `/usr/local/lib/systemd/system` in
+the protected stock evidence. Existing ancestors must be root-owned or owned
+by the qualified stock administrative user, with no group/world writes,
+special mode bits, ACLs, capabilities, symlinks or intervening mounts. Zeros
+principal IDs cannot be the qualified provider owner. Directory descriptors
+pin every component; the final pass checks identity, metadata, absence and
+mount identity again. Traversal also rejects nested `zeros-*` entries,
+`service.d` and redirected paths. New optional directories or changed ancestor
+owners/modes are refused; an unrelated regular unit in an already qualified
+directory can remain unrelated.
+
+Every base/boot check revalidates this policy. Computer pre/post recipe proofs
+include the observed owners, modes, empty ACL state, directory topology and
+protected-path absence in the externally held digest. Cold boots compare the
+policy without requiring old inode or mount numbers to survive restoration.
+The exception never applies to an actual protected file: those files keep
+strict root-owned ancestry and ordinary hash checks. Operational Zeros units
+remain under `/etc/systemd/system`, and the engine's `/usr` view stays read-only.
+
+The generated, installed `compatibility.json` includes the stock evidence and
+probe among its protected files. Their bytes and the changed bootstrap/Computer
+helper produce a new `bc1`; the v1 compatibility wire schema is unchanged.
+Qualify the new base/runtime/template tuple before promotion. Existing bases,
+runtime pins, Local Personal and organization-local workspaces keep their
+current implementation. The full hydration and runtime-hash gates remain.
+
 The fixed transport is:
 
 ```sh
@@ -229,7 +303,12 @@ udev have run. Their earlier success does not apply the restored configuration.
 
 Every `zeros-boot.service` invocation verifies the base's protected files,
 restores the facade and runtime directories, and runs the fixed command
-`/usr/sbin/apparmor_parser -r -W /etc/apparmor.d/zeros-cloud-engine`. Reloading is
+`/usr/sbin/apparmor_parser -r -K /etc/apparmor.d/zeros-cloud-engine`. In the
+qualified parser, `-K` (`--skip-cache`, documented by `apparmor_parser(8)`)
+skips both cache reads and writes. Unlike `-W`, it compiles the protected source
+for the current kernel without modifying the stock AppArmor cache. The stock
+probe requires the parser to accept `-K --help` and advertise that option;
+unsupported parsers fail qualification. Reloading is
 idempotent and also happens when the kernel boot ID has not changed. It is
 bounded to 30 seconds, suppresses command stdout/stderr, and fails with the
 closed bootstrap check `apparmor` if execution, loading or timeout fails.
@@ -263,11 +342,11 @@ named snapshot with a large system delta re-captures every system directory
 that delta touched once it writes and stops. On 2026-10-11, a stock snapshot
 with 537 MB added under `/usr/lib` led to a capture of all of `/usr/lib` (about
 51,000 files) after 480 MB was written to `/opt`; a 6-byte change did not. The
-v4 base installs about 359 MB of packages across `/usr/lib`, `/usr/share`,
+previous v4 base installed about 359 MB of packages across `/usr/lib`, `/usr/share`,
 `/usr/bin`, `/usr/local` and `/var/lib`, so Computer templates and workspaces
 derived from it grew from about 45,000 entries and 2.5 GB to about 350,000
 entries and 11.9 GB, and each restore spent minutes in Boat's `sysdelta` phase.
-A base rebuilt on 2026-10-11 behaves the same, so a rebuild alone does not
+A base rebuilt with the previous recipe behaved the same, so a rebuild alone does not
 restore the old snapshot size. To detect it, compare a recent template's
 snapshot tree (`GET /snapshots/<id>/tree`) with its base and runtime contents.
 
@@ -290,6 +369,10 @@ pnpm check:actions
 
 Tests use an injected temporary root, host adapter, clock and downloader. These
 are Python APIs only; production has no test flags or environment overrides.
+The base kit's test-only runtime generator includes explicit LFS/font inventory
+stubs so installer and persistence checks exercise the same admission shape.
+Those stubs cannot pass functional LFS/font qualification and are never a
+production runtime or evidence of glyph, Git filter, or credential behavior.
 Tests consume B1's golden fixtures from its merge in PR #280, including the
 §16 installer checks and §17 boundary cases. A verbatim pinned snapshot and its source commit are
 under `tests/fixtures/`; tests automatically prefer the shared protocol fixture

@@ -1,4 +1,7 @@
 """Fixed root probe; only public base contract, identities and closed checks leave it."""
+import sys
+sys.dont_write_bytecode = True
+
 import base64
 import grp
 import hashlib
@@ -11,9 +14,6 @@ import pwd
 import re
 import stat
 import subprocess
-import sys
-
-sys.dont_write_bytecode = True
 
 # Boat installs its own root key on every machine during boot. Builder
 # sanitation removes it before capture and the kit checks the saved tree, so a
@@ -40,6 +40,16 @@ def private_state_clean(root='/', cold_boot=COLD_BOOT):
             if os.path.lexists(target) and not (target.is_file() and target.stat().st_size == 0):
                 return False
     return True
+
+
+def verify_stock_prerequisites(app):
+    # app.base() already verified this helper and the stock evidence against
+    # the protected inventory. Repeat the read-only probes on the cold clone.
+    spec = importlib.util.spec_from_file_location('stock', app.path('/opt/zeros-bootstrap/stock-prerequisites.py'))
+    stock = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(stock)
+    expected = json.loads(app.read('/opt/zeros-bootstrap/stock-prerequisites.json', 128 * 1024, 0o444))
+    stock.require(stock.probe(app.root, uid=app.uid, gid=app.gid) == expected)
 
 
 def verify():
@@ -109,6 +119,7 @@ def verify_host(bootstrap, app):
         require(not os.listdir(name), 'base_compatibility')
     require(set(os.listdir('/srv/zeros/state')) <= {'workspaces'} and not os.listdir('/srv/zeros/state/workspaces'), 'base_compatibility')
     require(private_state_clean(), 'base_compatibility')
+    verify_stock_prerequisites(app)
     compatibility_raw = app.read('/opt/zeros-bootstrap/compatibility.json', 65536, 0o444)
     require('bc1-' + hashlib.sha256(compatibility_raw).hexdigest() == app.compat_id, 'base_compatibility')
     return {'schema': 'zeros.base-verification/v1', 'baseCompatibilityId': app.compat_id,

@@ -1,10 +1,12 @@
 """Operator-only runtime proof; transported by the kit, never installed."""
+import sys
+sys.dont_write_bytecode = True
+
 import importlib.util
 import json
 import os
 import pathlib
 import subprocess
-import sys
 import time
 
 

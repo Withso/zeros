@@ -356,7 +356,7 @@ describe("Boat bootstrap transport", () => {
     const f = v4Fixture(state);
     expect(f.input.env.ZEROS_CLOUD_WORKSPACE_SETUP_B64.length).toBeGreaterThan(48 * 1024);
     await f.runner.execute(f.input, new AbortController().signal);
-    expect(f.request.mock.calls[0][1]).toMatchObject({ body: { command: "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status" } });
+    expect(f.request.mock.calls[0][1]).toMatchObject({ body: { command: "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/bootstrap.py status" } });
     expect(f.channel.execute.mock.calls[0][0]).toMatchObject({ stdin: f.input.env.ZEROS_CLOUD_WORKSPACE_SETUP_B64,
       command: `/usr/bin/sudo -n /usr/bin/timeout --signal=TERM --kill-after=5s 60s ${CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND}` });
     expect(JSON.stringify(f.request.mock.calls)).not.toContain("ensure-cloud-worker-supervisor");

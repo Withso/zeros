@@ -124,7 +124,7 @@ describe("runtime update root channel", () => {
     expect(answer).toEqual({ ...scope, phase: "authorize", allow: true });
     expect(handlers.authorize).toHaveBeenCalledOnce();
     const command = runtimeUpdateCommand();
-    expect(command).toMatch(/^\/usr\/bin\/python3 -I -c /);
+    expect(command).toMatch(/^\/usr\/bin\/python3 -I -B -c /);
     expect(command).not.toContain(request.transitionId);
     expect(command).not.toContain("memory-only-canary");
     expect(command).not.toContain("\n");

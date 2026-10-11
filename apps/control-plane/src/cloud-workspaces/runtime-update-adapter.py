@@ -1,5 +1,5 @@
-#!/usr/bin/python3
-"""Fixed, deployment-owned v4 update adapter. Invoke with Python -I.
+#!/usr/bin/python3 -IB
+"""Fixed, deployment-owned v4 update adapter. Invoke with Python -I -B.
 
 Authentication is the control plane's expiring, command-restricted pinned SSH
 channel. The pipe protocol never accepts code, paths or shell commands. Registry
@@ -7,6 +7,9 @@ qualification and the quiet/transfer fence belong to the control plane; the VM
 independently verifies the source witness and the complete installed trees.
 No protected base bytes are changed. Import injection is for rootless tests only.
 """
+import sys
+sys.dont_write_bytecode = True
+
 import contextlib
 import fcntl
 import importlib.util
@@ -17,7 +20,6 @@ import signal
 import socket
 import stat
 import subprocess
-import sys
 import time
 
 JOURNAL = "/srv/zeros/runtime-installs/update.json"

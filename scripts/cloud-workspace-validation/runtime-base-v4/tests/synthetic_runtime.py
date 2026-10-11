@@ -16,6 +16,21 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def system_assets():
+    """Inventory stubs only. These cannot pass functional LFS/font qualification."""
+    packages = ("git-lfs", "fonts-noto-color-emoji", "fonts-unifont", "xfonts-cyrillic", "xfonts-scalable",
+                "fonts-ipafont-gothic", "fonts-wqy-zenhei", "fonts-tlwg-loma-otf", "fonts-freefont-ttf")
+    fonts = ["worker/design-fonts/" + name + "/fixture.ttf" for name in packages if name != "git-lfs"]
+    contents = {name: b"synthetic font fixture; not a usable font\n" for name in fonts}
+    contents.update({"lib/runtime-system-assets/" + name + "/copyright": b"Synthetic fixture; no third-party asset.\n" for name in packages})
+    contents.update({"bin/git-lfs": b"#!/bin/sh\nexit 99\n", "worker/gitconfig": b"# synthetic Git configuration\n",
+                     "worker/design-fonts/fonts.conf": b"<fontconfig/>\n",
+                     "worker/runtime-system-assets.json": json.dumps({"schema": "zeros.runtime-system-assets/v1",
+                         "gitLfs": "bin/git-lfs", "gitConfig": "worker/gitconfig", "fontConfig": "worker/design-fonts/fonts.conf",
+                         "fonts": sorted(fonts), "packages": [{"name": name} for name in sorted(packages)]}, sort_keys=True, separators=(",", ":")).encode()})
+    return contents
+
+
 def build(node_archive, node_sha256, source_commit, variant, output):
     raw = Path(node_archive).read_bytes()
     assert len(raw) <= 128 * 1024**2 and sha(raw) == node_sha256
@@ -32,8 +47,12 @@ def build(node_archive, node_sha256, source_commit, variant, output):
                 'lib/zeros/setup-cloud-workspace.mjs': setup.encode(),
                 'lib/zeros/runtime-self-test.mjs': b'process.exit(0);\n',
                 'worker/dist-engine/cli.js': b'export {};\n', 'worker/variant.txt': variant.encode()}
+    assets = system_assets()
+    contents.update(assets)
     entries = {name: {'path': name, 'type': 'file', 'mode': '0500' if name.endswith('cloud-engine-namespace') else '0555',
                       'size': len(value), 'sha256': sha(value)} for name, value in contents.items()}
+    for name in assets:
+        if name != 'bin/git-lfs': entries[name]['mode'] = '0444'
     for name in list(entries):
         for parent in Path(name).parents:
             if str(parent) != '.':
