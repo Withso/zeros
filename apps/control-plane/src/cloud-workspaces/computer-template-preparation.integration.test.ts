@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
@@ -7,7 +7,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { builderFixture, BUILDER_WALLET } from "./cloud-builder-vm-test-fixtures.js";
 import { DatabaseBuilderVmOperationStore, type BuilderVmIntent } from "./cloud-builder-vm-store.js";
 import { ComputerTemplateWorker } from "./computer-template-worker.js";
-import { seedComputerTemplateRuntime, templateRuntime } from "./computer-template-test-fixtures.js";
+import { seedComputerTemplateRuntime, seedComputerTemplateRuntimeImage, templateRuntime } from "./computer-template-test-fixtures.js";
 import { DatabaseCloudComputerV2Service } from "./computer-v2.js";
 import { BoatCloudBuilderVms } from "./cloud-builder-vm.js";
 import { createComputerTemplateBoatAdapters } from "./computer-template-boat.js";
@@ -60,6 +60,78 @@ database("computer template claim preparation with the real B7 journal", () => {
     });
   });
 
+  const seedImage = () => seedComputerTemplateRuntimeImage(pool, {
+    accountScope: claimOptions().accountScope, billingOrg: BUILDER_WALLET,
+  });
+
+  it("pins a ready runtime image with the allocation and prepared provider request", async () => {
+    const image = await seedImage();
+    const requested = await request();
+    await service.claimNextBuild(7, { ...claimOptions(), runtimeImageChannel: "alpha" });
+    const operation = await operations.find(`computer-build:${requested.build.id}`);
+    expect(operation).toMatchObject({
+      intent: { source: { kind: "image", imageId: image.imageId } },
+      provider_request: { path: "/sandboxes", body: { from: image.snapshotName, snapshots: true } },
+    });
+    expect(await withSystemTx(pool, async tx => (await tx.query(
+      "SELECT builder_source_image_id FROM cloud_computer_templates WHERE build_id=$1", [requested.build.id],
+    )).rows[0])).toEqual({ builder_source_image_id: image.imageId });
+    expect(boat.fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each(["disabled", "unavailable", "retiring", "foreign channel", "foreign account", "foreign wallet"])(
+    "keeps the legacy base intent and digest when the runtime image is %s", async reason => {
+      if (reason !== "unavailable") {
+        const image = await seedComputerTemplateRuntimeImage(pool, {
+          channel: reason === "foreign channel" ? "beta" : "alpha",
+          accountScope: reason === "foreign account" ? "another-fixture-account" : claimOptions().accountScope,
+          billingOrg: reason === "foreign wallet" ? "another-fixture-wallet" : BUILDER_WALLET,
+        });
+        if (reason === "retiring") await withSystemTx(pool, tx => tx.query(
+          "UPDATE cloud_runtime_images SET state='retiring',retire_requested_at=now() WHERE image_id=$1", [image.imageId],
+        ));
+      }
+      const requested = await request();
+      await service.claimNextBuild(7, { ...claimOptions(), ...(reason === "disabled" ? {} : { runtimeImageChannel: "alpha" as const }) });
+      const operation = (await operations.find(`computer-build:${requested.build.id}`))!;
+      const legacyIntent: BuilderVmIntent = {
+        purpose: "computer-build", source: { kind: "base", baseImageId: templateRuntime.baseImageId },
+        name: operation.intent.name, operationKey: operation.operation_key, ttlSeconds: 1800,
+      };
+      expect(operation.intent).toEqual(legacyIntent);
+      expect(operation.request_sha256).toBe(createHash("sha256").update(JSON.stringify(legacyIntent)).digest("hex"));
+      expect(operation.provider_request).toMatchObject({ path: "/sandboxes", body: { from: "zeros-v2-test-base" } });
+      expect(await withSystemTx(pool, async tx => (await tx.query(
+        "SELECT builder_source_image_id FROM cloud_computer_templates WHERE build_id=$1", [requested.build.id],
+      )).rows[0])).toEqual({ builder_source_image_id: null });
+    },
+  );
+
+  it("replays an unknown image create for cleanup after withdrawal with image selection disabled", async () => {
+    const image = await seedImage();
+    const requested = await request();
+    await service.claimNextBuild(7, { ...claimOptions(), runtimeImageChannel: "alpha" });
+    const key = `computer-build:${requested.build.id}`;
+    const prepared = (await operations.find(key))!;
+    expect(prepared.intent.source).toEqual({ kind: "image", imageId: image.imageId });
+    await operations.beginCreateAttempt(key, randomUUID());
+    await withSystemTx(pool, tx => tx.query(
+      "UPDATE cloud_runtime_images SET state='retiring',retire_requested_at=now() WHERE image_id=$1", [image.imageId],
+    ));
+    await service.cancel(fixture.organizationId, fixture.userId, requested.build.id, { expectedRevision: requested.revision });
+    await worker.tick();
+    const creates = boat.fetcher.mock.calls.filter(([url, init]) =>
+      new URL(String(url)).pathname.endsWith("/sandboxes") && init?.method === "POST");
+    expect(creates).toHaveLength(1);
+    expect(JSON.parse(String(creates[0]![1]!.body))).toEqual(prepared.provider_request.body);
+    expect(new Headers(creates[0]![1]!.headers).get("idempotency-key")).toBe(key);
+    expect(await operations.find(key)).toMatchObject({ state: "deleted", intent: prepared.intent,
+      request_sha256: prepared.request_sha256, provider_request: prepared.provider_request });
+    expect(await withSystemTx(pool, async tx => (await tx.query(
+      "SELECT builder_source_image_id,cleanup_confirmed_at FROM cloud_computer_templates WHERE build_id=$1", [requested.build.id],
+    )).rows[0])).toEqual({ builder_source_image_id: image.imageId, cleanup_confirmed_at: expect.any(Date) });
+  });
+
   it.each(["cancellation", "expiry"])(
     "closes a claim before its first create on %s and fences a late creator",
     async (reason) => {
@@ -104,21 +176,23 @@ database("computer template claim preparation with the real B7 journal", () => {
     },
   );
 
-  it("rolls back the claim, capacity hold and prepared intent together", async () => {
+  it.each(["base", "image"])("rolls back the %s claim, capacity hold and prepared intent together", async source => {
+    if (source === "image") await seedImage();
+    const options = { ...claimOptions(), ...(source === "image" ? { runtimeImageChannel: "alpha" as const } : {}) };
     const requested = await request();
     const prepare = operations.prepare.bind(operations);
     vi.spyOn(operations, "prepare").mockImplementationOnce(async (...args) => {
       await prepare(...args);
       throw new Error("fixture preparation failure");
     });
-    await expect(service.claimNextBuild(7, claimOptions())).rejects.toThrow("fixture preparation failure");
+    await expect(service.claimNextBuild(7, options)).rejects.toThrow("fixture preparation failure");
     expect((await read()).latestBuild?.state).toBe("queued");
     expect(await operations.find(`computer-build:${requested.build.id}`)).toBeNull();
     expect(await withSystemTx(pool, async tx => (await tx.query(
       "SELECT 1 FROM cloud_computer_templates WHERE build_id=$1", [requested.build.id],
     )).rowCount)).toBe(0);
     expect(boat.state.creates).toBe(0);
-    expect((await service.claimNextBuild(8, claimOptions()))?.build.id).toBe(requested.build.id);
+    expect((await service.claimNextBuild(8, options))?.build.id).toBe(requested.build.id);
   });
 
   it.each(["request", "confirmation"])("stops compute after deletion %s fails without reversing the deletion journal", async failure => {

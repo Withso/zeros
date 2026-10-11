@@ -9,6 +9,7 @@ export type TemplateAllocation = {
   state: string;
   build_state: string;
   base_image_id: string;
+  builder_source_image_id: string | null;
   builder_operation_key: string;
   builder_name: string;
   account_scope: string;

@@ -140,16 +140,18 @@ describe("runtime publication configuration", () => {
 describe("v4 runtime admission configuration", () => {
   it("defaults qualifications to full without a staff or runtime rollout switch", () => {
     expect(loadConfig(cloudSetupEnv()).cloudWorkspaces?.runtime).toEqual({
-      qualificationMode: "full", qualificationEnabled: false, stagingEnabled: false,
+      qualificationMode: "full", qualificationEnabled: false, stagingEnabled: false, imagesEnabled: false,
     });
   });
   it("accepts only the explicit runtime switches", () => {
     expect(loadConfig({ ...cloudSetupEnv(), CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE: "v4",
-      CLOUD_RUNTIME_V4_STAFF_ONLY: "false", CLOUD_RUNTIME_QUALIFICATION_MODE: "smoke", CLOUD_RUNTIME_QUALIFICATION_ENABLED: "true" }).cloudWorkspaces?.runtime)
-      .toEqual({ qualificationMode: "smoke", qualificationEnabled: true, stagingEnabled: false });
+      CLOUD_RUNTIME_V4_STAFF_ONLY: "false", CLOUD_RUNTIME_QUALIFICATION_MODE: "smoke", CLOUD_RUNTIME_QUALIFICATION_ENABLED: "true",
+      CLOUD_RUNTIME_IMAGES_ENABLED: "true" }).cloudWorkspaces?.runtime)
+      .toEqual({ qualificationMode: "smoke", qualificationEnabled: true, stagingEnabled: false, imagesEnabled: true });
     expect(loadConfig({ ...cloudSetupEnv(), CLOUD_RUNTIME_V4_STAFF_ONLY: "true" }).cloudWorkspaces?.runtime)
       .toEqual(loadConfig(cloudSetupEnv()).cloudWorkspaces?.runtime);
-    for (const name of ["CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE", "CLOUD_RUNTIME_QUALIFICATION_MODE", "CLOUD_RUNTIME_QUALIFICATION_ENABLED"]) {
+    for (const name of ["CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE", "CLOUD_RUNTIME_QUALIFICATION_MODE", "CLOUD_RUNTIME_QUALIFICATION_ENABLED",
+      "CLOUD_RUNTIME_IMAGES_ENABLED"]) {
       expect(() => loadConfig({ ...cloudSetupEnv(), [name]: "invalid" })).toThrow(name);
     }
   });

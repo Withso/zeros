@@ -20,6 +20,7 @@ import { createRuntimeArtifactStore } from "./cloud-workspaces/runtime-artifact-
 import { cloudRuntimeQualificationMode } from "./cloud-workspaces/runtime-config.js";
 import { loadPinnedCloudRuntime } from "./cloud-workspaces/runtime-selection.js";
 import { createRuntimeQualificationWorker } from "./cloud-workspaces/runtime-qualification.js";
+import { createRuntimeImageWorker } from "./cloud-workspaces/runtime-images.js";
 import { createCloudRuntimeStagingWorker } from "./cloud-workspaces/runtime-staging.js";
 import { DatabaseCloudRuntimeTransitionService } from "./cloud-workspaces/runtime-transfer.js";
 import { BoatApiClient } from "./cloud-workspaces/boat-client.js";
@@ -131,6 +132,7 @@ let stopCloudSetupWorker = async () => {};
 let stopCloudComputerRetirementWorker = async () => {};
 let stopCloudComputerTemplateWorker = async () => {};
 let stopCloudRuntimeQualificationWorker = async () => {};
+let stopCloudRuntimeImageWorker = async () => {};
 let stopCloudRuntimeStagingWorker = async () => {};
 let stopCloudComputerTemplateRetentionWorker = async () => {};
 let stopCloudAccessRevocationWorker = async () => {};
@@ -167,6 +169,8 @@ let cloudWorkspaceEngineClientAdmissionService:
   | undefined;
 const runtimeQualificationWorker = !config.databaseMaintenanceMode && migrationResult.status.state !== "controlled_migration_pending"
   ? createRuntimeQualificationWorker(config, pool, runtimeArtifacts) : null;
+const runtimeImageWorker = !config.databaseMaintenanceMode && migrationResult.status.state !== "controlled_migration_pending"
+  ? createRuntimeImageWorker(config, pool, runtimeArtifacts) : null;
 const runtimeStagingWorker = !config.databaseMaintenanceMode && migrationResult.status.state !== "controlled_migration_pending"
   ? createCloudRuntimeStagingWorker(config, pool, runtimeArtifacts, new DatabaseCloudRuntimeTransitionService({
     pool, qualificationMode: config.cloudWorkspaces?.runtime?.qualificationMode ?? "full",
@@ -623,6 +627,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       finally { await workerListenerPool.end(); }
     };
     if (runtimeQualificationWorker) stopCloudRuntimeQualificationWorker = runtimeQualificationWorker.start();
+    if (runtimeImageWorker) stopCloudRuntimeImageWorker = runtimeImageWorker.start();
     if (computerTemplateWorker) stopCloudComputerTemplateWorker = computerTemplateWorker.start();
     if (
       config.deploymentChannel === "alpha" &&
@@ -744,6 +749,7 @@ function shutdown(signal: string): void {
     stopCloudComputerRetirementWorker(),
     stopCloudComputerTemplateWorker(),
     stopCloudRuntimeQualificationWorker(),
+    stopCloudRuntimeImageWorker(),
     stopCloudRuntimeStagingWorker(),
     stopCloudComputerTemplateRetentionWorker(),
     stopCloudAccessRevocationWorker(),

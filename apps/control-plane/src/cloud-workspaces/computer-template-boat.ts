@@ -14,9 +14,10 @@ export { COMPUTER_TEMPLATE_FIXED_COMMANDS } from "./cloud-builder-commands.js";
 
 /** Claim preparation and every create/replay use the same immutable intent. */
 export function computerTemplateBuilderIntent(input: {
-  baseImageId: string; name: string; operationKey: string;
+  baseImageId: string; imageId?: string | null; name: string; operationKey: string;
 }): BuilderVmIntent {
-  return { purpose: "computer-build", source: { kind: "base", baseImageId: input.baseImageId },
+  return { purpose: "computer-build", source: input.imageId === undefined || input.imageId === null
+    ? { kind: "base", baseImageId: input.baseImageId } : { kind: "image", imageId: input.imageId },
     name: input.name, operationKey: input.operationKey, ttlSeconds: 1800 };
 }
 export type ComputerTemplateRuntime = {

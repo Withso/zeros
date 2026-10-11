@@ -71,6 +71,14 @@ describe("computer template worker factory", () => {
     }), mode);
   });
 
+  it.each([undefined, false, true])("enables new image choices only when the image flag is %s", enabled => {
+    const value = config();
+    if (enabled === undefined) delete value.cloudWorkspaces!.runtime!.imagesEnabled;
+    else value.cloudWorkspaces!.runtime!.imagesEnabled = enabled;
+    createComputerTemplateWorker(value, pool, artifacts, github);
+    expect(vi.mocked(ComputerTemplateWorker).mock.calls[0]![0].runtimeImageChannel).toBe(enabled ? "alpha" : undefined);
+  });
+
   it("reuses the entrypoint's Cloud Computer service", () => {
     const value = config();
     const service = new DatabaseCloudComputerV2Service(pool, value.cloudWorkspaces as CloudWorkspaceBackendConfig);
