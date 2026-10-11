@@ -17,6 +17,7 @@ import {
 } from "./computer-template-capacity.js";
 import { ComputerTemplateLogRedactor } from "./computer-template-logs.js";
 import { BuilderVmError, computerTemplateBuilderIntent } from "./computer-template-boat.js";
+import { quarantineRuntimeImage, type RuntimeImageChannel } from "./runtime-images.js";
 import type {
   BuilderFixedCommand,
   BuilderVm,
@@ -80,7 +81,7 @@ const SanitationResult = z
   .strict();
 
 class BuildFailure extends Error {
-  constructor(readonly code: CloudComputerV2BuildError) {
+  constructor(readonly code: CloudComputerV2BuildError, readonly confirmedTcbModification = false) {
     super(code);
   }
 }
@@ -108,6 +109,7 @@ export type ComputerTemplateWorkerDependencies = {
   };
   accountScope: string;
   billingOrg: string;
+  runtimeImageChannel?: RuntimeImageChannel;
   maxConcurrentBuilds?: number;
   pollMs?: number;
   namePrefix?: string;
@@ -215,6 +217,7 @@ export class ComputerTemplateWorker {
         operations: this.deps.operations,
         accountScope: this.deps.accountScope,
         billingOrg: this.deps.billingOrg,
+        ...(this.deps.runtimeImageChannel ? { runtimeImageChannel: this.deps.runtimeImageChannel } : {}),
         ...(this.deps.namePrefix ? { namePrefix: this.deps.namePrefix } : {}),
         selectRuntime: async (tx) => {
           runtime = await this.deps.runtime.select(tx);
@@ -295,9 +298,13 @@ export class ComputerTemplateWorker {
         diagnostic.timedOut ||
         diagnostic.failedChecks.length
       )
-        throw new BuildFailure(error);
+        throw new BuildFailure(error, command === "computer:verify-tcb" && output.exitCode > 0 &&
+          diagnostic?.schema === "zeros.diagnostic/v1" && diagnostic.component === "build" && diagnostic.stage === "integrity" &&
+          diagnostic.ok === false && diagnostic.exitCode === output.exitCode && diagnostic.timedOut === false &&
+          diagnostic.failedChecks.includes("tcb_modified"));
       return output.stdout;
-    } catch {
+    } catch (cause) {
+      if (cause instanceof BuildFailure) throw cause;
       throw new BuildFailure(error);
     } finally {
       input?.fill(0);
@@ -310,6 +317,7 @@ export class ComputerTemplateWorker {
       throw new BuildFailure("allocation_failed");
     return this.deps.vms.create(computerTemplateBuilderIntent({
       baseImageId: row.base_image_id,
+      imageId: row.builder_source_image_id,
       name: row.builder_name,
       operationKey: row.builder_operation_key,
     }));
@@ -339,30 +347,33 @@ export class ComputerTemplateWorker {
       await this.stage(claim, "runtime");
       failure = "runtime_install_failed";
       const status = await this.deps.vms.waitForBase(vm);
-      if (
-        status.baseCompatibilityId !== runtime.baseCompatibilityId ||
-        status.currentRuntimeId !== null ||
-        !["idle", "waiting_for_runtime"].includes(status.hostState)
-      )
+      const imageId = allocation.builder_source_image_id;
+      const literals: string[] = [];
+      if (status.baseCompatibilityId !== runtime.baseCompatibilityId) {
+        if (imageId) await quarantineRuntimeImage(this.deps.pool, imageId, "base_compatibility");
         throw new BuildFailure(failure);
-      const artifact = await this.deps.artifacts.presignGet(
-        runtime.objectKey,
-        900,
-      );
-      await this.fixed(
-        vm,
-        "install-runtime",
-        {
-          schema: "zeros.runtime-install/v1",
-          purpose: "build",
-          runtime: runtime.descriptor,
-          artifact,
-        },
-        failure,
-        this.timeout(claim, 600_000),
-        "installer",
-        "done",
-      );
+      }
+      if (imageId) {
+        if (status.currentRuntimeId !== pin.runtimeId) {
+          await quarantineRuntimeImage(this.deps.pool, imageId, "runtime_identity");
+          throw new BuildFailure(failure);
+        }
+        if (status.hostState !== "idle") throw new BuildFailure(failure);
+      } else {
+        if (status.currentRuntimeId !== null || !["idle", "waiting_for_runtime"].includes(status.hostState))
+          throw new BuildFailure(failure);
+        const artifact = await this.deps.artifacts.presignGet(runtime.objectKey, 900);
+        literals.push(artifact.url);
+        await this.fixed(
+          vm,
+          "install-runtime",
+          { schema: "zeros.runtime-install/v1", purpose: "build", runtime: runtime.descriptor, artifact },
+          failure,
+          this.timeout(claim, 600_000),
+          "installer",
+          "done",
+        );
+      }
       await this.guard(claim);
       const tcbInput = {
         schema: "zeros.computer-tcb-input/v1",
@@ -370,19 +381,27 @@ export class ComputerTemplateWorker {
         baseCompatibilityId: runtime.baseCompatibilityId,
         runtimeId: pin.runtimeId,
       };
-      const baseline = result(
-        TcbResult,
-        await this.fixed(
-          vm,
-          "computer:verify-tcb",
-          { ...tcbInput, action: "baseline" },
+      let baseline: z.infer<typeof TcbResult>;
+      try {
+        baseline = result(
+          TcbResult,
+          await this.fixed(
+            vm,
+            "computer:verify-tcb",
+            { ...tcbInput, action: "baseline" },
+            "tcb_modified",
+            this.timeout(claim, 180_000),
+            "build",
+            "integrity",
+          ),
           "tcb_modified",
-          this.timeout(claim, 180_000),
-          "build",
-          "integrity",
-        ),
-        "tcb_modified",
-      );
+        );
+      } catch (error) {
+        // Only a confirmed initial TCB failure implicates the shared image.
+        if (imageId && error instanceof BuildFailure && error.confirmedTcbModification)
+          await quarantineRuntimeImage(this.deps.pool, imageId, "tcb_modified");
+        throw error;
+      }
       if (
         baseline.buildId !== id ||
         baseline.runtimeId !== pin.runtimeId ||
@@ -397,7 +416,6 @@ export class ComputerTemplateWorker {
       );
       await this.stage(claim, "repositories");
       failure = "repository_access_denied";
-      const literals: string[] = [artifact.url];
       const repositories = await this.clone(claim, vm, literals);
       if (
         !(

@@ -33,6 +33,7 @@ export function createComputerTemplateWorker(
     artifacts,
     accountScope,
     billingOrg,
+    ...(cloud.runtime?.imagesEnabled === true ? { runtimeImageChannel: config.deploymentChannel } : {}),
     maxConcurrentBuilds: cloud.computerMaxConcurrentBuilds ?? 2,
   });
 }

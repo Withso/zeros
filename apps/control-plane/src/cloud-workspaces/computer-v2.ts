@@ -21,6 +21,7 @@ import { computerTemplateBuilderName } from "./computer-template-name.js";
 import { computerTemplateBuilderIntent } from "./computer-template-boat.js";
 import { builderVmBaseSnapshot, prepareBuilderVmOperation } from "./cloud-builder-vm.js";
 import type { BuilderVmOperationStore } from "./cloud-builder-vm-store.js";
+import { lockReadyRuntimeImage, type RuntimeImageChannel } from "./runtime-images.js";
 import { COMPUTER_TEMPLATE_RETENTION_CHANNEL } from "./computer-template-retention.js";
 import { updateRepositorySetupScript } from "./computer-repository-setup.js";
 import {
@@ -1389,6 +1390,7 @@ export class DatabaseCloudComputerV2Service {
     selectRuntime: (tx: Tx) => Promise<{ baseImageId: string; runtimeId: string } | null>;
     operations: BuilderVmOperationStore;
     accountScope: string; billingOrg: string; namePrefix?: string;
+    runtimeImageChannel?: RuntimeImageChannel;
   }): Promise<CloudComputerV2Claim | null> {
     const workerFence = parse(positive, fence);
     return withSystemTx(this.pool, async (tx) => {
@@ -1425,23 +1427,27 @@ export class DatabaseCloudComputerV2Service {
         [build.id, workerFence, runtimePin?.baseImageId ?? null, runtimePin?.runtimeId ?? null],
       );
       if (builder) {
+        const base = (await tx.query<{ image_ref: string; base_compatibility_id: string }>(`SELECT base.image_ref,base.base_compatibility_id
+          FROM cloud_runtime_base_images base JOIN cloud_runtime_base_contracts contract USING (base_compatibility_id)
+          WHERE base.base_image_id=$1 AND base.provider='boat' AND base.approved_at<=clock_timestamp()
+            AND base.revoked_at IS NULL AND contract.revoked_at IS NULL FOR SHARE OF base,contract`,
+        [runtimePin!.baseImageId])).rows[0];
+        const image = builder.runtimeImageChannel && base ? await lockReadyRuntimeImage(tx, {
+          channel: builder.runtimeImageChannel, runtimeId: runtimePin!.runtimeId, baseImageId: runtimePin!.baseImageId,
+          baseCompatibilityId: base.base_compatibility_id, accountScope: builder.accountScope, billingOrg: builder.billingOrg,
+        }) : null;
         const name = computerTemplateBuilderName(build.id, builder.namePrefix);
         const intent = computerTemplateBuilderIntent({
-          baseImageId: runtimePin!.baseImageId!, name, operationKey: `computer-build:${build.id}`,
+          baseImageId: runtimePin!.baseImageId!, imageId: image?.imageId ?? null, name, operationKey: `computer-build:${build.id}`,
         });
         // Commit the capacity hold and closable intent together. Resolve the
-        // pinned base through this transaction; preparation has no provider I/O.
-        await prepareBuilderVmOperation(builder.operations, intent, async () => {
-          const base = (await tx.query<{ image_ref: string }>(`SELECT base.image_ref FROM cloud_runtime_base_images base
-            JOIN cloud_runtime_base_contracts contract USING (base_compatibility_id)
-            WHERE base.base_image_id=$1 AND base.provider='boat' AND base.approved_at<=clock_timestamp()
-              AND base.revoked_at IS NULL AND contract.revoked_at IS NULL FOR SHARE OF base,contract`,
-          [runtimePin!.baseImageId])).rows[0];
-          return builderVmBaseSnapshot(base?.image_ref ?? "");
-        }, tx);
-        await tx.query(`INSERT INTO cloud_computer_templates(build_id,org_id,account_scope,billing_org,builder_operation_key,builder_name,allocation_requested_at)
-          VALUES($1,$2,$3,$4,$5,$6,clock_timestamp())`,
-        [build.id, build.org_id, parse(identifier, builder.accountScope), parse(identifier, builder.billingOrg), intent.operationKey, intent.name]);
+        // locked image or base here; preparation has no provider I/O.
+        await prepareBuilderVmOperation(builder.operations, intent,
+          async () => image?.snapshotName ?? builderVmBaseSnapshot(base?.image_ref ?? ""), tx);
+        await tx.query(`INSERT INTO cloud_computer_templates(build_id,org_id,account_scope,billing_org,builder_operation_key,builder_name,
+          builder_source_image_id,allocation_requested_at) VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp())`,
+        [build.id, build.org_id, parse(identifier, builder.accountScope), parse(identifier, builder.billingOrg), intent.operationKey, intent.name,
+          image?.imageId ?? null]);
       }
       const claimed = await buildRow(tx, build.org_id, build.id);
       return {

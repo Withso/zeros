@@ -1,6 +1,8 @@
+import { randomBytes, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withSystemTx } from "../db.js";
 import type { ComputerTemplateRuntime } from "./computer-template-boat.js";
+import type { RuntimeImageChannel } from "./runtime-images.js";
 
 export const templateRuntime: ComputerTemplateRuntime = {
   baseImageId: "zeros-v2-test-base",
@@ -54,4 +56,19 @@ export async function seedComputerTemplateRuntime(pool: pg.Pool) {
       ],
     );
   });
+}
+
+export async function seedComputerTemplateRuntimeImage(pool: pg.Pool, options: {
+  channel?: RuntimeImageChannel; accountScope?: string; billingOrg?: string;
+} = {}) {
+  const imageId = randomUUID(), channel = options.channel ?? "alpha";
+  const snapshotName = `zeros-rtimg-${channel}-${templateRuntime.descriptor.runtimeId.slice(3, 15)}-${randomBytes(4).toString("hex")}`;
+  await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_runtime_images
+    (image_id,channel,runtime_id,base_image_id,base_compatibility_id,account_scope,billing_org,snapshot_name,state,
+      builder_sandbox_id,probe_sandbox_id,snapshot_requested_at,snapshot_id,size_bytes,deadline_at,verified_at,ready_at,cleanup_confirmed_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'ready','bx_23456789','bx_abcdefgh',now(),'fixture-runtime-snapshot',123,
+      now()+interval '1 hour',now(),now(),now())`,
+  [imageId, channel, templateRuntime.descriptor.runtimeId, templateRuntime.baseImageId, templateRuntime.baseCompatibilityId,
+    options.accountScope ?? "fixture-account", options.billingOrg ?? "fixture-wallet", snapshotName]));
+  return { imageId, snapshotName };
 }
