@@ -226,6 +226,17 @@ function retryDelayMs(attempt: number, providerDelayMs?: number): number {
   return Math.max(exponential, requested);
 }
 
+function observationDelayMs(attempt: number, elapsedMs: number): number {
+  if (elapsedMs < 30_000) {
+    return Math.min(2_000, 500 * 2 ** Math.min(Math.max(attempt - 1, 0), 2));
+  }
+  // Resume the original exponential schedule by dispatch age. Extra healthy
+  // polls must not turn a thirty-second transition into a four-minute wait;
+  // slow provider replies must also retain their shorter existing delay.
+  const elapsedAttempt = 1 + Math.floor(Math.log2(1 + elapsedMs / 1_000));
+  return retryDelayMs(Math.min(attempt, elapsedAttempt));
+}
+
 function safeFailure(error: unknown): {
   code: string;
   message: string;
@@ -786,8 +797,10 @@ export class CloudWorkspaceReconciler {
         state: string;
         affects_workspace: boolean;
         lease_owner: string | null;
+        dispatched_age_ms: string;
       }>(
-        `SELECT state, affects_workspace, lease_owner
+        `SELECT state, affects_workspace, lease_owner,
+                extract(epoch FROM (now() - dispatched_at)) * 1000 AS dispatched_age_ms
          FROM cloud_workspace_lifecycle_intents
          WHERE id = $1 FOR UPDATE`,
         [intent.id],
@@ -943,7 +956,7 @@ export class CloudWorkspaceReconciler {
                next_attempt_at = now() + ($2::bigint * interval '1 millisecond'),
                error_code = NULL, error_message = NULL, updated_at = now()
            WHERE id = $1`,
-          [intent.id, retryDelayMs(intent.attemptCount)],
+          [intent.id, observationDelayMs(intent.attemptCount, Number(row.dispatched_age_ms))],
         );
       } else {
         await tx.query(

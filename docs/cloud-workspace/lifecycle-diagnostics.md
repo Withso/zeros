@@ -313,6 +313,17 @@ sweeps. Future retries and expired claims still progress through polling, using
 the existing `next_attempt_at`/lease checks. Stop discards pending hints, drains
 active lifecycle work, and retains setup cancellation behavior.
 
+Healthy lifecycle observations use 500 ms, 1 second, then a 2-second cap for the
+first 30 seconds from the persisted first dispatch, measured by database time.
+Later observations use bounded exponential backoff, capped by elapsed dispatch
+age so extra early polls do not inflate the long-transition delay. Replica
+handoff does not restart the fast window. Failures retain attempt-based backoff
+and bounded provider Retry-After; neither path bypasses a saved due date.
+
+Desktop Stop waits settle from exact organization/workspace catalog events,
+with a one-second detail poll as fallback. Their elapsed 60-second deadline and
+account/access retirement still end the wait when a detail read is hung.
+
 The configured defaults are a 5,000 ms lifecycle interval and a 1,000 ms setup
 interval. Without contention, polling alone can add up to one interval at each
 handoff; notification delivery removes that intentional wait when available.

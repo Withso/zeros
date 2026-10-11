@@ -824,6 +824,103 @@ d("cloud workspace reconciliation", () => {
     });
   });
 
+  describe("healthy lifecycle observation", () => {
+    const schedule = async (intentId: string) => (await pool.query(
+      `SELECT state, attempt_count, dispatched_at, next_attempt_at,
+              lease_owner, lease_expires_at, error_code,
+              round(extract(epoch FROM (next_attempt_at - updated_at)) * 1000)::integer AS delay_ms
+       FROM cloud_workspace_lifecycle_intents WHERE id = $1`,
+      [intentId],
+    )).rows[0];
+
+    const stopping = async () => {
+      const resourceId = "observed-resource";
+      const seeded = await seedWorkspace({ operation: "stop", desiredState: "stopped",
+        status: "stopping", providerResourceId: resourceId, observedState: "stopping" });
+      const provider = new FakeProvider();
+      provider.resources.set(resourceId, provider.make({ workspaceId: seeded.workspaceId, generation: 1 }, "stopping", resourceId));
+      return { ...seeded, provider, resourceId };
+    };
+
+    it("persists a short capped cadence across replicas without bypassing due dates", async () => {
+      const { intentId, provider, resourceId } = await stopping();
+      provider.resources.set(resourceId, { ...provider.resources.get(resourceId)!, state: "running" });
+      const stop = vi.spyOn(provider, "stop").mockImplementation(async id => {
+        const next = { ...provider.resources.get(id)!, state: "stopping" as const };
+        provider.resources.set(id, next);
+        return next;
+      });
+      let dispatchedAt: Date | undefined;
+      for (const [index, delayMs] of [500, 1_000, 2_000, 2_000].entries()) {
+        expect(await reconciler(provider).runOnce()).toBe(true);
+        const row = await schedule(intentId);
+        dispatchedAt ??= row.dispatched_at;
+        expect(row).toMatchObject({ state: "observing", attempt_count: index + 1,
+          delay_ms: delayMs, dispatched_at: dispatchedAt, lease_owner: null, lease_expires_at: null, error_code: null });
+        await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now()+interval '5 minutes' WHERE id=$1", [intentId]);
+        expect(await reconciler(provider).runOnce()).toBe(false);
+        await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now() WHERE id=$1", [intentId]);
+      }
+      expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      { ageSeconds: 45, attempts: 16, delayMs: 32_000 },
+      { ageSeconds: 45, attempts: 1, delayMs: 2_000 },
+      { ageSeconds: 3_600, attempts: 16, delayMs: 256_000 },
+    ])("returns a $ageSeconds-second-old transition to exponential observation after $attempts attempts", async ({ ageSeconds, attempts, delayMs }) => {
+      const { intentId, provider } = await stopping();
+      await pool.query(`UPDATE cloud_workspace_lifecycle_intents
+        SET state='dispatching',attempt_count=$3,dispatched_at=now()-($2::integer * interval '1 second'),
+            lease_owner='previous-replica',lease_expires_at=now()-interval '1 second' WHERE id=$1`, [intentId, ageSeconds, attempts]);
+      const before = await schedule(intentId);
+      expect(await reconciler(provider).runOnce()).toBe(true);
+      expect(await schedule(intentId)).toMatchObject({ state: "observing", attempt_count: attempts + 1,
+        delay_ms: delayMs, dispatched_at: before.dispatched_at, lease_owner: null, lease_expires_at: null });
+    });
+
+    it.each([
+      { retryAfterMs: undefined, delayMs: 8_000 },
+      { retryAfterMs: 60_000, delayMs: 60_000 },
+    ])("keeps failure backoff and Retry-After during the fast window ($delayMs ms)", async ({ retryAfterMs, delayMs }) => {
+      const { intentId, provider } = await stopping();
+      await pool.query("UPDATE cloud_workspace_lifecycle_intents SET attempt_count=3,dispatched_at=now() WHERE id=$1", [intentId]);
+      vi.spyOn(provider, "inspect").mockRejectedValueOnce(new CloudProviderError(
+        "provider_temporarily_unavailable", "temporarily unavailable", true,
+        retryAfterMs === undefined ? {} : { retryAfterMs },
+      ));
+      expect(await reconciler(provider).runOnce()).toBe(true);
+      expect(await schedule(intentId)).toMatchObject({ state: "observing", attempt_count: 4,
+        delay_ms: delayMs, error_code: "provider_temporarily_unavailable" });
+      expect(await reconciler(provider).runOnce()).toBe(false);
+    });
+
+    it("does not let a stale replica replace the current observation deadline", async () => {
+      const { intentId, provider, resourceId } = await stopping();
+      const entered = new Deferred(), release = new Deferred();
+      vi.spyOn(provider, "inspect").mockImplementationOnce(async () => {
+        entered.resolve();
+        await release.promise;
+        return provider.resources.get(resourceId)!;
+      });
+      const first = reconciler(provider).runOnce();
+      try {
+        await entered.promise;
+        expect(await reconciler(provider).runOnce()).toBe(false);
+        await pool.query("UPDATE cloud_workspace_lifecycle_intents SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [intentId]);
+        expect(await reconciler(provider).runOnce()).toBe(true);
+        const current = await schedule(intentId);
+        expect(current).toMatchObject({ state: "observing", attempt_count: 2, delay_ms: 1_000 });
+        release.resolve();
+        await first;
+        expect(await schedule(intentId)).toEqual(current);
+      } finally {
+        release.resolve();
+        await first;
+      }
+    });
+  });
+
   it("publishes payload-free work hints only after commit, without accelerating future retries", async () => {
     const listener = await pool.connect();
     const notices: string[] = [];

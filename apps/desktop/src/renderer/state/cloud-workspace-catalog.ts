@@ -385,19 +385,54 @@ export async function waitForCloudWorkspaceLifecycle(
   const account = epoch;
   const terminal = operation === "wake" ? ["ready", "busy"]
     : [operation === "archive" ? "archived" : operation === "delete" ? "deleted" : "stopped"];
-  const deadline = Date.now() + 60_000;
-  let doc = initial;
-  while (!terminal.includes(doc.status)) {
-    if (doc.error) throw new Error(doc.error.message);
-    if (Date.now() >= deadline)
-      throw new Error("The cloud workspace operation is still running. Its status will update when it finishes.");
-    await new Promise(resolve => setTimeout(resolve, 1_000));
-    if (account !== epoch) throw new Error("Cloud account changed");
-    const current = cloudWorkspaceDocument(target);
-    if (!current) throw new Error("Cloud workspace access changed");
-    doc = terminal.includes(current.status) ? current : await refreshCloudWorkspace(target);
-  }
-  return doc;
+  if (terminal.includes(initial.status)) return initial;
+  if (initial.error) throw new Error(initial.error.message);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let safety: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(safety);
+      off();
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      cleanup();
+      reject(error);
+    };
+    const observe = () => {
+      if (settled) return;
+      try {
+        if (account !== epoch) throw new Error("Cloud account changed");
+        const current = cloudWorkspaceDocument(target);
+        if (!current) throw new Error("Cloud workspace access changed");
+        if (terminal.includes(current.status)) {
+          cleanup();
+          resolve(current);
+        } else if (current.error) throw new Error(current.error.message);
+      } catch (error) { fail(error); }
+    };
+    const poll = () => {
+      timer = setTimeout(() => {
+        timer = undefined;
+        observe();
+        if (settled) return;
+        void refreshCloudWorkspace(target).then(() => {
+          observe();
+          if (!settled) poll();
+        }, fail);
+      }, 1_000);
+    };
+    // Exact catalog events can finish even while the fallback read is hung.
+    const off = subscribeCloudWorkspaces(observe);
+    safety = setTimeout(() => fail(new Error(
+      "The cloud workspace operation is still running. Its status will update when it finishes.",
+    )), 60_000);
+    observe();
+    if (!settled) poll();
+  });
 }
 function settleLifecycleIntents(doc: CloudWorkspaceDocument): void {
   const wakeKey = `${epoch}:${cloudWorkspaceKey({ organizationId: doc.organizationId, workspaceId: doc.id })}:wake`;
