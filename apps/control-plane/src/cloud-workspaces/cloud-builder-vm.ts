@@ -12,8 +12,9 @@ import { CloudProviderError } from "./provider.js";
 import { RuntimeBaseStatusSchema, RuntimeInstallInputSchema, RUNTIME_INSTALL_MAX_ENCODED_BYTES } from "./runtime-contract.js";
 
 export type { BuilderFixedCommand, ClosedDiagnostic } from "./cloud-builder-commands.js";
-export type BuilderVmSource = { kind: "base"; baseImageId: string } | { kind: "template"; templateId: string };
-export type BuilderVm = { sandboxId: string; purpose: "runtime-qualification" | "computer-build"; operationKey: string };
+export type BuilderVmSource = { kind: "base"; baseImageId: string } | { kind: "template"; templateId: string } |
+  { kind: "image"; imageId: string };
+export type BuilderVm = { sandboxId: string; purpose: "runtime-qualification" | "computer-build" | "runtime-image"; operationKey: string };
 export type BaseStatus = z.infer<typeof RuntimeBaseStatusSchema>;
 export interface CloudBuilderVms {
   create(input: BuilderVmIntent): Promise<BuilderVm>;
@@ -26,11 +27,15 @@ export interface CloudBuilderVms {
   delete(vm: BuilderVm): Promise<void>;
 }
 
+export const RUNTIME_IMAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const NAMED_SNAPSHOT_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
 const intentSchema = z.object({
-  purpose: z.enum(["runtime-qualification", "computer-build"]),
+  purpose: z.enum(["runtime-qualification", "computer-build", "runtime-image"]),
   source: z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("base"), baseImageId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/) }).strict(),
     z.object({ kind: z.literal("template"), templateId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/) }).strict(),
+    z.object({ kind: z.literal("image"), imageId: z.string().regex(RUNTIME_IMAGE_ID_PATTERN) }).strict(),
   ]),
   name: z.string().regex(/^zeros-v2-[a-z0-9][a-z0-9-]{0,52}$/),
   operationKey: z.string().regex(/^[A-Za-z0-9._:-]{1,255}$/),
@@ -98,25 +103,41 @@ export async function prepareBuilderVmOperation(operations: BuilderVmOperationSt
     return row;
   }
   const source = await resolveSource(input.source);
-  if (input.source.kind === "base" ? !/^[a-z0-9][a-z0-9-]{0,62}$/.test(source) : !BOAT_RESOURCE_ID_PATTERN.test(source)) fail("source_unavailable");
+  // Bases and runtime images are named snapshots; a template is a sandbox fork.
+  const named = input.source.kind !== "template";
+  if (named ? !NAMED_SNAPSHOT_PATTERN.test(source) : !BOAT_RESOURCE_ID_PATTERN.test(source)) fail("source_unavailable");
   return operations.prepare(input, digest, {
-    path: input.source.kind === "base" ? "/sandboxes" : `/sandboxes/${source}/fork`,
-    body: { ...(input.source.kind === "base" ? { from: source } : {}), name: input.name,
-      type: "default", ttlSeconds: input.ttlSeconds, noEnv: true, env: {}, snapshots: input.purpose === "computer-build",
+    path: named ? "/sandboxes" : `/sandboxes/${source}/fork`,
+    // Template captures and image saves need provider snapshots; a sandbox
+    // created without them can never be saved under a name.
+    body: { ...(named ? { from: source } : {}), name: input.name, type: "default", ttlSeconds: input.ttlSeconds,
+      noEnv: true, env: {}, snapshots: input.purpose === "computer-build" || input.purpose === "runtime-image",
       // Boat's process tracer would keep builder pipe and terminal output.
       // Journals created before this field replay their stored request.
       monitoring: false },
   }, tx);
 }
 
-/** Resolves only approved registry bases. C3 supplies an authorized, pinned
- * template resolver; this module never guesses an org's active template. */
+/** Resolves only approved registry bases and ready runtime images. C3
+ * supplies an authorized, pinned template resolver; this module never guesses
+ * an org's active template. Image producers prepare their own probe intent. */
 export function builderVmSourceResolver(pool: pg.Pool, template?: (id: string) => Promise<string>) {
   return async (source: BuilderVmSource): Promise<string> => {
     if (source.kind === "template") {
       const id = await template?.(source.templateId);
       if (!id || !BOAT_RESOURCE_ID_PATTERN.test(id)) fail("source_unavailable");
       return id;
+    }
+    if (source.kind === "image") {
+      const image = await withSystemTx(pool, async tx => (await tx.query<{ snapshot_name: string }>(
+        `SELECT image.snapshot_name FROM cloud_runtime_images image
+         JOIN cloud_runtime_bundles bundle USING (runtime_id)
+         JOIN cloud_runtime_base_images base USING (base_image_id, base_compatibility_id)
+         JOIN cloud_runtime_base_contracts contract USING (base_compatibility_id)
+         WHERE image.image_id=$1 AND image.state='ready' AND bundle.revoked_at IS NULL AND base.revoked_at IS NULL
+           AND contract.revoked_at IS NULL AND base.provider='boat'`, [source.imageId])).rows[0]);
+      if (!image || !NAMED_SNAPSHOT_PATTERN.test(image.snapshot_name)) fail("source_unavailable");
+      return image.snapshot_name;
     }
     const image = await withSystemTx(pool, async tx => (await tx.query<{ image_ref: string }>(
       `SELECT base.image_ref FROM cloud_runtime_base_images base
@@ -257,7 +278,10 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
         if (expiry <= this.now() || expiry > this.now() + 900_000) fail("command_invalid");
       } catch { fail("command_invalid"); }
     } else if (isComputerBuilderCommand(command)) {
-      if (vm.purpose !== "computer-build" || !Buffer.isBuffer(input) || input.length === 0 ||
+      // Image VMs may only prove a restored runtime with the read-only TCB
+      // helper; repository, install and sanitation stay Computer-only.
+      const admitted = vm.purpose === "computer-build" || (vm.purpose === "runtime-image" && command === "computer:verify-tcb");
+      if (!admitted || !Buffer.isBuffer(input) || input.length === 0 ||
           input.length > COMPUTER_TEMPLATE_MAX_INPUT_BYTES) fail("command_invalid");
       stdin = input.toString("utf8");
       if (!Buffer.from(stdin, "utf8").equals(input)) fail("command_invalid");

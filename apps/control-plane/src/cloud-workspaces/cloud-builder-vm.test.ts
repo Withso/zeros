@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { builderFixedCommand, parseBuilderDiagnostic } from "./cloud-builder-commands.js";
 import { BuilderVmError } from "./cloud-builder-vm.js";
-import { builderFixture, builderIntent, BUILDER_SANDBOX, BUILDER_WALLET, diagnostic, encodeInstaller, installerInput } from "./cloud-builder-vm-test-fixtures.js";
+import { builderFixture, builderIntent, BUILDER_IMAGE_ID, BUILDER_IMAGE_NAME, BUILDER_SANDBOX, BUILDER_WALLET, diagnostic, encodeInstaller,
+  installerInput } from "./cloud-builder-vm-test-fixtures.js";
 
 describe("short-lived Boat builder VMs", () => {
   it("does not close a builder deletion on two 404s without a deletion receipt", async () => {
@@ -33,13 +35,55 @@ describe("short-lived Boat builder VMs", () => {
 
   it.each([
     ["runtime-qualification", "base"], ["runtime-qualification", "template"],
-    ["computer-build", "base"], ["computer-build", "template"],
+    ["computer-build", "base"], ["computer-build", "template"], ["computer-build", "image"],
+    ["runtime-image", "base"], ["runtime-image", "image"],
   ] as const)("disables process monitoring for a new %s VM from %s", async (purpose, source) => {
     const f = builderFixture();
-    await f.vms.create({ ...builderIntent, purpose, source: source === "base" ? builderIntent.source :
-      { kind: "template", templateId: "zeros-v2-test-template" } });
+    await f.vms.create({ ...builderIntent, purpose, source: source === "base" ? builderIntent.source : source === "image"
+      ? { kind: "image", imageId: BUILDER_IMAGE_ID } : { kind: "template", templateId: "zeros-v2-test-template" } });
     const request = f.fetcher.mock.calls.find(([, init]) => init?.method === "POST");
     expect(JSON.parse(String(request?.[1]?.body)).monitoring).toBe(false);
+  });
+
+  it.each(["computer-build", "runtime-image"] as const)("creates a %s VM from a runtime image name with provider snapshots on", async purpose => {
+    const f = builderFixture();
+    await f.vms.create({ ...builderIntent, purpose, source: { kind: "image", imageId: BUILDER_IMAGE_ID } });
+    const [url, init] = f.fetcher.mock.calls[0]!;
+    expect(new URL(String(url)).pathname).toBe("/api/v1/sandboxes");
+    expect(JSON.parse(String(init?.body))).toEqual({ from: BUILDER_IMAGE_NAME, name: builderIntent.name,
+      type: "default", ttlSeconds: 1800, noEnv: true, env: {}, snapshots: true, monitoring: false });
+  });
+
+  it("keeps existing base intents and their digest byte-for-byte", async () => {
+    const f = builderFixture();
+    const intent = { ...builderIntent, purpose: "computer-build" as const };
+    await f.vms.create(intent);
+    const row = await f.operations.find(intent.operationKey);
+    expect(row?.request_sha256).toBe(createHash("sha256").update(JSON.stringify({ purpose: "computer-build",
+      source: { kind: "base", baseImageId: builderIntent.source.kind === "base" ? builderIntent.source.baseImageId : "" },
+      name: builderIntent.name, operationKey: builderIntent.operationKey, ttlSeconds: 1800 })).digest("hex"));
+    expect(row?.provider_request).toEqual({ path: "/sandboxes", body: { from: "zeros-v2-test-base", name: builderIntent.name,
+      type: "default", ttlSeconds: 1800, noEnv: true, env: {}, snapshots: true, monitoring: false } });
+  });
+
+  it.each([{ kind: "image", imageId: "not-a-uuid" }, { kind: "image", imageId: BUILDER_IMAGE_ID.toUpperCase() },
+    { kind: "image", imageId: BUILDER_IMAGE_ID, extra: true }])("rejects a malformed image source %#", async source => {
+    const f = builderFixture();
+    await expect(f.vms.create({ ...builderIntent, purpose: "runtime-image", source } as never)).rejects.toMatchObject({ check: "input_schema" });
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
+
+  it("admits only the read-only TCB helper and build installs on runtime image VMs", async () => {
+    const f = builderFixture();
+    const vm = await f.vms.create({ ...builderIntent, purpose: "runtime-image" });
+    for (const command of ["computer:clone-repos", "computer:run-install", "computer:sanitize"] as const)
+      await expect(f.vms.runFixed(vm, command, Buffer.from("{}"))).rejects.toMatchObject({ check: "command_invalid" });
+    await expect(f.vms.runFixed(vm, "install-runtime", encodeInstaller())).rejects.toMatchObject({ check: "command_invalid" });
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    await f.vms.runFixed(vm, "install-runtime", encodeInstaller({ ...installerInput(), purpose: "build" }));
+    await f.vms.runFixed(vm, "computer:verify-tcb", Buffer.from("{}"));
+    expect(f.channel.execute.mock.calls.map(([input]) => input.command)).toEqual([
+      expect.stringContaining("install-runtime.sh"), expect.stringContaining("computer-build.py verify-tcb")]);
   });
 
   it.each(["ready", "idle", "running"])("journals before creating, verifies the wallet and accepts %s", async ready => {

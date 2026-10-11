@@ -1,13 +1,19 @@
 import { createHash } from "node:crypto";
 
-const filename = "0136_cloud_runtime_transfers.sql";
-const exact: Readonly<Record<string, readonly string[]>> = {
-  "widen-check": [3, 4, 5].map(n =>
-    `ALTER TABLE cloud_workspace_generation_transitions DROP CONSTRAINT cloud_workspace_generation_transitions_check${n};`),
-  "nullable-enrollment": ["setup_run_id", "setup_execution_fence", "registration_grant_id"].map(column =>
-    `ALTER TABLE cloud_workspace_engine_instances ALTER COLUMN ${column} DROP NOT NULL;`),
-  "enrollment-trigger": ["cloud_engine_runtime_binding", "cloud_engine_current_setup_fence"].map(trigger =>
-    `DROP TRIGGER ${trigger} ON cloud_workspace_engine_instances;`),
+// Each reviewed migration lists its exact exempted statements by rule.
+const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0136_cloud_runtime_transfers.sql": {
+    "widen-check": [3, 4, 5].map(n =>
+      `ALTER TABLE cloud_workspace_generation_transitions DROP CONSTRAINT cloud_workspace_generation_transitions_check${n};`),
+    "nullable-enrollment": ["setup_run_id", "setup_execution_fence", "registration_grant_id"].map(column =>
+      `ALTER TABLE cloud_workspace_engine_instances ALTER COLUMN ${column} DROP NOT NULL;`),
+    "enrollment-trigger": ["cloud_engine_runtime_binding", "cloud_engine_current_setup_fence"].map(trigger =>
+      `DROP TRIGGER ${trigger} ON cloud_workspace_engine_instances;`),
+  },
+  // The constraint is re-added at once with one more allowed purpose.
+  "0141_cloud_runtime_images.sql": {
+    "widen-check": ["ALTER TABLE cloud_builder_vm_operations DROP CONSTRAINT cloud_builder_vm_operations_purpose_check;"],
+  },
 };
 // Exact reviewed function body, including quoted SQL. Changing its semantics or
 // even formatting requires updating this review pin and compatibility evidence.
@@ -70,7 +76,8 @@ function statements(sql: string): { text: string; header: string }[] {
 
 export function applyReviewedExpandExceptions(file: string, sql: string): string {
   if (!sql.includes("zeros-expand-exception:")) return sql;
-  if (file !== filename) throw new Error("Expand exceptions are reviewed only for 0136_cloud_runtime_transfers.sql");
+  const exact = reviewed[file];
+  if (!exact) throw new Error("Expand exceptions are reviewed only for listed migrations");
   let accepted = 0;
   const output = statements(sql).map(({ header, text }) => {
     const annotations = [...header.matchAll(/^-- zeros-expand-exception: ([a-z-]+) (\S[^\r\n]{15,})$/gm)];
@@ -78,7 +85,7 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
     if (annotations.length !== 1) throw new Error("An expand exception must annotate exactly one statement");
     const rule = annotations[0]![1]!;
     const statement = text.replace(/\r\n/g, "\n").trim();
-    const allowed = exact[rule]?.includes(statement) || (rule === "allocation-authority" &&
+    const allowed = exact[rule]?.includes(statement) || (rule === "allocation-authority" && file === "0136_cloud_runtime_transfers.sql" &&
       createHash("sha256").update(statement).digest("hex") === authorityDigest);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");
     accepted++;
