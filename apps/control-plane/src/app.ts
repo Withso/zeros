@@ -54,6 +54,7 @@ import { createDevAuthConfigurationRoutes } from "./dev-auth-configuration.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import {
   createCloudWorkspaceInternalRoutes,
+  CLOUD_WORKSPACE_ENGINE_CHECKPOINT_HINT_PATH,
   CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
   CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
   CLOUD_WORKSPACE_INTERNAL_PATHS,
@@ -82,6 +83,7 @@ import {
   DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
   engineLifecycleRequestsPerMinute,
 } from "./cloud-workspaces/engine-heartbeat.js";
+import { engineCheckpointHintRequestsPerMinute } from "./cloud-workspaces/engine-checkpoint-hints.js";
 import { DatabaseReleaseCanaryService, DatabaseReleaseCanaryDesignationService, releaseCanaryConfiguration, releaseCanaryDesignationConfiguration } from "./cloud-workspaces/release-canaries.js";
 import { createReleaseCanaryAdmissionRoutes, createReleaseCanaryDesignationRoutes } from "./cloud-workspaces/release-canary-routes.js";
 import { cloudAgentCredentialKeys } from "./cloud-workspaces/agent-credentials.js";
@@ -407,6 +409,14 @@ export function createApp(
       CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
       CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
     ]);
+    // Checkpoint hints are optional waits with their own budget, so a fleet
+    // holding them never crowds out lifecycle, command or record requests.
+    const engineCheckpointHintPreAuthLimit = rateLimit(
+      "cloud-workspace-engine-checkpoint-hint-preauth",
+      engineCheckpointHintRequestsPerMinute(),
+      60_000,
+      internalClientIp,
+    );
     if (dependencies.cloudGithubReads) {
       app.use(CLOUD_GITHUB_READ_PATH, cloudWorkspaceInternalResponseHeaders);
       app.use(CLOUD_GITHUB_READ_PATH, internalPreAuthLimit);
@@ -430,7 +440,9 @@ export function createApp(
       app.use(path, (c, next) =>
         (engineLifecyclePaths.has(c.req.path)
           ? engineLifecyclePreAuthLimit
-          : internalPreAuthLimit)(c, next),
+          : c.req.path === CLOUD_WORKSPACE_ENGINE_CHECKPOINT_HINT_PATH
+            ? engineCheckpointHintPreAuthLimit
+            : internalPreAuthLimit)(c, next),
       );
     }
     app.route(

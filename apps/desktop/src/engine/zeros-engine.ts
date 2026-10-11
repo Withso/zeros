@@ -1987,6 +1987,7 @@ export class ZerosEngine {
       ? new CloudRuntimeRegistration(this.cloudRuntimeConfig, {
           agentRuntime: readCloudAgentRuntimeAttestation(this.cloudWorker),
           negotiateLocalCommands: true,
+          checkpointHints: true,
           onAuthorityLost: () => this.handleCloudRuntimeAuthorityLoss(),
           onDurableRecordSync: (authority, context) => {
             this.cloudIdleStop.recordSync("pending");

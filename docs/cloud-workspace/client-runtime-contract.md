@@ -362,6 +362,20 @@ retires grants and queues compute Stop for a formerly ready or busy workspace.
 This applies to managed and customer providers independently of the deployment's
 managed default. Setup has its own bounded deadline and retry policy.
 
+Stop, Restart and Archive deliver their final checkpoint directive in a heartbeat
+response, so without help an engine sees it only at its next beat (default
+interval 10 seconds). Engines opt into an optional checkpoint hint: one
+heartbeat-token request to `/internal/v1/cloud-workspaces/engine/checkpoint-hint`
+that the control plane holds for up to 25 seconds and answers `pending: true`
+as soon as an undelivered request is queued for that exact live engine's
+generation. A database notification releases the waiter across replicas, with a
+5-second recheck if notifications are down. The engine then heartbeats at once.
+The hint is read-only: it renews no lease, takes no workspace lock and grants
+no authority, and delivery, fencing and acknowledgement stay with the
+heartbeat. A 404 (older control plane) or a refused hint ends the fast path;
+other failures back off to 30 seconds. Hints have their own per-address budget
+so waiting engines never use the lifecycle, command or record budgets.
+
 Transient actor-admission renewal retains only the last confirmed lease through
 its original expiry; an error cannot extend it. Explicit authority loss/4xx
 closes it immediately. The relay forwards safe native 1008 and shutdown 1012

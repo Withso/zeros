@@ -983,6 +983,132 @@ describe("cloud runtime registration", () => {
     await registration.stop();
   });
 
+  describe("checkpoint hints", () => {
+    const hintEndpoint = "https://control.example.test/internal/v1/cloud-workspaces/engine/checkpoint-hint";
+    const directive = { id: "55555555-5555-4555-8555-555555555555", reason: "before_stop", deadlineAtMs: NOW + 5 * 60_000 };
+    const hint = (pending: boolean) => Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-checkpoint-hint-v1", pending });
+    function harness(hints: Array<() => Response | Promise<Response>>, options: { enabled?: boolean; heartbeatDirective?: boolean } = {}) {
+      vi.useFakeTimers();
+      vi.setSystemTime(NOW);
+      const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
+      const calls: string[] = [];
+      let heartbeatGate: Promise<void> | undefined;
+      const fetch = vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const href = String(url);
+        calls.push(href === hintEndpoint ? "hint" : href === heartbeatEndpoint ? "heartbeat" : "register");
+        if (href === registrationEndpoint) return Response.json(registrationResponse());
+        if (href === hintEndpoint) {
+          const next = hints.shift();
+          if (next) return next();
+          // Hold like the control plane until the engine aborts it.
+          return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+        }
+        await heartbeatGate;
+        return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1", accepted: true,
+          engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: Date.now() + 90_000,
+          ...(options.heartbeatDirective === false ? {} : { checkpointRequest: directive }) });
+      });
+      const onCheckpointRequested = vi.fn(async () => {});
+      const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION,
+        fetch: fetch as unknown as typeof globalThis.fetch, now: Date.now, onAuthorityLost: vi.fn(),
+        onDurableRecordSync: completedDurableRecordSync(), onCheckpointRequested,
+        ...(options.enabled === false ? {} : { checkpointHints: true as const }) });
+      return { registration, fetch, calls, onCheckpointRequested, gate: (value: Promise<void> | undefined) => { heartbeatGate = value; } };
+    }
+
+    it("heartbeats at once for a queued checkpoint instead of waiting for the next beat", async () => {
+      const t = harness([() => hint(true)]);
+      await t.registration.start();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(t.onCheckpointRequested).toHaveBeenCalledOnce();
+      expect(t.calls.slice(0, 3)).toEqual(["register", "hint", "heartbeat"]);
+      const body = JSON.parse(String(t.fetch.mock.calls[1]![1]?.body));
+      expect(body).toEqual({ workspaceId: "11111111-1111-4111-8111-111111111111", organizationId: "22222222-2222-4222-8222-222222222222",
+        generation: 3, engineInstanceId: "44444444-4444-4444-8444-444444444444" });
+      expect(t.fetch.mock.calls[1]![1]?.headers).toMatchObject({ authorization: `Bearer zwh_${"H".repeat(43)}` });
+      await t.registration.stop();
+    });
+
+    it("asks for one more beat when the hint arrives during a heartbeat", async () => {
+      let release!: () => void, answer!: (response: Response) => void;
+      const t = harness([() => new Promise<Response>(resolve => { answer = resolve; })], { heartbeatDirective: false });
+      t.gate(new Promise<void>(resolve => { release = resolve; }));
+      await t.registration.start();
+      // The regular beat is now in flight and held.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(t.calls.filter(call => call === "heartbeat")).toHaveLength(1);
+      answer(hint(true));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(t.calls.filter(call => call === "heartbeat")).toHaveLength(1);
+      t.gate(undefined);
+      release();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(t.calls.filter(call => call === "heartbeat")).toHaveLength(2);
+      await t.registration.stop();
+    });
+
+    it("never treats a hint as a checkpoint directive", async () => {
+      const t = harness([() => hint(true)], { heartbeatDirective: false });
+      await t.registration.start();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(t.calls).toContain("heartbeat");
+      expect(t.onCheckpointRequested).not.toHaveBeenCalled();
+      await t.registration.stop();
+    });
+
+    it.each([404, 401, 403])("ends the fast path on %s and keeps the regular heartbeat", async status => {
+      const t = harness([() => Response.json({ error: { code: "not_available" } }, { status })]);
+      await t.registration.start();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(t.calls.filter(call => call === "hint")).toHaveLength(1);
+      expect(t.calls.filter(call => call === "heartbeat")).toHaveLength(2);
+      await t.registration.stop();
+    });
+
+    it.each(["503", "429", "network", "malformed"])("backs off after a %s hint failure without spinning", async kind => {
+      const failure = () => kind === "network" ? Promise.reject(new Error("offline"))
+        : kind === "malformed" ? Response.json({ version: 1, pending: true })
+          : Response.json({ error: {} }, { status: Number(kind) });
+      const t = harness([failure, failure, failure, () => hint(false)], { heartbeatDirective: false });
+      await t.registration.start();
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(t.calls.filter(call => call === "hint")).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(t.calls.filter(call => call === "hint")).toHaveLength(5);
+      expect(t.calls.filter(call => call === "heartbeat")).toHaveLength(0);
+      await t.registration.stop();
+    });
+
+    it("waits again at once after an idle hint and stops waiting on shutdown", async () => {
+      const t = harness([() => hint(false), () => hint(false)], { heartbeatDirective: false });
+      await t.registration.start();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(t.calls.filter(call => call === "hint")).toHaveLength(3);
+      await t.registration.stop();
+      const calls = t.fetch.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(t.fetch.mock.calls.length).toBe(calls);
+    });
+
+    it("leaves no retry timer behind when stopped during a held hint", async () => {
+      const t = harness([], { heartbeatDirective: false });
+      await t.registration.start();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(t.calls).toEqual(["register", "hint"]);
+      await t.registration.stop();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("holds no hint without the explicit opt-in", async () => {
+      const t = harness([() => hint(true)], { enabled: false, heartbeatDirective: false });
+      await t.registration.start();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(t.calls).toEqual(["register"]);
+      await t.registration.stop();
+    });
+  });
+
   it("rejects a cross-origin heartbeat or mismatched durable identity", async () => {
     const runtime = consumeCloudRuntimeEnvironment(
       { [CLOUD_RUNTIME_ENV]: encodedRuntime() },

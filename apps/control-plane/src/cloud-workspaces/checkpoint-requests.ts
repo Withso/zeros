@@ -4,6 +4,7 @@ import type pg from "pg";
 
 import { withSystemTx, type Tx } from "../db.js";
 import { cloudWorkspaceHasActiveWork } from "./idle-workloads.js";
+import { CLOUD_ENGINE_CHECKPOINT_HINT_CHANNEL, checkpointHintKey } from "./engine-checkpoint-hints.js";
 
 export type WorkspaceCheckpointRequestReason =
   | "before_stop"
@@ -117,6 +118,10 @@ export async function enqueueWorkspaceCheckpointRequest(
   ) {
     throw new Error("workspace checkpoint request idempotency conflict");
   }
+  // Wakes an engine waiting for a checkpoint hint once this commits. The
+  // payload is a lookup key, not authority; delivery stays on the heartbeat.
+  await tx.query("SELECT pg_notify($1,$2)", [CLOUD_ENGINE_CHECKPOINT_HINT_CHANNEL,
+    checkpointHintKey(input.workspaceId, input.generation)]);
   return { id: row.id, deadlineAt: row.deadline_at };
 }
 
