@@ -8,12 +8,17 @@ import React from "react";
 export type CanvasKnobAxis = "left" | "right" | "bottom";
 
 const ZONE = 12;
+const KNOB_LENGTH = 48;
+const KNOB_THICKNESS = 4;
 
 interface CanvasKnobHandlesProps {
   /** Which edges get a knob. Variants use right+bottom only. */
   axes: CanvasKnobAxis[];
   /** Axis currently being dragged — highlights that knob. */
   activeAxis?: CanvasKnobAxis | null;
+  /** Scale the parent frame is drawn at. Zones and knobs divide by it so a
+   * zoomed frame keeps screen-size handles. */
+  scale?: number;
   onStart: (
     e: React.PointerEvent,
     axis: CanvasKnobAxis,
@@ -27,8 +32,12 @@ interface CanvasKnobHandlesProps {
 export function CanvasKnobHandles({
   axes,
   activeAxis = null,
+  scale = 1,
   onStart,
 }: CanvasKnobHandlesProps) {
+  const zone = ZONE / scale;
+  const length = KNOB_LENGTH / scale;
+  const thickness = KNOB_THICKNESS / scale;
   const sideClass =
     "group absolute flex items-center justify-center bg-transparent pointer-events-auto";
   const barBase =
@@ -61,13 +70,16 @@ export function CanvasKnobHandles({
           style={{
             top: 0,
             bottom: 0,
-            left: -ZONE,
-            width: ZONE,
+            left: -zone,
+            width: zone,
             cursor: "ew-resize",
             zIndex: 20,
           }}
         >
-          <div className={`h-12 w-1 ${barBase} ${verticalVisual("left")}`} />
+          <div
+            className={`${barBase} ${verticalVisual("left")}`}
+            style={{ width: thickness, height: length }}
+          />
         </div>
       )}
       {axes.includes("right") && (
@@ -81,13 +93,16 @@ export function CanvasKnobHandles({
           style={{
             top: 0,
             bottom: 0,
-            right: -ZONE,
-            width: ZONE,
+            right: -zone,
+            width: zone,
             cursor: "ew-resize",
             zIndex: 20,
           }}
         >
-          <div className={`h-12 w-1 ${barBase} ${verticalVisual("right")}`} />
+          <div
+            className={`${barBase} ${verticalVisual("right")}`}
+            style={{ width: thickness, height: length }}
+          />
         </div>
       )}
       {axes.includes("bottom") && (
@@ -101,14 +116,15 @@ export function CanvasKnobHandles({
           style={{
             left: 0,
             right: 0,
-            bottom: -ZONE,
-            height: ZONE,
+            bottom: -zone,
+            height: zone,
             cursor: "ns-resize",
             zIndex: 20,
           }}
         >
           <div
-            className={`h-1 w-12 ${barBase} ${horizontalVisual("bottom")}`}
+            className={`${barBase} ${horizontalVisual("bottom")}`}
+            style={{ width: length, height: thickness }}
           />
         </div>
       )}

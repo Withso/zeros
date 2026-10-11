@@ -120,6 +120,8 @@ import {
 import { registerIpcHandlers } from "./ipc/router";
 import { registerIframeSessionCommands } from "./ipc/iframe-session";
 import { registerIframePickerCommands } from "./ipc/iframe-picker";
+import { registerBrowserFrameDevToolsCommand } from "./browser-frame-devtools";
+import { registerBrowserPreviewWindowCommands } from "./browser-preview-window";
 import { installIframeHeaderStripping } from "./iframe-headers";
 import { registerAllCommands } from "./ipc/commands";
 import { stopProviderSubscriptions } from "./ipc/commands/provider-subscription";
@@ -785,6 +787,10 @@ function startProcessMetricsLogger(): void {
 // mismatch keeps the failure mode obvious.
 const DEV_URL = process.env.ELECTRON_RENDERER_URL ?? "http://localhost:5193";
 const isDev = IS_DEV;
+// Same prefix rule the session permission handlers use to recognize the app's
+// own document; a preview window must never load a page that would match it.
+const isAppDocumentUrl = (url: string): boolean =>
+  url.startsWith("file://") || url.startsWith(DEV_URL);
 
 function createMainWindow(): BrowserWindow {
   // Durable theme mode (userData appearance.json — see ipc/commands/window.ts).
@@ -1668,6 +1674,8 @@ app.whenReady().then(async () => {
   // these cache/cookie commands. Conversation-owned agent Browser tabs use the
   // separate isolated WebContentsView service registered above.
   registerIframeSessionCommands({ mainWindow: win });
+  registerBrowserPreviewWindowCommands({ mainWindow: win, isAppUrl: isAppDocumentUrl });
+  registerBrowserFrameDevToolsCommand({ mainWindow: win });
   // Element picker — install/uninstall via
   // WebFrameMain.executeJavaScript + main-window region capture
   // for the picker chip's element thumbnail.
@@ -1691,6 +1699,8 @@ app.whenReady().then(async () => {
         }
       });
       registerIframeSessionCommands({ mainWindow: next });
+      registerBrowserPreviewWindowCommands({ mainWindow: next, isAppUrl: isAppDocumentUrl });
+      registerBrowserFrameDevToolsCommand({ mainWindow: next });
       registerIframePickerCommands({ mainWindow: next });
     }
   });

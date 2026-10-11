@@ -16,7 +16,9 @@
 //   - Type a URL, hit Enter → loads
 //   - Back / forward / reload buttons work
 //   - URL bar tracks internal navigation
-//   - ⋯ menu: Hard Reload + Clear Cache + Clear Cookies via IPC
+//   - ⋯ menu: Hard Reload, DevTools / separate preview window, device
+//     toolbar, Clear Cache + Clear Cookies via IPC
+//   - Float preview: the live viewport moves over the chat without reloading
 
 import React, {
   useCallback,
@@ -25,6 +27,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { workspacePreviewAvailable } from "../../../platform/cloud-workspace-access";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
 import { useCloudWorkspaceAccountAccess } from "../../../features/team/cloud-workspace-account-access";
@@ -35,11 +38,42 @@ import {
   MoreHorizontal,
   MousePointer2,
   Palette,
+  PictureInPicture2,
   RotateCw,
   Globe,
   GitFork,
   X,
 } from "lucide-react";
+import {
+  BrowserDeviceToolbar,
+  browserDeviceLayout,
+  browserDevicePreset,
+  browserDevicePresetForSize,
+  browserDeviceResizeSize,
+  clampBrowserDeviceSize,
+  normalizeBrowserDevicePreset,
+  type BrowserDevicePresetId,
+  type BrowserDeviceZoom,
+} from "../../../features/browser/browser-device-toolbar";
+import { beginDesignPointerGesture } from "../../../features/design-workspace/design-pointer-gesture";
+import {
+  browserFloatKey,
+  dockBrowserTab,
+  floatBrowserTab,
+  moveNodePreservingState,
+  onBrowserFloatSlotRemoved,
+  useBrowserFloatEntries,
+  useBrowserFloatSlot,
+  useBrowserTabFloating,
+} from "../../../features/browser/browser-float-store";
+import {
+  browserDevToolsUnavailableReason,
+  browserWindowUnavailableReason,
+  inspectBrowserFrame,
+  openBrowserWindow,
+} from "../../../features/browser/browser-window-actions";
+import { stageSelectedElementsInComposer } from "../../../features/browser/element-composer-staging";
+import { isPickerPageUrl } from "../../../features/browser/picker-message-guard";
 import {
   useIframeWebview,
   type SelectedElement,
@@ -61,7 +95,6 @@ import { applyForkManifestFields } from "../../../features/browser/variant-artif
 import {
   useWorkspaceStore,
   useWorkspaceDispatch,
-  type PendingChatSubmission,
   type PendingComposerAppend,
 } from "../../../state/store";
 import { nativeInvoke, useNativeRuntime } from "../../../platform/runtime";
@@ -82,15 +115,18 @@ import {
 } from "./localhost-url";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
   Tooltip,
 } from "../../../shared/ui/primitives";
 import { toast } from "../../../shared/ui/primitives/elements";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
-import type { ComposerAttachment } from "@/renderer/features/agent/composer-attachments";
+import { BrowserStartPage } from "./browser-start-page";
+import { requestWorkbenchCollapse } from "../workbench-visibility-controller";
 import {
   clearPreviewRuntimeForTab,
   consumePreviewNavigation,
@@ -738,10 +774,21 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   useEffect(() => {
     consumePreviewNavigation(tab.id);
   }, [tab.id]);
+  // A floated tab is visible over the chat even while its workbench body is
+  // hidden, so page-lifecycle work follows `live`. Shortcuts, focus and
+  // Design/Canvas stay tied to the docked, active body.
+  const floatKey = browserFloatKey(scope ?? "", tab.id);
+  const floatRequested = useBrowserTabFloating(floatKey);
+  const floatSlot = useBrowserFloatSlot(floatKey);
+  const floating = floatRequested && floatSlot !== null;
+  const floatViewport = useBrowserFloatEntries(scope ?? "").find(
+    (entry) => entry.key === floatKey,
+  )?.viewport;
+  const live = active || floating;
   const frameName = `zeros-browser-${tab.id}`;
   const webview = useIframeWebview({
     initialUrl: initialFrameUrl,
-    active,
+    active: live,
     frameName,
     trustedPreviewOrigin: previewRuntime?.origin,
     onNavigation: (url) => {
@@ -788,8 +835,10 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     "preview-renewal",
   );
   const [previewFrameMounted, setPreviewFrameMounted] = useState(false);
+  const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
   const attachWebviewFrame = webview.ref;
   const attachPreviewFrame = useCallback((node: HTMLIFrameElement | null) => {
+    previewFrameRef.current = node;
     attachWebviewFrame(node);
     setPreviewFrameMounted(Boolean(node));
   }, [attachWebviewFrame]);
@@ -805,7 +854,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     scope: nativeCloudPreview ? (scope ?? "") : "",
     url: safeTabUrl,
     frameName,
-    active,
+    active: live,
     ready: electron && previewFrameMounted,
     source: tab.previewSource,
     agentPreview: Boolean(tab.previewSource),
@@ -866,7 +915,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   // performs an immediate catch-up when their prior grant elapsed.
   useEffect(() => {
     const source = tab.previewSource;
-    if (!active || nativeCloudPreview || !source || !safeTabUrl) return;
+    if (!live || nativeCloudPreview || !source || !safeTabUrl) return;
     const current = previewRuntimeStateForTab(tab.id, safeTabUrl);
     const now = Date.now();
     const dueAt = Math.max(
@@ -945,7 +994,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
       window.clearTimeout(timer);
     };
   }, [
-    active,
+    live,
     nativeCloudPreview,
     electron,
     frameName,
@@ -970,14 +1019,20 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   const effectiveUrl = nativeCloudPreview || previewRuntimeActive
     ? safeTabUrl
     : webview.state.currentUrl || safeTabUrl;
+  // Canvas, forks and ⌥+click stay loopback-only (cloud previews keep their
+  // logical localhost URL here). Design Mode works on any http(s) page; the
+  // picker runs in the page's own world, so its messages are untrusted input
+  // (see picker-message-guard.ts).
   const localToolsEnabled = isLoopbackUrl(effectiveUrl);
-  const chipVisible = localToolsEnabled && webview.selectedElements.length > 0;
+  const designModeAvailable = isPickerPageUrl(effectiveUrl);
+  const designModeEnabled = designModeAvailable && !floating;
+  const chipVisible = designModeEnabled && webview.selectedElements.length > 0;
   const designModeActive = webview.designModeActive;
   const setWebviewDesignMode = webview.setDesignMode;
 
   // Mirror iframe picker selection to workspace store for MCP + @selection.
   useEffect(() => {
-    if (!active || !localToolsEnabled) return;
+    if (!active || !designModeEnabled) return;
     const primary = webview.selectedElements[0];
     if (!primary) {
       dispatch({ type: "SET_BROWSER_PICKER_SELECTION", selection: null });
@@ -997,24 +1052,20 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     return () => {
       dispatch({ type: "SET_BROWSER_PICKER_SELECTION", selection: null });
     };
-  }, [active, localToolsEnabled, webview.selectedElements, dispatch]);
+  }, [active, designModeEnabled, webview.selectedElements, dispatch]);
 
-  // Leaving loopback immediately exits both local-only modes. Persisting Canvas
-  // off prevents an external page from retaining an invisible canvas state that
-  // unexpectedly reappears on a later localhost navigation.
+  // Design Mode exits on a non-web page and while the page floats over the
+  // chat (the float is for viewing; picks there would have no chip).
   useEffect(() => {
-    if (localToolsEnabled) return;
-    if (designModeActive) setWebviewDesignMode(false);
-    if (tab.canvasMode) {
-      updateTab({ canvasMode: false });
-    }
-  }, [
-    localToolsEnabled,
-    designModeActive,
-    setWebviewDesignMode,
-    tab.canvasMode,
-    updateTab,
-  ]);
+    if (!designModeEnabled && designModeActive) setWebviewDesignMode(false);
+  }, [designModeEnabled, designModeActive, setWebviewDesignMode]);
+
+  // Leaving loopback immediately exits Canvas. Persisting it off prevents an
+  // external page from retaining an invisible canvas state that unexpectedly
+  // reappears on a later localhost navigation.
+  useEffect(() => {
+    if (!localToolsEnabled && tab.canvasMode) updateTab({ canvasMode: false });
+  }, [localToolsEnabled, tab.canvasMode, updateTab]);
 
   // ── ⌥+click direct-to-composer ──────────────────────────
   //
@@ -1130,7 +1181,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   //       the message gets the toggle, since each tab's hook has
   //       its own message listener scoped to its iframe.
   useEffect(() => {
-    if (!active || !localToolsEnabled) return;
+    if (!active || !designModeEnabled) return;
     const handler = (e: KeyboardEvent) => {
       if (e.shiftKey && (e.metaKey || e.ctrlKey) && e.code === "KeyD") {
         e.preventDefault();
@@ -1139,7 +1190,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [active, localToolsEnabled, webview]);
+  }, [active, designModeEnabled, webview]);
 
   // ── Escape exits Design Mode (renderer-side) ─────────────
   //
@@ -1155,7 +1206,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   // React shell (e.g., after the chip dismisses, focus may settle
   // on body before the user clicks back into the page).
   useEffect(() => {
-    if (!active || !localToolsEnabled || !webview.designModeActive) return;
+    if (!active || !designModeEnabled || !webview.designModeActive) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         // ElementChip stops propagation on its own Escape, so if
@@ -1166,7 +1217,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [active, localToolsEnabled, webview.designModeActive, webview]);
+  }, [active, designModeEnabled, webview.designModeActive, webview]);
 
   const hasUrl = Boolean(webview.state.currentUrl || safeTabUrl);
 
@@ -1185,7 +1236,11 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   // wrapper className/style based on mode. The chip is also
   // a sibling of the iframe inside the same wrapper so its
   // click-coord-based positioning stays correct in both modes.
-  const canvasMode = localToolsEnabled && (tab.canvasMode ?? false);
+  // Canvas, the device toolbar and the float are mutually exclusive layouts
+  // of that one frame; a float takes precedence and both others resume after.
+  const canvasMode = localToolsEnabled && !floating && (tab.canvasMode ?? false);
+  const deviceMode =
+    hasUrl && !floating && !canvasMode && tab.deviceToolbar === true;
   const persistedW = tab.viewportWidth ?? BROWSER_DEFAULT_WIDTH;
   const persistedH = tab.viewportHeight ?? BROWSER_DEFAULT_HEIGHT;
   // Drag state — live dims during a pointer drag for smooth
@@ -1206,6 +1261,177 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
       updateTab({ viewportWidth: w, viewportHeight: h });
     },
     [updateTab],
+  );
+
+  // ── Device toolbar ──────────────────────────────────────
+  //
+  // A fixed-size viewport, top-aligned and centered in a scrollable body,
+  // scaled by the zoom menu ("Fit" never enlarges). It shares the persisted
+  // viewport size with Canvas mode. Measurement runs only while visible.
+  const devicePresetId = normalizeBrowserDevicePreset(tab.devicePreset);
+  const deviceSize = clampBrowserDeviceSize(effW, effH);
+  const [deviceZoom, setDeviceZoom] = useState<BrowserDeviceZoom>("fit");
+  const viewportWrapperRef = useRef<HTMLDivElement>(null);
+  const [deviceBody, setDeviceBody] = useState({ width: 0, height: 0 });
+  useLayoutEffect(() => {
+    const el = viewportWrapperRef.current;
+    if (!active || !deviceMode || !el) return;
+    const update = () => {
+      const width = el.clientWidth;
+      const height = el.clientHeight;
+      setDeviceBody((current) =>
+        current.width === width && current.height === height
+          ? current
+          : { width, height },
+      );
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [active, deviceMode]);
+  // The drag renders the same layout it will persist, so "Fit" stays live
+  // and releasing a knob never rescales the frame.
+  const deviceLayout = browserDeviceLayout({
+    bodyWidth: deviceBody.width,
+    bodyHeight: deviceBody.height,
+    width: deviceSize.width,
+    height: deviceSize.height,
+    zoom: deviceZoom,
+  });
+
+  const setDeviceToolbar = useCallback(
+    (next: boolean) => {
+      updateTab(
+        next ? { deviceToolbar: true, canvasMode: false } : { deviceToolbar: false },
+      );
+    },
+    [updateTab],
+  );
+  const setDeviceSize = useCallback(
+    (width: number, height: number) => {
+      const next = clampBrowserDeviceSize(width, height);
+      const presetId = browserDevicePresetForSize(
+        devicePresetId,
+        next.width,
+        next.height,
+      );
+      updateTab({
+        viewportWidth: next.width,
+        viewportHeight: next.height,
+        devicePreset: presetId === "custom" ? undefined : presetId,
+      });
+    },
+    [devicePresetId, updateTab],
+  );
+  const setDevicePreset = useCallback(
+    (presetId: BrowserDevicePresetId) => {
+      const preset = browserDevicePreset(presetId);
+      updateTab(
+        preset
+          ? {
+              devicePreset: preset.id,
+              viewportWidth: preset.width,
+              viewportHeight: preset.height,
+            }
+          : { devicePreset: undefined },
+      );
+    },
+    [updateTab],
+  );
+  const rotateDevice = useCallback(() => {
+    setDeviceSize(deviceSize.height, deviceSize.width);
+  }, [deviceSize.height, deviceSize.width, setDeviceSize]);
+
+  // One knob drag at a time. Escape, window blur and lost capture cancel it
+  // back to the start size, and leaving device mode mid-drag cancels it so the
+  // frame never stays stuck in a resizing state.
+  const deviceGestureCancelRef = useRef<(() => void) | null>(null);
+  useLayoutEffect(() => {
+    if (!active || !deviceMode) deviceGestureCancelRef.current?.();
+  }, [active, deviceMode]);
+  useLayoutEffect(() => () => deviceGestureCancelRef.current?.(), []);
+  // A knob drag also scrolls the body to keep the knob under the pointer.
+  // The scroll waits for the commit that resizes the scroll area; set any
+  // earlier, the browser would clamp it to the old size.
+  const pendingDeviceScrollRef = useRef<{ left: number; top: number } | null>(
+    null,
+  );
+  useLayoutEffect(() => {
+    const pending = pendingDeviceScrollRef.current;
+    const el = viewportWrapperRef.current;
+    pendingDeviceScrollRef.current = null;
+    if (!pending || !el) return;
+    el.scrollLeft = pending.left;
+    el.scrollTop = pending.top;
+  }, [dragDims]);
+
+  const startDeviceResize = useCallback(
+    (e: React.PointerEvent, axis: CanvasKnobAxis, handle: HTMLElement) => {
+      if (!e.isPrimary || e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      deviceGestureCancelRef.current?.();
+      const body = viewportWrapperRef.current;
+      const start = {
+        axis,
+        width: deviceSize.width,
+        height: deviceSize.height,
+        zoom: deviceZoom,
+        bodyWidth: deviceBody.width,
+        bodyHeight: deviceBody.height,
+        scrollLeft: body?.scrollLeft ?? 0,
+        scrollTop: body?.scrollTop ?? 0,
+      };
+      const startX = e.clientX;
+      const startY = e.clientY;
+      let last = { width: start.width, height: start.height };
+      setDragDims({ w: last.width, h: last.height, axis });
+      const settle = (commit: boolean) => {
+        deviceGestureCancelRef.current = null;
+        // Persist before clearing the live size so no frame shows the old one.
+        if (
+          commit &&
+          (last.width !== start.width || last.height !== start.height)
+        ) {
+          setDeviceSize(last.width, last.height);
+        } else {
+          pendingDeviceScrollRef.current = {
+            left: start.scrollLeft,
+            top: start.scrollTop,
+          };
+        }
+        setDragDims(null);
+      };
+      deviceGestureCancelRef.current = beginDesignPointerGesture({
+        target: handle,
+        pointerId: e.pointerId,
+        cursor: axis === "bottom" ? "ns-resize" : "ew-resize",
+        onMove: (move) => {
+          const next = browserDeviceResizeSize(
+            start,
+            move.clientX - startX,
+            move.clientY - startY,
+          );
+          last = { width: next.width, height: next.height };
+          pendingDeviceScrollRef.current = {
+            left: next.scrollLeft,
+            top: next.scrollTop,
+          };
+          setDragDims({ w: last.width, h: last.height, axis });
+        },
+        onFinish: () => settle(true),
+        onCancel: () => settle(false),
+      });
+    },
+    [
+      deviceSize.width,
+      deviceSize.height,
+      deviceZoom,
+      deviceBody.width,
+      deviceBody.height,
+      setDeviceSize,
+    ],
   );
 
   // ── Infinite canvas viewport ────────────────────────────
@@ -1417,25 +1643,27 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     [spaceHeld, canvasViewport.x, canvasViewport.y],
   );
 
+  const setCanvasMode = useCallback(
+    (next: boolean) => {
+      updateTab(
+        next ? { canvasMode: true, deviceToolbar: false } : { canvasMode: false },
+      );
+    },
+    [updateTab],
+  );
+
   // ── ⌘+\ — toggle canvas mode ────────────────────────────
   useEffect(() => {
-    if (!active || !localToolsEnabled) return;
+    if (!active || !localToolsEnabled || floating) return;
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
         e.preventDefault();
-        updateTab({ canvasMode: !canvasMode });
+        setCanvasMode(!canvasMode);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [active, localToolsEnabled, canvasMode, updateTab]);
-
-  const setCanvasMode = useCallback(
-    (next: boolean) => {
-      updateTab({ canvasMode: next });
-    },
-    [updateTab],
-  );
+  }, [active, localToolsEnabled, floating, canvasMode, setCanvasMode]);
 
   const applyPresetWidth = useCallback(
     (width: number) => {
@@ -1608,6 +1836,111 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     panToRevealStrip,
   ]);
 
+  // ── Float preview ───────────────────────────────────────
+  //
+  // React renders the viewport into a detached host element. The host moves
+  // between the docked slot below and this tab's float slot with an atomic
+  // DOM move, so floating and docking never reload the page.
+  const [viewportHost] = useState<HTMLDivElement | null>(() => {
+    if (typeof document === "undefined") return null;
+    const host = document.createElement("div");
+    host.dataset.zerosBrowserViewport = "";
+    Object.assign(host.style, {
+      position: "absolute",
+      inset: "0",
+      overflow: "hidden",
+    });
+    return host;
+  });
+  const dockSlotRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!viewportHost) return;
+    const target = floating ? floatSlot : dockSlotRef.current;
+    if (target && viewportHost.parentElement !== target) {
+      moveNodePreservingState(target, viewportHost);
+    }
+  }, [viewportHost, floating, floatSlot]);
+  // A float slot can unmount before this tab re-renders (owner switch, chat
+  // column unmount); the rescue runs while that slot is still connected.
+  useLayoutEffect(() => {
+    if (!viewportHost) return;
+    return onBrowserFloatSlotRemoved(floatKey, (slot) => {
+      const dock = dockSlotRef.current;
+      if (dock && viewportHost.parentElement === slot) {
+        moveNodePreservingState(dock, viewportHost);
+      }
+    });
+  }, [floatKey, viewportHost]);
+  useLayoutEffect(
+    () => () => {
+      viewportHost?.remove();
+    },
+    [viewportHost],
+  );
+  useEffect(() => () => dockBrowserTab(floatKey), [floatKey]);
+  const renderInViewportHost = (node: React.ReactNode) =>
+    viewportHost ? createPortal(node, viewportHost) : node;
+
+  const toggleFloat = () => {
+    if (floatRequested) {
+      dockBrowserTab(floatKey);
+      return;
+    }
+    // The float keeps the page's current layout size and scales it down, so
+    // responsive pages do not reflow into a phone layout.
+    const body = canvasBodyRef.current;
+    floatBrowserTab({
+      scope: scope ?? "",
+      tabId: tab.id,
+      viewport: deviceMode
+        ? deviceSize
+        : canvasMode
+          ? { width: effW, height: effH }
+          : body
+            ? { width: body.clientWidth, height: body.clientHeight }
+            : null,
+    });
+    // The float sits over the chat; "Open in right panel" brings the column back.
+    requestWorkbenchCollapse();
+  };
+
+  // ── Separate window / DevTools ──────────────────────────
+  const windowInput = {
+    frameName,
+    url: effectiveUrl,
+    scope,
+    title: tab.title,
+    agentPreview: Boolean(tab.previewSource),
+    previewRuntimeActive,
+  };
+  const windowUnavailable = browserWindowUnavailableReason(windowInput);
+  const openWindow = () => {
+    void openBrowserWindow(windowInput).then((result) => {
+      if (!result.ok) toast.error(result.message);
+    });
+  };
+  const devToolsUnavailable = browserDevToolsUnavailableReason(effectiveUrl);
+  const openDevTools = () => {
+    void inspectBrowserFrame({ frameName, frame: previewFrameRef.current }).then(
+      (result) => {
+        if (!result.ok) toast.error(result.message);
+      },
+    );
+  };
+
+  const showStartPage = electron && !hasUrl;
+  const viewportLayout = floating
+    ? "float"
+    : canvasMode
+      ? "canvas"
+      : deviceMode
+        ? "device"
+        : "fill";
+  const floatFrame = floatViewport ?? {
+    width: BROWSER_DEFAULT_WIDTH,
+    height: BROWSER_DEFAULT_HEIGHT,
+  };
+
   return (
     <div className="bg-bg1 flex h-full min-h-0 flex-col">
       <WorkbenchTabToolbar>
@@ -1624,10 +1957,39 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
             navigateAddress(url);
           }}
           electron={electron}
+          designModeAvailable={designModeAvailable}
           localToolsEnabled={localToolsEnabled}
           canvasMode={canvasMode}
           onToggleCanvasMode={() => setCanvasMode(!canvasMode)}
+          floating={floatRequested}
+          canFloat={electron && hasUrl}
+          onToggleFloat={toggleFloat}
+          deviceToolbar={tab.deviceToolbar === true && !canvasMode}
+          canShowDeviceToolbar={electron && hasUrl && !floatRequested}
+          onToggleDeviceToolbar={setDeviceToolbar}
+          windowUnavailable={windowUnavailable}
+          onOpenWindow={openWindow}
+          devToolsUnavailable={devToolsUnavailable}
+          onOpenDevTools={openDevTools}
         />
+        {deviceMode && (
+          <BrowserDeviceToolbar
+            presetId={browserDevicePresetForSize(
+              devicePresetId,
+              deviceSize.width,
+              deviceSize.height,
+            )}
+            width={deviceSize.width}
+            height={deviceSize.height}
+            zoom={deviceZoom}
+            effectiveZoom={deviceLayout.zoom}
+            onPresetChange={setDevicePreset}
+            onSizeChange={setDeviceSize}
+            onRotate={rotateDevice}
+            onZoomChange={setDeviceZoom}
+            onClose={() => setDeviceToolbar(false)}
+          />
+        )}
       </WorkbenchTabToolbar>
       {/* Browser body — a real <iframe>. CSS positions it; in
           canvas mode the iframe becomes a centered explicit-sized
@@ -1658,12 +2020,20 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
             : undefined
         }
       >
-        {electron && !hasUrl ? (
-          <EmptyState
-            onNavigate={navigateAddress}
-            previewAvailable={previewAvailable}
+        {/* Holds the viewport host while docked; React never renders into it. */}
+        <div ref={dockSlotRef} className="absolute inset-0" />
+        {showStartPage && (
+          <BrowserStartPage
+            scope={scope ?? ""}
+            active={active}
+            onOpen={navigateAddress}
           />
-        ) : (
+        )}
+        {floating && (
+          <FloatingPreviewPlaceholder onDock={() => dockBrowserTab(floatKey)} />
+        )}
+        {renderInViewportHost(
+          showStartPage ? null : (
           <>
             {/* Canvas background — dot grid that pans/zooms with
                 the viewport. Only painted in canvas mode. */}
@@ -1679,13 +2049,22 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
                 }}
               />
             )}
-            {/* Iframe wrapper — same React tree position in both
-                modes, only the style differs. Stays mounted across
+            {/* Iframe wrapper — same React tree position in every
+                layout, only the style differs. Stays mounted across
                 mode toggles so page nav + scroll + JS heap survive.
-                In fill mode: inset:0 fills the body. In canvas mode:
-                absolute-positioned with the viewport transform. */}
+                Fill: inset:0 fills the body. Canvas: absolute-positioned
+                with the viewport transform. Device: a scroll area around
+                a fixed-size scaled frame. Float: the frame keeps its
+                layout size and the float box scales it. */}
             <div
-              className={canvasMode ? "absolute flex items-start" : "absolute"}
+              ref={viewportWrapperRef}
+              className={
+                VIEWPORT_WRAPPER_CLASSES[
+                  viewportLayout === "device" && deviceZoom !== "fit"
+                    ? "deviceFixedZoom"
+                    : viewportLayout
+                ]
+              }
               style={
                 canvasMode
                   ? {
@@ -1695,14 +2074,33 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
                       transformOrigin: "top left",
                       gap: BROWSER_VARIANT_GAP_PX,
                     }
-                  : { inset: 0 }
+                  : undefined
               }
             >
               <div
-                className={
-                  canvasMode ? "relative shrink-0" : "absolute inset-0"
+                className={VIEWPORT_FRAME_CLASSES[viewportLayout]}
+                style={
+                  viewportLayout === "canvas"
+                    ? { width: effW, height: effH }
+                    : viewportLayout === "device"
+                      ? {
+                          left: deviceLayout.left,
+                          top: deviceLayout.top,
+                          width: deviceSize.width,
+                          height: deviceSize.height,
+                          transform: `scale(${deviceLayout.zoom})`,
+                          transformOrigin: "top left",
+                        }
+                      : viewportLayout === "float"
+                        ? {
+                            width: floatFrame.width,
+                            height: floatFrame.height,
+                            transform:
+                              "scale(var(--zeros-browser-float-scale, 1))",
+                            transformOrigin: "top left",
+                          }
+                        : undefined
                 }
-                style={canvasMode ? { width: effW, height: effH } : undefined}
                 data-zeros-canvas-chrome
               >
                 <iframe
@@ -1766,22 +2164,22 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
                     forkPending={webview.forkPending}
                     onFork={() => void handleForkVariant()}
                     onSubmit={(text) => {
-                      submitElementsToChat({
-                        text,
+                      const staged = stageSelectedElementsInComposer({
                         elements: webview.selectedElements,
+                        prompt: text,
                         tabUrl: effectiveUrl || "",
                         activeChatId: useWorkspaceStore.getState().activeChatId,
-                        dispatch,
                       });
-                      webview.clearSelectedElements();
+                      if (staged.ok) webview.clearSelectedElements();
                     }}
                   />
                 )}
-                {canvasMode && (
+                {(canvasMode || deviceMode) && (
                   <CanvasKnobHandles
                     axes={["left", "right", "bottom"]}
                     activeAxis={dragDims?.axis ?? null}
-                    onStart={startResize}
+                    scale={deviceMode ? deviceLayout.zoom : undefined}
+                    onStart={canvasMode ? startResize : startDeviceResize}
                   />
                 )}
                 {canvasMode && (
@@ -1798,6 +2196,17 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
                   />
                 )}
               </div>
+              {deviceMode && (
+                // Sizes the scroll area: the scaled frame plus its padding.
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute top-0 left-0"
+                  style={{
+                    width: deviceLayout.contentWidth,
+                    height: deviceLayout.contentHeight,
+                  }}
+                />
+              )}
               {canvasMode &&
                 tabVariants.map((variant) => (
                   <BrowserVariantFrame
@@ -1812,8 +2221,52 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
                 ))}
             </div>
           </>
+          ),
         )}
       </div>
+    </div>
+  );
+}
+
+/** Wrapper and frame classes per viewport layout. The frame element is the
+ * same node in every layout so the iframe never remounts. The app's
+ * scrollbars take layout space, so a device-body scrollbar appearing mid-drag
+ * would narrow the body and shift the centered frame. */
+const VIEWPORT_WRAPPER_CLASSES = {
+  fill: "absolute inset-0",
+  canvas: "absolute flex items-start",
+  // Fit frames do not overflow, so no bar takes width from the centering.
+  device:
+    "bg-bg0 absolute inset-0 overflow-auto [&::-webkit-scrollbar-corner]:bg-transparent",
+  // A fixed zoom always reserves the vertical bar, so a frame that starts or
+  // stops overflowing mid-drag cannot shift the centering. Not
+  // `scrollbar-gutter`: Chromium drops the gutter width from the horizontal
+  // scroll range, which clips the frame's right padding.
+  deviceFixedZoom:
+    "bg-bg0 absolute inset-0 overflow-x-auto overflow-y-scroll [&::-webkit-scrollbar-corner]:bg-transparent",
+  float: "absolute inset-0",
+} as const;
+
+const VIEWPORT_FRAME_CLASSES = {
+  fill: "absolute inset-0",
+  canvas: "relative shrink-0",
+  device: "ring-border2 absolute ring-1",
+  float: "absolute top-0 left-0",
+} as const;
+
+/** Docked body while the page floats over the chat column. */
+function FloatingPreviewPlaceholder({ onDock }: { onDock: () => void }) {
+  return (
+    <div className="bg-bg1 absolute inset-0 flex flex-col items-center justify-center gap-3 px-10 text-center">
+      <PictureInPicture2
+        className="text-fg3 size-6"
+        strokeWidth={1.5}
+        aria-hidden="true"
+      />
+      <p className="text-fg2 m-0 text-xs">This page is floating over the chat.</p>
+      <Button variant="secondary" onClick={onDock}>
+        Show here
+      </Button>
     </div>
   );
 }
@@ -1825,9 +2278,25 @@ interface BrowserChromeProps {
   displayUrl: string;
   onNavigate: (url: string) => void;
   electron: boolean;
+  /** Any http(s) page can host Design Mode. */
+  designModeAvailable: boolean;
+  /** Loopback pages also get Canvas. */
   localToolsEnabled: boolean;
   canvasMode: boolean;
   onToggleCanvasMode: () => void;
+  floating: boolean;
+  canFloat: boolean;
+  onToggleFloat: () => void;
+  deviceToolbar: boolean;
+  canShowDeviceToolbar: boolean;
+  onToggleDeviceToolbar: (next: boolean) => void;
+  /** Why the page cannot open in its own window, or null when it can. */
+  windowUnavailable: string | null;
+  onOpenWindow: () => void;
+  /** Why DevTools has nothing to inspect, or null when it does. */
+  devToolsUnavailable: string | null;
+  /** Inspects the tab's own iframe; never opens a preview window. */
+  onOpenDevTools: () => void;
 }
 
 function BrowserChrome({
@@ -1835,9 +2304,20 @@ function BrowserChrome({
   displayUrl,
   onNavigate,
   electron,
+  designModeAvailable,
   localToolsEnabled,
   canvasMode,
   onToggleCanvasMode,
+  floating,
+  canFloat,
+  onToggleFloat,
+  deviceToolbar,
+  canShowDeviceToolbar,
+  onToggleDeviceToolbar,
+  windowUnavailable,
+  onOpenWindow,
+  devToolsUnavailable,
+  onOpenDevTools,
 }: BrowserChromeProps) {
   const {
     state,
@@ -1975,54 +2455,71 @@ function BrowserChrome({
       </form>
 
       {/* Design Mode toggle — element picker. When on, the
-          in-iframe picker (auto-injected on every iframe load by
-          main's did-frame-finish-load hook) starts handling hover
-          and click events. Clicking pops the ElementChip in the
-          BrowserTab body. */}
-      {localToolsEnabled && (
-        <>
-          <Tooltip label="Design Mode" shortcut="⌘⇧D">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className={[
-                "size-6",
-                designModeActive
-                  ? "bg-bg2-hover text-fg1"
-                  : "text-fg2 hover:text-fg1",
-                // Design/Canvas are plain toggles over the live iframe. Avoid a
-                // focus-visible carry-over when focus bounces through the page.
-                "focus-visible:border-transparent focus-visible:ring-0",
-              ].join(" ")}
-              onClick={() => setDesignMode(!designModeActive)}
-              disabled={!electron}
-              aria-pressed={designModeActive}
-              aria-label="Toggle Design Mode"
-            >
-              <MousePointer2 size={14} />
-            </Button>
-          </Tooltip>
-
-          <Tooltip label="Canvas Mode" shortcut={"⌘\\"}>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className={[
-                "size-6",
-                canvasMode
-                  ? "bg-bg2-hover text-fg1"
-                  : "text-fg2 hover:text-fg1",
-                "focus-visible:border-transparent focus-visible:ring-0",
-              ].join(" ")}
-              onClick={onToggleCanvasMode}
-              aria-pressed={canvasMode}
-              aria-label="Toggle Canvas Mode"
-            >
-              <Palette size={14} />
-            </Button>
-          </Tooltip>
-        </>
+          in-iframe picker (auto-injected on every http(s) iframe
+          load by main's did-frame-finish-load hook) starts handling
+          hover and click events. Clicking pops the ElementChip in the
+          BrowserTab body. Both toggles stay in place (disabled) while
+          the page floats so the float button does not shift. */}
+      {designModeAvailable && (
+        <Tooltip label="Design Mode" shortcut="⌘⇧D">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className={[
+              "size-6",
+              designModeActive
+                ? "bg-bg2-hover text-fg1"
+                : "text-fg2 hover:text-fg1",
+              // Design/Canvas are plain toggles over the live iframe. Avoid a
+              // focus-visible carry-over when focus bounces through the page.
+              "focus-visible:border-transparent focus-visible:ring-0",
+            ].join(" ")}
+            onClick={() => setDesignMode(!designModeActive)}
+            disabled={!electron || floating}
+            aria-pressed={designModeActive}
+            aria-label="Toggle Design Mode"
+          >
+            <MousePointer2 size={14} />
+          </Button>
+        </Tooltip>
       )}
+      {localToolsEnabled && (
+        <Tooltip label="Canvas Mode" shortcut={"⌘\\"}>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className={[
+              "size-6",
+              canvasMode
+                ? "bg-bg2-hover text-fg1"
+                : "text-fg2 hover:text-fg1",
+              "focus-visible:border-transparent focus-visible:ring-0",
+            ].join(" ")}
+            onClick={onToggleCanvasMode}
+            disabled={floating}
+            aria-pressed={canvasMode}
+            aria-label="Toggle Canvas Mode"
+          >
+            <Palette size={14} />
+          </Button>
+        </Tooltip>
+      )}
+      <Tooltip label={floating ? "Stop floating" : "Float preview over chat"}>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className={[
+            "size-6",
+            floating ? "bg-bg2-hover text-fg1" : "text-fg2 hover:text-fg1",
+          ].join(" ")}
+          onClick={onToggleFloat}
+          disabled={!canFloat}
+          aria-pressed={floating}
+          aria-label="Float preview over chat"
+        >
+          <PictureInPicture2 size={14} />
+        </Button>
+      </Tooltip>
 
       {/* Iframe migration — Radix DropdownMenu z-indexes naturally
           over the iframe body. No more native menu, no overlay-lock,
@@ -2044,22 +2541,47 @@ function BrowserChrome({
             </Button>
           </DropdownMenuTrigger>
         </Tooltip>
-        <DropdownMenuContent align="end" className="min-w-[180px]">
+        <DropdownMenuContent align="end" className="min-w-[220px]">
           <DropdownMenuItem onClick={hardReload} disabled={!electron}>
-            Hard Reload
+            Hard reload
           </DropdownMenuItem>
-          <DropdownMenuSeparator />
           <DropdownMenuItem
-            onClick={() => void clearCache()}
-            disabled={!electron}
+            onClick={onOpenDevTools}
+            disabled={!electron || devToolsUnavailable !== null}
           >
-            Clear Cache
+            Open DevTools
           </DropdownMenuItem>
+          <DropdownMenuItem
+            onClick={onOpenWindow}
+            disabled={!electron || windowUnavailable !== null}
+          >
+            Open separate preview window
+          </DropdownMenuItem>
+          {electron && windowUnavailable !== null && (
+            <DropdownMenuLabel className="text-muted-fg text-2xxs pt-0 font-normal">
+              {windowUnavailable}
+            </DropdownMenuLabel>
+          )}
+          <DropdownMenuCheckboxItem
+            indicatorSide="end"
+            checked={deviceToolbar}
+            disabled={!canShowDeviceToolbar}
+            onCheckedChange={(checked) => onToggleDeviceToolbar(checked === true)}
+          >
+            Show device toolbar
+          </DropdownMenuCheckboxItem>
+          <DropdownMenuSeparator />
           <DropdownMenuItem
             onClick={() => void clearCookies()}
             disabled={!electron}
           >
-            Clear Cookies
+            Clear cookies
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onClick={() => void clearCache()}
+            disabled={!electron}
+          >
+            Clear cache
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -2182,8 +2704,9 @@ const CHIP_GAP = 12;
  *  Edge-flips when overflowing right or bottom of the container.
  *
  *  Shows ALL selected elements as removable tags, plus
- *  an "+ Add" button to pick another element. Submit fires one
- *  combined chat message with every element. */
+ *  an "+ Add" button to pick another element. Submitting stages every
+ *  element in the active chat's composer (one screenshot pill each plus
+ *  a details .txt pill); it never sends. */
 function ElementChip({
   elements,
   onSubmit,
@@ -2240,7 +2763,7 @@ function ElementChip({
       onDismiss();
       return;
     }
-    // ⌘+L or Ctrl+L sends the selection to the active chat.
+    // ⌘+L or Ctrl+L stages the selection in the active chat's composer.
     // Also Enter (without Shift) submits. Shift/Option variants are
     // rejected so this plain chord can't double-fire alongside other
     // L-key chords (⇧⌘L is the internal copy-logs shortcut).
@@ -2249,7 +2772,8 @@ function ElementChip({
       !e.shiftKey &&
       !e.altKey &&
       (e.key === "l" || e.key === "L");
-    const isEnter = e.key === "Enter" && !e.shiftKey;
+    const isEnter =
+      e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing;
     if (isCmdL || isEnter) {
       e.preventDefault();
       onSubmit(text);
@@ -2376,7 +2900,7 @@ function ElementChip({
 }
 
 /** Format an element capture for inline insertion into a composer
- *  draft (⌥+click flow). The chat submission flow uses a richer
+ *  draft (⌥+click flow). The chip's staged details file uses a richer
  *  multi-line block; this one targets a single compact paragraph
  *  the user can comfortably edit around. */
 function formatElementForComposer(el: SelectedElement, tabUrl: string): string {
@@ -2397,158 +2921,4 @@ function formatElementForComposer(el: SelectedElement, tabUrl: string): string {
     : `<${el.tag}>`;
   const head = `[${ident} ${el.selector}${url ? ` @ ${url}` : ""}]`;
   return styleSummary ? `${head} { ${styleSummary} }` : head;
-}
-
-// ── Submit to active chat ─────────────────────────────────
-
-/** Narrow dispatch shape — we only emit the one action so we don't
- *  need to import the (unexported) full reducer Action union. The
- *  store's real dispatch is `Dispatch<Action>`, which is
- *  contravariantly assignable to this narrower function type
- *  because every concrete Action covers this one. */
-type EnqueueDispatch = (action: {
-  type: "ENQUEUE_CHAT_SUBMISSION";
-  submission: PendingChatSubmission;
-}) => void;
-
-interface SubmitArgs {
-  text: string;
-  elements: SelectedElement[];
-  tabUrl: string;
-  activeChatId: string | null;
-  dispatch: EnqueueDispatch;
-}
-
-/** Format ONE element as a markdown-ish block for the chat message.
- *  Includes selector, URL, shadow-DOM note, and computed styles
- *  subset so the agent can phrase concrete diffs. */
-function elementBlock(el: SelectedElement, fallbackUrl: string): string {
-  const styleLines = el.styles
-    ? Object.entries(el.styles)
-        .filter(([, v]) => v && v !== "auto" && v !== "normal" && v !== "none")
-        .map(([k, v]) => `  ${k}: ${v}`)
-        .join("\n")
-    : "";
-  // Lead with the component name when we have one — that's the
-  // identifier the user actually sees in the chip and recognizes
-  // from their own code. Fall back to the bare tag otherwise.
-  const heading = el.componentName
-    ? `${el.componentName} (<${el.tag}>)`
-    : `<${el.tag}>`;
-  return (
-    `${heading}\n` +
-    `  selector: ${el.selector}\n` +
-    `  url: ${el.href || fallbackUrl}` +
-    (el.hasShadowRoot ? "\n  note: inside shadow-DOM" : "") +
-    (styleLines ? `\n  computed styles:\n${styleLines}` : "")
-  );
-}
-
-/** Build a chat submission payload from the user's typed
- *  description + ALL captured elements + their screenshot
- *  attachments. ALWAYS target the active chat —
- *  never silently spawn a new one. If there's no active chat,
- *  surface a clear failure via the bottom-right toast. */
-function submitElementsToChat({
-  text,
-  elements,
-  tabUrl,
-  activeChatId,
-  dispatch,
-}: SubmitArgs): void {
-  if (!activeChatId) {
-    toast.error("No active chat to attach this element to.", {
-      description: "Open or create a chat first.",
-    });
-    return;
-  }
-  if (elements.length === 0) return;
-  const userText = text.trim();
-  // Header switches voice based on count: 1 element → "Selected
-  // element"; N elements → "Selected N elements", numbered list.
-  const header =
-    elements.length === 1
-      ? `Selected element: ${elementBlock(elements[0], tabUrl)}`
-      : `Selected ${elements.length} elements:\n\n` +
-        elements
-          .map((el, i) => `${i + 1}. ${elementBlock(el, tabUrl)}`)
-          .join("\n\n");
-  const body = userText ? `${userText}\n\n${header}` : header;
-
-  // Browser captures enter the SAME staged-attachment pipeline as paste/drop.
-  // It writes the full-resolution bytes to the active chat's disk namespace,
-  // sends them as vision content, and persists only the returned path.
-  const composerAttachments: ComposerAttachment[] = [];
-  elements.forEach((el, i) => {
-    if (!el.screenshot) return;
-    const m = el.screenshot.match(/^data:([^;]+);base64,(.+)$/);
-    if (!m) return;
-    composerAttachments.push({
-      // The id is part of the durable filename. Include entropy so two
-      // submissions in the same millisecond cannot overwrite an older chat
-      // image and silently change what that older message renders.
-      id: `browser-${Date.now().toString(36)}-${i + 1}-${Math.random()
-        .toString(36)
-        .slice(2, 8)}`,
-      name: `${el.tag}-${i + 1}.jpg`,
-      mimeType: m[1],
-      kind: "image",
-      data: m[2],
-      size: Math.floor((m[2].length * 3) / 4),
-      validation: { ok: true },
-    });
-  });
-
-  dispatch({
-    type: "ENQUEUE_CHAT_SUBMISSION",
-    submission: {
-      id: `elem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-      text: body,
-      source: "manual",
-      composerAttachments:
-        composerAttachments.length > 0 ? composerAttachments : undefined,
-    },
-  });
-}
-
-function EmptyState({
-  onNavigate,
-  previewAvailable,
-}: {
-  onNavigate: (url: string) => void;
-  previewAvailable: boolean;
-}) {
-  const suggestions: Array<{ label: string; url: string }> = [
-    { label: "localhost:3000", url: "http://localhost:3000" },
-    { label: "localhost:5173", url: "http://localhost:5173" },
-    { label: "localhost:8080", url: "http://localhost:8080" },
-  ];
-  return (
-    <div className="bg-bg1 absolute inset-0 flex flex-col items-center justify-center gap-3 px-10 text-center">
-      <Globe className="text-fg2 size-7" />
-      <p className="text-fg2 m-0 text-sm">
-        {previewAvailable ? "Open a site or preview your app" : "Open a site"}
-      </p>
-      <p className="text-fg2 m-0 max-w-[420px] text-xs leading-[1.55]">
-        Enter any http(s) URL in the address bar.
-        {previewAvailable
-          ? " Design and Canvas tools appear automatically for locally running sites."
-          : " Cloud preview URLs are not configured for this build."}
-      </p>
-      {previewAvailable && (
-        <div className="mt-1 flex flex-wrap items-center justify-center gap-1.5">
-          {suggestions.map((s) => (
-            <button
-              key={s.url}
-              type="button"
-              onClick={() => onNavigate(s.url)}
-              className="border-border1 bg-bg1 text-fg2 hover:bg-bg2-hover hover:text-fg1 rounded-sm border px-2 py-1 text-xs transition-colors"
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
 }

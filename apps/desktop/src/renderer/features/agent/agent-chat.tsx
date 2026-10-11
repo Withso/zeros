@@ -140,6 +140,7 @@ import {
   trackPendingTextAttachmentDelivery,
   waitForPendingTextAttachmentDeliveries,
 } from "./composer-text-attachment-delivery";
+import { registerLiveChatFileStager } from "./composer-file-attachment-delivery";
 import { admitTranscriptFork, buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
 import { resolveComposerPlaceholder } from "./composer-placeholder";
 import {
@@ -1897,6 +1898,21 @@ export function AgentChat({
       return staged !== null;
     });
   }, [chatId, composerEditor, interactive, stageTextAttachment]);
+
+  // Browser element selections arrive as Files and take the paste/drop path,
+  // so validation, workspace staging (local or cloud) and draft persistence
+  // match user-added pills. Same active-only gate as above: a hidden or
+  // read-only composer leaves the delivery queued for this exact chat.
+  useEffect(() => {
+    if (!chatId || !interactive || readOnly || !composerEditor) return;
+    return registerLiveChatFileStager(chatId, ({ files }) => {
+      if (composerEditor.isDestroyed) return false;
+      // Append after the typed text rather than splitting it at a stale caret.
+      composerEditor.commands.focus("end");
+      void addFiles(files);
+      return true;
+    });
+  }, [addFiles, chatId, composerEditor, interactive, readOnly]);
 
   // ── attach another chat's transcript ──
   //

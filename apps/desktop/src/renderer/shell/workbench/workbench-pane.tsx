@@ -58,6 +58,8 @@ import {
   useStableRetainedViewOrder,
 } from "../use-retained-view-keys";
 import { PrStatusRow } from "../pr/pr-status-row";
+import { useBrowserFloatEntries } from "../../features/browser/browser-float-store";
+import { activeBrowserDeckKeys, browserViewKey } from "./browser-deck-keys";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 // Proportional columns (2026-07-17): workbench grows by `(1 - ratio)·100`,
@@ -86,10 +88,6 @@ interface BrowserViewTarget {
   tab: WorkbenchTab;
 }
 
-function browserViewKey(scope: string, tabId: string): string {
-  return JSON.stringify([scope, tabId]);
-}
-
 /** A renderer-wide, bounded iframe deck. Keeping this subscription below the
  * main Workbench component means a hidden workspace's title/URL update does not
  * rerender the active tab strip or source surfaces. */
@@ -102,6 +100,7 @@ function RetainedBrowserDeck({
 }) {
   const workbenchByScope = useWorkspaceStore((state) => state.workbenchByScope);
   const activeScope = useWorkspaceStore(workbenchScopeKey);
+  const floatEntries = useBrowserFloatEntries(activeScope);
   const targets = useMemo(() => {
     const next = new Map<string, BrowserViewTarget>();
     for (const [scope, slice] of Object.entries(workbenchByScope)) {
@@ -114,16 +113,18 @@ function RetainedBrowserDeck({
   }, [workbenchByScope]);
   const availableKeys = useMemo(() => new Set(targets.keys()), [targets]);
   const currentBrowserKeys = useMemo(() => {
-    const keys: string[] = [];
+    const scopeKeys: string[] = [];
     for (const [key, target] of targets) {
-      if (target.scope === activeScope) keys.push(key);
+      if (target.scope === activeScope) scopeKeys.push(key);
     }
-    const activeKey = activeId ? browserViewKey(activeScope, activeId) : null;
-    if (activeKey && availableKeys.has(activeKey)) {
-      keys.push(activeKey);
-    }
-    return keys;
-  }, [activeId, activeScope, availableKeys, targets]);
+    return activeBrowserDeckKeys({
+      scopeKeys,
+      availableKeys,
+      activeScope,
+      activeId,
+      floats: floatEntries,
+    });
+  }, [activeId, activeScope, availableKeys, floatEntries, targets]);
   const retainedKeys = useRetainedViewKeySet(
     currentBrowserKeys,
     MAX_RETAINED_BROWSER_VIEWS,

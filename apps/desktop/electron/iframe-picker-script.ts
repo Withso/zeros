@@ -24,6 +24,15 @@
 // repeat install calls safe (e.g., the user toggles design mode
 // twice).
 //
+// Arbitrary websites: the picker is injected into every http(s) Browser
+// page, so it must not disturb the page. Its only page-visible global is the
+// non-enumerable sentinel; overlays live in a closed shadow root on a single
+// host element whose styles are reset with `all: initial`; and every style is
+// written through CSSOM, which a strict `style-src` CSP does not block (style
+// attributes would be). executeJavaScript itself is not subject to the page's
+// `script-src`. The page shares this world and can read or forge anything
+// here, so the parent treats every message as untrusted input.
+//
 // IMPORTANT: this is a STRING. Don't refactor inside via
 // template-literal interpolation (`${x}`) — write plain strings
 // with `+` concat. The only outer interpolation is the message
@@ -35,18 +44,26 @@ export const PICKER_SCRIPT = `
 (function() {
   var MSG_PREFIX = ${JSON.stringify(MSG_PREFIX)};
   var SENTINEL = "__zerosPickerInstalled__";
-  var PICKER_VERSION = 8;
+  var PICKER_VERSION = 9;
   // Upgrade path: tear down older picker installs so fork handlers
   // stay in sync after hot reload / electron restart without
-  // requiring a full page navigation.
-  if (window[SENTINEL]) {
-    if (window[SENTINEL].version >= PICKER_VERSION) {
-      window[SENTINEL].refreshParent();
+  // requiring a full page navigation. The page can define or replace the
+  // sentinel, so every read is guarded; a hostile value only disables the
+  // picker on that page.
+  var existing = null;
+  try {
+    if (Object.prototype.hasOwnProperty.call(window, SENTINEL)) existing = window[SENTINEL];
+  } catch (e) { existing = null; }
+  if (existing && typeof existing === "object") {
+    var existingVersion = 0;
+    try { existingVersion = Number(existing.version) || 0; } catch (e) { existingVersion = 0; }
+    if (existingVersion >= PICKER_VERSION) {
+      try { existing.refreshParent(); } catch (e) { /* */ }
       return;
     }
-    if (typeof window[SENTINEL].destroy === "function") {
-      window[SENTINEL].destroy();
-    }
+    try {
+      if (typeof existing.destroy === "function") existing.destroy();
+    } catch (e) { /* */ }
   }
 
   // ── State ───────────────────────────────────────────────
@@ -79,27 +96,78 @@ export const PICKER_SCRIPT = `
   // coords + absolute keep the overlay glued to its element
   // across scroll. The offset must remain stable while the page scrolls.
   var OVERLAY_ID = "__zeros_designmode_overlay__";
-  var OVERLAY_STYLE = [
-    "position:absolute",
-    "pointer-events:none",
-    "z-index:2147483647",
-    "border:2px solid #3b82f6",
-    "background:rgba(59,130,246,0.15)",
-    "border-radius:2px",
-    "display:none",
-    "box-shadow:0 0 0 1px rgba(59,130,246,0.5)",
-    "box-sizing:border-box",
-    "transition:left 60ms ease-out, top 60ms ease-out, width 60ms ease-out, height 60ms ease-out"
-  ].join(";");
+  var OVERLAY_STYLE = {
+    "position": "absolute",
+    "pointer-events": "none",
+    "z-index": "2",
+    "border": "2px solid #3b82f6",
+    "background": "rgba(59,130,246,0.15)",
+    "border-radius": "2px",
+    "display": "none",
+    "box-shadow": "0 0 0 1px rgba(59,130,246,0.5)",
+    "box-sizing": "border-box",
+    "transition": "left 60ms ease-out, top 60ms ease-out, width 60ms ease-out, height 60ms ease-out"
+  };
+
+  // CSSOM writes are not governed by a page's style-src CSP; style attributes are.
+  function applyStyles(el, styles) {
+    for (var name in styles) {
+      if (Object.prototype.hasOwnProperty.call(styles, name)) {
+        el.style.setProperty(name, styles[name], "important");
+      }
+    }
+  }
+
+  // One host element at the document root, absolutely positioned at the
+  // document origin so children use document coordinates. Its closed shadow
+  // root keeps page CSS out, and \`all: initial\` stops inherited page styles.
+  var HOST_TAG = "zeros-design-mode";
+  var hostEl = null;
+  var hostRoot = null;
+  function ensureRoot() {
+    var docEl = document.documentElement;
+    if (!docEl) return null;
+    try {
+      if (!hostEl) {
+        var host = document.createElement(HOST_TAG);
+        host.setAttribute("data-zeros", "");
+        host.setAttribute("aria-hidden", "true");
+        applyStyles(host, {
+          "all": "initial",
+          "display": "block",
+          "position": "absolute",
+          "top": "0",
+          "left": "0",
+          "width": "0",
+          "height": "0",
+          "overflow": "visible",
+          "z-index": "2147483647",
+          "pointer-events": "none"
+        });
+        hostRoot = host.attachShadow({ mode: "closed" });
+        hostEl = host;
+      }
+      if (hostEl.parentNode !== docEl) docEl.appendChild(hostEl);
+      return hostRoot;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function removeRoot() {
+    try {
+      if (hostEl && hostEl.parentNode) hostEl.parentNode.removeChild(hostEl);
+    } catch (e) { /* */ }
+  }
 
   function ensureOverlay() {
-    if (overlay && document.body && document.body.contains(overlay)) return overlay;
-    if (!document.body) return null;
+    var root = ensureRoot();
+    if (!root) return null;
+    if (overlay && overlay.parentNode === root) return overlay;
     var el = document.createElement("div");
     el.id = OVERLAY_ID;
-    el.setAttribute("style", OVERLAY_STYLE);
-    el.setAttribute("aria-hidden", "true");
-    document.body.appendChild(el);
+    applyStyles(el, OVERLAY_STYLE);
+    root.appendChild(el);
     overlay = el;
     return el;
   }
@@ -110,40 +178,42 @@ export const PICKER_SCRIPT = `
     var r = el.getBoundingClientRect();
     var docLeft = r.left + window.scrollX;
     var docTop = r.top + window.scrollY;
-    box.style.display = "block";
-    box.style.left = docLeft + "px";
-    box.style.top = docTop + "px";
-    box.style.width = r.width + "px";
-    box.style.height = r.height + "px";
+    applyStyles(box, {
+      "display": "block",
+      "left": docLeft + "px",
+      "top": docTop + "px",
+      "width": r.width + "px",
+      "height": r.height + "px"
+    });
   }
 
   function hideOverlay() {
-    if (overlay) overlay.style.display = "none";
+    if (overlay) overlay.style.setProperty("display", "none", "important");
     lastHover = null;
   }
 
   function paintSelectedOverlay(el) {
-    if (!document.body) return null;
+    var root = ensureRoot();
+    if (!root) return null;
     var r = el.getBoundingClientRect();
     var docLeft = r.left + window.scrollX;
     var docTop = r.top + window.scrollY;
     var box = document.createElement("div");
-    box.setAttribute("aria-hidden", "true");
-    box.setAttribute("style", [
-      "position:absolute",
-      "pointer-events:none",
-      "z-index:2147483646",
-      "border:3px solid #3b82f6",
-      "background:rgba(59,130,246,0.18)",
-      "border-radius:2px",
-      "box-shadow:0 0 0 1px rgba(59,130,246,0.6)",
-      "box-sizing:border-box",
-      "left:" + docLeft + "px",
-      "top:" + docTop + "px",
-      "width:" + r.width + "px",
-      "height:" + r.height + "px"
-    ].join(";"));
-    document.body.appendChild(box);
+    applyStyles(box, {
+      "position": "absolute",
+      "pointer-events": "none",
+      "z-index": "1",
+      "border": "3px solid #3b82f6",
+      "background": "rgba(59,130,246,0.18)",
+      "border-radius": "2px",
+      "box-shadow": "0 0 0 1px rgba(59,130,246,0.6)",
+      "box-sizing": "border-box",
+      "left": docLeft + "px",
+      "top": docTop + "px",
+      "width": r.width + "px",
+      "height": r.height + "px"
+    });
+    root.appendChild(box);
     return box;
   }
 
@@ -180,15 +250,14 @@ export const PICKER_SCRIPT = `
   var freezeBlocker = null;
   function makeFreezeBlocker() {
     var div = document.createElement("div");
-    div.setAttribute("aria-hidden", "true");
-    div.setAttribute("style", [
-      "position:fixed",
-      "inset:0",
-      "z-index:2147483645",
-      "background:transparent",
-      "pointer-events:auto",
-      "cursor:default"
-    ].join(";"));
+    applyStyles(div, {
+      "position": "fixed",
+      "inset": "0",
+      "z-index": "0",
+      "background": "transparent",
+      "pointer-events": "auto",
+      "cursor": "default"
+    });
     var swallow = function(e) {
       e.preventDefault();
       e.stopPropagation();
@@ -209,9 +278,10 @@ export const PICKER_SCRIPT = `
     if (frozen === next) return;
     frozen = next;
     if (frozen) {
-      if (!freezeBlocker && document.body) {
+      var root = ensureRoot();
+      if (!freezeBlocker && root) {
         freezeBlocker = makeFreezeBlocker();
-        document.body.appendChild(freezeBlocker);
+        root.appendChild(freezeBlocker);
       }
     } else {
       if (freezeBlocker && freezeBlocker.parentNode) {
@@ -225,6 +295,8 @@ export const PICKER_SCRIPT = `
   function targetFromEvent(e) {
     var path = e.composedPath();
     for (var i = 0; i < path.length; i++) {
+      // Events inside the closed overlay root retarget to its host.
+      if (path[i] === hostEl) return null;
       if (path[i] instanceof Element) return path[i];
     }
     return null;
@@ -630,8 +702,26 @@ export const PICKER_SCRIPT = `
     document.addEventListener("keydown", onKeyDown, true);
     document.addEventListener("keyup", onKeyUp, true);
     window.addEventListener("scroll", onScroll, { capture: true, passive: true });
-    try { document.body.style.setProperty("cursor", "crosshair", "important"); } catch (e) { /* */ }
+    try {
+      cursorBody = document.body;
+      savedCursor = cursorBody.style.getPropertyValue("cursor");
+      savedCursorPriority = cursorBody.style.getPropertyPriority("cursor");
+      cursorBody.style.setProperty("cursor", "crosshair", "important");
+    } catch (e) { cursorBody = null; }
     ensureOverlay();
+  }
+
+  // The page's own inline body cursor is restored on exit, not erased.
+  var cursorBody = null;
+  var savedCursor = "";
+  var savedCursorPriority = "";
+  function restoreCursor() {
+    if (!cursorBody) return;
+    try {
+      if (savedCursor) cursorBody.style.setProperty("cursor", savedCursor, savedCursorPriority);
+      else cursorBody.style.removeProperty("cursor");
+    } catch (e) { /* */ }
+    cursorBody = null;
   }
 
   function deactivate() {
@@ -646,7 +736,8 @@ export const PICKER_SCRIPT = `
     document.removeEventListener("keydown", onKeyDown, true);
     document.removeEventListener("keyup", onKeyUp, true);
     window.removeEventListener("scroll", onScroll, true);
-    try { document.body.style.removeProperty("cursor"); } catch (e) { /* */ }
+    restoreCursor();
+    removeRoot();
   }
 
   // ── Variant fork snapshot (Tier 2 matched rules + Tier 3 fallback) ──
@@ -1648,15 +1739,23 @@ export const PICKER_SCRIPT = `
   // Stored for idempotent re-install. \`refreshParent\` is called
   // on repeat injection to repoint window.parent in case the
   // iframe was detached/re-attached.
-  window[SENTINEL] = {
-    version: PICKER_VERSION,
-    refreshParent: function() { parentWindow = window.parent; },
-    destroy: function() {
-      deactivate();
-      window.removeEventListener("message", onParentMessage, true);
-      document.removeEventListener("keydown", onToggleRequestKey, true);
-    },
-  };
+  // Non-enumerable so page code that walks window properties never sees it.
+  try {
+    Object.defineProperty(window, SENTINEL, {
+      configurable: true,
+      enumerable: false,
+      writable: false,
+      value: {
+        version: PICKER_VERSION,
+        refreshParent: function() { parentWindow = window.parent; },
+        destroy: function() {
+          deactivate();
+          window.removeEventListener("message", onParentMessage, true);
+          document.removeEventListener("keydown", onToggleRequestKey, true);
+        }
+      }
+    });
+  } catch (e) { /* page locked the name; this install still works */ }
 
   // Announce ready so the parent knows it can send activate.
   postToParent("ready");

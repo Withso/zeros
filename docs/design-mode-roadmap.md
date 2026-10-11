@@ -2011,8 +2011,11 @@ interaction view) against a deliberately narrower embedded-preview feature.
 Record the session owner, storage lifetime, cookie clearing, popup/permission
 behavior, download attribution, crash recovery, and resource cost. Scope any
 framing-header override to the admitted preview; do not broaden the current
-policy as a shortcut. The existing picker accepts loopback and explicitly
-trusted preview origins; arbitrary-site extraction is new work.
+policy as a shortcut. The Browser tab's element picker runs on any http(s)
+page and treats every picker message as untrusted page input
+(`picker-message-guard.ts`); component forks, Canvas and ⌥+click composer
+appends stay limited to loopback and explicitly trusted preview origins.
+Arbitrary-site extraction is new work.
 
 Web clients cannot use Electron header overrides or session APIs. Sites can
 refuse embedding, login can fail under third-party storage restrictions, and

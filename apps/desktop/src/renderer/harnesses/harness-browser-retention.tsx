@@ -4,14 +4,18 @@
 // contexts. React keeps keyed component state across a list reorder, but
 // Chromium reloads an iframe whose DOM node is moved. The UI smoke drives an
 // A → B → A loop and verifies document, form, heap, and scroll continuity.
+// It then floats A the way the Browser tab does (a portal host moved between
+// a dock slot and a float slot) and verifies the same continuity.
 
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
 
-import React, { useMemo, useState } from "react";
+import React, { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 
+import { moveNodePreservingState } from "../features/browser/browser-float-store";
 import {
   useRetainedViewKeySet,
   useStableRetainedViewOrder,
@@ -40,8 +44,49 @@ const FRAME_DOCUMENTS: Record<BrowserId, string> = Object.fromEntries(
   ]),
 ) as Record<BrowserId, string>;
 
+/** Mirrors IframeBrowserTab's float: React renders the iframe into a detached
+ * host, and the host moves between the docked slot and the float slot. */
+function FloatableBrowserFrame({
+  id,
+  floatSlot,
+}: {
+  id: BrowserId;
+  floatSlot: HTMLElement | null;
+}) {
+  const [host] = useState(() => {
+    const element = document.createElement("div");
+    Object.assign(element.style, { position: "absolute", inset: "0" });
+    return element;
+  });
+  const dockRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const target = floatSlot ?? dockRef.current;
+    if (target && host.parentElement !== target) {
+      moveNodePreservingState(target, host);
+    }
+  }, [floatSlot, host]);
+  useLayoutEffect(() => () => host.remove(), [host]);
+  return (
+    <>
+      <div ref={dockRef} style={{ position: "absolute", inset: 0 }} />
+      {createPortal(
+        <iframe
+          data-browser-id={id}
+          title={`Browser ${id.toUpperCase()}`}
+          srcDoc={FRAME_DOCUMENTS[id]}
+          sandbox="allow-same-origin allow-scripts allow-forms"
+          style={{ width: "100%", height: "100%", border: 0 }}
+        />,
+        host,
+      )}
+    </>
+  );
+}
+
 function BrowserRetentionHarness() {
   const [activeId, setActiveId] = useState<BrowserId>("a");
+  const [floatSlot, setFloatSlot] = useState<HTMLDivElement | null>(null);
+  const [floatingA, setFloatingA] = useState(false);
   // Match RetainedBrowserDeck's eviction behavior: the active view is newest,
   // while every previously visited view remains within the bounded deck.
   const activeKeys = useMemo(() => [...BROWSER_IDS, activeId], [activeId]);
@@ -65,6 +110,13 @@ function BrowserRetentionHarness() {
             Browser {id.toUpperCase()}
           </button>
         ))}
+        <button
+          type="button"
+          aria-pressed={floatingA}
+          onClick={() => setFloatingA((current) => !current)}
+        >
+          Float A
+        </button>
       </nav>
       <div
         data-testid="browser-deck"
@@ -87,17 +139,20 @@ function BrowserRetentionHarness() {
                 pointerEvents: active ? "auto" : "none",
               }}
             >
-              <iframe
-                data-browser-id={id}
-                title={`Browser ${id.toUpperCase()}`}
-                srcDoc={FRAME_DOCUMENTS[id]}
-                sandbox="allow-same-origin allow-scripts allow-forms"
-                style={{ width: "100%", height: "100%", border: 0 }}
+              <FloatableBrowserFrame
+                id={id}
+                floatSlot={id === "a" && floatingA ? floatSlot : null}
               />
             </div>
           );
         })}
       </div>
+      <div
+        ref={setFloatSlot}
+        data-testid="browser-float-slot"
+        className="relative mt-3"
+        style={{ width: 320, height: 200 }}
+      />
     </main>
   );
 }

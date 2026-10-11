@@ -454,6 +454,76 @@ Reload controls target the existing named Chromium frame in Electron, so Back
 and Forward traverse live page history without replacing the iframe. Hard
 Reload remains an intentional cache-clearing reload.
 
+Float preview shows a tab's live page over the chat column without a reload
+and collapses the Workbench column; Open in right panel docks the tab and
+reveals the column again. React renders the tab's viewport into a detached
+host element, and the tab moves that host between its docked slot and a float
+slot with `moveBefore`, which keeps the browsing context
+(`browser-float-store.ts`). Up to three tabs per workspace float at once,
+stacked above the agent picture in picture. Floats are renderer-session state
+keyed by exact scope and tab id. A floated tab outranks other tabs for deck
+retention and keeps page-lifecycle work (cloud admission, preview renewal)
+running while its workbench body is hidden; Design Mode, Canvas and the device
+toolbar pause until it docks.
+
+A float keeps the page's layout size and draws it scaled down, at least 160px
+wide for tall pages while the height allows (`browser-float-stack.tsx`). Its
+bottom-right corner is anchored. Dragging the left or top edge changes the
+page's layout width or height at a fixed scale, so the page reflows; dragging
+a corner keeps the layout and the aspect ratio and changes the scale. Resizes
+stop at 160 × 100 px, at the chat column's 16px gutters and at 100% scale;
+Escape, window blur or lost pointer capture restores the starting size. A
+resized float keeps its scale and shrinks only while the column cannot hold
+it; docking forgets the resize. Hovering a float reveals two inset islands:
+the site's host on the left (truncated, hidden below 200px), and Open in right
+panel, Open in preview window and Close on the right.
+
+The device toolbar renders a fixed CSS viewport (Custom or a device preset,
+rotate, and Fit or a fixed zoom) from the same persisted width and height as
+Canvas mode. A resize knob stays under the pointer wherever the layout allows
+(`browserDeviceResizeSize`): a centered frame grows on both sides, a frame
+wider or taller than the panel scrolls the body instead of jumping, and Fit
+stays live during the drag so releasing never rescales the frame. A fixed-zoom
+body always reserves its vertical scrollbar, so a frame that starts or stops
+overflowing mid-drag cannot narrow the body and shift the centered frame
+(`scrollbar-gutter` is avoided: Chromium drops the gutter from the horizontal
+scroll range). Width and height fields commit on Enter or blur only after an
+edit, and arrow keys step from the shown value within the size limits.
+
+Open DevTools inspects the tab's own iframe and opens no other window
+(`apps/desktop/electron/browser-frame-devtools.ts`). Electron attaches
+DevTools only to a whole WebContents, so it opens the app window's DevTools
+detached, as ⌥⌘I does. Once the frontend loads, a fixed script selects the
+page's `<body>` and points the Console at the tab's frame. Packaged builds need
+that script because every http(s) page is cross-site from the `file://` app.
+`inspectElement` alone would select the `<iframe>` element and leave the
+Console on the app; it remains the fallback. Because nothing reloads the page,
+this works for Local pages, cloud previews and agent previews alike. Open
+separate preview window loads the tab's current URL in a dedicated
+preload-free window on the app's default session
+(`apps/desktop/electron/browser-preview-window.ts`); workspace previews whose
+origin is admitted only for the tab's iframe are refused.
+
+An empty Browser tab lists the current workspace's loopback dev servers for
+Local placements and the VM's detected ports for cloud placements. The Local
+probe (`apps/desktop/electron/browser/local-dev-servers.ts`) reads listening
+sockets and their process working directories with `lsof`, and keeps a server
+only when its working directory is inside the workspace folder and outside
+every other registered Local workspace nested in it, so servers started from
+other folders on the Mac never appear. The renderer keeps a bounded history of
+recently seen servers per workspace folder (`local-dev-servers.ts`); folderless
+scopes never probe. The cloud list is a passive heartbeat read that never
+wakes a VM.
+
+Design Mode runs on any http(s) page. Main injects the element picker into
+each `zeros-browser-*` frame, and the renderer treats every picker message as
+untrusted page input (`picker-message-guard.ts`): selections are rebuilt from
+size-capped fields and rate limited, and a page-forwarded toggle needs the
+tab, window and frame to be focused. Submitting the element chip stages a
+screenshot and a details text file in the active chat's composer; it never
+sends. Canvas, component forks and ⌥+click composer appends stay limited to
+loopback pages and trusted preview origins; elsewhere ⌥+click opens the chip.
+
 Page titles are similarly host-stabilized. Navigation keeps the last confirmed
 document title until Chromium has stopped loading and its explicit title has
 settled; transient hostname/default-title events are never persisted into the

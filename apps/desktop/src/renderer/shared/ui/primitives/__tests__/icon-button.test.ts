@@ -129,6 +129,28 @@ describe("IconButton markup equivalence", () => {
     expect(current).toContain('aria-label="Action"');
   });
 
+  it("gives compact actions Button's 24px icon-compact geometry", () => {
+    const button = renderToStaticMarkup(
+      createElement(
+        Button,
+        {
+          variant: "ghost",
+          size: "icon-compact",
+          className:
+            "text-fg2 rounded-sm hover:bg-bg2-hover hover:text-fg1 transition-[background-color,color] duration-120 ease-out",
+          "aria-label": "Action",
+        },
+        "icon",
+      ),
+    );
+    const markup = renderToStaticMarkup(
+      createElement(IconButton, { size: "compact", label: "Action" }, "icon"),
+    );
+    expect(classes(markup)).toEqual(classes(button));
+    expect(classes(markup)).toContain("size-6");
+    expect(markup).toContain('aria-label="Action"');
+  });
+
   it("preserves the logs link's native semantics and attributes", () => {
     const markup = renderToStaticMarkup(
       createElement(
