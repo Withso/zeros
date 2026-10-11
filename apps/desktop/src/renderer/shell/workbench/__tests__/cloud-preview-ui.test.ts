@@ -87,7 +87,12 @@ describe("preview-free cloud UI", () => {
     expect(cloud).not.toContain("localhost:5173");
     expect(cloud).not.toContain("localhost:8080");
     expect(cloud).not.toContain("preview your app");
-    expect(render("/repo")).toContain("localhost:5173");
+    expect(cloud).not.toContain('aria-label="Local servers"');
+    expect(cloud).not.toContain("<iframe");
+    const local = render("/repo");
+    expect(local).toContain('aria-label="Local servers"');
+    expect(local).toContain("preview your app");
+    expect(local).not.toContain('aria-label="Workspace ports"');
   });
   it("keeps conversation-owned agent browsers independent from preview domains", async () => {
     vi.stubEnv("VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES", "");

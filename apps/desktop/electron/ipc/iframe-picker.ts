@@ -7,9 +7,11 @@
 //
 // 1. Browser metadata + auto-inject. We hook `did-frame-finish-load` on the
 //    main window. Every named Browser-tab iframe publishes trusted URL/title
-//    metadata and a validated favicon. LOOPBACK pages additionally receive the
-//    picker script through `WebFrameMain.executeJavaScript`; public pages never
-//    receive that privileged interaction code.
+//    metadata and a validated favicon. Every http(s) page in such a frame also
+//    receives the dormant Design Mode picker through
+//    `WebFrameMain.executeJavaScript`. That API has no isolated world, so the
+//    picker shares the page's main world: everything it reports is treated as
+//    untrusted page input by the renderer and by the capture handler below.
 //
 //    The picker IIFE is idempotent (sentinel-guarded). Repeat
 //    injection on SPA navigations / hot-reloads is harmless.
@@ -17,7 +19,9 @@
 // 2. `iframe-picker:capture-region` — given a CSS-px rect in the
 //    main window's coordinate space, return a base64 PNG of that
 //    region (via `webContents.capturePage`). Renderer uses this
-//    to produce the picker chip's element thumbnail.
+//    to produce the picker chip's element thumbnail. The rect is clamped to
+//    the named iframe's own on-screen bounds, so a forged selection can never
+//    capture app UI or another tab.
 //
 // Frame identification: each Browser iframe has a stable, tab-derived `name`.
 // Main includes it in trusted navigation/favicon events so several mounted
@@ -27,7 +31,14 @@ import { webFrameMain, type BrowserWindow, type WebFrameMain } from "electron";
 import { setCommand } from "./router";
 import { emitEvent } from "./events";
 import { PICKER_SCRIPT } from "../iframe-picker-script";
-import { isLoopbackUrl } from "../../src/renderer/shell/workbench/tabs/localhost-url";
+import {
+  browserFrameBoundsScript,
+  clampCaptureRegion,
+  isBrowserFrameName,
+  parseCaptureRegionArgs,
+  parseFrameBounds,
+  pickerAllowedForUrl,
+} from "../iframe-picker-policy";
 import { PendingIframeNavigations } from "../iframe-navigation-state";
 import { previewFrameAuthorizations } from "../preview-frame-authorizations";
 import {
@@ -57,15 +68,18 @@ const cloudPreviewFrameAdmissions = new CloudPreviewFrameAdmissions<WebFrameMain
 const iframeFaviconGenerationByName = new Map<string, number>();
 const iframeFaviconUrlByName = new Map<string, string>();
 
-interface CaptureRegionArgs {
-  x?: unknown;
-  y?: unknown;
-  width?: unknown;
-  height?: unknown;
-}
+// A page that never finishes evaluating (busy loop, hung renderer) must not
+// leave main awaiting it indefinitely.
+const FRAME_SCRIPT_TIMEOUT_MS = 5_000;
 
-function isPositiveInt(v: unknown): v is number {
-  return typeof v === "number" && Number.isFinite(v) && v >= 0;
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("frame script timed out")), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }
 
 // ──────────────────────────────────────────────────────────
@@ -104,12 +118,20 @@ function isBrowserTabFrame(
   );
 }
 
+/** Callers have already proven `frame` is a named top-level Browser frame of
+ *  the main window. Nested frames (ads, embeds) and app frames never qualify.
+ *  Volatile cloud preview origins are ordinary https pages here; their
+ *  admission still governs headers and navigation, not picker injection. */
 function pickerAllowedForFrame(frame: WebFrameMain): boolean {
-  if (isLoopbackUrl(frame.url)) return true;
-  const frameName = browserFrameName(frame);
-  return Boolean(
-    frameName && previewFrameAuthorizations.allows(frameName, frame.url),
-  );
+  try {
+    return (
+      !frame.isDestroyed() &&
+      browserFrameName(frame) != null &&
+      pickerAllowedForUrl(frame.url)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function emitBrowserNavigation(
@@ -176,7 +198,11 @@ async function emitFinishedBrowserNavigation(
   if (!/^https?:\/\//i.test(url)) return;
   let title = "";
   try {
-    const value = await frame.executeJavaScript("document.title", true);
+    // No user gesture: a page-defined `title` getter must not gain activation.
+    const value = await withTimeout(
+      frame.executeJavaScript("document.title", false),
+      FRAME_SCRIPT_TIMEOUT_MS,
+    );
     if (typeof value === "string") title = value;
   } catch {
     // A destroyed/OOP frame can disappear between finish-load and this read;
@@ -271,14 +297,21 @@ async function emitIframeFavicon(
   });
 }
 
-async function injectPicker(frame: WebFrameMain): Promise<void> {
+async function injectPicker(frame: WebFrameMain): Promise<boolean> {
   try {
-    await frame.executeJavaScript(PICKER_SCRIPT, true);
-  } catch (err) {
-    console.warn(
-      "[Zeros iframe-picker] inject failed:",
-      err instanceof Error ? err.message : err,
+    // Never inject with a user gesture: page code reached from the picker's
+    // setup (for example a hooked addEventListener) would otherwise receive
+    // transient activation for popups, fullscreen or autoplay.
+    await withTimeout(
+      frame.executeJavaScript(PICKER_SCRIPT, false),
+      FRAME_SCRIPT_TIMEOUT_MS,
     );
+    return true;
+  } catch {
+    // Navigation races, crashed renderers and pages that break their own
+    // intrinsics all leave Design Mode unavailable on that document; that is
+    // the intended fail-closed outcome and not worth a log line per page.
+    return false;
   }
 }
 
@@ -295,8 +328,7 @@ export async function reinjectBrowserPicker(
       continue;
     await emitFinishedBrowserNavigation(child);
     await emitIframeFavicon(win, child);
-    if (pickerAllowedForFrame(child)) {
-      await injectPicker(child);
+    if (pickerAllowedForFrame(child) && (await injectPicker(child))) {
       injected = true;
     }
   }
@@ -397,8 +429,8 @@ function attachAutoInject(win: BrowserWindow): void {
         return;
       void emitFinishedBrowserNavigation(frame);
       void emitIframeFavicon(win, frame);
-      // Picker code is privileged main-world injection: external pages never
-      // receive it, even if they forge renderer postMessages or redirects.
+      // The dormant picker shares the page's main world; the renderer treats
+      // everything it posts as untrusted and only activates it on request.
       if (pickerAllowedForFrame(frame)) void injectPicker(frame);
     },
   );
@@ -523,40 +555,49 @@ function attachAutoInject(win: BrowserWindow): void {
 // ──────────────────────────────────────────────────────────
 
 async function handleCaptureRegion(
-  args: CaptureRegionArgs,
+  win: BrowserWindow,
+  args: unknown,
 ): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string }> {
-  if (!mainWindowRef || mainWindowRef.isDestroyed()) {
+  if (win.isDestroyed()) {
     return { ok: false, error: "main window not available" };
   }
-  if (
-    !isPositiveInt(args.x) ||
-    !isPositiveInt(args.y) ||
-    !isPositiveInt(args.width) ||
-    !isPositiveInt(args.height)
-  ) {
-    return { ok: false, error: "x/y/width/height required" };
+  // The rect originates from page-controlled picker geometry. Accept it only
+  // for a live named Browser frame and clamp it to that iframe's own on-screen
+  // box, so no forged selection can capture app chrome or a neighboring tab.
+  const request = parseCaptureRegionArgs(args);
+  if (!request) {
+    return { ok: false, error: "frameName/x/y/width/height required" };
   }
-  if (args.width === 0 || args.height === 0) {
-    return { ok: false, error: "zero-sized rect" };
+  if (!currentBrowserFrame(win, request.frameName)) {
+    return { ok: false, error: "browser frame not available" };
   }
-  // Clamp to window content bounds — capturePage errors on
-  // partially off-screen rects (e.g., picked element at viewport
-  // edge with the rect spilling past the right border).
-  const bounds = mainWindowRef.getContentBounds();
-  const x = Math.max(0, Math.min(args.x, bounds.width - 1));
-  const y = Math.max(0, Math.min(args.y, bounds.height - 1));
-  const w = Math.min(args.width, bounds.width - x);
-  const h = Math.min(args.height, bounds.height - y);
-  if (w <= 0 || h <= 0) {
+  let frameBounds;
+  try {
+    frameBounds = parseFrameBounds(
+      await withTimeout(
+        win.webContents.mainFrame.executeJavaScript(
+          browserFrameBoundsScript(request.frameName),
+          false,
+        ),
+        FRAME_SCRIPT_TIMEOUT_MS,
+      ),
+    );
+  } catch {
+    frameBounds = null;
+  }
+  if (!frameBounds || win.isDestroyed()) {
+    return { ok: false, error: "browser frame not visible" };
+  }
+  const region = clampCaptureRegion(
+    request.rect,
+    frameBounds,
+    win.getContentBounds(),
+  );
+  if (!region) {
     return { ok: false, error: "clamped to empty rect" };
   }
   try {
-    const img = await mainWindowRef.webContents.capturePage({
-      x: Math.round(x),
-      y: Math.round(y),
-      width: Math.round(w),
-      height: Math.round(h),
-    });
+    const img = await win.webContents.capturePage(region);
     return { ok: true, dataUrl: img.toDataURL() };
   } catch (err) {
     return {
@@ -577,16 +618,18 @@ export function registerIframePickerCommands(opts: {
   iframeFaviconUrlByName.clear();
   mainWindowRef = opts.mainWindow;
   attachAutoInject(opts.mainWindow);
-  setCommand("iframe-picker:capture-region", (a) =>
-    handleCaptureRegion(a as CaptureRegionArgs),
-  );
+  setCommand("iframe-picker:capture-region", async (args, event) => {
+    if (!isOwnedMainRendererFrame({
+      windowDestroyed: opts.mainWindow.isDestroyed(), senderWebContents: event.sender,
+      ownerWebContents: opts.mainWindow.webContents, senderFrame: event.senderFrame,
+      ownerMainFrame: opts.mainWindow.webContents.mainFrame,
+    })) return { ok: false, error: "capture renderer authority is unavailable" };
+    return handleCaptureRegion(opts.mainWindow, args);
+  });
   setCommand("browser:reinject-picker", async (args) => {
-    const frameName =
-      typeof args.frameName === "string" &&
-      args.frameName.startsWith("zeros-browser-") &&
-      args.frameName.length <= 320
-        ? args.frameName
-        : undefined;
+    const frameName = isBrowserFrameName(args.frameName)
+      ? args.frameName
+      : undefined;
     const ok = await reinjectBrowserPicker(opts.mainWindow, frameName);
     return { ok };
   });

@@ -34,6 +34,7 @@ import { WorkspaceHistoryBar } from "../workspace-history-bar";
 import { useActivePage } from "../../state/store";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
+import { BrowserFloatStack } from "@/renderer/features/browser/browser-float-stack";
 import {
   ConversationSummaryProvider,
   ConversationSummaryTrigger,
@@ -464,6 +465,9 @@ export function ConversationPane({
           {!readOnly && <TerminalDeck />}
         </div>
       </div>
+      {/* Floated Browser tabs hover over the chat's bottom-right corner,
+          stacked above the agent browser picture in picture. */}
+      {!readOnly && <BrowserFloatStack onRevealWorkbench={revealWorkbench} />}
       {/* Drag handle for the right
           edge. Hidden when workbench is collapsed (conversation pane is full-width then).
           Width persists across reload via localStorage. */}

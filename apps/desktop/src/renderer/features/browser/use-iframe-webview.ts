@@ -28,7 +28,9 @@
 // Cross-origin caveat: renderer DOM cannot read an external iframe's
 // URL/title/favicon. Electron therefore observes frame navigation and resolves
 // favicon artwork in main, then emits trusted iframe-name-scoped events here.
-// Picker postMessages remain loopback-only.
+// Design Mode picker postMessages are accepted from any http(s) page, but only
+// through picker-message-guard.ts: the page shares the picker's world and can
+// forge them, so they are validated, clamped and rate-limited as page input.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -37,8 +39,18 @@ import {
   nativeListen,
   useNativeRuntime,
 } from "../../platform/runtime";
-import { isLoopbackUrl } from "../../shell/workbench/tabs/localhost-url";
 import type { ForkSnapshotPayload } from "./variant-types";
+import {
+  computePickerCaptureRegion,
+  createPickerRateLimiter,
+  createPickerToggleGate,
+  isLocalDevelopmentPickerOrigin,
+  isPickerPageUrl,
+  isPickerSenderOrigin,
+  sanitizePickerBatch,
+  sanitizePickerSelection,
+  type PickerViewport,
+} from "./picker-message-guard";
 import {
   reconcileObservedIframeHistory,
   snapshotIframeHistory,
@@ -134,21 +146,12 @@ interface UseIframeWebviewOptions {
   /** Stable iframe `name`, used to route trusted main-process navigation events
    *  to the correct Browser tab when several iframes are mounted. */
   frameName?: string;
-  /** Volatile engine-authorized cloud preview origin. It is never persisted
-   * and grants picker messaging only to this Browser-tab hook instance. */
+  /** Volatile engine-authorized cloud preview origin. It is never persisted.
+   * Like a loopback origin, it may use ⌥+click direct-to-composer picks;
+   * other http(s) pages get the reviewed chip flow only. */
   trustedPreviewOrigin?: string;
   /** Committed navigation from Electron's exact named-frame event channel. */
   onNavigation?: (url: string) => void;
-}
-
-function pickerUrlAllowed(value: string, trustedOrigin?: string): boolean {
-  if (isLoopbackUrl(value)) return true;
-  if (!trustedOrigin) return false;
-  try {
-    return new URL(value).origin === trustedOrigin;
-  } catch {
-    return false;
-  }
 }
 
 export interface ForkSnapshotRequestResult {
@@ -183,7 +186,7 @@ export interface UseIframeWebviewResult {
   clearCookies: () => Promise<void>;
 
   // ── Design Mode ────────────────────────────────────────
-  // Main injects the picker only into loopback Browser frames; it posts
+  // Main injects the picker into every http(s) Browser frame; it posts
   // SelectedElement payloads back through the scoped listener below.
   designModeActive: boolean;
   selectedElements: SelectedElement[];
@@ -875,7 +878,7 @@ export function useIframeWebview(
   const postToPicker = useCallback(
     (type: string, extra: Record<string, unknown> = {}) => {
       const currentUrl = historyRef.current[indexRef.current] ?? "";
-      if (!pickerUrlAllowed(currentUrl, trustedPreviewOrigin)) return;
+      if (!isPickerPageUrl(currentUrl)) return;
       const iframe = ref.current;
       const cw = iframe?.contentWindow;
       if (!cw) return;
@@ -887,7 +890,7 @@ export function useIframeWebview(
            but reading the proxy can be touchy. Swallow. */
       }
     },
-    [trustedPreviewOrigin],
+    [],
   );
 
   // ── Iframe node listeners (callback ref) ─────────────────
@@ -979,66 +982,78 @@ export function useIframeWebview(
    *  coords; we translate to main-window CSS coords by adding the
    *  iframe's bounding rect, then clamp to the visible iframe area
    *  so spillover (element scrolled partly off-screen) doesn't
-   *  blow up capturePage. */
+   *  blow up capturePage. Main clamps again to the named iframe's
+   *  on-screen bounds, because the rect is page-controlled. */
   const captureElementScreenshot = useCallback(
     async (rect: SelectedElement["rect"]): Promise<string | undefined> => {
-      if (!isElectron()) return undefined;
+      if (!isElectron() || !frameName) return undefined;
       const iframe = ref.current;
-      if (!iframe) return undefined;
+      if (!iframe || !iframe.isConnected || iframe.closest("[inert]"))
+        return undefined;
+      if (
+        typeof iframe.checkVisibility === "function" &&
+        !iframe.checkVisibility({ opacityProperty: true, visibilityProperty: true })
+      )
+        return undefined;
       const ifr = iframe.getBoundingClientRect();
-      // Canvas Mode transforms the iframe wrapper. Picker rects remain in the
-      // iframe's unscaled CSS coordinates, while capturePage expects main-window
-      // coordinates, so apply the live transform scale on both axes.
-      const scaleX =
-        iframe.offsetWidth > 0 ? ifr.width / iframe.offsetWidth : 1;
-      const scaleY =
-        iframe.offsetHeight > 0 ? ifr.height / iframe.offsetHeight : 1;
-      // Intersection of element rect (translated to window coords)
-      // with the iframe's visible region.
-      const elLeft = ifr.left + rect.x * scaleX;
-      const elTop = ifr.top + rect.y * scaleY;
-      const elRight = elLeft + rect.width * scaleX;
-      const elBottom = elTop + rect.height * scaleY;
       // Canvas frames can be panned beyond an overflow-hidden ancestor. Clamp
       // to every clipping ancestor as well as the iframe itself so capturePage
       // never screenshots browser chrome or a neighboring variant where the
       // selected element is not actually visible.
-      let clipLeft = Math.max(0, ifr.left);
-      let clipTop = Math.max(0, ifr.top);
-      let clipRight = Math.min(window.innerWidth, ifr.right);
-      let clipBottom = Math.min(window.innerHeight, ifr.bottom);
+      const clips: Array<{
+        left?: number;
+        right?: number;
+        top?: number;
+        bottom?: number;
+      }> = [];
       for (let ancestor = iframe.parentElement; ancestor; ) {
         const style = window.getComputedStyle(ancestor);
-        const rect = ancestor.getBoundingClientRect();
-        if (/(auto|hidden|scroll|clip)/.test(style.overflowX)) {
-          clipLeft = Math.max(clipLeft, rect.left);
-          clipRight = Math.min(clipRight, rect.right);
-        }
-        if (/(auto|hidden|scroll|clip)/.test(style.overflowY)) {
-          clipTop = Math.max(clipTop, rect.top);
-          clipBottom = Math.min(clipBottom, rect.bottom);
+        const bounds = ancestor.getBoundingClientRect();
+        const clipX = /(auto|hidden|scroll|clip)/.test(style.overflowX);
+        const clipY = /(auto|hidden|scroll|clip)/.test(style.overflowY);
+        if (clipX || clipY) {
+          clips.push({
+            ...(clipX ? { left: bounds.left, right: bounds.right } : {}),
+            ...(clipY ? { top: bounds.top, bottom: bounds.bottom } : {}),
+          });
         }
         ancestor = ancestor.parentElement;
       }
-      const x = Math.max(clipLeft, elLeft);
-      const y = Math.max(clipTop, elTop);
-      const right = Math.min(clipRight, elRight);
-      const bottom = Math.min(clipBottom, elBottom);
-      const w = Math.max(0, right - x);
-      const h = Math.max(0, bottom - y);
-      if (w <= 0 || h <= 0) return undefined;
+      const region = computePickerCaptureRegion({
+        frame: ifr,
+        layout: { width: iframe.offsetWidth, height: iframe.offsetHeight },
+        element: rect,
+        window: { width: window.innerWidth, height: window.innerHeight },
+        clips,
+      });
+      if (!region) return undefined;
       try {
         const res = await nativeInvoke<{ ok: boolean; dataUrl?: string }>(
           "iframe-picker:capture-region",
-          { x, y, width: w, height: h },
+          { frameName, ...region },
         );
-        return res.ok ? res.dataUrl : undefined;
+        return res.ok && typeof res.dataUrl === "string"
+          ? res.dataUrl
+          : undefined;
       } catch {
         return undefined;
       }
     },
-    [],
+    [frameName],
   );
+
+  /** Unscaled iframe viewport size used to clamp page-reported geometry. */
+  const pickerViewport = useCallback((): PickerViewport => {
+    const iframe = ref.current;
+    return {
+      width: iframe?.clientWidth ?? 0,
+      height: iframe?.clientHeight ?? 0,
+    };
+  }, []);
+  const toggleGateRef = useRef(createPickerToggleGate());
+  const selectionLimiterRef = useRef(createPickerRateLimiter());
+  const tabActiveRef = useRef(opts.active !== false);
+  tabActiveRef.current = opts.active !== false;
 
   /** Activate / deactivate picker + reinject latest script on enter. */
   useEffect(() => {
@@ -1087,67 +1102,19 @@ export function useIframeWebview(
 
   /** Listen for messages FROM the picker. Filter by source so we
    *  don't pick up postMessage spam from other windows / extensions.
-   *  The picker shares contentWindow with the untrusted visited page, so
-   *  the source check can't tell them apart. Strictly validate every field shape
-   *  before any selection reaches the chat composer / agent loop — a forged
-   *  message with a NaN/Infinity rect, a non-string selector, or a giant string
-   *  is dropped rather than injected. (A per-load nonce would further authenticate
-   *  the source, but needs main→renderer per-frame delivery + isolated-world
-   *  injection — tracked as a follow-up; see the remediation notes.) */
+   *  The picker shares contentWindow and its main world with the untrusted
+   *  visited page, so neither the source check nor any embedded secret can
+   *  tell them apart. Every message is therefore handled as page input:
+   *  picker-message-guard rebuilds selections from known, size-capped fields
+   *  and clamps their geometry to this iframe; toggles need real focus in
+   *  this iframe; selections are rate-limited and ignored outside Design
+   *  Mode. A forged message can only change this frame's selection UI. */
   useEffect(() => {
-    const STR_CAP = 8192;
-    const isStr = (v: unknown): v is string =>
-      typeof v === "string" && v.length <= STR_CAP;
-    const isFiniteNum = (v: unknown): v is number =>
-      typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= 10_000_000;
-    const isRect = (r: unknown): boolean => {
-      const o = r as Record<string, unknown> | null;
-      return (
-        !!o &&
-        isFiniteNum(o.x) &&
-        isFiniteNum(o.y) &&
-        isFiniteNum(o.width) &&
-        isFiniteNum(o.height) &&
-        (o.width as number) >= 0 &&
-        (o.height as number) >= 0
-      );
-    };
-    const isValidSelected = (p: unknown): p is SelectedElement => {
-      const o = p as Record<string, unknown> | null;
-      if (!o || typeof o !== "object") return false;
-      if (!isStr(o.selector) || !isStr(o.tag)) return false;
-      if (!isRect(o.rect)) return false;
-      const click = o.click as Record<string, unknown> | undefined;
-      if (!click || !isFiniteNum(click.x) || !isFiniteNum(click.y))
-        return false;
-      if (o.componentName != null && !isStr(o.componentName)) return false;
-      if (typeof o.altKey !== "boolean") return false;
-      if (typeof o.hasShadowRoot !== "boolean") return false;
-      if (!isStr(o.href)) return false;
-      if (
-        o.devicePixelRatio != null &&
-        (!isFiniteNum(o.devicePixelRatio) || o.devicePixelRatio <= 0)
-      )
-        return false;
-      if (o.styles != null) {
-        if (typeof o.styles !== "object" || Array.isArray(o.styles))
-          return false;
-        const entries = Object.entries(o.styles as Record<string, unknown>);
-        if (entries.length > 100) return false;
-        for (const [k, v] of entries) {
-          if (!isStr(k) || !isStr(v)) return false;
-        }
-      }
-      return true;
-    };
     const onMessage = async (ev: MessageEvent) => {
       const iframe = ref.current;
       if (!iframe) return;
       if (ev.source !== iframe.contentWindow) return;
-      // Picker code is injected only on loopback pages. A public page shares
-      // the iframe's contentWindow proxy and could otherwise forge the same
-      // protocol to surface selections or append content into a chat.
-      if (!pickerUrlAllowed(ev.origin, trustedPreviewOrigin)) return;
+      if (!isPickerSenderOrigin(ev.origin)) return;
       if (!isPickerMessage(ev.data)) return;
       const msg = ev.data;
       const op = msg.type.slice(MSG_PREFIX.length);
@@ -1162,12 +1129,34 @@ export function useIframeWebview(
         return;
       }
       if (op === "toggle-request") {
+        if (
+          !toggleGateRef.current({
+            tabActive: tabActiveRef.current,
+            windowFocused: document.hasFocus(),
+            frameFocused: document.activeElement === iframe,
+            now: performance.now(),
+          })
+        )
+          return;
         setDesignMode(!designModeActive);
         return;
       }
       if (op === "single-selected") {
-        const payload = (msg as { payload: unknown }).payload;
-        if (!isValidSelected(payload)) return; // Drop a malformed or forged selection.
+        if (!designModeActiveRef.current) return;
+        if (!selectionLimiterRef.current(performance.now())) return;
+        const sanitized = sanitizePickerSelection(
+          (msg as { payload?: unknown }).payload,
+          { origin: ev.origin, viewport: pickerViewport() },
+        );
+        if (!sanitized) return; // Drop a malformed or forged selection.
+        // ⌥+click writes straight into a chat draft without the chip review
+        // step; keep that to the user's own local or cloud preview app.
+        // Elsewhere it opens the chip like a plain click.
+        const payload =
+          sanitized.altKey &&
+          !isLocalDevelopmentPickerOrigin(ev.origin, trustedPreviewOrigin)
+            ? { ...sanitized, altKey: false }
+            : sanitized;
         const generation = documentGenerationRef.current;
         const screenshot = await captureElementScreenshot(payload.rect);
         if (
@@ -1187,11 +1176,14 @@ export function useIframeWebview(
         return;
       }
       if (op === "batch-selected") {
-        const m = msg as { elements?: unknown };
-        // Validate the batch (bounded length + every element well-formed).
-        if (!Array.isArray(m.elements) || m.elements.length > 200) return;
-        const valid = m.elements.filter(isValidSelected);
-        if (valid.length === 0) return;
+        if (!designModeActiveRef.current) return;
+        if (!selectionLimiterRef.current(performance.now())) return;
+        // Bounded length; malformed entries are skipped.
+        const valid = sanitizePickerBatch(
+          (msg as { elements?: unknown }).elements,
+          { origin: ev.origin, viewport: pickerViewport() },
+        );
+        if (!valid || valid.length === 0) return;
         const generation = documentGenerationRef.current;
         // Capture screenshots in parallel — these are independent
         // IPC calls and the user just released Shift expecting
@@ -1228,7 +1220,13 @@ export function useIframeWebview(
         const snapshot = m.ok ? sanitizeForkSnapshot(m.snapshot) : null;
         const error = snapshot
           ? null
-          : (m.error ?? (m.ok ? "invalid-payload" : "capture-failed"));
+          : m.error === "element-not-found" ||
+              m.error === "capture-failed" ||
+              m.error === "capture-error"
+            ? m.error
+            : m.ok
+              ? "invalid-payload"
+              : "capture-failed";
         setForkPending(false);
         setLastForkError(error);
         if (forkTimeoutRef.current) {
@@ -1255,6 +1253,7 @@ export function useIframeWebview(
     setDesignMode,
     postToPicker,
     captureElementScreenshot,
+    pickerViewport,
     cancelPendingFork,
     trustedPreviewOrigin,
   ]);

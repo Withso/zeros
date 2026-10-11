@@ -19,8 +19,9 @@ export interface IconButtonProps extends Omit<
 > {
   label: string;
   /** inline = 20px action embedded in rows/tabs;
+   * compact = 24px action in a dense toolbar (Button icon-compact geometry);
    * standard = 28px chrome action (Button icon-sm geometry). */
-  size?: "inline" | "standard";
+  size?: "inline" | "compact" | "standard";
   hover?:
     | "raised"
     /** @deprecated Preserves a pre-existing recipe; unify during the UI iteration. */
@@ -31,6 +32,7 @@ export interface IconButtonProps extends Omit<
 
 const SIZE_CLASSES = {
   inline: "inline-flex size-5 items-center justify-center",
+  compact: buttonVariants({ variant: "ghost", size: "icon-compact" }),
   standard: buttonVariants({ variant: "ghost", size: "icon-sm" }),
 } as const;
 

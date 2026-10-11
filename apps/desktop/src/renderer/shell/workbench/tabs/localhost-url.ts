@@ -3,8 +3,9 @@
 // ──────────────────────────────────────────────────────────
 //
 // Browser tabs accept ordinary http(s) URLs. Loopback classification remains
-// separate because Design and Canvas are deliberately local-development tools:
-// external pages may render, but never receive picker injection or those modes.
+// separate because Canvas, component forks and ⌥+click composer appends are
+// local-development tools. Design Mode runs on any http(s) page; its gate is
+// `isPickerPageUrl` in features/browser/picker-message-guard.ts.
 
 const HTTP_SCHEME_RE = /^https?:\/\//i;
 const ANY_SCHEME_RE = /^[a-z][a-z\d+.-]*:\/\//i;

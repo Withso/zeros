@@ -127,6 +127,11 @@ export interface WorkbenchTab {
    * The per-process browserSessionId lives only in the activity store. */
   browserConversationId?: string;
   canvasMode?: boolean;
+  /** Browser tab: device toolbar open. Shares `viewportWidth/Height` with
+   * Canvas mode; the two modes are mutually exclusive. */
+  deviceToolbar?: boolean;
+  /** Browser tab: device preset id; absent means Custom. Validated on use. */
+  devicePreset?: string;
   viewportWidth?: number;
   viewportHeight?: number;
   variants?: BrowserTabVariant[];
@@ -765,6 +770,11 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
         previewSource,
         browserConversationId,
         canvasMode: url ? tab.canvasMode : false,
+        deviceToolbar: tab.deviceToolbar === true ? true : undefined,
+        devicePreset:
+          typeof tab.devicePreset === "string" && tab.devicePreset.length <= 64
+            ? tab.devicePreset
+            : undefined,
         variants: Array.isArray(tab.variants) ? tab.variants : undefined,
         reviewSubtab: undefined,
         changesView: undefined,

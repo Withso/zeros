@@ -129,6 +129,11 @@ export function notifyProjectsChanged(): void {
   }
 }
 
+/** The registry `useProjects` paints, read without subscribing. */
+export function peekProjects(): Project[] {
+  return getProjectsSnapshot();
+}
+
 /** Hook returning the current projects list. Re-renders when
  *  `notifyProjectsChanged()` fires. */
 export function useProjects(): {
