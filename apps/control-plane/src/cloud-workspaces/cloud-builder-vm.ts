@@ -287,8 +287,14 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
     const cleanupOnly = row.state === "deleting";
     const timeoutMs = options.timeoutMs ?? this.lifecycleTimeoutMs;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 1_800_000) fail("input_schema");
-    const deadline = this.now() + timeoutMs;
+    const deadline = this.now() + timeoutMs, capture = options.requireSnapshot === true;
+    // Each read is bounded by what remains of the caller's absolute deadline.
+    const read = (path: string) => this.retry(() => this.options.client.request(path,
+      { signal: AbortSignal.timeout(Math.max(1, deadline - this.now())) }), deadline);
     let sandbox = await this.inspect(vm.sandboxId, deadline);
+    // A capture needs the stop this call issued. An archive it did not issue
+    // (an earlier stop or auto-stop) proves nothing about the sanitized disk.
+    if (capture && sandbox.state === "archived") fail("stop_unconfirmed");
     if (sandbox.state !== "archived") {
       if (!cleanupOnly) await this.options.operations.state(vm.operationKey, "stopping");
       // A stop saves the disk first and is an operation: pin the one this call
@@ -299,28 +305,35 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
       if (sandbox.state !== "archiving") {
         const reply = await this.retry(() => this.options.client.request(`/sandboxes/${vm.sandboxId}/stop`, { method: "POST" }), deadline);
         stop = stopOperation(reply.stop, (reply.sandbox as { stop?: unknown } | null | undefined)?.stop);
+        // A reply without its stop is recovered from the sandbox, once.
+        if (!stop) { sandbox = await this.inspect(vm.sandboxId, deadline, read); stop = stopOperation(sandbox.stop); }
       }
-      while (sandbox.state !== "archived") {
+      if (capture && !stop) fail("stop_unconfirmed");
+      for (;;) {
         if (stop?.status === "superseded" || ["error", "cancelled"].includes(sandbox.state)) fail("builder_stopped");
+        // Cleanup needs only stopped compute; a capture needs its own stop completed.
+        if (sandbox.state === "archived" && (!capture || stop?.status === "completed")) break;
         const failing = stop?.status === "failing";
         try { await this.pause(deadline); }
         catch (error) { if (failing) fail("stop_snapshot_failed"); throw error; }
         if (stop) {
-          const id = stop.id, reply = await this.retry(() => this.options.client.request(`/sandboxes/${vm.sandboxId}/stops/${id}`), deadline);
-          stop = stopOperation(reply.stop);
+          const id = stop.id;
+          stop = stopOperation((await read(`/sandboxes/${vm.sandboxId}/stops/${id}`)).stop);
           if (stop?.id !== id) fail("stop_unconfirmed");
         }
-        sandbox = await this.inspect(vm.sandboxId, deadline);
+        sandbox = await this.inspect(vm.sandboxId, deadline, read);
       }
     }
     // A template is only as good as the disk snapshot its stop saved; forks
     // require the same completed snapshot from their source.
-    while (options.requireSnapshot && (sandbox.snapshotAvailable !== true || sandbox.lastSnapshotStatus !== "completed")) {
+    while (capture && (sandbox.snapshotAvailable !== true || sandbox.lastSnapshotStatus !== "completed")) {
       if (!["queued", "in_progress"].includes(sandbox.lastSnapshotStatus ?? "")) fail("stop_snapshot_failed");
       try { await this.pause(deadline); } catch { fail("stop_snapshot_failed"); }
-      sandbox = await this.inspect(vm.sandboxId, deadline);
+      sandbox = await this.inspect(vm.sandboxId, deadline, read);
       if (sandbox.state !== "archived") fail("builder_stopped");
     }
+    // A late success must never publish a capture past the caller's deadline.
+    if (this.now() >= deadline) fail("timeout");
     if (!cleanupOnly) await this.options.operations.state(vm.operationKey, "archived");
     return { archived: true };
   }
@@ -344,6 +357,9 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
         if (!(error instanceof CloudProviderError && error.code === "provider_not_found")) throw error;
       }
     }
+    // Absence alone is not deletion evidence: without an accepted receipt the
+    // journal stays deleting and cleanup stays unconfirmed.
+    if (!operationId) fail("cleanup_unconfirmed");
     for (;;) {
       if (operationId) {
         const reply = await this.retry(() => this.options.client.request(`/deletion-operations/${operationId}`), deadline);
@@ -373,8 +389,9 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
         (usable && ["deleting", "deleted"].includes(row.state))) builderOperationConflict();
     return row;
   }
-  private async inspect(id: string, deadline: number) {
-    const reply = await this.retry(() => this.options.client.request(`/sandboxes/${id}`), deadline);
+  private async inspect(id: string, deadline: number,
+    read: (path: string) => Promise<Record<string, unknown>> = path => this.retry(() => this.options.client.request(path), deadline)) {
+    const reply = await read(`/sandboxes/${id}`);
     const parsed = sandboxSchema.safeParse(reply.sandbox);
     if (!parsed.success || parsed.data.id !== id) fail("provider_response");
     return parsed.data;

@@ -4,6 +4,17 @@ import { BuilderVmError } from "./cloud-builder-vm.js";
 import { builderFixture, builderIntent, BUILDER_SANDBOX, BUILDER_WALLET, diagnostic, encodeInstaller, installerInput } from "./cloud-builder-vm-test-fixtures.js";
 
 describe("short-lived Boat builder VMs", () => {
+  it("does not close a builder deletion on two 404s without a deletion receipt", async () => {
+    const f = builderFixture();
+    const vm = await f.vms.create(builderIntent);
+    f.fetcher.mockResolvedValueOnce(Response.json({ ok: false }, { status: 404 }))
+      .mockResolvedValueOnce(Response.json({ ok: false }, { status: 404 }));
+    await expect(f.vms.delete(vm)).rejects.toMatchObject({ check: "cleanup_unconfirmed" });
+    const row = await f.operations.find(vm.operationKey);
+    expect(row?.state).toBe("deleting");
+    expect(row?.deletion_operation_id).toBeNull();
+  });
+
   it.each([true, undefined])("refuses builder setup admission with monitoring=%s and permits cleanup", async monitoring => {
     const f = builderFixture();
     const fetch = f.fetcher.getMockImplementation()!;
