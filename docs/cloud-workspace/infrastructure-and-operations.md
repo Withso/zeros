@@ -393,10 +393,10 @@ neither plaintext object bytes nor account identifiers and must remain in
 backups and restores.
 
 Organization compute quotas are operator-approved admission records, not
-Organization-admin settings. Creates and generation replacements are admitted
-only against concurrent compute: running workspaces, CPU and memory. The stored
-workspace-count and storage limits are still recorded and reported, but stopped
-and archived workspaces never block a create. Provision or change them only through
+Organization-admin settings. A cloud workspace still needs its Organization's
+quota record, but no numeric limit is enforced: workspace count, running
+workspaces, CPU, memory and storage are recorded and reported only. Compute
+credits bound what running workspaces can spend. Provision or change them only through
 `pnpm --dir apps/control-plane cloud-quota:manage` from a source checkout, or
 the supported `node dist/manage-cloud-workspace-quota.js` entrypoint in the
 production image. First generate a read-only target-bound plan, then execute

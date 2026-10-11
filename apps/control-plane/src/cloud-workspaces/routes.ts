@@ -1,4 +1,4 @@
-import { loadQuota, loadUsage, assertGenerationReplacementQuota, createCloudRecoveryTransition, requireCloudRecoveryPoint, cloudRecoveryPointLosslessSql, type QuotaRow, type UsageRow } from "./automatic-recovery.js";
+import { loadQuota, createCloudRecoveryTransition, requireCloudRecoveryPoint, cloudRecoveryPointLosslessSql } from "./automatic-recovery.js";
 import { CloudAgentPreviewTargetSchema } from "./preview-target.js";
 import { CloudAgentBootScopeSchema, CloudAgentInitialAdoptionsSchema } from "./agent-boot-contract.js";
 import { createCloudComputerRoutes } from "./computer-routes.js";
@@ -920,50 +920,15 @@ async function upsertCanonicalRepository(
   return result.rows[0]!.id;
 }
 
-function assertCreateQuota(
-  quota: QuotaRow,
-  usage: UsageRow,
-  config: Pick<
-    CloudWorkspaceProvisioningProfile,
-    "cpuMillicores" | "memoryMiB" | "storageMiB"
-  >,
-): void {
-  // Only concurrent compute is bounded. Stopped and archived workspaces keep
-  // their disks but run nothing, so their number and storage never block one.
-  const exceeded =
-    Number(usage.running) + 1 > quota.max_running_workspaces ||
-    Number(usage.cpu_millicores) + config.cpuMillicores >
-      quota.max_cpu_millicores ||
-    Number(usage.memory_mib) + config.memoryMiB > quota.max_memory_mib;
-  if (exceeded) {
-    throw new HttpError(
-      409,
-      "cloud_quota_exceeded",
-      "Cloud workspace quota would be exceeded",
-    );
-  }
-}
-
 async function assertWakeQuota(
   tx: Tx,
   orgId: string,
   row: WorkspaceRow,
 ): Promise<void> {
+  // Cloud workspaces still require a provisioned quota record. Its numeric
+  // limits are not enforced: compute credits bound what running VMs can spend.
   if (row.desired_state === "running") return;
-  const quota = await loadQuota(tx, orgId);
-  const usage = await loadUsage(tx, orgId);
-  const exceeded =
-    Number(usage.running) + 1 > quota.max_running_workspaces ||
-    Number(usage.cpu_millicores) + row.cpu_millicores >
-      quota.max_cpu_millicores ||
-    Number(usage.memory_mib) + row.memory_mib > quota.max_memory_mib;
-  if (exceeded) {
-    throw new HttpError(
-      409,
-      "cloud_quota_exceeded",
-      "Cloud workspace running quota would be exceeded",
-    );
-  }
+  await loadQuota(tx, orgId);
 }
 
 function encodeCursor(row: WorkspaceRow): string {
@@ -1325,11 +1290,7 @@ export function createCloudWorkspaceGenerationReplacement(config: CloudWorkspace
     );
     const candidate = sourcePins.profile;
     const digest = requestDigest(normalize(candidate));
-    const quota = await loadQuota(tx, orgId), usage = await loadUsage(tx, orgId);
-    if (upgradeInput && workspace.desired_state !== "running" && Number(usage.running) + 1 > quota.max_running_workspaces) {
-      throw new HttpError(409, "cloud_quota_exceeded", "Cloud workspace running quota would be exceeded");
-    }
-    assertGenerationReplacementQuota(quota, usage, candidate);
+    await loadQuota(tx, orgId);
 
     const nextGeneration = await tx.query<{ generation: number }>(
       `SELECT coalesce(max(generation), 0)::integer + 1 AS generation
@@ -2716,14 +2677,13 @@ export function createCloudWorkspaceRoutes(
         );
       }
 
-      const quota = await loadQuota(tx, orgId);
+      await loadQuota(tx, orgId);
       if (!resolvedRepository.resolvedRevision || !FullCommitPattern.test(resolvedRepository.resolvedRevision) ||
         !resolvedRepository.checkoutSource || resolvedRepository.checkoutSource.revision !== resolvedRepository.resolvedRevision ||
         (FullCommitPattern.test(body.repository.revision) && resolvedRepository.resolvedRevision !== body.repository.revision))
         throw new HttpError(409, "cloud_computer_repository_unavailable", "The requested repository revision could not be verified.");
       const normalized = normalize(profile);
       const digest = requestDigest(normalized);
-      assertCreateQuota(quota, await loadUsage(tx, orgId), profile);
 
       const repositoryId = await upsertCanonicalRepository(tx, {
         organizationId: orgId,
