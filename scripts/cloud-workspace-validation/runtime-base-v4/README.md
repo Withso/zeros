@@ -251,6 +251,31 @@ The base dependency audit is:
 | Sysctl, kernel modules and udev | The v4 profile installs no sysctl overrides, modules-load/modprobe configuration or udev rules. | No additional replay was identified in this base profile; stock kernel/device capabilities still require live qualification. |
 | Mutable data binds and machine ID | Boot creates the §23 backing layout; template sanitation can empty the machine ID. | Boot revalidates/recreates all four binds and fills an empty machine ID before publishing readiness; it does not rely on early-boot mount or machine-ID services. |
 
+## Naming and refreshing the base
+
+Name a released base `zeros-base-v<N>`, using the next unused `N`. Its builder
+and verification VMs are named `<base>-build` and `<base>-verify`. Registration
+and kit state still accept `zeros-v2-test-` names, which remain valid for
+existing registered bases and disposable test bases.
+
+Rebuild the base when VMs deployed from it start capturing the whole system.
+A Boat change between 2026-10-07 and 2026-10-09 caused this for VMs deployed
+from named snapshots saved before it (an October 5 base and a September 23
+image). On 2026-10-11 they captured the whole system on stop after writing
+about 250 MB or more, in `/opt` or `/home/user`. Computer templates derived
+from the October 5 base grew from about 45,000 entries and 2.5 GB to about
+350,000 entries and 11.9 GB, and each restore spent minutes in Boat's
+`sysdelta` phase. Deploying that base took about 53 seconds to hydration,
+compared with 17.5 seconds from a snapshot saved after the change. The same
+base with no writes, and a snapshot saved from a current stock VM before the
+same 2.1 GB was written, still captured only their own changes. Compare a
+recent template's snapshot tree (`GET /snapshots/<id>/tree`) with its base and
+runtime contents to detect the condition.
+
+An unchanged `compatibility.json` gives a rebuilt base the same `bc1-` ID, so
+existing runtime qualifications apply to it. New Computer builds and runtime
+images select the newest approved base.
+
 ## Local checks
 
 ```sh
