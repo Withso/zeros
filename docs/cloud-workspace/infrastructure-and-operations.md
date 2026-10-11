@@ -221,10 +221,13 @@ unchanged: a sandbox's setting is fixed at creation, so monitored allocations
 keep it until they are replaced. The template-setup, engine-connect and
 workspace-performance validation forks apply the same request and verification
 before any setup material. The retired release-worker producers create no new
-sandboxes; their journals serve cleanup only. The base-image kit's builder
-receives no setup material and is unchanged; Boat's account-level **Monitoring
-off** covers it for new builders, but is not evidence for any existing or
-replayed allocation.
+sandboxes; their journals serve cleanup only. The base-image kit requests
+`monitoring: false` for new builders (a replayed create keeps its original
+body), and its live check delivers the presigned runtime URL over SSH only to a
+sandbox that reports monitoring off. Its generic `builder run` executes operator
+scripts through Boat's command API, whose command text and output Boat retains
+unless monitoring is off; never pass secrets through it. Boat's account-level
+**Monitoring off** is not evidence for any existing or replayed allocation.
 
 ## Health alerts
 

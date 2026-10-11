@@ -359,7 +359,7 @@ class Bootstrap:
     const options = new Map([["--profile", "runtime-base-v4"], ["--max-used-hours", "2"]]);
     await expect(builderCommand("create", options, [], d)).resolves.toMatchObject({ id: "bx_testv4" });
     const create = d.calls.find(call => call.method === "POST")!;
-    expect(create.body).toEqual({ type: "default", ttlSeconds: 3600, noEnv: true, env: {} });
+    expect(create.body).toEqual({ type: "default", ttlSeconds: 3600, noEnv: true, env: {}, monitoring: false });
     expect(create.headers).toEqual({ "idempotency-key": "test-operation", "x-boat-org": "test-org" });
     expect(JSON.parse(fs.readFileSync(path.join(d.stateDir, "builder.json"), "utf8")).id).toBe("bx_testv4");
   });
@@ -708,6 +708,23 @@ sys.stdout.buffer.write(out.getvalue())`]);
     expect(f.machines.size).toBe(0);
   }, 30_000);
 
+  it.each([true, undefined])("refuses live-check bearer delivery when monitoring policy is %s", async monitoring => {
+    const key = Buffer.alloc(51);
+    key.writeUInt32BE(11); key.write("ssh-ed25519", 4); key.writeUInt32BE(32, 15);
+    const publicKey = `ssh-ed25519 ${key.toString("base64")}`;
+    const diagnostic = { schema: "zeros.diagnostic/v1", component: "installer", stage: "done", ok: true, exitCode: 0, timedOut: false, failedChecks: [] };
+    const execute = vi.fn().mockResolvedValue({ exitCode: 0, output: JSON.stringify(diagnostic), outputTruncated: false });
+    vi.spyOn(sshBoundary, "openBoatBootstrapChannel").mockResolvedValue({ publicKey, execute, dispose: vi.fn().mockResolvedValue(undefined) });
+    const d = deps();
+    d.boat = async (method, _route, options = {}) => {
+      if (method === "GET") return { status: 200, body: { sandbox: { id: "bx_fixture", ip: "8.8.8.8", monitoring } } };
+      const command = (options.body as { command: string }).command;
+      return { status: 200, body: { exitCode: 0, stdout: command.includes("/usr/bin/cat") ? publicKey : command.includes("expiry-time=") ? "restricted\n" : "revoked\n" } };
+    };
+    await installOverSsh(d, "bx_fixture", { artifact: { url: "https://fixture.test/synthetic-input" } }).catch(() => {});
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it("uses the existing pinned SSH result contract, sends bearer input only on stdin and revokes the key", async () => {
     const key = Buffer.alloc(51);
     key.writeUInt32BE(11); key.write("ssh-ed25519", 4); key.writeUInt32BE(32, 15);
@@ -718,7 +735,7 @@ sys.stdout.buffer.write(out.getvalue())`]);
     vi.spyOn(sshBoundary, "openBoatBootstrapChannel").mockResolvedValue({ publicKey, execute, dispose });
     const d = deps(), commands: string[] = [];
     d.boat = async (method, route, options = {}) => {
-      if (method === "GET") return { status: 200, body: { sandbox: { id: "bx_fixture", ip: "8.8.8.8" } } };
+      if (method === "GET") return { status: 200, body: { sandbox: { id: "bx_fixture", ip: "8.8.8.8", monitoring: false } } };
       const command = (options.body as any).command;
       commands.push(command);
       return { status: 200, body: { exitCode: 0, stdout: command.includes("/usr/bin/cat") ? publicKey : command.includes("expiry-time=") ? "restricted\n" : "revoked\n" } };
@@ -761,7 +778,7 @@ sys.stdout.buffer.write(out.getvalue())`]);
       execute: vi.fn().mockResolvedValue({ exitCode: entry.exitCode, outputTruncated: false,
         output: "legacy helper private-canary\n" + JSON.stringify(diagnostic) }) });
     d.boat = async (method, _route, options = {}) => {
-      if (method === "GET") return { status: 200, body: { sandbox: { id: "bx_fixture", ip: "8.8.8.8" } } };
+      if (method === "GET") return { status: 200, body: { sandbox: { id: "bx_fixture", ip: "8.8.8.8", monitoring: false } } };
       const command = (options.body as any).command;
       return { status: 200, body: { exitCode: command.includes("print('revoked')") && entry.revokeFailed ? 1 : 0,
         stdout: command.includes("/usr/bin/cat") ? publicKey : command.includes("expiry-time=") ? "restricted\n" : "revoked\n" } };

@@ -159,7 +159,10 @@ async function createBuilder(deps: KitDeps, from: string | undefined, type: stri
   // with the same key and body, which returns the original sandbox.
   const intentFile = path.join(deps.stateDir, "builder-intent.json");
   const replay = fs.existsSync(intentFile);
-  const intent = replay ? readJson(intentFile) : { from, type, ...(stockV4 ? { profile: "runtime-base-v4" } : {}), idempotencyKey: deps.randomUUID(), createdAt: iso(deps) };
+  // New intents disable Boat's process tracer; a replayed intent keeps its
+  // exact original body under its key.
+  const intent = replay ? readJson(intentFile) : { from, type, ...(stockV4 ? { profile: "runtime-base-v4" } : {}), monitoring: false,
+    idempotencyKey: deps.randomUUID(), createdAt: iso(deps) };
   if (intent.from !== from || intent.type !== type || (intent.profile === "runtime-base-v4") !== stockV4) {
     throw new KitError(`A create from ${intent.from} (${intent.type}) is unresolved; repeat it, or remove builder-intent.json once no such builder exists`);
   }
@@ -172,7 +175,7 @@ async function createBuilder(deps: KitDeps, from: string | undefined, type: stri
   let created: BoatResponse;
   try {
     created = await scopedBoatRequest(deps, "POST", "/sandboxes", {
-      body: { type, ...(from ? { from } : {}), ttlSeconds: LEASE_SECONDS, noEnv: true, env: {} },
+      body: { type, ...(from ? { from } : {}), ttlSeconds: LEASE_SECONDS, noEnv: true, env: {}, ...(intent.monitoring === false ? { monitoring: false } : {}) },
       headers: { "idempotency-key": intent.idempotencyKey, "x-boat-org": deps.billingOrg },
       timeoutMs: 180_000,
     });
