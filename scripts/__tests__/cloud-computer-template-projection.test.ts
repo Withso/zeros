@@ -159,6 +159,26 @@ describe("computer template repository projection", () => {
           readFileSync(helper, "utf8"),
           0o555,
         );
+        // Base and runtime verification have their own tests. This stand-in
+        // selects the fixture runtime so the real install shell can resolve
+        // its environment.
+        tree.write(
+          "/opt/zeros-bootstrap/bootstrap.py",
+          `import contextlib
+class Failure(Exception): pass
+class Bootstrap:
+    def __init__(self, root, uid, gid): pass
+    def base(self): pass
+    @contextlib.contextmanager
+    def lock(self, name):
+        if name != "runtime-publication.lock": raise Failure("lock")
+        yield
+    def current(self): return "${tree.descriptor.runtimeId}"
+    def verify_runtime(self, runtime_id, full):
+        if runtime_id != "${tree.descriptor.runtimeId}" or full is not True: raise Failure("runtime")
+`,
+          0o444,
+        );
         tree.write("/usr/bin/rg", "fixture executable", 0o555);
         tree.write(`${runtime.workerRoot}/binaries/rg`, "fixture executable", 0o555);
         tree.write(`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`, "// pinned Host fixture", 0o444);
@@ -208,6 +228,9 @@ spec=importlib.util.spec_from_file_location("computer_build", "/opt/zeros-bootst
 module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 args=module.SystemHost().install_command("11111111-1111-4111-8111-111111111111", 5)
 script="test \\"$PWD\\" = /srv/zeros/repos\\n"
+script+="test \\"$GIT_CONFIG_SYSTEM\\" = ${tree.descriptor.root}/worker/gitconfig\\n"
+script+="test \\"$FONTCONFIG_FILE\\" = ${tree.descriptor.root}/worker/design-fonts/fonts.conf\\n"
+script+="test \\"\${PATH%%:*}\\" = ${tree.descriptor.root}/bin\\n"
 for index in range(${repositoryCount}):
     script+="cd /srv/zeros/repos/fixture/repo"+str(index)+"\\npwd > install-path\\n"
 result=subprocess.run(args[args.index("/usr/bin/unshare"):], input=script.encode(), env=module.ENVIRONMENT,

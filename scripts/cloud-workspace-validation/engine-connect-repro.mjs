@@ -167,7 +167,7 @@ async function main() {
             check(source?.id === journal.childId && source.team?.id?.toLowerCase() === config.billingOrg.toLowerCase() &&
               (source.sourceSandboxId === undefined || source.sourceSandboxId === journal.templateId), "child_invalid");
             const reply = await boat.request(`/sandboxes/${journal.childId}/commands`, { method: "POST", body: {
-              command: "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status", timeoutSeconds: 20 } });
+              command: "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/bootstrap.py status", timeoutSeconds: 20 } });
             const parsed = RuntimeBaseStatusSchema.safeParse(JSON.parse(reply.stdout));
             if (reply.success === true && reply.exitCode === 0 && !reply.timedOut && !reply.stdoutTruncated && parsed.success &&
               parsed.data.baseCompatibilityId === material.baseCompatibilityId && ["idle", "waiting_for_runtime"].includes(parsed.data.hostState)) return;

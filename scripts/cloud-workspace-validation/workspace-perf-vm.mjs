@@ -14,10 +14,10 @@ import { PERF_UUID, PERF_RESOURCE, perfCheck, perfPool, perfRead, readPerfEnviro
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-const STATUS = "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status";
+const STATUS = "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/bootstrap.py status";
 const name = journal => `zeros-v2-test-perf-${journal.id}`;
 const providerReady = state => ["ready", "idle", "running"].includes(state);
-const BOOT_DETAILS = "/usr/bin/sudo -n /usr/bin/python3 -I - <<'PY_PERF'\n" +
+const BOOT_DETAILS = "/usr/bin/sudo -n /usr/bin/python3 -I -B - <<'PY_PERF'\n" +
   readFileSync(new URL("./workspace-perf-bootstrap.py", import.meta.url), "utf8") + "\nPY_PERF";
 const bootstrapUnits = new Set([
   "zeros-boot.service",

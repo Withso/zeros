@@ -354,7 +354,7 @@ export function boatAuthorizedKeyCommand(
  finally:
   os.close(output)`
     : "";
-  return `/usr/bin/python3 - <<'PY'
+  return `/usr/bin/python3 -B - <<'PY'
 import os,fcntl,stat
 home=os.open('/home/user',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
 hs=os.fstat(home)

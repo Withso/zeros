@@ -6,7 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as sshBoundary from "../../apps/control-plane/src/cloud-workspaces/boat-setup-runner";
 import { builderCommand, KitError, main, parseArgs, type KitDeps } from "../cloud-workspace-validation/boat-image/boat-image";
-import { basePayload, buildBase, closedFailure, parseProbe, profileDeps, resumeOwned, v4Command, verifyBase, waitSandbox } from "../cloud-workspace-validation/boat-image/runtime-base-v4";
+import { basePayload, buildBase, closedFailure, parseProbe, profileDeps, pythonProbe, resumeOwned, v4Command, verifyBase, waitSandbox } from "../cloud-workspace-validation/boat-image/runtime-base-v4";
 import { cleanupLiveObjects, installOverSsh, presignGet, probePersistence, probeRuntime, runInstallerStep, runLiveStep, signedHeaders, syntheticArchives, uploadLiveObject } from "../cloud-workspace-validation/runtime-base-v4/live-check";
 
 const scratch: string[] = [];
@@ -121,6 +121,21 @@ function seedState(d: KitDeps, overrides = {}) {
 }
 
 describe("runtime-base-v4 profile", () => {
+  it("starts the actual remote probe with bytecode disabled before any imports", () => {
+    const work = temp();
+    const program = "import hashlib, pathlib, sys\nassert sys.dont_write_bytecode\n";
+    const command = pythonProbe(program, "verify");
+    const [prefix, payload] = command.split("<<'PYV4'\n");
+    const argv = prefix.trim().split(" ").slice(3);
+    expect(argv).toEqual(["-I", "-B", "-"]);
+    const result = spawnSync("python3", [...argv.slice(0, -1), "-X", `pycache_prefix=${work}`, "-"], {
+      input: payload.replace(/\nPYV4$/, ""), encoding: "utf8", timeout: 5000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(fs.readdirSync(work)).toEqual([]);
+  });
+
   it("retains the exception identity and exact probe line from the real runtime probe", async () => {
     const d = deps(), directory = temp(), bootstrap = path.join(directory, "bootstrap.py"), evidence = path.join(directory, "logged");
     fs.writeFileSync(bootstrap, `from pathlib import Path
@@ -939,10 +954,23 @@ sys.stdout.buffer.write(out.getvalue())`]);
       expect(installed).toContain(name);
       expect(protectedBlock).toContain(`'${name}'`);
     }
-    // computer-build.py protects /usr/local/lib/systemd/system; Boat stock owns its ancestors.
-    expect(build).toMatch(/^chown root:root \/usr\/local \/usr\/local\/lib$/m);
-    expect(build).toMatch(/^chmod 0755 \/usr\/local \/usr\/local\/lib$/m);
-    expect(build.indexOf("chown root:root /usr/local")).toBeLessThan(build.indexOf("compat['protectedFiles']"));
+    // Stock metadata is sealed before recipes; no broad /usr/local hardening.
+    expect(build).not.toMatch(/(?:chown|chmod)[^\n]*\/usr\/local/);
+    expect(payload.files.map(file => file.name)).toContain("base/stock-prerequisites.py");
+    expect(protectedBlock).toContain("'stock-prerequisites.py'");
+    expect(build).toContain("/opt/zeros-bootstrap/stock-prerequisites.json");
+  });
+
+  it("qualifies stock prerequisites without package or system-directory mutations", () => {
+    const payload = basePayload(ROOT, "1".repeat(40), "2".repeat(32));
+    const build = payload.files.find(file => file.name === "build.sh")!.data.toString();
+    expect(build).not.toMatch(/apt-get|\bdpkg\s+-i|\/var\/lib\/apt|DEBIAN_FRONTEND/);
+    expect(build).not.toMatch(/\b(?:podman|crun|slirp4netns|uidmap|inotify-tools|xvfb)\b/);
+    expect(build).toContain("python3 -I -B base/stock-prerequisites.py");
+    expect(build.indexOf("python3 -I -B base/stock-prerequisites.py")).toBeLessThan(build.indexOf("chown root:root /opt"));
+    expect(build).toMatch(/apparmor_parser -r -K /);
+    expect(build.match(/^useradd .*--no-log-init.*$/gm)).toHaveLength(4);
+    expect(build).toContain("usermod --add-subuids 100000-165535 --add-subgids 100000-165535 zeros-agent");
   });
 
   it("accepts only bounded closed diagnostic output from remote commands", () => {
@@ -970,7 +998,7 @@ sys.stdout.buffer.write(out.getvalue())`]);
       expect(result.stderr).toBe("");
       expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, failedChecks: ["input_schema"] });
       expect(fs.readFileSync(file, "utf8")).toContain("/usr/bin/env -i");
-      expect(fs.readFileSync(file, "utf8")).toContain("/usr/bin/python3 -I");
+      expect(fs.readFileSync(file, "utf8")).toContain("/usr/bin/python3 -I -B");
     }
     const work = temp();
     for (const name of ["zeros-boot.service", "zeros-host.service"]) fs.copyFileSync(path.join(BASE, name), path.join(work, name));

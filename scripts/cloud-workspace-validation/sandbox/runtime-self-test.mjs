@@ -275,7 +275,7 @@ export function runtimeEngineLifecycleSmoke(runtime, environment) {
   prepareSelfTestLayout(runtime);
   // Keep only loopback usable in this otherwise disconnected namespace so
   // the existing local gateway/service probes can exercise their sockets.
-  command("/usr/bin/python3", ["-I", "-c",
+  command("/usr/bin/python3", ["-I", "-B", "-c",
     "import socket,fcntl,struct; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); fcntl.ioctl(s,0x8914,struct.pack('16sH14x',b'lo',1)); s.close()"], environment);
   // The fixed launcher runs W/scripts/.../qualify-cloud-engine.mjs inside
   // the v4 engine view, including direct non-root owned-process/service probes.
@@ -355,7 +355,7 @@ async function offlineChecks(environment) {
       return true;
     },
     supervisor_idle() {
-      const stdout = command("/usr/bin/python3", ["-I", "/opt/zeros-bootstrap/bootstrap.py", "status"], environment, 30_000);
+      const stdout = command("/usr/bin/python3", ["-I", "-B", "/opt/zeros-bootstrap/bootstrap.py", "status"], environment, 30_000);
       return supervisorIsIdle(JSON.parse(stdout), runtime);
     },
     engine_lifecycle: () => runtimeEngineLifecycleSmoke(runtime, environment),
@@ -401,7 +401,7 @@ async function main() {
       assert.equal(process.argv.length, 2);
       const { runtime } = await installedRuntime();
       lock = acquireSelfTestSetupLock();
-      assert(supervisorIsIdle(JSON.parse(command("/usr/bin/python3", ["-I", "/opt/zeros-bootstrap/bootstrap.py", "status"],
+      assert(supervisorIsIdle(JSON.parse(command("/usr/bin/python3", ["-I", "-B", "/opt/zeros-bootstrap/bootstrap.py", "status"],
         { PATH: "/usr/bin:/bin", LANG: "C.UTF-8" }, 30_000)), runtime));
       new CloudDelegatedCgroups({ runtime }).assertRetired();
       directory = mkdtempSync("/run/zeros/runtime-smoke-");

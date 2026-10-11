@@ -68,13 +68,13 @@ function runtimeUpdateProgram() {
     // Keep the forced command below sshd's 8 KiB authorized_keys line limit.
     // Read exactly the pinned source length without buffering the following
     // request; only these deployment-owned bytes may execute as root.
-    const loader = ["import hashlib,os,sys", `size=${source.length}`, "source=bytearray()",
+    const loader = ["import sys", "sys.dont_write_bytecode=True", "import hashlib,os", `size=${source.length}`, "source=bytearray()",
       "while len(source)<size:", " block=os.read(0,size-len(source))", " if not block: sys.exit(1)",
       " source.extend(block)",
       `if hashlib.sha256(source).hexdigest()!='${createHash("sha256").update(source).digest("hex")}': sys.exit(1)`,
       "exec(compile(bytes(source),'<runtime-update>','exec'))"].join("\n");
     const python = `exec(${JSON.stringify(loader)})`;
-    program = { command: `/usr/bin/python3 -I -c '${python.replaceAll("'", "'\\''")}'`, source: source.toString("utf8") };
+    program = { command: `/usr/bin/python3 -I -B -c '${python.replaceAll("'", "'\\''")}'`, source: source.toString("utf8") };
   }
   return program;
 }

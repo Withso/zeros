@@ -15,7 +15,7 @@ import {
 const SETUP_ENV = "ZEROS_CLOUD_WORKSPACE_SETUP_B64";
 const ENSURE_SUPERVISOR_COMMAND =
   "/usr/bin/sudo -n /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs";
-const BASE_STATUS_COMMAND = "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status";
+const BASE_STATUS_COMMAND = "/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/zeros-bootstrap/bootstrap.py status";
 const BASE_STATUS_TIMEOUT_SECONDS = 20;
 // The v4 base waits up to 480 seconds for the provider restore (bootstrap.py
 // HYDRATION_TIMEOUT) before reporting failure; allow a further minute.

@@ -1,10 +1,13 @@
-#!/usr/bin/python3 -I
+#!/usr/bin/python3 -IB
 """Base-owned Cloud Computer helpers. No shell text or token enters an argv.
 
 Install recipes are trusted administrator root code (D3), not an adversarial
 root sandbox. Verification code and its hashes belong to the approved base;
 the control plane holds the baseline digest across the recipe execution.
 """
+import sys
+sys.dont_write_bytecode = True
+
 import codecs
 import datetime
 import fcntl
@@ -21,12 +24,10 @@ import socket
 import stat
 import struct
 import subprocess
-import sys
 import threading
 import time
 import uuid
 
-sys.dont_write_bytecode = True
 MAX_INPUT = 262_144
 MAX_OUTPUT = 65_536
 # B7 bounds the last diagnostic line to 4096 bytes. Reserve it and both newlines
@@ -305,7 +306,7 @@ class SystemHost:
                 "--property=ReadOnlyPaths=/opt/zeros-bootstrap", "--property=ProtectControlGroups=yes",
                 "--property=WorkingDirectory=/", "--setenv=LANG=C.UTF-8", "--setenv=PATH=" + ENVIRONMENT["PATH"],
                 "/usr/bin/unshare", "--mount", "--propagation", "private", "--",
-                "/usr/bin/python3", "-I", "/opt/zeros-bootstrap/computer-build.py", "install-shell"]
+                "/usr/bin/python3", "-I", "-B", "/opt/zeros-bootstrap/computer-build.py", "install-shell"]
 
     def drain_install(self, identity):
         unit = "zeros-computer-install-" + identity + ".service"
@@ -514,6 +515,27 @@ class ComputerBuild:
             manifest.append(self.verify_repository(target, expected))
         return {"schema": "zeros.computer-repositories/v1", "buildId": value["buildId"], "repositories": manifest}
 
+    def install_environment(self):
+        # The fixed base helper selects the installed physical tree; neither
+        # inherited environment nor the mutable current facade reaches bash.
+        spec = importlib.util.spec_from_file_location("zeros_bootstrap", self.path("/opt/zeros-bootstrap/bootstrap.py"))
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        app = bootstrap.Bootstrap(root=self.root, uid=self.uid, gid=self.gid)
+        try:
+            app.base()
+            with app.lock("runtime-publication.lock"):
+                runtime_id = app.current()
+                require(type(runtime_id) is str and re.fullmatch(r"r1-[a-f0-9]{64}", runtime_id), "tcb_modified")
+                app.verify_runtime(runtime_id, full=True)
+        except bootstrap.Failure:
+            raise Failure("tcb_modified") from None
+        runtime = self.path("/opt/zeros-infra/" + runtime_id)
+        return {**ENVIRONMENT, "PATH": str(runtime / "bin") + ":" + ENVIRONMENT["PATH"],
+                "GIT_CONFIG_SYSTEM": str(runtime / "worker/gitconfig"),
+                "FONTCONFIG_FILE": str(runtime / "worker/design-fonts/fonts.conf"),
+                "FONTCONFIG_PATH": str(runtime / "worker/design-fonts")}
+
     def install_shell(self):
         # Internal systemd entry, never an SSH command or a JSON-input helper.
         # unshare makes all propagation private before any bind is installed.
@@ -535,7 +557,7 @@ class ComputerBuild:
                                        "tmpfs", str(target)], timeout=10)
             require(code == 0, "install_namespace")
         os.chdir(target)
-        os.execve("/usr/bin/bash", ["/usr/bin/bash", "-euo", "pipefail"], ENVIRONMENT)
+        os.execve("/usr/bin/bash", ["/usr/bin/bash", "-euo", "pipefail"], self.install_environment())
 
     def run_install(self, value):
         shape(value, ("schema", "buildId", "workerFence", "action", "after"), ("script", "timeoutSeconds", "redactions"))
@@ -610,11 +632,14 @@ class ComputerBuild:
         else: raise Failure("tcb_modified")
         return result
 
-    def protected_snapshot(self, build_id):
+    def protected_snapshot(self, build_id, optional_systemd):
         paths = {"/opt/zeros-bootstrap", "/etc/zeros", "/etc/sudoers", "/etc/sudoers.d", "/etc/apparmor.d/zeros-cloud-engine",
                  "/etc/apparmor.d/local/zeros-cloud-engine", "/etc/tmpfiles.d/zeros.conf", "/usr/lib/tmpfiles.d/zeros.conf",
                  "/run/tmpfiles.d/zeros.conf", "/opt/zeros-runtime", "/etc/nsswitch.conf"}
-        for base in ("/etc/systemd/system", "/run/systemd/system", "/run/systemd/transient", "/usr/local/lib/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"):
+        # The base's descriptor walk already proved the qualified absence of
+        # zeros-* and service.d beneath this one optional stock surface.
+        # Every actual protected file still goes through strict snapshot().
+        for base in ("/etc/systemd/system", "/run/systemd/system", "/run/systemd/transient", "/usr/lib/systemd/system", "/lib/systemd/system"):
             paths.add(base + "/service.d")
             root = self.path(base)
             if root.is_dir():
@@ -675,6 +700,9 @@ class ComputerBuild:
                 dependencies.update(re.findall(r"/[^\s()]+", output.decode()))
             for path in sorted(dependencies):
                 snapshot[path] = self.snapshot(path)
+        # Revalidate after runtime/dependency hashing, immediately before the
+        # external digest. A cached observation from base() is not sufficient.
+        snapshot["/usr/local/lib/systemd/system"] = {"qualifiedAbsence": optional_systemd()}
         return snapshot
 
     def verify_tcb(self, value):
@@ -698,7 +726,8 @@ class ComputerBuild:
         bootstrap = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(bootstrap)
         app = bootstrap.Bootstrap(root=self.root, uid=self.uid, gid=self.gid)
-        app.base()
+        try: app.base()
+        except bootstrap.Failure: raise Failure("tcb_modified") from None
         require(app.current() == value["runtimeId"], "tcb_modified")
         app.verify_runtime(value["runtimeId"], full=True)
         runtime = self.path("/opt/zeros-infra/" + value["runtimeId"])
@@ -706,7 +735,11 @@ class ComputerBuild:
             for name in files:
                 path = Path(parent) / name
                 require("security.capability" not in os.listxattr(path, follow_symlinks=False), "tcb_modified")
-        digest = sha(packed({"baseCompatibilityId": value["baseCompatibilityId"], "runtimeId": value["runtimeId"], "protected": self.protected_snapshot(value["buildId"])}))
+        def optional_systemd():
+            try: return app.optional_systemd_absence(app.optional_systemd_policy)
+            except bootstrap.Failure: raise Failure("tcb_modified") from None
+        digest = sha(packed({"baseCompatibilityId": value["baseCompatibilityId"], "runtimeId": value["runtimeId"],
+                             "protected": self.protected_snapshot(value["buildId"], optional_systemd)}))
         if value["action"] == "verify": require(digest == value.get("protectedContractDigest"), "tcb_modified")
         return {"schema": "zeros.computer-tcb/v1", "buildId": value["buildId"], "runtimeId": value["runtimeId"],
                 "baseCompatibilityId": value["baseCompatibilityId"], "protectedContractDigest": digest}
