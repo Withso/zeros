@@ -97,6 +97,13 @@ suite("retired Boat deletion release readiness", () => {
     expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(true);
   });
 
+  it("defers more retired generations than the former allowlist bound, but not with one disqualified", async () => {
+    for (let generation = 2; generation <= 9; generation++) await retiredDeletion({ generation });
+    expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(true);
+    await retiredDeletion({ generation: 10, receipt: null });
+    expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(false);
+  });
+
   it("fails closed when one of several stalled generations is ineligible", async () => {
     await retiredDeletion();
     await retiredDeletion({ generation: 3, intentState: "failed" });

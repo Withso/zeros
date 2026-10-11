@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { alphaFrontierIdentity } from "./alpha-frontier";
 import { HostedReceipt, ReleaseIdentity } from "./contracts";
 
 const digest = "b".repeat(64), sha = "a".repeat(40);
@@ -34,6 +35,8 @@ describe("receipted deferred retired Boat deletion readiness", () => {
       { deferredReadiness: { ...deferredReadiness, expiresAt: exception.expiresAt } },
       { cloud: { ...identity.cloud, operationalState: "healthy" } },
       { cloud: { ...identity.cloud, operationalState: undefined } },
+      { cloud: { ...identity.cloud, enabled: false } },
+      { cloud: { ...identity.cloud, state: "disabled" } },
       { alphaReadinessException: exception },
     ]) expect(ReleaseIdentity.safeParse({ ...identity, ...changed }).success).toBe(false);
   });
@@ -50,5 +53,22 @@ describe("receipted deferred retired Boat deletion readiness", () => {
       { alphaReadinessException: { ...exception, kind: "skip-all-health" } },
       { cloud: { ...identity.cloud, operationalState: "healthy" } },
     ]) expect(ReleaseIdentity.safeParse({ ...legacy, ...changed }).success).toBe(false);
+  });
+  // Admission reads the outgoing deployment before replacing it, ready or not.
+  it.each([
+    ["the new deferral", 200, {}],
+    ["a current legacy waiver", 200, { deferredReadiness: undefined, alphaReadinessException: exception }],
+    ["an unready identity", 503, { ready: false, deferredReadiness: undefined,
+      cloud: { enabled: true, ready: false, state: "unready" } }],
+  ] as const)("admission reads an outgoing Alpha API that reports %s", async (_name, status, changed) => {
+    clock();
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ ...identity, ...changed }), { status }));
+    await expect(alphaFrontierIdentity(fetcher as unknown as typeof fetch)).resolves.toMatchObject({ channel: "alpha", sourceSha: sha });
+  });
+  it("admission refuses an outgoing identity whose legacy waiver has expired", async () => {
+    clock();
+    const expired = { ...identity, deferredReadiness: undefined, alphaReadinessException: { ...exception, expiresAt: new Date().toISOString() } };
+    const fetcher = vi.fn(async () => new Response(JSON.stringify(expired), { status: 200 }));
+    await expect(alphaFrontierIdentity(fetcher as unknown as typeof fetch)).resolves.toBeNull();
   });
 });
