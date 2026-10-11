@@ -12,7 +12,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
-describe("deleted cloud conversation native state", () => {
+describe.runIf(process.platform === "linux")("deleted cloud conversation native state", () => {
   it("erases an orphan execution HOME when deletion follows an abrupt writer exit", async () => {
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), "zeros-native-erase-"));
     roots.push(dataRoot);
@@ -121,5 +121,31 @@ describe("deleted cloud conversation native state", () => {
     for (const dataRoot of ["relative/data", `${root}/../${path.basename(root)}`])
       await expect(deleteCloudNativeHistory({ root, conversationId: "invalid", dataRoot })).rejects.toThrow("identity is invalid");
     expect(await readdir(root)).toEqual([]);
+  });
+
+  it("retains the original lock and deletion fence after a HOME parent refusal and allows a safe retry", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "zeros-native-parent-erase-"));
+    const outside = await mkdtemp(path.join(os.tmpdir(), "zeros-native-parent-target-"));
+    roots.push(dataRoot, outside);
+    const root = path.join(dataRoot, "history"), conversationId = "retry-parent";
+    const key = createHash("sha256").update(conversationId).digest("hex");
+    await mkdir(path.join(outside, key));
+    await writeFile(path.join(outside, key, "unrelated"), "kept");
+    const homes = path.join(dataRoot, "native-agent-homes");
+    await symlink(outside, homes, "dir");
+    await expect(deleteCloudNativeHistory({ root, conversationId, dataRoot })).rejects.toThrow();
+    const owner = path.join(root, key);
+    const lock = await lstat(path.join(owner, ".lock"));
+    const tombstone = await lstat(path.join(owner, ".deleted"));
+    await expect(acquireCloudNativeHistory({ root, conversationId, provider: "cursor",
+      uid: process.geteuid!(), gid: process.getegid!() })).rejects.toThrow("deleted");
+    expect(await readFile(path.join(outside, key, "unrelated"), "utf8")).toBe("kept");
+    await rm(homes);
+    await mkdir(homes, { mode: 0o700 });
+    await deleteCloudNativeHistory({ root, conversationId, dataRoot });
+    expect((await readdir(owner)).sort()).toEqual([".deleted", ".lock"]);
+    expect((await lstat(path.join(owner, ".lock"))).ino).toBe(lock.ino);
+    expect((await lstat(path.join(owner, ".deleted"))).ino).toBe(tombstone.ino);
+    expect(await readFile(path.join(outside, key, "unrelated"), "utf8")).toBe("kept");
   });
 });
