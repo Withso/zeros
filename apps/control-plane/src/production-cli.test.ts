@@ -72,6 +72,17 @@ it("runs the compiled entitlement manager as the documented production entrypoin
   );
 });
 
+it("runs the compiled cloud deletion operator without loading credentials or contacting a provider", () => {
+  const result = spawnSync(process.execPath, [path.join(PACKAGE_ROOT, "dist/manage-cloud-workspace-deletion.js")], {
+    cwd: PACKAGE_ROOT,
+    encoding: "utf8",
+    env: { PATH: process.env.PATH, DATABASE_URL: "" },
+  });
+  expect(result.status).toBe(1);
+  expect(result.stdout).toBe("");
+  expect(result.stderr).toBe("[cloud-workspace-deletion] failed: DATABASE_URL is required\n");
+});
+
 it("runs the compiled object-storage manager as the documented production entrypoint", () => {
   const result = spawnSync(process.execPath, [DIST_OBJECT_STORAGE_MANAGER], {
     cwd: PACKAGE_ROOT,
