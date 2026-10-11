@@ -193,6 +193,53 @@ describe("Boat bootstrap transport", () => {
     expect(f.channel.dispose).toHaveBeenCalledOnce();
   });
 
+  const restoringStatus = (f: ReturnType<typeof v4Fixture>) => () => new Promise<Record<string, unknown>>(resolve =>
+    setTimeout(() => resolve({ ...f.prepared, exitCode: null, stdout: "", timedOut: true }), 20_000));
+  it("keeps one claim polling while the base status waits for the provider restore", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture();
+    f.input.timeoutSeconds = 600;
+    const restoring = restoringStatus(f);
+    f.request.mockReset().mockImplementation(fixture().request.getMockImplementation()!);
+    for (let poll = 0; poll < 9; poll++) f.request.mockImplementationOnce(restoring);
+    f.request.mockResolvedValueOnce(f.prepared);
+    const result = f.runner.execute(f.input, new AbortController().signal).then(value => ({ value }), error => ({ error }));
+    await vi.advanceTimersByTimeAsync(179_999);
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    const outcome = await result;
+    expect("error" in outcome ? outcome.error?.code : "success").toBe("success");
+    expect(f.request.mock.calls.filter(([, init]) =>
+      String((init as { body?: { command?: string } } | undefined)?.body?.command).includes("bootstrap.py status"))).toHaveLength(10);
+    expect(f.channel.execute).toHaveBeenCalledOnce();
+    expect(f.channel.dispose).toHaveBeenCalledOnce();
+  });
+  it("bounds a restore-gated base by the admission's remaining install budget, then uses the normal retry policy", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture();
+    f.input.timeoutSeconds = 600;
+    f.request.mockReset().mockImplementation(restoringStatus(f));
+    const result = f.runner.execute(f.input, new AbortController().signal).catch(error => error);
+    await vi.advanceTimersByTimeAsync(259_999);
+    expect(f.request).toHaveBeenCalledTimes(13);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toMatchObject({ code: "provider_bootstrap_unavailable", retryable: true,
+      diagnostic: { phase: "bootstrap", exit: "timeout" } });
+    expect(f.request).toHaveBeenCalledTimes(13);
+    expect(f.channel.execute).not.toHaveBeenCalled();
+    expect(f.channel.dispose).toHaveBeenCalledOnce();
+  });
+  it("bounds a restore-gated base by a shorter execution timeout", async () => {
+    vi.useFakeTimers();
+    const f = v4Fixture();
+    f.input.timeoutSeconds = 60;
+    f.request.mockReset().mockImplementation(restoringStatus(f));
+    const result = f.runner.execute(f.input, new AbortController().signal).catch(error => error);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await result).toMatchObject({ code: "provider_bootstrap_unavailable", diagnostic: { exit: "timeout" } });
+    expect(f.request.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(f.channel.execute).not.toHaveBeenCalled();
+  });
   it("keeps polling an exact-base stopped host while enabled restore units start", async () => {
     vi.useFakeTimers();
     const f = v4Fixture("stopped");

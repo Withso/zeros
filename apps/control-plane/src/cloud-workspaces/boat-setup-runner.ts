@@ -4,7 +4,8 @@ import { executeBoatPinnedSsh, type BoatBootstrapChannel } from "./boat-pinned-s
 export { boatAuthorizedKeyCommand, isPublicBoatAddress, openBoatBootstrapChannel,
   parseBoatHostKey, parseBoatSshEndpoint, type BoatBootstrapExecution } from "./boat-pinned-ssh.js";
 export type { BoatBootstrapChannel } from "./boat-pinned-ssh.js";
-import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND, CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND } from "./linux-setup-executor.js";
+import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND, CLOUD_WORKSPACE_RUNTIME_ADMISSION_TTL_SECONDS, CLOUD_WORKSPACE_RUNTIME_INSTALL_COMMAND,
+  MIN_ADMISSION_REMAINING_MS, RUNTIME_INSTALL_BUDGET_MS } from "./linux-setup-executor.js";
 import { RuntimeBaseStatusSchema, RuntimeInstallInputSchema, RUNTIME_INSTALL_MAX_ENCODED_BYTES } from "./runtime-contract.js";
 import { setupTimingClock } from "./setup-timings.js";
 import {
@@ -16,6 +17,12 @@ const SETUP_ENV = "ZEROS_CLOUD_WORKSPACE_SETUP_B64";
 const ENSURE_SUPERVISOR_COMMAND =
   "/usr/bin/sudo -n /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs";
 const BASE_STATUS_COMMAND = "/usr/bin/sudo -n /usr/bin/python3 -I /opt/zeros-bootstrap/bootstrap.py status";
+const BASE_STATUS_TIMEOUT_SECONDS = 20;
+// Polling runs after the one-use admission and artifact capability are minted.
+// A restoring base may use only what their install allowance leaves, less the
+// helper's entry minimum, one status interval and a margin (270 seconds).
+const BASE_RESTORE_POLL_MS = CLOUD_WORKSPACE_RUNTIME_ADMISSION_TTL_SECONDS * 1000 - RUNTIME_INSTALL_BUDGET_MS -
+  MIN_ADMISSION_REMAINING_MS - BASE_STATUS_TIMEOUT_SECONDS * 1000 - 5_000;
 // A fixed list, no path/argv disclosure and no dependency on the restored Node.
 const BOOTSTRAP_FILE_PROBE_COMMAND = "/bin/sh -c 'for f in /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs /opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs /opt/zeros/dist-engine/cli.js; do if test -f \"$f\"; then printf 1; else printf 0; fi; done'";
 type CommandResult = Awaited<ReturnType<CloudWorkspaceCommandRunner["execute"]>>;
@@ -34,10 +41,17 @@ function baseHostStopped(response: Record<string, unknown>, expectedBase: string
  * All setup/installer/SSH failures retain the worker's ordinary retry policy.
  */
 async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, resourceId: string, expectedBase: string, signal: AbortSignal, timeoutSeconds: number) {
-  const deadline = new AbortController();
-  const timer = setTimeout(() => deadline.abort(), Math.min(120_000, timeoutSeconds * 1000));
-  timer.unref();
-  const readinessSignal = AbortSignal.any([signal, deadline.signal]);
+  const started = Date.now();
+  const boot = new AbortController(), restore = new AbortController();
+  const restoreMs = Math.min(BASE_RESTORE_POLL_MS, timeoutSeconds * 1000);
+  const timers = [setTimeout(() => boot.abort(), Math.min(120_000, timeoutSeconds * 1000)), setTimeout(() => restore.abort(), restoreMs)];
+  for (const timer of timers) timer.unref();
+  // The status command itself waits while the base gates on the provider
+  // restore, so a timed-out status means the base is restoring, not broken.
+  // That evidence extends this claim's polling instead of failing it into a
+  // backed-off retry that would wait for the same restore.
+  let restoring = false;
+  const deadline = () => restoring ? restore.signal : boot.signal;
   const hostPending = Object.assign(new CloudProviderError("provider_bootstrap_unavailable", "Boat runtime broker is not ready", true),
     { diagnostic: { version: 1, phase: "bootstrap", exit: "unknown" } });
   let previousError: unknown;
@@ -46,20 +60,27 @@ async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, res
       signal.throwIfAborted();
       try {
         const response = await client.request(`/sandboxes/${resourceId}/commands`, {
-          method: "POST", body: { command: BASE_STATUS_COMMAND, timeoutSeconds: 20 }, signal: readinessSignal,
+          method: "POST", body: { command: BASE_STATUS_COMMAND, timeoutSeconds: BASE_STATUS_TIMEOUT_SECONDS },
+          signal: AbortSignal.any([signal, deadline()]),
         });
         // Commands may work before the enabled host unit starts after overlay
         // restoration. Observe only; never restart the host or accept a failed,
         // malformed or foreign base as transient readiness.
         if (baseHostStopped(response, expectedBase)) throw hostPending;
+        if (response.timedOut === true && response.stdoutTruncated !== true &&
+            restoreMs - (Date.now() - started) >= (BASE_STATUS_TIMEOUT_SECONDS + 2) * 1000) {
+          restoring = true;
+          continue;
+        }
         return response;
       } catch (error) {
         signal.throwIfAborted();
-        if (deadline.signal.aborted) throw previousError ?? error;
+        if (deadline().aborted) throw previousError ?? error;
         const bootPending = error === hostPending || error instanceof BoatBootPendingError || (error instanceof CloudProviderError &&
           error.retryable && error.httpStatus !== undefined && error.httpStatus >= 500);
         if (!bootPending || (error instanceof CloudProviderError && (error.retryAfterMs ?? 0) > 2000)) throw error;
         previousError = error;
+        const readinessSignal = AbortSignal.any([signal, deadline()]);
         await new Promise<void>((resolve, reject) => {
           const abort = () => { clearTimeout(wait); reject(error); };
           const wait = setTimeout(() => { readinessSignal.removeEventListener("abort", abort); resolve(); }, 2000);
@@ -68,7 +89,7 @@ async function waitForBoatBaseStatus(client: Pick<BoatApiClient, "request">, res
         });
       }
     }
-  } finally { clearTimeout(timer); }
+  } finally { for (const timer of timers) clearTimeout(timer); }
 }
 
 /** Boat commands do not have a separate stdin/environment carrier. Use its

@@ -29,13 +29,13 @@ const SETUP_REQUEST_AUDIENCE = "zeros-cloud-workspace-setup-v1";
 const SETUP_RESULT_AUDIENCE = "zeros-cloud-workspace-setup-result-v1";
 const MAX_REQUEST_BYTES = 32 * 1024;
 const MAX_LOG_BYTES = 128 * 1024;
-const MIN_ADMISSION_REMAINING_MS = 5_000;
+export const MIN_ADMISSION_REMAINING_MS = 5_000;
 export const CLOUD_WORKSPACE_RUNTIME_ADMISSION_TTL_SECONDS = 900;
 const MAX_ADMISSION_LIFETIME_MS = CLOUD_WORKSPACE_RUNTIME_ADMISSION_TTL_SECONDS * 1_000;
 // Installation precedes the one-use redemption. Reserve the ten-minute
 // delivery/install allowance plus the helper's minimum entry lifetime; the
 // remaining setup budget runs on fresh materials after that redemption.
-const RUNTIME_INSTALL_BUDGET_MS = 10 * 60_000;
+export const RUNTIME_INSTALL_BUDGET_MS = 10 * 60_000;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const COMMIT_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;

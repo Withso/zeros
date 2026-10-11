@@ -750,7 +750,11 @@ the disposable automatic-wake exercise, cleanup and owner Mac acceptance. Local
 PostgreSQL and mocked tests do not constitute live Alpha acceptance.
 
 V4 setup checks the base status and compatibility ID, requiring `idle` or
-`waiting_for_runtime`. The existing pinned SSH transport delivers a maximum
+`waiting_for_runtime`. The status command waits inside the base while the
+provider restore is incomplete, so a timed-out status keeps the same setup
+claim polling instead of failing it into a backed-off retry. That polling uses
+only what the one-use admission leaves after its install allowance (270
+seconds); transient provider errors keep their 120-second bound. The existing pinned SSH transport delivers a maximum
 64 KiB encoded installer input containing the descriptor, a 15-minute artifact
 GET capability and the unchanged nested setup payload. Artifact URLs never enter workspace responses, persisted
 setup logs, grants or errors. The helper result uses the existing parser and the
