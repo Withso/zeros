@@ -8,6 +8,7 @@ import type {
 import {
   cloudWorkspaceKey,
   parseCloudWorkspaceKey,
+  type CloudWorkspaceTarget,
 } from "../../platform/bridge/cloud-workspace-key";
 import {
   cloudAgentBootAvailability,
@@ -46,6 +47,19 @@ export function modelsForWorkspaceAgent(
 }
 
 const cache = new KeyedAsyncCache<WorkspaceRegistryAgent[]>(32);
+/** Confirmed and in-flight discovery belongs to the catalog authority it was
+ * read under: agent mode, generation, engine, boot, writer, funding owner and
+ * epoch, and binding status. When that changes, the workspace selects a new
+ * cache entry at once, so no earlier picker or late reply can carry over. */
+function registryKey(target: CloudWorkspaceTarget): string {
+  const document = cloudWorkspaceDocument(target), binding = document?.agentCredentials;
+  const authority = binding
+    ? ["boot", binding.generation, binding.engineInstanceId, binding.bootId, binding.writerEpoch,
+        binding.fundingOwnerUserId, binding.fundingOwnerEpoch, binding.status]
+    : ["legacy", document?.generation?.number ?? 0];
+  return `${cloudWorkspaceKey(target)}#${authority.join(":")}`;
+}
+const registryTarget = (key: string) => parseCloudWorkspaceKey(key.slice(0, key.indexOf("#")));
 // Reuse the catalog cadence for changes from other devices, consent expiry,
 // and engine replacement. Only active hook subscribers initiate revalidation.
 subscribeCloudWorkspaceRefresh(() => {
@@ -56,12 +70,14 @@ export const clearCloudAgentRegistry = () => {
 };
 export function invalidateCloudOrganizationAgentRegistry(organizationId: string): void {
   for (const key of cache.keys()) {
-    if (parseCloudWorkspaceKey(key)?.organizationId === organizationId) cache.invalidate(key);
+    if (registryTarget(key)?.organizationId === organizationId) cache.invalidate(key);
   }
 }
 export function invalidateCloudAgentRegistry(folder: string): void {
   const target = parseCloudWorkspaceKey(folder);
-  if (target) cache.invalidate(cloudWorkspaceKey(target));
+  if (!target) return;
+  const workspace = cloudWorkspaceKey(target);
+  for (const key of cache.keys()) if (key.startsWith(`${workspace}#`)) cache.invalidate(key);
 }
 /** A closed admission denial is authoritative for this workspace/provider.
  * Publish it before returning the draft, then recheck durable discovery (which
@@ -69,20 +85,20 @@ export function invalidateCloudAgentRegistry(folder: string): void {
 export function reportCloudAgentRuntimeUpgrade(folder: string, agentId: string): void {
   const target = parseCloudWorkspaceKey(folder);
   if (!target) return;
-  const key = cloudWorkspaceKey(target), agents = cache.getSnapshot(key).data;
+  const key = registryKey(target), agents = cache.getSnapshot(key).data;
   if (agents) cache.setData(key, agents.map(agent => agent.id === agentId ? {
     ...agent, runtimeUpgradeRequired: true, authenticated: false, cloudModels: [],
     runtimeUnavailableReason: "This workspace gets the new cloud runtime the next time it wakes",
   } : agent));
   cache.invalidate(key);
-  void warmCloudAgentRegistry(key).catch(() => { /* Retain the confirmed denial until revalidation succeeds. */ });
+  void warmCloudAgentRegistry(cloudWorkspaceKey(target)).catch(() => { /* Retain the confirmed denial until revalidation succeeds. */ });
 }
 export function workspaceAgentsSnapshot(
   folder?: string | null,
 ): WorkspaceRegistryAgent[] | null {
   const target = parseCloudWorkspaceKey(folder);
   return target
-    ? (cache.getSnapshot(cloudWorkspaceKey(target)).data ?? null)
+    ? (cache.getSnapshot(registryKey(target)).data ?? null)
     : getAgentsSnapshot();
 }
 export function hasConfirmedWorkspaceAgents(folder?: string | null): boolean {
@@ -118,8 +134,14 @@ async function readCloudAgentRegistry(
 ): Promise<WorkspaceRegistryAgent[]> {
   const bridge = getActiveBridge();
   if (!bridge) throw new Error("Workspace is disconnected");
-  const target = parseCloudWorkspaceKey(value)!;
-  const registryRequest = { type: "AGENT_LIST_AGENTS" as const, cwd: value };
+  const target = registryTarget(value);
+  if (!target) throw new Error("Cloud workspace identity is required");
+  // Publish nothing read under an authority the catalog has since replaced.
+  const current = () => {
+    if (registryKey(target) !== value) throw new Error("Cloud agent availability changed while loading");
+  };
+  current();
+  const registryRequest = { type: "AGENT_LIST_AGENTS" as const, cwd: cloudWorkspaceKey(target) };
   // The passive boot read is bound to the exact activated boot the catalog
   // shows. Legacy workspaces and older servers keep per-actor discovery.
   const discovery = cloudWorkspaceDocument(target)?.agentCredentials
@@ -131,15 +153,17 @@ async function readCloudAgentRegistry(
   ]);
   if (response.type !== "AGENT_AGENTS_LIST" || !Array.isArray(response.agents))
     throw new Error("Cloud agent registry is unavailable");
+  current();
   if ("availability" in found && found.availability?.mode === "boot-owner-v1") {
-    const { availability } = found, current = cloudWorkspaceDocument(target)?.agentCredentials;
-    if (!current || (["generation", "bootId", "writerEpoch", "fundingOwnerUserId", "fundingOwnerEpoch"] as const)
-      .some(key => current[key] !== availability.scope[key]))
+    const { availability } = found, binding = cloudWorkspaceDocument(target)?.agentCredentials;
+    if (!binding || (["generation", "bootId", "writerEpoch", "fundingOwnerUserId", "fundingOwnerEpoch"] as const)
+      .some(key => binding[key] !== availability.scope[key]))
       throw new Error("Cloud agent availability changed while loading");
     return bootRegistryAgents(response.agents, availability);
   }
   // The server reports legacy mode or predates passive discovery.
   const delegations = "delegations" in found ? found.delegations : await cloudAgentDelegations(target);
+  current();
   return response.agents.map((agent) => {
     const grants = delegations.filter(grant => grant.kind.startsWith(`${agent.id}-`));
     const qualified = grants.filter(grant => grant.runtimeQualified !== false);
@@ -160,7 +184,7 @@ export function warmCloudAgentRegistry(
   const target = parseCloudWorkspaceKey(folder);
   if (!target)
     return Promise.reject(new Error("Cloud workspace identity is required"));
-  const key = cloudWorkspaceKey(target);
+  const key = registryKey(target);
   return cache.load(key, () => readCloudAgentRegistry(key), {
     maxAgeMs: 30_000,
   });
@@ -171,7 +195,8 @@ export function useWorkspaceAgents(
 ): WorkspaceRegistryAgent[] | null {
   const local = useAgentsSnapshot();
   const target = parseCloudWorkspaceKey(folder);
-  const key = target ? cloudWorkspaceKey(target) : null;
+  // Follows catalog detail publication too, which changes the authority key.
+  const key = useSyncExternalStore(subscribeCloudWorkspaces, () => target ? registryKey(target) : null, () => null);
   const ready = useSyncExternalStore(
     subscribeCloudWorkspaces,
     () =>
