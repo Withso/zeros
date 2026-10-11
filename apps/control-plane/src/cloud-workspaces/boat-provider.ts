@@ -411,8 +411,11 @@ export class BoatWorkspaceProvider
         throw failure("provider_response_invalid");
       if (parsed.data.status === "completed" && parsed.data.completedAt === null)
         throw failure("provider_response_invalid");
-      const stage = typeof parsed.data.stage === "string" && ["waiting_for_uploads","kept_for_newer_snapshots","waiting_for_restore","deleting"].includes(parsed.data.stage)
-        ? parsed.data.stage : parsed.data.status;
+      // Boat's current `removing` stage is the stored `deleting` stage. Other
+      // stages, including `retrying`, retain the coarse provider status.
+      const reported = parsed.data.stage === "removing" ? "deleting" : parsed.data.stage;
+      const stage = typeof reported === "string" && ["waiting_for_uploads","kept_for_newer_snapshots","waiting_for_restore","deleting"].includes(reported)
+        ? reported : parsed.data.status;
       await this.options.operations.recordDeletionProgress?.(resourceId,current.deletionOperationId,stage).catch(() => undefined);
       if (parsed.data.status === "completed") {
         if (parsed.data.completedAt === null)

@@ -613,6 +613,19 @@ describe("Boat allocation lifecycle", () => {
       code: "provider_generation_retired",
     });
   });
+  it.each([["processing", "removing", "deleting"], ["blocked", "retrying", "blocked"], ["blocked", "waiting_for_uploads", "waiting_for_uploads"],
+    ["processing", "unrecognized", "processing"], ["pending", undefined, "pending"]])(
+    "records Boat's %s / %s receipt as the %s stage", async (status, stage, recorded) => {
+      const f=fixture(); await f.allocate();
+      await f.operations.beginDelete(RESOURCE); await f.operations.bindDeletion(RESOURCE,OPERATION);
+      f.fetcher.mockResolvedValueOnce(json(deletion(status!, stage === undefined ? {} : { stage })));
+      const resource = await f.provider.listManaged()[Symbol.asyncIterator]().next().then(next => next.value).catch(error => error);
+      if (status === "blocked") expect(resource).toMatchObject({ state: "deleting", metadata: { deletionStatus: "blocked" } });
+      else expect(resource).toMatchObject({ state: "deleting", metadata: { deletionStatus: status } });
+      expect(f.operations.recordDeletionProgress).toHaveBeenCalledWith(RESOURCE, OPERATION, recorded);
+      expect(f.operations.completeDeletion).not.toHaveBeenCalled();
+    },
+  );
   it("never advances cleanup progress from an incomplete completed receipt", async () => {
     const f=fixture(); await f.allocate();
     await f.operations.beginDelete(RESOURCE); await f.operations.bindDeletion(RESOURCE,OPERATION);

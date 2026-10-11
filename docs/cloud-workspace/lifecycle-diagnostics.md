@@ -131,7 +131,8 @@ oscillation. Health reports `deletion_intent_stalled` for failed intents,
 one-hour lack of progress, or 24-hour total age, including retirement while a
 replacement workspace remains active. Provider-reported waiting stages (Boat's
 `waiting_for_uploads`, `kept_for_newer_snapshots` and `waiting_for_restore`)
-count as progress until the 24-hour limit. Old pending idle checkpoints report
+count as progress until the 24-hour limit. Boat's `removing` stage is recorded
+as `deleting`; `retrying` keeps the provider status (normally `blocked`). Old pending idle checkpoints report
 `idle_stop_blocked`. These are aggregate health reasons without tenant IDs.
 
 Legacy credential compatibility is reconciled at organization discovery/selection

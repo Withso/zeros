@@ -297,10 +297,11 @@ export class BoatCloudBuilderVms implements CloudBuilderVms {
         const reply = await this.retry(() => this.options.client.request(`/deletion-operations/${operationId}`), deadline);
         const parsed = deletionSchema.safeParse(reply.operation);
         if (!parsed.success || parsed.data.id !== operationId || parsed.data.targetId !== vm.sandboxId) fail("cleanup_unconfirmed");
-        // These documented blocked stages retain storage only. Compute release
-        // still requires the following sandbox 404; this does not prove erasure.
+        // These documented blocked purge stages retain storage only; `retrying`
+        // is Boat's own automatic purge retry. Compute release still requires
+        // the following sandbox 404; this does not prove erasure.
         const storagePending = parsed.data.status === "blocked" &&
-          ["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"].includes(parsed.data.stage ?? "");
+          ["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore", "retrying"].includes(parsed.data.stage ?? "");
         if (parsed.data.status !== "completed" && !storagePending) { await this.pause(deadline); continue; }
       }
       try { await this.inspect(vm.sandboxId, deadline); }
