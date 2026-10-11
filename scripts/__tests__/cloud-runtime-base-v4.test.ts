@@ -714,15 +714,21 @@ sys.stdout.buffer.write(out.getvalue())`]);
     const publicKey = `ssh-ed25519 ${key.toString("base64")}`;
     const diagnostic = { schema: "zeros.diagnostic/v1", component: "installer", stage: "done", ok: true, exitCode: 0, timedOut: false, failedChecks: [] };
     const execute = vi.fn().mockResolvedValue({ exitCode: 0, output: JSON.stringify(diagnostic), outputTruncated: false });
-    vi.spyOn(sshBoundary, "openBoatBootstrapChannel").mockResolvedValue({ publicKey, execute, dispose: vi.fn().mockResolvedValue(undefined) });
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(sshBoundary, "openBoatBootstrapChannel").mockResolvedValue({ publicKey, execute, dispose });
     const d = deps();
+    let keyGrants = 0;
     d.boat = async (method, _route, options = {}) => {
       if (method === "GET") return { status: 200, body: { sandbox: { id: "bx_fixture", ip: "8.8.8.8", monitoring } } };
       const command = (options.body as { command: string }).command;
+      if (command.includes("expiry-time=")) keyGrants++;
       return { status: 200, body: { exitCode: 0, stdout: command.includes("/usr/bin/cat") ? publicKey : command.includes("expiry-time=") ? "restricted\n" : "revoked\n" } };
     };
-    await installOverSsh(d, "bx_fixture", { artifact: { url: "https://fixture.test/synthetic-input" } }).catch(() => {});
+    await expect(installOverSsh(d, "bx_fixture", { artifact: { url: "https://fixture.test/synthetic-input" } }))
+      .rejects.toMatchObject({ diagnostic: { stage: "install", failedChecks: ["monitoring_unconfirmed"] } });
     expect(execute).not.toHaveBeenCalled();
+    expect(keyGrants).toBe(0);
+    expect(dispose).toHaveBeenCalledOnce();
   });
 
   it("uses the existing pinned SSH result contract, sends bearer input only on stdin and revokes the key", async () => {

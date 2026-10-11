@@ -19,7 +19,7 @@ const STAGES = new Set(["validate_input", "create", "upload", "build", "verify",
 const CHECKS = new Set(["input_schema", "source_commit", "provider_request", "provider_budget", "start_budget", "build_exit", "timeout",
   "process_signal", "diagnostic_missing", "base_compatibility", "uid_map", "apparmor", "cgroup_controllers", "cgroup_retired", "root_ownership",
   "host_start", "private_state", "snapshot_identity", "snapshot_size", "cleanup_pending", "ssh_key_revoked", "archive_digest",
-  "runtime_install", "runtime_switch", "boot_reconciliation", "file_digest", "cache_conflict", "pointer_publish"]);
+  "runtime_install", "runtime_switch", "boot_reconciliation", "file_digest", "cache_conflict", "pointer_publish", "monitoring_unconfirmed"]);
 const hash = (data: Buffer | string) => createHash("sha256").update(data).digest("hex");
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 const read = (file: string) => JSON.parse(fs.readFileSync(file, "utf8"));
