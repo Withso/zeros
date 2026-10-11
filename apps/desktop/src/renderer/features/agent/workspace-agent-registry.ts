@@ -9,7 +9,11 @@ import {
   cloudWorkspaceKey,
   parseCloudWorkspaceKey,
 } from "../../platform/bridge/cloud-workspace-key";
-import { cloudAgentDelegations } from "../../platform/cloud-workspaces";
+import {
+  cloudAgentBootAvailability,
+  cloudAgentDelegations,
+  type CloudAgentBootAvailability,
+} from "../../platform/cloud-workspaces";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { useCachedRead } from "../../state/use-cached-read";
 import {
@@ -86,18 +90,56 @@ export function hasConfirmedWorkspaceAgents(folder?: string | null): boolean {
     ? workspaceAgentsSnapshot(folder) !== null
     : hasConfirmedAgents();
 }
+const UPGRADE_ON_WAKE = "This workspace gets the new cloud runtime the next time it wakes";
+/** An activated boot runs only the funding owner's slots, so its picker shows
+ * exactly those, never this actor's own grants. */
+function bootRegistryAgents(agents: BridgeRegistryAgent[],
+  availability: Extract<CloudAgentBootAvailability, { mode: "boot-owner-v1" }>): WorkspaceRegistryAgent[] {
+  const unavailable = availability.status === "ready" ? null
+    : ["runtime_upgrade_required", "owner_changed", "retired"].includes(availability.status) ? UPGRADE_ON_WAKE
+      : availability.status === "funding_unavailable" ? "The workspace owner hasn't shared agent access with you"
+        : "Agents can't run on this workspace's compute";
+  return agents.map((agent) => {
+    const slot = unavailable ? undefined : availability.providers.find(value => value.provider === agent.id);
+    const ready = slot?.status === "ready" && Array.isArray(slot.models);
+    const runtimeUpgradeRequired = unavailable === UPGRADE_ON_WAKE || slot?.code === "cloud_runtime_upgrade_required";
+    const reason = unavailable ?? (slot?.code === "cloud_runtime_upgrade_required" ? UPGRADE_ON_WAKE : null);
+    return {
+      ...agent,
+      runtimeUpgradeRequired,
+      cloudModels: ready ? [...new Set(slot.models)] : [],
+      ...(reason ? { runtimeUnavailableReason: reason } : {}),
+      authenticated: !agent.runtimeUnavailableReason && !reason && ready,
+    };
+  });
+}
 async function readCloudAgentRegistry(
   value: string,
 ): Promise<WorkspaceRegistryAgent[]> {
   const bridge = getActiveBridge();
   if (!bridge) throw new Error("Workspace is disconnected");
+  const target = parseCloudWorkspaceKey(value)!;
   const registryRequest = { type: "AGENT_LIST_AGENTS" as const, cwd: value };
-  const [response, delegations] = await Promise.all([
+  // The passive boot read is bound to the exact activated boot the catalog
+  // shows. Legacy workspaces and older servers keep per-actor discovery.
+  const discovery = cloudWorkspaceDocument(target)?.agentCredentials
+    ? cloudAgentBootAvailability(target).then(availability => ({ availability }))
+    : cloudAgentDelegations(target).then(delegations => ({ delegations }));
+  const [response, found] = await Promise.all([
     bridge.request<AgentAgentsListMessage>(registryRequest, 30_000),
-    cloudAgentDelegations(parseCloudWorkspaceKey(value)!),
+    discovery,
   ]);
   if (response.type !== "AGENT_AGENTS_LIST" || !Array.isArray(response.agents))
     throw new Error("Cloud agent registry is unavailable");
+  if ("availability" in found && found.availability?.mode === "boot-owner-v1") {
+    const { availability } = found, current = cloudWorkspaceDocument(target)?.agentCredentials;
+    if (!current || (["generation", "bootId", "writerEpoch", "fundingOwnerUserId", "fundingOwnerEpoch"] as const)
+      .some(key => current[key] !== availability.scope[key]))
+      throw new Error("Cloud agent availability changed while loading");
+    return bootRegistryAgents(response.agents, availability);
+  }
+  // The server reports legacy mode or predates passive discovery.
+  const delegations = "delegations" in found ? found.delegations : await cloudAgentDelegations(target);
   return response.agents.map((agent) => {
     const grants = delegations.filter(grant => grant.kind.startsWith(`${agent.id}-`));
     const qualified = grants.filter(grant => grant.runtimeQualified !== false);

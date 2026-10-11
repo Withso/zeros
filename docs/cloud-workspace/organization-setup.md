@@ -37,6 +37,18 @@ CP records the actual role/grant revision. Account changes apply on the next run
 through background publication. See
 [funding, cards and fenced removal](agent-authentication-and-language-tools.md#negotiated-boot-funding).
 
+The composer of an activated boot reads
+`GET /v1/cloud-workspaces/:workspace/agent-availability` instead of preparing
+self-delegations. In one read-only snapshot it reports the slots warm-context
+would admit for that actor: the funding owner's current sources, through the
+same per-provider check delivery uses, or a closed status (`owner_changed`,
+`retired`, `funding_unavailable`, `compute_unavailable` or
+`runtime_upgrade_required`) with no providers. It returns metadata only and
+never locks, mints, revokes, delivers or wakes anything. The desktop accepts a
+reply only for the exact boot (generation, boot, writer and funding-owner epoch)
+its catalog shows. A member's own connections never appear for such a
+workspace. Legacy workspaces, and servers without the endpoint, keep `prepare`.
+
 `GET /v1/organizations/:organization/agent-connections` returns metadata;
 `PUT .../agent-connections/:provider` selects or disconnects with an expected
 revision. `DELETE .../agent-connections/accounts/:credential` is the legacy

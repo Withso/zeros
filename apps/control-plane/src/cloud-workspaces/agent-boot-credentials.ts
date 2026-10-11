@@ -391,6 +391,7 @@ import { runtimeCredentialQualificationJoin, runtimeQualifiedNativeCapabilities 
 import { cloudRuntimeQualificationMode } from "./runtime-config.js";
 import { cloudAgentModels } from "./agent-models.js";
 import { recordCloudAgentFundingConsents, readCloudAgentFundingConsent } from "./agent-funding-consent.js";
+import { authorizeCloudWorkspaceActor } from "./actors.js";
 import { confirmDetachedCloudActor } from "./actor-sessions.js";
 import { CloudActorProvenanceSchema, CloudAgentActorConfirmResponseSchema, CloudAgentWarmActorResponseSchema, type CloudActorProvenance } from "./agent-boot-contract.js";
 import { admitBootCustomization } from "./mcp-admission.js";
@@ -420,6 +421,54 @@ const unavailable=(provider:typeof bootProviders[number],code:"cloud_agent_crede
 function bootScope(row:BootRow):CloudAgentBootScope { return CloudAgentBootScopeSchema.parse({organizationId:row.org_id,workspaceId:row.workspace_id,
   generation:row.generation,engineInstanceId:row.engine_instance_id,bootId:row.boot_id,writerEpoch:row.writer_epoch,
   fundingOwnerUserId:row.funding_owner_user_id,fundingOwnerEpoch:readRevision(row.funding_owner_epoch)}); }
+type BootProvider=typeof bootProviders[number];
+type BootProviderSelection={status:"unavailable";code:Parameters<typeof unavailable>[1]}|
+  {status:"ready";source:BootSource;caps:NonNullable<ReturnType<typeof runtimeQualifiedNativeCapabilities>>;models:string[]};
+
+/** The funding owner's current source for one provider. Credential delivery
+ * and passive discovery share it, so discovery shows exactly the slots
+ * warm-context admits. Delivery holds the rows FOR SHARE; discovery reads its
+ * consistent snapshot without locks. Material is never opened here. */
+async function readBootProviderSource(tx:Tx,scope:CloudAgentBootScope,consentFingerprint:string,provider:BootProvider,lock:boolean):Promise<BootProviderSelection> {
+  const share=lock?" FOR SHARE":"";
+  const selected=(await tx.query<{credential_id:string|null;credential_revision:string|null;revision:string;consent_fingerprint:string}>(`SELECT credential_id,credential_revision,revision,consent_fingerprint
+    FROM cloud_agent_organization_connections WHERE org_id=$1 AND owner_user_id=$2 AND provider=$3${share}`,[scope.organizationId,scope.fundingOwnerUserId,provider])).rows[0];
+  if(!selected?.credential_id)return {status:"unavailable",code:"cloud_agent_credential_required"};
+  const parent=(await tx.query<{revoked_at:Date|null;revision:string}>(`SELECT revoked_at,revision FROM cloud_agent_credentials WHERE id=$1 AND owner_user_id=$2${share}`,[selected.credential_id,scope.fundingOwnerUserId])).rows[0];
+  if(!parent||parent.revoked_at||!selected.credential_revision||selected.credential_revision!==parent.revision||selected.consent_fingerprint!==consentFingerprint)
+    return {status:"unavailable",code:"cloud_agent_credential_revoked"};
+  const source=(await tx.query<BootSource>(`SELECT credential.id,credential.kind,credential.display_name,credential.revision,credential.current_version,material.material_mode,
+    material.key_version,material.nonce,material.ciphertext,material.auth_tag,material.material_expires_at,
+    connection.revision AS connection_revision,connection.models,connection.all_models,qualification.native_capabilities,qualification.mcp_qualified
+    FROM cloud_agent_credentials credential JOIN cloud_agent_credential_versions material ON material.credential_id=credential.id AND material.version=credential.current_version
+    JOIN cloud_agent_credential_organizations association ON association.credential_id=credential.id AND association.owner_user_id=credential.owner_user_id AND association.org_id=$1
+    JOIN cloud_agent_organization_connections connection ON connection.credential_id=credential.id AND connection.owner_user_id=credential.owner_user_id AND connection.org_id=$1 AND connection.provider=$4
+    JOIN cloud_workspace_engine_instances engine ON engine.id=$3 JOIN cloud_workspace_generations generation ON generation.workspace_id=engine.workspace_id AND generation.generation=engine.generation
+    ${runtimeCredentialQualificationJoin("$5","false")}
+    WHERE credential.id=$2 AND credential.owner_user_id=$6 AND credential.revoked_at IS NULL${lock?" FOR SHARE OF credential,material,connection":""}`,
+    [scope.organizationId,selected.credential_id,scope.engineInstanceId,provider,cloudRuntimeQualificationMode(),scope.fundingOwnerUserId])).rows[0];
+  if(!source||source.material_mode!=="local"||!source.kind.startsWith(`${provider}-`))return {status:"unavailable",code:"cloud_runtime_upgrade_required"};
+  if(source.material_expires_at&&source.material_expires_at.getTime()<=Date.now()+30_000)return {status:"unavailable",code:"cloud_agent_credential_expired"};
+  const caps=runtimeQualifiedNativeCapabilities(source.native_capabilities),models=[...cloudAgentModels(provider)];
+  if(!caps||!models.length)return {status:"unavailable",code:"cloud_agent_model_not_authorized"};
+  return {status:"ready",source,caps,models};
+}
+
+/** An initialized boot holds fixed sources. A ready slot that differs from
+ * the one it already holds needs an authorized desired revision; without one
+ * the engine must start a new boot before any provider can run. */
+function bootSlotNeedsUpgrade(row:{credentials_initialized:boolean;cache_revision:string|number;desired_cache_revision:string|number},previous:unknown,
+  slot:{credentialId:string;credentialRevision:number;connectionRevision:number;models:unknown;nativeCapabilities:unknown}):boolean {
+  if(!row.credentials_initialized||readRevision(row.cache_revision)!==readRevision(row.desired_cache_revision))return false;
+  const previousReady=previous&&typeof previous==="object"?previous as Record<string,unknown>:undefined;
+  return !previousReady||previousReady.status!=="ready"||previousReady.credentialId!==slot.credentialId||
+    previousReady.credentialRevision!==slot.credentialRevision||previousReady.connectionRevision!==slot.connectionRevision||
+    bootMetadataJson(previousReady.models)!==bootMetadataJson(slot.models)||bootMetadataJson(previousReady.nativeCapabilities)!==bootMetadataJson(slot.nativeCapabilities);
+}
+/** The previously delivered slot metadata, without its vault binding. */
+function deliveredBootMetadata(raw:unknown):unknown {
+  return raw&&typeof raw==="object"?(({vaultBinding:_binding,...metadata})=>metadata)(raw as Record<string,unknown>):raw;
+}
 
 /** A source is retired only by the existing positive provider lifecycle or
  * consumed-resident journal. Revocation, lease expiry and a successor engine
@@ -455,6 +504,61 @@ export async function retireCloudAgentBootSources(tx:Tx,scope:{organizationId:st
     await tx.query("DELETE FROM cloud_agent_boot_contexts WHERE binding_id=$1",[binding.id]);
     await tx.query("DELETE FROM cloud_agent_boot_refreshes WHERE binding_id=$1",[binding.id]);
   }
+}
+
+export type CloudAgentBootAvailability={version:1;mode:"legacy"}|{version:1;mode:"boot-owner-v1";
+  scope:{generation:number;bootId:string;writerEpoch:string;fundingOwnerUserId:string;fundingOwnerEpoch:number};
+  status:"ready"|"owner_changed"|"retired"|"funding_unavailable"|"compute_unavailable"|"runtime_upgrade_required";
+  providers:Array<{provider:BootProvider;status:"ready";kind:string;models:string[]}|{provider:BootProvider;status:"unavailable";code:string}>};
+
+/** Passive, nonsecret composer discovery for the activated workspace boot:
+ * the provider slots warm-context would admit for this actor, read in the
+ * caller's one consistent snapshot. It takes no locks and never opens
+ * material, allocates adoptions, delivers credentials, mints grants or wakes
+ * an engine. A known boot that cannot serve this actor reports why, rather
+ * than letting a caller fall back to the actor's own legacy grants. Only a
+ * workspace in legacy mode reports `legacy`. Malformed boot authority fails
+ * closed, as in admission. */
+export async function readCloudAgentBootAvailability(tx:Tx,input:{workspaceId:string;actorUserId:string}):Promise<CloudAgentBootAvailability> {
+  const workspace=(await tx.query<{org_id:string}>("SELECT org_id FROM cloud_workspaces WHERE id=$1 AND deleted_at IS NULL",[input.workspaceId])).rows[0];
+  if(!workspace)rejected();
+  const organizationId=workspace.org_id;
+  const actor=await authorizeCloudWorkspaceActor(tx,{workspaceId:input.workspaceId,organizationId,actorUserId:input.actorUserId,capability:"run"});
+  const current=await readCurrentCloudAgentBootBinding(tx,{organizationId,workspaceId:input.workspaceId});
+  if(current.mode==="legacy")return {version:1,mode:"legacy"};
+  const bound=current.binding,scope=CloudAgentBootScopeSchema.parse({organizationId:bound.organizationId,workspaceId:bound.workspaceId,
+    generation:bound.generation,engineInstanceId:bound.engineInstanceId,bootId:bound.bootId,writerEpoch:bound.writerEpoch,
+    fundingOwnerUserId:bound.fundingOwnerUserId,fundingOwnerEpoch:bound.fundingOwnerEpoch});
+  const result=(status:Exclude<CloudAgentBootAvailability,{mode:"legacy"}>["status"],providers:Exclude<CloudAgentBootAvailability,{mode:"legacy"}>["providers"]=[]):CloudAgentBootAvailability=>
+    ({version:1,mode:"boot-owner-v1",scope:{generation:scope.generation,bootId:scope.bootId,writerEpoch:scope.writerEpoch,
+      fundingOwnerUserId:scope.fundingOwnerUserId,fundingOwnerEpoch:scope.fundingOwnerEpoch},status,providers});
+  if(bound.status!=="current")return result("owner_changed");
+  if(bound.writerState!=="active")return result("retired");
+  let funded:boolean;
+  try{funded=!!await readCloudAgentFundingConsent(tx,scope,{userId:input.actorUserId,role:actor.role},{passive:true});}
+  catch(error){if(!(error instanceof HttpError)||error.status!==403)throw error;funded=false;}
+  if(!funded)return result("funding_unavailable");
+  const compute=await readCloudAgentComputeTrust(tx,scope.workspaceId);
+  if(compute?.trust!=="zeros-managed")return result("compute_unavailable");
+  const consent=(await tx.query<{fingerprint:string}>(`SELECT encode(digest(jsonb_build_array(organization.id,organization.authorization_revision,
+    account.id,account.auth_revision,member.authorization_revision,member.role,member.created_at)::text,'sha256'),'hex') AS fingerprint
+    FROM organization_members member JOIN organizations organization ON organization.id=member.org_id JOIN users account ON account.id=member.user_id
+    WHERE member.org_id=$1 AND member.user_id=$2 AND organization.deleted_at IS NULL AND NOT organization.is_personal`,[scope.organizationId,scope.fundingOwnerUserId])).rows[0];
+  if(!consent)return result("funding_unavailable");
+  const prior=(await tx.query<{provider:string;metadata:unknown}>("SELECT provider,metadata FROM cloud_agent_boot_credentials WHERE binding_id=$1",[bound.id])).rows;
+  const delivery={credentials_initialized:true,cache_revision:bound.cacheRevision,desired_cache_revision:bound.desiredCacheRevision};
+  const providers:Exclude<CloudAgentBootAvailability,{mode:"legacy"}>["providers"]=[];
+  for(const provider of bootProviders) {
+    const selection=await readBootProviderSource(tx,scope,consent.fingerprint,provider,false);
+    if(selection.status!=="ready") {providers.push({provider,status:"unavailable",code:selection.code});continue;}
+    const {source,caps,models}=selection;
+    // Delivery would refuse every provider until a new boot; never show this one as ready.
+    if(bootSlotNeedsUpgrade(delivery,deliveredBootMetadata(prior.find(value=>value.provider===provider)?.metadata),{credentialId:source.id,
+      credentialRevision:readRevision(source.revision),connectionRevision:readRevision(source.connection_revision),models,nativeCapabilities:caps}))
+      return result("runtime_upgrade_required");
+    providers.push({provider,status:"ready",kind:source.kind,models});
+  }
+  return result("ready",providers);
 }
 
 export class DatabaseCloudAgentBootService {
@@ -654,52 +758,24 @@ export class DatabaseCloudAgentBootService {
     const next:CloudAgentBootCredentialResponse["providers"]=[],sealed:Array<{provider:string;metadata:unknown;envelope:CloudAgentCredentialEnvelope|null}>=[];
     let revisionNumber=readRevision(row.desired_cache_revision),changed=false;
     for(const provider of bootProviders) {
-      const selected=(await tx.query<{credential_id:string|null;credential_revision:string|null;revision:string;consent_fingerprint:string}>(`SELECT credential_id,credential_revision,revision,consent_fingerprint
-        FROM cloud_agent_organization_connections WHERE org_id=$1 AND owner_user_id=$2 AND provider=$3 FOR SHARE`,[scope.organizationId,scope.fundingOwnerUserId,provider])).rows[0];
-      let slot:CloudAgentBootCredentialResponse["providers"][number]=unavailable(provider,"cloud_agent_credential_required");
-      let material:CloudAgentAccessMaterial|undefined,source:BootSource|undefined;
-      if(selected?.credential_id) {
-        const parent=(await tx.query<{revoked_at:Date|null;revision:string}>("SELECT revoked_at,revision FROM cloud_agent_credentials WHERE id=$1 AND owner_user_id=$2 FOR SHARE",[selected.credential_id,scope.fundingOwnerUserId])).rows[0];
-        if(!parent||parent.revoked_at||!selected.credential_revision||selected.credential_revision!==parent.revision||selected.consent_fingerprint!==consent.fingerprint)
-          slot=unavailable(provider,"cloud_agent_credential_revoked");
-        else {
-          source=(await tx.query<BootSource>(`SELECT credential.id,credential.kind,credential.display_name,credential.revision,credential.current_version,material.material_mode,
-            material.key_version,material.nonce,material.ciphertext,material.auth_tag,material.material_expires_at,
-            connection.revision AS connection_revision,connection.models,connection.all_models,qualification.native_capabilities,qualification.mcp_qualified
-            FROM cloud_agent_credentials credential JOIN cloud_agent_credential_versions material ON material.credential_id=credential.id AND material.version=credential.current_version
-            JOIN cloud_agent_credential_organizations association ON association.credential_id=credential.id AND association.owner_user_id=credential.owner_user_id AND association.org_id=$1
-            JOIN cloud_agent_organization_connections connection ON connection.credential_id=credential.id AND connection.owner_user_id=credential.owner_user_id AND connection.org_id=$1 AND connection.provider=$4
-            JOIN cloud_workspace_engine_instances engine ON engine.id=$3 JOIN cloud_workspace_generations generation ON generation.workspace_id=engine.workspace_id AND generation.generation=engine.generation
-            ${runtimeCredentialQualificationJoin("$5","false")}
-            WHERE credential.id=$2 AND credential.owner_user_id=$6 AND credential.revoked_at IS NULL FOR SHARE OF credential,material,connection`,
-            [scope.organizationId,selected.credential_id,scope.engineInstanceId,provider,cloudRuntimeQualificationMode(),scope.fundingOwnerUserId])).rows[0];
-          if(!source||source.material_mode!=="local"||!source.kind.startsWith(`${provider}-`))slot=unavailable(provider,"cloud_runtime_upgrade_required");
-          else if(source.material_expires_at&&source.material_expires_at.getTime()<=Date.now()+30_000)slot=unavailable(provider,"cloud_agent_credential_expired");
-          else {
-            const caps=runtimeQualifiedNativeCapabilities(source.native_capabilities),models=[...cloudAgentModels(provider)];
-            if(!caps||!models.length)slot=unavailable(provider,"cloud_agent_model_not_authorized");
-            else {
-              material=projectCloudAgentBootAccess(openCloudAgentCredential({nonce:source.nonce,ciphertext:source.ciphertext,authTag:source.auth_tag},
-                {credentialId:source.id,ownerUserId:scope.fundingOwnerUserId,version:source.current_version,keyVersion:source.key_version,kind:source.kind},this.keys.keys));
-              const expiresAt=source.material_expires_at?.toISOString()??null;
-              const adoptionId=await allocateCloudAgentAdoptionId(tx,scope,material,this.keys);
-              slot=CloudAgentBootProviderReadySchema.parse({status:"ready",provider,credentialId:source.id,credentialRevision:readRevision(source.revision),
-                connectionRevision:readRevision(source.connection_revision),adoptionId,displayName:source.display_name,kind:source.kind,models,nativeCapabilities:caps,
-                materialVersion:source.current_version,expiresAt,refreshAfter:material.kind==="codex-chatgpt"?new Date(material.expiresAt*1000-600_000).toISOString():null,
-                authorityExpiresAt:null,material});
-            }
-          }
-        }
+      const selection=await readBootProviderSource(tx,scope,consent.fingerprint,provider,true);
+      let slot:CloudAgentBootCredentialResponse["providers"][number],material:CloudAgentAccessMaterial|undefined;
+      if(selection.status!=="ready")slot=unavailable(provider,selection.code);
+      else {
+        const {source,caps,models}=selection;
+        material=projectCloudAgentBootAccess(openCloudAgentCredential({nonce:source.nonce,ciphertext:source.ciphertext,authTag:source.auth_tag},
+          {credentialId:source.id,ownerUserId:scope.fundingOwnerUserId,version:source.current_version,keyVersion:source.key_version,kind:source.kind},this.keys.keys));
+        const expiresAt=source.material_expires_at?.toISOString()??null;
+        const adoptionId=await allocateCloudAgentAdoptionId(tx,scope,material,this.keys);
+        slot=CloudAgentBootProviderReadySchema.parse({status:"ready",provider,credentialId:source.id,credentialRevision:readRevision(source.revision),
+          connectionRevision:readRevision(source.connection_revision),adoptionId,displayName:source.display_name,kind:source.kind,models,nativeCapabilities:caps,
+          materialVersion:source.current_version,expiresAt,refreshAfter:material.kind==="codex-chatgpt"?new Date(material.expiresAt*1000-600_000).toISOString():null,
+          authorityExpiresAt:null,material});
       }
-      const rawPrevious=prior.find(value=>value.provider===provider)?.metadata;
-      const previous=rawPrevious&&typeof rawPrevious==="object"?(({vaultBinding:_binding,...metadata})=>metadata)(rawPrevious as Record<string,unknown>):rawPrevious;
+      const previous=deliveredBootMetadata(prior.find(value=>value.provider===provider)?.metadata);
       const metadata=slot.status==="ready"?(({material:_material,...value})=>value)(slot):slot;
       if(row.credentials_initialized && bootMetadataJson(previous)!==bootMetadataJson(metadata)) {
-        const previousReady=previous&&typeof previous==="object"?previous as Record<string,unknown>:undefined;
-        if(slot.status==="ready"&&readRevision(row.cache_revision)===readRevision(row.desired_cache_revision) &&
-          (!previousReady || previousReady.status!=="ready" || previousReady.credentialId!==slot.credentialId ||
-            previousReady.credentialRevision!==slot.credentialRevision || previousReady.connectionRevision!==slot.connectionRevision ||
-            bootMetadataJson(previousReady.models)!==bootMetadataJson(slot.models) || bootMetadataJson(previousReady.nativeCapabilities)!==bootMetadataJson(slot.nativeCapabilities)))
+        if(slot.status==="ready"&&bootSlotNeedsUpgrade(row,previous,slot))
           throw new HttpError(409,"cloud_runtime_upgrade_required","cloud_runtime_upgrade_required");
         changed=true;
       }
