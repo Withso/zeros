@@ -85,9 +85,16 @@ directories and user profiles stay unchanged.
 Design capture and the same child environments use
 `FONTCONFIG_FILE=<runtime>/worker/design-fonts/fonts.conf` and
 `FONTCONFIG_PATH=<runtime>/worker/design-fonts`. The config resolves bundled
-fonts relative to itself, also searches stock `/usr/share/fonts`, and writes
-caches only under the user's XDG cache. Recipe environment values cannot replace
-these selections. Codex's native shell allowlist carries exactly these four
+fonts relative to itself and keeps them authoritative for their families, even
+when stock `/usr/share/fonts` contains newer versions. It marks and rejects only
+stock faces of the pinned, fontconfig-visible families, including their styles
+and localized aliases; stock-only families such as Liberation remain available.
+Directory globs cannot override font-pattern rejection in fontconfig, so the
+rule qualifies stock paths during scanning. A rule-specific directory salt
+separates these cached patterns from the host's unfiltered catalog and changes
+with the family list. Update that list when changing font pins. Caches stay
+under the user's XDG cache; the archive embeds no runtime ID or build path.
+Recipe environment values cannot replace these selections. Codex's native shell allowlist carries exactly these four
 non-secret selectors from the credential-free executor. Cloud stdio MCP entries
 receive them explicitly because native transports filter inherited variables.
 SSH selects them at both production entries and still rejects client environment
@@ -114,18 +121,21 @@ and the exact configured filter's shell prefix must report the pinned version.
 Native helpers still resolve to the runner's read-only `/usr`; no host
 installation or archive byte changes. Historical
 archives without either asset marker retain their original probe environment.
-Failures report closed `runtime_system_assets_` sub-checks for identity,
+Font checks require both the exact family and its bundled package path, so a
+different family in the right package cannot satisfy the probe. Failures report
+closed `runtime_system_assets_` sub-checks for identity,
 inventory, files, environment, Git selection/version, filter configuration and
 each required font package; native output and arbitrary paths stay private.
 
 `cloud-runtime-system-assets-probe.test.ts` runs in the ordinary Linux Vitest
 suite without an opt-in. It stages nine synthetic packages through the real
 stager, then exercises the actual probe and namespace with real Git/fontconfig,
-small original TrueType fonts and a conflicting runner LFS. Its system-font
-directory is a controlled fixture: a runner's installed families otherwise
-outscore the tiny fonts on language coverage. A negative case proves that a
-matching system font cannot satisfy a missing bundled family. It covers every
-sub-check's failure reporting. The real pinned binary/font payload is also
+small original TrueType fonts and a conflicting runner LFS. Its controlled
+system-font directory includes higher-revision copies of bundled families and
+stock-only Liberation. Tests cover nested package paths, an already populated
+stock cache, families beyond the seven probe queries, and refusal of a matching
+system font when a bundled family is missing. It covers every sub-check's
+failure reporting. The real pinned binary/font payload is also
 checked during every bundle build. An additional offline native test accepts an
 already acquired tree (including its
 `bin/node`) or a complete runtime:

@@ -38,6 +38,13 @@ type AssetLock = {
 
 const PACKAGE_NAMES = ["git-lfs", "fonts-noto-color-emoji", "fonts-unifont", "xfonts-cyrillic", "xfonts-scalable",
   "fonts-ipafont-gothic", "fonts-wqy-zenhei", "fonts-tlwg-loma-otf", "fonts-freefont-ttf"].sort();
+// Canonical families of the pinned fonts exposed by fontconfig/FreeType. A
+// matching face is excluded with all its localized aliases and styles too.
+const BUNDLED_FONT_FAMILIES = [
+  "Noto Color Emoji", "Unifont", "Unifont CSUR", "Unifont Sample", "Unifont Upper", "Unifont-JP",
+  "IPAGothic", "IPAPGothic", "WenQuanYi Zen Hei", "WenQuanYi Zen Hei Mono", "WenQuanYi Zen Hei Sharp",
+  "Loma", "FreeSans", "FreeSerif", "FreeMono", "Bitstream Charter", "Courier 10 Pitch",
+];
 const safePath = (name: string) => typeof name === "string" && /^[A-Za-z0-9_+./-]+$/.test(name) &&
   !path.posix.isAbsolute(name) && name.split("/").every(part => part !== "" && part !== "." && part !== "..");
 
@@ -154,12 +161,26 @@ export async function stageExtractedSystemAssets(options: {
   const filters = Object.entries({ clean: `${lfs} clean -- %f`, smudge: `${lfs} smudge -- %f`, process: `${lfs} filter-process` })
     .map(([name, command]) => `\t${name} = ${JSON.stringify(command)}\n`).join("");
   await writeFile(path.join(worker, "gitconfig"), `[filter "lfs"]\n${filters}\trequired = true\n`, { mode: 0o444, flag: "wx" });
+  // Fontconfig's glob filters apply to directories, separately from pattern
+  // filters. Qualify family rejection at scan time instead: only stock copies
+  // get this marker. A rule-specific cache salt prevents reuse of unmarked host
+  // patterns (or a previous family set), without embedding a runtime/build path.
+  const stockSalt = `zeros-runtime-stock-v1-${sha256(canonicalJson(BUNDLED_FONT_FAMILIES)).slice(0, 12)}`;
+  const stockRules = BUNDLED_FONT_FAMILIES.map(family => `  <match target="scan">
+    <test name="file" compare="contains"><string>/usr/share/fonts/</string></test>
+    <test name="family"><string>${family}</string></test>
+    <edit name="fontformat" mode="assign"><string>ZerosBlockedSystemFont</string></edit>
+  </match>`).join("\n");
   await writeFile(path.join(worker, "design-fonts/fonts.conf"), `<?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
 <fontconfig>
   <dir prefix="relative">.</dir>
-  <dir>/usr/share/fonts</dir>
+  <dir salt="${stockSalt}">/usr/share/fonts</dir>
   <cachedir prefix="xdg">fontconfig</cachedir>
+${stockRules}
+  <selectfont><rejectfont><pattern>
+    <patelt name="fontformat"><string>ZerosBlockedSystemFont</string></patelt>
+  </pattern></rejectfont></selectfont>
   <alias><family>sans-serif</family><prefer><family>FreeSans</family></prefer></alias>
   <alias><family>serif</family><prefer><family>FreeSerif</family></prefer></alias>
   <alias><family>monospace</family><prefer><family>FreeMono</family></prefer></alias>
