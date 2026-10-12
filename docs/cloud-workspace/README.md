@@ -51,7 +51,7 @@ migration, publication, adoption and acceptance gates.
 | Area | Owning guides |
 | --- | --- |
 | Client routing, commands and access | [Client/runtime contract](client-runtime-contract.md), [relay capacity](relay-capacity.md), [native access acceptance](native-access-acceptance.md), [native preview acceptance](native-preview-acceptance.md) |
-| Durable data and copies | [Data and sync](data-and-sync.md), [native checkpoint format](checkpoint-native-format.md) |
+| Durable data and copies | [Data and sync](data-and-sync.md), [native checkpoint format](checkpoint-native-format.md), [stopped snapshot recovery](checkpoint-recovery.md) |
 | Organization and account authority | [Organization setup](organization-setup.md), [Pro backend](pro-backend.md), [account Pro operations](account-pro-operations.md), [compute credits](compute-credits.md) |
 | Cloud Computer | [Template builds](computer-template-builds.md), [durable named snapshots](computer-named-snapshots.md), [runtime images](runtime-images.md), [template forks](template-forks.md), [template retention](computer-template-retention.md), [Computer tools](computer-tools.md), [environment/setup](computer-environment.md) |
 | Native agents and customization | [Authentication/language tools](agent-authentication-and-language-tools.md), [bounded repo configuration](agent-authentication-and-language-tools.md#repository-instructions-and-configuration), [MCP and skills](mcp-and-skills.md), [provider background work](provider-background-work.md) |

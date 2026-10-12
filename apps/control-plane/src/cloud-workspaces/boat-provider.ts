@@ -228,6 +228,12 @@ export class BoatWorkspaceProvider
         ...(sandbox.memoryGB ? { memoryGB: sandbox.memoryGB } : {}),
         snapshotAvailable: sandbox.snapshotAvailable ?? false,
         lastSnapshotStatus: sandbox.lastSnapshotStatus ?? null,
+        // Explicit absence on an owned, stopped sandbox is recoverable from
+        // a checkpoint. Omitted fields, failed captures and pending uploads
+        // do not establish loss; never infer expiry from a local age timer.
+        ...(sandbox.state === "archived" && sandbox.snapshotAvailable === false &&
+          (sandbox.lastSnapshotStatus === "completed" || sandbox.lastSnapshotStatus === null) &&
+          billingScope === "match" && !sourceMismatch ? { snapshotMissing: true } : {}),
       },
     };
   }
@@ -524,7 +530,7 @@ export class BoatWorkspaceProvider
     if (current.state === "archiving")
       throw failure("provider_operation_pending", true);
     if (current.state === "failed")
-      throw failure("provider_snapshot_unavailable");
+      throw failure(current.metadata.snapshotMissing === true ? "provider_snapshot_missing" : "provider_snapshot_unavailable");
     await this.client.request(`/sandboxes/${resourceId}/resume`, {
       method: "POST",
       body: { ttlSeconds },

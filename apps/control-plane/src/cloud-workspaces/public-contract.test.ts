@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { isCustomerCloudPath, publicCloudError } from "./public-contract.js";
 
 describe("customer cloud response boundary", () => {
+  it("explains how to unblock checkpoint recovery without provider details", () => {
+    expect(publicCloudError("cloud_recovery_computer_unavailable").message).toBe("Build the current Cloud Computer before restoring this workspace.");
+    expect(publicCloudError("cloud_recovery_repository_unavailable").message).toBe("The current Cloud Computer must include this workspace's repository before it can be restored.");
+  });
   it("distinguishes an authorized absent conversation from an absent workspace", () => {
     expect(publicCloudError("cloud_conversation_not_found")).toEqual({ code: "cloud_conversation_not_found", message: "Cloud conversation not found" });
     expect(publicCloudError("not_found")).toEqual({ code: "not_found", message: "Cloud workspace not found" });

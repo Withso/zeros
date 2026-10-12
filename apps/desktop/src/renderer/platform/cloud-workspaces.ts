@@ -3,7 +3,7 @@ import { z } from "zod";
 import { CloudComputerAdminWorkspaceSchema } from "@zeros/protocol/cloud-computer-v2";
 import { CloudNativeCapabilitiesSchema } from "@zeros/protocol/cloud-agent-execution";
 import { CloudAgentInitialAdoptionsSchema } from "@zeros/protocol/cloud-agent-bootstrap";
-import { CloudRuntimeUpgradeAvailabilitySchema, type CloudRuntimeUpgradeAvailability } from "@zeros/protocol/cloud-runtime-lifecycle";
+import { CloudRuntimeUpgradeAvailabilitySchema, CloudWorkspaceCheckpointRestoreSchema, type CloudRuntimeUpgradeAvailability } from "@zeros/protocol/cloud-runtime-lifecycle";
 import { getSession } from "../features/auth/auth-store";
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
@@ -56,6 +56,7 @@ export const CloudWorkspaceDocumentSchema = z.object({
     checkpointAt: z.string().nullable(),
     sourceGeneration: z.number().int().positive(),
     needsAcknowledgement: z.boolean(),
+    restored: CloudWorkspaceCheckpointRestoreSchema.nullable().optional(),
   }).nullable().optional(),
   placement: z.literal("cloud"),
   status: z.string().min(1).max(64),

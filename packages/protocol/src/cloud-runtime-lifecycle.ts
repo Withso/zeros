@@ -1,6 +1,17 @@
 import { z } from "zod";
 import { RuntimeIdSchema } from "./cloud-runtime-bundle";
 
+/** Completed restoration is history, separate from active recovery and VM
+ * readiness. Older servers omit it; bind it to the exact current generation. */
+export const CloudWorkspaceCheckpointRestoreSchema = z.object({
+  checkpointId: z.string().uuid(),
+  checkpointAt: z.string().datetime({ offset: true }),
+  completedAt: z.string().datetime({ offset: true }),
+  sourceGeneration: z.number().int().positive().safe(),
+  generation: z.number().int().positive().safe(),
+}).strict().refine(value => value.generation > value.sourceGeneration);
+export type CloudWorkspaceCheckpointRestore = z.infer<typeof CloudWorkspaceCheckpointRestoreSchema>;
+
 /** Staff-only explicit upgrade. The server retains the source base and pins
  * the selected runtime once; operationId replays that accepted selection. */
 export const CloudRuntimeUpgradeRequestSchema = z.object({

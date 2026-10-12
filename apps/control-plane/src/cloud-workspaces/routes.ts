@@ -361,7 +361,8 @@ type WorkspaceRow = CloudRuntimePinRow & {
   observed_state: string;
   provider_target: string | null;
   provider_last_observed_at: Date | string | null;
-  recovery: { state: string | null; checkpointId: string | null; checkpointAt: string | null; sourceGeneration: number; needsAcknowledgement: boolean } | null;
+  recovery: { state: string | null; checkpointId: string | null; checkpointAt: string | null; sourceGeneration: number; needsAcknowledgement: boolean;
+    restored: import("./workspace-ui-contracts.js").CloudWorkspaceCheckpointRestore | null } | null;
 };
 
 type IntentRow = {
@@ -463,7 +464,17 @@ const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
                  AND transition.source_generation=cw.current_generation AND transition.operation='recover')
                THEN 'recovery_needed' ELSE NULL END),
            'checkpointId', checkpoint.id, 'checkpointAt', checkpoint.durable_at, 'sourceGeneration', cw.current_generation,
-           'needsAcknowledgement', coalesce(NOT ${cloudRecoveryPointLosslessSql("cw.current_generation")},true))
+           'needsAcknowledgement', coalesce(NOT ${cloudRecoveryPointLosslessSql("cw.current_generation")},true),
+           'restored', (SELECT json_build_object('checkpointId',restored.id,'checkpointAt',restored.durable_at,
+               'completedAt',transition.completed_at,'sourceGeneration',transition.source_generation,'generation',generation.generation)
+             FROM cloud_workspace_generation_transitions transition
+             JOIN cloud_workspace_generations generation ON generation.workspace_id=transition.workspace_id
+               AND generation.org_id=transition.org_id AND generation.generation=transition.candidate_generation
+             JOIN workspace_checkpoints restored ON restored.id=generation.recovery_checkpoint_id
+               AND restored.workspace_id=cw.id AND restored.org_id=cw.org_id AND restored.state='durable'
+             WHERE transition.workspace_id=cw.id AND transition.org_id=cw.org_id AND transition.operation='recover'
+               AND transition.state='succeeded' AND transition.candidate_generation=cw.current_generation
+             ORDER BY transition.completed_at DESC LIMIT 1))
            FROM (SELECT 1) recovery_scope LEFT JOIN workspace_content_heads head ON head.workspace_id=cw.id
            LEFT JOIN workspace_checkpoints checkpoint ON checkpoint.id=head.current_checkpoint_id AND checkpoint.state='durable') AS recovery,
          cw.repository_forge, cw.repository_owner, cw.repository_name,

@@ -61,6 +61,29 @@ describe("compact cloud workspace details", () => {
     expect(html).not.toContain("12.5% used");
     expect(html).toContain("Recovery needs attention");
   });
+  it("shows successful checkpoint restoration and its exclusions while retaining running usage", () => {
+    const restored = { checkpointId: "33333333-3333-4333-8333-333333333333", checkpointAt: "2026-10-01T00:00:00Z",
+      completedAt: "2026-10-02T00:00:00Z", sourceGeneration: 1, generation: 2 };
+    const recovered = { ...workspace, recovery: { state: null, checkpointId: null, checkpointAt: null, sourceGeneration: 2,
+      needsAcknowledgement: true, restored } };
+    const html = render({ workspace: recovered, resourceUsage: usage });
+    expect(html).toContain("Restored from checkpoint");
+    expect(html).toContain("Home directories");
+    expect(html).toContain("ignored or private files");
+    expect(html).toContain("credentials");
+    expect(html).toContain("running processes");
+    expect(html).toContain("extra installed packages");
+    expect(html).toContain("Work newer than this checkpoint may be missing");
+    expect(html).toContain("Running");
+    expect(html).toContain("12.5% used");
+    expect(render({ workspace: { ...recovered, generation: { ...workspace.generation, number: 3 } } })).not.toContain("Restored from checkpoint");
+  });
+  it("shows the current Computer refusal when recovery needs attention", () => {
+    const html = render({ workspace: { ...workspace, status: "failed", recovery: { state: "recovery_needed", checkpointId: null,
+      checkpointAt: null, sourceGeneration: 2, needsAcknowledgement: false },
+      error: { code: "cloud_recovery_computer_unavailable", message: "Build the current Cloud Computer before restoring this workspace." } } });
+    expect(html).toContain("Build the current Cloud Computer before restoring this workspace.");
+  });
   it.each(["stopped", "failed", "archived"])("does not display a running sample for %s", status => {
     const html = render({ workspace: { ...workspace, status }, resourceUsage: usage });
     expect(html).not.toContain("12.5% used");

@@ -141,6 +141,17 @@ describe("authorized runtime update controls", () => {
   });
 });
 describe("cloud checkpoint recovery controls", () => {
+  it("scopes the restore notice to its cloud owner and generation across placement switches", () => {
+    state.workspace!.generation.number = 2;
+    state.workspace!.recovery = { state: null, checkpointId: null, checkpointAt: null, sourceGeneration: 2, needsAcknowledgement: true,
+      restored: { checkpointId: "33333333-3333-4333-8333-333333333333", checkpointAt: "2026-10-01T00:00:00Z",
+        completedAt: "2026-10-02T00:00:00Z", sourceGeneration: 1, generation: 2 } };
+    expect(render()).toContain("Restored from checkpoint");
+    expect(render("/local/workspace")).toBe("");
+    expect(render("/organizations/example/local-workspace")).toBe("");
+    state.workspace = { ...state.workspace!, organizationId: "99999999-9999-4999-8999-999999999999", recovery: null };
+    expect(render("cloud://99999999-9999-4999-8999-999999999999/22222222-2222-4222-8222-222222222222")).not.toContain("Restored from checkpoint");
+  });
   it.each(["failed", "stopping", "stopped"])("keeps the failed setup visible while the workspace is %s", status => {
     Object.assign(state.workspace!, { status, recovery: null, setupFailure: { code: "setup_image_contract_invalid", hasLog: false } });
     const html = render();

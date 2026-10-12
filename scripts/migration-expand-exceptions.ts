@@ -11,6 +11,7 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
       `DROP TRIGGER ${trigger} ON cloud_workspace_engine_instances;`),
   },
   "0145_cloud_computer_named_snapshots.sql": {},
+  "0146_cloud_provider_snapshot_recovery.sql": {},
   // The constraint is re-added at once with one more allowed purpose.
   "0141_cloud_runtime_images.sql": {
     "widen-check": ["ALTER TABLE cloud_builder_vm_operations DROP CONSTRAINT cloud_builder_vm_operations_purpose_check;"],
@@ -22,6 +23,7 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
 // Exact reviewed function body, including quoted SQL. Changing its semantics or
 // even formatting requires updating this review pin and compatibility evidence.
 const computerNamedPinDigest = "8ec827f17e5dd360032affa81051498682ab39b8c355284f5b341f30e8126258";
+const providerRecoveryEvidenceDigest = "e5f93ac17017bc01286ac0e856530ed299bfb0307622f8f2b850d4d0590993ed";
 const authorityDigest = "797f837c345244da5af77d503614c9ddf3abb03048998a0081b98a3c2512ab30";
 const deletedBootPointerDigest = "9cff55a9f31819e2468f331b64d2ba978b0e1dd2bdb39d332dad892fe49fc562";
 
@@ -96,7 +98,9 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
       (rule === "deleted-boot-pointer" && file === "0142_cloud_workspace_data_purge.sql" &&
         createHash("sha256").update(statement).digest("hex") === deletedBootPointerDigest) ||
       (rule === "computer-named-pin" && file === "0145_cloud_computer_named_snapshots.sql" &&
-        createHash("sha256").update(statement).digest("hex") === computerNamedPinDigest);
+        createHash("sha256").update(statement).digest("hex") === computerNamedPinDigest) ||
+      (rule === "provider-recovery-evidence" && file === "0146_cloud_provider_snapshot_recovery.sql" &&
+        createHash("sha256").update(statement).digest("hex") === providerRecoveryEvidenceDigest);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");
     accepted++;
     return "\n";
