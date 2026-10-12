@@ -2,6 +2,7 @@ import type { OrganizationSummary } from "./control-plane";
 import { getKnownPersonalOrganizationIds } from "./organization-membership-history";
 import { PERSONAL_ORGANIZATION_ID } from "./personal-organization";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { isFeatureEnabled } from "../../config/release-channel";
 
 /** Repository choices follow their runtime owner, even before any workspace
  * rows are loaded. Never hand a cloud URI to the Local branch picker. */
@@ -12,7 +13,7 @@ export function filterProjectsForOrganization<T extends { repoRoot: string }>(
   const local = !owner || owner === PERSONAL_ORGANIZATION_ID || getKnownPersonalOrganizationIds().includes(owner);
   const filtered = projects.filter(project => {
     if (!isCloudWorkspace(project.repoRoot)) return local;
-    if (local) return false;
+    if (local || !isFeatureEnabled("cloud-workspaces")) return false;
     try { return parseCloudWorkspaceKey(project.repoRoot)?.organizationId === owner?.toLowerCase(); }
     catch { return false; }
   });
@@ -30,6 +31,7 @@ export function canCreateWorkspaceIn(
 ): boolean {
   if (placement === "local") return !organization || organization.isPersonal;
   return Boolean(
+    isFeatureEnabled("cloud-workspaces") &&
     organization &&
     !organization.isPersonal &&
     organization.workspaceCapabilities.cloud,
@@ -84,6 +86,8 @@ export function filterRowsForOrganization<T extends OrganizationOwned>(
   rows: readonly T[],
   organization: OrganizationSummary | null,
 ): T[] {
+  if (!isFeatureEnabled("cloud-workspaces") && rows.some(row => row.placement === "cloud"))
+    rows = rows.filter(row => row.placement !== "cloud");
   if (!organization) return rows as T[];
   const personalIds = organization.isPersonal
     ? new Set(

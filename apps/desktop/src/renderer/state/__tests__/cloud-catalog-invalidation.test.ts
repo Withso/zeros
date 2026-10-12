@@ -1,3 +1,5 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CloudWorkspaceDocument } from "@/renderer/platform/cloud-workspaces";
 
@@ -105,7 +107,7 @@ it("a cloud catalog change does not invalidate every Local repository", () => {
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
   });
-  CloudWorkspaceLifecycle();
+  renderToStaticMarkup(createElement(CloudWorkspaceLifecycle));
   const cleanup = state.effects.find(effect => effect.toString().includes("clearCloudWorkspaceCatalog"))!();
   if (cleanup) cleanups.push(cleanup);
   acceptCloudWorkspaceDocument(doc);

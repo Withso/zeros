@@ -17,6 +17,8 @@ import {
 import { loginCursorSubscription } from "./cursor-subscription";
 import { resolveRuntime } from "./provider-subscription";
 import type { CommandHandler } from "../router";
+import { channel } from "../../../src/engine/runtime";
+import { cloudWorkspaceChannelEnabled } from "../../../shared/cloud-workspace-channel";
 
 const controller = new CloudProviderAuthController({
   reportFailure(event) { console.warn("[cloud-provider-auth] connection failed", event); },
@@ -137,6 +139,8 @@ const controller = new CloudProviderAuthController({
 onMainAuthSessionChanged(() => controller.stop());
 const windows = new Set<number>();
 export const cloudProviderAuth: CommandHandler = (args, event) => {
+  if (!cloudWorkspaceChannelEnabled(channel()))
+    throw new Error("Cloud agent connections are not available in this release channel.");
   const request = cloudProviderAuthActionSchema.safeParse(args);
   if (!request.success)
     throw new Error("Invalid cloud account connection request.");

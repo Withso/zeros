@@ -21,6 +21,51 @@ function baseEnv(): NodeJS.ProcessEnv {
   };
 }
 
+describe("Local-only release channels", () => {
+  it.each(["beta", "production"])("disables every cloud subsystem on %s before reading its stale configuration", channel => {
+    const config = loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
+      CLOUD_WORKSPACES_ENABLED: "true", CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
+      CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: "true", CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "true",
+      CLOUD_RUNTIME_PUBLICATION_ENABLED: "true", CLOUD_WORKSPACE_PROVIDER: "retired-provider",
+      CLOUD_WORKSPACE_NEW_RUNTIME_PROFILE: "legacy", CLOUD_RUNTIME_OIDC_ENVIRONMENT: "alpha" });
+    expect(config.cloudWorkspaces).toBeNull();
+    expect(config.cloudAgentCredentials).toBeNull();
+    expect(config.selectedCloudWorker).toBeNull();
+    expect(config.cloudRuntimePublication).toMatchObject({ enabled: false, s3: null });
+    expect(config.cloudWorkspaceResumeExistingEnabled).toBe(false);
+    expect(config.cloudWorkspaceNewRuntimeProfile).toBe("v4");
+  });
+
+  it("still validates the shared database and authentication configuration", () => {
+    expect(() => loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: "beta", DATABASE_URL: "invalid" })).toThrow();
+    expect(() => loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: "production", AUTH_AUDIENCE: "" })).toThrow();
+  });
+
+  it.each(["beta", "production"])("restores the existing cloud config on %s when its checked-in pause switch is flipped", async channel => {
+    vi.resetModules();
+    vi.doMock("./cloud-workspace-channels.json", () => ({ default: { development: true, alpha: true,
+      beta: channel === "beta", production: channel === "production" } }));
+    try {
+      const { loadConfig: unpausedConfig } = await import("./config.js");
+      const config = unpausedConfig({ ...cloudSetupEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
+        CLOUD_WORKSPACE_OBJECT_STORE_KIND: "s3", CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: undefined,
+        CLOUD_RUNTIME_PUBLICATION_ENABLED: "true", CLOUD_WORKSPACE_S3_ENDPOINT: "https://objects.example.test",
+        CLOUD_WORKSPACE_S3_BUCKET: "runtime-artifacts", CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: "synthetic-access",
+        CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: "synthetic-secret" });
+      expect(config.cloudWorkspaces).toMatchObject({ provider: "boat", backgroundWorkersEnabled: true });
+      expect(config.cloudWorkspaces?.setupExecution).not.toBeNull();
+      expect(config.cloudAgentCredentials).not.toBeNull();
+      expect(config.cloudRuntimePublication).toMatchObject({ enabled: true, environment: channel });
+      // Unpause restores credential validation too; it is not a bypass.
+      expect(() => unpausedConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: channel, CLOUD_WORKSPACES_ENABLED: "true" }))
+        .toThrow(/cloud workspace/i);
+    } finally {
+      vi.doUnmock("./cloud-workspace-channels.json");
+      vi.resetModules();
+    }
+  });
+});
+
 describe("retired Alpha deletion readiness exception", () => {
   // Automatic deferral replaced the expiring allowlist. A value left in a
   // deployed environment, including a malformed one, must not affect boot.
@@ -42,10 +87,10 @@ describe("same-generation resume configuration", () => {
         CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "false" }).cloudWorkspaceResumeExistingEnabled).toBe(false);
     }
   });
-  it("defaults off elsewhere and rejects an explicit non-Alpha enable", () => {
+  it("defaults off in development and rejects an explicit development enable", () => {
     expect(loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: "alpha",
       CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "true" }).cloudWorkspaceResumeExistingEnabled).toBe(true);
-    for (const channel of ["development", "beta", "production", "preview", ""]) {
+    for (const channel of ["development", "preview", ""]) {
       expect(loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: channel }).cloudWorkspaceResumeExistingEnabled).toBe(false);
       expect(() => loadConfig({ ...baseEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
         CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED: "true" })).toThrow(/resume.*Alpha/i);
@@ -112,7 +157,7 @@ describe("runtime publication configuration", () => {
     expect(message.includes("http:")).toBe(false);
   });
 
-  it.each(["alpha", "beta", "production"])("admits publication with the matching default OIDC environment on %s", channel => {
+  it.each(["alpha"])("admits publication with the matching default OIDC environment on %s", channel => {
     const config = loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel });
     expect(config.cloudRuntimePublication).toMatchObject({
       enabled: true, audience: `zeros-control-plane-${channel}`, environment: channel,
@@ -125,15 +170,18 @@ describe("runtime publication configuration", () => {
     expect(() => loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel })).toThrow(/runtime publication.*channel/i);
   });
 
-  it.each(["alpha", "beta", "production"])("refuses an explicit OIDC environment for another deployment channel: %s", channel => {
+  it.each(["alpha"])("refuses an explicit OIDC environment for another deployment channel: %s", channel => {
     expect(() => loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
       CLOUD_RUNTIME_OIDC_ENVIRONMENT: channel === "alpha" ? "beta" : "alpha" }))
       .toThrow(/runtime publication.*CLOUD_RUNTIME_OIDC_ENVIRONMENT/);
   });
 
-  it.each(["beta", "production"])("keeps the legacy null-environment opt-out confined to Alpha: %s", channel => {
-    expect(() => loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
-      CLOUD_RUNTIME_OIDC_ENVIRONMENT: "" })).toThrow(/runtime publication.*CLOUD_RUNTIME_OIDC_ENVIRONMENT/);
+  it.each(["beta", "production"])("keeps publication inert on %s regardless of a leftover OIDC environment", channel => {
+    for (const environment of [undefined, "", "alpha", channel]) {
+      expect(loadConfig({ ...publicationEnv(), RAILWAY_ENVIRONMENT_NAME: channel,
+        CLOUD_RUNTIME_OIDC_ENVIRONMENT: environment }).cloudRuntimePublication)
+        .toMatchObject({ enabled: false, environment: channel, s3: null });
+    }
   });
 });
 

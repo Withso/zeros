@@ -134,8 +134,8 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       cloud_enabled: ${{ steps.capability.outputs.cloud_enabled }}
     env:
-      # Protected release capability, baked into both Electron main and the
-      # packaged engine. Unset environments remain explicitly fail-closed.
+      RELEASE_CHANNEL: production
+      # The checked-in channel policy below overrides stale cloud opt-ins.
       ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
       CLOUD_WORKSPACE_PROVIDER: ${{ vars.CLOUD_WORKSPACE_PROVIDER || 'boat' }}
 
@@ -199,6 +199,9 @@ jobs:
 
       - name: Setup Bun (for engine sidecar compile)
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Apply the cloud channel pause
+        run: node scripts/release/channel-policy.mjs --github-env
 
       - name: Record the baked cloud capability
         id: capability
@@ -671,6 +674,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Apply the cloud channel pause
+        run: node scripts/release/channel-policy.mjs --github-env
       - name: Download notarized release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

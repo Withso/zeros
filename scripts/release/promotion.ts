@@ -1,5 +1,5 @@
 import { refuseRetiredWorkerPromotion } from "./worker-retirement";
-import { HostedReceipt, HostedServicesReceipt, MigrationReceipt, PromotionError, ReleaseIdentity, requireCheck, type PromotionConfig, type Surface } from "./contracts";
+import { assertCloudChannelState, HostedReceipt, HostedServicesReceipt, MigrationReceipt, PromotionError, ReleaseIdentity, requireCheck, type PromotionConfig, type Surface } from "./contracts";
 
 export type PromotionDependencies = {
   assertCurrent(): Promise<void>;
@@ -43,6 +43,7 @@ export async function promoteServices(config: PromotionConfig, deps: PromotionDe
     stage = "Railway readiness";
     await deps.waitDeployment(railwayDeploymentId);
     const backend = ReleaseIdentity.parse(await deps.waitIdentity());
+    assertCloudChannelState(config.channel, backend);
     requireCheck(backend.channel === config.channel && backend.sourceSha === config.sourceSha && backend.migrations.head === backend.migrations.expectedHead,
       "Services API identity does not belong to this exact release");
     stage = "Pages publication";
@@ -93,6 +94,7 @@ export async function finalizePromotion(config: PromotionConfig, value: unknown,
     const railwayDeploymentId = services.railwayDeploymentId;
     stage = "final API readiness";
     const backend = ReleaseIdentity.parse(await deps.waitIdentity());
+    assertCloudChannelState(config.channel, backend);
     requireCheck(backend.channel === config.channel && backend.sourceSha === config.sourceSha &&
       backend.migrations.head === services.backend.migrations.head && backend.migrations.expectedHead === services.backend.migrations.expectedHead &&
       backend.migrations.manifestSha256 === services.backend.migrations.manifestSha256, "Final API source or migration manifest changed after services promotion");

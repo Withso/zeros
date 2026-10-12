@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { loadConfig } from "../../apps/control-plane/src/config";
+import { cloudWorkspaceChannelEnabled } from "../../apps/control-plane/src/cloud-workspaces/channel-policy";
 import { BoatAccountAdmissionConfigurationSchema } from "../../apps/control-plane/src/cloud-workspaces/boat-account-admission";
 import { CHANNELS, ReleaseIdentity, WorkerIdentity, type Channel } from "./contracts";
 import { WORKER_TUPLE_KEYS } from "./worker-identity";
@@ -93,6 +94,7 @@ function validateCanaries(values: Record<string, string>): string[] {
 
 export function validateCloudProvisionConfiguration(values: Record<string, string>, channel: Channel,
   inputs: NodeJS.ProcessEnv = {}): CloudProvisionValidation {
+  if (!cloudWorkspaceChannelEnabled(channel)) return { ok: false, names: ["CLOUD_WORKSPACE_CHANNEL"] };
   const names = validateCanaries(values);
   const databaseUrl = "postgresql://cloud_provision@127.0.0.1:5432/zeros";
   const env: NodeJS.ProcessEnv = { ...values, DATABASE_URL: databaseUrl,

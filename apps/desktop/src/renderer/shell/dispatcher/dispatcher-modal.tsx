@@ -117,6 +117,7 @@ import {
   getOrganizationStoreGeneration,
 } from "../../features/team/team-store";
 import { canCreateWorkspaceIn, localWorkspaceOwner } from "../../features/team/organization-capabilities";
+import { CloudWorkspacePausedNotice, useOrganizationCloudPaused } from "../../features/team/cloud-workspace-pause";
 import { useNativeRuntime } from "../../platform/runtime";
 import { createWorkspaceForProject } from "../create-workspace";
 import { RepositoryIcon } from "../../features/repositories/repository-icon";
@@ -158,7 +159,13 @@ function resolveInitialProjectId(
   return projects[0]?.id ?? null;
 }
 
-export function DispatcherPage({
+export function DispatcherPage(props: DispatcherPageProps) {
+  const paused = useOrganizationCloudPaused();
+  if (paused) return <main className="p-8"><CloudWorkspacePausedNotice /></main>;
+  return <ActiveDispatcherPage {...props} />;
+}
+
+function ActiveDispatcherPage({
   active,
   initialProjectId,
   onOpenProject,

@@ -542,12 +542,18 @@ prefixed—to a desktop release environment. The release gate rejects any
 
 `ZEROS_CLOUD_WORKSPACES_ENABLED` is a separate exact-`true` desktop build
 capability, not the Railway `CLOUD_WORKSPACES_ENABLED` rollout flag and not an
-installed-app preference. The protected release environment supplies one value
-to both the packaged engine and Electron compile steps; each artifact bakes it,
-and Electron pins the child environment to the same decision. Leave it unset or
-set it to `false` until the channel is approved. Enabling only the backend does
-not activate a desktop client, and enabling only the desktop does not bypass
-backend admission. The first cloud release leaves public cloud-preview suffixes
+installed-app preference. The checked-in
+[`cloud-workspace-channels.json`](../apps/control-plane/src/cloud-workspace-channels.json)
+policy is an additional required gate shared by desktop builds, control-plane
+configuration and release jobs. Development/Alpha allow cloud; Beta/Production
+pause it. Desktop `dev` maps to `development`, and `stable` to `production`.
+Environment opt-ins cannot override a paused channel. On an allowed channel,
+the protected release environment supplies one value to both the packaged
+engine and Electron compile steps; each artifact bakes it, and Electron pins
+the child environment to the same decision. Leave it unset or set it to `false`
+until the channel is approved. Enabling only the backend does not activate a
+desktop client, and enabling only the desktop does not bypass backend admission.
+The first cloud release leaves public cloud-preview suffixes
 unset: Cloud Preview URL controls are hidden, while preview-independent
 forward-to-localhost tunnels remain available. The release-environment check
 allows cloud-enabled builds without preview suffixes and validates their format
@@ -556,8 +562,9 @@ requires no provider gateway pin; a
 supplied pin document is still validated. Flags-off builds remain valid without
 either value.
 
-Organization Settings → Agents credential enrollment is independent of desktop
-cloud execution. Signed-in members can connect their own native accounts while
+On channels that allow cloud, Organization Settings → Agents credential
+enrollment is independent of desktop cloud execution. Signed-in members can
+connect their own native accounts while
 `ZEROS_CLOUD_WORKSPACES_ENABLED=false`; Electron still validates requests, binds
 ceremonies to the current main session and window, and imports into the current
 channel's authenticated backend. That backend needs its credential encryption
@@ -565,6 +572,58 @@ and Codex refresh-fingerprint keys. Enrollment allocates no VM, bypasses no
 workspace admission gate, and does not authorize release checks: **Use for release
 checks** retains its separate configured platform-owner and current-revision
 consent requirements.
+
+### Reversible cloud pause
+
+The Beta/Production pause preserves cloud rows, objects, provider resources,
+runtime pins and desktop caches. It performs no resource cleanup. The desktop
+hides cloud workspaces and controls, shows “Cloud workspaces are paused” where
+organization cloud creation/settings would appear, and sends no cloud API
+requests. Local Personal and organization-local workspaces and device agents
+keep their existing behavior.
+
+The control plane ignores stale cloud opt-ins before constructing cloud
+configuration: no cloud provider client, worker, listener, runtime publication
+or qualification starts. Shared authentication, security and directory services
+remain enabled. Release identity reports disabled cloud without reading cloud
+health, the runtime registry or worker qualifications. The hosted release can
+repair an older deployment without first requiring that older deployment's
+cloud readiness, and verifies the pause on the newly deployed API before
+publication.
+
+Beta/Production releases still apply **all pending expand migrations**, including
+cloud migrations, using the normal backup, checksum and schema verification.
+Any genuinely pending controlled migration retains its existing approval gate.
+Exact-source CI, CodeQL, WorkOS/auth checks, release receipts, signing and
+Production approval/notarization remain mandatory. Cloud runtime publication,
+worker selection and cloud readiness do not block a paused desktop release.
+
+The pause is evaluated only at desktop, control-plane and release boundaries.
+A VM engine has no required release-channel field and does not consult the
+desktop gate; a missing channel cannot disable an Alpha VM's agents or transport.
+
+Unpause checklist (one channel at a time):
+
+1. Change that channel's boolean in `cloud-workspace-channels.json` to `true` in
+   a reviewed release. This restores its existing cloud UI, configuration and
+   release checks without reverting code. Retain the environment opt-outs until
+   the channel's supported runtime is qualified.
+2. Apply pending migrations and deploy the compatible control plane normally.
+   Configure the channel's v4 runtime publication, artifact store and OIDC
+   environment/audience, then publish with `cloud-runtime-bundle.yml`.
+3. Approve the base, build/promote the supported runtime image and complete the
+   channel's runtime and native-agent qualification before admitting customer
+   workspaces. Preserve each workspace's pinned runtime and existing resources.
+   Keep the retired v3 `ZEROS_WORKER_PROMOTION` lane **disabled**; it is not the
+   supported v4 promotion path.
+4. Enable the channel's existing backend/desktop rollout settings. Cloud
+   readiness and the configured qualification checks now apply again; verify
+   the deployed release identity and the normal publication receipt. Rebuild
+   the desktop so its baked channel policy and capability match the backend.
+5. The owner smoke-tests Beta, including Local, organization-local and existing
+   cloud workspaces and owner switching. Dispatch Production only after the
+   owner's go-ahead. To pause again, set the boolean to `false` and release;
+   no cloud data or provider resources need deletion or reconstruction.
 
 Set GitHub Environment deployment-branch protection too: `alpha` permits only
 `main`; `beta` and `production` permit `release/*`, with `main` also allowed
@@ -620,7 +679,9 @@ its existing Alpha audience default. A custom audience must match
 
 On Railway, enable `CLOUD_RUNTIME_PUBLICATION_ENABLED=true` only for the
 intended channel and retain its own CP-held `CLOUD_WORKSPACE_S3_*` artifact
-configuration. `CLOUD_RUNTIME_OIDC_ENVIRONMENT` defaults to that CP's channel;
+configuration. The checked-in channel policy must also allow cloud; publication
+remains disabled during the Beta/Production pause.
+`CLOUD_RUNTIME_OIDC_ENVIRONMENT` defaults to that CP's channel;
 if explicitly set it must match. Leave it nonempty for standalone publication.
 The explicit empty compatibility value is confined to the legacy Alpha push
 and cannot authorize this dispatch. Artifact credentials stay on the control
@@ -1539,11 +1600,13 @@ Owner setup, once per channel before **enabling** the controller:
 ## Worker lane and first rollout of this branch
 
 The opt-in v3 worker-promotion lane is retired. Setting
-`ZEROS_WORKER_PROMOTION=enabled` refuses before build/allocation, provider reads,
+`ZEROS_WORKER_PROMOTION=enabled` on an unpaused channel refuses before build/allocation, provider reads,
 credential preparation or release handoff. Default-disabled hosted promotion
 and publication keep their existing source, schema, receipt and exact worker
 checks. Explicit guarded storage reconciliation and historical receipts remain
 available; the supported artifact is the v4 runtime bundle.
+Paused channels normalize this stale opt-in to disabled before worker decisions;
+it cannot block their Local desktop release or re-enable the retired lane.
 
 The separate shared Dev native agent canary is also retired: `pnpm dev:agents`,
 the native/hosted canary producer and SSH/backend start entry points return

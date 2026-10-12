@@ -1,5 +1,5 @@
 import { refuseRetiredWorkerPromotion } from "./worker-retirement";
-import { CHANNELS, HostedReceipt, ReleaseIdentity, requireCheck, type Channel, type Surface } from "./contracts";
+import { assertCloudChannelState, CHANNELS, HostedReceipt, ReleaseIdentity, requireCheck, type Channel, type Surface } from "./contracts";
 
 type Candidate = { channel: Channel; sourceSha: string; branch: string; repository: string; runId: string; cloudRequired: boolean;
   /** False while worker promotion is off: cloud ships on the API's current worker state. */
@@ -25,6 +25,7 @@ export async function publicationGate(config: Candidate, deps: {
   const current = ReleaseIdentity.safeParse(await deps.identity());
   requireCheck(current.success, "Current channel readiness is unavailable; desktop publication refused");
   const identity = current.data, expected = receipt.backend;
+  assertCloudChannelState(config.channel, identity);
   requireCheck(identity.channel === config.channel && identity.sourceSha === config.sourceSha && expected.sourceSha === config.sourceSha &&
     identity.migrations.head === expected.migrations.head && identity.migrations.expectedHead === expected.migrations.expectedHead &&
     identity.migrations.manifestSha256 === expected.migrations.manifestSha256 && identity.cloud.enabled === expected.cloud.enabled &&

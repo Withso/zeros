@@ -16,6 +16,7 @@ import { getActiveBridge } from "./bridge/active-bridge";
 import { WorkspaceRuntimeClient, type CloudResourceUsageConnection } from "./bridge/workspace-runtime-client";
 import { bridgeWorkspaceResourceUsage } from "./bridge/workspace-bridge";
 import { forgetCloudWorkspacePortForwarding } from "./cloud-workspace-access";
+import { isFeatureEnabled } from "../config/release-channel";
 
 export const CloudWorkspaceActorRoleSchema = z.enum(["viewer", "prompter", "developer", "manager", "owner"]);
 export type CloudWorkspaceActorRole = z.infer<typeof CloudWorkspaceActorRoleSchema>;
@@ -130,6 +131,8 @@ export async function cloudAccountRequest<T>(
   schema: z.ZodType<T>,
   input?: { body: unknown; idempotencyKey: string; method?: "POST" | "DELETE" | "PUT" | "PATCH" },
 ): Promise<T> {
+  if (!isFeatureEnabled("cloud-workspaces"))
+    throw new Error("Cloud workspaces are not available in this release channel.");
   if (!CONTROL_PLANE_URL)
     throw new Error("Cloud workspaces are not configured");
   // Capture the initiating account synchronously, before token refresh or any

@@ -25,6 +25,7 @@ import { developmentIdentity, type DevelopmentIdentity } from "./development-env
 import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
 import { loadCloudRuntimeConfig, type CloudRuntimeConfig } from "./cloud-workspaces/runtime-config.js";
+import { cloudWorkspaceChannelEnabled } from "./cloud-workspaces/channel-policy.js";
 import { BOAT_BILLING_ORG_PATTERN } from "./cloud-workspaces/boat-client.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS } from "./request-timing.js";
 import { validateReleaseLedgerUrl } from "./client-compatibility.js";
@@ -338,7 +339,7 @@ export type Config = {
   /** Null unless the explicit paid-resource gate and complete provider block
    * are present. Merely setting a Boat API key never enables creation. */
   cloudWorkspaces: CloudWorkspaceBackendConfig | null;
-  cloudAgentCredentials?: CloudAgentCredentialConfig;
+  cloudAgentCredentials?: CloudAgentCredentialConfig | null;
   selectedCloudWorker?: SelectedCloudWorker | null;
   cloudRuntimePublication?: CloudRuntimePublicationConfig;
   /** Metadata for release identity; workspace selection is owned separately. */
@@ -1517,6 +1518,11 @@ const CloudRuntimePublicationEnvSchema = z.object({
 function loadCloudRuntimePublicationConfig(env: NodeJS.ProcessEnv, channel: Config["deploymentChannel"]): {
   publication: CloudRuntimePublicationConfig; newWorkspaceProfile: "v4";
 } {
+  if (!cloudWorkspaceChannelEnabled(channel)) return {
+    publication: { enabled: false, audience: `zeros-control-plane-${channel}`, repository: "Withso/zeros",
+      environment: channel === "production" ? "production" : "beta", s3: null },
+    newWorkspaceProfile: "v4",
+  };
   const parsed = CloudRuntimePublicationEnvSchema.safeParse(env);
   if (!parsed.success) {
     // Enum/url validators can quote their input in issue messages. Diagnostics
@@ -1580,7 +1586,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
   const e = parsed.data;
   const channel = (env.RAILWAY_ENVIRONMENT_NAME ?? "development").trim().toLowerCase();
   const deploymentChannel = channel === "alpha" || channel === "beta" || channel === "production" ? channel : "development";
-  const resumeFlag = env.CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED ?? (deploymentChannel === "alpha" ? "true" : "false");
+  const cloudChannel = cloudWorkspaceChannelEnabled(deploymentChannel);
+  const resumeFlag = cloudChannel
+    ? env.CLOUD_WORKSPACE_RESUME_EXISTING_ENABLED ?? (deploymentChannel === "alpha" ? "true" : "false") : "false";
   if (!["true", "false"].includes(resumeFlag)) throw new Error("Invalid cloud workspace resume configuration");
   if (resumeFlag === "true" && deploymentChannel !== "alpha") throw new Error("Cloud workspace resume is available only on Alpha");
   const runtime = loadCloudRuntimePublicationConfig(env, deploymentChannel);
@@ -1652,9 +1660,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     github,
     feedback: loadFeedbackConfig(env, diagnostics),
     chatTitleApiKey: e.CHAT_TITLE_OPENAI_API_KEY || null,
-    cloudWorkspaces: loadCloudWorkspaceConfig(env, github),
-    cloudAgentCredentials: loadCloudAgentCredentialConfig(env),
-    selectedCloudWorker: loadSelectedCloudWorker(env),
+    cloudWorkspaces: cloudChannel ? loadCloudWorkspaceConfig(env, github) : null,
+    cloudAgentCredentials: cloudChannel ? loadCloudAgentCredentialConfig(env) : null,
+    selectedCloudWorker: cloudChannel ? loadSelectedCloudWorker(env) : null,
     cloudRuntimePublication: runtime.publication,
     cloudWorkspaceNewRuntimeProfile: runtime.newWorkspaceProfile,
     cloudWorkspaceResumeExistingEnabled: resumeFlag === "true",

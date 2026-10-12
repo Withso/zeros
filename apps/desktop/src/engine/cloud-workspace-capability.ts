@@ -7,7 +7,8 @@
  * cannot override that release decision. Source/dev entrypoints without a
  * compiled value may opt in with the same exact-true environment contract.
  */
-import { isLocalDevelopmentRuntime } from "./runtime";
+import { cloudWorkspaceChannelEnabled } from "../../shared/cloud-workspace-channel";
+import { channel, isLocalDevelopmentRuntime } from "./runtime";
 
 export const CLOUD_WORKSPACES_DESKTOP_CAPABILITY_ENV =
   "ZEROS_CLOUD_WORKSPACES_ENABLED" as const;
@@ -31,7 +32,7 @@ function compiledCapability(): boolean | undefined {
 export function cloudWorkspaceDesktopCapabilityEnabled(
   options: CloudWorkspaceDesktopCapabilityOptions = {},
 ): boolean {
-  if (isLocalDevelopmentRuntime()) return false;
+  if (isLocalDevelopmentRuntime() || !cloudWorkspaceChannelEnabled(channel())) return false;
   const baked = options.bakedCapability ?? compiledCapability();
   if (typeof baked === "boolean") return baked;
   const environment = options.environment ?? process.env;
@@ -60,9 +61,12 @@ export function createCloudWorkspaceDesktopPipelines<Replica, Fork>(options: {
   createReplica: () => Replica;
   createFork: (replica: Replica) => Fork;
 }): { replica: Replica | null; fork: Fork | null } {
+  // VM engines have no desktop release channel. Preserve their native cloud
+  // execution without ever evaluating a desktop capability or channel gate.
+  if (options.cloudWorker) return { replica: null, fork: null };
   const enabled =
     options.capabilityEnabled ?? cloudWorkspaceDesktopCapabilityEnabled;
-  if (options.cloudWorker || !enabled()) {
+  if (!enabled()) {
     return { replica: null, fork: null };
   }
   const replica = options.createReplica();

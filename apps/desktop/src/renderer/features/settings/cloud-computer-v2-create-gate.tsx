@@ -5,6 +5,7 @@ import { useWorkspaceDispatch } from "../../state/store";
 import { Button } from "../../shared/ui";
 import { useActiveOrganization, useTeams } from "../team/team-store";
 import { requestUserSettingsSection } from "./settings-navigation";
+import { isFeatureEnabled } from "../../config/release-channel";
 import {
   cloudComputerV2Cache,
   cloudComputerV2Key,
@@ -38,7 +39,7 @@ export function useCloudComputerV2CreateGate(active: boolean) {
   const organization = useActiveOrganization();
   const { me } = useTeams();
   const enabled =
-    Boolean(organization && !organization.isPersonal && me);
+    isFeatureEnabled("cloud-workspaces") && Boolean(organization && !organization.isPersonal && me);
   const visible = useCloudComputerV2Visible(active);
   const key = enabled
     ? cloudComputerV2Key(me!.user.id, organization!.id)

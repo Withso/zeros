@@ -1,3 +1,5 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const harness = vi.hoisted(() => ({
   effects: [] as Array<() => void | (() => void)>,
@@ -109,7 +111,7 @@ it.each(["initial failure", "new revision"])(
     });
     setActiveBridge(bridge);
     acceptCloudWorkspaceDocument(doc);
-    CloudWorkspaceLifecycle();
+    renderToStaticMarkup(createElement(CloudWorkspaceLifecycle));
     // Run the real active-workspace effect; invoke the same catalog poll as the timer.
     const off = harness.effects.find(effect => effect.toString().includes("warmCloudWorkspaceDestination"))!();
     try {
@@ -154,7 +156,7 @@ it("successful polls revalidate only the visible owner and notify only a new con
   acceptCloudWorkspaceDocument(other);
   const changes = vi.fn();
   const offChanges = bridge.on("DB_CHANGED", changes);
-  CloudWorkspaceLifecycle();
+  renderToStaticMarkup(createElement(CloudWorkspaceLifecycle));
   const off = harness.effects.find(effect => effect.toString().includes("warmCloudWorkspaceDestination"))!();
   try {
     await flush();
@@ -223,7 +225,7 @@ it("resume retries failed stopped history, while a failed catalog poll and hidde
   });
   setActiveBridge(bridge);
   acceptCloudWorkspaceDocument(doc);
-  CloudWorkspaceLifecycle();
+  renderToStaticMarkup(createElement(CloudWorkspaceLifecycle));
   const off = harness.effects.find(effect => effect.toString().includes("warmCloudWorkspaceDestination"))!();
   const visibility = vi
     .mocked(document.addEventListener)
