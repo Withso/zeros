@@ -7,7 +7,7 @@ import type {
   CloudAgentBootSyncRequest, CloudAgentWarmActorRequest, CloudAgentWarmActorResponse,
 } from "@zeros/protocol/cloud-agent-bootstrap";
 import { cloudMcpDigest } from "../agents/cloud-mcp";
-import { requestCloudAgentBoot } from "../cloud-agent-execution-client";
+import { isTransientCloudAgentAuthorityError, requestCloudAgentBoot } from "../cloud-agent-execution-client";
 
 const capabilities = { version: 1 as const, goals: false, nativeFork: false, transcriptFork: false,
   nativeReview: false, connectedApps: false, multiAgent: false };
@@ -199,6 +199,16 @@ describe("private negotiated boot client", () => {
     const f = fixture(), requestFetch = vi.fn().mockResolvedValue(Response.json({ error: "cloud_validation_credential_refresh_rejected" }, { status }));
     await expect(requestCloudAgentBoot(f.authority, "sync", f.sync, f.signal, requestFetch))
       .rejects.toMatchObject({ code: "cloud_validation_credential_refresh_rejected", message: "Cloud agent execution authority is unavailable" });
+    expect(requestFetch).toHaveBeenCalledOnce();
+  });
+
+  it.each([401, 403, 409])("keeps HTTP %s denial terminal even with a transient error envelope", async status => {
+    const f = fixture(), requestFetch = vi.fn().mockResolvedValue(
+      Response.json({ error: "cloud_validation_authority_transport" }, { status }));
+    const error = await requestCloudAgentBoot(f.authority, "actor-confirm", f.confirm, f.signal, requestFetch)
+      .catch(error => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(isTransientCloudAgentAuthorityError(error)).toBe(false);
     expect(requestFetch).toHaveBeenCalledOnce();
   });
 

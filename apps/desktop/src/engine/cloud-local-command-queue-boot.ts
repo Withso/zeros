@@ -15,7 +15,7 @@ import { CloudAgentContextCache, createCloudBootAgentExecutionFactory, cloudBoot
 import { CloudLocalCommandQueue, type CloudLocalCommandHistory } from "./cloud-local-command-queue";
 import { CloudCredentialStartFences, CloudAgentCredentialControlExchangeResponseSchema, CloudCredentialControlError } from "./cloud-local-command-queue-start-fences";
 import { CloudCommandRuntimeError } from "./cloud-command-client";
-import { CloudAgentExecutionError } from "./cloud-agent-execution-client";
+import { CloudAgentExecutionError, isTransientCloudAgentAuthorityError } from "./cloud-agent-execution-client";
 import type { CloudRuntimeRegistration, CloudRuntimeClientAdmission } from "./cloud-runtime-registration";
 
 type Reference = Pick<CloudAgentBootScope, "organizationId" | "workspaceId" | "generation" | "engineInstanceId">;
@@ -62,6 +62,7 @@ export class CloudLocalAgentBootRuntime {
   private queueValue: CloudLocalCommandQueue | null = null;
   private fencesValue: CloudCredentialStartFences | null = null;
   private readonly actors = new Map<string, Actor>();
+  private readonly actorConfirmations = new Map<string, Promise<void>>();
   private readonly interests = new Map<string, Interest>();
   private readonly flights = new Set<Promise<unknown>>();
   private cacheTimer: ReturnType<typeof setTimeout> | null = null;
@@ -254,6 +255,25 @@ export class CloudLocalAgentBootRuntime {
     if (!this.active) return;
     const actor = admission.actor;
     if (!actor || !admission.accountUserId) throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
+    // Token redemption/renewal remains per connection. Only the subsequent
+    // exact actor proof is shared with other sockets and the background loop.
+    // This runtime owns one immutable boot/writer/funding scope.
+    const snapshot = { ...admission, actor: { ...actor } };
+    const key = JSON.stringify([snapshot.accountUserId, snapshot.authorityEpoch, actor.sessionId,
+      actor.deviceId, actor.role, actor.fingerprint]);
+    const pending = this.actorConfirmations.get(key);
+    if (pending) return pending;
+    if (this.actorConfirmations.size >= 256) throw new CloudCommandRuntimeError("cloud_actor_authority_rejected");
+    const task = this.confirmActorAdmission(snapshot);
+    this.actorConfirmations.set(key, task); this.flights.add(task);
+    void task.finally(() => {
+      if (this.actorConfirmations.get(key) === task) this.actorConfirmations.delete(key);
+      this.flights.delete(task);
+    }).catch(() => {});
+    return task;
+  }
+  private async confirmActorAdmission(admission: CloudRuntimeClientAdmission & { actor: NonNullable<CloudRuntimeClientAdmission["actor"]> }): Promise<void> {
+    const actor = admission.actor;
     const result = await this.options.registration.agentBootRequest("actor-confirm",
       { ...this.reference(), actorSessionId: actor.sessionId }, this.controller.signal);
     const proof = CloudActorProvenanceSchema.parse(result.provenance);
@@ -343,7 +363,9 @@ export class CloudLocalAgentBootRuntime {
     record.timer = setTimeout(() => {
       record.timer = null; if (!this.live() || !current()) return;
       const flight = work(); this.flights.add(flight);
-      void flight.catch(() => { if (current()) this.schedule(record, 500, work, current); }).finally(() => this.flights.delete(flight));
+      void flight.catch(error => {
+        if (current() && isTransientCloudAgentAuthorityError(error)) this.schedule(record, 500, work, current);
+      }).finally(() => this.flights.delete(flight));
     }, Math.max(250, Math.min(5_000, delay))); record.timer.unref?.();
   }
   private scheduleCache(retry = false): void {

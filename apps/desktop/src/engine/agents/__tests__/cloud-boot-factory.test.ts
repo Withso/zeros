@@ -123,6 +123,29 @@ async function fixture(initialize = true) {
 }
 
 describe("genuine boot execution factory", () => {
+  it("reuses immutable context payload across exact proof renewals without extending a revoked context", async () => {
+    const f = await fixture(), factory = f.register(f.create()), first = factory.selectBoot(f.input);
+    const response = await f.contextRequest.mock.results[0]!.value as CloudAgentWarmActorResponse;
+    // Span three original 8 s windows; actor-only confirmation must never be
+    // enough to keep this exact context alive.
+    for (let index = 1; index <= 8; index++) {
+      f.advance(3_000);
+      f.contextRequest.mockResolvedValueOnce({ ...response,
+        actor: { ...response.actor, confirmedUntilMs: response.actor.confirmedUntilMs + index * 3_000 } });
+      expect(await f.contexts.warm(f.input)).toBe(f.input.context);
+      const next = factory.selectBoot({ ...f.input, executionId: randomUUID() });
+      expect(next.environment).toBe(first.environment);
+      expect(next.gitAuthor).toBe(first.gitAuthor);
+      expect(next.context).toBe(first.context);
+      expect(Object.isFrozen(next.environment)).toBe(true);
+      next.context.assertLive();
+    }
+    expect(f.contextRequest).toHaveBeenCalledTimes(9);
+    f.registry.revoke(f.provenance.actorSessionId);
+    expect(first.context.signal.aborted).toBe(true);
+    expect(() => factory.selectBoot({ ...f.input, executionId: randomUUID() })).toThrow();
+  });
+
   it("shares one original physical HOME between the native provider and workload tools", async () => {
     const f = await fixture(), factory = f.register(f.create()), prepared = await f.prepare(factory);
     const home = prepared.execution.coordinator.nativeHome;
