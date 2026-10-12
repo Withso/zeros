@@ -188,7 +188,8 @@ export function buildEngineImage(options: {sourceCommit?:string} = {}): { docker
     lines.push(`COPY ${JSON.stringify([archivePath, "/opt/zeros-runtime/lib/zeros/cgroup-resources.mjs"])}`);
   }
   lines.push(...[
-`install -o root -g root -m 0444 ${engineDirectory}/apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs /opt/zeros-runtime/lib/zeros/cloud-runtime-root.mjs`
+`install -o root -g root -m 0444 ${engineDirectory}/apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs /opt/zeros-runtime/lib/zeros/cloud-runtime-root.mjs`,
+`install -o root -g root -m 0444 ${engineDirectory}/apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs /opt/zeros-runtime/lib/zeros/cloud-runtime-assets.mjs`
   ].map(command => `RUN ${command}`));
   {
     const sourcePath = path.join(here, "sandbox", "cloud-runtime-profile.mjs");

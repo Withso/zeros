@@ -9,6 +9,7 @@ import {CloudNativeBoundary} from "./containment/cloud-native-boundary";
 import {CloudNativeHistoryError} from "./containment/cloud-native-history";
 import {assertCloudPreparedBoundaryLive} from "./containment/cloud-execution-boundary";
 import {resolveCloudRuntime} from "./containment/cloud-runtime-root.mjs";
+import {cloudRuntimeAssetEnvironment} from "./containment/cloud-runtime-assets.mjs";
 import type {PreparedBoundary} from "./containment/types";
 import type {McpServerRegistration} from "./types";
 import {materializeMcpServerRegistrations} from "./mcp-registration";
@@ -84,7 +85,9 @@ export function adminWorkspaceSystemInstruction(boundary:PreparedBoundary|undefi
 /** An execution uses its admitted snapshot, never the mutable Local registry. */
 export function executionMcpServers(execution:CloudProviderExecution|null,registrations:readonly McpServerRegistration[]|undefined):McpServerRegistration[]|undefined{
   // A deep copy keeps the lease-scoped admitted snapshot immutable to callers.
-  return execution?structuredClone([...(execution.productServers??[]),...(execution.userServers??[])]):registrations?[...registrations]:undefined;
+  if(!execution)return registrations?[...registrations]:undefined;
+  return structuredClone([...(execution.productServers??[]),...(execution.userServers??[])]).map(server=>
+    server.transport==="stdio"?{...server,env:{...server.env,...cloudRuntimeAssetEnvironment(resolveCloudRuntime())}}:server);
 }
 export interface CloudAgentExecutionFactory {
   prepare(input:{admission:CloudAgentExecutionAdmission;conversationId:string;workload:PreparedBoundary;cwd:string;signal:AbortSignal;

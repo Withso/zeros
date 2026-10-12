@@ -41,6 +41,7 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   "apps/desktop/src/engine/agents/cloud-mcp.ts",
   "apps/desktop/src/engine/agents/containment/cloud-engine-startup-failure.mjs",
   "apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs",
+  "apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs",
   "apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime.ts",
   "apps/desktop/src/engine/cloud-agent-execution-client.ts",
   "apps/desktop/src/engine/cloud-command-client.ts",

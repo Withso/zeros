@@ -144,6 +144,29 @@ const checks = {
     assert(browser.startsWith(path.join(worker, "design-browsers") + "/"));
     assert(fs.existsSync(path.join(worker, "design-browsers/NOTICE.txt")));
   },
+  runtime_system_assets() {
+    // Historical archives keep their original closure contract. A new helper
+    // or capability entry opts in; a partially staged new runtime must refuse.
+    if (!manifest.files.some(file => ["worker/runtime-system-assets.json", "lib/zeros/cloud-runtime-assets.mjs"].includes(file.path))) return;
+    assert.equal(process.geteuid(), 10003);
+    assert.equal(process.getegid(), 10003);
+    const assets = JSON.parse(fs.readFileSync(path.join(worker, "runtime-system-assets.json"), "utf8"));
+    assert.equal(assets.schema, "zeros.runtime-system-assets/v1");
+    for (const file of [assets.gitLfs, assets.gitConfig, assets.fontConfig, ...assets.fonts]) {
+      const filename = internal(path.join(root, file));
+      assert(fs.lstatSync(filename).isFile());
+    }
+    Object.assign(process.env, { GIT_CONFIG_SYSTEM: path.join(worker, "gitconfig"),
+      FONTCONFIG_FILE: path.join(worker, "design-fonts/fonts.conf"), FONTCONFIG_PATH: path.join(worker, "design-fonts") });
+    const version = assets.packages.find(pkg => pkg.name === "git-lfs").version.split("-")[0];
+    assert(execute("git", ["lfs", "version"]).startsWith(`git-lfs/${version} `));
+    assert(execute("git", ["config", "--system", "--get", "filter.lfs.process"])
+      .includes('"${GIT_CONFIG_SYSTEM%/worker/gitconfig}/bin/git-lfs" filter-process'));
+    for (const [family, pkg] of [["Noto Color Emoji", "fonts-noto-color-emoji"], ["Unifont", "fonts-unifont"],
+      ["IPAGothic", "fonts-ipafont-gothic"], ["WenQuanYi Zen Hei", "fonts-wqy-zenhei"],
+      ["Loma", "fonts-tlwg-loma-otf"], ["FreeSans", "fonts-freefont-ttf"], ["Bitstream Charter", "xfonts-scalable"]])
+      assert(execute("fc-match", ["--format=%{file}", family]).startsWith(path.join(worker, "design-fonts", pkg) + "/"));
+  },
   host_assets() {
     const modules = [
       "host-process-supervisor.mjs",

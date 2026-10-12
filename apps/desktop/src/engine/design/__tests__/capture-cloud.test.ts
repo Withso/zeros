@@ -55,7 +55,8 @@ it("uses the pinned Node and browser cache through the original owned workload, 
     expect.objectContaining({ kind: "service", role: "workload", retainFailedPreparationProof: true, signal: expect.any(AbortSignal) }));
   const request = fixture.spawn.mock.calls[0]![0];
   expect(request).toMatchObject({ command: "/pinned/runtime/bin/node", args: ["/pinned/runtime/worker/dist-engine/design-capture-worker.js"],
-    env: { PLAYWRIGHT_BROWSERS_PATH: "/pinned/runtime/worker/design-browsers" } });
+    env: { PLAYWRIGHT_BROWSERS_PATH: "/pinned/runtime/worker/design-browsers",
+      FONTCONFIG_FILE: "/pinned/runtime/worker/design-fonts/fonts.conf", FONTCONFIG_PATH: "/pinned/runtime/worker/design-fonts" } });
   expect(request.env.HOME).toBe(request.cwd); expect(request.env.TMPDIR).toBe(request.cwd);
   expect(request.env).not.toHaveProperty("OPENAI_API_KEY");
   value.finish(); expect(await result).toEqual({ bytes: Buffer.from("png"), renderer: "fixture" });

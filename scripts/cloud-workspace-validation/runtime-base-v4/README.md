@@ -42,6 +42,17 @@ selects `worker/gitconfig`, and `FONTCONFIG_FILE`/`FONTCONFIG_PATH` select its
 `worker/design-fonts/fonts.conf` and containing directory. Managed repository
 clones still disable system Git configuration, skip LFS smudge, and refuse
 LFS pointers. The administrator recipe keeps its ordinary LFS filters.
+The runtime's shipped filters select its absolute LFS binary through the physical
+`GIT_CONFIG_SYSTEM` path. Cloud login shells also inherit a per-runtime
+`GIT_EXEC_PATH` prepared at `/opt/zeros-infra/.git-exec/<runtimeId>` by the runtime
+launcher. This protected sibling is outside the hashed runtime tree and visible
+read-only in older resident namespaces. It preserves native Git helpers and
+selects the pinned LFS for plain `git lfs` and generated hooks even when a profile
+resets PATH. Missing derived links are reconstructed at launch; changed or
+foreign entries refuse. The validated derived parent is explicitly set and
+rechecked at 0755 so UID 10003 can traverse it even when the host creates it
+under its unchanged 0077 umask. This requires the new runtime; restarting a
+generation with its historical pin does not replace its binary or filters.
 
 Every controlled guest Python launch disables bytecode at interpreter startup
 with `-B`; installed executable scripts use the combined `-IB` shebang option.

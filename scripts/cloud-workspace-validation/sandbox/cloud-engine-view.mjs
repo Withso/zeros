@@ -1,5 +1,6 @@
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 import { resolveCloudRuntime } from "./cloud-runtime-root.mjs";
+import { CLOUD_GIT_EXEC_ROOT, cloudRuntimeAssetEnvironment } from "./cloud-runtime-assets.mjs";
 import { isCloudComputerRepositoryDirectory } from "./cloud-computer-checkout.mjs";
 import { CLOUD_ENGINE_MUTABLE_LAYOUT } from "./prepare-cloud-image-files.mjs";
 
@@ -124,6 +125,9 @@ export function cloudEngineViewArguments(operation = "serve",version=4,runtime=r
     "--bind",
     "/run/zeros/engine",
     "/run/zeros",
+    // Keep all physical pins visible to a resident that admits later engines.
+    // Each protected projection keeps native Git helpers and overrides only LFS.
+    "--ro-bind", CLOUD_GIT_EXEC_ROOT, CLOUD_GIT_EXEC_ROOT,
     ...(common ? [
       "--bind", "/run/zeros/workload-custody", "/run/zeros/workload-custody",
       // The pinned root publisher fills this one file before the C transition
@@ -203,6 +207,7 @@ export function cloudEngineViewEnvironment(source, operation = "serve", runtime=
   if (!["serve", "qualify", "resident", "probe-cursor"].includes(operation) || runtime.profile !== "v4")
     throw new Error("Invalid cloud engine launch operation");
   const environment = {
+    ...cloudRuntimeAssetEnvironment(runtime),
     PATH: `${runtime.binRoot}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
     HOME: "/srv/zeros/home/agent",
     USER: "zeros-engine",

@@ -38,6 +38,7 @@ export const RUNTIME_HELPERS = [
     "cloud-setup-timings.mjs",
     "cloud-computer-checkout.mjs",
     "prepare-cloud-image-files.mjs",
+    "prepare-cloud-git.mjs",
     "cloud-engine-view.mjs",
     "cloud-engine-launcher.mjs",
     "publish-cloud-workload-custody.mjs",
@@ -62,6 +63,11 @@ export const RUNTIME_HELPERS = [
   {
     source: "apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs",
     target: "lib/zeros/cloud-runtime-root.mjs",
+    optional: false,
+  },
+  {
+    source: "apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs",
+    target: "lib/zeros/cloud-runtime-assets.mjs",
     optional: false,
   },
   {

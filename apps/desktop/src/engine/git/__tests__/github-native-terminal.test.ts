@@ -11,6 +11,11 @@ import type { CloudGithubNativeSource } from "@zeros/protocol/github-auth";
 import type { createNativeGithubBroker } from "../github-native-broker";
 import { configureNativeGithubTransport, requestNativeGithub } from "../github-native-client";
 import { configureNativeGithubDesktop } from "../github-native-desktop";
+import { testCloudRuntime } from "../../agents/__tests__/helpers/test-cloud-runtime";
+vi.mock("../../agents/containment/cloud-runtime-root.mjs", async original => ({
+  ...await original<typeof import("../../agents/containment/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime: () => testCloudRuntime(),
+}));
 type Broker = Awaited<ReturnType<typeof createNativeGithubBroker>>;
 type Options = Parameters<typeof createNativeGithubBroker>[0];
 const fixture = vi.hoisted(() => ({ brokers: [] as Broker[], options: [] as Options[], sources: [] as CloudGithubNativeSource[], forwarded: [] as string[], realRequest: false }));
@@ -87,6 +92,8 @@ it.runIf(process.platform === "linux")("admits actor env for a v2 terminal witho
   try {
     expect(f.environmentRequest).toHaveBeenCalledWith({kind:"terminal-environment",actorSessionId:f.a.cloudActor!.sessionId},expect.any(AbortSignal));
     expect(f.env).toMatchObject({ORG_SETTING:"synthetic-org-value",PERSONAL_SETTING:"actor-a-personal-value"});
+    expect(f.env).toMatchObject({ GIT_CONFIG_SYSTEM: `${testCloudRuntime().workerRoot}/gitconfig`,
+      FONTCONFIG_FILE: `${testCloudRuntime().workerRoot}/design-fonts/fonts.conf` });
     expect(process.env.PERSONAL_SETTING).toBeUndefined();
     const filter=f.create.mock.calls[0]![0].outputFilter!;
     expect(filter.write("actor-a-personal-")+filter.write("value")+filter.finish()).toBe("[redacted]");

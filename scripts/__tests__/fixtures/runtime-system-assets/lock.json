@@ -1,0 +1,129 @@
+{
+  "schema": "zeros.runtime-system-assets-lock/v1",
+  "archive": "https://archive.ubuntu.com/ubuntu/",
+  "release": {
+    "path": "dists/fixture/InRelease",
+    "size": 742,
+    "sha256": "91e13e659ae8ab975bb34aed46ad5c6e44f23783d0602c506db072f156506beb",
+    "origin": "Fixture Archive",
+    "suite": "fixture",
+    "codename": "fixture",
+    "date": "Sun, 11 Oct 2026 00:00:00 UTC",
+    "validUntil": null
+  },
+  "key": {
+    "file": "archive-key.asc",
+    "sha256": "594c77e23914ba201e7af134a325954c157c3b04d0ef09cccc34a56cabcab5ec",
+    "fingerprint": "FE0D48D5056B3EA320B41A6D5F62A48E63C9C897"
+  },
+  "indexes": [
+    {
+      "path": "dists/fixture/universe/binary-amd64/Packages.xz",
+      "size": 700,
+      "sha256": "505f45c278a941ba8d8e997327f3ae45da6bfe5903a382f6eb91c0cc5f76ef92"
+    }
+  ],
+  "packages": [
+    {
+      "name": "git-lfs",
+      "version": "1.2.3-1",
+      "architecture": "amd64",
+      "component": "universe",
+      "filename": "pool/fixture/git-lfs.deb",
+      "size": 2396,
+      "sha256": "c155d0ca1c8615b0be2d7e839a2e51ebb6e184a955b008394401fe3991e2413b",
+      "license": "MIT",
+      "copyrightSha256": "f8f80ce1f7ef2ee2094881795fa43ce01024e73911f81d43ee1fd25b198a8d2e"
+    },
+    {
+      "name": "fonts-noto-color-emoji",
+      "version": "1.2.3-1",
+      "architecture": "all",
+      "component": "universe",
+      "filename": "pool/fixture/fonts-noto-color-emoji.deb",
+      "size": 840,
+      "sha256": "221d9aec0bbc27051cf8e6d97d2b5d376d5265dcd2a9ba87f0efba6bfb6d3a29",
+      "license": "MIT",
+      "copyrightSha256": "f8f80ce1f7ef2ee2094881795fa43ce01024e73911f81d43ee1fd25b198a8d2e"
+    },
+    {
+      "name": "fonts-unifont",
+      "version": "1.2.3-1",
+      "architecture": "all",
+      "component": "universe",
+      "filename": "pool/fixture/fonts-unifont.deb",
+      "size": 828,
+      "sha256": "d778d4e7f3349f2f3555459013d62fe78b582db869830cfcb74cc57770e1d7c9",
+      "license": "MIT",
+      "copyrightSha256": "f8f80ce1f7ef2ee2094881795fa43ce01024e73911f81d43ee1fd25b198a8d2e"
+    },
+    {
+      "name": "xfonts-cyrillic",
+      "version": "1.2.3-1",
+      "architecture": "all",
+      "component": "universe",
+      "filename": "pool/fixture/xfonts-cyrillic.deb",
+      "size": 828,
+      "sha256": "6b4c704725f481e8f7137e0a718ae0b5e74a507caeae6d3d3c6f200825321542",
+      "license": "MIT",
+      "copyrightSha256": "f8f80ce1f7ef2ee2094881795fa43ce01024e73911f81d43ee1fd25b198a8d2e"
+    },
+    {
+      "name": "xfonts-scalable",
+      "version": "1.2.3-1",
+      "architecture": "all",
+      "component": "universe",
+      "filename": "pool/fixture/xfonts-scalable.deb",
+      "size": 832,
+      "sha256": "70b11834fd09e1172015395a66af92b21d7f890b562c7c70828de7cf793d9a7d",
+      "license": "MIT",
+      "copyrightSha256": "f8f80ce1f7ef2ee2094881795fa43ce01024e73911f81d43ee1fd25b198a8d2e"
+    },
+    {
+      "name": "fonts-ipafont-gothic",
+      "version": "1.2.3-1",
+      "architecture": "all",
+      "component": "universe",
+      "filename": "pool/fixture/fonts-ipafont-gothic.deb",
+      "size": 840,
+      "sha256": "79ef01a16ce6ab7b66a5a657be30644c6f2e2ba51f12e2c6ee71907bc0a89d6b",
+      "license": "MIT",
+      "copyrightSha256": "f8f80ce1f7ef2ee2094881795fa43ce01024e73911f81d43ee1fd25b198a8d2e"
+    },
+    {
+      "name": "fonts-wqy-zenhei",
+      "version": "1.2.3-1",
+      "architecture": "all",
+      "component": "universe",
+      "filename": "pool/fixture/fonts-wqy-zenhei.deb",
+      "size": 836,
+      "sha256": "3784ce5ec19498816b33a93cc72c1b88fb1c2836828f314c65474b837bf49c79",
+      "license": "MIT",
+      "copyrightSha256": "f8f80ce1f7ef2ee2094881795fa43ce01024e73911f81d43ee1fd25b198a8d2e"
+    },
+    {
+      "name": "fonts-tlwg-loma-otf",
+      "version": "1.2.3-1",
+      "architecture": "all",
+      "component": "universe",
+      "filename": "pool/fixture/fonts-tlwg-loma-otf.deb",
+      "size": 836,
+      "sha256": "a69e411fa927ce5b903be843e0ac8a55fe4db6136d7ab2f0308e0d63e637bb8e",
+      "license": "MIT",
+      "copyrightSha256": "f8f80ce1f7ef2ee2094881795fa43ce01024e73911f81d43ee1fd25b198a8d2e"
+    },
+    {
+      "name": "fonts-freefont-ttf",
+      "version": "1.2.3-1",
+      "architecture": "all",
+      "component": "universe",
+      "filename": "pool/fixture/fonts-freefont-ttf.deb",
+      "size": 840,
+      "sha256": "2db1d6c5138fac8368e8893aa99a8791dd68f6a9f1bc26eac2bdf6d97cfabf50",
+      "license": "MIT",
+      "copyrightSha256": "f8f80ce1f7ef2ee2094881795fa43ce01024e73911f81d43ee1fd25b198a8d2e"
+    }
+  ],
+  "sources": [],
+  "mirror": "https://github.com/Withso/zeros/releases/download/runtime-assets-985c2acfe73d/"
+}

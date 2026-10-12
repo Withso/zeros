@@ -1,6 +1,7 @@
 import {spawn} from "node:child_process";
 import path from "node:path";
 import {resolveCloudRuntimeChild,assertCloudRuntimeChildPath} from "./cloud-runtime-root.mjs";
+import { cloudRuntimeAssetEnvironment } from "./cloud-runtime-assets.mjs";
 
 // The parent supplies the original physical per-conversation HOME/XDG and
 // credential-free actor environment. This helper preserves those paths.
@@ -12,6 +13,7 @@ const child=spawn(binary,["exec-server","--listen","stdio"],{cwd:process.cwd(),e
     // The workload parent supplies only its filtered, actor-scoped environment;
     // it never inherits the credential-bearing coordinator's process env.
     ...process.env,
+    ...cloudRuntimeAssetEnvironment(runtime),
     PATH:`${runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,SHELL:"/bin/bash",
   },stdio:"inherit"});
   await new Promise((resolve,reject)=>{child.once("error",reject);child.once("exit",(code,signal)=>{process.exitCode=code??(signal?1:0);resolve();});});

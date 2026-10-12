@@ -2,6 +2,8 @@ import type * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { testCloudRuntime } from "../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime";
+import { removeRuntimeFixtureTree } from "../../apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-fixture";
 
 // A real temporary filesystem models B4's sanitized, empty files parent. Only
 // VM ownership and kernel/process boundaries are simulated; layout preparation,
@@ -42,7 +44,11 @@ vi.mock("node:fs", async original => {
       const result = actual.mkdtempSync(route(prefix) as string);
       return virtual(prefix) ? result.slice(vm.root.length) : result;
     },
-    symlinkSync: routed("symlinkSync", [1]),
+    symlinkSync: (target: string, file: string) => actual.symlinkSync(route(target) as string, route(file) as string),
+    readlinkSync: (file: string) => {
+      const target = actual.readlinkSync(route(file) as string);
+      return target.startsWith(vm.root + "/") ? target.slice(vm.root.length) : target;
+    },
     renameSync: (from: string, to: string) => {
       if (actual.lstatSync(route(from) as string).isDirectory()) vm.directoryRenames.push(from);
       actual.renameSync(route(from) as string, route(to) as string);
@@ -60,7 +66,7 @@ vi.mock("node:child_process", async original => ({
 
 let actual: typeof fs;
 let smoke: (runtime: object, environment: object) => boolean;
-let runtime: { profile: string; root: string; node: string; workerRoot: string; binRoot: string; libRoot: string; engineNamespace: string };
+let runtime: ReturnType<typeof testCloudRuntime>;
 let qualified: ReturnType<typeof vi.fn<() => Promise<unknown>>>;
 let mutableLayout: typeof import("../cloud-workspace-validation/sandbox/prepare-cloud-image-files.mjs").CLOUD_ENGINE_MUTABLE_LAYOUT;
 const observations: { result: Promise<unknown>; releaseView: ReturnType<typeof vi.fn>;
@@ -77,11 +83,18 @@ async function observeUnqualifiedRuntime() {
   expect(actual.statSync(mapped(observation.resourceFile)).mode & 0o777).toBe(0o444);
   expect(vm.owners.get(observation.resourceFile)).toEqual({ uid: 0, gid: 0 });
   const binds = observation.viewArguments.flatMap((argument, index, args) =>
-    argument === "--bind" ? [args.slice(index, index + 3)] : []);
+    argument === "--bind" || argument === "--ro-bind" ? [args.slice(index, index + 3)] : []);
   expect(binds).toContainEqual(["--bind", mutableLayout.agentHome, "/srv/zeros/home/agent"]);
   expect(binds).toContainEqual(["--bind", mutableLayout.captureHome, "/srv/zeros/home/capture"]);
   expect(binds).not.toContainEqual(["--bind", "/srv/zeros/home/agent", "/srv/zeros/home/agent"]);
   expect(binds).not.toContainEqual(["--bind", "/srv/zeros/home/capture", "/srv/zeros/home/capture"]);
+  const gitRoot = "/opt/zeros-infra/.git-exec", gitExec = `${gitRoot}/${runtime.runtimeId}`;
+  expect(actual.statSync(mapped(gitRoot)).mode & 0o777).toBe(0o755);
+  expect(actual.statSync(mapped(gitExec)).mode & 0o777).toBe(0o555);
+  expect(actual.realpathSync(mapped(`${gitExec}/git-lfs`))).toBe(mapped(`${runtime.binRoot}/git-lfs`));
+  for (const name of ["git", "git-sh-setup", "git-remote-https"])
+    expect(actual.realpathSync(mapped(`${gitExec}/${name}`))).toBe(mapped(`/usr/lib/git-core/${name}`));
+  expect(binds).toContainEqual(["--ro-bind", gitRoot, gitRoot]);
   await expect(observation.result).resolves.toMatchObject({
     version: 2, boundary: "workspace-vm", qualified: false, engineChecksPassed: false,
   });
@@ -100,9 +113,7 @@ beforeEach(async () => {
   // Exercise the actual v4 filesystem/adoption path against a fake VM. The
   // original runtime qualifier must refuse this fixture's unknown custody.
   const v4 = actual.existsSync(path.resolve("scripts/cloud-workspace-validation/sandbox/cloud-runtime-root.mjs"));
-  const root = `/opt/zeros-infra/r1-${"a".repeat(64)}`;
-  runtime = { profile: "v4", root, node: `${root}/bin/node`, binRoot: `${root}/bin`, libRoot: `${root}/lib/zeros`,
-    workerRoot: `${root}/worker`, engineNamespace: `${root}/libexec/cloud-engine-namespace` };
+  runtime = testCloudRuntime();
   if (v4) vi.doMock("../cloud-workspace-validation/sandbox/cloud-runtime-root.mjs", async original => ({
     ...await original<Record<string, unknown>>(), resolveCloudRuntime: () => runtime, cloudActiveRuntimeDescriptor: () => ({}),
   }));
@@ -114,8 +125,9 @@ beforeEach(async () => {
     actual.mkdirSync(mapped(file), { recursive: true, mode }); actual.chmodSync(mapped(file), mode);
     vm.owners.set(file, { uid, gid });
   };
-  const file = (name: string, data = "") => {
-    directory(path.dirname(name)); actual.writeFileSync(mapped(name), data, { mode: 0o444 });
+  const file = (name: string, data = "", mode = 0o444) => {
+    directory(path.dirname(name)); actual.writeFileSync(mapped(name), data, { mode });
+    actual.chmodSync(mapped(name), mode);
   };
   // B4 build/sanitize leave these parents and an empty files directory. A
   // qualification install prepares runtime/facade/receipt paths, not a repo.
@@ -130,6 +142,8 @@ beforeEach(async () => {
   directory("/srv/zeros/managed-settings", 0, 0o750, 10001);
   for (const name of ["/usr/bin/bwrap", "/usr/bin/setpriv", "/usr/bin/rg", runtime.node, runtime.engineNamespace,
     `${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`, `${runtime.workerRoot}/binaries/rg`, `${runtime.workerRoot}/dist-engine/cli.js`, "/opt/zeros-runtime/bin/node", "/opt/zeros-runtime/cloud-engine-namespace", "/opt/zeros/dist-engine/cli.js"]) file(name);
+  for (const name of ["/usr/bin/git", "/usr/lib/git-core/git", "/usr/lib/git-core/git-sh-setup",
+    "/usr/lib/git-core/git-remote-https", `${runtime.binRoot}/git-lfs`]) file(name, "synthetic executable\n", 0o555);
   file("/opt/zeros/disk-epoch", "1\n");
   file("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "0\n");
   file("/proc/sys/kernel/overflowuid", "65534\n"); file("/proc/sys/kernel/overflowgid", "65534\n");
@@ -150,6 +164,8 @@ beforeEach(async () => {
   vm.execute.mockImplementation((executable: string, args: string[]) => {
     const success = { status: 0, signal: null, stdout: "", stderr: "" };
     if (executable === "/usr/bin/python3") return success;
+    if (executable === "/usr/bin/git" && args.length === 1 && args[0] === "--exec-path")
+      return { ...success, stdout: "/usr/lib/git-core\n" };
     if (args[0] === `${runtime.libRoot}/runtime-self-test.mjs` && args[1] === "--host-qualify") {
       const view = prepareCloudEngineView(runtime, {}, "qualify", undefined, undefined, resourceProjection);
       const releaseView = vi.fn(() => view.releaseView?.());
@@ -168,7 +184,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await Promise.allSettled(observations.splice(0).map(observation => observation.result));
   vi.restoreAllMocks();
-  actual.rmSync(vm.root, { recursive: true, force: true });
+  removeRuntimeFixtureTree(vm.root, actual);
   vi.doUnmock("../cloud-workspace-validation/sandbox/cloud-runtime-profile.mjs");
   vi.doUnmock("../cloud-workspace-validation/sandbox/cloud-runtime-root.mjs");
 });

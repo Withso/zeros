@@ -31,6 +31,7 @@ describe("v4 runtime launch containment", () => {
     tree.write(`${runtime.workerRoot}/package.json`,{});
     const resolver=`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs`;
     tree.write(resolver,readFileSync(path.resolve("apps/desktop/src/engine/agents/containment/cloud-runtime-root.mjs"),"utf8"));
+    tree.write(`${path.dirname(resolver)}/cloud-runtime-assets.mjs`,readFileSync(path.resolve("apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs"),"utf8"));
     tree.write(`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs`,"// fixed Host fixture");
     tree.write(`${runtime.workerRoot}/binaries/rg`,"fixture",0o555);
     for(const file of [runtime.node,runtime.engineNamespace])unlinkSync(tree.physical(file));
@@ -39,13 +40,13 @@ describe("v4 runtime launch containment", () => {
     chmodSync(tree.physical(runtime.engineNamespace),0o500);
     tree.write(`${runtime.workerRoot}/dist-engine/cli.js`,
       "require('node:fs').writeFileSync('/srv/zeros/state/engine-executed','unexpected');");
-    for(const directory of ["/srv/zeros/files/workspace/Design","/srv/zeros/state",CLOUD_ENGINE_MUTABLE_LAYOUT.agentHome,CLOUD_ENGINE_MUTABLE_LAYOUT.captureHome,"/run/zeros/engine","/run/zeros/view/settings",`${view}/facade/sessions`,`${view}/etc`])tree.mkdir(directory);
+    for(const directory of ["/srv/zeros/files/workspace/Design","/srv/zeros/state",CLOUD_ENGINE_MUTABLE_LAYOUT.agentHome,CLOUD_ENGINE_MUTABLE_LAYOUT.captureHome,"/run/zeros/engine","/opt/zeros-infra/.git-exec","/run/zeros/view/settings",`${view}/facade/sessions`,`${view}/etc`])tree.mkdir(directory);
     tree.write(`${view}/etc/cloud-worker.json`,cloudEngineWorkerProjection(runtime));
     tree.write(`${view}/active-runtime.json`,tree.descriptor);
     for(const [name,target] of Object.entries({current:`../zeros-infra/${tree.descriptor.runtimeId}`,bin:"current/bin",worker:"current/worker","manifest.json":"current/manifest.json",logs:"/srv/zeros/log",state:"/srv/zeros/state"}))tree.link(`${view}/facade/${name}`,target);
     const args=cloudEngineViewArguments("serve",4,runtime,view);
     for(let i=0;i<args.length;i++)if(["--bind","--ro-bind"].includes(args[i])){
-      const source=args[i+1];if(source.startsWith("/srv/zeros")||source.startsWith("/run/zeros")||source===runtime.root)args[i+1]=tree.physical(source);
+      const source=args[i+1];if(source.startsWith("/srv/zeros")||source.startsWith("/run/zeros")||source==="/opt/zeros-infra/.git-exec"||source===runtime.root)args[i+1]=tree.physical(source);
     }
     try {
       execFileSync("sudo",["-n","/usr/bin/chown","-hR","0:0",tree.directory]);
