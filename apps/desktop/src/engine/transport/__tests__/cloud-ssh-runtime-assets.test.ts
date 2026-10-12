@@ -87,7 +87,10 @@ describe("cloud SSH runtime selectors", () => {
     const script = path.join(transport, "cloud-ssh-session.mjs"), preload = path.join(root, "fixture.mjs");
     await copyFile(path.resolve("apps/desktop/src/engine/transport/cloud-ssh-session.mjs"), script);
     await copyFile(path.resolve("apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs"), path.join(containment, "cloud-runtime-assets.mjs"));
-    await writeFile(path.join(containment, "cloud-runtime-root.mjs"), `export const resolveCloudRuntimeChild=()=>(${JSON.stringify(runtime)});`);
+    // The runtime is data in its own file, never spliced into module source.
+    await writeFile(path.join(containment, "cloud-runtime.json"), JSON.stringify(runtime));
+    await writeFile(path.join(containment, "cloud-runtime-root.mjs"),
+      "import fs from 'node:fs';export const resolveCloudRuntimeChild=()=>JSON.parse(fs.readFileSync(new URL('./cloud-runtime.json',import.meta.url),'utf8'));");
     // Only VM identity/absolute cwd differ here. Run the real standalone entry
     // and protocol, without needing a privileged host or changing its files.
     await writeFile(preload, `import fs from 'node:fs';import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';

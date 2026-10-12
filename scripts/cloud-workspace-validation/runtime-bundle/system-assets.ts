@@ -1,4 +1,5 @@
-import { chmod, copyFile, lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, copyFile, lstat, mkdir, open, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DependencyInventoryEntry } from "./closure";
@@ -256,11 +257,19 @@ export async function stageRuntimeSystemAssets(options: {
     await mkdir(path.dirname(target), { recursive: true, mode: 0o755 });
     const bytes = await get(file);
     // Small retained sources can already have arrived with the notice payload.
-    // Reuse only an ordinary, immutable copy of the same authenticated bytes.
-    const existing = await lstat(target).catch(error => { if (error.code !== "ENOENT") throw error; return null; });
-    if (existing) check(existing.isFile() && existing.nlink === 1 && (existing.mode & 0o7777) === 0o444 &&
-      await realpath(target) === target && existing.size === file.size && sha256(await readFile(target)) === file.sha256, "asset_source_copy");
-    else await writeFile(target, bytes, { flag: "wx", mode: 0o444 });
+    // Create exclusively; otherwise reuse only an ordinary, immutable copy of
+    // the same authenticated bytes, checked and read through one descriptor.
+    try { await writeFile(target, bytes, { flag: "wx", mode: 0o444 }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      check(await realpath(target) === target, "asset_source_copy");
+      const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const existing = await handle.stat();
+        check(existing.isFile() && existing.nlink === 1 && (existing.mode & 0o7777) === 0o444 &&
+          existing.size === file.size && sha256(await handle.readFile()) === file.sha256, "asset_source_copy");
+      } finally { await handle.close(); }
+    }
   }
   return inventory;
 }
