@@ -57,6 +57,7 @@ database("computer template claim preparation with the real B7 journal", () => {
       runtime: { select: async () => templateRuntime, validate: async () => true },
       github: { mintContentsRead: vi.fn(), revoke: vi.fn() },
       artifacts: { presignGet: vi.fn() },
+      snapshots: { capture: vi.fn(), reconcile: vi.fn(async () => 0) },
     });
   });
 

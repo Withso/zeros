@@ -24,6 +24,8 @@ import type {
 import { seedComputerTemplateRuntime, seedComputerTemplateRuntimeImage } from "./computer-template-test-fixtures.js";
 import { builderFixture, memoryBuilderOperations } from "./cloud-builder-vm-test-fixtures.js";
 import { BuilderVmError } from "./cloud-builder-vm.js";
+import { ComputerTemplateSnapshots } from "./computer-template-snapshots.js";
+import type { ComputerNamedSnapshot } from "./computer-template-snapshot-boat.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const runtime: ComputerTemplateRuntime = {
@@ -122,9 +124,9 @@ database("Cloud Computer template worker", () => {
         base_image_id: runtime.baseImageId,
         runtime_id: runtime.descriptor.runtimeId,
       });
-      await recordOperation(input, "zeros-v2-test-builder");
+      await recordOperation(input, "bx_23456789");
       return {
-        sandboxId: "zeros-v2-test-builder",
+        sandboxId: "bx_23456789",
         purpose: input.purpose,
         operationKey: input.operationKey,
       } as BuilderVm;
@@ -250,6 +252,20 @@ database("Cloud Computer template worker", () => {
       billingOrg: "fixture-wallet",
       runtime: { select: selectRuntime, validate: validateRuntime },
       artifacts: { presignGet },
+      snapshots: new ComputerTemplateSnapshots(pool, { channel: "alpha", accountScope: "fixture-account", billingOrg: "fixture-wallet", pollMs: 0,
+        provider: (() => {
+          const names = new Map<string, ComputerNamedSnapshot>();
+          return {
+            assertStopped: vi.fn(async () => {}),
+            get: vi.fn(async (name: string) => names.get(name) ?? null),
+            save: vi.fn(async (sourceSandboxId: string, name: string) => { names.set(name, { name, sourceSandboxId,
+              status: "ready", snapshotId: `capture_${name}`, sizeBytes: 4096 }); }),
+            prove: vi.fn(async (value) => ({ schema: "zeros.computer-saved-tree/v1" as const, snapshotId: value.snapshotId,
+              sourceSandboxId: value.sourceSandboxId, treeSha256: "a".repeat(64), entryCount: 1 })),
+            remove: vi.fn(async (value) => { names.delete(value.name); return true; }),
+          };
+        })(),
+      }),
       pollMs: 0,
       namePrefix: "zeros-v2-test-computer",
     };
@@ -306,6 +322,19 @@ database("Cloud Computer template worker", () => {
     };
   }
 
+  it("does not publish or activate when the named saved-artifact proof fails", async () => {
+    const capture = vi.fn(async () => { throw new Error("synthetic named proof failure"); });
+    Object.assign(workerOptions, { snapshots: { capture, reconcile: vi.fn(async () => 0) } });
+    const complete = vi.spyOn(service, "completeBuild");
+    await request();
+    await worker.tick();
+    expect(capture).toHaveBeenCalledOnce();
+    expect(complete).not.toHaveBeenCalled();
+    expect((await read()).active).toBeNull();
+    expect((await read()).latestBuild).toMatchObject({ state: "failed", errorCode: "template_capture_failed" });
+    expect(vm.stop).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ requireSnapshot: true }));
+  });
+
   it("pins before allocation, installs with build purpose, publishes an archived template and auto-activates", async () => {
     const build = await request();
     await worker.tick();
@@ -325,7 +354,7 @@ database("Cloud Computer template worker", () => {
       ).rows[0],
     ).toMatchObject({
       state: "ready",
-      image_ref: "boat-template:zeros-v2-test-builder",
+      image_ref: "boat-template:bx_23456789",
       protected_contract_digest: Buffer.from(tcb, "hex"),
     });
     expect(vm.stop).toHaveBeenCalledTimes(1);
@@ -587,7 +616,7 @@ database("Cloud Computer template worker", () => {
     async (failure) => {
       const build = await request();
       create.mockImplementation(async (input) => {
-        await recordOperation(input, "zeros-v2-test-builder");
+        await recordOperation(input, "bx_23456789");
         throw new Error(failure);
       });
       await worker.tick();
@@ -597,7 +626,7 @@ database("Cloud Computer template worker", () => {
       });
       expect(create).toHaveBeenCalledTimes(1);
       expect(remove).toHaveBeenCalledWith({
-        sandboxId: "zeros-v2-test-builder",
+        sandboxId: "bx_23456789",
         purpose: "computer-build",
         operationKey: `computer-build:${build.build.id}`,
       });
@@ -610,7 +639,7 @@ database("Cloud Computer template worker", () => {
           )
         ).rows[0],
       ).toEqual({
-        provider_resource_id: "zeros-v2-test-builder",
+        provider_resource_id: "bx_23456789",
         cleanup_confirmed_at: expect.any(Date),
       });
     },
@@ -708,7 +737,7 @@ database("Cloud Computer template worker", () => {
       [claim!.build.id],
     );
     create.mockImplementation(async (input) => {
-      await recordOperation(input, "zeros-v2-test-builder");
+      await recordOperation(input, "bx_23456789");
       // Replayed allocation can bind the ID and still fail readiness because
       // the expired VM is already archived. Deletion must bypass readiness.
       throw new Error("builder_stopped");
@@ -787,6 +816,7 @@ database("Cloud Computer template worker", () => {
       service,
       vms: vm,
       operations,
+      snapshots: workerOptions.snapshots,
       github,
       accountScope: "fixture-account",
       billingOrg: "fixture-wallet",

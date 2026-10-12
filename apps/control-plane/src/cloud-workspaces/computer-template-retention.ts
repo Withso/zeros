@@ -63,6 +63,21 @@ export function computerTemplateKeepSet(input: {
   ]);
 }
 
+/** Named and stopped artifacts share the workspace/data deletion boundary.
+ * Retired generations and legacy pins still hold their Computer source. */
+export async function computerTemplateWorkspaceReferences(
+  tx: Tx,
+  org: string,
+): Promise<string[]> {
+  const references = await tx.query<{ template_id: string }>(
+    `SELECT DISTINCT source.template_id FROM cloud_workspace_computer_sources source
+     JOIN cloud_workspaces workspace ON workspace.id=source.workspace_id AND workspace.org_id=source.org_id
+     WHERE source.org_id=$1 AND (workspace.status<>'deleted' OR workspace.data_deleted_at IS NULL)`,
+    [org],
+  );
+  return references.rows.map((row) => row.template_id);
+}
+
 /** The caller holds the organization row. Serialize with build preparation,
  * then require positive deletion or a closed unallocated create for every
  * account's builder journal before erasing its build/template identities. */
@@ -116,7 +131,7 @@ export async function computerTemplateCleanupPending(
       return true;
     if (template.account_scope && !rows.length) return true;
   }
-  return false;
+  return (await tx.query("SELECT 1 FROM cloud_computer_template_snapshots WHERE org_id=$1 AND state<>'retired' LIMIT 1", [org])).rowCount !== 0;
 }
 
 /** C5 must accept forks under this same org/head lock and require ready.
@@ -179,15 +194,7 @@ export class CloudComputerTemplateRetentionWorker {
       )
     ).rows[0];
     if (!head) return new Set();
-    // Retired/superseded generations can still be recovery sources. A delete
-    // request alone is insufficient: keep every source until workspace/data
-    // cleanup has actually reached its terminal state.
-    const references = await tx.query<{ template_id: string }>(
-      `SELECT DISTINCT source.template_id FROM cloud_workspace_computer_sources source
-       JOIN cloud_workspaces workspace ON workspace.id=source.workspace_id AND workspace.org_id=source.org_id
-       WHERE source.org_id=$1 AND (workspace.status<>'deleted' OR workspace.data_deleted_at IS NULL)`,
-      [org],
-    );
+    const references = await computerTemplateWorkspaceReferences(tx, org);
     const newest = head.erasing
       ? []
       : (
@@ -202,7 +209,7 @@ export class CloudComputerTemplateRetentionWorker {
     return computerTemplateKeepSet({
       active: head.erasing ? null : head.active_build_id,
       previous: head.erasing ? null : head.previous_build_id,
-      referenced: references.rows.map((row) => row.template_id),
+      referenced: references,
       newestReady: newest,
     });
   }

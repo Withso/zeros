@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { COMPUTER_NAMED_REF, isComputerTemplateSnapshotName, type ComputerSnapshotChannel } from "./computer-template-name.js";
+import type { ComputerSnapshotIdentity } from "./computer-template-snapshot-boat.js";
 import { assertHostedDevAdmission } from "../development-environment.js";
 import { z } from "zod";
 import { BoatApiClient, BoatCreateRejectedError, type BoatApiClientOptions, BOAT_RESOURCE_ID_PATTERN } from "./boat-client.js";
@@ -101,6 +103,9 @@ export type BoatWorkspaceProviderOptions = BoatApiClientOptions & {
   resolveSnapshot?: (input: CloudProviderCreateInput) => Promise<string>;
   /** Resolves the saved generation's C1 source pin, account and org wallet. */
   resolveTemplate?: (input: CloudProviderCreateInput) => Promise<string>;
+  /** Resolves a durable Computer artifact through its exact saved generation. */
+  resolveNamedTemplate?: (input: CloudProviderCreateInput) => Promise<ComputerSnapshotIdentity>;
+  snapshotChannel?: ComputerSnapshotChannel;
   /** Mutable label only; resolved after a confirmed allocation, outside its journal. */
   resolveDisplayName?: (input: CloudProviderCreateInput) => BoatDisplayName;
   now?: () => number;
@@ -122,6 +127,7 @@ export class BoatWorkspaceProvider
   readonly name = "boat";
   private readonly snapshotName: string | null;
   private readonly templateSandboxId: string | null;
+  private readonly namedTemplate: boolean;
   private readonly client: BoatApiClient;
   private readonly now: () => number;
   constructor(private readonly options: BoatWorkspaceProviderOptions) {
@@ -129,8 +135,9 @@ export class BoatWorkspaceProvider
       options.imageRef,
     );
     const template = /^boat-template:([A-Za-z0-9_-]{1,128})$/.exec(options.imageRef);
+    const computer = COMPUTER_NAMED_REF.exec(options.imageRef);
     if (
-      !template && (!image ||
+      !template && !computer && (!image ||
       [
         "latest",
         "tree",
@@ -143,7 +150,8 @@ export class BoatWorkspaceProvider
       ].includes(image[1]!))
     )
       throw new Error("Invalid qualified Boat snapshot name");
-    this.snapshotName = image?.[1] ?? null;
+    this.snapshotName = computer?.[1] ?? image?.[1] ?? null;
+    this.namedTemplate = computer !== null;
     this.templateSandboxId = template?.[1] ?? null;
     if (
       !Number.isSafeInteger(options.qualifiedStorageMiB) ||
@@ -282,13 +290,26 @@ export class BoatWorkspaceProvider
       input.storageMiB !== this.options.qualifiedStorageMiB
     )
       throw failure("provider_profile_unsupported");
-    if (this.templateSandboxId) {
+    if (this.templateSandboxId || this.namedTemplate) {
       if (ttlSeconds === null) throw failure("provider_compute_lease_invalid");
       this.assertFiniteLease(ttlSeconds);
+    }
+    if (this.templateSandboxId) {
       if (!this.options.resolveTemplate || await this.options.resolveTemplate(input) !== this.templateSandboxId)
         throw failure("provider_template_identity_mismatch");
     }
-    const resolvedName = this.templateSandboxId ? null : this.options.resolveSnapshot ? await this.options.resolveSnapshot(input) : this.snapshotName;
+    if (this.namedTemplate && (!this.options.snapshotChannel ||
+        !isComputerTemplateSnapshotName(this.snapshotName!, this.options.snapshotChannel)))
+      throw failure("provider_template_identity_mismatch");
+    // A captured allocation no longer needs its source name. Still validate
+    // the exact saved create digest below before returning the owned sandbox.
+    const alreadyBound = this.namedTemplate && (await this.options.operations.find(input))?.resourceId;
+    const namedSource = this.namedTemplate && !alreadyBound ? await this.options.resolveNamedTemplate?.(input) : null;
+    if (this.namedTemplate && !alreadyBound && (!namedSource || namedSource.name !== this.snapshotName ||
+        !BOAT_RESOURCE_ID_PATTERN.test(namedSource.sourceSandboxId) || !/^[A-Za-z0-9_-]{1,160}$/.test(namedSource.snapshotId)))
+      throw failure("provider_template_identity_mismatch");
+    const resolvedName = this.templateSandboxId ? null : namedSource?.name ??
+      (this.options.resolveSnapshot ? await this.options.resolveSnapshot(input) : this.snapshotName);
     if (resolvedName !== this.snapshotName || (this.snapshotName?.startsWith("zeros-org-") && !this.options.resolveSnapshot))
       throw failure("provider_snapshot_identity_mismatch");
     const unmonitored = {
@@ -334,6 +355,13 @@ export class BoatWorkspaceProvider
         source.data.snapshotAvailable !== true || source.data.lastSnapshotStatus !== "completed")
         throw failure("provider_template_identity_mismatch");
       if (this.billingScope(response.sandbox) !== "match") throw failure("provider_billing_scope_mismatch");
+    }
+    if (namedSource) {
+      const response = await this.client.request(`/named-snapshots/${namedSource.name}`);
+      const source = z.object({ name: z.literal(namedSource.name), status: z.literal("ready"),
+        snapshotId: z.literal(namedSource.snapshotId), sourceSandboxId: z.literal(namedSource.sourceSandboxId),
+      }).safeParse(response.snapshot);
+      if (!source.success) throw failure("provider_template_identity_mismatch");
     }
     // Persist every dispatch before I/O. A timeout remains unknown even when
     // another request using the same key receives a definite refusal later.

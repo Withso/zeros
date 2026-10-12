@@ -323,6 +323,61 @@ describe("Boat workspace monitoring policy", () => {
   });
 });
 
+describe("Boat named Computer templates", () => {
+  const source = { name: "example-alpha-computer-v1", snapshotId: "snapshot_fixture", sourceSandboxId: "bx_abcdefgh" };
+  const input = { ...INPUT, imageRef: `boat-computer:${source.name}@sha256:${"b".repeat(64)}` };
+  function namedFixture() {
+    const f = fixture();
+    const resolveNamedTemplate = vi.fn(async () => source);
+    const provider = new BoatWorkspaceProvider({ ...f.options, imageRef: input.imageRef, snapshotChannel: "alpha", ttlSeconds: 1800, resolveNamedTemplate });
+    return { ...f, provider, resolveNamedTemplate };
+  }
+  it("creates from the ready name after the exact captured sandbox has expired", async () => {
+    const f = namedFixture();
+    f.fetcher.mockResolvedValueOnce(json({ ok: true, snapshot: { ...source, status: "ready" } }))
+      .mockResolvedValueOnce(json(sandbox()));
+    expect(await f.provider.create(input)).toMatchObject({ resourceId: RESOURCE });
+    expect(f.resolveNamedTemplate).toHaveBeenCalledWith(input);
+    const post = f.fetcher.mock.calls.find(([, init]) => init?.method === "POST")!;
+    expect(post[0]).toBe("https://boat.dev/api/v1/sandboxes");
+    expect(JSON.parse(String(post[1]!.body))).toMatchObject({ from: source.name, ttlSeconds: 1800, noEnv: true, env: {}, monitoring: false });
+    expect(f.fetcher.mock.calls.some(([url]) => String(url).includes(`/sandboxes/${source.sourceSandboxId}`))).toBe(false);
+  });
+  it.each([{ status: "saving" }, { snapshotId: "substituted_snapshot" }, { sourceSandboxId: "bx_3456789a" }, { name: "foreign-name" }])(
+    "refuses an unready or substituted named artifact before allocation: %j", changed => {
+      const f = namedFixture();
+      f.fetcher.mockResolvedValue(json({ ok: true, snapshot: { ...source, status: "ready", ...changed } }));
+      return expect(f.provider.create(input)).rejects.toMatchObject({ code: "provider_template_identity_mismatch" });
+    },
+  );
+  it("requires a saved generation resolver and a finite compute lease", async () => {
+    const f = fixture();
+    const missing = new BoatWorkspaceProvider({ ...f.options, imageRef: input.imageRef, ttlSeconds: 1800 });
+    await expect(missing.create(input)).rejects.toMatchObject({ code: "provider_template_identity_mismatch" });
+    const unlimited = new BoatWorkspaceProvider({ ...f.options, imageRef: input.imageRef, resolveNamedTemplate: async () => source });
+    await expect(unlimited.create(input)).rejects.toMatchObject({ code: "provider_compute_lease_invalid" });
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
+  it.each(["beta", "production", "development"])("never allocates from a %s Computer through Alpha", async channel => {
+    const f = fixture(), foreign = { ...source, name: `example-${channel}-computer-v1` };
+    const imageRef = `boat-computer:${foreign.name}@sha256:${"b".repeat(64)}`;
+    const provider = new BoatWorkspaceProvider({ ...f.options, imageRef, snapshotChannel: "alpha", ttlSeconds: 1800,
+      resolveNamedTemplate: async () => foreign });
+    await expect(provider.create({ ...INPUT, imageRef })).rejects.toMatchObject({ code: "provider_template_identity_mismatch" });
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
+  it("reconciles an already-bound allocation after its named Computer retires", async () => {
+    const f = namedFixture();
+    f.fetcher.mockResolvedValueOnce(json({ ok: true, snapshot: { ...source, status: "ready" } }))
+      .mockResolvedValueOnce(json(sandbox())).mockResolvedValueOnce(json(sandbox()));
+    await f.provider.create(input);
+    f.resolveNamedTemplate.mockRejectedValue(new Error("fixture name retired"));
+    expect(await f.provider.create(input)).toMatchObject({ resourceId: RESOURCE });
+    expect(f.resolveNamedTemplate).toHaveBeenCalledTimes(1);
+    expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+});
+
 describe("Boat Cloud Computer template forks", () => {
   const sourceId = "bx_3456789a";
   const input = { ...INPUT, imageRef: `boat-template:${sourceId}` };
