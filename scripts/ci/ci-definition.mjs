@@ -20,6 +20,7 @@ export const CI_DEFINITION_PATTERNS = Object.freeze([
   ".github/actionlint.yaml",
   ".github/CODEOWNERS",
   "scripts/ci/**",
+  "scripts/agent-runtime/**",
   "scripts/check-*",
   "scripts/run-explicit-vitest.mjs",
   "scripts/ui-smoke-composer.mjs",

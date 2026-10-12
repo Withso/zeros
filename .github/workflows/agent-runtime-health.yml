@@ -1,0 +1,31 @@
+name: Agent runtime notification health
+on:
+  schedule:
+    - cron: "43 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: agent-runtime-state
+  cancel-in-progress: false
+jobs:
+  watchdog:
+    if: github.repository == 'Withso/zeros' && github.ref == 'refs/heads/main' && (vars.ZEROS_AGENT_RUNTIME_MODE == 'notify' || vars.ZEROS_AGENT_RUNTIME_MODE == 'enabled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Independently check collection and publication heartbeats
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZEROS_AGENT_RUNTIME_MODE: ${{ vars.ZEROS_AGENT_RUNTIME_MODE }}
+          ZEROS_AGENT_RUNTIME_TRACKING_ISSUE: ${{ vars.ZEROS_AGENT_RUNTIME_TRACKING_ISSUE }}
+          ZEROS_AGENT_RUNTIME_MODELS: ${{ vars.ZEROS_AGENT_RUNTIME_MODELS }}
+        run: node scripts/agent-runtime/cli.mjs watchdog

@@ -429,75 +429,12 @@ jobs:
           VITEST_PART: ${{ matrix.part }}
         run: bash scripts/ci/with-userns.sh pnpm test:git --shard="${VITEST_PART}/4"
 
-      - name: Cloud runtime version-skew contracts
-        if: matrix.part == 1
-        run: pnpm check:runtime-skew
-
       - name: Code + Design authoring contracts
         # Keep transactional Design API, Local native authoring, lifecycle
         # and coding-agent capability contracts. Cloud API authoring is policy,
         # not an OS filesystem restriction.
         if: matrix.part == 2
         run: pnpm check:design-containment
-
-      - name: Verify model catalog (strict)
-        # Structural validation + the CLI-version gate: a curated model whose
-        # minCliVersion exceeds the bundled SDK fails here (it would silently
-        # downgrade at runtime).
-        if: matrix.part == 1
-        run: pnpm models:verify --strict
-
-      - name: Cursor asarUnpack closure is covered
-        # A @cursor/sdk require() not in electron-builder.yml's asarUnpack list is
-        # MODULE_NOT_FOUND in the packaged DMG (Cursor dead, no dev signal). Drift
-        # comes from the weekly @cursor/sdk Renovate bump.
-        if: matrix.part == 1
-        run: pnpm check:cursor-asar
-
-      - name: Cursor SDK host actually loads (real spawn, source runtime)
-        # The step above compares the asarUnpack globs to the require() closure
-        # STATICALLY; this spawns the real cursor-host.cjs and drives a protocol
-        # round-trip, so a dep that resolves in theory but not in practice fails
-        # here. It needs NO credentials — the probes only have to reach auth, not
-        # pass it — so unlike `agents:smoke` it can run on every PR. This run
-        # covers the runtime the engine uses from source (plain node).
-        if: matrix.part == 1
-        run: pnpm cursor:smoke
-
-      - name: Cursor SDK host actually works (real spawn, SHIPPED runtime)
-        # The packaged app runs the host under the installed Electron binary
-        # (apps/desktop/electron/sidecar.ts sets ZEROS_PTY_HOST_RUNTIME to
-        # process.execPath with ELECTRON_RUN_AS_NODE=1). @cursor/sdk's default
-        # local store depends on node:sqlite, whose availability can differ
-        # between the CI Node runtime and Electron's bundled runtime. Exercise
-        # the runtime the app actually ships.
-        if: matrix.part == 1
-        run: pnpm cursor:smoke:electron
-
-      - name: Claude CLI actually launches under the Agent SDK
-        # check:runtime-pins execs `claude --version`, which proves the binary
-        # runs. It does NOT prove the SDK can DRIVE it — query() spawns the CLI
-        # over its own control protocol, and that seam broke in production once
-        # already (the SDK resolves its platform binary relative to sdk.mjs,
-        # which is impossible in the bun-compiled packaged engine; every send
-        # failed with "AGENT RESPONSE FAILURE" in Beta/Prod only). This drives a
-        # real query() and asserts it dies on AUTH, not on resolution/spawn.
-        # Costs nothing: the key is invalid and HOME is redirected to an empty
-        # dir, so the turn 401s before inference — the gate asserts
-        # total_cost_usd and output_tokens are both 0 rather than trusting that.
-        if: matrix.part == 1
-        run: pnpm claude:smoke
-
-      - name: Codex app-server actually boots and matches the pin
-        # check:codex-pin compares three version STRINGS and never touches the
-        # artifact, so a missing platform package, an unspawnable binary, or a
-        # handshake regression all ship green. This boots the real
-        # `codex app-server`, completes the initialize handshake, and asserts
-        # the RUNNING binary's version equals the installed @openai/codex — the
-        # equivalent of the `claude --version` exec check, but proving the
-        # protocol the committed v2 bindings were generated from. No credentials.
-        if: matrix.part == 1
-        run: pnpm codex:smoke
 
       - name: Migration ladder is forward-only
         # The shipped zeros.db is each user's only copy of their data; editing a
@@ -509,10 +446,6 @@ jobs:
       - name: Secret scan (tracked files)
         if: matrix.part == 1
         run: pnpm check:secrets
-
-      - name: Third-party license inventory is current
-        if: matrix.part == 1
-        run: pnpm check:licenses
 
       - name: Production dependency audit has no unreviewed high advisory
         if: matrix.part == 1
@@ -529,25 +462,6 @@ jobs:
         # preload — a regression here is renderer-XSS → RCE on the user's machine.
         if: matrix.part == 1
         run: pnpm check:electron-hardening
-
-      - name: Codex protocol pin in lockstep
-        if: matrix.part == 1
-        run: pnpm check:codex-pin
-
-      - name: Bundled agent runtime pins are exact and provable
-        # The gate for Renovate's weekly "agent CLIs" PR. Every other check is
-        # blind to a FORWARD bump: models:verify --strict only fires when the
-        # bundled CLI is OLDER than a curated model needs, and test:adapters
-        # replays committed fixtures, so both are green by construction for the
-        # one direction Renovate moves. This resolves the Claude platform binary
-        # and execs its own --version, so a renamed or dropped platform package
-        # fails HERE instead of in release-alpha (post-merge) or the weekly cron.
-        if: matrix.part == 1
-        run: pnpm check:runtime-pins
-
-      - name: electron-builder source paths resolve
-        if: matrix.part == 1
-        run: pnpm check:packaging-paths
 
       - name: Control-plane migrations naming + forward-only
         # Preserve released migration files. The migration ledger records their
@@ -577,12 +491,6 @@ jobs:
         if: matrix.part == 1
         run: npm --prefix apps/web test
 
-      - name: Agent stream-translator contract (offline fixtures)
-        # Replays committed fixtures through the Claude translator and diffs the
-        # emitted sessionUpdate sequence — catches vendor-event drift, fully offline.
-        if: matrix.part == 1
-        run: pnpm test:adapters
-
       - name: Wire-protocol version-bump reminder (advisory)
         # Flags a @zeros/protocol wire-message change without a PROTOCOL_VERSION bump.
         # Coarse file-touch heuristic → advisory.
@@ -602,8 +510,16 @@ jobs:
         if: matrix.part == 1
         run: pnpm schemas:build
 
+  runtime-qualification:
+    name: runtime-qualification
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-vitest == 'true') }}
+    uses: ./.github/workflows/agent-runtime-qualification.yml
+    with:
+      scope-result: ${{ needs.scope.result }}
+
   # The repository ruleset requires `test`. Keep that context as an explicit
-  # aggregate of all four Vitest parts; `always()` turns a failed or cancelled
+  # aggregate of all four Vitest parts and independent runtime checks; `always()` turns a failed or cancelled
   # part into a red required check rather than a skipped one that can be missed.
   test:
     name: test
@@ -611,6 +527,7 @@ jobs:
     needs:
       - scope
       - test-shard
+      - runtime-qualification
     runs-on: ubuntu-latest
     steps:
       - name: Verify CI selection
@@ -628,6 +545,18 @@ jobs:
             true:success|false:skipped|false:success) ;;
             *) echo "::error::Invalid Vitest selection/result: ${LANE_SELECTED}:${LANE_RESULT}"; exit 1 ;;
           esac
+      - name: Verify runtime selection
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          LANE_SELECTED: ${{ needs.scope.outputs.job-vitest }}
+          LANE_RESULT: ${{ needs.runtime-qualification.result }}
+        run: |
+          set -euo pipefail
+          test "$SCOPE_RESULT" = success
+          case "${LANE_SELECTED}:${LANE_RESULT}" in
+            true:success|false:skipped|false:success) ;;
+            *) echo '::error::Independent runtime qualification did not satisfy selection'; exit 1 ;;
+          esac
       - name: Enforce the test result
         env:
           # The preceding raw-result validation alone authorizes this adapter.
@@ -636,6 +565,15 @@ jobs:
           set -euo pipefail
           if [ "$TEST_RESULT" != "success" ]; then
             echo "::error::TEST_RESULT was ${TEST_RESULT}"
+            exit 1
+          fi
+      - name: Enforce the runtime result
+        env:
+          RUNTIME_RESULT: ${{ needs.runtime-qualification.result == 'skipped' && needs.scope.outputs.job-vitest == 'false' && 'success' || needs.runtime-qualification.result }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNTIME_RESULT" != "success" ]; then
+            echo "::error::RUNTIME_RESULT was ${RUNTIME_RESULT}"
             exit 1
           fi
 
@@ -1299,6 +1237,7 @@ jobs:
       - quality
       - quality-workload
       - test-shard
+      - runtime-qualification
       - test
       - build
       - source-sync-workload
@@ -1399,6 +1338,7 @@ jobs:
             quality: true,
             "quality-workload": ledger.jobs.quality,
             "test-shard": ledger.jobs.vitest,
+            "runtime-qualification": ledger.jobs.vitest,
             test: true,
             build: ledger.jobs.build,
             "source-sync-workload": ledger.jobs.macos,

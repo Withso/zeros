@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { load } from "js-yaml";
+import { GATES } from "../agent-runtime/qualification.mjs";
 const workflow = (name: string) => readFileSync(`.github/workflows/${name}.yml`, "utf8");
 const publicationWorkflow = (name: string) => workflow(name === "release-alpha" ? "alpha-publication" : name);
 function job(text: string, name: string) {
@@ -422,8 +423,14 @@ esac
   });
   it("inherits the exact-source Preflight coverage instead of repeating its secret-free quality checks", () => {
     const preflight = workflow("preflight");
-    for (const command of ["typecheck:app", "typecheck:electron", "typecheck:packages", "lint", "test:git", "models:verify --strict", "check:cursor-asar", "check:licenses", "check:audit", "check:packaging-paths", "check:vite-env", "check:codex-pin", "check:electron-hardening", "check:deep-link-schemes"])
+    for (const command of ["typecheck:app", "typecheck:electron", "typecheck:packages", "lint", "test:git", "check:audit", "check:vite-env", "check:electron-hardening", "check:deep-link-schemes"])
       expect(preflight).toContain(`pnpm ${command}`);
+    expect(job(preflight, "runtime-qualification")).toContain("uses: ./.github/workflows/agent-runtime-qualification.yml");
+    expect(job(preflight, "test")).toContain("- runtime-qualification");
+    expect(job(preflight, "test")).toContain('"$RUNTIME_RESULT" != "success"');
+    expect(workflow("agent-runtime-qualification")).toContain("node scripts/agent-runtime/cli.mjs qualify");
+    for (const command of ["models:verify", "check:cursor-asar", "check:licenses", "check:packaging-paths", "check:codex-pin"])
+      expect(GATES).toContain(command);
     expect(preflight).toContain("scripts/release/tsconfig.json");
     expect(preflight).toContain("scripts/release/vitest.config.ts");
   });

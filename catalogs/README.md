@@ -84,14 +84,14 @@ remain unchanged. Version-specific `opus-5.5` and `sonnet-5.5` aliases resolve
 to their own model IDs. The new `haiku-5.5` alias resolves to `claude-haiku-5-5`;
 `haiku` continues to resolve to Haiku 4.5.
 
-| Model | Effort controls | Fast |
-| --- | --- | --- |
-| GPT-6 Sol, GPT-6.1 Sol | Low, Medium, High, Extra High, Max, Ultra | Yes |
-| GPT-6 Luna | Low, Medium, High, Extra High, Max | Yes |
-| Claude Opus 5.5 | Low, Medium, High, Extra High, Max, Ultracode | Yes |
-| Claude Sonnet 5.5 | Low, Medium, High, Extra High, Max | No |
-| Claude Haiku 5.5 | Low, Medium, High, Extra High, Max | No |
-| Grok 4.7 | Low, Medium, High, Extra High | Yes |
+| Model                  | Effort controls                               | Fast |
+| ---------------------- | --------------------------------------------- | ---- |
+| GPT-6 Sol, GPT-6.1 Sol | Low, Medium, High, Extra High, Max, Ultra     | Yes  |
+| GPT-6 Luna             | Low, Medium, High, Extra High, Max            | Yes  |
+| Claude Opus 5.5        | Low, Medium, High, Extra High, Max, Ultracode | Yes  |
+| Claude Sonnet 5.5      | Low, Medium, High, Extra High, Max            | No   |
+| Claude Haiku 5.5       | Low, Medium, High, Extra High, Max            | No   |
+| Grok 4.7               | Low, Medium, High, Extra High                 | Yes  |
 
 Haiku 5.5 follows Sonnet 5 and precedes Haiku 4.5 in the Claude catalog. The
 official [model configuration](https://code.claude.com/docs/en/model-config)
@@ -154,10 +154,20 @@ new catalog defaults.
 2. Preserve persisted aliases and defaults unless the change includes an
    explicit compatibility migration.
 3. Run `pnpm models:verify` for structural and pin checks.
-4. Run `pnpm models:verify --live` and `pnpm models:list <agent>` when provider
-   authentication is available.
+4. With dedicated test-account authentication, run
+   `pnpm models:verify --require-complete --bundled --json` and
+   `pnpm models:list <agent> --bundled --json`. Missing credentials or incomplete
+   native listing exits nonzero under `--require-complete`. The older `--live`
+   and unqualified list commands remain available for interactive diagnosis.
 5. Run the adjacent catalog tests before committing.
 
 Live discovery can differ by account, CLI, and availability. It replaces
 bundled capability fallbacks for exact matches while the checked-in catalog and
 tests continue to own display compatibility and cold-start behavior.
+
+The [runtime radar](../docs/agent-runtime-notifications.md) can run these bundled
+listing paths daily on trusted main and report server-side model/capability
+changes in GitHub. It never starts inference or edits this catalog. Unknown or
+account-only IDs remain hashed until their public status is reviewed. Listing
+freshness can depend on provider caches and is not proof that an account can
+execute every advertised model.

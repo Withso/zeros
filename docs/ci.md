@@ -23,8 +23,10 @@ These inputs are ignored on push and merge-group events, so canonical release
 Preflight always retains its complete exact-source graph.
 
 Both paths retain four Vitest shards, eight isolated Postgres shards and three
-composer browser shards, with fail-fast disabled. Repository guards remain on
-Vitest part 1 and containment on part 2. The selected and complementary paths
+composer browser shards, with fail-fast disabled. General repository guards remain on
+Vitest part 1 and containment on part 2. Runtime qualification has its own
+independent reusable job, selected with `job-vitest`, so a failing shard cannot
+hide runtime checks. Both `test` aggregates include that job. The selected and complementary paths
 partition workload execution; they do not reuse evidence from another SHA,
 event, run or PR. The shared control-plane static job's actual result is passed
 to the complementary database verifier, including failures. Whichever path
@@ -54,6 +56,14 @@ All reused verification jobs retain read-only tokens, no inherited secrets and
 no protected environments. Fork PRs use `pull_request`. Credentialed provider
 qualification and deployment retain their existing operator triggers. Runtime
 drift reports stale pins and fails broken pins, as before.
+
+The [agent runtime radar](agent-runtime-notifications.md) maintains one working
+upgrade PR per provider and a subscribed GitHub issue. Its default-branch
+publisher validates qualification run/artifact provenance before updating a PR
+report. Public scans, the model publisher, watchdog and branch writer serialize
+through the non-cancelling `agent-runtime-state` group. Pending-run replacement
+is recovered by scheduled reconciliation; human pushes are checked separately.
+These workflows ship off and do not replace required CI or owner merges.
 
 CodeQL runs its `security-and-quality` suite across all JS/TS sources on PRs,
 main and release pushes. This includes every query in `security-extended` and
@@ -156,16 +166,16 @@ non-advisory check must have a job or an explicit `runs_elsewhere` execution
 owner. Shared checks may belong to multiple jobs because their commands span
 the existing workload boundaries.
 
-| Job output                 | CI workload                                                                                | Mapped check IDs                                                                                                                                                                                                                                                                                               |
-| -------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `job-quality`              | `quality-workload`, with the always-running required `quality` aggregate                   | `desktop-static`, `ui-source-guard`, `protocol-package-static`, `web-static-and-tests`, `marketing-static`, `release-contracts`, `changed-prettier-advisory`                                                                                                                                                   |
-| `job-vitest`               | `test-shard`, with the required `test` aggregate                                           | `root-vitest`, `web-static-and-tests`, `codex-keeper-pin`, `preload`, `design-containment`, `catalog-and-provider-runtime`, `engine-migrations`, `backend-migration-guards`, `dependency-licenses-audit`, `release-and-security-static`, `adapter-fixtures`, `protocol-advisory`, `settings-schema-generation` |
-| `job-build`                | `build`                                                                                    | `renderer-build`, `engine-and-electron-build`, `web-and-marketing-build`                                                                                                                                                                                                                                       |
-| `job-macos`                | `source-sync-workload`, with the required `source-sync (macOS)` aggregate                  | `source-sync-macos`, `unsigned-packaging-proof`                                                                                                                                                                                                                                                                |
-| `job-control-plane-db`     | `control-plane-database`, with report validation in the required `control plane` aggregate | `control-plane-database`, `control-plane-reports`                                                                                                                                                                                                                                                              |
-| `job-ui-smoke`             | `ui-smoke (composer)`                                                                      | `composer-full`                                                                                                                                                                                                                                                                                                |
-| `job-control-plane-static` | `control-plane-static` and `control-plane-scope`                                           | `control-plane-static` (always selected)                                                                                                                                                                                                                                                                       |
-| `job-secret-scan`          | `secret scan (PR commit range)`                                                            | `commit-range-secrets` (always selected)                                                                                                                                                                                                                                                                       |
+| Job output                 | CI workload                                                                                | Mapped check IDs                                                                                                                                                                                                                                                                                                                         |
+| -------------------------- | ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `job-quality`              | `quality-workload`, with the always-running required `quality` aggregate                   | `desktop-static`, `ui-source-guard`, `protocol-package-static`, `web-static-and-tests`, `marketing-static`, `release-contracts`, `changed-prettier-advisory`                                                                                                                                                                             |
+| `job-vitest`               | `test-shard` and `runtime-qualification`, with the required `test` aggregate               | `root-vitest`, `web-static-and-tests`, `codex-keeper-pin`, `preload`, `design-containment`, `catalog-and-provider-runtime`, `runtime-surface-review`, `engine-migrations`, `backend-migration-guards`, `dependency-licenses-audit`, `release-and-security-static`, `adapter-fixtures`, `protocol-advisory`, `settings-schema-generation` |
+| `job-build`                | `build`                                                                                    | `renderer-build`, `engine-and-electron-build`, `web-and-marketing-build`                                                                                                                                                                                                                                                                 |
+| `job-macos`                | `source-sync-workload`, with the required `source-sync (macOS)` aggregate                  | `source-sync-macos`, `unsigned-packaging-proof`                                                                                                                                                                                                                                                                                          |
+| `job-control-plane-db`     | `control-plane-database`, with report validation in the required `control plane` aggregate | `control-plane-database`, `control-plane-reports`                                                                                                                                                                                                                                                                                        |
+| `job-ui-smoke`             | `ui-smoke (composer)`                                                                      | `composer-full`                                                                                                                                                                                                                                                                                                                          |
+| `job-control-plane-static` | `control-plane-static` and `control-plane-scope`                                           | `control-plane-static` (always selected)                                                                                                                                                                                                                                                                                                 |
+| `job-secret-scan`          | `secret scan (PR commit range)`                                                            | `commit-range-secrets` (always selected)                                                                                                                                                                                                                                                                                                 |
 
 `tracked-secrets` runs in full Preflight and is also bundled into selected CI
 Vitest shards; its independent selection does not force a Vitest workload on
@@ -346,7 +356,7 @@ skips.
 
 CI-definition PRs need an owner merge. Agents must not auto-merge changes to the
 paths recognized by `scripts/ci/ci-definition.mjs`: workflows/actions,
-`.github/actionlint.yaml`, `.github/CODEOWNERS`, `scripts/ci/**`, `scripts/check-*`,
+`.github/actionlint.yaml`, `.github/CODEOWNERS`, `scripts/ci/**`, `scripts/agent-runtime/**`, `scripts/check-*`,
 the explicit Vitest runner, composer entry and `scripts/ui-smoke/**`, release
 scripts, root Vitest/ESLint configs, root package/lock/workspace files, and the
 control-plane/web package and lockfiles.
