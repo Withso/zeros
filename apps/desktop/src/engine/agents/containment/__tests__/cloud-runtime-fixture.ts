@@ -2,6 +2,18 @@ import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+/** Restore write access only to disposable directories, never symlink targets. */
+export function removeRuntimeFixtureTree(directory: string, filesystem = fs) {
+  const metadata = filesystem.lstatSync(directory, { throwIfNoEntry: false });
+  if (!metadata) return;
+  if (metadata.isDirectory()) {
+    filesystem.chmodSync(directory, 0o700);
+    for (const name of filesystem.readdirSync(directory))
+      removeRuntimeFixtureTree(path.join(directory, name), filesystem);
+  }
+  filesystem.rmSync(directory, { recursive: true, force: true });
+}
+
 /** Real files behind a logical VM root; tests never write to /etc or /run. */
 export function cloudRuntimeFixture({ mapAbsoluteLinks = true } = {}) {
   const directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "zeros-runtime-root-")));
@@ -90,5 +102,5 @@ export function cloudRuntimeFixture({ mapAbsoluteLinks = true } = {}) {
   link("/opt/zeros/state", "/srv/zeros/state");
   write("/opt/zeros/disk-epoch", "1\n", 0o600);
   return { directory, physical, filesystem, owners, descriptor, marker, mkdir, write, link, install,
-    dispose: () => fs.rmSync(directory, { recursive: true, force: true }) };
+    dispose: () => removeRuntimeFixtureTree(directory) };
 }

@@ -5,9 +5,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { prepareCloudGitExecPath } from "../cloud-workspace-validation/sandbox/prepare-cloud-git.mjs";
 import { cloudRuntimeAssetEnvironment } from "../../apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs";
 import { testCloudRuntime } from "../../apps/desktop/src/engine/agents/__tests__/helpers/test-cloud-runtime";
+import { cloudRuntimeFixture, removeRuntimeFixtureTree } from "../../apps/desktop/src/engine/agents/containment/__tests__/cloud-runtime-fixture";
 
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { for (const root of roots.splice(0)) removeRuntimeFixtureTree(root); });
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-git-exec-")); roots.push(root);
   const runtime = testCloudRuntime(), foreign = new Set<string>();
@@ -39,6 +40,26 @@ function fixture() {
 }
 
 describe("physical runtime Git exec selection", () => {
+  it("removes read-only fixtures without following native helper symlinks", () => {
+    const tree = cloudRuntimeFixture(), outside = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-git-helper-"));
+    roots.push(tree.directory, outside);
+    const projected = `/opt/zeros-infra/.git-exec/${tree.descriptor.runtimeId}`;
+    tree.mkdir(projected);
+    fs.writeFileSync(path.join(outside, "native-helper"), "unchanged", { mode: 0o444 });
+    fs.symlinkSync(outside, tree.physical(`${projected}/helpers`));
+    fs.chmodSync(tree.physical(projected), 0o555);
+    fs.chmodSync(outside, 0o555);
+    try {
+      tree.dispose();
+      expect(fs.existsSync(tree.directory)).toBe(false);
+      expect(fs.statSync(outside).mode & 0o777).toBe(0o555);
+      expect(fs.readFileSync(path.join(outside, "native-helper"), "utf8")).toBe("unchanged");
+    } finally {
+      if (fs.existsSync(tree.physical(projected))) fs.chmodSync(tree.physical(projected), 0o755);
+      fs.chmodSync(outside, 0o755);
+    }
+  });
+
   it("creates a searchable owned parent under the private host umask without changing that umask", () => {
     const f = fixture(), previous = process.umask(0o077);
     try {
