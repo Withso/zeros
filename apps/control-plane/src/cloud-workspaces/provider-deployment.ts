@@ -4,7 +4,7 @@ import { withSystemTx } from "../db.js";
 import { BoatApiClient } from "./boat-client.js";
 import { boatWorkspaceDisplayName } from "./boat-display-name.js";
 import { BoatWorkspaceProvider } from "./boat-provider.js";
-import { resolveComputerTemplateFork } from "./computer-workspace-source.js";
+import { resolveComputerNamedTemplate, resolveComputerTemplateFork } from "./computer-workspace-source.js";
 import type { CloudProviderCreateInput } from "./provider.js";
 import { BoatRuntimeAccessProvider } from "./boat-runtime-access.js";
 import { BoatRuntimeEndpointResolver } from "./boat-runtime-endpoint.js";
@@ -56,6 +56,8 @@ export function createCloudProviderDeployment(
     access,
     ttlSeconds: cloud.boat.ttlSeconds,
     resolveTemplate: (input: CloudProviderCreateInput) => resolveComputerTemplateFork(pool, cloud.boat!.accountScope, cloud.boat!.billingOrg, input),
+    snapshotChannel: deploymentChannel,
+    resolveNamedTemplate: (input: CloudProviderCreateInput) => resolveComputerNamedTemplate(pool, cloud.boat!.accountScope, cloud.boat!.billingOrg, input, deploymentChannel),
     resolveDisplayName: async (input: CloudProviderCreateInput) => {
       const row = await withSystemTx(pool, async tx => (await tx.query<{ org_id: string; org_slug: string; display_name: string }>(
         `SELECT workspace.org_id,org.slug AS org_slug,workspace.display_name

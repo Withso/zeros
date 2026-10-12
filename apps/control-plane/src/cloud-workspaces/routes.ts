@@ -499,7 +499,12 @@ const workspaceSelect = (actorSql="NULL::text",actorUserSql="NULL::uuid") => `
              AND base.base_image_id=g.runtime_base_image_id AND base.base_compatibility_id=g.runtime_base_compatibility_id
              AND build.state='succeeded' AND template.state='ready' AND template.stopped_at IS NOT NULL
              AND template.protected_contract_digest IS NOT NULL AND template.provider_resource_id ~ '^[A-Za-z0-9_-]{1,128}$'
-             AND g.image_ref='boat-template:'||template.provider_resource_id AND build.repository_manifest IS NOT NULL
+             AND (g.image_ref='boat-template:'||template.provider_resource_id OR EXISTS (
+               SELECT 1 FROM cloud_computer_template_snapshots snapshot WHERE snapshot.build_id=template.build_id
+                 AND snapshot.org_id=template.org_id AND snapshot.image_ref=g.image_ref AND snapshot.verified_at IS NOT NULL
+                 AND snapshot.source_sandbox_id=template.provider_resource_id AND snapshot.account_scope=template.account_scope
+                 AND snapshot.billing_org=template.billing_org AND snapshot.manifest_sha256=template.manifest_sha256))
+             AND build.repository_manifest IS NOT NULL
              AND coalesce((SELECT jsonb_agg(jsonb_build_object('id',repo.repository_id,'owner',repo.repository_owner,'name',repo.repository_name) ORDER BY repo.position)
                FROM cloud_computer_v2_config_repositories repo WHERE repo.config_id=source.config_id AND repo.org_id=source.org_id),'[]'::jsonb)
                =coalesce((SELECT jsonb_agg(item.value-'sha' ORDER BY item.position)

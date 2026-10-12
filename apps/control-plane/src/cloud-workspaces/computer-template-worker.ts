@@ -19,6 +19,7 @@ import {
 import { ComputerTemplateLogRedactor } from "./computer-template-logs.js";
 import { BuilderVmError, computerTemplateBuilderIntent } from "./computer-template-boat.js";
 import { quarantineRuntimeImage, type RuntimeImageChannel } from "./runtime-images.js";
+import type { ComputerTemplateSnapshotLifecycle } from "./computer-template-snapshots.js";
 import type {
   BuilderFixedCommand,
   BuilderVm,
@@ -31,6 +32,7 @@ const hash = z.string().regex(/^[a-f0-9]{64}$/);
 // Recording the capture and completing the build must finish before the
 // build deadline, so the template stop leaves this much of it unused.
 const CAPTURE_COMPLETION_MS = 60_000;
+const NAMED_CAPTURE_MS = 5 * 60_000;
 const TcbResult = z
   .object({
     schema: z.literal("zeros.computer-tcb/v1"),
@@ -91,6 +93,7 @@ export type ComputerTemplateWorkerDependencies = {
   service: DatabaseCloudComputerV2Service;
   vms: CloudBuilderVms;
   operations: BuilderVmOperations;
+  snapshots: ComputerTemplateSnapshotLifecycle;
   github: {
     mintContentsRead(input: {
       installationId: number;
@@ -156,6 +159,7 @@ export class ComputerTemplateWorker {
   private fence = Date.now();
   private ticking: Promise<void> | null = null;
   private stopping = false;
+  private snapshotSweepAt = 0;
   constructor(private readonly deps: ComputerTemplateWorkerDependencies) {
     this.journal = new ComputerTemplateJournal(
       deps.pool,
@@ -199,6 +203,10 @@ export class ComputerTemplateWorker {
     }
   }
   private async work() {
+    if (Date.now() - this.snapshotSweepAt >= 60_000) {
+      await this.deps.snapshots.reconcile();
+      this.snapshotSweepAt = Date.now();
+    }
     await this.journal.fenceExpired();
     for (let index = 0; index < this.concurrency; index++) {
       const row = await this.journal.claimCleanup();
@@ -483,10 +491,10 @@ export class ComputerTemplateWorker {
       await this.stage(claim, "stopping");
       failure = "template_stop_failed";
       // Archiving saves the whole disk, and Boat can take well over ten
-      // minutes to do it. Wait for the build's own deadline, keeping a minute
-      // to record the capture and complete the build before it.
+      // minutes to do it. Reserve five minutes for the named capture/proof
+      // and one minute for the final completion CAS.
       const stopped = await this.deps.vms
-        .stop(vm, { timeoutMs: this.timeout(claim, 30 * 60_000, CAPTURE_COMPLETION_MS), requireSnapshot: true })
+        .stop(vm, { timeoutMs: this.timeout(claim, 30 * 60_000, CAPTURE_COMPLETION_MS + NAMED_CAPTURE_MS), requireSnapshot: true })
         .catch((error: unknown) => {
           if (error instanceof BuilderVmError && error.check === "stop_snapshot_failed")
             throw new BuildFailure("template_capture_failed");
@@ -495,6 +503,12 @@ export class ComputerTemplateWorker {
       if (stopped.archived !== true)
         throw new BuildFailure("template_capture_failed");
       const stoppedAt = await this.journal.recordStopped(id);
+      failure = "template_capture_failed";
+      // The saved artifact, rather than the expiring stopped sandbox, becomes
+      // the creation source. A name/save without its exact proof is not ready.
+      await this.deps.snapshots.capture({ buildId: id, workerFence: fence,
+        deadlineAt: new Date(Date.parse(claim.deadlineAt) - CAPTURE_COMPLETION_MS).toISOString(),
+        guard: () => this.guard(claim) });
       await this.stage(claim, "capture_confirmed");
       await this.deps.service.completeBuild(
         id,

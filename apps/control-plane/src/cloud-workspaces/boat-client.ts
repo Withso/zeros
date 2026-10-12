@@ -177,6 +177,8 @@ export class BoatApiClient {
       confirmDelete?: string;
       signal?: AbortSignal;
       timeoutMs?: number;
+      /** Complete snapshot trees are larger than ordinary API documents. */
+      maxResponseBytes?: number;
     } = {},
   ): Promise<Record<string, unknown>> {
     if (
@@ -185,6 +187,12 @@ export class BoatApiClient {
       path.includes("..")
     )
       throw new Error("Invalid Boat API path");
+    const maxResponseBytes = input.maxResponseBytes ?? MAX_RESPONSE_BYTES;
+    if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 1 ||
+        maxResponseBytes > 64 * 1024 * 1024 ||
+        (maxResponseBytes > MAX_RESPONSE_BYTES &&
+          (!/^\/snapshots\/[A-Za-z0-9_-]{1,160}\/tree$/.test(path) || (input.method ?? "GET") !== "GET")))
+      throw new Error("Invalid Boat response limit");
     const headers = new Headers({
       authorization: `Bearer ${this.options.apiKey}`,
       accept: "application/json",
@@ -225,7 +233,7 @@ export class BoatApiClient {
             const next = await reader.read();
             if (next.done) break;
             bytes += next.value.byteLength;
-            if (bytes > MAX_RESPONSE_BYTES)
+            if (bytes > maxResponseBytes)
               throw new CloudProviderError(
                 "provider_response_too_large",
                 "Boat response exceeded its size limit",

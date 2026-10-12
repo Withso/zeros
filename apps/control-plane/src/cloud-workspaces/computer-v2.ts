@@ -1196,7 +1196,9 @@ export class DatabaseCloudComputerV2Service {
       if (
         !(
           await tx.query(
-            "SELECT build_id FROM cloud_computer_templates WHERE build_id=$1 AND org_id=$2 AND state='ready' FOR UPDATE",
+            `SELECT build_id FROM cloud_computer_templates template WHERE build_id=$1 AND org_id=$2 AND state='ready'
+              AND (NOT named_snapshot_required OR EXISTS (SELECT 1 FROM cloud_computer_template_snapshots snapshot
+                WHERE snapshot.build_id=template.build_id AND snapshot.org_id=template.org_id AND snapshot.state='ready')) FOR UPDATE`,
             [build.id, org],
           )
         ).rowCount
@@ -1447,7 +1449,7 @@ export class DatabaseCloudComputerV2Service {
         await prepareBuilderVmOperation(builder.operations, intent,
           async () => image?.snapshotName ?? builderVmBaseSnapshot(base?.image_ref ?? ""), tx);
         await tx.query(`INSERT INTO cloud_computer_templates(build_id,org_id,account_scope,billing_org,builder_operation_key,builder_name,
-          builder_source_image_id,allocation_requested_at) VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp())`,
+          builder_source_image_id,allocation_requested_at,named_snapshot_required) VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp(),true)`,
         [build.id, build.org_id, parse(identifier, builder.accountScope), parse(identifier, builder.billingOrg), intent.operationKey, intent.name,
           image?.imageId ?? null]);
       }

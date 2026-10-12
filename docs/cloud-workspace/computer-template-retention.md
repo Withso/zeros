@@ -1,5 +1,10 @@
 # Cloud Computer template retention
 
+This is the stopped-builder policy. [Durable named snapshots](computer-named-snapshots.md)
+share its active + previous + referenced keep-set and also protect unresolved
+provider creates. Retaining database metadata or a stopped builder does not
+extend Boat's 14-day clock.
+
 The control plane retains only each organization's active template, previous
 template, and every template referenced by a workspace whose workspace/data
 deletion is not complete. Stopped workspaces and retired generations still
@@ -42,7 +47,8 @@ version before activating it." Rebuild creates a new version from the historical
 configuration and recorded repository commits.
 
 Organization final erasure checks B7's operation journals across provider accounts
-before deleting template, build or mutation journals. A missing sandbox ID is
+and waits for every named artifact to be retired before deleting template,
+build or mutation journals. A missing sandbox ID is
 not cleanup evidence: an unallocated create must be positively closed, including
 every recorded create attempt. Once the durable deletion request enters
 irreversible purge, retention releases active/previous holds, including

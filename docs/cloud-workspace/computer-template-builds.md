@@ -21,6 +21,10 @@ legacy mutable checkout/HOME ownership from 10001/10002 to 10003 only after posi
 Agents can read engine data on their VM: one trust domain per workspace. Conversation directories
 separate state, not agents from each other.
 
+Completed builds also require a ready [durable named snapshot](computer-named-snapshots.md)
+with an exact saved-tree proof. New workspace allocations use the saved name;
+legacy accepted generation pins keep their original fork path.
+
 ## Worker and durable authority
 
 `apps/control-plane/src/cloud-workspaces/computer-template-worker.ts` consumes
@@ -61,21 +65,21 @@ The pipeline starts with base create and build-purpose runtime install, or a
 create from a ready runtime image with the pinned runtime already current and
 idle. The image path skips artifact presigning and installation. Both continue
 with protected-file baseline → shallow repository clones → root recipe → integrity and runtime
-self-test → sanitation → verified archive → C1 completion CAS. The baseline
-digest and final manifest digest are stored outside the VM. The source ref is
-`boat-template:<sandboxId>`; the final Computer template does not require a named
-snapshot or verifier VM. The separate runtime-image producer owns its shared
-named snapshot and cold probe.
-Per the ACD-11/D8 capture decision, the final evidence is the sanitation manifest
-plus the stopped/ARCHIVED sandbox confirmed by B7's provider GET. There is no
-separate snapshot operation. Boat's stop saves the disk first and reports itself
+self-test → sanitation → verified archive → named save and saved-tree proof →
+C1 completion CAS. The baseline digest and final manifest digest are stored
+outside the VM. New source refs are `boat-computer:<name>@sha256:<manifest>`;
+legacy accepted `boat-template:<sandboxId>` pins keep their fork path. The final
+Computer uses a named saved-tree proof, without an additional verifier VM.
+The separate runtime-image producer still owns its shared name and cold probe.
+The final evidence includes the sanitation manifest, B7's confirmed stopped
+sandbox, and the complete tree of the exact named snapshot. Boat's stop saves
+the disk first and reports itself
 as an operation: B7 pins the stop it issued or joined (`GET
 /sandboxes/{id}/stops/{stopId}`), rechecks it after every poll, and captures
 only when that exact stop is `completed` and the sandbox is archived. While the
 stop is `pending` or `failing` (Boat retries a refused save itself) it waits
-until one minute before the build's 30-minute deadline, because saving a
-builder's disk can take Boat well over ten minutes; the last minute is kept for
-recording the capture and completing the build. Capture then requires the
+until six minutes before the build's 30-minute deadline, reserving five minutes
+for the named save/proof and one minute for completion. Capture then requires the
 archived sandbox's `snapshotAvailable` with a `completed` `lastSnapshotStatus`,
 the same evidence a template fork checks on its source. A builder that is
 already archived, or a stop without an identity, is refused: an archive this
@@ -234,7 +238,6 @@ machine-id during sanitation and does not change base boot files.
 
 `createComputerTemplateBoatAdapters` constructs the account-scoped
 `DatabaseBuilderVmOperationStore`, real `BoatCloudBuilderVms`, and B5b selector.
-Pass the control plane's `deploymentChannel` explicitly for Boat display names.
 Pass its `operations`, `vms` and `runtime` together to the worker. Runtime
 selection happens inside the claim transaction; completion calls
 `loadPinnedCloudRuntime` on the original tuple without selecting a new head.

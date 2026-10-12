@@ -1,9 +1,11 @@
 import { readFileSync, readdirSync } from "node:fs";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { withSystemTx } from "../db.js";
 import { planMigrations, runMigrations } from "../migrate.js";
 import { confirmWorkspaceDeletion, seedWorkspaceDeletionGraph } from "./deletion-test-fixtures.js";
+import * as computerWorkspaceSource from "./computer-workspace-source.js";
+import { loadPrePurgeComputerWorkspaceSource } from "./data-purge-legacy-source.test-fixtures.js";
 import { CloudWorkspaceOperationsWorker } from "./operations.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -29,7 +31,14 @@ suite("data-purge expansion on the populated previous schema", () => {
         } catch (error) { await tx.query("ROLLBACK"); throw error; }
       }
     } finally { tx.release(); }
-    const old = await seedWorkspaceDeletionGraph(pool, 2);
+    expect((await pool.query("SELECT to_regclass('cloud_computer_template_snapshots') AS relation")).rows[0].relation).toBeNull();
+    // Keep admission on the actual pre-0142 reader while seeding the old
+    // schema. Restore today's reader before migration and every purge check.
+    const legacyReader = vi.spyOn(computerWorkspaceSource, "loadComputerWorkspaceSource")
+      .mockImplementation(loadPrePurgeComputerWorkspaceSource);
+    let old: Awaited<ReturnType<typeof seedWorkspaceDeletionGraph>>;
+    try { old = await seedWorkspaceDeletionGraph(pool, 2); }
+    finally { legacyReader.mockRestore(); }
     const retained = ["cloud_workspaces", "cloud_workspace_generations", "cloud_workspace_engine_instances",
       "cloud_workspace_generation_transitions", "cloud_workspace_runtime_transitions", "cloud_workspace_runtime_enrollments",
       "cloud_workspace_allocation_owners", "cloud_workspace_allocation_transfers", "workspace_billing_epochs", "audit_log"];

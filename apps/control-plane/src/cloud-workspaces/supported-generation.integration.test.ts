@@ -27,6 +27,37 @@ d("saved supported cloud generation admission and catalog", () => {
     expect(settings.sourceVersions.computerEnvironment).toMatchObject({ configId: result.source.configId });
     expect((await pool.query("SELECT current_generation FROM cloud_workspaces WHERE id=$1", [fixture.workspaceId])).rows[0].current_generation).toBe(1);
   });
+  it.each(["ready", "retired"])("keeps a workspace allocated from a %s named Computer supported in the catalog", async state => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    // Seed the already-accepted immutable generation; production INSERT is
+    // covered separately by the named source/pin constraint tests.
+    const tx = await pool.connect();
+    try {
+      await tx.query("BEGIN");
+      await tx.query("SELECT set_config('app.system','on',true)");
+      const template = (await tx.query("SELECT * FROM cloud_computer_templates WHERE org_id=$1", [fixture.organizationId])).rows[0];
+      await tx.query("UPDATE cloud_computer_templates SET provider_resource_id='bx_23456789',manifest_sha256=$2 WHERE build_id=$1", [template.build_id, Buffer.alloc(32, 12)]);
+      const named = (await tx.query(`INSERT INTO cloud_computer_template_snapshots
+        (build_id,org_id,channel,account_scope,billing_org,source_sandbox_id,snapshot_name,manifest_sha256,
+         state,save_requested_at,snapshot_id,size_bytes,tree_sha256,verified_at,ready_at,retire_requested_at,retired_at)
+        VALUES($1,$2,'alpha',$3,$4,'bx_23456789','fixture-alpha-computer-v1',$5,$6,now(),'fixture_snapshot',4096,$5,now(),now(),
+          CASE WHEN $6='retired' THEN now() END,CASE WHEN $6='retired' THEN now() END) RETURNING image_ref`,
+      [template.build_id, fixture.organizationId, template.account_scope, template.billing_org, Buffer.alloc(32, 12), state])).rows[0];
+      await tx.query("SET LOCAL session_replication_role=replica");
+      await tx.query("UPDATE cloud_workspace_generations SET image_ref=$2 WHERE workspace_id=$1", [fixture.workspaceId, named.image_ref]);
+      await tx.query("COMMIT");
+    } catch (error) { await tx.query("ROLLBACK"); throw error; }
+    finally { tx.release(); }
+    await expect(withSystemTx(pool, tx => requireSupportedCloudWorkspaceGeneration(tx, scope(fixture)))).resolves.toBeDefined();
+    const user = await ensureUser(pool, { provider: "workos", providerSubject: `workos|${fixture.userId}`,
+      email: `durable-${fixture.userId}@example.test`, displayName: "Owner" });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", user); await next(); });
+    app.route("/", createCloudWorkspaceRoutes(pool, null, { workosEnabled: false }));
+    const response = await app.request(`/v1/cloud-workspaces/${fixture.workspaceId}`);
+    expect(response.status).toBe(200);
+    expect((await response.json()).workspace.error?.code).not.toBe("cloud_workspace_v2_required");
+  });
   it("keeps separate supported workspace sources when a test has multiple owners", async () => {
     const one = await seedReadyCloudWorkspace(pool), two = await seedReadyCloudWorkspace(pool);
     const first = await withSystemTx(pool, tx => requireSupportedCloudWorkspaceGeneration(tx, scope(one)));

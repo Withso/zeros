@@ -8,6 +8,8 @@ import { DatabaseBuilderVmOperationStore, type BuilderVmIntent } from "./cloud-b
 import type { CloudRuntimeQualificationMode } from "./runtime-config.js";
 import { loadPinnedCloudRuntime, selectCloudRuntime } from "./runtime-selection.js";
 import type { RuntimeDescriptor } from "./runtime-contract.js";
+import { BoatComputerTemplateSnapshots } from "./computer-template-snapshot-boat.js";
+import { ComputerTemplateSnapshots } from "./computer-template-snapshots.js";
 
 export type { BuilderVm, BuilderFixedCommand, ClosedDiagnostic, CloudBuilderVms } from "./cloud-builder-vm.js";
 export { BuilderVmError } from "./cloud-builder-vm.js";
@@ -63,5 +65,9 @@ export function createComputerTemplateBoatAdapters(input: {
       }, input.qualificationMode) !== null;
     },
   };
-  return { operations, vms, runtime };
+  const snapshots = new ComputerTemplateSnapshots(input.pool, {
+    provider: new BoatComputerTemplateSnapshots(input.client, input.billingOrg, input.deploymentChannel), channel: input.deploymentChannel,
+    accountScope: input.accountScope, billingOrg: input.billingOrg,
+  });
+  return { operations, vms, runtime, snapshots };
 }
