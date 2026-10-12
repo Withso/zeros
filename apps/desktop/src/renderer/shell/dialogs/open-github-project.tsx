@@ -42,6 +42,7 @@ import { acceptCloudWorkspaceDocument, cloudProjectForFolder } from "../../state
 import { cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { useWorkspaceDispatch } from "../../state/store";
 import { spawnPreparedDefaultChat } from "../../state/spawn-default-chat";
+import { useOrganizationCloudPaused } from "../../features/team/cloud-workspace-pause";
 
 interface OpenGithubProjectDialogProps {
   open: boolean;
@@ -77,6 +78,8 @@ function previewDirName(url: string): string {
 export function OpenGithubProjectDialog(props: OpenGithubProjectDialogProps) {
   const organization = useActiveOrganization();
   const { me } = useTeams();
+  const paused = useOrganizationCloudPaused();
+  if (paused) return null;
   return <ScopedOpenGithubProjectDialog key={JSON.stringify([me?.user.id, organization?.id])} {...props} />;
 }
 

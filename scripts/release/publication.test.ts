@@ -18,6 +18,18 @@ const deps = () => ({ receipt: async () => receipt, identity: async () => backen
   page: async (surface: string) => ({ version: 1, commitSha: sha, surface }) });
 
 describe("V6 publication-time proof", () => {
+  it.each(["beta", "production"] as const)("requires the %s control plane to honor its cloud pause before publication", async channel => {
+    const config = { ...candidate, channel, branch: "release/1.2.3", cloudRequired: false };
+    const paused = { ...backend, channel, cloud: { enabled: false, ready: true, state: "disabled" }, worker: null, workerQualified: false };
+    const makeReceipt = (current: typeof paused | typeof backend) => ({ ...receipt, channel, branch: config.branch,
+      cloudRequired: false, backend: current, pages: channel === "beta" ? [{ id: "app", surface: "app" }] : receipt.pages });
+    await expect(publicationGate(config, { ...deps(), receipt: async () => makeReceipt(paused), identity: async () => paused })).resolves.toBeUndefined();
+    for (const current of [{ ...backend, channel }, { ...paused, worker }]) {
+      await expect(publicationGate(config, { ...deps(), receipt: async () => makeReceipt(current), identity: async () => current }))
+        .rejects.toThrow(/channel.*paused/i);
+    }
+  });
+
   it("allows a desktop-only retry while the channel remains in the receipted state", async () => {
     await expect(publicationGate(candidate, deps())).resolves.toBeUndefined();
   });

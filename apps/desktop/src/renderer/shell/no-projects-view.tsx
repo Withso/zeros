@@ -19,6 +19,7 @@ import { Tile } from "../shared/ui/primitives";
 import { useCustomWindowDrag } from "./use-custom-window-drag";
 import { useAddProject } from "./add-project-provider";
 import zerosLogo from "../../assets/zeros-logo.png";
+import { CloudWorkspacePausedNotice, useOrganizationCloudPaused } from "../features/team/cloud-workspace-pause";
 
 interface StartTileProps {
   icon: ComponentType<{ className?: string }>;
@@ -49,6 +50,7 @@ function StartTile({
 
 export function NoProjectsView() {
   const { openProject, openGithubProject, quickStart } = useAddProject();
+  const cloudPaused = useOrganizationCloudPaused();
   const dragRef = useRef<HTMLDivElement | null>(null);
   useCustomWindowDrag(dragRef);
 
@@ -65,7 +67,7 @@ export function NoProjectsView() {
         draggable={false}
         className="size-16 select-none [-webkit-user-drag:none]"
       />
-      <div className="flex flex-wrap items-stretch justify-center gap-3">
+      {cloudPaused ? <CloudWorkspacePausedNotice /> : <div className="flex flex-wrap items-stretch justify-center gap-3">
         <StartTile
           icon={FolderOpen}
           label="Open project"
@@ -84,7 +86,7 @@ export function NoProjectsView() {
           description="Start a fresh repo"
           onClick={() => quickStart()}
         />
-      </div>
+      </div>}
     </div>
   );
 }

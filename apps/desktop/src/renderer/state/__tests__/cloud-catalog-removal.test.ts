@@ -1,3 +1,5 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, expect, it, vi } from "vitest";
 const harness = vi.hoisted(() => ({
   effects: [] as Array<() => void | (() => void)>,
@@ -133,7 +135,7 @@ it("catalog removal prunes unmounted live/archive collections and preserves Loca
     "disconnected",
   );
   harness.effects.length = 0;
-  CloudWorkspaceLifecycle();
+  renderToStaticMarkup(createElement(CloudWorkspaceLifecycle));
   const off = harness.effects.find(effect => effect.toString().includes("clearCloudWorkspaceCatalog"))!(); // Real catalog -> consumer publication path.
   try {
     request.mockClear();

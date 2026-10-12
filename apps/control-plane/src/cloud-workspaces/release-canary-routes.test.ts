@@ -8,6 +8,13 @@ import { loadConfig } from "../config.js";
 import { createReleaseCanaryAdmissionRoutes, createReleaseCanaryDesignationRoutes } from "./release-canary-routes.js";
 import { DatabaseReleaseCanaryService, DatabaseReleaseCanaryDesignationService, releaseCanaryDesignationConfiguration, releaseCanaryConfiguration } from "./release-canaries.js";
 
+// Preserve the existing admission contract after a config-only Beta unpause.
+// Paused-channel configuration and startup have separate boundary regressions.
+vi.mock("../cloud-workspace-channels.json", async original => {
+  const { default: channels } = await original<typeof import("../cloud-workspace-channels.json")>();
+  return { default: { ...channels, beta: true } };
+});
+
 const owner = "11111111-1111-4111-8111-111111111111", credentialId = "22222222-2222-4222-8222-222222222222";
 const token = "synthetic-release-only-admission-token";
 const config = { ownerUserId: owner, organizationId: "33333333-3333-4333-8333-333333333333", channel: "alpha", sourceSha: "a".repeat(40),

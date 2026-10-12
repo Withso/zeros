@@ -189,6 +189,8 @@ import { useDefaultAgent, pickDefaultAgentId } from "./default-agent";
 import type { AgentMemorySettings } from "@zeros/protocol/agent-events";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
+import { isFeatureEnabled } from "../../config/release-channel";
+import { CloudWorkspacePausedNotice } from "../team/cloud-workspace-pause";
 type SectionId =
   | "general"
   | "appearance"
@@ -505,6 +507,7 @@ export function SettingsPage() {
 
 function ScopedSettingsPage({ owner }: { owner: string }) {
   const local = owner === "local";
+  const cloudEnabled = isFeatureEnabled("cloud-workspaces");
   const organization = useActiveOrganization();
   const { me } = useTeams();
   const pageSurfaceRef = useRef<HTMLDivElement | null>(null);
@@ -625,10 +628,11 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
           // Chrome setup is reachable for every owner. BrowserUsePanel selects
           // device controls or cloud guidance from the workspace placement.
           (local ? !["cloud-computer", "cloud-mcp", "cloud-skills"].includes(s.id) : ["providers", "integrations", "cloud-computer", "cloud-mcp", "cloud-skills", "browser-use"].includes(s.id)) &&
+          (cloudEnabled || !["cloud-computer", "cloud-mcp", "cloud-skills"].includes(s.id)) &&
           (s.id !== "terminal-agents" || terminalAgentsEnabled) &&
           (s.id !== "internal" || internalUser),
       ),
-    [terminalAgentsEnabled, internalUser, local],
+    [terminalAgentsEnabled, internalUser, local, cloudEnabled],
   );
   const activeSection: SectionDef | null =
     selection.scope === "user"
@@ -825,6 +829,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                     aria-hidden={!isActive}
                   >
                     <h1 className={PAGE_HEADING_CLS}>{section.label}</h1>
+                    {!local && !cloudEnabled && <CloudWorkspacePausedNotice />}
                     <Panel surfaceActive={pageActive && isActive} />
                   </div>
                 );
@@ -1118,7 +1123,7 @@ function IntegrationsPanel({ surfaceActive = true }: { surfaceActive?: boolean }
   const { me } = useTeams();
   const organizationId = organization?.isPersonal ? null : organization?.id ?? getActiveOrganizationIdSnapshot();
   return <div className="flex flex-col gap-8">
-    {organizationId ? me && <CloudGithubSection key={`${me.user.id}:${organizationId}`} userId={me.user.id} organizationId={organizationId} surfaceActive={surfaceActive} />
+    {organizationId && isFeatureEnabled("cloud-workspaces") ? me && <CloudGithubSection key={`${me.user.id}:${organizationId}`} userId={me.user.id} organizationId={organizationId} surfaceActive={surfaceActive} />
       : <GitHubSection surfaceActive={surfaceActive} />}
   </div>;
 }

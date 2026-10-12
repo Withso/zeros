@@ -15,6 +15,8 @@
 // `channel()`, keyed off process.env.ZEROS_CHANNEL). Keep the two conceptually
 // in sync; this module is purely for gating renderer UI.
 
+import { CLOUD_WORKSPACE_CHANNELS } from "../../../shared/cloud-workspace-channel";
+
 /** Keep in lockstep with apps/desktop/src/engine/runtime.ts's CHANNELS. Duplicated (not
  *  imported) because this module is renderer-only and must stay free of any
  *  process.env read; the engine module is the authority for main + engine. */
@@ -59,8 +61,7 @@ export const isPreReleaseChannel: boolean = CHANNEL !== "stable";
  * forgotten registration can never silently ship to Production.
  */
 const FEATURE_CHANNELS: Record<string, readonly Channel[]> = {
-  // Example (delete when the first real flag lands):
-  // "new-onboarding": ["dev", "alpha"],
+  "cloud-workspaces": CLOUD_WORKSPACE_CHANNELS,
 };
 
 /** Whether `feature` is enabled in this build's channel. Unregistered → false. */

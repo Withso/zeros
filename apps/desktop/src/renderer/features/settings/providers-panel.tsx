@@ -26,6 +26,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { isFeatureEnabled } from "../../config/release-channel";
 import {
   ArrowUpRight,
   ChevronDown,
@@ -276,6 +277,7 @@ export function ProvidersPanel({
 }) {
   const organization = useActiveOrganization();
   const { me } = useTeams();
+  if (!isFeatureEnabled("cloud-workspaces")) return <LocalProvidersPanel surfaceActive={surfaceActive} />;
   if (!organization && getActiveOrganizationIdSnapshot())
     return <p className="text-fg2 text-xs">Loading organization agent settings…</p>;
   return organization && !organization.isPersonal

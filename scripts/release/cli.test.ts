@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main } from "./cli";
+import * as githubModule from "./github";
 import { validateWorkerArtifact } from "./github";
 import { workerEnvironment } from "./worker-test-fixtures";
 import { WORKER_CREDENTIAL_KINDS } from "./worker";
@@ -101,6 +102,47 @@ describe("real hosted CLI retirement boundary", () => {
     expect(test.providers.verifyWorkerIdentity).not.toHaveBeenCalled(); expect(test.providers.waitIdentity).not.toHaveBeenCalled();
     await expect(readFile(".context/release/hosted-receipt.json")).rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(".context/release/hosted-services.json")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe.each(["beta", "production"] as const)("paused %s hosted CLI", channel => {
+  it.each(["--plan", "--services"])("runs %s without reading the old cloud identity or discovering a worker", async mode => {
+    for (const [key, value] of Object.entries({ RELEASE_CHANNEL: channel, RELEASE_BRANCH: "release/1.2.3",
+      PLANETSCALE_DATABASE: `zeros-control-plane-${channel}`, CF_PAGES_APP_PROJECT: channel === "beta" ? "zeros-web-beta" : "zeros-web",
+      CF_PAGES_OPS_PROJECT: channel === "beta" ? "" : "zeros-ops", ZEROS_WORKER_PROMOTION: "enabled",
+      WORKER_PROMOTION_REQUIRED: "true" })) vi.stubEnv(key, value);
+    process.argv[2] = mode;
+    const checks = { assertRequiredChecks: vi.fn(async () => {}), assertCurrent: vi.fn(async () => {}), betaReceipt: vi.fn(async () => {}) };
+    vi.spyOn(githubModule, "githubClient").mockReturnValue(checks as unknown as ReturnType<typeof githubModule.githubClient>);
+    const services = fixture().services;
+    const backend = { ...services.backend, channel, cloud: { enabled: false, ready: true, state: "disabled" }, worker: null, workerQualified: false };
+    const providers = { inspect: vi.fn(async () => {}), retarget: vi.fn(async () => {}),
+      deploy: vi.fn(async () => "deployment"), waitDeployment: vi.fn(async () => {}),
+      waitIdentity: vi.fn(async () => backend), publishPages: vi.fn(async (surface: string) => ({ id: surface, surface })),
+      verifyWorkOS: vi.fn(async () => ({ ...services.workos, surfaces: channel === "beta" ? ["app"] : ["app", "ops"] })) };
+    dependencies.providers.mockReturnValue(providers);
+    dependencies.read.mockImplementation(async () => { throw new Error("Paused preflight must not read cloud readiness"); });
+    dependencies.command.mockImplementation(async (name: string, args: string[]) => {
+      expect(name).toBe("pnpm");
+      expect(args.slice(0, 3)).toEqual(["exec", "tsx", "scripts/release/migration-cli.ts"]);
+      return JSON.stringify({ ...services.migration, database: `zeros-control-plane-${channel}`,
+        mode: args.includes("--execute") ? "execute" : "plan" });
+    });
+    await expect(main()).resolves.toBeUndefined();
+    expect(checks.assertRequiredChecks).toHaveBeenCalled();
+    expect(checks.assertCurrent).toHaveBeenCalled();
+    expect(checks.betaReceipt).toHaveBeenCalledTimes(channel === "production" ? 1 : 0);
+    expect(dependencies.read).not.toHaveBeenCalled();
+    expect(dependencies.inputs).not.toHaveBeenCalled();
+    if (mode === "--services") {
+      expect(dependencies.command).toHaveBeenCalledTimes(2); // Plan + backed-up migration.
+      expect(providers.waitIdentity).toHaveBeenCalledOnce();
+      expect(JSON.parse(await readFile(".context/release/hosted-services.json", "utf8")))
+        .toMatchObject({ channel, cloudRequired: false, backend: { worker: null, cloud: { enabled: false } } });
+    } else {
+      expect(dependencies.command).not.toHaveBeenCalled();
+      expect(providers.deploy).not.toHaveBeenCalled();
+    }
   });
 });
 

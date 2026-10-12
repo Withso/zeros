@@ -1,5 +1,6 @@
 import type { Me } from "./control-plane";
 import { getTeamStoreState, useTeams } from "./team-store";
+import { isFeatureEnabled } from "../../config/release-channel";
 
 /** Account admission, independent of staff roles and retired preferences.
  * A known organization's Cloud entitlement must remain enabled. Guests can
@@ -9,7 +10,7 @@ export function cloudWorkspaceAccountAccess(
   me: Me | null,
   organizationId?: string,
 ): boolean {
-  if (!me?.user.id) return false;
+  if (!isFeatureEnabled("cloud-workspaces") || !me?.user.id) return false;
   if (!organizationId) return true;
   const organization = (me.organizations ?? me.teams ?? []).find(
     candidate => candidate.id === organizationId,

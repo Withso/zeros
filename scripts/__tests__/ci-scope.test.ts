@@ -240,6 +240,36 @@ describe("CI scope globs", () => {
 });
 
 describe("CI scope path ownership", () => {
+  it.each([
+    "apps/control-plane/src/cloud-workspace-channels.json",
+    "apps/control-plane/src/cloud-workspaces/channel-policy.ts",
+    "apps/desktop/shared/cloud-workspace-channel.ts",
+    "scripts/release/channel-policy.mjs",
+  ])("checks every shared cloud channel policy consumer for %s", (file) => {
+    const decision = decide([change(file)]);
+    expect(decision.full).toBe(false);
+    expect(selected(decision)).toEqual(
+      expect.arrayContaining([
+        "control-plane",
+        "desktop-renderer",
+        "desktop-engine",
+        "electron",
+        "packaging",
+        "cloud-runtime",
+      ]),
+    );
+    expect(selectChecks(POLICY, decision)).toEqual(
+      expect.arrayContaining([
+        "root-vitest",
+        "desktop-static",
+        "control-plane-static",
+        "release-contracts",
+        "renderer-build",
+        "engine-and-electron-build",
+      ]),
+    );
+  });
+
   it("unions every matching rule and every changed path", () => {
     const renderer = decide([
       change("apps/desktop/src/renderer/app-shell.tsx"),

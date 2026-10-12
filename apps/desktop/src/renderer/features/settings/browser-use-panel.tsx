@@ -18,6 +18,7 @@ import { SettingsGroup, SettingsRow } from "./settings-ui";
 import { useResolvedSettings, useSettingsLayer } from "./use-settings";
 import { getActiveOrganizationIdSnapshot, useActiveOrganization } from "../team/team-store";
 import { NativeBrowserAvailability } from "../agent/native-browser-availability";
+import { isFeatureEnabled } from "../../config/release-channel";
 import {
   BROWSER_SETTINGS_ROWS,
   CLAUDE_CHROME_DOCS_URL,
@@ -57,6 +58,7 @@ function openClaudeChromeUrl(url: string): void {
 
 export function BrowserUsePanel() {
   const organization = useActiveOrganization();
+  if (!isFeatureEnabled("cloud-workspaces")) return <LocalBrowserUsePanel />;
   if (!organization && getActiveOrganizationIdSnapshot())
     return <p className="text-fg2 text-xs">Loading organization browser settings…</p>;
   if (organization && !organization.isPersonal)

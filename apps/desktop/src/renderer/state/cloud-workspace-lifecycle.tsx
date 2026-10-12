@@ -1,4 +1,5 @@
 import { clearCloudComputersV2 } from "../features/settings/cloud-computer-v2-client";
+import { isFeatureEnabled } from "../config/release-channel";
 import { cloudServiceAccessCache, cloudServiceContextCache } from "./read-caches";
 import { clearCloudGithub } from "../platform/cloud-github";
 import { useEffect } from "react";
@@ -62,6 +63,12 @@ function recordCloudOpenFailure(key: string, error: unknown): void {
 /** Account/catalog lifecycle, mounted once beside the existing persistence
  * controller. It never replaces the conversation or workbench renderers. */
 export function CloudWorkspaceLifecycle() {
+  // A release pause leaves durable caches and provider data untouched. Do not
+  // install cloud subscriptions, timers, or restoration while it is paused.
+  return isFeatureEnabled("cloud-workspaces") ? <ActiveCloudWorkspaceLifecycle /> : null;
+}
+
+function ActiveCloudWorkspaceLifecycle() {
   const folder = useWorkspaceStore(selectActiveFolder);
   const cloudComputerV2 = useCloudWorkspaceAccountAccess();
   useEffect(() => {

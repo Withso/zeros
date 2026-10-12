@@ -1,0 +1,6 @@
+{
+  "development": true,
+  "alpha": true,
+  "beta": false,
+  "production": false
+}

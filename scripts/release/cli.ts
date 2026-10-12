@@ -1,4 +1,5 @@
 import { refuseRetiredWorkerPromotion } from "./worker-retirement";
+import { cloudWorkspaceChannelEnabled } from "../../apps/control-plane/src/cloud-workspaces/channel-policy";
 import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -14,7 +15,8 @@ import { alphaFrontierIdentity } from "./alpha-frontier";
 import type { z } from "zod";
 
 export async function main() {
-  if (process.env.ZEROS_WORKER_PROMOTION === "enabled") refuseRetiredWorkerPromotion();
+  const cloudChannel = cloudWorkspaceChannelEnabled(process.env.RELEASE_CHANNEL ?? "");
+  if (cloudChannel && process.env.ZEROS_WORKER_PROMOTION === "enabled") refuseRetiredWorkerPromotion();
   const mode = process.argv[2];
   requireCheck(["--plan", "--execute", "--services", "--finalize"].includes(mode), "Usage: cli.ts --plan|--execute|--services|--finalize");
   const config = promotionConfig(process.env, { migrations: mode !== "--finalize" });
@@ -22,16 +24,19 @@ export async function main() {
   const providers = createProviders(config, process.env), github = githubClient(config, process.env);
   const assertCurrent = async () => { await github.assertRequiredChecks(); await github.assertCurrent(); };
   const manifest = await migrationManifest();
-  const workerPending = process.env.WORKER_PROMOTION_REQUIRED === "true" || process.env.WORKER_PROMOTION_REQUIRED === undefined && process.env.ZEROS_WORKER_PROMOTION === "enabled";
+  const workerPending = cloudChannel && (process.env.WORKER_PROMOTION_REQUIRED === "true" ||
+    process.env.WORKER_PROMOTION_REQUIRED === undefined && process.env.ZEROS_WORKER_PROMOTION === "enabled");
   requireCheck(mode !== "--execute" || !workerPending, "Worker-changing releases require the callable services/worker/finalize handoff");
   let worker: z.infer<typeof WorkerIdentity> | undefined;
   const reuseWorker = async () => {
+    if (!cloudChannel) return;
     // Reuse requires an identical committed input tree, not a protocol number
     // or a manually copied snapshot ID. An old API without identity fails shut.
     const identity = await jsonClient()(`${config.api}/v1/release-identity`);
     worker = await reusableWorker(config, identity);
   };
   const prepareWorker = async () => {
+    if (!cloudChannel) return;
     // The old Alpha API may be unready because of the bug this candidate repairs.
     // Read its identity without making old readiness a prerequisite for deployment.
     if (config.channel === "alpha") {

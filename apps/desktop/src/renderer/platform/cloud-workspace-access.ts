@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
 import { cloudServiceAccessCache, cloudServiceContextCache } from "../state/read-caches";
 import { isCloudWorkspace } from "./bridge/cloud-workspace-key";
+import { isFeatureEnabled } from "../config/release-channel";
 import type {
   CloudRuntimeConnectionTarget,
   RuntimeConnectionTarget,
@@ -89,6 +90,7 @@ export function workspacePreviewAvailable(folder: string): boolean {
 }
 
 export function cloudWorkspaceCapability(): Promise<{ enabled: boolean }> {
+  if (!isFeatureEnabled("cloud-workspaces")) return Promise.resolve({ enabled: false });
   return nativeInvoke("cloud_workspace_capability", {});
 }
 

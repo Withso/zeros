@@ -11,6 +11,7 @@ import {
 } from "../../../features/settings/__tests__/cloud-computer-v2-fixtures";
 
 const state = vi.hoisted(() => ({
+  cloudChannel: true,
   feature: true,
   role: "developer" as string | null,
   organizationRole: "admin",
@@ -20,6 +21,10 @@ const state = vi.hoisted(() => ({
   reads: [] as { key: string | null; enabled: boolean }[],
   warm: vi.fn(),
   dispatch: vi.fn(),
+}));
+vi.mock("../../../config/release-channel", async original => ({
+  ...(await original<typeof import("../../../config/release-channel")>()),
+  isFeatureEnabled: () => state.cloudChannel,
 }));
 vi.mock("../../../features/team/team-store", () => ({
   useTeams: () => ({
@@ -100,6 +105,15 @@ function readGate(active = true) {
   renderToStaticMarkup(createElement(Probe));
   return result;
 }
+it("keeps Computer status and repository prefetch dormant when the release channel disables cloud", () => {
+  state.cloudChannel = false;
+  const gate = readGate();
+  expect(gate.enabled).toBe(false);
+  expect(gate.key).toBeNull();
+  gate.warm();
+  expect(state.reads.every(read => read.key === null && !read.enabled)).toBe(true);
+  expect(state.warm).not.toHaveBeenCalled();
+});
 function create(active = true) {
   let result!: ReturnType<typeof useCloudCreate>;
   function Probe() {
@@ -110,6 +124,7 @@ function create(active = true) {
   return result;
 }
 beforeEach(() => {
+  state.cloudChannel = true;
   state.feature = true;
   state.role = "developer";
   state.organizationRole = "admin";

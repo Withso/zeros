@@ -9,6 +9,7 @@ import { isNewerExpandMigration } from "./migration-phase.js";
 import type { CloudWorkspaceReleaseHealthReader } from "./cloud-workspaces/health.js";
 import { readRuntimeReleaseIdentity } from "./cloud-workspaces/runtime-publication-routes.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./cloud-workspaces/engine-protocol-version.js";
+import { cloudWorkspaceChannelEnabled } from "./cloud-workspaces/channel-policy.js";
 
 type LedgerRow = { name: string; checksum: string | null; phase?: string | null };
 type Dependencies = {
@@ -74,7 +75,8 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
         manifestSha256: digest(JSON.stringify(expected)),
       };
     } catch { /* Fail closed without exposing database errors. */ }
-    const configured = config.cloudWorkspaces;
+    const cloudChannel = cloudWorkspaceChannelEnabled(config.deploymentChannel);
+    const configured = cloudChannel ? config.cloudWorkspaces : null;
     let cloud: { enabled: boolean; ready: boolean; state: string; operationalState?: "degraded" } =
       { enabled: !!configured, ready: !configured, state: configured ? "unknown" : "disabled" };
     let deferredReadiness: { kind: "retired-boat-deletions" } | undefined;
@@ -98,7 +100,7 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
     }
     // Image references are immutable public artifact identities, never URLs.
     const selected = configured ? { provider: configured.provider, imageRef: configured.imageRef, sourceSha: configured.sourceCommit,
-      architecture: configured.architecture, storageMiB: configured.storageMiB } : config.selectedCloudWorker;
+      architecture: configured.architecture, storageMiB: configured.storageMiB } : cloudChannel ? config.selectedCloudWorker : null;
     const imageRef = selected?.imageRef;
     const validImage = selected?.provider === "boat" && /^boat:[a-z0-9][a-z0-9-]{0,62}@sha256:[a-f0-9]{64}$/.test(imageRef ?? "");
     const worker = selected && typeof imageRef === "string" && validImage && sha(selected.sourceSha) &&
@@ -133,7 +135,7 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
       } catch { /* Missing/unreadable approval must not authorize publication. */ }
     }
     let runtimeV4: Awaited<ReturnType<typeof readRuntimeReleaseIdentity>> | undefined;
-    if (config.cloudRuntimePublication && !maintenance && migrations.state === "current") {
+    if (cloudChannel && config.cloudRuntimePublication && !maintenance && migrations.state === "current") {
       try {
         runtimeV4 = await (deps.readRuntimeIdentity ? deps.readRuntimeIdentity() :
           readRuntimeReleaseIdentity(pool, config.cloudWorkspaceNewRuntimeProfile ?? "v4"));
