@@ -58,8 +58,10 @@ export function verifyComputerTemplateSavedTree(value: unknown, snapshot: Comput
   if (!parsed.success) templateCaptureInvalid();
   const entries = new Map<string, { path: string; kind: string; size?: number | undefined }>();
   for (const entry of parsed.data.entries) {
+    // Boat paths are POSIX: backslashes (including systemd's literal \\x2d)
+    // are filename characters, never separators or escapes to normalize.
     const parts = entry.path.split("/");
-    if (parts.some(part => !part || part === "." || part === "..") || [...entry.path].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127 || char === "\\") || entries.has(entry.path))
+    if (parts.some(part => !part || part === "." || part === "..") || [...entry.path].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) || entries.has(entry.path))
       templateCaptureInvalid();
     entries.set(entry.path, entry);
   }
@@ -67,19 +69,19 @@ export function verifyComputerTemplateSavedTree(value: unknown, snapshot: Comput
   for (const entry of entries.values()) {
     // An aliased parent can conceal private contents even when the listing
     // contains no child entries underneath that parent.
-    if (entry.kind !== "directory" && protectedPaths.some(root => root.startsWith(`${entry.path}/`))) templateCaptureInvalid();
+    if (entry.kind !== "dir" && protectedPaths.some(root => root.startsWith(`${entry.path}/`))) templateCaptureInvalid();
     let parent = entry.path;
     while (parent.includes("/")) {
       parent = parent.slice(0, parent.lastIndexOf("/"));
       const ancestor = entries.get(parent);
-      if (ancestor && ancestor.kind !== "directory") templateCaptureInvalid();
+      if (ancestor && ancestor.kind !== "dir") templateCaptureInvalid();
     }
     const privatePath = ["", "__system__/root/"].some(home => {
       const relative = entry.path.startsWith(home) ? entry.path.slice(home.length) : null;
       return relative !== null && (privateHome.some(root => below(relative, root)) || /^\.env[^/]*(?:\/|$)/.test(relative));
     });
     if (privatePath || emptyRoots.some(root => below(entry.path, root)) || emptyFiles.includes(entry.path)) {
-      if (entry.kind !== "directory" && !(entry.kind === "file" && entry.size === 0)) templateCaptureInvalid();
+      if (entry.kind !== "dir" && !(entry.kind === "file" && entry.size === 0)) templateCaptureInvalid();
     }
   }
   const manifest = entries.get("__system__/srv/zeros/computer-template.json");
