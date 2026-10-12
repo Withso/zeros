@@ -1,10 +1,23 @@
 import { describe, expect, it } from "vitest";
+import { CloudWorkspaceCheckpointRestoreSchema as desktopRestore } from "@zeros/protocol/cloud-runtime-lifecycle";
 import { CloudWorkspaceDetectedPortsSchema as desktopPorts, CloudWorkspaceRenameInputSchema as desktopRename } from "../cloud-workspaces";
 import {
   CloudWorkspaceDetectedPortsSchema as serverPorts, CloudWorkspaceRenameInputSchema as serverRename,
+  CloudWorkspaceCheckpointRestoreSchema as serverRestore,
 } from "../../../../../control-plane/src/cloud-workspaces/workspace-ui-contracts";
 
 describe("cloud UI control-plane/desktop schema parity", () => {
+  it("agrees on completed checkpoint restore identity and generation bounds", () => {
+    const restore = { checkpointId: "11111111-1111-4111-8111-111111111111", checkpointAt: "2026-10-01T00:00:00+00:00",
+      completedAt: "2026-10-02T00:00:00+00:00", sourceGeneration: 1, generation: 2 };
+    expect(desktopRestore.safeParse(restore).success).toBe(true);
+    expect(serverRestore.safeParse(restore).success).toBe(true);
+    for (const change of [{ checkpointId: "bad" }, { checkpointAt: null }, { completedAt: "bad" }, { generation: 1 },
+      { sourceGeneration: 0 }, { generation: Number.MAX_SAFE_INTEGER + 1 }, { providerResourceId: "private" }]) {
+      expect(desktopRestore.safeParse({ ...restore, ...change }).success).toBe(false);
+      expect(serverRestore.safeParse({ ...restore, ...change }).success).toBe(false);
+    }
+  });
   it("agrees on port identity, empty/unknown state, timestamps and listener bounds", () => {
     const scope = { version: 1, organizationId: "11111111-1111-4111-8111-111111111111",
       workspaceId: "22222222-2222-4222-8222-222222222222", generation: 3, status: "ready" };

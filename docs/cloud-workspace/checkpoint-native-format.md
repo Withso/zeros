@@ -140,8 +140,10 @@ expires, provided no current starting/ready engine has a live lease. The
 workspace lock orders this check with heartbeat and registration. The checkpoint must be the current durable checkpoint of that same workspace and
 organization. Recovery preserves entitlement, owner, resource-headroom and
 idempotency checks. It pins the checkpoint to the candidate before revoking the
-source authority, drains the old allocation and then creates a fresh generation
-using the current qualified image. It does not fabricate a successful final
+source authority, drains the old allocation and then creates a fresh generation.
+Ordinary recovery retains its saved source; confirmed missing stopped snapshots
+use the organization's current durable Computer as described in
+[stopped snapshot recovery](checkpoint-recovery.md). It does not fabricate a successful final
 checkpoint request from an unavailable engine. Healthy workspaces use normal
 upgrade/rollback so their final work is captured first.
 
@@ -150,6 +152,11 @@ generation number. The reconciler retires its authority and reports
 `provider_resource_lost`; an unconfirmed provider 404 remains retryable and does
 not allocate a duplicate VM. Recovery uses the explicit checkpoint selection
 above. Accepted deletion and confirmed physical erasure remain separate states.
+
+Explicit missing stopped-snapshot evidence is narrower than allocation absence.
+It can trigger automatic checkpoint recovery into a new generation, including
+from a periodic checkpoint with possible data loss. See
+[the evidence, source-selection and UI contract](checkpoint-recovery.md).
 
 After a healthy durable-record heartbeat, the engine schedules a recovery point
 every five minutes. One capture runs at a time with a one-minute deadline.

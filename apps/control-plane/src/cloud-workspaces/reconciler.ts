@@ -6,7 +6,7 @@ import { audit } from "../audit.js";
 import { HttpError } from "../authz.js";
 import { CLOUD_WORKSPACE_V2_REQUIRED, requireSupportedCloudWorkspaceGeneration } from "./supported-generation.js";
 import { withSystemTx } from "../db.js";
-import { deferCloudRecoveryResourceBlock } from "./automatic-recovery.js";
+import { deferCloudRecoveryResourceBlock, enqueueCloudMissingSnapshotRecovery } from "./automatic-recovery.js";
 import { requireGenerationRuntime } from "./generation-pins.js";
 import { CloudRuntimeError } from "./runtime-selection.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
@@ -60,6 +60,7 @@ type ClaimedIntent = {
   affectsWorkspace: boolean;
   generationWasCurrent: boolean;
   generationTransitionId: string | null;
+  authorityEpoch: string;
 };
 
 type DriftCandidate = {
@@ -413,9 +414,10 @@ export class CloudWorkspaceReconciler {
         generation_transition_id: string | null;
         checkpoint_request_id: string | null;
         checkpoint_request_state: string | null;
+        authority_epoch: string;
       }>(
         `SELECT i.id, i.workspace_id, i.org_id, i.operation,
-                cw.desired_state, cw.current_generation, i.generation,
+                cw.desired_state, cw.current_generation, cw.authority_epoch, i.generation,
                 i.affects_workspace, i.generation_transition_id, g.provider,
                 g.image_ref, g.architecture, g.cpu_millicores,
                 g.memory_mib, g.storage_mib, pb.provider_resource_id,
@@ -532,6 +534,7 @@ export class CloudWorkspaceReconciler {
         affectsWorkspace: row.affects_workspace,
         generationWasCurrent: row.generation === row.current_generation,
         generationTransitionId: row.generation_transition_id,
+        authorityEpoch: row.authority_epoch,
       };
     });
   }
@@ -601,6 +604,10 @@ export class CloudWorkspaceReconciler {
         return true;
       }
 
+      if (intent.operation === "wake" && intent.affectsWorkspace && !intent.generationTransitionId &&
+          provider.name === "boat" && current?.state === "failed" && current.computeStopped === true &&
+          current.metadata.snapshotMissing === true)
+        throw new CloudProviderError("provider_snapshot_missing", "The stopped snapshot is no longer available", false);
       if (mayUpgradeOnWake && current && ["stopped", "archived"].includes(current.state) &&
           await upgradeCloudRuntimeOnWake(this.pool, this.runtimeUpgradeConfig!, {
             workspaceId: intent.workspaceId, organizationId: intent.orgId, generation: intent.generation,
@@ -976,8 +983,9 @@ export class CloudWorkspaceReconciler {
       const current = await tx.query<{
         desired_state: DesiredState;
         current_generation: number;
+        authority_epoch: string;
       }>(
-        `SELECT desired_state, current_generation
+        `SELECT desired_state, current_generation, authority_epoch
          FROM cloud_workspaces WHERE id = $1 FOR UPDATE`,
         [intent.workspaceId],
       );
@@ -987,22 +995,29 @@ export class CloudWorkspaceReconciler {
         state: string;
         affects_workspace: boolean;
         lease_owner: string | null;
+        lease_current: boolean;
       }>(
-        `SELECT state, affects_workspace, lease_owner
+        `SELECT state, affects_workspace, lease_owner, lease_expires_at>clock_timestamp() AS lease_current
          FROM cloud_workspace_lifecycle_intents
          WHERE id = $1 FOR UPDATE`,
         [intent.id],
       );
       const row = owned.rows[0];
       if (!row || row.lease_owner !== this.workerId) return;
+      if (failure.code === "provider_snapshot_missing" && (!row.lease_current || row.state !== "dispatching")) return;
 
+      const newerCaptureAuthority = failure.code === "provider_snapshot_missing" &&
+        workspace?.current_generation === intent.generation && workspace.authority_epoch !== intent.authorityEpoch;
       const superseded =
         !workspace ||
         (row.affects_workspace &&
           (workspace.current_generation !== intent.generation ||
-            workspace.desired_state !== desiredForOperation(intent.operation)));
+            workspace.desired_state !== desiredForOperation(intent.operation) ||
+            newerCaptureAuthority));
       if (superseded) {
-        await retireCloudWorkspaceRuntimeAccess(tx, {
+        // A later wake can admit new setup/access in the same generation.
+        // This old provider observation cannot retire the newer authority.
+        if (!newerCaptureAuthority) await retireCloudWorkspaceRuntimeAccess(tx, {
           workspaceId: intent.workspaceId,
           organizationId: intent.orgId,
           generation: intent.generation,
@@ -1124,6 +1139,12 @@ export class CloudWorkspaceReconciler {
           generation: intent.generation,
           reason: "provider_operation_failed",
         });
+        if (failure.code === "provider_snapshot_missing" && intent.provider === "boat" && intent.operation === "wake" &&
+            row.affects_workspace && row.lease_current && row.state === "dispatching" && this.runtimeUpgradeConfig &&
+            !intent.generationTransitionId && intent.providerResourceId)
+          await enqueueCloudMissingSnapshotRecovery(tx, { workspaceId: intent.workspaceId, organizationId: intent.orgId,
+            generation: intent.generation, wakeIntentId: intent.id, providerResourceId: intent.providerResourceId,
+            authorityEpoch: intent.authorityEpoch });
       }
       await audit(
         tx,

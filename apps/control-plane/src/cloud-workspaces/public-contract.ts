@@ -1,6 +1,8 @@
 /** Customer errors never reuse infrastructure diagnostic text. Internal
  * records retain the original code/message for the operator's investigation. */
 const messages: Record<string, string> = {
+  cloud_recovery_computer_unavailable: "Build the current Cloud Computer before restoring this workspace.",
+  cloud_recovery_repository_unavailable: "The current Cloud Computer must include this workspace's repository before it can be restored.",
   cloud_workspace_v2_required: "This workspace uses a retired cloud runtime — create a new workspace.",
   cloud_workspace_client_update_required: "Update Zeros to connect to cloud workspaces.",
   cloud_runtime_revoked: "This workspace runtime was revoked. Request an explicit runtime upgrade to continue.",

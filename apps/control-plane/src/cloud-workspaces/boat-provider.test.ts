@@ -992,6 +992,33 @@ describe("Boat allocation lifecycle", () => {
     expect(f.fetcher.mock.calls.filter(([,init])=>init?.method==='POST')).toHaveLength(1);
   });
 
+  it.each(["completed", null])("identifies an explicitly missing stopped capture with %s history before resume", async lastSnapshotStatus => {
+    const f = fixture(); await f.allocate();
+    f.fetcher.mockImplementation(async () => json(sandbox("archived", { snapshotAvailable: false, lastSnapshotStatus })));
+    await expect(f.provider.inspect(RESOURCE)).resolves.toMatchObject({ state: "failed", computeStopped: true,
+      metadata: { snapshotMissing: true } });
+    await expect(f.provider.startWithComputeLease(RESOURCE, 600)).rejects.toMatchObject({ code: "provider_snapshot_missing", retryable: false });
+    expect(f.fetcher.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
+  });
+
+  it.each([
+    { snapshotAvailable: undefined, lastSnapshotStatus: "completed" },
+    { snapshotAvailable: false, lastSnapshotStatus: undefined },
+    { snapshotAvailable: true, lastSnapshotStatus: "failed" },
+    { snapshotAvailable: false, lastSnapshotStatus: "failed" },
+    { snapshotAvailable: false, lastSnapshotStatus: "cancelled" },
+    { snapshotAvailable: false, lastSnapshotStatus: "queued" },
+    { snapshotAvailable: false, lastSnapshotStatus: "in_progress" },
+    { snapshotAvailable: false, lastSnapshotStatus: "completed", state: "error" },
+    { snapshotAvailable: false, lastSnapshotStatus: "completed", state: "cancelled" },
+    { snapshotAvailable: false, lastSnapshotStatus: "completed", team: undefined },
+    { snapshotAvailable: false, lastSnapshotStatus: "completed", team: { id: OTHER_WALLET } },
+  ])("does not infer missing capture authority from ambiguous or failed evidence %j", async evidence => {
+    const f = fixture(); await f.allocate();
+    f.fetcher.mockResolvedValue(json(sandbox("archived", evidence)));
+    expect((await f.provider.inspect(RESOURCE))?.metadata.snapshotMissing).not.toBe(true);
+  });
+
   it("does not race resume against an in-progress archive", async () => {
     const f = fixture();
     await f.allocate();
