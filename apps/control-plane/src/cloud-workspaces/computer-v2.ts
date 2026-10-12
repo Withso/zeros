@@ -1187,7 +1187,9 @@ export class DatabaseCloudComputerV2Service {
         throw new HttpError(
           409,
           "cloud_computer_not_built",
-          "Activate requires a successful version with a ready template.",
+          build?.template_state === "retiring" || build?.template_state === "retired"
+            ? "This template is no longer retained. Rebuild this version before activating it."
+            : "Activate requires a successful version with a ready template.",
         );
       // C3 supplies registry/qualification checks before publishing ready;
       // later retention/revocation workers withdraw that readiness.
@@ -1202,7 +1204,7 @@ export class DatabaseCloudComputerV2Service {
         throw new HttpError(
           409,
           "cloud_computer_not_built",
-          "This template is no longer ready.",
+          "This template is no longer ready. Rebuild this version before activating it.",
         );
       requireEnvironment(await configuration(tx, org, build.config_id));
       const revision = Number(head.revision) + 1;

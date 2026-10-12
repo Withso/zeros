@@ -970,7 +970,11 @@ d("Cloud Computer v2 metadata and completion CAS", () => {
         expectedRevision: (await read()).revision,
         operationId: randomUUID(),
       }),
-    ).rejects.toMatchObject({ code: "cloud_computer_not_built" });
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "cloud_computer_not_built",
+      message: "This template is no longer retained. Rebuild this version before activating it.",
+    });
   });
   it("rebuilds historical configurations using recorded SHAs and a new immutable version", async () => {
     const repository = await proof();

@@ -8,7 +8,7 @@ import { CloudProviderError } from "./provider.js";
 
 export const COMPUTER_TEMPLATE_RETENTION_CHANNEL =
   "cloud_computer_template_retention";
-export const COMPUTER_TEMPLATE_READY_HISTORY = 10;
+export const COMPUTER_TEMPLATE_READY_HISTORY = 0;
 
 /** The deletion-only subset of B7's BuilderVmOperationStore. The journal is
  * already scoped to a stable provider account, never to a credential version. */

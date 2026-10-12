@@ -131,7 +131,7 @@ export async function runComputerTemplateRetentionLiveCheck(
         requireCheck(
           (await fixture.service.read(org, fixture.userId)).revision === 0,
         );
-        for (let index = 0; index < 14; index++) {
+        for (let index = 0; index < 4; index++) {
           try {
             await fixture.buildNext();
           } finally {
@@ -144,7 +144,7 @@ export async function runComputerTemplateRetentionLiveCheck(
           .slice()
           .reverse();
         requireCheck(
-          versions.length === 14 &&
+          versions.length === 4 &&
             versions.every(
               (row) =>
                 row.state === "succeeded" && row.templateState === "ready",
@@ -186,7 +186,7 @@ export async function runComputerTemplateRetentionLiveCheck(
     } catch {
       report.status = "failed";
     } finally {
-      // Only this disposable local DB changes. Erasure releases head/history
+      // Only this disposable local DB changes. Erasure releases head
       // holds; the same production retention worker deletes the real sandboxes.
       await withSystemTx(pool, async (tx) => {
         await tx.query(
