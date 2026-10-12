@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CloudComputerTemplateRetentionWorker } from "../../apps/control-plane/src/cloud-workspaces/computer-template-retention.js";
 import {
   runComputerTemplateRetentionLiveCheck,
   type ComputerTemplateRetentionAlphaFixture,
@@ -18,7 +19,103 @@ const report = (): RetentionLiveReport => ({
   cleanupConfirmed: false,
 });
 
+afterEach(() => vi.restoreAllMocks());
+
 describe("template retention live runbook boundaries", () => {
+  it("uses four builds to check active, previous and source holds, then confirms cleanup", async () => {
+    const builds: Array<{
+      id: string;
+      configId: string;
+      version: number;
+      state: "succeeded";
+      templateState: "ready" | "retired";
+    }> = [];
+    let namePrefix = "";
+    let erasing = false;
+    const query = vi.fn(async (sql: string) => {
+      if (sql.startsWith("UPDATE organizations")) erasing = true;
+      const rows = sql.includes("SELECT template.build_id")
+        ? builds.map((build) => ({
+            build_id: build.id,
+            sandbox_id: `bx_fixture${build.version}`,
+            deletion_operation_id:
+              build.templateState === "retired" ? "bdop_fixture" : null,
+            name: `${namePrefix}-${build.version}`,
+            state: build.templateState === "retired" ? "deleted" : "archived",
+            closed: false,
+          }))
+        : [];
+      return { rows, rowCount: rows.length };
+    });
+    const activate = vi.fn().mockResolvedValue({ activated: true });
+    const buildNext = vi.fn(async () => {
+      const version = builds.length + 1;
+      builds.push({
+        id: `build-${version}`,
+        configId: "configuration",
+        version,
+        state: "succeeded",
+        templateState: "ready",
+      });
+    });
+    // The database-backed suite exercises the worker. Here its outcomes drive
+    // the operator harness without contacting a database or provider.
+    vi.spyOn(CloudComputerTemplateRetentionWorker.prototype, "tick")
+      .mockImplementation(async () => {
+        const retiring = builds.filter(
+          (build) =>
+            build.templateState === "ready" && (erasing || build.version === 4),
+        );
+        for (const build of retiring) build.templateState = "retired";
+        return retiring.length;
+      });
+    const close = vi.fn();
+    const factory = vi.fn(async (input: { namePrefix: string }) => {
+      namePrefix = input.namePrefix;
+      return {
+        channel: "alpha",
+        namePrefix,
+        pool: {
+          options: {
+            connectionString: "postgresql://localhost/zeros_v2_test_retention",
+          },
+          connect: async () => ({ query, release: vi.fn() }),
+        },
+        service: {
+          read: async () => ({
+            revision: builds.length + activate.mock.calls.length,
+            history: { builds: builds.slice().reverse() },
+          }),
+          activate,
+        },
+        organizationId: "organization",
+        userId: "user",
+        workspaceId: "workspace",
+        options: {},
+        buildNext,
+        cleanupFailedBuilds: async () => true,
+        close,
+      } as unknown as ComputerTemplateRetentionAlphaFixture;
+    });
+    const result = report();
+    await runComputerTemplateRetentionLiveCheck(
+      factory,
+      credentials,
+      result,
+      vi.fn(),
+    );
+    expect(buildNext).toHaveBeenCalledTimes(4);
+    expect(activate.mock.calls.map((args) => args[2])).toEqual([2, 1]);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO cloud_workspace_computer_sources"),
+      ["workspace", "organization", "build-3", "configuration"],
+    );
+    expect(result).toMatchObject({ status: "passed", cleanupConfirmed: true });
+    expect(result.resources).toHaveLength(4);
+    expect(result.resources.every((resource) => resource.deleted)).toBe(true);
+    expect(close).toHaveBeenCalledWith({ cleanupConfirmed: true });
+  });
+
   it("requires Alpha resource names before opening an adapter", async () => {
     const factory = vi.fn();
     await expect(

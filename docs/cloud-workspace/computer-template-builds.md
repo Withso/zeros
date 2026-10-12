@@ -109,8 +109,9 @@ closed. Failed, cancelled and superseded builds delete their VM; if deletion
 fails, they attempt verified stop, then retain a cleanup lease/retry record.
 Completion checks the deadline independently of the sweep. A lost completion
 reply cannot delete an already active template. Ready-template retention (active,
-previous, referenced generations, newest ten) belongs to the separate retention
-worker, not this build worker.
+previous, and sources of workspaces whose workspace/data deletion is unfinished)
+belongs to the separate retention worker, not this build worker. There is no
+additional ready-history hold; retired versions require Rebuild before Activate.
 
 ## Base-owned helpers
 
