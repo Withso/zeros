@@ -198,7 +198,9 @@ const checks = {
       ["IPAGothic", "fonts-ipafont-gothic"], ["WenQuanYi Zen Hei", "fonts-wqy-zenhei"],
       ["Loma", "fonts-tlwg-loma-otf"], ["FreeSans", "fonts-freefont-ttf"], ["Bitstream Charter", "xfonts-scalable"]])
       subcheck(`font_${pkg.replaceAll("-", "_")}`, () => {
-        assert(execute("fc-match", ["--format=%{file}", family]).startsWith(path.join(worker, "design-fonts", pkg) + "/"));
+        const [file, matchedFamily] = execute("fc-match", ["--format=%{file}\n%{family}", family]).split("\n");
+        assert(file.startsWith(path.join(worker, "design-fonts", pkg) + "/"));
+        assert(matchedFamily.split(",").includes(family));
       });
   },
   host_assets() {

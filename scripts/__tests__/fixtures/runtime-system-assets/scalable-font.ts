@@ -2,7 +2,7 @@
 // empty .notdef glyph. No upstream font data, font compiler or downloads. Each
 // family also has distinct full, unique and PostScript names so fontconfig
 // never has to reconcile duplicate bitmap/XLFD identities across packages.
-export function scalableFont(family: string): Buffer {
+export function scalableFont(family: string, revision = 1): Buffer {
   const u16 = (...values: number[]) => {
     const bytes = Buffer.alloc(values.length * 2);
     values.forEach((value, index) => bytes.writeUInt16BE(value & 0xffff, index * 2));
@@ -15,8 +15,8 @@ export function scalableFont(family: string): Buffer {
   };
   const postscript = `${family.replaceAll(/[^A-Za-z0-9-]/g, "")}-Regular`;
   const names: [number, string][] = [
-    [1, family], [2, "Regular"], [3, `${postscript}:1.0`],
-    [4, `${family} Regular`], [5, "Version 1.0"], [6, postscript],
+    [1, family], [2, "Regular"], [3, `${postscript}:${revision}.0`],
+    [4, `${family} Regular`], [5, `Version ${revision}.0`], [6, postscript],
     [16, family], [17, "Regular"],
   ];
   const strings = names.map(([, value]) => Buffer.from(value, "utf16le").swap16());
@@ -39,7 +39,7 @@ export function scalableFont(family: string): Buffer {
     // One contour, four on-curve points, no hinting; signed coordinate deltas.
     glyf: Buffer.concat([u16(1, 0, 0, 500, 700, 3, 0), Buffer.from([1, 1, 1, 1]),
       u16(0, 500, 0, -500, 0, 0, 700, 0)]),
-    head: Buffer.concat([u32(0x10000, 0x10000, 0, 0x5f0f3cf5), u16(0, 1000),
+    head: Buffer.concat([u32(0x10000, revision * 0x10000, 0, 0x5f0f3cf5), u16(0, 1000),
       Buffer.alloc(16), u16(0, 0, 500, 700, 0, 8, 2, 0, 0)]),
     hhea: Buffer.concat([u32(0x10000), u16(800, -200, 0, 600, 0, 100, 500, 1, 0, 0),
       Buffer.alloc(8), u16(0, 2)]),

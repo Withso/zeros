@@ -28,3 +28,7 @@ fonts: an empty .notdef, one rectangular outline and distinct family/full/
 PostScript identities. These fonts use no upstream data or compiler. Real
 fontconfig scans validate their names, scalability and Unicode mapping before
 the probe exercises them with a controlled system-font catalog.
+The generator can set the SFNT revision independently of the family so the
+ordinary CI test gives competing system copies a higher `fontversion` and
+verifies they cannot shadow the runtime's fonts. Stock-only families must still
+resolve, including after the system catalog has been cached.
