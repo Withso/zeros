@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { lstatSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { LIMITS, PROVIDERS, managedPath } from "./config.mjs";
 import { invariant, parseJson, validateTask } from "./contracts.mjs";
@@ -10,6 +10,7 @@ import {
 } from "./patch.mjs";
 import { inspectSurfaces } from "./surfaces.mjs";
 import { cleanProcessEnv } from "./environment.mjs";
+import { readBoundedRegularFile } from "./files.mjs";
 export { cleanProcessEnv } from "./environment.mjs";
 
 export function git(root, args, maximum = LIMITS.patch) {
@@ -186,17 +187,7 @@ export async function prepareUpdate(
         beforeBlob: oldFiles.get(file)?.sha ?? null,
         after: null,
       };
-    const full = join(root, file);
-    const stat = lstatSync(full);
-    invariant(
-      stat.isFile() &&
-        !stat.isSymbolicLink() &&
-        (stat.mode & 0o111) === 0 &&
-        stat.size <= LIMITS.file &&
-        realpathSync(full).startsWith(`${root}/`),
-      "Generated output is not a bounded regular checkout file.",
-    );
-    const bytes = readFileSync(full);
+    const bytes = readBoundedRegularFile(root, file, { allowExecutable: false });
     const text = bytes.toString("utf8");
     invariant(
       Buffer.from(text, "utf8").equals(bytes),

@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { readFileSync, readdirSync, realpathSync, lstatSync } from "node:fs";
+import { readFileSync, readdirSync, realpathSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import ts from "typescript";
@@ -15,6 +15,7 @@ import {
   stableVersion,
 } from "./contracts.mjs";
 import { publicFetch, publicUrl, readBounded } from "./network.mjs";
+import { readBoundedRegularFile } from "./files.mjs";
 
 const DECLARATION = /\.d\.(?:ts|mts|cts)$/;
 const SCHEMAS = [
@@ -131,7 +132,7 @@ export async function releasedDeclarations(provider, version, options = {}) {
   );
   const response = await (options.fetchImpl ?? fetch)(url.href, {
     redirect: "error",
-    signal: AbortSignal.timeout(LIMITS.timeout),
+    signal: globalThis.AbortSignal.timeout(LIMITS.timeout),
   });
   invariant(response.ok, "Package archive is unavailable.");
   const files = declarationArchive(
@@ -217,7 +218,7 @@ export function installedDeclarationSurface(root, provider, version) {
     join(root, "node_modules", ...PROVIDERS[provider].package.split("/")),
   );
   const manifest = parseJson(
-    readFileSync(join(directory, "package.json"), "utf8"),
+    readBoundedRegularFile(directory, "package.json").toString("utf8"),
   );
   invariant(
     manifest.version === version,
@@ -234,11 +235,8 @@ export function installedDeclarationSurface(root, provider, version) {
       );
       if (entry.isDirectory() && entry.name !== "node_modules") walk(file);
       else if (entry.isFile() && DECLARATION.test(entry.name)) {
-        invariant(
-          lstatSync(file).size <= LIMITS.file,
-          "Declaration file exceeds its bound.",
-        );
-        const text = readFileSync(file, "utf8");
+        const text = readBoundedRegularFile(directory, relative(directory, file))
+          .toString("utf8");
         bytes += Buffer.byteLength(text);
         invariant(
           bytes <= LIMITS.patch && Object.keys(files).length < LIMITS.files,
