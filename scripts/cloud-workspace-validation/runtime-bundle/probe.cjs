@@ -148,24 +148,58 @@ const checks = {
     // Historical archives keep their original closure contract. A new helper
     // or capability entry opts in; a partially staged new runtime must refuse.
     if (!manifest.files.some(file => ["worker/runtime-system-assets.json", "lib/zeros/cloud-runtime-assets.mjs"].includes(file.path))) return;
-    assert.equal(process.geteuid(), 10003);
-    assert.equal(process.getegid(), 10003);
-    const assets = JSON.parse(fs.readFileSync(path.join(worker, "runtime-system-assets.json"), "utf8"));
-    assert.equal(assets.schema, "zeros.runtime-system-assets/v1");
-    for (const file of [assets.gitLfs, assets.gitConfig, assets.fontConfig, ...assets.fonts]) {
-      const filename = internal(path.join(root, file));
-      assert(fs.lstatSync(filename).isFile());
-    }
-    Object.assign(process.env, { GIT_CONFIG_SYSTEM: path.join(worker, "gitconfig"),
-      FONTCONFIG_FILE: path.join(worker, "design-fonts/fonts.conf"), FONTCONFIG_PATH: path.join(worker, "design-fonts") });
-    const version = assets.packages.find(pkg => pkg.name === "git-lfs").version.split("-")[0];
-    assert(execute("git", ["lfs", "version"]).startsWith(`git-lfs/${version} `));
-    assert(execute("git", ["config", "--system", "--get", "filter.lfs.process"])
-      .includes('"${GIT_CONFIG_SYSTEM%/worker/gitconfig}/bin/git-lfs" filter-process'));
+    // Names come only from these assertions, never native stderr or paths.
+    const subcheck = (name, run) => {
+      try { run(); return true; }
+      catch { failedChecks.push(`runtime_system_assets_${name}`); return false; }
+    };
+    if (!subcheck("identity", () => {
+      assert.equal(process.geteuid(), 10003);
+      assert.equal(process.getegid(), 10003);
+    })) return;
+    let assets, version;
+    if (!subcheck("inventory", () => {
+      assets = JSON.parse(fs.readFileSync(path.join(worker, "runtime-system-assets.json"), "utf8"));
+      assert.equal(assets.schema, "zeros.runtime-system-assets/v1");
+      assert.equal(assets.gitLfs, "bin/git-lfs");
+      assert.equal(assets.gitConfig, "worker/gitconfig");
+      assert.equal(assets.fontConfig, "worker/design-fonts/fonts.conf");
+      assert(Array.isArray(assets.fonts) && assets.fonts.length > 0);
+      version = assets.packages.find(pkg => pkg.name === "git-lfs").version.split("-")[0];
+      assert(/^\d+\.\d+\.\d+$/.test(version));
+    })) return;
+    if (!subcheck("files", () => {
+      for (const file of [assets.gitLfs, assets.gitConfig, assets.fontConfig, ...assets.fonts]) {
+        const filename = internal(path.join(root, file));
+        assert(fs.lstatSync(filename).isFile());
+      }
+    })) return;
+    if (!subcheck("environment", () => {
+      assert.equal(process.env.GIT_CONFIG_SYSTEM, path.join(worker, "gitconfig"));
+      assert.equal(process.env.GIT_EXEC_PATH, `/opt/zeros-infra/.git-exec/${path.basename(root)}`);
+      assert.equal(process.env.FONTCONFIG_FILE, path.join(worker, "design-fonts/fonts.conf"));
+      assert.equal(process.env.FONTCONFIG_PATH, path.join(worker, "design-fonts"));
+    })) return;
+    subcheck("git_lfs", () => {
+      assert.equal(execute("git", ["--exec-path"]), process.env.GIT_EXEC_PATH);
+      assert.equal(internal(path.join(process.env.GIT_EXEC_PATH, "git-lfs")), path.join(root, "bin/git-lfs"));
+      assert(execute("git", ["lfs", "version"]).startsWith(`git-lfs/${version} `));
+    });
+    subcheck("filter", () => {
+      const filter = execute("git", ["config", "--system", "--get", "filter.lfs.process"]);
+      const lfs = ': "${GIT_CONFIG_SYSTEM:?Missing runtime Git configuration}"; exec "${GIT_CONFIG_SYSTEM%/worker/gitconfig}/bin/git-lfs"';
+      assert.equal(filter, `${lfs} filter-process`);
+      // Resolve the exact configured shell prefix too, independently of Git's
+      // dashed-command lookup. Only the subcommand changes to a bounded probe.
+      assert(execute("/bin/sh", ["-c", `${filter.slice(0, -"filter-process".length)}version`])
+        .startsWith(`git-lfs/${version} `));
+    });
     for (const [family, pkg] of [["Noto Color Emoji", "fonts-noto-color-emoji"], ["Unifont", "fonts-unifont"],
       ["IPAGothic", "fonts-ipafont-gothic"], ["WenQuanYi Zen Hei", "fonts-wqy-zenhei"],
       ["Loma", "fonts-tlwg-loma-otf"], ["FreeSans", "fonts-freefont-ttf"], ["Bitstream Charter", "xfonts-scalable"]])
-      assert(execute("fc-match", ["--format=%{file}", family]).startsWith(path.join(worker, "design-fonts", pkg) + "/"));
+      subcheck(`font_${pkg.replaceAll("-", "_")}`, () => {
+        assert(execute("fc-match", ["--format=%{file}", family]).startsWith(path.join(worker, "design-fonts", pkg) + "/"));
+      });
   },
   host_assets() {
     const modules = [

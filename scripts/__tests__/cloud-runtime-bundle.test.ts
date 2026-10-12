@@ -102,6 +102,7 @@ describe("Cursor platform payload closure", () => {
     const runTool = toolchain.runTool;
     const identities: string[] = [];
     const spy = vi.spyOn(toolchain, "runTool").mockImplementation((command, args, options, failure) => {
+      if (command !== "setpriv") return runTool(command, args, options, failure);
       expect(args.slice(args.indexOf("/proc") - 1, args.indexOf("/proc") + 2)).toEqual(["--ro-bind", "/proc", "/proc"]);
       expect(args).toContain("--unshare-net"); expect(args).toContain("--clearenv");
       expect(options.env).toEqual({ PATH: "/usr/bin:/bin", HOME: options.cwd });

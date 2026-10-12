@@ -22,3 +22,9 @@ lock. `make-extract-case.py` generates the six independent archive review cases
 (ordinary, writable root, chained/direct link escapes, relative parent file and
 link as parent), plus ownership, duplicate-root, cycle and safe-link cases.
 No package is installed and no package script is executed.
+
+`scalable-font.ts` generates the closure probe's original minimal TrueType
+fonts: an empty .notdef, one rectangular outline and distinct family/full/
+PostScript identities. These fonts use no upstream data or compiler. Real
+fontconfig scans validate their names, scalability and Unicode mapping before
+the probe exercises them with a controlled system-font catalog.

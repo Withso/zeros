@@ -105,8 +105,29 @@ base pin or legacy branch is rewritten. Local Personal and organization-local
 environments retain their current tools; cloud runtime selection remains exact
 across owners, generations and resident transfers.
 
-The ordinary closure probe checks LFS and font families as UID/GID 10003. An
-optional offline native test accepts an already acquired tree (including its
+The ordinary closure probe checks LFS and font families as UID/GID 10003. It
+mounts a disposable read-only Git helper selector at the same physical path as
+an installed runtime and supplies the shared asset environment. This matters
+even when the runtime is first on PATH: Git prepends its exec-path and binary
+directory, where a build runner can have its own LFS. Both plain `git lfs version`
+and the exact configured filter's shell prefix must report the pinned version.
+Native helpers still resolve to the runner's read-only `/usr`; no host
+installation or archive byte changes. Historical
+archives without either asset marker retain their original probe environment.
+Failures report closed `runtime_system_assets_` sub-checks for identity,
+inventory, files, environment, Git selection/version, filter configuration and
+each required font package; native output and arbitrary paths stay private.
+
+`cloud-runtime-system-assets-probe.test.ts` runs in the ordinary Linux Vitest
+suite without an opt-in. It stages nine synthetic packages through the real
+stager, then exercises the actual probe and namespace with real Git/fontconfig,
+small original TrueType fonts and a conflicting runner LFS. Its system-font
+directory is a controlled fixture: a runner's installed families otherwise
+outscore the tiny fonts on language coverage. A negative case proves that a
+matching system font cannot satisfy a missing bundled family. It covers every
+sub-check's failure reporting. The real pinned binary/font payload is also
+checked during every bundle build. An additional offline native test accepts an
+already acquired tree (including its
 `bin/node`) or a complete runtime:
 
 ```sh

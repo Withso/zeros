@@ -1,9 +1,12 @@
 import {
   copyFile,
+  mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -17,6 +20,7 @@ import {
   sha256,
 } from "./manifest";
 import { runTool } from "./toolchain";
+import { cloudRuntimeAssetEnvironment } from "../../../apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs";
 
 export type ClosureReport = {
   checks: string[];
@@ -28,7 +32,7 @@ export async function runClosureProbes(
 ): Promise<ClosureReport> {
   const start = performance.now();
   const manifest = await readFile(path.join(runtime, "manifest.json"));
-  parseManifest(manifest);
+  const parsed = parseManifest(manifest);
   const manifestSha256 = sha256(manifest);
   const runtimeId = `r1-${manifestSha256}`;
   const installed = `/opt/zeros-infra/${runtimeId}`;
@@ -154,6 +158,24 @@ export async function runClosureProbes(
       ["state", "/srv/zeros/state"],
     ])
       args.push("--symlink", target, `/opt/zeros/${name}`);
+    let assetEnvironment: Record<string, string> = {};
+    if (parsed.files.some(file => ["worker/runtime-system-assets.json", "lib/zeros/cloud-runtime-assets.mjs"].includes(file.path))) {
+      assetEnvironment = cloudRuntimeAssetEnvironment({ profile: "v4", runtimeId, workerRoot: `${installed}/worker` });
+      // Match the installed runtime's selector without changing the build host.
+      // Git prepends its exec-path and binary directory to PATH; a runner's LFS
+      // must never qualify (or reject) our staged binary. Native helpers stay native.
+      const native = await runTool("/usr/bin/git", ["--exec-path"], {
+        cwd: scratch, env: { PATH: "/usr/bin:/bin", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }, timeout: 1000,
+      }, "runtime_system_assets_git_exec");
+      check(["/usr/lib/git-core", "/usr/libexec/git-core"].includes(native), "runtime_system_assets_git_exec");
+      const names = await readdir(native);
+      check(names.length <= 512 && names.every(name => /^[a-zA-Z0-9][a-zA-Z0-9._+-]*$/.test(name)) &&
+        ["git", "git-sh-setup", "git-remote-https"].every(name => names.includes(name)), "runtime_system_assets_git_exec");
+      const selector = path.join(scratch, "git-exec"); await mkdir(selector, { mode: 0o755 });
+      for (const name of names) if (name !== "git-lfs") await symlink(`${native}/${name}`, path.join(selector, name));
+      await symlink(`${installed}/bin/git-lfs`, path.join(selector, "git-lfs"));
+      args.push("--ro-bind", selector, assetEnvironment.GIT_EXEC_PATH);
+    }
     args.push(
       "--ro-bind",
       script,
@@ -182,10 +204,9 @@ export async function runClosureProbes(
       "--setenv",
       "PLAYWRIGHT_HOST_PLATFORM_OVERRIDE",
       "ubuntu24.04-x64",
-      `${installed}/bin/node`,
-      "/probe.cjs",
-      installed,
     );
+    for (const [name, value] of Object.entries(assetEnvironment)) args.push("--setenv", name, value);
+    args.push(`${installed}/bin/node`, "/probe.cjs", installed);
     const checks: string[] = [];
     // Map the shared non-root engine identity before installing read-only proc
     // (#410). These two bounded namespaces verify archive closure only.
