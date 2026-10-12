@@ -80,6 +80,7 @@ async function fixture(provider: "cursor" | "codex" | "claude" = "cursor") {
     agentId: provider, providerBinding: null, sessionId: null, permissionMode: "auto", lastModeId: null }]]);
   const registration = {
     localCommandsNegotiated: () => true,
+    agentBootAuthorityRemainingMs: () => 89_000,
     async agentBootRequest<Operation extends CloudAgentBootOperation>(operation: Operation,
       input: CloudAgentBootRequests[Operation]): Promise<CloudAgentBootResponses[Operation]> {
       return bootResponses[operation].parse(await request(operation, input));
@@ -87,7 +88,7 @@ async function fixture(provider: "cursor" | "codex" | "claude" = "cursor") {
     credentialControlsRequest: vi.fn(async () => CloudAgentCredentialControlExchangeResponseSchema.parse({
       version: 1, mode: "boot-owner-v1", controls: [],
     })),
-  } satisfies Pick<CloudRuntimeRegistration, "localCommandsNegotiated" | "agentBootRequest" | "credentialControlsRequest">;
+  } satisfies Pick<CloudRuntimeRegistration, "localCommandsNegotiated" | "agentBootAuthorityRemainingMs" | "agentBootRequest" | "credentialControlsRequest">;
   const boot = new CloudLocalAgentBootRuntime({ file: path.join(directory, "queue.sqlite"), scope,
     runtimeBootId: f.scope.bootId, registration,
     legacy: f.legacy, supervisor: { onRetirementFailure: vi.fn() }, engineLive: () => true,

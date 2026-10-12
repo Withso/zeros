@@ -4143,6 +4143,10 @@ export class ZerosEngine {
     this.cloudAgentBoot ??= new CloudLocalAgentBootRuntime({
       file: path.join(engineRuntimeDir(this.root), "cloud-local-commands.sqlite"),
       runtimeBootId: registration.runtimeBootId, registration, legacy,
+      observeStartup: observation => {
+        this.cloudStartupPhase = observation.phase;
+        console.info("[Zeros cloud boot]", JSON.stringify(observation));
+      },
       scope: { organizationId: config.execution.organizationId, workspaceId: config.execution.workspaceId,
         generation: config.execution.generation, engineInstanceId: config.engine.instanceId },
       supervisor: { onRetirementFailure: () => this.handleCloudRuntimeAuthorityLoss() },

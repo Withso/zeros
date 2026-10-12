@@ -1,5 +1,36 @@
 # Lifecycle evidence and idle liveness
 
+## Engine boot-owner startup
+
+Negotiated cloud boot-owner startup retries only the exact bootstrap, initial
+credential sync and activation requests after a typed transport failure, timeout,
+HTTP 5xx or rate limit. Each request has at most three attempts, with 250 ms and
+500 ms backoff. All startup requests share one 30-second monotonic budget capped
+by the initially confirmed engine authority, including its existing one-second
+safety margin. Current authority is checked before and after requests; failed
+requests, later heartbeats and wall-clock changes cannot reset the boot budget.
+The existing 10-second HTTP timeout and 90-second setup/heartbeat policies remain
+unchanged. Lost authority, explicit denial, invalid identity/response, credential
+and integrity failures stay terminal.
+
+Retries retain the same boot, writer, funding identity and FULL SQLite queue.
+History restore, local durability work, cutover and installation are never
+replayed by this retry loop. Credential and control background polling starts
+after activation and durable installation. Readiness and client admission remain
+unavailable until that original initialization completes. A terminal startup
+result is retained for later readiness/socket waiters; they cannot restart the
+retry cycle or repeat a failed installation. Local Personal and
+organization-local engines do not enter this path.
+
+Content-free stage observations distinguish `boot_bootstrap`, `boot_credentials`,
+`boot_durability`, `boot_activate` and `boot_install`, with outcome, elapsed time,
+retry attempt and a closed failure cause. The private startup failure file and
+the control-plane setup diagnostic preserve those stages and existing encoded
+admission/validation causes; messages, stacks, credentials and response bodies
+are excluded. Deploy the additive control-plane diagnostic reader before the
+qualified runtime. The previous `boot_owner` phase remains readable. These
+observations do not grant authority or alter safety-stop policy.
+
 ## Agent command failures
 
 Agent failures retain a closed `cloud_<stage>_<category>` result code through

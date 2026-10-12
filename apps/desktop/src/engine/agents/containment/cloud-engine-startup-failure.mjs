@@ -4,18 +4,33 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 
 export const CLOUD_ENGINE_STARTUP_FAILURE_FILE = "cloud-engine-startup-failure.json";
-export const CLOUD_ENGINE_STARTUP_PHASES = Object.freeze(["startup", "registration", "history_restore", "boot_owner"]);
+export const CLOUD_ENGINE_STARTUP_PHASES = Object.freeze(["startup", "registration", "history_restore", "boot_owner",
+  "boot_bootstrap", "boot_credentials", "boot_durability", "boot_activate", "boot_install"]);
 export const CLOUD_ENGINE_STARTUP_NAMES = Object.freeze([
   "Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "TimeoutError", "ZodError", "SqliteError",
   "CloudCommandRuntimeError", "CloudRuntimeRequestError", "CloudAgentExecutionError", "CloudAgentAdmissionError",
   "CloudRuntimeUpgradeRequiredError", "unknown",
 ]);
+// This helper is also shipped as standalone setup code. Mirror the protocol's
+// closed admission/validation categories here; parity tests cover both copies.
+const bootFailureCategories = [
+  "rejected", "authority_unavailable", "authority_timeout", "authority_transport", "authority_http_4xx", "authority_http_5xx",
+  "authority_response_invalid", "canary_failed", "attestation_failed", "timeout", "auth_required", "verification_required",
+  "cloud_credential_error", "subprocess_exited", "protocol_error", "transport_closed", "lifecycle_superseded", "rate_limited",
+  "design_protection_failed", "session_expired",
+  "executor_start_failed", "provider_login_failed", "environment_setup_failed", "environment_identity_mismatch", "environment_not_ready",
+  "credential_refresh_invalid", "credential_refresh_timeout", "credential_refresh_unchanged", "credential_refresh_rejected", "lock_busy", "execution_limit",
+  "customization_changed", "access_denied", "environment_revoked", "environment_runtime_required", "environment_unavailable", "lease_expired",
+];
 export const CLOUD_ENGINE_STARTUP_CODES = Object.freeze([
   "ENOENT", "ENOTDIR", "EISDIR", "EACCES", "EPERM", "EIO", "EROFS", "ENOSPC", "EDQUOT", "EMFILE", "ENFILE",
   "EEXIST", "ELOOP", "EBUSY", "ETIMEDOUT", "ECONNREFUSED", "ECONNRESET",
   "SQLITE_CORRUPT", "SQLITE_NOTADB", "SQLITE_CANTOPEN", "SQLITE_BUSY", "SQLITE_IOERR", "SQLITE_READONLY", "SQLITE_FULL",
   "command_storage_unavailable", "command_conflict", "cloud_command_writer_retired", "engine_authority_rejected",
   "cloud_commands_unavailable", "cloud_actor_authority_rejected", "cloud_runtime_upgrade_required", "unknown",
+  "cloud_workspace_client_update_required", "cloud_workspace_v2_required", "cloud_agent_model_not_authorized",
+  "cloud_agent_credential_required", "cloud_agent_credential_expired", "cloud_agent_credential_revoked", "cloud_agent_credential_refresh_required",
+  ...["admission", "validation"].flatMap(stage => bootFailureCategories.map(category => `cloud_${stage}_${category}`)),
 ]);
 export const CLOUD_ENGINE_STARTUP_ERRNOS = Object.freeze([-1, -2, -5, -13, -16, -17, -20, -21, -23, -24, -28, -30, -40, -104, -110, -111, -122]);
 const MAX_BYTES = 4096;

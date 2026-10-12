@@ -45,6 +45,15 @@ describe("bounded cloud diagnostics", () => {
         expect(parseSetupDiagnostic(diagnostic)).toEqual(diagnostic);
       }
   });
+  it("keeps boot substages and typed denial/transport causes readable without retaining provider text", () => {
+    for (const phase of ["boot_owner", "boot_bootstrap", "boot_credentials", "boot_durability", "boot_activate", "boot_install"])
+      for (const code of ["cloud_admission_authority_timeout", "cloud_validation_authority_http_5xx", "cloud_validation_access_denied",
+        "cloud_agent_credential_revoked", "command_storage_unavailable"]) {
+        const diagnostic = { version: 1, phase: "engine_readiness", engineStartup: { phase, name: "CloudAgentExecutionError", code, errno: null } };
+        expect(parseSetupDiagnostic(diagnostic)).toEqual(diagnostic);
+        expect(parseSetupDiagnostic({ ...diagnostic, engineStartup: { ...diagnostic.engineStartup, body: "private-canary" } })).toBeNull();
+      }
+  });
   it("distinguishes stable stop reasons", () => {
     expect(cloudStopReason("compute_credit_exhausted").code).toBe("budget_stop");
     expect(cloudStopReason("compute_reconciliation_failed").code).toBe("safety_failure");
