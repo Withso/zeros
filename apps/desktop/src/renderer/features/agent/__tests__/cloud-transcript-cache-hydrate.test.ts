@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { cloudScopedId, parseCloudScopedId, isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 import { BLANK, useSessionsStore } from "../sessions-store";
 import { reconcileHistoryMessages } from "../history-message-identity";
-import { seedPersistedMessageRefs } from "../message-persistence-tracker";
+import { messageSnapshotsEqual, seedPersistedMessageRefs } from "../message-persistence-tracker";
 import { isCurrentTranscriptRequest, releaseTranscriptRequest } from "../transcript-retention";
 import type { AgentMessage } from "../use-agent-session";
 import { cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch, type CloudHistoryRestoreFence } from "../../../platform/cloud-transcript-cache-contract";
@@ -20,23 +20,33 @@ const code = ts.transpileModule(`globalThis.hydrate = ${callback};`, { compilerO
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
 const cloudId = cloudScopedId(target, "chat-a");
 const message = (text: string): AgentMessage => ({ id: "m-1", kind: "text", role: "agent", text, createdAt: 1 });
-function harness(chatId = cloudId, native = false) {
+function harness(chatId = cloudId, native = false, source = native ? "native" : "control-plane") {
   let restoreHead: CloudHistoryRestoreFence | undefined;
+  let requestedHead: CloudHistoryRestoreFence | undefined, responseHead: CloudHistoryRestoreFence | undefined;
   let resolve!: (rows: AgentMessage[]) => void;
   const server = new Promise<AgentMessage[]>(done => { resolve = done; });
   const history = vi.fn((_id: string, _limit: number, _before?: number, onCached?: (rows: AgentMessage[]) => void) => {
+    requestedHead = restoreHead;
     queueMicrotask(() => onCached?.([message("cached")])); return server;
+  });
+  const snapshotHistory = vi.fn(async (id: string, limit: number, before?: number,
+    onCached?: (page: { messages: AgentMessage[]; source: "cache"; restoreHead?: CloudHistoryRestoreFence }) => void) => {
+    const cachedHead = restoreHead;
+    const messages = await history(id, limit, before, onCached ? rows => onCached({ messages: rows, source: "cache", restoreHead: cachedHead }) : undefined);
+    return { messages, source, restoreHead: responseHead ?? requestedHead };
   });
   const requests = new Map<string, Promise<void>>();
   const repair = vi.fn(async () => {});
   const context: Record<string, unknown> = { console: { warn: vi.fn() }, BLANK, parseCloudScopedId, isCloudWorkspace, cloudComputerV2: true,
-    HYDRATE_WINDOW: 200, reconcileHistoryMessages, seedPersistedMessageRefs, isCurrentTranscriptRequest, releaseTranscriptRequest,
+    HYDRATE_WINDOW: 200, reconcileHistoryMessages, messageSnapshotsEqual, seedPersistedMessageRefs, isCurrentTranscriptRequest, releaseTranscriptRequest,
     getStore: useSessionsStore.getState, bridge: { status: "connected" }, reconcileChatMessages: vi.fn(), persistWindowMessages: history,
+    persistMessageWindow: snapshotHistory,
     cloudHistoryRestoreHead: () => restoreHead, cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch, cloudHasNativeTranscript: () => native,
     hydrateCloudSendRef: { current: repair },
     hydrateInFlightRef: { current: requests }, pendingHydratesRef: { current: new Set() }, persistedMessageRefsRef: { current: new Map() } };
   vm.runInNewContext(code, context);
-  return { resolve, requests, history, repair, hydrate: context.hydrate as (id: string) => Promise<void>, chatId,
+  return { resolve: (rows: AgentMessage[], head?: CloudHistoryRestoreFence) => { responseHead = head; resolve(rows); },
+    requests, history, repair, hydrate: context.hydrate as (id: string) => Promise<void>, chatId,
     setHead: (head: CloudHistoryRestoreFence) => { restoreHead = head; } };
 }
 beforeEach(() => { useSessionsStore.getState().clearAll(); });
@@ -48,6 +58,40 @@ const incomplete: CloudHistoryRestoreFence = { conversationId: "chat-a", project
     source: { kind: "mutation", mutationId: "77777777-7777-4777-8777-777777777777", operation: "edit" }, restoreRevision: 2, deleted: false,
     recordSequence: null, eventSequence: null, manifestSha256: null, incompleteReason: "history_limit" } };
 describe("production initial transcript hydration", () => {
+  it("cannot borrow successor authority from a global head that the returned page did not verify", async () => {
+    const a: CloudHistoryRestoreFence = { ...incomplete, head: { ...incomplete.head!, recordSequence: 4, eventSequence: 8,
+      manifestSha256: "a".repeat(64), incompleteReason: null } };
+    const b = { ...a, projection: { ...a.projection, bootId: "88888888-8888-4888-8888-888888888888" } };
+    const h = harness(); h.setHead(a);
+    const result = h.hydrate(h.chatId); await Promise.resolve();
+    expect(useSessionsStore.getState().sessions[h.chatId]?.transcriptPresentation?.restoreHead).toEqual(a);
+    // A global observation may come from disk; only the page's own receipt or
+    // the authenticated head subscriber can establish boot continuity.
+    h.setHead(b); h.resolve([message("old page A")], a); await result;
+    expect(useSessionsStore.getState().sessions[h.chatId]).toMatchObject({ messages: [], transcriptPresentation: null, transcriptState: "loading" });
+    expect(h.repair).toHaveBeenCalledExactlyOnceWith(h.chatId);
+  });
+  it("does not relabel an incomplete CP result as native because a native execution exists after the await", async () => {
+    const h = harness(cloudId, true, "control-plane"); h.setHead(incomplete);
+    const result = h.hydrate(h.chatId); h.resolve([]); await result;
+    expect(useSessionsStore.getState().sessions[h.chatId]).toMatchObject({ messages: [], transcriptState: "loading", hasTranscript: true });
+  });
+  it("installs the first page's own verified head without a second history read", async () => {
+    const head: CloudHistoryRestoreFence = { ...incomplete, head: { ...incomplete.head!, recordSequence: 1, eventSequence: 2,
+      manifestSha256: "b".repeat(64), incompleteReason: null } };
+    const h = harness(), result = h.hydrate(h.chatId); await Promise.resolve();
+    h.setHead(head); useSessionsStore.getState().applyCloudHistoryRestoreHead(h.chatId, head);
+    h.resolve([message("verified first page")], head); await result;
+    expect(useSessionsStore.getState().sessions[h.chatId]).toMatchObject({ messages: [message("verified first page")], transcriptState: "resident" });
+    expect(h.repair).not.toHaveBeenCalled();
+  });
+  it("preserves message references when validation confirms the cached presentation unchanged", async () => {
+    const h = harness(), result = h.hydrate(h.chatId); await Promise.resolve();
+    const messages = useSessionsStore.getState().sessions[h.chatId]!.messages;
+    h.resolve([message("cached")]); await result;
+    expect(useSessionsStore.getState().sessions[h.chatId]!.messages).toBe(messages);
+    expect(useSessionsStore.getState().sessions[h.chatId]!.transcriptState).toBe("resident");
+  });
   it("does not install complete page A after a newer complete repair B crosses the outer await", async () => {
     const a: CloudHistoryRestoreFence = { ...incomplete, head: { ...incomplete.head!, recordSequence: 4, eventSequence: 8,
       manifestSha256: "a".repeat(64), incompleteReason: null } };
@@ -98,6 +142,7 @@ describe("production initial transcript hydration", () => {
     await Promise.resolve();
     expect(useSessionsStore.getState().sessions[h.chatId]?.messages).toEqual([message("cached")]);
     expect(useSessionsStore.getState().sessions[h.chatId]?.transcriptState).toBe("loading");
+    expect(useSessionsStore.getState().sessions[h.chatId]).toMatchObject({ transcriptPresentation: { source: "cache" } });
     h.resolve([message("new server")]); await result;
     expect(useSessionsStore.getState().sessions[h.chatId]?.messages).toEqual([message("new server")]);
     expect(useSessionsStore.getState().sessions[h.chatId]?.transcriptState).toBe("resident");

@@ -15,7 +15,8 @@ import { CLOUD_RUNTIME_UPGRADE_TOOLTIP, notifyAgentSendFailure } from "./agent-s
 
 import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
 import { transcriptParentId } from "./transcript-parent";
-import { useCloudTranscriptLatency } from "./use-cloud-transcript-latency";
+import { useCloudTranscriptLatency, useCloudTranscriptLoading } from "./use-cloud-transcript-latency";
+import { hasTranscriptPresentation } from "./transcript-retention";
 import { startCloudSubmitSpan } from "../../state/cloud-workspace-latency";
 import React, {
   useCallback,
@@ -244,7 +245,7 @@ import {
   refreshAgents,
 } from "./agents-cache";
 import { useWorkspaceAgents } from "./workspace-agent-registry";
-import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
 import { cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
 import { isRunnableAgent } from "./agent-runnable";
 import { requestProviderSettings, requestUserSettingsSection } from "../settings/settings-navigation";
@@ -393,6 +394,9 @@ export function AgentChat({
   // Chat-owned settings are needed by both the turn lifecycle and composer.
   // In particular, background continuation chrome is an Ultracode-only aid.
   const chatThread = useChatById(chatId);
+  const provisionalTranscript = (isCloudWorkspace(chatThread?.folder ?? session.cwd) || !!parseCloudScopedId(chatId)) &&
+    session.transcriptState === "loading" && !!session.transcriptPresentation;
+  const transcriptReadOnly = readOnly || provisionalTranscript;
   const cloudNativeCapabilities=session.boundary?.cloudExecution?.capabilities??session.session?.nativeCapabilities;
   const goalsAvailable=!isCloudWorkspace(chatThread?.folder)||cloudNativeCapabilities?.goals===true;
   const browserConfirmation = useBrowserConfirmation(chatId);
@@ -582,13 +586,13 @@ export function AgentChat({
   // RendererContext contract).
   const respondToQuestion = useCallback(
     (text: string) => {
-      if (readOnly) return;
+      if (transcriptReadOnly) return;
       if (chatThread?.folder) recordWorkspaceActivity(chatThread.folder);
       session.sendPrompt(text, text).catch(() => {
         /* error surfaces via session.error */
       });
     },
-    [chatThread?.folder, session, readOnly],
+    [chatThread?.folder, session, transcriptReadOnly],
   );
   // pendingPermission is threaded into ctx so the matching
   // tool card can render its inline Allow/Deny cluster. respondToPermission
@@ -597,11 +601,11 @@ export function AgentChat({
     (
       response: import("../../platform/bridge/agent-events").RequestPermissionResponse,
     ) => {
-      if (readOnly) return;
+      if (transcriptReadOnly) return;
       if (chatThread?.folder) recordWorkspaceActivity(chatThread.folder);
       session.respondToPermission(response);
     },
-    [chatThread?.folder, session, readOnly],
+    [chatThread?.folder, session, transcriptReadOnly],
   );
   // Sticky-policy mutators are bound to the active chatId so
   // the InlinePermissionCluster can fire-and-forget without knowing
@@ -609,10 +613,10 @@ export function AgentChat({
   const policyChatId = chatId;
   const recordPolicy = useCallback(
     (rule: import("./policies").PolicyRule) => {
-      if (readOnly || !policyChatId) return;
+      if (transcriptReadOnly || !policyChatId) return;
       useSessionsStore.getState().addPolicy(policyChatId, rule);
     },
-    [policyChatId, readOnly],
+    [policyChatId, transcriptReadOnly],
   );
   // Surface the session's setMode through ctx so the
   // ExitPlanModeCard can apply the user's "approve and continue in
@@ -620,12 +624,12 @@ export function AgentChat({
   // wrap it so consumers don't have to handle the maybe-undefined.
   const setModeForCtx = useMemo(
     () =>
-      !readOnly && session.setMode
+      !transcriptReadOnly && session.setMode
         ? (modeId: string) => {
             void session.setMode!(modeId);
           }
         : null,
-    [session, readOnly],
+    [session, transcriptReadOnly],
   );
   // Mount-flicker fix (2026-07-16): the rail publishes its scroll-spy
   // pass here so the scroll-restore layout effect below can light the
@@ -658,7 +662,7 @@ export function AgentChat({
       segments?: ComposerSegment[],
     ) => {
       const trimmed = editedText.trim();
-      if (readOnly || !chatId) return;
+      if (transcriptReadOnly || !chatId) return;
       if (trimmed.length === 0 && attachments.length === 0) {
         return;
       }
@@ -740,7 +744,7 @@ export function AgentChat({
           /* error surfaces via session.error */
         });
     },
-    [chatId, chatThread?.folder, session, readOnly],
+    [chatId, chatThread?.folder, session, transcriptReadOnly],
   );
 
   // Forward-ref to the composer hook's
@@ -802,12 +806,12 @@ export function AgentChat({
   const retrySafetyReviewRef = useRef(session.retrySafetyReview);
   retrySafetyReviewRef.current = session.retrySafetyReview;
   const retrySafetyReviewThroughRef = useCallback((retryId: string) => {
-    if (readOnly) return Promise.resolve();
+    if (transcriptReadOnly) return Promise.resolve();
     const retry = retrySafetyReviewRef.current;
     return retry
       ? retry(retryId)
       : Promise.reject(new Error("Safety retry is unavailable."));
-  }, [readOnly]);
+  }, [transcriptReadOnly]);
   const openBrowserSettings = useCallback(() => {
     if (!interactive) return;
     requestUserSettingsSection("browser-use");
@@ -815,20 +819,21 @@ export function AgentChat({
   }, [dispatch, interactive]);
   const messageCtx: RendererContext = useMemo(
     () => ({
+      transcriptReadOnly,
       isStreaming,
       lastMessageId,
       activeTurnStartedAt,
       subagentChildren,
       editBaselines,
       respondToQuestion,
-      pendingQuestionToolCallIds: readOnly
+      pendingQuestionToolCallIds: transcriptReadOnly
         ? new Set<string>()
         : pendingQuestionToolCallIds,
-      hasBlockingQuestion: !readOnly && hasBlockingQuestion,
-      pendingPermission: readOnly ? null : session.pendingPermission,
+      hasBlockingQuestion: !transcriptReadOnly && hasBlockingQuestion,
+      pendingPermission: transcriptReadOnly ? null : session.pendingPermission,
       respondToPermission,
       retrySafetyReview: retrySafetyReviewThroughRef,
-      safetyReviewRetries: readOnly ? undefined : session.safetyReviewRetries,
+      safetyReviewRetries: transcriptReadOnly ? undefined : session.safetyReviewRetries,
       recordPolicy,
       chatId: chatId ?? null,
       setMode: setModeForCtx,
@@ -866,6 +871,7 @@ export function AgentChat({
       session.cwd,
       surfaceActive,
       readOnly,
+      transcriptReadOnly,
       openFileThroughRef,
       warmFileThroughRef,
       openPrUrlThroughRef,
@@ -1275,7 +1281,7 @@ export function AgentChat({
       : true,
   );
   const transcriptPaintReady = useSessionsStore((s) =>
-    !!chatId && s.sessions[chatId]?.transcriptState === "resident",
+    !!chatId && hasTranscriptPresentation(s.sessions[chatId]),
   );
   useCloudTranscriptLatency(chatThread?.folder ?? session.cwd, chatId, surfaceActive,
     transcriptPaintReady, hasSessionMessages);
@@ -1939,7 +1945,7 @@ export function AgentChat({
     !!chatThread?.folder;
   const [showTranscriptLoading, setShowTranscriptLoading] = useState(false);
   useEffect(() => {
-    if (session.transcriptState === "resident") {
+    if (!surfaceActive || session.transcriptState === "resident" || transcriptPaintReady) {
       setShowTranscriptLoading(false);
       return;
     }
@@ -1949,7 +1955,9 @@ export function AgentChat({
     // completes.
     const timer = window.setTimeout(() => setShowTranscriptLoading(true), 180);
     return () => window.clearTimeout(timer);
-  }, [session.transcriptState]);
+  }, [chatId, surfaceActive, session.transcriptState, transcriptPaintReady]);
+  const transcriptLoadingVisible = showTranscriptLoading && surfaceActive && !transcriptPaintReady && session.transcriptState !== "resident";
+  useCloudTranscriptLoading(chatThread?.folder ?? session.cwd, chatId, transcriptLoadingVisible);
   const { summaries: transcriptSummaries, loaded: transcriptsLoaded } =
     useChatTranscriptSummaries(
       chatThread?.folder,
@@ -2914,6 +2922,13 @@ export function AgentChat({
   useLayoutEffect(() => {
     stableTurnsRef.current = turns;
   }, [turns]);
+  const initialCachedTurnIndex = useMemo(() => {
+    if (!provisionalTranscript || !chatId) return -1;
+    const saved = useSessionsStore.getState().scrollPositions[chatId];
+    return saved && !saved.atBottom
+      ? turns.findIndex(turn => turn.userPrompt?.id === saved.anchorId)
+      : -1;
+  }, [chatId, provisionalTranscript, turns]);
 
   // Checkpoint list for the left-edge rail — one entry per user prompt,
   // transcript order. Ids match the data-checkpoint-id TurnContainer
@@ -4741,7 +4756,7 @@ export function AgentChat({
           >
             {/* Older history auto-pages in via the nearTop effect above, with
               no visible affordance: scrolling back should show everything. */}
-            {showTranscriptLoading && (
+            {transcriptLoadingVisible && (
               <div className="text-muted-fg flex items-center gap-2 py-2 text-xs">
                 <ZerosSpinner
                   size={14}
@@ -4826,14 +4841,17 @@ export function AgentChat({
                 isTail: isVisualTail,
                 inFlight: turnInFlight,
               });
-              const authRequired = !readOnly && authState === "sign-in";
+              const authRequired = !transcriptReadOnly && authState === "sign-in";
               const authStopped = authState === "stopped";
               const visibleEvents = cloudAdmission ? [] : authState
                 ? authenticationTurnOutput(turn.events)
                 : turn.events;
               return (
                 <React.Fragment key={turnKey(turn)}>
-                  <TurnContainer turn={turn} isActive={isVisualTail}>
+                  <TurnContainer turn={turn} isActive={isVisualTail}
+                    deferContent={provisionalTranscript} surfaceActive={surfaceActive} scrollRoot={scrollEl}
+                    initialContent={initialCachedTurnIndex >= 0 ? Math.abs(i - initialCachedTurnIndex) <= 4 : i >= turns.length - 6}>
+                    {() => <>
                     {/* Follow-up queue rows do not render here. A first prompt
                         awaiting only provider admission does: it is already
                         presented as this active turn, before wire dispatch. */}
@@ -4868,7 +4886,7 @@ export function AgentChat({
                         // copy-only: their reset boundary is the opening
                         // provider prompt, not the steer message id.
                         onEdit={
-                          readOnly ||
+                          transcriptReadOnly ||
                           turn.userPrompt.autoAction ||
                           turn.userPrompt.queued ||
                           turn.isSteer
@@ -4951,10 +4969,14 @@ export function AgentChat({
                         )}
                         workflow={activeWorkflow}
                         onStopWorkflow={
-                          readOnly ? undefined : session.stopBackgroundTask
+                          transcriptReadOnly ? undefined : session.stopBackgroundTask
                         }
                         ctx={messageCtx}
                         footer={
+                          // Cached rows have no native turn/usage authority.
+                          // Do not mount turn metadata reads or reset/fork
+                          // controls until the transcript has validated.
+                          !provisionalTranscript &&
                           !authRequired &&
                           turn.userPrompt &&
                           chatId &&
@@ -5047,6 +5069,7 @@ export function AgentChat({
                         onSignIn={handleSignIn}
                       />
                     )}
+                    </>}
                   </TurnContainer>
                 </React.Fragment>
               );

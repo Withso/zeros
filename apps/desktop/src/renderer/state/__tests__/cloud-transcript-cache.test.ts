@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { CloudTranscriptCache, CloudHistoryRestoreTracker } from "../cloud-transcript-cache";
+import type { CloudHistoryRestoreFence } from "../../platform/cloud-transcript-cache-contract";
 
 const owner = { accountId: "account-a", organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222", chatId: "chat-a" };
 const epoch = "33333333-3333-4333-8333-333333333333";
@@ -22,6 +23,40 @@ beforeEach(() => {
   cache = new CloudTranscriptCache({ isAllowed: () => allowed, read, write, prune }); cache.setAccount(owner.accountId);
 });
 describe("authorized cloud transcript cache reads", () => {
+  it.each(["source", "hash", "record-coverage", "event-coverage", "incomplete", "deleted", "null", "funding"])(
+    "retires cached bytes when the successor changes %s", async reason => {
+      const before: CloudHistoryRestoreFence = { ...fence, head: { ...fence.head, recordSequence: 3, manifestSha256: "a".repeat(64), incompleteReason: null } };
+      read.mockResolvedValue({ cacheEpoch: epoch, historyEpoch: epoch, restoreHead: before, window: { ...window(), restoreHead: before } });
+      await cache.read(owner);
+      const next: CloudHistoryRestoreFence = { ...before, projection: { ...projection, generation: 3 }, head: { ...before.head! } };
+      if (reason === "source") next.head!.source = { kind: "mutation", operation: "edit", mutationId: epoch };
+      if (reason === "hash") next.head!.manifestSha256 = "b".repeat(64);
+      if (reason === "record-coverage") next.head!.recordSequence = 4;
+      if (reason === "event-coverage") next.head!.eventSequence = 5;
+      if (reason === "incomplete") { next.head!.manifestSha256 = null; next.head!.incompleteReason = "history_limit"; }
+      if (reason === "deleted") next.head!.deleted = true;
+      if (reason === "null") next.head = null;
+      if (reason === "funding") next.projection.fundingOwnerEpoch++;
+      const installing = cache.installRestoreHead(owner, next);
+      expect(cache.peek(owner)).toBeNull();
+      await installing;
+      expect(cache.peek(owner)).toBeNull();
+    });
+  it("retains identical verified presentation across a new boot while retiring the old confirmation token", async () => {
+    const before = { ...fence, head: { ...fence.head, recordSequence: 3, manifestSha256: "a".repeat(64), incompleteReason: null } };
+    read.mockResolvedValue({ cacheEpoch: epoch, historyEpoch: epoch, restoreHead: before, window: { ...window(20), restoreHead: before } });
+    const saved = await cache.read(owner), confirmOld = cache.captureConfirmation(owner)!;
+    const next = { ...before, projection: { ...projection, generation: 3, bootId: "88888888-8888-4888-8888-888888888888",
+      writerEpoch: "99999999-9999-4999-8999-999999999999" } };
+    const pending = deferred<void>(); prune.mockReturnValueOnce(pending.promise);
+    const installing = cache.installRestoreHead(owner, next);
+    expect(cache.peek(owner)?.messages).toBe(saved!.messages);
+    expect(cache.peek(owner)?.restoreHead).toEqual(next);
+    await confirmOld({ ...window(100), restoreHead: before });
+    expect(write).not.toHaveBeenCalled();
+    pending.resolve(); await installing;
+    expect(cache.peek(owner)?.messages).toBe(saved!.messages);
+  });
   it("keeps the CP writer fence after a failed durable prune instead of promoting an old disk writer", async () => {
     const disk = { ...fence, projection: { ...projection, generation: 1,
       writerEpoch: "88888888-8888-4888-8888-888888888888" },

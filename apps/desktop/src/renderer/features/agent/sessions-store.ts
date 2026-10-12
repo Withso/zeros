@@ -77,7 +77,7 @@ import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
 import type { AgentGoal } from "@zeros/protocol/agent-events";
 import type { CloudConversationSnapshot } from "@zeros/protocol/cloud-events";
 import { isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
-import { CloudHistoryRestoreFenceSchema, cloudHistoryFenceCanAdvance, cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch,
+import { CloudHistoryRestoreFenceSchema, cloudHistoryFenceCanAdvance, cloudHistoryFenceHasTranscript, cloudHistoryFencesMatch, cloudHistoryPresentationContinues,
   type CloudHistoryRestoreFence } from "../../platform/cloud-transcript-cache-contract";
 
 const MAX_STDERR_LINES = 200;
@@ -264,6 +264,7 @@ export const BLANK: AgentSessionState = {
   session: null,
   status: "idle",
   transcriptState: "resident",
+  transcriptPresentation: null,
   transcriptDirty: false,
   hasTranscript: false,
   messages: [],
@@ -406,7 +407,7 @@ export interface SessionsStoreState {
   installCloudSnapshot: (chatId: string, snapshot: CloudConversationSnapshot, metadata?: Partial<AgentSessionState>) => void;
   /** CP restore state only; a separately proved live/native snapshot keeps its
    * own transcript lineage. This does not settle or cancel any native turn. */
-  applyCloudHistoryRestoreHead: (chatId: string, fence: CloudHistoryRestoreFence, preserveNativeSnapshot?: boolean) => void;
+  applyCloudHistoryRestoreHead: (chatId: string, fence: CloudHistoryRestoreFence, preserveNativeSnapshot?: boolean, authenticated?: boolean) => void;
 
   /** Permission requests are routed through the request's sessionId. */
   applyBridgePermissionRequest: (
@@ -626,6 +627,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         normalized = { ...normalized, executionId, sessionId: executionId };
       }
       const previous = state.sessions[chatId];
+      if (normalized.transcriptState === "cold" || previous && normalized.messages !== previous.messages &&
+          normalized.transcriptPresentation === previous.transcriptPresentation) {
+        normalized = { ...normalized, transcriptPresentation: null };
+      }
       if (
         previous &&
         (previous.executionId ?? previous.sessionId) !== executionId &&
@@ -655,10 +660,12 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           // transcript. Bridge deltas for cold/loading slots are handled in
           // applyBridgeUpdate and never reach this path with message arrays.
           transcriptState: patch.transcriptState ?? "resident",
+          transcriptPresentation: patch.transcriptPresentation ?? null,
           transcriptDirty: patch.transcriptDirty ?? false,
         };
       }
       let updated = { ...existing, ...normalizedPatch };
+      if (updated.transcriptState === "cold") updated = { ...updated, transcriptPresentation: null };
       const executionId =
         patch.executionId !== undefined
           ? patch.executionId
@@ -732,6 +739,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           [chatId]: {
             ...slot,
             transcriptState: "cold",
+            transcriptPresentation: null,
             transcriptDirty: false,
             hasTranscript,
             messages: [],
@@ -1289,6 +1297,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           [chatId]: {
             ...slot,
             messages: nextMessages,
+            transcriptPresentation: null,
             hasTranscript:
               slot.hasTranscript || hasDurableMessages(nextMessages),
           },
@@ -1297,7 +1306,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     });
   },
 
-  applyCloudHistoryRestoreHead: (chatId, input, preserveNativeSnapshot = false) => {
+  applyCloudHistoryRestoreHead: (chatId, input, preserveNativeSnapshot = false, authenticated = false) => {
     const chat = parseCloudScopedId(chatId), parsed = CloudHistoryRestoreFenceSchema.safeParse(input);
     if (!chat || !parsed.success) return;
     const fence = parsed.data;
@@ -1311,13 +1320,24 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       const unchanged = !!previous && cloudHistoryFencesMatch(previous, fence);
       if (unchanged && preserveNativeSnapshot) return state;
       const heads = { ...state.cloudHistoryRestoreHeads, [chatId]: fence };
-      if (preserveNativeSnapshot) return { cloudHistoryRestoreHeads: heads };
+      if (preserveNativeSnapshot) return { cloudHistoryRestoreHeads: heads,
+        ...(slot.transcriptPresentation ? { sessions: { ...state.sessions, [chatId]: { ...slot, transcriptPresentation: null } } } : {}) };
+      const presentation = slot.transcriptPresentation;
+      if (!slot.transcriptDirty && slot.status !== "streaming" && presentation?.restoreHead &&
+          (authenticated || cloudHistoryFencesMatch(presentation.restoreHead, fence)) &&
+          cloudHistoryPresentationContinues(presentation.restoreHead, fence)) {
+        if (unchanged && cloudHistoryFencesMatch(presentation.restoreHead, fence)) return state;
+        return { cloudHistoryRestoreHeads: heads, sessions: { ...state.sessions, [chatId]: { ...slot,
+          transcriptState: "loading", transcriptPresentation: { ...presentation, restoreHead: fence },
+        } } };
+      }
       const pending = state.pendingLocalTurns[chatId];
       const messages = slot.messages.filter(message => message.id === pending || message.kind === "text" && message.queued);
       const deleted = fence.head?.deleted === true;
       if (unchanged && messages.length === slot.messages.length && slot.transcriptState === (deleted ? "resident" : "loading")) return state;
       return { cloudHistoryRestoreHeads: heads, sessions: { ...state.sessions, [chatId]: { ...slot, messages,
         historyExpanded: false, transcriptState: deleted ? "resident" : "loading",
+        transcriptPresentation: null,
         transcriptDirty: false, hasTranscript: deleted ? hasDurableMessages(messages) : !cloudHistoryFenceHasTranscript(fence) || hasDurableMessages(messages),
       } } };
     });
@@ -1348,6 +1368,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       installed = true;
       return { pendingLocalTurns: !snapshot.activeTurn && terminal?.turnId === pendingId ? withoutPendingLocalTurn(state.pendingLocalTurns, chatId) : state.pendingLocalTurns,
         sessions: { ...state.sessions, [chatId]: { ...slot, ...metadata, messages, hasTranscript: hasDurableMessages(messages), transcriptState: "resident",
+        transcriptPresentation: null,
         transcriptDirty: false, pendingPermissions: permissions, pendingPermission: permissions[0] ?? null, pendingQuestions: snapshot.questions,
         status: snapshot.activeTurn || newerPending ? "streaming" : failure ? "failed" : "ready", failure, error: failure?.message ?? null,
         activeTurnStartedAt: newerPending ? slot.activeTurnStartedAt : snapshot.activeTurn?.startedAt ?? null,

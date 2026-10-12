@@ -44,6 +44,7 @@ export const MessageView = memo(
     // not change, so hidden transcripts release decoded screenshots.
     if (
       prev.ctx.attachmentImagesActive !== next.ctx.attachmentImagesActive ||
+      prev.ctx.transcriptReadOnly !== next.ctx.transcriptReadOnly ||
       prev.ctx.attachmentCwd !== next.ctx.attachmentCwd ||
       prev.ctx.chatId !== next.ctx.chatId
     )

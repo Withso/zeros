@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const h = vi.hoisted(() => ({ native: vi.fn(), allowed: true, confirmed: true, electron: true }));
+const h = vi.hoisted(() => ({ native: vi.fn(), log: vi.fn(), allowed: true, confirmed: true, electron: true }));
 vi.mock("../runtime", () => ({ isElectron: () => h.electron, nativeInvoke: h.native }));
+vi.mock("../observability/logging/renderer-log", () => ({ logEvent: h.log }));
 vi.mock("../../state/cloud-workspace-catalog", () => ({ canReadCloudWorkspace: () => h.allowed,
   cloudWorkspaceCatalogConfirmed: () => h.confirmed, cloudWorkspaceDocument: () => ({ status: "stopped" }) }));
 import { readCachedCloudTranscriptWindow, readCloudTranscriptWithCachedPaint, setCloudTranscriptCacheOwner,
   peekCloudTranscriptWindow, forgetRemovedCloudTranscriptWorkspaces, installCloudHistoryRestoreMetadata } from "../cloud-transcript-cache";
 import { cloudScopedId } from "../bridge/cloud-workspace-key";
+import type { CloudHistoryRestoreFence } from "../cloud-transcript-cache-contract";
 
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
 const chatId = cloudScopedId(target, "chat-a");
@@ -15,11 +17,45 @@ function deferred<T>() { let resolve!: (value: T) => void, reject!: (error: unkn
   const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; }
 beforeEach(() => {
   h.allowed = true; h.confirmed = true; h.electron = true;
+  h.log.mockClear();
   h.native.mockReset().mockImplementation(async (command: string) => command === "cloud_transcript_cache_read"
     ? { cacheEpoch: "33333333-3333-4333-8333-333333333333", window } : undefined);
   setCloudTranscriptCacheOwner("account-a");
 });
 describe("provisional cloud transcript paint", () => {
+  it("continues an identical authenticated boot head without an empty paint, while the read remains pending", async () => {
+    const projection: CloudHistoryRestoreFence["projection"] = { ...target, generation: 2,
+      engineInstanceId: "33333333-3333-4333-8333-333333333333", bootId: "44444444-4444-4444-8444-444444444444",
+      writerEpoch: "55555555-5555-4555-8555-555555555555", fundingOwnerUserId: "66666666-6666-4666-8666-666666666666",
+      fundingOwnerEpoch: 1, version: 1, mode: "boot-owner-v1", fundingScope: "workspace-roles-v1", mirroredSequence: 10, sealedSequence: null, complete: false };
+    const head: CloudHistoryRestoreFence["head"] = { conversationId: "chat-a", originWriterEpoch: projection.writerEpoch,
+      source: { kind: "mutation", mutationId: "77777777-7777-4777-8777-777777777777", operation: "repair" },
+      restoreRevision: 2, deleted: false, recordSequence: 3, eventSequence: 4, manifestSha256: "a".repeat(64), incompleteReason: null };
+    const restoreHead = { projection, conversationId: "chat-a", head };
+    h.native.mockImplementation(async command => command === "cloud_transcript_cache_read"
+      ? { cacheEpoch: projection.engineInstanceId, historyEpoch: projection.bootId, restoreHead, window: { ...window, restoreHead } } : undefined);
+    const saved = await readCachedCloudTranscriptWindow(chatId);
+    const server = deferred<string>(), painted = vi.fn();
+    const result = readCloudTranscriptWithCachedPaint(chatId, () => server.promise, painted);
+    await Promise.resolve();
+    const next = { ...projection, generation: 3, bootId: "88888888-8888-4888-8888-888888888888" };
+    await installCloudHistoryRestoreMetadata(target, { projection: next, historyHeads: [head] });
+    expect(painted).toHaveBeenCalledTimes(2);
+    expect(painted.mock.calls.every(([page]) => page.messages === saved!.messages)).toBe(true);
+    expect(painted.mock.lastCall![0].restoreHead.projection.bootId).toBe(next.bootId);
+    expect(h.log).toHaveBeenCalledWith("cloud_transcript_cache", expect.objectContaining({ outcome: "continued", source: "control-plane", head: "complete" }), expect.anything());
+    expect(JSON.stringify(h.log.mock.calls)).not.toContain(chatId);
+    expect(JSON.stringify(h.log.mock.calls)).not.toContain(head.manifestSha256);
+    server.resolve("verified"); await result;
+  });
+  it("records a catalog-cold miss without content or durable identities", async () => {
+    h.confirmed = false;
+    const server = deferred<string>(), result = readCloudTranscriptWithCachedPaint(chatId, () => server.promise, vi.fn());
+    await readCachedCloudTranscriptWindow(chatId); await Promise.resolve();
+    expect(h.log).toHaveBeenCalledWith("cloud_transcript_cache", expect.objectContaining({ outcome: "miss", catalog_ready: false }), expect.anything());
+    expect(JSON.stringify(h.log.mock.calls)).not.toContain(chatId);
+    server.resolve("confirmed"); await result;
+  });
   it.each(["incomplete", "deleted"])("removes already painted old rows when an authoritative %s head arrives before a 503", async kind => {
     await readCachedCloudTranscriptWindow(chatId);
     const server = deferred<string>(), painted = vi.fn();

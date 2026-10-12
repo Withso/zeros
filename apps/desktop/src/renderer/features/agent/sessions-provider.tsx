@@ -100,6 +100,7 @@ import {
   appendMessages as persistAppendMessages,
   clearChat as persistClearChat,
   windowMessages as persistWindowMessages,
+  windowMessagesSnapshot as persistMessageWindow,
   persistAuthenticationPrompt,
 } from "./agent-history-client";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
@@ -566,7 +567,7 @@ export function AgentSessionsProvider({
     if (!before) return;
     const replacement = origin === "native" && fence.head?.source.kind === "mutation" &&
       ["delete", "prune", "repair"].includes(fence.head.source.operation);
-    store.applyCloudHistoryRestoreHead(chatId, fence, !replacement && cloudHasNativeTranscript(bridge, chatId, before.executionId));
+    store.applyCloudHistoryRestoreHead(chatId, fence, !replacement && cloudHasNativeTranscript(bridge, chatId, before.executionId), origin !== "disk");
     const after = getStore().sessions[chatId];
     if (after?.messages !== before.messages) persistedMessageRefsRef.current.delete(chatId);
     if (after?.transcriptState === "loading") pendingHydratesRef.current.add(chatId);
@@ -5241,7 +5242,6 @@ export function AgentSessionsProvider({
       request = (async () => {
         const store = getStore();
         const slot = store.sessions[chatId];
-        const restoreBefore = cloud ? cloudHistoryRestoreHead(chatId) : undefined;
         if (!slot) return; // not open here → hydrates fresh when opened
         if (slot.transcriptState !== "resident") {
           // A DB_CHANGED nudge for an evicted chat must not pull its payload
@@ -5258,9 +5258,8 @@ export function AgentSessionsProvider({
         }
         if (slot.status === "streaming") return; // live turn here is canonical
         try {
-          const windowed = reconcileHistoryMessages(
-            await persistWindowMessages(chatId, HYDRATE_WINDOW),
-          );
+          const page = await persistMessageWindow(chatId, HYDRATE_WINDOW);
+          const windowed = reconcileHistoryMessages(page.messages);
           // The committed deck may have evicted this chat while the DB request
           // was in flight. Eviction deletes the exact request identity; never
           // let a late result resurrect the payload.
@@ -5273,11 +5272,12 @@ export function AgentSessionsProvider({
           ) {
             return;
           }
+          if (page.isCurrent?.() === false) { retryAfterRestore = true; return; }
           const fresh = getStore().sessions[chatId];
           const head = cloud ? cloudHistoryRestoreHead(chatId) : undefined;
-          const native = cloud && cloudHasNativeTranscript(bridge, chatId, fresh?.executionId);
+          const native = page.source === "native" && cloudHasNativeTranscript(bridge, chatId, fresh?.executionId);
           if (head && !native && !cloudHistoryFenceHasTranscript(head)) return;
-          if (head && (!restoreBefore || !cloudHistoryFencesMatch(restoreBefore, head))) {
+          if (head && (!page.restoreHead || !cloudHistoryFencesMatch(page.restoreHead, head))) {
             retryAfterRestore = true;
             getStore().applyCloudHistoryRestoreHead(chatId, head);
             return;
@@ -5300,9 +5300,11 @@ export function AgentSessionsProvider({
           // scrolled-up history, drop a remotely-truncated tail, and don't let a
           // transient empty read wipe the slot. See mergeWindowedTail.
           const next: AgentMessage[] = mergeWindowedTail(cur, windowed);
+          const presentation = page.source === "control-plane" && page.restoreHead && cloudHistoryFenceHasTranscript(page.restoreHead)
+            ? { source: "control-plane" as const, restoreHead: page.restoreHead } : null;
           if (messageSnapshotsEqual(cur, next)) {
-            if (fresh.transcriptDirty) {
-              getStore().patchSession(chatId, { transcriptDirty: false });
+            if (fresh.transcriptDirty || restoring) {
+              getStore().patchSession(chatId, { transcriptDirty: false, transcriptState: "resident", transcriptPresentation: presentation });
             }
             return;
           }
@@ -5316,6 +5318,7 @@ export function AgentSessionsProvider({
             ...fresh,
             messages: next,
             transcriptState: "resident",
+            transcriptPresentation: presentation,
             transcriptDirty: false,
           });
         } catch (err) {
@@ -5346,7 +5349,6 @@ export function AgentSessionsProvider({
       let retryAfterRestore = false;
       // eslint-disable-next-line prefer-const
       request = (async () => {
-        const restoreBefore = parseCloudScopedId(chatId) ? cloudHistoryRestoreHead(chatId) : undefined;
         // Fix #2 — refresh the device-local policy slice alongside message
         // hydration. The store mutator preserves its reference when unchanged.
         void getStore().hydrateChatPolicies(chatId);
@@ -5384,19 +5386,22 @@ export function AgentSessionsProvider({
           return;
         }
         try {
-          const messages = await persistWindowMessages(chatId, HYDRATE_WINDOW, undefined,
+          const page = await persistMessageWindow(chatId, HYDRATE_WINDOW, undefined,
             parseCloudScopedId(chatId) ? cached => {
               if (!isCurrentTranscriptRequest(hydrateInFlightRef.current, chatId, request)) return;
               const head = cloudHistoryRestoreHead(chatId);
-              if (cached.length && head && !cloudHistoryFenceHasTranscript(head)) return;
+              if (cached.messages.length && head && (!cloudHistoryFenceHasTranscript(head) ||
+                  !cached.restoreHead || !cloudHistoryFencesMatch(cached.restoreHead, head))) return;
               const fresh = getStore().sessions[chatId];
               if (!fresh || fresh.transcriptState !== "loading" || fresh.status === "streaming" || fresh.transcriptDirty) return;
-              const deduped = reconcileHistoryMessages(cached);
+              const deduped = reconcileHistoryMessages(cached.messages);
+              const next = [...deduped, ...fresh.messages.filter(message => message.kind === "text" && message.queued && !deduped.some(saved => saved.id === message.id))];
               getStore().patchSession(chatId, {
                 // Provisional data never satisfies admission/send/completion.
                 // Queued bubbles remain owned by the existing send path.
-                messages: [...deduped, ...fresh.messages.filter(message => message.kind === "text" && message.queued && !deduped.some(saved => saved.id === message.id))],
+                messages: messageSnapshotsEqual(fresh.messages, next) ? fresh.messages : next,
                 transcriptState: "loading",
+                transcriptPresentation: deduped.length ? { source: "cache", restoreHead: cached.restoreHead } : null,
                 transcriptDirty: false,
                 hasTranscript: head && !cloudHistoryFenceHasTranscript(head) ? head.head?.deleted !== true : deduped.length > 0,
               });
@@ -5410,17 +5415,21 @@ export function AgentSessionsProvider({
           ) {
             return;
           }
+          if (page.isCurrent?.() === false) { retryAfterRestore = true; return; }
           const head = parseCloudScopedId(chatId) ? cloudHistoryRestoreHead(chatId) : undefined;
           const currentSlot = getStore().sessions[chatId];
-          if (head && !cloudHistoryFenceHasTranscript(head) && !cloudHasNativeTranscript(bridge, chatId, currentSlot?.executionId)) {
+          if (head && !cloudHistoryFenceHasTranscript(head) &&
+              !(page.source === "native" && cloudHasNativeTranscript(bridge, chatId, currentSlot?.executionId))) {
             getStore().applyCloudHistoryRestoreHead(chatId, head);
             if (head.head?.deleted) pendingHydratesRef.current.delete(chatId);
             else pendingHydratesRef.current.add(chatId);
             return;
           }
-          if (head && (!restoreBefore || !cloudHistoryFencesMatch(restoreBefore, head))) {
-            // Message[] no longer carries the bridge response's source. Retire
-            // this exact outer read rather than label A's rows with new head B.
+          if (head && (!page.restoreHead || !cloudHistoryFencesMatch(page.restoreHead, head))) {
+            // Validate the head supplied with this page, never whichever head
+            // happens to be current after its outer await. This observation
+            // can fence paint, but only the authenticated head subscriber can
+            // prove continuity to a successor the page did not verify.
             getStore().applyCloudHistoryRestoreHead(chatId, head);
             retryAfterRestore = true;
             return;
@@ -5433,7 +5442,7 @@ export function AgentSessionsProvider({
           // current adapter replays its transcript on resume — so this is
           // purely cleanup of pre-existing disk content + the safety net
           // should a future adapter ever start replaying.
-          const deduped = reconcileHistoryMessages(messages);
+          const deduped = reconcileHistoryMessages(page.messages);
           // Re-read the slot after the await — the user may have started
           // typing while we were fetching, in which case live state wins.
           const fresh = getStore().sessions[chatId];
@@ -5451,15 +5460,19 @@ export function AgentSessionsProvider({
             refs = new Map();
             persistedMessageRefsRef.current.set(chatId, refs);
           }
-          seedPersistedMessageRefs(refs, deduped);
+          const next = cloudComputerV2 && isCloudWorkspace(fresh.cwd)
+            ? [...deduped, ...fresh.messages.filter(message => message.kind === "text" && message.queued && !deduped.some(saved => saved.id === message.id))]
+            : deduped;
+          const confirmed = messageSnapshotsEqual(fresh.messages, next) ? fresh.messages : next;
+          seedPersistedMessageRefs(refs, confirmed);
           getStore().setSession(chatId, {
             ...BLANK,
             ...fresh,
-            messages: cloudComputerV2 && isCloudWorkspace(fresh.cwd)
-              ? [...deduped, ...fresh.messages.filter(message => message.kind === "text" && message.queued && !deduped.some(saved => saved.id === message.id))]
-              : deduped,
+            messages: confirmed,
             transcriptState: "resident",
             transcriptDirty: false,
+            transcriptPresentation: page.source === "control-plane" && page.restoreHead && cloudHistoryFenceHasTranscript(page.restoreHead)
+              ? { source: "control-plane", restoreHead: page.restoreHead } : null,
             // A connected authoritative empty read is the one place allowed
             // to clear the conservative hint retained across eviction.
             hasTranscript: deduped.some(

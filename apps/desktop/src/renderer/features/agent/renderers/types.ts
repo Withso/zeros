@@ -34,6 +34,9 @@ import type {
  *  inside renderer files. Extend by adding fields here, never by
  *  reaching into globals. */
 export interface RendererContext {
+  /** Provisional cached rows carry no authority to mutate a native turn.
+   * Included in memo comparisons so old action closures cannot outlive it. */
+  transcriptReadOnly?: boolean;
   /** True when the session is actively streaming agent output. Renderers
    *  use this for shimmer / live-tick duration / "now" affordances. */
   isStreaming: boolean;

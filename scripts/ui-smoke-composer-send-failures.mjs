@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { expect } from "@playwright/test";
+import { checkCloudTranscriptPaint } from "./ui-smoke-cloud-transcript-paint.mjs";
 
 export async function runComposerSendFailuresSmoke({ page, check, harnessBase }) {
   // Keep toast acknowledgement and screenshots independent of machine load.
@@ -53,6 +54,9 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
     await expect(toasts).toHaveCount(0);
   };
 
+  await page.goto(`${harnessBase}/harness-composer-send-failures.html`);
+  await expect(editor).toBeVisible();
+  await checkCloudTranscriptPaint({ page, check, screenshotDir });
   await page.goto(`${harnessBase}/harness-composer-send-failures.html`);
   await expect(editor).toBeVisible();
   for (const [code, copy, action] of [
