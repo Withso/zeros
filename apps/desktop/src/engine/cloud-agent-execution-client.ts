@@ -29,6 +29,13 @@ export class CloudAgentExecutionError extends Error{
     this.code=encodeCloudCommandFailure({stage,category});this.failure=cloudCommandFailureFromCode(this.code);
   }
 }
+/** Only closed transport/server categories can consume an already confirmed
+ * authority window. An unknown error or explicit rejection is never grace. */
+export function isTransientCloudAgentAuthorityError(error: unknown): boolean {
+  const cause = decodeCloudCommandFailure(error && typeof error === "object" && "code" in error ? error.code : undefined);
+  return cause !== null && (cause.category === "authority_transport" || cause.category === "authority_timeout" ||
+    cause.category === "authority_http_5xx" || cause.category === "rate_limited");
+}
 export class CloudAgentAdmissionError extends Error {
   constructor(readonly code:CloudAgentAdmissionCode){super(code);this.name="CloudAgentAdmissionError";}
 }
@@ -128,7 +135,14 @@ export async function requestCloudAgentBoot<Operation extends CloudAgentBootOper
     if (!response.ok && Object.keys(document).join() === "error") {
       const code = (document as { error?: unknown }).error;
       const cause = decodeCloudCommandFailure(code);
-      if (cause) throw new CloudAgentExecutionError(cause.category, cause.stage);
+      if (cause) {
+        const error = new CloudAgentExecutionError(cause.category, cause.stage);
+        // The HTTP refusal must not be lost when decoding a conflicting
+        // transient envelope; callers may retry that category during renewal.
+        if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429 &&
+            isTransientCloudAgentAuthorityError(error)) throw failure("authority_http_4xx");
+        throw error;
+      }
       if (isCloudAgentAdmissionCode(code))
         throw code === "cloud_runtime_upgrade_required" ? new CloudRuntimeUpgradeRequiredError() : new CloudAgentAdmissionError(code);
     }

@@ -13,6 +13,7 @@ import { CloudAgentBootSyncResponseSchema, CloudAgentBootRefreshResponseSchema }
 import ts from "typescript";
 import { ZerosEngine } from "../zeros-engine";
 import { CloudTransport } from "../transport/cloud";
+import { CloudAgentExecutionError } from "../cloud-agent-execution-client";
 
 type Readiness = ReturnType<CloudRuntimeRegistration["readiness"]>;
 const engineMethods = ZerosEngine.prototype as unknown as {
@@ -74,6 +75,99 @@ async function fixture(provider: "cursor" | "codex" = "cursor") {
 }
 
 describe("engine boot-mode orchestration", () => {
+  it.each([100, 5_000])("shares actor confirmation across sockets and a background renewal delayed by %ims without sharing token admission", async delay => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const f = await fixture(); await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+    const actor = f.boot.authorizeActor(f.admission.actor.sessionId, "run");
+    const original = f.request.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    f.request.mockClear().mockImplementation(async (operation, input) => {
+      if (operation === "actor-confirm") await held;
+      return original(operation, input);
+    });
+    const verify = vi.fn(async (_token: string, _renew: boolean) => f.admission);
+    const engine = { cloudLocalHistoryRestored: true, cloudLocalEvents: {}, cloudRuntimeAuthorityStopping: false,
+      cloudRuntimeRegistration: { ...f.options.registration, verifyClientAdmission: verify }, cloudAgentBoot: f.boot };
+    await vi.advanceTimersByTimeAsync(4_000);
+    const renewals = ["synthetic-device-token-a", "synthetic-device-token-b"].map(token =>
+      engineMethods.verifyCloudActorClient.call(engine, token, true));
+    try {
+      await vi.waitFor(() => expect(verify).toHaveBeenCalledTimes(2), { interval: 1 });
+      expect(f.request.mock.calls.filter(([operation]) => operation === "actor-confirm")).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(delay);
+      release();
+      await expect(Promise.all(renewals)).resolves.toEqual([f.admission, f.admission]);
+      if (delay < 4_000) expect(f.boot.authorizeActor(f.admission.actor.sessionId, "run")).toBe(actor);
+      else expect(actor.signal.aborted).toBe(true); // A new proof never revives the expired principal.
+      expect(verify.mock.calls.map(call => call[0])).toEqual(["synthetic-device-token-a", "synthetic-device-token-b"]);
+    } finally { release(); await Promise.allSettled(renewals); }
+  });
+
+  it("rejects every waiter when an actor is revoked during shared confirmation", async () => {
+    const f = await fixture(); await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+    const actor = f.boot.authorizeActor(f.admission.actor.sessionId, "run"), original = f.request.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    f.request.mockClear().mockImplementation(async (operation, input) => {
+      if (operation === "actor-confirm") await held;
+      return original(operation, input);
+    });
+    const results = Promise.allSettled([f.boot.confirmAdmission(f.admission), f.boot.confirmAdmission(f.admission)]);
+    try {
+      expect(f.request.mock.calls.filter(([operation]) => operation === "actor-confirm")).toHaveLength(1);
+      f.boot.revokeActor(f.admission.actor.sessionId); release();
+      expect((await results).map(result => result.status)).toEqual(["rejected", "rejected"]);
+      expect(actor.signal.aborted).toBe(true);
+      expect(() => f.boot.authorizeActor(f.admission.actor.sessionId, "read")).toThrow();
+    } finally { release(); await results; }
+  });
+
+  it("does not share confirmation success with a different admitted identity", async () => {
+    const f = await fixture(); await f.boot.initialize();
+    const foreign = { ...f.admission, accountUserId: randomUUID() };
+    const results = await Promise.allSettled([f.boot.confirmAdmission(f.admission), f.boot.confirmAdmission(foreign)]);
+    expect(results[0].status).toBe("fulfilled");
+    expect(results[1]).toMatchObject({ status: "rejected", reason: { code: "cloud_actor_authority_rejected" } });
+  });
+
+  it.each(["access_denied", "authority_response_invalid"] as const)(
+    "does not background-retry an actor confirmation rejected with %s", async category => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+      const f = await fixture(); await f.boot.initialize(); await f.boot.confirmAdmission(f.admission);
+      const original = f.request.getMockImplementation()!;
+      f.request.mockClear().mockImplementation(async (operation, input) => {
+        if (operation === "actor-confirm") throw new CloudAgentExecutionError(category, "validation");
+        return original(operation, input);
+      });
+      await vi.advanceTimersByTimeAsync(4_750);
+      expect(f.request.mock.calls.filter(([operation]) => operation === "actor-confirm")).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(3_250);
+      expect(() => f.boot.authorizeActor(f.admission.actor.sessionId, "read")).toThrow();
+    });
+
+  it.each(["authority_transport", "authority_timeout", "authority_http_5xx", "rate_limited"] as const)(
+    "preserves a typed transient actor-confirm %s for transport renewal", async category => {
+      const f = await fixture(), error = new CloudAgentExecutionError(category, "validation");
+      const confirmAdmission = vi.fn(async () => { throw error; });
+      const engine = { cloudLocalHistoryRestored: true, cloudLocalEvents: {}, cloudRuntimeAuthorityStopping: false,
+        cloudRuntimeRegistration: { localCommandsNegotiated: () => true, verifyClientAdmission: async () => f.admission },
+        cloudAgentBoot: { active: true, initialize: async () => true, confirmAdmission } };
+      await expect(engineMethods.verifyCloudActorClient.call(engine, "synthetic-token", true))
+        .rejects.toMatchObject({ code: "cloud_client_authority_transient" });
+      await expect(engineMethods.verifyCloudActorClient.call(engine, "synthetic-token"))
+        .rejects.toBe(error);
+    });
+
+  it.each(["access_denied", "authority_response_invalid", "lifecycle_superseded", "authority_unavailable"] as const)(
+    "keeps actor-confirm %s terminal during renewal", async category => {
+      const f = await fixture(), error = new CloudAgentExecutionError(category, "validation");
+      const engine = { cloudLocalHistoryRestored: true, cloudLocalEvents: {}, cloudRuntimeAuthorityStopping: false,
+        cloudRuntimeRegistration: { localCommandsNegotiated: () => true, verifyClientAdmission: async () => f.admission },
+        cloudAgentBoot: { active: true, initialize: async () => true, confirmAdmission: async () => { throw error; } } };
+      await expect(engineMethods.verifyCloudActorClient.call(engine, "synthetic-token", true)).rejects.toBe(error);
+    });
+
   it.each([100, 300])("withholds actual readiness during %ims bootstrap/activation and authenticates after the original flight", async delay => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
     const f = await fixture(), original = f.request.getMockImplementation()!;

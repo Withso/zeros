@@ -902,7 +902,9 @@ async function renewalTransientContract(engine, current) {
     const [code, reason] = await Promise.race([closed, new Promise((_resolve, reject) => {
       timer = setTimeout(() => reject(new Error("runtime_skew_renewal_expiry_incompatible")), 2_000);
     })]).finally(() => clearTimeout(timer));
-    assert.equal(renewals, 1, "runtime_skew_renewal_expiry_incompatible");
+    // Current renewals allow two bounded retries inside the same confirmed
+    // deadline; the frozen runtime still closes on its first refusal.
+    assert.equal(renewals, engine === current ? 3 : 1, "runtime_skew_renewal_expiry_incompatible");
     assert.equal(code, 1008);
     assert.equal(reason.toString(), engine === current ? "client authority expired" : "client authority revoked");
     assert.equal(lost, false);

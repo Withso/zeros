@@ -363,7 +363,11 @@ export class CloudAgentContextCache{
         if(response.actor.confirmedUntilMs>existing.confirmedUntilMs){
           existing.confirmedUntilMs=response.actor.confirmedUntilMs;
           existing.deadline=this.time.monotonic()+existing.confirmedUntilMs-this.time.wall();
-          existing.response=freezeCloudSnapshot(structuredClone(response));this.schedule(existing);
+          // The exact context payload was compared above and is immutable.
+          // Replace only its renewed proof; keep environment/MCP/history/Git
+          // references shared by admitted executions across lease periods.
+          existing.response=Object.freeze({...existing.response,actor:freezeCloudSnapshot(structuredClone(response.actor))});
+          this.schedule(existing);
         }
         return existing.context;
       }

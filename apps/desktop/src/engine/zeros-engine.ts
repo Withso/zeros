@@ -181,7 +181,7 @@ import { cloudClaudePreferencesEnv } from "./cloud-claude-preferences";
 import { CloudConversationCreateSchema, CloudConversationReadSchema, CloudConversationModeSchema, CloudCommandSnapshotSchema,
   CloudCommandClientRequestSchema, CloudBootCommandClientRequestSchema, CloudBootCommandSnapshotSchema, CloudBootCommandClaimSchema } from "@zeros/protocol/cloud-commands";
 import { cloudCommandFailureCode, decodeCloudCommandFailure, cloudCommandFailureFromCode, CloudCommandFailureError } from "@zeros/protocol/cloud-commands";
-import { CloudAgentAdmissionError } from "./cloud-agent-execution-client";
+import { CloudAgentAdmissionError, isTransientCloudAgentAuthorityError } from "./cloud-agent-execution-client";
 import { listKnownRepoRoots } from "./db/projects";
 import { resolveRunActions } from "./settings/repo-scripts";
 import {
@@ -286,6 +286,7 @@ import {
 } from "@zeros/protocol/version";
 import {
   CloudRuntimeRegistration,
+  CloudClientAuthorityTransientError,
   consumeCloudRuntimeEnvironment,
   type CloudCheckpointDirective,
   type CloudRuntimeConfig,
@@ -4516,7 +4517,13 @@ export class ZerosEngine {
     if (!admission || registration !== this.cloudRuntimeRegistration) return null;
     if (registration.localCommandsNegotiated()) {
       if (!boot || boot !== this.cloudAgentBoot || !boot.active || this.cloudRuntimeAuthorityStopping) return null;
-      await boot.confirmAdmission(admission);
+      try { await boot.confirmAdmission(admission); }
+      catch (error) {
+        if (renew && registration === this.cloudRuntimeRegistration && boot === this.cloudAgentBoot && boot.active &&
+            !this.cloudRuntimeAuthorityStopping && isTransientCloudAgentAuthorityError(error))
+          throw new CloudClientAuthorityTransientError();
+        throw error;
+      }
       if (registration !== this.cloudRuntimeRegistration || boot !== this.cloudAgentBoot || !boot.active ||
           this.cloudRuntimeAuthorityStopping) return null;
     }
