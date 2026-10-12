@@ -2,6 +2,7 @@ import type pg from "pg";
 import { DATABASE_CONNECTION_LIFETIME_SECONDS } from "../db.js";
 
 const channels = {
+  workos: "zeros_account_maintenance_work",
   lifecycle: "zeros_cloud_lifecycle_work",
   setup: "zeros_cloud_setup_work",
   runtimeStaging: "zeros_cloud_runtime_staging_work",

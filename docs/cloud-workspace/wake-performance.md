@@ -148,6 +148,15 @@ deadlines; a quiet fallback does not extend an engine lease, funded deadline or
 the current stop policy. Provider drift and orphan inventory are maintenance
 work. Local Personal and organization-local Host execution are unchanged.
 
+Account maintenance uses one shared deadline read for WorkOS commands, security
+mail and account/organization deletion. Migration 0144 adds empty commit-bound
+wakes, including future retries, organization provisioning and completion of
+ordered predecessors. Each queue retains its own in-flight work and existing
+batch cadence, so a slow provider command cannot block security mail or deletion.
+The Events API repair sweep retains its 60-second cadence. These account paths
+serve Local and cloud users even when cloud workspaces are disabled; deletion
+still waits for its existing controlled-migration boundary.
+
 Notifications are hints, not a durable queue or an authority grant. Missing
 hints or a failed deadline read retry within the fallback. A healthy notification
 path targets claim p99 below one second; an outage uses the bounded fallback.
@@ -158,7 +167,8 @@ deployed measurement with the worker replica count recorded.
 For rollback, `WORKER_POLL_INTERVALS_MS` accepts a JSON map of explicit fallback
 intervals, for example `{"outbox":5000,"setup":1000}`. Keys are `outbox`, `access`,
 `invitations`, `security`, `setup` (including recovery), `forks`, `checkpoints`,
-`lifecycle`, `operations`, `retirement`, `templates` and `runtimeStaging`.
+`lifecycle`, `operations`, `retirement`, `templates`, `runtimeStaging` and
+`workos` (the shared account-queue fallback).
 An override disables jitter for that worker; deadlines and notifications still
 wake sooner. Remove a key to restore its default. Explicit legacy
 `CLOUD_WORKSPACE_RECONCILE_INTERVAL_MS` and `CLOUD_WORKSPACE_SETUP_INTERVAL_MS`
