@@ -304,4 +304,20 @@ jobs:
           set -euo pipefail
           pnpm exec tsx scripts/release/alpha-build-cli.ts --verify-producer runtime
           pnpm exec tsx scripts/release/ci-cli.ts --verify
-          pnpm exec tsx scripts/cloud-workspace-validation/runtime-bundle/publish.ts --out-dir "$RUNNER_TEMP/cloud-runtime-bundle"
+          pnpm exec tsx scripts/cloud-workspace-validation/runtime-bundle/publish.ts --out-dir "$RUNNER_TEMP/cloud-runtime-bundle" | tee "$RUNNER_TEMP/runtime-publication-diagnostic.json"
+      - name: Record public runtime publication evidence
+        if: always()
+        continue-on-error: true
+        env:
+          RUNTIME_BUNDLE_DIRECTORY: ${{ runner.temp }}/cloud-runtime-bundle
+          RUNTIME_PUBLICATION_DIAGNOSTIC: ${{ runner.temp }}/runtime-publication-diagnostic.json
+        run: node scripts/agent-runtime/cli.mjs publication-receipt --out "$RUNNER_TEMP/runtime-publication"
+      - name: Save runtime publication evidence
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: agent-runtime-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-publication/publication.json
+          if-no-files-found: error
+          retention-days: 7

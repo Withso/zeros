@@ -151,6 +151,7 @@ describe("independent main Preflight runs", () => {
       "control-plane-scope",
       "control-plane-static",
       "quality",
+      "runtime-qualification",
       "secret-scan",
       "source-sync",
       "source-sync-workload",

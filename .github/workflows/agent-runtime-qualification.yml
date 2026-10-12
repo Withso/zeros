@@ -1,0 +1,57 @@
+name: Agent runtime qualification
+on:
+  workflow_call:
+    inputs:
+      scope-result:
+        description: Trusted caller scope result; full Preflight has no selector
+        type: string
+        default: success
+permissions:
+  contents: read
+jobs:
+  qualification:
+    name: agent-runtime-qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Verify scope result
+        env:
+          SCOPE_RESULT: ${{ inputs.scope-result }}
+        run: |
+          set -euo pipefail
+          test "$SCOPE_RESULT" = success
+      - name: Checkout exact tested source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Install runtime qualification dependencies
+        id: install
+        run: pnpm install --frozen-lockfile
+      - name: Run every independent runtime gate
+        if: always()
+        env:
+          RUNTIME_SETUP_OK: ${{ steps.install.outcome == 'success' }}
+          RUNTIME_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUNTIME_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+          RUNTIME_PR: ${{ github.event.pull_request.number || '' }}
+        run: |
+          # A push compares against its immutable predecessor. Merge queue and
+          # manually called runs fall back to the checked commit's first parent.
+          if ! [[ "$RUNTIME_BASE_SHA" =~ ^[a-f0-9]{40}$ ]] || [[ "$RUNTIME_BASE_SHA" =~ ^0+$ ]]; then
+            RUNTIME_BASE_SHA=$(git rev-parse HEAD^1)
+            export RUNTIME_BASE_SHA
+          fi
+          node scripts/agent-runtime/cli.mjs qualify --out "$RUNNER_TEMP/runtime-qualification"
+      - name: Save runtime qualification report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: agent-runtime-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-qualification/report.json
+          retention-days: 7
+          if-no-files-found: error

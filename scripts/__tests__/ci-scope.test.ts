@@ -108,6 +108,7 @@ describe("CI scope job mapping", () => {
       "preload",
       "design-containment",
       "catalog-and-provider-runtime",
+      "runtime-surface-review",
       "engine-migrations",
       "backend-migration-guards",
       "dependency-licenses-audit",

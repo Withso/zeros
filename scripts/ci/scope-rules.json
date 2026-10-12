@@ -28,6 +28,7 @@
       ".github/actionlint.yaml",
       ".github/CODEOWNERS",
       "scripts/ci/**",
+      "scripts/agent-runtime/**",
       "scripts/check-*",
       "scripts/design-system/**",
       "styles/policy/ui-debt.json",
@@ -485,6 +486,7 @@
       "preload",
       "design-containment",
       "catalog-and-provider-runtime",
+      "runtime-surface-review",
       "engine-migrations",
       "backend-migration-guards",
       "dependency-licenses-audit",
@@ -684,7 +686,7 @@
         "full": true,
         "any_lanes": ["control-plane"]
       },
-      "execution_group": "test",
+      "execution_group": "runtime-qualification",
       "commands": ["pnpm check:codex-pin"]
     },
     "control-plane-database": {
@@ -734,9 +736,7 @@
         ]
       },
       "execution_group": "test",
-      "commands": [
-        "pnpm check:design-containment"
-      ]
+      "commands": ["pnpm check:design-containment"]
     },
     "catalog-and-provider-runtime": {
       "when": {
@@ -752,7 +752,7 @@
           "packaging"
         ]
       },
-      "execution_group": "test",
+      "execution_group": "runtime-qualification",
       "commands": [
         "pnpm models:verify --strict",
         "pnpm check:cursor-asar",
@@ -761,8 +761,27 @@
         "pnpm claude:smoke",
         "pnpm codex:smoke",
         "pnpm check:codex-pin",
+        "pnpm check:codex-coverage",
+        "pnpm check:runtime-skew",
         "pnpm check:runtime-pins"
       ]
+    },
+    "runtime-surface-review": {
+      "when": {
+        "always": false,
+        "full": true,
+        "any_lanes": [
+          "desktop-engine",
+          "electron",
+          "model-catalogs",
+          "protocol",
+          "cloud-runtime",
+          "dependencies-toolchain",
+          "packaging"
+        ]
+      },
+      "execution_group": "runtime-qualification",
+      "commands": ["pnpm agent-runtime:surfaces"]
     },
     "engine-migrations": {
       "when": {
@@ -804,8 +823,9 @@
           "model-catalogs"
         ]
       },
-      "execution_group": "test",
-      "commands": ["pnpm check:licenses", "pnpm check:audit"]
+      "execution_group": "test-runtime-qualification",
+      "commands": ["pnpm check:licenses", "pnpm check:audit"],
+      "runs_elsewhere": "check:licenses runs independently in runtime-qualification; check:audit remains in test-shard part 1."
     },
     "release-and-security-static": {
       "when": {
@@ -822,13 +842,14 @@
           "control-plane"
         ]
       },
-      "execution_group": "test",
+      "execution_group": "test-runtime-qualification",
       "commands": [
         "pnpm check:vite-env",
         "pnpm check:electron-hardening",
         "pnpm check:packaging-paths",
         "pnpm check:deep-link-schemes"
-      ]
+      ],
+      "runs_elsewhere": "check:packaging-paths runs independently in runtime-qualification; the remaining static checks stay in test-shard part 1."
     },
     "adapter-fixtures": {
       "when": {
@@ -841,7 +862,7 @@
           "dependencies-toolchain"
         ]
       },
-      "execution_group": "test",
+      "execution_group": "runtime-qualification",
       "commands": ["pnpm test:adapters"]
     },
     "protocol-advisory": {

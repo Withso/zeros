@@ -41,6 +41,7 @@ import { execFileSync } from "node:child_process";
 
 import { resolveClaudeCliSource } from "./stage-claude-cli.mjs";
 import { qualifiesAgainst } from "./cursor-curated-ids.mjs";
+import { discoverAll } from "./agent-runtime/models.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -421,12 +422,26 @@ function liveCheck(catalog) {
   return warnings;
 }
 
-function main() {
+async function main() {
   // `--strict` (used in CI): a CLI-version-gate warning becomes a HARD FAILURE.
   // A curated model that needs a newer CLI than the bundled SDK would silently
   // downgrade at runtime — fail the build so the SDK pin gets bumped instead.
   const strict = process.argv.includes("--strict");
   const catalog = JSON.parse(readFileSync(CATALOG_PATH, "utf8"));
+  if (process.argv.includes("--require-complete") || (process.argv.includes("--bundled") && process.argv.includes("--live"))) {
+    const validation = validateCatalog(catalog);
+    const discovery = await discoverAll({ root: ROOT, additionalPublicIds: JSON.parse(readFileSync(join(ROOT, "scripts/agent-runtime/public-model-ids.json"), "utf8")) });
+    const complete = discovery.every((source) => source.status === "complete");
+    const drift = discovery.some((source) => source.data.requiredCuratedMissing?.length);
+    const success = validation.errors.length === 0 && complete && !drift;
+    if (process.argv.includes("--json")) console.log(JSON.stringify({ schema: 1, status: success ? "passed" : "incomplete", errors: validation.errors, discovery }));
+    else {
+      for (const source of discovery) console.log(`${source.provider}: ${source.status}; ${source.status === "complete" ? `${source.data.items.length} models, ${source.data.requiredCuratedMissing.length} required curated IDs absent` : source.reason}`);
+      console.log(success ? "Bundled model discovery complete." : "Bundled model discovery incomplete or drifting; unavailable probes are not passes.");
+    }
+    process.exitCode = success ? 0 : 1;
+    return;
+  }
   const { errors, warnings } = validateCatalog(catalog);
   const versionWarnings = checkCliVersionGate(catalog, bundledClaudeCliVersion());
   // Reads the ~275 MiB binary (~0.4s). Worth it on the only path that can catch
@@ -454,4 +469,4 @@ function main() {
   );
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main();
+if (import.meta.url === `file://${process.argv[1]}`) await main();

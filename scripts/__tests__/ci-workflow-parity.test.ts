@@ -25,6 +25,7 @@ type Job = {
   "runs-on"?: unknown;
   "timeout-minutes"?: unknown;
   services?: unknown;
+  uses?: string;
 };
 type Workflow = { jobs: Record<string, Job> };
 
@@ -32,28 +33,16 @@ const ROOT = path.resolve(import.meta.dirname, "../..");
 const PART_ONE_GUARDS = [
   "Fetch origin/main (for the migration forward-only guard)",
   "Check preload allowlist is in sync",
-  "Cloud runtime version-skew contracts",
-  "Verify model catalog (strict)",
-  "Cursor asarUnpack closure is covered",
-  "Cursor SDK host actually loads (real spawn, source runtime)",
-  "Cursor SDK host actually works (real spawn, SHIPPED runtime)",
-  "Claude CLI actually launches under the Agent SDK",
-  "Codex app-server actually boots and matches the pin",
   "Migration ladder is forward-only",
   "Secret scan (tracked files)",
-  "Third-party license inventory is current",
   "Production dependency audit has no unreviewed high advisory",
   "Prod VITE_* env-set is wired into release.yml",
   "Electron security posture intact",
-  "Codex protocol pin in lockstep",
-  "Bundled agent runtime pins are exact and provable",
-  "electron-builder source paths resolve",
   "Control-plane migrations naming + forward-only",
   "Control-plane expand/contract migration phases",
   "Desktop ↔ web deep-link schemes in lockstep",
   "Install web hub dependencies",
   "Web hub unit tests (schemes + host routing)",
-  "Agent stream-translator contract (offline fixtures)",
   "Wire-protocol version-bump reminder (advisory)",
   "Settings schemas regenerate cleanly",
 ];
@@ -77,6 +66,7 @@ const PR_ONLY_STEPS = new Set([
   "Reject unresolved CI incident markers",
   "Verify scope result",
   "Verify CI selection",
+  "Verify runtime selection",
   "Combine database selections",
 ]);
 // Preflight's quality workload has its own producer in CI so the required
@@ -84,12 +74,14 @@ const PR_ONLY_STEPS = new Set([
 const CI_WORKLOADS: Record<string, string> = { quality: "quality-workload" };
 const SELECTION_INPUTS: Record<string, string> = {
   "Enforce the test result": "TEST_RESULT",
+  "Enforce the runtime result": "RUNTIME_RESULT",
   "Enforce the source-sync result": "SOURCE_SYNC_RESULT",
   "Enforce control-plane results": "DATABASE_RESULT",
   "Decide whether the database suites run": "CI_FULL_DATABASE",
 };
 const comparable = (job: Job) => ({
   name: job.name,
+  uses: job.uses,
   needs: (typeof job.needs === "string"
     ? [job.needs]
     : (job.needs ?? [])
@@ -209,7 +201,7 @@ describe("CI and Preflight job parity", () => {
       expect(jobs.test!.if).toContain("always()");
       expect(
         (jobs.test!.needs as string[]).filter((id) => id !== "scope"),
-      ).toEqual(["test-shard"]);
+      ).toEqual(["test-shard", "runtime-qualification"]);
       const verdict = jobs.test!.steps!.find(
         (step) => step.name === "Enforce the test result",
       )!;
@@ -226,8 +218,8 @@ describe("CI and Preflight job parity", () => {
   it.each(["ci.yml", "preflight.yml"])(
     "replaces every report upload consumed by a merged pattern on reruns in %s",
     (file) => {
-      const steps = Object.entries(workflow(file).jobs).flatMap(([job, value]) =>
-        (value.steps ?? []).map((step) => ({ job, step })),
+      const steps = Object.entries(workflow(file).jobs).flatMap(
+        ([job, value]) => (value.steps ?? []).map((step) => ({ job, step })),
       );
       const uploads = steps.filter(({ step }) =>
         step.uses?.startsWith("actions/upload-artifact@"),
