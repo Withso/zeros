@@ -12,6 +12,16 @@ refuse publication. The proof hashes metadata; it does not download private
 file contents. Existing runtime, protected-contract and manifest checks still
 run in the builder. Live provider qualification remains a rollout requirement.
 
+Qualify the saved-tree proof against a real Boat `GET /snapshots/<id>/tree`
+response before relying on publication or migration. Boat uses `dir`, `file`
+and `symlink` entries; only files carry `size`, and additional top-level metadata
+is allowed. Paths use POSIX `/` separators: literal backslashes in systemd unit
+names are ordinary filename characters, not escapes to decode. Symlink ancestors
+still refuse proof, including aliases of private roots with no listed children.
+Keep qualification evidence private and record only aggregate metadata and the
+proof receipt, never file paths or contents. Synthetic fixtures cover the wire
+shape but do not replace this live qualification.
+
 The name is `<org-slug>-<channel>-computer-v<N>`. Channel is `development`,
 `alpha`, `beta` or `production`. Slugs are normalized to lowercase ASCII and
 hyphens and shortened to keep the whole name within Boat's 63-character limit;
