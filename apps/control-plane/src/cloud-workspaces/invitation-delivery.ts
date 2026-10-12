@@ -1,3 +1,5 @@
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
+import { readCloudWorkerNextDelay } from "./worker-deadlines.js";
 import {randomUUID} from "node:crypto";
 import type pg from "pg";
 import {withSystemTx} from "../db.js";
@@ -30,8 +32,16 @@ export function workspaceInvitationSender(config:EmailConfig):WorkspaceInvitatio
  * Network calls never hold a database connection. Revocation can race a send,
  * but the resulting email contains a revoked, unusable invitation. */
 export class CloudWorkspaceInvitationDeliveryWorker {
+  private readonly scheduler: CloudWorkerScheduler;
+  private stopped = false;
   constructor(private readonly pool:pg.Pool,private readonly config:WorkspaceInvitationDeliveryConfig,
-    private readonly send:WorkspaceInvitationSender,private readonly logger:Pick<Console,"error">=console) {}
+    private readonly send:WorkspaceInvitationSender,private readonly logger:Pick<Console,"error">=console,
+    options: { intervalMs?: number } = {}) {
+    this.scheduler = new CloudWorkerScheduler(options.intervalMs ?? 60_000, async () => {
+      for (let index = 0; index < 20 && !this.stopped; index++) if (!await this.runOnce()) break;
+    }, () => this.logger.error("[cloud-workspace] invitation delivery tick failed"),
+    () => readCloudWorkerNextDelay(this.pool, "invitations"), { readBeforeRun: true, jitter: options.intervalMs === undefined });
+  }
 
   private async claim():Promise<Delivery|null> {
     return withSystemTx(this.pool,async tx=>{
@@ -118,14 +128,10 @@ export class CloudWorkspaceInvitationDeliveryWorker {
     return true;
   }
 
-  start():()=>Promise<void> {
-    let stopped=false,active:Promise<void>|null=null,timer:NodeJS.Timeout|undefined;
-    const tick=()=>{
-      if(stopped)return;
-      active=(async()=>{for(let i=0;i<20&&!stopped;i++)if(!await this.runOnce())break;})()
-        .catch(()=>this.logger.error("[cloud-workspace] invitation delivery tick failed"))
-        .finally(()=>{active=null;if(!stopped){timer=setTimeout(tick,1000);timer.unref();}});
-    };
-    tick();return async()=>{stopped=true;clearTimeout(timer);await active;};
+  start(): () => Promise<void> {
+    this.scheduler.start();
+    return async () => { this.stopped = true; await this.scheduler.stop(); };
   }
+
+  notify(): void { this.scheduler.notify(); }
 }

@@ -1,3 +1,5 @@
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
+import { readCloudWorkerNextDelay } from "./worker-deadlines.js";
 import {
   createHash,
   randomBytes,
@@ -1732,8 +1734,7 @@ export class CloudWorkspaceAccessRevocationWorker {
   private readonly intervalMs: number;
   private readonly maxBatch: number;
   private readonly logger: Pick<Console, "error">;
-  private timer: NodeJS.Timeout | null = null;
-  private activeTick: Promise<void> | null = null;
+  private readonly scheduler: CloudWorkerScheduler;
   private stopped = false;
 
   constructor(input: {
@@ -1754,7 +1755,7 @@ export class CloudWorkspaceAccessRevocationWorker {
     this.provider = input.provider ?? null;
     this.providerResolver = input.providerResolver ?? null;
     this.leaseMs = input.leaseMs;
-    this.intervalMs = input.intervalMs ?? 1_000;
+    this.intervalMs = input.intervalMs ?? 60_000;
     this.maxBatch = input.maxBatch ?? 100;
     this.logger = input.logger ?? console;
     if (
@@ -1770,6 +1771,9 @@ export class CloudWorkspaceAccessRevocationWorker {
     ) {
       throw new Error("Cloud access revocation worker timing is invalid");
     }
+    this.scheduler = new CloudWorkerScheduler(this.intervalMs, () => this.drain(), () => {
+      this.logger.error("[cloud-workspace] access revocation tick failed; will retry");
+    }, () => readCloudWorkerNextDelay(this.pool, "access"), { readBeforeRun: true, jitter: input.intervalMs === undefined });
   }
 
   async runOnce(): Promise<boolean> {
@@ -1803,28 +1807,11 @@ export class CloudWorkspaceAccessRevocationWorker {
   }
 
   start(): () => Promise<void> {
-    if (this.timer || this.activeTick || this.stopped) {
-      return async () => this.stop();
-    }
-    const run = () => {
-      if (this.stopped || this.activeTick) return;
-      const task = this.drain().catch((error) => {
-        this.logger.error(
-          `[cloud-workspace] access revocation tick failed: ${
-            error instanceof Error ? error.name : "unknown"
-          }`,
-        );
-      });
-      this.activeTick = task;
-      void task.finally(() => {
-        if (this.activeTick === task) this.activeTick = null;
-      });
-    };
-    this.timer = setInterval(run, this.intervalMs);
-    this.timer.unref();
-    run();
-    return async () => this.stop();
+    this.scheduler.start();
+    return () => this.stop();
   }
+
+  notify(): void { this.scheduler.notify(); }
 
   private async drain(): Promise<void> {
     let processed = 0;
@@ -1839,16 +1826,15 @@ export class CloudWorkspaceAccessRevocationWorker {
 
   private async stop(): Promise<void> {
     this.stopped = true;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
-    await this.activeTick;
+    await this.scheduler.stop();
   }
 
   private claim(): Promise<RevocationClaim | null> {
     return withSystemTx(this.pool, async (tx) => {
       // Provider TTL is authoritative after expiry; no remote mutation is
       // needed merely to retire the local verifier.
-      await tx.query(
+      if ((await tx.query(`SELECT 1 FROM cloud_workspace_client_access_grants
+        WHERE state='active' AND expires_at<=now() LIMIT 1`)).rowCount) await tx.query(
         `UPDATE cloud_workspace_client_access_grants
          SET state = 'revoked', revoked_at = coalesce(revoked_at, now()),
              updated_at = now()
@@ -1856,7 +1842,8 @@ export class CloudWorkspaceAccessRevocationWorker {
       );
       // A process can die after provider issuance and before publication.
       // Convert the durable `issuing` marker into a provider-wide drain.
-      await tx.query(
+      if ((await tx.query(`SELECT 1 FROM cloud_workspace_client_access_grants
+        WHERE state='issuing' AND created_at<now()-interval '2 minutes' LIMIT 1`)).rowCount) await tx.query(
         `UPDATE cloud_workspace_client_access_grants
          SET state = 'revocation_pending',
              revocation_reason = 'stale_issuance',

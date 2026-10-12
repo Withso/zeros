@@ -7,6 +7,7 @@ import { audit } from "../audit.js";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { CloudWorkerScheduler } from "./worker-scheduler.js";
+import { recoveryWorkDeadlines } from "./worker-deadlines.js";
 import { parseCloudWorkspaceSetupHookLog, type CloudWorkspaceSetupHookLog } from "./setup-log.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { cloudRuntimePin, cloudRuntimePinValues, requirePinnedCloudRuntime, CloudRuntimeError, type CloudRuntimePin, type CloudRuntimePinRow } from "./runtime-selection.js";
@@ -136,7 +137,7 @@ export type CloudWorkspaceSetupWorkerOptions = {
   executor: CloudWorkspaceSetupExecutor;
   /** Required secret/output redaction boundary before any text reaches SQL. */
   sanitizeLog: (value: string) => string;
-  intervalMs: number;
+  intervalMs?: number;
   leaseMs?: number;
   heartbeatMs?: number;
   executionTimeoutMs?: number;
@@ -327,7 +328,7 @@ export class CloudWorkspaceSetupWorker {
     this.pool = options.pool;
     this.executor = options.executor;
     this.sanitizeLog = options.sanitizeLog;
-    this.intervalMs = options.intervalMs;
+    this.intervalMs = options.intervalMs ?? 60_000;
     this.leaseMs = options.leaseMs ?? 60_000;
     this.heartbeatMs = options.heartbeatMs ?? Math.floor(this.leaseMs / 3);
     this.executionTimeoutMs = options.executionTimeoutMs ?? 30 * 60_000;
@@ -354,7 +355,7 @@ export class CloudWorkspaceSetupWorker {
     }
     this.scheduler = new CloudWorkerScheduler(this.intervalMs, () => this.tick(), () => {
       this.logger.error("[cloud-workspace] setup tick failed; will retry");
-    }, () => this.readNextDelayMs());
+    }, () => this.readNextDelayMs(), { readBeforeRun: true, jitter: options.intervalMs === undefined });
   }
 
   start(): () => Promise<void> {
@@ -387,8 +388,9 @@ export class CloudWorkspaceSetupWorker {
     return withSystemTx(this.pool, async tx => {
       const started = Date.now();
       const result = await tx.query<{ delay_ms: string | null }>(
-        `SELECT extract(epoch FROM (min(CASE WHEN sr.state = 'queued'
-             THEN sr.next_attempt_at ELSE sr.lease_expires_at END) - now())) * 1000 AS delay_ms
+        `SELECT extract(epoch FROM (min(due_at) - now())) * 1000 AS delay_ms FROM (
+         SELECT CASE WHEN sr.state = 'queued'
+             THEN sr.next_attempt_at ELSE sr.lease_expires_at END AS due_at
          FROM cloud_workspace_setup_runs sr
          JOIN cloud_workspaces cw ON cw.id = sr.workspace_id AND cw.org_id = sr.org_id
            AND cw.current_generation = sr.generation
@@ -402,8 +404,10 @@ export class CloudWorkspaceSetupWorker {
            AND cw.desired_state = 'running' AND cw.status = 'setting_up' AND cw.deleted_at IS NULL
            AND pb.observed_state = 'running' AND pb.provider_resource_id IS NOT NULL
            AND cloud_workspace_generation_policy_current(cw.id, cw.current_generation, cw.org_id)
-           AND cloud_workspace_runtime_authority_live(cw.id, cw.current_generation, cw.owner_user_id, $1)`,
-        [this.workosEnabled],
+           AND cloud_workspace_runtime_authority_live(cw.id, cw.current_generation, cw.owner_user_id, $1)
+         UNION ALL SELECT due_at FROM (${recoveryWorkDeadlines}) recovery WHERE $2::boolean
+         ) work`,
+        [this.workosEnabled, this.recoveryConfig !== null],
       );
       const delay = result.rows[0]?.delay_ms;
       return delay == null ? null : Number(delay) - (Date.now() - started);

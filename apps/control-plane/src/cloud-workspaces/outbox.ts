@@ -1,3 +1,5 @@
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
+import { readCloudWorkerNextDelay } from "./worker-deadlines.js";
 import { createHmac, randomUUID } from "node:crypto";
 
 import type pg from "pg";
@@ -136,8 +138,7 @@ function safeFailure(error: unknown): { code: string; retryable: boolean } {
 
 export class CloudWorkspaceOutboxWorker {
   private readonly workerId: string;
-  private timer: NodeJS.Timeout | null = null;
-  private active: Promise<void> | null = null;
+  private readonly scheduler: CloudWorkerScheduler;
   private stopped = false;
   private started = false;
 
@@ -152,7 +153,7 @@ export class CloudWorkspaceOutboxWorker {
       logger?: Pick<Console, "warn" | "error">;
     } = {},
   ) {
-    const intervalMs = options.intervalMs ?? 1_000;
+    const intervalMs = options.intervalMs ?? 60_000;
     const leaseMs = options.leaseMs ?? 30_000;
     const maxAttempts = options.maxAttempts ?? 12;
     if (
@@ -172,10 +173,9 @@ export class CloudWorkspaceOutboxWorker {
     if (!isValidCloudWorkspaceWorkerId(this.workerId)) {
       throw new Error("cloud workspace outbox worker identity is invalid");
     }
-  }
-
-  private get intervalMs(): number {
-    return this.options.intervalMs ?? 1_000;
+    this.scheduler = new CloudWorkerScheduler(intervalMs, () => this.drain(), () => {
+      (this.options.logger ?? console).error("[cloud-workspace] outbox tick failed; will retry");
+    }, () => readCloudWorkerNextDelay(this.pool, "outbox"), { readBeforeRun: true, jitter: options.intervalMs === undefined });
   }
 
   private get leaseMs(): number {
@@ -187,36 +187,17 @@ export class CloudWorkspaceOutboxWorker {
   }
 
   start(): () => Promise<void> {
-    if (this.started || this.stopped) {
-      throw new Error("cloud workspace outbox worker lifecycle is invalid");
-    }
+    if (this.started || this.stopped) throw new Error("cloud workspace outbox worker lifecycle is invalid");
     this.started = true;
-    const run = () => {
-      if (this.stopped) return;
-      const task = this.drain().catch((error) => {
-        (this.options.logger ?? console).error(
-          `[cloud-workspace] outbox tick failed: ${
-            error instanceof Error ? error.name : "unknown"
-          }`,
-        );
-      });
-      this.active = task;
-      void task.finally(() => {
-        if (this.active === task) this.active = null;
-        if (this.stopped) return;
-        this.timer = setTimeout(run, this.intervalMs);
-        this.timer.unref();
-      });
-    };
-    run();
+    this.scheduler.start();
     return () => this.stop();
   }
 
+  notify(): void { this.scheduler.notify(); }
+
   async stop(): Promise<void> {
     this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
-    await this.active;
+    await this.scheduler.stop();
   }
 
   private async drain(): Promise<void> {

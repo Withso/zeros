@@ -14,6 +14,7 @@ import {
 } from "./provider.js";
 import { runtimeWitness } from "./runtime-test-fixtures.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
+import { readLifecycleDeadlines } from "./lifecycle-deadlines.js";
 import { DatabaseCloudWorkspacePaidAuthorityReconciler } from "./paid-authority.js";
 import { CloudWorkspaceCheckpointRequestWorker, enqueueWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import {assertDatabaseLockOrder} from "./lock-order-test-utils.js";
@@ -795,23 +796,22 @@ d("cloud workspace reconciliation", () => {
     });
 
   describe("durable retry deadlines", () => {
-    const nextDelay = (value: CloudWorkspaceReconciler) =>
-      (value as unknown as { readNextDelayMs(): Promise<number | null> }).readNextDelayMs();
+    const nextDelay = async () => (await readLifecycleDeadlines(pool, "boat", 1_000)).lifecycle ?? null;
 
     it.each(["queued", "observing"])("reads future %s work before the periodic interval", async intentState => {
       const seeded = await seedWorkspace({ intentState });
       await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now()+interval '2 seconds' WHERE id=$1", [seeded.intentId]);
-      const delay = await nextDelay(reconciler(new FakeProvider()));
+      const delay = await nextDelay();
       expect(delay).toBeGreaterThan(0); expect(delay).toBeLessThanOrEqual(2_000);
       await pool.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1", [seeded.intentId]);
-      expect(await nextDelay(reconciler(new FakeProvider()))).toBeNull();
+      expect(await nextDelay()).toBeNull();
     });
 
     it("waits for a live dispatch lease even when its retry date is already due", async () => {
       const seeded = await seedWorkspace({ intentState: "dispatching" });
       await pool.query(`UPDATE cloud_workspace_lifecycle_intents SET lease_owner='other-worker',
         lease_expires_at=now()+interval '3 seconds',next_attempt_at=now() WHERE id=$1`, [seeded.intentId]);
-      const delay = await nextDelay(reconciler(new FakeProvider()));
+      const delay = await nextDelay();
       expect(delay).toBeGreaterThan(2_000); expect(delay).toBeLessThanOrEqual(3_000);
     });
 
@@ -820,7 +820,7 @@ d("cloud workspace reconciliation", () => {
       await withSystemTx(pool, tx => enqueueWorkspaceCheckpointRequest(tx, { workspaceId: seeded.workspaceId,
         organizationId: orgId, generation: 1, requestedBy: ownerId, lifecycleIntentId: seeded.intentId,
         reason: "before_stop", idempotencyKey: `deadline.${seeded.intentId}` }));
-      expect(await nextDelay(reconciler(new FakeProvider()))).toBeNull();
+      expect(await nextDelay()).toBeNull();
     });
   });
 
@@ -961,7 +961,9 @@ d("cloud workspace reconciliation", () => {
       } finally { await writer.query("ROLLBACK"); writer.release(); }
       await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now()+interval '1 hour' WHERE id=$1", [seeded.intentId]);
       await barrier();
-      expect(notices).toEqual([]);
+      expect(notices.splice(0)).toEqual(["zeros_cloud_lifecycle_work"]);
+      expect((await readLifecycleDeadlines(pool, "boat", 1_000)).lifecycle).toBeGreaterThan(3_500_000);
+      expect(await reconciler(new FakeProvider()).runOnce()).toBe(false);
       await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now() WHERE id=$1", [seeded.intentId]);
       await barrier();
       expect(notices.splice(0)).toEqual(["zeros_cloud_lifecycle_work"]);
@@ -970,14 +972,14 @@ d("cloud workspace reconciliation", () => {
       expect(notices.splice(0)).toEqual(["zeros_cloud_setup_work"]);
       await pool.query("UPDATE cloud_workspaces SET status='setting_up' WHERE id=$1", [seeded.workspaceId]);
       await barrier();
-      expect(notices.splice(0)).toEqual(["zeros_cloud_setup_work"]);
+      expect(notices.splice(0).sort()).toEqual(["zeros_cloud_lifecycle_work", "zeros_cloud_setup_work"]);
       await pool.query(`INSERT INTO cloud_workspace_setup_runs (workspace_id,generation,org_id,attempt)
         VALUES ($1,1,$2,1)`, [seeded.workspaceId, orgId]);
       await barrier();
       expect(notices.splice(0)).toEqual(["zeros_cloud_setup_work"]);
       await pool.query("UPDATE cloud_workspace_setup_runs SET next_attempt_at=now()+interval '1 hour' WHERE workspace_id=$1", [seeded.workspaceId]);
       await barrier();
-      expect(notices).toEqual([]);
+      expect(notices.splice(0)).toEqual(["zeros_cloud_setup_work"]);
     } finally {
       listener.removeListener("notification", onNotice);
       listener.release(true);

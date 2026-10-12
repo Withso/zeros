@@ -87,7 +87,12 @@ suite("cloud engine liveness and compute convergence", () => {
     });
     return {
       provider,
-      tick: () => (reconciler as unknown as { tick(): Promise<void> }).tick(),
+      tick: async () => {
+        const scheduled = reconciler as unknown as { readNextDelayMs(): Promise<number | null>; tick(): Promise<void> };
+        // Exercise the same durable preflight as the production scheduler.
+        await scheduled.readNextDelayMs();
+        await scheduled.tick();
+      },
     };
   }
   it.each(["expired", "revoked", "missing"])(

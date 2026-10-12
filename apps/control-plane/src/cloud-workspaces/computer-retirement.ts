@@ -8,6 +8,7 @@ import { ensureWorkspaceDeletionJob } from "./workspace-deletion-job.js";
 import { CLOUD_WORKSPACE_V2_REQUIRED } from "./supported-generation.js";
 import { createComputerRetirementDriver } from "./computer-retirement-boat.js";
 import { cloudWorkspaceProvisioningProfile } from "./provisioning-profile.js";
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
 
 const digest = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest();
@@ -93,6 +94,7 @@ export class ComputerImageRetirementWorker {
     private readonly driver: ComputerRetirementDriver,
     private readonly protectedImageRefs: readonly string[] = [],
   ) {}
+  get accountScope(): string { return this.account; }
   async tick() {
     await withSystemTx(this.pool, async (tx) => {
       await tx.query(
@@ -298,13 +300,28 @@ export class ComputerImageRetirementWorker {
 /** This worker only retires explicitly-created disposable build workspaces.
  * All provider deletion stays in the existing receipt-verified reconciler. */
 export class CloudComputerRetirementWorker {
+  private readonly scheduler: CloudWorkerScheduler;
   constructor(
     private readonly pool: pg.Pool,
     private readonly batchSize = 32,
     private readonly imageWorker?: ComputerImageRetirementWorker,
+    options: { intervalMs?: number } = {},
   ) {
     if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 32)
       throw new Error("Invalid Cloud Computer reconciliation batch size");
+    this.scheduler = new CloudWorkerScheduler(options.intervalMs ?? 60_000, () => this.tick(), () => {
+      console.warn("[cloud-computer] historical retirement pending");
+    }, () => withSystemTx(this.pool, async tx => {
+      const started = Date.now();
+      const result = await tx.query<{ delay_ms: string | null }>(`SELECT extract(epoch FROM (min(
+          CASE WHEN build.last_checked_at=build.created_at THEN now() ELSE build.last_checked_at+interval '5 seconds' END
+        )-now()))*1000 AS delay_ms
+        FROM cloud_computer_builds build LEFT JOIN cloud_computer_images image USING(id)
+        WHERE (image.id IS NULL AND (build.state='building' OR build.cleanup_state<>'complete'))
+          OR (image.account_scope=$1 AND (image.state<>'retired' OR build.cleanup_state<>'complete'))`, [this.imageWorker?.accountScope ?? null]);
+      const delay = result.rows[0]?.delay_ms;
+      return delay == null ? null : Number(delay) - (Date.now() - started);
+    }, { consistentRead: true }), { readBeforeRun: true, jitter: options.intervalMs === undefined });
   }
   async tick(): Promise<void> {
     await this.imageWorker?.tick();
@@ -415,32 +432,16 @@ export class CloudComputerRetirementWorker {
     }
   }
   start(): () => Promise<void> {
-    let stopping = false,
-      pending: Promise<void> | null = null;
-    const tick = () => {
-      if (stopping || pending) return;
-      pending = this.tick()
-        .catch(() => {
-          console.warn("[cloud-computer] historical retirement pending");
-        })
-        .finally(() => {
-          pending = null;
-        });
-    };
-    const timer = setInterval(tick, 5000);
-    timer.unref();
-    tick();
-    return async () => {
-      stopping = true;
-      clearInterval(timer);
-      await pending;
-    };
+    this.scheduler.start();
+    return () => this.scheduler.stop();
   }
+  notify(): void { this.scheduler.notify(); }
 }
 
 export function createCloudComputerRetirementWorker(
   pool: pg.Pool,
   config: CloudWorkspaceBackendConfig,
+  options: { intervalMs?: number } = {},
 ) {
   return new CloudComputerRetirementWorker(
     pool,
@@ -453,5 +454,6 @@ export function createCloudComputerRetirementWorker(
           [cloudWorkspaceProvisioningProfile(config, "boat").imageRef],
         )
       : undefined,
+    options,
   );
 }

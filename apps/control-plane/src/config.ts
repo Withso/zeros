@@ -28,6 +28,7 @@ import { loadCloudRuntimeConfig, type CloudRuntimeConfig } from "./cloud-workspa
 import { cloudWorkspaceChannelEnabled } from "./cloud-workspaces/channel-policy.js";
 import { BOAT_BILLING_ORG_PATTERN } from "./cloud-workspaces/boat-client.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS } from "./request-timing.js";
+import { loadWorkerPollIntervals, type WorkerPollIntervals } from "./worker-polling-config.js";
 import { validateReleaseLedgerUrl } from "./client-compatibility.js";
 import {
   DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
@@ -313,6 +314,7 @@ export type Config = {
   databaseMigrationRole?: string;
   databaseMigrationsOnBoot?: boolean;
   databasePoolMax?: number;
+  workerPollIntervalsMs?: WorkerPollIntervals;
   /** Requests at least this slow are logged once by route template. */
   slowRequestLogMs?: number;
   /** Receives aggregate cloud health alerts; null disables them. */
@@ -1638,6 +1640,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     }
   }
 
+  const cloudWorkspaces = cloudChannel ? loadCloudWorkspaceConfig(env, github) : null;
   return {
     databaseUrl: parseDatabaseTarget(e.DATABASE_URL).toString(),
     ...(e.DATABASE_LISTEN_URL ? {databaseListenUrl: parseDatabaseTarget(e.DATABASE_LISTEN_URL).toString()} : {}),
@@ -1645,6 +1648,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     ...(migrationRole ? {databaseMigrationRole: migrationRole} : {}),
     databaseMigrationsOnBoot: e.DATABASE_MIGRATIONS_ON_BOOT === "true",
     databasePoolMax: e.DATABASE_POOL_MAX,
+    workerPollIntervalsMs: loadWorkerPollIntervals(env, cloudWorkspaces !== null),
     slowRequestLogMs: e.SLOW_REQUEST_LOG_MS,
     operationsAlertEmail: loadOperationsAlertEmail(env, diagnostics),
     databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
@@ -1660,7 +1664,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     github,
     feedback: loadFeedbackConfig(env, diagnostics),
     chatTitleApiKey: e.CHAT_TITLE_OPENAI_API_KEY || null,
-    cloudWorkspaces: cloudChannel ? loadCloudWorkspaceConfig(env, github) : null,
+    cloudWorkspaces,
     cloudAgentCredentials: cloudChannel ? loadCloudAgentCredentialConfig(env) : null,
     selectedCloudWorker: cloudChannel ? loadSelectedCloudWorker(env) : null,
     cloudRuntimePublication: runtime.publication,

@@ -6,6 +6,8 @@ import type { AuthedUser } from "./auth.js";
 import { HttpError } from "./authz.js";
 import { DATABASE_CONNECTION_LIFETIME_SECONDS, withSystemTx, type Tx } from "./db.js";
 import {publishCloudWorkspaceDirectoryChanges} from "./cloud-workspaces/directory-events.js";
+import { CloudWorkerScheduler } from "./cloud-workspaces/worker-scheduler.js";
+import { readCloudWorkerNextDelay } from "./cloud-workspaces/worker-deadlines.js";
 
 const EVENT_PAGE_SIZE = 100;
 const HEARTBEAT_MS = 25_000;
@@ -46,13 +48,25 @@ async function publishSecurityEvents(pool: pg.Pool): Promise<number> {
 /** Publication and erasure cleanup progress even with no connected clients.
  * One in-flight batch per process/pool; DB locks fence multiple API replicas. */
 export function startSecurityEventPublisher(pool:pg.Pool,logger:Pick<Console,"error">=console):()=>Promise<void> {
-  let stopped=false,active:Promise<void>|null=null,timer:NodeJS.Timeout|undefined;
-  const tick=()=>{
-    if(stopped)return;
-    active=publishPendingSecurityEvents(pool).then(()=>{}).catch(()=>logger.error("[security-events] publication failed"))
-      .finally(()=>{active=null;if(!stopped){timer=setTimeout(tick,1000);timer.unref();}});
-  };
-  tick();return async()=>{stopped=true;clearTimeout(timer);await active;};
+  return new SecurityEventPublisher(pool, logger).start();
+}
+
+export class SecurityEventPublisher {
+  private readonly scheduler: CloudWorkerScheduler;
+  private stopped = false;
+  constructor(pool: pg.Pool, logger: Pick<Console, "error"> = console, options: { intervalMs?: number } = {}) {
+    this.scheduler = new CloudWorkerScheduler(options.intervalMs ?? 60_000, async () => {
+      for (let batch = 0; batch < 20 && !this.stopped; batch++) if (!await publishPendingSecurityEvents(pool)) break;
+    }, () => logger.error("[security-events] publication failed"), () => readCloudWorkerNextDelay(pool, "security"),
+    { readBeforeRun: true, jitter: options.intervalMs === undefined });
+  }
+
+  notify(): void { this.scheduler.notify(); }
+
+  start(): () => Promise<void> {
+    this.scheduler.start();
+    return async () => { this.stopped = true; await this.scheduler.stop(); };
+  }
 }
 
 export type SecurityEventWire = {
