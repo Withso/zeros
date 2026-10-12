@@ -13,6 +13,7 @@ import {parseLanguageDocument} from "./cloud-language-document";
 import {LspError} from "./lsp-rpc";
 import {cloudGitAuthorEnvironment} from "../git/cloud-git-author";
 import {cloudComputerProcessEnvironment} from "./cloud-computer-environment";
+import { cloudRuntimeAssetEnvironment } from "./containment/cloud-runtime-assets.mjs";
 import { isCloudNativeHome, type CloudNativeHome } from "./containment/cloud-native-home";
 
 const MAX_OUTPUT=1024*1024,MAX_JOBS=8,MAX_CALLS=4;
@@ -51,7 +52,7 @@ export class CloudWorkloadTools implements CloudAgentToolBridge {
     this.legacyLease=boot?null:authority;
     this.lifetime=boot?authority.lifetime:authority;
     this.lifetime.assertLive();
-    this.env=cloudComputerProcessEnvironment({...nativeHome.environment(),PATH:`${this.runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,LANG:"C.UTF-8",
+    this.env=cloudComputerProcessEnvironment({...nativeHome.environment(),...cloudRuntimeAssetEnvironment(this.runtime),PATH:`${this.runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,LANG:"C.UTF-8",
       SHELL:"/bin/bash",ZEROS_WORKTREE_PATH:cwd,
       ...cloudGitAuthorEnvironment(authority.gitAuthor??null)},authority.environment?.values,"agent");
     this.lifetime.attach(this);this.lifetime.attach(boundary);

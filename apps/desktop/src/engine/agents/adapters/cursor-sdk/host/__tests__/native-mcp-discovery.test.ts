@@ -10,6 +10,11 @@ import type { CloudProviderExecution } from "../../../../cloud-provider-executio
 import { cloudCursorRequest } from "../cloud-policy";
 import { prepareCloudCursorConfigView } from "../../../../containment/cloud-native-boundary";
 import { materializeCloudSkills } from "../../../../cloud-skills";
+import { testCloudRuntime } from "../../../../__tests__/helpers/test-cloud-runtime";
+vi.mock("../../../../containment/cloud-runtime-root.mjs", async original => ({
+  ...await original<typeof import("../../../../containment/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime: () => testCloudRuntime(),
+}));
 
 const require = createRequire(import.meta.url);
 const sdk = require.resolve("@cursor/sdk");
@@ -107,14 +112,20 @@ describe.skipIf(process.platform !== "linux")("pinned Cursor native MCP discover
       const execution = { cwd: f.cwd, model: "qualified-model", lease: { assertLive: vi.fn(), admission: { model: "qualified-model" } },
         coordinator: { environment: () => ({ CURSOR_API_KEY: "synthetic-admitted-key" }) }, productServers: [],
         userServers: [{ name: "admitted", transport: "stdio", cwd: tools, command: process.execPath,
-          args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(admittedMarker)},process.cwd())`] }] } as unknown as CloudProviderExecution;
+          env: { GIT_EXEC_PATH: "/user/git-exec-trap", FONTCONFIG_FILE: "/user/fontconfig-trap", FONTCONFIG_PATH: "/user/fonts-trap" },
+          args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(admittedMarker)},JSON.stringify({cwd:process.cwd(),assets:Object.fromEntries(['GIT_CONFIG_SYSTEM','GIT_EXEC_PATH','FONTCONFIG_FILE','FONTCONFIG_PATH'].map(name=>[name,process.env[name]||'unset']))}))`] }] } as unknown as CloudProviderExecution;
       for (const operation of ["platform.prewarm", "agent.create", "agent.resume"]) {
         const raw = { cwd: "/untrusted-root", local: { settingSources: ["project", "plugins", "all"] }, mcpServers: {} };
         const request = cloudCursorRequest(execution, operation, operation === "agent.resume" ? { agentId: "saved", opts: raw } : raw) as { opts?: unknown };
         // Native workspace startup is the side-effecting phase shared by these
         // three operations; no model turn/provider authentication is claimed.
         f.run(operation === "agent.resume" ? request.opts : request);
-        expect(await readFile(admittedMarker, "utf8")).toBe(tools);
+        const runtime = testCloudRuntime();
+        expect(JSON.parse(await readFile(admittedMarker, "utf8"))).toEqual({ cwd: tools, assets: {
+          GIT_CONFIG_SYSTEM: `${runtime.workerRoot}/gitconfig`, FONTCONFIG_FILE: `${runtime.workerRoot}/design-fonts/fonts.conf`,
+          GIT_EXEC_PATH: `/opt/zeros-infra/.git-exec/${runtime.runtimeId}`,
+          FONTCONFIG_PATH: `${runtime.workerRoot}/design-fonts`,
+        } });
         await rm(admittedMarker);
         await expect(readFile(f.marker)).rejects.toMatchObject({ code: "ENOENT" });
       }

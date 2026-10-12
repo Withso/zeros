@@ -1,4 +1,5 @@
 import {resolveCloudRuntimeChild} from "../agents/containment/cloud-runtime-root.mjs";
+import {cloudRuntimeAssetEnvironment} from "../agents/containment/cloud-runtime-assets.mjs";
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
@@ -192,11 +193,12 @@ if (process.argv[1] && path.basename(process.argv[1]) === 'cloud-ssh-session.mjs
     assertCloudSshEngineIdentity({platform: process.platform, uid: process.geteuid(), gid: process.getegid()});
     const cwd = '/srv/zeros/workspace';
     if (realpathSync(cwd) !== cwd) throw new Error('SSH workspace is unavailable');
+    const runtime = resolveCloudRuntimeChild();
     const stream = Duplex.from({ readable: process.stdin, writable: process.stdout });
     const session = createCloudSshSession(stream, {
       cwd,
       sftpServer: '/usr/lib/openssh/sftp-server',
-      env: { HOME: '/srv/zeros/home/agent', PATH: `${resolveCloudRuntimeChild().binRoot}:/usr/local/bin:/usr/bin:/bin`,
+      env: { ...cloudRuntimeAssetEnvironment(runtime), HOME: '/srv/zeros/home/agent', PATH: `${runtime.binRoot}:/usr/local/bin:/usr/bin:/bin`,
         LANG: 'C.UTF-8', USER: 'zeros-engine', LOGNAME: 'zeros-engine', SHELL: '/bin/bash' },
     });
     process.stdout.write(JSON.stringify({ version: 1, kind: 'ssh', publicKey: session.publicKey, hostKeySha256: session.hostKeySha256 }) + '\n', () => session.start());

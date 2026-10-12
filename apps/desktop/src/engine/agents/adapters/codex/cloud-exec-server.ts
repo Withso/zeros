@@ -7,6 +7,7 @@ import {WebSocketServer,type WebSocket} from "ws";
 import {cloudExecutionLifetime,type CloudProviderExecution,type CloudAgentExecutionLifetime} from "../../cloud-provider-execution";
 import type {BoundaryProcess} from "../../containment/types";
 import {cloudComputerProcessEnvironment} from "../../cloud-computer-environment";
+import { cloudRuntimeAssetEnvironment } from "../../containment/cloud-runtime-assets.mjs";
 
 const MAX_FRAME=4*1024*1024,MAX_BUFFER=8*1024*1024;
 
@@ -65,7 +66,7 @@ export class CloudCodexExecServer {
       try{
         bridge.child=await Promise.race([lifetime.launch(()=>execution.coordinator.workload.spawn({
           command:runtime.node,args:[`${runtime.workerRoot}/apps/desktop/src/engine/agents/containment/cloud-codex-executor.mjs`,binary],cwd:execution.cwd,
-          env:cloudComputerProcessEnvironment({...execution.coordinator.nativeHome.environment(),PATH:`${runtime.binRoot}:/usr/bin:/bin`,LANG:"C.UTF-8"},execution.environment?.values,"agent"),stdio:"pipe",
+          env:cloudComputerProcessEnvironment({...execution.coordinator.nativeHome.environment(),...cloudRuntimeAssetEnvironment(runtime),PATH:`${runtime.binRoot}:/usr/bin:/bin`,LANG:"C.UTF-8"},execution.environment?.values,"agent"),stdio:"pipe",
         })),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error("Cloud executor launch timed out")),5000);})]);
       }finally{if(timer)clearTimeout(timer);}
       lifetime.assertLive();

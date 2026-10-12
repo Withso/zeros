@@ -66,11 +66,13 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
     const nativeHome=await createCloudNativeHome({dataRoot:root,conversationId:actor,provider:"codex",executionId:"executor"});
     const helper=path.join(root,"cloud-codex-executor.mjs");
     await copyFile(path.resolve("apps/desktop/src/engine/agents/containment/cloud-codex-executor.mjs"),helper);
+    await copyFile(path.resolve("apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs"),path.join(root,"cloud-runtime-assets.mjs"));
     // Only the runtime's absolute deployment paths differ in this offline fixture.
     // The module is static source; fixture values are data it reads at load.
     await writeFile(path.join(root,"cloud-runtime-root.json"),JSON.stringify({runtime:{...importedRuntime,workerRoot:process.cwd(),binRoot:path.dirname(process.execPath)},nativeBinary}));
     await writeFile(path.join(root,"cloud-runtime-root.mjs"),"import {readFileSync} from 'node:fs';const fixture=JSON.parse(readFileSync(new URL('./cloud-runtime-root.json',import.meta.url),'utf8'));export const resolveCloudRuntimeChild=()=>structuredClone(fixture.runtime);export const assertCloudRuntimeChildPath=file=>{if(file!==fixture.nativeBinary)throw new Error('unadmitted fixture executable');};");
     const values={ORG_VALUE:"synthetic-org-value",REPO_VALUE:"synthetic-repository-value",PERSONAL_VALUE:actor,ORG_SECRET:"synthetic-org-secret",EMPTY_VALUE:"",LANG:"C",
+      FONTCONFIG_FILE:"/recipe/fontconfig-trap",FONTCONFIG_PATH:"/recipe/fonts-trap",
       OPENAI_API_KEY:"synthetic-provider-value",ANTHROPIC_API_KEY:"synthetic-provider-value",CURSOR_API_KEY:"synthetic-provider-value",CODEX_API_KEY:"synthetic-provider-value"};
     const abort=new AbortController(),domains=new Set<{stopAndProve():Promise<void>}>();let closing:Promise<void>|undefined;
     const close=vi.fn(()=>{
@@ -115,7 +117,7 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
       });
       const config=cloudCodexConfig(execution);
       // Force distinct output reads with an empty poll between them so a cursor bug cannot hide an admitted layer.
-      await rpc(3,"process/start",{processId:"env-check",argv:["/bin/bash","--noprofile","--norc","-c",'printf "%s\\n" "$ORG_VALUE"; while [ ! -f environment-release ]; do sleep 0.01; done; printf "%s\\n" "$REPO_VALUE" "$PERSONAL_VALUE" "$ORG_SECRET" "${EMPTY_VALUE-unset}" "${OPENAI_API_KEY-unset}" "${ANTHROPIC_API_KEY-unset}" "${CURSOR_API_KEY-unset}" "${CODEX_API_KEY-unset}" "$HOME" "$CODEX_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$LANG"'],cwd:`file://${root}`,env:{},tty:false,
+      await rpc(3,"process/start",{processId:"env-check",argv:["/bin/bash","--noprofile","--norc","-c",'printf "%s\\n" "$ORG_VALUE"; while [ ! -f environment-release ]; do sleep 0.01; done; printf "%s\\n" "$REPO_VALUE" "$PERSONAL_VALUE" "$ORG_SECRET" "${EMPTY_VALUE-unset}" "${OPENAI_API_KEY-unset}" "${ANTHROPIC_API_KEY-unset}" "${CURSOR_API_KEY-unset}" "${CODEX_API_KEY-unset}" "$HOME" "$CODEX_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$LANG" "${GIT_CONFIG_SYSTEM-unset}" "${GIT_EXEC_PATH-unset}" "${FONTCONFIG_FILE-unset}" "${FONTCONFIG_PATH-unset}"'],cwd:`file://${root}`,env:{},tty:false,
         envPolicy:{inherit:config["shell_environment_policy.inherit"],ignoreDefaultExcludes:config["shell_environment_policy.ignore_default_excludes"]??false,
           includeOnly:config["shell_environment_policy.include_only"]??[],exclude:[],set:{}}});
       let output="",afterSeq:number|null=null,closed=false,released=false;
@@ -140,6 +142,8 @@ describe.skipIf(process.platform!=="linux")("cloud native executor wire (no mode
       expect(lines[9]).toBe(nativeHome.paths.home);
       expect(lines.slice(10,15)).toEqual([nativeHome.paths.codexHome,nativeHome.paths.xdgConfigHome,nativeHome.paths.xdgCacheHome,nativeHome.paths.xdgDataHome,nativeHome.paths.xdgStateHome]);
       expect(lines[15]).toBe("C");
+      expect(lines.slice(16,20)).toEqual([path.join(process.cwd(),"gitconfig"),`/opt/zeros-infra/.git-exec/${importedRuntime.runtimeId}`,
+        path.join(process.cwd(),"design-fonts/fonts.conf"),path.join(process.cwd(),"design-fonts")]);
       for(const [request] of workloadSpawn.mock.calls){
         for(const value of Object.values(values).filter(value=>value.length>1)){
           expect(request.args.join("\0").includes(value)).toBe(false);expect(JSON.stringify(config).includes(value)).toBe(false);

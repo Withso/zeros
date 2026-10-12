@@ -46,7 +46,7 @@ export const CLOUD_CODEX_CONFIG={
   // selected physical state paths and captured actor environment names.
   "shell_environment_policy.inherit":"all",
   "shell_environment_policy.ignore_default_excludes":true,
-  "shell_environment_policy.include_only":["HOME","PATH","LANG","SHELL","TMPDIR","USER","LOGNAME","CODEX_HOME","XDG_CONFIG_HOME","XDG_CACHE_HOME","XDG_DATA_HOME","XDG_STATE_HOME"],
+  "shell_environment_policy.include_only":["HOME","PATH","LANG","SHELL","TMPDIR","USER","LOGNAME","CODEX_HOME","XDG_CONFIG_HOME","XDG_CACHE_HOME","XDG_DATA_HOME","XDG_STATE_HOME","GIT_CONFIG_SYSTEM","GIT_EXEC_PATH","FONTCONFIG_FILE","FONTCONFIG_PATH"],
   "features.multi_agent":false,
   "mcp_servers.codex_apps.enabled":false,
   "mcp_servers.codex_apps.command":"zeros-disabled-mcp-server",

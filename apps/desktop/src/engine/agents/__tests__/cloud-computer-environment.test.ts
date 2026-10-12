@@ -6,6 +6,11 @@ import {
 import { CloudCustomizationRedactor } from "../cloud-customization-redaction";
 
 describe("execution-scoped computer environment", () => {
+  it.each(["agent", "terminal"] as const)("retains pinned font configuration for %s environments", target => {
+    const base = { FONTCONFIG_FILE: "/runtime/worker/design-fonts/fonts.conf", FONTCONFIG_PATH: "/runtime/worker/design-fonts" };
+    expect(cloudComputerProcessEnvironment(base, { FONTCONFIG_FILE: "/tmp/foreign", FONTCONFIG_PATH: "/tmp", APP_MODE: "recipe" }, target))
+      .toEqual({ ...base, APP_MODE: "recipe" });
+  });
   it("merges ordinary values after defaults while native authentication and locations stay managed", () => {
     const base = {
       APP_MODE: "default",
@@ -34,6 +39,7 @@ describe("execution-scoped computer environment", () => {
       "OPENAI_BASE_URL",
       "ZEROS_CLOUD_ENGINE_RUNTIME_B64",
       "GIT_CONFIG_COUNT",
+      "GIT_EXEC_PATH",
     ])
       expect(() =>
         cloudComputerProcessEnvironment(

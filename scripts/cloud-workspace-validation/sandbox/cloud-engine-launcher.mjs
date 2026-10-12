@@ -36,6 +36,7 @@ import { validCloudResourceBudgetProjection } from "./cloud-resource-admission.m
 import { CLOUD_ROOT_CUSTODY_DIRECTORY, cloudRootProcessBirth, readCloudRootControllerRecord } from "./publish-cloud-workload-custody.mjs";
 import runtimeLayout from "./runtime-layout.json" with { type: "json" };
 import { CLOUD_ENGINE_MUTABLE_LAYOUT } from "./prepare-cloud-image-files.mjs";
+import { prepareCloudGitExecPath } from "./prepare-cloud-git.mjs";
 
 function rootPath(file, directory = false) {
   if (realpathSync(file) !== file)
@@ -312,6 +313,7 @@ export function prepareCloudEngineView(runtime = resolveCloudRuntime(), source =
   // Recheck immutable path ancestry at the final launch boundary as well.
   rootPath(runtime.workerRoot, true);
   rootPath(runtime.root, true);
+  prepareCloudGitExecPath(runtime);
   prepareCloudEngineAppArmor({runtime});
   privateDirectory("/run/zeros/view", 0, 0, 0o700);
   privateDirectory("/run/zeros/view/settings", 10003, 10003, 0o750);

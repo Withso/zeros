@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 describe('pinned Codex admitted MCP namespace',()=>{
   let results: { label: string; error?: string; inherited?: string; launched?: string | null; threadStarted?: boolean;
+    assetEnvironment?:Record<string,string>;assetRoot?:string;assetRuntimeId?:string;
     projectSettings?:Record<string,unknown>;projectLaunched?:string|null;skillNames?:string[];trustedCwd?:string;instructionsLoaded?:boolean;instructionsDelivered?:boolean }[];
   beforeAll(async()=>{
     const {stdout}=await promisify(execFile)(process.execPath,['--import','tsx','apps/desktop/src/engine/agents/adapters/codex/__tests__/fixtures/cloud-mcp-probe.mts'],{cwd:process.cwd(),timeout:30000,maxBuffer:1024*1024});
@@ -12,6 +13,12 @@ describe('pinned Codex admitted MCP namespace',()=>{
   it('replaces the complete lower-precedence transport',()=>{
     expect(results.find(row=>row.label==='transport replacement')).toMatchObject({threadStarted:true});
     expect(results.find(row=>row.label==='transport replacement')!.error).toBeUndefined();
+  });
+  it('passes runtime-selected Git/font paths to the final native MCP process',()=>{
+    const row=results.find(row=>row.label==='runtime asset environment')!;
+    expect(row.error).toBeUndefined();expect(row.threadStarted).toBe(true);
+    expect(row.assetEnvironment).toEqual({GIT_CONFIG_SYSTEM:`${row.assetRoot}/gitconfig`,GIT_EXEC_PATH:`/opt/zeros-infra/.git-exec/${row.assetRuntimeId}`,
+      FONTCONFIG_FILE:`${row.assetRoot}/design-fonts/fonts.conf`,FONTCONFIG_PATH:`${row.assetRoot}/design-fonts`});
   });
   it('does not give a higher-precedence replacement the lower source environment',()=>{
     expect(results.find(row=>row.label==='lower layer environment inheritance')!.inherited).toBe('absent');

@@ -12,6 +12,8 @@ import type { ResidentEngineAuthority } from "../resident-protocol";
 import { HostExecutionBoundary } from "../../agents/containment/host-boundary";
 import { sessionsRoot } from "../../agents/session-paths";
 import type { PreparedBoundary } from "../../agents/containment/types";
+import { cloudRuntimeAssetEnvironment } from "../../agents/containment/cloud-runtime-assets.mjs";
+import { lfsLoginRuntime, runtimeLfsLoginFixture } from "../../../../../../scripts/__tests__/fixtures/runtime-system-assets/login-fixture";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -154,6 +156,23 @@ describe.runIf(process.platform === "linux")("Local Host interrupted launches", 
 });
 
 describe.runIf(process.platform === "linux")("resident cloud terminals", () => {
+  it.runIf(!!lfsLoginRuntime).each([false, true])("keeps pinned LFS through a real login profile (legacy resident=%s)", async legacyResident => {
+    const root = await mkdtemp(path.join(tmpdir(), "zeros-resident-lfs-")); roots.push(root);
+    const fixture = await runtimeLfsLoginFixture(root, legacyResident), socketPath = path.join(root, "host.sock");
+    const host = new ResidentPtyHost({ root, socketPath, organizationId, workspaceId,
+      shell: fixture.wrapper, identity: { uid: process.getuid!(), gid: process.getgid!() } });
+    hosts.push(host); await host.start(); const current = authority(1); host.authorize(current);
+    const client = new ResidentPtyClient({ socketPath, authority: current }); clients.push(client); await client.connect();
+    const session = await client.create({ sessionId: "runtime-lfs", cwd: root, cols: 100, rows: 30,
+      env: { ...cloudRuntimeAssetEnvironment(fixture.runtime), HOME: "/srv/zeros/home/agent", PATH: `${fixture.runtime.binRoot}:/usr/bin:/bin` } });
+    await client.write(session.sessionId, { producerId: randomUUID(), sequence: 1, data: `${fixture.command}; exit\n` });
+    await expect.poll(async () => (await client.list())[0].exited, { timeout: 20_000 }).toBe(true);
+    const output = (await client.snapshot(session.sessionId)).data;
+    expect(output).toContain("git-lfs/3.7.1 ");
+    expect(output).toContain("P5_LFS_OK");
+    expect(output).not.toContain("HOSTILE_LFS");
+  }, 30_000);
+
   it("refuses a different Unix identity even if a caller supplies a valid resident scope", () => {
     expect(() => new ResidentPtyHost({root: '/tmp', socketPath: '/tmp/unused.sock', organizationId, workspaceId,
       shell: '/bin/bash', identity: {uid: process.getuid!() + 1, gid: process.getgid!()}})).toThrow('request_rejected');

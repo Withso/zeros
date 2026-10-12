@@ -13,6 +13,15 @@ const runtime = testCloudRuntime();
 const view = "/run/zeros/view/runtime-11111111-1111-4111-8111-111111111111";
 
 describe("fixed cloud engine mount and environment contract", () => {
+  it.each(["serve", "qualify", "resident", "probe-cursor"])("selects LFS and font configuration from the physical %s runtime", operation => {
+    const env = cloudEngineViewEnvironment({ GIT_CONFIG_SYSTEM: "/untrusted/gitconfig", GIT_EXEC_PATH: "/untrusted/git-exec", FONTCONFIG_FILE: "/untrusted/fonts.conf" }, operation, runtime);
+    expect(env).toMatchObject({ GIT_EXEC_PATH: `/opt/zeros-infra/.git-exec/${runtime.runtimeId}`, GIT_CONFIG_SYSTEM: `${runtime.workerRoot}/gitconfig`,
+      FONTCONFIG_FILE: `${runtime.workerRoot}/design-fonts/fonts.conf`, FONTCONFIG_PATH: `${runtime.workerRoot}/design-fonts` });
+    expect(env.PATH.split(":")[0]).toBe(runtime.binRoot);
+    const other = { ...runtime, runtimeId: `r1-${"b".repeat(64)}`, root: "/opt/zeros-infra/other", binRoot: "/opt/zeros-infra/other/bin", workerRoot: "/opt/zeros-infra/other/worker" };
+    expect(cloudEngineViewEnvironment(env, operation, other).GIT_EXEC_PATH).toBe(`/opt/zeros-infra/.git-exec/${other.runtimeId}`);
+    expect(cloudEngineViewEnvironment(env, operation, other).FONTCONFIG_FILE).toBe(`${other.workerRoot}/design-fonts/fonts.conf`);
+  });
   it.each([2,3])("refuses retired profile %i even with a supplied legacy runtime", version => {
     expect(() => cloudEngineViewArguments("serve",version,{...runtime,profile:"v3"},view)).toThrow(/profile version/);
   });
@@ -26,6 +35,7 @@ describe("fixed cloud engine mount and environment contract", () => {
       const engine = cloudEngineViewArguments("serve", 4, runtime, view, undefined, hostId);
       for (const args of [resident, engine]) expect(args.join("\n")).toContain(
         `--bind\n/run/zeros/resident-workloads/${hostId}\n/tmp/zeros-resident`);
+      for (const args of [resident, engine]) expect(args.join("\n")).toContain("--ro-bind\n/opt/zeros-infra/.git-exec\n/opt/zeros-infra/.git-exec");
       expect(resident.join("\n")).toContain("--ro-bind\n/opt/zeros-infra\n/opt/zeros-infra");
       expect(engine.join("\n")).not.toContain("--ro-bind\n/opt/zeros-infra\n/opt/zeros-infra");
       for (const invalid of ["../engine", "", "/run/zeros"]) expect(() =>

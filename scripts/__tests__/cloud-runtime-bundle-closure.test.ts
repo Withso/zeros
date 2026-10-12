@@ -432,7 +432,7 @@ describe("pnpm runtime closure", () => {
         .map((entry) => path.basename(entry.target))
         .sort(),
     ).toEqual([...names, "runtime-update-adapter.py", "cloud-resident-workload.mjs",
-      "prepare-cloud-image-files.mjs", "publish-cloud-workload-custody.mjs", "cloud-resource-budget.mjs",
+      "prepare-cloud-image-files.mjs", "prepare-cloud-git.mjs", "publish-cloud-workload-custody.mjs", "cloud-resource-budget.mjs",
       "cloud-resident-control.mjs"].sort());
     expect(RUNTIME_HELPERS).toContainEqual({
       source: "scripts/cloud-workspace-validation/sandbox/cloud-resource-budget.mjs",
@@ -477,6 +477,8 @@ describe("pnpm runtime closure", () => {
       recursive: true,
     });
     await writeFile(path.join(source, resolverSource), contents);
+    const assetSource = "apps/desktop/src/engine/agents/containment/cloud-runtime-assets.mjs";
+    await writeFile(path.join(source, assetSource), await readFile(assetSource));
     await link(
       path.join(source, resolverSource),
       path.join(
@@ -545,7 +547,7 @@ describe("pnpm runtime closure", () => {
   it("imports the actual resource-budget helper from its copied lib/zeros deployment path", async () => {
     const temp = await directory(), source = path.join(temp, "source"), runtime = path.join(temp, "runtime");
     for (const slice of SOURCE_SLICES) await mkdir(path.join(source, slice), { recursive: true });
-    const actualHelpers = new Set(["cloud-resource-budget.mjs", "cloud-resource-admission.mjs", "cgroup-resources.mjs", "cloud-runtime-root.mjs"]);
+    const actualHelpers = new Set(["cloud-resource-budget.mjs", "cloud-resource-admission.mjs", "cgroup-resources.mjs", "cloud-runtime-root.mjs", "cloud-runtime-assets.mjs"]);
     for (const relative of [...ROOT_METADATA, ...RUNTIME_HELPERS.map(helper => helper.source),
       ...hostSources, "scripts/cloud-workspace-validation/sandbox/start-engine.sh"]) {
       const filename = path.join(source, relative);

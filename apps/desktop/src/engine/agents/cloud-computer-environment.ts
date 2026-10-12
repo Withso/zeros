@@ -20,7 +20,7 @@ export function cloudComputerProcessEnvironment(
     if (isRuntimeInjectionEnvName(name) || isCredentialRedirectEnvName(name))
       throw new Error("Cloud environment is invalid");
     if (
-      /^(?:ZEROS_|CONDUCTOR_|GIT_|XDG_)/.test(name) ||
+      /^(?:ZEROS_|CONDUCTOR_|GIT_|XDG_|FONTCONFIG_)/.test(name) ||
       ["HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR"].includes(name)
     )
       continue;

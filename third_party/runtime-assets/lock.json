@@ -1,0 +1,613 @@
+{
+  "schema": "zeros.runtime-system-assets-lock/v1",
+  "archive": "https://archive.ubuntu.com/ubuntu/",
+  "release": {
+    "path": "dists/noble/InRelease",
+    "sha256": "cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0",
+    "size": 255850,
+    "origin": "Ubuntu",
+    "suite": "noble",
+    "codename": "noble",
+    "date": "Thu, 25 Apr 2024 15:10:33 UTC",
+    "validUntil": null
+  },
+  "key": {
+    "file": "ubuntu-archive-2018.asc",
+    "sha256": "85309b698b7bdac6f21de64aa1eaa998470bbd9c8c853ea274d0c27a95013210",
+    "fingerprint": "F6ECB3762474EDA9D21B7022871920D1991BC93C"
+  },
+  "indexes": [
+    {
+      "path": "dists/noble/main/binary-amd64/Packages.xz",
+      "sha256": "2a6a199e1031a5c279cb346646d594993f35b1c03dd4a82aaa0323980dd92451",
+      "size": 1401160
+    },
+    {
+      "path": "dists/noble/main/source/Sources.xz",
+      "sha256": "4f8e45d8f84dd2a6b7ce87695c70336114b9e96e6fd6db066c115f758e39308e",
+      "size": 1383940
+    },
+    {
+      "path": "dists/noble/universe/binary-amd64/Packages.xz",
+      "sha256": "ba9057fa1b91438cc8a1d26808d00c85389fe101d0c1496254df97236405599a",
+      "size": 15037908
+    },
+    {
+      "path": "dists/noble/universe/source/Sources.xz",
+      "sha256": "796c4253df46fe9d0b468c5b18259f8d5172bf6c8b3b17451ba98ffc1781f682",
+      "size": 19839948
+    },
+    {
+      "path": "dists/resolute/universe/binary-amd64/Packages.xz",
+      "sha256": "1587be86d66d38542325215e0e109f75bd695c8f24d793ace2762038a6ad581e",
+      "size": 15960824
+    },
+    {
+      "path": "dists/resolute/universe/source/Sources.xz",
+      "sha256": "9c732321580ae2824f7d8cb936e12cca435a60a252d0654b8cc2a0011dc82903",
+      "size": 13374880
+    }
+  ],
+  "packages": [
+    {
+      "name": "fonts-freefont-ttf",
+      "version": "20211204+svn4273-2",
+      "architecture": "all",
+      "component": "main",
+      "filename": "pool/main/f/fonts-freefont/fonts-freefont-ttf_20211204+svn4273-2_all.deb",
+      "sha256": "c8283ec9ca390e6ad8d2114cb0942182db62bb97f5142c2f955218fc5f2027b4",
+      "size": 5640794,
+      "license": "GPL-3.0-or-later WITH Font-exception-2.0",
+      "copyrightSha256": "18834b9bd37876d71e37a5aa9b2e2a003bd66c52e1e3cfbbf7456a6d9b2b7a44"
+    },
+    {
+      "name": "fonts-ipafont-gothic",
+      "version": "00303-21ubuntu1",
+      "architecture": "all",
+      "component": "universe",
+      "filename": "pool/universe/f/fonts-ipafont/fonts-ipafont-gothic_00303-21ubuntu1_all.deb",
+      "sha256": "71e63f0f88cca672fbb24ed27873d799d8c37233f001aa0bbcdc2f303b1b98a2",
+      "size": 3513360,
+      "license": "IPA",
+      "copyrightSha256": "77797e4ebb10839ce90c43b61d40def65d70fa448bee7c4daee07997ff928757"
+    },
+    {
+      "name": "fonts-noto-color-emoji",
+      "version": "2.042-1",
+      "architecture": "all",
+      "component": "main",
+      "filename": "pool/main/f/fonts-noto-color-emoji/fonts-noto-color-emoji_2.042-1_all.deb",
+      "sha256": "d99a5f5e3a416946b5b584a017cf56c5e27944b945cee015f78b85ba0b559b07",
+      "size": 9670614,
+      "license": "OFL-1.1 AND Apache-2.0",
+      "copyrightSha256": "3720722d2046accb40e1696f096b57c658b0b47d74031b3d114cf7545b840b3c"
+    },
+    {
+      "name": "fonts-tlwg-loma-otf",
+      "version": "1:0.7.3-1",
+      "architecture": "all",
+      "component": "universe",
+      "filename": "pool/universe/f/fonts-tlwg/fonts-tlwg-loma-otf_0.7.3-1_all.deb",
+      "sha256": "888038637a15d11993e3a9ddd50f6391a704918b2e38fe75b2f4d74b4fcfda9a",
+      "size": 106786,
+      "license": "GPL-2.0-or-later WITH Font-exception-2.0",
+      "copyrightSha256": "46d029d17ed9adb2a95761bbb750e5c66a7d455dfaa09a8be6cd2b5f3d8d5006"
+    },
+    {
+      "name": "fonts-unifont",
+      "version": "1:15.1.01-1build1",
+      "architecture": "all",
+      "component": "universe",
+      "filename": "pool/universe/u/unifont/fonts-unifont_15.1.01-1build1_all.deb",
+      "sha256": "56c9d46ce8223fa29c28eaeb99cabfc3a3159d3eec58f0bbbea839953f4cf363",
+      "size": 2993066,
+      "license": "GPL-2.0-or-later",
+      "copyrightSha256": "0986c8df2fc58c2103248700e14dca643db03aa64bb2b84638d4c99780f37f77"
+    },
+    {
+      "name": "fonts-wqy-zenhei",
+      "version": "0.9.45-8",
+      "architecture": "all",
+      "component": "universe",
+      "filename": "pool/universe/f/fonts-wqy-zenhei/fonts-wqy-zenhei_0.9.45-8_all.deb",
+      "sha256": "496969d65dc5664a3291e678d5cbef6815dc308ee5bf37b656c00af2cb490410",
+      "size": 7471624,
+      "license": "(GPL-2.0-only WITH Font-exception-2.0) AND mplus",
+      "copyrightSha256": "d183af7db6d782fe7009eeafef0cef67099ef50ef18dd81513de8004b0361cb7"
+    },
+    {
+      "name": "git-lfs",
+      "version": "3.7.1-1",
+      "architecture": "amd64",
+      "component": "universe",
+      "filename": "pool/universe/g/git-lfs/git-lfs_3.7.1-1_amd64.deb",
+      "sha256": "790ced8d61606015e15ce4b39c12feb013fcc1e4ac2497f3933c14ae2aa600ff",
+      "size": 4308962,
+      "license": "MIT AND BSD-2-Clause AND BSD-3-Clause AND Apache-2.0 AND MPL-2.0",
+      "copyrightSha256": "88098d745c1fa4ddb1a63574a9a557e9de7abc2033a7f92935ada9dd9a0bb070",
+      "suite": "resolute",
+      "builtUsingField": "Static-Built-Using",
+      "builtUsing": "golang-1.25 (= 1.25.0-0ubuntu1), golang-github-dpotapov-go-spnego (= 0.0~git20190506.c2c6091-2), golang-github-git-lfs-gitobj (= 2.1.1-1), golang-github-git-lfs-go-netrc (= 0.0~git20210914.f0c862d-1), golang-github-git-lfs-pktline (= 0.0~git20210330.06e9096-2), golang-github-git-lfs-wildmatch (= 2.0.1-1), golang-github-golang-groupcache (= 0.0~git20210331.41bb18b-2), golang-github-hashicorp-go-uuid (= 1.0.3-1), golang-github-jcmturner-gofork (= 1.0.0-4), golang-github-jmhodges-clock (= 1.1-1), golang-github-leonelquinteros-gotext (= 1.5.0-3), golang-github-mattn-go-isatty (= 0.0.20-1), golang-github-olekukonko-ts (= 0.0~git20140412.0.ecf753e-4), golang-github-pkg-errors (= 0.9.1-3), golang-github-rubyist-tracerx (= 0.0~git20170927.0.7879593-2), golang-github-spf13-cobra (= 1.10.1-1), golang-github-spf13-pflag (= 1.0.10-1), golang-github-ssgelm-cookiejarparser (= 1.0.0-3), golang-go.crypto (= 1:0.25.0-1), golang-golang-x-net (= 1:0.27.0-2), golang-golang-x-sync (= 0.7.0-1), golang-golang-x-sys (= 0.38.0-1), golang-golang-x-text (= 0.31.0-1), golang-gopkg-jcmturner-aescts.v1 (= 1.0.1-4), golang-gopkg-jcmturner-dnsutils.v1 (= 1.0.1-2build1), golang-gopkg-jcmturner-gokrb5.v5 (= 5.3.0+dfsg-2), golang-gopkg-jcmturner-rpc.v0 (= 0.0.2-2build1)"
+    },
+    {
+      "name": "xfonts-cyrillic",
+      "version": "1:1.0.5+nmu1",
+      "architecture": "all",
+      "component": "universe",
+      "filename": "pool/universe/x/xfonts-cyrillic/xfonts-cyrillic_1.0.5+nmu1_all.deb",
+      "sha256": "d4a63d4da9f6d58467ccaa22b7b26c009ab46b07f0b1be2138d3bb037e74d2cb",
+      "size": 384312,
+      "license": "MIT",
+      "copyrightSha256": "406f0f1ff0be3e8253d1ceaa9d4d7b10ba368ea0206cbb7f07870cc2c907dfa9"
+    },
+    {
+      "name": "xfonts-scalable",
+      "version": "1:1.0.3-1.3",
+      "architecture": "all",
+      "component": "main",
+      "filename": "pool/main/x/xfonts-scalable/xfonts-scalable_1.0.3-1.3_all.deb",
+      "sha256": "517f73a4f6e37332addffe6ff1795d5371f2f9c0863781efc31c4613f69993de",
+      "size": 304118,
+      "license": "Bitstream-Charter",
+      "copyrightSha256": "eca307f5e148200991e7cdacf6b11910e014073ed09c81cf853aa09d09ee2a60"
+    }
+  ],
+  "sources": [
+    {
+      "name": "fonts-freefont",
+      "version": "20211204+svn4273-2",
+      "component": "main",
+      "directory": "pool/main/f/fonts-freefont",
+      "files": [
+        {
+          "path": "pool/main/f/fonts-freefont/fonts-freefont_20211204+svn4273-2.dsc",
+          "sha256": "085525ac838e0fee10ffa350bf7f78cb6ed98b1ffb362fe36c9e677d9b003d5b",
+          "size": 2357
+        },
+        {
+          "path": "pool/main/f/fonts-freefont/fonts-freefont_20211204+svn4273.orig.tar.gz",
+          "sha256": "41d21ea08cdb64f208dd452c8a6251bfd84bc585baa35eb6378d0ae7a4d7a39e",
+          "size": 8745686
+        },
+        {
+          "path": "pool/main/f/fonts-freefont/fonts-freefont_20211204+svn4273-2.debian.tar.xz",
+          "sha256": "8a999b1191aebe4c2c2a10125a18d46cfc654ced74db7e0c84120e490cbbb245",
+          "size": 11824
+        }
+      ]
+    },
+    {
+      "name": "fonts-tlwg",
+      "version": "1:0.7.3-1",
+      "component": "main",
+      "directory": "pool/main/f/fonts-tlwg",
+      "files": [
+        {
+          "path": "pool/main/f/fonts-tlwg/fonts-tlwg_0.7.3-1.dsc",
+          "sha256": "3cad1cb35491175b787af223e3def1f91cea39de20482dab0dc55aefcfb90c59",
+          "size": 5111
+        },
+        {
+          "path": "pool/main/f/fonts-tlwg/fonts-tlwg_0.7.3.orig.tar.xz",
+          "sha256": "6e4eff904d8cb6618a48a00d659042b25fc1b21f189d44d79268ea2b6b46bb02",
+          "size": 8191656
+        },
+        {
+          "path": "pool/main/f/fonts-tlwg/fonts-tlwg_0.7.3-1.debian.tar.xz",
+          "sha256": "b62b7b15be153a3630d5885bb2c514bd8973c56ca08531492487dca48a991c59",
+          "size": 15640
+        }
+      ]
+    },
+    {
+      "name": "fonts-wqy-zenhei",
+      "version": "0.9.45-8",
+      "component": "universe",
+      "directory": "pool/universe/f/fonts-wqy-zenhei",
+      "files": [
+        {
+          "path": "pool/universe/f/fonts-wqy-zenhei/fonts-wqy-zenhei_0.9.45-8.dsc",
+          "sha256": "e13b283d8b220fea7cf2735b4e7a302f957096a625d1b0871739e2c336150512",
+          "size": 2030
+        },
+        {
+          "path": "pool/universe/f/fonts-wqy-zenhei/fonts-wqy-zenhei_0.9.45.orig.tar.gz",
+          "sha256": "e4b7e306475bf9427d1757578f0e4528930c84c44eaa3f167d4c42f110ee75d6",
+          "size": 9247393
+        },
+        {
+          "path": "pool/universe/f/fonts-wqy-zenhei/fonts-wqy-zenhei_0.9.45-8.debian.tar.xz",
+          "sha256": "edad5b22d8d7550d38b431b56d699c675e98fec38da5998790af59b88ede8db5",
+          "size": 5432
+        }
+      ]
+    },
+    {
+      "name": "unifont",
+      "version": "1:15.1.01-1build1",
+      "component": "universe",
+      "directory": "pool/universe/u/unifont",
+      "files": [
+        {
+          "path": "pool/universe/u/unifont/unifont_15.1.01-1build1.dsc",
+          "sha256": "4826c311811406f5b3384275eb5e081f1296e81206f7e9e644332275c79bd6e9",
+          "size": 2612
+        },
+        {
+          "path": "pool/universe/u/unifont/unifont_15.1.01.orig.tar.gz",
+          "sha256": "e15f4209a2f7937951681f4522b21a4deb9fb36220c82f8b8cb66e2b1466cdb7",
+          "size": 30733769
+        },
+        {
+          "path": "pool/universe/u/unifont/unifont_15.1.01.orig.tar.gz.asc",
+          "sha256": "45b977c43feb4ac251eafff40d518e6bbf5a854d12f16485d74223333dfec7c1",
+          "size": 833
+        },
+        {
+          "path": "pool/universe/u/unifont/unifont_15.1.01-1build1.debian.tar.xz",
+          "sha256": "6339df0dce8e8a426a60b82ec689b1ac37758842c046a2d9868e8df5bad1ae44",
+          "size": 19040
+        }
+      ]
+    },
+    {
+      "name": "golang-github-hashicorp-go-uuid",
+      "version": "1.0.3-1",
+      "component": "universe",
+      "suite": "resolute",
+      "directory": "pool/universe/g/golang-github-hashicorp-go-uuid",
+      "files": [
+        {
+          "path": "pool/universe/g/golang-github-hashicorp-go-uuid/golang-github-hashicorp-go-uuid_1.0.3-1.dsc",
+          "size": 2325,
+          "sha256": "05cf6163db144fde12fd5fbb9f302f3b2fb39fec37e8d05aca5a424072414d3a"
+        },
+        {
+          "path": "pool/universe/g/golang-github-hashicorp-go-uuid/golang-github-hashicorp-go-uuid_1.0.3.orig.tar.gz",
+          "size": 7095,
+          "sha256": "fc3d6d38503b8cd2d65de7d3dce9dc7fa2673cdaa6ff292575a6a0a2ba9a91ac"
+        },
+        {
+          "path": "pool/universe/g/golang-github-hashicorp-go-uuid/golang-github-hashicorp-go-uuid_1.0.3-1.debian.tar.xz",
+          "size": 7444,
+          "sha256": "227c7a3353dcfb8bdd3d0132d5d7be9b7b5bf95672b2a620d2e8e81bb6cbfa67"
+        }
+      ]
+    }
+  ],
+  "commonLicenses": {
+    "package": "base-files",
+    "version": "13ubuntu10",
+    "filename": "pool/main/b/base-files/base-files_13ubuntu10_amd64.deb",
+    "sha256": "cd06729c776397bb74779773f4dece372a1a3f795e5992804022bffab0278ffb",
+    "files": [
+      {
+        "file": "LICENSE.GPL-2",
+        "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643"
+      },
+      {
+        "file": "LICENSE.GPL-3",
+        "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+      },
+      {
+        "file": "LICENSE.GFDL-1.3",
+        "sha256": "110535522396708cea37c72a802c5e7e81391139f5f7985631c93ef242b206a4"
+      },
+      {
+        "file": "LICENSE.Apache-2.0",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      }
+    ]
+  },
+  "gitLfsNotices": {
+    "builtUsingField": "Static-Built-Using",
+    "builtUsing": "golang-1.25 (= 1.25.0-0ubuntu1), golang-github-dpotapov-go-spnego (= 0.0~git20190506.c2c6091-2), golang-github-git-lfs-gitobj (= 2.1.1-1), golang-github-git-lfs-go-netrc (= 0.0~git20210914.f0c862d-1), golang-github-git-lfs-pktline (= 0.0~git20210330.06e9096-2), golang-github-git-lfs-wildmatch (= 2.0.1-1), golang-github-golang-groupcache (= 0.0~git20210331.41bb18b-2), golang-github-hashicorp-go-uuid (= 1.0.3-1), golang-github-jcmturner-gofork (= 1.0.0-4), golang-github-jmhodges-clock (= 1.1-1), golang-github-leonelquinteros-gotext (= 1.5.0-3), golang-github-mattn-go-isatty (= 0.0.20-1), golang-github-olekukonko-ts (= 0.0~git20140412.0.ecf753e-4), golang-github-pkg-errors (= 0.9.1-3), golang-github-rubyist-tracerx (= 0.0~git20170927.0.7879593-2), golang-github-spf13-cobra (= 1.10.1-1), golang-github-spf13-pflag (= 1.0.10-1), golang-github-ssgelm-cookiejarparser (= 1.0.0-3), golang-go.crypto (= 1:0.25.0-1), golang-golang-x-net (= 1:0.27.0-2), golang-golang-x-sync (= 0.7.0-1), golang-golang-x-sys (= 0.38.0-1), golang-golang-x-text (= 0.31.0-1), golang-gopkg-jcmturner-aescts.v1 (= 1.0.1-4), golang-gopkg-jcmturner-dnsutils.v1 (= 1.0.1-2build1), golang-gopkg-jcmturner-gokrb5.v5 (= 5.3.0+dfsg-2), golang-gopkg-jcmturner-rpc.v0 (= 0.0.2-2build1)",
+    "upstream": {
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/git-lfs/git-lfs_3.7.1.orig.tar.gz",
+      "archiveSha256": "0e83566a9e2477e03627e7fd6bf81f01fadbf93dcaf6abd2686fca90f6bac7dd",
+      "file": "git-lfs/LICENSE.upstream",
+      "sha256": "4fae9062ab5cdd5fb15486b728534d8aded8b4ae9d84b6d66a956f5162c366b6",
+      "authenticatedIndex": "resolute/universe"
+    },
+    "sources": [
+      {
+        "name": "golang-1.25",
+        "version": "1.25.0-0ubuntu1",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/main/g/golang-1.25/golang-1.25_1.25.0-0ubuntu1.debian.tar.xz",
+        "archiveSha256": "fe6d83ca24de36afd3aadd222d4093e197a65ee3c91e3d49bcc80d36f09f42d1",
+        "file": "git-lfs/copyright.golang-1.25",
+        "sha256": "a739b83e49889464462830f3c992b275f5acba9380d859f64bb75d71b18c1e03",
+        "authenticatedIndex": null
+      },
+      {
+        "name": "golang-github-dpotapov-go-spnego",
+        "version": "0.0~git20190506.c2c6091-2",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-dpotapov-go-spnego/golang-github-dpotapov-go-spnego_0.0~git20190506.c2c6091-2.debian.tar.xz",
+        "archiveSha256": "663d93afadd7882d15f233614ed54d59fab7e1f8b3cc009bd1cda2842fde6914",
+        "file": "git-lfs/copyright.golang-github-dpotapov-go-spnego",
+        "sha256": "5d597c4858ad690d0328f1ef358043e9f0255f2780d810ac4af37e409dcf6599",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-github-git-lfs-gitobj",
+        "version": "2.1.1-1",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-git-lfs-gitobj/golang-github-git-lfs-gitobj_2.1.1-1.debian.tar.xz",
+        "archiveSha256": "442437e7d715fe05e047393a13b72497c210dbe0062ef5d2e47f0b4b4f72cc9b",
+        "file": "git-lfs/copyright.golang-github-git-lfs-gitobj",
+        "sha256": "206d54fe9535c262da4b2775f58fb1f87df007cbb241926f696d903cd2386f94",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-github-git-lfs-go-netrc",
+        "version": "0.0~git20210914.f0c862d-1",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-git-lfs-go-netrc/golang-github-git-lfs-go-netrc_0.0~git20210914.f0c862d-1.debian.tar.xz",
+        "archiveSha256": "acb6810844565aa6493611dbdc1219fe8330feaf0ca383f17820ea55d0f18584",
+        "file": "git-lfs/copyright.golang-github-git-lfs-go-netrc",
+        "sha256": "f6ac5385c890680a9236904eb51e02bb50dd067c482d39390d0089ac545a33b4",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-github-git-lfs-pktline",
+        "version": "0.0~git20210330.06e9096-2",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-git-lfs-pktline/golang-github-git-lfs-pktline_0.0~git20210330.06e9096-2.debian.tar.xz",
+        "archiveSha256": "5b0fe0b79836a3fbac0edea1a7a4a5f9136f1f731b249b8888575dbd8c90ff0a",
+        "file": "git-lfs/copyright.golang-github-git-lfs-pktline",
+        "sha256": "dc86ded6f83a8f14c3c78863249c85fbb9a363fca28d650ea9824d949be5d825",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-github-git-lfs-wildmatch",
+        "version": "2.0.1-1",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-git-lfs-wildmatch/golang-github-git-lfs-wildmatch_2.0.1-1.debian.tar.xz",
+        "archiveSha256": "a3276df564cb67a5720503b0e7374004aae78d4bb176a43fe8d225faae648bd3",
+        "file": "git-lfs/copyright.golang-github-git-lfs-wildmatch",
+        "sha256": "9006bc6589fa11066cff3995652ef62b59faa78aa1a0ef6e309875e2eef1ae0f",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-github-golang-groupcache",
+        "version": "0.0~git20210331.41bb18b-2",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-golang-groupcache/golang-github-golang-groupcache_0.0~git20210331.41bb18b-2.debian.tar.xz",
+        "archiveSha256": "e945688e8461e210f85f2d23cb1e494d98cedc4ad582ba07a3111c5f55eae731",
+        "file": "git-lfs/copyright.golang-github-golang-groupcache",
+        "sha256": "83c57837c777c5032b244db187bc0a467c1f502218b662e06c5031f37d8f0470",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-github-hashicorp-go-uuid",
+        "version": "1.0.3-1",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-hashicorp-go-uuid/golang-github-hashicorp-go-uuid_1.0.3-1.debian.tar.xz",
+        "archiveSha256": "227c7a3353dcfb8bdd3d0132d5d7be9b7b5bf95672b2a620d2e8e81bb6cbfa67",
+        "file": "git-lfs/copyright.golang-github-hashicorp-go-uuid",
+        "sha256": "9b4934e3b9a0dc1f0762d112d117d66fd725f3bb589e211e431cbfe5307feffb",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-github-jcmturner-gofork",
+        "version": "1.0.0-4",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-jcmturner-gofork/golang-github-jcmturner-gofork_1.0.0-4.debian.tar.xz",
+        "archiveSha256": "b59e9a7e833746e1b4b766999a1f934879b9fa7ff36dc72cab504a3924b162d8",
+        "file": "git-lfs/copyright.golang-github-jcmturner-gofork",
+        "sha256": "e0b1e4e7fc8652fd165366e100818cb2d6d8e82d358fee37e15683f971ca7262",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-github-jmhodges-clock",
+        "version": "1.1-1",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-jmhodges-clock/golang-github-jmhodges-clock_1.1-1.debian.tar.xz",
+        "archiveSha256": "b3c5fcc6a2060cedae72f783bc4af8a3de7fa0dc6f3dbe4d703aca560549fa46",
+        "file": "git-lfs/copyright.golang-github-jmhodges-clock",
+        "sha256": "147fa3c1dc5f557e2d4edab79367ea08e0c574f5c18735123596a5d9894ab8b9",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-github-leonelquinteros-gotext",
+        "version": "1.5.0-3",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-leonelquinteros-gotext/golang-github-leonelquinteros-gotext_1.5.0-3.debian.tar.xz",
+        "archiveSha256": "42a66025dca4e7639e718ea9f79ee94b4eef896065d8aa66cebacdcb98fbb7d1",
+        "file": "git-lfs/copyright.golang-github-leonelquinteros-gotext",
+        "sha256": "b8c70b07813f3f83f66944080c5d1315cdb7d662866955f8c1b86a4534c90184",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-github-mattn-go-isatty",
+        "version": "0.0.20-1",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-mattn-go-isatty/golang-github-mattn-go-isatty_0.0.20-1.debian.tar.xz",
+        "archiveSha256": "99c9cc0d2e2f76511b022aa4ef24a34493e6f92cb3eb7a07ab340d047ed737f9",
+        "file": "git-lfs/copyright.golang-github-mattn-go-isatty",
+        "sha256": "b6d6c662b013c05bc116ebb2710c2bdc53e649040c005977f148a83e898bcad6",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-github-olekukonko-ts",
+        "version": "0.0~git20140412.0.ecf753e-4",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-olekukonko-ts/golang-github-olekukonko-ts_0.0~git20140412.0.ecf753e-4.debian.tar.xz",
+        "archiveSha256": "340de7c6264b7ec85dd88cbbee461c5bbc4fb0e2c4cf8a31e4c446a1aa5ebf9b",
+        "file": "git-lfs/copyright.golang-github-olekukonko-ts",
+        "sha256": "e77abbeed806485a27b72254d7b1975be96adc3c9e73c7fb6e09ae1db95ebaf0",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-github-pkg-errors",
+        "version": "0.9.1-3",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-pkg-errors/golang-github-pkg-errors_0.9.1-3.debian.tar.xz",
+        "archiveSha256": "565b592d4fa542ca81aec8188a2ef1e9d5ebbdff0c3b93d774000bff48d5d47e",
+        "file": "git-lfs/copyright.golang-github-pkg-errors",
+        "sha256": "9f2847f86832fb8a1c4710e27bc272ef1efa139b029ba6f66b4274f3cbce40cb",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-github-rubyist-tracerx",
+        "version": "0.0~git20170927.0.7879593-2",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-rubyist-tracerx/golang-github-rubyist-tracerx_0.0~git20170927.0.7879593-2.debian.tar.xz",
+        "archiveSha256": "07d2c7630bb496ad0ca926937dbb11e595d3289ec66ceb0642d9ec8e69f0377d",
+        "file": "git-lfs/copyright.golang-github-rubyist-tracerx",
+        "sha256": "307e5f4d3e4f14001da8d52bd4d817c7da59780d2edbab533b183698f5f06278",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-github-spf13-cobra",
+        "version": "1.10.1-1",
+        "archive": "https://snapshot.ubuntu.com/ubuntu/20251115T000000Z/pool/universe/g/golang-github-spf13-cobra/golang-github-spf13-cobra_1.10.1-1.debian.tar.xz",
+        "archiveSha256": "e42b55846f6b4e03df81e8222bf10bef95fd25c7f65ae427982c334d1e67b7d6",
+        "file": "git-lfs/copyright.golang-github-spf13-cobra",
+        "sha256": "522f9130aeae0006d9c3c62609c19f23d241871bb9f15a7ed993494815918f57",
+        "authenticatedIndex": null
+      },
+      {
+        "name": "golang-github-spf13-pflag",
+        "version": "1.0.10-1",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-spf13-pflag/golang-github-spf13-pflag_1.0.10-1.debian.tar.xz",
+        "archiveSha256": "12788d1048d9223c00b427b1f9d95d27461deaf2d799f269e1b682c9055068a9",
+        "file": "git-lfs/copyright.golang-github-spf13-pflag",
+        "sha256": "eb65d49166df4bc4406a72d569a277e41cecc115101965e70f24836fd0e590f1",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-github-ssgelm-cookiejarparser",
+        "version": "1.0.0-3",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-ssgelm-cookiejarparser/golang-github-ssgelm-cookiejarparser_1.0.0-3.debian.tar.xz",
+        "archiveSha256": "d16b6a3c24c9fd45492e1348a15c73fbecfd8e4d5a991be5ad39ddc723eced87",
+        "file": "git-lfs/copyright.golang-github-ssgelm-cookiejarparser",
+        "sha256": "b72081dbd4152aab31ffb4631c7536c61b28e38cbeacd94f8d46aad91e0376cb",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-go.crypto",
+        "version": "1:0.25.0-1",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-go.crypto/golang-go.crypto_0.25.0-1.debian.tar.xz",
+        "archiveSha256": "068a83e430cd23117b099bd3ebbd287857040058a46f6735b590a17ddfb22ba6",
+        "file": "git-lfs/copyright.golang-go.crypto",
+        "sha256": "578015af382ff88ed49a8397e38293e9a75d71bdb226795b0862a769d69f4549",
+        "authenticatedIndex": "20251115T000000Z/resolute/universe"
+      },
+      {
+        "name": "golang-golang-x-net",
+        "version": "1:0.27.0-2",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-golang-x-net/golang-golang-x-net_0.27.0-2.debian.tar.xz",
+        "archiveSha256": "5be2ffeb69555c142eebf0a38e3f6aa43d74b2dee3259d124851083a5c43b2d2",
+        "file": "git-lfs/copyright.golang-golang-x-net",
+        "sha256": "293e6d5f2547c5d30c595d954276fe13122c6458377f331053dccfd22fd346c1",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-golang-x-sync",
+        "version": "0.7.0-1",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-golang-x-sync/golang-golang-x-sync_0.7.0-1.debian.tar.xz",
+        "archiveSha256": "007a3e61067d3f155ca858fda411c86d95bf1a9ff78ce8095eb31ac930357e19",
+        "file": "git-lfs/copyright.golang-golang-x-sync",
+        "sha256": "c6bd98e848a800f186d9085d7c475e747743358aeaee81f6761a1fd64bf58c50",
+        "authenticatedIndex": "20251115T000000Z/resolute/universe"
+      },
+      {
+        "name": "golang-golang-x-sys",
+        "version": "0.38.0-1",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-golang-x-sys/golang-golang-x-sys_0.38.0-1.debian.tar.xz",
+        "archiveSha256": "3f1559bd659da27a241dfcaaba7b87b175a42937f99d301efb6aac8748bfdf56",
+        "file": "git-lfs/copyright.golang-golang-x-sys",
+        "sha256": "20a24fe41058c5e98cb160f19e3c1dfce0acc6d58c2c7bd42c749684e4d93df0",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-golang-x-text",
+        "version": "0.31.0-1",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-golang-x-text/golang-golang-x-text_0.31.0-1.debian.tar.xz",
+        "archiveSha256": "77d16629d0fa4c46f828d64fe5620253bb00339c052e30b12c163b96e1ce6b9f",
+        "file": "git-lfs/copyright.golang-golang-x-text",
+        "sha256": "16aaec08d0ec7588f94bc344e38e2e4de4ae990a5e0bfd6a9022e3a5af584b4b",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-gopkg-jcmturner-aescts.v1",
+        "version": "1.0.1-4",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-gopkg-jcmturner-aescts.v1/golang-gopkg-jcmturner-aescts.v1_1.0.1-4.debian.tar.xz",
+        "archiveSha256": "28c37dbc288fc7f349e498c3575b697245277e6e3815600fc59620b87e316e91",
+        "file": "git-lfs/copyright.golang-gopkg-jcmturner-aescts.v1",
+        "sha256": "19a9b076e44d94f9f6a915118ac8ea5c746fa1de59316eea41ab6f9fa93b75c5",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-gopkg-jcmturner-dnsutils.v1",
+        "version": "1.0.1-2build1",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-gopkg-jcmturner-dnsutils.v1/golang-gopkg-jcmturner-dnsutils.v1_1.0.1-2build1.debian.tar.xz",
+        "archiveSha256": "22c24d53277abe319505581411472f0d400a4383a430ce979fc28c3b82048429",
+        "file": "git-lfs/copyright.golang-gopkg-jcmturner-dnsutils.v1",
+        "sha256": "7c09d8909e4e4d7a1e6e5f941d20445a663388d1f69b59cca36a6e5eacd8a98c",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-gopkg-jcmturner-gokrb5.v5",
+        "version": "5.3.0+dfsg-2",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-gopkg-jcmturner-gokrb5.v5/golang-gopkg-jcmturner-gokrb5.v5_5.3.0+dfsg-2.debian.tar.xz",
+        "archiveSha256": "20979b338f16950d94a3ec77552cb16f515cb63d519d70e8627406076ef8005b",
+        "file": "git-lfs/copyright.golang-gopkg-jcmturner-gokrb5.v5",
+        "sha256": "1105c922034f1356783f8cd0e9ef3b580de32b8a42e93b0d383f59a5ba649127",
+        "authenticatedIndex": "resolute/universe"
+      },
+      {
+        "name": "golang-gopkg-jcmturner-rpc.v0",
+        "version": "0.0.2-2build1",
+        "archive": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-gopkg-jcmturner-rpc.v0/golang-gopkg-jcmturner-rpc.v0_0.0.2-2build1.debian.tar.xz",
+        "archiveSha256": "4a4e1ecdf7da1d6c11ac5c487755a95bb14f4adec8ff131f02decaec843f62f3",
+        "file": "git-lfs/copyright.golang-gopkg-jcmturner-rpc.v0",
+        "sha256": "9c1a19fc2aa27d515aad0b84832139c86a0ef4b937ee91da00bec5ec1e57b76a",
+        "authenticatedIndex": "resolute/universe"
+      }
+    ],
+    "retainedSource": [
+      {
+        "file": "sources/golang-github-hashicorp-go-uuid/golang-github-hashicorp-go-uuid_1.0.3-1.dsc",
+        "sha256": "05cf6163db144fde12fd5fbb9f302f3b2fb39fec37e8d05aca5a424072414d3a",
+        "size": 2325,
+        "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-hashicorp-go-uuid/golang-github-hashicorp-go-uuid_1.0.3-1.dsc"
+      },
+      {
+        "file": "sources/golang-github-hashicorp-go-uuid/golang-github-hashicorp-go-uuid_1.0.3.orig.tar.gz",
+        "sha256": "fc3d6d38503b8cd2d65de7d3dce9dc7fa2673cdaa6ff292575a6a0a2ba9a91ac",
+        "size": 7095,
+        "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-hashicorp-go-uuid/golang-github-hashicorp-go-uuid_1.0.3.orig.tar.gz"
+      },
+      {
+        "file": "sources/golang-github-hashicorp-go-uuid/golang-github-hashicorp-go-uuid_1.0.3-1.debian.tar.xz",
+        "sha256": "227c7a3353dcfb8bdd3d0132d5d7be9b7b5bf95672b2a620d2e8e81bb6cbfa67",
+        "size": 7444,
+        "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-hashicorp-go-uuid/golang-github-hashicorp-go-uuid_1.0.3-1.debian.tar.xz"
+      }
+    ],
+    "archiveMetadata": [
+      {
+        "url": "https://archive.ubuntu.com/ubuntu/dists/resolute/InRelease",
+        "size": 135549,
+        "sha256": "45f95ce276cdba3e41870516a130e03c58b8b7a79e9546b0efe9e526d255740c"
+      },
+      {
+        "url": "https://archive.ubuntu.com/ubuntu/dists/resolute/universe/source/Sources.xz",
+        "size": 13374880,
+        "sha256": "9c732321580ae2824f7d8cb936e12cca435a60a252d0654b8cc2a0011dc82903"
+      },
+      {
+        "url": "https://snapshot.ubuntu.com/ubuntu/20251115T000000Z/dists/resolute/InRelease",
+        "size": 87785,
+        "sha256": "6b8cd86bba1d8d0760a2c049d6a8638dd08349a49efc31fb18fc9df25f039ceb"
+      },
+      {
+        "url": "https://snapshot.ubuntu.com/ubuntu/20251115T000000Z/dists/resolute/universe/source/Sources.xz",
+        "size": 21324200,
+        "sha256": "f074befe77d24e9c294b6ba9008499254d72484fbbc65d89b7eaefe95497127e"
+      }
+    ]
+  },
+  "mirror": "https://github.com/Withso/zeros/releases/download/runtime-assets-56455a092550/",
+  "additionalReleases": [
+    {
+      "path": "dists/resolute/InRelease",
+      "size": 135549,
+      "sha256": "45f95ce276cdba3e41870516a130e03c58b8b7a79e9546b0efe9e526d255740c",
+      "suite": "resolute",
+      "codename": "resolute",
+      "origin": "Ubuntu",
+      "date": "Thu, 23 Apr 2026 17:07:15 UTC",
+      "validUntil": null
+    }
+  ]
+}

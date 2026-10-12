@@ -15,7 +15,7 @@ const logical = "/etc/zeros/cloud-resource-contract.json";
 it("imports the actual copied lib/zeros helper graph without source-only app paths", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-resource-library-")); roots.push(root);
   const library = path.join(root, "lib/zeros"); fs.mkdirSync(library, { recursive: true });
-  for (const name of ["cloud-resource-budget.mjs", "cloud-resource-admission.mjs", "cgroup-resources.mjs", "cloud-runtime-root.mjs"])
+  for (const name of ["cloud-resource-budget.mjs", "cloud-resource-admission.mjs", "cgroup-resources.mjs", "cloud-runtime-root.mjs", "cloud-runtime-assets.mjs"])
     fs.copyFileSync(path.resolve("scripts/cloud-workspace-validation/sandbox", name), path.join(library, name));
   const copied = await import(pathToFileURL(path.join(library, "cloud-resource-budget.mjs")).href);
   expect(copied.parseCloudResourceBudgetProjection(Buffer.from(JSON.stringify(projection())))).toEqual(projection());

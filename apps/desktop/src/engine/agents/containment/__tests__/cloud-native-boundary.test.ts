@@ -72,6 +72,8 @@ describe("native provider process ownership", () => {
     const values = { APP_PATH: "/home/zeros-agent/app", ORG_SECRET: "/home/zeros-agent/synthetic-private-value" };
     const env = cloudNativeProviderEnvironment({ kind: "cursor-api-key", apiKey: "synthetic-cursor-key" }, "qualified-model", undefined, values, nativeHome);
     expect(env.HOME).toBe(nativeHome.paths.home);
+    expect(env.FONTCONFIG_FILE).toMatch(/^\/opt\/zeros-infra\/r1-[a-f0-9]{64}\/worker\/design-fonts\/fonts.conf$/);
+    expect(env.GIT_CONFIG_SYSTEM).toMatch(/^\/opt\/zeros-infra\/r1-[a-f0-9]{64}\/worker\/gitconfig$/);
     expect({ APP_PATH: env.APP_PATH, ORG_SECRET: env.ORG_SECRET }).toEqual(values);
     await lease.close();
   });

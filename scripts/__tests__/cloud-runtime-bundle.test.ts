@@ -79,7 +79,10 @@ describe("Cursor platform payload closure", () => {
     // Import the actual self-test with its shipped helper graph. The identity
     // probe still runs only the original Cursor payload check; no VM custody,
     // engine role or provider success is fabricated by this fixture.
-    for (const helper of RUNTIME_HELPERS) await copyFile(helper.source, path.join(root, helper.target));
+    for (const helper of RUNTIME_HELPERS) {
+      await copyFile(helper.source, path.join(root, helper.target));
+      await chmod(path.join(root, helper.target), 0o644);
+    }
     for (const file of ["bin/start-engine.sh", "lib/zeros/setup-cloud-workspace.mjs", "lib/zeros/cloud-worker-supervisor.mjs"])
       await writeFile(path.join(root, file), "", { mode: 0o555 });
     await writeFile(path.join(root, "manifest.json"), canonicalJson(createManifest({

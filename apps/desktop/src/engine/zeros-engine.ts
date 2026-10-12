@@ -72,6 +72,7 @@ import { readObservedCloudWorkspacePorts } from "./cloud-observed-ports";
 import { CloudPreviewGatewayFactory } from "./agents/containment/cloud-preview-links";
 import { CloudNativePreviewGatewayFactory } from "./agents/containment/cloud-native-preview-gateway";
 import { resolveCloudRuntime } from "./agents/containment/cloud-runtime-root.mjs";
+import { cloudRuntimeAssetEnvironment } from "./agents/containment/cloud-runtime-assets.mjs";
 import type { Transport, TransportClient } from "./transport/types";
 import {
   channel,
@@ -11739,6 +11740,7 @@ export class ZerosEngine {
       );
       env = credentialEnv ? { ...baseEnv, ...credentialEnv.env } : baseEnv;
       if (this.cloudWorker) {
+        if (this.cloudWorker.version === 4) Object.assign(env, cloudRuntimeAssetEnvironment(resolveCloudRuntime()));
         // Isolated image/login probes have no account actor. Keep their
         // existing terminal admission and give them no default Git identity.
         if (client.cloudActor && !this.cloudRuntimeRegistration) { ptyExit(); return; }

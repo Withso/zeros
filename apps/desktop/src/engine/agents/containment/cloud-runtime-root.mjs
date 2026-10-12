@@ -2,6 +2,7 @@ import * as nativeFs from "node:fs";
 import { TextDecoder } from "node:util";
 const { closeSync, constants, statfsSync, openSync, readSync } = nativeFs;
 import path from "node:path";
+import { runtimeSystemAssetFiles } from "./cloud-runtime-assets.mjs";
 
 const PROC_SUPER_MAGIC = 0x9fa0;
 const OVERFLOW_ID = 65534;
@@ -290,7 +291,7 @@ export function createCloudRuntimeResolver({
     const fd = filesystem.openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       const stat = filesystem.fstatSync(fd), current = filesystem.lstatSync(file);
-      if (!stat.isFile() || stat.nlink !== 1 || !isOwner(file, stat.uid) || (stat.mode & 0o022) ||
+      if (!stat.isFile() || stat.nlink !== 1 || !owns(file, stat.uid) || (stat.mode & 0o022) ||
         stat.dev !== current.dev || stat.ino !== current.ino || stat.size < 2 || stat.size > maximum)
         throw invalidRuntime();
       if (file === ACTIVE && ((stat.mode & 0o7000) || (stat.mode & 0o777) !== 0o600 &&
@@ -312,6 +313,13 @@ export function createCloudRuntimeResolver({
     const stat = filesystem.lstatSync(file);
     if (!stat.isSymbolicLink() || !isOwner(file, stat.uid) || filesystem.readlinkSync(file) !== target)
       throw invalidRuntime();
+  }
+  function assertSystemAssets(runtime, owns = isOwner) {
+    try {
+      const document = readDocument(`${runtime.workerRoot}/runtime-system-assets.json`, 256 * 1024, owns);
+      for (const relative of runtimeSystemAssetFiles(document)) assertPath(`${runtime.root}/${relative}`, false, owns);
+      if (!(filesystem.lstatSync(`${runtime.binRoot}/git-lfs`).mode & 0o111)) throw invalidRuntime();
+    } catch { throw new Error("Cloud runtime system assets are missing or invalid"); }
   }
   function assertFacade(runtime) {
     assertPath("/opt/zeros", true);
@@ -396,6 +404,7 @@ export function createCloudRuntimeResolver({
       `${runtime.workerRoot}/dist-engine/cli.js`, `${runtime.root}/manifest.json`, runtime.helpers.supervisor, runtime.helpers.setup]) assertPath(file);
     for (const file of [runtime.node, runtime.startEngine, runtime.engineNamespace])
       if (!(filesystem.lstatSync(file).mode & 0o111)) throw invalidRuntime();
+    assertSystemAssets(runtime);
     return resolved = runtime;
   }
   const childOwner = (file, uid) => isOwner(file, uid) || uid === OVERFLOW_ID &&
@@ -415,6 +424,7 @@ export function createCloudRuntimeResolver({
     assertChildPath(runtime.workerRoot, true);
     assertChildPath(runtime.node);
     if (!(filesystem.lstatSync(runtime.node).mode & 0o111)) throw invalidRuntime();
+    assertSystemAssets(runtime, childOwner);
     return childResolved = runtime;
   }
   return Object.freeze({ resolve, resolveChild, assertPath, assertChildPath, packagePath });

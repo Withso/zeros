@@ -8,6 +8,12 @@ import { cloudClaudeTools } from "../adapters/claude-sdk/cloud-tools";
 import { cloudCursorRequest } from "../adapters/cursor-sdk/host/cloud-policy";
 import { cloudCodexRequest } from "../adapters/codex/cloud-policy";
 import { createCloudNativeHome } from "../containment/cloud-native-home";
+import { testCloudRuntime } from "./helpers/test-cloud-runtime";
+
+vi.mock("../containment/cloud-runtime-root.mjs", async original => ({
+  ...await original<typeof import("../containment/cloud-runtime-root.mjs")>(),
+  resolveCloudRuntime: () => testCloudRuntime(),
+}));
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
