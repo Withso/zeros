@@ -7,6 +7,7 @@ import { canonicalJson, createManifest, inventoryTree, sha256 } from "../cloud-w
 import { stageExtractedSystemAssets, type RuntimeAssetPackage } from "../cloud-workspace-validation/runtime-bundle/system-assets";
 import { runClosureProbes } from "../cloud-workspace-validation/runtime-bundle/probe";
 import * as toolchain from "../cloud-workspace-validation/runtime-bundle/toolchain";
+import { scalableFont as font } from "./fixtures/runtime-system-assets/scalable-font";
 
 const roots: string[] = [];
 const families = [
@@ -20,46 +21,13 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
-// A tiny original bitmap font, parsed by real fontconfig. The regular CI test
-// needs no network, acquired archive, system font installation or opt-in flag.
-function font(family: string) {
-  return `STARTFONT 2.1
-FONT -zeros-fixture-medium-r-normal--8-80-75-75-c-50-iso10646-1
-SIZE 8 75 75
-FONTBOUNDINGBOX 5 8 0 0
-STARTPROPERTIES 4
-FONT_ASCENT 8
-FONT_DESCENT 0
-FAMILY_NAME "${family}"
-WEIGHT_NAME "Regular"
-ENDPROPERTIES
-CHARS 1
-STARTCHAR A
-ENCODING 65
-SWIDTH 500 0
-DWIDTH 5 0
-BBX 5 8 0 0
-BITMAP
-00
-70
-88
-88
-F8
-88
-88
-00
-ENDCHAR
-ENDFONT
-`;
-}
-
 async function fixture(changeNamespace?: (args: string[]) => void) {
   const root = await mkdtemp(path.join(os.tmpdir(), "zeros-asset-probe-")); roots.push(root);
   const runtime = path.join(root, "runtime"), extracted = new Map<string, string>();
   const packages: RuntimeAssetPackage[] = [];
   for (const [family, name] of [["", "git-lfs"], ...families]) {
     const source = path.join(root, "extracted", name); extracted.set(name, source);
-    const asset = path.join(source, name === "git-lfs" ? "usr/bin/git-lfs" : "usr/share/fonts/fixture.bdf");
+    const asset = path.join(source, name === "git-lfs" ? "usr/bin/git-lfs" : "usr/share/fonts/fixture.ttf");
     await mkdir(path.dirname(asset), { recursive: true });
     await writeFile(asset, name === "git-lfs" ? '#!/bin/sh\nprintf "git-lfs/3.7.1 (synthetic offline fixture)\\n"\n' : font(family),
       { mode: name === "git-lfs" ? 0o755 : 0o644 });
@@ -96,22 +64,41 @@ async function fixture(changeNamespace?: (args: string[]) => void) {
     if (name !== "git-lfs") await symlink(`/probe-native-git-core/${name}`, path.join(stock, name));
   }
   await writeFile(path.join(stock, "git-lfs"), '#!/bin/sh\nprintf "git-lfs/0.0.0 (synthetic runner)\\n"\n', { mode: 0o555 });
+  // A runner can already have these real families installed. Their broader
+  // language coverage wins over our tiny fonts, so keep the fixture's system
+  // font catalog explicit too. Production still sees the real host catalog.
+  const systemFonts = path.join(root, "system-fonts"); await mkdir(systemFonts);
   const runTool = toolchain.runTool;
   vi.spyOn(toolchain, "runTool").mockImplementation((command, args, options, failure) => {
     if (command !== "setpriv") return runTool(command, args, options, failure);
     const mounted = [...args], entry = mounted.indexOf("/probe.cjs"); mounted[entry - 1] = probe;
     mounted.splice(mounted.indexOf("--symlink"), 0,
-      "--ro-bind", native, "/probe-native-git-core", "--ro-bind", stock, native);
+      "--ro-bind", native, "/probe-native-git-core", "--ro-bind", stock, native,
+      "--ro-bind", systemFonts, "/usr/share/fonts");
     changeNamespace?.(mounted);
     return runTool(command, mounted, options, failure);
   });
-  const replace = async (relative: string, value: string) => {
+  const replace = async (relative: string, value: string | Uint8Array) => {
     const file = path.join(runtime, relative); await chmod(file, 0o755); await writeFile(file, value);
   };
-  return { runtime, replace };
+  return { runtime, replace, systemFonts };
 }
 
 describe.skipIf(process.platform !== "linux")("system assets in the ordinary CI closure namespace", () => {
+  it("stages distinct scalable font identities for every fixture family", async () => {
+    const { runtime } = await fixture();
+    const inventory = JSON.parse(await readFile(path.join(runtime, "worker/runtime-system-assets.json"), "utf8"));
+    const patterns = inventory.fonts.map((file: string) => execFileSync("/usr/bin/fc-scan", [
+      "--format=%{family[0]}|%{postscriptname}|%{scalable}|%{fontformat}|%{charset}", path.join(runtime, file),
+    ], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: path.dirname(runtime),
+      FONTCONFIG_FILE: path.join(runtime, "worker/design-fonts/fonts.conf") } }).trim().split("|"));
+    expect(new Set(patterns.map(([family]: string[]) => family))).toEqual(new Set(families.map(([family]) => family)));
+    expect(patterns.every(([, , scalable]: string[]) => scalable === "True")).toBe(true);
+    expect(patterns.every(([, postscript]: string[]) => postscript.length > 0)).toBe(true);
+    expect(new Set(patterns.map(([, postscript]: string[]) => postscript)).size).toBe(families.length);
+    expect(patterns.every(([, , , format, charset]: string[]) => format === "TrueType" && charset === "41")).toBe(true);
+  });
+
   it("uses the staged LFS despite a runner exec-path override and matches all seven fonts without /etc", async () => {
     const { runtime } = await fixture();
     await expect(runClosureProbes(runtime)).resolves.toMatchObject({
@@ -161,9 +148,18 @@ describe.skipIf(process.platform !== "linux")("system assets in the ordinary CI 
 
   it.each(families.slice(0, 7))("reports the closed package name when %s cannot resolve", async (_family, pkg) => {
     const f = await fixture();
-    await f.replace(`worker/design-fonts/${pkg}/fixture.bdf`, font("Foreign fixture family"));
+    await f.replace(`worker/design-fonts/${pkg}/fixture.ttf`, "invalid font fixture");
     await expect(runClosureProbes(f.runtime)).rejects.toMatchObject({
       failedChecks: ["closure_probes", `runtime_system_assets_font_${pkg.replaceAll("-", "_")}`],
+    });
+  });
+
+  it("refuses a matching system font when its bundled family cannot resolve", async () => {
+    const f = await fixture();
+    await f.replace("worker/design-fonts/fonts-freefont-ttf/fixture.ttf", font("Foreign fixture family"));
+    await writeFile(path.join(f.systemFonts, "stock.ttf"), font("FreeSans"));
+    await expect(runClosureProbes(f.runtime)).rejects.toMatchObject({
+      failedChecks: ["closure_probes", "runtime_system_assets_font_fonts_freefont_ttf"],
     });
   });
 

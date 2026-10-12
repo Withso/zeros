@@ -121,7 +121,10 @@ each required font package; native output and arbitrary paths stay private.
 `cloud-runtime-system-assets-probe.test.ts` runs in the ordinary Linux Vitest
 suite without an opt-in. It stages nine synthetic packages through the real
 stager, then exercises the actual probe and namespace with real Git/fontconfig,
-small original bitmap fonts and a conflicting runner LFS. It covers every
+small original TrueType fonts and a conflicting runner LFS. Its system-font
+directory is a controlled fixture: a runner's installed families otherwise
+outscore the tiny fonts on language coverage. A negative case proves that a
+matching system font cannot satisfy a missing bundled family. It covers every
 sub-check's failure reporting. The real pinned binary/font payload is also
 checked during every bundle build. An additional offline native test accepts an
 already acquired tree (including its
