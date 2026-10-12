@@ -116,6 +116,7 @@ const workosSync = workosProvider && !config.databaseMaintenanceMode
       pool,
       provider: workosProvider,
       email: emailConfig,
+      ...workerPollingOptions(config.workerPollIntervalsMs, "workos"),
       deletionLifecycleEnabled:
         migrationResult.status.state !== "controlled_migration_pending",
     })
@@ -737,6 +738,7 @@ const server = serve({ fetch: app.fetch, port: config.port, ...(config.host ? { 
     const securityPublisher = new SecurityEventPublisher(pool, console, workerPollingOptions(config.workerPollIntervalsMs, "security"));
     stopSecurityEventPublisher = securityPublisher.start();
     workerNotifications.security = () => securityPublisher.notify();
+    if (workosSync) workerNotifications.workos = () => workosSync.notify();
     // Security/directory publication also runs with cloud disabled. One
     // dedicated disposable session serves the handlers that actually started.
     const workerListenerPool = createPool(config.databaseListenUrl ?? config.databaseUrl, {

@@ -46,8 +46,13 @@ function options(
     deletionLifecycleEnabled?: boolean;
   } = {},
 ): WorkOSSyncRuntimeOptions {
+  const client = {
+    query: vi.fn(async (sql: string) => ({ rows: sql.includes("delay_ms")
+      ? [{ kind: "commands", delay_ms: 0 }, { kind: "notifications", delay_ms: 0 }] : [] })),
+    release: vi.fn(),
+  };
   return {
-    pool: {} as pg.Pool,
+    pool: { connect: async () => client } as unknown as pg.Pool,
     provider: {} as WorkOSManagementProvider,
     email: {} as EmailConfig,
     commandIntervalMs: 60_000,
@@ -68,6 +73,10 @@ describe("WorkOS sync runtime migration boundary", () => {
       options({ deletionLifecycleEnabled: false }),
     );
 
+    await vi.waitFor(() => {
+      expect(ticks.commands).toHaveBeenCalledTimes(1);
+      expect(ticks.notifications).toHaveBeenCalledTimes(1);
+    });
     await runtime.stop();
 
     expect(ticks.commands).toHaveBeenCalledTimes(1);

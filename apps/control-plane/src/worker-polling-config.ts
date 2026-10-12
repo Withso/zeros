@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const worker = z.enum(["outbox", "access", "invitations", "security", "setup", "forks", "checkpoints",
+const worker = z.enum(["workos", "outbox", "access", "invitations", "security", "setup", "forks", "checkpoints",
   "lifecycle", "operations", "retirement", "templates", "runtimeStaging"]);
 const intervals = z.record(worker, z.number().int().min(100).max(300_000));
 export type WorkerPollIntervals = z.infer<typeof intervals>;

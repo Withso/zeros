@@ -28,3 +28,14 @@ describe("per-worker polling rollback", () => {
       }
     });
 });
+
+describe("account queue polling override", () => {
+  it("allows the account fallback override with cloud disabled", () => {
+    expect(
+      loadWorkerPollIntervals(
+        { WORKER_POLL_INTERVALS_MS: '{"workos":2000}' },
+        false,
+      ),
+    ).toEqual({ workos: 2000 });
+  });
+});

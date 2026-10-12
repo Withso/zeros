@@ -130,3 +130,54 @@ describe("cloud worker notifications", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe("shared account queue wakes", () => {
+  it("listens and reconnects with only WorkOS registered, without any cloud worker", async () => {
+    vi.useFakeTimers();
+    const first = Object.assign(new EventEmitter(), {
+      query: vi.fn(async () => ({})),
+      release: vi.fn(),
+    });
+    const second = Object.assign(new EventEmitter(), {
+      query: vi.fn(async () => ({})),
+      release: vi.fn(),
+    });
+    const connect = vi
+        .fn()
+        .mockResolvedValueOnce(first)
+        .mockResolvedValue(second),
+      workos = vi.fn();
+    const stop = startCloudWorkerNotifications(
+      { connect } as unknown as pg.Pool,
+      { workos },
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(first.query).toHaveBeenCalledExactlyOnceWith(
+        "LISTEN zeros_account_maintenance_work",
+      );
+      expect(workos).toHaveBeenCalledOnce();
+      first.emit("notification", {
+        channel: "zeros_account_maintenance_work",
+        payload: "private",
+      });
+      expect(workos).toHaveBeenCalledOnce();
+      first.emit("notification", {
+        channel: "zeros_account_maintenance_work",
+        payload: "",
+      });
+      expect(workos).toHaveBeenCalledTimes(2);
+      first.emit("error", new Error("disconnected"));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(workos).toHaveBeenCalledTimes(3);
+    } finally {
+      await stop();
+    }
+    second.emit("notification", {
+      channel: "zeros_account_maintenance_work",
+      payload: "",
+    });
+    expect(workos).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
