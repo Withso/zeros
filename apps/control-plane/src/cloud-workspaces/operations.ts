@@ -4,6 +4,8 @@ import type pg from "pg";
 
 import { withSystemTx } from "../db.js";
 import { isValidCloudWorkspaceWorkerId } from "./worker-identity.js";
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
+import { readCloudWorkerNextDelay } from "./worker-deadlines.js";
 
 export interface CloudWorkspaceDeletionObjectService {
   deleteUnreferencedSystem(input: {
@@ -51,8 +53,7 @@ export class CloudWorkspaceOperationsWorker {
   private readonly leaseMs: number;
   private readonly maxAttempts: number;
   private readonly deletionBatchSize: number;
-  private timer: NodeJS.Timeout | null = null;
-  private active: Promise<void> | null = null;
+  private readonly scheduler: CloudWorkerScheduler;
   private started = false;
   private stopped = false;
 
@@ -90,6 +91,9 @@ export class CloudWorkspaceOperationsWorker {
     ) {
       throw new Error("cloud workspace operations configuration is invalid");
     }
+    this.scheduler = new CloudWorkerScheduler(this.intervalMs, async () => { await this.runOnce(); }, () => {
+      (this.options.logger ?? console).error("[cloud-workspace] operations tick failed; will retry");
+    }, () => readCloudWorkerNextDelay(this.pool, "operations"), { readBeforeRun: true, jitter: options.intervalMs === undefined });
   }
 
   start(): () => Promise<void> {
@@ -97,34 +101,15 @@ export class CloudWorkspaceOperationsWorker {
       throw new Error("cloud workspace operations lifecycle is invalid");
     }
     this.started = true;
-    const tick = () => {
-      if (this.stopped) return;
-      const task = this.runOnce()
-        .then(() => undefined)
-        .catch((error) => {
-          (this.options.logger ?? console).error(
-            `[cloud-workspace] operations tick failed: ${
-              error instanceof Error ? error.name : "unknown"
-            }`,
-          );
-        });
-      this.active = task;
-      void task.finally(() => {
-        if (this.active === task) this.active = null;
-        if (this.stopped) return;
-        this.timer = setTimeout(tick, this.intervalMs);
-        this.timer.unref();
-      });
-    };
-    tick();
+    this.scheduler.start();
     return () => this.stop();
   }
 
+  notify(): void { this.scheduler.notify(); }
+
   async stop(): Promise<void> {
     this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
-    await this.active;
+    await this.scheduler.stop();
   }
 
   async runOnce(): Promise<{

@@ -20,6 +20,7 @@ import { createCloudWorkspaceRoutes } from "./routes.js";
 import { cloudRuntimePinValues } from "./runtime-selection.js";
 import { runtimeWitness } from "./runtime-test-fixtures.js";
 import { previousBackendRecoveryRollback } from "./lifecycle-compatibility-fixtures.js";
+import { readCloudWorkerNextDelay } from "./worker-deadlines.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const recoveryConfig = { provider: "boat", imageRef: "qualified-image", sourceCommit: "b".repeat(40), architecture: "linux/amd64",
@@ -97,6 +98,22 @@ suite("automatic Boat checkpoint recovery", () => {
     await subject.runOnce();
     return subject;
   }
+  it("schedules the existing recovery retry and retains terminal quarantine until provider deletion is proven", async () => {
+    await exhaust();
+    await pool.query(`UPDATE cloud_workspace_restore_incidents SET state='waiting_for_funding',
+      next_attempt_at=now()+interval '20 seconds',deadline_at=now()+interval '1 second' WHERE workspace_id=$1`, [fixture.workspaceId]);
+    const retry = await readCloudWorkerNextDelay(pool, "recovery");
+    expect(retry).toBeGreaterThan(19_000); expect(retry).toBeLessThanOrEqual(20_000);
+    await pool.query(`UPDATE cloud_workspace_restore_incidents SET state='cancelled',updated_at=now()-interval '31 days',
+      automatic_started_at=NULL WHERE workspace_id=$1`, [fixture.workspaceId]);
+    expect(await readCloudWorkerNextDelay(pool, "recovery")).toBeLessThanOrEqual(0);
+    await pool.query("UPDATE cloud_workspace_restore_incidents SET automatic_started_at=now() WHERE workspace_id=$1", [fixture.workspaceId]);
+    expect(await readCloudWorkerNextDelay(pool, "recovery")).toBeNull();
+    await pool.query("UPDATE cloud_workspace_generations SET retired_at=now() WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId]);
+    expect(await readCloudWorkerNextDelay(pool, "recovery")).toBeNull();
+    await pool.query("UPDATE cloud_workspace_provider_bindings SET observed_state='deleted',deletion_verified_at=now() WHERE workspace_id=$1 AND generation=1", [fixture.workspaceId]);
+    expect(await readCloudWorkerNextDelay(pool, "recovery")).toBeLessThanOrEqual(0);
+  });
   function route(path = "", body?: unknown, key = randomUUID()) {
     const app = new Hono();
     app.use("*", async (c, next) => { c.set("user", { id: fixture.userId }); await next(); });

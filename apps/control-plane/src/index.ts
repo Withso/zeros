@@ -26,7 +26,8 @@ import { DatabaseCloudRuntimeTransitionService } from "./cloud-workspaces/runtim
 import { BoatApiClient } from "./cloud-workspaces/boat-client.js";
 import { DatabaseBuilderVmOperationStore } from "./cloud-workspaces/cloud-builder-vm-store.js";
 import { CloudComputerTemplateRetentionWorker } from "./cloud-workspaces/computer-template-retention.js";
-import { startCloudWorkerNotifications } from "./cloud-workspaces/worker-notifications.js";
+import { startCloudWorkerNotifications, type CloudWorkerNotificationHandlers } from "./cloud-workspaces/worker-notifications.js";
+import { workerPollingOptions } from "./worker-polling-config.js";
 import { CloudEngineCheckpointHints, startCloudEngineCheckpointHintNotifications } from "./cloud-workspaces/engine-checkpoint-hints.js";
 import { DatabaseCloudWorkspaceActionService } from "./cloud-workspaces/action-receipts.js";
 import { loadConfig } from "./config.js";
@@ -60,7 +61,7 @@ import { DatabaseCloudRuntimeServiceAccess } from "./cloud-workspaces/runtime-se
 import { createCloudRuntimeServiceRelay } from "./cloud-workspaces/runtime-service-relay.js";
 import { DatabaseCloudWorkspaceCommandService } from "./cloud-workspaces/commands.js";
 import { DatabaseCloudWorkspaceEventService } from "./cloud-workspaces/event-streams.js";
-import { PostgresSecurityEventBroker,startSecurityEventPublisher } from "./security-events.js";
+import { PostgresSecurityEventBroker, SecurityEventPublisher } from "./security-events.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import { startWorkOSSyncRuntime } from "./workos-sync-runtime.js";
 import {CloudWorkspaceInvitationDeliveryWorker,workspaceInvitationDeliveryConfig,workspaceInvitationSender} from "./cloud-workspaces/invitation-delivery.js";
@@ -149,6 +150,7 @@ let stopCloudHealthAlerts = async () => {};
 let startCloudHealthAlerts = () => {};
 let startCloudBackground = () => {};
 let stopSecurityEventPublisher=async()=>{};
+const workerNotifications: CloudWorkerNotificationHandlers = {};
 let cloudRuntimeBridge: CloudRuntimeBridgeRelay | null = null;
 let cloudPreviewWebSocketRelay: CloudPreviewWebSocketRelay | null = null;
 let cloudRuntimeServiceRelay: CloudPreviewWebSocketRelay | null = null;
@@ -245,7 +247,8 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
   ]);
   const cloud = config.cloudWorkspaces;
   const invitationConfig=workspaceInvitationDeliveryConfig(cloud,config.inviteLinkBase,emailConfig);
-  const invitationWorker=invitationConfig?new CloudWorkspaceInvitationDeliveryWorker(pool,invitationConfig,workspaceInvitationSender(emailConfig)):null;
+  const invitationWorker=invitationConfig?new CloudWorkspaceInvitationDeliveryWorker(pool,invitationConfig,workspaceInvitationSender(emailConfig),console,
+    workerPollingOptions(config.workerPollIntervalsMs, "invitations")):null;
   cloudWorkspaceHealthService = new DatabaseCloudWorkspaceHealthService(pool, {
     backgroundWorkersEnabled: cloud.backgroundWorkersEnabled !== false,
     setupExecutionEnabled: cloud.setupExecution !== null,
@@ -286,12 +289,12 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
   const accessRevocationWorker = new CloudWorkspaceAccessRevocationWorker({
     pool,
     providerResolver,
-    intervalMs: cloud.reconcileIntervalMs,
+    ...workerPollingOptions(config.workerPollIntervalsMs, "access"),
     leaseMs: Math.max(60_000, cloud.operationTimeoutSeconds * 2_000),
   });
   const checkpointRequestWorker = new CloudWorkspaceCheckpointRequestWorker(
     pool,
-    { intervalMs: cloud.reconcileIntervalMs },
+    workerPollingOptions(config.workerPollIntervalsMs, "checkpoints"),
   );
   const contentService = new DatabaseCloudWorkspaceContentService({
     pool,
@@ -346,7 +349,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       config.auth.provider === "workos",
     );
     forkWorker = new CloudWorkspaceForkWorker(pool, blobService, {
-      intervalMs: cloud.reconcileIntervalMs,
+      ...workerPollingOptions(config.workerPollIntervalsMs, "forks"),
       leaseMs: Math.max(60_000, cloud.operationTimeoutSeconds * 2_000),
     });
     objectMaintenanceWorker = new CloudWorkspaceObjectMaintenanceWorker(
@@ -357,7 +360,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       },
     );
     operationsWorker = new CloudWorkspaceOperationsWorker(pool, blobService, {
-      intervalMs: Math.max(5_000, cloud.reconcileIntervalMs),
+      ...workerPollingOptions(config.workerPollIntervalsMs, "operations"),
       leaseMs: Math.max(60_000, cloud.operationTimeoutSeconds * 2_000),
     });
   }
@@ -370,7 +373,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
           cloud.outbox.timeoutMs,
         ),
         {
-          intervalMs: cloud.reconcileIntervalMs,
+          ...workerPollingOptions(config.workerPollIntervalsMs, "outbox"),
           leaseMs: Math.max(30_000, cloud.outbox.timeoutMs * 2),
         },
       )
@@ -569,7 +572,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       recoveryConfig: cloud,
       workosEnabled: config.auth.provider === "workos",
       sanitizeLog: sanitizeCloudWorkspaceSetupLog,
-      intervalMs: setup.intervalMs,
+      ...workerPollingOptions(config.workerPollIntervalsMs, "setup"),
       leaseMs: setup.leaseMs,
       heartbeatMs: Math.max(250, Math.floor(setup.leaseMs / 3)),
       executionTimeoutMs: (setup.timeoutSeconds + 15) * 1_000,
@@ -608,7 +611,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       runtimeUpgradeConfig: cloud,
       ...(cloud.computePolicy?{computePolicy:cloud.computePolicy}:{}),
       workosEnabled: config.auth.provider === "workos",
-      intervalMs: cloud.reconcileIntervalMs,
+      ...workerPollingOptions(config.workerPollIntervalsMs, "lifecycle"),
       leaseMs: Math.max(10 * 60_000, cloud.operationTimeoutSeconds * 2_000),
     });
     stopCloudReconciler = lifecycle.stop;
@@ -626,22 +629,23 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     if (invitationWorker) stopCloudInvitationWorker=invitationWorker.start();
 
     if (setupWorker) stopCloudSetupWorker = setupWorker.start();
-    stopCloudComputerRetirementWorker = createCloudComputerRetirementWorker(pool, cloud).start();
+    const retirementWorker = createCloudComputerRetirementWorker(pool, cloud, workerPollingOptions(config.workerPollIntervalsMs, "retirement"));
+    stopCloudComputerRetirementWorker = retirementWorker.start();
     if (runtimeStagingWorker) stopCloudRuntimeStagingWorker = runtimeStagingWorker.start();
-    // Reserve a separate session even without DATABASE_LISTEN_URL: long-held
-    // listeners must not consume request/worker transaction pool capacity.
-    const workerListenerPool = createPool(config.databaseListenUrl ?? config.databaseUrl, {
-      maxConnections: 1, applicationName: "zeros-cloud-worker-listener",
-    });
-    const stopNotifications = startCloudWorkerNotifications(workerListenerPool, {
+    Object.assign(workerNotifications, {
       lifecycle: () => lifecycle.reconciler.notify(),
       setup: () => setupWorker?.notify(),
+      recovery: () => setupWorker?.notify(),
+      access: () => accessRevocationWorker.notify(),
+      checkpoints: () => checkpointRequestWorker.notify(),
+      ...(outboxWorker ? { outbox: () => outboxWorker.notify() } : {}),
+      ...(invitationWorker ? { invitations: () => invitationWorker.notify() } : {}),
+      ...(forkWorker ? { forks: () => forkWorker.notify() } : {}),
+      ...(operationsWorker ? { operations: () => operationsWorker.notify() } : {}),
+      retirement: () => retirementWorker.notify(),
+      ...(computerTemplateWorker ? { templates: () => computerTemplateWorker.notify() } : {}),
       ...(runtimeStagingWorker ? { runtimeStaging: () => runtimeStagingWorker.notify() } : {}),
-    });
-    stopCloudWorkerNotifications = async () => {
-      try { await stopNotifications(); }
-      finally { await workerListenerPool.end(); }
-    };
+    } satisfies CloudWorkerNotificationHandlers);
     if (runtimeQualificationWorker) stopCloudRuntimeQualificationWorker = runtimeQualificationWorker.start();
     if (runtimeImageWorker) stopCloudRuntimeImageWorker = runtimeImageWorker.start();
     if (computerTemplateWorker) stopCloudComputerTemplateWorker = computerTemplateWorker.start();
@@ -730,7 +734,19 @@ const server = serve({ fetch: app.fetch, port: config.port, ...(config.host ? { 
     }
     startCloudBackground();
     startCloudHealthAlerts();
-    stopSecurityEventPublisher=startSecurityEventPublisher(pool);
+    const securityPublisher = new SecurityEventPublisher(pool, console, workerPollingOptions(config.workerPollIntervalsMs, "security"));
+    stopSecurityEventPublisher = securityPublisher.start();
+    workerNotifications.security = () => securityPublisher.notify();
+    // Security/directory publication also runs with cloud disabled. One
+    // dedicated disposable session serves the handlers that actually started.
+    const workerListenerPool = createPool(config.databaseListenUrl ?? config.databaseUrl, {
+      maxConnections: 1, applicationName: "zeros-cloud-worker-listener",
+    });
+    const stopNotifications = startCloudWorkerNotifications(workerListenerPool, workerNotifications);
+    stopCloudWorkerNotifications = async () => {
+      try { await stopNotifications(); }
+      finally { await workerListenerPool.end(); }
+    };
   }
   console.log(`[control-plane] listening on :${info.port}`);
 });

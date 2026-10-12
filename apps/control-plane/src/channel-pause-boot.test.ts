@@ -5,7 +5,7 @@ const fixture = vi.hoisted(() => ({
   pool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
   serve: vi.fn(),
   app: vi.fn(() => ({ fetch: vi.fn() })),
-  security: vi.fn(() => async () => {}),
+  securityStart: vi.fn(),
   cloudNotifications: vi.fn(),
   checkpointNotifications: vi.fn(),
   boat: vi.fn(),
@@ -31,7 +31,11 @@ vi.mock("./migrate.js", async original => ({
 vi.mock("./email.js", () => ({ loadEmailConfig: () => ({ from: null, apiKey: null }), sendEmailStrict: vi.fn() }));
 vi.mock("./app.js", () => ({ createApp: fixture.app }));
 vi.mock("./security-events.js", () => ({
-  PostgresSecurityEventBroker: class { stop() {} }, startSecurityEventPublisher: fixture.security,
+  PostgresSecurityEventBroker: class { stop() {} },
+  SecurityEventPublisher: class {
+    start() { fixture.securityStart(); return async () => {}; }
+    notify() {}
+  },
 }));
 vi.mock("./cloud-workspaces/worker-notifications.js", () => ({ startCloudWorkerNotifications: fixture.cloudNotifications }));
 vi.mock("./cloud-workspaces/engine-checkpoint-hints.js", async original => ({
@@ -67,8 +71,11 @@ describe("paused-channel control-plane startup", () => {
     await import("./index.js");
     await vi.advanceTimersByTimeAsync(120_000);
     expect(fixture.serve).toHaveBeenCalledOnce();
-    expect(fixture.security).toHaveBeenCalledOnce(); // Shared security remains on.
-    expect(fixture.cloudNotifications).not.toHaveBeenCalled();
+    expect(fixture.securityStart).toHaveBeenCalledOnce(); // Shared security remains on.
+    // The one shared listener serves security/directory publication only; no
+    // cloud worker handler is registered while the channel is paused.
+    expect(fixture.cloudNotifications).toHaveBeenCalledOnce();
+    expect(Object.keys(fixture.cloudNotifications.mock.calls[0]![1] as object)).toEqual(["security"]);
     expect(fixture.checkpointNotifications).not.toHaveBeenCalled();
     expect(fixture.boat).not.toHaveBeenCalled();
     expect(fixture.pool.query).not.toHaveBeenCalled();

@@ -17,6 +17,36 @@ function fixture() {
 afterEach(() => { vi.useRealTimers(); });
 
 describe("cloud worker notifications", () => {
+  it("wakes every registered idle worker after LISTEN, on commit hints, and after a lost connection", async () => {
+    vi.useFakeTimers();
+    const first = client(), second = client();
+    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValue(second);
+    const workers = { outbox: vi.fn(), access: vi.fn(), invitations: vi.fn(), security: vi.fn(),
+      recovery: vi.fn(), forks: vi.fn(), checkpoints: vi.fn(), operations: vi.fn(), retirement: vi.fn(), templates: vi.fn() };
+    const channels = { outbox: "zeros_cloud_outbox_work", access: "zeros_cloud_access_work",
+      invitations: "zeros_cloud_invitation_work", security: "zeros_security_publication_work",
+      recovery: "zeros_cloud_recovery_work", forks: "zeros_cloud_fork_work", checkpoints: "zeros_cloud_checkpoint_work",
+      operations: "zeros_cloud_operations_work", retirement: "zeros_cloud_retirement_work", templates: "zeros_cloud_template_work" };
+    const stop = startCloudWorkerNotifications({ connect } as unknown as pg.Pool, workers);
+    await vi.advanceTimersByTimeAsync(0);
+    for (const name of Object.keys(workers) as Array<keyof typeof workers>) {
+      expect(first.query).toHaveBeenCalledWith(expect.stringContaining(`LISTEN ${channels[name]}`));
+      expect(workers[name]).toHaveBeenCalledOnce();
+      first.emit("notification", { channel: channels[name], payload: "private payload" });
+      expect(workers[name]).toHaveBeenCalledOnce();
+      first.emit("notification", { channel: channels[name], payload: "" });
+      expect(workers[name]).toHaveBeenCalledTimes(2);
+    }
+    first.emit("error", new Error("connection interrupted"));
+    // Hints while disconnected are deliberately lost; reconnect scans each queue.
+    await vi.advanceTimersByTimeAsync(1_000);
+    for (const wake of Object.values(workers)) expect(wake).toHaveBeenCalledTimes(3);
+    await stop();
+    second.emit("notification", { channel: channels.outbox, payload: "" });
+    expect(workers.outbox).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("wakes staging on committed qualification/release hints and after reconnect", async () => {
     vi.useFakeTimers();
     const connection = client(), runtimeStaging = vi.fn();

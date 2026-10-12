@@ -1,5 +1,6 @@
 import type pg from "pg";
 import type { Config } from "../config.js";
+import { workerPollingOptions } from "../worker-polling-config.js";
 import { BoatApiClient } from "./boat-client.js";
 import type { RuntimeArtifactStore } from "./runtime-artifact-store.js";
 import { DatabaseRuntimeStagingStore } from "./runtime-staging-store.js";
@@ -27,6 +28,7 @@ export function createCloudRuntimeStagingWorker(config: Config, pool: pg.Pool, a
     hosted: !!cloud?.boat, artifacts: artifacts !== null })) return null;
   const client = new BoatApiClient({ apiKey: cloud!.apiKey, billingOrg: cloud!.boat!.billingOrg, timeoutMs: 45_000 });
   return new CloudRuntimeStagingWorker({
+    ...workerPollingOptions(config.workerPollIntervalsMs, "runtimeStaging"),
     store: new DatabaseRuntimeStagingStore({ pool, qualificationMode: cloud!.runtime!.qualificationMode,
       workosEnabled: config.auth.provider === "workos" }),
     transitions, artifacts: artifacts!,

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type pg from "pg";
 import { z } from "zod";
 import type { Tx } from "../db.js";
+import { CloudWorkerScheduler } from "./worker-scheduler.js";
 import {
   DatabaseCloudComputerV2Service,
   type CloudComputerV2Claim,
@@ -112,6 +113,7 @@ export type ComputerTemplateWorkerDependencies = {
   runtimeImageChannel?: RuntimeImageChannel;
   maxConcurrentBuilds?: number;
   pollMs?: number;
+  intervalMs?: number;
   namePrefix?: string;
 };
 
@@ -150,6 +152,7 @@ export class ComputerTemplateWorker {
   private readonly journal: ComputerTemplateJournal;
   private readonly concurrency: number;
   private readonly pollMs: number;
+  private readonly scheduler: CloudWorkerScheduler;
   private fence = Date.now();
   private ticking: Promise<void> | null = null;
   private stopping = false;
@@ -171,29 +174,21 @@ export class ComputerTemplateWorker {
       .min(0)
       .max(10_000)
       .parse(deps.pollMs ?? 1000);
+    const intervalMs = z.number().int().min(100).max(300_000).parse(deps.intervalMs ?? 60_000);
+    this.scheduler = new CloudWorkerScheduler(intervalMs, () => this.tick(), () => {
+      // No provider exception, script output or stdin in infrastructure logs.
+      console.error("[computer-template-worker] reconciliation_failed");
+    }, () => this.journal.readNextDelayMs(this.concurrency), { readBeforeRun: true, jitter: deps.intervalMs === undefined });
   }
   start(): () => Promise<void> {
-    this.stopping = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const schedule = () => {
-      if (this.stopping) return;
-      timer = setTimeout(() => {
-        void this.tick()
-          .catch(() => {
-            // No provider exception, script output or stdin in infrastructure logs.
-            console.error("[computer-template-worker] reconciliation_failed");
-          })
-          .finally(schedule);
-      }, 1000);
-      timer.unref();
-    };
-    schedule();
+    this.scheduler.start();
     return async () => {
       this.stopping = true;
-      clearTimeout(timer);
+      await this.scheduler.stop();
       await this.ticking;
     };
   }
+  notify(): void { this.scheduler.notify(); }
   async tick(): Promise<void> {
     if (this.ticking) return this.ticking;
     this.ticking = this.work();

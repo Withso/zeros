@@ -36,8 +36,10 @@ suite("data-purge expansion on the populated previous schema", () => {
     const snapshot = async () => Object.fromEntries(await Promise.all(retained.map(async table => [table,
       (await pool.query(`SELECT to_jsonb(row) AS value FROM ${table} row ORDER BY to_jsonb(row)::text`)).rows])));
     const before = await snapshot();
-    expect(await planMigrations(pool)).toEqual({ pendingMigrations: [migration], controlledApprovals: [] });
-    expect(await runMigrations(pool, { env: { NODE_ENV: "production" } })).toEqual([migration]);
+    const pendingMigrations = readdirSync(directory).filter(file => /^\d{4}_.+\.sql$/.test(file) && file >= migration).sort();
+    expect(pendingMigrations[0]).toBe(migration);
+    expect(await planMigrations(pool)).toEqual({ pendingMigrations, controlledApprovals: [] });
+    expect(await runMigrations(pool, { env: { NODE_ENV: "production" } })).toEqual(pendingMigrations);
     expect(await snapshot()).toEqual(before);
     expect(await runMigrations(pool, { env: { NODE_ENV: "production" } })).toEqual([]);
     await expect(withSystemTx(pool, tx => tx.query("UPDATE cloud_workspaces SET agent_boot_id=NULL WHERE id=$1", [old.workspaceId])))

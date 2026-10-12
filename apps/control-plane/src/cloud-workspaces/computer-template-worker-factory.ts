@@ -1,5 +1,6 @@
 import type pg from "pg";
 import type { Config } from "../config.js";
+import { workerPollingOptions } from "../worker-polling-config.js";
 import { BoatApiClient } from "./boat-client.js";
 import { createComputerTemplateBoatAdapters } from "./computer-template-boat.js";
 import { sanitizeComputerTemplateLog } from "./computer-template-logs.js";
@@ -36,5 +37,6 @@ export function createComputerTemplateWorker(
     billingOrg,
     ...(cloud.runtime?.imagesEnabled === true ? { runtimeImageChannel: config.deploymentChannel } : {}),
     maxConcurrentBuilds: cloud.computerMaxConcurrentBuilds ?? 2,
+    ...workerPollingOptions(config.workerPollIntervalsMs, "templates"),
   });
 }

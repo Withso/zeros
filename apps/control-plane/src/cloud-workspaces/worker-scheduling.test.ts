@@ -5,8 +5,8 @@ import { CloudWorkspaceSetupWorker } from "./setup-worker.js";
 import type { CloudWorkspaceProvider } from "./provider.js";
 
 const workers = {
-  lifecycle: () => new CloudWorkspaceReconciler({
-    pool: {} as pg.Pool, provider: { name: "boat" } as CloudWorkspaceProvider,
+  lifecycle: (pool = {} as pg.Pool) => new CloudWorkspaceReconciler({
+    pool, provider: { name: "boat" } as CloudWorkspaceProvider,
     intervalMs: 5_000, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   }),
   setup: () => new CloudWorkspaceSetupWorker({
@@ -22,11 +22,14 @@ describe.each(Object.entries(workers))("%s work scheduling", (_name, makeWorker)
   function fixture() {
     vi.useFakeTimers();
     const worker = makeWorker();
+    let due = true;
+    vi.spyOn(worker as unknown as { readNextDelayMs(): Promise<number | null> }, "readNextDelayMs")
+      .mockImplementation(async () => due ? 0 : null);
     // Exercise the real start/stop loop without database/provider I/O.
     const tick = vi.spyOn(worker as unknown as { tick(periodic?: boolean): Promise<void> }, "tick")
-      .mockResolvedValue(undefined);
-    const notify = () => (worker as unknown as { notify(): void }).notify();
-    return { worker, tick, notify };
+      .mockImplementation(async () => { due = false; });
+    const notify = () => { due = true; worker.notify(); };
+    return { worker, tick, notify, makeDue: () => { due = true; } };
   }
 
   it("runs committed work immediately instead of waiting for the poll", async () => {
@@ -57,7 +60,7 @@ describe.each(Object.entries(workers))("%s work scheduling", (_name, makeWorker)
   });
 
   it("keeps polling even when notifications are absent or frequent", async () => {
-    const { worker, tick, notify } = fixture();
+    const { worker, tick, notify, makeDue } = fixture();
     const stop = worker.start();
     await vi.advanceTimersByTimeAsync(0);
     const interval = _name === "lifecycle" ? 5_000 : 1_000;
@@ -65,8 +68,10 @@ describe.each(Object.entries(workers))("%s work scheduling", (_name, makeWorker)
     notify();
     await vi.advanceTimersByTimeAsync(0);
     expect(tick).toHaveBeenCalledTimes(2);
+    makeDue(); // New work whose notification was lost.
     await vi.advanceTimersByTimeAsync(100);
     expect(tick).toHaveBeenCalledTimes(3);
+    makeDue();
     await vi.advanceTimersByTimeAsync(interval);
     expect(tick).toHaveBeenCalledTimes(4);
     await stop();
@@ -92,27 +97,28 @@ describe.each(Object.entries(workers))("%s work scheduling", (_name, makeWorker)
   });
 
   it("continues polling after a failed tick", async () => {
-    const { worker, tick, notify } = fixture();
+    const { worker, tick, notify, makeDue } = fixture();
     tick.mockRejectedValueOnce(new Error("tick failed"));
     const stop = worker.start();
     await vi.advanceTimersByTimeAsync(0);
     notify();
     await vi.advanceTimersByTimeAsync(0);
     expect(tick).toHaveBeenCalledTimes(2);
+    makeDue();
     await vi.advanceTimersByTimeAsync(_name === "lifecycle" ? 5_000 : 1_000);
     expect(tick).toHaveBeenCalledTimes(3);
     await stop();
   });
 });
 
-it("notification ticks do not advance lifecycle maintenance or orphan sweeps", async () => {
-  const worker = workers.lifecycle();
+it("lifecycle hints do not run maintenance without its own due deadline", async () => {
+  const query = vi.fn(async (sql: string) => ({ rows: sql.includes("delay_ms") ? [{ kind: "lifecycle", delay_ms: 0 }] : [], rowCount: 0 }));
+  const worker = workers.lifecycle({ connect: async () => ({ query, release: vi.fn() }) } as unknown as pg.Pool);
   const claim = vi.spyOn(worker, "runOnce").mockResolvedValue(false);
   const drift = vi.spyOn(worker, "reconcileDriftOnce").mockResolvedValue(false);
   const orphans = vi.spyOn(worker, "reconcileOrphansOnce").mockResolvedValue(0);
-  const internal = worker as unknown as { tick(periodic: boolean): Promise<void> };
-  // The fixture has no database. Any maintenance/lease/authority read fails.
-  for (let i = 0; i < 24; i++) await internal.tick(false);
+  const internal = worker as unknown as { readNextDelayMs(): Promise<number | null>; tick(): Promise<void> };
+  for (let i = 0; i < 24; i++) { await internal.readNextDelayMs(); await internal.tick(); }
   expect(claim).toHaveBeenCalledTimes(24);
   expect(drift).not.toHaveBeenCalled();
   expect(orphans).not.toHaveBeenCalled();
