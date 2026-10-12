@@ -27,6 +27,9 @@ import {
 type Message = Partial<BridgeMessage> & { type: string };
 /** Renderer-only refresh ownership; never sent to an engine. */
 export type ChatSnapshotRefresh = "all" | "local" | "retained" | readonly string[];
+/** Renderer-only receipt captured from the actual read, never inferred from
+ * whichever peer happens to be connected when an outer await completes. */
+export type CloudHistoryReadReceipt = { source: "native" | "control-plane"; isCurrent: () => boolean };
 type RequestOptions = Exclude<
   Parameters<RuntimeClient["request"]>[1],
   number | undefined
@@ -146,6 +149,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private readonly stopLocalStatus: () => void;
   private readonly stopLocalChanges: () => void;
   private readonly historyRestore = new CloudHistoryRestoreTracker();
+  private readonly historyReadReceipts = new WeakMap<object, CloudHistoryReadReceipt>();
   private readonly nativeHistoryRestore = new CloudHistoryRestoreTracker();
   private readonly stopHistoryRestore: () => void;
 
@@ -635,7 +639,28 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       this.historyWorkspaces.set(key, target);
       while (this.historyWorkspaces.size > 32) this.historyWorkspaces.delete(this.historyWorkspaces.keys().next().value!);
     }
+    this.historyReadReceipts.set(snapshot, { source: peer ? "native" : "control-plane", isCurrent: () => {
+      try {
+        assertAccess();
+        const metadata = this.historyMetadata(snapshot), conversations = this.historyConversations(op, params, snapshot);
+        if (peer && nativeRead) {
+          this.assertCurrent(peer);
+          if (peer.client.status !== "connected") return false;
+          this.nativeHistoryRestore.assertResult(nativeRead, metadata, conversations);
+          assertCloudHistoryRestoreResult(globalNativeRead, metadata, conversations);
+        } else if (restoreRead) {
+          this.historyRestore.assertResult(restoreRead, metadata, conversations);
+          const nextPeer = this.peers.get(key);
+          if (nextPeer && nextPeer.identity === identity && !nextPeer.retired && nextPeer.client.status === "connected") return false;
+        }
+        return true;
+      } catch { return false; }
+    } });
     return snapshot;
+  }
+
+  cloudHistoryReadReceipt(snapshot: object): CloudHistoryReadReceipt | undefined {
+    return this.historyReadReceipts.get(snapshot);
   }
 
   /** Passive CP checkpoint; call only for a terminal turn or chat departure.

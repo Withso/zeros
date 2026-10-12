@@ -3,7 +3,7 @@ const mocks = vi.hoisted(() => ({ epoch: 1, generation: 1, readable: true, log: 
 vi.mock("../cloud-workspace-catalog", () => ({ cloudCatalogGeneration: () => mocks.epoch,
   cloudWorkspaceDocument: () => ({ generation: { number: mocks.generation } }), canReadCloudWorkspace: () => mocks.readable }));
 vi.mock("../../platform/observability/logging/renderer-log", () => ({ logEvent: mocks.log }));
-import { clearCloudLatencySpans, cloudLatencySnapshot, finishCloudFirstText, observeCloudTranscriptPaint, pruneCloudLatencySpans, startCloudNavigationSpan, startCloudSubmitSpan } from "../cloud-workspace-latency";
+import { clearCloudLatencySpans, cloudLatencySnapshot, finishCloudFirstText, observeCloudTranscriptPaint, observeCloudTranscriptLoading, pruneCloudLatencySpans, startCloudNavigationSpan, startCloudSubmitSpan } from "../cloud-workspace-latency";
 import { cloudScopedId } from "../../platform/bridge/cloud-workspace-key";
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
 const folder = `cloud://${target.organizationId}/${target.workspaceId}`;
@@ -19,6 +19,17 @@ beforeEach(() => {
 });
 afterEach(() => { clearCloudLatencySpans(); vi.unstubAllGlobals(); });
 describe("cloud latency UI boundaries", () => {
+  it("measures a visible loading interval without content or durable identity and retires owner changes", () => {
+    const stop = observeCloudTranscriptLoading(folder, chat);
+    expect(cloudLatencySnapshot()).toEqual([]);
+    stop();
+    expect(cloudLatencySnapshot()[0]).toMatchObject({ span: "transcript_loading_visible" });
+    expect(JSON.stringify(mocks.log.mock.calls)).not.toContain(folder);
+    expect(JSON.stringify(mocks.log.mock.calls)).not.toContain(chat);
+    const retired = observeCloudTranscriptLoading(folder, chat); mocks.epoch++; retired();
+    const local = observeCloudTranscriptLoading("/personal/checkout", "local-chat"); local();
+    expect(cloudLatencySnapshot()).toHaveLength(1);
+  });
   it("finishes intent and click only after the visible transcript has painted", () => {
     startCloudNavigationSpan(folder, "intent");
     startCloudNavigationSpan(folder, "click", chat);

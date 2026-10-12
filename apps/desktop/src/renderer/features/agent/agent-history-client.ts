@@ -29,7 +29,7 @@ import {
 } from "./attachment-file-reader";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
-import { parseCloudScopedId, cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
 import { readCloudTranscriptWithCachedPaint } from "../../platform/cloud-transcript-cache";
 import { runtimeExecutionKey } from "../../platform/bridge/ws-client";
 import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-id-resolver";
@@ -41,6 +41,7 @@ import {
   bridgeChatClearProviderIdentity,
   bridgeChatBulkUpsert,
   bridgeMessageWindow,
+  bridgeMessageWindowSnapshot,
   bridgeMessageWindowOlder,
   bridgeMessageClear,
   bridgeMessageTruncateFrom,
@@ -52,6 +53,7 @@ import {
   type DbPullResult,
   type ChatMessageDelta,
   type ChatSnapshotWire,
+  type MessageWindowSnapshot,
 } from "../../platform/bridge/workspace-bridge";
 
 export type { MessageSearchHit, DbPullResult, ChatMessageDelta };
@@ -130,17 +132,32 @@ export async function windowMessages(
   before?: number,
   onCached?: (messages: AgentMessage[]) => void,
 ): Promise<AgentMessage[]> {
+  return (await windowMessagesSnapshot(chatId, limit, before, onCached ? page => onCached(page.messages) : undefined)).messages;
+}
+
+export type AgentMessageWindow = Omit<MessageWindowSnapshot, "messages" | "source"> & {
+  messages: AgentMessage[];
+  source: MessageWindowSnapshot["source"] | "cache";
+};
+
+export async function windowMessagesSnapshot(
+  chatId: string,
+  limit: number,
+  before?: number,
+  onCached?: (page: AgentMessageWindow) => void,
+): Promise<AgentMessageWindow> {
   const bridge = requireBridge("load the chat transcript");
   const target = parseCloudScopedId(chatId);
   const canPaintCached = !!target && before === undefined && !!onCached &&
-    !(bridge instanceof WorkspaceRuntimeClient && (bridge.hasCloudMessageSnapshot(chatId, limit) || bridge.statusForWorkspace(cloudWorkspaceKey(target)) === "connected"));
-  const rows = await readCloudTranscriptWithCachedPaint(chatId,
-    () => bridgeMessageWindow(bridge, chatId, limit, before),
-    canPaintCached ? window => onCached!(window.messages.map(fromPersistedMessage).filter((message): message is AgentMessage => message !== null)) : undefined,
+    !(bridge instanceof WorkspaceRuntimeClient && bridge.hasCloudMessageSnapshot(chatId, limit));
+  const page = await readCloudTranscriptWithCachedPaint(chatId,
+    () => bridgeMessageWindowSnapshot(bridge, chatId, limit, before),
+    canPaintCached ? window => onCached!({ source: "cache", restoreHead: window.restoreHead,
+      messages: window.messages.map(fromPersistedMessage).filter((message): message is AgentMessage => message !== null) }) : undefined,
   );
-  return rows
+  return { ...page, messages: page.messages
     .map(fromPersistedMessage)
-    .filter((m): m is AgentMessage => m !== null);
+    .filter((m): m is AgentMessage => m !== null) };
 }
 
 /** Fetch the next page of older messages relative to the oldest

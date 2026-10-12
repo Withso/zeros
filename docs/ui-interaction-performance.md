@@ -85,6 +85,40 @@ or engine replacement rehydrates once its authorized chat metadata is available.
 If it shared a read that retired after that cleanup, it retries once after the
 read releases its identity. This recovery must not start an agent, wake a VM,
 poll on ordinary failures, or reactivate a hidden surface.
+
+Cloud presentation readiness is separate from authoritative transcript
+hydration. An eligible account/org/workspace/chat cache window (at most 200
+messages and 512 KiB) can paint while the session remains `loading`; it suppresses
+Loading, but cannot authorize a send, queue drain or completion. Connected peers
+with no message snapshot still use the parallel cache read. Cache misses,
+eviction, denial and known incomplete/null/deleted heads remain truthful. Reads
+carry their own verified head and CP/native source through the final await;
+the currently connected peer is not proof of an earlier page's provenance.
+Provisional rows do not mount native turn metadata reads or offer edit, reset,
+fork, permission or retry actions. Their bounded cached window mounts rich
+turns around the visible tail or saved reading anchor first, then on viewport
+approach. All checkpoint anchors remain available for scroll-back; revealed
+turns stay mounted within that existing window. Hidden surfaces suspend the
+observer. Authoritative and Local turns retain their normal rendering, and
+unchanged validation preserves visible message nodes and collection references.
+
+The acceptance target for an eligible 200-row window is a visible paint under
+100 ms during start or resume, measured on the minified production build. The
+development-mode UI smoke (`scripts/ui-smoke-cloud-transcript-paint.mjs`) is a
+regression guard with a looser bound, because development React is not the
+shipped build.
+
+A new authenticated boot may retain presentation only when the complete
+immutable manifest, source, coverage, conversation and funding identity match.
+Disk alone cannot prove a successor. Binding changes still retire read and
+confirmation tokens and rotate the durable history nonce; old writes cannot
+restore retired bytes. Projection revisions are not compared across bindings.
+Changed source/edit/delete/incomplete heads invalidate incompatible rows before
+paint. Unchanged validation keeps message references. Local Personal and
+organization-local hydration remain authoritative. Closed cache outcomes/head
+facts and visible-paint/loading durations enter cloud diagnostics without
+content, hashes or durable owner/conversation identifiers.
+
 Sending immediately after Stop may race the cancelled command's durable
 retirement. Resume can retry only when the entire revision advance is accounted
 for by the same dispatching commands becoming terminal. A newer Stop, recovery,

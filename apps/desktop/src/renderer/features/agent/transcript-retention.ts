@@ -1,5 +1,12 @@
 import type { AgentSessionState } from "./use-agent-session";
 
+/** Display readiness is deliberately weaker than transcript authority. Only
+ * the exact eligible cloud window can bypass a loading presentation. */
+export function hasTranscriptPresentation(slot: AgentSessionState | undefined): boolean {
+  return !!slot && (slot.transcriptState === "resident" || slot.transcriptState === "loading" &&
+    !!slot.transcriptPresentation && slot.messages.some(message => message.kind !== "text" || !message.queued));
+}
+
 /** A turn can start and finish during one history read. Ready → ready does
  * not prove freshness: compare the immutable transcript and execution captured
  * before awaiting I/O, including edits, resets and local queued messages. */

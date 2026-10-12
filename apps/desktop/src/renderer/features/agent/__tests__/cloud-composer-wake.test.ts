@@ -91,7 +91,8 @@ function harness(cloud = true, status = "stopped", resident = true) {
     capUserAppend: (messages: unknown[], message: unknown) => [...messages, message], evictUnretainedTranscripts: vi.fn(),
     hasPromptAttachmentReferences: () => false, refreshPromptAttachments: vi.fn(), toast: toasts, drainOrDropQueue: vi.fn(), persistAuthPrompt: vi.fn(),
     HYDRATE_WINDOW: 100, hydrateInFlightRef: { current: new Map() }, pendingHydratesRef: { current: new Set() }, persistedMessageRefsRef: { current: new Map() },
-    persistWindowMessages: vi.fn(async () => [{ id: "past", kind: "text", role: "user", text: "History" }]), reconcileHistoryMessages: (messages: unknown[]) => messages,
+    persistMessageWindow: vi.fn(async () => ({ source: "control-plane", messages: [{ id: "past", kind: "text", role: "user", text: "History" }] })),
+    reconcileHistoryMessages: (messages: unknown[]) => messages, messageSnapshotsEqual: (a: unknown[], b: unknown[]) => JSON.stringify(a) === JSON.stringify(b),
     seedPersistedMessageRefs: vi.fn(), reconcileChatMessages: vi.fn(),
   };
   vm.runInNewContext(providerCode, provider);
@@ -127,6 +128,19 @@ function harness(cloud = true, status = "stopped", resident = true) {
 }
 
 describe("cloud composer readiness queue", () => {
+  it("does not dispatch cached presentation after wake until authoritative history settles", async () => {
+    const h = harness(true, "stopped", false), history = deferred();
+    h.store.sessions.chat.messages = [{ id: "cached", kind: "text", role: "agent", text: "Visible cached history" }];
+    h.store.sessions.chat.transcriptPresentation = { source: "cache" };
+    h.provider.persistMessageWindow.mockImplementationOnce(async () => { await history.promise;
+      return { source: "control-plane", messages: [{ id: "past", kind: "text", role: "agent", text: "Verified history" }] }; });
+    await h.send(); h.ready(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.provider.persistMessageWindow).toHaveBeenCalledOnce();
+    expect(h.store.sessions.chat.transcriptState).toBe("loading");
+    expect(h.delivered).not.toHaveBeenCalled(); expect(encoding.run).not.toHaveBeenCalled();
+    history.resolve(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.delivered).toHaveBeenCalledOnce();
+  });
   it.each(["signed-out", "no-entitlement"])("does not prepare or dispatch a cloud send for %s", async reason => {
     const h = harness();
     if (reason === "signed-out") h.account.me = null;

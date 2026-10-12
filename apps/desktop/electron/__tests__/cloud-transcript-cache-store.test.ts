@@ -27,6 +27,23 @@ async function fixture(options: { maxEntries?: number; maxBytes?: number } = {})
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 
 describe("durable desktop cloud transcript windows", () => {
+  it("retains a proven identical head across boot with a fresh nonce that rejects late old writes", async () => {
+    const { directory, store } = await fixture();
+    const before = restoreHead(2);
+    store.prune({ ...owner, restoreHead: before, historyEpoch: store.readReceipt(owner).historyEpoch });
+    const oldReceipt = store.readReceipt(owner);
+    store.write(owner, { ...window(20), restoreHead: before }, oldReceipt.historyEpoch);
+    const saved = store.read(owner)!.messages;
+    const next = { ...before, projection: { ...projection, generation: 3, bootId: "88888888-8888-4888-8888-888888888888",
+      writerEpoch: "99999999-9999-4999-8999-999999999999" } };
+    store.prune({ ...owner, restoreHead: next, historyEpoch: oldReceipt.historyEpoch });
+    const receipt = store.readReceipt(owner);
+    expect(receipt.historyEpoch).not.toBe(oldReceipt.historyEpoch);
+    expect(receipt.window?.messages).toEqual(saved);
+    expect(receipt.window?.restoreHead).toEqual(next);
+    store.write(owner, { ...window(100, "late old writer"), restoreHead: before }, oldReceipt.historyEpoch);
+    expect(new CloudTranscriptCacheStore(directory).read(owner)?.messages).toEqual(saved);
+  });
   it("retains root and child partial answers in source order across cached reloads", async () => {
     const { directory, store } = await fixture();
     const messages = [

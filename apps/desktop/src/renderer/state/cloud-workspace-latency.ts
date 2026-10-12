@@ -19,7 +19,7 @@ export function startCloudNavigationSpan(folder: string, phase: "intent" | "clic
   for (const listener of paintListeners) listener();
 }
 
-/** Runs only for a committed, visible, hydrated transcript. Two animation
+/** Runs only for a committed, visible, eligible transcript presentation. Two animation
  * frames bracket its first paint; this is a renderer paint approximation,
  * never a measurement of catalog arrival or offscreen hydration. */
 export function observeCloudTranscriptPaint(folder: string, chatId: string, hasHistory: boolean): () => void {
@@ -45,6 +45,17 @@ export function observeCloudTranscriptPaint(folder: string, chatId: string, hasH
   paintListeners.add(schedule);
   schedule();
   return () => { cancelled = true; paintListeners.delete(schedule); if (frame !== undefined) cancelAnimationFrame(frame); };
+}
+
+/** Measure only a Loading indicator actually committed on the active view. */
+export function observeCloudTranscriptLoading(folder: string, chatId: string): () => void {
+  const key = owner(folder);
+  if (!key || !visible()) return () => {};
+  const id = spans.begin(key, "transcript_loading_visible", chatId);
+  return () => {
+    if (owner(folder) === key && visible()) spans.finish(key, "transcript_loading_visible", chatId);
+    else spans.cancel(key, "transcript_loading_visible", chatId, id);
+  };
 }
 
 export function startCloudSubmitSpan(chatId: string): (() => void) | undefined {

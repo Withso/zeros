@@ -46,6 +46,15 @@ export function cloudHistoryFencesMatch(a: CloudHistoryRestoreFence, b: CloudHis
   return cloudHistoryBindingKey(a.projection) === cloudHistoryBindingKey(b.projection) &&
     a.conversationId === b.conversationId && JSON.stringify(a.head) === JSON.stringify(b.head);
 }
+/** Presentation continuity only, after the successor has been independently
+ * authorized. An inherited immutable manifest/source/coverage proves the same
+ * bytes; it does not extend a writer, read token, funding grant or disk nonce. */
+export function cloudHistoryPresentationContinues(a: CloudHistoryRestoreFence, b: CloudHistoryRestoreFence): boolean {
+  return cloudHistoryFenceHasTranscript(a) && cloudHistoryFenceHasTranscript(b) &&
+    a.projection.organizationId === b.projection.organizationId && a.projection.workspaceId === b.projection.workspaceId &&
+    a.projection.fundingOwnerUserId === b.projection.fundingOwnerUserId && a.projection.fundingOwnerEpoch === b.projection.fundingOwnerEpoch &&
+    a.conversationId === b.conversationId && JSON.stringify(a.head) === JSON.stringify(b.head);
+}
 /** Restore revisions are comparable only within the authenticated projection.
  * A changed binding is installed using a captured per-conversation epoch. */
 export function cloudHistoryFenceCanAdvance(previous: CloudHistoryRestoreFence, next: CloudHistoryRestoreFence): boolean {
@@ -132,6 +141,13 @@ export const CachedTranscriptWindowSchema = z.object({
   restoreHead: CloudHistoryRestoreFenceSchema.optional(),
 }).strict();
 export type CachedTranscriptWindow = z.infer<typeof CachedTranscriptWindowSchema>;
+
+export function continueCachedTranscriptPresentation(window: CachedTranscriptWindow, fence: CloudHistoryRestoreFence): CachedTranscriptWindow | null {
+  if (!window.restoreHead || !cloudHistoryPresentationContinues(window.restoreHead, fence)) return null;
+  // Revisions from different bindings are not comparable. Only the proven
+  // presentation and its message cursor survive; a new page validates afresh.
+  return { ...window, recordEpoch: null, revision: 0, restoreHead: fence };
+}
 
 export function transcriptCacheKey(owner: CloudTranscriptOwner): string {
   const key = CloudTranscriptOwnerSchema.parse(owner);
