@@ -5,8 +5,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ZerosEngine } from "../zeros-engine";
+import { CloudAgentExecutionError } from "../cloud-agent-execution-client";
+import { CLOUD_COMMAND_FAILURE_CATEGORIES } from "@zeros/protocol/cloud-commands";
+import { CLOUD_AGENT_ADMISSION_CODES } from "@zeros/protocol/cloud-agent-execution";
 import { classifyCloudEngineStartupFailure, parseCloudEngineStartupFailure, readCloudEngineStartupFailure,
-  writeCloudEngineStartupFailure } from "../agents/containment/cloud-engine-startup-failure.mjs";
+  writeCloudEngineStartupFailure, CLOUD_ENGINE_STARTUP_CODES } from "../agents/containment/cloud-engine-startup-failure.mjs";
 
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
@@ -88,6 +91,20 @@ describe("cloud engine startup failure publication", () => {
 });
 
 describe("closed startup evidence", () => {
+  it("mirrors the closed admission/validation protocol codes without accepting arbitrary suffixes", () => {
+    for (const stage of ["admission", "validation"] as const) {
+      expect(CLOUD_ENGINE_STARTUP_CODES.filter(code => code.startsWith(`cloud_${stage}_`)))
+        .toEqual(CLOUD_COMMAND_FAILURE_CATEGORIES.map(category => `cloud_${stage}_${category}`));
+      expect(classifyCloudEngineStartupFailure({ code: `cloud_${stage}_private_canary` }, "boot_owner").code).toBe("unknown");
+    }
+    for (const code of CLOUD_AGENT_ADMISSION_CODES) expect(CLOUD_ENGINE_STARTUP_CODES).toContain(code);
+  });
+  it.each(["authority_timeout", "authority_transport", "authority_http_5xx", "access_denied", "authority_response_invalid"] as const)(
+    "retains the existing typed %s cause through the startup wrapper", category => {
+      const cause = new CloudAgentExecutionError(category);
+      expect(classifyCloudEngineStartupFailure(new Error("private startup wrapper", { cause }), "boot_owner"))
+        .toEqual({ phase: "boot_owner", name: "CloudAgentExecutionError", code: cause.code, errno: null });
+    });
   it("follows a bounded typed cause without evaluating getters or retaining arbitrary text", () => {
     const error = Object.assign(new Error("credential-canary"), { code: "ENOENT", errno: -2, body: "body-canary" });
     expect(classifyCloudEngineStartupFailure(new Error("wrapper-canary", { cause: error }), "history_restore")).toEqual(closedFailure);

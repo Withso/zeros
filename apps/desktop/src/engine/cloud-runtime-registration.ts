@@ -528,6 +528,12 @@ export class CloudRuntimeRegistration {
     return this.localCommandsAcknowledged && this.document !== null &&
       this.initialRecordConnected && !this.recordHandoffPaused && this.hasControlAuthority(this.document);
   }
+  /** A retry may consume only already-confirmed authority. This read neither
+   * renews the heartbeat nor relaxes its one-second dispatch safety margin. */
+  agentBootAuthorityRemainingMs(): number {
+    if (!this.document || !this.localCommandsNegotiated()) return 0;
+    return Math.max(0, this.document.leaseExpiresAtMs - this.now() - 1000);
+  }
   get runtimeBootId(): string { return this.agentRuntime.bootId; }
   /** Authenticated history provenance, never execution or retirement authority. */
   get agentSourceWriterEpoch(): string | null { return this.sourceWriterEpoch; }

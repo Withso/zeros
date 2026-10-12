@@ -146,13 +146,38 @@ describe("cloud runtime registration", () => {
       const starting = registration.start();
       await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
       expect(registration.localCommandsNegotiated()).toBe(false);
+      expect(registration.agentBootAuthorityRemainingMs()).toBe(0);
       expect(fetcher.mock.calls[0]![1].headers["x-zeros-cloud-local-commands"]).toBe("1");
       expect(JSON.parse(fetcher.mock.calls[0]![1].body)).not.toHaveProperty("cloudLocalCommandsVersion");
       release(); await starting;
       expect(registration.localCommandsNegotiated()).toBe(acknowledged);
+      expect(registration.agentBootAuthorityRemainingMs()).toBe(acknowledged ? 89_000 : 0);
       await registration.stop();
       expect(registration.localCommandsNegotiated()).toBe(false);
+      expect(registration.agentBootAuthorityRemainingMs()).toBe(0);
     } finally { release(); await registration.stop(); }
+  });
+
+  it("bounds the boot budget by the existing authority margin and fences handoff without renewing", async () => {
+    let now = NOW;
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => now)!;
+    const fetcher = vi.fn().mockResolvedValue(Response.json(registrationResponse(), {
+      headers: { "x-zeros-cloud-local-commands": "1" },
+    }));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: V4_ATTESTATION, fetch: fetcher,
+      now: () => now, negotiateLocalCommands: true, onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    try {
+      await registration.start(); now += 10_000;
+      expect(registration.agentBootAuthorityRemainingMs()).toBe(79_000);
+      await registration.pauseRecordForRuntimeHandoff();
+      expect(registration.agentBootAuthorityRemainingMs()).toBe(0);
+      registration.resumeRecordAfterRuntimeHandoff();
+      expect(registration.agentBootAuthorityRemainingMs()).toBe(79_000);
+      now += 79_000;
+      expect(registration.agentBootAuthorityRemainingMs()).toBe(0);
+      expect(registration.localCommandsNegotiated()).toBe(false);
+      expect(fetcher).toHaveBeenCalledOnce();
+    } finally { await registration.stop(); }
   });
 
   it("ignores an unsolicited new-mode header on a legacy registration", async () => {
