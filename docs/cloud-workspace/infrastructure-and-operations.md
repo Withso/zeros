@@ -267,7 +267,7 @@ target-bound approval, and change nothing until rerun unchanged with
 | `engine_lease_expired` | A ready engine missed its 90-second heartbeat lease. | Check the sandbox at the provider and the engine log. A healthy engine that cannot reach the control plane (network, TLS or a 429 on registration or heartbeat) stops itself when its lease runs out. |
 | `access_revocation_stalled` | A client access grant failed or waited more than 15 minutes for revocation. | Check the provider's revoke API and credential. The worker retries; a failed grant needs the provider cause fixed first. |
 | `outbox_stalled` | A cloud outbox entry is dead, or queued or processing for 15 minutes. | Check the configured outbox sink's reachability and signing secret. |
-| `deletion_jobs_failed` | A workspace deletion job failed. | Read the job error and resolve it through the staff deletion operations; never purge around a provider that has not confirmed deletion. |
+| `deletion_jobs_failed` | A workspace deletion job failed. | Fix the cause first. A record purge with completed provider/object evidence can use the owner-approved `cloud-workspace-deletion:manage --retry-records` plan below; never purge around unconfirmed deletion. |
 | `deletion_intent_stalled` | A delete intent failed, made no deletion-stage progress for an hour, or is 24 hours old. Boat's `waiting_for_uploads`, `kept_for_newer_snapshots` and `waiting_for_restore` stages count as progress until the 24-hour limit. | Read the intent `error_code` and the provider deletion receipt (Boat `bdop_*`). A receipt in a waiting stage needs no action before 24 hours; a generic `blocked` receipt or a missing receipt needs the provider cause fixed. Never mark a generation deleted before the provider confirms it. |
 | `deletion_provider_stalled` | A deletion waited more than 24 hours for the provider. | Look up the provider deletion receipt (Boat `bdop_*`). Boat reports `blocked` while it retries; receipts have completed up to about 20 hours later, so keep the job waiting. Once every receipt has completed, the job also needs each generation's binding verified deleted (`deletion_verified_at`). |
 | `object_rotation_failed` | A blob rotation failed, or cleanup is stuck for 15 minutes or three attempts. | Fix the object-store or key cause, then queue a fresh target with `cloud-object-rotation:retry`. |
@@ -280,7 +280,8 @@ target-bound approval, and change nothing until rerun unchanged with
 | `health_query_failed` | The aggregate health query itself failed. | Check database connectivity, pool saturation and whether a migration is pending. |
 
 [Retired Boat deletions do not block release readiness](../deployment-environments.md#retired-boat-deletions-do-not-block-release-readiness)
-while Boat finishes erasing accepted receipts. That changes publication
+also covers accepted receipts for deleting/deleted workspaces while Boat
+finishes erasing them. That changes publication
 admission only: this health reason, operator alerts, reserved storage and
 deletion verification remain active. A sandbox lookup returning 404 is not a
 physical-deletion receipt.
@@ -413,7 +414,7 @@ In development, Alpha or Beta, use
 `pnpm --dir apps/control-plane cloud-workspace-deletion:manage` (deployed image:
 `node dist/manage-cloud-workspace-deletion.js`) from a controlled database-owner
 shell with that deployment's `DATABASE_URL`. Production is refused. The command
-only requests the server's normal deletion lifecycle; workers retire provider
+requests the server's normal deletion lifecycle by default; workers retire provider
 resources and finish durable-data deletion. Never delete the provider sandbox
 directly while its workspace row still references it.
 
@@ -443,6 +444,38 @@ DELETE and keeps runtime authority until that checkpoint completes; it never
 opts into discarding uncheckpointed work. A requested deletion is asynchronous,
 so confirm worker completion before treating its resources as removed. Personal
 Local and organization-local workspaces are outside this command's scope.
+
+After fixing a failed **record purge**, use the same identity, channel and
+workspace inputs with `--retry-records`. This separate mode refuses Production,
+running workspaces and `--allow-running`; it accepts only an already-deleted
+workspace with an unerased, failed `workspace_deletion_unknown_failure` job,
+no lease or legal hold, no remaining blob references, all blob targets complete,
+and verified provider deletion for every generation. It does not call a
+provider or recreate deletion intents.
+
+Run `pnpm --dir apps/control-plane cloud-workspace-deletion:manage --retry-records`
+to print the dry-run plan. Review its exact job/workspace IDs and approval;
+then set `CONTROL_PLANE_CLOUD_DELETION_APPROVAL` and rerun with both
+`--retry-records --execute` after owner approval. The approval binds the target,
+actor, reason, workspace version, job identity, failed attempt, update time and
+completed target counts. The transaction resets that job to `deleting_records`
+with a fresh attempt budget and writes
+`cloud_workspace.operator_deletion_records_retried` to `audit_log`. Completed
+blob targets, provider journals, job identity and original requester are kept.
+An identical replay reports the audit receipt; it never rearms a later failure.
+A later failure needs a fresh approval ID and plan.
+
+Data erasure runs under the worker's live, tenant-scoped deletion lease in one
+transaction. The purge clears the boot pointer without reverting command mode,
+removes local history heads before writer cascades, releases checkpoint
+references, and removes setup attestations and runtime transitions before setup
+runs cascade into engines. Runtime enrollments and their credentials disappear;
+generation, allocation-transfer, billing and audit tombstones remain. Migration
+0142 is an expand migration compatible with the previous application: the
+allocation audit keeps its unchanged identity and requires a live runtime
+transition on insertion, while its foreign key anchors it to the retained
+generation-transition tombstone. Only the scoped erasure capability permits
+clearing an activated boot pointer or deleting runtime transitions.
 
 A Boat create journal whose outcome can never be certified (a pre-0093
 untracked journal, or dispatches whose refusal was not recognized) keeps its

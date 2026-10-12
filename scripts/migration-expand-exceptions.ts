@@ -14,10 +14,14 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
   "0141_cloud_runtime_images.sql": {
     "widen-check": ["ALTER TABLE cloud_builder_vm_operations DROP CONSTRAINT cloud_builder_vm_operations_purpose_check;"],
   },
+  "0142_cloud_workspace_data_purge.sql": {
+    "retain-transfer-audit": ["ALTER TABLE cloud_workspace_allocation_transfers DROP CONSTRAINT cloud_workspace_allocation_tr_transition_id_workspace_id_o_fkey;"],
+  },
 };
 // Exact reviewed function body, including quoted SQL. Changing its semantics or
 // even formatting requires updating this review pin and compatibility evidence.
 const authorityDigest = "797f837c345244da5af77d503614c9ddf3abb03048998a0081b98a3c2512ab30";
+const deletedBootPointerDigest = "9cff55a9f31819e2468f331b64d2ba978b0e1dd2bdb39d332dad892fe49fc562";
 
 /** Split only at top-level SQL semicolons. Dollar bodies, nested comments and
  * quoted values remain intact; an annotation inside a function cannot exempt
@@ -86,7 +90,9 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
     const rule = annotations[0]![1]!;
     const statement = text.replace(/\r\n/g, "\n").trim();
     const allowed = exact[rule]?.includes(statement) || (rule === "allocation-authority" && file === "0136_cloud_runtime_transfers.sql" &&
-      createHash("sha256").update(statement).digest("hex") === authorityDigest);
+      createHash("sha256").update(statement).digest("hex") === authorityDigest) ||
+      (rule === "deleted-boot-pointer" && file === "0142_cloud_workspace_data_purge.sql" &&
+        createHash("sha256").update(statement).digest("hex") === deletedBootPointerDigest);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");
     accepted++;
     return "\n";

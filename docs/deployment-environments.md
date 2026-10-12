@@ -1200,27 +1200,31 @@ The public boolean does not replace per-credential native launch qualification.
 
 ### Retired Boat deletions do not block release readiness
 
-Once Boat accepts a deletion (a `bdop_*` receipt), the retired sandbox is gone
-from every list, restore and fork, and erasing its stored data is Boat's
-background work; Zeros has no further request to send. A receipt that Boat keeps
-`blocked`, `retrying` or otherwise unfinished therefore never closes release
-readiness on any channel, and no operator exception, allowlist or expiry is
-involved.
+Once Boat accepts a deletion (a `bdop_*` receipt), erasing its stored data is
+Boat's background work. This release deferral covers both retired, non-current
+generations and generations of a workspace whose status is `deleting` or
+`deleted`. A qualifying receipt that Boat keeps `blocked`, `retrying` or
+otherwise unfinished does not close release readiness on any channel; no
+operator exception, allowlist or expiry is involved.
 
 In one read-only, repeatable-read system transaction, the API requires
 `deletion_intent_stalled` to be the sole health reason and checks **every**
 stalled intent and provider journal. Each must have a Boat deletion receipt, an
-observing delete intent with no error or a pending/blocked provider cause, a
-retired non-current generation, and a matching archived Boat binding without
-deletion proof. A missing or mismatched record, failed/queued intent, current
-generation, unbound journal, other provider, or another health reason (including
-`deletion_provider_stalled` for a deleted workspace's job) keeps publication
-blocked. Workers, setup execution and durability must remain enabled.
+observing delete intent with `provider_deletion_pending` or
+`provider_deletion_blocked`, one of the generation/workspace conditions above,
+and a matching archived Boat binding without deletion proof. The original
+no-error intent allowance remains valid only for retired non-current
+generations. A missing or mismatched record, failed/queued intent, a current
+generation on a live workspace, unbound journal, other provider, or another
+health reason (including `deletion_jobs_failed` or `deletion_provider_stalled`)
+keeps publication blocked. Workers, setup execution and durability must remain
+enabled.
 
 While deferred, `/v1/release-identity` retains `cloud.ready=true` and the v1
 `cloud.state="healthy"` **release-readiness** posture, and explicitly adds
 `cloud.operationalState="degraded"` plus
-`deferredReadiness={"kind":"retired-boat-deletions"}`. No resource IDs or
+`deferredReadiness={"kind":"retired-boat-deletions"}`. This existing v1 label
+also covers qualifying deleting/deleted workspaces. No resource IDs or
 counts are public. `/healthz`, health alerts, deletion workers, pending storage
 accounting and physical-deletion verification are unchanged, so the receipt
 stays visible until Boat completes it; track it with the provider. The API still

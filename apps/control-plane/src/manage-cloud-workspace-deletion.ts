@@ -15,7 +15,7 @@ import { authorizeCloudWorkspaceCleanup } from "./cloud-workspaces/actors.js";
 import { loadGenerationCloudProviderConnection } from "./cloud-workspaces/provider-connections.js";
 import { requestCloudWorkspaceDeletion } from "./cloud-workspaces/routes.js";
 import { parseDatabaseTarget } from "./database-target.js";
-import { createMigrationPool } from "./db.js";
+import { createMigrationPool, type Tx } from "./db.js";
 
 const CHANNELS = ["development", "alpha", "beta"] as const;
 const UUID = z.string().uuid();
@@ -30,6 +30,11 @@ const SnapshotSchema = z.object({
   deleted: z.boolean(),
 });
 type Snapshot = z.infer<typeof SnapshotSchema>;
+const RetryJobSchema = z.object({
+  id: UUID, workspaceId: UUID, state: z.string(), attemptCount: z.number().int().nonnegative(),
+  errorCode: z.string().nullable(), updatedAt: z.string(),
+  targetCount: z.number().int().nonnegative(), completedTargetCount: z.number().int().nonnegative(),
+});
 
 export interface CloudWorkspaceDeletionRequestInput {
   databaseUrl: string;
@@ -37,6 +42,7 @@ export interface CloudWorkspaceDeletionRequestInput {
   railwayEnvironmentName?: string | undefined;
   execute: boolean;
   allowRunning?: boolean | undefined;
+  retryRecords?: boolean | undefined;
   approval?: string | undefined;
   approvalId: string | undefined;
   organizationId: string | undefined;
@@ -51,6 +57,7 @@ export interface ValidatedCloudWorkspaceDeletionRequest {
   targetFingerprint: string;
   execute: boolean;
   allowRunning: boolean;
+  retryRecords: boolean;
   approval: string | null;
   approvalId: string;
   organizationId: string;
@@ -67,6 +74,8 @@ export interface CloudWorkspaceDeletionResult {
     outcome: "planned" | "requested" | "replayed" | "skipped_deleted";
     intentId: string | null;
     intentState: string | null;
+    deletionJobId?: string;
+    deletionJobState?: string;
   }>;
 }
 
@@ -94,6 +103,7 @@ export function validateCloudWorkspaceDeletionRequest(
   if (!CHANNELS.includes(channel as (typeof CHANNELS)[number]))
     fail("CONTROL_PLANE_CLOUD_DELETION_CHANNEL must be development, alpha or beta");
   if (deployment && deployment !== channel) fail("Cloud deletion channel does not match RAILWAY_ENVIRONMENT_NAME");
+  if (input.retryRecords && input.allowRunning) fail("Record-purge retry cannot allow running workspaces");
 
   const ids = [input.approvalId, input.organizationId, input.actorUserId].map(value => UUID.safeParse(value));
   if (ids.some(id => !id.success)) fail("Cloud deletion approval id, Organization and actor must be exact UUIDs");
@@ -115,6 +125,7 @@ export function validateCloudWorkspaceDeletionRequest(
   return {
     channel: channel as ValidatedCloudWorkspaceDeletionRequest["channel"], targetFingerprint,
     execute: input.execute, allowRunning: input.allowRunning === true, approval: input.approval?.trim() || null,
+    retryRecords: input.retryRecords === true,
     approvalId: input.approvalId!.toLowerCase(), organizationId: input.organizationId!.toLowerCase(),
     actorUserId: input.actorUserId!.toLowerCase(), expectedOrganizationSlug: slug.data.toLowerCase(),
     workspaceIds: workspaceIds.sort(), reason: reason.data,
@@ -127,6 +138,82 @@ function approvalText(request: ValidatedCloudWorkspaceDeletionRequest, workspace
     actorUserId: request.actorUserId, workspaceIds: request.workspaceIds,
     allowRunning: request.allowRunning, reason: request.reason, workspaces,
   })].join(":");
+}
+
+/** This opt-in recovery never requests provider deletion or detaches objects.
+ * One approval retries one failed attempt; replay reports its receipt without
+ * rearming a later failure. The ordinary operator's v1 approvals stay intact. */
+async function retryDeletionRecords(
+  tx: Tx, request: ValidatedCloudWorkspaceDeletionRequest, snapshots: Snapshot[], principal: string,
+): Promise<CloudWorkspaceDeletionResult> {
+  if (request.allowRunning) fail("Record-purge retry cannot allow running workspaces");
+  const action = "cloud_workspace.operator_deletion_records_retried";
+  const currentJobs = (await tx.query<z.infer<typeof RetryJobSchema> & { eligible: boolean }>(`SELECT
+    job.id,job.workspace_id AS "workspaceId",job.state,job.attempt_count AS "attemptCount",job.error_code AS "errorCode",
+    job.updated_at::text AS "updatedAt",
+    (SELECT count(*)::int FROM workspace_deletion_blob_targets target WHERE target.job_id=job.id) AS "targetCount",
+    (SELECT count(*)::int FROM workspace_deletion_blob_targets target WHERE target.job_id=job.id AND target.completed_at IS NOT NULL) AS "completedTargetCount",
+    (workspace.status='deleted' AND workspace.desired_state='deleted' AND workspace.deleted_at IS NOT NULL
+      AND workspace.data_deleted_at IS NULL AND job.state='failed' AND job.error_code='workspace_deletion_unknown_failure'
+      AND job.lease_owner IS NULL AND job.lease_expires_at IS NULL
+      AND NOT EXISTS(SELECT 1 FROM workspace_deletion_blob_targets target JOIN workspace_blobs blob
+        ON blob.id=target.blob_id AND blob.org_id=target.org_id
+        WHERE target.job_id=job.id AND (target.completed_at IS NULL OR blob.legal_hold))
+      AND NOT EXISTS(SELECT 1 FROM workspace_blob_references reference WHERE reference.workspace_id=workspace.id AND reference.org_id=workspace.org_id)
+      AND NOT EXISTS(SELECT 1 FROM workspace_retention_policies policy WHERE policy.workspace_id=workspace.id AND policy.org_id=workspace.org_id AND policy.legal_hold)
+      AND NOT EXISTS(SELECT 1 FROM workspace_checkpoints checkpoint WHERE checkpoint.workspace_id=workspace.id AND checkpoint.org_id=workspace.org_id AND checkpoint.legal_hold)
+      AND NOT EXISTS(SELECT 1 FROM cloud_workspace_generations generation LEFT JOIN cloud_workspace_provider_bindings binding
+        ON binding.workspace_id=generation.workspace_id AND binding.generation=generation.generation AND binding.org_id=generation.org_id
+        WHERE generation.workspace_id=workspace.id AND generation.org_id=workspace.org_id AND binding.deletion_verified_at IS NULL)
+    ) AS eligible
+    FROM workspace_deletion_jobs job JOIN cloud_workspaces workspace ON workspace.id=job.workspace_id AND workspace.org_id=job.org_id
+    WHERE job.org_id=$1 AND job.workspace_id=ANY($2::uuid[]) ORDER BY job.workspace_id FOR UPDATE OF job`,
+  [request.organizationId, request.workspaceIds])).rows;
+  if (currentJobs.length !== snapshots.length) fail("Record-purge retry requires an existing job for every workspace");
+  const receipts = (await tx.query<{ subject: unknown }>(`SELECT subject FROM audit_log
+    WHERE org_id=$1 AND action=$2 AND subject->>'approvalId'=$3 ORDER BY id LIMIT 2`,
+  [request.organizationId, action, request.approvalId])).rows;
+  if (receipts.length > 1) fail("Record-purge retry has inconsistent receipts");
+  const receipt = receipts[0] ? z.object({ schemaVersion: z.literal(1), approval: z.string(),
+    workspaces: z.array(SnapshotSchema).min(1).max(MAX_WORKSPACES), jobs: z.array(RetryJobSchema).min(1).max(MAX_WORKSPACES),
+  }).safeParse(receipts[0].subject) : null;
+  if (receipt && !receipt.success) fail("Record-purge retry has an invalid receipt");
+  const jobs = receipt?.success ? receipt.data.jobs : currentJobs.map(job => RetryJobSchema.parse(job));
+  const approvedSnapshots = receipt?.success ? receipt.data.workspaces : snapshots;
+  const approval = ["cloud-workspace-deletion-records-retry", request.channel, request.targetFingerprint, request.approvalId, hash({
+    organizationId: request.organizationId, expectedOrganizationSlug: request.expectedOrganizationSlug,
+    actorUserId: request.actorUserId, workspaceIds: request.workspaceIds, reason: request.reason,
+    workspaces: approvedSnapshots, jobs,
+  })].join(":");
+  if ((receipt?.success && receipt.data.approval !== approval) || (request.execute && request.approval !== approval))
+    fail("CONTROL_PLANE_CLOUD_DELETION_APPROVAL does not match the record-purge retry plan");
+  if (receipt) {
+    if (jobs.length !== currentJobs.length || jobs.some(job => !currentJobs.some(current =>
+      current.id === job.id && current.workspaceId === job.workspaceId)))
+      fail("Record-purge retry no longer has its exact jobs; generate a fresh plan");
+  } else if (currentJobs.some(job => !job.eligible)) {
+    fail("Record-purge retry requires a deleted workspace, a failed record purge, completed deletion evidence and no legal hold or lease");
+  }
+  if (request.execute && !receipt) {
+    for (const job of jobs) {
+      const updated = await tx.query(`UPDATE workspace_deletion_jobs SET state='deleting_records',attempt_count=0,
+        error_code=NULL,completed_at=NULL,next_attempt_at=clock_timestamp(),updated_at=clock_timestamp()
+        WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND state='failed' AND lease_owner IS NULL RETURNING id`,
+      [job.id, job.workspaceId, request.organizationId]);
+      if (updated.rowCount !== 1) fail("Record-purge retry lost its exact failed job");
+    }
+    await audit(tx, request.organizationId, request.actorUserId, action, {
+      schemaVersion: 1, approvalId: request.approvalId, approval, channel: request.channel,
+      targetFingerprint: request.targetFingerprint, organizationId: request.organizationId, actorUserId: request.actorUserId,
+      reason: request.reason, databasePrincipal: principal, workspaces: snapshots, jobs,
+    });
+  }
+  await tx.query(request.execute ? "COMMIT" : "ROLLBACK");
+  const outcome = receipt ? "replayed" : request.execute ? "requested" : "planned";
+  return { state: outcome, approval, workspaces: snapshots.map(workspace => ({ ...workspace, outcome,
+    intentId: null, intentState: null, deletionJobId: currentJobs.find(job => job.workspaceId === workspace.workspaceId)!.id,
+    deletionJobState: request.execute && !receipt ? "deleting_records" : currentJobs.find(job => job.workspaceId === workspace.workspaceId)!.state,
+  })) };
 }
 
 export async function manageCloudWorkspaceDeletion(
@@ -175,6 +262,8 @@ export async function manageCloudWorkspaceDeletion(
         generation: workspace.generation, requireActive: false,
       })) fail("A requested workspace uses unsupported compute authority");
     }
+
+    if (request.retryRecords) return await retryDeletionRecords(tx, request, snapshots, owner.principal);
 
     const receipts = (await tx.query<{ subject: unknown }>(`SELECT subject FROM audit_log
       WHERE org_id=$1 AND action=$2 AND subject->>'approvalId'=$3 ORDER BY id LIMIT 2`,
@@ -261,6 +350,7 @@ async function runCli(): Promise<void> {
   const { values } = parseArgs({ options: {
     execute: { type: "boolean", default: false },
     "allow-running": { type: "boolean", default: false },
+    "retry-records": { type: "boolean", default: false },
   }, allowPositionals: false, strict: true });
   const databaseUrl = process.env.DATABASE_URL?.trim();
   if (!databaseUrl) fail("DATABASE_URL is required");
@@ -268,6 +358,7 @@ async function runCli(): Promise<void> {
     databaseUrl, channel: process.env.CONTROL_PLANE_CLOUD_DELETION_CHANNEL,
     railwayEnvironmentName: process.env.RAILWAY_ENVIRONMENT_NAME,
     execute: values.execute, allowRunning: values["allow-running"],
+    retryRecords: values["retry-records"],
     approval: process.env.CONTROL_PLANE_CLOUD_DELETION_APPROVAL,
     approvalId: process.env.CONTROL_PLANE_CLOUD_DELETION_APPROVAL_ID,
     organizationId: process.env.CONTROL_PLANE_CLOUD_DELETION_ORGANIZATION_ID,
@@ -284,6 +375,7 @@ async function runCli(): Promise<void> {
     for (const workspace of result.workspaces) console.log(
       `[cloud-workspace-deletion] workspace=${workspace.workspaceId} status=${workspace.status} version=${workspace.version} ` +
       `outcome=${workspace.outcome} intent=${workspace.intentId ?? "none"} intent_state=${workspace.intentState ?? "none"}`,
+      ...(workspace.deletionJobId ? [`job=${workspace.deletionJobId} job_state=${workspace.deletionJobState}`] : []),
     );
     console.log(`[cloud-workspace-deletion] approval=${result.approval}`);
   } finally {
