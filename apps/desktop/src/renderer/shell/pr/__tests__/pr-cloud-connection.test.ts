@@ -51,13 +51,31 @@ beforeEach(() => {
   });
 });
 describe("PR action connection ownership", () => {
+  it.each(["personal", "organization"])("does not add a cloud intent to a %s Local PR action", async owner => {
+    const local = `/local/${owner}`;
+    fixture.cloudComputerV2 = true;
+    fixture.chats = [{ id: "chat", folder: local, agentId: "codex", kind: "chat" }];
+    expect(useSendToActiveChat(local)({ text: "Create a PR" })).toBe(true);
+    await vi.waitFor(() => expect(fixture.sendPrompt).toHaveBeenCalledOnce());
+    expect(fixture.prepareForSend).toHaveBeenCalledExactlyOnceWith("chat");
+    expect(fixture.sendPrompt).toHaveBeenCalledExactlyOnceWith("chat", "Create a PR", undefined, undefined, undefined, undefined, undefined);
+  });
+  it("retains the PR action's wake identity when its prepared message enters the cloud queue", async () => {
+    fixture.cloudComputerV2 = true;
+    expect(useSendToActiveChat(folder)({ text: "Create a PR" })).toBe(true);
+    await vi.waitFor(() => expect(fixture.sendPrompt).toHaveBeenCalledOnce());
+    const prepared = fixture.prepareForSend.mock.calls[0] as unknown[];
+    const sent = fixture.sendPrompt.mock.calls[0] as unknown[];
+    expect(prepared[1]).toEqual({ id: expect.any(String) });
+    expect(sent[9]).toBe(prepared[1]);
+  });
   it("prepares an explicitly submitted cloud message before requiring its runtime connection", async () => {
     fixture.cloudComputerV2 = true;
     vi.mocked(fixture.bridge.statusForWorkspace).mockReturnValue("disconnected");
     let ready!: () => void;
     fixture.prepareForSend.mockReturnValue(new Promise<void>(resolve => { ready = resolve; }));
     expect(useSendToActiveChat(folder)({ text: "Create a PR" })).toBe(true);
-    expect(fixture.prepareForSend).toHaveBeenCalledExactlyOnceWith("chat");
+    expect(fixture.prepareForSend).toHaveBeenCalledExactlyOnceWith("chat", { id: expect.any(String) });
     expect(fixture.sendPrompt).not.toHaveBeenCalled();
     vi.mocked(fixture.bridge.statusForWorkspace).mockReturnValue("connected");
     ready();

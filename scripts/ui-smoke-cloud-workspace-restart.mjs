@@ -120,6 +120,18 @@ export async function runCloudWorkspaceRestartSmoke({ page, check, harnessBase }
     await expect(status.getByRole("status")).toHaveText("Running");
     await expect(restart).toBeEnabled();
     await screenshot("running", theme);
+    const beforeTransportGap = writes.length;
+    await page.evaluate(() => window.cloudRestartFixture.bridge.setConnection("disconnected"));
+    await page.clock.runFor(3_000);
+    await expect(status.getByRole("status")).toHaveText("Running");
+    await page.clock.runFor(8_000);
+    await expect(status.getByRole("status")).toHaveText("Reconnecting…");
+    expect(await page.evaluate(() => window.cloudRestartFixture.document.status)).toBe("ready");
+    expect(writes.length).toBe(beforeTransportGap);
+    await screenshot("reconnecting", theme);
+    await page.evaluate(() => window.cloudRestartFixture.bridge.setConnection("connected"));
+    await expect(status.getByRole("status")).toHaveText("Running");
+    check(`Cloud transport loss retains the ready lifecycle without Starting or a wake (${theme})`, true);
     await page.evaluate(() => { window.cloudRestartFixture.bridge.holdConnect = true; });
     const before = writes.length;
     const stopReceipt = page.waitForResponse(response =>

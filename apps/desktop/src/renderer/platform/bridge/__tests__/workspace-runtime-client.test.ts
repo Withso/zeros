@@ -147,6 +147,41 @@ function providerRouting(open: WorkspaceRuntimeOptions["open"]) {
 }
 
 describe("workspace runtime routing", () => {
+  it("carries one supplied intent through settled opens, including preparation of a connected peer", async () => {
+    const peer = fakePeer(a), prepare = vi.fn<NonNullable<CloudPeer["prepareForRun"]>>(async () => true);
+    peer.peer.prepareForRun = prepare;
+    const open = vi.fn<WorkspaceRuntimeOptions["open"]>(async () => peer.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
+    const wakeIntent = { id: crypto.randomUUID() };
+    try {
+      for (let attempt = 0; attempt < 7; attempt++) await client.openWorkspace(a, { wakeIntent });
+      expect(open).toHaveBeenCalledExactlyOnceWith(a, expect.objectContaining({ wake: true, wakeIntent }));
+      expect(prepare).toHaveBeenCalledTimes(6);
+      for (const call of prepare.mock.calls) expect(call).toEqual([expect.any(AbortSignal), undefined, wakeIntent]);
+    } finally { client.dispose(); }
+  });
+
+  it("keeps the auto-created wake intent through admission retargeting and gives a later explicit use a new one", async () => {
+    let generation = 7, fail!: (error: Error) => void;
+    const peer = fakePeer(a), prepare = vi.fn<NonNullable<CloudPeer["prepareForRun"]>>(async () => true);
+    peer.peer.prepareForRun = prepare;
+    const first = new Promise<CloudPeer>((_resolve, reject) => { fail = reject; });
+    const open = vi.fn<WorkspaceRuntimeOptions["open"]>().mockReturnValueOnce(first).mockResolvedValue(peer.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [], identity: () => `account:${generation}`,
+      wakeOwner: () => ({ account: "account", generation, stopVersion: 0 }) });
+    try {
+      const pending = client.openWorkspace(a);
+      generation++; client.pruneCloudConnections(); fail(new Error("Cloud workspace generation changed during admission"));
+      await pending;
+      const intent = open.mock.calls[0][1]?.wakeIntent;
+      expect(intent?.id).toEqual(expect.any(String));
+      expect(open.mock.calls[1][1]?.wakeIntent).toBe(intent);
+      await client.openWorkspace(a);
+      expect(prepare).toHaveBeenCalledWith(expect.any(AbortSignal), undefined, expect.objectContaining({ id: expect.any(String) }));
+      expect(prepare.mock.calls[0]?.[2]).not.toBe(intent);
+    } finally { client.dispose(); }
+  });
+
   it("releases a terminally rejected peer while retaining its last confirmed cloud history", async () => {
     const pa = fakePeer(a), replacement = fakePeer(a); let status!: (value: ConnectionStatus) => void;
     pa.peer.client.onStatusChange = (listener) => { status = listener; return () => {}; };
@@ -558,7 +593,7 @@ describe("workspace runtime routing", () => {
         const automaticWake = client.openWorkspace(a, { reason: "interaction" });
         const preparingSend = client.openWorkspace(a);
         await vi.waitFor(() => expect(old.peer.prepareForRun).toHaveBeenCalledOnce());
-        expect(old.peer.prepareForRun).toHaveBeenCalledWith(expect.any(AbortSignal), "interaction");
+        expect(old.peer.prepareForRun).toHaveBeenCalledWith(expect.any(AbortSignal), "interaction", expect.objectContaining({ id: expect.any(String) }));
         generation++; client.pruneCloudConnections();
         if (cause === "rolled-back-on-wake") { generation--; client.pruneCloudConnections(); }
         upgraded.resolve(false); await Promise.all([automaticWake, preparingSend]);

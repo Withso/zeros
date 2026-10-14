@@ -90,8 +90,8 @@ export function useChatSession(
     // with the chat's id baked in.
     startSession: (agentId, options) =>
       ctx.ensureSession(chatId, agentId, options),
-    sendPrompt: (text, displayText, attachments, bubbleAttachments, segments, onAccepted, cloudQueue) =>
-      ctx.sendPrompt(
+    sendPrompt: (text, displayText, attachments, bubbleAttachments, segments, onAccepted, cloudQueue, wakeIntent) => {
+      const sendArgs: Parameters<typeof ctx.sendPrompt> = [
         chatId,
         text,
         displayText,
@@ -100,8 +100,11 @@ export function useChatSession(
         segments,
         undefined,
         onAccepted,
-        ...(cloudQueue ? [cloudQueue] : []),
-      ),
+      ];
+      if (cloudQueue) sendArgs[8] = cloudQueue;
+      if (wakeIntent) sendArgs[9] = wakeIntent;
+      return ctx.sendPrompt(...sendArgs);
+    },
     cancel: () => ctx.cancel(chatId),
     stopBackgroundTask,
     openBoundaryPort: (portId: string) => ctx.openBoundaryPort(chatId, portId),

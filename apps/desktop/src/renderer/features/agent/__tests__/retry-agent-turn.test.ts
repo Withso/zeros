@@ -90,6 +90,15 @@ beforeEach(() => {
 });
 
 describe("explicit failed-turn recovery", () => {
+  it("uses the same cloud wake identity for preparation and the queued retry", async () => {
+    const h = harness();
+    h.chats.set(source.id, { ...source, folder: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222" });
+    await retryAgentTurn({ chatId: source.id, prompt, events: [], newChat: false }, h.dependencies);
+    const prepared = h.sessions.prepareForSend.mock.calls[0] as unknown[];
+    const sent = h.sessions.sendPrompt.mock.calls[0] as unknown[];
+    expect(prepared[1]).toEqual({ id: expect.any(String) });
+    expect(sent[9]).toBe(prepared[1]);
+  });
   it.each([false, true])("prepares cloud use before admission and honors cancellation: %s", async cancel => {
     const h = harness();
     let ready!: () => void;

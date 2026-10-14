@@ -3792,8 +3792,9 @@ export function AgentChat({
     if (cloudSubmission && chatId) {
       if (!cloudTarget) throw new Error("The cloud workspace identity is unavailable. Reopen this workspace to send.");
       if (recordActivity && chatThread?.folder) recordWorkspaceActivity(chatThread.folder);
+      const wakeIntent = bareCommand && !commandHasAttachments ? { id: crypto.randomUUID() } : undefined;
       if (bareCommand && !commandHasAttachments) {
-        await agentSessions.prepareForSend(chatId);
+        await agentSessions.prepareForSend(chatId, wakeIntent);
         if (agentSessions.getSendGeneration(chatId) !== sendGeneration) return;
         if (openTerminalCommand(bareCommand[1])) {
           if (override === undefined) {
@@ -3811,7 +3812,7 @@ export function AgentChat({
           if (!capabilitiesBridge) throw new Error("The frame context connection is unavailable.");
           return prepareDesignFrameAttachments(capabilitiesBridge, submittedDesignFrame);
         } : undefined });
-      await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue);
+      await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue, wakeIntent);
       const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
       if (unchanged) {
         clearComposer(); designFrameContext.pin(undefined);

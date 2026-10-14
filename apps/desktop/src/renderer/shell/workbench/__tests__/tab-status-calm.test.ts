@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   describeWorkspaceAvailability,
+  describeWorkspaceRuntimeStatus,
   WorkbenchStatusSources,
 } from "../tab-status-model";
 
@@ -10,6 +11,18 @@ describe("calm workbench status", () => {
     vi.setSystemTime(100);
   });
   afterEach(() => vi.useRealTimers());
+
+  it.each(["ready", "busy"])("does not describe %s cloud compute as Starting after socket loss", state => {
+    const current = { cloud: true, state, connection: "connecting" as const,
+      previouslyConnected: true, since: 100 };
+    expect(describeWorkspaceRuntimeStatus(current, 10_099)).toBe("Running");
+    expect(describeWorkspaceRuntimeStatus(current, 10_100)).toBe("Reconnecting…");
+    expect(describeWorkspaceRuntimeStatus({ ...current, previouslyConnected: false }, 10_100)).toBe("Connecting…");
+    expect(describeWorkspaceRuntimeStatus(current, 45_100)).toBe("Needs attention");
+    expect(describeWorkspaceRuntimeStatus({ ...current, connection: "connected" }, 45_100)).toBe("Running");
+    expect(describeWorkspaceRuntimeStatus({ ...current, state: "waking" }, 10_100)).toBe("Starting");
+    expect(describeWorkspaceRuntimeStatus({ ...current, cloud: false }, 10_100)).toBe("Starting");
+  });
 
   it.each([true, false])(
     "uses the same gap thresholds (cloud=%s)",

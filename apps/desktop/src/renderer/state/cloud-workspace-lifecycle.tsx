@@ -363,7 +363,7 @@ function ActiveCloudWorkspaceLifecycle() {
       const state = useWorkspaceStore.getState();
       return document.visibilityState !== "hidden" && state.activePage === "workspace" && selectActiveFolder(state) === key;
     };
-    const off = subscribeCloudWorkspaceOpens(target => {
+    const off = subscribeCloudWorkspaceOpens((target, wakeIntent) => {
       const key = cloudWorkspaceKey(target);
       if (!ownsView(key) || pending?.key === key || !hasCloudWorkspaceAccountAccess(target.organizationId) ||
           !cloudWorkspaceDocument(target)?.capabilities.canWrite) return;
@@ -372,7 +372,7 @@ function ActiveCloudWorkspaceLifecycle() {
       cancel();
       const intent = { key, controller: new AbortController() };
       pending = intent;
-      void bridge.openWorkspace(target, { signal: intent.controller.signal })
+      void bridge.openWorkspace(target, { signal: intent.controller.signal, wakeIntent })
         .then(() => {
           if (!intent.controller.signal.aborted && ownsView(key)) clearWorkbenchConnectionFailure(key);
         })
