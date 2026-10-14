@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ProductApi } from "../zeros-dev/product";
 import { AlphaTransport } from "../zeros-dev/transport";
 import { parseFixture } from "../zeros-dev/config";
+import { ZerosDevError } from "../zeros-dev/errors";
 import type { Run, RunHandle } from "../zeros-dev/receipts";
 import { computerBuild, computerState } from "../../apps/desktop/src/renderer/features/settings/__tests__/cloud-computer-v2-fixtures";
 
@@ -39,6 +40,16 @@ function setup(){
 }
 
 describe("zeros-dev calls normal product lifecycle and Computer APIs",()=>{
+  it.each(["ensureRepository","buildComputer","createWorkspace"] as const)("keeps %s closed when only the identity is configured",async method=>{
+    const f=setup();
+    f.session.whoami=async()=>({subject:fixture.subject,accountId:fixture.accountId,email:fixture.email,organizationId:fixture.organizationId}) as typeof fixture;
+    f.session.fixture=async()=>{throw new ZerosDevError("fixture_invalid");};
+    const operation=method==="ensureRepository"?f.api.ensureRepository():f.api[method](f.handle);
+    await expect(operation).rejects.toThrow("zeros_dev_fixture_invalid");
+    expect(f.fetcher).not.toHaveBeenCalled();
+    expect(f.handle.run.create).toBeUndefined();expect(f.handle.run.computer).toBeUndefined();
+  });
+
   it("preserves T2's completed checkpoint restoration through the shared response contract",async()=>{
     const f=setup();await f.api.createWorkspace(f.handle);
     const restored={checkpointId:randomUUID(),checkpointAt:"2026-10-11T00:00:00.000Z",completedAt:"2026-10-12T00:00:00.000Z",sourceGeneration:1,generation:2};

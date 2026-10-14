@@ -1,11 +1,41 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { parseCommand, executeCommand, type Services } from "../zeros-dev/commands";
 import type { RunHandle } from "../zeros-dev/receipts";
+import { runCli } from "../zeros-dev/cli";
 
 describe("documented zeros-dev Linux command", () => {
+  it("runs health with identity pins alone and sends no credential or GitHub request",async()=>{
+    const root=await mkdtemp(path.join(tmpdir(),"zeros-dev-health-cli-"));
+    const rows:unknown[]=[];
+    const fetcher=vi.fn<typeof fetch>(async()=>Response.json({version:1,channel:"alpha",sourceSha:"a".repeat(40),ready:true,maintenance:false,
+      migrations:{state:"current"},cloud:{enabled:true,ready:true,state:"healthy"}}));
+    vi.stubGlobal("fetch",fetcher);
+    try{
+      await mkdir(path.join(root,".git"),{mode:0o700});
+      await writeFile(path.join(root,".env.agent"),"ZEROS_DEV_WORKOS_SUBJECT=user_fixture\nZEROS_DEV_ACCOUNT_ID=11111111-1111-4111-8111-111111111111\nZEROS_DEV_EMAIL=fixture@example.test\nZEROS_DEV_ORGANIZATION_ID=22222222-2222-4222-8222-222222222222\n",{mode:0o600});
+      expect(await runCli(["health"],{cwd:root,write:row=>rows.push(row)})).toBe(0);
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(fetcher.mock.calls[0]?.[0]).toBe("https://api-alpha.zeros.build/v1/release-identity");
+      expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("authorization")).toBeNull();
+      expect(rows).toContainEqual(expect.objectContaining({schema:"zeros.dev-result/v1",command:"health cp",data:expect.objectContaining({ready:true})}));
+    }finally{vi.unstubAllGlobals();await rm(root,{recursive:true,force:true});}
+  });
+
+  it("accepts an identity-only GitHub connection with nonsecret repository selection",()=>{
+    expect(parseCommand(["github","connect","--repository","fixture-owner/fixture-repo","--repository-id","1234"]))
+      .toEqual({name:"github connect",options:{repository:"fixture-owner/fixture-repo","repository-id":"1234"}});
+    expect(parseCommand(["health"])).toEqual({name:"health cp",options:{}});
+    for(const args of [["github","connect"],["github","connect","--installation-id",randomUUID()],
+      ["github","connect","--repository","../foreign","--repository-id","1234"],
+      ["github","connect","--repository","fixture-owner/fixture-repo","--repository-id","0"]])
+      expect(()=>parseCommand(args)).toThrow("zeros_dev_invalid_request");
+  });
+
   it("launches under the real tsx loader and needs no credentials for help", () => {
     const stdout = execFileSync(process.execPath, ["--import", "tsx", path.resolve("scripts/zeros-dev/cli.ts"), "--help"],
       { timeout: 15_000, encoding: "utf8", env: { PATH: process.env.PATH, HOME: process.env.HOME }, stdio: ["ignore", "pipe", "pipe"] });

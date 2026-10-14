@@ -33,14 +33,14 @@ export class ProductApi {
   }
   async computerState(signal?:AbortSignal){const fixture=await this.session.fixture();return this.request(`${this.computerRoot(fixture)}?activeRepositories=true`,cloudComputerV2StateSchema,{signal});}
   async ensureRepository(signal?:AbortSignal):Promise<{revision:string}>{
-    const fixture=await this.session.whoami(),repo=fixture.repository;
+    await this.session.whoami();const fixture=await this.session.fixture(),repo=fixture.repository;
     const result=await this.request(`${this.root(fixture)}/create-options?owner=${encodeURIComponent(repo.owner)}&repository=${encodeURIComponent(repo.name)}&cloudComputerV2=true`,OptionsSchema,{signal});
     if(!result.configured||result.repository?.owner!==repo.owner||result.repository.name!==repo.name||
       !result.installations.some(row=>row.id===repo.installationId))throw new ZerosDevError("repository_required");
     return {revision:result.repository.defaultBranch};
   }
   async buildComputer(handle:RunHandle,signal?:AbortSignal):Promise<CloudComputerV2BuildSummary>{
-    const fixture=await this.session.whoami();
+    await this.session.whoami();const fixture=await this.session.fixture();
     if(handle.run.computer?.result)return this.readBuild(handle.run,signal);
     if(!handle.run.computer){
       const state=await this.computerState(signal);
@@ -80,7 +80,7 @@ export class ProductApi {
     if(receipt&&(row.generation.number<receipt.generation||!allowNextGeneration&&row.generation.number!==receipt.generation))throw new ZerosDevError("runtime_changed");
   }
   async createWorkspace(handle:RunHandle,signal?:AbortSignal):Promise<CloudWorkspaceDocument>{
-    const fixture=await this.session.whoami();
+    await this.session.whoami();const fixture=await this.session.fixture();
     if(handle.run.deletionConfirmed)throw new ZerosDevError("operation_conflict");
     if(handle.run.create?.result)return this.workspace(handle.run,signal);
     if(!handle.run.create){
@@ -105,7 +105,7 @@ export class ProductApi {
     this.assertWorkspace(workspace,fixture,run,allowNextGeneration);return workspace;
   }
   async lifecycle(handle:RunHandle,operation:"wake"|"stop"|"delete",signal?:AbortSignal):Promise<CloudWorkspaceDocument>{
-    const fixture=await this.session.whoami();
+    await this.session.whoami();const fixture=await this.session.fixture();
     const previous=handle.run.lifecycle.at(-1);
     if(previous&&!previous.confirmed&&previous.operation!==operation)throw new ZerosDevError("operation_conflict");
     const workspace=await this.workspace(handle.run,signal);

@@ -24,10 +24,10 @@ const config={version:1,environment:"alpha",env:{AUTH_PROVIDER:"workos",AUTH_DES
 const directories:string[]=[];
 afterEach(async()=>{await Promise.all(directories.splice(0).map(root=>rm(root,{recursive:true,force:true})));});
 
-async function fixture() {
+async function fixture(initial:Record<string,string>=values) {
   const root=await mkdtemp(path.join(tmpdir(),"zeros-dev-session-"));directories.push(root);
   const file=path.join(root,".env.agent");
-  await writeFile(file,Object.entries({...values,BOAT_API_KEY:"synthetic-infra-never-send"}).map(([k,v])=>`${k}=${v}`).join("\n")+"\n",{mode:0o600});
+  await writeFile(file,Object.entries({...initial,BOAT_API_KEY:"synthetic-infra-never-send"}).map(([k,v])=>`${k}=${v}`).join("\n")+"\n",{mode:0o600});
   const store=new AgentFileStore(file);
   const fetcher=vi.fn<typeof fetch>(async(url,init)=>{
     const pathname=new URL(String(url)).pathname;
@@ -46,6 +46,36 @@ async function fixture() {
 }
 
 describe("Alpha zeros-dev session uses the desktop contract",()=>{
+  it.each(["missing","blank","partial"])("logs in with %s repository pins before GitHub can connect",async kind=>{
+    const initial:Record<string,string>={...values};
+    for(const key of ["ZEROS_DEV_REPOSITORY","ZEROS_DEV_REPOSITORY_ID","ZEROS_DEV_GITHUB_INSTALLATION_ID"])delete initial[key];
+    if(kind==="blank")Object.assign(initial,{ZEROS_DEV_REPOSITORY:"",ZEROS_DEV_REPOSITORY_ID:"",ZEROS_DEV_GITHUB_INSTALLATION_ID:""});
+    if(kind==="partial")initial.ZEROS_DEV_REPOSITORY=values.ZEROS_DEV_REPOSITORY;
+    const f=await fixture(initial);
+    await expect(f.session.login()).resolves.toBeUndefined();
+    expect(await f.session.whoami()).toEqual({subject:claims.providerSubject,accountId:account,email:claims.email,organizationId:org});
+    expect((await f.session.device()).deviceId).toBe(device);
+    await expect(f.session.fixture()).rejects.toThrow("zeros_dev_fixture_invalid");
+    expect(f.fetcher.mock.calls.some(([url])=>String(url).endsWith("/auth/zeros-dev/session"))).toBe(true);
+  });
+
+  it("keeps identity-only whoami independent of removed repository pins",async()=>{
+    const f=await fixture();await f.session.login();
+    const contents=(await readFile(f.file,"utf8")).split("\n").filter(line=>!/^ZEROS_DEV_(REPOSITORY|REPOSITORY_ID|GITHUB_INSTALLATION_ID)=/.test(line)).join("\n");
+    await writeFile(f.file,contents);
+    expect(await f.session.whoami()).toEqual({subject:claims.providerSubject,accountId:account,email:claims.email,organizationId:org});
+    await expect(f.session.fixture()).rejects.toThrow("zeros_dev_fixture_invalid");
+    await expect(f.session.logout()).resolves.toBeUndefined();
+  });
+
+  it("keeps a complete fixture bound for repository-dependent work",async()=>{
+    const f=await fixture();await f.session.fixture();await f.session.login();
+    await writeFile(f.file,(await readFile(f.file,"utf8")).replace(values.ZEROS_DEV_REPOSITORY_ID,"9876"));
+    const before=f.fetcher.mock.calls.length;
+    await expect(f.session.accessToken()).rejects.toThrow("zeros_dev_identity_changed");
+    expect(f.fetcher.mock.calls).toHaveLength(before);
+  });
+
   it("strictly pins account, organization, repository and WorkOS identity",()=>{
     expect(parseFixture(values)).toMatchObject({accountId:account,organizationId:org,repository:{owner:"test-owner",name:"test-repo",id:"1234"}});
     for(const [key,value] of [["ACCOUNT_ID","other"],["EMAIL","wrong"],["WORKOS_SUBJECT","other"],["REPOSITORY","../foreign"],["REPOSITORY_ID","0"],["GITHUB_INSTALLATION_ID","other"]])

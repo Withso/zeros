@@ -6,7 +6,7 @@ import { WorkOSDesktopClient, validateWorkOSDesktopTokenClaims, type WorkOSDeskt
 import { createCloudReplicaDeviceCredential, parseCloudReplicaDeviceCredential, type CloudReplicaDeviceCredential } from "../../apps/desktop/src/engine/cloud-replica-device";
 import { HttpCloudReplicaEnrollmentClient } from "../../apps/desktop/src/engine/cloud-replica-client";
 import { AgentFileStore } from "./agent-file.mjs";
-import { ALPHA_APP_ORIGIN, ALPHA_ORIGIN, assertSameFixture, parseFixture, type AgentValues, type Fixture } from "./config";
+import { ALPHA_APP_ORIGIN, ALPHA_ORIGIN, assertSameFixture, assertSameIdentity, assertRepositoryPins, repositoryPins, parseFixture, parseIdentity, type AgentValues, type Fixture, type FixtureIdentity, type RepositorySelection } from "./config";
 import { ZerosDevError } from "./errors";
 import { AlphaTransport } from "./transport";
 
@@ -23,19 +23,42 @@ const emptySession={ZEROS_DEV_ACCESS_TOKEN:"",ZEROS_DEV_REFRESH_TOKEN:"",ZEROS_D
 /** One CLI invocation binds one account/session. Refresh uses the desktop's
  * exact rotation semantics, inside the canonical credential file's lock. */
 export class ZerosDevSession {
+  private identityValue?:FixtureIdentity;
   private fixtureValue?:Fixture;
   private contract?:WorkOSDesktopClientConfig;
   private keys?:ReturnType<typeof createRemoteJWKSet>;
   private sessionId:string|null=null;
   private readonly now:()=>number;
   constructor(readonly store:AgentFileStore,readonly transport:AlphaTransport,private readonly dependencies:Dependencies={}){this.now=dependencies.now??Date.now;}
-  private bound(values:AgentValues):Fixture {
+  private bound(values:AgentValues):FixtureIdentity {
+    const identity=parseIdentity(values);
+    if(this.identityValue)assertSameIdentity(this.identityValue,identity);else this.identityValue=identity;
+    // Once repository-dependent work binds the complete fixture, token use
+    // still fences every pin just as before. Login itself needs no repository.
+    if(this.fixtureValue)assertSameFixture(this.fixtureValue,parseFixture(values));
+    return identity;
+  }
+  async identity():Promise<FixtureIdentity>{return this.bound((await this.store.read()).values);}
+  async fixture():Promise<Fixture>{
+    const {values}=await this.store.read();this.bound(values);
     const fixture=parseFixture(values);
     if(this.fixtureValue)assertSameFixture(this.fixtureValue,fixture);else this.fixtureValue=fixture;
     return fixture;
   }
-  async fixture():Promise<Fixture>{return this.bound((await this.store.read()).values);}
-  accountSessionKey():string|null{return this.sessionId&&this.fixtureValue?`${this.fixtureValue.accountId}:${this.sessionId}`:null;}
+  async checkRepositoryPins(repository:RepositorySelection&{installationId?:string}):Promise<void>{
+    const {values}=await this.store.read();this.bound(values);assertRepositoryPins(values,repository);
+  }
+  async pinRepository(repository:Fixture["repository"]):Promise<void>{
+    await this.store.locked(async(current:LockedFile&{pinRepository(values:Record<string,string>):Promise<void>})=>{
+      this.bound(current.values);this.bindSession(current.values.ZEROS_DEV_SESSION_ID);
+      if(!this.sessionId)throw new ZerosDevError("login_required");
+      const changes=repositoryPins(repository),fixture=parseFixture({...current.values,...changes});
+      assertRepositoryPins(current.values,fixture.repository);
+      await current.pinRepository(changes);
+      this.fixtureValue=fixture;
+    });
+  }
+  accountSessionKey():string|null{return this.sessionId&&this.identityValue?`${this.identityValue.accountId}:${this.sessionId}`:null;}
   private bindSession(id:string):void{if(this.sessionId&&this.sessionId!==id)throw new ZerosDevError("identity_changed");this.sessionId=id;}
   private async authConfig():Promise<WorkOSDesktopClientConfig>{
     if(this.contract)return this.contract;
@@ -49,7 +72,7 @@ export class ZerosDevSession {
     this.contract={clientId:env.AUTH_DESKTOP_CLIENT_ID,issuer:env.AUTH_ISSUER,jwksUrl:env.AUTH_JWKS_URL,audience:env.AUTH_AUDIENCE};
     return this.contract;
   }
-  private async verify(token:string,fixture:Fixture,sessionId:string):Promise<WorkOSDesktopTokenClaims>{
+  private async verify(token:string,fixture:FixtureIdentity,sessionId:string):Promise<WorkOSDesktopTokenClaims>{
     const config=await this.authConfig();
     let claims:WorkOSDesktopTokenClaims;
     try{
@@ -65,12 +88,12 @@ export class ZerosDevSession {
     if(claims.expiresAt*1000<=this.now())throw new ZerosDevError("login_required");
     return claims;
   }
-  private async checkAccount(accessToken:string,fixture:Fixture):Promise<void>{
+  private async checkAccount(accessToken:string,fixture:FixtureIdentity):Promise<void>{
     const parsed=meSchema.safeParse(await this.transport.json("/v1/me",{token:accessToken}));
     if(!parsed.success||parsed.data.user.id!==fixture.accountId||parsed.data.user.email!==fixture.email||
       !parsed.data.organizations.some(org=>org.id===fixture.organizationId&&!org.isPersonal))throw new ZerosDevError("identity_changed");
   }
-  private credential(values:AgentValues,fixture:Fixture):CloudReplicaDeviceCredential|null{
+  private credential(values:AgentValues,fixture:FixtureIdentity):CloudReplicaDeviceCredential|null{
     const raw=values.ZEROS_DEV_DEVICE_PRIVATE_KEY_B64;if(!raw)return null;
     try{
       if(raw.length>8192||Buffer.from(raw,"base64").toString("base64")!==raw)throw new Error();
@@ -82,7 +105,7 @@ export class ZerosDevSession {
     await current.update({ZEROS_DEV_ACCESS_TOKEN:session.accessToken,ZEROS_DEV_REFRESH_TOKEN:session.refreshToken,
       ZEROS_DEV_SESSION_ID:session.sessionId,ZEROS_DEV_TOKEN_EXPIRES_AT:String(session.expiresAt)});
   }
-  private async enroll(current:LockedFile,accessToken:string,fixture:Fixture):Promise<void>{
+  private async enroll(current:LockedFile,accessToken:string,fixture:FixtureIdentity):Promise<void>{
     const credential=this.credential(current.values,fixture);
     if(!credential)throw new ZerosDevError("credentials_invalid");
     if(credential.deviceId)return;
@@ -159,7 +182,7 @@ export class ZerosDevSession {
       await this.saveSession(current,result.session);return result.session.accessToken;
     });
   }
-  async whoami():Promise<Fixture>{const token=await this.accessToken(),fixture=await this.fixture();await this.checkAccount(token,fixture);return fixture;}
+  async whoami():Promise<FixtureIdentity>{const token=await this.accessToken(),identity=await this.identity();await this.checkAccount(token,identity);return identity;}
   async device():Promise<CloudReplicaDeviceCredential>{
     const token=await this.accessToken();
     return this.store.locked(async(current:LockedFile)=>{

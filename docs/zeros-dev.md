@@ -86,13 +86,42 @@ Use `pnpm exec tsx scripts/zeros-dev/cli.ts --help` for the complete command
 surface. Commands have one live target: `https://api-alpha.zeros.build`.
 There is no channel, origin, SQL, provider sandbox ID or credential argument.
 The CLI never loads credentials from ambient environment variables. Set the
-owner-prepared subject, account UUID, verified email, org UUID, repository
-`owner/name`, GitHub numeric repository ID, Zeros installation UUID and password
-in `.env.agent`. `pnpm agent:check` reports structural fixture validity without
-logging in, refreshing or enrolling a device.
+owner-prepared subject, account UUID, verified email, org UUID and password in
+`.env.agent` first. `login`, `whoami`, `org ensure`, `health` (an alias for
+`health cp`) and `github connect` work before repository pins exist.
+`pnpm agent:check` reports a valid identity awaiting GitHub as a warning, without
+logging in, refreshing or enrolling a device. Repository, Computer, workspace
+and receipt-scoped health commands still require the complete fixture.
 
-The normal product fixture must already have its GitHub connection and App
-installation, one Computer draft repository matching that exact fixture, an
+Run `github connect --repository OWNER/NAME --repository-id NUMERIC_ID` with the
+owner-approved private fixture repository. These arguments are nonsecret
+selection metadata; no installation UUID or credential is accepted on argv.
+The command prints a `zeros.dev-github-authorization/v1` record containing only
+the validated GitHub authorization URL, followed by closed completion metadata.
+Send that URL to the owner while the command remains running. The owner signs
+into their own GitHub account and authorizes the Alpha GitHub App. On the
+**GitHub connected** page, they can close the tab without selecting **Open
+Zeros**. They never sign into the fixture account or enter its password.
+
+The CLI reuses the desktop OAuth client and polls the normal owner-bound
+handoff every 25 seconds, allowing the 90-second completion grace after the
+ten-minute authorization window. It then uses the fixture session's normal
+catalog, source and connect routes. It requires one active organization
+installation, a complete catalog, and the exact private repository name and
+numeric ID. The **Zeros installation UUID** comes from that member's catalog
+and must agree with the source and connect responses; a GitHub provider
+installation number or another member's row is never substituted.
+
+After rechecking the account, it atomically pins `ZEROS_DEV_REPOSITORY`,
+`ZEROS_DEV_REPOSITORY_ID` and `ZEROS_DEV_GITHUB_INSTALLATION_ID` under the same
+canonical lock used for token rotation. Matching pins may be confirmed again;
+conflicting pins or an account/session change fail closed. The nonce and GitHub
+tokens stay in process memory and are not written to `.env.agent`, receipts or
+logs. If approval expires or the process exits before confirmation, rerun the
+command to start another normal handoff; it cannot resume an abandoned nonce.
+
+The normal product fixture needs the GitHub App installed and selected for the
+repository before connect. It also needs one Computer draft repository matching that exact fixture, an
 approved recipe, entitlement/quota and the chosen agent's supported account
 connection. `org ensure` and `repo ensure` validate/adopt these prerequisites.
 They do not create an org, change membership/funding, install a GitHub App or
@@ -101,6 +130,7 @@ revision and operation ID. A missing prerequisite fails explicitly.
 
 ```sh
 pnpm exec tsx scripts/zeros-dev/cli.ts login
+pnpm exec tsx scripts/zeros-dev/cli.ts github connect --repository OWNER/NAME --repository-id NUMERIC_ID
 pnpm exec tsx scripts/zeros-dev/cli.ts org ensure
 pnpm exec tsx scripts/zeros-dev/cli.ts repo ensure
 pnpm exec tsx scripts/zeros-dev/cli.ts computer build --wait

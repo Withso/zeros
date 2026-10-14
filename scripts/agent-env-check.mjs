@@ -225,13 +225,18 @@ export function checkZerosDevValues(values) {
   const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const email=values.ZEROS_DEV_EMAIL??"",repo=(values.ZEROS_DEV_REPOSITORY??"").split("/");
   const valid=/^user_[A-Za-z0-9_-]{1,240}$/.test(values.ZEROS_DEV_WORKOS_SUBJECT??"") &&
-    ["ZEROS_DEV_ACCOUNT_ID","ZEROS_DEV_ORGANIZATION_ID","ZEROS_DEV_GITHUB_INSTALLATION_ID"].every(key=>uuid.test(values[key]??"")) &&
+    ["ZEROS_DEV_ACCOUNT_ID","ZEROS_DEV_ORGANIZATION_ID"].every(key=>uuid.test(values[key]??"")) &&
     email===email.trim().toLowerCase() && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length<=254 &&
-    repo.length===2 && /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(repo[0]) && /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/.test(repo[1]) && !repo[1].endsWith(".git") &&
-    /^[1-9][0-9]{0,39}$/.test(values.ZEROS_DEV_REPOSITORY_ID??"") &&
     (Boolean(values.ZEROS_DEV_PASSWORD) && values.ZEROS_DEV_PASSWORD.length<=1024 ||
       Boolean(values.ZEROS_DEV_REFRESH_TOKEN) && /^[A-Za-z0-9_-]{1,512}$/.test(values.ZEROS_DEV_SESSION_ID??""));
-  return valid ? ok("fixed Alpha fixture structurally valid; live login not checked") : fail("zeros-dev fixture incomplete or invalid; values withheld");
+  const repositoryValid=repo.length===2 && /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(repo[0]) &&
+    /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/.test(repo[1]) && !repo[1].endsWith(".git");
+  const repositoryIdValid=/^[1-9][0-9]{0,39}$/.test(values.ZEROS_DEV_REPOSITORY_ID??"");
+  const installationValid=uuid.test(values.ZEROS_DEV_GITHUB_INSTALLATION_ID??"");
+  if(!valid || (values.ZEROS_DEV_REPOSITORY&&!repositoryValid) || (values.ZEROS_DEV_REPOSITORY_ID&&!repositoryIdValid) ||
+    (values.ZEROS_DEV_GITHUB_INSTALLATION_ID&&!installationValid))return fail("zeros-dev fixture incomplete or invalid; values withheld");
+  return repositoryValid&&repositoryIdValid&&installationValid ? ok("fixed Alpha fixture structurally valid; live login not checked") :
+    warn("fixed Alpha identity structurally valid; GitHub fixture pending; live login not checked");
 }
 
 const siblings = (name) =>
