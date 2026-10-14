@@ -8,7 +8,7 @@ import { readPendingDeletionCapacity } from "./pending-deletion.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
-suite("retired Boat deletion release readiness", () => {
+suite("legacy retired Boat deletion readiness label", () => {
   let pool: pg.Pool;
   let fixture: Awaited<ReturnType<typeof seedReadyCloudWorkspace>>;
   let service: DatabaseCloudWorkspaceHealthService;
@@ -86,7 +86,7 @@ suite("retired Boat deletion release readiness", () => {
     const resource = await deletingWorkspace(status, { errorCode });
     const before = await withSystemTx(pool, tx => readPendingDeletionCapacity(tx, fixture.organizationId));
     const result = await service.readForRelease();
-    expect(result).toMatchObject({ stalledDeletionsDeferred: true,
+    expect(result).toMatchObject({ stalledDeletionsDeferred: true, controlPlaneReady: true,
       health: { operationalState: "degraded", reasons: ["deletion_intent_stalled"] } });
     expect(await service.read()).toEqual(result.health);
     expect((await withSystemTx(pool, tx => readPendingDeletionCapacity(tx, fixture.organizationId))).pendingDeletion
@@ -112,14 +112,14 @@ suite("retired Boat deletion release readiness", () => {
     { bindingResource: "bx_foreign" }, { observedState: "running" }, { intent: false },
     { intentState: "queued" }, { intentState: "dispatching" }, { intentState: "failed" },
     { errorCode: null }, { errorCode: "provider_absence_unconfirmed" }, { provider: "daytona" as const },
-  ])("keeps unconfirmed current-generation deletion blocking: %j", async options => {
+  ])("keeps unconfirmed current-generation deletion outside the legacy label: %j", async options => {
     await deletingWorkspace("deleted", options);
     await retiredDeletion({ generation: 3 });
     expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(false);
   });
 
   it.each(["failed", "waiting_for_provider"] as const)(
-    "keeps a %s deletion job blocking beside a deferrable current-generation deletion", async state => {
+    "does not use the legacy label for a separate %s deletion job", async state => {
       await deletingWorkspace("deleted");
       const other = await seedReadyCloudWorkspace(pool);
       await pool.query(`INSERT INTO workspace_deletion_jobs
@@ -132,6 +132,7 @@ suite("retired Boat deletion release readiness", () => {
       expect(result.health.reasons).toContain("deletion_intent_stalled");
       expect(result.health.reasons).toContain(state === "failed" ? "deletion_jobs_failed" : "deletion_provider_stalled");
       expect(result.stalledDeletionsDeferred).toBe(false);
+      expect(result).toMatchObject({ controlPlaneReady: true });
     },
   );
 
@@ -204,7 +205,7 @@ suite("retired Boat deletion release readiness", () => {
     expect((await service.readForRelease()).stalledDeletionsDeferred).toBe(false);
   });
 
-  it("keeps an unbound provider-only journal blocking, including one from another organization", async () => {
+  it("keeps an unbound provider-only journal outside the legacy label, including one from another organization", async () => {
     await retiredDeletion();
     const other = await seedReadyCloudWorkspace(pool);
     await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_workspace_provider_operations

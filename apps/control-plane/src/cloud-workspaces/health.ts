@@ -16,8 +16,21 @@ export type CloudWorkspaceHealth = {
 
 export type CloudWorkspaceReleaseHealthReader = {
   read(): Promise<CloudWorkspaceHealth>;
-  readForRelease?(): Promise<{ health: CloudWorkspaceHealth; stalledDeletionsDeferred: boolean }>;
+  readForRelease?(): Promise<{ health: CloudWorkspaceHealth; stalledDeletionsDeferred: boolean;
+    /** CP artifact eligibility; operational alerts and resource proofs stay separate. */
+    controlPlaneReady?: boolean }>;
 };
+
+const cleanupReasons = new Set([
+  "deletion_jobs_failed", "deletion_provider_stalled", "deletion_intent_stalled",
+  "object_deletion_stalled", "provider_orphans_stalled", "lifecycle_stalled", "object_rotation_failed",
+]);
+
+/** Mixed lifecycle/rotation reasons also require the SQL projection. Unknown
+ * reasons fail closed even if an older or inconsistent reader claims readiness. */
+export function hasOnlyCloudWorkspaceCleanupReasons(reasons: readonly string[]): boolean {
+  return reasons.length > 0 && reasons.every(reason => cleanupReasons.has(reason));
+}
 
 type HealthSignals = {
   lifecycle_stalled: boolean;
@@ -37,6 +50,8 @@ type HealthSignals = {
   compute_lease_expired: boolean;
   compute_platform_exposure: boolean;
 };
+type ReleaseSignals = HealthSignals & { release_lifecycle_stalled: boolean; release_rotation_failed: boolean };
+type MeasuredHealth = { health: CloudWorkspaceHealth; controlPlaneReady: boolean };
 
 /** Aggregate-only health: no workspace, Organization, user, provider, or
  * repository identifiers leave this service. `/healthz` can therefore expose
@@ -53,23 +68,24 @@ export class DatabaseCloudWorkspaceHealthService {
   ) {}
 
   async read(): Promise<CloudWorkspaceHealth> {
-    return withSystemTx(this.pool, tx => this.readHealth(tx));
+    return withSystemTx(this.pool, async tx => (await this.readHealth(tx)).health);
   }
 
-  async readForRelease(): Promise<{ health: CloudWorkspaceHealth; stalledDeletionsDeferred: boolean }> {
+  async readForRelease(): Promise<MeasuredHealth & { stalledDeletionsDeferred: boolean }> {
     return withSystemTx(this.pool, async tx => {
-      const health = await this.readHealth(tx);
+      const measured = await this.readHealth(tx);
+      const { health } = measured;
       const stalledDeletionsDeferred = health.operationalState === "degraded" &&
         health.reasons.length === 1 && health.reasons[0] === "deletion_intent_stalled" &&
         await canDeferRetiredBoatDeletions(tx);
-      return { health, stalledDeletionsDeferred };
+      return { ...measured, stalledDeletionsDeferred };
     }, { consistentRead: true });
   }
 
-  private async readHealth(tx: Tx): Promise<CloudWorkspaceHealth> {
-    const signals =
+  private async readHealth(tx: Tx): Promise<MeasuredHealth> {
+    const { release_lifecycle_stalled, release_rotation_failed, ...signals } =
       (
-        await tx.query<HealthSignals>(
+        await tx.query<ReleaseSignals>(
           `SELECT
              EXISTS (
                SELECT 1 FROM cloud_workspace_lifecycle_intents
@@ -77,6 +93,12 @@ export class DatabaseCloudWorkspaceHealthService {
                  AND next_attempt_at <= now() - interval '15 minutes'
                  AND updated_at <= now() - interval '15 minutes'
              ) AS lifecycle_stalled,
+             EXISTS (
+               SELECT 1 FROM cloud_workspace_lifecycle_intents
+               WHERE state IN ('queued', 'observing') AND operation <> 'delete'
+                 AND next_attempt_at <= now() - interval '15 minutes'
+                 AND updated_at <= now() - interval '15 minutes'
+             ) AS release_lifecycle_stalled,
              CASE WHEN $3::boolean THEN EXISTS (
                SELECT 1 FROM cloud_workspace_setup_runs
                WHERE state = 'running' AND lease_expires_at <= now()
@@ -124,6 +146,9 @@ export class DatabaseCloudWorkspaceHealthService {
                     )
                   )
              ) ELSE false END AS object_rotation_failed,
+             CASE WHEN $2::boolean THEN EXISTS (
+               SELECT 1 FROM workspace_blob_rotation_jobs WHERE state = 'failed'
+             ) ELSE false END AS release_rotation_failed,
              CASE WHEN $2::boolean THEN EXISTS (
                SELECT 1 FROM workspace_blob_object_deletions
                WHERE fenced_at IS NULL
@@ -173,7 +198,7 @@ export class DatabaseCloudWorkspaceHealthService {
     >)
       .filter(([, active]) => active)
       .map(([reason]) => reason);
-    return {
+    const health: CloudWorkspaceHealth = {
       enabled: true,
       backgroundWorkers: this.posture.backgroundWorkersEnabled === false ? "paused" : "enabled",
       setupExecution: this.posture.setupExecutionEnabled ? "enabled" : "paused",
@@ -182,5 +207,11 @@ export class DatabaseCloudWorkspaceHealthService {
       operationalState: reasons.length === 0 ? "healthy" : "degraded",
       reasons,
     };
+    // Cleanup can keep an old resource degraded while a CP repair deploys.
+    // Measure mixed reasons in the same query/snapshot: a stalled start/stop
+    // or failed rotation still blocks alongside any amount of cleanup.
+    const controlPlaneReady = reasons.length === 0 ||
+      (hasOnlyCloudWorkspaceCleanupReasons(reasons) && !release_lifecycle_stalled && !release_rotation_failed);
+    return { health, controlPlaneReady };
   }
 }
