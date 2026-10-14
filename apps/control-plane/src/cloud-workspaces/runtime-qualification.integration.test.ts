@@ -122,8 +122,81 @@ const url = process.env.TEST_DATABASE_URL;
     expect((await runs())[0]).toMatchObject({ state: "running", diagnostic: { stage: "cleanup", failedChecks: ["cleanup_unconfirmed"] } });
     boat.state.deletionStatus = "completed";
     await makeWorker().tick();
-    expect((await runs())[0]).toMatchObject({ state: "failed", cleanup_confirmed_at: expect.any(Date), diagnostic: { timedOut: true } });
+    expect((await runs())[0]).toMatchObject({ state: "failed", cleanup_confirmed_at: expect.any(Date),
+      diagnostic: { stage: "cleanup", failedChecks: ["cleanup_unconfirmed"], timedOut: false } });
     expect(await qualifications()).toHaveLength(0);
+  });
+
+  it("retains the first self-test failure through repeated pending cleanup and reconciliation", async () => {
+    boat.state.failChecks = ["engine_load"];
+    boat.state.deletionStatus = "pending";
+    const { runId } = await worker.enqueue(runtimeId);
+    await worker.tick();
+    const first = { schema: "zeros.diagnostic/v1", component: "qualification", stage: "self_test",
+      ok: false, exitCode: 1, timedOut: false, failedChecks: ["engine_load"] };
+    expect((await runs())[0]).toMatchObject({ id: runId, state: "running", cleanup_confirmed_at: null, diagnostic: first });
+    await makeWorker().tick();
+    expect((await runs())[0]).toMatchObject({ state: "running", cleanup_confirmed_at: null, diagnostic: first });
+    expect(await qualifications()).toHaveLength(0);
+    boat.state.deletionStatus = "completed";
+    await makeWorker().tick();
+    expect((await runs())[0]).toMatchObject({ state: "failed", cleanup_confirmed_at: expect.any(Date), diagnostic: first });
+    expect(await qualifications()).toHaveLength(0);
+  });
+
+  it("persists a failure before blocked cleanup and keeps it after another replica finishes", async () => {
+    boat.state.failChecks = ["engine_load"];
+    const { runId } = await worker.enqueue(runtimeId);
+    let release!: () => void, entered!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const realDelete = boat.vms.delete.bind(boat.vms);
+    vi.spyOn(boat.vms, "delete").mockImplementationOnce(async value => {
+      entered(); await barrier; await realDelete(value);
+    });
+    const running = worker.tick();
+    await reached;
+    try {
+      expect((await runs())[0]).toMatchObject({ state: "running", cleanup_confirmed_at: null,
+        diagnostic: { stage: "self_test", failedChecks: ["engine_load"] } });
+      expect(await qualifications()).toHaveLength(0);
+      await expire(runId!);
+      await makeWorker().tick();
+      expect((await runs())[0]).toMatchObject({ state: "failed", cleanup_confirmed_at: expect.any(Date),
+        diagnostic: { stage: "self_test", failedChecks: ["engine_load"] } });
+    } finally { release(); await running; }
+    expect((await runs())[0]).toMatchObject({ state: "failed", diagnostic: { stage: "self_test", failedChecks: ["engine_load"] } });
+    expect(await qualifications()).toHaveLength(0);
+  });
+
+  it.each(["completed", "pending"])("retains the failure after a diagnostic write outage with %s cleanup", async deletionStatus => {
+    boat.state.failChecks = ["engine_load"];
+    boat.state.deletionStatus = deletionStatus;
+    await pool.query(`CREATE FUNCTION qualification_diagnostic_write_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF OLD.state='running' AND NEW.state='running' AND OLD.diagnostic IS NULL AND NEW.diagnostic IS NOT NULL
+            AND OLD.deadline_at=NEW.deadline_at THEN
+            RAISE EXCEPTION 'private diagnostic storage error';
+          END IF;
+          RETURN NEW;
+        END $$;
+        CREATE TRIGGER qualification_diagnostic_write_failure BEFORE UPDATE ON cloud_runtime_qualification_runs
+          FOR EACH ROW EXECUTE FUNCTION qualification_diagnostic_write_failure()`);
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await worker.enqueue(runtimeId); await worker.tick();
+      expect(log).toHaveBeenCalledExactlyOnceWith("[cloud-runtime] qualification_diagnostic_persist_failed");
+      if (deletionStatus === "pending") {
+        expect((await runs())[0]).toMatchObject({ state: "running", cleanup_confirmed_at: null,
+          diagnostic: { stage: "self_test", failedChecks: ["engine_load"] } });
+        boat.state.deletionStatus = "completed";
+        await makeWorker().tick();
+      }
+      expect(boat.state.deleted).toBe(true);
+      expect((await runs())[0]).toMatchObject({ state: "failed", cleanup_confirmed_at: expect.any(Date),
+        diagnostic: { stage: "self_test", failedChecks: ["engine_load"] } });
+      expect(await qualifications()).toHaveLength(0);
+    } finally { log.mockRestore(); }
   });
 
   it("reconciles an expired storage-pending deletion, then qualifies the queued runtime on the newest approved base", async () => {
@@ -133,7 +206,7 @@ const url = process.env.TEST_DATABASE_URL;
     const { runId } = await worker.enqueue(runtimeId);
     await worker.tick();
     expect((await runs())[0]).toMatchObject({ state: "running", cleanup_confirmed_at: null,
-      diagnostic: { stage: "cleanup", failedChecks: ["cleanup_unconfirmed"] } });
+      diagnostic: { stage: "base_status", failedChecks: ["builder_stopped"] } });
     const newestBase = { ...runtimeBase, id: "zeros-v2-test-newest-base",
       imageRef: `boat:zeros-v2-test-newest-base@sha256:${"c".repeat(64)}` };
     const nextRuntime = await withSystemTx(pool, async tx => {

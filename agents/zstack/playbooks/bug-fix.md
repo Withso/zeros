@@ -10,6 +10,9 @@
    Cover records arriving during a pending flight and an open failure circuit.
 3. **Root cause.** Trace to the mechanism (`file:line`). If you can only
    observe the symptom, say so, and fix only what the evidence supports.
+   For worker failures, retain the first closed diagnostic before cleanup and
+   across reconciliation. For packaged imports, reproduce against staged
+   sources; a checkout import or bundled CLI can hide a missing source file.
 4. **Fix** the root cause with the smallest change. Keep compatibility.
    Local and cloud placements must both stay correct.
 5. **Green.** Run the regression, the adjacent suites and the static gates

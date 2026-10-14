@@ -547,8 +547,18 @@ identity under the immutable registry contract; rerunning today's smoke worker
 cannot upgrade existing evidence. Keep full-mode deployments closed until that
 evidence exists.
 
-Failures retain only a closed diagnostic and insert no qualifications. A
-crashed run is reconciled after its deadline: recover the sandbox identity from
+The first closed failure is committed before cleanup and retained through
+pending deletion, worker restart and reconciliation. If that write fails,
+cleanup still proceeds and the worker retries recording the original failure
+when it records pending cleanup or finishes. Cleanup status is tracked by the
+run state, cleanup lease, provider journal and confirmation timestamp; it must
+not replace an earlier self-test or install failure. A successful smoke with
+unconfirmed cleanup records `cleanup/cleanup_unconfirmed` and grants no
+qualification. `reconcile/timeout` is a fallback only when no earlier failure
+was stored; cleanup may shorten the run deadline, so this code alone does not
+prove the smoke exceeded its original deadline.
+
+A crashed run is reconciled after its deadline: recover the sandbox identity from
 the provider journal, delete it, verify the deletion receipt and a subsequent
 404, then mark the run failed. A receipt may be `completed`, or `blocked` at
 `waiting_for_uploads`, `kept_for_newer_snapshots` or `waiting_for_restore` with
@@ -569,6 +579,13 @@ Closure prevents any future dispatch or resource binding. Every builder intent
 tracks attempts from the start. Deleting a bound sandbox remains possible after
 the qualification run becomes terminal; cleanup evidence is recorded only
 after confirmed absence.
+
+Publication alone does not make a runtime selectable. Diagnose its exact
+runtime/base compatibility pair and retained failure before retrying. A missing
+packaged source dependency requires a new immutable runtime publication; a
+retry cannot repair the old archive. After the corrected descendant qualifies,
+verify the new Computer build's persisted `runtime_id` before using it for
+workspace setup. Existing Computers and workspace generations keep their pins.
 
 The shared `CloudBuilderVms` module also supports authorized template and runtime-image sources
 and graceful stop-to-archived for Cloud Computer builds. Its system-only

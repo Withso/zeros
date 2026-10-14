@@ -227,6 +227,7 @@ const checks = {
   },
   qualification_imports() {
     fromWorker("tsx/cjs");
+    assert.equal(typeof fromWorker(path.join(worker, "apps/desktop/src/engine/zeros-engine.ts")).ZerosEngine, "function");
     fromWorker(path.join(worker, "apps/desktop/src/engine/agents/gateway.ts"));
     fromWorker(
       path.join(
