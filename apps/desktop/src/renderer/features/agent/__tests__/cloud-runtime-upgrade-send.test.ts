@@ -11,6 +11,7 @@ import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../../platform/brid
 import { BLANK, useSessionsStore } from "../sessions-store";
 import { AuthPromptRecovery } from "../auth-prompt-recovery";
 import * as lifecycle from "../session-reload-lifecycle";
+import { hasBackgroundAgentWork } from "../background-task-state";
 import { SendQueue } from "../send-queue";
 import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode, cloudAdmissionForTurn } from "../cloud-admission-failure";
 import { reportCloudAgentRuntimeUpgrade, invalidateCloudAgentRegistry } from "../workspace-agent-registry";
@@ -113,7 +114,7 @@ function harness(folder: string, cause = "cloud_runtime_upgrade_required", durin
   const finished = vi.fn(), persist = vi.fn(), output = new Map<string, boolean>();
   const history = vi.fn(options.history ?? (async () => useSessionsStore.getState().sessions.chat.messages));
   const context: Record<string, unknown> = {
-    ...lifecycle, Error, DOMException, AbortController, setTimeout, clearTimeout, crypto: { randomUUID },
+    ...lifecycle, hasBackgroundAgentWork, Error, DOMException, AbortController, setTimeout, clearTimeout, crypto: { randomUUID },
     parseCloudWorkspaceKey, hasCloudWorkspaceAccountAccess: () => true,
     bridge: { request }, cloudComputerV2: !isCloudWorkspace(folder) || queued, prepareForSend: () => null, getStore: useSessionsStore.getState,
     // Exercise post-readiness dispatch; cloud FIFO preparation has its own

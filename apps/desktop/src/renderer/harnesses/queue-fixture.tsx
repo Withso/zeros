@@ -22,11 +22,13 @@ export function QueueFixture({
   prompts,
   finish,
   acknowledge,
+  background,
 }: {
   provider: string;
   prompts: string[];
   finish: (sessionId: string) => void;
   acknowledge: (sessionId: string, outcome: string) => void;
+  background: (sessionId: string, active: boolean) => void;
 }) {
   const chatId = `chat-${provider}`;
   const actions = useAgentSessions();
@@ -74,6 +76,10 @@ export function QueueFixture({
       <output id="queue-prompts">{JSON.stringify(prompts)}</output>
       <div className="flex gap-2">
         <Button onClick={() => void actions.cancel(chatId)}>Stop</Button>
+        <Button onClick={() => {
+          useSessionsStore.getState().patchSession(chatId, { initialize: null });
+          void actions.loadIntoChat(chatId, provider, null, { cwd: "/fixture/repository" });
+        }}>Reopen conversation</Button>
         <Button onClick={() => finish(session.sessionId!)}>Finish turn</Button>
         <Button onClick={() => acknowledge(session.sessionId!, "delivered")}>
           Confirm delivery
@@ -81,6 +87,8 @@ export function QueueFixture({
         <Button onClick={() => acknowledge(session.sessionId!, "queued")}>
           Return to queue
         </Button>
+        <Button onClick={() => background(session.sessionId!, true)}>Start background task</Button>
+        <Button onClick={() => background(session.sessionId!, false)}>Finish background task</Button>
       </div>
       <div className="max-w-xl">
         <QueuedMessagesCard
@@ -100,7 +108,7 @@ export function QueueFixture({
           onDelete={(id) => actions.removeQueued(chatId, id)}
           onSendNow={(id) => void actions.steerQueued(chatId, id)}
           steeringSupported={
-            session.initialize?.agentCapabilities?.steering === true
+            session.initialize?.agentCapabilities?.steering
           }
           streaming={session.status === "streaming"}
           paused={session.queuePaused}

@@ -276,6 +276,7 @@ export interface AgentSessionControls {
     onAccepted?: () => void,
     cloudQueue?: import("./sessions-context").CloudQueuedPrompt,
     wakeIntent?: import("../../state/cloud-workspace-wake").CloudWorkspaceWakeIntent,
+    followUpBehavior?: import("../settings/follow-up-behavior").FollowUpBehavior,
   ): Promise<void>;
   /** Cancel the in-flight prompt (if any). */
   cancel(): Promise<void>;

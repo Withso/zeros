@@ -132,6 +132,8 @@ export interface SessionsActions {
     cloudQueue?: CloudQueuedPrompt,
     /** Retains lifecycle identity when a cloud action prepared before enqueueing. */
     wakeIntent?: CloudWorkspaceWakeIntent,
+    /** Explicit composer intent; queued flushes retain Queue semantics. */
+    followUpBehavior?: import("../settings/follow-up-behavior").FollowUpBehavior,
   ): Promise<void>;
   cancel(chatId: string): Promise<void>;
   /** Revoke only the active native Browser lease. If the official Browser

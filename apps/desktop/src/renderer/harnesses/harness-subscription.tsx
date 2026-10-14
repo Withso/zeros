@@ -38,6 +38,7 @@ import type {
   BridgeMessage,
   BridgeRegistryAgent,
 } from "../platform/bridge/messages";
+import { createMessage } from "../platform/bridge/messages";
 import type { AgentTextMessage } from "../features/agent/use-agent-session";
 import { Button } from "../shared/ui";
 import { TooltipProvider } from "../shared/ui/primitives/tooltip";
@@ -50,6 +51,7 @@ const queueFixture = ids.find((id) => id === params.get("queue"));
 const queueTurns = new Map<string, (reason: string) => void>();
 const queueSteers = new Map<string, (outcome: string) => void>();
 const queuePrompts: string[] = [];
+const queueBridgeListeners = new Map<string, Set<(message: BridgeMessage) => void>>();
 const usageFixture = ids.find((id) => id === params.get("usage"));
 let holdUsage = params.has("holdUsage");
 const pendingUsage = new Set<() => void>();
@@ -288,6 +290,12 @@ Object.defineProperty(RuntimeClient.prototype, "status", {
   get: () => "connected",
 });
 RuntimeClient.prototype.connect = () => Promise.resolve();
+if (queueFixture) RuntimeClient.prototype.on = function (type, handler) {
+  const handlers = queueBridgeListeners.get(type) ?? new Set();
+  queueBridgeListeners.set(type, handlers);
+  handlers.add(handler);
+  return () => { handlers.delete(handler); };
+};
 RuntimeClient.prototype.send = (message) => {
   if (queueFixture && message.type === "AGENT_CANCEL" && message.sessionId) queueTurns.get(message.sessionId)?.("cancelled");
   if (message.type === "PTY_WRITE") {
@@ -336,6 +344,9 @@ RuntimeClient.prototype.request = async function <
   }
   if (request.type === "AGENT_LIST_AGENTS")
     return { type: "AGENT_AGENTS_LIST", agents: registry() } as unknown as T;
+  if (request.type === "AGENT_INIT_AGENT")
+    return { type: "AGENT_AGENT_INITIALIZED", agentId: request.agentId,
+      initialize: { protocolVersion: 1, agentCapabilities: { steering: true } } } as unknown as T;
   if (request.type === "AGENT_VALIDATE_KEY")
     return { type: "AGENT_KEY_VALIDATED", ok: true } as unknown as T;
   if (request.type === "RESOLVE_AGENT_BINARY")
@@ -670,6 +681,14 @@ createRoot(document.getElementById("root")!).render(
       <AgentSessionsProvider>
         {queueFixture ? <QueueFixture provider={queueFixture} prompts={queuePrompts}
           finish={(sessionId) => queueTurns.get(sessionId)?.("end_turn")}
+          background={(sessionId, active) => {
+            const notification = createMessage({ type: "AGENT_SESSION_UPDATE", source: "engine", agentId: queueFixture,
+              notification: { sessionId, update: { sessionUpdate: "background_tasks_update", waiting: active,
+                activity: { state: "idle", startedAt: 1 }, tasks: active
+                  ? [{ taskId: "background-check", taskType: "local_bash", name: "Background verification", startedAt: 1, updatedAt: 1 }]
+                  : [] } } });
+            for (const listener of queueBridgeListeners.get("AGENT_SESSION_UPDATE") ?? []) listener(notification);
+          }}
           acknowledge={(sessionId, outcome) => queueSteers.get(sessionId)?.(outcome)} /> : <Harness />}
       </AgentSessionsProvider>
     </BridgeProvider>

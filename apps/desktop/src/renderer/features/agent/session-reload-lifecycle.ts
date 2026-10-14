@@ -316,6 +316,7 @@ export function settledTurnStatus(slot: {
  * than a secondary check. A queue flush bypasses the gate by construction. */
 export function shouldQueuePrompt(input: {
   status: SessionStatus;
+  hasBackgroundWork?: boolean;
   hasLocalSend: boolean;
   hasQueuedSends: boolean;
   queueHeld: boolean;
@@ -323,6 +324,7 @@ export function shouldQueuePrompt(input: {
 }): boolean {
   if (input.flushing) return false;
   return (
+    input.hasBackgroundWork === true ||
     input.hasLocalSend ||
     input.hasQueuedSends ||
     input.queueHeld ||
@@ -554,10 +556,12 @@ export function sendAdmissionPark(input: {
 export function queueReleaseAction(input: {
   status: SessionStatus;
   queueHeld: boolean;
+  hasBackgroundWork?: boolean;
 }): "hold" | "drain" | "drop" {
   // Parked mid-edit: releaseQueue() owns it — the edit target must not be sent
   // out from under the user, and a held queue survives an unhealthy settle.
   if (input.queueHeld) return "hold";
+  if (input.status === "ready" && input.hasBackgroundWork) return "hold";
   return input.status === "ready" ? "drain" : "drop";
 }
 

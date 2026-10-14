@@ -78,7 +78,7 @@ import { CloudSendPreparation } from "./cloud-send-preparation";
 import { CloudSendWait, CloudSendWaitError, type CloudSendWaitBudget } from "./cloud-send-wait";
 import { ControlPlaneError } from "../team/control-plane";
 import { chatChangeTargets } from "../../state/chat-change-targets";
-import { BackgroundTaskSnapshots, loadedBackgroundTaskState } from "./background-task-state";
+import { BackgroundTaskSnapshots, hasBackgroundAgentWork, loadedBackgroundTaskState } from "./background-task-state";
 import { cloudSessionMetadata } from "./cloud-session-metadata";
 import {
   deriveProviderEnv,
@@ -981,6 +981,21 @@ export function AgentSessionsProvider({
       ) {
         prebindBackgroundTasksRef.current.remember(chatId, sourceExecution, msg.notification.update);
       }
+      if (msg.notification.update.sessionUpdate === "background_tasks_update" ||
+          msg.notification.update.sessionUpdate === "workflow_progress_update") {
+        // Queue ownership is control state. Publish before the foreground RPC
+        // can settle and drain; animation-frame buffering would race that drain.
+        state.applyBridgeUpdate({ ...msg.notification, ...(chatId ? { chatId } : {}) } as SessionNotification);
+        if (chatId) promptActivityRef.current.get(chatId)?.();
+        if (chatId) queueMicrotask(() => {
+          const slot = useSessionsStore.getState().sessions[chatId];
+          if ((slot?.executionId ?? slot?.sessionId) === sourceExecution &&
+              slot?.status === "ready" && !hasBackgroundAgentWork(slot)) {
+            releaseQueueRef.current(chatId);
+          }
+        });
+        return;
+      }
       if (
         chatId &&
         sessionUpdate.sessionUpdate === "goal_update" &&
@@ -1617,6 +1632,7 @@ export function AgentSessionsProvider({
         waitStartedAt?: number;
         retryAdmission?: boolean;
       },
+      allowBackgroundWork = false,
     ): Promise<boolean> => {
       if (!sendQueueRef.current.claim(chatId, entry.bubbleId)) return false;
       const generation = cancelGeneration(cancelGenerationsRef.current, chatId);
@@ -1629,7 +1645,8 @@ export function AgentSessionsProvider({
         }
         // Cloud readiness and file refresh finish before claiming the row, so
         // it stays editable/removable throughout the expected wait.
-        const status = getStore().sessions[chatId]?.status;
+        const slot = getStore().sessions[chatId];
+        const status = slot?.status;
         if (
           !ownsEntry() ||
           cancelledSince(cancelGenerationsRef.current, chatId, generation) ||
@@ -1638,7 +1655,8 @@ export function AgentSessionsProvider({
           sendingChatsRef.current.has(chatId) ||
           !status ||
           status === "warming" ||
-          status === "streaming"
+          status === "streaming" ||
+          !allowBackgroundWork && hasBackgroundAgentWork(slot)
         )
           return false;
         const remaining = sendQueueRef.current
@@ -1682,6 +1700,7 @@ export function AgentSessionsProvider({
       if (queueHeldRef.current.has(chatId)) return;
       if (!sendQueueRef.current.canDrain(chatId)) return;
       if (sendingChatsRef.current.has(chatId)) return;
+      if (hasBackgroundAgentWork(getStore().sessions[chatId])) return;
       const q = sendQueueRef.current.get(chatId);
       if (!q || q.length === 0) return;
       if (q[0]?.cloud && !q[0].prepared) {
@@ -1714,6 +1733,7 @@ export function AgentSessionsProvider({
       const queued = sendQueueRef.current.get(chatId);
       if (!queued || queued.length === 0 || !sendQueueRef.current.canDrain(chatId)) return;
       const settled = getStore().sessions[chatId];
+      if (settled?.status === "ready" && hasBackgroundAgentWork(settled)) return;
       // An admitted cloud send waits in the editable FIFO. Readiness failures
       // belong to its bounded editable wait, never the Local drop path.
       if (queued.some(entry => entry.cloud)) {
@@ -1723,6 +1743,7 @@ export function AgentSessionsProvider({
       const action = queueReleaseAction({
         status: settled?.status ?? "idle",
         queueHeld: queueHeldRef.current.has(chatId),
+        hasBackgroundWork: hasBackgroundAgentWork(settled),
       });
       if (action === "hold") return;
       if (action === "drain") {
@@ -2358,8 +2379,18 @@ export function AgentSessionsProvider({
       onAccepted,
       cloudQueue,
       wakeIntent,
+      followUpBehavior = "queue",
     ) => {
       const original = getStore().sessions[chatId];
+      const steerSubmission = (messageId: string) => {
+        const generation = cancelGeneration(cancelGenerationsRef.current, chatId);
+        void steerQueuedRef.current?.(chatId, messageId).then(delivered => {
+          if (delivered === false && !cancelledSince(cancelGenerationsRef.current, chatId, generation) &&
+              sendQueueRef.current.get(chatId)?.some(entry => entry.bubbleId === messageId)) {
+            toast.error("Couldn't send now", { description: "The message stays queued. Choose Send now to retry delivery." });
+          }
+        });
+      };
       const chat = useWorkspaceStore.getState().chats.find(candidate => candidate.id === chatId);
       const cloudTarget = parseCloudWorkspaceKey(chat?.folder ?? original?.cwd);
       if (cloudTarget && !hasCloudWorkspaceAccountAccess(cloudTarget.organizationId))
@@ -2388,7 +2419,11 @@ export function AgentSessionsProvider({
         getStore().patchSession(chatId, { messages: capUserAppend(slot.messages, queuedMsg, slot.historyExpanded) });
         resumeQueue(chatId);
         onAccepted?.();
-        if (slot.status !== "streaming" && !sendingChatsRef.current.has(chatId)) beginCloudSendWaitRef.current?.(chatId);
+        if (followUpBehavior === "steer" && (slot.status === "streaming" || hasBackgroundAgentWork(slot))) {
+          steerSubmission(bubbleId);
+        } else if (slot.status !== "streaming" && !hasBackgroundAgentWork(slot) && !sendingChatsRef.current.has(chatId)) {
+          beginCloudSendWaitRef.current?.(chatId);
+        }
         return;
       }
       if (!bridge) return;
@@ -2493,6 +2528,7 @@ export function AgentSessionsProvider({
       if (
         shouldQueuePrompt({
           status: entryStatus,
+          hasBackgroundWork: hasBackgroundAgentWork(getStore().sessions[chatId]),
           ...queueFacts,
         })
       ) {
@@ -2560,7 +2596,9 @@ export function AgentSessionsProvider({
         // The queue may be parked in an IDLE chat (nothing in flight to
         // trigger the turn-completion drain) — kick it so this send isn't
         // stranded. No-op while held/in-flight/non-ready.
-        drainNextQueued(chatId);
+        if (followUpBehavior === "steer" && (slot?.status === "streaming" || hasBackgroundAgentWork(slot))) {
+          steerSubmission(bubbleId);
+        } else drainNextQueued(chatId);
         return;
       }
       // The send needs an admission before it can dispatch: either no session
@@ -4953,7 +4991,7 @@ export function AgentSessionsProvider({
       const q = sendQueueRef.current.get(chatId);
       const entry = q?.find((e) => e.bubbleId === messageId);
       if (!entry) return false;
-      const slot = getStore().sessions[chatId];
+      let slot = getStore().sessions[chatId];
       if (entry.cloud && slot?.cloudSendWait) {
         if (slot.cloudSendWait.state === "failed") {
           for (const queued of q ?? []) if (queued.cloud) { queued.waitStartedAt = undefined; queued.waitBudget = undefined; queued.waitStopVersion = undefined; queued.wakeIntent = undefined; }
@@ -4964,6 +5002,53 @@ export function AgentSessionsProvider({
       if (!slot?.agentId) return false;
 
       if (sendQueueRef.current.isSending(chatId, messageId)) return true;
+      if (entry.cloud && !entry.prepared && !entry.steerRequest) {
+        // A cloud draft normally encodes at FIFO dispatch. Send now must run
+        // that same preparation for this exact row before native steering.
+        const generation = cancelGeneration(cancelGenerationsRef.current, chatId);
+        const executionId = slot.executionId ?? slot.sessionId;
+        const cwd = slot.cwd;
+        const agentId = slot.agentId;
+        const account = cloudCatalogGeneration();
+        const ownsPreparation = () => {
+          const current = getStore().sessions[chatId];
+          return sendQueueRef.current.get(chatId)?.includes(entry) === true &&
+            !cancelledSince(cancelGenerationsRef.current, chatId, generation) &&
+            cloudCatalogGeneration() === account && current?.agentId === agentId &&
+            current?.cwd === cwd && (current?.executionId ?? current?.sessionId) === executionId;
+        };
+        sendQueueRef.current.claim(chatId, messageId);
+        markQueuedDelivery(chatId, messageId, "sending");
+        try {
+          await prepareForSend(chatId, entry.wakeIntent ??= { id: crypto.randomUUID() });
+          if (!ownsPreparation()) return false;
+          if (entry.cloudQueue) {
+            const args = entry.args;
+            const payload = await entry.cloudQueue.prepare(slot.initialize?.agentCapabilities?.promptCapabilities?.image !== false);
+            if (!ownsPreparation() || entry.args !== args) return false;
+            entry.args = [chatId, payload.text, payload.displayText, payload.attachments, payload.bubbleAttachments, payload.segments, args[6]];
+          }
+          if (hasPromptAttachmentReferences({ bubbleAttachments: entry.args[4] }) &&
+              !(await refreshQueuedAttachments(chatId, entry))) return false;
+          // Files may have outlived the initial admission. Reuse its wake
+          // identity while rechecking the account, owner and live connection.
+          await prepareForSend(chatId, entry.wakeIntent);
+          if (!ownsPreparation()) return false;
+          entry.prepared = true;
+          slot = getStore().sessions[chatId]!;
+          getStore().patchSession(chatId, { messages: slot.messages.map(message =>
+            message.kind === "text" && message.id === messageId
+              ? { ...message, attachments: entry.args[4], segments: entry.args[5] }
+              : message) });
+        } catch {
+          if (ownsPreparation()) pauseQueue(chatId);
+          return false;
+        } finally {
+          sendQueueRef.current.release(chatId, messageId);
+          if (sendQueueRef.current.get(chatId)?.includes(entry)) markQueuedDelivery(chatId, messageId, undefined);
+        }
+      }
+      if (!slot.agentId) return false;
       const sendNowAction = queuedSendNowAction({
         status: slot.status,
         hasLocalSend: sendingChatsRef.current.has(chatId),
@@ -4984,7 +5069,7 @@ export function AgentSessionsProvider({
           sendQueueRef.current.canDrain(chatId) &&
           slot.status !== "warming"
         ) {
-          return flushQueuedPrompt(chatId, entry);
+          return flushQueuedPrompt(chatId, entry, true);
         } else drainNextQueued(chatId);
         return true;
       }
@@ -5182,6 +5267,7 @@ export function AgentSessionsProvider({
       markQueuedDelivery,
       refreshQueuedAttachments,
       flushQueuedPrompt,
+      prepareForSend,
     ],
   );
 
@@ -5924,6 +6010,7 @@ export function AgentSessionsProvider({
         getStore().patchSession(chatId, {
           status: loadedSessionStatus(resp.promptActive === true),
         });
+        refreshModelCatalog(chatId);
         // Recovery drain (same reasoning as ensureSession): a send parked while
         // this chat was reconnecting flushes now that loadSession restored it to
         // ready. Self-gated + lock-guarded inside drainNextQueued.
@@ -6018,6 +6105,7 @@ export function AgentSessionsProvider({
       cancelStalledAdmission,
       reconcileChatMessages,
       evictUnretainedTranscripts,
+      refreshModelCatalog,
     ],
   );
 

@@ -230,5 +230,44 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   await expect(send).toBeEnabled();
   await expect(editor).toHaveText("Keep this draft through Restart");
   check("Runtime toast Restart uses an explicit Stop then fresh wake, reconnects, and preserves the unsent draft", true);
+  await runFollowUpBehaviorSmoke({ page, check, harnessBase });
   expect(errors).toEqual([]);
+}
+
+export async function runFollowUpBehaviorSmoke({ page, check, harnessBase }) {
+  await page.goto(`${harnessBase}/harness-composer-send-failures.html?follow-up`);
+  const setting = page.getByRole("combobox", { name: "Follow-up behavior", exact: true });
+  const editor = page.locator('[data-slot="prompt-input"]:visible').locator("..").locator('[contenteditable="true"]');
+  await expect(setting).toHaveText("Queue");
+  const select = async label => {
+    await setting.click();
+    await page.getByRole("option", { name: label, exact: true }).click();
+    await expect(setting).toHaveText(label);
+  };
+  for (const [index, placement] of [[0, "Cloud"], [1, "Local"], [2, "Organization local"]]) {
+    await page.getByRole("button", { name: placement, exact: true }).click();
+    for (const [behavior, key, expected] of [
+      ["Queue", "Enter", "queue"], ["Queue", "ControlOrMeta+Enter", "steer"],
+      ["Steer", "Enter", "steer"], ["Steer", "ControlOrMeta+Enter", "queue"],
+    ]) {
+      await select(behavior);
+      const before = await page.evaluate(() => window.composerSendFailureFixture.followUps.length);
+      await editor.fill(`${placement} ${behavior} follow-up`);
+      await editor.press(key);
+      await expect.poll(() => page.evaluate(() => window.composerSendFailureFixture.followUps.length)).toBe(before + 1);
+      expect(await page.evaluate(() => window.composerSendFailureFixture.followUps.at(-1))).toEqual({ chatId: `composer-chat-${index}`, behavior: expected });
+      await expect(editor).toBeEmpty();
+    }
+    await select("Queue");
+  }
+  await select("Steer");
+  await page.reload();
+  await expect(setting).toHaveText("Steer");
+  await expect(page.locator("[data-follow-up-setting]")).toContainText("Use Cmd/Ctrl+Enter to queue.");
+  for (const theme of ["dark", "light"]) {
+    await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+    await page.locator("[data-follow-up-setting]").screenshot({ path: `.context/follow-up-settings-${theme}.png` });
+  }
+  await select("Queue");
+  check("Follow-up settings default to Queue, persist Steer, and invert Enter for Local, organization-local and cloud composers", true);
 }

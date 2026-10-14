@@ -5,6 +5,7 @@ import type {
   SessionNotification,
 } from "../../../platform/bridge/agent-events";
 import { BLANK, useSessionsStore } from "../sessions-store";
+import { hasBackgroundAgentWork } from "../background-task-state";
 
 const task = (taskId: string, name = taskId): BackgroundTask => ({
   taskId,
@@ -225,6 +226,36 @@ describe("sessions-store workflow progress snapshots", () => {
       sessionId,
       update: { sessionUpdate: "workflow_progress_update", workflows },
     }) as unknown as SessionNotification;
+
+  it.each(["/repo", "/organization/repo", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"])(
+    "does not hold a replacement execution's queue with a late workflow in %s",
+    cwd => {
+      const store = useSessionsStore.getState();
+      store.setSession("chat-a", {
+        ...BLANK, agentId: "claude", cwd, status: "ready",
+        executionId: "replacement", sessionId: "replacement",
+      });
+      // The engine's chat id survives a process replacement, so routing alone
+      // is insufficient to decide whether this still represents live work.
+      store.applyBridgeUpdate({ ...workflowNote("old-execution", [workflow(1)]), chatId: "chat-a" } as SessionNotification);
+      const slot = useSessionsStore.getState().sessions["chat-a"];
+      expect(hasBackgroundAgentWork(slot)).toBe(false);
+      expect(slot.workflows).toEqual([]);
+    },
+  );
+
+  it("cannot release current workflow work with a superseded execution's completion", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-a", {
+      ...BLANK, agentId: "claude", status: "ready",
+      executionId: "replacement", sessionId: "replacement",
+    });
+    store.applyBridgeUpdate(workflowNote("replacement", [workflow(1)]));
+    const current = useSessionsStore.getState().sessions["chat-a"];
+    store.applyBridgeUpdate({ ...workflowNote("old-execution", []), chatId: "chat-a" } as SessionNotification);
+    expect(useSessionsStore.getState().sessions["chat-a"]).toBe(current);
+    expect(hasBackgroundAgentWork(useSessionsStore.getState().sessions["chat-a"])).toBe(true);
+  });
 
   it("routes a full replacement only to the exact session", () => {
     const store = useSessionsStore.getState();

@@ -17,6 +17,8 @@ import { CloudWorkspaceWakeEndedError } from "../../../state/cloud-workspace-wak
 import { classifyCloudAdmissionFailure, cloudAdmissionFailureCode } from "../cloud-admission-failure";
 import { isCloudWorkspaceLifecyclePending } from "../../../state/cloud-workspace-catalog";
 import { notifyAgentSendFailure } from "../agent-send-failure-toast";
+import { hasBackgroundAgentWork } from "../background-task-state";
+import { getFollowUpBehavior } from "../../settings/follow-up-behavior";
 
 const encoding = vi.hoisted(() => ({ run: vi.fn() }));
 const mocks = vi.hoisted(() => ({ failureToast: vi.fn() }));
@@ -71,7 +73,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
     teams: [],
   } as Me | null };
 
-  const provider: any = { ...lifecycle, ...retention, Error, BLANK: {}, useCallback: (fn: unknown) => fn, isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId,
+  const provider: any = { ...lifecycle, ...retention, hasBackgroundAgentWork, Error, BLANK: {}, useCallback: (fn: unknown) => fn, isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId,
     hasCloudWorkspaceAccountAccess: (organizationId: string) => cloudWorkspaceAccountAccess(account.me, organizationId),
     cloudComputerV2: cloud && cloudWorkspaceAccountAccess(account.me), bridge: { status: "connected" }, getStore: () => store, useWorkspaceStore: { getState: () => workspace },
     refreshModelCatalog: vi.fn(), cloudCatalogGeneration: () => 1, cloudWorkspaceDocument: () => doc, prepareForSend: prepare, cloudSendWaitRef: { current: wait },
@@ -105,9 +107,9 @@ function harness(cloud = true, status = "stopped", resident = true) {
   let current: any = draft;
   const clear = vi.fn(() => { current = { ...draft, displayText: "", attachments: [], segments: [], json: {} }; });
   const dispatch = vi.fn(), localSend = vi.fn(async () => {}), cloudError = vi.fn();
-  const composer: any = { ...lifecycle, chatId: "chat", readOnly: false, runtimeUpgradeRequired: false, cloudComputerV2: cloud, chatThread: workspace.chats[0], workspaceProvisioning: false,
+  const composer: any = { ...lifecycle, getFollowUpBehavior, chatId: "chat", readOnly: false, runtimeUpgradeRequired: false, cloudComputerV2: cloud, chatThread: workspace.chats[0], workspaceProvisioning: false,
     session: { transcriptState: resident ? "resident" : "loading", status: "reconnecting", agentId: "codex", startSession: vi.fn(async () => {}),
-      sendPrompt: cloud ? (...args: unknown[]) => provider.actions.sendPrompt("chat", ...args.slice(0, 5), undefined, args[5], args[6], args[7]) : localSend },
+      sendPrompt: cloud ? (...args: unknown[]) => provider.actions.sendPrompt("chat", ...args.slice(0, 5), undefined, args[5], args[6], args[7], args[8]) : localSend },
     agentSessions: { getSendGeneration: () => cancellation }, cloudWorkspaceDocument: () => doc, parseCloudWorkspaceKey, isCloudWorkspace,
     cloudQueuedPrompt, redactLogSecrets: (s: string) => s, setCloudSendError: cloudError,
     notifyAgentSendFailure: failureNotice, crypto: provider.crypto,
@@ -129,6 +131,24 @@ function harness(cloud = true, status = "stopped", resident = true) {
 }
 
 describe("cloud composer readiness queue", () => {
+  it.each(["task", "report", "workflow"])("waits for native background %s work before preparing and delivering a cloud queue", async work => {
+    const h = harness(true, "ready");
+    Object.assign(h.store.sessions.chat, { status: "ready", sessionId: "admitted" });
+    if (work === "task") h.store.sessions.chat.backgroundTasks = [{ taskId: "child", name: "Verify", taskType: "local_bash", startedAt: 1, updatedAt: 1 }];
+    else if (work === "report") h.store.sessions.chat.backgroundActivity = { state: "running", startedAt: 1 };
+    else h.store.sessions.chat.workflows = [{ taskId: "workflow", status: "running" }];
+    h.ready();
+    await h.send();
+    expect(h.queue.get("chat")).toHaveLength(1);
+    expect(h.prepare).not.toHaveBeenCalled();
+    expect(h.delivered).not.toHaveBeenCalled();
+    Object.assign(h.store.sessions.chat, { backgroundTasks: [], backgroundActivity: { state: "idle", startedAt: 1 }, workflows: [] });
+    h.provider.actions.releaseQueue("chat");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.delivered).toHaveBeenCalledOnce();
+    expect(h.queue.get("chat")).toBeUndefined();
+  });
+
   it.each(["cloud", "personal-local", "organization-local"])("forwards the intent through the actual %s preparation callback", async placement => {
     const h = harness(placement === "cloud", "ready");
     class BridgeFixture { openWorkspace = vi.fn(async () => {}); }
