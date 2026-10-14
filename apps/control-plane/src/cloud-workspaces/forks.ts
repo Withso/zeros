@@ -1745,7 +1745,7 @@ export class DatabaseCloudWorkspaceForkService {
       // workspace id. The workspace authorization is intentionally checked
       // before returning an existing result: idempotency is not an access
       // capability after Team membership or ownership is revoked.
-      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 31))`, [
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 31)) /*lock_purpose='workspace-fork'*/`, [
         `cloud-to-local-fork:${input.organizationId}:${input.accountUserId}:${input.idempotencyKey}`,
       ]);
       await lockCloudWorkspaceScope(tx, input);

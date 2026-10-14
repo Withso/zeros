@@ -3,6 +3,7 @@ import type pg from "pg";
 
 import { withSystemTx, type Tx } from "./db.js";
 import {assertWorkOSProviderLockHeld,withHeldWorkOSProviderLock,WorkOSProviderLockLostError} from "./workos-provider-lock-context.js";
+import { observeDatabaseLockQueries, recordPoolWait } from "./request-timing.js";
 
 export type WorkOSProviderSubject = {
   kind: "user" | "organization";
@@ -242,7 +243,7 @@ async function unlockProviderKeys(
       const unlocked = await client.query<{ unlocked: boolean }>(
         `SELECT pg_advisory_unlock(
            hashtextextended($1::text, 0)
-         ) AS unlocked`,
+         ) AS unlocked /*lock_purpose='workos-provider'*/`,
         [key],
       );
       if (!unlocked.rows[0]?.unlocked) {
@@ -560,11 +561,12 @@ export async function withWorkOSProviderLocks<T>(
   try {
     let retryDelayMs = 5;
     for (;;) {
-      const client = await connectBeforeDeadline(
-        pool,
-        deadline,
-        options.signal,
-      );
+      const connecting = performance.now();
+      let client: pg.PoolClient;
+      try { client = await connectBeforeDeadline(pool, deadline, options.signal); }
+      catch (error) { recordPoolWait(performance.now() - connecting); throw error; }
+      recordPoolWait(performance.now() - connecting, false);
+      const stopObserving = observeDatabaseLockQueries(client);
       const acquired: string[] = [];
       let contended = false;
       let discard=false,workFailed=false;
@@ -580,7 +582,7 @@ export async function withWorkOSProviderLocks<T>(
             const result = await client.query<{ acquired: boolean }>(
               `SELECT pg_try_advisory_lock(
                  hashtextextended($1::text, 0)
-               ) AS acquired`,
+               ) AS acquired /*lock_purpose='workos-provider'*/`,
               [key],
             );
             if (!result.rows[0]?.acquired) {
@@ -604,6 +606,7 @@ export async function withWorkOSProviderLocks<T>(
         const connectionLost=held.signal.aborted;
         held.abort(new WorkOSProviderLockLostError());
         client.removeListener("error",lost);client.removeListener("end",lost);
+        stopObserving?.();
         client.release(discard||connectionLost||unlockError?true:undefined);
         if(!workFailed){if(connectionLost)throw new WorkOSProviderLockLostError();if(unlockError)throw unlockError;}
       }

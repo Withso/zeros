@@ -205,7 +205,7 @@ export class DatabaseCloudAgentCredentialService {
     if(preparation.state==="pending")throw new HttpError(503,"cloud_agent_credential_busy","cloud_agent_credential_busy");
     return withSystemTx(this.pool,async tx=>{
       await this.owner(tx,ownerUserId,input.credentialId!==null);
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412))",[ownerUserId]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412)) /*lock_purpose='agent-credential-owner'*/",[ownerUserId]);
       const fingerprint=await this.organizationConsent(tx,ownerUserId,organizationId);
       await this.reconcileLegacyOrganizations(tx,ownerUserId,organizationId);
       // Preserve released request hashes when the additive flag is absent/false.
@@ -249,7 +249,7 @@ export class DatabaseCloudAgentCredentialService {
     }
     return withSystemTx(this.pool,async tx=>{
       await this.owner(tx,ownerUserId);
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412))",[ownerUserId]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412)) /*lock_purpose='agent-credential-owner'*/",[ownerUserId]);
       await this.organizationConsent(tx,ownerUserId,organizationId);
       await assertLegacyCloudAgentCredentialMutationAllowed(tx,ownerUserId,{credentialId,organizationId});
       await tx.query(`UPDATE cloud_agent_credential_delegations SET revoked_at=coalesce(revoked_at,now())
@@ -265,7 +265,7 @@ export class DatabaseCloudAgentCredentialService {
     if(!uuid.safeParse(workspaceId).success)invalid();
     await withSystemTx(this.pool,async tx=>{
       await this.owner(tx,ownerUserId,true);
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412))",[ownerUserId]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412)) /*lock_purpose='agent-credential-owner'*/",[ownerUserId]);
       const workspace=(await tx.query<{org_id:string}>("SELECT org_id FROM cloud_workspaces WHERE id=$1 AND deleted_at IS NULL",[workspaceId])).rows[0];
       if(!workspace)unavailable();
       // Guests may have explicit workspace grants but cannot inherit a member's
@@ -332,7 +332,7 @@ export class DatabaseCloudAgentCredentialService {
       if(input.organizationId)await this.organizationConsent(tx,input.ownerUserId,input.organizationId);
       // A per-owner transaction lock bounds concurrent creation without taking
       // mutable user authorization locks or allowing duplicate count checks.
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412))",[input.ownerUserId]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412)) /*lock_purpose='agent-credential-owner'*/",[input.ownerUserId]);
       const previous=(await tx.query<Credential>("SELECT * FROM cloud_agent_credentials WHERE id=$1 FOR UPDATE",[input.credentialId])).rows[0];
       if(previous){
         if(previous.owner_user_id!==input.ownerUserId)unavailable();

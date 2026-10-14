@@ -1419,7 +1419,7 @@ export class DatabaseCloudWorkspaceBlobService {
       await tx.query(
         `SELECT pg_advisory_xact_lock(
            hashtextextended('workspace-object-storage:' || $1::text, 0)
-         )`,
+         ) /*lock_purpose='object-storage'*/`,
         [input.organizationId],
       );
       const load = () =>
@@ -1592,7 +1592,7 @@ export class DatabaseCloudWorkspaceBlobService {
       await tx.query(
         `SELECT pg_advisory_xact_lock(
            hashtextextended('workspace-object-storage:' || $1::text, 0)
-         )`,
+         ) /*lock_purpose='object-storage'*/`,
         [input.organizationId],
       );
       const row = (
@@ -1750,7 +1750,7 @@ export class DatabaseCloudWorkspaceBlobService {
     const assertAuthority = async (tx: Tx) => {
       signal.throwIfAborted();
       await assertCurrentCloudEngineAuthority(tx, { ...input, workosEnabled: this.workosEnabled });
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('workspace-object-storage:' || $1::text, 0))", [input.organizationId]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('workspace-object-storage:' || $1::text, 0)) /*lock_purpose='object-storage'*/", [input.organizationId]);
     };
     const reserve = async (tx: Tx, ids: string[], physical: boolean) => {
       const result = await tx.query<{ rejection_code: string | null }>(

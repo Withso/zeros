@@ -48,7 +48,7 @@ async function authority(
   return row;
 }
 async function lock(tx: Tx, org: string) {
-  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,62171))", [
+  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,62171)) /*lock_purpose='computer-version'*/", [
     org,
   ]);
 }

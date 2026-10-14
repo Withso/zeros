@@ -13,7 +13,7 @@ export async function bootstrapDevConnectionDatabase(env:NodeJS.ProcessEnv) {
   try {
     const tx=await pool.connect();
     try{
-      await tx.query('BEGIN; SELECT pg_advisory_xact_lock(730318511)');
+      await tx.query('BEGIN; SELECT pg_advisory_xact_lock(730318511) /*lock_purpose=\'dev-connection-bootstrap\'*/');
       if((await tx.query("SELECT to_regclass('public.users') AS product")).rows[0].product)throw new Error('Refuse product database bootstrap');
       for(const url of [owner,runtime]){
         const role=(await tx.query('SELECT rolname,rolsuper,rolbypassrls,rolcreatedb,rolcreaterole FROM pg_roles WHERE rolname=$1',[url.username])).rows[0];

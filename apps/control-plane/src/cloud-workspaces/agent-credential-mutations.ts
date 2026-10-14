@@ -203,7 +203,7 @@ async function lockOwner(tx: Tx, userId: string) {
     AND account.deleted_at IS NULL AND EXISTS(SELECT 1 FROM user_identities identity WHERE identity.user_id=account.id
       AND identity.provider='workos' AND identity.status='active' AND identity.email_verified_at IS NOT NULL) FOR SHARE OF account`, [userId]);
   if (account.rowCount !== 1) denied();
-  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412))", [userId]);
+  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412)) /*lock_purpose='agent-credential-owner'*/", [userId]);
 }
 /** First delivery and every destructive source writer use the same ordering. */
 export const serializeCloudAgentCredentialSourceMutation = lockOwner;

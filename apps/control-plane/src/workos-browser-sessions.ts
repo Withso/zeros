@@ -453,7 +453,7 @@ export class PostgresWorkOSBrowserSessionRepository implements WorkOSBrowserSess
   ): Promise<T> {
     return withSystemTx(this.pool, async (tx) => {
       const lockKey = credentialHash.toString("hex");
-      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 4))`, [
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 4)) /*lock_purpose='browser-session-refresh'*/`, [
         `workos-browser:${lockKey}`,
       ]);
       const selected = await tx.query<SessionRow>(

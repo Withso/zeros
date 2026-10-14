@@ -597,7 +597,7 @@ async function withMigrationClient<T>(
     }
     await client.query("SET statement_timeout = 0");
     timeoutDisabled = true;
-    await client.query("SELECT pg_advisory_lock($1::integer, $2::integer)", [
+    await client.query("SELECT pg_advisory_lock($1::integer, $2::integer) /*lock_purpose='schema-migration'*/", [
       ...MIGRATION_LOCK_KEYS,
     ]);
     lockHeld = true;
@@ -611,7 +611,7 @@ async function withMigrationClient<T>(
   if (lockHeld) {
     try {
       await client.query(
-        "SELECT pg_advisory_unlock($1::integer, $2::integer)",
+        "SELECT pg_advisory_unlock($1::integer, $2::integer) /*lock_purpose='schema-migration'*/",
         [...MIGRATION_LOCK_KEYS],
       );
     } catch (error) {
