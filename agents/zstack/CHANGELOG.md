@@ -3,6 +3,34 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.1.6
+
+Folds the lessons from #482 and #484, pins merged eval cases to their merge commits, and adds the
+lessons from the first fixture lifecycle run.
+
+- **Qualification hid its first failure.** Pending cleanup replaced the closed smoke diagnostic, and
+  reconciliation then replaced that with a timeout. Persist the first failure before cleanup and keep it
+  through retries, including a transient diagnostic-write outage (`playbooks/bug-fix.md`, case
+  `qualification-first-failure-survives-cleanup`).
+- **Checkout imports hid a missing runtime dependency.** The engine's channel-policy imports lay outside
+  the staged source slices. Probe the staged import and the complete source engine in the archive,
+  separately from bundled CLI help (`playbooks/bug-fix.md`, case `runtime-source-import-closure`).
+- **A hidden or stable catalog still woke every two seconds.** The fetch guard suppressed requests but left
+  the interval running. Use one visible next-due timeout and count callbacks as well as requests in
+  fake-clock tests. Release the network flight before the slower cache restore, and recheck workspace
+  eligibility after it (`docs/ui-interaction-performance.md`, case `cloud-catalog-next-due-timer`).
+- **The owner was asked to rebuild before the runtime qualified.** A build pins the newest qualified
+  runtime, which was still the broken one. Confirm qualification first, then compare the build's persisted
+  `runtime_id` (`playbooks/alpha-operator.md`).
+- **The integrate steps asked for the PR number before the PR existed.** Open the PR first, then pin
+  pending cases and force-push with lease. Check all four PR sections before arming (`integrate-pr.md`).
+- **A scripted lifecycle run chained cleanup after a failed resume.** It would have deleted the evidence.
+  Stop at the first failed stage and capture database rows and control-plane logs first; a lifecycle run
+  counts only once stop and resume pass (`zstack-verify`).
+- **A plan recorded estimated times.** Every recorded time comes from a clock read (`zstack-verify`).
+- **A subagent sat idle for 50 minutes** while its feed was quiet. Masters check session status when a feed
+  goes quiet and send the next step (`zstack`).
+
 ## 0.1.5
 
 - **Every PR appended to the same eval file and changelog,** so parallel PRs always conflicted. New eval

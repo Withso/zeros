@@ -50,12 +50,19 @@ Then run `terminal run`, `workspace stop` and `workspace resume` with
   keys live. Trigger that workflow; never copy provider keys into `.env.agent`.
 - Every live run leaves a signed receipt. Report the failing stage and its
   closed code, never raw provider output.
+- A lifecycle run counts only once stop and resume both pass; create alone
+  hid a resume loop.
+- Scripted live runs stop at the first failed stage. Capture server-side
+  state (database rows, control-plane logs, the failing attempt) before any
+  cleanup; never chain cleanup unconditionally after a failure.
 
 ## Evidence rules
 
 - Report counts, for example "adjacent 130/130 across 11 suites". Name what you
   did not run and why.
 - A retry never relabels the original failure. Record both results.
+- Every time in a record, plan or report comes from a clock read (`date -u`),
+  never an estimate.
 - Don't claim macOS-only checks from Linux.
 
 ## Gotchas already paid for

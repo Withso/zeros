@@ -113,7 +113,7 @@
       "id": "empty-renderer-log-poll",
       "kind": "replay",
       "area": "desktop-cloud-ui-state",
-      "fixedBy": "pr:477",
+      "fixedBy": "fdf5de08fccdaa2c5397dedc40c4ad55b755ff96",
       "symptom": "Renderer logging left a one-second interval running with an empty queue or stalled IPC, despite making no log_submit requests.",
       "rule": "playbooks/bug-fix.md: exercise the real producer and consumer with a fake clock; assert no scheduled work after the queue drains, and cover pending flights and failure backoff.",
       "check": "pnpm test:git apps/desktop/src/renderer/platform/observability/logging/__tests__/renderer-log-scheduling.test.ts"
@@ -122,7 +122,7 @@
       "id": "warm-context-capacity-commit-order",
       "kind": "replay",
       "area": "access-authority",
-      "fixedBy": "pr:478",
+      "fixedBy": "32d791e6b63b7bb45707c7a98f6146d439d9c33a",
       "symptom": "The concurrent last-slot warm-context test expected only a capacity 429, but bounded SERIALIZABLE retries can exhaust before the winner commits and correctly return transient contention 503.",
       "rule": "playbooks/ci-red.md: control both commit schedules, distinguish observed committed capacity from retry exhaustion, and keep the exact final capacity bound.",
       "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/agent-boot-executions.integration.test.ts -t 'does not oversubscribe the last context slot'"
@@ -131,7 +131,7 @@
       "id": "retention-pagination-test-budget",
       "kind": "replay",
       "area": "snapshots-retention",
-      "fixedBy": "pr:474",
+      "fixedBy": "b8ab0b239a8c9615d50d83a153c853854c91b305",
       "symptom": "A retention pagination fixture with 53 durable journals and 153 deletion attempts exceeded the default 5 s test timeout under modest database latency. The listener changed by the PR was never started by this test.",
       "rule": "playbooks/ci-red.md: trace callback reachability, qualify large database fixtures with bounded transit delay, and adjust only the test budget; prove notification overlap with held work and observed completion.",
       "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/computer-template-retention.integration.test.ts"
