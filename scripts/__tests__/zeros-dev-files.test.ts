@@ -156,6 +156,16 @@ describe.runIf(process.platform === "linux")("real Linux CLI input boundary", ()
     expect(await f.run()).toBe(0); expect(f.read()).toBe("synthetic prompt");
   });
 
+  it("accepts an owned absolute script outside the checkout but refuses group-write permission",async()=>{
+    const f=await inputFixture(),outside=await mkdtemp(path.join(tmpdir(),"zeros-dev-absolute-input-"));roots.push(outside);
+    const script=path.join(outside,"check.sh");await writeFile(script,"printf synthetic-check",{mode:0o600});
+    let read=false;io.content=async services=>{expect(await services.content(script,2048)).toBe("printf synthetic-check");read=true;};
+    expect(await f.run()).toBe(0);expect(read).toBe(true);
+    await chmod(script,0o664);read=false;
+    expect(await f.run()).toBe(1);expect(read).toBe(false);
+    expect(f.rows).toEqual([{schema:"zeros.dev-error/v1",code:"invalid_request"}]);
+  });
+
   it.each(["canonical", "ancestor alias"])("refuses %s credential input across atomic rotation", async kind => {
     const f = await inputFixture(), replacement = `${f.secret}.next`;
     await writeFile(replacement, "ZEROS_DEV_REFRESH_TOKEN=synthetic-rotated\n", { mode: 0o600 });

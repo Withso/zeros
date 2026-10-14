@@ -6,6 +6,8 @@ import { parseFixture } from "../zeros-dev/config";
 import { ZerosDevError } from "../zeros-dev/errors";
 import type { Run, RunHandle } from "../zeros-dev/receipts";
 import { computerBuild, computerState } from "../../apps/desktop/src/renderer/features/settings/__tests__/cloud-computer-v2-fixtures";
+import { createCloudWorkspaceRoutes } from "../../apps/control-plane/src/cloud-workspaces/routes";
+import { HttpError } from "../../apps/control-plane/src/authz";
 
 const fixture=parseFixture({ZEROS_DEV_WORKOS_SUBJECT:"user_fixture",ZEROS_DEV_ACCOUNT_ID:"11111111-1111-4111-8111-111111111111",ZEROS_DEV_EMAIL:"fixture@example.test",
   ZEROS_DEV_ORGANIZATION_ID:"22222222-2222-4222-8222-222222222222",ZEROS_DEV_REPOSITORY:"test-owner/test-repo",ZEROS_DEV_REPOSITORY_ID:"1234",ZEROS_DEV_GITHUB_INSTALLATION_ID:"33333333-3333-4333-8333-333333333333"});
@@ -68,6 +70,42 @@ describe("zeros-dev calls normal product lifecycle and Computer APIs",()=>{
     expect(post[1]?.headers).toMatchObject({"idempotency-key":body.operationId});
     expect(f.handle.run.computer!.result).toEqual({id:build.id,version:4});
     expect(JSON.stringify(f.handle.run)).not.toContain("synthetic-recipe");
+  });
+
+  it("uses the ordinary workspace create contract rather than the retired builder field",async()=>{
+    const f=setup(),original=f.fetcher.getMockImplementation()!;
+    const admission=new Error("synthetic admission boundary"),connect=vi.fn(async()=>{throw admission;});
+    const route=createCloudWorkspaceRoutes({connect} as never,{provider:"boat"} as never,{repositoryResolver:{resolve:vi.fn()} as never});
+    // Exercise the real CP request parser and retired-field rejection, stopping
+    // at its first transaction. No live database or provider is involved.
+    route.onError((error,c)=>error===admission?c.json({workspace:workspace()}):
+      c.json({error:{code:error instanceof HttpError?error.code:"unexpected"}},error instanceof HttpError?error.status:500));
+    f.fetcher.mockImplementation(async(url,init)=>{
+      if(new URL(String(url)).pathname.endsWith("/cloud-workspaces")&&init?.method==="POST"){
+        return route.request(new URL(String(url)).pathname,init);
+      }
+      return original(url,init);
+    });
+    await expect(f.api.createWorkspace(f.handle)).resolves.toMatchObject({id:workspace().id});
+    expect(connect).toHaveBeenCalledOnce();
+    const call=f.fetcher.mock.calls.find(([url,init])=>String(url).endsWith("/cloud-workspaces")&&init?.method==="POST")!;
+    expect(JSON.parse(String(call[1]?.body))).toEqual({name:`zd-${f.handle.run.runId}`,repository:{forge:"github.com",owner:repository.owner,
+      name:repository.name,revision:"main",githubInstallationId:repository.installationId}});
+    expect(f.snapshots[0]?.create?.body).toEqual(JSON.parse(String(call[1]?.body)));
+    expect(call[1]?.headers).toMatchObject({"idempotency-key":f.handle.run.create?.key});
+  });
+
+  it("never rewrites a recorded legacy create body or selects a new key to work around a refusal",async()=>{
+    const f=setup();
+    const body={name:`zd-${f.handle.run.runId}`,cloudComputerBuild:{id:build.id,version:build.version},
+      repository:{forge:"github.com" as const,owner:repository.owner,name:repository.name,revision:"main",githubInstallationId:repository.installationId}};
+    const key=randomUUID();f.handle.run.create={body,key};
+    f.fetcher.mockResolvedValue(Response.json({error:{code:"cloud_computer_build_unavailable"}},{status:409}));
+    await expect(f.api.createWorkspace(f.handle)).rejects.toThrow("zeros_dev_operation_conflict");
+    expect(f.fetcher).toHaveBeenCalledOnce();
+    expect(f.fetcher.mock.calls[0]?.[1]?.body).toBe(JSON.stringify(body));
+    expect(f.fetcher.mock.calls[0]?.[1]?.headers).toMatchObject({"idempotency-key":key});
+    expect(f.handle.run.create).toEqual({body,key});expect(f.snapshots).toEqual([]);
   });
 
   it.each(["ensureRepository","buildComputer","createWorkspace","workspace"] as const)("accepts product-normalized GitHub casing in %s without changing fixture pins",async method=>{

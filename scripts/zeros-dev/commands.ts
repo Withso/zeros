@@ -38,6 +38,10 @@ export const HELP = `Alpha-only Linux zeros-dev (credentials: canonical .env.age
   scenario run smoke --agent AGENT --model MODEL [--run UUID] [--build-computer] [--prompt-file FILE]
   cleanup --run UUID|--all [--apply]
 Lifecycle/build/prompt commands wait with finite deadlines. Cleanup defaults to a plan.
+Input files: relative paths resolve from the current checkout; absolute paths also work.
+Use owned regular files (chmod 600 FILE), without links or group/world write access.
+Credential files are refused. --script must be nonempty and at most 2 KiB;
+--prompt-file must be nonempty and at most 64 KiB.
 No channel, origin, password, token, sandbox-ID or SQL argument is supported.`;
 
 export function parseCommand(args: string[]): Command | null {

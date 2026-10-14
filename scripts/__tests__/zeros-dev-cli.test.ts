@@ -42,6 +42,17 @@ describe("documented zeros-dev Linux command", () => {
     expect(JSON.parse(stdout)).toMatchObject({ schema: "zeros.dev-help/v1", help: expect.stringContaining("workspace create") });
   });
 
+  it("documents how to prepare safe terminal and prompt input files without requiring login",async()=>{
+    const rows:unknown[]=[];
+    expect(await runCli(["--help"],{write:row=>rows.push(row),initialize:async()=>{throw new Error("help must not read credentials");}})).toBe(0);
+    const help=(rows[0] as {help:string}).help;
+    expect(help).toContain("current checkout");
+    expect(help).toContain("chmod 600");
+    expect(help).toContain("owned regular files");
+    expect(help).toContain("absolute paths");
+    expect(help).toContain("2 KiB");
+  });
+
   it.each([["login", "--password", "synthetic-password"], ["workspace", "create", "--base-url", "https://foreign.example"],
     ["workspace", "create", "--channel", "production"], ["cleanup", "--all", "--run", randomUUID()], ["terminal", "run", "--run", randomUUID(), "--sql", "select 1"],
     ["agent", "send", "--run", randomUUID(), "--agent", "foreign", "--model", "fixture", "--prompt-file", "prompt.txt"], ["cleanup"]].map(args => ({ args })))("refuses unscoped or secret-bearing argv without reflecting values", ({ args }) => {
