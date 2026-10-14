@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import type pg from "pg";
 import { z } from "zod";
 
@@ -6,6 +7,9 @@ import { HttpError } from "../authz.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { rateLimit } from "../ratelimit.js";
 import { DatabaseCloudWorkspaceManagementService } from "./management.js";
+import { DatabaseCloudWorkspaceDeletionRetirement } from "./deletion-retirement.js";
+import { CloudWorkspaceDeletionRetirementRequestSchema } from "./deletion-retirement-contract.js";
+import type { CloudWorkspaceProviderResolver } from "./provider-resolver.js";
 
 const Uuid = z.string().uuid();
 const ExpectedVersion = z.number().int().nonnegative();
@@ -142,12 +146,24 @@ export function createCloudWorkspaceManagementRoutes(
   config: CloudWorkspaceBackendConfig,
   options: {
     workosEnabled: boolean;
+    providerResolver?: CloudWorkspaceProviderResolver | null;
   },
 ): Hono {
   const app = new Hono();
   const service = new DatabaseCloudWorkspaceManagementService(pool, config, options);
   const root = "/v1/organizations/:organization/cloud-workspace-management";
   const workspaceRoot = "/v1/organizations/:organization/cloud-workspaces/:workspace";
+  const retirement = new DatabaseCloudWorkspaceDeletionRetirement(pool, options.providerResolver ?? null);
+
+  app.use(`${workspaceRoot}/deletion-retirement`, async (c, next) => { c.header("Cache-Control", "no-store"); await next(); });
+  app.use(`${workspaceRoot}/deletion-retirement`, rateLimit("cloud-workspace-retirement-read", 120, 60_000));
+  app.use(`${workspaceRoot}/deletion-retirement`, bodyLimit({ maxSize: 2_048 }));
+  app.post(`${workspaceRoot}/deletion-retirement`, async c => c.json(await retirement.read({
+    organizationId: uuid(c.req.param("organization")), workspaceId: uuid(c.req.param("workspace")),
+    actorUserId: c.get("user").id,
+    ...parse(CloudWorkspaceDeletionRetirementRequestSchema, await c.req.json().catch(() => ({}))),
+    signal: c.req.raw.signal,
+  })));
 
   app.use(`${root}/*`, async (c,next) => {c.header("Cache-Control","no-store");await next();});
   app.use(`${workspaceRoot}/management`, async (c,next) => {c.header("Cache-Control","no-store");await next();});

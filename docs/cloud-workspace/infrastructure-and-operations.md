@@ -290,6 +290,57 @@ verification remain active for every case. A ready release receipt does not
 claim these resources are healthy or deleted; a sandbox lookup returning 404
 is not a physical-deletion receipt.
 
+## Fixture compute retirement while storage deletion is pending
+
+The authenticated product read
+`POST /v1/organizations/:organization/cloud-workspaces/:workspace/deletion-retirement`
+accepts only the exact current `generation` and original accepted
+`deleteIdempotencyKey`. Its version 1 response repeats the retained creation,
+owner, repository, workspace and delete identity, the original delete request
+time, and a fresh observation time. It includes every persisted generation in
+sorted order, including candidates above the current generation. More than 64
+rows, missing bindings, unsupported identities or incomplete proof refuse the
+whole observation with `409/cloud_workspace_retirement_unconfirmed`.
+Missing or foreign authority returns 404. The response is never cached.
+
+`compute_retired_storage_pending` requires desired deleted, retired engine and
+runtime access, settled compute leases and reservations, and no pending setup or
+generation transition. Every pending Boat allocation must have its exact
+accepted deletion operation freshly report a documented storage-only blocked
+stage: `waiting_for_uploads`, `kept_for_newer_snapshots` or
+`waiting_for_restore`. The same authenticated account must then observe that
+exact sandbox as absent. A sandbox 404 or stopped binding alone cannot qualify.
+Upload advice must be valid and within the documented six-hour bound; passing
+`expectedBy` remains pending. Never-allocated generations require a tracked,
+closed create journal with no uncertain dispatch and positively verified
+absence. A transferred or historical identity that cannot meet every predicate
+remains outside this optional proof; normal physical cleanup continues.
+
+Provider reads use a shared ten-second observation budget and hold no database
+client. The service rechecks the exact workspace, actor authority, delete,
+generation, journal and settlement snapshot after the provider reads. It issues
+only GETs to the provider and never replays DELETE, updates a deletion journal,
+changes lifecycle or D1 state, or releases capacity. `receiptSha256` binds each
+generation's private allocation/deletion identity without exposing provider IDs.
+
+The pending response keeps `deletionConfirmed=false`, reports zero reserved CPU
+and memory, and retains each pending generation's disk reservation. Disk is
+reserved capacity, not measured physical bytes or a claim about snapshot size.
+`physically_deleted` additionally requires every positive provider/binding
+completion, the succeeded deletion intent and D1 job, and `data_deleted_at`.
+Existing workspace, generation, binding, journal and job tombstones retain this
+proof and original creation/delete identity after source records are purged.
+
+The fixture harness signs the complete response with its original run receipt
+and rereads it before using its explicit deferred-storage mode. It owns the
+fixture identity and backlog count, disk and age limits; a refreshed observation
+never resets age. This endpoint does not authorize allocation or native writer
+custody. Ordinary user deletion, quotas, storage retention and Local workspaces
+keep their existing behavior. Deploy the CP endpoint before its harness
+consumer; an older CP or unavailable proof leaves that consumer closed. Rollback
+can disable deferred admission while preserving all signed cleanup records and
+the original physical deletion workflow. No migration is required.
+
 ## Recovery drills and measured limits
 
 Keep dated deployment/load/restore observations in private operational evidence.

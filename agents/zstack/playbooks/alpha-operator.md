@@ -39,8 +39,11 @@ WorkOS. Never use Beta or Production credentials or data.
 - Don't change Railway variables in a way that redeploys a service while a
   release workflow is running. Check for an in-flight release first.
 - Before deleting a scratch, worktree or `.context` folder, check that no
-  agent's PATH or running process uses it (`/proc/*/environ`). Keep shared host
-  tools in one stable directory outside any `.context`.
+  agent's PATH or running process uses it. Inspect working directories and
+  process names; if PATH inspection is needed, extract only PATH in memory.
+  Never emit raw process arguments or environments: agent launch arguments can
+  contain session credentials. Keep shared host tools in one stable directory
+  outside any `.context`.
 
 ## After
 

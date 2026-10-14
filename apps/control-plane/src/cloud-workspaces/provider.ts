@@ -86,6 +86,17 @@ export type CloudProviderIdentity = {
   generation: number;
 };
 
+/** A fresh read of an irreversible, exact deletion receipt plus unavailable
+ * compute. This is neither physical erasure nor boot/writer custody proof. */
+export type CloudProviderDeletionRetirement = CloudProviderIdentity & {
+  resourceId: string;
+  deletionOperationId: string;
+  stage: "waiting_for_uploads" | "kept_for_newer_snapshots" | "waiting_for_restore";
+  requestedAt: string;
+  expectedBy: string | null;
+  observedAt: string;
+};
+
 export type CloudProviderCreateInput = CloudProviderIdentity & {
   imageRef: string;
   architecture: "linux/amd64" | "linux/arm64";
@@ -104,6 +115,10 @@ export interface CloudWorkspaceProvider {
   /** Providers with finite idempotency windows or hidden asynchronous deletes
    * must reject absence while an allocation/deletion outcome remains unknown. */
   verifyAbsence?(identity: CloudProviderIdentity): Promise<boolean>;
+  /** Read-only: never dispatch DELETE, complete the journal, or free storage. */
+  observeDeletionRetirement?(
+    resourceId: string, input: { signal: AbortSignal },
+  ): Promise<CloudProviderDeletionRetirement>;
   create(input: CloudProviderCreateInput): Promise<CloudProviderResource>;
   inspect(resourceId: string): Promise<CloudProviderResource | null>;
   start(resourceId: string): Promise<CloudProviderResource>;

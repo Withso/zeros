@@ -165,6 +165,88 @@ function fixture(extraOptions: Partial<Pick<BoatWorkspaceProviderOptions, "billi
   };
 }
 
+describe("read-only deletion retirement evidence", () => {
+  it.each(["waiting_for_uploads", "kept_for_newer_snapshots", "waiting_for_restore"])(
+    "requires the exact %s receipt and sandbox absence without completing deletion", async stage => {
+      const f = fixture();
+      await f.allocate();
+      await f.operations.beginDelete(RESOURCE);
+      await f.operations.bindDeletion(RESOURCE, OPERATION);
+      const before = structuredClone(f.stored());
+      f.fetcher.mockClear();
+      f.fetcher.mockResolvedValueOnce(json(deletion("blocked", { stage,
+        requestedAt: new Date(NOW).toISOString(), expectedBy: stage === "waiting_for_uploads" ? new Date(NOW + 6 * 3600_000).toISOString() : null })))
+        .mockResolvedValueOnce(json({ ok: false }, 404));
+      const observation = await f.provider.observeDeletionRetirement(RESOURCE, { signal: new AbortController().signal });
+      expect(observation).toEqual({ workspaceId: INPUT.workspaceId, generation: INPUT.generation, resourceId: RESOURCE,
+        deletionOperationId: OPERATION, stage, requestedAt: new Date(NOW).toISOString(),
+        expectedBy: stage === "waiting_for_uploads" ? new Date(NOW + 6 * 3600_000).toISOString() : null,
+        observedAt: new Date(NOW).toISOString() });
+      expect(f.fetcher.mock.calls.map(([url, init]) => [String(url), init?.method ?? "GET"])).toEqual([
+        [`https://boat.dev/api/v1/deletion-operations/${OPERATION}`, "GET"],
+        [`https://boat.dev/api/v1/sandboxes/${RESOURCE}`, "GET"],
+      ]);
+      expect(f.stored()).toEqual(before);
+      expect(f.operations.recordDeletionProgress).not.toHaveBeenCalled();
+      expect(f.operations.completeDeletion).not.toHaveBeenCalled();
+      expect(f.access.revokeSshAccess).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { id: `bdop_${"b".repeat(32)}` }, { kind: "snapshot" }, { targetId: "bx_3456789a" },
+    { status: "processing" }, { status: "pending" }, { stage: "retrying" }, { stage: null },
+    { expectedBy: null }, { expectedBy: "invalid" }, { expectedBy: new Date(NOW + 7 * 3600_000).toISOString() },
+    { requestedAt: new Date(NOW - 60_000).toISOString() }, { completedAt: new Date(NOW).toISOString() },
+  ])("refuses incomplete or foreign storage-only evidence %j", async changed => {
+    const f = fixture(); await f.allocate(); await f.operations.beginDelete(RESOURCE); await f.operations.bindDeletion(RESOURCE, OPERATION);
+    f.fetcher.mockClear();
+    f.fetcher.mockResolvedValueOnce(json(deletion("blocked", { stage: "waiting_for_uploads", requestedAt: new Date(NOW).toISOString(),
+      expectedBy: new Date(NOW + 6 * 3600_000).toISOString(), ...changed })));
+    await expect(f.provider.observeDeletionRetirement(RESOURCE, { signal: new AbortController().signal }))
+      .rejects.toMatchObject({ code: "provider_deletion_unconfirmed" });
+    expect(f.fetcher).toHaveBeenCalledTimes(1);
+    expect(f.operations.completeDeletion).not.toHaveBeenCalled();
+  });
+
+  it.each([200, 401, 500])("does not turn sandbox HTTP %s into absence", async status => {
+    const f = fixture(); await f.allocate(); await f.operations.beginDelete(RESOURCE); await f.operations.bindDeletion(RESOURCE, OPERATION);
+    f.fetcher.mockClear();
+    f.fetcher.mockResolvedValueOnce(json(deletion("blocked", { stage: "waiting_for_restore", requestedAt: new Date(NOW).toISOString() })))
+      .mockResolvedValueOnce(json(status === 200 ? sandbox("archived") : { ok: false }, status));
+    await expect(f.provider.observeDeletionRetirement(RESOURCE, { signal: new AbortController().signal })).rejects.toBeInstanceOf(CloudProviderError);
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+    expect(f.operations.recordDeletionProgress).not.toHaveBeenCalled();
+    expect(f.operations.completeDeletion).not.toHaveBeenCalled();
+  });
+
+  it("never replays a missing DELETE receipt or accepts a bare receipt 404", async () => {
+    const f = fixture(); await f.allocate(); await f.operations.beginDelete(RESOURCE); f.fetcher.mockClear();
+    await expect(f.provider.observeDeletionRetirement(RESOURCE, { signal: new AbortController().signal }))
+      .rejects.toMatchObject({ code: "provider_deletion_unconfirmed" });
+    expect(f.fetcher).not.toHaveBeenCalled();
+    await f.operations.bindDeletion(RESOURCE, OPERATION);
+    f.fetcher.mockResolvedValueOnce(json({ ok: false }, 404));
+    await expect(f.provider.observeDeletionRetirement(RESOURCE, { signal: new AbortController().signal }))
+      .rejects.toMatchObject({ code: "provider_not_found" });
+    expect(f.fetcher).toHaveBeenCalledTimes(1);
+    expect(f.operations.completeDeletion).not.toHaveBeenCalled();
+  });
+
+  it("keeps an overdue upload estimate pending and refuses journal changes during I/O", async () => {
+    const f = fixture(); await f.allocate(); await f.operations.beginDelete(RESOURCE); await f.operations.bindDeletion(RESOURCE, OPERATION);
+    f.fetcher.mockResolvedValueOnce(json(deletion("blocked", { stage: "waiting_for_uploads", requestedAt: new Date(NOW).toISOString(),
+      expectedBy: new Date(NOW).toISOString() }))).mockResolvedValueOnce(json({ ok: false }, 404));
+    const future = new BoatWorkspaceProvider({ ...f.options, now: () => NOW + 7 * 3600_000 });
+    expect((await future.observeDeletionRetirement(RESOURCE, { signal: new AbortController().signal })).stage).toBe("waiting_for_uploads");
+    f.fetcher.mockResolvedValueOnce(json(deletion("blocked", { stage: "waiting_for_restore", requestedAt: new Date(NOW).toISOString() })))
+      .mockImplementationOnce(async () => { f.stored().deletionOperationId = `bdop_${"b".repeat(32)}`; return json({ ok: false }, 404); });
+    await expect(f.provider.observeDeletionRetirement(RESOURCE, { signal: new AbortController().signal }))
+      .rejects.toMatchObject({ code: "provider_deletion_unconfirmed" });
+    expect(f.operations.completeDeletion).not.toHaveBeenCalled();
+  });
+});
+
 describe("Boat workspace display names", () => {
   describe.each(["lookup", "PATCH"] as const)("pending label %s", stage => {
     it.each([

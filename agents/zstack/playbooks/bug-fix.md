@@ -65,6 +65,11 @@
    a closed phase through confirmed cleanup; only typed transient provider
    errors offer retries. Test unknown defects, failed cleanup and repeated
    grant retirement through the HTTP boundary, without raw exception logging.
+   For fixture cleanup, distinguish compute retirement from physical erasure.
+   Require the original accepted delete, every generation, fresh exact provider
+   proof and a post-I/O authority recheck; preserve storage debt and the D1 gate.
+   Test the actual record purge so a signed carry can later retire from positive
+   retained proof, never from a missing row or a provider 404 alone.
 4. **Fix** the root cause with the smallest change. Keep compatibility.
    Local and cloud placements must both stay correct.
 5. **Green.** Run the regression, the adjacent suites and the static gates
