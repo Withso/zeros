@@ -13,9 +13,10 @@ import {DatabaseCloudAgentCredentialService} from "./agent-credentials.js";
 import {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
 import {cloudAgentModels} from "./agent-models.js";
 import {CloudAgentBootCredentialResponseSchema,CloudAgentActorConfirmResponseSchema,CloudAgentWarmActorResponseSchema,type CloudAgentBootCredentialResponse} from "./agent-boot-contract.js";
-import {interceptQueries,withAuthorityDeadlineBarrier} from "./authority-deadline-test-utils.js";
+import {interceptQueries,withAuthorityDeadlineBarrier,withHeldEngineRows} from "./authority-deadline-test-utils.js";
 import {assertNativeGithubActor} from "./github-native-grants.js";
 import {cloudGithubNativeSourceSchema} from "./github-native-schema.js";
+import {purgeCloudAgentAdoptions} from "./agent-boot-credentials.js";
 const suite=process.env.TEST_DATABASE_URL?describe:describe.skip;
 suite("genuine private boot credential execution",()=>{
   let pool:pg.Pool,fixture:Awaited<ReturnType<typeof seedReadyCloudWorkspace>>,credentials:DatabaseCloudAgentCredentialService,service:DatabaseCloudAgentExecutionService;
@@ -150,6 +151,152 @@ suite("genuine private boot credential execution",()=>{
     await pool.query("UPDATE devices SET revoked_at=now(),trust_state='revoked' WHERE id=$1",[sender.deviceId]);
     await expect(service.boot(engine(),"actor-confirm",input)).rejects.toThrow();
   });
+  it.each(["device", "source-session"] as const)("bounds an actor observation racing %s revocation and refuses the next renewal", async change => {
+    const bound = await boot(), sender = await actor();
+    const input = { ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId };
+    let revoked = false, began = 0;
+    const reader = interceptQueries(pool, async sql => {
+      if (!began && sql.startsWith("BEGIN")) began = Date.now();
+      if (revoked || !sql.startsWith("SELECT session.*,least(")) return;
+      revoked = true;
+      if (change === "device") await pool.query("UPDATE devices SET revoked_at=clock_timestamp(),trust_state='revoked' WHERE id=$1", [sender.deviceId]);
+      else await pool.query("UPDATE auth_sessions SET status='revoked',revoked_at=clock_timestamp() WHERE provider_session_id=$1", [sender.user.authentication.sessionId]);
+    });
+    const proof = CloudAgentActorConfirmResponseSchema.parse(
+      await new DatabaseCloudAgentExecutionService(reader, keys, false).boot(engine(), "actor-confirm", input));
+    expect(revoked).toBe(true);
+    expect(proof.provenance.actorSessionId).toBe(sender.actorSessionId);
+    expect(proof.provenance.confirmedUntilMs).toBeLessThanOrEqual(began + 10_000);
+    await expect(service.boot(engine(), "actor-confirm", input)).rejects.toBeDefined();
+  });
+  it.each(["actor-confirm", "warm-context"] as const)("keeps %s reads independent of the funding owner's mutation lock", async operation => {
+    const bound = await boot(), sender = await actor();
+    const input = { ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId,
+      ...(operation === "warm-context" ? { provider: "cursor", model: "grok-4.6", conversationId: randomUUID(),
+        cwd: "/srv/zeros/workspace", repositoryServers: [] } : {}) };
+    if (operation === "warm-context") await service.boot(engine(), operation, input);
+    const held = await pool.connect();
+    const reader = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 1, options: "-c lock_timeout=250ms" });
+    try {
+      await held.query("BEGIN");
+      await held.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412))", [fixture.userId]);
+      await expect(new DatabaseCloudAgentExecutionService(reader, keys, false).boot(engine(), operation, input))
+        .resolves.toMatchObject({ version: 1, mode: "boot-owner-v1" });
+    } finally {
+      await held.query("ROLLBACK"); held.release(); await reader.end();
+    }
+  });
+  it.each(["actor-confirm", "warm-context"] as const)("keeps %s reads independent of exclusive engine mutation locks", async operation => {
+    const bound = await boot(), sender = await actor();
+    const input = { ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId,
+      ...(operation === "warm-context" ? { provider: "cursor", model: "grok-4.6", conversationId: randomUUID(),
+        cwd: "/srv/zeros/workspace", repositoryServers: [] } : {}) };
+    if (operation === "warm-context") await service.boot(engine(), operation, input);
+    await withHeldEngineRows(pool, fixture, "UPDATE", async reader => {
+      await expect(new DatabaseCloudAgentExecutionService(reader, keys, false).boot(engine(), operation, input))
+        .resolves.toMatchObject({ version: 1, mode: "boot-owner-v1" });
+    });
+  });
+  it("renews a warm context without republishing credentials or taking mutation locks", async () => {
+    const bound = await boot(), sender = await actor();
+    const input = { ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId,
+      provider: "cursor", model: "grok-4.6", conversationId: randomUUID(), cwd: "/srv/zeros/workspace", repositoryServers: [] };
+    const first = CloudAgentWarmActorResponseSchema.parse(await service.boot(engine(), "warm-context", input));
+    const versions = async () => (await pool.query(`SELECT provider,xmin::text AS version FROM cloud_agent_boot_credentials ORDER BY provider`)).rows;
+    const before = await versions(), queries: string[] = [];
+    const reader = interceptQueries(pool, sql => { queries.push(sql); });
+    const second = CloudAgentWarmActorResponseSchema.parse(await new DatabaseCloudAgentExecutionService(reader, keys, false)
+      .boot(engine(), "warm-context", input));
+    expect(second.contextId).toBe(first.contextId);
+    expect(second.contextRevision).toBe(first.contextRevision);
+    expect(await versions()).toEqual(before);
+    expect(queries.some(sql => /pg_advisory_xact_lock|FOR UPDATE|cloud_workspace_engine_authority_current/.test(sql))).toBe(false);
+  });
+  it.each(["adoption", "writer"] as const)("refuses warm renewal after the %s identity was retired", async retired => {
+    const bound = await boot(), sender = await actor();
+    if (retired === "writer") await service.boot(engine(), "activate", syncRequest(bound));
+    const input = { ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId,
+      provider: "cursor", model: "grok-4.6", conversationId: randomUUID(), cwd: "/srv/zeros/workspace", repositoryServers: [] };
+    await service.boot(engine(), "warm-context", input);
+    if (retired === "adoption") await withSystemTx(pool, tx => purgeCloudAgentAdoptions(tx, fixture.userId));
+    else await pool.query("UPDATE cloud_workspace_local_command_writers SET state='retired',retired_at=clock_timestamp() WHERE writer_epoch=$1", [bound.writerEpoch]);
+    await expect(service.boot(engine(), "warm-context", input)).rejects.toMatchObject({ status: 403 });
+    if (retired === "adoption") expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_adoption_keys")).rows[0]).toEqual({ count: 0 });
+  });
+  it.each(["credential-revoke", "adoption-retire", "owner-aba", "publication"] as const)("bounds an in-flight read across %s and refuses its next renewal", async change => {
+    const bound = await boot(), sender = await actor();
+    const other = change === "owner-aba" ? await ensureCloudPilotUser(pool, { provider: "workos", providerSubject: `user_${randomUUID()}`,
+      email: `projection-${randomUUID()}@example.test`, displayName: "Other owner" }) : null;
+    if (other) await withCloudFixtureOwnerTx(pool, async tx => {
+      await tx.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [fixture.organizationId, other.id]);
+      await tx.query("INSERT INTO organization_seat_assignments(org_id,user_id,state) VALUES($1,$2,'active')", [fixture.organizationId, other.id]);
+    });
+    const input = { ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId,
+      provider: "cursor", model: "grok-4.6", conversationId: randomUUID(), cwd: "/srv/zeros/workspace", repositoryServers: [] };
+    const first = CloudAgentWarmActorResponseSchema.parse(await service.boot(engine(), "warm-context", input));
+    let changed = false, firstBegin = 0;
+    const reader = interceptQueries(pool, async sql => {
+      if (!firstBegin && sql.startsWith("BEGIN")) firstBegin = Date.now();
+      if (changed || !sql.includes("SELECT github_user_id,github_login,git_author_name FROM github_authorizations")) return;
+      changed = true;
+      if (change === "credential-revoke") await pool.query("UPDATE cloud_agent_credentials SET revoked_at=clock_timestamp() WHERE id=$1", [credentialId]);
+      if (change === "adoption-retire") await withSystemTx(pool, tx => purgeCloudAgentAdoptions(tx, fixture.userId));
+      if (change === "owner-aba") {
+        await pool.query("UPDATE cloud_workspaces SET owner_user_id=$2 WHERE id=$1", [fixture.workspaceId, other!.id]);
+        await pool.query("UPDATE cloud_workspaces SET owner_user_id=$2 WHERE id=$1", [fixture.workspaceId, fixture.userId]);
+      }
+      if (change === "publication") await pool.query("UPDATE cloud_agent_boot_bindings SET desired_cache_revision=desired_cache_revision+1 WHERE engine_instance_id=$1", [fixture.engineInstanceId]);
+    });
+    const outcome = await new DatabaseCloudAgentExecutionService(reader, keys, false).boot(engine(), "warm-context", input)
+      .then(value => ({ value }), (error: unknown) => ({ error }));
+    expect(changed).toBe(true);
+    if ("value" in outcome) {
+      // A coherent observation can linearize before a concurrent change, but
+      // it cannot borrow time from its response or acquire the new identity.
+      const value = CloudAgentWarmActorResponseSchema.parse(outcome.value);
+      expect(value.contextRevision).toBe(first.contextRevision);
+      expect(value.fundingOwnerEpoch).toBe(first.fundingOwnerEpoch);
+      expect(value.actor.confirmedUntilMs).toBeLessThanOrEqual(firstBegin + 10_000);
+    } else expect(outcome.error).toMatchObject({ status: expect.any(Number) });
+    await expect(service.boot(engine(), "warm-context", input)).rejects.toBeDefined();
+  });
+  it("recomputes a context after a serialization abort instead of publishing the superseded cache", async () => {
+    const bound = await boot(), sender = await actor();
+    const input = { ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId,
+      provider: "cursor", model: "grok-4.6", conversationId: randomUUID(), cwd: "/srv/zeros/workspace", repositoryServers: [] };
+    let aborted = false;
+    const reader = interceptQueries(pool, async sql => {
+      if (aborted || !sql.startsWith("INSERT INTO cloud_agent_boot_contexts")) return;
+      aborted = true;
+      await pool.query("UPDATE cloud_agent_boot_bindings SET desired_cache_revision=desired_cache_revision+1 WHERE engine_instance_id=$1", [fixture.engineInstanceId]);
+      throw Object.assign(new Error("synthetic context serialization abort"), { code: "40001" });
+    });
+    await expect(new DatabaseCloudAgentExecutionService(reader, keys, false).boot(engine(), "warm-context", input))
+      .rejects.toMatchObject({ status: 503, code: "cloud_agent_credential_busy" });
+    expect(aborted).toBe(true);
+    expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_boot_contexts")).rows[0]).toEqual({ count: 0 });
+  });
+  it("keeps one context and the original request deadline across concurrent serializable publications", async () => {
+    const bound = await boot(), sender = await actor();
+    const input = { ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId,
+      provider: "cursor", model: "grok-4.6", conversationId: randomUUID(), cwd: "/srv/zeros/workspace", repositoryServers: [] };
+    let publications = 0, release!: () => void;
+    const together = new Promise<void>(resolve => { release = resolve; });
+    const began: number[] = [];
+    const reader = interceptQueries(pool, async sql => {
+      if (sql.startsWith("BEGIN")) began.push(Date.now());
+      if (!sql.startsWith("INSERT INTO cloud_agent_boot_contexts") || ++publications > 2) return;
+      if (publications === 2) release();
+      await together;
+    });
+    const reads = new DatabaseCloudAgentExecutionService(reader, keys, false);
+    const values = await Promise.all([reads.boot(engine(), "warm-context", input), reads.boot(engine(), "warm-context", input)]);
+    const contexts = values.map(value => CloudAgentWarmActorResponseSchema.parse(value));
+    expect(publications).toBeGreaterThan(2);
+    expect(contexts[0]!.contextId).toBe(contexts[1]!.contextId);
+    for (const context of contexts) expect(context.actor.confirmedUntilMs).toBeLessThanOrEqual(Math.max(...began.slice(0, 2)) + 10_000);
+    expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_boot_contexts")).rows[0]).toEqual({ count: 1 });
+  });
   it("warms the sender's bounded native context with real context storage and no lease",async()=>{
     const bound=await boot(),sender=await actor(),input={...request(),bootId:bound.bootId,writerEpoch:bound.writerEpoch,actorSessionId:sender.actorSessionId,
       provider:"cursor",model:"grok-4.6",conversationId:randomUUID(),cwd:"/srv/zeros/workspace",repositoryServers:[]};
@@ -165,7 +312,7 @@ suite("genuine private boot credential execution",()=>{
       provider:"cursor",model:"grok-4.6",conversationId:randomUUID(),cwd:"/srv/zeros/workspace",repositoryServers:[]};
     const first=await service.boot(engine(),"warm-context",input) as {contextId:string};
     let expired=false;
-    const controlled=withAuthorityDeadlineBarrier(pool,/SELECT pg_advisory_xact_lock\(hashtextextended\(\$1,71511\)\)/,async client=>{
+    const controlled=withAuthorityDeadlineBarrier(pool,/SELECT \* FROM cloud_customization WHERE/,async client=>{
       expired=true;return client.query("UPDATE cloud_agent_boot_contexts SET expires_at=clock_timestamp()-interval '1 second' WHERE context_id=$1",[first.contextId]);
     });
     const second=await new DatabaseCloudAgentExecutionService(controlled,keys,false).boot(engine(),"warm-context",input) as {contextId:string};
@@ -194,6 +341,52 @@ suite("genuine private boot credential execution",()=>{
     await expect(service.boot(engine(),"warm-context",{...input,conversationId:randomUUID()})).rejects.toMatchObject({status:429,code:"cloud_validation_execution_limit"});
     expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_boot_contexts")).rows[0]).toEqual({count:4096});
     expect(await service.boot(engine(),"warm-context",input)).toMatchObject({contextId:first.contextId});
+  });
+  it("does not oversubscribe the last context slot with concurrent publishers", async () => {
+    const bound = await boot(), sender = await actor();
+    const input = { ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId,
+      provider: "cursor", model: "grok-4.6", conversationId: randomUUID(), cwd: "/srv/zeros/workspace", repositoryServers: [] };
+    const first = CloudAgentWarmActorResponseSchema.parse(await service.boot(engine(), "warm-context", input));
+    await pool.query(`INSERT INTO cloud_agent_boot_contexts SELECT (jsonb_populate_record(NULL::cloud_agent_boot_contexts,
+      to_jsonb(saved)||jsonb_build_object('context_id',gen_random_uuid(),'retired_at',clock_timestamp()))).*
+      FROM cloud_agent_boot_contexts saved CROSS JOIN generate_series(1,4094) WHERE saved.context_id=$1`, [first.contextId]);
+    let publications = 0, release!: () => void;
+    const together = new Promise<void>(resolve => { release = resolve; });
+    const reader = interceptQueries(pool, async sql => {
+      if (!sql.startsWith("INSERT INTO cloud_agent_boot_contexts") || ++publications > 2) return;
+      if (publications === 2) release();
+      await together;
+    });
+    const reads = new DatabaseCloudAgentExecutionService(reader, keys, false);
+    const results = await Promise.allSettled([1, 2].map(() => reads.boot(engine(), "warm-context", { ...input, conversationId: randomUUID() })));
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.find(result => result.status === "rejected")).toMatchObject({ reason: { status: 429, code: "cloud_validation_execution_limit" } });
+    expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_boot_contexts")).rows[0]).toEqual({ count: 4096 });
+  });
+  it("bounds serialization retries without publishing a partial context", async () => {
+    const bound = await boot(), sender = await actor();
+    const input = { ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId,
+      provider: "cursor", model: "grok-4.6", conversationId: randomUUID(), cwd: "/srv/zeros/workspace", repositoryServers: [] };
+    let publications = 0;
+    const reader = interceptQueries(pool, sql => {
+      if (!sql.startsWith("INSERT INTO cloud_agent_boot_contexts")) return;
+      publications++;
+      throw Object.assign(new Error("synthetic persistent serialization abort"), { code: "40001" });
+    });
+    await expect(new DatabaseCloudAgentExecutionService(reader, keys, false).boot(engine(), "warm-context", input))
+      .rejects.toMatchObject({ status: 503, code: "cloud_agent_credential_busy" });
+    expect(publications).toBe(3);
+    expect((await pool.query("SELECT count(*)::int AS count FROM cloud_agent_boot_contexts")).rows[0]).toEqual({ count: 0 });
+  });
+  it("does not renew an expired context with actor confirmation alone", async () => {
+    const bound = await boot(), sender = await actor();
+    const actorInput = { ...request(), bootId: bound.bootId, writerEpoch: bound.writerEpoch, actorSessionId: sender.actorSessionId };
+    const first = CloudAgentWarmActorResponseSchema.parse(await service.boot(engine(), "warm-context", { ...actorInput,
+      provider: "cursor", model: "grok-4.6", conversationId: randomUUID(), cwd: "/srv/zeros/workspace", repositoryServers: [] }));
+    await pool.query("UPDATE cloud_agent_boot_contexts SET expires_at=clock_timestamp()-interval '1 second' WHERE context_id=$1", [first.contextId]);
+    await expect(service.boot(engine(), "actor-confirm", actorInput)).resolves.toMatchObject({ provenance: { actorSessionId: sender.actorSessionId } });
+    expect((await pool.query("SELECT expires_at<clock_timestamp() AS expired FROM cloud_agent_boot_contexts WHERE context_id=$1", [first.contextId])).rows[0])
+      .toEqual({ expired: true });
   });
   it("does not export an offline plaintext verifier for repository secret values",async()=>{
     const bound=await boot(),sender=await actor(),repositoryServers=[{name:"sentinel",transport:"stdio",command:"node",env:{SENTINEL_SECRET:"short-private-value"}}];

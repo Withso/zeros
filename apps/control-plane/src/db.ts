@@ -162,7 +162,7 @@ export async function withUserTx<T>(
 export async function withSystemTx<T>(
   pool: pg.Pool,
   fn: (tx: Tx) => Promise<T>,
-  options: { consistentRead?: boolean } = {},
+  options: { consistentRead?: boolean; serializable?: boolean } = {},
 ): Promise<T> {
   assertWorkOSProviderLockHeld();
   const started = performance.now();
@@ -179,8 +179,9 @@ export async function withSystemTx<T>(
   let discard = false;
   try {
     connection.assert();
-    await client.query(`${options.consistentRead
-      ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
+    await client.query(`${options.serializable
+      ? `BEGIN ISOLATION LEVEL SERIALIZABLE${options.consistentRead ? " READ ONLY" : ""}`
+      : options.consistentRead ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
       : "BEGIN"}; ${ENTER_APP_ROLE}; SELECT set_config('app.system', 'on', true)`);
     connection.assert();
     const result = await fn(client);

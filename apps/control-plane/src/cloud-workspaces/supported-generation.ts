@@ -17,12 +17,13 @@ export function cloudWorkspaceV2Required(): HttpError {
 export async function requireSupportedCloudWorkspaceGeneration(
   tx: Tx,
   scope: { organizationId: string; workspaceId: string; generation: number },
+  options: { consistentRead?: boolean } = {},
 ) {
   const row = (await tx.query<CloudRuntimePinRow>(
     `SELECT runtime_id,runtime_manifest_sha256,runtime_base_image_id,
             runtime_base_compatibility_id,runtime_profile,runtime_engine_protocol_version
      FROM cloud_workspace_generations
-     WHERE workspace_id=$1 AND generation=$2 AND org_id=$3 FOR SHARE`,
+     WHERE workspace_id=$1 AND generation=$2 AND org_id=$3${options.consistentRead ? "" : " FOR SHARE"}`,
     [scope.workspaceId, scope.generation, scope.organizationId],
   )).rows[0];
   if (!row || row.runtime_profile !== "zeros-cloud-worker-v4" ||
@@ -32,7 +33,9 @@ export async function requireSupportedCloudWorkspaceGeneration(
   const runtimePin = cloudRuntimePin(row)!;
   let source;
   try {
-    source = await loadComputerWorkspaceSource(tx, scope);
+    source = options.consistentRead
+      ? await loadComputerWorkspaceSource(tx, scope, { consistentRead: true })
+      : await loadComputerWorkspaceSource(tx, scope);
   } catch (error) {
     if (error instanceof HttpError && error.code === "cloud_computer_build_required")
       throw cloudWorkspaceV2Required();

@@ -88,6 +88,25 @@ d.each(["legacy","pro"] as const)("actor-aware cloud runtime admission (%s)",fun
     await service.consume({...engine(),token:viewer.grantToken});
     expect(await service.authorizeRelay(viewer.grantToken,{connected:true})).toMatchObject({readOnly:true});
   });
+  it("checks the relay without locking the accepted generation or template", async () => {
+    const signer = await device(), grant = await service.issue({ ...subject(), proof: signer.proof() });
+    await service.consume({ ...engine(), token: grant.grantToken });
+    const held = await pool.connect();
+    const reader = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 1, options: "-c lock_timeout=250ms" });
+    try {
+      await held.query("BEGIN");
+      await held.query("SELECT workspace_id FROM cloud_workspace_generations WHERE workspace_id=$1 FOR UPDATE", [fixture.workspaceId]);
+      await held.query(`SELECT template.build_id FROM cloud_computer_templates template
+        JOIN cloud_workspace_computer_sources source ON source.template_id=template.build_id
+        WHERE source.workspace_id=$1 FOR UPDATE OF template`, [fixture.workspaceId]);
+      const reads = new DatabaseCloudWorkspaceActorSessionService({ pool: reader, enginePort: 39393,
+        bridgeUrl: "wss://api.example.test/v1/cloud-workspaces/bridge", workosEnabled: false });
+      await expect(reads.authorizeRelay(grant.grantToken, { connected: true }))
+        .resolves.toMatchObject({ workspaceId: fixture.workspaceId, generation: 1 });
+    } finally {
+      await held.query("ROLLBACK"); held.release(); await reader.end();
+    }
+  });
 
   it.each(["admission", "renewal", "engine", "source", "pro", "guest"] as const)("rejects %s expiry after the transaction starts",async deadline=>{
     // Isolate the paid deadline from this legacy fixture's complimentary staff benefit.

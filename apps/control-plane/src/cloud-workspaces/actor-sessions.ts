@@ -74,15 +74,15 @@ async function recordedActorAuthority(
 /** Background confirmation of an already consumed actor. Disconnect does not
  * erase accepted work; current account/auth/device/access proof still does. */
 export async function confirmDetachedCloudActor(tx:Tx,scope:Omit<CloudActorEngineScope,"heartbeatToken">,
-  actorSessionId:string):Promise<CloudRecordedActor & {role:CloudWorkspaceActorRole;confirmedUntilMs:number}> {
+  actorSessionId:string,options:{consistentRead?:boolean}={}):Promise<CloudRecordedActor & {role:CloudWorkspaceActorRole;confirmedUntilMs:number}> {
   if(!uuid.test(actorSessionId))rejected();
-  const row=(await tx.query<Session & {confirmed_until:Date}>(`SELECT session.*,least(clock_timestamp()+interval '10 seconds',engine.lease_expires_at,
+  const row=(await tx.query<Session & {confirmed_until:Date}>(`SELECT session.*,least(${options.consistentRead ? "transaction_timestamp()" : "clock_timestamp()"}+interval '10 seconds',engine.lease_expires_at,
       auth.last_token_expires_at) AS confirmed_until
     FROM cloud_workspace_actor_sessions session JOIN cloud_workspace_engine_instances engine ON engine.id=session.engine_instance_id
     JOIN auth_sessions auth ON auth.provider_session_id=session.auth_session_id AND auth.user_id=session.actor_user_id
     WHERE session.id=$1 AND session.workspace_id=$2 AND session.org_id=$3 AND session.generation=$4 AND session.engine_instance_id=$5
       AND session.consumed_at IS NOT NULL AND auth.status='active' AND auth.last_token_expires_at>clock_timestamp()
-      AND engine.revoked_at IS NULL AND engine.state='ready' AND engine.lease_expires_at>clock_timestamp() FOR SHARE OF session,auth`,
+      AND engine.revoked_at IS NULL AND engine.state='ready' AND engine.lease_expires_at>clock_timestamp()${options.consistentRead ? "" : " FOR SHARE OF session,auth"}`,
       [actorSessionId,scope.workspaceId,scope.organizationId,scope.generation,scope.engineInstanceId])).rows[0];
   if(!row)rejected();
   const actor=recordedActor(row),authority=await assertRecordedCloudActor(tx,{...scope,actorUserId:actor.actorUserId,actor,capability:"read"});
@@ -257,10 +257,13 @@ export class DatabaseCloudWorkspaceActorSessionService {
 
   async authorizeRelay(token:string,options:{connected?:boolean}={}):Promise<CloudEngineRelayGrant|null> {
     if (!CLOUD_ACTOR_TOKEN_PATTERN.test(token)) return null;
-    return withSystemTx(this.options.pool,tx=>this.authorizeRelayInTx(tx,token,options));
+    const deadline=Date.now()+10_000;
+    const result=await withSystemTx(this.options.pool,tx=>this.authorizeRelayInTx(tx,token,{...options,consistentRead:true}),{consistentRead:true});
+    return Date.now()<deadline?result:null;
   }
-  private async authorizeRelayInTx(tx:Tx,token:string,options:{connected?:boolean}):Promise<CloudEngineRelayGrant|null> {
-      const row = (await tx.query<Session & {provider_resource_id:string}>(`SELECT session.*,binding.provider_resource_id
+  private async authorizeRelayInTx(tx:Tx,token:string,options:{connected?:boolean;consistentRead?:boolean}):Promise<CloudEngineRelayGrant|null> {
+      const row = (await tx.query<Session & {provider_resource_id:string;confirmed_until:Date}>(`SELECT session.*,binding.provider_resource_id,
+          least(transaction_timestamp()+interval '10 seconds',engine.lease_expires_at,session.session_expires_at) AS confirmed_until
         FROM cloud_workspace_actor_sessions session
         JOIN cloud_workspaces workspace ON workspace.id=session.workspace_id AND workspace.org_id=session.org_id
           AND workspace.current_generation=session.generation AND workspace.authority_epoch=session.authority_epoch
@@ -280,10 +283,12 @@ export class DatabaseCloudWorkspaceActorSessionService {
       if (!row || !row.provider_resource_id) return null;
       let role:CloudWorkspaceActorRole;
       try {
-        await requireSupportedCloudWorkspaceGeneration(tx,{workspaceId:row.workspace_id,organizationId:row.org_id,generation:row.generation});
+        await requireSupportedCloudWorkspaceGeneration(tx,{workspaceId:row.workspace_id,organizationId:row.org_id,generation:row.generation},
+          {consistentRead:options.consistentRead===true});
         ({role}=await assertRecordedCloudActor(tx,{workspaceId:row.workspace_id,organizationId:row.org_id,
         actorUserId:row.actor_user_id,actor:recordedActor(row),capability:"read"})); }
       catch (error) { if (error instanceof HttpError) return null; throw error; }
+      if(row.confirmed_until.getTime()<=Date.now())return null;
       return {workspaceId:row.workspace_id,organizationId:row.org_id,generation:row.generation,
         authorityEpoch:Number(row.authority_epoch),engineInstanceId:row.engine_instance_id,resourceId:row.provider_resource_id,
         readOnly:role==="viewer"};

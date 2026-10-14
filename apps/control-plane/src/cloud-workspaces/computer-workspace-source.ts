@@ -42,7 +42,7 @@ function buildRequired(): never {
   throw new HttpError(409, "cloud_computer_build_required", "Build your Cloud Computer before creating a workspace.");
 }
 
-const templateSelect = `SELECT build.id AS build_id,build.version,build.config_id,template.provider_resource_id,
+const templateSelect = (consistentRead=false) => `SELECT build.id AS build_id,build.version,build.config_id,template.provider_resource_id,
   template.account_scope,template.billing_org,template.protected_contract_digest,template.named_snapshot_required,
   snapshot.image_ref AS snapshot_image_ref,snapshot.state AS snapshot_state,snapshot.snapshot_name,snapshot.snapshot_id,
   snapshot.verified_at AS snapshot_verified_at,
@@ -57,7 +57,7 @@ const templateSelect = `SELECT build.id AS build_id,build.version,build.config_i
     AND snapshot.billing_org=template.billing_org AND snapshot.manifest_sha256=template.manifest_sha256
   WHERE build.id=$1 AND build.org_id=$2 AND build.state='succeeded' AND template.state='ready'
     AND template.stopped_at IS NOT NULL AND template.protected_contract_digest IS NOT NULL
-  FOR SHARE OF build,template`;
+  ${consistentRead ? "" : "FOR SHARE OF build,template"}`;
 
 async function sourceFromRow(tx: Tx, organizationId: string, row: TemplateRow): Promise<CloudComputerWorkspaceSource> {
   const manifest = CloudComputerV2RepositoryManifestSchema.safeParse(row.repository_manifest);
@@ -147,7 +147,7 @@ export async function selectComputerWorkspaceSource(tx: Tx, input: {
     throw new HttpError(409, "cloud_computer_changed", "Cloud Computer changed during workspace creation. Refresh before trying again.");
   if (!head) return null;
   if (!head.active_build_id) buildRequired();
-  const row = (await tx.query<TemplateRow>(templateSelect, [head.active_build_id, input.organizationId])).rows[0];
+  const row = (await tx.query<TemplateRow>(templateSelect(), [head.active_build_id, input.organizationId])).rows[0];
   if (!row) buildRequired();
   if (row.named_snapshot_required && row.snapshot_state !== "ready") buildRequired();
   if (input.expectedActiveVersion !== undefined && Number(row.version) !== input.expectedActiveVersion)
@@ -190,7 +190,8 @@ export async function copyComputerWorkspaceSource(tx: Tx, input: {
 
 /** Saved-generation lookup shared by setup and the provider's fork admission.
  * A later activation never changes the environment of an accepted generation. */
-export async function loadComputerWorkspaceSource(tx: Tx, input: { workspaceId: string; generation: number; organizationId: string }) {
+export async function loadComputerWorkspaceSource(tx: Tx, input: { workspaceId: string; generation: number; organizationId: string },
+  options: { consistentRead?: boolean } = {}) {
   const saved = (await tx.query<{ build_id: string; config_id: string; image_ref: string; runtime_base_image_id: string }>(
     `SELECT source.build_id,source.config_id,generation.image_ref,generation.runtime_base_image_id
      FROM cloud_workspace_generations generation
@@ -198,7 +199,7 @@ export async function loadComputerWorkspaceSource(tx: Tx, input: { workspaceId: 
      WHERE generation.workspace_id=$1 AND generation.generation=$2 AND generation.org_id=$3`,
     [input.workspaceId, input.generation, input.organizationId])).rows[0];
   if (!saved) return null;
-  const row = (await tx.query<TemplateRow>(templateSelect, [saved.build_id, input.organizationId])).rows[0];
+  const row = (await tx.query<TemplateRow>(templateSelect(options.consistentRead), [saved.build_id, input.organizationId])).rows[0];
   if (!row || row.config_id !== saved.config_id || row.base_image_id !== saved.runtime_base_image_id ||
     (saved.image_ref !== `boat-template:${row.provider_resource_id}` &&
       (!row.snapshot_verified_at || saved.image_ref !== row.snapshot_image_ref))) buildRequired();

@@ -13,9 +13,9 @@ export class CloudWorkspaceEngineAuthorityError extends Error {
   }
 }
 
-/** Only after assertCurrentCloudEngineAuthority has locked this engine and its
- * parents in the same transaction. Later credential locks can consume the
- * remaining lease time even though those authority rows cannot change. */
+/** Recheck wall-clock expiry after reading or locking authority in the same
+ * transaction. A coherent reader must also retain its original observation
+ * deadline: this check does not advance its snapshot or replace a mutation fence. */
 export async function assertCloudEngineAuthorityDeadline(
   tx: Tx,
   engineInstanceId: string,
@@ -60,6 +60,45 @@ function validIdentityInput(input: {
     input.generation > 0 &&
     HEARTBEAT_TOKEN_PATTERN.test(input.heartbeatToken)
   );
+}
+
+/** A versioned authority observation for short-lived reads. The caller uses a
+ * consistent snapshot and never treats this as a mutation fence. Its deadline
+ * starts at BEGIN, not after a slow query or a later response. Mutators retain
+ * assertCurrentCloudEngineAuthority and its existing parent/engine locks. */
+export async function readCurrentCloudEngineAuthority(
+  tx: Tx,
+  input: {
+    workspaceId: string; organizationId: string; generation: number;
+    engineInstanceId: string; heartbeatToken: string; workosEnabled: boolean;
+  },
+): Promise<CurrentCloudEngineAuthority & { version: 1; confirmedUntilMs: number }> {
+  if (!validIdentityInput(input)) throw new CloudWorkspaceEngineAuthorityError();
+  const row = (await tx.query<{
+    authority_epoch: string; account_user_id: string; heartbeat_token_hash: Buffer; confirmed_until: Date;
+  }>(`SELECT workspace.authority_epoch,engine.account_user_id,engine.heartbeat_token_hash,
+      least(transaction_timestamp()+interval '10 seconds',engine.lease_expires_at) AS confirmed_until
+    FROM cloud_workspace_engine_instances engine
+    JOIN cloud_workspaces workspace ON workspace.id=engine.workspace_id AND workspace.org_id=engine.org_id
+    WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.current_generation=$3 AND engine.id=$4 AND engine.generation=$3
+      AND workspace.deleted_at IS NULL AND workspace.desired_state='running' AND workspace.status IN ('setting_up','ready','busy')
+      AND cloud_workspace_generation_policy_current(workspace.id,$3,workspace.org_id)
+      AND engine.state='ready' AND engine.revoked_at IS NULL AND engine.final_checkpoint_at IS NULL
+      AND engine.lease_expires_at>clock_timestamp()
+      AND cloud_workspace_runtime_authority_live(workspace.id,$3,engine.account_user_id,$5)
+      AND (engine.setup_run_id IS NOT NULL OR EXISTS (
+        SELECT 1 FROM cloud_workspace_runtime_enrollments enrollment
+        JOIN cloud_workspace_runtime_transitions runtime ON runtime.transition_id=enrollment.transition_id
+        WHERE enrollment.id=engine.runtime_transition_enrollment_id AND enrollment.consumed_at IS NOT NULL
+          AND enrollment.revoked_at IS NULL AND enrollment.sequence=runtime.enrollment_sequence
+          AND runtime.phase IN ('healthy','rolled_back')))`,
+  [input.workspaceId,input.organizationId,input.generation,input.engineInstanceId,input.workosEnabled])).rows[0];
+  const authorityEpoch = Number(row?.authority_epoch), confirmedUntilMs = row?.confirmed_until.getTime();
+  if (!row || !row.heartbeat_token_hash || !equalHash(row.heartbeat_token_hash,tokenHash(input.heartbeatToken)) ||
+      !Number.isSafeInteger(authorityEpoch) || authorityEpoch < 1 || confirmedUntilMs === undefined ||
+      !Number.isSafeInteger(confirmedUntilMs) || confirmedUntilMs <= Date.now()) throw new CloudWorkspaceEngineAuthorityError();
+  return { version: 1, workspaceId: input.workspaceId, organizationId: input.organizationId, generation: input.generation,
+    authorityEpoch, accountUserId: row.account_user_id, engineInstanceId: input.engineInstanceId, confirmedUntilMs };
 }
 
 /** Authenticate the exact engine identity without asserting that it remains
